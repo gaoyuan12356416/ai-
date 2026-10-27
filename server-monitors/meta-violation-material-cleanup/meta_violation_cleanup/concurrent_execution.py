@@ -8,6 +8,7 @@ from collections import defaultdict,deque
 from concurrent.futures import ThreadPoolExecutor,wait,FIRST_COMPLETED
 import threading
 import time
+from copy import deepcopy
 
 from .current_contexts import current_contexts
 from .graph import GraphClient
@@ -37,7 +38,7 @@ class ConcurrentExecutor:
     def __init__(self,runner,run_id,manifest,job_id,shared_run,entries,groups,record,counts):
         self.runner=runner;self.run_id=run_id;self.manifest=manifest;self.job=job_id;self.shared=shared_run
         self.entries=entries;self.groups=groups;self.record=record;self.counts=counts
-        self.maximum=runner.config['execution_workers'];self.per_account=runner.config.get('execution_per_account',2)
+        self.maximum=runner.config.get('execution_workers',1);self.per_account=runner.config.get('execution_per_account',2)
         self.batch_size=runner.config.get('execution_batch_size',32)
         self.ttl=runner.config.get('execution_context_ttl_seconds',30)
         self.governor=Governor(self.maximum,self.per_account,runner.config.get('execution_max_rps',24))
@@ -88,7 +89,7 @@ class ConcurrentExecutor:
             # final identity GET inside Graph.delete, immediately before DELETE.
             return self.runner.preflight(candidate,self.manifest,context=context,ad=candidate['ad_snapshot'])
         entry=self.entries[candidate['creative_id']]
-        valid,reason=basis_valid(self.runner,candidate,entry['evidence'],entry.get('disabled_account',False),
+        valid,reason=basis_valid(self.runner,candidate,self.manifest['evidence'],entry.get('disabled_account',False),
             context=context,graph=graph,receipt=receipt)
         return {'eligible':valid,'reason':reason}
 
@@ -107,7 +108,11 @@ class ConcurrentExecutor:
         graph=self.graph(candidate['account_id'],check);result=None
         try:
             check()
-            guard=lambda ad:self.runner.preflight(candidate,self.manifest,context=sql_context,ad=ad)
+            observed={}
+            def guard(ad):
+                decision=self.runner.preflight(candidate,self.manifest,context=sql_context,ad=ad)
+                if decision.get('eligible'):observed['ad']=deepcopy(ad)
+                return decision
             kwargs={'expected_creative_id':candidate['creative_id'],'ad_guard':guard} if kind=='ad' and isinstance(graph,GraphClient) else {}
             if kind=='ad' and not isinstance(graph,GraphClient):
                 decision=guard(graph.get_ad(identifier,candidate['user_id']))
@@ -115,6 +120,7 @@ class ConcurrentExecutor:
             check()
             result=graph.delete(kind,identifier,candidate['user_id'],candidate['account_id'],**kwargs)
             result=dict(result,**context,delete_status=result['status'],api_accepted=result['status']=='api_accepted')
+            if observed.get('ad'):result['pre_delete_ad_snapshot']=observed['ad']
             if policy:
                 result=policy.outcome(kind,candidate,result,self.claim_sources[(kind,identifier)])
             if result['status'] in ('api_accepted','unknown'):
@@ -139,8 +145,11 @@ class ConcurrentExecutor:
                 return result
             return dict(context,status='unknown',prior_result=result,api_accepted=result.get('api_accepted',False),requires_reconciliation=True)
         except BaseException as exc:
+            if not isinstance(exc,Exception):
+                self.abort.set()
             return dict(context,status='unknown',error=safe_error(exc),prior_result=result,
-                api_accepted=bool(result and result.get('api_accepted')),requires_reconciliation=True)
+                api_accepted=bool(result and result.get('api_accepted')),requires_reconciliation=True,
+                interrupted=not isinstance(exc,Exception))
 
     def claim(self,kind,candidate):
         identifier=candidate['ad_id'] if kind=='ad' else candidate['creative_id'];key=kind+':'+identifier
@@ -172,7 +181,8 @@ class ConcurrentExecutor:
         self.runner.store.finish_object(self.job,kind+':'+identifier,self.shared,status,result)
 
     def phase(self,kind,items):
-        from .phased_execution import object_state,has_ad_receipt
+        from .phased_execution import object_state
+        from .backlog_policy import read_deleted_ad_proof
         # Keep startup/cooldown waves small; widen only with observed headroom.
         for batch in waves(items,lambda:min(self.batch_size,self.governor.limit*4),self.per_account):
             self.runner.check_stop();self.governor.wait_ready(self.stopped)
@@ -191,7 +201,7 @@ class ConcurrentExecutor:
                             yield c,{'status':'deferred','request_sent':False,'reason':'ad_result_unknown'};continue
                         if self.runner.skip_policy and self.runner.skip_policy.result(kind,c) is not None:
                             yield c,self.claim(kind,c);continue
-                        receipt=has_ad_receipt(self.runner.store,c['ad_id']) if kind=='creative' else None
+                        receipt=(read_deleted_ad_proof(self.runner.store,c['ad_id'],c['account_id']) or {}) if kind=='creative' else None
                         future=self.pool.submit(self.preflight,kind,c,contexts[(c['ad_id'],c['creative_id'])],receipt)
                         pending[future]=('preflight',c)
                     while pending:
@@ -200,6 +210,11 @@ class ConcurrentExecutor:
                             phase,c=pending.pop(future)
                             if phase=='write':
                                 result=future.result();self.persist(kind,c,result);self.completed+=1
+                                if result.get('interrupted'):
+                                    self.record(kind,c['ad_id'] if kind=='ad' else c['creative_id'],result,kind+'s')
+                                    raise KeyboardInterrupt('worker_interrupted')
+                                if kind=='ad' and result.get('pre_delete_ad_snapshot'):
+                                    c=deepcopy(c);c['pre_delete_ad_snapshot']=result['pre_delete_ad_snapshot']
                                 if kind=='ad' and result['status']=='deleted_verified':
                                     self.confirmed_basis[c['creative_id']]=c
                                     self.save_basis(c)
@@ -214,7 +229,7 @@ class ConcurrentExecutor:
                             self.runner.runtime.event(self.run_id,'preflight',{'ad_id':c['ad_id'],'stage':kind,'decision':decision})
                             if not decision['eligible']:
                                 if kind=='ad':self.counts['skipped_ads']+=1
-                                else:yield c,{'status':'deferred','request_sent':False,'reason':decision['reason']}
+                                yield c,{'status':'deferred','request_sent':False,'reason':decision['reason']}
                                 continue
                             self.runner.check_stop()
                             if lease is not None:lease.check()
@@ -252,6 +267,6 @@ class ConcurrentExecutor:
 
     def save_basis(self,candidate):
         entry=self.entries[candidate['creative_id']]
-        entry['basis']=candidate;entry['evidence']={'materials':{mid:self.manifest['evidence']['materials'][mid]
+        entry['basis']=candidate;entry['execution_evidence']={'materials':{mid:self.manifest['evidence']['materials'][mid]
             for mid in candidate['material_ids'] if mid in self.manifest['evidence']['materials']}}
         self.runner.runtime.queue_creative(entry)

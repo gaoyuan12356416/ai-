@@ -9,6 +9,13 @@ from datetime import datetime, timedelta, timezone
 
 
 ROOT_PRODUCTS = {1479: "DramaWave", 3302: "HotDrama"}
+POLICY_VERSION = "20261027-v3"
+POLICY_CONTRACT = {
+    "min_distinct_violating_ads": 5,
+    "lookback_days": 3,
+    "pause_scope": "any_level",
+    "allow_active": False,
+}
 POLICY_NAMES = (
     "Adult Nudity and Sexual Activity",
     "Adult Sexual Solicitation and Sexually Explicit Language",
@@ -259,8 +266,27 @@ def _feedback_empty(value):
     raise ValueError("review_feedback_unreadable")
 
 
+def qualified_material_ids(evidence):
+    """Validate frozen counts before using the five-distinct-Ad lookup gate."""
+    materials = evidence.get("materials", {})
+    if not isinstance(materials, dict):
+        raise ValueError("evidence_count_conflict")
+    qualified = set()
+    for mid, entry in materials.items():
+        mid = _id(mid)
+        if not isinstance(entry, dict):
+            raise ValueError("evidence_count_conflict")
+        ids = parse_ids(entry.get("violating_ad_ids"))
+        count = entry.get("count")
+        if type(count) is not int or count != len(ids):
+            raise ValueError("evidence_count_conflict")
+        if count >= POLICY_CONTRACT["min_distinct_violating_ads"]:
+            qualified.add(mid)
+    return qualified
+
+
 def evaluate_ad(ad, identity, evidence):
-    """Apply current-review and pause guards, then the two explicit rules."""
+    """Five distinct violations AND an explicit Ad/AdSet/Campaign pause."""
     result = {"eligible": False, "reason": "", "rules": [], "material_ids": [],
               "root_id": "", "creative_id": "", "ad_id": ""}
     try:
@@ -312,11 +338,10 @@ def evaluate_ad(ad, identity, evidence):
                 raise ValueError("evidence_count_conflict")
             counts.append(count)
         rules = []
-        if closed and any(count >= 1 for count in counts):
-            rules.append("rule1")
-        if any(count >= 4 for count in counts):
-            rules.append("rule2")
-        result.update(eligible=bool(rules), rules=rules, reason="" if rules else "rule_not_matched")
+        if closed and any(count >= POLICY_CONTRACT["min_distinct_violating_ads"] for count in counts):
+            rules.append("paused_material_5")
+        reason = "" if rules else "active_ad_protected" if not closed else "violation_threshold_not_met"
+        result.update(eligible=bool(rules), rules=rules, reason=reason)
     except (AttributeError, TypeError, ValueError) as exc:
         result["reason"] = str(exc) if isinstance(exc, ValueError) else "current_ad_malformed"
     return result

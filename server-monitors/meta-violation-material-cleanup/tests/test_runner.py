@@ -12,12 +12,12 @@ sys.path.insert(0,str(HERE.parents[1]))
 sys.path.insert(0,str(HERE.parents[3]))
 from features.fb_ad_asset_delete.store import Store, StoreError
 from meta_violation_cleanup.runner import Runner, chunks, source_keys
-from meta_violation_cleanup.policy import product_scope
+from meta_violation_cleanup.policy import product_scope, POLICY_VERSION, POLICY_CONTRACT
 from meta_violation_cleanup.runtime import digest
 from meta_violation_cleanup.graph import GraphClient
 
 
-START='2026-09-23T12:00:00+08:00'
+START='2026-10-20T12:00:00+08:00'
 END='2026-10-23T12:00:00+08:00'
 
 
@@ -27,19 +27,19 @@ def ad(identifier='10',creative='20',account='100',status='PAUSED'):
         'campaign':{'id':'40','status':'ACTIVE'},'issues_info':[],'ad_review_feedback':{}}
 
 
-def lineage(identifier,creative,product='1479',material='501'):
+def lineage(identifier,creative,product='1479',material='501',account='100'):
     return {'ad_id':identifier,'creative_id':creative,'product':product,
-        'source_id':'0','original_source_id':material,'user_id':'1'}
+        'source_id':'0','original_source_id':material,'user_id':'1','ad_account_id':account}
 
 
 class Source:
     def __init__(self,ads):
-        self.rows={a['id']:[lineage(a['id'],a['creative']['id'])] for a in ads}
+        self.rows={a['id']:[lineage(a['id'],a['creative']['id'],account=a['account_id'])] for a in ads}
         self.vios=[];self.source_rows={};self.credential_fail=set();self.credential_values={};self.queried_sources=[]
         self.settings=[{'id':'1479','ads_app_id':'0'},{'id':'3302','ads_app_id':'0'},
             {'id':'14790','ads_app_id':'1479'},{'id':'9999','ads_app_id':'0'}]
         self.context_calls=[]
-        for i in range(4):
+        for i in range(5):
             aid=str(101+i)
             self.rows[aid]=[lineage(aid,str(201+i))]
             self.vios.append({'id':str(i+1),'ad_id':aid,'created_at':'2026-10-22T10:00:00+08:00',
@@ -75,7 +75,7 @@ class Graph:
         return {'accounts':{a['account_id']:{'user_ids':['1']} for a in self.ads.values()},'errors':[]}
     def list_ads(self,account,user):
         if account in self.bad_accounts:raise ValueError('incomplete pages')
-        return copy.deepcopy([a for a in self.ads.values() if a['account_id']==account])
+        return copy.deepcopy([a for a in self.ads.values() if a['account_id']==account and a['status'] not in ('DELETED','ARCHIVED')])
     def get_ad(self,identifier,user):
         self.calls.append(('get',identifier))
         return copy.deepcopy(self.ads[identifier])
@@ -85,10 +85,11 @@ class Graph:
         result=self.results.get((kind,identifier),{'status':'api_accepted','request_sent':True})
         if isinstance(result,BaseException):raise result
         if result['status']=='api_accepted':
-            if kind=='ad':self.ads[identifier]['status']='DELETED'
+            if kind=='ad':self.ads[identifier].update(status='DELETED',effective_status='DELETED')
         return copy.deepcopy(result)
     def reconcile(self,kind,identifier,user,account):
-        value=self.verifications.get((kind,identifier),{'status':'deleted_verified'})
+        value=self.verifications.get((kind,identifier),{'status':'deleted_verified',
+            'object':{'id':identifier,'account_id':account,'status':'DELETED'}})
         if isinstance(value,BaseException):raise value
         return copy.deepcopy(value)
 
@@ -100,6 +101,10 @@ class RuntimeLedgerError(RuntimeError):
 class Runtime:
     def __init__(self):
         self.data={};self.artifacts={};self.events=[];self.ads={};self.barriers=0;self.fail_barrier=None
+        self.queue={}
+    def queue_creative(self,entry):self.queue[entry['basis']['creative_id']]=copy.deepcopy(entry)
+    def cleanup_backlog(self):return list(copy.deepcopy(self.queue).values())
+    def complete_creative(self,cid):self.queue.pop(cid,None)
     def artifact(self,run,name,data):self.artifacts[(run,name)]=copy.deepcopy(data)
     def update(self,run,**data):self.data.update(copy.deepcopy(data))
     def event(self,run,kind,data):self.events.append((kind,copy.deepcopy(data)))
@@ -125,6 +130,8 @@ class RunnerTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory()
         self.store=Store(str(pathlib.Path(self.temp.name)/'ledger.sqlite'))
         self.patches=[patch('meta_violation_cleanup.runner.legacy_delete_lock',legacy_lock),
+            patch('meta_violation_cleanup.phased_execution.legacy_delete_lock',legacy_lock),
+            patch('meta_violation_cleanup.concurrent_execution.legacy_delete_lock',legacy_lock),
             patch('features.fb_ad_asset_delete.store._process_start',return_value=(True,'test-owner'))]
         for p in self.patches:p.start()
 
@@ -135,10 +142,15 @@ class RunnerTests(unittest.TestCase):
     def fixture(self,ads=None):
         ads=ads or [ad()]
         source=Source(ads);graph=Graph(ads);runtime=Runtime()
-        runner=Runner({'legacy_lock':'unused'},source,graph,runtime,self.store,None)
+        runner=Runner({'legacy_lock':'unused','execution_workers':1,'execution_batch_size':8,
+                       'shared_reference_scan_workers':4},source,graph,runtime,self.store,None)
         return runner,source,graph,runtime
 
-    def manifest(self,runner):return runner.scan('test-run',START,END)
+    def manifest(self,runner):
+        value=runner.scan('test-run',START,END)
+        value.update(version=3,policy_version=POLICY_VERSION,selection_policy=copy.deepcopy(POLICY_CONTRACT))
+        value['sha256']=digest({k:v for k,v in value.items() if k!='sha256'})
+        return value
     def deletes(self,graph):return [c for c in graph.calls if c[0]=='delete']
 
     def test_credential_failure_is_per_ad_and_is_coverage_gap(self):
@@ -179,7 +191,7 @@ class RunnerTests(unittest.TestCase):
         source.vios[0]['source_id']='900'
         source.source_rows['900']={'id':'900','source_type':'3','source_id':'501'}
         manifest=self.manifest(runner)
-        self.assertEqual(manifest['evidence']['materials']['501']['count'],4)
+        self.assertEqual(manifest['evidence']['materials']['501']['count'],5)
         source.queried_sources=[]
         self.assertTrue(runner.preflight(manifest['candidates'][0],manifest)['eligible'])
         self.assertNotIn('900',source.queried_sources)
@@ -217,41 +229,45 @@ class RunnerTests(unittest.TestCase):
     def test_mutation_graph_uses_separate_session_with_zero_get_retries(self):
         runner,_,_,_=self.fixture()
         manifest=self.manifest(runner)
+        deleted=set();sessions=[];constructor=[]
         class Response:
             status_code=200;headers={}
             def __init__(self,payload):self.payload=payload
             def json(self):return copy.deepcopy(self.payload)
         class Session:
-            def __init__(self,values):self.values=list(values);self.calls=[];self.closed=False
+            def __init__(self):self.calls=[];self.closed=False
             def mount(self,*args):pass
             def request(self,method,url,**kwargs):
-                self.calls.append((method,url,kwargs));return Response(self.values.pop(0))
+                self.calls.append((method,url,kwargs));identifier=url.rsplit('/',1)[-1]
+                if method=='DELETE':deleted.add(identifier);return Response(True)
+                if identifier=='ads':return Response({'data':[] if '10' in deleted else [ad()]})
+                if identifier=='10':return Response(ad(status='DELETED' if '10' in deleted else 'PAUSED'))
+                if identifier=='20':return Response({'id':'20','account_id':'100','status':'DELETED' if '20' in deleted else 'ACTIVE'})
+                raise AssertionError('unexpected graph request')
             def close(self):self.closed=True
-        scan_session=Session([])
+        scan_session=Session()
         scan_graph=GraphClient({'1':'secret'},session=scan_session,get_retries=2,timeout=60)
         runner.graph=scan_graph
-        values=[ad(),{'id':'20','account_id':'100','status':'ACTIVE'},True,
-            {'id':'20','account_id':'100','status':'DELETED'},ad(),ad(),True,ad(status='DELETED')]
-        mutation_session=Session(values);constructor=[];original_init=GraphClient.__init__
+        original_init=GraphClient.__init__
         def initialize(client,*args,**kwargs):
-            constructor.append(copy.deepcopy(kwargs));kwargs['session']=mutation_session
+            constructor.append(copy.deepcopy(kwargs));session=Session();sessions.append(session);kwargs['session']=session
             original_init(client,*args,**kwargs)
         with patch.object(GraphClient,'__init__',initialize):
             self.assertEqual(runner.execute('test-run',manifest),'completed')
-        self.assertEqual(constructor[0]['get_retries'],0)
-        self.assertEqual(constructor[0]['timeout'],20)
+        self.assertTrue(constructor)
+        self.assertTrue(all(c.get('get_retries')==0 for c in constructor))
         self.assertEqual(scan_graph.get_retries,2)
         self.assertEqual(scan_session.calls,[])
         self.assertFalse(scan_session.closed)
-        self.assertTrue(mutation_session.closed)
-        self.assertEqual(len([c for c in mutation_session.calls if c[0]=='DELETE']),2)
+        self.assertTrue(all(session.closed for session in sessions))
+        self.assertEqual(sum(method=='DELETE' for session in sessions for method,*_ in session.calls),2)
 
     def test_multiple_violation_rows_for_one_ad_retained_in_frozen_proof(self):
         runner,source,_,_=self.fixture()
         source.vios.append(dict(source.vios[0],id='88'))
         manifest=self.manifest(runner)
         self.assertEqual(manifest['violation_ids_by_ad']['101'],['1','88'])
-        self.assertEqual(manifest['evidence']['materials']['501']['count'],4)
+        self.assertEqual(manifest['evidence']['materials']['501']['count'],5)
         self.assertTrue(runner.preflight(manifest['candidates'][0],manifest)['eligible'])
 
     def test_material_product_and_ad_state_changes_cancel_preflight(self):
@@ -267,15 +283,15 @@ class RunnerTests(unittest.TestCase):
                 self.assertFalse(runner.preflight(manifest['candidates'][0],manifest)['eligible'])
 
     def test_complete_window_evidence_remains_fixed_after_scan(self):
-        runner,source,_,_=self.fixture([ad(status='ACTIVE')])
+        runner,source,_,_=self.fixture([ad()])
         manifest=self.manifest(runner)
         source.vios=[]
-        for aid in ('101','102','103','104'):del source.rows[aid]
+        for aid in ('101','102','103','104','105'):del source.rows[aid]
         source.violations_by_ids=lambda _:self.fail('historical evidence must stay frozen')
         decision=runner.preflight(manifest['candidates'][0],manifest)
         self.assertTrue(decision['eligible'])
-        self.assertEqual(decision['rules'],['rule2'])
-        self.assertEqual(decision['checked_evidence']['materials']['501']['count'],4)
+        self.assertEqual(decision['rules'],['paused_material_5'])
+        self.assertEqual(decision['checked_evidence']['materials']['501']['count'],5)
         self.assertEqual(runner.dependency_guard(manifest['candidates'][0],decision),'')
         self.assertEqual(source.context_calls,[('10','20'),('10','20')])
 
@@ -311,136 +327,101 @@ class RunnerTests(unittest.TestCase):
                 expected='dependency_credential_changed' if change=='credential' else 'dependency_identity_changed'
                 self.assertEqual(runner.dependency_guard(candidate,decision),expected)
 
-    def test_shared_creative_all_targets_preflight_before_mutation_other_product_not_deleted(self):
+    def test_other_product_reference_keeps_creative_and_only_eligible_ads_delete(self):
         runner,source,graph,runtime=self.fixture([ad(),ad('11','20'),ad('99','20')])
         source.rows['99'][0]['product']='9999'
         manifest=self.manifest(runner)
         self.assertEqual(manifest['shared_creative_impacts']['20'][0]['ad_id'],'99')
-        self.assertEqual(runner.execute('test-run',manifest),'completed')
-        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10'),('delete','ad','11')])
-        first_delete=graph.calls.index(('delete','creative','20'))
-        self.assertIn(('get','10'),graph.calls[:first_delete])
-        self.assertIn(('get','11'),graph.calls[:first_delete])
-        self.assertEqual(runtime.barriers,3)
+        self.assertEqual(runner.execute('test-run',manifest),'partial')
+        self.assertCountEqual(self.deletes(graph),[('delete','ad','10'),('delete','ad','11')])
+        self.assertIn('20',runtime.queue)
+        self.assertEqual(graph.ads['99']['status'],'PAUSED')
 
-    def test_creative_uses_last_successful_preflight_without_redundant_refresh(self):
+    def test_creative_runs_only_after_every_eligible_ad_is_confirmed_deleted(self):
         runner,_,graph,_=self.fixture([ad(),ad('11','20')])
-        manifest=self.manifest(runner);basis=[];original=runner.attempt
-        def attempt(job,shared,kind,identifier,candidate,*args):
-            if kind=='creative':basis.append(candidate['ad_id'])
-            return original(job,shared,kind,identifier,candidate,*args)
-        runner.attempt=attempt
+        manifest=self.manifest(runner)
+        def observe(kind,identifier):
+            if kind=='creative':
+                self.assertEqual({a['status'] for a in graph.ads.values()},{'DELETED'})
+        graph.on_delete=observe
         self.assertEqual(runner.execute('test-run',manifest),'completed')
-        self.assertEqual(basis,['11'])
-        first_delete=graph.calls.index(('delete','creative','20'))
-        self.assertEqual(graph.calls[:first_delete],[('get','10'),('get','11')])
+        self.assertEqual(self.deletes(graph)[-1],('delete','creative','20'))
+        self.assertCountEqual(self.deletes(graph)[:-1],[('delete','ad','10'),('delete','ad','11')])
 
-    def test_later_failed_checks_refresh_last_eligible_creative_basis(self):
+    def test_later_review_change_protects_shared_creative(self):
         runner,_,graph,runtime=self.fixture([ad(),ad('11','20')])
         manifest=self.manifest(runner)
         graph.ads['11']['effective_status']='PENDING_REVIEW'
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        first_delete=graph.calls.index(('delete','creative','20'))
-        self.assertEqual(graph.calls[:first_delete],[('get','10'),('get','11'),('get','10')])
-        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
-        refreshed=[data['ad_id'] for kind,data in runtime.events
-            if kind=='preflight' and data['stage']=='creative_basis']
-        self.assertEqual(refreshed,['10'])
+        self.assertEqual(self.deletes(graph),[('delete','ad','10')])
+        self.assertIn('20',runtime.queue)
 
-    def test_changed_creative_basis_is_removed_and_previous_success_rechecked(self):
+    def test_changed_shared_members_cannot_be_bypassed_by_valid_basis(self):
         runner,_,graph,runtime=self.fixture([ad(),ad('11','20'),ad('12','20')])
-        manifest=self.manifest(runner);basis=[]
-        original_get=graph.get_ad;original_attempt=runner.attempt
-        def get_ad(identifier,user):
-            if identifier=='12':
-                graph.ads['12']['effective_status']='PENDING_REVIEW'
-                graph.ads['11']['effective_status']='PENDING_REVIEW'
-            return original_get(identifier,user)
-        def attempt(job,shared,kind,identifier,candidate,*args):
-            if kind=='creative':basis.append(candidate['ad_id'])
-            return original_attempt(job,shared,kind,identifier,candidate,*args)
-        graph.get_ad=get_ad;runner.attempt=attempt
+        manifest=self.manifest(runner)
+        graph.ads['11']['effective_status']='PENDING_REVIEW'
+        graph.ads['12']['effective_status']='PENDING_REVIEW'
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        first_delete=graph.calls.index(('delete','creative','20'))
-        self.assertEqual(graph.calls[:first_delete],
-            [('get','10'),('get','11'),('get','12'),('get','11'),('get','10')])
-        self.assertEqual(basis,['10'])
-        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
-        self.assertEqual(runtime.data['remaining_ads'],2)
+        self.assertEqual(self.deletes(graph),[('delete','ad','10')])
+        self.assertIn('20',runtime.queue)
+        self.assertNotEqual(graph.ads['11']['status'],'DELETED')
+        self.assertNotEqual(graph.ads['12']['status'],'DELETED')
 
-    def test_no_creative_write_when_last_eligible_basis_fails_refresh(self):
+    def test_no_creative_write_when_every_basis_fails_current_review(self):
         runner,_,graph,_=self.fixture([ad(),ad('11','20')])
-        manifest=self.manifest(runner);original=graph.get_ad
-        def get_ad(identifier,user):
-            if identifier=='11':
-                graph.ads['10']['effective_status']='PENDING_REVIEW'
-                graph.ads['11']['effective_status']='PENDING_REVIEW'
-            return original(identifier,user)
-        graph.get_ad=get_ad
+        manifest=self.manifest(runner)
+        for current in graph.ads.values():current['effective_status']='PENDING_REVIEW'
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        self.assertEqual(graph.calls,[('get','10'),('get','11'),('get','10')])
         self.assertEqual(self.deletes(graph),[])
 
-    def test_external_creative_change_after_group_preflight_cancels_ad(self):
+    def test_external_creative_change_before_delete_cancels_ad(self):
         runner,_,graph,runtime=self.fixture()
         manifest=self.manifest(runner)
-        def change(kind,identifier):
-            if kind=='creative':graph.ads['10']['creative']['id']='999'
-        graph.on_delete=change
+        original=graph.get_ad
+        def changed(identifier,user):
+            graph.ads[identifier]['creative']['id']='999'
+            return original(identifier,user)
+        graph.get_ad=changed
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        self.assertEqual(self.deletes(graph),[('delete','creative','20')])
-        self.assertEqual(runtime.data['remaining_ads'],1)
+        self.assertEqual(self.deletes(graph),[])
+        self.assertNotEqual(graph.ads['10']['status'],'DELETED')
 
-    def test_new_rejection_or_review_after_failed_or_accepted_creative_blocks_ad(self):
-        for creative_status in ('failed','api_accepted','unknown'):
-            for review in ('DISAPPROVED','PENDING_REVIEW','ACTIVE_WITH_NEW_FEEDBACK'):
-                with self.subTest(creative_status=creative_status,review=review):
-                    # Every scenario needs its own frozen run and shared job.
-                    runner,_,graph,runtime=self.fixture()
-                    run_id='review-'+creative_status+'-'+review
-                    runner.store=Store(str(pathlib.Path(self.temp.name)/(run_id+'.sqlite')))
-                    manifest=runner.scan(run_id,START,END)
-                    graph.results[('creative','20')]={'status':creative_status,'request_sent':True}
-                    if creative_status=='unknown':graph.verifications[('creative','20')]={'status':'present'}
-                    def change(kind,identifier):
-                        if kind=='creative':
-                            graph.ads['10']['effective_status']='PAUSED' if review=='ACTIVE_WITH_NEW_FEEDBACK' else review
-                            if review!='PENDING_REVIEW':
-                                graph.ads['10']['ad_review_feedback']={'global':{'Spam':'new review rejection'}}
-                    graph.on_delete=change
-                    self.assertEqual(runner.execute(run_id,manifest),'partial')
-                    self.assertEqual(self.deletes(graph),[('delete','creative','20')])
-                    self.assertEqual(runtime.data['remaining_ads'],1)
+    def test_new_rejection_or_review_before_delete_blocks_ad_and_creative(self):
+        for review in ('DISAPPROVED','PENDING_REVIEW','ACTIVE_WITH_NEW_FEEDBACK'):
+            with self.subTest(review=review):
+                runner,_,graph,runtime=self.fixture()
+                run_id='review-'+review
+                runner.store=Store(str(pathlib.Path(self.temp.name)/(run_id+'.sqlite')))
+                manifest=runner.scan(run_id,START,END)
+                graph.ads['10']['effective_status']='PAUSED' if review=='ACTIVE_WITH_NEW_FEEDBACK' else review
+                if review!='PENDING_REVIEW':
+                    graph.ads['10']['ad_review_feedback']={'global':{'Spam':'new review rejection'}}
+                self.assertEqual(runner.execute(run_id,manifest),'partial')
+                self.assertEqual(self.deletes(graph),[])
+                self.assertNotEqual(graph.ads['10']['status'],'DELETED')
 
-    def test_verified_deleted_creative_does_not_prove_with_issues_is_self_induced(self):
+    def test_current_with_issues_never_assumed_to_be_self_induced(self):
         runner,_,graph,runtime=self.fixture()
         manifest=self.manifest(runner)
-        def change(kind,identifier):
-            if kind=='creative':
-                graph.ads['10']['effective_status']='WITH_ISSUES'
-                graph.ads['10']['issues_info']=[{'error_code':123,'error_message':'Creative is unavailable'}]
-        graph.on_delete=change
+        graph.ads['10']['effective_status']='WITH_ISSUES'
+        graph.ads['10']['issues_info']=[{'error_code':123,'error_message':'Creative is unavailable'}]
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        self.assertEqual(self.deletes(graph),[('delete','creative','20')])
-        self.assertEqual(runtime.data['remaining_ads'],1)
-        self.assertEqual(self.store.get_job('policy-cleanup-test-run')['objects'][0]['status'],'deleted')
+        self.assertEqual(self.deletes(graph),[])
+        self.assertNotEqual(graph.ads['10']['status'],'DELETED')
 
     def test_failed_creative_still_allows_independently_current_clear_ad(self):
         runner,_,graph,_=self.fixture()
         manifest=self.manifest(runner)
         graph.results[('creative','20')]={'status':'failed','request_sent':True}
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
+        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','creative','20')])
 
-    def test_rule1_resumed_ad_is_not_deleted_after_creative(self):
-        runner,source,graph,_=self.fixture()
-        source.vios=source.vios[:1]
+    def test_five_violation_paused_ad_resumed_before_delete_is_protected(self):
+        runner,_,graph,_=self.fixture()
         manifest=self.manifest(runner)
-        def change(kind,identifier):
-            if kind=='creative':graph.ads['10']['status']='ACTIVE'
-        graph.on_delete=change
+        graph.ads['10'].update(status='ACTIVE',effective_status='ACTIVE')
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        self.assertEqual(self.deletes(graph),[('delete','creative','20')])
+        self.assertEqual(self.deletes(graph),[])
 
     def test_canary_then_same_manifest_continuation_only_pending_groups(self):
         runner,_,graph,runtime=self.fixture([ad(),ad('11','21')])
@@ -449,7 +430,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(runtime.data['remaining_ads'],1)
         self.assertEqual(runner.execute('test-run',manifest,start_phase='start-2'),'completed')
         self.assertEqual(self.deletes(graph),[
-            ('delete','creative','20'),('delete','ad','10'),('delete','creative','21'),('delete','ad','11')])
+            ('delete','ad','10'),('delete','creative','20'),('delete','ad','11'),('delete','creative','21')])
         job=self.store.get_job('policy-cleanup-test-run')
         self.assertEqual(len(job['runs']),2)
         self.assertEqual(len({r['request_id'] for r in job['runs']}),2)
@@ -463,45 +444,49 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(runtime.data['remaining_ads'],2)
         self.assertEqual(runner.execute('test-run',manifest,max_ads=2,start_phase='start-2'),'completed')
 
-    def test_api_accepted_is_preserved_while_unknown_blocks_replay(self):
+    def test_api_accepted_ad_unknown_blocks_replay_and_creative(self):
         runner,_,graph,_=self.fixture()
         manifest=self.manifest(runner)
-        graph.verifications={('creative','20'):{'status':'unknown'},('ad','10'):{'status':'unknown'}}
+        graph.verifications={('ad','10'):{'status':'unknown'}}
         self.assertEqual(runner.execute('test-run',manifest),'partial')
-        before=len(self.deletes(graph))
         self.assertEqual(runner.execute('test-run',manifest,start_phase='start-2'),'partial')
-        self.assertEqual(len(self.deletes(graph)),before)
-        objects=self.store.get_job('policy-cleanup-test-run')['objects']
-        for obj in objects:
-            self.assertEqual(obj['status'],'unknown')
-            self.assertTrue(obj['result']['api_accepted'])
-            self.assertEqual(obj['result']['delete_status'],'api_accepted')
-            self.assertEqual(obj['result']['credential_user_id'],'1')
+        self.assertEqual(self.deletes(graph),[('delete','ad','10')])
+        objects={o['key']:o for o in self.store.get_job('policy-cleanup-test-run')['objects']}
+        obj=objects['ad:10']
+        self.assertEqual(obj['status'],'unknown')
+        self.assertTrue(obj['result']['api_accepted'])
+        self.assertEqual(obj['result']['delete_status'],'api_accepted')
+        self.assertEqual(obj['result']['credential_user_id'],'1')
+        self.assertNotEqual(objects['creative:20']['status'],'deleted')
 
     def test_failed_objects_are_not_automatically_retried_same_run(self):
         runner,_,graph,_=self.fixture()
         manifest=self.manifest(runner)
-        graph.results={('creative','20'):{'status':'failed'},('ad','10'):{'status':'failed'}}
+        graph.results={('ad','10'):{'status':'failed','request_sent':True}}
         runner.execute('test-run',manifest)
+        first=list(self.deletes(graph))
         runner.execute('test-run',manifest,start_phase='start-2')
-        self.assertEqual(len(self.deletes(graph)),2)
+        self.assertEqual(first,[('delete','ad','10')])
+        self.assertEqual(self.deletes(graph),first)
 
     def test_runtime_ledger_failure_stops_before_any_delete(self):
         runner,_,graph,runtime=self.fixture()
         manifest=self.manifest(runner);runtime.fail_barrier=1
         with self.assertRaises(RuntimeLedgerError):runner.execute('test-run',manifest)
         self.assertEqual(self.deletes(graph),[])
-        creative=self.store.get_job('policy-cleanup-test-run')['objects'][0]
-        self.assertEqual(creative['status'],'unknown')
+        objects={o['key']:o for o in self.store.get_job('policy-cleanup-test-run')['objects']}
+        self.assertEqual(objects['ad:10']['status'],'unknown')
+        self.assertEqual(objects['creative:20']['status'],'pending')
 
     def test_shared_ledger_failure_stops_all_later_deletes(self):
         runner,_,graph,_=self.fixture()
         manifest=self.manifest(runner)
         with patch.object(self.store,'finish_object',side_effect=StoreError('disk stopped')):
             with self.assertRaises(StoreError):runner.execute('test-run',manifest)
-        self.assertEqual(self.deletes(graph),[('delete','creative','20')])
-        creative=self.store.get_job('policy-cleanup-test-run')['objects'][0]
-        self.assertEqual(creative['status'],'unknown')
+        self.assertEqual(self.deletes(graph),[('delete','ad','10')])
+        objects={o['key']:o for o in self.store.get_job('policy-cleanup-test-run')['objects']}
+        self.assertEqual(objects['ad:10']['status'],'unknown')
+        self.assertEqual(objects['creative:20']['status'],'pending')
 
     def test_interruption_fences_touched_object_and_continuation_does_not_replay(self):
         runner,_,graph,_=self.fixture([ad(),ad('11','21')])
@@ -511,10 +496,13 @@ class RunnerTests(unittest.TestCase):
         graph.results.clear()
         runner.execute('test-run',manifest,start_phase='start-2')
         self.assertEqual(self.deletes(graph).count(('delete','ad','10')),1)
-        self.assertIn(('delete','ad','11'),self.deletes(graph))
         statuses={o['key']:o['status'] for o in self.store.get_job('policy-cleanup-test-run')['objects']}
         self.assertEqual(statuses['ad:10'],'unknown')
-        self.assertEqual(statuses['ad:11'],'deleted')
+        # A cancelled claimed sibling is retried only under fresh batch evidence.
+        fresh=runner.scan('fresh-after-interruption',START,END)
+        runner.execute('fresh-after-interruption',fresh)
+        self.assertEqual(self.deletes(graph).count(('delete','ad','10')),1)
+        self.assertEqual(self.deletes(graph).count(('delete','ad','11')),1)
 
     def test_legacy_priority_releases_then_rechecks_and_continues_without_fence(self):
         runner,_,graph,_=self.fixture()
@@ -527,11 +515,11 @@ class RunnerTests(unittest.TestCase):
             number=len(acquisitions)+1;acquisitions.append(number)
             try:yield StopLease() if number==1 else Lease()
             finally:releases.append(number)
-        with patch('meta_violation_cleanup.runner.legacy_delete_lock',lock):
+        with patch('meta_violation_cleanup.concurrent_execution.legacy_delete_lock',lock):
             self.assertEqual(runner.execute('test-run',manifest),'completed')
         self.assertEqual(acquisitions,[1,2,3])
         self.assertEqual(releases,[1,2,3])
-        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
+        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','creative','20')])
         self.assertTrue(all(o['status']=='deleted' for o in self.store.get_job('policy-cleanup-test-run')['objects']))
 
     def test_legacy_priority_between_creative_and_ad_does_not_replay_creative(self):
@@ -543,32 +531,29 @@ class RunnerTests(unittest.TestCase):
         def lock(path,stop):
             number=len(acquisitions)+1;acquisitions.append(number)
             yield StopLease() if number==2 else Lease()
-        with patch('meta_violation_cleanup.runner.legacy_delete_lock',lock):
+        with patch('meta_violation_cleanup.concurrent_execution.legacy_delete_lock',lock):
             self.assertEqual(runner.execute('test-run',manifest),'completed')
-        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','10')])
+        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','creative','20')])
         self.assertEqual(acquisitions,[1,2,3])
 
-    def test_legacy_wait_after_complete_preflight_rechecks_whole_group(self):
+    def test_legacy_wait_refreshes_policy_before_retrying_unsubmitted_ad(self):
         runner,_,graph,_=self.fixture([ad(),ad('11','20')])
         manifest=self.manifest(runner);acquisitions=[]
         class WindowAfterPreflight:
             def __init__(self):self.checks=0
             def check(self):
                 self.checks+=1
-                if self.checks==5:
+                if self.checks==2:
                     graph.ads['10']['effective_status']='PENDING_REVIEW'
                     raise InterruptedError('legacy_priority_window')
         @contextmanager
         def lock(path,stop):
             acquisitions.append(len(acquisitions)+1)
             yield WindowAfterPreflight() if len(acquisitions)==1 else Lease()
-        with patch('meta_violation_cleanup.runner.legacy_delete_lock',lock):
+        with patch('meta_violation_cleanup.concurrent_execution.legacy_delete_lock',lock):
             self.assertEqual(runner.execute('test-run',manifest),'partial')
-        first_delete=graph.calls.index(('delete','creative','20'))
-        self.assertEqual(graph.calls[:first_delete],
-            [('get','10'),('get','11'),('get','10'),('get','11')])
-        self.assertEqual(self.deletes(graph),[('delete','creative','20'),('delete','ad','11')])
-        self.assertEqual(acquisitions,[1,2,3])
+        self.assertEqual(self.deletes(graph),[('delete','ad','11')])
+        self.assertGreaterEqual(len(acquisitions),2)
 
     def test_stop_after_claim_before_graph_call_records_known_not_sent(self):
         runner,_,graph,runtime=self.fixture()
@@ -576,9 +561,10 @@ class RunnerTests(unittest.TestCase):
         runner.stop=lambda:runtime.barriers>0
         with self.assertRaises(InterruptedError):runner.execute('test-run',manifest)
         self.assertEqual(self.deletes(graph),[])
-        creative=self.store.get_job('policy-cleanup-test-run')['objects'][0]
-        self.assertEqual(creative['status'],'failed')
-        self.assertFalse(creative['result']['request_sent'])
+        objects={o['key']:o for o in self.store.get_job('policy-cleanup-test-run')['objects']}
+        self.assertEqual(objects['ad:10']['status'],'failed')
+        self.assertFalse(objects['ad:10']['result']['request_sent'])
+        self.assertEqual(objects['creative:20']['status'],'pending')
 
     def test_incomplete_account_cannot_contribute_candidates_or_counts(self):
         runner,_,graph,_=self.fixture([ad(),ad('11','21',account='200')])

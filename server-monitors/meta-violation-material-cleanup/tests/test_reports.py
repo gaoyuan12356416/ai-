@@ -1,5 +1,6 @@
 """Bounded summaries preserve evidence and count final unique ledger objects."""
 import copy
+import json
 import pathlib
 import sys
 import tempfile
@@ -10,7 +11,7 @@ HERE = pathlib.Path(__file__).resolve()
 sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE.parents[3]))
 from features.fb_ad_asset_delete.store import Store, StoreError
-from meta_violation_cleanup.reports import classify, summarize_objects
+from meta_violation_cleanup.reports import classify, summarize_objects, origin_counts, _accepted_writes
 from meta_violation_cleanup.runner import ACTOR, Runner
 from meta_violation_cleanup.runtime import Runtime
 
@@ -326,6 +327,161 @@ class ReportTests(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in paths}, before_files)
         self.assertEqual(len(self.runtime.load_artifact('report', 'deferred-cleanup.json')[0]['blocked_ads']), 20000)
         self.notifier.assert_not_called()
+
+
+class V3ReportTests(unittest.TestCase):
+    def setUp(self):
+        ReportTests.setUp(self)
+        self.manifest.update(policy_version='20261027-v3',
+            candidates=[{'ad_id': '10', 'creative_id': '20', 'root_id': '1479'},
+                        {'ad_id': '11', 'creative_id': '21', 'root_id': '3302'}],
+            recovery_creatives=[{'basis': {'creative_id': '20'}}, {'basis': {'creative_id': '22'}}],
+            recovery_assessment={'total': 5, 'eligible_ids': ['20', '22'],
+                                 'deferred_by_reason': {'below_threshold': 2, 'active_reference': 1}},
+            shared_reference_coverage='checked_before_creative_delete')
+        self.runtime.artifact('report', 'manifest.json', self.manifest)
+        self.runtime.update('report', reference_scan_metrics={'wall_seconds': 65.9,
+            'account_scans': 2, 'peak_accounts': 2, 'request_wait_milliseconds': 999999999})
+        self.store = Store(str(pathlib.Path(self.temp.name) / 'v3-shared.sqlite3'))
+        self.runner.store = self.store
+
+    def tearDown(self):
+        ReportTests.tearDown(self)
+
+    def create_job(self, objects=None, job_id='policy-cleanup-report', request='v3-test'):
+        if objects is None:
+            objects = [row('10'), row('11'), row('12'), row('20', kind='creative'),
+                       row('21', kind='creative'), row('22', kind='creative')]
+        self.store.create_job({'job_id': job_id, 'preview_id': 'hash', 'actor': ACTOR,
+                              'policy_version': '20261027-v3', 'objects': objects})
+        with patch('features.fb_ad_asset_delete.store._process_start', return_value=(True, 'test-owner')):
+            return self.store.claim_run(job_id, 'hash', ACTOR, ['ad', 'creative'], request)['run_id']
+
+    def finish(self, run, identifier, result, status='deleted', kind='ad', job_id='policy-cleanup-report'):
+        key = kind + ':' + identifier
+        self.assertTrue(self.store.claim_object(job_id, key, run)['claimed'])
+        self.store.finish_object(job_id, key, run, status, result)
+
+    def test_v3_origin_and_actual_results_separated_without_mutation(self):
+        run = self.create_job()
+        self.finish(run, '10', verified('10'))
+        self.finish(run, '11', {'request_sent': True, 'api_accepted': True,
+                               'verification': {'status': 'unknown'}}, 'unknown')
+        self.finish(run, '12', verified('12', request_sent=False, api_accepted=False))
+        self.finish(run, '20', verified('20'), kind='creative')
+        self.finish(run, '22', failed(200, 1487235), 'failed', kind='creative')
+        self.runtime.claim_notice('report', 'end', 'IMMUTABLE HISTORICAL NOTICE')
+        before_notice = self.runtime.notice('report', 'end')
+        before_job = self.store.get_job('policy-cleanup-report')
+        text = self.runner.end_text('report')
+        for expected in ('最近3天，同素材≥5个不同违规广告', '活跃不删',
+                         '新候选：DramaWave 1；HotDrama 1；广告合计2，关联唯一Creative 2',
+                         '历史待清理Creative：总数5；本批合格2；暂缓3；与新候选重复1；历史净新增1',
+                         '共享补删：新增纳入广告1；本批纳入总数：广告3、Creative 3',
+                         '本批实际确认删除：广告1；Creative 1',
+                         '广告其余：已接受待核验1；历史/非本批已删1',
+                         '共享引用耗时：1分5秒', '失败主因：共享引用阻塞1个'):
+            self.assertIn(expected, text)
+        self.assertNotIn('999999999', text)
+        self.assertNotIn('共享引用覆盖未完成', text)
+        self.assertLessEqual(len(text), 1200)
+        self.assertLessEqual(len(text.splitlines()), 14)
+        self.assertEqual(self.store.get_job('policy-cleanup-report'), before_job)
+        self.assertEqual(self.runtime.notice('report', 'end'), before_notice)
+        self.notifier.assert_not_called()
+
+    def test_current_job_accepted_then_reconciled_uses_original_audit(self):
+        run = self.create_job()
+        self.finish(run, '10', {'status': 'unknown', 'request_sent': True,
+                              'api_accepted': True, 'verification': {'status': 'present'}}, 'unknown')
+        self.store.reconcile_object('policy-cleanup-report', 'ad:10', 'deleted', {
+            'request_sent': False, 'reconciliation_only': True,
+            'proof': {'id': '10', 'account_id': '100', 'status': 'DELETED'}})
+        job = self.store.get_job('policy-cleanup-report')
+        self.assertIn(('ad', '10'), _accepted_writes(self.store, 'policy-cleanup-report', job['objects']))
+        self.assertIn('本批实际确认删除：广告1；Creative 0', self.runner.end_text('report'))
+
+    def test_other_job_sent_accepted_proof_never_becomes_current_deletion(self):
+        old = self.create_job([row('12')], job_id='policy-cleanup-old', request='old')
+        self.finish(old, '12', verified('12'), job_id='policy-cleanup-old')
+        self.store.finish_run(old, 'completed', {})
+        run = self.create_job()
+        claim = self.store.claim_object('policy-cleanup-report', 'ad:12', run)
+        self.assertFalse(claim['claimed'])
+        self.assertEqual(claim['status'], 'already_deleted')
+        job = self.store.get_job('policy-cleanup-report')
+        self.assertNotIn(('ad', '12'), _accepted_writes(self.store, 'policy-cleanup-report', job['objects']))
+        text = self.runner.end_text('report')
+        self.assertIn('本批实际确认删除：广告0；Creative 0', text)
+        self.assertIn('历史/非本批已删1', text)
+
+    def test_unsent_or_unaccepted_attempt_cannot_claim_actual_deletion(self):
+        run = self.create_job()
+        self.finish(run, '10', verified('10', request_sent=False))
+        self.finish(run, '11', verified('11', api_accepted=False))
+        text = self.runner.end_text('report')
+        self.assertIn('本批实际确认删除：广告0；Creative 0', text)
+        self.assertIn('广告其余：已接受待核验0；历史/非本批已删2', text)
+
+    def test_unknown_without_acceptance_is_not_new_delete_after_readback(self):
+        run = self.create_job()
+        self.finish(run, '10', {'request_sent': True, 'status': 'unknown', 'api_accepted': False}, 'unknown')
+        self.store.reconcile_object('policy-cleanup-report', 'ad:10', 'deleted', {
+            'request_sent': False, 'proof': {'id': '10', 'account_id': '100', 'status': 'DELETED'}})
+        self.assertIn('本批实际确认删除：广告0；Creative 0', self.runner.end_text('report'))
+
+    def test_same_job_retries_are_counted_once(self):
+        run = self.create_job()
+        self.finish(run, '10', failed(200, 1487235), 'failed')
+        self.finish(run, '10', failed(100, 3858800), 'failed')
+        self.finish(run, '10', verified('10'))
+        text = self.runner.end_text('report')
+        self.assertIn('本批实际确认删除：广告1；Creative 0', text)
+        self.assertNotIn('失败主因', text)
+
+    def test_bad_original_account_or_attempt_link_is_not_write_provenance(self):
+        run = self.create_job()
+        self.finish(run, '10', verified('10', account_id='101'))
+        self.finish(run, '11', verified('11'))
+        with self.store._transaction() as conn:
+            conn.execute("UPDATE fb_asset_delete_v2_audit SET details=? WHERE job_id=? AND action='object_finished' "
+                         "AND json_extract(details,'$.key')='ad:11'", (json.dumps({'key': 'ad:11',
+                         'run_id': run, 'attempt_id': 'wrong-attempt', 'result': verified('11')}), 'policy-cleanup-report'))
+        text = self.runner.end_text('report')
+        self.assertIn('本批实际确认删除：广告0；Creative 0', text)
+
+    def test_origin_mismatch_and_provenance_failure_do_not_invent_counts(self):
+        self.create_job([row('10')])
+        text = self.runner.end_text('report')
+        self.assertIn('来源校验失败', text)
+        self.assertNotIn('本批实际确认删除', text)
+        with patch('meta_violation_cleanup.reports._accepted_writes', side_effect=RuntimeError('SECRET')):
+            text = self.runner.end_text('report')
+        self.assertIn('删除凭据或来源校验失败', text)
+        self.assertNotIn('SECRET', text)
+
+    def test_assessment_must_partition_backlog(self):
+        for change in ({'total': 6}, {'eligible_ids': ['20', '20']},
+                       {'deferred_by_reason': {'bad': -1}}, {'eligible_ids': ['20']}):
+            manifest = copy.deepcopy(self.manifest)
+            manifest['recovery_assessment'].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                origin_counts(manifest)
+
+    def test_previous_audited_counts_reconcile_exact_source_sets(self):
+        candidate_creatives = [str(100000+i) for i in range(10584)]
+        candidates = [{'ad_id': str(200000+i), 'creative_id': candidate_creatives[i % 10584],
+                       'root_id': '1479' if i < 7500 else '3302'} for i in range(11774)]
+        history = candidate_creatives[:1669] + [str(400000+i) for i in range(10765)]
+        manifest = {'candidates': candidates, 'recovery_creatives': [
+            {'basis': {'creative_id': cid}} for cid in history]}
+        objects = [row(str(200000+i)) for i in range(16530)] + [
+            row(cid, kind='creative') for cid in sorted(set(candidate_creatives) | set(history))]
+        result = origin_counts(manifest, objects)
+        self.assertEqual((result['new_ads'], result['shared_ads'], result['final_ads']), (11774, 4756, 16530))
+        self.assertEqual((result['new_creatives'], result['historical_total'], result['historical_overlap'],
+                          result['historical_net_new'], result['final_creatives']), (10584, 12434, 1669, 10765, 21349))
+        self.assertEqual(result['products'], {'1479': 7500, '3302': 4274})
 
 
 if __name__ == '__main__':

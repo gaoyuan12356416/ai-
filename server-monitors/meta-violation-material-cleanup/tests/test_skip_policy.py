@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import test_phased_execution as phased
-from test_runner import ad, legacy_lock
+from test_runner import ad, lineage, legacy_lock
 from meta_violation_cleanup.runtime import digest
 from meta_violation_cleanup.skip_policy import SkipPolicy, failure_reason, ACTOR
 from meta_violation_cleanup.throttle import Governor, GovernedSession, RequestNotSent
@@ -37,24 +37,25 @@ class SkipExecutionTests(unittest.TestCase):
     def test_content_failure_is_not_repeated_in_shared_phase_or_next_run(self):
         runner,source,graph,runtime,m=self.prepare()
         graph.ads['12']=ad('12','20')
+        source.rows['12']=[lineage('12','20')]
         graph.results[('ad','10')]=CONTENT
         graph.results[('creative','20')]=DEPENDENCY
         runner.execute('test-run',m)
         original=self.store.get_job('policy-cleanup-test-run')
-        blocked=next(o for o in original['objects'] if o['key']=='ad:10')['result']
-        self.assertEqual(blocked['status'],'blocked')
-        self.assertFalse(blocked['request_sent'])
-        self.assertTrue(blocked['policy_skip_source']['original_result']['request_sent'])
-        self.assertEqual(blocked['policy_skip_reason'],'content_unavailable')
+        failed=next(o for o in original['objects'] if o['key']=='ad:10')['result']
+        self.assertEqual(failed['status'],'failed')
+        self.assertTrue(failed['request_sent'])
+        self.assertEqual(failed['policy_skip_reason'],'content_unavailable')
         with self.store._transaction(False) as conn:
             sent=conn.execute("SELECT result FROM fb_asset_delete_v2_attempts WHERE object_key='ad:10' AND status='failed'").fetchone()
         self.assertIn('"request_sent":true',sent['result'])
         second=self.next_manifest(m,runtime)
         runner.execute('second-run',second)
+        self.assertEqual(self.store.get_job('policy-cleanup-test-run'),original)
         self.assertEqual(self.deletes(graph).count(('delete','ad','10')),1)
-        self.assertEqual(self.deletes(graph).count(('delete','ad','12')),1)
-        self.assertEqual(self.deletes(graph).count(('delete','creative','20')),1)
-        self.assertEqual(runtime.queue['20']['blocked_ads'][0]['result']['policy_skip_reason'],'content_unavailable')
+        self.assertEqual(self.deletes(graph).count(('delete','ad','12')),0)
+        self.assertEqual(self.deletes(graph).count(('delete','creative','20')),0)
+        self.assertEqual(runtime.queue['20']['blocked_ads'][0]['result']['reason'],'content_unavailable')
 
     def test_account_failure_blocks_its_ads_and_creatives_but_other_account_completes(self):
         runner,source,graph,runtime,m=self.prepare([ad(),ad('11','21'),ad('12','22','200')])

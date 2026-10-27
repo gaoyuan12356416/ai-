@@ -16,8 +16,15 @@ from test_runner import ad, lineage, START, END
 class MaterialScanTests(unittest.TestCase):
     setUp=fixtures.RunnerTests.setUp
     tearDown=fixtures.RunnerTests.tearDown
-    fixture=fixtures.RunnerTests.fixture
-    def test_three_day_scan_with_no_new_violations_keeps_old_creative_backlog(self):
+    def fixture(self,ads=None):
+        result=fixtures.RunnerTests.fixture(self,ads)
+        source=result[1]
+        if len(source.vios)<5:
+            aid='105';source.rows[aid]=[lineage(aid,'205')]
+            source.vios.append(dict(source.vios[0],id='5',ad_id=aid))
+        return result
+
+    def test_three_day_scan_with_no_new_violations_defers_old_creative_backlog(self):
         runner,source,graph,runtime=self.fixture()
         old=runner.scan('old30',START,END)
         entry={'basis':copy.deepcopy(old['candidates'][0]),'origin_run_id':'old30',
@@ -31,21 +38,24 @@ class MaterialScanTests(unittest.TestCase):
             fresh=scan(runner,'new3',start,END)
         self.assertEqual(fresh['candidates'],[])
         self.assertEqual(fresh['evidence']['materials'],{})
-        self.assertEqual(fresh['recovery_creatives'],[entry])
+        self.assertEqual(fresh['recovery_creatives'],[])
+        self.assertEqual(fresh['recovery_assessment']['total'],1)
+        self.assertEqual(fresh['recovery_assessment']['deferred_by_reason'],{'violation_threshold_not_met':1})
+        self.assertEqual(runtime.cleanup_backlog(),[entry])
         self.assertEqual(fresh['window_start'],start)
 
     def test_reference_comparison_keeps_old_threshold_separate_from_fresh_candidates(self):
-        runner,source,graph,runtime=self.fixture([ad(status='ACTIVE')])
+        runner,source,graph,runtime=self.fixture([ad()])
         old=runner.scan('baseline',START,END)
         self.assertEqual(len(old['candidates']),1)
         runtime.load_artifact=lambda run,name:copy.deepcopy(old)
         runner.config['comparison_reference_run_id']='baseline'
-        source.vios.pop() # Fresh evidence has 3 violations; old control still has 4.
+        source.vios.pop() # Fresh evidence has 4 violations; old control still has 5.
         for aid,rows in source.rows.items():
             for row in rows:row.update(id=aid,ad_account_id='100')
         source.selected_credentials=lambda rows:{r['id']:{'user_id':'1','error':''} for r in rows}
         graph.safe_metrics={};source.safe_metrics={}
-        graph.iter_target_ads=lambda *args:iter([(('1','100',['10']),{'10':ad(status='ACTIVE')},{})])
+        graph.iter_target_ads=lambda *args:iter([(('1','100',['10']),{'10':ad()},{})])
         raw=[dict(source.rows['10'][0])]
         with patch('meta_violation_cleanup.material_scan.material_rows',return_value=(raw,{})):
             result=scan(runner,'fresh',START,END)
@@ -88,6 +98,47 @@ class MaterialScanTests(unittest.TestCase):
         self.assertEqual([c['ad_id'] for c in result['candidates']],['10'])
         self.assertEqual(result['skip_counts']['current_creative_lineage_missing'],1)
         self.assertEqual(result['scanner'],'material_indexed')
+        self.assertEqual(result['policy_version'],'20261027-v3')
+        self.assertEqual(result['selection_policy']['min_distinct_violating_ads'],5)
+
+    def test_reverse_lookup_excludes_materials_below_threshold(self):
+        runner,source,graph,runtime=self.fixture()
+        source.vios.pop()
+        graph.safe_metrics={};source.safe_metrics={}
+        graph.iter_target_ads=lambda *args:iter([])
+        with patch('meta_violation_cleanup.material_scan.material_rows',return_value=([],{})) as lookup:
+            result=scan(runner,'below',START,END)
+        self.assertEqual(lookup.call_args.args[1],set())
+        self.assertEqual(result['candidates'],[])
+
+    def test_partial_account_discards_its_candidates_but_preserves_other_accounts(self):
+        runner,source,graph,runtime=self.fixture([ad(),ad('11','21'),ad('12','22',account='200')])
+        for aid,rows in source.rows.items():
+            for row in rows:row['id']=aid
+        source.selected_credentials=lambda rows:{r['id']:{'user_id':'1','error':''} for r in rows}
+        graph.safe_metrics={};source.safe_metrics={}
+        graph.iter_target_ads=lambda *args:iter([
+            (('1','100',['10','11']),{'10':ad()},{'11':{'code':'unreadable'}}),
+            (('1','200',['12']),{'12':ad('12','22',account='200')},{})])
+        raw=[dict(r) for aid in ('10','11','12') for r in source.rows[aid]]
+        with patch('meta_violation_cleanup.material_scan.material_rows',return_value=(raw,{})):
+            result=scan(runner,'partial-account',START,END)
+        self.assertEqual([c['ad_id'] for c in result['candidates']],['12'])
+        self.assertEqual(result['skip_counts']['account_coverage_incomplete'],1)
+        self.assertEqual({c['account_id']:c['candidates'] for c in result['coverage']['accounts']}, {'100':0,'200':1})
+
+    def test_unreadable_ad_does_not_create_disabled_account_creative_probe(self):
+        runner,source,graph,runtime=self.fixture()
+        for aid,rows in source.rows.items():
+            for row in rows:row.update(id=aid,ad_account_id='100')
+        source.selected_credentials=lambda rows:{r['id']:{'user_id':'1','error':''} for r in rows}
+        graph.safe_metrics={};source.safe_metrics={}
+        graph.iter_target_ads=lambda *args:iter([(('1','100',['10']),{}, {'10':{'code':100}})])
+        graph.account_diagnostic=lambda *args:self.fail('disabled account cannot bypass v3 qualification')
+        with patch('meta_violation_cleanup.material_scan.material_rows',return_value=([source.rows['10'][0]],{})):
+            result=scan(runner,'unreadable',START,END)
+        self.assertEqual(result['blocked_account_creatives'],[])
+        self.assertEqual(len(result['coverage']['errors']),1)
 
     def test_batch_read_preserves_per_object_errors_and_account_identity(self):
         class Response:

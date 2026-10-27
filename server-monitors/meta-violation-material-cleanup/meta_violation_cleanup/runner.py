@@ -248,7 +248,8 @@ class Runner:
                     if str(a.get('creative_id',''))==cid and str(a.get('product','')).isdigit()})} for r in extra]
         violation_ids=defaultdict(list)
         for row in policy_rows:violation_ids[str(row['ad_id'])].append(str(row['id']))
-        manifest={'version':1,'policy_version':'20261023-v1','run_id':run_id,'window_start':start,'window_end':end,'frozen_at':now(),
+        from .policy import POLICY_VERSION, POLICY_CONTRACT
+        manifest={'version':3,'policy_version':POLICY_VERSION,'selection_policy':dict(POLICY_CONTRACT),'run_id':run_id,'window_start':start,'window_end':end,'frozen_at':now(),
             'root_products':['1479','3302'],'scope':scope,'candidates':candidates,'evidence':evidence,
             'violation_ids_by_ad':{adid:sorted(set(ids)) for adid,ids in violation_ids.items()},
             'coverage':{'accounts_total':len(accounts),'accounts':account_results,'errors':errors},
@@ -277,6 +278,9 @@ class Runner:
         if context is None:
             with self.sql_snapshot():
                 context=self.source.current_ad_context(candidate['ad_id'],candidate['creative_id'])
+        from .backlog_policy import current_account_matches
+        if not current_account_matches(context,candidate):
+            return {'eligible':False,'reason':'current_account_changed'}
         rows=context['rows'];sources=context['sources'];scope=context['scope']
         users={numeric_id(uid) for uid in context['credential_users']}
         if users!={candidate['user_id']}:
@@ -411,170 +415,9 @@ class Runner:
         return ''
 
     def execute(self, run_id, manifest, max_ads=None, start_phase='start'):
-        if self.config.get('execution_order') == 'ads_first':
-            from .phased_execution import execute
-            return execute(self, run_id, manifest, max_ads, start_phase)
-        plain={k:v for k,v in manifest.items() if k!='sha256'}
-        if digest(plain)!=manifest['sha256']:raise ValueError('manifest_hash_mismatch')
-        if manifest.get('run_id')!=run_id:raise ValueError('manifest_run_mismatch')
-        if max_ads is not None and (isinstance(max_ads,bool) or not isinstance(max_ads,int) or max_ads<1):
-            raise ValueError('max_ads_must_be_positive')
-        notice=self.runtime.notice(run_id,start_phase)
-        if not notice or notice['status']!='sent':raise RuntimeError('start_notification_not_confirmed')
-        all_groups=defaultdict(list);seen=set()
-        complete_accounts={str(a['account_id']) for a in manifest['coverage']['accounts'] if a['status']=='complete'}
-        for c in manifest['candidates']:
-            for name in ('ad_id','creative_id','account_id','user_id'):numeric_id(c[name])
-            if c['ad_id'] in seen:raise ValueError('duplicate_candidate_ad')
-            seen.add(c['ad_id'])
-            if c['account_id'] not in complete_accounts:raise ValueError('candidate_account_not_complete')
-            if c['root_id'] not in ('1479','3302'):raise ValueError('candidate_product_out_of_scope')
-            all_groups[c['creative_id']].append(c)
-        objects=[]
-        for cid,items in all_groups.items():
-            first=items[0]
-            if any(c['account_id']!=first['account_id'] for c in items):raise ValueError('creative_account_conflict')
-            common={'account_ids':[first['account_id']],'user_ids':sorted({c['user_id'] for c in items}),'product_ids':sorted({p for x in items for p in x['identity']['product_ids']})}
-            objects.append(dict(common,kind='creative',object_id=cid,shared_impact=manifest['shared_creative_impacts'].get(cid,[])))
-            for c in items:
-                objects.append(dict(common,kind='ad',object_id=c['ad_id'],creative_ids=[cid],material_ids=c['material_ids'],rules=c['rules'],user_ids=[c['user_id']]))
-        job_id='policy-cleanup-'+run_id
-        try:job=self.store.get_job(job_id)
-        except Exception as exc:
-            if getattr(exc,'code',None)!='not_found':raise
-            job=self.store.create_job({'job_id':job_id,'preview_id':manifest['sha256'],'actor':ACTOR,'actor_name':'Meta违规素材定时清理',
-                'status':'ready','objects':objects,'job_source':'scheduled_violation_cleanup','policy_version':manifest['policy_version'],
-                'manifest_sha256':manifest['sha256'],'window_start':manifest['window_start'],'window_end':manifest['window_end'],
-                'products':[{'id':r,'name':n,'kind':'root','parent_id':r,'parent_name':n} for r,n in [('1479','DramaWave'),('3302','HotDrama')]]})
-        if job.get('preview_id')!=manifest['sha256'] or job.get('actor')!=ACTOR:
-            raise ValueError('existing_job_manifest_mismatch')
-        old={o['key']:o for o in job['objects']}
-        if set(old)!={o['kind']+':'+o['object_id'] for o in objects}:
-            raise ValueError('existing_job_object_scope_mismatch')
-        # A canary uses whole Creative dependency groups. The full manifest is
-        # frozen in the job from the outset, so a later invocation can process
-        # untouched groups without resetting receipts, failures, or fences.
-        groups={};selected=0;limited=0
-        for cid,items in all_groups.items():
-            pending=[c for c in items if old['ad:'+c['ad_id']]['status']=='pending']
-            if not pending:continue
-            if max_ads is not None and selected+len(pending)>max_ads:
-                limited+=len(pending);continue
-            groups[cid]=pending;selected+=len(pending)
-        run=self.store.claim_run(job_id,manifest['sha256'],ACTOR,['creative','ad'],job_id+'-'+uuid.uuid4().hex)
-        shared_run=run['run_id']
-        counts=Counter();results=[];final='completed'
-        isolated_graph=None
-        try:
-            if isinstance(self.graph,GraphClient):
-                # Do not alter the scan client's retries or any inventory
-                # worker's session. A separate short, non-retrying read client
-                # bounds lock-held mutation/preflight work near 10:00.
-                isolated_graph=GraphClient(self.graph.tokens,version=self.graph.version,
-                    timeout=min(self.graph.timeout,20),get_retries=0)
-                isolated_graph.share_read_metrics(self.graph)
-                isolated_graph.delete_stop=self.stop
-                self.execution_graph=isolated_graph
-            self.runtime.update(run_id,stage='executing',shared_job_id=job_id,shared_run_id=shared_run,canary_deferred_ads=limited)
-            for cid,items in groups.items():
-                self.check_stop()
-                while True:
-                    try:
-                        with legacy_delete_lock(self.config['legacy_lock'],self.stop) as lease:
-                            admitted=[];decisions={};group_skipped=0
-                            def checked_preflight(c,stage):
-                                self.check_stop()
-                                if lease is not None:lease.check()
-                                try:decision=self.preflight(c,manifest)
-                                except Exception as exc:
-                                    if ledger_error(exc):raise
-                                    decision={'eligible':False,'reason':'preflight_failed','error':safe_error(exc)}
-                                if lease is not None:lease.check()
-                                self.runtime.event(run_id,'preflight',{'ad_id':c['ad_id'],'stage':stage,'decision':decision})
-                                return decision
-                            last_checked=None
-                            for c in items:
-                                decision=checked_preflight(c,'group')
-                                last_checked=c['ad_id']
-                                if decision['eligible']:admitted.append(c);decisions[c['ad_id']]=decision
-                                else:group_skipped+=1
-                            previous=old['creative:'+cid]
-                            # Use the most recently checked eligible Ad as the
-                            # Creative basis. Later rejected checks also age an
-                            # earlier success, so refresh that one Ad. If it no
-                            # longer qualifies, remove it and freshly check the
-                            # next basis instead of falling back to stale proof.
-                            if previous['status']=='pending':
-                                while admitted and admitted[-1]['ad_id']!=last_checked:
-                                    c=admitted[-1]
-                                    decision=checked_preflight(c,'creative_basis')
-                                    last_checked=c['ad_id']
-                                    if decision['eligible']:decisions[c['ad_id']]=decision
-                                    else:
-                                        admitted.pop();decisions.pop(c['ad_id']);group_skipped+=1
-                            if admitted:
-                                if previous['status']=='pending':
-                                    result=self.attempt(job_id,shared_run,'creative',cid,admitted[-1],run_id,lease)
-                                else:
-                                    result={'status':previous['status'],'request_sent':False,'reason':'previous_attempt_preserved','prior_result':previous.get('result',{})}
-                        break
-                    except InterruptedError as exc:
-                        if str(exc)!='legacy_priority_window':raise
-                        # Exiting the context releases the lock. Reacquisition
-                        # waits for the old task and repeats qualification.
-                        self.runtime.event(run_id,'legacy_priority_yield',{'creative_id':cid,'stage':'creative'})
-                counts['skipped_ads']+=group_skipped
-                if not admitted:continue
-                results.append({'kind':'creative','id':cid,'result':result});counts['creative_'+result['status']]+=1
-                if result.get('api_accepted'):counts['creative_api_accepted']+=1
-                self.runtime.event(run_id,'delete_result',results[-1])
-                # Each Ad independently reacquires the legacy lock and checks
-                # current identity/pause after any wait. Never hold one large
-                # Creative group's lock across the old task's start window.
-                for c in admitted:
-                    while True:
-                        self.check_stop()
-                        try:
-                            with legacy_delete_lock(self.config['legacy_lock'],self.stop) as lease:
-                                if lease is not None:lease.check()
-                                try:guard=self.dependency_guard(c,decisions[c['ad_id']])
-                                except Exception as exc:
-                                    if ledger_error(exc):raise
-                                    guard='dependency_recheck_failed'
-                                if lease is not None:lease.check()
-                                if not guard:result=self.attempt(job_id,shared_run,'ad',c['ad_id'],c,run_id,lease)
-                            break
-                        except InterruptedError as exc:
-                            if str(exc)!='legacy_priority_window':raise
-                            self.runtime.event(run_id,'legacy_priority_yield',{'ad_id':c['ad_id'],'stage':'ad'})
-                    if guard:
-                        counts['skipped_ads']+=1
-                        self.runtime.event(run_id,'ad_skipped',{'ad_id':c['ad_id'],'reason':guard})
-                        continue
-                    results.append({'kind':'ad','id':c['ad_id'],'result':result});counts['ad_'+result['status']]+=1
-                    if result.get('api_accepted'):counts['ad_api_accepted']+=1
-                    self.runtime.event(run_id,'delete_result',results[-1])
-                self.runtime.update(run_id,result_counts=dict(counts))
-            if manifest['coverage']['errors'] or counts['skipped_ads'] or any(k.endswith(('failed','unknown','pending')) for k in counts):final='partial'
-            if limited:final='partial'
-        except BaseException:
-            final='interrupted'
-            raise
-        finally:
-            self.execution_graph=self.graph
-            if isolated_graph is not None:isolated_graph.close()
-            # Fence in-flight claims before writing optional reporting files.
-            # If this commit fails, propagate and let startup recovery fence
-            # the durable in-progress records; never proceed to another write.
-            finished=self.store.finish_run(shared_run,final,dict(counts))
-            final=finished['status']
-            current=self.store.get_job(job_id)
-            remaining=sum(o['kind']=='ad' and o['status']=='pending' for o in current['objects'])
-            unresolved=sum(o['kind']=='ad' and o['status'] not in ('deleted','already_deleted') for o in current['objects'])
-            self.runtime.artifact(run_id,'execution-results-'+shared_run+'.json',results)
-            self.runtime.artifact(run_id,'execution-results.json',results)
-            self.runtime.update(run_id,stage='execution_finished',execution_status=final,result_counts=dict(counts),remaining_ads=remaining,unresolved_ads=unresolved)
-        return final
+        # No config flag or legacy manifest may recover the former active-Ad rule.
+        from .phased_execution import execute
+        return execute(self, run_id, manifest, max_ads, start_phase)
 
     def start_text(self, run_id, start, end):
         from .reports import start_text

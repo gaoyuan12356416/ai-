@@ -5,6 +5,34 @@ description: Maintain, inspect, deploy, and reconcile the twice-daily CPU Meta v
 
 # Meta violation-material cleanup
 
+## Current operator contract (2026-10-27)
+
+The approved `20261027-v3` contract supersedes all older rule, backlog, shared-Ad,
+and stop/restart rollout instructions below. New runs use exactly three days,
+at least five distinct violating Ads for a material, and explicit pause at Ad,
+Ad Set or Campaign level. Fully active Ads are protected, including shared
+references. Historical Creative work must requalify using fresh evidence;
+neither a receipt nor a disabled account bypasses the rule. Preserve original
+evidence, successes, unknown fences and temporarily ineligible backlog.
+
+Use the common V3 evaluator at selection and the immediate destructive boundary.
+Shared scans use at most four different accounts concurrently, with one complete
+scan per account/credential pair, owner-thread SQL/SQLite, and the shared request
+governor. Recheck known blockers by targeted GET first; if still blocked, defer
+that Creative without a full inventory. No known/unknown binding may be treated
+as cleared because a read failed. Finish qualifying Ads before Creative writes.
+
+Do not interrupt, restart, reconfigure, or replace the code link of an in-flight
+run. Prepare a verified GitHub release; switch only after natural completion
+under the existing process lock, restoring only the timer. Do not launch an
+extra deletion run. Follow `../../deployment-v3.md`; rollback must retain the
+five-plus-paused policy. The current installed runtime limit is authoritative.
+
+Report new candidates, historical total/eligible/deferred/overlap/net-new,
+shared additions, final unique admission and this batch's actual confirmed
+deletions separately. New deletion requires this job's original sent/accepted
+write audit and exact final DELETED proof. Preserve historical notices.
+
 This skill maintains the independent job on CPU `43.166.187.96`. Source lives in
 GitHub `gaoyuan12356416/ai-`, directory
 `server-monitors/meta-violation-material-cleanup`. Read

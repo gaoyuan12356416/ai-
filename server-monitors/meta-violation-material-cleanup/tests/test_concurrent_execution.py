@@ -73,14 +73,14 @@ class ParallelTests(phased_fixtures.PhasedExecutionTests):
         self.assertEqual(len(self.deletes(graph)),160)
         self.assertEqual(runtime.queue,{})
 
-    def test_last_changed_ad_does_not_replace_confirmed_creative_basis(self):
+    def test_last_changed_ad_protects_creative_despite_confirmed_basis(self):
         runner,source,graph,runtime,m=self.prepare([ad(),ad('11','20')])
         graph.ads['11']['effective_status']='DISAPPROVED'
         runner.execute('test-run',m)
         self.assertIn(('delete','ad','10'),graph.calls)
         self.assertNotIn(('delete','ad','11'),graph.calls)
-        self.assertIn(('delete','creative','20'),graph.calls)
-        self.assertEqual(runtime.queue,{})
+        self.assertNotIn(('delete','creative','20'),graph.calls)
+        self.assertIn('20',runtime.queue)
 
     def test_unknown_ad_is_not_retried_or_followed_by_creative(self):
         runner,source,graph,runtime,m=self.prepare()
@@ -91,9 +91,7 @@ class ParallelTests(phased_fixtures.PhasedExecutionTests):
 
     def test_resumed_ad_is_blocked_by_final_full_policy_guard(self):
         runner,source,graph,runtime,m=self.prepare()
-        m['evidence']['materials']['501']['count']=1
-        m['evidence']['materials']['501']['violating_ad_ids']=['101']
-        m['sha256']=digest({k:v for k,v in m.items() if k!='sha256'})
+        self.assertEqual(m['evidence']['materials']['501']['count'],5)
         graph.ads['10']=ad(status='ACTIVE')
         runner.execute('test-run',m)
         self.assertEqual(self.deletes(graph),[])

@@ -10,6 +10,7 @@ from test_runner import ad, START, END
 from meta_violation_cleanup.runtime import digest
 from meta_violation_cleanup.graph import GraphError
 from meta_violation_cleanup.phased_execution import shared_state
+from meta_violation_cleanup.policy import POLICY_VERSION, POLICY_CONTRACT
 
 
 class PhasedExecutionTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class PhasedExecutionTests(unittest.TestCase):
     def prepare(self,ads=None):
         runner,source,graph,runtime=self.fixture(ads)
         manifest=runner.scan('test-run',START,END)
-        manifest['policy_version']='20261024-v2'
+        manifest.update(version=3,policy_version=POLICY_VERSION,selection_policy=copy.deepcopy(POLICY_CONTRACT))
         manifest['sha256']=digest({k:v for k,v in manifest.items() if k!='sha256'})
         runner.config['execution_order']='ads_first'
         runtime.queue={}
@@ -49,12 +50,13 @@ class PhasedExecutionTests(unittest.TestCase):
         runner,source,graph,runtime,m=self.prepare([ad(),ad('11','20')])
         graph.ads['10']['effective_status']='DISAPPROVED'
         runner.execute('test-run',m)
-        self.assertEqual(self.deletes(graph),[('delete','ad','11'),('delete','creative','20')])
-        self.assertEqual(runtime.queue,{})
+        self.assertEqual(self.deletes(graph),[('delete','ad','11')])
+        self.assertIn('20',runtime.queue)
+        self.assertTrue(runtime.queue['20']['blocked_ads'])
 
     def test_definite_dependency_rejection_collects_shared_ads_then_retries(self):
         runner,source,graph,runtime,m=self.prepare()
-        graph.ads['12']=ad('12','20',status='ACTIVE')
+        graph.ads['12']=ad('12','20');source.rows['12']=[fixtures.lineage('12','20')]
         tries=[]
         def on_delete(kind,identifier):
             if kind=='creative':
@@ -64,21 +66,25 @@ class PhasedExecutionTests(unittest.TestCase):
                     {'status':'api_accepted','request_sent':True})
         graph.on_delete=on_delete
         runner.execute('test-run',m)
-        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','creative','20'),
-            ('delete','ad','12'),('delete','creative','20')])
+        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','ad','12'),('delete','creative','20')])
+        self.assertIn('20',runtime.queue)
+        second=self.next_manifest(m,runtime)
+        runner.execute('second-run',second)
+        self.assertEqual(self.deletes(graph).count(('delete','creative','20')),2)
         self.assertEqual(runtime.queue,{})
         job=self.store.get_job('policy-cleanup-test-run')
         dependency=next(o for o in job['objects'] if o['key']=='ad:12')
-        self.assertEqual(dependency['scope_rule'],'shared_reference_cleanup_20261024')
+        self.assertEqual(dependency['scope_rule'],'shared_reference_cleanup_20261027-v3')
 
     def test_violating_shared_ad_waits_and_is_rechecked_in_next_run(self):
         runner,source,graph,runtime,m=self.prepare()
-        graph.ads['12']=ad('12','20');graph.ads['12']['effective_status']='DISAPPROVED'
+        graph.ads['12']=ad('12','20');source.rows['12']=[fixtures.lineage('12','20')]
+        graph.ads['12']['effective_status']='DISAPPROVED'
         graph.results[('creative','20')]={'status':'failed','request_sent':True,
             'response':{'code':100,'error_subcode':3858800}}
         runner.execute('test-run',m)
         self.assertNotIn(('delete','ad','12'),self.deletes(graph))
-        self.assertEqual(runtime.queue['20']['blocked_ads'][0]['result']['reason'],'violating')
+        self.assertEqual(runtime.queue['20']['blocked_ads'][0]['result']['reason'],'current_status_not_eligible')
         second=self.next_manifest(m,runtime);graph.ads['12']['effective_status']='PAUSED'
         def on_delete(kind,identifier):
             if kind=='ad' and identifier=='12':graph.results[('creative','20')]={'status':'api_accepted','request_sent':True}
@@ -91,27 +97,20 @@ class PhasedExecutionTests(unittest.TestCase):
     def test_all_shared_ads_precede_every_creative_retry(self):
         runner,source,graph,runtime,m=self.prepare([ad(),ad('11','21')])
         graph.ads['12']=ad('12','20');graph.ads['13']=ad('13','21')
-        tries={}
-        def on_delete(kind,identifier):
-            if kind=='creative':
-                tries[identifier]=tries.get(identifier,0)+1
-                graph.results[(kind,identifier)]=({'status':'failed','request_sent':True,
-                    'response':{'error_subcode':3858800}} if tries[identifier]==1 else
-                    {'status':'api_accepted','request_sent':True})
-        graph.on_delete=on_delete
+        source.rows['12']=[fixtures.lineage('12','20')];source.rows['13']=[fixtures.lineage('13','21')]
         runner.execute('test-run',m)
-        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','ad','11'),
-            ('delete','creative','20'),('delete','creative','21'),
-            ('delete','ad','12'),('delete','ad','13'),
-            ('delete','creative','20'),('delete','creative','21')])
+        writes=self.deletes(graph)
+        self.assertEqual({r[2] for r in writes if r[1]=='ad'},{'10','11','12','13'})
+        self.assertEqual({r[2] for r in writes if r[1]=='creative'},{'20','21'})
+        self.assertTrue(all(r[1]=='ad' for r in writes[:4]))
         self.assertEqual(runtime.queue,{})
 
     def test_unknown_creative_does_not_trigger_reference_deletes_or_retry(self):
         runner,source,graph,runtime,m=self.prepare()
         graph.results[('creative','20')]={'status':'unknown','request_sent':True}
         graph.verifications[('creative','20')]={'status':'unknown'}
-        graph.list_ads=lambda *args:self.fail('unknown is not definite dependency failure')
         runner.execute('test-run',m)
+        graph.list_ads=lambda *args:self.fail('unknown must not trigger another inventory scan')
         second=self.next_manifest(m,runtime)
         runner.execute('second-run',second)
         self.assertEqual(self.deletes(graph).count(('delete','creative','20')),1)
@@ -123,8 +122,9 @@ class PhasedExecutionTests(unittest.TestCase):
         m['sha256']=digest({k:v for k,v in m.items() if k!='sha256'})
         graph.account_diagnostic=lambda *args:{'account_status':2}
         graph.get_ad=lambda *args:(_ for _ in ()).throw(GraphError(200,'account disabled'))
-        runner.execute('test-run',m)
-        self.assertEqual(self.deletes(graph),[('delete','creative','20')])
+        with self.assertRaisesRegex(ValueError,'disabled_account_probe_forbidden'):
+            runner.execute('test-run',m)
+        self.assertEqual(self.deletes(graph),[])
 
     def test_changed_material_blocks_ad_and_creative(self):
         runner,source,graph,runtime,m=self.prepare()
@@ -145,31 +145,30 @@ class PhasedExecutionTests(unittest.TestCase):
         value=ad();value['effective_status']='PENDING_REVIEW'
         self.assertEqual(shared_state(value),'state_not_eligible')
 
-    def test_1487235_uses_same_shared_ad_before_creative_order(self):
+    def test_1487235_never_authorizes_active_shared_ad_deletion(self):
         runner,source,graph,runtime,m=self.prepare()
         graph.ads['12']=ad('12','20',status='ACTIVE')
-        calls=[]
-        def on_delete(kind,identifier):
-            if kind=='creative':
-                calls.append(identifier)
-                graph.results[(kind,identifier)]=({'status':'failed','request_sent':True,
-                    'response':{'code':200,'error_subcode':1487235}} if len(calls)==1 else
-                    {'status':'api_accepted','request_sent':True})
-        graph.on_delete=on_delete
+        source.rows['12']=[fixtures.lineage('12','20')]
+        m['recovery_creatives']=[{'basis':copy.deepcopy(m['candidates'][0]),
+            'origin_run_id':'old','origin_manifest_sha256':'proof','evidence':copy.deepcopy(m['evidence']),
+            'last_result':{'status':'failed','request_sent':True,'response':{'code':200,'error_subcode':1487235}}}]
+        m['sha256']=digest({k:v for k,v in m.items() if k!='sha256'})
         runner.execute('test-run',m)
-        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','creative','20'),
-                                            ('delete','ad','12'),('delete','creative','20')])
+        self.assertEqual(self.deletes(graph),[('delete','ad','10')])
+        self.assertEqual(runtime.queue['20']['blocked_ads'][0]['result']['reason'],'active_ad_protected')
 
     def test_known_dependency_backlog_skips_creative_probe_until_shared_ads_finish(self):
         runner,source,graph,runtime,m=self.prepare([ad(),ad('11','21')])
         graph.ads['12']=ad('12','20');graph.ads['13']=ad('13','21')
+        source.rows['12']=[fixtures.lineage('12','20')];source.rows['13']=[fixtures.lineage('13','21')]
         m['recovery_creatives']=[{'basis':c,'origin_run_id':'old','origin_manifest_sha256':'proof',
             'evidence':m['evidence'],'last_result':{'status':'failed','response':{'error_subcode':1487235}}}
             for c in m['candidates']]
         m['sha256']=digest({k:v for k,v in m.items() if k!='sha256'})
         runner.execute('test-run',m)
-        self.assertEqual(self.deletes(graph),[('delete','ad','10'),('delete','ad','11'),
-            ('delete','ad','12'),('delete','ad','13'),('delete','creative','20'),('delete','creative','21')])
+        deletes=self.deletes(graph)
+        self.assertCountEqual(deletes[:4],[('delete','ad',aid) for aid in ('10','11','12','13')])
+        self.assertCountEqual(deletes[4:],[('delete','creative','20'),('delete','creative','21')])
 
     def test_stale_dependency_backlog_cannot_override_global_unknown(self):
         runner,source,graph,runtime,m=self.prepare()

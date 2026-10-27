@@ -12,5 +12,6 @@
   "execution_order": "ads_first",
   "query_timeout_seconds": 120,
   "graph_read_workers": 4,
+  "shared_reference_scan_workers": 4,
   "mysql_compress": true
 }

@@ -1,0 +1,16 @@
+[Unit]
+Description=Apply verified Meta cleanup v3 release only after natural worker exit
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/meta-violation-material-cleanup
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=@RELEASE@/server-monitors/meta-violation-material-cleanup
+ExecStart=/usr/bin/python3 @RELEASE@/server-monitors/meta-violation-material-cleanup/run_idle_deployment.py --candidate-release @RELEASE@ --expected-current @PREVIOUS@ --expected-sha @SHA@ --config /mnt/data-disk/meta-violation-material-cleanup/config.json --apply
+SuccessExitStatus=75
+TimeoutStartSec=300
+Restart=no
+

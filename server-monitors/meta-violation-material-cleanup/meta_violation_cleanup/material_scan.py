@@ -1,15 +1,17 @@
 """Material-driven candidate discovery and exact-ID, read-only Meta validation."""
 from collections import Counter, defaultdict
-from datetime import datetime
+from copy import deepcopy
 import time
 
 from .indexed_source import material_rows
-from .policy import product_scope, qualifying_policies, build_evidence, material_identity, evaluate_ad
+from .policy import (POLICY_VERSION, POLICY_CONTRACT, product_scope, qualifying_policies,
+                     build_evidence, material_identity, evaluate_ad, qualified_material_ids)
+from .backlog_policy import assess_backlog
 from .runtime import now, digest
 
 
 def scan(runner, run_id, start, end):
-    from .runner import chunks, numeric_id, object_id, safe_error, ledger_error
+    from .runner import chunks, numeric_id, object_id
     began=time.monotonic(); timing={}; errors=[]; skips=Counter(); coverage={}
     progress=lambda **kw: runner.runtime.update(run_id,**kw)
     frozen_comparison=bool(runner.config.get('comparison_baseline_run_id'))
@@ -38,10 +40,10 @@ def scan(runner, run_id, start, end):
     timing['evidence_seconds']=round(time.monotonic()-began,3)
     progress(stage='material_lookup',material_count=len(evidence['materials']))
     phase=time.monotonic()
-    lookup_materials=set(evidence['materials'])
+    lookup_materials=qualified_material_ids(evidence)
     lookup_scope=dict(scope)
     if baseline:
-        lookup_materials.update(baseline['evidence']['materials'])
+        lookup_materials.update(qualified_material_ids(baseline['evidence']))
         lookup_scope=dict(baseline['scope'],**scope)
     raw,lookup=material_rows(runner.source,lookup_materials,lookup_scope,progress,runner.stop)
     timing['reverse_lookup_seconds']=round(time.monotonic()-phase,3)
@@ -50,7 +52,6 @@ def scan(runner, run_id, start, end):
         try: ids.add(numeric_id(row['ad_id']))
         except ValueError: skips['invalid_publication_ad_id']+=1
     del raw
-    retrieval_ids=set(ids)
     comparison={}
     if baseline:
         old={c['ad_id']:c for c in baseline['candidates']}
@@ -73,7 +74,7 @@ def scan(runner, run_id, start, end):
             'baseline_window_end':baseline['window_end'],'same_product_scope':baseline['scope']==scope}
         runner.runtime.artifact(run_id,'comparison-retrieval.json',comparison)
         if unresolved: raise ValueError('material_lookup_lost_baseline_candidates')
-    phase=time.monotonic(); targets=[]; identities={}; by_ad=defaultdict(list)
+    phase=time.monotonic(); targets=[]; identities={}
     material_set=lookup_materials
     # Read every current publication row for each retrieved Ad, so an older
     # matched row cannot override a later Creative/product/material binding.
@@ -102,7 +103,6 @@ def scan(runner, run_id, start, end):
                     skips['selected_credential_unavailable']+=1; continue
                 candidate={'ad_id':aid,'creative_id':cid,'account_id':account,'user_id':user,'identity':identity}
                 identities[(aid,cid)]=candidate
-                by_ad[aid].append(candidate)
                 options.append(candidate)
             if options:
                 # A read may use the selected identity of a historical binding;
@@ -111,7 +111,7 @@ def scan(runner, run_id, start, end):
             else: skips['no_confirmed_material_route']+=1
         progress(stage='publication_context',target_ads=len(targets),processed_publication_ads=len(identities))
     timing['publication_context_seconds']=round(time.monotonic()-phase,3)
-    phase=time.monotonic(); candidates=[]; blocked=[]; checked={}; account_diagnostics={}
+    phase=time.monotonic(); candidates=[]; checked={}
     baseline_checked={};baseline_current=set()
     read_failures=defaultdict(list); read_success=set(); accepted_ids=set()
     for (user,account,requested),records,failures in runner.graph.iter_target_ads(targets,runner.stop):
@@ -151,33 +151,35 @@ def scan(runner, run_id, start, end):
         for account,user,error in failed_routes:
             coverage[account]['status']='partial'
             errors.append({'ad_id':aid,'account_id':account,'stage':'target_get','error':error})
-            key=(account,user)
-            if key not in account_diagnostics:
-                try:account_diagnostics[key]=runner.graph.account_diagnostic(account,user)
-                except Exception as exc:account_diagnostics[key]={'error':safe_error(exc)}
-            diagnostic=account_diagnostics[key]
-            if diagnostic.get('account_status')==2:
-                for candidate in by_ad[aid]:
-                    if candidate['account_id']!=account:continue
-                    if not set(candidate['identity']['material_ids'])&set(evidence['materials']):continue
-                    blocked.append(dict(candidate,root_id=candidate['identity']['root_id'],
-                        material_ids=candidate['identity']['material_ids'],rules=['disabled_account_creative_only'],
-                        account_diagnostic=diagnostic,ad_read_error=error))
+    # A failed target page invalidates that account's frozen execution scope;
+    # retain complete accounts without allowing an incomplete account through.
+    complete_candidates=[]
+    for candidate in candidates:
+        if coverage[candidate['account_id']]['status'] == 'complete':
+            complete_candidates.append(candidate)
+        else:
+            skips['account_coverage_incomplete']+=1
+    candidates=complete_candidates
+    candidate_counts=Counter(c['account_id'] for c in candidates)
+    for account,cov in coverage.items():cov['candidates']=candidate_counts[account]
     timing['meta_verification_seconds']=round(time.monotonic()-phase,3)
     candidates.sort(key=lambda c:(int(c['account_id']),int(c['ad_id'])))
     by_creative=defaultdict(list)
     for candidate in candidates: by_creative[candidate['creative_id']].append(candidate)
-    # Preserve failed/deferred Creative work even if its last normal Ad has
-    # already been deleted or its original violation has aged out of the window.
+    # Keep the durable queue untouched. Only entries that pass this run's fresh
+    # v3 evidence and current identity checks enter its execution manifest.
     backlog=getattr(runner.runtime,'cleanup_backlog',lambda:[])()
+    phase=time.monotonic()
+    recovery,recovery_assessment=assess_backlog(runner,backlog,evidence)
+    timing['backlog_requalification_seconds']=round(time.monotonic()-phase,3)
     timing['total_seconds']=round(time.monotonic()-began,3)
-    manifest={'version':2,'policy_version':'20261024-v2','scanner':'material_indexed',
+    manifest={'version':3,'policy_version':POLICY_VERSION,'selection_policy':deepcopy(POLICY_CONTRACT),'scanner':'material_indexed',
         'run_id':run_id,'window_start':start,'window_end':end,'frozen_at':now(),
         'root_products':['1479','3302'],'scope':scope,'candidates':candidates,'evidence':evidence,
         'violation_ids_by_ad':dict(violation_ids),'coverage':{'accounts_total':len(coverage),
             'accounts':list(coverage.values()),'errors':errors},'shared_creative_impacts':{},
         'shared_reference_coverage':'checked_on_dependency_failure',
-        'blocked_account_creatives':blocked,'recovery_creatives':backlog,
+        'blocked_account_creatives':[],'recovery_creatives':recovery,'recovery_assessment':recovery_assessment,
         'qualified_violation_ads':len({a for e in evidence['materials'].values() for a in e['violating_ad_ids']}),
         'skip_counts':dict(skips),'mapping_gap_counts':{},'product_scanned_ads':{},
         'lookup_metrics':lookup,'timings':timing,'comparison_only':frozen_comparison}
@@ -197,8 +199,7 @@ def scan(runner, run_id, start, end):
         candidate_creatives=len(by_creative),accounts_total=len(coverage),accounts_finished=len(coverage),
         coverage_errors=len(errors),material_count=len(evidence['materials']),
         product_candidate_ads=dict(Counter(c['root_id'] for c in candidates)),skip_counts=dict(skips),
-        rule1_ads=sum('rule1' in c['rules'] for c in candidates),
-        rule2_ads=sum('rule2' in c['rules'] for c in candidates),
-        scan_timings=timing,lookup_metrics=lookup,blocked_account_creatives=len(blocked),
-        recovery_creatives=len(backlog),remaining_ads=len(candidates))
+        paused_material_5_ads=sum('paused_material_5' in c['rules'] for c in candidates),
+        scan_timings=timing,lookup_metrics=lookup,blocked_account_creatives=0,
+        recovery_creatives=len(recovery),recovery_assessment=recovery_assessment,remaining_ads=len(candidates))
     return manifest

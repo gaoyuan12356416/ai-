@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry the approved idle-only Meta cleanup v3 release switch
+
+[Timer]
+OnActiveSec=15s
+OnUnitInactiveSec=5min
+AccuracySec=1s
+Unit=meta-violation-material-cleanup-v3-deploy.service
+
+[Install]
+WantedBy=timers.target

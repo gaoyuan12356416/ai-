@@ -49,7 +49,7 @@ def load_config(path):
     if not isinstance(config.get("live_enabled", False), bool):
         raise CliError("invalid_live_setting")
     for key,default,minimum,maximum in (
-            ('lookback_days',30,1,30),
+            ('lookback_days',3,1,30),('shared_reference_scan_workers',4,1,4),
             ('execution_workers',1,1,32),('execution_per_account',2,1,2),
             ('execution_batch_size',32,1,64),('execution_context_ttl_seconds',30,5,30),
             ('execution_max_rps',24,1,30)):
@@ -109,7 +109,7 @@ def summary(runtime, run_id):
             result[key] = _safe_counts(data[key])
     if "graph_metrics" in data:
         result["graph_metrics"] = _safe_graph_metrics(data["graph_metrics"])
-    for key in ('scan_timings','lookup_metrics','execution_metrics'):
+    for key in ('scan_timings','lookup_metrics','execution_metrics','reference_scan_metrics'):
         if key in data:result[key]=data[key]
     attempt = data.get("execution_attempt", 1)
     attempt = attempt if isinstance(attempt, int) and attempt > 0 else 1
@@ -235,7 +235,9 @@ def scan_or_run(args, config, runtime, stop):
         raise CliError("live_execution_disabled")
     run_id = validate_run_id(args.run_id or datetime.now(CST).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8])
     end = datetime.now(CST).replace(microsecond=0)
-    start = end - timedelta(days=config.get('lookback_days',30))
+    if config.get('lookback_days',3) != 3:
+        raise CliError('v3_requires_three_day_window')
+    start = end - timedelta(days=3)
     created = runtime.begin(run_id, args.command, {"window_start": start.isoformat(), "window_end": end.isoformat(), "stage": "starting"})
     manifest = None
     if not created:

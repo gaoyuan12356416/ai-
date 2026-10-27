@@ -7,14 +7,18 @@ import json
 from features.fb_ad_asset_delete.store import StoreError, _json, _now
 
 
-def append_shared_ad(store, job_id, run_id, creative_id, ad, user_id, actor):
+def append_shared_ad(store, job_id, run_id, creative_id, ad, user_id, actor, candidate=None):
+    from .policy import POLICY_VERSION
+    if (not candidate or not candidate.get('eligible') or candidate.get('rules') != ['paused_material_5']
+            or candidate.get('ad_id') != str(ad['id']) or candidate.get('creative_id') != str(creative_id)):
+        raise StoreError('Shared reference lacks v3 qualification', 'invalid_input')
     key='ad:'+str(ad['id']); cid=str(creative_id); now=_now()
     with store._transaction() as conn:
         job=store._require(conn,'jobs','job_id',job_id)
         run=store._require(conn,'runs','run_id',run_id)
         metadata=json.loads(job['metadata'])
         if (job['actor']!=actor or run['actor']!=actor or run['job_id']!=job_id or
-                run['status']!='running' or metadata.get('policy_version')!='20261024-v2'):
+                run['status']!='running' or metadata.get('policy_version')!=POLICY_VERSION):
             raise StoreError('Shared dependency is outside the active cleanup','invalid_state')
         creative=store._object(conn,job_id,'creative:'+cid)
         parent=json.loads(creative['payload'])
@@ -29,7 +33,8 @@ def append_shared_ad(store, job_id, run_id, creative_id, ad, user_id, actor):
                 raise StoreError('Shared Ad conflicts with frozen object','invalid_input')
             return
         payload={'account_ids':[account],'user_ids':[str(user_id)],'creative_ids':[cid],
-                 'dependency_creative_id':cid,'scope_rule':'shared_reference_cleanup_20261024',
+                 'dependency_creative_id':cid,'scope_rule':'shared_reference_cleanup_20261027-v3',
+                 'material_ids':candidate['material_ids'],'rules':candidate['rules'],
                  'discovered_ad':ad}
         ordinal=conn.execute('SELECT COALESCE(MAX(ordinal),-1)+1 FROM fb_asset_delete_v2_objects WHERE job_id=?',
                              (job_id,)).fetchone()[0]

@@ -381,3 +381,48 @@ An uncertain service start is not replayed. Private start, first-pass, completio
 and exception notices use the existing fixed recipient and durable message UUIDs.
 The original run's in-memory counters remain historical; the repair target ledger
 and shared object ledger are the authoritative reconciled counts.
+# Current contract: 20261027-v3
+
+This section supersedes older execution and rollout instructions below.
+Every new executable run freezes exactly the preceding three days and requires
+at least five distinct qualifying violating Ads per canonical material. The
+target Ad, its Ad Set, or its Campaign must be explicitly PAUSED. Fully ACTIVE
+Ads are protected. Current review, exact account/product/material/credential
+checks remain mandatory. Historical backlog and shared references use the same
+fresh-window rule; old receipts and disabled accounts never bypass it.
+
+V3 refuses old executable manifests. Failed/blocked objects are not replayed
+inside the same frozen run; the next scheduled scan makes a fresh decision.
+Unknown writes remain fenced and may only be reconciled by exact readback.
+An already-deleted historical basis requires both exact deletion proof and a
+matching paused pre-deletion snapshot, plus fresh threshold and SQL identity.
+Backlog entries failing requalification remain preserved, with assessment
+reasons recorded in the new manifest; original evidence is retained.
+
+The sequence is selected Ads, complete shared-reference inspection, eligible
+shared Ads, then Creatives. `shared_reference_scan_workers=4` bounds different
+accounts; one account and each credential pair are scanned once per batch.
+Workers own separate HTTP sessions and share the existing request governor.
+SQL/SQLite and object claims stay on the owner thread. Known references receive
+targeted GET checks first; any unresolved blocker suppresses that Creative's
+full scan without suppressing other eligible Creatives in the same account.
+
+Reference coverage is a complete per-batch account snapshot, not a continuously
+current view. Each actual Ad DELETE has an immediate policy/binding guard.
+If a reference is created/rebound after the snapshot, Meta's Creative dependency
+rejection is the final boundary: retain backlog, do not expand Ad deletion or
+retry that Creative within the batch. Missing objects never prove deletion.
+
+Broadcasts separate candidate sources, requalified backlog, overlap/net-new,
+shared additions, final admission and actual confirmed current-job deletions.
+Current-job immutable write audit plus exact final proof is required for the
+last category. `reference_scan_metrics` separates account scans/pages/peak,
+suppressed scans, scan-and-validation wall time and shared-Ad time. Summed
+request-wait milliseconds are never presented as wall time.
+
+Deployment is idle-only; see [deployment-v3.md](deployment-v3.md). Never stop or
+restart the active worker to install this change, replace its config, or switch
+its `current` link while it runs. Preserve the currently installed runtime limit
+and 09:00/21:00 schedule. Performance rollback changes the scanner to one account
+only while idle; it must retain V3's five-plus-paused rule. A serious failure
+disables future scheduling, never restores the old active-Ad deletion policy.

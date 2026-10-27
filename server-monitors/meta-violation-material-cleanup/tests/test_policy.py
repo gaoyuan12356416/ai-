@@ -21,7 +21,7 @@ def live_ad(ad_id="100", creative="900"):
             "adset": {"id": "2", "status": "ACTIVE"}}
 
 
-def evidence(count=1, mid="501"):
+def evidence(count=5, mid="501"):
     return {"materials": {mid: {"count": count, "violating_ad_ids": [str(200 + n) for n in range(count)],
                                 "policies": ["Spam"], "root_ids": ["1479"]}}, "excluded": []}
 
@@ -128,31 +128,32 @@ class PolicyTests(unittest.TestCase):
         result = policy.build_evidence([violation], {"100": [lineage()]}, {"10": {"source_type": 3, "source_id": "502"}}, self.scope, "2026-09-23", "2026-10-24")
         self.assertEqual(result["excluded"][0]["reason"], "violation_material_identity_conflict")
 
-    def test_active_three_versus_four_violations(self):
-        self.assertFalse(policy.evaluate_ad(live_ad(), self.identity(), evidence(3))["eligible"])
-        result = policy.evaluate_ad(live_ad(), self.identity(), evidence(4))
-        self.assertTrue(result["eligible"])
-        self.assertEqual(result["rules"], ["rule2"])
+    def test_active_is_protected_even_with_many_violations(self):
+        for count in (0, 4, 5, 20):
+            result = policy.evaluate_ad(live_ad(), self.identity(), evidence(count))
+            self.assertFalse(result["eligible"])
+            self.assertEqual(result["reason"], "active_ad_protected")
 
-    def test_paused_one_and_four(self):
+    def test_paused_requires_five_distinct_violations(self):
         ad = live_ad()
         ad.update(status="PAUSED", effective_status="PAUSED")
-        self.assertEqual(policy.evaluate_ad(ad, self.identity(), evidence(1))["rules"], ["rule1"])
-        self.assertEqual(policy.evaluate_ad(ad, self.identity(), evidence(4))["rules"], ["rule1", "rule2"])
-        self.assertFalse(policy.evaluate_ad(ad, self.identity(), evidence(0))["eligible"])
+        for count in (0, 1, 3, 4):
+            self.assertEqual(policy.evaluate_ad(ad, self.identity(), evidence(count))["reason"], "violation_threshold_not_met")
+        self.assertEqual(policy.evaluate_ad(ad, self.identity(), evidence(5))["rules"], ["paused_material_5"])
 
     def test_each_parent_pause_counts_as_closed(self):
         for parent, effective in (("campaign", "CAMPAIGN_PAUSED"), ("adset", "ADSET_PAUSED")):
             ad = live_ad()
             ad[parent]["status"] = "PAUSED"
             ad["effective_status"] = effective
-            self.assertEqual(policy.evaluate_ad(ad, self.identity(), evidence())["rules"], ["rule1"])
+            self.assertEqual(policy.evaluate_ad(ad, self.identity(), evidence())["rules"], ["paused_material_5"])
 
     def test_recovered_historical_violation_and_omitted_review_fields_allowed(self):
         ad = live_ad()
-        self.assertTrue(policy.evaluate_ad(ad, self.identity(), evidence(4))["eligible"])
+        ad.update(status="PAUSED", effective_status="PAUSED")
+        self.assertTrue(policy.evaluate_ad(ad, self.identity(), evidence(5))["eligible"])
         ad.update(issues_info=[], ad_review_feedback={"global": {}, "placement_specific": {}})
-        self.assertTrue(policy.evaluate_ad(ad, self.identity(), evidence(4))["eligible"])
+        self.assertTrue(policy.evaluate_ad(ad, self.identity(), evidence(5))["eligible"])
 
     def test_current_review_issue_or_unreadable_feedback_skips(self):
         for field in ("issues_info", "ad_review_feedback"):
@@ -176,14 +177,27 @@ class PolicyTests(unittest.TestCase):
 
     def test_current_ad_with_hit_and_good_material_can_be_deleted(self):
         identity = self.identity(material="501,502")
-        result = policy.evaluate_ad(live_ad(), identity, evidence(4, mid="502"))
+        ad = live_ad(); ad.update(status="PAUSED", effective_status="PAUSED")
+        result = policy.evaluate_ad(ad, identity, evidence(5, mid="502"))
         self.assertTrue(result["eligible"])
         self.assertEqual(result["material_ids"], ["501", "502"])
 
-    def test_shared_creative_is_not_a_protection(self):
+    def test_pause_gate_also_applies_to_shared_ad_candidates(self):
         ad = live_ad()
         ad["shared_outside_scope"] = True
-        self.assertTrue(policy.evaluate_ad(ad, self.identity(), evidence(4))["eligible"])
+        self.assertFalse(policy.evaluate_ad(ad, self.identity(), evidence(5))["eligible"])
+        ad.update(status="PAUSED", effective_status="PAUSED")
+        self.assertTrue(policy.evaluate_ad(ad, self.identity(), evidence(5))["eligible"])
+
+    def test_lookup_gate_validates_distinct_ids_and_threshold(self):
+        self.assertEqual(policy.qualified_material_ids(evidence(4)), set())
+        self.assertEqual(policy.qualified_material_ids(evidence(5)), {"501"})
+        proof = evidence(5)
+        proof['materials']['501']['violating_ad_ids'][-1] = '200'
+        with self.assertRaisesRegex(ValueError, 'evidence_count_conflict'):
+            policy.qualified_material_ids(proof)
+        self.assertEqual(policy.POLICY_VERSION, '20261027-v3')
+        self.assertFalse(policy.POLICY_CONTRACT['allow_active'])
 
     def test_evidence_count_and_current_identity_cannot_conflict(self):
         proof = evidence(3)

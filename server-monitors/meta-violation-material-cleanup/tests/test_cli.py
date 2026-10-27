@@ -300,10 +300,10 @@ class CliTests(unittest.TestCase):
         self.invoke("run", "--run-id", "r1")
         self.assertEqual(self.events, ["start-2", "execute", "end-2"])
 
-    def test_three_day_next_scan_does_not_shorten_existing_frozen_run(self):
+    def test_three_day_default_and_continuation_preserve_frozen_manifest(self):
         self.invoke('preview','--run-id','current30')
         frozen=json.loads(json.dumps(self.runtime.artifacts[('current30','manifest.json')]))
-        self.assertEqual(datetime.fromisoformat(frozen['window_end'])-datetime.fromisoformat(frozen['window_start']),timedelta(days=30))
+        self.assertEqual(datetime.fromisoformat(frozen['window_end'])-datetime.fromisoformat(frozen['window_start']),timedelta(days=3))
         self.config['lookback_days']=3
         self.events.clear()
         self.assertEqual(self.invoke('run','--run-id','current30')[0],0)

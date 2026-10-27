@@ -28,7 +28,7 @@ def fixture(count=2):
         'frozen_at': (current - timedelta(seconds=1)).isoformat(),
         'window_start': (end - timedelta(days=30)).isoformat(), 'window_end': end.isoformat(),
         'coverage': {'accounts_total': 1, 'accounts': [{'account_id': '100', 'status': 'complete'}], 'errors': []},
-        'evidence': {'materials': {'501': {'count': 4, 'violating_ad_ids': ['101', '102', '103', '104']}}},
+        'evidence': {'materials': {'501': {'count': 5, 'violating_ad_ids': ['101', '102', '103', '104', '105']}}},
         'candidates': [], 'shared_creative_impacts': {}}
     for i in range(count):
         aid, cid = str(10 + i), str(20 + i)
