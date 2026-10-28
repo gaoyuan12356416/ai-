@@ -1,6 +1,6 @@
 # 部署与回滚
 
-状态：2026-10-28 18:27:43 Asia/Shanghai 已切换代码，持续消费尚未开启；只读预览及首批真实验收进行中。
+状态：2026-10-28 19:59 Asia/Shanghai 已部署 cf5d16047dbdf523e9f25a1e9b176ef41e960aae，持续 worker 与小时扫描/通知 timers 已 enabled/active；旧 Ad 删除 timer 仍 disabled/inactive。下文早期回执为历史阶段。
 
 ## 目标
 
@@ -71,3 +71,7 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/releases/a37148ebf5d02588
 封面后续小修可用 prepare <release> --active-ledgers-only：必须确认 legacy live_enabled=false、旧 service/timer inactive 且 timer disabled/masked；完整备份 shared-tasks、cover、cover-audit、配置和 units，未改动旧历史账本保留原位及已校验完整备份。默认 prepare 仍完整备份旧账本；rollback 一贯不恢复旧账本覆盖进度。新增活动/启用保护测试，封面及安装回归共 115 项通过。
 
 实际失败快照确认：绑定后短暂只有 Pixel/转化追踪，三种帖子派生追踪暂未回传。仅允许已证明其他业务字段和非帖子 tracking 多重集合完全不变时，将其隔离为 unknown 等待只读复核；不计成功、不准入删除、不重发绑定。其他字段差异仍全局暂停。新增 worker 状态机测试覆盖缺少派生追踪→unknown→GET-only 成功且单次绑定，并验证同时出价/父级变化仍报错。共116项回归通过。
+
+## 修复后的正式运行回执（2026-10-28 19:59）
+
+GitHub 分支 codex/meta-cover-readback-repair-20261028；服务器精确提交 cf5d16047dbdf523e9f25a1e9b176ef41e960aae。19:59:28 冻结：替换成功73、处理中23、排队5648、等待审核71、明确失败97、未知0；旧Creative删除成功23、引用暂缓2、待处理45。运行中数量继续变化，失败含初始明确失败的关联依赖，不重置旧失败。当前无全局 write-pause；scan 下次20:00。小批真实执行 halted=false，8替换成功、23旧Creative删除成功、2引用暂缓，355 HTTP响应、峰值8、无冷却降档。批次end-3通知sent，message_id om_x100b612a7a180934c30b64cf7deba2c。116回归通过。备份 /mnt/data-disk/meta-violation-material-cleanup/backups/cover-20261028T115451Z-cf5d16047dbd；rollback使用该提交installer rollback此路径，保留最新账本和围栏。技能已随运行版本同步；本次回执提交仅文档，不改已部署代码。

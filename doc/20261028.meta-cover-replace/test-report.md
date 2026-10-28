@@ -34,3 +34,5 @@
 封面后续小修可用 prepare <release> --active-ledgers-only：必须确认 legacy live_enabled=false、旧 service/timer inactive 且 timer disabled/masked；完整备份 shared-tasks、cover、cover-audit、配置和 units，未改动旧历史账本保留原位及已校验完整备份。默认 prepare 仍完整备份旧账本；rollback 一贯不恢复旧账本覆盖进度。新增活动/启用保护测试，封面及安装回归共 115 项通过。
 
 实际失败快照确认：绑定后短暂只有 Pixel/转化追踪，三种帖子派生追踪暂未回传。仅允许已证明其他业务字段和非帖子 tracking 多重集合完全不变时，将其隔离为 unknown 等待只读复核；不计成功、不准入删除、不重发绑定。其他字段差异仍全局暂停。新增 worker 状态机测试覆盖缺少派生追踪→unknown→GET-only 成功且单次绑定，并验证同时出价/父级变化仍报错。共116项回归通过。
+
+2026-10-28 19:59 正式修复验收：116本地回归通过；GitHub精确版本cf5d160部署，连续worker已启用并继续产生确认成功；快照替换成功73、旧Creative删除23、仍有引用2、未知0。首个完整无暂停小批 result.halted=false，通知end-3 sent，源/身份/覆盖/一次删除约束保留。详见deploy.md最终回执。
