@@ -360,7 +360,8 @@ class CoverWorker:
                 uncertain_bind = True
                 self._halt('ad_parameters_changed_after_bind')
                 return self._finish(task, 'unknown', dict(intent, bind_result=result,
-                    reason='ad_parameters_changed_after_bind', request_sent=True, error=_error(exc)))
+                    reason='ad_parameters_changed_after_bind', request_sent=True, error=_error(exc),
+                    ad_snapshot=actual))
             except Exception as exc:
                 uncertain_bind = True
                 return self._finish(task, 'unknown', dict(intent, bind_result=result,

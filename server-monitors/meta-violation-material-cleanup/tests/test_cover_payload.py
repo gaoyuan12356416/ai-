@@ -56,6 +56,12 @@ class PayloadTests(unittest.TestCase):
         new['tracking_specs'].reverse()
         proof = {'old_story_id':'40_50','new_story_id':'40_51'}
         verify_ad_binding(new, old, '21', **proof)
+        mixed = copy.deepcopy(new)
+        mixed['tracking_specs'][0]['post'] = ['50']
+        verify_ad_binding(mixed, old, '21', **proof)
+        old_posts = copy.deepcopy(old); old_posts['creative'] = {'id':'21'}
+        old_posts['tracking_specs'].reverse()
+        verify_ad_binding(old_posts,old,'21',**proof)
         with self.assertRaises(PayloadError): verify_ad_binding(new, old, '21')
         for mutate in (
             lambda x: x['tracking_specs'][-1].update(fb_pixel=['801']),

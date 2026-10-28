@@ -65,3 +65,5 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/releases/a37148ebf5d02588
 用户于本会话明确确认“允许该视频专用项不再回传，继续修复和替换”。仅允许已核实图片 Creative 的 video_auto_crop 不回传（原值必须为严格 OPT_IN/OPT_OUT 结构），发送仍保留原值，返回不同值仍拒绝，其他逐项功能缺失仍拒绝。封面回归 112 项通过。
 
 真实样本发现 effective_object_story_id 可在绑定后才生成，故绑定后必须重新 GET 新 Creative 并验全参，再核对新旧帖子引用；仍未就绪时仅保留未知，禁止重发绑定。新增真实 SQLite worker 行为测试覆盖绑定后才有帖子 ID、延迟就绪后 GET-only 确认且仅一次 POST。封面回归 113 项通过。
+
+补充处理 GET 非原子传播：仅三种派生帖子追踪允许暂时仍指向已核实旧帖子或已核实新帖子，Page 必须一致，任意第三方帖子或 Pixel/转化/动作/重复数/额外字段变化仍拒绝。保留失败时实时 Ad 快照以便复核。113 项回归通过（含旧/新混合传播及无关帖子拒绝）。

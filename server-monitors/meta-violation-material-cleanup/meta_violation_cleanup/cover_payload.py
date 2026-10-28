@@ -292,7 +292,7 @@ def _tracking_after_story_change(actual, expected, old_story_id, new_story_id):
     if (len(old) != 2 or len(new) != 2 or not all(x.isdigit() for x in old + new)
             or old[0] != new[0] or not isinstance(actual, list) or not isinstance(expected, list)):
         return False
-    def normalize(rows, post):
+    def normalize(rows, posts):
         result = deepcopy(rows)
         for row in result:
             if not isinstance(row, dict):
@@ -302,11 +302,15 @@ def _tracking_after_story_change(actual, expected, old_story_id, new_story_id):
             action = row.get('action.type')
             page_key = 'post.wall' if action == ['link_click'] else 'page'
             if (action not in (['post_engagement'], ['post_interaction_gross'], ['link_click'])
-                    or row.get('post') != [post] or row.get(page_key) != [old[0]]):
+                    or row.get('post') not in [[post] for post in posts] or row.get(page_key) != [old[0]]):
                 raise PayloadError('tracking_post_identity_unverified')
             row['post'] = ['verified-story-post']
         return sorted(json.dumps(r, sort_keys=True, ensure_ascii=False) for r in result)
-    return normalize(actual, new[1]) == normalize(expected, old[1])
+    # Ad and Creative GETs are not an atomic snapshot. Meta may still return
+    # the original post on some derived tracking actions during propagation.
+    # Both IDs are proven Creative identities on the same Page; no third ID,
+    # feature, action, conversion or Pixel change is accepted.
+    return normalize(actual, {old[1], new[1]}) == normalize(expected, {old[1]})
 
 
 def verify_ad_binding(actual, expected_ad, new_creative_id, *, old_story_id=None, new_story_id=None):
