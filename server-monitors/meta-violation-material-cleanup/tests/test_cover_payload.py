@@ -29,6 +29,32 @@ def video():
 
 
 class PayloadTests(unittest.TestCase):
+    def test_binding_accepts_only_verified_derived_story_post_changes(self):
+        old = {'id':'1', 'creative':{'id':'20'}, 'tracking_specs':[
+            {'action.type':['offsite_conversion'], 'fb_pixel':['800']},
+            {'action.type':['onsite_conversion'], 'conversion_id':['900']},
+            {'action.type':['post_engagement'], 'post':['50'], 'page':['40']},
+            {'action.type':['link_click'], 'post':['50'], 'post.wall':['40']}]}
+        new = copy.deepcopy(old); new['creative'] = {'id':'21'}
+        for row in new['tracking_specs']:
+            if 'post' in row: row['post'] = ['51']
+        new['tracking_specs'].reverse()
+        proof = {'old_story_id':'40_50','new_story_id':'40_51'}
+        verify_ad_binding(new, old, '21', **proof)
+        with self.assertRaises(PayloadError): verify_ad_binding(new, old, '21')
+        for mutate in (
+            lambda x: x['tracking_specs'][-1].update(fb_pixel=['801']),
+            lambda x: x['tracking_specs'][-2].update(conversion_id=['901']),
+            lambda x: x['tracking_specs'][0].update(post=['52']),
+            lambda x: x['tracking_specs'][0].update(**{'post.wall':['41']}),
+            lambda x: x['tracking_specs'].pop(),
+            lambda x: x['tracking_specs'].append(copy.deepcopy(x['tracking_specs'][0])),
+        ):
+            changed=copy.deepcopy(new); mutate(changed)
+            with self.assertRaises(PayloadError): verify_ad_binding(changed,old,'21',**proof)
+        with self.assertRaises(PayloadError):
+            verify_ad_binding(new,old,'21',old_story_id='40_50',new_story_id='41_51')
+
     def test_observed_generated_name_and_retired_aggregate_readback(self):
         expected = build_payload(video(), 'https://cdn.example/new.jpg')
         frozen = copy.deepcopy(expected)

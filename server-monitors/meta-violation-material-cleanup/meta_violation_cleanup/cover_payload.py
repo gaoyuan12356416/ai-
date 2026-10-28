@@ -277,7 +277,31 @@ def verify_creative(actual, expected_payload):
     _assert_subset(actual, expected, 'creative')
 
 
-def verify_ad_binding(actual, expected_ad, new_creative_id):
+def _tracking_after_story_change(actual, expected, old_story_id, new_story_id):
+    """Only Meta-derived post references may change; preserve the full multiset."""
+    old = str(old_story_id or '').split('_')
+    new = str(new_story_id or '').split('_')
+    if (len(old) != 2 or len(new) != 2 or not all(x.isdigit() for x in old + new)
+            or old[0] != new[0] or not isinstance(actual, list) or not isinstance(expected, list)):
+        return False
+    def normalize(rows, post):
+        result = deepcopy(rows)
+        for row in result:
+            if not isinstance(row, dict):
+                raise PayloadError('tracking_specs_malformed')
+            if 'post' not in row:
+                continue
+            action = row.get('action.type')
+            page_key = 'post.wall' if action == ['link_click'] else 'page'
+            if (action not in (['post_engagement'], ['post_interaction_gross'], ['link_click'])
+                    or row.get('post') != [post] or row.get(page_key) != [old[0]]):
+                raise PayloadError('tracking_post_identity_unverified')
+            row['post'] = ['verified-story-post']
+        return sorted(json.dumps(r, sort_keys=True, ensure_ascii=False) for r in result)
+    return normalize(actual, new[1]) == normalize(expected, old[1])
+
+
+def verify_ad_binding(actual, expected_ad, new_creative_id, *, old_story_id=None, new_story_id=None):
     if not isinstance(actual, dict) or not isinstance(expected_ad, dict):
         raise PayloadError('ad_readback_malformed')
     if str((actual.get('creative') or {}).get('id')) != str(new_creative_id):
@@ -285,6 +309,9 @@ def verify_ad_binding(actual, expected_ad, new_creative_id):
     for key in ('id', 'account_id', 'name', 'status', 'configured_status',
                 'adset_id', 'campaign_id', 'tracking_specs', 'conversion_specs', 'bid_amount'):
         if key in expected_ad and actual.get(key) != expected_ad[key]:
+            if key == 'tracking_specs' and _tracking_after_story_change(
+                    actual.get(key), expected_ad[key], old_story_id, new_story_id):
+                continue
             raise PayloadError('ad_parameter_changed:' + key)
     for key in ('adset', 'campaign'):
         if key in expected_ad and str((actual.get(key) or {}).get('id')) != str((expected_ad[key] or {}).get('id')):

@@ -346,7 +346,9 @@ class CoverWorker:
                 if _binding(actual) != new_id and result['status'] == 'unknown':
                     return self._finish(task, 'unknown', dict(intent, bind_result=result,
                         reason='binding_result_unknown', request_sent=True, ad_snapshot=actual))
-                verify_ad_binding(actual, fresh, new_id)
+                verify_ad_binding(actual, fresh, new_id,
+                    old_story_id=old.get('effective_object_story_id'),
+                    new_story_id=(resource.get('creative_snapshot') or {}).get('effective_object_story_id'))
             except PayloadError as exc:
                 uncertain_bind = True
                 self._halt('ad_parameters_changed_after_bind')
@@ -724,7 +726,12 @@ class CoverWorker:
             try:
                 user = str(result.get('user_id') or task['candidate']['user_id'])
                 actual = graph.get_cover_ad(task['ad_id'], user, task['account_id'])
-                verify_ad_binding(actual, expected, str(new_id))
+                creative = graph.get_creative(str(new_id), user, task['account_id'])
+                resource = self.store.get_resource(result['resource_key'])
+                verify_creative(creative, resource['payload'])
+                verify_ad_binding(actual, expected, str(new_id),
+                    old_story_id=(result.get('old_creative_snapshot') or {}).get('effective_object_story_id'),
+                    new_story_id=creative.get('effective_object_story_id'))
                 proof = dict(result, confirmed_binding=True, ad_snapshot=actual, reconciled=True)
                 self.store.finish_task(task['id'], 'succeeded', proof)
                 self.shared.release_cover_resources('cover-task:' + str(task['id']), verified=True)
