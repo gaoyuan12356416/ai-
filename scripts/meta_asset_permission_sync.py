@@ -392,10 +392,18 @@ def preview(args, db, graph, credentials):
         snapshots[kind] = part
     # Ownership and the reader's explicit tasks establish the authority to delegate.
     owned_pages = snapshot("owned_pages", lambda: mapping(graph.rows(args.business + "/owned_pages", admin, "id")))
-    client_accounts = snapshot("client_accounts", lambda: mapping(graph.rows(args.business + "/client_ad_accounts", admin, "id,user_tasks")))
+    backend_by_kind = {kind: db.assets(kind) for kind in ("account", "page")}
+    account_part = snapshots["account"]
+    normal_account_ids = ["act_" + k for k, row in account_part["source"].items()
+                          if k in account_part["source_visible"]
+                          and eligibility("account", row, backend_by_kind["account"].get(k))[0] == "normal"
+                          and not full_access("account", (account_part["target"].get(k) or {}).get("tasks"))]
+    # Large client_ad_accounts task expansions degrade to 5-6 rows per call.
+    # Read only the in-scope, currently eligible accounts through GET-only batches.
+    client_accounts = snapshot("account_delegation", lambda: mapping(graph.batch_get(normal_account_ids, "id,user_tasks", admin)))
     assets = []
     for kind, part in snapshots.items():
-        backend = db.assets(kind)
+        backend = backend_by_kind[kind]
         if kind == "page":
             normal_ids = [k for k in part["source"] if k in part["source_visible"] and backend.get(k)
                           and backend[k].get("status") == 0 and backend[k].get("forbidden_status") == 0]
@@ -443,7 +451,11 @@ def preview(args, db, graph, credentials):
                     row["delegable"] = delegable
                     if not delegable:
                         row["difference"] = row["category"]
-                        row.update(category="not_delegable", reason="full_management_not_proven_for_bm")
+                        if kind == "account" and not isinstance((client_accounts.get(key) or {}).get("user_tasks"), list):
+                            row.update(category="unknown", reason="delegation_read_unknown")
+                            row["delegation_error"] = client_accounts.get(key)
+                        else:
+                            row.update(category="not_delegable", reason="full_management_not_proven_for_bm")
             assets.append(row)
     manifest = {"format_version": 1, "created_at": now(), "code_version": args.code_version,
                 "graph_version": graph.version, "business_id": args.business, "identities": identities,
