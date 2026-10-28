@@ -75,3 +75,5 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/releases/a37148ebf5d02588
 ## 修复后的正式运行回执（2026-10-28 19:59）
 
 GitHub 分支 codex/meta-cover-readback-repair-20261028；服务器精确提交 cf5d16047dbdf523e9f25a1e9b176ef41e960aae。19:59:28 冻结：替换成功73、处理中23、排队5648、等待审核71、明确失败97、未知0；旧Creative删除成功23、引用暂缓2、待处理45。运行中数量继续变化，失败含初始明确失败的关联依赖，不重置旧失败。当前无全局 write-pause；scan 下次20:00。小批真实执行 halted=false，8替换成功、23旧Creative删除成功、2引用暂缓，355 HTTP响应、峰值8、无冷却降档。批次end-3通知sent，message_id om_x100b612a7a180934c30b64cf7deba2c。116回归通过。备份 /mnt/data-disk/meta-violation-material-cleanup/backups/cover-20261028T115451Z-cf5d16047dbd；rollback使用该提交installer rollback此路径，保留最新账本和围栏。技能已随运行版本同步；本次回执提交仅文档，不改已部署代码。
+
+扩大批次观察到 Meta 自动管理名称 video Auto Creative 同媒体/日期前缀下重新生成源 hash，再追加日期/hash。其余业务字段逐项相同；仅允许该固定自动名称模式的 hash 变化，用户自定义名称、原 Ad 名称和 link_data.name 广告标题仍严格校验。117回归通过。扩大批次确认成功102，23旧Creative删除，新增管理名称差异已知ID未绑定，保持未知围栏等待只读复核。

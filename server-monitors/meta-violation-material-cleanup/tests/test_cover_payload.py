@@ -29,6 +29,20 @@ def video():
 
 
 class PayloadTests(unittest.TestCase):
+    def test_meta_auto_label_hash_can_change_but_business_names_cannot(self):
+        old=video();old['name']='video Auto Creative 2026-10-27-'+'a'*32
+        expected=build_payload(old,'https://cdn.example/new.jpg')
+        actual=copy.deepcopy(expected)
+        actual['name']='video Auto Creative 2026-10-27-'+'b'*32+' 2026-10-28-'+'c'*32
+        verify_creative(actual,expected)
+        for name in ('image Auto Creative 2026-10-27-'+'b'*32,
+                     'video Auto Creative 2026-10-26-'+'b'*32,
+                     'operator chosen name'):
+            changed=copy.deepcopy(actual);changed['name']=name
+            with self.assertRaises(PayloadError):verify_creative(changed,expected)
+        actual['object_story_spec']['link_data']['name']='changed displayed headline'
+        with self.assertRaises(PayloadError):verify_creative(actual,expected)
+
     def test_approved_video_crop_absence_for_image_does_not_allow_other_losses(self):
         old = video()
         old['degrees_of_freedom_spec']['creative_features_spec']['video_auto_crop'] = {'enroll_status':'OPT_IN'}
