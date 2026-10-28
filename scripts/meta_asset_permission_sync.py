@@ -614,8 +614,26 @@ def read_assignment(graph, credential, asset, target_id, bm):
 
 def live_asset(graph, credential, asset):
     prefix = "act_" if asset["kind"] == "account" else ""
-    fields = "id,account_status,business,user_tasks" if prefix else "id,is_published,is_permanently_closed"
+    fields = "id,account_status,business,user_tasks" if prefix else "id,is_published,is_permanently_closed,business"
     return graph.get(prefix + asset["asset_id"], credential, {"fields": fields})
+
+
+def page_delegable_now(graph, credential, asset, source_assignment, live, bm):
+    if full_access("page", source_assignment.get("tasks")):
+        return True
+    owner = (live.get("business") or {}).get("id")
+    if owner is not None:
+        return owner == bm
+    owned = graph.rows(bm + "/owned_pages", credential, "id", stop_id=asset["asset_id"])
+    return asset["asset_id"] in owned
+
+
+def retryable_unwritten_results(journal):
+    """Older read-only visibility skips may be reconsidered; writes never are."""
+    attempted = {e["key"] for e in journal.events if e["event"] == "intent"}
+    return {key for key, result in journal.results().items()
+            if key not in attempted and result.get("status") == "skipped"
+            and result.get("reason") == "source_permission_removed"}
 
 
 def verify_after(graph, admin, target, asset, target_id, bm):
@@ -715,6 +733,9 @@ def execute(args, db, graph, credentials):
     canary_done = set()
     results = journal.results()
     pending = journal.unresolved()
+    for key in retryable_unwritten_results(journal):
+        results.pop(key, None)
+        journal.append("recheck_unwritten_visibility", key=key)
     try:
         for a in assets:
             key = a["kind"] + ":" + a["asset_id"]
@@ -774,14 +795,15 @@ def execute(args, db, graph, credentials):
                             journal.append("admin_not_delegable", key=key, actor=public_credential(c))
                             continue
                     source_assignment = read_assignment(graph, c, a, manifest["identities"]["source"]["meta_id"], args.business)
-                    if a["kind"] == "page":
-                        if source_assignment and not full_access("page", source_assignment.get("tasks")):
-                            owned_now = graph.rows(args.business + "/owned_pages", c, "id", stop_id=a["asset_id"])
-                            if a["asset_id"] not in owned_now:
-                                result = {"status": "skipped", "reason": "page_delegation_no_longer_proven"}
-                                break
                     if not source_assignment:
-                        result = {"status": "skipped", "reason": "source_permission_removed"}
+                        # A BM administrator's asset visibility may be narrower
+                        # than another administrator's. Absence from one read
+                        # does not establish that the source assignment vanished.
+                        journal.append("admin_asset_visibility_missing", key=key, actor=public_credential(c))
+                        continue
+                    if a["kind"] == "page" and not page_delegable_now(
+                            graph, c, a, source_assignment, live, args.business):
+                        result = {"status": "skipped", "reason": "page_delegation_no_longer_proven"}
                         break
                 except GraphError as exc:
                     category = error_kind(exc.response)

@@ -86,6 +86,23 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.filtered_pages(graph, "user", {}, ["123"], "bm")
 
+    def test_page_owner_rechecked_without_full_list_scan(self):
+        graph = SimpleNamespace(rows=lambda *a, **kw: self.fail("unexpected ownership list scan"))
+        asset = {"asset_id": "123"}
+        partial = {"tasks": ["ADVERTISE"]}
+        self.assertTrue(m.page_delegable_now(graph, {}, asset, partial, {"business": {"id": "bm"}}, "bm"))
+        self.assertFalse(m.page_delegable_now(graph, {}, asset, partial, {"business": {"id": "other"}}, "bm"))
+        self.assertTrue(m.page_delegable_now(graph, {}, asset, {"tasks": sorted(m.PAGE_TASKS)}, {}, "bm"))
+
+    def test_visibility_recheck_never_retries_an_intended_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            j = m.Journal(Path(d), "digest")
+            result = {"status": "skipped", "reason": "source_permission_removed"}
+            j.append("result", key="page:1", result=result)
+            j.append("intent", key="page:2")
+            j.append("result", key="page:2", result=result)
+            self.assertEqual(m.retryable_unwritten_results(j), {"page:1"})
+
     def test_status_batch_is_get_only_and_preserves_unknowns(self):
         graph = object.__new__(m.Graph)
         graph.version = "v26.0"

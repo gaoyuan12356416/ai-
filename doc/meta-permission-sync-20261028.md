@@ -51,6 +51,11 @@ are serial, >=5 seconds apart globally and >=30 seconds per token. Every saved
 unique credential is considered and relevant BM ADMIN status is verified live.
 Discovery may reuse this run's fingerprint-matched checks for 30 minutes; each
 selected acting administrator is revalidated before its first submission.
+Page preflight reads the current owning business together with publication state;
+only absent ownership metadata falls back to the BM-owned Page list. A source
+assignment invisible to one administrator causes another verified administrator
+to check it, rather than being interpreted as removed. Resume may reconsider old
+visibility skips only if the journal contains no write intent for that asset.
 368/1390008 and rate-limit responses pause the BM without switching tokens.
 Credential/permission errors may use the next verified administrator only when
 the API explicitly rejected the request. Timeouts/5xx require readback and never
