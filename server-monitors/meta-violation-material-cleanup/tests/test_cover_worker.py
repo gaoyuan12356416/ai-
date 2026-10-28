@@ -145,6 +145,31 @@ class Graph:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_post_identity_materializes_only_after_bind(self):
+        for available in (True, False):
+            with self.subTest(available=available):
+                aid = '10' if available else '11'
+                original = ad(aid); original['tracking_specs'].append(
+                    {'action.type':['post_engagement'],'page':['7'],'post':['9']})
+                old = creative(); old['effective_object_story_id'] = '7_9'
+                self.enqueue([original],batch='materialized-'+aid)
+                class MaterializingGraph(Graph):
+                    def bind_creative(self, aid, cid, user, account, before):
+                        result = super().bind_creative(aid,cid,user,account,before)
+                        self.ads[aid]['tracking_specs'][-1]['post'] = ['10']
+                        if available: self.creatives[cid]['effective_object_story_id'] = '7_10'
+                        return result
+                graph = MaterializingGraph([original],[old]); worker = self.worker(graph)
+                worker.run_once(max_ads=1,process_deletes=False)
+                task = self.store.get_task(1 if available else 2)
+                self.assertFalse(worker.halted.is_set())
+                self.assertEqual(task['status'],'succeeded' if available else 'unknown')
+                if not available:
+                    graph.creatives[task['result']['new_creative_id']]['effective_object_story_id'] = '7_10'
+                    self.assertEqual(worker.reconcile_unknown()['tasks_confirmed'],1)
+                    self.assertEqual(self.store.get_task(task['id'])['status'],'succeeded')
+                self.assertEqual(sum(call[0]=='bind' for call in graph.calls),1)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

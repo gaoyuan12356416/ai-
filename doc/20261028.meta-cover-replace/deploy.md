@@ -63,3 +63,5 @@ python3 /mnt/data-disk/meta-violation-material-cleanup/releases/a37148ebf5d02588
 绑定阶段真实样本确认：Meta 会将 post_engagement/post_interaction_gross/link_click 的旧帖子 ID 替换为新 Creative 的 effective_object_story_id，并重排 tracking_specs。仅当新旧有效帖子 ID 归属同 Page 且完整 tracking 多重集合（含重复数、Pixel、转化 ID、额外字段）一致时接受。绑定未知只读重新取 Ad/Creative 并验全参后确认，不重发 POST。111 项封面回归通过。
 
 用户于本会话明确确认“允许该视频专用项不再回传，继续修复和替换”。仅允许已核实图片 Creative 的 video_auto_crop 不回传（原值必须为严格 OPT_IN/OPT_OUT 结构），发送仍保留原值，返回不同值仍拒绝，其他逐项功能缺失仍拒绝。封面回归 112 项通过。
+
+真实样本发现 effective_object_story_id 可在绑定后才生成，故绑定后必须重新 GET 新 Creative 并验全参，再核对新旧帖子引用；仍未就绪时仅保留未知，禁止重发绑定。新增真实 SQLite worker 行为测试覆盖绑定后才有帖子 ID、延迟就绪后 GET-only 确认且仅一次 POST。封面回归 113 项通过。
