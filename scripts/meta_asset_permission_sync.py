@@ -23,6 +23,9 @@ from urllib.parse import urlencode
 ACCOUNT_TASKS = {"MANAGE", "ADVERTISE", "ANALYZE", "DRAFT"}
 PAGE_TASKS = {"MANAGE", "ADVERTISE", "ANALYZE", "CREATE_CONTENT", "MESSAGING",
               "MODERATE", "MANAGE_LEADS", "VIEW_MONETIZATION_INSIGHTS"}
+PAGE_PROFILE_TASKS = {"PROFILE_PLUS_MANAGE", "PROFILE_PLUS_ADVERTISE", "PROFILE_PLUS_ANALYZE",
+                      "PROFILE_PLUS_CREATE_CONTENT", "PROFILE_PLUS_MESSAGING", "PROFILE_PLUS_MODERATE",
+                      "PROFILE_PLUS_MANAGE_LEADS", "PROFILE_PLUS_REVENUE", "PROFILE_PLUS_FACEBOOK_ACCESS"}
 DEFAULT_BM = "163392938074395"
 BLOCK_CODES = {368}
 RATE_CODES = {4, 17, 32, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006}
@@ -55,7 +58,7 @@ def expected_tasks(kind, existing=()):
 
 def full_access(kind, tasks):
     tasks = set(tasks or [])
-    if kind == "page" and "PROFILE_PLUS_FULL_CONTROL" in tasks:
+    if kind == "page" and ("PROFILE_PLUS_FULL_CONTROL" in tasks or PAGE_PROFILE_TASKS.issubset(tasks)):
         return True
     return expected_tasks(kind, tasks).issubset(tasks)
 
@@ -575,9 +578,10 @@ class Journal:
 
 
 class Rotation:
-    def __init__(self, candidates, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, candidates, clock=time.monotonic, sleep=time.sleep, global_interval=5, token_interval=30):
         self.candidates = list(candidates)
         self.clock, self.sleep = clock, sleep
+        self.global_interval, self.token_interval = max(5, global_interval), max(30, token_interval)
         self.last_global, self.last_token = None, {}
         self.index, self.disabled = 0, set()
 
@@ -591,8 +595,8 @@ class Rotation:
 
     def before_write(self, c):
         t = self.clock()
-        wait = max(0, (self.last_global + 5 - t) if self.last_global is not None else 0,
-                   (self.last_token[c["id"]] + 30 - t) if c["id"] in self.last_token else 0)
+        wait = max(0, (self.last_global + self.global_interval - t) if self.last_global is not None else 0,
+                   (self.last_token[c["id"]] + self.token_interval - t) if c["id"] in self.last_token else 0)
         if wait:
             self.sleep(wait)
         self.last_global = self.clock()
@@ -634,6 +638,44 @@ def retryable_unwritten_results(journal):
     return {key for key, result in journal.results().items()
             if key not in attempted and result.get("status") == "skipped"
             and result.get("reason") == "source_permission_removed"}
+
+
+def assignment_equal(left, right):
+    if left is None or right is None:
+        return left is right
+    return (isinstance(left.get("tasks"), list) and isinstance(right.get("tasks"), list)
+            and set(left["tasks"]) == set(right["tasks"]))
+
+
+def current_share_grant(graph, admin, source, asset, live, bm):
+    if (live.get("business") or {}).get("id") == bm:
+        return {"id": bm, "owned": True}
+    prefix = "act_" if asset["kind"] == "account" else ""
+    credential = admin
+    if asset["kind"] == "page":
+        # Page agency reads require a Page token; derive it only in memory.
+        value = graph.get(asset["asset_id"], source, {"fields": "id,access_token"})
+        if not value.get("access_token"):
+            return None
+        credential = dict(source, accessToken=value["access_token"])
+    return graph.rows(prefix + asset["asset_id"] + "/agencies", credential, "id,permitted_tasks").get(bm)
+
+
+def validate_recovery(manifest):
+    recovery = manifest.get("recovery")
+    if not recovery:
+        return None
+    parent = Path(recovery["prior_run_dir"])
+    if hashlib.sha256((parent/"manifest.json").read_bytes()).hexdigest() != recovery["prior_manifest_sha256"]:
+        raise ValueError("recovery_parent_manifest_changed")
+    events = [json.loads(line) for line in (parent/"journal.jsonl").read_text().splitlines()]
+    pause = next((e for e in reversed(events) if e["event"] == "bm_paused"), None)
+    intent = next((e for e in reversed(events) if e["event"] == "intent" and e["key"] == recovery["key"]), None)
+    if not pause or not intent or pause["key"] != recovery["key"] or pause["at"] != recovery["restricted_at"]:
+        raise ValueError("recovery_does_not_match_latest_restriction")
+    if intent["actor"]["credential_id"] != recovery["actor_credential_id"] or intent["actor"]["fingerprint"] != recovery["actor_fingerprint"] or intent["target_id"] != recovery["target_id"]:
+        raise ValueError("recovery_actor_or_target_changed")
+    return recovery
 
 
 def verify_after(graph, admin, target, asset, target_id, bm):
@@ -702,6 +744,7 @@ def execute(args, db, graph, credentials):
     manifest = json.loads(manifest_path.read_text())
     if not manifest["complete"] or manifest["business_id"] != args.business:
         raise ValueError("incomplete_or_wrong_business_manifest")
+    recovery = validate_recovery(manifest)
     journal = Journal(directory, digest)
     if args.command == "execute" and journal.events:
         raise ValueError("existing_journal_use_resume")
@@ -722,13 +765,27 @@ def execute(args, db, graph, credentials):
     admins = discover_admins(graph, credentials, args.business, users, directory)
     if not admins:
         raise ValueError("no_current_verified_administrators")
-    rotation = Rotation(admins)
+    recovery_pending = bool(recovery) and not any(e["event"] == "recovery_verified" for e in journal.events)
+    if recovery_pending:
+        recovered_actor = next((c for c in admins if c["id"] == recovery["actor_credential_id"]), None)
+        if not recovered_actor or public_credential(recovered_actor)["fingerprint"] != recovery["actor_fingerprint"]:
+            journal.append("bm_paused", business_id=args.business, key=recovery["key"], reason="original_restricted_actor_unavailable")
+            raise ValueError("original_restricted_actor_unavailable")
+        admins = [recovered_actor] + [c for c in admins if c is not recovered_actor]
+    rotation = Rotation(admins, global_interval=manifest.get("write_interval", 5), token_interval=manifest.get("token_interval", 30))
     checked_actors = set()
     assets = [a for a in manifest["assets"] if a["category"] in ("missing", "insufficient")]
     # One canary per kind before proceeding with that asset class.
     assets.sort(key=lambda a: (a["kind"], a["asset_id"]))
     firsts = [next((a for a in assets if a["kind"] == kind), None) for kind in ("account", "page")]
     assets = [a for a in firsts if a] + [a for a in assets if a not in firsts]
+    if recovery_pending:
+        canary = next((a for a in manifest["assets"] if a["kind"]+":"+a["asset_id"] == recovery["key"]), None)
+        if not canary or canary["category"] not in ("missing", "insufficient", "already_sufficient") or canary.get("delegable") is not True:
+            journal.append("bm_paused", business_id=args.business, key=recovery["key"], reason="original_restricted_asset_not_eligible")
+            raise ValueError("original_restricted_asset_not_eligible")
+        assets = [canary] + [a for a in assets if a is not canary]
+        journal.append("recovery_canary_start", recovery=recovery)
     blocked_kinds = set()
     canary_done = set()
     results = journal.results()
@@ -755,6 +812,14 @@ def execute(args, db, graph, credentials):
                     result = {"status": "unknown", "reason": "resume_readback_failed", "error": safe_response(exc.response)}
                 journal.append("result", key=key, result=result)
                 results[key] = result
+                if recovery_pending:
+                    ack = any(e["event"] == "response" and e.get("key") == recovery["key"] and e.get("acknowledged") for e in journal.events)
+                    if key == recovery["key"] and result["status"] == "verified" and ack:
+                        journal.append("recovery_verified", key=key, actor_credential_id=recovery["actor_credential_id"], prior_restricted_at=recovery["restricted_at"])
+                        recovery_pending = False
+                    else:
+                        journal.append("bm_paused", business_id=args.business, key=key, reason="recovery_readback_inconclusive")
+                        break
                 if result["status"] == "verified":
                     canary_done.add(a["kind"])
                 elif a["kind"] not in canary_done:
@@ -762,8 +827,11 @@ def execute(args, db, graph, credentials):
                 continue
             tried = set()
             result = None
+            recovery_acknowledged = False
             while True:
-                c = rotation.next(tried)
+                # Recovery must use the exact actor/asset that was blocked, with
+                # one submission at most. No alternate credential can prove it.
+                c = None if recovery_pending and tried else rotation.next(tried)
                 if not c:
                     result = {"status": "failed", "reason": "no_eligible_admin_remaining"}
                     break
@@ -777,6 +845,11 @@ def execute(args, db, graph, credentials):
                             continue
                         checked_actors.add(c["id"])
                     before = read_assignment(graph, c, a, target_id, args.business)
+                    if manifest.get("format_version", 1) >= 2:
+                        before_self = read_assignment(graph, target, a, target_id, args.business)
+                        if not assignment_equal(before, before_self):
+                            journal.append("admin_target_assignment_disagrees", key=key, actor=public_credential(c))
+                            continue
                     live = live_asset(graph, source, a)
                     raw_id = ("act_" if a["kind"] == "account" else "") + a["asset_id"]
                     backend = db.assets(a["kind"], [raw_id]).get(a["asset_id"])
@@ -784,7 +857,7 @@ def execute(args, db, graph, credentials):
                     if state != "normal":
                         result = {"status": "skipped", "reason": reason}
                         break
-                    if before and full_access(a["kind"], before.get("tasks")):
+                    if before and full_access(a["kind"], before.get("tasks")) and not recovery_pending:
                         result = verify_after(graph, c, target, a, target_id, args.business)
                         result["reason"] = "already_full_before_write"
                         break
@@ -795,13 +868,22 @@ def execute(args, db, graph, credentials):
                             journal.append("admin_not_delegable", key=key, actor=public_credential(c))
                             continue
                     source_assignment = read_assignment(graph, c, a, manifest["identities"]["source"]["meta_id"], args.business)
+                    if manifest.get("format_version", 1) >= 2:
+                        source_self = read_assignment(graph, source, a, manifest["identities"]["source"]["meta_id"], args.business)
+                        if not assignment_equal(source_assignment, source_self):
+                            journal.append("admin_source_assignment_disagrees", key=key, actor=public_credential(c))
+                            continue
+                        share = current_share_grant(graph, c, source, a, live, args.business)
+                        if not share or not (share.get("owned") or full_access(a["kind"], share.get("permitted_tasks"))):
+                            result = {"status": "skipped", "reason": "current_bm_full_control_not_proven"}
+                            break
                     if not source_assignment:
                         # A BM administrator's asset visibility may be narrower
                         # than another administrator's. Absence from one read
                         # does not establish that the source assignment vanished.
                         journal.append("admin_asset_visibility_missing", key=key, actor=public_credential(c))
                         continue
-                    if a["kind"] == "page" and not page_delegable_now(
+                    if manifest.get("format_version", 1) < 2 and a["kind"] == "page" and not page_delegable_now(
                             graph, c, a, source_assignment, live, args.business):
                         result = {"status": "skipped", "reason": "page_delegation_no_longer_proven"}
                         break
@@ -829,6 +911,7 @@ def execute(args, db, graph, credentials):
                 journal.append("response", key=key, actor=public_credential(c), response=safe_response(response),
                                acknowledged=response.get("ok") and response["data"].get("success") is True)
                 category = error_kind(response) if not response.get("ok") else "submitted"
+                recovery_acknowledged = response.get("ok") and response["data"].get("success") is True
                 if category == "restricted":
                     result = {"status": "restricted", "reason": "platform_restriction_no_token_bypass",
                               "error": safe_response(response)}
@@ -859,6 +942,16 @@ def execute(args, db, graph, credentials):
                         journal.append("bm_paused", business_id=args.business, key=key,
                                        reason="readback_platform_restriction", response=safe_response(exc.response))
                 break
+            if recovery_pending:
+                if result["status"] == "verified" and recovery_acknowledged:
+                    journal.append("recovery_verified", key=key, actor_credential_id=recovery["actor_credential_id"],
+                                   prior_restricted_at=recovery["restricted_at"])
+                    recovery_pending = False
+                else:
+                    if result["status"] == "verified":
+                        result = {"status": "unknown", "reason": "recovery_write_not_acknowledged"}
+                    if not any(e["event"] == "bm_paused" for e in journal.events):
+                        journal.append("bm_paused", business_id=args.business, key=key, reason="recovery_not_verified")
             journal.append("result", key=key, result=result)
             results[key] = result
             emit("asset_result", key=key, **result)

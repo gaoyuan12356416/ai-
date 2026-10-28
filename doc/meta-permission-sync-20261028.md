@@ -79,3 +79,43 @@ remove only the newly created assignment if no assignment existed before. Never
 remove another actor's later-added tasks or delete an entire user's access blindly.
 
 Tests: `python -m unittest discover -s scripts -p test_meta_asset_permission_sync.py`.
+
+## Follow-up investigation and controlled recovery
+
+`scripts/meta_asset_permission_followup.py --run-dir NEW_DIRECTORY --prior-run
+PAUSED_DIRECTORY --code-version COMMIT` performs a fresh read-only audit. It reads
+`permitted_tasks` from the BM's complete `client_ad_accounts` and `client_pages`
+lists, rather than treating one administrator's `user_tasks` as the BM sharing
+ceiling. Assets absent from those lists remain unknown unless current ownership
+proves authority. It does not modify the owner-to-BM sharing arrangement.
+
+Page permission comparison uses the same `assigned_pages` edge through both
+the system user's own token and a verified administrator. `me/accounts` remains
+the actual visibility check; its effective task list is retained separately.
+Those two different edges may differ on leads/revenue tasks. Same-edge conflicts
+are checked with other verified administrators and remain unknown if unresolved.
+State failures take precedence over task discrepancies.
+
+New Page grants can expose either `PROFILE_PLUS_FULL_CONTROL` or an expanded
+bundle containing management, Facebook access, ads, analytics, content, messages,
+moderation, leads, and revenue tasks. Require the complete bundle, not `MANAGE`
+alone. Preserve existing target tasks. The task names follow Meta's official
+[Page SDK](https://github.com/facebook/facebook-python-business-sdk/blob/main/facebook_business/adobjects/page.py);
+the expanded share bundle was also cross-checked against existing system-user
+management assignments during the read-only investigation.
+
+The new manifest links the immutable prior restriction, original actor fingerprint,
+target identity, and restricted asset. Its first authorization must use that exact
+actor and asset; a successful acknowledged response and both readbacks establish
+recovery for that attempt. Elapsed time, ordinary GET success, or a different
+administrator cannot establish recovery. Any failure or ambiguous outcome keeps
+the BM paused. Resume of an interrupted recovery reads back first and requires a
+previously acknowledged write before releasing the queue. No prior restriction
+event is deleted. Ordinary follow-up writes are serial, at least 30 seconds apart
+globally and 300 seconds per credential.
+
+For format-v2 manifests, every write rechecks both users' assignment through the
+acting administrator and their own tokens. Current shared authority is reread via
+the asset's `agencies.permitted_tasks`; Page agency reads derive a Page token only
+in memory. Derived credentials are never persisted or logged. Test the complete
+operation with `python -m unittest discover -s scripts -p 'test_meta_asset_permission*.py'`.

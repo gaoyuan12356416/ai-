@@ -25,6 +25,9 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(m.full_access("page", m.PAGE_TASKS - {"MANAGE_LEADS"}))
         self.assertTrue(m.full_access("page", ["PROFILE_PLUS_FULL_CONTROL"]))
         self.assertEqual(m.expected_tasks("page", ["PROFILE_PLUS_ADVERTISE"]), {"PROFILE_PLUS_FULL_CONTROL"})
+        self.assertTrue(m.full_access("page", m.PAGE_PROFILE_TASKS))
+        self.assertFalse(m.full_access("page", m.PAGE_PROFILE_TASKS - {"PROFILE_PLUS_REVENUE"}))
+        self.assertFalse(m.full_access("page", ["PROFILE_PLUS_MANAGE"]))
 
     def test_legacy_id_does_not_override_current_identity(self):
         graph = SimpleNamespace(get=lambda *a: {"id": "current", "name": "backup"})
@@ -159,12 +162,12 @@ class PolicyTests(unittest.TestCase):
 
 
 class ExecuteTests(unittest.TestCase):
-    def run_scenario(self, response, resume=False):
+    def run_scenario(self, response, resume=False, recovery=False, readback_status="pending_verification"):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = Path(tmp.name)
         assets = [{"kind": "account", "asset_id": str(i), "category": "insufficient",
-                   "desired_tasks": sorted(m.ACCOUNT_TASKS), "before_tasks": ["ADVERTISE"]} for i in (1, 2)]
+                   "desired_tasks": sorted(m.ACCOUNT_TASKS), "before_tasks": ["ADVERTISE"], "delegable": True} for i in (1, 2)]
         manifest = {"complete": True, "business_id": m.DEFAULT_BM, "code_version": "preview-version",
                     "identities": {"source": {"local_user_id": 803, "meta_id": "s"},
                                    "target": {"local_user_id": 916, "meta_id": "t"}}, "assets": assets}
@@ -176,6 +179,8 @@ class ExecuteTests(unittest.TestCase):
             journal.append("intent", key="account:1")
         credentials = [{"id": i, "user_id": u, "accessToken": "fake" + str(i), "facebookUserID": "old"}
                        for i, u in [(1, 803), (2, 916), (3, 1), (4, 2)]]
+        recovery_info = {"key": "account:1", "actor_credential_id": 3, "actor_fingerprint": m.public_credential(credentials[2])["fingerprint"],
+                         "restricted_at": "2026-10-28T00:00:00+00:00"} if recovery else None
         posts = []
         class G:
             def rows(self, *a, **kw): return {}
@@ -186,12 +191,13 @@ class ExecuteTests(unittest.TestCase):
         db = SimpleNamespace(assets=lambda kind, ids: {m.normalized_id(ids[0]): {"account_status": 1, "is_inactive": 0}})
         identity = lambda graph, c, users: {"meta_id": "s" if c["user_id"] == 803 else "t"}
         patches = [patch.object(m, "primary_admin", return_value=(credentials[2], {})),
+                   patch.object(m, "validate_recovery", return_value=recovery_info),
                    patch.object(m, "verify_admin", return_value={"proof": "ADMIN"}),
                    patch.object(m, "verify_identity", side_effect=identity),
                    patch.object(m, "discover_admins", return_value=credentials[2:]),
                    patch.object(m, "read_assignment", return_value={"tasks": ["ADVERTISE"]}),
                    patch.object(m, "live_asset", return_value={"account_status": 1, "user_tasks": sorted(m.ACCOUNT_TASKS)}),
-                   patch.object(m, "verify_after", return_value={"status": "pending_verification", "reason": "not_confirmed"}),
+                   patch.object(m, "verify_after", return_value={"status": readback_status, "reason": "test_readback"}),
                    patch.object(m.time, "sleep"), patch.object(m, "emit")]
         for p in patches: p.start()
         try:
@@ -220,6 +226,28 @@ class ExecuteTests(unittest.TestCase):
     def test_429_does_not_rotate_around_limit(self):
         posts, summary, _ = self.run_scenario({"ok": False, "http": 429, "retry_after": "300"})
         self.assertEqual(len(posts), 1)
+        self.assertTrue(summary["bm_paused"])
+
+    def test_recovery_permission_failure_does_not_switch_actor(self):
+        posts, summary, _ = self.run_scenario({"ok": False, "http": 400, "error": {"code": 200}}, recovery=True)
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(summary["bm_paused"])
+
+    def test_recovery_requires_ack_and_target_readback(self):
+        posts, summary, journal = self.run_scenario({"ok": False, "http": 599, "transport_error": "Timeout"}, recovery=True, readback_status="verified")
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(summary["bm_paused"])
+        self.assertFalse(any(e['event']=='recovery_verified' for e in journal.events))
+
+    def test_recovery_success_opens_remaining_queue(self):
+        posts, summary, journal = self.run_scenario({"ok": True, "http": 200, "data": {"success": True}}, recovery=True, readback_status="verified")
+        self.assertEqual(len(posts), 2)
+        self.assertFalse(summary["bm_paused"])
+        self.assertTrue(any(e['event']=='recovery_verified' for e in journal.events))
+
+    def test_interrupted_recovery_without_ack_only_reads(self):
+        posts, summary, _ = self.run_scenario({"ok": True, "http": 200, "data": {"success": True}}, resume=True, recovery=True, readback_status="verified")
+        self.assertEqual(posts, [])
         self.assertTrue(summary["bm_paused"])
 
 
