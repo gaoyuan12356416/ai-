@@ -7,6 +7,7 @@ from copy import deepcopy
 import hashlib
 import ipaddress
 import json
+import re
 from urllib.parse import urlsplit
 
 
@@ -246,6 +247,25 @@ def verify_creative(actual, expected_payload):
         raise PayloadError('creative_readback_not_single_image')
     expected = deepcopy(expected_payload)
     actual = deepcopy(actual)
+    # Meta appends this observed generated suffix to Creative's administrative
+    # name. Never normalize the displayed link_data.name (the ad headline).
+    name, returned_name = expected.get('name'), actual.get('name')
+    if (isinstance(name, str) and name and isinstance(returned_name, str)
+            and returned_name.startswith(name + ' ')
+            and re.fullmatch(r'\d{4}-\d{2}-\d{2}-[0-9a-f]{32}', returned_name[len(name) + 1:])):
+        actual['name'] = name
+    # The create projection explicitly omits Meta's retired aggregate only
+    # when individual feature settings exist. Accept its absence on GET, but
+    # keep strict comparison of every individual option and any returned aggregate.
+    wire = creation_payload(expected)
+    features = (expected.get('degrees_of_freedom_spec') or {}).get('creative_features_spec')
+    wire_features = (wire.get('degrees_of_freedom_spec') or {}).get('creative_features_spec')
+    actual_features = (actual.get('degrees_of_freedom_spec') or {}).get('creative_features_spec')
+    if (isinstance(features, dict) and isinstance(wire_features, dict)
+            and isinstance(actual_features, dict) and 'standard_enhancements' in features
+            and 'standard_enhancements' not in wire_features
+            and 'standard_enhancements' not in actual_features):
+        features.pop('standard_enhancements')
     if 'adlabels' in expected and 'adlabels' in actual:
         actual['adlabels'] = _labels(actual['adlabels'])
     if _meaningful(expected.get('creative_sourcing_spec')):

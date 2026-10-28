@@ -57,3 +57,5 @@ Meta validate_only 对照校验（不创建对象）确认 enable_direct_install
 ```bash
 python3 /mnt/data-disk/meta-violation-material-cleanup/releases/a37148ebf5d02588137c67a905fe6fb8da7a3a2b/server-monitors/meta-violation-material-cleanup/deploy/install_cover.py rollback /mnt/data-disk/meta-violation-material-cleanup/backups/cover-20261028T102157Z-a37148ebf5d0
 ```
+
+2026-10-28 回读修复：真实创建已被接受；4 个已知 ID 因 Meta 自动追加 Creative 管理名称后缀、GET 省略退役 standard_enhancements 聚合而隔离。仅允许原名称完整前缀加精确日期/32位十六进制后缀；仅在合法创建投影已省略聚合且逐项配置齐全时允许 GET 缺失聚合。广告标题、文案、完整链接、身份及逐项增强仍严格核验。110 项封面回归通过。旧失败任务不重置，未知对象只读核对后仅恢复首次未发送绑定。

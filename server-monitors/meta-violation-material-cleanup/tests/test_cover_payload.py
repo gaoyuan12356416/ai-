@@ -29,6 +29,28 @@ def video():
 
 
 class PayloadTests(unittest.TestCase):
+    def test_observed_generated_name_and_retired_aggregate_readback(self):
+        expected = build_payload(video(), 'https://cdn.example/new.jpg')
+        frozen = copy.deepcopy(expected)
+        actual = creation_payload(expected)
+        actual['name'] += ' 2026-10-28-9f481f0cef7f198ee5c3ccf7957fb7b4'
+        verify_creative(actual, expected)
+        self.assertEqual(expected, frozen)
+        for field, value in [('name', 'unrelated'), ('name', expected['name'] + ' arbitrary')]:
+            changed = copy.deepcopy(actual); changed[field] = value
+            with self.assertRaises(PayloadError): verify_creative(changed, expected)
+        for mutate in (
+            lambda x: x['object_story_spec']['link_data'].update(name='changed headline'),
+            lambda x: x['object_story_spec']['link_data'].update(link='https://other.example'),
+            lambda x: x['object_story_spec']['link_data'].update(message='changed copy'),
+            lambda x: x['object_story_spec'].update(page_id='999'),
+            lambda x: x['degrees_of_freedom_spec']['creative_features_spec']['text_optimizations'].update(enroll_status='OPT_IN'),
+            lambda x: x['degrees_of_freedom_spec']['creative_features_spec'].pop('text_optimizations'),
+            lambda x: x['degrees_of_freedom_spec']['creative_features_spec'].update(standard_enhancements={'enroll_status':'OPT_IN'}),
+        ):
+            changed = copy.deepcopy(actual); mutate(changed)
+            with self.assertRaises(PayloadError): verify_creative(changed, expected)
+
     def test_creation_projection_omits_only_readonly_and_legacy_aggregate(self):
         old = video(); old['enable_direct_install'] = False
         old['enable_launch_instant_app'] = False

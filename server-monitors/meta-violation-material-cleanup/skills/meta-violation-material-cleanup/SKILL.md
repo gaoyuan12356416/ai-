@@ -23,6 +23,7 @@ Source: GitHub gaoyuan12356416/ai-, server-monitors/meta-violation-material-clea
 - Preserve observed creative_sourcing_spec.destination_screenshot_spec OPT_OUT and page-equal object_id; unsupported media sourcing or a different object_id remains a per-Ad failure.
 - The creation wire projection omits read-only enable_direct_install=False and Meta's retired standard_enhancements aggregate only when individual feature settings exist. Keep the full expected payload/hash and strict readback; preserve every individual setting. Do not reset prior failures to test a new release.
 - Preserve the full destination including query parameters, copy, CTA, deep links, attribution and identity fields. Unsupported meaningful parameters, ambiguous covers or multi-drama conversions fail explicitly; do not invent defaults or drop fields.
+- Readback may accept only the observed exact administrative Creative name suffix (original name plus date and 32 lowercase hex digits), never a changed ad headline. Permit missing retired standard_enhancements only when creation_payload validated its omission; preserve all individual features and verify any returned aggregate.
 - Reuse only matching account/full payload/cover version. Without reliable cover version, scope reuse to the batch.
 
 ## Write and deletion boundary
