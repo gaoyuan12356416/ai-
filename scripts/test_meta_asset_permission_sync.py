@@ -71,6 +71,16 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.Journal(Path(d), "wrong")
 
+    def test_page_assignment_uses_business_user_edge(self):
+        calls = []
+        def rows(*a, **kw):
+            calls.append((a, kw))
+            return {"p": {"id": "p", "tasks": sorted(m.PAGE_TASKS)}}
+        assignment = m.read_assignment(SimpleNamespace(rows=rows), {}, {"kind": "page", "asset_id": "p"}, "target", "bm")
+        self.assertTrue(m.full_access("page", assignment["tasks"]))
+        self.assertEqual(calls[0][0][0], "target/assigned_pages")
+        self.assertEqual(calls[0][1]["stop_id"], "p")
+
 
 class ExecuteTests(unittest.TestCase):
     def run_scenario(self, response, resume=False):

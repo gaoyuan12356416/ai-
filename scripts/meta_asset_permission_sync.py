@@ -451,6 +451,13 @@ class Rotation:
 
 
 def read_assignment(graph, credential, asset, target_id, bm):
+    if asset["kind"] == "page":
+        # Page /assigned_users GET requires pages_manage_metadata even for BM
+        # administrators. The business-management user edge exposes the same
+        # assignment tasks without requiring an unrelated OAuth scope.
+        rows = graph.rows(target_id + "/assigned_pages", credential, "id,name,tasks",
+                          {"business": bm}, stop_id=asset["asset_id"])
+        return rows.get(asset["asset_id"])
     path = ("act_" if asset["kind"] == "account" else "") + asset["asset_id"]
     rows = graph.rows(path + "/assigned_users", credential, "id,name,tasks", {"business": bm})
     return rows.get(target_id)
