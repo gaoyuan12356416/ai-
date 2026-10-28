@@ -553,12 +553,23 @@ def verify_after(graph, admin, target, asset, target_id, bm):
 def discover_admins(graph, credentials, bm, system_users, directory):
     # All saved unique tokens, not only historically cached administrator IDs.
     checks, admins, seen = [], [], set()
+    cache_path = directory / "admin_checks.json"
+    prior = json.loads(cache_path.read_text()) if cache_path.exists() else []
+    reusable = {str(x["credential_id"]): x for x in prior
+                if x.get("business_id") == bm and x.get("checked_at")
+                and (datetime.now(timezone.utc) - datetime.fromisoformat(x["checked_at"])).total_seconds() < 600}
     for i, c in enumerate(credentials):
         fingerprint = hashlib.sha256(c["accessToken"].encode()).hexdigest()
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
-        check = public_credential(c)
+        check = {**public_credential(c), "business_id": bm, "checked_at": now()}
+        cached = reusable.get(str(c["id"]))
+        if cached and cached.get("fingerprint") == check["fingerprint"]:
+            checks.append(cached)
+            if cached.get("verified_admin"):
+                admins.append(c)
+            continue
         try:
             proof = verify_admin(graph, c, bm, system_users)
             check.update(verified_admin=bool(proof), proof=proof)
