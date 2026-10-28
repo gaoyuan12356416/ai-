@@ -87,5 +87,10 @@ class PoolOwnerTests(unittest.TestCase):
         with self.assertRaises(a.AttributionError):m.apply(self.fx.x,manifest)
         self.assertEqual(a.load_frozen(self.fx.x,3),self.before[2])
 
+    def test_historical_unbound_canary_is_outside_pool_migration(self):
+        self.freeze_old();self.fx.execute(self.fx.x,'UPDATE x_post_queue SET pool_item_id=NULL WHERE id=3')
+        manifest=m.plan(self.fx.x,self.fx.users)
+        self.assertEqual([r['queue_id'] for r in manifest['rows']],[4])
+
 
 if __name__=='__main__':unittest.main()

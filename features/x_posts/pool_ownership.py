@@ -16,7 +16,7 @@ def identity(connection, queue, users, *, unresolved_tenant=''):
     key, content = specs[kind]
     pool_id = queue.get(key)
     if not pool_id:
-        if queue.get('schedule_run_id'):
+        if queue.get('schedule_run_id') and not unresolved_tenant:
             raise AttributionError('x_attribution_pool_binding_missing')
         return None  # Unbound legacy canaries are outside the pool correction.
     row = connection.execute('SELECT * FROM x_post_' + kind + '_pool WHERE id=?', (pool_id,)).fetchone()
