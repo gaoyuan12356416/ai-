@@ -130,11 +130,35 @@ class ScopedMetricTests(unittest.TestCase):
 
     def test_row_budget_applies_across_batches(self):
         values = ['campaign', 'second']
-        with patch.object(scoped, 'BATCH_SIZE', 1), patch.object(routes, 'MAX_ROWS', 1), \
+        with patch.object(scoped, 'SINGLE_DAY_BATCH_SIZE', 1), patch.object(routes, 'MAX_ROWS', 1), \
                 patch.object(routes, 'query_source_rows', side_effect=[
                     [dict(date=DAY)], [metric()], [metric(campaign='second')]]):
             with self.assertRaisesRegex(report.ReportError, '上限'):
                 scoped.source({}, DAY, DAY, 'youtube', '2284', values)
+        self.assertFalse(routes._cache)
+
+    def test_single_day_large_history_keeps_all_batches_and_exact_ids(self):
+        ids = ['p%04d' % i for i in range(2100)]
+        def query(app, sql, limit):
+            if 'GROUP BY dt LIMIT 94' in sql:
+                return [dict(date=DAY)]
+            present = [cid for cid in ids if 'CONVERT(0x' + cid.encode().hex() + ' USING' in sql]
+            return [metric(campaign=cid) for cid in present]
+        with patch.object(routes, 'query_source_rows', side_effect=query) as read:
+            rows, _, coverage = scoped.source({}, DAY, DAY, 'youtube', '2284', ids)
+        self.assertEqual(read.call_count, 4)
+        self.assertEqual({r['campaign_id'] for r in rows}, set(ids))
+        self.assertEqual(len(rows), 2100)
+        self.assertEqual(coverage, {DAY})
+        with self.assertRaises(report.ReportError):
+            scoped.metric_sql('2026-09-01', DAY, 'youtube', '2284', ids[:101])
+
+    def test_last_single_day_batch_failure_never_caches_partial_success(self):
+        ids = ['p%04d' % i for i in range(1001)]
+        with patch.object(routes, 'query_source_rows', side_effect=[
+                [dict(date=DAY)], [metric(campaign=ids[0])], report.ReportError('timeout', 503)]):
+            with self.assertRaises(report.ReportError):
+                scoped.source({}, DAY, DAY, 'youtube', '2284', ids)
         self.assertFalse(routes._cache)
 
     def test_filters_and_csv_keep_same_values_as_full_source(self):

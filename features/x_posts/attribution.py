@@ -208,6 +208,13 @@ class Resolver:
         elif source != "system":
             raise AttributionError("x_attribution_source_invalid")
         users = self.users()
+        pool_owner = None
+        if source == "system":
+            from .pool_ownership import identity
+            with closing(readonly(self.x_db)) as c:
+                pool_owner = identity(c, q, users)
+            if pool_owner:
+                owner_id, tenant = pool_owner['owner'], pool_owner['tenant']
         candidates = [u for u in users if u["user_id"] == owner_id and (not tenant or u["tenant_key"] == tenant)] if owner_id else []
         if len({(u["tenant_key"], u["user_id"]) for u in candidates}) > 1:
             raise AttributionError("x_attribution_tenant_ambiguous")
@@ -224,12 +231,16 @@ class Resolver:
         sub_id = None if fallback else self._mapped(actor["email"])
         if not fallback and sub_id is None:
             fallback = "publisher_mapping_missing"
-        if fallback:
+        if fallback and pool_owner:
+            # Missing URL mapping must not transfer the reporting owner to admin.
+            effective, sub_id = actor, "248"
+            fallback = "pool_url_" + fallback
+        elif fallback:
             effective = self._default_owner(users, tenant or (actor or {}).get("tenant_key", ""))
             sub_id = "248"
         else:
             effective = actor
-        return validate_context(dict(
+        context = dict(
             version=VERSION, tenant=effective["tenant_key"], owner=effective["user_id"],
             owner_name=effective["name"], sub_user_id=sub_id,
             source_owner=owner_id, source_tenant=tenant or (actor or {}).get("tenant_key", ""),
@@ -238,7 +249,11 @@ class Resolver:
             material_id=text(q["material_id"]), material_name=text(q["material_name"]),
             content_id=text(q["content_id"]), drama_name=text(q["drama_name"], True),
             language=text(q["material_language"], True), tag=text(q.get("tag") or "none", True),
-            af_c_id=str(queue_id), excluded=False, frozen_at=l["created_at"]), l)
+            af_c_id=str(queue_id), excluded=False, frozen_at=l["created_at"])
+        if pool_owner:
+            context.update({k: v for k, v in pool_owner.items()
+                            if k not in {'fallback_reason'}})
+        return validate_context(context, l)
 
 
 def resolve_via_loopback(queue_id, log_id):

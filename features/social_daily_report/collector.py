@@ -98,7 +98,9 @@ def present(shared, report_date):
 
 def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH,
             fb_db_path=FB_DB_PATH, facebook_attribution_db_path=FACEBOOK_ATTRIBUTION_DB_PATH):
+    from features.social_analytics.adapters import read_catalogs
     from features.social_analytics.routes import build_report
+    from features.social_daily_report.billing import collect_financials
 
     day = date.fromisoformat(report_date).isoformat()
     app = read_settings(env_path)
@@ -108,9 +110,10 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
                SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2,
                SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + 120)
+    catalog_snapshot = read_catalogs(app, ["youtube", "x", "facebook"])
     shared = build_report(
         app, {"role": "admin", "_system_report": True},
         {"start": [day], "end": [day], "group_by": ["owner,platform"], "page_size": ["100"]},
-        include_titles=False, ai_backend_only=True,
+        include_titles=False, ai_backend_only=True, catalog_snapshot=catalog_snapshot,
     )
-    return present(shared, day)
+    return collect_financials(present(shared, day), app, catalog_snapshot[0])
