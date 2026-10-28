@@ -1,6 +1,6 @@
 # 部署与回滚
 
-状态：2026-10-28 19:59 Asia/Shanghai 已部署 cf5d16047dbdf523e9f25a1e9b176ef41e960aae，持续 worker 与小时扫描/通知 timers 已 enabled/active；旧 Ad 删除 timer 仍 disabled/inactive。下文早期回执为历史阶段。
+状态：2026-10-28 20:12 Asia/Shanghai，精确版本a5078f9031cf31dc71213de31021dd7cff148ae2；worker、小时scan和notify timers enabled/active，补扫进行中，旧Ad删除timer disabled/inactive。下文早期回执均为历史阶段。
 
 ## 目标
 
@@ -79,3 +79,7 @@ GitHub 分支 codex/meta-cover-readback-repair-20261028；服务器精确提交 
 扩大批次观察到 Meta 自动管理名称 video Auto Creative 同媒体/日期前缀下重新生成源 hash，再追加日期/hash。其余业务字段逐项相同；仅允许该固定自动名称模式的 hash 变化，用户自定义名称、原 Ad 名称和 link_data.name 广告标题仍严格校验。117回归通过。扩大批次确认成功102，23旧Creative删除，新增管理名称差异已知ID未绑定，保持未知围栏等待只读复核。
 
 自动名称校验按完整 Auto Creative 生成格式识别其管理元数据（媒体/日期/hash及可重复日期/hash后缀），业务身份完全由 exact ID/account 与完整 payload 证明，不拿生成标签作业务指纹；原 Ad 名称和展示标题不归一化，自定义名称仍严格验证。117回归通过。已知名称差异资源已 GET-only 确认、恢复首次未发送绑定，未重复创建。
+
+## 最终运行回执（20:12）
+
+部署分支codex/meta-cover-readback-repair-20261028，精确运行a5078f9031cf31dc71213de31021dd7cff148ae2；117回归通过。20:12:19冻结：替换成功190、排队5338、等待审核90、明确失败103、obsolete449、未知0；旧Creative删除64、引用暂缓6、待核对100。worker active/running且enabled；扫描补跑active，scan timer下次21:00，notify timer active；无write-pause。旧GK失败资源86个，最后写入18:58:06；失败关联继续保留，未重放创建。已知自动名称差异对象1651412593432900复用并成功绑定，未重复创建。备份 /mnt/data-disk/meta-violation-material-cleanup/backups/cover-20261028T120712Z-a5078f9031cf；回滚使用本运行提交installer rollback该目录并保留当前账本。源技能已更新，实际数字由runtime/deployments/repair-20261028-final.json与实时status核实；仍在处理，冻结数字不代表已清空积压。本回执仅文档提交，不改部署代码。
