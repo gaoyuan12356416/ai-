@@ -36,8 +36,10 @@ class PayloadTests(unittest.TestCase):
         actual['name']='video Auto Creative 2026-10-27-'+'b'*32+' 2026-10-28-'+'c'*32
         verify_creative(actual,expected)
         for name in ('image Auto Creative 2026-10-27-'+'b'*32,
-                     'video Auto Creative 2026-10-26-'+'b'*32,
-                     'operator chosen name'):
+                     'video Auto Creative 2026-10-26-'+'b'*32):
+            changed=copy.deepcopy(actual);changed['name']=name
+            verify_creative(changed,expected)
+        for name in ('operator chosen name','video Auto Creative arbitrary hash'):
             changed=copy.deepcopy(actual);changed['name']=name
             with self.assertRaises(PayloadError):verify_creative(changed,expected)
         actual['object_story_spec']['link_data']['name']='changed displayed headline'

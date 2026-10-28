@@ -256,11 +256,11 @@ def verify_creative(actual, expected_payload):
             and re.fullmatch(r'\d{4}-\d{2}-\d{2}-[0-9a-f]{32}', returned_name[len(name) + 1:])):
         actual['name'] = name
     if isinstance(name, str) and isinstance(returned_name, str):
-        automatic = re.fullmatch(r'((?:video|image) Auto Creative \d{4}-\d{2}-\d{2}-)[0-9a-f]{32}', name)
-        if automatic and re.fullmatch(re.escape(automatic[1]) +
-                r'[0-9a-f]{32}(?: \d{4}-\d{2}-\d{2}-[0-9a-f]{32})?', returned_name):
+        automatic = r'(?:video|image) Auto Creative \d{4}-\d{2}-\d{2}-[0-9a-f]{32}(?: \d{4}-\d{2}-\d{2}-[0-9a-f]{32})*'
+        if re.fullmatch(automatic, name) and re.fullmatch(automatic, returned_name):
             # Observed Meta response can regenerate the hash in its own
-            # administrative Auto Creative label. This is not the Ad name
+            # administrative Auto Creative label. Media/date/hash are label
+            # metadata, not creative content. This is not the Ad name
             # or displayed headline, both of which remain strict.
             actual['name'] = name
     # The create projection explicitly omits Meta's retired aggregate only
