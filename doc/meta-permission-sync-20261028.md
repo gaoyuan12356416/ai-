@@ -16,11 +16,12 @@ Exclude disabled/inactive backend accounts, abnormal/forbidden/unpublished Pages
 unknown status, incomplete listings, and assets without proven delegation rights.
 Preserve the target's pre-existing additional tasks. No downgrade fallback.
 
-The source user's administrator-facing `assigned_pages` currently returns Graph
-code 1 even with minimal fields and limit 5. Use the authenticated source's fully
-paged `me/accounts` with `tasks` as source permission evidence; explicitly record
-this limitation in the manifest. The target's administrator assignment list is
-cross-checked against its own visible list. Page publication state is fetched in
+Unfiltered administrator-facing `assigned_pages` currently returns Graph code 1
+even with minimal fields and limit 5. Discover source IDs through the authenticated
+source's fully paged `me/accounts`, then read both users' administrator assignment
+tasks with the official `pages` ID filter (50 IDs per call). Reject a response
+containing IDs outside that filter. Cross-check source tasks and target presence
+against each token's own list. Page publication state is fetched in
 separate Graph envelopes containing GET operations only. Administrator Page
 `assigned_users` reads require an unavailable OAuth scope; read tasks from the
 system-user `assigned_pages` edge instead. No OAuth scopes are changed.

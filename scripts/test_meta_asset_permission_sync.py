@@ -75,11 +75,16 @@ class PolicyTests(unittest.TestCase):
         calls = []
         def rows(*a, **kw):
             calls.append((a, kw))
-            return {"p": {"id": "p", "tasks": sorted(m.PAGE_TASKS)}}
-        assignment = m.read_assignment(SimpleNamespace(rows=rows), {}, {"kind": "page", "asset_id": "p"}, "target", "bm")
+            return {"123": {"id": "123", "tasks": sorted(m.PAGE_TASKS)}}
+        assignment = m.read_assignment(SimpleNamespace(rows=rows), {}, {"kind": "page", "asset_id": "123"}, "target", "bm")
         self.assertTrue(m.full_access("page", assignment["tasks"]))
         self.assertEqual(calls[0][0][0], "target/assigned_pages")
-        self.assertEqual(calls[0][1]["stop_id"], "p")
+        self.assertEqual(json.loads(calls[0][0][3]["pages"]), [123])
+
+    def test_page_id_filter_must_be_honored(self):
+        graph = SimpleNamespace(rows=lambda *a, **kw: {"999": {"id": "999"}})
+        with self.assertRaises(ValueError):
+            m.filtered_pages(graph, "user", {}, ["123"], "bm")
 
     def test_status_batch_is_get_only_and_preserves_unknowns(self):
         graph = object.__new__(m.Graph)

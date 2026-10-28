@@ -324,6 +324,23 @@ def mapping(rows):
     return {normalized_id(k): v for k, v in rows.items()}
 
 
+def filtered_pages(graph, user_id, credential, ids, bm):
+    # Official SystemUser.assigned_pages supports a `pages` ID filter. Restrict
+    # each read to 50 IDs so unrelated large assignments cannot break the query.
+    found = {}
+    for offset in range(0, len(ids), 50):
+        batch = ids[offset:offset + 50]
+        rows = graph.rows(user_id + "/assigned_pages", credential, "id,name,tasks",
+                          {"business": bm, "pages": json.dumps([int(x) for x in batch])})
+        if set(rows) - set(batch):
+            raise ValueError("page_filter_not_honored")
+        found.update(rows)
+        if (offset // 50 + 1) % 10 == 0 or offset + 50 >= len(ids):
+            emit("filtered_permissions_progress", user_id=user_id, checked=min(offset + 50, len(ids)), total=len(ids), assigned=len(found))
+        time.sleep(.15)
+    return found
+
+
 def preview(args, db, graph, credentials):
     directory = Path(args.run_dir)
     manifest_path = directory / "manifest.json"
@@ -355,16 +372,20 @@ def preview(args, db, graph, credentials):
             ("account", "assigned_ad_accounts", "id,name,account_status,tasks,business", "adaccounts"),
             ("page", "assigned_pages", "id,name,tasks", "accounts")]:
         part = {}
+        if kind == "page":
+            part["source"] = snapshot("page_source_assignments", lambda: mapping(graph.rows(
+                "me/accounts", source, "id,name,tasks", initial_limit=100)))
+            part["source_visible"] = {k: {"id": k} for k in part["source"]}
+            write_json(directory / "page_source_visible.json", part["source_visible"])
+            scoped_ids = sorted(part["source"])
+            part["source_admin"] = snapshot("page_source_admin_assignments", lambda: filtered_pages(
+                graph, identities["source"]["meta_id"], admin, scoped_ids, args.business))
+            part["target"] = snapshot("page_target_assignments", lambda: filtered_pages(
+                graph, identities["target"]["meta_id"], admin, scoped_ids, args.business))
+            part["target_visible"] = snapshot("page_target_visible", lambda: mapping(graph.rows("me/accounts", target, "id")))
+            snapshots[kind] = part
+            continue
         for side, cred in [("source", source), ("target", target)]:
-            if kind == "page" and side == "source":
-                # Meta's administrator-facing source assigned_pages edge fails
-                # even with one field and limit 5. The authenticated source's
-                # /me/accounts returns its actual tasks and paginates correctly.
-                part[side] = snapshot("page_source_assignments", lambda: mapping(graph.rows(
-                    "me/accounts", source, "id,name,tasks", initial_limit=100)))
-                part[side + "_visible"] = {k: {"id": k} for k in part[side]}
-                write_json(directory / "page_source_visible.json", part[side + "_visible"])
-                continue
             part[side] = snapshot(kind + "_" + side + "_assignments", lambda: mapping(graph.rows(
                 identities[side]["meta_id"] + "/" + edge, admin, fields, {"business": args.business})))
             part[side + "_visible"] = snapshot(kind + "_" + side + "_visible", lambda: mapping(graph.rows("me/" + direct, cred, "id")))
@@ -392,6 +413,8 @@ def preview(args, db, graph, credentials):
             row["desired_tasks"] = sorted(set(row["before_tasks"]) | expected_tasks(kind, row["before_tasks"]))
             if not source_row or key not in part["source_visible"]:
                 row.update(category="unknown", reason="source_assignment_visibility_disagree")
+            elif kind == "page" and (key not in part["source_admin"] or set(source_row.get("tasks") or []) != set(part["source_admin"][key].get("tasks") or [])):
+                row.update(category="unknown", reason="source_admin_token_tasks_disagree")
             elif not isinstance(source_row.get("tasks"), list):
                 row.update(category="unknown", reason="source_tasks_missing")
             else:
@@ -425,8 +448,8 @@ def preview(args, db, graph, credentials):
     manifest = {"format_version": 1, "created_at": now(), "code_version": args.code_version,
                 "graph_version": graph.version, "business_id": args.business, "identities": identities,
                 "read_admin": admin_proof, "complete": True, "assets": assets,
-                "source_page_assignment_evidence": "source_token_me_accounts_tasks",
-                "source_page_edge_limitation": "admin_assigned_pages_code1_even_minimal_fields",
+                "source_page_assignment_evidence": "source_me_accounts_and_filtered_admin_assigned_pages",
+                "source_page_edge_limitation": "unfiltered_admin_assigned_pages_code1_resolved_with_pages_filter",
                 "counts": {kind: dict(collections.Counter(r["category"] for r in assets if r["kind"] == kind))
                            for kind in ("account", "page")}}
     write_json(manifest_path, manifest)
@@ -517,7 +540,7 @@ def read_assignment(graph, credential, asset, target_id, bm):
         # administrators. The business-management user edge exposes the same
         # assignment tasks without requiring an unrelated OAuth scope.
         rows = graph.rows(target_id + "/assigned_pages", credential, "id,name,tasks",
-                          {"business": bm}, stop_id=asset["asset_id"])
+                          {"business": bm, "pages": json.dumps([int(asset["asset_id"])])})
         return rows.get(asset["asset_id"])
     path = ("act_" if asset["kind"] == "account" else "") + asset["asset_id"]
     rows = graph.rows(path + "/assigned_users", credential, "id,name,tasks", {"business": bm})
@@ -541,8 +564,8 @@ def verify_after(graph, admin, target, asset, target_id, bm):
                 "after_tasks": assignment["tasks"]}
     if asset["kind"] == "page":
         # The target's own system-user edge verifies tasks in addition to a public Page GET.
-        rows = graph.rows(target_id + "/assigned_pages", target, "id,tasks", {"business": bm},
-                          stop_id=asset["asset_id"])
+        rows = graph.rows(target_id + "/assigned_pages", target, "id,tasks",
+                          {"business": bm, "pages": json.dumps([int(asset["asset_id"])])})
         direct = rows.get(asset["asset_id"])
         if not direct or not full_access("page", direct.get("tasks")):
             return {"status": "pending_verification", "reason": "target_token_page_tasks_not_full",
@@ -685,15 +708,13 @@ def execute(args, db, graph, credentials):
                         if "MANAGE" not in (actor.get("user_tasks") or []):
                             journal.append("admin_not_delegable", key=key, actor=public_credential(c))
                             continue
+                    source_assignment = read_assignment(graph, c, a, manifest["identities"]["source"]["meta_id"], args.business)
                     if a["kind"] == "page":
-                        source_assignment = graph.rows("me/accounts", source, "id,tasks", stop_id=a["asset_id"], initial_limit=100).get(a["asset_id"])
                         if source_assignment and not full_access("page", source_assignment.get("tasks")):
                             owned_now = graph.rows(args.business + "/owned_pages", c, "id", stop_id=a["asset_id"])
                             if a["asset_id"] not in owned_now:
                                 result = {"status": "skipped", "reason": "page_delegation_no_longer_proven"}
                                 break
-                    else:
-                        source_assignment = read_assignment(graph, c, a, manifest["identities"]["source"]["meta_id"], args.business)
                     if not source_assignment:
                         result = {"status": "skipped", "reason": "source_permission_removed"}
                         break
