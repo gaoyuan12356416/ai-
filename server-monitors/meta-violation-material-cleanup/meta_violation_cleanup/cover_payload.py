@@ -115,6 +115,32 @@ def _validate_sourcing(value):
         raise PayloadError('social_feedback_preservation_malformed')
 
 
+def creation_payload(expected):
+    """Project writable v25 fields without changing the readback contract."""
+    if not isinstance(expected, dict):
+        raise PayloadError('creative_malformed')
+    wire = deepcopy(expected)
+    if 'enable_direct_install' in wire:
+        # This is returned by GET but absent from the v25 create parameter
+        # schema. An enabled value cannot safely be reproduced by omission.
+        if wire['enable_direct_install'] is not False:
+            raise PayloadError('direct_install_enabled_or_unverified')
+        wire.pop('enable_direct_install')
+    freedom = wire.get('degrees_of_freedom_spec')
+    features = freedom.get('creative_features_spec') if isinstance(freedom, dict) else None
+    if isinstance(features, dict) and 'standard_enhancements' in features:
+        aggregate = features['standard_enhancements']
+        individual = {key: value for key, value in features.items() if key != 'standard_enhancements'}
+        if (not isinstance(aggregate, dict) or set(aggregate) != {'enroll_status'} or
+                aggregate['enroll_status'] not in ('OPT_IN', 'OPT_OUT') or
+                not any(isinstance(value, dict) and value for value in individual.values())):
+            raise PayloadError('legacy_enhancements_without_individual_settings')
+        # Meta rejects this deprecated aggregate on creation. All explicit
+        # individual options remain verbatim, including each OPT_IN/OPT_OUT.
+        features.pop('standard_enhancements')
+    return wire
+
+
 def build_payload(old_creative, url):
     url = cover_url(url)
     if not isinstance(old_creative, dict):
@@ -170,6 +196,7 @@ def build_payload(old_creative, url):
     if 'adlabels' in result:
         result['adlabels'] = _labels(result['adlabels'])
     result['object_story_spec'] = new_story
+    creation_payload(result)  # Preflight unsupported enabled/aggregate settings.
     return result
 
 

@@ -21,6 +21,7 @@ Source: GitHub gaoyuan12356416/ai-, server-monitors/meta-violation-material-clea
 - Fetch ads_drama_resource.cover by root product, drama and language. Use object_story_spec.link_data.picture directly; never download/upload an image as an intermediate step.
 - Source type must be drama (data_source=6). Preserve existing HotDrama reuse of DramaWave materials; always resolve the cover using the Ad's root product, exact shared content ID and language.
 - Preserve observed creative_sourcing_spec.destination_screenshot_spec OPT_OUT and page-equal object_id; unsupported media sourcing or a different object_id remains a per-Ad failure.
+- The creation wire projection omits read-only enable_direct_install=False and Meta's retired standard_enhancements aggregate only when individual feature settings exist. Keep the full expected payload/hash and strict readback; preserve every individual setting. Do not reset prior failures to test a new release.
 - Preserve the full destination including query parameters, copy, CTA, deep links, attribution and identity fields. Unsupported meaningful parameters, ambiguous covers or multi-drama conversions fail explicitly; do not invent defaults or drop fields.
 - Reuse only matching account/full payload/cover version. Without reliable cover version, scope reuse to the batch.
 

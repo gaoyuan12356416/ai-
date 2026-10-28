@@ -48,6 +48,10 @@ CPU 43.166.187.96，运行目录 /mnt/data-disk/meta-violation-material-cleanup�
 
 首个只读预览：477.454 秒完成扫描，47 个规范素材（57 个产品/素材关系），候选 6,170 Ads，跳过历史确认已删 Ads 7,690、路由不明确关系 1,934；无 Meta 写入。64 条参数预览最初全部被严格校验拒绝。真实 GET/只读源库查明：截图来源为 OPT_OUT 默认配置，2 个 object_id 与 page_id 完全相同，18 条来源差异均为已支持的 HotDrama 复用 DramaWave 剧素材，且对应根产品/剧 ID/语言封面唯一。已添加原样保留和精确跨产品映射的回归；仅修复这些已确认形态，其他复杂媒体模式继续逐条失败。
 
+5d618a0 复核为 64/64 参数有效、绑定一致；正式扫描批次 cover-20261028T184730-996d0cf9 共 6,170 候选，485.186 秒。首批 256 条于 18:58:07 完成：129 obsolete、36 waiting_review、91 failed，尚余 5,914 pending。86 个资源均明确拒绝（code 3），无新 Creative ID、绑定意图或 DELETE；参数替换验收尚未通过。峰值在途 9（配置上限 32），427 次 HTTP 响应、68.175 秒，无限流降档。飞书已送达，回执 om_x100b61291d2390a8c060e94fd2edd75。不得重置这些失败任务进行重试。
+
+Meta validate_only 对照校验（不创建对象）确认 enable_direct_install=False 触发 neko_direct_api_enable；省略它后，Meta 要求移除已经停用的 standard_enhancements 聚合字段。保留完整逐项增强配置、仅省略上述两个提交字段后，校验返回 HTTP 200 / success=true / 无 ID。账本及回读预期保留原完整配置，创建后须严格验证再绑定。诊断回执位于 runtime/validation-20261028/；继续验收仅选尚未执行候选。
+
 回滚命令（在 CPU 上运行，保留最新账本与共享围栏）：
 
 ```bash

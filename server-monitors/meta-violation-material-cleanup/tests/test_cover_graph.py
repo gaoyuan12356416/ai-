@@ -8,6 +8,7 @@ import requests
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from meta_violation_cleanup.cover_graph import CoverGraph, REFERENCE_STATUSES
+from meta_violation_cleanup.cover_payload import PayloadError
 from meta_violation_cleanup.graph import GraphError
 from meta_violation_cleanup.throttle import Governor, RequestNotSent
 
@@ -96,6 +97,33 @@ class CoverGraphTests(unittest.TestCase):
         result = graph.bind_creative('10', '50', '1', '100', lambda: None)
         self.assertEqual(result['status'], 'accepted')
         self.assertEqual(session.calls[0][2]['data'], {'creative': '{"creative_id":"50"}'})
+
+    def test_create_projects_transport_but_preserves_expected_payload(self):
+        graph, session, _ = self.client([Response({'id': '50'})])
+        payload = {'object_story_spec': {}, 'enable_direct_install': False,
+                   'enable_launch_instant_app': False,
+                   'creative_sourcing_spec': {'destination_screenshot_spec': {'enroll_status': 'OPT_OUT'}},
+                   'degrees_of_freedom_spec': {'creative_features_spec': {
+                       'standard_enhancements': {'enroll_status': 'OPT_IN'},
+                       'enhance_cta': {'enroll_status': 'OPT_IN'}}}}
+        frozen = copy.deepcopy(payload)
+        graph.create_creative('100', '1', payload, lambda: None)
+        wire = session.calls[0][2]['data']
+        self.assertEqual(payload, frozen)
+        self.assertNotIn('enable_direct_install', wire)
+        self.assertEqual(json.loads(wire['degrees_of_freedom_spec']), {
+            'creative_features_spec': {'enhance_cta': {'enroll_status': 'OPT_IN'}}})
+        self.assertEqual(json.loads(wire['creative_sourcing_spec']), payload['creative_sourcing_spec'])
+
+    def test_unsupported_projection_never_claims_or_sends_write(self):
+        for extra in ({'enable_direct_install': True},
+                      {'degrees_of_freedom_spec': {'creative_features_spec': {
+                          'standard_enhancements': {'enroll_status': 'OPT_IN'}}}}):
+            graph, session, _ = self.client([]); guards = []
+            with self.assertRaises(PayloadError):
+                graph.create_creative('100', '1', dict(object_story_spec={}, **extra), lambda: guards.append(True))
+            self.assertEqual(session.calls, [])
+            self.assertEqual(guards, [])
 
     def test_unknown_transport_and_5xx_never_retry(self):
         for response in (requests.Timeout(), Response({'error': {'code': 2}}, 503),

@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from meta_violation_cleanup.cover_payload import (
-    PayloadError, build_payload, payload_key, verify_creative, verify_ad_binding,
+    PayloadError, build_payload, creation_payload, payload_key, verify_creative, verify_ad_binding,
 )
 
 
@@ -14,7 +14,9 @@ def video():
         'id': '20', 'account_id': '100', 'name': 'original', 'object_type': 'VIDEO',
         'status': 'ACTIVE', 'video_id': '30', 'effective_object_story_id': '40_50',
         'url_tags': 'utm_source=a&campaign={{campaign.id}}',
-        'degrees_of_freedom_spec': {'creative_features_spec': {'standard_enhancements': {'enroll_status': 'OPT_OUT'}}},
+        'degrees_of_freedom_spec': {'creative_features_spec': {
+            'standard_enhancements': {'enroll_status': 'OPT_OUT'},
+            'text_optimizations': {'enroll_status': 'OPT_OUT'}}},
         'regional_regulation_disclaimer_spec': {'taiwan_finserv_beneficiary': '60'},
         'object_story_spec': {'page_id': '40', 'instagram_user_id': '70', 'video_data': {
             'video_id': '30', 'image_url': 'https://old.example/thumb.jpg',
@@ -27,6 +29,43 @@ def video():
 
 
 class PayloadTests(unittest.TestCase):
+    def test_creation_projection_omits_only_readonly_and_legacy_aggregate(self):
+        old = video(); old['enable_direct_install'] = False
+        old['enable_launch_instant_app'] = False
+        old['creative_sourcing_spec'] = {'destination_screenshot_spec': {'enroll_status': 'OPT_OUT'}}
+        features = old['degrees_of_freedom_spec']['creative_features_spec']
+        features.update(enhance_cta={'enroll_status': 'OPT_IN'},
+                        video_auto_crop={'enroll_status': 'OPT_IN'})
+        expected = build_payload(old, 'https://cdn.example/new.jpg')
+        frozen = copy.deepcopy(expected); before_key = payload_key('100', expected)
+        wire = creation_payload(expected)
+        self.assertEqual(expected, frozen)
+        self.assertEqual(payload_key('100', expected), before_key)
+        wanted = copy.deepcopy(expected); wanted.pop('enable_direct_install')
+        wanted['degrees_of_freedom_spec']['creative_features_spec'].pop('standard_enhancements')
+        self.assertEqual(wire, wanted)
+        self.assertEqual(wire['creative_sourcing_spec'], expected['creative_sourcing_spec'])
+        self.assertEqual(wire['enable_launch_instant_app'], False)
+        # Readback remains the complete original expectation, not the wire.
+        with self.assertRaises(PayloadError): verify_creative(wire, expected)
+        verify_creative(copy.deepcopy(expected), expected)
+
+    def test_enabled_direct_install_and_umbrella_only_fail_preflight(self):
+        for value in (True, 0, None, 'false'):
+            old = video(); old['enable_direct_install'] = value
+            if value is None:
+                expected = {'enable_direct_install': value}
+                with self.assertRaises(PayloadError): creation_payload(expected)
+            else:
+                with self.subTest(value=value), self.assertRaisesRegex(PayloadError, 'direct_install'):
+                    build_payload(old, 'https://cdn.example/new.jpg')
+        for individual in ({}, {'text_optimizations': {}}, {'text_optimizations': False}):
+            old = video()
+            old['degrees_of_freedom_spec']['creative_features_spec'] = {
+                'standard_enhancements': {'enroll_status': 'OPT_IN'}, **individual}
+            with self.subTest(individual=individual), self.assertRaisesRegex(PayloadError, 'legacy_enhancements'):
+                build_payload(old, 'https://cdn.example/new.jpg')
+
     def test_video_preserves_business_fields_and_removes_actual_video(self):
         old = video(); frozen = copy.deepcopy(old)
         payload = build_payload(old, 'https://cdn.example/drama/abc.jpg')

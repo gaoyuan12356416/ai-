@@ -7,7 +7,7 @@ Transport-level retries are disabled and writes are never replayed here.
 import json
 import requests
 
-from .cover_payload import TOP_PRESERVE, TOP_UNSUPPORTED
+from .cover_payload import TOP_PRESERVE, TOP_UNSUPPORTED, creation_payload
 from .graph import GraphClient, GraphError, _object_id, CURRENT_STATUSES
 from .throttle import RequestNotSent
 
@@ -187,7 +187,7 @@ class CoverGraph(GraphClient):
         if not isinstance(payload, dict) or not isinstance(payload.get('object_story_spec'), dict):
             raise ValueError('creative_payload_required')
         return self._write('POST', 'act_' + account + '/adcreatives', user_id,
-                           account, payload, before_send, creates=True)
+                           account, creation_payload(payload), before_send, creates=True)
 
     def bind_creative(self, ad_id, creative_id, user_id, account_id, before_send):
         identifier, creative = _object_id(ad_id), _object_id(creative_id)
