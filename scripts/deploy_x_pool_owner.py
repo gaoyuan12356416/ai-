@@ -68,7 +68,7 @@ def prepare():
     save(folder,'deployment.json',state)
     print(json.dumps(dict(folder=str(folder),status='prepared',rows=len(manifest['rows']),counts=summary),ensure_ascii=False))
 
-def execute(folder,rollback=False):
+def execute(folder,rollback=False,wait_seconds=50):
     import fcntl
     mount();folder=Path(folder).resolve();assert BASE/'backups' in folder.parents
     state=read(folder/'deployment.json');assert state['commit']==run('git','-C',str(ROOT),'rev-parse','HEAD')
@@ -82,9 +82,13 @@ def execute(folder,rollback=False):
     try:
         enabled=[u for u,s in triggers.items() if s=='active']
         if enabled:run('systemctl','stop',*enabled)
-        deadline=time.monotonic()+50
+        deadline=time.monotonic()+wait_seconds
+        last_notice=0
         while any(active(u) in ('active','activating','deactivating') for u in WORKERS):
             if time.monotonic()>deadline:raise RuntimeError('publishers_busy_no_process_was_interrupted')
+            if time.monotonic()-last_notice>=30:
+                print(json.dumps(dict(status='waiting_for_existing_publisher',remaining_seconds=round(deadline-time.monotonic()))),flush=True)
+                last_notice=time.monotonic()
             time.sleep(1)
         for name in ['/run/x-post-daily/runner.lock','/run/x-auto-post/scheduler.lock','/mnt/data-disk/youtube-publisher-daily-report/run.lock']:
             h=open(name,'a');locks.append(h);fcntl.flock(h,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -152,7 +156,9 @@ def execute(folder,rollback=False):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','apply','rollback']);p.add_argument('--backup')
+    p.add_argument('--wait-seconds',type=int,default=50)
     args=p.parse_args()
+    if not 1<=args.wait_seconds<=900:raise ValueError('invalid_drain_wait')
     if args.action=='prepare':prepare()
-    else:execute(args.backup,rollback=args.action=='rollback')
+    else:execute(args.backup,rollback=args.action=='rollback',wait_seconds=args.wait_seconds)
 if __name__=='__main__':main()
