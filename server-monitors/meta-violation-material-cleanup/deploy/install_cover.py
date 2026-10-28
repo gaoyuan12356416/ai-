@@ -28,7 +28,11 @@ def run(args, **kwargs):
 
 
 def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    value = hashlib.sha256()
+    with path.open('rb') as stream:
+        for part in iter(lambda: stream.read(1024*1024), b''):
+            value.update(part)
+    return value.hexdigest()
 
 
 def atomic(source, target):

@@ -322,6 +322,7 @@ class CoverWorker:
             except PayloadError:
                 return self._finish(task, 'obsolete', {'reason': 'ad_parameters_changed_before_bind', 'request_sent': False})
             intent = {'new_creative_id': new_id, 'expected_ad': fresh,
+                      'old_creative_snapshot': old,
                       'resource_key': resource['resource_key'], 'user_id': user,
                       'cover_url': context['cover_url']}
 

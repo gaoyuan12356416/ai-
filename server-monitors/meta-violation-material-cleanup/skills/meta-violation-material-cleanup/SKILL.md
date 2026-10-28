@@ -19,6 +19,8 @@ Source: GitHub gaoyuan12356416/ai-, server-monitors/meta-violation-material-clea
 - Include current already-qualified materials on the first scan. Persist triggers and waiting tasks beyond the rolling window. Each hour discover newly associated Ads; exclude queued/terminal pairs and proven historical Ad deletion receipts before expensive reads.
 - Replace only nondeleted Ads currently free of review issues. Review/appeal waits are durable and checked hourly. Current source identity, account, credentials and Meta binding must agree before writes.
 - Fetch ads_drama_resource.cover by root product, drama and language. Use object_story_spec.link_data.picture directly; never download/upload an image as an intermediate step.
+- Source type must be drama (data_source=6). Preserve existing HotDrama reuse of DramaWave materials; always resolve the cover using the Ad's root product, exact shared content ID and language.
+- Preserve observed creative_sourcing_spec.destination_screenshot_spec OPT_OUT and page-equal object_id; unsupported media sourcing or a different object_id remains a per-Ad failure.
 - Preserve the full destination including query parameters, copy, CTA, deep links, attribution and identity fields. Unsupported meaningful parameters, ambiguous covers or multi-drama conversions fail explicitly; do not invent defaults or drop fields.
 - Reuse only matching account/full payload/cover version. Without reliable cover version, scope reuse to the batch.
 

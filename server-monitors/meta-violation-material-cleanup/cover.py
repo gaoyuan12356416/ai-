@@ -137,16 +137,24 @@ def do_scan(config, store, audit, stop):
         notify_completed(store, audit, config)
 
 
-def preview(config, stop, limit):
+def preview(config, stop, limit, reuse_dir=None):
     root = Path(config['runtime_dir']) / 'previews'
     root.mkdir(parents=True, exist_ok=True)
-    folder = Path(tempfile.mkdtemp(prefix='cover-', dir=str(root)))
+    folder = Path(reuse_dir).resolve() if reuse_dir else Path(tempfile.mkdtemp(prefix='cover-', dir=str(root)))
+    if reuse_dir and (root.resolve() not in folder.parents or not (folder/'cover.sqlite3').is_file()):
+        raise ValueError('invalid_preview_directory')
     store, audit = CoverStore(folder / 'cover.sqlite3'), Runtime(folder / 'audit')
     bid = batch_id('preview')
     audit.begin(bid, 'preview', {})
     source = CoverSource(config)
     try:
-        summary = scan(source, store, bid, audit, stop)
+        if reuse_dir:
+            batches = store.get_batches(1)
+            if not batches or batches[0]['status'] != 'sealed':
+                raise ValueError('preview_scan_not_complete')
+            summary = dict(batches[0]['meta'], reused_scan_batch=batches[0]['id'])
+        else:
+            summary = scan(source, store, bid, audit, stop)
         tasks = store.ready_tasks(limit)
         prepared = source.prepare_candidates(tasks)
         tokens = source.credentials()
@@ -166,7 +174,8 @@ def preview(config, stop, limit):
                     results.append({'ad_id': c['ad_id'], 'account_id': c['account_id'],
                                     'old_creative_id': c['old_creative_id'], 'current_creative_id': (ad.get('creative') or {}).get('id'),
                                     'status': ad.get('status'), 'effective_status': ad.get('effective_status'),
-                                    'payload_key': payload_key(c['account_id'], payload), 'payload': payload})
+                                    'payload_key': payload_key(c['account_id'], payload), 'payload': payload,
+                                    'old_creative_snapshot': creative, 'ad_snapshot': ad})
                 except Exception as exc:
                     detail = exc.as_dict() if isinstance(exc, GraphError) else (
                         {'code': exc.code} if isinstance(exc, PayloadError) else safe_error(exc))
@@ -268,6 +277,7 @@ def main():
     parser.add_argument('command', choices=('scan', 'work', 'preview', 'status', 'notify'))
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--max-ads', type=int, default=256)
+    parser.add_argument('--preview-dir', help='Reuse only an isolated completed preview scan; refresh all write-time sources/Graph reads')
     args = parser.parse_args()
     config = load_config(args.config)
     validate_paths(config)
@@ -276,7 +286,7 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: event.set())
     if args.command == 'preview':
-        preview(config, event.is_set, min(max(args.max_ads, 1), 256))
+        preview(config, event.is_set, min(max(args.max_ads, 1), 256), args.preview_dir)
         return 0
     store, audit = CoverStore(root / 'cover.sqlite3'), Runtime(root / 'cover-audit')
     try:

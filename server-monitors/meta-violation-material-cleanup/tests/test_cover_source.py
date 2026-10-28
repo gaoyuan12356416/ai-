@@ -37,6 +37,10 @@ class CoverSourceTests(unittest.TestCase):
             self.assertEqual(select_cover([dict(self.materials[0],**extra)], '1479', [self.row()])['error'],
                              'cover_material_product_or_type_mismatch')
 
+    def test_hotdrama_reuses_dramawave_material_but_reads_own_cover(self):
+        rows=[self.row(),self.row(app_id='3302',cover='https://example.com/hot.jpg')]
+        self.assertEqual(select_cover(self.materials, '3302', rows)['cover_url'], 'https://example.com/hot.jpg')
+
     def test_url_keeps_attribution_and_rejects_credentials(self):
         self.assertEqual(cover_url('https://static.mydramawave.com/a.png?q=2'), 'https://static-v1.mydramawave.com/a.png?q=2')
         self.assertEqual(cover_url('https://user:secret@example.com/a.png'), '')
@@ -98,6 +102,13 @@ class ScanTests(unittest.TestCase):
         summary=self.scan('first')
         self.assertEqual(summary['historical_deleted_ads_skipped'],1)
         self.assertEqual(summary['new_ads'],3)
+
+    def test_same_material_across_roots_has_one_material_counter(self):
+        self.rows['102'][0]['product']='3302'
+        summary=self.scan('first')
+        self.assertEqual(summary['new_materials'],1)
+        self.assertEqual(summary['new_material_product_pairs'],2)
+        self.assertEqual(summary['new_ads'],4)
 
 
 if __name__ == '__main__':

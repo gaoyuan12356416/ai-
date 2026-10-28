@@ -77,6 +77,60 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(PayloadError, 'video_destination_unavailable'):
             build_payload(old, 'https://cdn.example/new.jpg')
 
+    def test_disabled_screenshot_sourcing_preserves_exact_config(self):
+        for extra in ({}, {'enable_social_feedback_preservation': False},
+                      {'enable_social_feedback_preservation': True}):
+            old = video()
+            spec = {'destination_screenshot_spec': {'enroll_status': 'OPT_OUT'}, **extra}
+            old['creative_sourcing_spec'] = copy.deepcopy(spec)
+            payload = build_payload(old, 'https://cdn.example/new.jpg')
+            self.assertEqual(payload['creative_sourcing_spec'], spec)
+            self.assertIsNot(payload['creative_sourcing_spec'], old['creative_sourcing_spec'])
+            verify_creative(copy.deepcopy(payload), payload)
+
+    def test_sourcing_media_and_unrecognized_modes_still_fail(self):
+        for spec in (
+            {'destination_screenshot_spec': {'enroll_status': 'OPT_IN'}},
+            {'destination_screenshot_spec': {'enroll_status': 'OPT_OUT', 'source_url': 'https://example.com'}},
+            {'destination_screenshot_spec': {}},
+            {'website': 'https://example.com'},
+            {'site_links': []},
+            {'enable_social_feedback_preservation': 1},
+            [],
+        ):
+            old = video(); old['creative_sourcing_spec'] = spec
+            with self.subTest(spec=spec), self.assertRaises(PayloadError):
+                build_payload(old, 'https://cdn.example/new.jpg')
+
+    def test_readback_detects_missing_changed_or_added_sourcing(self):
+        old = video()
+        old['creative_sourcing_spec'] = {'destination_screenshot_spec': {'enroll_status': 'OPT_OUT'}}
+        payload = build_payload(old, 'https://cdn.example/new.jpg')
+        for change in (
+            lambda c: c.pop('creative_sourcing_spec'),
+            lambda c: c['creative_sourcing_spec']['destination_screenshot_spec'].update(enroll_status='OPT_IN'),
+            lambda c: c['creative_sourcing_spec'].update(enable_social_feedback_preservation=True),
+        ):
+            actual = copy.deepcopy(payload); change(actual)
+            with self.assertRaisesRegex(PayloadError, 'creative_readback_mismatch'):
+                verify_creative(actual, payload)
+
+    def test_object_id_preserves_exact_story_page_identity_and_readback(self):
+        old = video(); old['object_id'] = old['object_story_spec']['page_id']
+        payload = build_payload(old, 'https://cdn.example/new.jpg')
+        self.assertEqual(payload['object_id'], old['object_id'])
+        verify_creative(copy.deepcopy(payload), payload)
+        for value in ('41', None):
+            actual = copy.deepcopy(payload); actual['object_id'] = value
+            with self.assertRaises(PayloadError):
+                verify_creative(actual, payload)
+
+    def test_object_id_rejects_other_object_or_malformed_identity(self):
+        for value in ('41', '40.0', '040', True, {'id': '40'}):
+            old = video(); old['object_id'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(PayloadError, 'object_id_not_story_page'):
+                build_payload(old, 'https://cdn.example/new.jpg')
+
     def test_cover_url_rejects_credentials_local_files_and_private_literals(self):
         for url in ('file:///tmp/a.png', 'https://u:p@example.com/a.jpg', 'http://127.0.0.1/a.jpg',
                     'http://[::1]/a.jpg', 'http://localhost/a.jpg', 'https://example.com/a.jpg\n'):

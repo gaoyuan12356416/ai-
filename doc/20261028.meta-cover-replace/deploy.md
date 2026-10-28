@@ -1,6 +1,6 @@
 # 部署与回滚
 
-状态：编写时尚无生产切换或真实首批回执。发布负责人补充准确 SHA、备份点及验收结果。
+状态：2026-10-28 18:27:43 Asia/Shanghai 已切换代码，持续消费尚未开启；只读预览及首批真实验收进行中。
 
 ## 目标
 
@@ -30,13 +30,26 @@ CPU 43.166.187.96，运行目录 /mnt/data-disk/meta-violation-material-cleanup�
 
 保留最新 cover.sqlite3、共享 tasks.sqlite3、cover-audit 和未知状态；绝不以旧 SQLite 备份覆盖进度。成功绑定不会随代码回滚自动恢复；已删除 Creative 无法恢复旧 ID。业务素材恢复需另行制定可核实操作。
 
-## 发布回执（执行后填写）
+## 发布回执
 
-- GitHub SHA、服务器 current、旧版本：
-- 备份点与回滚命令：
+- GitHub SHA：a37148ebf5d02588137c67a905fe6fb8da7a3a2b，分支 codex/meta-cover-replace-20261028 已推送。
+- current：/mnt/data-disk/meta-violation-material-cleanup/releases/a37148ebf5d02588137c67a905fe6fb8da7a3a2b。
+- 旧版本：869a183a8402ef2bceb0417e41af6c9118d9e606。
+- 备份点：/mnt/data-disk/meta-violation-material-cleanup/backups/cover-20261028T102157Z-a37148ebf5d0；含代码链接、配置、旧 unit/timer、1,907,179,520 字节共享账本及 14,347,395,072 字节旧运行账本，SQLite integrity_check 和文件 SHA256 完成。
+- 安装器 transient unit meta-cover-install-a37148.service：Result=success、ExecMainStatus=0。
+- drama-material-api.service 已重启并 active；受保护 API /api/fb-post-ad-delete/jobs 返回预期 401 cookie_auth_required。
+- 旧 meta-violation-material-cleanup.timer 仍 disabled/inactive；新 worker 在首批验收前 inactive。
 - 首批自然命中、处理数、积压：
 - 替换成功/失败/未知：
 - 删除成功/失败/未知/引用暂缓：
 - Graph 实际峰值、吞吐、限流：
 - Feishu 回执：
 - 新服务/timer 状态和旧删除 timer 停用证据：
+
+首个只读预览：477.454 秒完成扫描，47 个规范素材（57 个产品/素材关系），候选 6,170 Ads，跳过历史确认已删 Ads 7,690、路由不明确关系 1,934；无 Meta 写入。64 条参数预览最初全部被严格校验拒绝。真实 GET/只读源库查明：截图来源为 OPT_OUT 默认配置，2 个 object_id 与 page_id 完全相同，18 条来源差异均为已支持的 HotDrama 复用 DramaWave 剧素材，且对应根产品/剧 ID/语言封面唯一。已添加原样保留和精确跨产品映射的回归；仅修复这些已确认形态，其他复杂媒体模式继续逐条失败。
+
+回滚命令（在 CPU 上运行，保留最新账本与共享围栏）：
+
+```bash
+python3 /mnt/data-disk/meta-violation-material-cleanup/releases/a37148ebf5d02588137c67a905fe6fb8da7a3a2b/server-monitors/meta-violation-material-cleanup/deploy/install_cover.py rollback /mnt/data-disk/meta-violation-material-cleanup/backups/cover-20261028T102157Z-a37148ebf5d0
+```

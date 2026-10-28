@@ -34,9 +34,11 @@ def cover_url(value):
 
 def select_cover(metadata, root_id, rows):
     """All materials in one simple creative must resolve to the same drama."""
-    product = {'1479':'dramawave','3302':'hotdrama'}.get(str(root_id))
-    if not product or any(str(m.get('data_source')) != '6' or
-                          str(m.get('product') or '').strip().casefold() != product for m in metadata):
+    # HotDrama intentionally reuses DramaWave materials with the same shared
+    # content ID. The cover still comes from the Ad's own root product below.
+    products = {'1479': {'dramawave'}, '3302': {'hotdrama', 'dramawave'}}.get(str(root_id))
+    if not products or any(str(m.get('data_source')) != '6' or
+                           str(m.get('product') or '').strip().casefold() not in products for m in metadata):
         return {'error': 'cover_material_product_or_type_mismatch'}
     keys = {(str(m.get('data_source_id') or '').strip(),
              str(m.get('language') or '').strip().casefold()) for m in metadata}
@@ -162,8 +164,10 @@ def scan(source, store, batch_id, audit=None, stop=lambda: False):
     evidence = build_evidence(rows, lineage, sources, scope, start, end)
     qualified = {'materials': {mid: dict(e, window_start=start, window_end=end, triggered_at=now())
                                for mid, e in evidence['materials'].items() if e['count'] >= 3}}
-    new_materials = store.add_triggers(qualified)
+    previous_materials = set(store.triggered_materials())
+    new_material_product_pairs = store.add_triggers(qualified)
     triggered = store.triggered_materials()
+    new_materials = len(set(triggered) - previous_materials)
     progress = lambda **kw: audit.update(batch_id, **kw) if audit else None
     found, lookup = material_rows(source, set(triggered), scope, progress, stop)
     existing = store.known_keys()
@@ -209,6 +213,7 @@ def scan(source, store, batch_id, audit=None, stop=lambda: False):
         if store.requeue_waiting(row['id'], batch_id):
             counts['review_rechecks'] += 1
     summary = dict(counts, new_materials=new_materials, triggered_materials=len(triggered),
+                   new_material_product_pairs=new_material_product_pairs,
                    violation_rows=len(violations), policy_rows=len(rows), lookup=lookup,
                    seconds=round(time.monotonic() - began, 3), **meta)
     store.seal_batch(batch_id, summary)

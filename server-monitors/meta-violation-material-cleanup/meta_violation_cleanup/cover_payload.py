@@ -24,6 +24,7 @@ TOP_PRESERVE = frozenset({
     'instagram_branded_content', 'instagram_user_id', 'instagram_actor_id',
     'use_page_actor_override', 'contextual_multi_ads', 'adlabels',
     'enable_direct_install', 'enable_launch_instant_app',
+    'creative_sourcing_spec', 'object_id',
 })
 # These fields describe the existing object or duplicate values derived from
 # object_story_spec. None is a writable business setting in this conversion.
@@ -41,7 +42,7 @@ TOP_UNSUPPORTED = frozenset({
     'photo_album_source_object_story_id', 'product_set_id', 'product_data',
     'destination_set_id', 'destination_spec', 'template_url', 'template_url_spec',
     'playable_asset_id', 'interactive_components_spec', 'media_sourcing_spec',
-    'creative_sourcing_spec', 'image_crops', 'object_id', 'omnichannel_link_spec',
+    'image_crops', 'omnichannel_link_spec',
     'format_transformation_spec', 'bundle_folder_id', 'dynamic_ad_voice',
     'link_deep_link_url', 'link_destination_display_url',
 })
@@ -96,16 +97,39 @@ def _unsupported(values, allowed, context):
         raise PayloadError(context + '_unsupported_fields:' + ','.join(unsupported))
 
 
+def _validate_sourcing(value):
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise PayloadError('creative_sourcing_spec_malformed')
+    # Meta returns this disabled screenshot default even on ordinary single
+    # image/video creatives. Preserve it, without admitting sourced media.
+    allowed = {'destination_screenshot_spec', 'enable_social_feedback_preservation'}
+    if set(value) - allowed:
+        raise PayloadError('creative_sourcing_spec_unsupported')
+    if ('destination_screenshot_spec' in value and
+            value['destination_screenshot_spec'] != {'enroll_status': 'OPT_OUT'}):
+        raise PayloadError('destination_screenshot_sourcing_unsupported')
+    if ('enable_social_feedback_preservation' in value and
+            type(value['enable_social_feedback_preservation']) is not bool):
+        raise PayloadError('social_feedback_preservation_malformed')
+
+
 def build_payload(old_creative, url):
     url = cover_url(url)
     if not isinstance(old_creative, dict):
         raise PayloadError('creative_malformed')
     _unsupported(old_creative, TOP_PRESERVE | TOP_DERIVED | {'object_story_spec'}, 'creative')
+    _validate_sourcing(old_creative.get('creative_sourcing_spec'))
     story = old_creative.get('object_story_spec')
     _unsupported(story, STORY_IDENTITY | {'link_data', 'video_data'}, 'story')
     page_id = story.get('page_id')
     if not str(page_id or '').isdigit() or str(page_id).startswith('0'):
         raise PayloadError('page_identity_missing')
+    object_id = old_creative.get('object_id')
+    if _meaningful(object_id) and (not str(object_id).isascii() or
+            not str(object_id).isdigit() or str(object_id) != str(page_id)):
+        raise PayloadError('creative_object_id_not_story_page')
     choices = [key for key in ('link_data', 'video_data') if _meaningful(story.get(key))]
     if len(choices) != 1:
         raise PayloadError('single_image_or_video_required')
@@ -141,6 +165,8 @@ def build_payload(old_creative, url):
     new_story['link_data'] = converted
     result = {k: deepcopy(v) for k, v in old_creative.items()
               if k in TOP_PRESERVE and v is not None}
+    if 'object_id' in result and not _meaningful(result['object_id']):
+        result.pop('object_id')
     if 'adlabels' in result:
         result['adlabels'] = _labels(result['adlabels'])
     result['object_story_spec'] = new_story
@@ -195,6 +221,9 @@ def verify_creative(actual, expected_payload):
     actual = deepcopy(actual)
     if 'adlabels' in expected and 'adlabels' in actual:
         actual['adlabels'] = _labels(actual['adlabels'])
+    if _meaningful(expected.get('creative_sourcing_spec')):
+        if actual.get('creative_sourcing_spec') != expected['creative_sourcing_spec']:
+            raise PayloadError('creative_readback_mismatch:creative.creative_sourcing_spec')
     # Meta fetches picture and may return its CDN URL and/or generated image hash.
     # This verifies Media identity exists, not a hash of un-downloaded input bytes.
     expected['object_story_spec']['link_data'].pop('picture', None)
