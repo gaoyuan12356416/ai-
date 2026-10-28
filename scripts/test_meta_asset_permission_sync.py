@@ -128,7 +128,7 @@ class ExecuteTests(unittest.TestCase):
 
     def test_resume_unknown_item_does_not_write_it(self):
         posts, _, _ = self.run_scenario({"ok": False, "http": 400, "error": {"code": 100}}, resume=True)
-        self.assertTrue(all(p[1] != "act_1/assigned_users" for p in posts))
+        self.assertEqual(posts, [])  # The unresolved canary also pauses the rest of its class.
 
     def test_429_does_not_rotate_around_limit(self):
         posts, summary, _ = self.run_scenario({"ok": False, "http": 429, "retry_after": "300"})

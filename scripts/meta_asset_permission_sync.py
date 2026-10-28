@@ -139,7 +139,7 @@ class Graph:
             raise GraphError(response)
         return response["data"]
 
-    def rows(self, path, credential, fields, params=None):
+    def rows(self, path, credential, fields, params=None, stop_id=None):
         out, seen, cursor_seen = {}, set(), set()
         after, limit, retries = None, 100, 0
         while True:
@@ -168,6 +168,8 @@ class Graph:
                 if key in out and out[key] != item:
                     raise ValueError("conflicting_pagination_record")
                 out[key] = item
+            if stop_id is not None and stop_id in out:
+                return out
             paging = data.get("paging") or {}
             if not paging.get("next"):
                 break
@@ -471,7 +473,8 @@ def verify_after(graph, admin, target, asset, target_id, bm):
                 "after_tasks": assignment["tasks"]}
     if asset["kind"] == "page":
         # The target's own system-user edge verifies tasks in addition to a public Page GET.
-        rows = graph.rows(target_id + "/assigned_pages", target, "id,tasks", {"business": bm})
+        rows = graph.rows(target_id + "/assigned_pages", target, "id,tasks", {"business": bm},
+                          stop_id=asset["asset_id"])
         direct = rows.get(asset["asset_id"])
         if not direct or not full_access("page", direct.get("tasks")):
             return {"status": "pending_verification", "reason": "target_token_page_tasks_not_full",
@@ -548,6 +551,8 @@ def execute(args, db, graph, credentials):
             if key in results and results[key]["status"] not in ("pending_verification", "unknown"):
                 if results[key]["status"] == "verified":
                     canary_done.add(a["kind"])
+                elif a["kind"] not in canary_done:
+                    blocked_kinds.add(a["kind"])
                 continue
             if a["kind"] in blocked_kinds:
                 continue
@@ -559,6 +564,10 @@ def execute(args, db, graph, credentials):
                     result = {"status": "unknown", "reason": "resume_readback_failed", "error": safe_response(exc.response)}
                 journal.append("result", key=key, result=result)
                 results[key] = result
+                if result["status"] == "verified":
+                    canary_done.add(a["kind"])
+                elif a["kind"] not in canary_done:
+                    blocked_kinds.add(a["kind"])
                 continue
             tried = set()
             result = None
