@@ -361,7 +361,7 @@ def preview(args, db, graph, credentials):
                 # even with one field and limit 5. The authenticated source's
                 # /me/accounts returns its actual tasks and paginates correctly.
                 part[side] = snapshot("page_source_assignments", lambda: mapping(graph.rows(
-                    "me/accounts", source, "id,name,tasks", initial_limit=25)))
+                    "me/accounts", source, "id,name,tasks", initial_limit=100)))
                 part[side + "_visible"] = {k: {"id": k} for k in part[side]}
                 write_json(directory / "page_source_visible.json", part[side + "_visible"])
                 continue
@@ -557,7 +557,7 @@ def discover_admins(graph, credentials, bm, system_users, directory):
     prior = json.loads(cache_path.read_text()) if cache_path.exists() else []
     reusable = {str(x["credential_id"]): x for x in prior
                 if x.get("business_id") == bm and x.get("checked_at")
-                and (datetime.now(timezone.utc) - datetime.fromisoformat(x["checked_at"])).total_seconds() < 600}
+                and (datetime.now(timezone.utc) - datetime.fromisoformat(x["checked_at"])).total_seconds() < 1800}
     for i, c in enumerate(credentials):
         fingerprint = hashlib.sha256(c["accessToken"].encode()).hexdigest()
         if fingerprint in seen:
@@ -617,6 +617,7 @@ def execute(args, db, graph, credentials):
     if not admins:
         raise ValueError("no_current_verified_administrators")
     rotation = Rotation(admins)
+    checked_actors = set()
     assets = [a for a in manifest["assets"] if a["category"] in ("missing", "insufficient")]
     # One canary per kind before proceeding with that asset class.
     assets.sort(key=lambda a: (a["kind"], a["asset_id"]))
@@ -659,6 +660,13 @@ def execute(args, db, graph, credentials):
                     break
                 tried.add(c["id"])
                 try:
+                    if c["id"] not in checked_actors:
+                        proof = verify_admin(graph, c, args.business, users)
+                        if not proof:
+                            rotation.disabled.add(c["id"])
+                            journal.append("admin_role_removed", actor=public_credential(c))
+                            continue
+                        checked_actors.add(c["id"])
                     before = read_assignment(graph, c, a, target_id, args.business)
                     live = live_asset(graph, source, a)
                     raw_id = ("act_" if a["kind"] == "account" else "") + a["asset_id"]
@@ -678,7 +686,7 @@ def execute(args, db, graph, credentials):
                             journal.append("admin_not_delegable", key=key, actor=public_credential(c))
                             continue
                     if a["kind"] == "page":
-                        source_assignment = graph.rows("me/accounts", source, "id,tasks", stop_id=a["asset_id"], initial_limit=25).get(a["asset_id"])
+                        source_assignment = graph.rows("me/accounts", source, "id,tasks", stop_id=a["asset_id"], initial_limit=100).get(a["asset_id"])
                         if source_assignment and not full_access("page", source_assignment.get("tasks")):
                             owned_now = graph.rows(args.business + "/owned_pages", c, "id", stop_id=a["asset_id"])
                             if a["asset_id"] not in owned_now:

@@ -135,6 +135,7 @@ class ExecuteTests(unittest.TestCase):
         db = SimpleNamespace(assets=lambda kind, ids: {m.normalized_id(ids[0]): {"account_status": 1, "is_inactive": 0}})
         identity = lambda graph, c, users: {"meta_id": "s" if c["user_id"] == 803 else "t"}
         patches = [patch.object(m, "primary_admin", return_value=(credentials[2], {})),
+                   patch.object(m, "verify_admin", return_value={"proof": "ADMIN"}),
                    patch.object(m, "verify_identity", side_effect=identity),
                    patch.object(m, "discover_admins", return_value=credentials[2:]),
                    patch.object(m, "read_assignment", return_value={"tasks": ["ADVERTISE"]}),
