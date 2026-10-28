@@ -11,6 +11,8 @@ from .report import ReportError, campaign_index, selected, validate_metrics
 BATCH_SIZE = 100
 SINGLE_DAY_BATCH_SIZE = 1000
 WINDOW_DAYS = 14
+YOUTUBE_RANGE_BATCH_SIZE = 3000
+YOUTUBE_RANGE_WINDOW_DAYS = 7
 NARROW_CAMPAIGNS = 10
 QUERY_BUDGET_SECONDS = 40
 
@@ -25,30 +27,35 @@ def campaign_scope(catalog, actor, params, platform, site):
                              and not row.get("excluded") for row in candidates)}))
 
 
-def windows(start, end):
+def windows(start, end, days=WINDOW_DAYS):
     current, last = date.fromisoformat(start), date.fromisoformat(end)
     while current <= last:
-        stop = min(last, current + timedelta(days=WINDOW_DAYS - 1))
+        stop = min(last, current + timedelta(days=days - 1))
         yield current.isoformat(), stop.isoformat()
         current = stop + timedelta(days=1)
 
 
-def metric_sql(start, end, platform, site, campaigns):
+def metric_sql(start, end, platform, site, campaigns, *, site_scan=False):
     from .routes import metric_sql as unscoped_sql
     batch_size = SINGLE_DAY_BATCH_SIZE if start == end else BATCH_SIZE
+    if site_scan:
+        if platform != "youtube" or not 0 <= (date.fromisoformat(end) - date.fromisoformat(start)).days < YOUTUBE_RANGE_WINDOW_DAYS:
+            raise ReportError("站点效果查询范围无效", 503)
+        batch_size = YOUTUBE_RANGE_BATCH_SIZE
     if not campaigns or len(campaigns) > batch_size or any(
             not isinstance(value, str) or not value or len(value.encode("utf-8")) > 1024
             for value in campaigns):
         raise ReportError("归因 ID 查询范围无效", 503)
     literals = ["0x" + value.encode("utf-8").hex() for value in campaigns]
-    # The first predicate uses the existing (campaign_id, dt) range index.
+    # Narrow selections use (campaign_id, dt); broad YouTube history uses
+    # contiguous (site_id, dt) ranges, bounded to seven days per statement.
     # The second retains exact-case identity even under a case-insensitive DB
     # collation, and stops adjacent batches from counting the same ID twice.
     indexed = ",".join("CONVERT(%s USING utf8mb4)" % value for value in literals)
     predicate = "AND campaign_id IN (%s) AND BINARY campaign_id IN (%s) " % (
         indexed, ",".join(literals))
     return unscoped_sql(start, end, platform, site).replace(
-        "FORCE INDEX(sd)", "FORCE INDEX(c_id_dt)").replace(
+        "FORCE INDEX(sd)", "FORCE INDEX(%s)" % ("sd" if site_scan else "c_id_dt")).replace(
         "GROUP BY dt,BINARY campaign_id", predicate + "GROUP BY dt,BINARY campaign_id")
 
 
@@ -89,11 +96,16 @@ def source(app, start, end, platform, site, campaigns):
     # A few exact IDs use a tiny range scan even over 93 days. Avoid repeated
     # SQL-gate/connection overhead for a single-post drill-down; broad candidate
     # sets still use bounded date windows.
-    periods = [(start, end)] if len(campaigns) <= NARROW_CAMPAIGNS else list(windows(start, end))
+    site_scan = platform == "youtube" and start != end and len(campaigns) > BATCH_SIZE
+    periods = (list(windows(start, end, YOUTUBE_RANGE_WINDOW_DAYS)) if site_scan else
+               [(start, end)] if len(campaigns) <= NARROW_CAMPAIGNS else list(windows(start, end)))
     # A single-day tenant report can contain thousands of historical posts.
     # Reconnecting per 100 IDs exhausts the HTTP deadline before reading them.
-    # Keep broader date ranges at their existing bounded range-scan size.
+    # Broad YouTube selections avoid thousands of scattered campaign ranges
+    # and repeated connections. Other sources keep their existing query plan.
     batch_size = SINGLE_DAY_BATCH_SIZE if start == end else BATCH_SIZE
+    if site_scan:
+        batch_size = YOUTUBE_RANGE_BATCH_SIZE
     for batch_start in range(0, len(campaigns), batch_size):
         batch = campaigns[batch_start:batch_start + batch_size]
         for first, last in periods:
@@ -101,7 +113,8 @@ def source(app, start, end, platform, site, campaigns):
                 continue
             if time.monotonic() >= settings["SOCIAL_ANALYTICS_QUERY_DEADLINE"]:
                 raise ReportError("效果查询时间预算已用完；本次不按零统计", 503)
-            rows = query_source_rows(settings, metric_sql(first, last, platform, site, batch), MAX_ROWS)
+            rows = query_source_rows(settings, metric_sql(
+                first, last, platform, site, batch, site_scan=site_scan), MAX_ROWS)
             if any(str(row.get("campaign_id") or "") not in batch for row in rows):
                 raise ReportError("效果数据超出所选归因 ID 范围", 503)
             validate_metrics(rows, platform, {day for day in populated if first <= day <= last}, site_id=site)

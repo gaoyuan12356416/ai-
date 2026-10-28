@@ -2,6 +2,8 @@ import copy
 import csv
 import io
 import unittest
+import re
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from features.social_analytics import report, routes, scoped_metrics as scoped
@@ -160,6 +162,61 @@ class ScopedMetricTests(unittest.TestCase):
             with self.assertRaises(report.ReportError):
                 scoped.source({}, DAY, DAY, 'youtube', '2284', ids)
         self.assertFalse(routes._cache)
+
+    def test_broad_youtube_month_uses_weekly_site_ranges_with_exact_ids(self):
+        ids = ['p%04d' % i for i in range(2038)]
+        days = [(date(2026, 10, 1) + timedelta(days=i)).isoformat() for i in range(27)]
+        def query(app, sql, limit):
+            if 'GROUP BY dt LIMIT 94' in sql:
+                return [dict(date=day) for day in days]
+            self.assertIn('FORCE INDEX(sd)', sql)
+            self.assertIn('AND BINARY campaign_id IN (', sql)
+            self.assertIn("site_id='2284'", sql)
+            first, last = re.search(r"dt BETWEEN '([^']+)' AND '([^']+)'", sql).groups()
+            self.assertLessEqual((date.fromisoformat(last) - date.fromisoformat(first)).days, 6)
+            return [metric(date=day, campaign=cid) for day in days if first <= day <= last
+                    for cid in (ids[0], ids[-1])]
+        with patch.object(routes, 'query_source_rows', side_effect=query) as read:
+            rows, _, coverage = scoped.source({}, days[0], days[-1], 'youtube', '2284', ids)
+        self.assertEqual(read.call_count, 5)
+        self.assertEqual(len(rows), 54)
+        self.assertEqual(coverage, set(days))
+        self.assertEqual({(r['date'], r['campaign_id']) for r in rows},
+                         {(day, cid) for day in days for cid in (ids[0], ids[-1])})
+
+    def test_broad_range_batches_are_disjoint_and_missing_days_stay_missing(self):
+        ids = ['p%04d' % i for i in range(3001)]
+        def query(app, sql, limit):
+            if 'GROUP BY dt LIMIT 94' in sql:
+                return [dict(date=DAY)]
+            included = [cid for cid in ids if 'CONVERT(0x' + cid.encode().hex() + ' USING' in sql]
+            return [metric(campaign=cid) for cid in included]
+        with patch.object(routes, 'query_source_rows', side_effect=query) as read:
+            rows, _, coverage = scoped.source({}, '2026-10-18', DAY, 'youtube', '2284', ids)
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(len(rows), len(ids))
+        self.assertEqual({r['campaign_id'] for r in rows}, set(ids))
+        self.assertEqual(coverage, {DAY})
+
+    def test_broad_range_last_window_failure_does_not_cache_partial_metrics(self):
+        ids = ['p%04d' % i for i in range(101)]
+        with patch.object(routes, 'query_source_rows', side_effect=[
+                [dict(date='2026-10-01'), dict(date='2026-10-08')],
+                [metric(date='2026-10-01', campaign=ids[0])], report.ReportError('timeout', 503)]):
+            with self.assertRaises(report.ReportError):
+                scoped.source({}, '2026-10-01', '2026-10-14', 'youtube', '2284', ids)
+        self.assertFalse(routes._cache)
+
+    def test_site_scan_is_bounded_and_does_not_change_x_or_narrow_queries(self):
+        for platform, start, end, ids in [
+                ('x', DAY, DAY, ['id']),
+                ('youtube', '2026-10-01', '2026-10-08', ['id']),
+                ('youtube', DAY, DAY, ['id'] * 3001)]:
+            with self.assertRaises(report.ReportError):
+                scoped.metric_sql(start, end, platform, '2116' if platform == 'x' else '2284',
+                                  ids, site_scan=True)
+        self.assertIn('FORCE INDEX(c_id_dt)', scoped.metric_sql(DAY, DAY, 'youtube', '2284', ['id']))
+        self.assertIn('FORCE INDEX(c_id_dt)', scoped.metric_sql('2026-10-01', DAY, 'x', '2116', ['id']))
 
     def test_filters_and_csv_keep_same_values_as_full_source(self):
         rows = [published(), published(campaign='other', owner='bob')]
