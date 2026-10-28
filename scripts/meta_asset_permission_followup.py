@@ -90,6 +90,8 @@ def audit(args):
         raise ValueError('data_disk_uuid_mismatch')
     directory.mkdir(parents=True, exist_ok=True)
     restriction = prior_restriction(Path(args.prior_run).resolve())
+    prior_manifest = json.loads((Path(args.prior_run)/'manifest.json').read_text())
+    prior_page_ids = sorted(a['asset_id'] for a in prior_manifest['assets'] if a['kind']=='page')
     db = m.Database(args.credential_config)
     try:
         credentials, graph = db.credentials(), m.Graph(args.graph_version)
@@ -126,11 +128,16 @@ def audit(args):
         parts = {}
         for kind, edge, direct in [('account', 'assigned_ad_accounts', 'adaccounts'), ('page', 'assigned_pages', 'accounts')]:
             part = {}
-            for side, c in [('source', source), ('target', target)]:
-                # Visibility only: tasks come from the identical assigned edge.
-                # Expanding me/accounts tasks causes expensive short pages.
-                part[side + '_visible'] = snapshot(kind + '_' + side + '_visible', lambda: m.mapping(graph.rows('me/' + direct, c, 'id')))
-            ids = sorted(part['source_visible'])
+            if kind == 'account':
+                for side, c in [('source', source), ('target', target)]:
+                    part[side + '_visible'] = snapshot(kind + '_' + side + '_visible', lambda: m.mapping(graph.rows('me/' + direct, c, 'id')))
+                ids = sorted(part['source_visible'])
+            else:
+                # Follow-up is bounded to the original frozen Page universe.
+                # Current own-token assignments plus individual Page business
+                # reads establish access without a slow global me/accounts scan.
+                ids = prior_page_ids
+            part['scope_ids'] = ids
             for side, c in [('source', source), ('target', target)]:
                 uid = identities[side]['meta_id']
                 for view, reader in [('self', c), ('admin', admin)]:
@@ -140,12 +147,16 @@ def audit(args):
             if kind == 'page':
                 active_ids = [key for key in ids if backend[kind].get(key) and backend[kind][key].get('status') == 0 and backend[kind][key].get('forbidden_status') == 0]
                 part['live'] = snapshot('page_live_status', lambda: graph.concurrent_get(active_ids, 'id,business,is_published,is_permanently_closed', source, directory/'page_live_status.partial.json'))
+                target_ids = [key for key in active_ids if key in part['target_self']]
+                target_access = snapshot('page_target_access', lambda: graph.concurrent_get(target_ids, 'id,business,is_published,is_permanently_closed', target, directory/'page_target_access.partial.json'))
+                part['source_visible'] = {key: value for key,value in part['live'].items() if 'read_error' not in value}
+                part['target_visible'] = {key: value for key,value in target_access.items() if 'read_error' not in value}
             else:
                 part['live'] = part['source_self']
             parts[kind] = part
         assets = []
         for kind, part in parts.items():
-            for key in sorted(set(part['source_visible']) | set(part['source_self'])):
+            for key in sorted(set(part['scope_ids']) | set(part['source_self'])):
                 sr = part['source_self'].get(key)
                 row = {'kind': kind, 'asset_id': key, 'business_id': args.business,
                        'name': (sr or part['source_visible'].get(key) or {}).get('name', ''),
@@ -183,7 +194,8 @@ def audit(args):
                     'graph_version': graph.version, 'business_id': args.business, 'identities': identities,
                     'read_admin': m.public_credential(admin), 'complete': True, 'assets': assets,
                     'recovery': restriction, 'write_interval': 30, 'token_interval': 300,
-                    'permission_evidence': 'same_assigned_edge_admin_and_self_plus_actual_token_visibility',
+                    'permission_evidence': 'same_assigned_edge_admin_and_self_plus_individual_page_business_reads',
+                    'page_scope': 'prior_frozen_page_ids_revalidated_individually',
                     'delegation_evidence': 'current_owned_business_or_bm_client_asset_permitted_tasks',
                     'counts': {kind: dict(collections.Counter(a['category'] for a in assets if a['kind']==kind)) for kind in ('account','page')}}
         m.write_json(directory/'manifest.json', manifest)

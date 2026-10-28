@@ -89,10 +89,13 @@ lists, rather than treating one administrator's `user_tasks` as the BM sharing
 ceiling. Assets absent from those lists remain unknown unless current ownership
 proves authority. It does not modify the owner-to-BM sharing arrangement.
 
-Page permission comparison uses the same `assigned_pages` edge through both
-the system user's own token and a verified administrator. `me/accounts` remains
-the actual visibility check; its effective task list is retained separately.
-Those two different edges may differ on leads/revenue tasks. Same-edge conflicts
+Page follow-up stays within the prior frozen Page IDs. Permission comparison uses
+the same `assigned_pages` edge through both the system user's own token and a
+verified administrator. Each token independently reads the assigned Page's current
+business/publication metadata to confirm actual access. This avoids the currently
+slow global `me/accounts` scan; it does not claim to discover newly added Pages.
+The prior `me/accounts` effective tasks remain separate evidence because those
+two different edges may differ on leads/revenue tasks. Same-edge conflicts
 are checked with other verified administrators and remain unknown if unresolved.
 State failures take precedence over task discrepancies.
 
