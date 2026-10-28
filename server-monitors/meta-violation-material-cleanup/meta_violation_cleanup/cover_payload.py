@@ -4,6 +4,7 @@ Media is the only intentionally replaced content. Unknown meaningful fields
 are rejected, rather than silently omitted. No I/O or image download occurs.
 """
 from copy import deepcopy
+from collections import Counter
 import hashlib
 import ipaddress
 import json
@@ -285,7 +286,7 @@ def verify_creative(actual, expected_payload):
     _assert_subset(actual, expected, 'creative')
 
 
-def _tracking_after_story_change(actual, expected, old_story_id, new_story_id):
+def _tracking_after_story_change(actual, expected, old_story_id, new_story_id, *, pending=False):
     """Only Meta-derived post references may change; preserve the full multiset."""
     old = str(old_story_id or '').split('_')
     new = str(new_story_id or '').split('_')
@@ -310,7 +311,17 @@ def _tracking_after_story_change(actual, expected, old_story_id, new_story_id):
     # the original post on some derived tracking actions during propagation.
     # Both IDs are proven Creative identities on the same Page; no third ID,
     # feature, action, conversion or Pixel change is accepted.
-    return normalize(actual, {old[1], new[1]}) == normalize(expected, {old[1]})
+    observed = normalize(actual, {old[1], new[1]})
+    wanted = normalize(expected, {old[1]})
+    if not pending:
+        return observed == wanted
+    # Meta can briefly omit derived post tracking rows altogether after the
+    # binding. This is not success: retain an unknown binding for GET-only
+    # reconciliation while all conversion/Pixel tracking remains identical.
+    business = lambda rows: sorted(json.dumps(r, sort_keys=True, ensure_ascii=False)
+                                   for r in rows if 'post' not in r)
+    return (observed != wanted and business(actual) == business(expected)
+            and not (Counter(observed) - Counter(wanted)))
 
 
 def verify_ad_binding(actual, expected_ad, new_creative_id, *, old_story_id=None, new_story_id=None):
@@ -318,13 +329,20 @@ def verify_ad_binding(actual, expected_ad, new_creative_id, *, old_story_id=None
         raise PayloadError('ad_readback_malformed')
     if str((actual.get('creative') or {}).get('id')) != str(new_creative_id):
         raise PayloadError('ad_binding_not_confirmed')
+    tracking_pending = False
     for key in ('id', 'account_id', 'name', 'status', 'configured_status',
                 'adset_id', 'campaign_id', 'tracking_specs', 'conversion_specs', 'bid_amount'):
         if key in expected_ad and actual.get(key) != expected_ad[key]:
             if key == 'tracking_specs' and _tracking_after_story_change(
                     actual.get(key), expected_ad[key], old_story_id, new_story_id):
                 continue
+            if key == 'tracking_specs' and _tracking_after_story_change(
+                    actual.get(key), expected_ad[key], old_story_id, new_story_id, pending=True):
+                tracking_pending = True
+                continue
             raise PayloadError('ad_parameter_changed:' + key)
     for key in ('adset', 'campaign'):
         if key in expected_ad and str((actual.get(key) or {}).get('id')) != str((expected_ad[key] or {}).get('id')):
             raise PayloadError('ad_parameter_changed:' + key)
+    if tracking_pending:
+        raise PayloadError('ad_tracking_materialization_pending')

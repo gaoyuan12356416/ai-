@@ -145,6 +145,27 @@ class Graph:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_missing_derived_tracking_is_unknown_then_reconciled_without_second_bind(self):
+        original=ad();original['tracking_specs'].append(
+            {'action.type':['post_engagement'],'page':['7'],'post':['9']})
+        old=creative();old['effective_object_story_id']='7_9';self.enqueue([original])
+        class DelayedTrackingGraph(Graph):
+            def bind_creative(self,aid,cid,user,account,before):
+                result=super().bind_creative(aid,cid,user,account,before)
+                self.creatives[cid]['effective_object_story_id']='7_10'
+                self.ads[aid]['tracking_specs']=[r for r in self.ads[aid]['tracking_specs'] if 'post' not in r]
+                return result
+        graph=DelayedTrackingGraph([original],[old]);worker=self.worker(graph)
+        worker.run_once(max_ads=1,process_deletes=False)
+        task=self.store.get_task(1)
+        self.assertEqual(task['status'],'unknown');self.assertFalse(worker.halted.is_set())
+        self.assertEqual(self.store.stats()['deletions'],{})
+        graph.ads['10']['tracking_specs'].append(
+            {'action.type':['post_engagement'],'page':['7'],'post':['10']})
+        self.assertEqual(worker.reconcile_unknown()['tasks_confirmed'],1)
+        self.assertEqual(self.store.get_task(1)['status'],'succeeded')
+        self.assertEqual(sum(c[0]=='bind' for c in graph.calls),1)
+
     def test_post_identity_materializes_only_after_bind(self):
         for available in (True, False):
             with self.subTest(available=available):

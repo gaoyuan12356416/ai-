@@ -62,6 +62,21 @@ class PayloadTests(unittest.TestCase):
         old_posts = copy.deepcopy(old); old_posts['creative'] = {'id':'21'}
         old_posts['tracking_specs'].reverse()
         verify_ad_binding(old_posts,old,'21',**proof)
+        pending=copy.deepcopy(new)
+        pending['tracking_specs']=[r for r in pending['tracking_specs'] if 'post' not in r]
+        with self.assertRaisesRegex(PayloadError,'ad_tracking_materialization_pending'):
+            verify_ad_binding(pending,old,'21',**proof)
+        with_bid=copy.deepcopy(old);with_bid['bid_amount']=5
+        changed_bid=copy.deepcopy(pending);changed_bid['bid_amount']=6
+        with self.assertRaisesRegex(PayloadError,'ad_parameter_changed:bid_amount'):
+            verify_ad_binding(changed_bid,with_bid,'21',**proof)
+        with_parent=copy.deepcopy(old);with_parent['campaign']={'id':'80'}
+        changed_parent=copy.deepcopy(pending);changed_parent['campaign']={'id':'81'}
+        with self.assertRaisesRegex(PayloadError,'ad_parameter_changed:campaign'):
+            verify_ad_binding(changed_parent,with_parent,'21',**proof)
+        pending['tracking_specs'].pop()
+        with self.assertRaisesRegex(PayloadError,'ad_parameter_changed:tracking_specs'):
+            verify_ad_binding(pending,old,'21',**proof)
         with self.assertRaises(PayloadError): verify_ad_binding(new, old, '21')
         for mutate in (
             lambda x: x['tracking_specs'][-1].update(fb_pixel=['801']),

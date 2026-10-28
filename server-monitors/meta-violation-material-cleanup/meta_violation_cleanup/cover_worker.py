@@ -358,9 +358,12 @@ class CoverWorker:
                     new_story_id=bound_creative.get('effective_object_story_id'))
             except PayloadError as exc:
                 uncertain_bind = True
-                self._halt('ad_parameters_changed_after_bind')
+                tracking_pending = exc.code == 'ad_tracking_materialization_pending'
+                if not tracking_pending:
+                    self._halt('ad_parameters_changed_after_bind')
                 return self._finish(task, 'unknown', dict(intent, bind_result=result,
-                    reason='ad_parameters_changed_after_bind', request_sent=True, error=_error(exc),
+                    reason='binding_tracking_materialization_pending' if tracking_pending else 'ad_parameters_changed_after_bind',
+                    request_sent=True, error=_error(exc),
                     ad_snapshot=actual))
             except Exception as exc:
                 uncertain_bind = True
