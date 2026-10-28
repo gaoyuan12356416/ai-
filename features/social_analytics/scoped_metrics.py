@@ -9,6 +9,7 @@ from .backend_scope import eligible
 from .report import ReportError, campaign_index, selected, validate_metrics
 
 BATCH_SIZE = 100
+SINGLE_DAY_BATCH_SIZE = 1000
 WINDOW_DAYS = 14
 NARROW_CAMPAIGNS = 10
 QUERY_BUDGET_SECONDS = 40
@@ -34,7 +35,8 @@ def windows(start, end):
 
 def metric_sql(start, end, platform, site, campaigns):
     from .routes import metric_sql as unscoped_sql
-    if not campaigns or len(campaigns) > BATCH_SIZE or any(
+    batch_size = SINGLE_DAY_BATCH_SIZE if start == end else BATCH_SIZE
+    if not campaigns or len(campaigns) > batch_size or any(
             not isinstance(value, str) or not value or len(value.encode("utf-8")) > 1024
             for value in campaigns):
         raise ReportError("归因 ID 查询范围无效", 503)
@@ -88,8 +90,12 @@ def source(app, start, end, platform, site, campaigns):
     # SQL-gate/connection overhead for a single-post drill-down; broad candidate
     # sets still use bounded date windows.
     periods = [(start, end)] if len(campaigns) <= NARROW_CAMPAIGNS else list(windows(start, end))
-    for batch_start in range(0, len(campaigns), BATCH_SIZE):
-        batch = campaigns[batch_start:batch_start + BATCH_SIZE]
+    # A single-day tenant report can contain thousands of historical posts.
+    # Reconnecting per 100 IDs exhausts the HTTP deadline before reading them.
+    # Keep broader date ranges at their existing bounded range-scan size.
+    batch_size = SINGLE_DAY_BATCH_SIZE if start == end else BATCH_SIZE
+    for batch_start in range(0, len(campaigns), batch_size):
+        batch = campaigns[batch_start:batch_start + batch_size]
         for first, last in periods:
             if not any(first <= day <= last for day in populated):
                 continue
