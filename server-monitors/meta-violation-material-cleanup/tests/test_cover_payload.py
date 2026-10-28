@@ -29,6 +29,21 @@ def video():
 
 
 class PayloadTests(unittest.TestCase):
+    def test_approved_video_crop_absence_for_image_does_not_allow_other_losses(self):
+        old = video()
+        old['degrees_of_freedom_spec']['creative_features_spec']['video_auto_crop'] = {'enroll_status':'OPT_IN'}
+        expected = build_payload(old,'https://cdn.example/new.jpg')
+        actual = copy.deepcopy(expected)
+        actual['degrees_of_freedom_spec']['creative_features_spec'].pop('video_auto_crop')
+        verify_creative(actual, expected)
+        self.assertIn('video_auto_crop',expected['degrees_of_freedom_spec']['creative_features_spec'])
+        for mutate in (
+            lambda x: x['degrees_of_freedom_spec']['creative_features_spec'].pop('text_optimizations'),
+            lambda x: x['degrees_of_freedom_spec']['creative_features_spec'].update(video_auto_crop={'enroll_status':'OPT_OUT'}),
+        ):
+            changed=copy.deepcopy(actual); mutate(changed)
+            with self.assertRaises(PayloadError): verify_creative(changed,expected)
+
     def test_binding_accepts_only_verified_derived_story_post_changes(self):
         old = {'id':'1', 'creative':{'id':'20'}, 'tracking_specs':[
             {'action.type':['offsite_conversion'], 'fb_pixel':['800']},

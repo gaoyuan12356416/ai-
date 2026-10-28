@@ -24,3 +24,5 @@
 2026-10-28 回读修复：真实创建已被接受；4 个已知 ID 因 Meta 自动追加 Creative 管理名称后缀、GET 省略退役 standard_enhancements 聚合而隔离。仅允许原名称完整前缀加精确日期/32位十六进制后缀；仅在合法创建投影已省略聚合且逐项配置齐全时允许 GET 缺失聚合。广告标题、文案、完整链接、身份及逐项增强仍严格核验。110 项封面回归通过。旧失败任务不重置，未知对象只读核对后仅恢复首次未发送绑定。
 
 绑定阶段真实样本确认：Meta 会将 post_engagement/post_interaction_gross/link_click 的旧帖子 ID 替换为新 Creative 的 effective_object_story_id，并重排 tracking_specs。仅当新旧有效帖子 ID 归属同 Page 且完整 tracking 多重集合（含重复数、Pixel、转化 ID、额外字段）一致时接受。绑定未知只读重新取 Ad/Creative 并验全参后确认，不重发 POST。111 项封面回归通过。
+
+用户于本会话明确确认“允许该视频专用项不再回传，继续修复和替换”。仅允许已核实图片 Creative 的 video_auto_crop 不回传（原值必须为严格 OPT_IN/OPT_OUT 结构），发送仍保留原值，返回不同值仍拒绝，其他逐项功能缺失仍拒绝。封面回归 112 项通过。

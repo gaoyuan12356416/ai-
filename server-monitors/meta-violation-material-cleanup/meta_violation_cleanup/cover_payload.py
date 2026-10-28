@@ -266,6 +266,14 @@ def verify_creative(actual, expected_payload):
             and 'standard_enhancements' not in wire_features
             and 'standard_enhancements' not in actual_features):
         features.pop('standard_enhancements')
+    # Explicit operator approval on 2026-10-28: after image binding Meta no
+    # longer returns the video-only crop option. Keep submitting its original
+    # setting; accept only its absence, never a changed value or another loss.
+    if (isinstance(features, dict) and isinstance(actual_features, dict)
+            and features.get('video_auto_crop') in (
+                {'enroll_status': 'OPT_IN'}, {'enroll_status': 'OPT_OUT'})
+            and 'video_auto_crop' not in actual_features):
+        features.pop('video_auto_crop')
     if 'adlabels' in expected and 'adlabels' in actual:
         actual['adlabels'] = _labels(actual['adlabels'])
     if _meaningful(expected.get('creative_sourcing_spec')):
