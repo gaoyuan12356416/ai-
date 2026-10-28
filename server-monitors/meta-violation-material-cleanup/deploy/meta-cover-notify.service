@@ -1,0 +1,12 @@
+[Unit]
+Description=Deliver changed Meta cover batch summaries
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/meta-violation-material-cleanup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/meta-violation-material-cleanup
+ExecStart=/usr/bin/env python3 cover.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json notify
+TimeoutStartSec=120
+UMask=0077

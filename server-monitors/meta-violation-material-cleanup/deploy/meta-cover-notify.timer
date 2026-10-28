@@ -1,0 +1,11 @@
+[Unit]
+Description=Check changed Meta cover batch summaries
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Unit=meta-cover-notify.service
+
+[Install]
+WantedBy=timers.target

@@ -69,6 +69,12 @@ _SCHEMA = (
         object_key TEXT PRIMARY KEY, job_id TEXT NOT NULL, run_id TEXT,
         attempt_id TEXT, status TEXT NOT NULL, result TEXT NOT NULL,
         updated_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS fb_asset_cover_reservations (
+        object_key TEXT PRIMARY KEY, owner TEXT NOT NULL, account_id TEXT NOT NULL,
+        status TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS fb_asset_cover_delete_once (
+        object_key TEXT PRIMARY KEY, owner TEXT NOT NULL, account_id TEXT NOT NULL,
+        status TEXT NOT NULL, result TEXT NOT NULL, updated_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS fb_asset_delete_v2_audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
         action TEXT NOT NULL, created_at TEXT NOT NULL, details TEXT NOT NULL)""",
@@ -475,6 +481,139 @@ class Store:
                 self.update_recheck(row["operation_id"], status="interrupted",
                     step="核验进程已中断，进度保留，请人工重新核验；未自动恢复删除")
 
+    @staticmethod
+    def _cover_identity(owner, account_id):
+        owner = _id(owner, 'cover owner')
+        account_id = str(account_id or '').removeprefix('act_')
+        if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,180}', owner) or not re.fullmatch(r'[1-9][0-9]*', account_id):
+            raise StoreError('Invalid cover reservation identity', 'invalid_input')
+        return owner, account_id
+
+    @staticmethod
+    def _cover_key(kind, value):
+        text = str(value or '')
+        if kind not in ('ad','creative') or not re.fullmatch(r'[1-9][0-9]*',text):
+            raise StoreError('Invalid cover object identity', 'invalid_input')
+        return kind+':'+text
+
+    def reserve_cover_resources(self, owner, account_id, ad_id=None, creative_ids=()):
+        """Atomically exclude legacy deletions without fabricating deletion jobs."""
+        owner, account_id = self._cover_identity(owner, account_id)
+        keys = {self._cover_key('creative',value) for value in creative_ids}
+        if ad_id is not None:
+            keys.add(self._cover_key('ad',ad_id))
+        if not keys:
+            raise StoreError('Cover reservation needs an object', 'invalid_input')
+        with self._transaction() as conn:
+            for key in sorted(keys):
+                receipt = conn.execute('SELECT * FROM fb_asset_delete_v2_receipts WHERE object_key=?',(key,)).fetchone()
+                if receipt:
+                    return {'claimed':False,'reason':'previous_deleted','object_key':key,'proof':json.loads(receipt['result'])}
+                legacy = conn.execute('SELECT * FROM fb_asset_delete_v2_object_locks WHERE object_key=?',(key,)).fetchone()
+                if legacy:
+                    return {'claimed':False,'reason':'unknown_fence' if legacy['status']=='unknown' else 'object_locked','object_key':key}
+                once = conn.execute('SELECT * FROM fb_asset_cover_delete_once WHERE object_key=?',(key,)).fetchone()
+                if once and once['status'] not in ('failed','blocked'):
+                    return {'claimed':False,'reason':'cover_delete_once_'+once['status'],'object_key':key}
+                held = conn.execute('SELECT * FROM fb_asset_cover_reservations WHERE object_key=?',(key,)).fetchone()
+                if held and (held['owner'] != owner or held['account_id'] != account_id or held['status'] != 'in_progress'):
+                    return {'claimed':False,'reason':'cover_unknown_fence' if held['status']=='unknown' else 'cover_object_locked','object_key':key}
+            for key in sorted(keys):
+                conn.execute('INSERT OR IGNORE INTO fb_asset_cover_reservations VALUES(?,?,?,?,?)',
+                             (key,owner,account_id,'in_progress',_now()))
+            return {'claimed':True,'owner':owner,'object_keys':sorted(keys)}
+
+    def release_cover_resources(self, owner, unknown=False, verified=False):
+        owner = _id(owner,'cover owner')
+        with self._transaction() as conn:
+            if unknown:
+                return conn.execute("UPDATE fb_asset_cover_reservations SET status='unknown',updated_at=? WHERE owner=?",(_now(),owner)).rowcount
+            if not verified and conn.execute("SELECT 1 FROM fb_asset_cover_reservations WHERE owner=? AND status='unknown' LIMIT 1",(owner,)).fetchone():
+                raise StoreError('Unknown cover reservations require read-only verification','unknown_fence')
+            return conn.execute('DELETE FROM fb_asset_cover_reservations WHERE owner=?',(owner,)).rowcount
+
+    def cover_reservations(self, owner=None):
+        with self._transaction(False) as conn:
+            sql = 'SELECT * FROM fb_asset_cover_reservations'
+            args = ()
+            if owner is not None:
+                sql += ' WHERE owner=?'; args=(owner,)
+            return [dict(row) for row in conn.execute(sql,args)]
+
+    def claim_cover_delete_once(self, owner, account_id, creative_id):
+        """Commit the new workflow's one DELETE intent immediately before send.
+
+        Earlier unrelated definite failures do not consume this newly authorized
+        post-replacement attempt. Success/unknown evidence always takes precedence.
+        """
+        owner,account_id = self._cover_identity(owner,account_id)
+        key = self._cover_key('creative',creative_id)
+        with self._transaction() as conn:
+            receipt = conn.execute('SELECT * FROM fb_asset_delete_v2_receipts WHERE object_key=?',(key,)).fetchone()
+            if receipt:
+                return {'claimed':False,'status':'previous_deleted','reason':'previous_deleted','proof':json.loads(receipt['result'])}
+            legacy = conn.execute('SELECT * FROM fb_asset_delete_v2_object_locks WHERE object_key=?',(key,)).fetchone()
+            if legacy:
+                return {'claimed':False,'status':'unknown' if legacy['status']=='unknown' else 'blocked',
+                        'reason':'unknown_fence' if legacy['status']=='unknown' else 'object_locked'}
+            once = conn.execute('SELECT * FROM fb_asset_cover_delete_once WHERE object_key=?',(key,)).fetchone()
+            if once:
+                return {'claimed':False,'status':once['status'],'reason':'delete_once_consumed','proof':json.loads(once['result'])}
+            held = conn.execute('SELECT * FROM fb_asset_cover_reservations WHERE object_key=?',(key,)).fetchone()
+            if held and (held['owner'] != owner or held['account_id'] != account_id or held['status'] != 'in_progress'):
+                return {'claimed':False,'status':'unknown' if held['status']=='unknown' else 'blocked','reason':'cover_object_locked'}
+            # All known in-process replacements reserve the old Creative too.
+            # Keep the separate reservation for the full reference-check/DELETE.
+            if held is None:
+                conn.execute('INSERT INTO fb_asset_cover_reservations VALUES(?,?,?,?,?)',(key,owner,account_id,'in_progress',_now()))
+            intent = {'request_sent':True,'stage':'creative_delete_intent','account_id':account_id,'creative_id':str(creative_id)}
+            conn.execute('INSERT INTO fb_asset_cover_delete_once VALUES(?,?,?,?,?,?)',
+                         (key,owner,account_id,'in_progress',_json(intent),_now()))
+            self._audit(conn,'cover-replace:'+owner,'cover_delete_intent',dict(intent,object_key=key))
+            return {'claimed':True,'status':'in_progress','owner':owner,'object_key':key}
+
+    def get_cover_delete_once(self, account_id, creative_id):
+        """Read a durable cover intent without claiming or recovering it."""
+        _, account_id = self._cover_identity('inspection', account_id)
+        key = self._cover_key('creative', creative_id)
+        with self._transaction(False) as conn:
+            row = conn.execute('SELECT * FROM fb_asset_cover_delete_once WHERE object_key=? AND account_id=?',
+                               (key, account_id)).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result['result'] = json.loads(result['result'])
+            return result
+
+    def finish_cover_delete(self, owner, account_id, creative_id, status, result):
+        owner,account_id = self._cover_identity(owner,account_id)
+        key = self._cover_key('creative',creative_id)
+        if status not in ('deleted_verified','previous_deleted','failed','unknown','blocked'):
+            raise StoreError('Invalid cover delete outcome','invalid_input')
+        if status in ('deleted_verified','previous_deleted') and result.get('confirmed_deleted') is not True:
+            raise StoreError('Exact deletion proof is required','invalid_input')
+        encoded = _json(result)
+        with self._transaction() as conn:
+            row = conn.execute('SELECT * FROM fb_asset_cover_delete_once WHERE object_key=?',(key,)).fetchone()
+            if not row or row['owner'] != owner or row['account_id'] != account_id:
+                raise StoreError('Cover delete intent does not belong to owner','claim_conflict')
+            if row['status'] not in ('in_progress','unknown'):
+                if row['status'] == status and row['result'] == encoded:
+                    return
+                raise StoreError('A completed cover delete cannot change','claim_conflict')
+            if row['status']=='unknown' and status not in ('unknown','deleted_verified','previous_deleted'):
+                raise StoreError('Unknown delete requires readonly reconciliation','unknown_fence')
+            conn.execute('UPDATE fb_asset_cover_delete_once SET status=?,result=?,updated_at=? WHERE object_key=?',
+                         (status,encoded,_now(),key))
+            if status in ('deleted_verified','previous_deleted'):
+                conn.execute('INSERT OR IGNORE INTO fb_asset_delete_v2_receipts VALUES(?,?,?,?,?,?,?)',
+                             (key,'cover-replace:'+owner,None,owner,'deleted',encoded,_now()))
+            if status=='unknown':
+                conn.execute("UPDATE fb_asset_cover_reservations SET status='unknown',updated_at=? WHERE object_key=? AND owner=?",(_now(),key,owner))
+            else:
+                conn.execute('DELETE FROM fb_asset_cover_reservations WHERE object_key=? AND owner=?',(key,owner))
+            self._audit(conn,'cover-replace:'+owner,'cover_delete_finished',dict(result,object_key=key,status=status))
+
     def claim_object(self, job_id, key, run_id):
         with self._transaction() as conn:
             run = self._require(conn, "runs", "run_id", run_id)
@@ -492,6 +631,16 @@ class Store:
                              (_json(proof), _now(), job_id, key))
                 self._audit(conn, job_id, "object_skipped_with_proof", {"key": key, "run_id": run_id, **proof})
                 return dict(self._object_data(self._object(conn, job_id, key)), claimed=False)
+            cover = conn.execute('SELECT * FROM fb_asset_cover_reservations WHERE object_key=?', (key,)).fetchone()
+            once = conn.execute('SELECT * FROM fb_asset_cover_delete_once WHERE object_key=?', (key,)).fetchone()
+            if cover is not None or once is not None:
+                held = once if once is not None else cover
+                result = {'reason': 'cover_delete_once_'+held['status'] if once is not None else 'cover_resource_'+held['status'],
+                          'cover_owner': held['owner']}
+                conn.execute('UPDATE fb_asset_delete_v2_objects SET result=?,updated_at=? WHERE job_id=? AND object_key=?',
+                             (_json(result),_now(),job_id,key))
+                self._audit(conn,job_id,'object_fenced_by_cover',dict(result,object_key=key,run_id=run_id))
+                return dict(self._object_data(self._object(conn,job_id,key)),claimed=False,reason=result['reason'])
             lock = conn.execute("SELECT * FROM fb_asset_delete_v2_object_locks WHERE object_key=?", (key,)).fetchone()
             if lock is not None:
                 result = {"reason": "unknown_fence" if lock["status"] == "unknown" else "object_locked",

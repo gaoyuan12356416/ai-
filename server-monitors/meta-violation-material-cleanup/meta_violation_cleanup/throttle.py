@@ -14,8 +14,13 @@ class RequestNotSent(Exception):
 
 
 class Governor:
-    def __init__(self,maximum=16,per_account=2,rps=24,clock=time.monotonic):
-        self.maximum=maximum;self.limit=min(4,maximum);self.per_account=per_account;self.rps=rps
+    def __init__(self,maximum=16,per_account=2,rps=24,clock=time.monotonic,
+                 *,initial_limit=None,ramp_up=True):
+        if initial_limit is not None and (type(initial_limit) is not int or not 1 <= initial_limit <= maximum):
+            raise ValueError('initial_limit_out_of_range')
+        if not isinstance(ramp_up,bool):raise ValueError('ramp_up_must_be_boolean')
+        self.maximum=maximum;self.limit=min(4,maximum) if initial_limit is None else initial_limit
+        self.per_account=per_account;self.rps=rps;self.ramp_up=ramp_up
         self.clock=clock;self.lock=threading.Lock();self.active=0;self.accounts=Counter()
         self.global_until=0.;self.account_until={};self.next_request=0.;self.last_change=clock()
         self.observed=False;self.usage={};self.metrics=Counter();self.max_seen=0
@@ -104,7 +109,7 @@ class Governor:
                     self.global_until=max(self.global_until,now+max(60,regain))
                 if max(values.get('x-ad-account-usage',0),values.get('x-business-use-case-usage',0))>=85:
                     self.account_until[account]=max(self.account_until.get(account,0),now+max(60,regain))
-            elif values and recent and pressure<60 and now-self.last_change>=20:
+            elif self.ramp_up and values and recent and pressure<60 and now-self.last_change>=20:
                 self.limit=min(self.maximum,self.limit+2);self.last_change=now
                 self.metrics['increases']+=1
 

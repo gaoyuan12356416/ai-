@@ -1,0 +1,21 @@
+[Unit]
+Description=Meta cover replacement and one-attempt Creative cleanup
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/meta-violation-material-cleanup /mnt/data-disk/fb-ad-asset-delete
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/data-disk/meta-violation-material-cleanup/current/server-monitors/meta-violation-material-cleanup
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment=PYTHONUNBUFFERED=1
+Environment=SQL_GATE_BYPASS=0
+ExecStart=/usr/bin/env python3 cover.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json work --max-ads 256
+KillSignal=SIGINT
+TimeoutStopSec=180
+Restart=no
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
