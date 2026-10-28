@@ -16,6 +16,7 @@ import re
 import subprocess
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 ACCOUNT_TASKS = {"MANAGE", "ADVERTISE", "ANALYZE", "DRAFT"}
 PAGE_TASKS = {"MANAGE", "ADVERTISE", "ANALYZE", "CREATE_CONTENT", "MESSAGING",
@@ -139,9 +140,45 @@ class Graph:
             raise GraphError(response)
         return response["data"]
 
-    def rows(self, path, credential, fields, params=None, stop_id=None):
+    def batch_get(self, ids, fields, credential):
+        """Graph batch envelope contains GET operations exclusively (25 per call)."""
+        result = {}
+        for offset in range(0, len(ids), 25):
+            keys = ids[offset:offset + 25]
+            if any(not re.fullmatch(r"(?:act_)?\d+", k) for k in keys):
+                raise ValueError("invalid_batch_object_id")
+            batch = [{"method": "GET", "relative_url": key + "?" + urlencode({"fields": fields})} for key in keys]
+            try:
+                r = self.session.post("https://graph.facebook.com/" + self.version + "/",
+                                      headers={"Authorization": "Bearer " + credential["accessToken"]},
+                                      data={"batch": json.dumps(batch), "include_headers": "false"},
+                                      timeout=(6, 60), allow_redirects=False)
+                body = r.json()
+            except Exception as exc:
+                raise GraphError({"http": 599, "transport_error": type(exc).__name__}) from None
+            if not isinstance(body, list) or len(body) != len(keys):
+                raise GraphError({"http": r.status_code, "error": {"message": "incomplete_read_batch"}})
+            for key, entry in zip(keys, body):
+                try:
+                    payload = json.loads((entry or {}).get("body", "{}"))
+                except ValueError:
+                    payload = {}
+                if (entry or {}).get("code") == 200 and str(payload.get("id")) == key:
+                    result[key] = payload
+                else:
+                    e = payload.get("error") or {}
+                    error = {k: e.get(k) for k in ("code", "error_subcode", "type", "fbtrace_id")}
+                    if error_kind({"http": (entry or {}).get("code", 599), "error": error}) in ("restricted", "rate_limited"):
+                        raise GraphError({"http": (entry or {}).get("code", 599), "error": error})
+                    result[key] = {"id": key, "read_error": error, "http": (entry or {}).get("code")}
+            if (offset // 25 + 1) % 10 == 0 or offset + 25 >= len(ids):
+                emit("status_read_progress", processed=min(offset + 25, len(ids)), total=len(ids))
+            time.sleep(.5)
+        return result
+
+    def rows(self, path, credential, fields, params=None, stop_id=None, initial_limit=100):
         out, seen, cursor_seen = {}, set(), set()
-        after, limit, retries = None, 100, 0
+        after, limit, retries = None, initial_limit, 0
         while True:
             q = dict(params or {}, fields=fields, limit=limit)
             if after:
@@ -298,27 +335,52 @@ def preview(args, db, graph, credentials):
     source = single_credential(credentials, args.source)
     target = single_credential(credentials, args.target)
     identities = {"source": verify_identity(graph, source, users), "target": verify_identity(graph, target, users)}
+    previous_identities = directory / "identities.json"
+    if args.reuse_complete_snapshots:
+        old = json.loads(previous_identities.read_text())
+        if any(old[s]["meta_id"] != identities[s]["meta_id"] for s in ("source", "target")):
+            raise ValueError("cached_snapshot_identity_mismatch")
+    def snapshot(name, fn):
+        path = directory / (name + ".json")
+        if args.reuse_complete_snapshots and path.exists() and time.time() - path.stat().st_mtime < 3600:
+            emit("complete_snapshot_reused", name=name)
+            return json.loads(path.read_text())
+        value = fn()
+        write_json(path, value)
+        return value
     write_json(directory / "identities.json", identities)
     emit("identities_verified", **identities)
     snapshots = {}
     for kind, edge, fields, direct in [
             ("account", "assigned_ad_accounts", "id,name,account_status,tasks,business", "adaccounts"),
-            ("page", "assigned_pages", "id,name,tasks,is_published,is_permanently_closed", "accounts")]:
+            ("page", "assigned_pages", "id,name,tasks", "accounts")]:
         part = {}
         for side, cred in [("source", source), ("target", target)]:
-            part[side] = mapping(graph.rows(identities[side]["meta_id"] + "/" + edge,
-                                           admin, fields, {"business": args.business}))
-            write_json(directory / (kind + "_" + side + "_assignments.json"), part[side])
-            part[side + "_visible"] = mapping(graph.rows("me/" + direct, cred, "id"))
-            write_json(directory / (kind + "_" + side + "_visible.json"), part[side + "_visible"])
+            if kind == "page" and side == "source":
+                # Meta's administrator-facing source assigned_pages edge fails
+                # even with one field and limit 5. The authenticated source's
+                # /me/accounts returns its actual tasks and paginates correctly.
+                part[side] = snapshot("page_source_assignments", lambda: mapping(graph.rows(
+                    "me/accounts", source, "id,name,tasks", initial_limit=25)))
+                part[side + "_visible"] = {k: {"id": k} for k in part[side]}
+                write_json(directory / "page_source_visible.json", part[side + "_visible"])
+                continue
+            part[side] = snapshot(kind + "_" + side + "_assignments", lambda: mapping(graph.rows(
+                identities[side]["meta_id"] + "/" + edge, admin, fields, {"business": args.business})))
+            part[side + "_visible"] = snapshot(kind + "_" + side + "_visible", lambda: mapping(graph.rows("me/" + direct, cred, "id")))
         snapshots[kind] = part
     # Ownership and the reader's explicit tasks establish the authority to delegate.
-    owned_pages = mapping(graph.rows(args.business + "/owned_pages", admin, "id"))
-    admin_pages = mapping(graph.rows(admin_proof["bm_user_id"] + "/assigned_pages", admin,
-                                    "id,tasks", {"business": args.business}))
+    owned_pages = snapshot("owned_pages", lambda: mapping(graph.rows(args.business + "/owned_pages", admin, "id")))
+    client_accounts = snapshot("client_accounts", lambda: mapping(graph.rows(args.business + "/client_ad_accounts", admin, "id,user_tasks")))
     assets = []
     for kind, part in snapshots.items():
         backend = db.assets(kind)
+        if kind == "page":
+            normal_ids = [k for k in part["source"] if k in part["source_visible"] and backend.get(k)
+                          and backend[k].get("status") == 0 and backend[k].get("forbidden_status") == 0]
+            states = snapshot("page_live_status", lambda: graph.batch_get(normal_ids, "id,is_published,is_permanently_closed", source))
+            for key, state in states.items():
+                part["source"][key] = dict(part["source"][key], **state)
         for key in sorted(set(part["source"]) | set(part["source_visible"])):
             source_row = part["source"].get(key)
             target_row = part["target"].get(key)
@@ -345,19 +407,16 @@ def preview(args, db, graph, credentials):
                 else:
                     row.update(category="missing" if not target_row else "insufficient", reason="needs_full_access")
                     if kind == "page":
-                        delegable = key in owned_pages or full_access("page", (admin_pages.get(key) or {}).get("tasks"))
-                        row["delegation_proof"] = "bm_owned_page" if key in owned_pages else "admin_page_tasks"
+                        delegable = key in owned_pages or full_access("page", source_row.get("tasks"))
+                        row["delegation_proof"] = "bm_owned_page" if key in owned_pages else "bm_source_system_user_full_tasks"
                     else:
                         owner = (source_row.get("business") or {}).get("id")
                         delegable = owner == args.business
                         row["delegation_proof"] = "bm_owned_account" if delegable else "admin_account_tasks"
                         if not delegable:
-                            try:
-                                detail = graph.get("act_" + key, admin, {"fields": "id,user_tasks"})
-                                row["admin_tasks"] = detail.get("user_tasks")
-                                delegable = "MANAGE" in (detail.get("user_tasks") or [])
-                            except GraphError as exc:
-                                row["delegation_error"] = safe_response(exc.response)
+                            detail = client_accounts.get(key) or {}
+                            row["admin_tasks"] = detail.get("user_tasks")
+                            delegable = "MANAGE" in (detail.get("user_tasks") or [])
                     row["delegable"] = delegable
                     if not delegable:
                         row["difference"] = row["category"]
@@ -366,6 +425,8 @@ def preview(args, db, graph, credentials):
     manifest = {"format_version": 1, "created_at": now(), "code_version": args.code_version,
                 "graph_version": graph.version, "business_id": args.business, "identities": identities,
                 "read_admin": admin_proof, "complete": True, "assets": assets,
+                "source_page_assignment_evidence": "source_token_me_accounts_tasks",
+                "source_page_edge_limitation": "admin_assigned_pages_code1_even_minimal_fields",
                 "counts": {kind: dict(collections.Counter(r["category"] for r in assets if r["kind"] == kind))
                            for kind in ("account", "page")}}
     write_json(manifest_path, manifest)
@@ -530,6 +591,8 @@ def execute(args, db, graph, credentials):
     if any(e["event"] == "bm_paused" for e in journal.events):
         emit("execution_paused", reason="existing_bm_restriction_requires_platform_resolution")
         return
+    journal.append("execution_start", code_version=args.code_version, command=args.command,
+                   manifest_code_version=manifest["code_version"])
     admin, _ = primary_admin(graph, credentials, args.business, args.admin_cache)
     users = graph.rows(args.business + "/system_users", admin, "id,name,role")
     source = single_credential(credentials, manifest["identities"]["source"]["local_user_id"])
@@ -603,7 +666,15 @@ def execute(args, db, graph, credentials):
                         if "MANAGE" not in (actor.get("user_tasks") or []):
                             journal.append("admin_not_delegable", key=key, actor=public_credential(c))
                             continue
-                    source_assignment = read_assignment(graph, c, a, manifest["identities"]["source"]["meta_id"], args.business)
+                    if a["kind"] == "page":
+                        source_assignment = graph.rows("me/accounts", source, "id,tasks", stop_id=a["asset_id"], initial_limit=25).get(a["asset_id"])
+                        if source_assignment and not full_access("page", source_assignment.get("tasks")):
+                            owned_now = graph.rows(args.business + "/owned_pages", c, "id", stop_id=a["asset_id"])
+                            if a["asset_id"] not in owned_now:
+                                result = {"status": "skipped", "reason": "page_delegation_no_longer_proven"}
+                                break
+                    else:
+                        source_assignment = read_assignment(graph, c, a, manifest["identities"]["source"]["meta_id"], args.business)
                     if not source_assignment:
                         result = {"status": "skipped", "reason": "source_permission_removed"}
                         break
@@ -624,7 +695,7 @@ def execute(args, db, graph, credentials):
                 desired = sorted(current | set(a["desired_tasks"]))
                 rotation.before_write(c)
                 journal.append("intent", key=key, actor=public_credential(c), target_id=target_id,
-                               before_tasks=sorted(current), desired_tasks=desired,
+                               before_assigned=before is not None, before_tasks=sorted(current), desired_tasks=desired,
                                source_live=live, backend=backend)
                 response = graph.call("POST", raw_id + "/assigned_users", c,
                                       {"user": target_id, "tasks": json.dumps(desired)})
@@ -695,6 +766,7 @@ def main():
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--graph-version", default="v26.0")
     parser.add_argument("--code-version", required=True)
+    parser.add_argument("--reuse-complete-snapshots", action="store_true", help="Reuse this run's complete <1h read checkpoints after verifying identities")
     parser.add_argument("--credential-config", default="/root/codex_test/authorize_fb_accounts_to_user913_20260819.py")
     parser.add_argument("--admin-cache", default="/root/codex_test/output/meta_bm_admin_token_cache.json")
     args = parser.parse_args()

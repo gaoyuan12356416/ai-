@@ -16,6 +16,15 @@ Exclude disabled/inactive backend accounts, abnormal/forbidden/unpublished Pages
 unknown status, incomplete listings, and assets without proven delegation rights.
 Preserve the target's pre-existing additional tasks. No downgrade fallback.
 
+The source user's administrator-facing `assigned_pages` currently returns Graph
+code 1 even with minimal fields and limit 5. Use the authenticated source's fully
+paged `me/accounts` with `tasks` as source permission evidence; explicitly record
+this limitation in the manifest. The target's administrator assignment list is
+cross-checked against its own visible list. Page publication state is fetched in
+separate Graph envelopes containing GET operations only. Administrator Page
+`assigned_users` reads require an unavailable OAuth scope; read tasks from the
+system-user `assigned_pages` edge instead. No OAuth scopes are changed.
+
 ## Run and audit
 
 Run on CPU server using Python 3.9+ with requests and pymysql. `--run-dir` must be
@@ -27,6 +36,11 @@ on the verified data disk. All commands require `--code-version COMMIT`.
 4. `resume --run-dir SAME_DIRECTORY` only reads back unknown submissions. A
    restricted BM stays paused; a new approved run after platform resolution is
    required instead of deleting restriction events or changing tokens.
+
+After an interrupted preview, `preview --reuse-complete-snapshots` can reuse this
+run's complete read checkpoints younger than one hour after revalidating the two
+identities. Partial pages are never saved as complete snapshots. Every write
+still rechecks live asset state and source/target assignment before submission.
 
 An exclusive file lock protects the run directory. The fsynced journal records
 each intent before submission, sanitized response and verified result. Writes

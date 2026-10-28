@@ -81,6 +81,31 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(calls[0][0][0], "target/assigned_pages")
         self.assertEqual(calls[0][1]["stop_id"], "p")
 
+    def test_status_batch_is_get_only_and_preserves_unknowns(self):
+        graph = object.__new__(m.Graph)
+        graph.version = "v26.0"
+        submitted = []
+        def post(url, **kw):
+            submitted.extend(json.loads(kw["data"]["batch"]))
+            return SimpleNamespace(status_code=200, json=lambda: [
+                {"code": 200, "body": json.dumps({"id": "123", "is_published": True})},
+                {"code": 400, "body": json.dumps({"error": {"code": 100}})}])
+        graph.session = SimpleNamespace(post=post)
+        with patch.object(m.time, "sleep"), patch.object(m, "emit"):
+            result = graph.batch_get(["123", "456"], "id,is_published", {"accessToken": "fake"})
+        self.assertTrue(all(x["method"] == "GET" for x in submitted))
+        self.assertTrue(result["123"]["is_published"])
+        self.assertNotIn("is_published", result["456"])
+        self.assertEqual(result["456"]["read_error"]["code"], 100)
+
+    def test_status_batch_restriction_stops_reads(self):
+        graph = object.__new__(m.Graph)
+        graph.version = "v26.0"
+        graph.session = SimpleNamespace(post=lambda *a, **kw: SimpleNamespace(status_code=200,
+            json=lambda: [{"code": 400, "body": json.dumps({"error": {"code": 368}})}]))
+        with self.assertRaises(m.GraphError):
+            graph.batch_get(["123"], "id", {"accessToken": "fake"})
+
 
 class ExecuteTests(unittest.TestCase):
     def run_scenario(self, response, resume=False):
@@ -89,7 +114,7 @@ class ExecuteTests(unittest.TestCase):
         path = Path(tmp.name)
         assets = [{"kind": "account", "asset_id": str(i), "category": "insufficient",
                    "desired_tasks": sorted(m.ACCOUNT_TASKS), "before_tasks": ["ADVERTISE"]} for i in (1, 2)]
-        manifest = {"complete": True, "business_id": m.DEFAULT_BM,
+        manifest = {"complete": True, "business_id": m.DEFAULT_BM, "code_version": "preview-version",
                     "identities": {"source": {"local_user_id": 803, "meta_id": "s"},
                                    "target": {"local_user_id": 916, "meta_id": "t"}}, "assets": assets}
         m.write_json(path / "manifest.json", manifest)
@@ -106,7 +131,7 @@ class ExecuteTests(unittest.TestCase):
             def call(self, *a, **kw):
                 posts.append(a)
                 return response
-        args = SimpleNamespace(run_dir=str(path), business=m.DEFAULT_BM, command="resume" if resume else "execute", admin_cache="unused")
+        args = SimpleNamespace(run_dir=str(path), business=m.DEFAULT_BM, command="resume" if resume else "execute", admin_cache="unused", code_version="execute-version")
         db = SimpleNamespace(assets=lambda kind, ids: {m.normalized_id(ids[0]): {"account_status": 1, "is_inactive": 0}})
         identity = lambda graph, c, users: {"meta_id": "s" if c["user_id"] == 803 else "t"}
         patches = [patch.object(m, "primary_admin", return_value=(credentials[2], {})),
