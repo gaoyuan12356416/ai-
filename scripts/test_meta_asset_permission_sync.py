@@ -111,6 +111,35 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(m.GraphError):
             graph.batch_get(["123"], "id", {"accessToken": "fake"})
 
+    def test_scoped_reads_are_get_only_and_resume_complete_items(self):
+        graph = object.__new__(m.Graph); graph.version = "v26.0"
+        calls = []
+        class Client:
+            def __init__(self, version): pass
+            def call(self, method, key, credential, params):
+                calls.append((method, key))
+                return {"ok": True, "http": 200, "data": {"id": key, "user_tasks": ["ANALYZE"]}}
+        with tempfile.TemporaryDirectory() as d, patch.object(m, "Graph", Client), patch.object(m, "emit"):
+            checkpoint = Path(d) / "partial.json"
+            credential = {"id": 1, "user_id": 1, "accessToken": "fake"}
+            first = graph.concurrent_get(["1", "2"], "id,user_tasks", credential, checkpoint, workers=2)
+            second = graph.concurrent_get(["1", "2", "3"], "id,user_tasks", credential, checkpoint, workers=2)
+        self.assertEqual(set(first), {"1", "2"})
+        self.assertEqual(set(second), {"1", "2", "3"})
+        self.assertEqual(sorted(calls), [("GET", "1"), ("GET", "2"), ("GET", "3")])
+
+    def test_scoped_read_restriction_prevents_new_submissions(self):
+        graph = object.__new__(m.Graph); graph.version = "v26.0"
+        calls = []
+        class Client:
+            def __init__(self, version): pass
+            def call(self, method, key, credential, params):
+                calls.append(key)
+                return {"ok": False, "http": 400, "error": {"code": 368}}
+        with tempfile.TemporaryDirectory() as d, patch.object(m, "Graph", Client), self.assertRaises(m.GraphError):
+            graph.concurrent_get(["1", "2", "3"], "id", {"id": 1, "user_id": 1, "accessToken": "fake"}, Path(d)/"partial.json", workers=1)
+        self.assertEqual(calls, ["1"])
+
 
 class ExecuteTests(unittest.TestCase):
     def run_scenario(self, response, resume=False):

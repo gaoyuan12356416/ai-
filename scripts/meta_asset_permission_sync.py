@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import subprocess
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -174,6 +176,55 @@ class Graph:
             if (offset // 25 + 1) % 10 == 0 or offset + 25 >= len(ids):
                 emit("status_read_progress", processed=min(offset + 25, len(ids)), total=len(ids))
             time.sleep(.5)
+        return result
+
+    def concurrent_get(self, ids, fields, credential, checkpoint, workers=8):
+        """Bounded GET-only reads, with durable partial results and no token rotation."""
+        fingerprint = public_credential(credential)["fingerprint"]
+        result = {}
+        if checkpoint.exists():
+            old = json.loads(checkpoint.read_text())
+            if old.get("fields") == fields and old.get("fingerprint") == fingerprint and time.time() - checkpoint.stat().st_mtime < 1800:
+                result = {k: v for k, v in old.get("values", {}).items() if k in set(ids)}
+        local = threading.local()
+        def read(key):
+            if not hasattr(local, "graph"):
+                local.graph = Graph(self.version)
+            response = local.graph.call("GET", key, credential, {"fields": fields})
+            if error_kind(response) in ("restricted", "rate_limited"):
+                raise GraphError(response)
+            if response.get("ok") and str(response["data"].get("id")) == key:
+                return response["data"]
+            return {"id": key, "read_error": safe_response(response)}
+        def save():
+            write_json(checkpoint, {"fields": fields, "fingerprint": fingerprint, "at": now(), "values": result})
+        pending, iterator = {}, iter(k for k in ids if k not in result)
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            for _ in range(workers):
+                key = next(iterator, None)
+                if key is not None:
+                    pending[pool.submit(read, key)] = key
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    key = pending.pop(future)
+                    result[key] = future.result()
+                if len(result) // 25 != (len(result) - len(done)) // 25 or not pending:
+                    save()
+                    emit("scoped_read_progress", fields=fields, processed=len(result), total=len(ids))
+                while len(pending) < workers:
+                    key = next(iterator, None)
+                    if key is None:
+                        break
+                    pending[pool.submit(read, key)] = key
+        finally:
+            for future in pending:
+                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
+            save()
+        if set(result) != set(ids):
+            raise ValueError("incomplete_scoped_read")
         return result
 
     def rows(self, path, credential, fields, params=None, stop_id=None, initial_limit=100):
@@ -400,14 +451,16 @@ def preview(args, db, graph, credentials):
                           and not full_access("account", (account_part["target"].get(k) or {}).get("tasks"))]
     # Large client_ad_accounts task expansions degrade to 5-6 rows per call.
     # Read only the in-scope, currently eligible accounts through GET-only batches.
-    client_accounts = snapshot("account_delegation", lambda: mapping(graph.batch_get(normal_account_ids, "id,user_tasks", admin)))
+    client_accounts = snapshot("account_delegation", lambda: mapping(graph.concurrent_get(
+        normal_account_ids, "id,user_tasks", admin, directory / "account_delegation.partial.json")))
     assets = []
     for kind, part in snapshots.items():
         backend = backend_by_kind[kind]
         if kind == "page":
             normal_ids = [k for k in part["source"] if k in part["source_visible"] and backend.get(k)
                           and backend[k].get("status") == 0 and backend[k].get("forbidden_status") == 0]
-            states = snapshot("page_live_status", lambda: graph.batch_get(normal_ids, "id,is_published,is_permanently_closed", source))
+            states = snapshot("page_live_status", lambda: graph.concurrent_get(
+                normal_ids, "id,is_published,is_permanently_closed", source, directory / "page_live_status.partial.json"))
             for key, state in states.items():
                 part["source"][key] = dict(part["source"][key], **state)
         for key in sorted(set(part["source"]) | set(part["source_visible"])):
