@@ -127,7 +127,9 @@ def audit(args):
         for kind, edge, direct in [('account', 'assigned_ad_accounts', 'adaccounts'), ('page', 'assigned_pages', 'accounts')]:
             part = {}
             for side, c in [('source', source), ('target', target)]:
-                part[side + '_visible'] = snapshot(kind + '_' + side + '_visible', lambda: m.mapping(graph.rows('me/' + direct, c, 'id,name,tasks' if kind == 'page' else 'id')))
+                # Visibility only: tasks come from the identical assigned edge.
+                # Expanding me/accounts tasks causes expensive short pages.
+                part[side + '_visible'] = snapshot(kind + '_' + side + '_visible', lambda: m.mapping(graph.rows('me/' + direct, c, 'id')))
             ids = sorted(part['source_visible'])
             for side, c in [('source', source), ('target', target)]:
                 uid = identities[side]['meta_id']
@@ -206,6 +208,8 @@ def main():
     directory=Path(args.run_dir).resolve()
     if not str(directory).startswith('/mnt/data-disk/'):
         raise ValueError('run_directory_must_be_on_data_disk')
+    if subprocess.check_output(['findmnt','-no','UUID','/mnt/data-disk'],text=True).strip() != '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':
+        raise ValueError('data_disk_uuid_mismatch')
     directory.mkdir(parents=True,exist_ok=True)
     with (directory/'.run.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
