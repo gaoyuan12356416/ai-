@@ -30,3 +30,5 @@
 真实样本发现 effective_object_story_id 可在绑定后才生成，故绑定后必须重新 GET 新 Creative 并验全参，再核对新旧帖子引用；仍未就绪时仅保留未知，禁止重发绑定。新增真实 SQLite worker 行为测试覆盖绑定后才有帖子 ID、延迟就绪后 GET-only 确认且仅一次 POST。封面回归 113 项通过。
 
 补充处理 GET 非原子传播：仅三种派生帖子追踪允许暂时仍指向已核实旧帖子或已核实新帖子，Page 必须一致，任意第三方帖子或 Pixel/转化/动作/重复数/额外字段变化仍拒绝。保留失败时实时 Ad 快照以便复核。113 项回归通过（含旧/新混合传播及无关帖子拒绝）。
+
+封面后续小修可用 prepare <release> --active-ledgers-only：必须确认 legacy live_enabled=false、旧 service/timer inactive 且 timer disabled/masked；完整备份 shared-tasks、cover、cover-audit、配置和 units，未改动旧历史账本保留原位及已校验完整备份。默认 prepare 仍完整备份旧账本；rollback 一贯不恢复旧账本覆盖进度。新增活动/启用保护测试，封面及安装回归共 115 项通过。

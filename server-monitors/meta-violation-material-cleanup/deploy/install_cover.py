@@ -65,7 +65,15 @@ def snapshot(source, target):
                 raise RuntimeError('backup_integrity_failed')
 
 
-def prepare(release):
+def require_disabled_legacy(config, state):
+    if (config.get('live_enabled') is not False
+            or state.get(OLD_UNITS[0], {}).get('is-active') != 'inactive'
+            or state.get(OLD_UNITS[1], {}).get('is-active') != 'inactive'
+            or state.get(OLD_UNITS[1], {}).get('is-enabled') not in ('disabled', 'masked')):
+        raise RuntimeError('legacy_not_proven_disabled')
+
+
+def prepare(release, active_ledgers_only=False):
     disk(); idle()
     release = release.resolve()
     if ROOT/'releases' not in release.parents:
@@ -87,13 +95,19 @@ def prepare(release):
             shutil.copy2(str(path),str(backup/unit))
         state[unit] = {field:subprocess.run(['systemctl',field,unit],capture_output=True,text=True).stdout.strip()
                        for field in ('is-enabled','is-active')}
+    if active_ledgers_only:
+        require_disabled_legacy(json.loads((backup/'config.json').read_text()),state)
     snapshot(SHARED,backup/'shared-tasks.sqlite3')
-    for source,name in ((ROOT/'runs.sqlite3','legacy-runs.sqlite3'),
-                        (ROOT/'cover.sqlite3','cover.sqlite3'),
-                        (ROOT/'cover-audit/runs.sqlite3','cover-audit.sqlite3')):
+    ledgers = [(ROOT/'cover.sqlite3','cover.sqlite3'),
+               (ROOT/'cover-audit/runs.sqlite3','cover-audit.sqlite3')]
+    if not active_ledgers_only:
+        ledgers.insert(0,(ROOT/'runs.sqlite3','legacy-runs.sqlite3'))
+    for source,name in ledgers:
         snapshot(source,backup/name)
     plan = {'release':str(release),'commit':commit,'previous_release':str((ROOT/'current').resolve()),
-            'backup':str(backup),'unit_state':state,'web_store_before':digest(WEB/STORE)}
+            'backup':str(backup),'unit_state':state,'web_store_before':digest(WEB/STORE),
+            'active_ledgers_only':active_ledgers_only,
+            'legacy_ledger_preserved_in_place':str(ROOT/'runs.sqlite3')}
     (backup/'plan.json').write_text(json.dumps(plan,indent=2),encoding='utf-8')
     (backup/'hashes.json').write_text(json.dumps({p.name:digest(p) for p in backup.iterdir() if p.is_file()},indent=2))
     print(json.dumps({'backup':str(backup),'commit':commit}))
@@ -152,5 +166,9 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('mode',choices=('prepare','apply','rollback'))
     parser.add_argument('path',type=Path)
+    parser.add_argument('--active-ledgers-only',action='store_true',
+                        help='Keep disabled, unmodified legacy ledger in place; back up all cover/shared ledgers')
     args=parser.parse_args()
-    prepare(args.path) if args.mode=='prepare' else switch(args.path,args.mode=='rollback')
+    if args.active_ledgers_only and args.mode != 'prepare':
+        parser.error('--active-ledgers-only is only valid with prepare')
+    prepare(args.path,args.active_ledgers_only) if args.mode=='prepare' else switch(args.path,args.mode=='rollback')
