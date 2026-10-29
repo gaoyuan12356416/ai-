@@ -28,7 +28,8 @@
     job: null, activeJobId: null, jobs: [], formGeneration: 0, boundGeneration: -1,
     query: { page: 1, kind: "", status: "" }, displayedQuery: { page: 1, kind: "", status: "" }, detailSeq: 0, detailBusy: false,
     previewBusy: false, executing: false, reconciling: false, rechecking: false, historyBusy: false,
-    poll: null, pollErrors: 0, confirmation: null, blockedSeq: 0, pendingAction: null, pendingRecheck: null, storageKey: "",
+    poll: null, pollErrors: 0, pollBlocked: false, previewRetry: null, previewAttempts: 0, pendingPreview: null,
+    confirmation: null, blockedSeq: 0, pendingAction: null, pendingRecheck: null, storageKey: "",
   };
   const htmlCache = new Map();
   let toastTimer;
@@ -111,15 +112,32 @@
   function legacy(job = state.job) { return !!job && (job.read_only === true || !job.preview_id); }
   function recheckRunning(job = state.job) { return !!job && !legacy(job) && !!job.recheck && job.recheck.status === "running"; }
   function jobBusy(job = state.job) { return !!job && (["previewing", "running"].includes(job.status) || recheckRunning(job)); }
+  function incompletePreview(job = state.job) { return !!job && !legacy(job) && (job.status === "previewing" || job.status === "failed" && !job.preview_completed_at); }
+  function retryablePreview(job = state.job) {
+    const error = job && job.error || {};
+    return incompletePreview(job) && job.status === "failed" && (error.retryable === true ||
+      error.retryable !== false && ["source_unavailable", "preview_interrupted", "preview_failed"].includes(error.code));
+  }
+  function previewScope(job) {
+    return { input_type: job.input_type, ids: list(job.ids).map(str), product_ids: list(job.products).map(product => str(product.id)) };
+  }
+  function previewStep(job) {
+    const progress = job.preview_progress || {};
+    const step = typeof job.preview_step === "string" && job.preview_step ? job.preview_step : "";
+    const detail = typeof progress.message === "string" ? progress.message : "";
+    const currentAdsProgress = progress.stage === "ads" && (!step || step === detail);
+    const products = currentAdsProgress && num(progress.products_total) ? "已查询 " + num(progress.products_done) + " / " + num(progress.products_total) + " 个产品" : "";
+    return [step || detail || "正在查询匹配对象", products].filter(Boolean).join(" · ");
+  }
   function dirty() { return !!state.job && state.formGeneration !== state.boundGeneration; }
   function actionBusy() { return state.previewBusy || state.executing || state.reconciling || state.rechecking || state.detailBusy; }
   function canExecute() {
-    return state.permitted && !!state.job && !legacy() && !dirty() && !actionBusy() && !jobBusy() && !state.pendingAction && !state.pendingRecheck &&
+    return state.permitted && !!state.job && !legacy() && !dirty() && !actionBusy() && !jobBusy() && !state.pendingPreview && !state.pendingAction && !state.pendingRecheck &&
       state.activeJobId === state.job.job_id && EXECUTABLE_STATES.has(state.job.status) && phases().length > 0 && selectedEligible() > 0;
   }
   function canRecheck() {
     return state.permitted && !!state.job && !legacy() && !dirty() && !actionBusy() && !jobBusy() &&
-      !state.pendingAction && !state.pendingRecheck && state.activeJobId === state.job.job_id &&
+      !state.pendingPreview && !state.pendingAction && !state.pendingRecheck && state.activeJobId === state.job.job_id &&
       EXECUTABLE_STATES.has(state.job.status) && remainingBlockedTotal() > 0;
   }
   function productById(id, job = state.job) {
@@ -164,8 +182,13 @@
   function updateControls() {
     const busy = actionBusy();
     const selected = phases();
-    $("previewBtn").disabled = !state.permitted || !state.productsLoaded || busy || jobBusy() || !!state.pendingAction || !!state.pendingRecheck;
+    $("previewBtn").disabled = !state.permitted || !state.productsLoaded || busy || jobBusy() || !!state.pendingPreview || !!state.pendingAction || !!state.pendingRecheck;
     $("previewBtn").textContent = state.previewBusy ? "正在提交预览…" : "预览匹配对象 →";
+    show("previewRequestNotice", !!state.pendingPreview);
+    $("resolvePreviewRequestBtn").disabled = !state.permitted || state.previewBusy;
+    $("resolvePreviewRequestBtn").textContent = state.previewBusy ? "正在核对…" : "立即重试";
+    show("retryPreviewBtn", retryablePreview());
+    $("retryPreviewBtn").disabled = !state.permitted || busy || !!state.pendingPreview || !!state.pendingAction || !!state.pendingRecheck;
     $("executeBtn").disabled = !canExecute();
     $("executeBtn").textContent = state.executing ? "正在提交…" : state.job && ["partial", "interrupted", "completed"].includes(state.job.status) ? "继续或重试所选阶段" : "执行所选阶段";
     $("executeBtn").title = dirty() ? "输入范围已变更，请重新预览" : !selected.length ? "请至少选择一个阶段" : !selectedEligible() ? "所选阶段没有待执行、明确失败或可直接尝试的 Video" : "";
@@ -177,7 +200,7 @@
     $("recheckBtn").textContent = state.rechecking || recheckRunning() ? "正在重新核验…" : "重新核验阻止项";
     $("recheckBtn").title = dirty() ? "输入范围已变更，请重新预览" : "重新核验原任务中的阻止项，保留固定对象清单；不会执行删除";
     show("reconcileBtn", !legacy() && num(state.job && state.job.summary && state.job.summary.unknown) > 0);
-    $("reconcileBtn").disabled = !state.permitted || legacy() || dirty() || busy || jobBusy() || !!state.pendingAction || !!state.pendingRecheck;
+    $("reconcileBtn").disabled = !state.permitted || legacy() || dirty() || busy || jobBusy() || !!state.pendingPreview || !!state.pendingAction || !!state.pendingRecheck;
     $("reconcileBtn").textContent = state.reconciling ? "正在核实…" : "核实待确认结果";
     $("refreshJobBtn").disabled = !state.job || busy;
     $("refreshJobsBtn").disabled = state.historyBusy;
@@ -192,9 +215,9 @@
     const resultPages = Math.max(1, Math.ceil(num(state.job && state.job.total) / 50));
     $("prevPageBtn").disabled = !state.job || state.detailBusy || state.query.page <= 1;
     $("nextPageBtn").disabled = !state.job || state.detailBusy || state.query.page >= resultPages;
-    $("kindFilter").disabled = !state.job || state.detailBusy;
-    $("statusFilter").disabled = !state.job || state.detailBusy;
-    all("[data-job]").forEach(button => { button.disabled = state.executing || state.reconciling || state.rechecking || state.previewBusy; });
+    $("kindFilter").disabled = !state.job || state.detailBusy || incompletePreview();
+    $("statusFilter").disabled = !state.job || state.detailBusy || incompletePreview();
+    all("[data-job]").forEach(button => { button.disabled = state.executing || state.reconciling || state.rechecking || state.previewBusy || !!state.pendingPreview; });
     if (state.confirmation) {
       $("confirmExecuteBtn").disabled = state.executing || !state.confirmation.blockedReady || !canExecute();
       $("confirmExecuteBtn").textContent = state.executing ? "正在提交…" : "确认删除 " + selectedEligible(state.confirmation.job, state.confirmation.phases) + " 个对象";
@@ -323,7 +346,7 @@
   function renderObjects(job) {
     const objects = list(job.objects);
     const total = num(job.total);
-    $("detailCount").textContent = "共 " + total + " 个对象" + (state.query.kind || state.query.status ? "（当前筛选）" : " · 相同对象已去重") + " · Video 按关联广告账户分别处理";
+    $("detailCount").textContent = incompletePreview(job) ? (job.status === "previewing" ? "正在查询，完整对象清单尚未生成" : "查询未完成，对象数量尚未确定") : "共 " + total + " 个对象" + (state.query.kind || state.query.status ? "（当前筛选）" : " · 相同对象已去重") + " · Video 按关联广告账户分别处理";
     html("detailBody", objects.map(item => {
       const products = list(item.product_ids).map(id => {
         const product = productById(id, job);
@@ -339,9 +362,9 @@
       const scopeLabel = item.kind === "video" ? '<span class="cell-sub">' + (accountVideo ? "广告账户视频素材" : oldVideoResult ? "历史记录 · Video ID 直删" : item.result && Object.keys(item.result).length ? "历史 Video 结果" : "广告账户视频素材") + '</span>' : "";
       const oldDetails = oldVideoResult && accountResults.length ? '<details class="object-diagnostic"><summary>查看历史 Video ID 请求记录</summary>' + reason + diagnosticDetails(item) + '</details>' : reason + diagnosticDetails(item);
       return '<tr data-object-key="' + esc(item.key || item.object_id) + '"><td><strong>' + esc(PHASE_NAMES[item.kind] || item.kind) + '</strong><span class="cell-sub mono">' + esc(item.object_id) + '</span></td><td><div class="cell-lines">' + (products || "—") + '</div></td><td class="mono">' + esc(list(item.account_ids).join("、") || "—") + "</td><td>" + content + "</td><td>" + resultLabel + scopeLabel + videoAccountDetails(accountResults) + oldDetails + "</td></tr>";
-    }).join("") || '<tr><td colspan="5" class="empty">' + (job.status === "previewing" ? "正在解析剧集并核查 Meta 对象，请稍候…" : "当前范围下没有匹配对象") + "</td></tr>");
+    }).join("") || '<tr><td colspan="5" class="empty">' + (job.status === "previewing" ? "正在解析剧集并核查 Meta 对象，请稍候…" : incompletePreview(job) ? "查询未完成，尚不能确定匹配对象。此次预览未执行删除。" : "当前范围下没有匹配对象") + "</td></tr>");
     const pages = Math.max(1, Math.ceil(total / 50));
-    $("pageText").textContent = "第 " + state.query.page + " / " + pages + " 页";
+    $("pageText").textContent = incompletePreview(job) ? "等待完整清单" : "第 " + state.query.page + " / " + pages + " 页";
   }
   function renderJob(job) {
     state.job = job;
@@ -362,7 +385,7 @@
       ["失败", num(summary.failed), "error"], ["已阻止", Math.max(0, num(summary.blocked) - directVideoCount(job)), "warning"],
       ["待核实", num(summary.unknown), "warning"],
     ];
-    html("stats", stats.map(([label, count, style]) => '<div class="stat ' + style + '"><strong>' + count.toLocaleString("zh-CN") + "</strong><span>" + label + "</span></div>").join(""));
+    html("stats", stats.map(([label, count, style]) => '<div class="stat ' + style + '"><strong>' + (incompletePreview(job) ? "—" : count.toLocaleString("zh-CN")) + "</strong><span>" + label + "</span></div>").join(""));
     const dramas = list(job.dramas);
     $("dramaCount").textContent = dramas.length;
     html("dramaBody", dramaRows(dramas));
@@ -372,17 +395,17 @@
     html("blockerList", blockerRows(blockers));
     PHASES.forEach(kind => {
       const result = phaseResult(kind, job);
-      $(kind + "Count").textContent = num(result.total).toLocaleString("zh-CN");
+      $(kind + "Count").textContent = incompletePreview(job) ? "—" : num(result.total).toLocaleString("zh-CN");
       const pieces = [
         ["待执行", num(result.pending) + (kind === "video" ? directVideoCount(job) : 0)], ["执行中", num(result.in_progress)],
         ["已删除", num(result.deleted) + num(result.already_deleted)], ["失败", num(result.failed)],
         ["阻止", remainingBlocked(kind, job)], ["待核实", num(result.unknown)],
       ].filter(item => item[1] > 0);
-      $(kind + "Summary").textContent = (pieces.map(item => item[0] + " " + item[1]).join(" · ") || (job.status === "previewing" ? "正在核查…" : "无匹配对象")) + (kind === "video" && num(result.total) ? " · 按 Video ID 计数" : "");
+      $(kind + "Summary").textContent = incompletePreview(job) ? (job.status === "previewing" ? "正在查询…" : "查询未完成") : (pieces.map(item => item[0] + " " + item[1]).join(" · ") || "无匹配对象") + (kind === "video" && num(result.total) ? " · 按 Video ID 计数" : "");
     });
     let notice = "";
     let tone = "info";
-    if (job.status === "previewing") notice = (typeof job.preview_step === "string" && job.preview_step ? job.preview_step + "。" : "正在解析剧集、匹配广告并核查 Meta 关联关系。") + "预览完成后可确认执行。";
+    if (job.status === "previewing") notice = previewStep(job) + "。查询仍在继续，可刷新页面后继续查看。预览完成后才能确认执行。";
     else if (job.status === "running") notice = "任务正在执行" + (num(summary.in_progress) ? "，当前有 " + num(summary.in_progress) + " 个对象处理中" : "") + "。页面会自动更新结果。";
     else if (job.status === "interrupted") { notice = "任务已中断。请先核实待确认结果，再手动继续或重试所选阶段。"; tone = "warning"; }
     else if (job.status === "failed") { notice = typeof job.message === "string" ? job.message : typeof job.error === "string" ? job.error : job.error && typeof job.error.message === "string" ? job.error.message : "任务未能完成，请查看范围核查提示并重新预览。"; tone = "error"; }
@@ -390,6 +413,7 @@
     else if (job.status !== "previewing" && !legacy(job) && !num(summary.total)) notice = "当前产品及剧集范围未匹配到 Meta 广告资产，可核对输入后重新预览。";
     message("jobNotice", notice);
     $("jobNotice").className = "notice " + tone + (notice ? "" : " hidden");
+    show("retryPreviewHelp", retryablePreview(job));
     renderRecheck(job);
     if (legacy(job)) {
       const logs = list(job.legacy_logs).slice(-20).map(entry => '<li><span class="mono">' + esc(time(entry.ts || entry.created_at)) + "</span> · " + esc(typeof entry === "string" ? entry : entry.message || "—") + "</li>").join("");
@@ -425,19 +449,22 @@
   }
 
   function stopPolling() { if (state.poll) clearTimeout(state.poll); state.poll = null; }
+  function retryDelay(attempts) { return Math.min(30000, 2500 * Math.pow(2, Math.min(attempts, 4))); }
+  function persistActive(jobId) {
+    try {
+      if (jobId) sessionStorage.setItem(state.storageKey + ":active", jobId);
+      else sessionStorage.removeItem(state.storageKey + ":active");
+    } catch (_) { /* Refresh recovery is best effort; server task state is authoritative. */ }
+  }
   function schedulePoll() {
     stopPolling();
-    if (!jobBusy() || state.activeJobId !== state.job.job_id) return;
+    if (state.pollBlocked || !state.activeJobId || state.job && ((!jobBusy() && !state.pollErrors) || state.activeJobId !== state.job.job_id)) return;
     state.poll = setTimeout(async () => {
       state.poll = null;
       if (document.hidden || state.executing || state.rechecking || state.detailBusy) { schedulePoll(); return; }
-      try { await loadJob(state.activeJobId, { polling: true }); state.pollErrors = 0; }
-      catch (error) {
-        state.pollErrors += 1;
-        if (state.pollErrors === 1) message("actionError", "任务自动更新失败：" + error.message + " 已保留当前结果，稍后自动重试。");
-        schedulePoll();
-      }
-    }, 2500);
+      try { await loadJob(state.activeJobId, { polling: true, hydrate: !state.job }); }
+      catch (_) { /* loadJob preserves the task and schedules the next read. */ }
+    }, retryDelay(state.pollErrors));
   }
   function hydrateForm(job) {
     $("inputType").value = job.input_type === "series_code" ? "series_code" : "content_id";
@@ -461,6 +488,7 @@
     const previousStatus = state.job && state.job.job_id === jobId ? state.job.status : null;
     const previousRecheckStatus = state.job && state.job.job_id === jobId && state.job.recheck ? state.job.recheck.status : null;
     stopPolling();
+    if (!options.polling) { state.pollBlocked = false; state.pollErrors = 0; }
     if (options.hydrate) {
       closeConfirmation(true);
       state.activeJobId = jobId;
@@ -473,6 +501,11 @@
     try {
       const job = await api(detailPath(jobId));
       if (seq !== state.detailSeq || state.activeJobId !== jobId) return;
+      if (!job || str(job.job_id) !== str(jobId)) throw new Error("任务响应不完整，正在重新读取状态。");
+      state.pollErrors = 0;
+      state.pollBlocked = false;
+      message("connectionNotice", "");
+      persistActive(jobId);
       if (options.hydrate && generation === state.formGeneration && !legacy(job)) hydrateForm(job);
       else if (options.hydrate) state.boundGeneration = -1;
       state.query.page = num(job.page) || state.query.page;
@@ -485,11 +518,15 @@
       if ((previousStatus && previousStatus !== job.status) || previousRecheckStatus !== (job.recheck && job.recheck.status || null)) loadJobs().catch(() => {});
     } catch (error) {
       if (seq === state.detailSeq) {
-        state.activeJobId = state.job ? state.job.job_id : null;
+        state.pollErrors += 1;
+        state.pollBlocked = error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+        state.activeJobId = state.job ? state.job.job_id : jobId;
+        if (!state.job && state.pollBlocked) persistActive(null);
         state.query = { ...state.displayedQuery };
         $("kindFilter").value = state.query.kind;
         $("statusFilter").value = state.query.status;
-        if (!options.polling) message("actionError", error.message);
+        message("connectionNotice", state.pollBlocked ? "任务状态读取失败：" + error.message : "任务状态暂时无法更新：" + error.message + " 已保留当前任务，" + Math.ceil(retryDelay(state.pollErrors) / 1000) + " 秒后自动重试。这不表示任务失败。");
+        if (!options.polling && state.pollBlocked) message("actionError", error.message);
       }
       throw error;
     } finally {
@@ -500,30 +537,89 @@
     if ($("previewBtn").disabled) return;
     let payload;
     try { payload = validateInput(); } catch (error) { message("formError", error.message); return; }
-    const generation = state.formGeneration;
+    await startPreview(payload, state.formGeneration);
+  }
+  function persistPreview(action) {
+    state.pendingPreview = action;
+    try {
+      if (action) sessionStorage.setItem(state.storageKey + ":preview", JSON.stringify(action));
+      else sessionStorage.removeItem(state.storageKey + ":preview");
+    } catch (_) { /* A retained request ID still prevents duplicates in this page. */ }
+    updateControls();
+  }
+  function stopPreviewRetry() { if (state.previewRetry) clearTimeout(state.previewRetry); state.previewRetry = null; }
+  function schedulePreviewRetry() {
+    stopPreviewRetry();
+    if (!state.pendingPreview || state.previewBusy) return;
+    state.previewRetry = setTimeout(() => {
+      state.previewRetry = null;
+      if (document.hidden) { schedulePreviewRetry(); return; }
+      sendPreview(state.pendingPreview);
+    }, retryDelay(state.previewAttempts));
+  }
+  async function startPreview(payload, generation) {
+    if (state.previewBusy || state.pendingPreview || !state.permitted) return;
+    if (!window.crypto || typeof window.crypto.randomUUID !== "function") {
+      message("formError", "当前浏览器无法生成安全请求编号，请使用新版浏览器通过 HTTPS 访问后台。");
+      return;
+    }
+    state.previewAttempts = 0;
+    const action = { payload: { ...payload, request_id: window.crypto.randomUUID() }, generation };
+    persistPreview(action);
+    await sendPreview(action);
+  }
+  async function retryPreview() {
+    if ($("retryPreviewBtn").disabled || !retryablePreview()) return;
+    const job = state.job;
+    // Retry the failed task's frozen scope, regardless of current form edits.
+    hydrateForm(job);
+    await startPreview(previewScope(job), state.formGeneration);
+  }
+  async function sendPreview(action) {
+    if (!action || state.previewBusy || !state.permitted) return;
+    stopPreviewRetry();
     state.previewBusy = true;
     closeConfirmation(true);
     $("productPicker").open = false;
     message("formError", "");
+    $("previewRequestText").textContent = "正在核对预览请求，请稍候。刷新页面后会继续核对同一次请求。";
     updateControls();
     try {
-      const job = await post(API + "/preview", payload);
-      if (!job.job_id || !job.preview_id) throw new Error("预览响应缺少任务信息，请刷新任务记录核实。");
+      const job = await post(API + "/preview", action.payload);
+      if (!job.job_id || !job.preview_id) {
+        const error = new Error("预览响应缺少任务信息。");
+        error.uncertain = true;
+        throw error;
+      }
+      persistPreview(null);
+      state.previewAttempts = 0;
+      state.pollErrors = 0;
+      state.pollBlocked = false;
       ++state.detailSeq;
       state.detailBusy = false;
       state.activeJobId = job.job_id;
-      state.boundGeneration = generation;
+      persistActive(job.job_id);
+      state.boundGeneration = action.generation;
       state.query = { page: 1, kind: "", status: "" };
       state.displayedQuery = { ...state.query };
       $("kindFilter").value = "";
       $("statusFilter").value = "";
       renderJob(job);
       message("actionError", "");
+      message("connectionNotice", "");
       schedulePoll();
       loadJobs().catch(() => {});
-      toast(job.status === "previewing" ? "预览任务已建立，正在核查对象。" : "预览已完成，请核对范围。");
-    } catch (error) { message("formError", error.message); }
-    finally { state.previewBusy = false; updateControls(); }
+      toast(job.status === "previewing" ? "预览任务已建立，正在核查对象。" : job.status === "failed" ? "已找到本次预览，请查看未完成原因。" : "预览已完成，请核对范围。");
+    } catch (error) {
+      if (error.uncertain || error.status === 429 && error.code === "preview_busy") {
+        state.previewAttempts += 1;
+        $("previewRequestText").textContent = (error.code === "preview_busy" ? "当前预览任务较多，正在等待空闲。" : error.message + "正在核对是否已建立任务。") + " 将在 " + Math.ceil(retryDelay(state.previewAttempts) / 1000) + " 秒后使用同一请求编号重试，不会重复建立任务。";
+      } else { persistPreview(null); message("formError", error.message); }
+    } finally {
+      state.previewBusy = false;
+      updateControls();
+      schedulePreviewRetry();
+    }
   }
   async function loadProducts() {
     try {
@@ -551,8 +647,9 @@
         const input = list(job.ids || job.series_ids).join("、") || str(job.job_id);
         const products = list(job.products).map(product => str(product.name || product.id)).join("、");
         const isLegacy = legacy(job);
-        const count = isLegacy ? "Ad " + num(summary.ads) + " / Post " + num(summary.post_objects) : num(summary.total) + " 个对象";
-        return '<button type="button" class="job-card' + (state.job && state.job.job_id === job.job_id ? " active" : "") + '" data-job="' + esc(job.job_id) + '"><div><strong title="' + esc(input) + '">' + (isLegacy ? "历史任务 · " : job.input_type === "series_code" ? "资源 ID · " : "剧 ID · ") + esc(input) + '</strong><small>' + esc(products || "产品范围见任务详情") + " · " + esc(time(job.created_at || job.created_at_utc)) + '</small></div><div class="job-right">' + (isLegacy ? '<span class="tag neutral">历史只读</span>' : recheckRunning(job) ? '<span class="tag info">正在重新核验</span>' : badge(job.status, JOB_STATES)) + '<span class="job-quantity">' + count + "</span></div></button>";
+        const count = isLegacy ? "Ad " + num(summary.ads) + " / Post " + num(summary.post_objects) : incompletePreview(job) ? (job.status === "previewing" ? "正在查询" : "查询未完成") : num(summary.total) + " 个对象";
+        const progress = job.status === "previewing" ? '<small class="job-progress">' + esc(previewStep(job)) + '</small>' : "";
+        return '<button type="button" class="job-card' + (state.job && state.job.job_id === job.job_id ? " active" : "") + '" data-job="' + esc(job.job_id) + '"><div><strong title="' + esc(input) + '">' + (isLegacy ? "历史任务 · " : job.input_type === "series_code" ? "资源 ID · " : "剧 ID · ") + esc(input) + '</strong><small>' + esc(products || "产品范围见任务详情") + " · " + esc(time(job.created_at || job.created_at_utc)) + '</small>' + progress + '</div><div class="job-right">' + (isLegacy ? '<span class="tag neutral">历史只读</span>' : recheckRunning(job) ? '<span class="tag info">正在重新核验</span>' : badge(job.status, JOB_STATES)) + '<span class="job-quantity">' + count + "</span></div></button>";
       }).join("") || '<div class="empty">暂无任务。预览后会在这里保留记录。</div>');
     } catch (error) {
       if (!state.jobs.length) html("jobsBox", '<div class="empty">任务记录加载失败：' + esc(error.message) + "</div>");
@@ -663,6 +760,14 @@
       if (value && typeof value.job_id === "string" && value.payload && typeof value.payload.preview_id === "string" &&
           /^[a-f0-9-]{36}$/i.test(value.payload.request_id)) state.pendingRecheck = value;
     } catch (_) { /* A missing hint does not change server-side task state. */ }
+    try {
+      const value = JSON.parse(sessionStorage.getItem(state.storageKey + ":preview") || "null");
+      const payload = value && value.payload;
+      if (payload && ["content_id", "series_code"].includes(payload.input_type) &&
+          list(payload.ids).length > 0 && list(payload.ids).length <= 50 && payload.ids.every(id => typeof id === "string") &&
+          list(payload.product_ids).length > 0 && list(payload.product_ids).length <= 20 && payload.product_ids.every(id => typeof id === "string") &&
+          /^[A-Za-z0-9_-]{16,80}$/.test(payload.request_id)) state.pendingPreview = value;
+    } catch (_) { /* A corrupt local hint cannot create a preview. */ }
     updateControls();
   }
   async function sendExecution(action) {
@@ -826,6 +931,8 @@
     });
     $("clearProductsBtn").addEventListener("click", () => { state.selectedProducts.clear(); renderProducts(); invalidateScope(); });
     $("previewBtn").addEventListener("click", preview);
+    $("retryPreviewBtn").addEventListener("click", retryPreview);
+    $("resolvePreviewRequestBtn").addEventListener("click", () => { if (!$("resolvePreviewRequestBtn").disabled) sendPreview(state.pendingPreview); });
     $("phaseChoices").addEventListener("change", () => { closeConfirmation(true); updateControls(); });
     $("executeBtn").addEventListener("click", () => openConfirmation().catch(error => message("actionError", error.message)));
     $("recheckBtn").addEventListener("click", recheck);
@@ -867,8 +974,10 @@
       $("sidebar").classList.remove("is-open");
       $("navToggle").setAttribute("aria-expanded", "false");
     });
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) schedulePoll(); });
-    window.addEventListener("pagehide", stopPolling);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) { schedulePoll(); schedulePreviewRetry(); } });
+    window.addEventListener("online", () => { schedulePoll(); schedulePreviewRetry(); });
+    window.addEventListener("pagehide", () => { stopPolling(); stopPreviewRetry(); });
+    window.addEventListener("pageshow", () => { schedulePoll(); schedulePreviewRetry(); });
   }
   async function init() {
     bindEvents();
@@ -898,6 +1007,17 @@
       await Promise.allSettled([loadProducts(), loadJobs()]);
       if (state.pendingAction) await loadJob(state.pendingAction.job_id, { hydrate: true }).catch(error => message("actionError", error.message));
       else if (state.pendingRecheck) await loadJob(state.pendingRecheck.job_id, { hydrate: true }).catch(error => message("actionError", error.message));
+      else if (state.pendingPreview) {
+        const action = state.pendingPreview;
+        hydrateForm({ ...action.payload, products: action.payload.product_ids.map(id => ({ id })) });
+        action.generation = state.formGeneration;
+        persistPreview(action);
+        await sendPreview(action);
+      } else {
+        let active;
+        try { active = sessionStorage.getItem(state.storageKey + ":active"); } catch (_) {}
+        if (active && /^[A-Za-z0-9_-]{1,128}$/.test(active)) await loadJob(active, { hydrate: true }).catch(() => {});
+      }
     } catch (error) {
       show("loadingGate", false);
       show("loadErrorGate", true);
