@@ -108,6 +108,7 @@ def read_account_publish_blockers(conn, account_ids):
             if row["status"] not in {
                 "revoked", "disabled", "disconnected", "revoke_pending",
                 "error", "token_missing", "scope_missing",
+                "reauth_required",
             } and row["publish_approved"]:
                 continue
             account_id = int(row["id"])

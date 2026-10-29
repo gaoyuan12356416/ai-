@@ -117,7 +117,7 @@
       <div id="pageRoot" class="hidden">
         <section class="stats">
           <article class="stat"><span>全部 X 账号</span><strong id="totalCount">0</strong></article>
-          <article class="stat"><span>授权有效</span><strong id="activeCount">0</strong></article>
+          <article class="stat"><span>当前 API 已授权</span><strong id="activeCount">0</strong></article>
           <article class="stat"><span>已停用/解除授权</span><strong id="disconnectedCount">0</strong></article>
           <article class="stat"><span>需要处理</span><strong id="attentionCount">0</strong></article>
         </section>
@@ -130,14 +130,15 @@
 
         <section class="panel">
           <div class="section-head">
-            <div><h2>全部授权账号</h2><p>勾选“允许发布”且授权有效的账号会进入发布池；短期 Access Token 到期时会在实际执行前自动续期，只有无法续期时才需要重新授权。</p></div>
+            <div><h2>全部 X 账号</h2><p>API 切换后，待授权账号请由原运营人进入“我的 X 账号授权”重新登录同一 X 账号。授权成功后保留原发布设置和历史记录；勾选允许发布且已授权的账号可进入发布池。</p></div>
             <div class="xp-actions"><a id="xPersonalWorkspace" class="button hidden" href="/x-video-publish.html">X 发布工作台</a><button id="xOpenExcel" class="button hidden" type="button">Excel 发布</button><button id="reloadAccounts" class="button" type="button">刷新列表</button></div>
           </div>
           <div class="filters">
             <input id="searchInput" type="search" autocomplete="off" aria-label="搜索 X 账号" placeholder="搜索名称、@账号、X ID、授权人或地区" />
             <select id="statusFilter" aria-label="按授权状态筛选">
               <option value="">全部状态</option>
-              <option value="active">有效</option>
+              <option value="active">已授权</option>
+              <option value="reauth_required">待重新授权</option>
               <option value="expired">需重新授权</option>
               <option value="scope_missing">权限不完整</option>
               <option value="revoke_pending">旧退出待处理</option>
@@ -162,7 +163,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/x-video-account-settings.js?v=20261023shared2"></script>
+  <script src="/x-video-account-settings.js?v=20261027pool-import"></script>
   <script src="/vendor/xlsx.full.min.js?v=0.20.3"></script>
   <script src="/x-excel-publish.js?v=20261023shared2"></script>
   <script src="/quick-nav.js?v=20261023xshared2"></script>
@@ -174,11 +175,13 @@
         ["fr","Français"], ["de","Deutsch"], ["ru","Русский"],
         ["ja","日本語"], ["ko","한국어"], ["ar","العربية"],
         ["th","ไทย"], ["id","Bahasa Indonesia"], ["vi","Tiếng Việt"],
-        ["zh","中文"], ["tr","Türkçe"], ["it","Italiano"],
+        ["zh-TW","繁体中文"], ["tr","Türkçe"], ["it","Italiano"],
         ["ms","Bahasa Melayu"], ["fil","Filipino"],
+        ["cs","Čeština（捷克语）"], ["pl","Polski（波兰语）"],
       ];
       const statusMeta = {
-        active:["有效","active"], expired:["需重新授权","expired"],
+        active:["已授权","active"], expired:["需重新授权","expired"],
+        reauth_required:["待重新授权","expired"],
         scope_missing:["权限不完整","scope_missing"], revoked:["授权已失效","revoked"],
         token_missing:["缺少Token","token_missing"], revoke_pending:["旧退出待处理","error"],
         disabled:["已停用","disabled"], disconnected:["已解除授权","disconnected"],
@@ -200,8 +203,11 @@
       const dramaLanguageOptions = value => {
         const current = canonicalLanguage(value);
         const options = dramaLanguages.slice();
-        if (!options.some(([code]) => code === current)) options.unshift([current, current]);
-        return options.map(([code,label]) => `<option value="${escapeHtml(code)}" ${code === current ? "selected" : ""}>${escapeHtml(label)} (${escapeHtml(code)})</option>`).join("");
+        if (!options.some(([code]) => canonicalLanguage(code) === current)) options.unshift([current, current]);
+        return options.map(([code,label]) => {
+          const normalizedCode = canonicalLanguage(code);
+          return `<option value="${escapeHtml(normalizedCode)}" ${normalizedCode === current ? "selected" : ""}>${escapeHtml(label)} (${escapeHtml(code)})</option>`;
+        }).join("");
       };
       const formatTime = value => {
         if (!value) return "—";
@@ -234,6 +240,7 @@
           expired: "已到期，需重新授权",
           missing: "缺失，需重新授权",
         };
+        if (item.status === "reauth_required") return `<div class="error-text">待重新登录授权</div>`;
         const status = String(item.access_token_status || "");
         const label = labels[status] || "状态未知";
         const renewal = item.authorization_refreshable === true ? "自动续期：可用" : "自动续期：不可用";
@@ -349,7 +356,9 @@
           const publishApproved = item.publish_approved === true;
           const credentialPublishEligible = item.credential_publish_eligible === true;
           const autoPublishConfigured = item.daily_auto_publish_configured === true;
-          const verifyButton = item.status === "disabled" || item.status === "disconnected" || item.status === "revoke_pending"
+          const verifyButton = item.status === "reauth_required"
+            ? `<a class="button small" href="/x-accounts.html">前往重新授权</a>`
+            : item.status === "disabled" || item.status === "disconnected" || item.status === "revoke_pending"
             ? `<button class="button small" type="button" disabled>${item.status === "disabled" ? "已停用" : (item.status === "disconnected" ? "已解除授权" : "旧退出待处理")}</button>`
             : `<button class="button small" type="button" data-verify-id="${escapeHtml(item.id)}">同步/校验</button>`;
           const own = window.XVideoPublish.account(item.id);
@@ -362,7 +371,7 @@
             <td class="drama-language-col"><select class="drama-language-select" data-drama-language-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(username)} 剧语言">${dramaLanguageOptions(item.drama_language)}</select><div class="subtle">仅影响新生成任务</div></td>
             <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? (item.access_token_status === "expired_refreshable" || item.access_token_status === "missing_refreshable" ? "发布池可选；执行时自动续期" : "发布池可选") : (publishApproved ? "授权不可用，发布池不可选" : "发布池不可选")}</div></td>
             <td>${metricsHtml(item)}</td>
-            <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
+            <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(meta[0])}</span><div class="subtle">${escapeHtml(item.oauth_app_name || "当前 API")}</div>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
             <td><div class="xp-row-actions">${verifyButton}<button class="button small" data-x-settings="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(publishingReason)}">发布设置</button><button class="button small" data-x-pool="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(publishingReason)}">素材池</button></div>${publishingReason ? `<div class="xp-row-reason">${escapeHtml(publishingReason)}</div>` : ""}</td>
           </tr>`;
         }).join("");

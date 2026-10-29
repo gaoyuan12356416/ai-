@@ -143,6 +143,8 @@ load_env_file(os.environ.get("X_POST_ENV_FILE", DEFAULT_ENV_FILE))
 
 CLIENT_ID = os.environ.get("X_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("X_CLIENT_SECRET", "").strip()
+OAUTH_APP_NAME = os.environ.get("X_OAUTH_APP_NAME", "当前 API").strip()
+REQUIRE_APP_BOUND_TOKENS = env_bool("X_REQUIRE_APP_BOUND_TOKENS", False)
 INTERNAL_TOKEN = (
     os.environ.get("X_INTERNAL_TOKEN", "").strip()
     or os.environ.get("X_POST_AUTOMATION_INTERNAL_TOKEN", "").strip()
@@ -760,11 +762,24 @@ def actor_from_state(state_row):
     }
 
 
+def current_app_fingerprint():
+    return hashlib.sha256(CLIENT_ID.encode()).hexdigest()
+
+
+def token_matches_current_app(token):
+    fingerprint = str((token or {}).get("oauth_client_id_sha256", ""))
+    if not fingerprint:
+        return not REQUIRE_APP_BOUND_TOKENS
+    return secrets.compare_digest(fingerprint, current_app_fingerprint())
+
+
 def status_for(scopes, access_expires_at, token=None, stored="active"):
     scope_set = set(scopes)
     missing = [scope for scope in REQUIRED_SCOPES if scope not in scope_set]
     if stored in EXPLICITLY_DISABLED_STATUSES:
         return stored, missing
+    if stored == "reauth_required" or (token is not None and not token_matches_current_app(token)):
+        return "reauth_required", missing
     if stored in {"revoked", "error", "token_missing"}:
         return stored, missing
     if missing:
@@ -941,6 +956,7 @@ def complete_authorization(code, raw_state):
         )
         obtained = now_epoch()
         token["obtained_at"] = iso_utc(obtained)
+        token["oauth_client_id_sha256"] = current_app_fingerprint()
         scopes = parse_scopes(token.get("scope"), fallback=SCOPES)
         token["scope"] = " ".join(scopes)
         expires = iso_utc(obtained + int(token.get("expires_in", 0) or 0)) if token.get("expires_in") else ""
@@ -1069,6 +1085,10 @@ def row_to_item(row):
         except ServiceError:
             pass
     status, missing = status_for(scopes, item.get("access_expires_at", ""), token, stored_status)
+    item["oauth_app_name"] = OAUTH_APP_NAME
+    item["app_authorization_status"] = "authorized" if status == "active" else "pending"
+    if status == "reauth_required":
+        item["last_error"] = "API 已切换，请登录同一 X 账号重新授权至 " + OAUTH_APP_NAME
     publish_approved = bool(int(item.get("publish_approved") or 0))
     refresh_token_available = token_refresh_available(scopes, token)
     authorization_refreshable = bool(
@@ -1086,6 +1106,9 @@ def row_to_item(row):
         token,
         refreshable=authorization_refreshable,
     )
+    if status == "reauth_required":
+        item["access_token_status"] = "reauth_required"
+        item["refresh_token_available"] = False
     item["credential_publish_eligible"] = status == "active"
     item["publish_eligible"] = (
         status == "active" and publish_approved
@@ -1410,6 +1433,8 @@ def verify_account(
         if stored_status == "revoke_pending":
             raise ServiceError("x_disconnect_pending", "X账号存在旧退出待处理状态，请先完成停用", 409)
         item = row_to_item(row)
+        if item["status"] == "reauth_required":
+            raise ServiceError("x_account_not_publishable", item["last_error"], 409)
         if require_publish_approved and item.get("publish_approved") is not True:
             raise ServiceError(
                 "x_account_publish_not_approved",
@@ -1455,6 +1480,7 @@ def verify_account(
                 if not refreshed.get("scope"):
                     refreshed["scope"] = token.get("scope", " ".join(item.get("scopes", [])))
                 refreshed["obtained_at"] = timestamp
+                refreshed["oauth_client_id_sha256"] = current_app_fingerprint()
                 token = refreshed
                 atomic_write_json(token_path(item["x_user_id"]), token)
                 refresh_at = timestamp
@@ -5051,6 +5077,7 @@ def config_payload():
     required_complete = all(scope in set(SCOPES) for scope in REQUIRED_SCOPES)
     return {
         "configured": bool(CLIENT_ID and CLIENT_SECRET and required_complete),
+        "oauth_app_name": OAUTH_APP_NAME,
         "callback_url": callback_url(),
         "scopes": list(SCOPES),
         "required_scopes": list(REQUIRED_SCOPES),
@@ -5579,7 +5606,10 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "item": preflight_post_storage_request(
-                            len(DAILY_ACCOUNT_IDS) if internal_role == "daily" else 1
+                            payload.get(
+                                "required_media_count",
+                                len(DAILY_ACCOUNT_IDS) if internal_role == "daily" else 1,
+                            )
                         )
                     },
                 )
