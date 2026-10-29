@@ -91,11 +91,13 @@ def collect(path, start, end):
         added_ads = db.execute('SELECT count(*) FROM tasks WHERE created_at>=? AND created_at<?', bounds).fetchone()[0]
         added_materials = db.execute('''SELECT count(*) FROM (SELECT material_id,min(first_seen) first_seen
             FROM materials GROUP BY material_id) WHERE first_seen>=? AND first_seen<?''', bounds).fetchone()[0]
-        failed_scans = db.execute("SELECT count(*) FROM batches WHERE status='failed' AND created_at>=? AND created_at<?", bounds).fetchone()[0]
+        failed_scans = db.execute("SELECT count(*) FROM batches WHERE status='failed' AND id NOT LIKE 'cover-error-%' AND created_at>=? AND created_at<?", bounds).fetchone()[0]
+        worker_errors = db.execute("SELECT count(*) FROM batches WHERE status='failed' AND id LIKE 'cover-error-%' AND created_at>=? AND created_at<?", bounds).fetchone()[0]
         return {'window_start': start.isoformat(), 'window_end': end.isoformat(),
                 'snapshot_at': datetime.now(CST).isoformat(timespec='seconds'),
                 'new_ads': added_ads, 'new_materials': added_materials,
-                'scan_completed': len(batches), 'scan_failed': failed_scans,
+                'scan_completed': sum(r['status'] == 'sealed' for r in batches),
+                'scan_failed': failed_scans, 'worker_errors': worker_errors,
                 'tasks': dict(tasks), 'deletions': dict(deletions),
                 'current_tasks': current_tasks, 'current_deletions': current_deletions,
                 'timings': {k: summary(v) for k, v in (
@@ -126,6 +128,7 @@ def report_body(data):
              '范围：DramaWave / HotDrama；每天 09:30 播报一次',
              '新增达标素材 %d；新增关联广告 %d' % (data['new_materials'], data['new_ads']),
              '扫描：完成 %d 批，异常 %d 批' % (data['scan_completed'], data['scan_failed']),
+             '执行异常批次：%d' % data['worker_errors'],
              '广告结果：成功 %d，失败 %d，未知 %d，跳过 %d' % (
                  t.get('succeeded', 0), t.get('failed', 0), t.get('unknown', 0),
                  t.get('obsolete', 0) + t.get('blocked', 0)),

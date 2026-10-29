@@ -65,6 +65,18 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(daily.summary([])['mean_seconds'], None)
         self.assertEqual(daily.summary(range(1, 101))['p95_seconds'], 95)
 
+    def test_worker_error_batches_are_not_scans(self):
+        with self.store._tx() as db:
+            for key, status in (('cover-scan-ok', 'sealed'), ('cover-scan-fail', 'failed'),
+                                ('cover-error-interrupted', 'failed')):
+                db.execute('INSERT INTO batches(id,status,created_at,sealed_at,meta) VALUES(?,?,?,?,?)',
+                           (key, status, '2026-10-28T02:00:00.000000+00:00',
+                            '2026-10-28T02:01:00.000000+00:00', '{"seconds":60}'))
+        data = daily.collect(self.store.path, *daily.window(self.at))
+        self.assertEqual(data['scan_completed'], 1)
+        self.assertEqual(data['scan_failed'], 1)
+        self.assertEqual(data['worker_errors'], 1)
+
     def test_daily_delivery_is_frozen_and_sent_once(self):
         audit, sent = self.audit, []
         class Sender:
