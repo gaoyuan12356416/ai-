@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import time
 
 from install_cover import (ROOT, WEB, SHARED, MODULE, STORE, UNITS, OLD_UNITS,
                            atomic, digest, disk, require_disabled_legacy, run)
@@ -67,11 +68,23 @@ def require_compatible_guards(reference, api):
 
 
 def online_snapshot(source, target):
-    # Release the source read lock between small steps so independent backend
-    # jobs can continue writing. SQLite maintains a consistent backup result.
+    # A fixed read transaction prevents an active external writer from making
+    # every incremental backup step restart. DELETE-journal writers may wait
+    # briefly; keep this read lock below their existing 30-second busy timeout.
     with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as src, \
          closing(sqlite3.connect(str(target))) as dst:
-        src.backup(dst, pages=256, sleep=.05)
+        started = time.monotonic()
+        def progress(status, remaining, total):
+            if time.monotonic() - started >= 15:
+                raise TimeoutError('backup_snapshot_deadline_exceeded')
+        try:
+            src.execute('BEGIN')
+            src.execute('SELECT name FROM sqlite_master LIMIT 1').fetchone()
+            src.backup(dst, pages=256, sleep=.05, progress=progress)
+        finally:
+            src.rollback()
+        # Integrity verification can be expensive; it must not extend the
+        # source read transaction or block unrelated backend writes.
         if dst.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise RuntimeError('backup_integrity_failed')
 

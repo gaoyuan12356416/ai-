@@ -139,5 +139,59 @@ class NarrowPrepareTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM facts').fetchone()[0], 2)
 
 
+class SnapshotDeadlineTests(unittest.TestCase):
+    def connections(self, *, fail=False):
+        events = []
+        class Cursor:
+            def fetchone(self): return ('ok',)
+        class Source:
+            def execute(self, sql):
+                events.append(sql)
+                return Cursor()
+            def backup(self, target, **kwargs):
+                events.append('backup')
+                assert kwargs['pages'] == 256
+                kwargs['progress'](0, 100, 200)
+                if fail:
+                    raise sqlite3.OperationalError('fixture_copy_failed')
+                kwargs['progress'](101, 0, 200)
+            def rollback(self): events.append('source_rollback')
+            def close(self): events.append('source_close')
+        class Target:
+            def execute(self, sql):
+                assert 'source_rollback' in events
+                events.append(sql)
+                return Cursor()
+            def close(self): events.append('target_close')
+        return events, [Source(), Target()]
+
+    def test_timeout_rolls_back_source_and_skips_integrity_scan(self):
+        events, connections = self.connections()
+        with patch.object(installer.sqlite3, 'connect', side_effect=connections), \
+             patch.object(installer.time, 'monotonic', side_effect=[0., 15.]):
+            with self.assertRaisesRegex(TimeoutError, 'backup_snapshot_deadline_exceeded'):
+                installer.online_snapshot(Path.cwd() / 'source.sqlite3', Path.cwd() / 'target.sqlite3')
+        self.assertIn('source_rollback', events)
+        self.assertIn('source_close', events)
+        self.assertNotIn('PRAGMA integrity_check', events)
+
+    def test_backup_exception_rolls_back_source_before_close(self):
+        events, connections = self.connections(fail=True)
+        with patch.object(installer.sqlite3, 'connect', side_effect=connections), \
+             patch.object(installer.time, 'monotonic', side_effect=[0., 1.]):
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'fixture_copy_failed'):
+                installer.online_snapshot(Path.cwd() / 'source.sqlite3', Path.cwd() / 'target.sqlite3')
+        self.assertLess(events.index('source_rollback'), events.index('source_close'))
+        self.assertNotIn('PRAGMA integrity_check', events)
+
+    def test_success_releases_source_lock_before_integrity_check(self):
+        events, connections = self.connections()
+        with patch.object(installer.sqlite3, 'connect', side_effect=connections), \
+             patch.object(installer.time, 'monotonic', side_effect=[0., 1., 2.]):
+            installer.online_snapshot(Path.cwd() / 'source.sqlite3', Path.cwd() / 'target.sqlite3')
+        self.assertEqual(events[:3], ['BEGIN', 'SELECT name FROM sqlite_master LIMIT 1', 'backup'])
+        self.assertLess(events.index('source_rollback'), events.index('PRAGMA integrity_check'))
+
+
 if __name__ == '__main__':
     unittest.main()
