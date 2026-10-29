@@ -8,10 +8,9 @@ backup=Path('/mnt/data-disk/social-report-repair-20261029/deploy-backup')
 m=json.loads((backup/'deployment.json').read_text())
 followup=backup.with_name('deploy-backup-followup')/'deployment.json'
 if followup.exists():
-    f=json.loads(followup.read_text());target=Path(f['path'])
-    tmp=target.with_name(target.name+'.report-rollback-next')
-    tmp.write_bytes(Path(f['backup']).read_bytes());tmp.chmod(f['old_mode']);os.replace(tmp,target)
-
+    for f in json.loads(followup.read_text())['files']:
+        target=Path(f['path']);tmp=target.with_name(target.name+'.report-rollback-next')
+        tmp.write_bytes(Path(f['backup']).read_bytes());tmp.chmod(f['old_mode']);os.replace(tmp,target)
 for item in m['files']:
     target=Path(item['path'])
     if item['backup']:

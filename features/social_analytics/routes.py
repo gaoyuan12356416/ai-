@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
@@ -185,36 +186,54 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
         # Two independent, bounded YouTube windows at a time. All connections
         # still queue through the existing shared SQL gate.
         app.setdefault("SOCIAL_ANALYTICS_RANGE_WORKERS", 2)
+        app["SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS"] = max(
+            12000, int(app.get("SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS", 8000)))
         app["SOCIAL_ANALYTICS_QUERY_DEADLINE"] = min(
             app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")), time.monotonic() + 40)
-    for platform in params["platforms"]:
-        for spec in PLATFORMS[platform]["sources"]:
-            key = source_key(platform, spec["site_id"])
-            try:
-                # Retain the single-site call contract used by existing collectors.
-                args = () if len(PLATFORMS[platform]["sources"]) == 1 else (spec["site_id"],)
-                if ai_backend_only and platform == "facebook":
-                    candidates = None if actor.get("_system_report") is True else catalog
-                    channel_rows, channel_fetched = scoped_facebook_source(
-                        app, params["start"], params["end"], spec["site_id"], candidates)
-                elif web_scoped and platform in {"youtube", "x"}:
-                    from .scoped_metrics import campaign_scope, source as scoped_source
-                    candidates = campaign_scope(catalog, actor, params, platform, spec["site_id"])
-                    channel_rows, channel_fetched, populated = scoped_source(
-                        app, params["start"], params["end"], platform, spec["site_id"], candidates)
-                    query_coverage[key] = populated
-                    scoped_sources.append(key)
-                else:
-                    channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
-                metrics.extend(channel_rows)
-                fetched.append(channel_fetched)
-            except ReportError as exc:
-                # A capacity error needs a narrower request, not a partial export.
-                if exc.status == 400:
-                    raise
-                errors[key] = str(exc)
-            except Exception:
-                errors[key] = "效果数据读取失败或繁忙，待核实；本次不按零统计"
+    def read_channel(task):
+        platform, spec = task
+        key = source_key(platform, spec["site_id"])
+        populated = None
+        try:
+            args = () if len(PLATFORMS[platform]["sources"]) == 1 else (spec["site_id"],)
+            if ai_backend_only and platform == "facebook":
+                candidates = None if actor.get("_system_report") is True else catalog
+                channel_rows, channel_fetched = scoped_facebook_source(
+                    app, params["start"], params["end"], spec["site_id"], candidates)
+            elif web_scoped and platform in {"youtube", "x"}:
+                from .scoped_metrics import campaign_scope, source as scoped_source
+                candidates = campaign_scope(catalog, actor, params, platform, spec["site_id"])
+                channel_rows, channel_fetched, populated = scoped_source(
+                    app, params["start"], params["end"], platform, spec["site_id"], candidates)
+            else:
+                channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
+            return key, channel_rows, channel_fetched, populated, None
+        except ReportError as exc:
+            if exc.status == 400:
+                raise
+            return key, [], None, None, str(exc)
+        except Exception:
+            return key, [], None, None, "效果数据读取失败或繁忙，待核实；本次不按零统计"
+
+    tasks = [(platform, spec) for platform in params["platforms"] for spec in PLATFORMS[platform]["sources"]]
+    def collect(chunks):
+        for key, rows, timestamp, populated, error in chunks:
+            if error:
+                errors[key] = error
+                continue
+            metrics.extend(rows)
+            fetched.append(timestamp)
+            if populated is not None:
+                query_coverage[key] = populated
+                scoped_sources.append(key)
+    # Independent sources must not consume one another's shared HTTP deadline
+    # serially. At most two channel reads, each with at most two windows, still
+    # pass the shared SQL gate (maximum four concurrent statements/request).
+    if web_scoped and len(tasks) > 1:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="social-channels") as executor:
+            collect(executor.map(read_channel, tasks))
+    else:
+        collect(map(read_channel, tasks))
     coverage, scope_audit = None, None
     if ai_backend_only:
         from .backend_scope import restrict

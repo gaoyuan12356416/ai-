@@ -133,6 +133,24 @@ class WebBackendScopeTests(unittest.TestCase):
         finally:
             routes._cache.clear()
 
+    def test_web_channels_share_deadline_without_serial_starvation(self):
+        import threading
+        from features.social_analytics import scoped_metrics
+        barrier = threading.Barrier(2)
+        calls = []
+        def read(app, start, end, platform, site, campaigns):
+            calls.append((platform, app["SOCIAL_ANALYTICS_QUERY_DEADLINE"]))
+            barrier.wait(timeout=2)
+            return [], "snapshot", {DAY}
+        actor = dict(role="admin", tenant_key="tenant", user_id="alice")
+        with patch.object(routes, "read_catalogs", return_value=([], {})), \
+                patch.object(scoped_metrics, "source", side_effect=read):
+            report = routes.build_report({}, actor, {"start": [DAY], "end": [DAY],
+                "platform": ["youtube", "x"]}, ai_backend_only=True)
+        self.assertEqual({call[0] for call in calls}, {"youtube", "x"})
+        self.assertEqual(len({call[1] for call in calls}), 1)
+        self.assertTrue(report["quality"]["complete"])
+
 
 if __name__ == "__main__":
     unittest.main()
