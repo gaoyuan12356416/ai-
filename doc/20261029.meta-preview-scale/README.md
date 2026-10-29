@@ -126,3 +126,13 @@ to the scoped source/service rollout, with the same 16eb baseline and no schema
 change. Tests cover exact-ID deletion, unchanged Ad/replacement scope, idempotency,
 rejected approval scopes, fresh Meta failures and newly appearing outside
 references before execution.
+
+The waiting controller was replaced at 2026-10-29 17:16 CST with verified release
+`a7176fbebe308138b66213b7356ef99bde9522ab` and the protected approval manifest.
+It records 1,278 approved keys and digest
+`6ee8c8b97b60b8801ee55e61129d72caa7ee26a1b344e353ac9ec99f574c738e`.
+All 365 Python tests passed locally and on the CPU server. An isolated SQLite
+rehearsal using the real 1,278 Creatives and their 1,278 parent Ads verified the
+approval without changing live rows or making any Meta call. Both waiting
+services were replaced; the active Video run and main API PID 1594216 continued.
+The main API still uses 16eb until this staged controller reaches its idle rollout.
