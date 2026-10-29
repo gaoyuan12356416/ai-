@@ -209,7 +209,7 @@ class ScopedMetricTests(unittest.TestCase):
 
     def test_site_scan_is_bounded_and_does_not_change_x_or_narrow_queries(self):
         for platform, start, end, ids in [
-                ('x', DAY, DAY, ['id']),
+                ('facebook', DAY, DAY, ['id']),
                 ('youtube', '2026-10-01', '2026-10-08', ['id']),
                 ('youtube', DAY, DAY, ['id'] * 3001)]:
             with self.assertRaises(report.ReportError):

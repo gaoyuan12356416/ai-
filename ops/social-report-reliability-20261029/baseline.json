@@ -1,0 +1,11 @@
+{
+  "/root/drama_material_service/features/social_analytics/routes.py": "03b813cafffdbf2d5f327b61842990f85c228275fc58b0a8ffb2a13625dcbecc",
+  "/root/drama_material_service/features/social_analytics/scoped_metrics.py": "1920dcf68ac87ebe97525276ecfc2018dbc6fae3f7dbe5e9bba63298b367c85d",
+  "/root/drama_material_service/features/social_analytics/report.py": "69b1461d59d5138d63c1872908298e8fc3f64b15b58a3a30c212c9491a62b90d",
+  "/root/drama_material_service/features/social_analytics/query_cache.py": null,
+  "/root/drama_material_service/features/social_analytics/facebook.py": "6e372a67bb1b4c7ec067d23f6b016c094c40d3ced7cfdb6fe33d7c91e2a9a00d",
+  "/root/drama_material_service/static/social-analytics.js": "bfe0a1bc79d172bc25f3ceb13a7dd8bd268d38ccd64782d6270567c945956fb3",
+  "/root/drama_material_service/static/social-analytics.html": "9c92589b4f95db45c89a1f8405075bd07a989d1cb2df11b160c0edb379aae9f1",
+  "/usr/share/nginx/html/social-analytics.js": "bfe0a1bc79d172bc25f3ceb13a7dd8bd268d38ccd64782d6270567c945956fb3",
+  "/usr/share/nginx/html/social-analytics.html": "9c92589b4f95db45c89a1f8405075bd07a989d1cb2df11b160c0edb379aae9f1"
+}

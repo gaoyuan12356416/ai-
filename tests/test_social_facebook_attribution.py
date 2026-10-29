@@ -436,6 +436,38 @@ class FacebookAttributionTests(unittest.TestCase):
         self.assertEqual(result["sources"]["2049"]["status"], "complete")
         self.assertEqual(result["sources"]["2310"]["status"], "partial")
 
+    @unittest.skipIf(os.name == "nt", "POSIX descriptor locks")
+    def test_collect_does_not_open_or_close_sqlite_owned_sidecars(self):
+        original = fb._private_open
+        def safe(path):
+            self.assertFalse(str(path).endswith(('-wal', '-shm')),
+                             'closing a sidecar FD can release SQLite locks')
+            return original(path)
+        with patch.object(fb, '_private_open', side_effect=safe):
+            self.assertEqual(self.run_collect()['status'], 'complete')
+
+    @unittest.skipIf(os.name == "nt", "POSIX descriptor locks")
+    def test_sidecar_permission_tightening_keeps_existing_process_lock(self):
+        import fcntl
+        import subprocess
+        import sys
+        path = self.root / 'guard-shm'
+        path.write_bytes(b'lock evidence')
+        path.chmod(0o666)
+        with path.open('r+b') as handle:
+            fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fb._tighten_sidecar_mode(path)
+            script = """import fcntl,sys
+h=open(sys.argv[1],'r+b')
+try: fcntl.lockf(h,fcntl.LOCK_EX|fcntl.LOCK_NB)
+except BlockingIOError: sys.exit(0)
+sys.exit(1)
+"""
+            self.assertEqual(subprocess.run([sys.executable, '-c', script, str(path)],
+                                            timeout=3).returncode, 0)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(path.read_bytes(), b'lock evidence')
+
 
 if __name__ == "__main__":
     unittest.main()

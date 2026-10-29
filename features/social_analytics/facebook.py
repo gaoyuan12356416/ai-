@@ -376,6 +376,28 @@ def _private_open(path):
         raise
 
 
+def _tighten_sidecar_mode(path):
+    # Never open/close SQLite-owned WAL or SHM descriptors while its connection
+    # is alive: POSIX close() releases this process's locks on that file.
+    # The ledger directory is private and we reject symlinks/nonregular files.
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(info.st_mode):
+        raise AttributionError("ledger_path_invalid")
+    mode = stat.S_IMODE(info.st_mode) & 0o600
+    if os.chmod in os.supports_follow_symlinks:
+        os.chmod(path, mode, follow_symlinks=False)
+    else:
+        # Some Linux Python builds lack nofollow chmod. A caller-owned directory
+        # that is not writable by other users excludes untrusted path replacement.
+        parent = os.stat(Path(path).parent, follow_symlinks=False)
+        if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o022:
+            raise AttributionError("ledger_directory_not_private")
+        os.chmod(path, mode)
+
+
 @contextmanager
 def collector_lock(path):
     path = Path(path)
@@ -521,8 +543,7 @@ def collect(fb_db=DEFAULT_FB_DB, users_db=DEFAULT_USERS_DB, ledger=DEFAULT_LEDGE
             if os.name != "nt":
                 for suffix in ("-wal", "-shm"):
                     sidecar = Path(str(ledger) + suffix)
-                    if sidecar.exists():
-                        os.close(_private_open(sidecar))
+                    _tighten_sidecar_mode(sidecar)
             schema(conn)
             schema_ready = True
             captured, failures = source_snapshot(fb_db)

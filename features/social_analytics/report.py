@@ -378,7 +378,10 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         source_quality[key] = dict(
             label=spec["label"], site_id=spec["site_id"], source_key=key,
             state="complete" if complete else "partial" if available else "unavailable",
-            missing_dates=[day for day in days if day not in populated[key]],
+            # A failed read cannot establish that a date was never synced.
+            missing_dates=[day for day in days if day not in populated[key]]
+                          if not failure(errors, key) and not failure(catalog_errors, key) else [],
+            unverified_dates=days if failure(errors, key) or failure(catalog_errors, key) else [],
             error=failure(errors, key) or failure(catalog_errors, key) or collector.get("error", ""),
             collector=collector,
             unmatched_campaigns=len(quality["unmatched_keys"]), excluded_campaigns=len(quality["excluded_keys"]),
@@ -411,7 +414,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             label=PLATFORMS[platform]["label"],
             state="complete" if complete else "partial" if available else "unavailable",
             sources={specs[key]["site_id"]: source_quality[key] for key in keys},
-            missing_dates=[day for day in days if any(day not in populated[key] for key in keys)],
+            missing_dates=[day for day in days if any(day in source_quality[key]["missing_dates"] for key in keys)],
+            unverified_dates=[day for day in days if any(day in source_quality[key]["unverified_dates"] for key in keys)],
             error="；".join(dict.fromkeys(source_quality[key]["error"] for key in keys if source_quality[key]["error"])),
             unmatched_campaigns=sum(source_quality[key]["unmatched_campaigns"] for key in keys),
             excluded_campaigns=sum(source_quality[key]["excluded_campaigns"] for key in keys),
@@ -427,7 +431,8 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                                 else "pending"))
     available, complete, _ = availability(platforms)
     metric_available = any(populated.values())
-    missing_dates = [day for day in days if any(day not in populated[key] for key in specs)]
+    missing_dates = [day for day in days if any(day in source_quality[key]["missing_dates"] for key in specs)]
+    unverified_dates = [day for day in days if any(day in source_quality[key]["unverified_dates"] for key in specs)]
     warnings = [
         "效果按 UTC 自然日统计，覆盖全部历史链接；发布量按确认完成的 UTC 日期去重。",
         "按渠道站点内 campaign ID 唯一关联发布表或链接账本；名称与 af_channel 不参与效果归因。",
@@ -456,6 +461,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         trend=[dict(formatted(trend[day], platforms, day), date=day) for day in days],
         pagination=dict(page=page, page_size=params["page_size"], total=total_rows, pages=pages),
         quality=dict(platforms=platform_quality, complete=complete, missing_dates=missing_dates,
+                     unverified_dates=unverified_dates,
                      unmatched_campaigns=sum(q["unmatched_campaigns"] for q in platform_quality.values()),
                      unmatched_totals=dto(unmatched_total, metric_available),
                      excluded_campaigns=sum(q["excluded_campaigns"] for q in platform_quality.values()),

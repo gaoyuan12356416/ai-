@@ -170,7 +170,7 @@ async function main() {
     };
     await page.goto(origin + "/social-analytics.html");
     await loaded();
-    assert.equal(await page.locator("h1").textContent(), "发布效果分析");
+    assert.equal(await page.locator("h1").textContent(), "社媒效果分析");
     assert.deepEqual(await page.locator('input[name="group"]:checked').evaluateAll(items => items.map(item => item.value)), ["owner", "platform"]);
     assert.equal(await page.locator('input[name="platform"]:checked').count(), 0);
     const yesterday = new Date(); yesterday.setUTCHours(0,0,0,0); yesterday.setUTCDate(yesterday.getUTCDate()-1);

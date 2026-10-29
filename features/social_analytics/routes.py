@@ -1,5 +1,7 @@
 """Cookie-authenticated API and reusable collector, with independent channel quality."""
 import json
+import logging
+import re
 import hashlib
 import os
 import subprocess
@@ -14,10 +16,19 @@ from .adapters import PLATFORMS, read_catalogs, source_key, source_site
 from .report import (ReportError, csv_export, options, parameters, summarize, validate_metrics,
                      public_collector_metadata)
 
-_cache = OrderedDict()
+class ReportCache(OrderedDict):
+    def clear(self):
+        # Administrative/test cache clears must also force fresh SQL reads.
+        from .query_cache import clear
+        super().clear()
+        clear()
+
+
+_cache = ReportCache()
 _lock = threading.Lock()
 TTL = 300
 MAX_ROWS = 50000
+logger = logging.getLogger(__name__)
 
 
 def metric_sql(start, end, platform, site_id=None):
@@ -44,6 +55,7 @@ def query_rows(app, statement, max_rows=1001):
     env.pop("SQL_GATE_BYPASS", None)
     # The scheduled report opts into a bounded longer query budget; HTTP stays
     # at eight seconds. Keep the FIFO gate and the overall collection deadline.
+    query_digest = hashlib.sha256(statement.encode()).hexdigest()[:16]
     statement_ms = min(20000, max(1000, int(app.get("SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS", 8000))))
     statement_seconds = (statement_ms + 999) // 1000
     env.update(MYSQL_PWD=app["ADMIN_MAPPING_MYSQL_PASSWORD"], SQL_GATE_JOB_NAME="social-analytics",
@@ -62,7 +74,13 @@ def query_rows(app, statement, max_rows=1001):
         lines = result.stdout.splitlines()
         if result.returncode or not lines or lines.pop(0) != "1":
             if "ERROR 3024 (HY000)" in result.stderr:
+                logger.warning("social_effect_query_timeout query=%s mysql_code=3024", query_digest)
                 raise ReportError("效果查询超时（MySQL 3024）；本次不按零统计", 503)
+            mysql_error = re.search(r"ERROR (\d+)", result.stderr)
+            logger.warning("social_effect_query_failed query=%s returncode=%s mysql_code=%s",
+                           query_digest, result.returncode, mysql_error.group(1) if mysql_error else "none")
+            if re.search(r"wait_timeout|queue_full|queue_timeout", result.stderr, re.I):
+                raise ReportError("效果查询排队超时，请稍后重试；本次不按零统计", 503)
             raise ValueError("readonly_query_failed")
         result_rows = [json.loads(bytes.fromhex(line).decode("utf-8")) for line in lines if line.strip()]
         if len(result_rows) > max_rows:
@@ -70,11 +88,27 @@ def query_rows(app, statement, max_rows=1001):
         return result_rows
     except ReportError:
         raise
-    except Exception:
+    except subprocess.TimeoutExpired:
+        logger.warning("social_effect_query_timeout query=%s", query_digest)
+        raise ReportError("效果数据查询超时，请稍后重试；本次不按零统计", 503) from None
+    except Exception as exc:
+        logger.warning("social_effect_query_exception query=%s type=%s", query_digest, type(exc).__name__)
         raise ReportError("效果数据读取失败或繁忙，请稍后重试；本次不按零统计", 503) from None
 
 
 def query_source_rows(app, statement, max_rows):
+    from .query_cache import get_or_load
+    # The SQL includes site/date/exact campaign or source IDs. Reuse only that
+    # same read from the same configured reader; attribution still runs per actor.
+    identity = [str(app.get(key, "")) for key in (
+        "ADMIN_MAPPING_MYSQL_HOST", "ADMIN_MAPPING_MYSQL_PORT", "ADMIN_MAPPING_MYSQL_USER")]
+    key = hashlib.sha256(json.dumps([identity, statement, max_rows]).encode()).hexdigest()
+    deadline = min(app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")), time.monotonic() + 40)
+    return get_or_load(key, lambda: _query_source_uncached(app, statement, max_rows),
+                       deadline=deadline, ttl=TTL)
+
+
+def _query_source_uncached(app, statement, max_rows):
     # Only the scheduled collector opts into one bounded read-only retry.
     # Keep the FIFO gate and retry only the failing source, never publication.
     attempts = min(2, max(1, int(app.get("SOCIAL_ANALYTICS_QUERY_ATTEMPTS", 1))))
@@ -133,17 +167,24 @@ def scoped_facebook_source(app, start, end, site, catalog=None):
     return result, fetched
 
 
-def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False):
+def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False,
+                 catalog_snapshot=None):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
     params = parameters(query)
     # Content provenance is independent of permission scope. HTTP keeps the
     # authenticated tenant/owner actor; only scheduled collection is global.
-    catalog, catalog_errors = read_catalogs(app, params["platforms"])
+    if catalog_snapshot is not None and actor.get('_system_report') is not True:
+        raise ReportError('冻结归属快照仅供内部采集', 400)
+    catalog, catalog_errors = (catalog_snapshot if catalog_snapshot is not None
+                               else read_catalogs(app, params["platforms"]))
     metrics, errors, fetched = [], {}, []
     query_coverage, scoped_sources = {}, []
     web_scoped = ai_backend_only and actor.get("_system_report") is not True
     if web_scoped:
         app = dict(app)
+        # Two independent, bounded YouTube windows at a time. All connections
+        # still queue through the existing shared SQL gate.
+        app.setdefault("SOCIAL_ANALYTICS_RANGE_WORKERS", 2)
         app["SOCIAL_ANALYTICS_QUERY_DEADLINE"] = min(
             app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")), time.monotonic() + 40)
     for platform in params["platforms"]:
@@ -206,7 +247,14 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
 
 
 def dispatch(handler, parsed, app, *, legacy=False):
-    reply = lambda status, value: app["json_response"](handler, status, value, no_store=True)
+    def reply(status, value):
+        try:
+            return app["json_response"](handler, status, value, no_store=True)
+        except (BrokenPipeError, ConnectionResetError):
+            # Changing filters aborts the old browser request. Do not attempt a
+            # second HTTP response on the closed socket or label it a SQL error.
+            handler.close_connection = True
+            return None
     actor = handler._social_analytics_actor()
     if actor is None:
         return
@@ -279,6 +327,9 @@ def dispatch(handler, parsed, app, *, legacy=False):
             return
         report.pop("all_rows")
         return reply(200, report)
+    except (BrokenPipeError, ConnectionResetError):
+        handler.close_connection = True
+        return None
     except ReportError as exc:
         return reply(exc.status, dict(error="report_unavailable" if exc.status == 503 else "invalid_request",
                                       message=str(exc)))

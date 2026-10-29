@@ -202,8 +202,10 @@
   function renderQuality() {
     const quality = report.quality, warnings = [];
     const missing = Array.isArray(quality.missing_dates) ? quality.missing_dates : [];
+    const unverified = Array.isArray(quality.unverified_dates) ? quality.unverified_dates : [];
     if (quality.complete === false) warnings.push('当前合计不完整，仅包含已可用的渠道和日期；缺失数据不按零统计。');
     if (missing.length) warnings.push(`有 ${missing.length} 个日期未同步：${missing.slice(0,10).join('、')}${missing.length > 10 ? ' 等' : ''}。汇总仅包含已有日期的数据，未同步日期不会按 0 处理。`);
+    if (unverified.length) warnings.push(`有 ${unverified.length} 个日期因读取失败或不可用而待核实，不能据此判断为未同步；请刷新重试。`);
     if (Number(quality.unmatched_campaigns) > 0) {
       const total = quality.unmatched_totals || {};
       warnings.push(`有 ${format(quality.unmatched_campaigns)} 个 campaign ID 待归属，未计入人员汇总${finite(total.revenue) ? '；待归属收入 ' + format(total.revenue,'revenue') : ''}。`);
@@ -215,9 +217,9 @@
     $('#platform-quality').innerHTML = Object.entries(platformQuality).map(([key,value]) => {
       const state = ['complete','partial','unavailable'].includes(value.state) ? value.state : 'unavailable';
       const dates = Array.isArray(value.missing_dates) ? value.missing_dates : [];
-      const details = [dates.length ? dates.length + ' 个日期未同步' : '', value.error ? String(value.error) : ''].filter(Boolean).join(' · ');
+      const details = [dates.length ? dates.length + ' 个日期未同步' : '', value.unverified_dates?.length ? value.unverified_dates.length + ' 个日期待核实' : '', value.error ? String(value.error) : ''].filter(Boolean).join(' · ');
       const sources = Object.entries(value.sources || {}).map(([siteId,source]) => {
-        const sourceDetails = [statusText(source.state), source.missing_dates?.length ? source.missing_dates.length + ' 个日期未同步' : '', source.error || ''];
+        const sourceDetails = [statusText(source.state), source.missing_dates?.length ? source.missing_dates.length + ' 个日期未同步' : '', source.unverified_dates?.length ? source.unverified_dates.length + ' 个日期待核实' : '', source.error || ''];
         if (source.collector?.state && !['complete','available','ok'].includes(source.collector.state)) sourceDetails.push('归属采集待核实');
         if (['stale','expired'].includes(source.collector?.freshness)) sourceDetails.push('归属快照已过期');
         return `<span class="source-status" data-source="${esc(source.source_key || key + ':' + siteId)}">${esc(source.label || siteId)}（${esc(siteId)}）：${esc(sourceDetails.filter(Boolean).join(' · '))}</span>`;
@@ -240,8 +242,8 @@
       $('#trend-caption').textContent = ''; return;
     }
     const available = points.filter(row => finite(row[key]));
-    $('#trend-caption').textContent = metrics[key].label + (metrics[key].money ? ' · USD' : '') + ' · 将鼠标悬停或键盘聚焦数据点查看详情；断点表示未同步，橙色点表示当日数据不完整。';
-    if (!available.length) { $('#trend-chart').innerHTML = emptyChart('暂无可展示的趋势',points.length ? '所选日期的数据尚未同步' : '当前筛选没有可用的日期数据'); return; }
+    $('#trend-caption').textContent = metrics[key].label + (metrics[key].money ? ' · USD' : '') + ' · 将鼠标悬停或键盘聚焦数据点查看详情；断点表示数据暂不可用，橙色点表示当日数据不完整。';
+    if (!available.length) { $('#trend-chart').innerHTML = emptyChart('暂无可展示的趋势',points.length ? '所选日期的数据暂不可用，请查看数据状态提示' : '当前筛选没有可用的日期数据'); return; }
     const width = 760,height = 260,left = 67,right = 19,top = 20,bottom = 39;
     const values = available.map(row => Number(row[key]));
     const minimum = Math.min(0,...values),maximum = Math.max(1,...values),range = maximum-minimum;
@@ -261,14 +263,14 @@
         const detail = `${row.date} · ${metrics[key].label}：${format(row[key],key)}${incomplete ? ' · ' + statusText(row.data_status) : ''}`;
         svg += `<circle class="trend-dot${incomplete ? ' partial' : ''}" cx="${x(index)}" cy="${y(Number(row[key]))}" r="3.5" tabindex="0" aria-label="${esc(detail)}"><title>${esc(detail)}</title></circle>`;
       }
-      else svg += `<text x="${x(index)}" y="${height-bottom-6}" text-anchor="middle"><title>${esc(row.date)} · 未同步</title>—</text>`;
+      else svg += `<text x="${x(index)}" y="${height-bottom-6}" text-anchor="middle"><title>${esc(row.date)} · 数据暂不可用</title>—</text>`;
     });
     $('#trend-chart').innerHTML = svg + '</svg>';
   }
   function renderConversion() {
     const stages = [{key:'clicks',label:'落地页点击',color:'#5c89dc'},{key:'installs',label:'安装',color:'#76aaa9',rate:'install_rate',rateLabel:'点击 → 安装'},{key:'conversions',label:'付费转化',color:'#a896ca',rate:'pay_rate',rateLabel:'安装 → 付费'}];
     const max = Math.max(1,...stages.map(stage => finite(report.totals[stage.key]) ? Number(report.totals[stage.key]) : 0));
-    $('#conversion-chart').innerHTML = stages.map(stage => { const value = report.totals[stage.key],size = finite(value) ? Math.max(0,Number(value))/max*100 : 0; return `<div class="conversion-stage"><div class="conversion-stage-head"><span>${stage.label}</span><strong>${format(value,stage.key)}</strong></div><div class="conversion-track" aria-hidden="true"><span style="width:${size}%;background:${stage.color}"></span></div><div class="conversion-rate"><span>${stage.rateLabel || '所选日期合计'}</span><span>${stage.rate ? format(report.totals[stage.rate],stage.rate) : finite(value) ? '' : '数据未同步'}</span></div></div>`; }).join('');
+    $('#conversion-chart').innerHTML = stages.map(stage => { const value = report.totals[stage.key],size = finite(value) ? Math.max(0,Number(value))/max*100 : 0; return `<div class="conversion-stage"><div class="conversion-stage-head"><span>${stage.label}</span><strong>${format(value,stage.key)}</strong></div><div class="conversion-track" aria-hidden="true"><span style="width:${size}%;background:${stage.color}"></span></div><div class="conversion-rate"><span>${stage.rateLabel || '所选日期合计'}</span><span>${stage.rate ? format(report.totals[stage.rate],stage.rate) : finite(value) ? '' : '数据暂不可用'}</span></div></div>`; }).join('');
   }
   function renderRanking() {
     const key = applied.get('ranking_metric'),rows = report.ranking.filter(row => appliesTo(row,key)).slice(0,10);
