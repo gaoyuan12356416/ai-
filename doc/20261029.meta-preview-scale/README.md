@@ -136,3 +136,33 @@ rehearsal using the real 1,278 Creatives and their 1,278 parent Ads verified the
 approval without changing live rows or making any Meta call. Both waiting
 services were replaced; the active Video run and main API PID 1594216 continued.
 The main API still uses 16eb until this staged controller reaches its idle rollout.
+
+## Pending-only recovery after the API interruption
+
+A systemd stop/start at 17:18:07 interrupted the original Video run before the
+controller's own idle restart at 17:18:35. The initiating actor is unconfirmed;
+the journal shows an orderly restart rather than an OOM. At 17:24, 6,722 Videos
+remained pending and four had unknown outcomes. The controller deployed a717
+successfully and started the authorized Creative recheck. Its backup is
+`/mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T091821Z-a7176fbebe30`.
+
+The execution API now accepts an explicit boolean `only_pending` for recovery.
+It retains the complete frozen scope while executing only pending objects and
+pending Video-account pairs. Successful, blocked, failed and unknown outcomes
+remain untouched. The filter is recorded durably in the run, preserved when it
+finishes, and included in request-id conflict checks. The default execution
+behavior is unchanged. All 367 Python tests pass, including interrupted-run
+recovery that preserves failed records and unknown fences.
+
+`scripts/resume_meta_pending_video_once.py` waits for the current Creative
+continuation and first complete Video audit, then waits for all asset writes to
+be idle. Its selected service/store rollout uses the a717 baseline and a fresh
+backup. The script reconciles unknowns with GET-only calls, submits one stable
+pending-only Video run through the main API, and performs a new final read-only
+account audit. It never automatically retries another interruption.
+
+The pending-recovery layer rolls back with
+`python3 RELEASE/scripts/deploy_meta_pending_resume.py rollback BACKUP` while
+the main API is stopped and all writes are idle, followed by
+`bash RELEASE/scripts/safe_restart_drama_api.sh`. Roll back this layer before
+the a717 reference/approval layer, and retain the live ledger throughout.

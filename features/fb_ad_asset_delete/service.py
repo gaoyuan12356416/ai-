@@ -351,6 +351,9 @@ class Service:
 
     def execute(self, session, job_id, payload):
         phases = normalize_phases(payload.get("phases"))
+        only_pending = payload.get("only_pending", False)
+        if not isinstance(only_pending, bool):
+            raise AssetError("invalid_execution_filter", "only_pending 必须为布尔值")
         request_id = str(payload.get("request_id") or "")
         if not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", request_id):
             raise AssetError("invalid_request_id", "执行请求标识无效，请刷新页面后重试")
@@ -358,14 +361,14 @@ class Service:
             raise AssetError("frozen_preview_only", "执行仅接受预览清单，不能追加对象 ID")
         job = self.store.get_job(job_id)
         self._allowed(session, job)
-        run = self.store.claim_run(job_id, str(payload.get("preview_id") or ""), actor_key(session), phases, request_id)
+        run = self.store.claim_run(job_id, str(payload.get("preview_id") or ""), actor_key(session), phases, request_id, only_pending=only_pending)
         if not run["duplicate"]:
             try:
-                self.spawn(self._run, job_id, run["run_id"], phases, copy.deepcopy(session))
+                self.spawn(self._run, job_id, run["run_id"], phases, copy.deepcopy(session), only_pending)
             except Exception:
                 self.store.finish_run(run["run_id"], "interrupted", {"message": "后台执行线程未启动，请人工恢复"})
                 raise AssetError("worker_unavailable", "后台执行未启动，进度已保留，请人工恢复", 503) from None
-        return {k: run[k] for k in ("job_id", "run_id", "status", "duplicate")}
+        return {k: run[k] for k in ("job_id", "run_id", "status", "duplicate", "only_pending")}
 
     def _parallel_groups(self, groups, work, stop):
         errors, error_lock = [], threading.Lock()
@@ -411,7 +414,7 @@ class Service:
         if callable(close):
             close()
 
-    def _run(self, job_id, run_id, phases, session):
+    def _run(self, job_id, run_id, phases, session, only_pending=False):
         stop = threading.Event()
         try:
             job = self.store.get_job(job_id)
@@ -422,12 +425,13 @@ class Service:
                 self._allowed(self.authorize(session), job)
                 self.store.update_job(job_id, current_phase=phase, execution_concurrency=self.execution_budget.concurrency)
                 objects = [o for o in job["objects"] if o["kind"] == phase and
-                           (o["status"] in ("pending", "failed") or phase == "video" and o["status"] == "blocked")]
+                           (o["status"] == "pending" if only_pending else
+                            o["status"] in ("pending", "failed") or phase == "video" and o["status"] == "blocked")]
                 probe = self.graph_factory()
                 account_mode = phase == "video" and callable(getattr(probe, "prepare_video_account_delete", None))
                 self._close_graph(probe)
                 if account_mode:
-                    self._run_video_phase(job, run_id, objects, session, stop)
+                    self._run_video_phase(job, run_id, objects, session, stop, only_pending=only_pending)
                     continue
                 refs_error, outside_keys = None, set()
                 if phase == "creative":
@@ -509,7 +513,7 @@ class Service:
             except Exception:
                 pass  # restart recovery fences the durable active claim
 
-    def _run_video_phase(self, job, run_id, objects, session, stop):
+    def _run_video_phase(self, job, run_id, objects, session, stop, only_pending=False):
         job_id = job["job_id"]
         groups, initialized, init_lock = defaultdict(list), {}, threading.Lock()
         remaining, finished = {}, set()
@@ -561,7 +565,7 @@ class Service:
                         if not claimed:
                             continue
                         current = next(r for r in self.store.video_account_results(job_id, obj["key"]) if r["account_id"] == aid)
-                        if current["status"] not in ("pending", "failed"):
+                        if current["status"] not in (("pending",) if only_pending else ("pending", "failed")):
                             account_done(obj, aid)
                             continue
                         prepared, error = None, None

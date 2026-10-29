@@ -607,6 +607,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.statuses(job)['creative:201'], 'blocked')
         self.assertEqual(self.graph.deleted_keys(), [])
 
+    def test_pending_only_resume_preserves_failed_and_unknown_attempts(self):
+        self.source.ads = [ad(1), ad(2), ad(3)]
+        job = self.preview()
+        run = self.store.claim_run(job['job_id'], job['preview_id'], actor_key(SESSION), ['video'], 'interrupted-video-123456')
+        for key, status in [('video:301', 'failed'), ('video:302', 'unknown')]:
+            self.store.claim_object(job['job_id'], key, run['run_id'])
+            self.store.finish_object(job['job_id'], key, run['run_id'], status, {'code': 'original_outcome'})
+        self.store.finish_run(run['run_id'], 'interrupted')
+        before = self.store.get_job(job['job_id'])
+        result = self.execute(job, ('video',), request_id='pending-only-video-123456', extra={'only_pending': True})
+        self.assertTrue(result['only_pending'])
+        self.assertEqual(self.graph.deleted_keys(), ['video:303'])
+        self.assertEqual(self.statuses(job)['video:301'], 'failed')
+        self.assertEqual(self.statuses(job)['video:302'], 'unknown')
+        after = self.store.get_job(job['job_id'])
+        for key in ('video:301', 'video:302'):
+            self.assertEqual(next(o for o in before['objects'] if o['key'] == key),
+                             next(o for o in after['objects'] if o['key'] == key))
+        self.assertTrue(self.execute(job, ('video',), request_id='pending-only-video-123456', extra={'only_pending': True})['duplicate'])
+        with self.assertRaises(StoreError):
+            self.execute(job, ('video',), request_id='pending-only-video-123456')
+
+    def test_pending_only_filter_rejects_non_boolean_values_before_execution(self):
+        job = self.preview()
+        for value in ('true', 1, None):
+            with self.subTest(value=value), self.assertRaises(AssetError):
+                self.execute(job, ('video',), extra={'only_pending': value})
+        self.assertEqual(self.graph.events, [])
+
 
 if __name__ == "__main__":
     unittest.main()

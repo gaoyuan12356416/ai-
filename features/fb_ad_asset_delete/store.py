@@ -265,6 +265,7 @@ class Store:
         data = dict(row)
         data["phases"] = json.loads(data["phases"])
         data["summary"] = json.loads(data["summary"])
+        data["only_pending"] = data["summary"].get("execution_options", {}).get("only_pending") is True
         data["duplicate"] = duplicate
         return data
 
@@ -406,7 +407,9 @@ class Store:
                                     (str(actor), limit)).fetchall()
             return [self._job_data(conn, row, False, False) for row in rows]
 
-    def claim_run(self, job_id, preview_id, actor, phases, request_id):
+    def claim_run(self, job_id, preview_id, actor, phases, request_id, only_pending=False):
+        if not isinstance(only_pending, bool):
+            raise StoreError("only_pending must be a boolean", "invalid_input")
         job_id, preview_id, actor, request_id = (_id(value, name) for value, name in
             ((job_id, "job_id"), (preview_id, "preview_id"), (actor, "actor"), (request_id, "request_id")))
         if not isinstance(phases, (list, tuple)) or not phases or any(phase not in PHASES for phase in phases):
@@ -418,6 +421,8 @@ class Store:
             if existing is not None:
                 if (existing["job_id"], existing["preview_id"], existing["actor"], existing["phases"]) != (job_id, preview_id, actor, encoded_phases):
                     raise StoreError("request_id was used with different execution parameters", "request_conflict")
+                if self._run_data(existing)["only_pending"] != only_pending:
+                    raise StoreError("request_id was used with a different execution filter", "request_conflict")
                 return self._run_data(existing, True)
             job = self._require(conn, "jobs", "job_id", job_id)
             if job["preview_id"] != preview_id:
@@ -430,10 +435,11 @@ class Store:
             if exists is not True or not identity:
                 raise StoreError("Cannot establish worker process identity", "owner_identity_unavailable")
             run_id, now = uuid.uuid4().hex, _now()
+            options = {"execution_options": {"only_pending": True}} if only_pending else {}
             conn.execute("INSERT INTO fb_asset_delete_v2_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (run_id, request_id, job_id, preview_id, actor, encoded_phases, "running", os.getpid(), identity, now, now, "{}"))
+                         (run_id, request_id, job_id, preview_id, actor, encoded_phases, "running", os.getpid(), identity, now, now, _json(options)))
             conn.execute("UPDATE fb_asset_delete_v2_jobs SET status='running',updated_at=? WHERE job_id=?", (now, job_id))
-            self._audit(conn, job_id, "run_claimed", {"run_id": run_id, "actor": actor, "phases": phases, "request_id": request_id})
+            self._audit(conn, job_id, "run_claimed", {"run_id": run_id, "actor": actor, "phases": phases, "request_id": request_id, "only_pending": only_pending})
             return self._run_data(self._require(conn, "runs", "run_id", run_id))
 
     def claim_recheck(self, job_id, preview_id, actor, request_id, total, approved_changed_parent_creative_keys=None):
@@ -1207,6 +1213,9 @@ class Store:
             run = self._require(conn, "runs", "run_id", run_id)
             if run["status"] != "running":
                 return self._run_data(run, True)
+            summary = dict(summary or {})
+            if self._run_data(run)["only_pending"]:
+                summary["execution_options"] = {"only_pending": True}
             self._fence_inflight(conn, run_id, "run_ended_without_definite_object_result")
             phases = json.loads(run["phases"])
             placeholders = ",".join("?" for _ in phases)
