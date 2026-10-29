@@ -109,7 +109,7 @@ class Governor:
                     self.global_until=max(self.global_until,now+max(60,regain))
                 if max(values.get('x-ad-account-usage',0),values.get('x-business-use-case-usage',0))>=85:
                     self.account_until[account]=max(self.account_until.get(account,0),now+max(60,regain))
-            elif self.ramp_up and values and recent and pressure<60 and now-self.last_change>=20:
+            elif self.ramp_up and self.limit<self.maximum and values and recent and pressure<60 and now-self.last_change>=20:
                 self.limit=min(self.maximum,self.limit+2);self.last_change=now
                 self.metrics['increases']+=1
 

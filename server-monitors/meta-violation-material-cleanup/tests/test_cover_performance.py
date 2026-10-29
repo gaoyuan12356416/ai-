@@ -72,6 +72,10 @@ class RecoveryTests(unittest.TestCase):
             now[0] += 21
             governor.observe(Response({}, headers={'x-app-usage': '{"call_count":10}'}), '100')
         self.assertEqual(governor.limit, 32)
+        increases = governor.snapshot()['increases']
+        now[0] += 21
+        governor.observe(Response({}, headers={'x-app-usage': '{"call_count":10}'}), '100')
+        self.assertEqual(governor.snapshot()['increases'], increases)
         self.assertEqual(governor.per_account, 2)
         self.assertEqual(governor.rps, 24)
 
