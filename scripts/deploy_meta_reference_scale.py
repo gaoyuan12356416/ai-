@@ -8,7 +8,7 @@ from deploy_meta_preview_scale import no_writes
 
 
 BASE = '16eb6d9e8277983264da8cac1e87b5ff3d1b990e'
-FILES = ['features/fb_ad_asset_delete/'+name+'.py' for name in ('source', 'service')]
+FILES = ['features/fb_ad_asset_delete/'+name+'.py' for name in ('source', 'service', 'store')]
 
 
 def main():

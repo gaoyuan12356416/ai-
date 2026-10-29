@@ -25,7 +25,7 @@ task's products, and submits an explicitly authorized execution through the main
 API so all DELETEs share its existing budget. It never repeats an unknown write
 or changes the operation ID. Results and SQLite evidence stay on the data disk.
 
-Validation: 359 Python module tests, 19 actual-source DOM tests, syntax checks,
+Validation: 365 Python module tests, 19 actual-source DOM tests, syntax checks,
 and a real-browser local 15,000-object fixture. No fixture test sends a deletion.
 Live operator execution and final receipts are separate acceptance evidence.
 
@@ -100,3 +100,29 @@ stop the main API, run the same release's
 `scripts/deploy_meta_reference_scale.py rollback BACKUP`, then restart with
 `scripts/safe_restart_drama_api.sh`. Roll back this layer before attempting the
 earlier full preview rollback. Retain the current SQLite database throughout.
+
+## Explicit approval of original Creatives after parent Ad replacement
+
+On October 29 the user additionally authorized the 1,278 Creatives marked
+`ad_ownership_unverified`. Their own accounts and video relationships were
+verified; each related blocked Ad has the specific `creative_changed` reason.
+The protected operational manifest freezes these original Creative keys, owner,
+preview and a SHA-256 digest. It does not include replacement Creatives or approve
+deleting the changed Ads.
+
+The normal recheck API accepts an optional exact
+`approved_changed_parent_creative_keys` list. Within the recheck claim transaction,
+the store checks frozen membership, Creative proof and the exact parent reason,
+then records the actor, request ID and allowed parent references per object.
+Idempotent requests must retain the same key fingerprint. These approvals only
+waive references from those original changed parents for those specific old
+Creatives. Fresh Creative ownership/video checks, other source/Meta references,
+permissions, global dedupe and uncertain-result fencing remain in force.
+Unknown or successful objects cannot be force-released by approval.
+
+The controller takes `--creative-approval` and uses the stable v2 continuation
+request prefix; only the Creative phase is executed. This release adds `store.py`
+to the scoped source/service rollout, with the same 16eb baseline and no schema
+change. Tests cover exact-ID deletion, unchanged Ad/replacement scope, idempotency,
+rejected approval scopes, fresh Meta failures and newly appearing outside
+references before execution.

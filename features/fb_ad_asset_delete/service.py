@@ -60,6 +60,15 @@ class Service:
         return selected
 
     @staticmethod
+    def _approved_parent_ids(job, obj):
+        approval = obj.get("changed_parent_ad_approval") or {}
+        if (obj.get("kind") != "creative" or approval.get("job_id") != job["job_id"] or
+                approval.get("preview_id") != job["preview_id"] or approval.get("object_key") != obj["key"]):
+            return set()
+        ids = set(approval.get("ad_ids") or [])
+        return ids if ids <= set(obj.get("ad_ids") or []) else set()
+
+    @staticmethod
     def _counts(job):
         if "objects" in job and "object_counts" not in job:
             job["summary"], job["phase_results"] = summary(job["objects"])
@@ -177,7 +186,7 @@ class Service:
         return "核验 Creative 共享引用：%d / %d" % (done, total)
 
     def _preview_inspect(self, entries, allowed_ads, progress, on_result=None, check_references=False,
-                         authorize=None, on_checked=None, deleted_creatives=None):
+                         authorize=None, on_checked=None, deleted_creatives=None, allowed_ads_for=None):
         """Bounded account workers, independent clients, and one-use GET batches."""
         groups, stop, result_lock = defaultdict(list), threading.Event(), threading.Lock()
         checked = [0]
@@ -201,7 +210,7 @@ class Service:
                             if authorize:
                                 authorize()
                             try:
-                                state, proof = graph.inspect(obj, allowed_ads, deleted_creatives=deleted_creatives,
+                                state, proof = graph.inspect(obj, allowed_ads_for(obj) if allowed_ads_for else allowed_ads, deleted_creatives=deleted_creatives,
                                                              check_references=check_references)
                             except AssetError as exc:
                                 with result_lock:
@@ -407,6 +416,7 @@ class Service:
         try:
             job = self.store.get_job(job_id)
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
+            approved_parents = {o["key"]: self._approved_parent_ids(job, o) for o in job["objects"] if o["kind"] == "creative"}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
             for phase in phases:
                 self._allowed(self.authorize(session), job)
@@ -424,7 +434,8 @@ class Service:
                     try:
                         refs = self.source.shared_references(objects, progress=lambda kind, done, total:
                             self.store.update_job(job_id, execution_step=self._reference_step(kind, done, total)))
-                        outside_keys = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
+                        outside_keys = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads and
+                                        str(r["ad_id"]) not in approved_parents.get(r["key"], set())}
                     except AssetError as exc:
                         refs_error = exc
                 groups, successes, success_lock = defaultdict(list), set(), threading.Lock()
@@ -459,7 +470,8 @@ class Service:
                                             raise refs_error
                                         if obj["key"] in outside_keys:
                                             raise GraphError("shared_outside_scope", "执行前发现范围外广告引用该素材，已阻止")
-                                        state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
+                                        permitted_refs = allowed_ads | approved_parents.get(obj["key"], set())
+                                        state, result = graph.inspect(obj, permitted_refs, deleted_creatives)
                                         if state == "pending":
                                             # Revalidate after reads, immediately before the write.
                                             self._allowed(self.authorize(session), job)
@@ -645,7 +657,7 @@ class Service:
         return {"job_id": job_id, "checked": checked, "read_only": True}
 
     def recheck(self, session, job_id, payload):
-        if set(payload) - {"preview_id", "request_id"}:
+        if set(payload) - {"preview_id", "request_id", "approved_changed_parent_creative_keys"}:
             raise AssetError("frozen_preview_only", "重新核验仅使用原任务固定清单，不能追加或修改对象")
         request_id = str(payload.get("request_id") or "")
         if not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", request_id):
@@ -653,7 +665,8 @@ class Service:
         job = self.store.get_job(job_id)
         self._allowed(session, job)
         result = self.store.claim_recheck(job_id, str(payload.get("preview_id") or ""), actor_key(session), request_id,
-                                         sum(o["status"] == "blocked" and o["kind"] != "video" for o in job["objects"]))
+                                         sum(o["status"] == "blocked" and o["kind"] != "video" for o in job["objects"]),
+                                         approved_changed_parent_creative_keys=payload.get("approved_changed_parent_creative_keys"))
         if not result["duplicate"]:
             try:
                 self.spawn(self._recheck, job_id, result["operation_id"], copy.deepcopy(session))
@@ -663,8 +676,9 @@ class Service:
         return result
 
     def _recheck(self, job_id, operation_id, session):
-        # Ownership/lineage conflicts still require a new preview. Read/transient
-        # reference blockers alone are eligible for clearing on this frozen list.
+        # An explicit audited exception can waive a changed parent Ad relation
+        # for exact frozen Creatives. Their own ownership and other references
+        # still need fresh checks; Ad execution and replacement IDs are unchanged.
         retryable = {"reference_check_incomplete", "shared_outside_scope", "source_unavailable",
                      "read_unavailable", "video_owner_unverified", "video_index_incomplete",
                      "video_index_expired", "video_index_malformed", "video_index_unavailable",
@@ -675,12 +689,14 @@ class Service:
             self._allowed(self.authorize(session), job)
             blocked = [o for o in job["objects"] if o["status"] == "blocked" and o["kind"] != "video"]
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
+            approved_parents = {o["key"]: self._approved_parent_ids(job, o) for o in blocked}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
             for phase in PHASES:
                 objects = [o for o in blocked if o["kind"] == phase]
                 if not objects:
                     continue
-                candidates = [o for o in objects if o.get("result", {}).get("code") in retryable]
+                candidates = [o for o in objects if o.get("result", {}).get("code") in retryable or
+                              o.get("result", {}).get("code") == "ad_ownership_unverified" and approved_parents[o["key"]]]
                 ref_error, refs = None, []
                 if phase != "ad" and candidates:
                     try:
@@ -688,7 +704,8 @@ class Service:
                             self.store.update_recheck(operation_id, step=self._reference_step(kind, done, total)))
                     except AssetError as exc:
                         ref_error = exc
-                outside = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
+                outside = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads and
+                           str(r["ad_id"]) not in approved_parents.get(r["key"], set())}
                 candidate_keys = {obj["key"] for obj in candidates}
                 verify = []
                 def authorize():
@@ -712,7 +729,8 @@ class Service:
                     else:
                         verify.append(obj)
                 self._preview_inspect(verify, allowed_ads, lambda data: None, check_references=True,
-                    authorize=authorize, on_checked=record, deleted_creatives=deleted_creatives)
+                    authorize=authorize, on_checked=record, deleted_creatives=deleted_creatives,
+                    allowed_ads_for=lambda obj: allowed_ads | approved_parents.get(obj["key"], set()))
             self.store.update_recheck(operation_id, status="completed", checked=checked, released=released,
                 step="核验完成：%d 个通过，%d 个仍阻止。执行需另行确认" % (released, len(blocked)-released))
         except Exception as exc:

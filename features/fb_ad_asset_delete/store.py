@@ -8,6 +8,7 @@ provides deletion proof. Opening a Store never starts or resumes a worker.
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -435,12 +436,20 @@ class Store:
             self._audit(conn, job_id, "run_claimed", {"run_id": run_id, "actor": actor, "phases": phases, "request_id": request_id})
             return self._run_data(self._require(conn, "runs", "run_id", run_id))
 
-    def claim_recheck(self, job_id, preview_id, actor, request_id, total):
+    def claim_recheck(self, job_id, preview_id, actor, request_id, total, approved_changed_parent_creative_keys=None):
+        keys = approved_changed_parent_creative_keys if approved_changed_parent_creative_keys is not None else []
+        if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys) or len(keys) != len(set(keys)):
+            raise StoreError("Approval requires unique frozen Creative keys", "invalid_input")
+        keys = sorted(keys)
+        fingerprint = hashlib.sha256(_json(keys).encode()).hexdigest()
+        empty_fingerprint = hashlib.sha256(_json([]).encode()).hexdigest()
         with self._transaction() as conn:
             existing = conn.execute("SELECT * FROM fb_asset_delete_v2_rechecks WHERE request_id=?", (request_id,)).fetchone()
             if existing:
                 if (existing["job_id"], existing["preview_id"], existing["actor"]) != (job_id, preview_id, actor):
                     raise StoreError("Recheck request conflicts", "request_conflict")
+                if json.loads(existing["metadata"]).get("parent_approval_fingerprint", empty_fingerprint) != fingerprint:
+                    raise StoreError("Recheck approval scope conflicts", "request_conflict")
                 return dict(job_id=job_id, operation_id=existing["operation_id"], status=existing["status"], duplicate=True, read_only=True)
             job = self._require(conn, "jobs", "job_id", job_id)
             if job["preview_id"] != preview_id:
@@ -451,14 +460,42 @@ class Store:
             exists, identity = _process_start(os.getpid())
             if exists is not True or not identity:
                 raise StoreError("Cannot establish process identity", "owner_identity_unavailable")
+            approvals = {}
+            for key in keys:
+                obj = self._object(conn, job_id, key)
+                payload, result = json.loads(obj["payload"]), json.loads(obj["result"])
+                if (obj["kind"] != "creative" or obj["status"] != "blocked" or
+                        result.get("code") != "ad_ownership_unverified" or
+                        payload.get("account_verified") is not True or "verified_video_ids" not in payload):
+                    raise StoreError("Only verified frozen Creatives blocked by changed parent Ads can be approved", "approval_scope_mismatch")
+                changed = []
+                for ad_id in payload.get("ad_ids", []):
+                    parent = self._object(conn, job_id, "ad:" + ad_id)
+                    if parent["status"] == "blocked":
+                        if (json.loads(parent["result"]).get("code") != "creative_changed" or
+                                set(json.loads(parent["payload"]).get("account_ids", [])) != set(payload.get("account_ids", []))):
+                            raise StoreError("Approval cannot waive parent ownership or account conflicts", "approval_scope_mismatch")
+                        changed.append(ad_id)
+                if not changed:
+                    raise StoreError("No changed parent Ad exists in the frozen scope", "approval_scope_mismatch")
+                approval = dict(job_id=job_id, preview_id=preview_id, object_key=key, actor=actor,
+                                request_id=request_id, ad_ids=sorted(set(changed)), approved_at=_now())
+                payload["changed_parent_ad_approval"] = approval
+                conn.execute("UPDATE fb_asset_delete_v2_objects SET payload=?,updated_at=? WHERE job_id=? AND object_key=?",
+                             (_json(payload), _now(), job_id, key))
+                approvals[key] = approval["ad_ids"]
             op = uuid.uuid4().hex
             check = dict(operation_id=op, status="running", checked=0, total=total,
-                         step="正在重新核验固定清单；此操作不会执行删除", updated_at=_now())
+                         step="正在重新核验固定清单；此操作不会执行删除", updated_at=_now(),
+                         parent_approval_fingerprint=fingerprint, approved_changed_parent_creatives=len(keys))
             conn.execute("INSERT INTO fb_asset_delete_v2_rechecks VALUES (?,?,?,?,?,?,?,?,?)",
                          (op, request_id, job_id, preview_id, actor, "running", os.getpid(), identity, _json(check)))
             data["recheck"] = check
             conn.execute("UPDATE fb_asset_delete_v2_jobs SET metadata=?,updated_at=? WHERE job_id=?", (_json(data), _now(), job_id))
             self._audit(conn, job_id, "recheck_claimed", dict(operation_id=op, request_id=request_id, actor=actor, total=total))
+            if approvals:
+                self._audit(conn, job_id, "changed_parent_creatives_approved", dict(
+                    operation_id=op, request_id=request_id, actor=actor, preview_id=preview_id, approvals=approvals))
             return dict(job_id=job_id, operation_id=op, status="running", duplicate=False, read_only=True)
 
     def update_recheck(self, operation_id, **fields):

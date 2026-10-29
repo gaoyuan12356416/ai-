@@ -7,6 +7,7 @@ from the ledger and are never blindly submitted again.
 import argparse
 from contextlib import closing
 import json
+import hashlib
 from pathlib import Path
 import sqlite3
 import time
@@ -30,6 +31,7 @@ def main():
     parser.add_argument('--operation', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--creative-approval', type=Path)
     args = parser.parse_args()
     assert Path('/mnt/data-disk').resolve() in args.output.resolve().parents
     job = read('SELECT * FROM fb_asset_delete_v2_jobs WHERE job_id=?', (args.job,))[0]
@@ -49,6 +51,15 @@ def main():
     response = http.get(url, params={'page': 1, 'page_size': 1}, timeout=30)
     response.raise_for_status()
     report = dict(job_id=args.job, operation=args.operation, execute_authorized=args.execute)
+    approval_payload = {}
+    if args.creative_approval:
+        approval = json.loads(args.creative_approval.read_text())
+        assert (approval['job_id'], approval['preview_id'], approval['actor']) == (args.job, job['preview_id'], job['actor'])
+        keys = approval['creative_keys']
+        assert keys and len(keys) == len(set(keys)) == approval['count']
+        assert hashlib.sha256('\n'.join(sorted(keys)).encode()).hexdigest() == approval['keys_sha256']
+        approval_payload['approved_changed_parent_creative_keys'] = keys
+        report['approved_changed_parent_creatives'] = len(keys)
 
     def save(**fields):
         report.update(fields, updated_at=int(time.time()))
@@ -82,7 +93,7 @@ def main():
     save(stage='validated')
     if not args.execute:
         return
-    state = operation('recheck', 'fb_asset_delete_v2_rechecks', 'recheck', {})
+    state = operation('recheck', 'fb_asset_delete_v2_rechecks', 'recheck', approval_payload)
     assert state == 'completed', 'Read-only recheck interrupted; no execution submitted'
     # No Ad/Video retry: only Creative objects released by this recheck run.
     pending = read("SELECT 1 FROM fb_asset_delete_v2_objects WHERE job_id=? AND kind='creative' AND status='pending' LIMIT 1", (args.job,))

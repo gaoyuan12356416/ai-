@@ -6,6 +6,7 @@ No timer, automatic retry, or independent Meta DELETE pool is created.
 """
 import argparse
 from contextlib import redirect_stdout
+import hashlib
 import io
 import json
 import os
@@ -25,15 +26,24 @@ def main():
     parser.add_argument('--job', required=True)
     parser.add_argument('--run', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--creative-approval', type=Path)
     args = parser.parse_args()
     release = Path(__file__).resolve().parents[1]
     assert Path('/mnt/data-disk').resolve() in args.output.resolve().parents
     assert args.output.is_dir()
-    job = read('SELECT metadata FROM fb_asset_delete_v2_jobs WHERE job_id=?', (args.job,))[0]
+    job = read('SELECT metadata,preview_id,actor FROM fb_asset_delete_v2_jobs WHERE job_id=?', (args.job,))[0]
     scope = json.loads(job['metadata'])
     assert set(scope['ids']) == {'XEY147', 'XEY50328'}
     assert {str(p['id']) for p in scope['products']} == {'2373', '3360', '2472', '3443'}
     report = dict(job_id=args.job, waited_run_id=args.run, release=str(release))
+    if args.creative_approval:
+        approval = json.loads(args.creative_approval.read_text())
+        assert (approval['job_id'], approval['preview_id'], approval['actor']) == (args.job, job['preview_id'], job['actor'])
+        keys = approval['creative_keys']
+        assert len(keys) == len(set(keys)) == approval['count']
+        assert hashlib.sha256('\n'.join(sorted(keys)).encode()).hexdigest() == approval['keys_sha256']
+        report.update(approval_manifest=str(args.creative_approval), approved_changed_parent_creatives=len(keys),
+                      approval_sha256=approval['keys_sha256'])
 
     def save(**fields):
         report.update(fields, updated_at=int(time.time()))
@@ -89,9 +99,12 @@ def main():
     assert all(rollout.digest(Path(item['target'])) == item['after'] for item in plan['files'])
     new_pid = subprocess.check_output(['systemctl','show','drama-material-api.service','-p','MainPID','--value'], text=True).strip()
     save(stage='verified', after_pid=new_pid, health_status=200)
-    subprocess.run(['python3', str(release/'scripts/finish_meta_creative_scope_once.py'),
-        '--job', args.job, '--operation', 'scope-recovery-20261029-reference-v1',
-        '--output', str(args.output/'creative-continuation.json'), '--execute'], check=True)
+    command = ['python3', str(release/'scripts/finish_meta_creative_scope_once.py'),
+        '--job', args.job, '--operation', 'scope-recovery-20261029-reference-v2' if args.creative_approval else 'scope-recovery-20261029-reference-v1',
+        '--output', str(args.output/'creative-continuation.json'), '--execute']
+    if args.creative_approval:
+        command += ['--creative-approval', str(args.creative_approval)]
+    subprocess.run(command, check=True)
     save(stage='finished')
 
 
