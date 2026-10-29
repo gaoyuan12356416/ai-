@@ -134,6 +134,8 @@ class MaterialSource:
         if row is None:return None
         data=row['data']
         result={'status':row['status'],'error':data.get('error','')}
+        if data.get('source_variant'):
+            result['source_variant']=dict(data['source_variant'])
         if row['status']=='succeeded' and _positive(data.get('material_id')):
             result['material_id']=str(data['material_id'])
         return result
@@ -162,7 +164,7 @@ class MaterialSource:
                 'material_cos_unconfigured','公开 COS 存储配置无效',503)
         return bucket,region,prefix,domain
 
-    def enqueue(self,task_id,actor):
+    def enqueue(self,task_id,actor,payload=None):
         task=self.service.task(task_id,actor)
         require(task['kind']=='render' and task['status']=='completed','material_task_not_ready','仅已完成的制作任务可以入库',409)
         output_id=task['data'].get('output_id')
@@ -182,18 +184,37 @@ class MaterialSource:
                 type(artifact.get('size_bytes')) is int and 0<artifact['size_bytes']<=MAX_BYTES and
                 re.fullmatch(r'[0-9a-f]{64}',str(artifact.get('sha256',''))),
                 'material_artifact_invalid','成片 COS 身份无效',409)
-        country,language=self._catalog().drama(task['data'].get('app_id'),task['data'].get('content_id'))
+        source_variant=None
+        if task['data'].get('schema_version')==2:
+            payload={} if payload is None else payload
+            require(isinstance(payload,dict),'material_variant_required','请选择成片所属的产品和语言剧目版本',409)
+            require(payload.get('app_id') and payload.get('content_id'),
+                    'material_variant_required','请选择成片所属的产品和语言剧目版本',409)
+            catalog=self.service.catalog
+            require(catalog is not None,'material_catalog_unconfigured','资源版本目录暂不可用',503)
+            selected=catalog.variant(payload['app_id'],payload['content_id'],series_code=task['data'].get('series_code'))
+            country=str(selected.get('country') or '').strip().upper()
+            language=_language(selected.get('language'))
+            require(language in COUNTRY_FOR_LANGUAGE,'drama_language_unknown','所选剧目语言尚未支持素材入库',409)
+            require(re.fullmatch(r'[A-Z]{2}',country),'drama_country_unknown','所选剧目国家无效，无法入库',409)
+            content_id=str(selected['content_id'])
+            source_variant={key:str(selected.get(key) or '') for key in ('app_id','content_id','series_code','title')}
+            source_variant.update(country=country,language=language)
+        else:
+            country,language=self._catalog().drama(task['data'].get('app_id'),task['data'].get('content_id'))
+            content_id=str(task['data']['content_id'])
         initiator=self._catalog().initiator(actor.get('email'))
         bucket,region,prefix,domain=self.settings()
         sign=hashlib.sha256(('video-editing-material-source-v1\0'+output_id+'\0'+artifact['sha256']).encode()).hexdigest()
         key=prefix+'/'+output_id+'-'+artifact['sha256'][:16]+'.mp4'
         url='https://'+domain+'/'+quote(key,safe='/')
-        name=(str(task['data'].get('drama_title') or task['data']['content_id']).strip()[:180]
+        name=(str(task['data'].get('drama_title') or content_id).strip()[:180]
               +'_'+output_id+'.mp4')
-        request={'app_id':PRODUCT_ID,'country':country,'language':language,'content_id':str(task['data']['content_id']),
+        request={'app_id':PRODUCT_ID,'country':country,'language':language,'content_id':content_id,
                  'content_sign':sign,'url':url,'name':name,'user_id':248,'initiator':initiator,'category':CATEGORY}
         data={'artifact':artifact,'target_bucket':bucket,'target_region':region,'target_key':key,
               'request':request,'attempts':0,'receipt_id':'','material_id':'','error':'','next_check_at':0}
+        if source_variant:data['source_variant']=source_variant
         with self.store.transaction() as db:
             current=self.store.get('task',task_id,db)
             require(current and can_manage(current,actor) and current['status']=='completed' and

@@ -31,15 +31,28 @@ class ValidationCliTests(unittest.TestCase):
     def test_sign_expiry_override_is_isolated_and_restored(self):
         cos=FakeCos();sdk=SimpleNamespace(CosConfig=lambda **kwargs:None,CosS3Client=lambda *args,**kwargs:cos)
         app=SimpleNamespace(COS_BUCKET='bucket',COS_REGION='ap-hongkong',COS_SECRET_ID='dummy',COS_SECRET_KEY='dummy')
-        with tempfile.TemporaryDirectory() as tmp,patch.dict(sys.modules,{'qcloud_cos':sdk}),patch.dict(os.environ,{},clear=True):
+        with tempfile.TemporaryDirectory() as tmp,patch.dict(sys.modules,{'qcloud_cos':sdk}),patch.dict(os.environ,{},clear=True),\
+             patch('features.video_editing.catalog.Catalog.resource',return_value={'series_code':'21481','english_title':'Verified Resource'}) as resolver:
             root=Path(tmp);base={'run_id':'canary_20261022'}
-            created=cli.dispatch({**base,'op':'create','operation_id':'operation_1','name':'test.mp4','size_bytes':12,'content_type':'video/mp4'},app,root)
+            created=cli.dispatch({**base,'op':'create','operation_id':'operation_1','name':'test.mp4','size_bytes':12,'content_type':'video/mp4',
+                                  'library_kind':'material','series_code':'21481'},app,root)
+            resolver.assert_called_once_with('21481')
             import base64,hashlib
             signed=cli.dispatch({**base,'op':'sign','upload_id':created['item']['id'],'part_number':1,
                                  'content_md5':base64.b64encode(hashlib.md5(b'hello world!').digest()).decode(),'validation_expiry_seconds':1},app,root)
             self.assertTrue(signed['ok']);self.assertEqual(cos.signs[-1]['Expired'],1)
             self.assertEqual(uploads_module.SIGN_SECONDS,600)
             self.assertTrue(cos.signs[-1]['Key'].startswith('video-editing/validation/canary_20261022/'))
+    def test_new_canary_upload_cannot_bypass_resource_requirement(self):
+        cos=FakeCos();sdk=SimpleNamespace(CosConfig=lambda **kwargs:None,CosS3Client=lambda *args,**kwargs:cos)
+        app=SimpleNamespace(COS_BUCKET='bucket',COS_REGION='ap-hongkong',COS_SECRET_ID='dummy',COS_SECRET_KEY='dummy')
+        with tempfile.TemporaryDirectory() as tmp,patch.dict(sys.modules,{'qcloud_cos':sdk}),patch.dict(os.environ,{},clear=True),\
+             patch('features.video_editing.catalog.Catalog.resource') as resolver:
+            with self.assertRaises(VideoEditingError):
+                cli.dispatch({'op':'create','run_id':'canary_20261029','operation_id':'operation_1','name':'test.mp4',
+                              'size_bytes':12,'content_type':'video/mp4','library_kind':'material'},app,Path(tmp))
+            resolver.assert_not_called()
+            self.assertEqual(cos.initializations,[])
     def test_external_exception_text_never_reaches_json(self):
         stream=io.StringIO()
         with patch.object(sys,'argv',['validate']),patch.object(sys,'stdin',io.StringIO('{"op":"catalog_products"}')),patch.object(sys,'stdout',stream),\

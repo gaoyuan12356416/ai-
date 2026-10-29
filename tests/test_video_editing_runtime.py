@@ -15,7 +15,7 @@ import os
 from features.drama_synthesis.async_runtime import AsyncRuntime, render_fingerprint
 from features.drama_synthesis.core import DramaSynthesisError
 from features.video_editing.gpu_integration import RuntimeAdapter, mixed_validate, mixed_fingerprint, public_result, task_kind
-from features.video_editing.recipe import PROFILE, TASK_TYPE, recipe_fingerprint, payload_fingerprint
+from features.video_editing.recipe import LEGACY_PROFILE, PROFILE, TASK_TYPE, recipe_fingerprint, payload_fingerprint
 from features.video_editing import gpu_integration as editing_gpu
 from features.drama_synthesis.local_checkpoint import atomic_write_record, read_record, save_completed
 from features.video_editing.media import upload_private, verify_receipt
@@ -100,6 +100,34 @@ class RuntimeTests(unittest.TestCase):
             wrong = legacy(); wrong["task_type"] = TASK_TYPE
             with self.assertRaises(DramaSynthesisError): mixed_validate(wrong)
             runtime.close()
+
+    def test_v2_mirror_coexists_with_v1_and_restores_its_frozen_effect(self):
+        original, mirrored = editing("1"), editing("2")
+        original["recipe"]["profile"] = LEGACY_PROFILE
+        mirrored["recipe"]["version"] = 2
+        mirrored["recipe"]["clips"][0]["mirror"] = True
+        with tempfile.TemporaryDirectory() as root:
+            runtime, service = self.create(root)
+            try:
+                runtime.submit(original); runtime.submit(mirrored); runtime.start()
+                wait(lambda: runtime.get(mirrored["job_id"])["status"] == "completed")
+                before = runtime.get(original["job_id"])["result"]
+                receipt = runtime.get(mirrored["job_id"])["result"]
+                self.assertEqual(service.execute.call_count, 2)
+                executed = mixed_validate(service.execute.call_args_list[1].args[0])
+                self.assertEqual(executed["recipe"]["clips"][0]["subtitle_band"], {"top": 960, "bottom": 1280})
+                changed = deepcopy(mirrored); changed["recipe"]["clips"][0]["subtitle_band"] = None
+                with self.assertRaises(DramaSynthesisError) as caught: runtime.submit(changed)
+                self.assertEqual(caught.exception.code, "gpu_job_input_conflict")
+            finally:
+                runtime.close()
+            recovered, replacement = self.create(root)
+            try:
+                self.assertEqual(recovered.submit(original)["result"], before)
+                self.assertEqual(recovered.submit(mirrored)["result"], receipt)
+                replacement.execute.assert_not_called()
+            finally:
+                recovered.close()
 
     def test_public_result_rejects_recipe_conflict_and_strips_extra(self):
         value = result(editing()); value["secret"] = "hidden"

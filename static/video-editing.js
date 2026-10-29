@@ -55,7 +55,7 @@
     if (index < 0) throw new Error('请先选择片段');
     const clip = result[index]; const point = Math.round(atMs);
     if (point <= clip.start_ms || point >= clip.end_ms) throw new Error('请将播放位置移到片段内部再切割');
-    result.splice(index, 1, { ...clip, end_ms: point, transition: 'cut' }, { ...clip, id: uid(), start_ms: point });
+    result.splice(index, 1, { ...clone(clip), end_ms: point, transition: 'cut' }, { ...clone(clip), id: uid(), start_ms: point });
     return result;
   }
   function normalizeLast(clips) { if (clips.length) clips[clips.length - 1].transition = 'cut'; return clips; }
@@ -109,7 +109,24 @@
     }
     return encoded;
   }
-  const model = { FADE_MS, toFrame, layout, totalDuration, validateClips, split, move, applyCommon, md5Base64, probeDisplay };
+  function projectUnits(project) {
+    const units=project.schema_version===2?project.units:(project.upgrade_units||project.dramas||[]);
+    return (units||[]).map((unit,index)=>({id:unit.id||`unit_legacy_${index}`,series_code:String(unit.series_code||''),title:unit.title||unit.english_title||'',clips:clone(unit.clips||[])}));
+  }
+  function draftForSave(project) {
+    return {schema_version:2,name:project.name,units:(project.dramas||projectUnits(project)).map(unit=>({id:unit.id,series_code:unit.series_code||'',title:unit.title||'',clips:clone(unit.clips||[])}))};
+  }
+  function effectiveBand(clip) {
+    if(!clip.mirror||clip.subtitle_band===null)return null;
+    const band=clip.subtitle_band||{top:960,bottom:1280};
+    return {top:Math.max(0,Math.min(1278,Math.round(Number(band.top)/2)*2)),bottom:Math.max(2,Math.min(1280,Math.round(Number(band.bottom)/2)*2))};
+  }
+  function fitRectangle(width,height,fit) {
+    const evenNear=(n,d)=>Math.max(2,2*Math.floor((n+d)/(2*d))),proportionalWidth=evenNear(1280*width,height),proportionalHeight=evenNear(720*height,width);
+    if(fit==='cover'){const w=Math.max(720,proportionalWidth),h=Math.max(1280,proportionalHeight);return {x:-Math.floor((w-720)/4)*2,y:-Math.floor((h-1280)/4)*2,width:w,height:h};}
+    const w=Math.min(720,proportionalWidth),h=Math.min(1280,proportionalHeight);return {x:Math.floor((720-w)/4)*2,y:Math.floor((1280-h)/4)*2,width:w,height:h};
+  }
+  const model = { projectUnits,draftForSave,effectiveBand,fitRectangle, FADE_MS, toFrame, layout, totalDuration, validateClips, split, move, applyCommon, md5Base64, probeDisplay };
   if (typeof module !== 'undefined' && module.exports) module.exports = model;
   if (!global.document) return;
   global.VideoEditingModel = model;
@@ -117,9 +134,10 @@
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
   const demo = new URLSearchParams(location.search).get('demo') === '1';
   const ROOT = '/api/video-editing';
-  const state = { auth:null, config:{ max_file_bytes:8*1024**3, part_size:16*1024**2, max_dramas:20 }, assets:[], assetsTotal:0, sources:{}, projects:[], project:{ name:'未命名剪辑项目', asset_id:'', dramas:[] }, activeDrama:0, selectedClip:null, undo:[], dirty:false, saving:null, saveTimer:null, revision:0, projectLoadSeq:0, tasks:[], uploads:new Map(), probeRecoveries:new Map(), playMs:0, playing:false, playTick:0, playOrigin:0, activeView:'editor', catalog:[], episodes:[], selectedCatalog:null, catalogLoadSeq:0, operationId:null, renderOperation:null, ready:false };
+  const state = { auth:null, config:{ max_file_bytes:8*1024**3, part_size:16*1024**2, max_dramas:20 }, assets:[], assetsTotal:0, sources:{}, projects:[], project:{schema_version:2,name:'未命名剪辑项目',dramas:[]}, activeDrama:0, selectedClip:null, undo:[], dirty:false, saving:null, saveTimer:null, revision:0, projectLoadSeq:0, tasks:[], uploads:new Map(), probeRecoveries:new Map(), playMs:0, playing:false, playTick:0, playOrigin:0, activeView:'editor', catalog:[], episodes:[], selectedCatalog:null, catalogLoadSeq:0, operationId:null, renderOperation:null, ready:false };
   const readRequests = new Map(), actions = new Map(), busyButtons = new WeakMap();
   Object.assign(state, { catalogSessionSeq:0, catalogProducts:null, pendingAdd:null, polling:null, assetsLoadSeq:0, projectsLoading:null, tasksLoading:null, projectOpening:0, sourceLoading:false, sourceLoadFailed:false, renderSubmitting:false, materialUploadSubmitting:new Set() });
+  Object.assign(state,{libraryKind:'material',libraryResource:null,uploadResource:null,resourceSearchSeq:0,resourceDialogSeq:0,resourceResults:[],resourcePurpose:null,pickerKind:'free_episode',pickerItems:[],pickerSeq:0,selectedUnits:new Set(),renderIssues:[],insertSourceId:null,variantTask:null,variantSeq:0});
   let toastTimer;
   function toast(message, error) { $('toast').textContent = message; $('toast').classList.toggle('error', !!error); $('toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').classList.add('hidden'), error ? 7500 : 4200); }
   async function api(path, options = {}) {
@@ -160,14 +178,14 @@
     (async()=>{try{resolve(await fn());}catch(error){reject(error);}finally{actions.delete(key);const saved=button&&busyButtons.get(button);if(saved&&saved.token===token){button.innerHTML=saved.html;button.disabled=saved.disabled;button.removeAttribute('aria-busy');busyButtons.delete(button);}syncEditorLocks();}})();
     return promise;
   }
-  function editingLocked(){return !!(state.projectOpening||state.sourceLoading||state.sourceLoadFailed||state.renderSubmitting);}
+  function editingLocked(){return !!(state.projectOpening||state.renderSubmitting);}
   function syncEditorLocks(){
     const locked=editingLocked();
-    for(const id of ['projectName','chooseAsset','addDrama','addDramaBottom','insertAsset','applyCommon','clipStart','clipEnd','trimStart','trimEnd','clipSound','splitClip','removeClip','removeEpisode','moveLeft','moveRight','confirmInsert']){const el=$(id);if(el&&!busyButtons.has(el))el.disabled=locked;}
+    for(const id of ['projectName','chooseAsset','addDrama','addDramaBottom','insertAsset','applyCommon','clipStart','clipEnd','trimStart','trimEnd','clipSound','splitClip','removeClip','removeEpisode','moveLeft','moveRight','confirmInsert','clipMirror','protectSubtitles','subtitleTop','subtitleBottom','changeUnitResource']){const el=$(id);if(el&&!busyButtons.has(el))el.disabled=locked;}
     document.querySelectorAll('[data-fit]').forEach(button=>{button.disabled=locked;});
     $('undoEdit').disabled=locked||!state.undo.length;
-    const clip=selectedClip(),drama=currentDrama();$('clipTransition').disabled=locked||!clip||clip===(drama&&drama.clips[drama.clips.length-1]);
-    $('renderProject').disabled=locked||actions.has('renderProject')||!state.project.dramas.length||!state.project.asset_id||state.config.intake_enabled===false||state.config.worker_configured===false;
+    const clip=selectedClip(),drama=currentDrama();$('clipTransition').disabled=locked||!clip||clip===(drama&&drama.clips[drama.clips.length-1]);$('protectSubtitles').disabled=locked||!clip?.mirror;$('changeUnitResource').disabled=locked||!drama;
+    $('renderProject').disabled=locked||actions.has('renderProject')||!state.project.dramas.length||state.config.intake_enabled===false||state.config.worker_configured===false;
     if(!busyButtons.has($('newProject')))$('newProject').disabled=state.renderSubmitting;
     $('projectPicker').disabled=state.renderSubmitting;
     $('retryProjectSources').classList.toggle('hidden',!state.sourceLoadFailed);$('retryProjectSources').disabled=!!state.projectOpening||state.sourceLoading;
@@ -179,11 +197,11 @@
   function sourceTitle(source) { return source && (source.name || source.title || (source.episode_number ? `第 ${source.episode_number} 集` : source.id)) || '待载入来源'; }
   function currentDrama() { return state.project.dramas[state.activeDrama]; }
   function selectedClip() { return (currentDrama() && currentDrama().clips || []).find(clip => clip.id === state.selectedClip); }
-  function selectedAsset() { return state.assets.find(asset => asset.id === state.project.asset_id) || state.sources[state.project.asset_id]; }
-  function newClip(source, overrides = {}) { return { id:uid(), source_id:source.source_id || source.id, start_ms:0, end_ms:durationOf(source), fit:'contain', mute:false, transition:'cut', ...overrides }; }
+  function selectedAsset() { return state.sources[state.insertSourceId] || null; }
+  function newClip(source, overrides = {}) { return { id:uid(), source_id:source.source_id || source.id, start_ms:0, end_ms:durationOf(source), fit:'contain',mute:false,transition:'cut',mirror:false,subtitle_band:{top:960,bottom:1280},...overrides }; }
   function rememberSources(sources) { for (const source of sources || []) { const id=source.source_id||source.id;state.sources[id] = { ...source, _previewFetchedAt:Date.now() };if(source.status==='ready')state.probeRecoveries.delete(id); } }
   function snapshot() { state.undo.push(clone(state.project)); if (state.undo.length > 60) state.undo.shift(); }
-  function changed(mutator) { if(editingLocked())return toast('正在载入或提交项目，请稍候');snapshot(); stopPreview(); mutator(); state.revision++; state.dirty=true; state.renderOperation=null; renderEditor(); scheduleSave(); }
+  function changed(mutator) { if(editingLocked())return toast('正在载入或提交项目，请稍候');snapshot(); stopPreview(); mutator(); state.project.schema_version=2;state.project.issues=[];state.renderIssues=[]; state.revision++; state.dirty=true; state.renderOperation=null; renderEditor(); scheduleSave(); }
   function scheduleSave() { clearTimeout(state.saveTimer); $('saveStatus').textContent = demo ? '模拟草稿 · 仅本页' : '有未保存修改'; if (!demo) state.saveTimer=setTimeout(() => saveProject(false).catch(error => toast(`草稿未保存：${error.message}`, true)), 1000); }
   async function ensureSource(id, refresh = false) {
     const cached = state.sources[id];
@@ -193,30 +211,40 @@
     const source = item(await api(`${ROOT}/sources/${encodeURIComponent(id)}`)); rememberSources([source]); return source;
   }
   function setView(view) {
-    stopPreview(); state.activeView=view;
-    document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-    ['editor','library','tasks'].forEach(name => $(`${name}View`).classList.toggle('hidden', name !== view));
-    if (view === 'library') loadAssets().catch(error => toast(error.message,true));
-    if (view === 'tasks') {if(!state.tasks.length)$('taskList').innerHTML='<div class="empty" role="status">正在加载制作任务…</div>';loadTasks().catch(error=>{$('taskList').innerHTML=state.tasks.length?$('taskList').innerHTML:`<div class="empty danger">任务加载失败：${esc(error.message)}，请点击刷新任务。</div>`;toast(error.message,true);});}
+    stopPreview();state.activeView=view;
+    document.querySelectorAll('[data-view]').forEach(button=>button.classList.toggle('active',button.dataset.view===view));
+    ['editor','library','tasks'].forEach(name=>$(`${name}View`).classList.toggle('hidden',name!==(view==='free'?'library':view)));
+    if(view==='library'||view==='free'){
+      state.libraryKind=view==='free'?'free_episode':'material';
+      $('libraryTitle').textContent=view==='free'?'免费集':'共享素材库';
+      $('libraryDescription').textContent=view==='free'?'按资源管理免费合集或视频，不要求填写集号。':'原素材直接上传 COS，有权限的同事均可使用。';
+      $('uploadButton').textContent=view==='free'?'↑ 上传免费集':'↑ 上传本地素材';
+      $('assetGrid').innerHTML='<div class="empty" role="status">正在加载视频…</div>';loadAssets().catch(error=>{$('assetGrid').innerHTML=`<div class="empty danger">${esc(error.message)}</div>`;toast(error.message,true);});
+    }
+    if(view==='tasks'){if(!state.tasks.length)$('taskList').innerHTML='<div class="empty" role="status">正在加载制作任务…</div>';loadTasks().catch(error=>toast(error.message,true));}
   }
+  function adaptProject(project){project.dramas=projectUnits(project);return project;}
+  function unitTitle(unit){return unit.title||unit.series_code||'未选择资源';}
+  function currentIssues(){const unit=currentDrama();if(!unit)return [];const issues=[...(state.project.issues||[]),...state.renderIssues].filter(issue=>issue.unit_id===unit.id).map(issue=>issue.message);if(!unit.series_code)issues.unshift('请为当前单元选择目标资源；草稿仍可保存。');for(const clip of unit.clips){const source=state.sources[clip.source_id];if(source&&source.series_code&&unit.series_code&&source.series_code!==unit.series_code)issues.push(`${sourceTitle(source)}属于其他资源，请调整片段或资源标签。`);}return [...new Set(issues)];}
+
   function renderEditor() {
     $('projectName').value=state.project.name || ''; $('dramaCount').textContent=`${state.project.dramas.length} 部`;
-    $('selectedAssetName').textContent=selectedAsset() ? sourceTitle(selectedAsset()) : '选择一个素材';
+    $('selectedAssetName').textContent=currentDrama()?.series_code?`选择 ${currentDrama().series_code} 的视频`:'先选择目标资源';$('changeUnitResource').disabled=!currentDrama();
     $('undoEdit').disabled=!state.undo.length;
     $('saveCopy').classList.toggle('hidden',!state.conflicted);
-    $('renderProject').disabled=!state.project.dramas.length || !state.project.asset_id || state.config.intake_enabled===false || state.config.worker_configured===false;
-    $('dramaList').innerHTML=state.project.dramas.map((drama,index) => `<div class="drama-row ${index===state.activeDrama?'active':''}"><span class="drama-cover">${esc((drama.title||'剧').slice(0,1))}</span><button data-drama-index="${index}"><strong>${esc(drama.title || drama.content_id)}</strong><small>${drama.clips.length} 片段 · ${seconds(totalDuration(drama.clips))} 秒</small></button><button class="remove-drama" data-remove-drama="${index}" title="移除此短剧" aria-label="移除此短剧">×</button></div>`).join('') || '<div class="empty">还没有短剧</div>';
-    const drama=currentDrama(); const clips=drama && drama.clips || []; const duration=totalDuration(clips);
-    if(!clips.length){$('previewA').style.opacity=0;$('previewB').style.opacity=0;$('previewPlaceholder').classList.remove('hidden');$('previewMessage').textContent=demo?'演示画面，正式素材校验后可播放':'添加素材与剧集后即可预览';$('previewExpiry').textContent='';}
+    $('renderProject').disabled=!state.project.dramas.length || state.config.intake_enabled===false || state.config.worker_configured===false;
+    $('dramaList').innerHTML=state.project.dramas.map((drama,index)=>`<div class="drama-row ${index===state.activeDrama?'active':''}"><input type="checkbox" data-render-unit="${esc(drama.id)}" aria-label="选择制作 ${esc(unitTitle(drama))}" ${state.selectedUnits.has(drama.id)?'checked':''}><button data-drama-index="${index}"><strong>${esc(unitTitle(drama))}</strong><small>${esc(drama.series_code||'待关联资源')} · ${drama.clips.length} 片段</small></button><button class="remove-drama" data-remove-drama="${index}" title="移除此单元" aria-label="移除此单元">×</button></div>`).join('')||'<div class="empty">先添加目标资源，再选择视频。</div>';
+        const drama=currentDrama(); const clips=drama && drama.clips || []; const duration=totalDuration(clips);
+    if(!clips.length){$('canvasA').style.opacity=0;$('canvasB').style.opacity=0;$('previewPlaceholder').classList.remove('hidden');$('previewMessage').textContent=demo?'演示画面，正式素材校验后可播放':'添加素材与剧集后即可预览';$('previewExpiry').textContent='';}
     if (!clips.find(clip => clip.id === state.selectedClip)) state.selectedClip=clips.length ? clips[0].id : null;
-    $('previewTitle').textContent=drama ? drama.title : '选择短剧后预览';
+    $('previewTitle').textContent=drama?unitTitle(drama):'选择资源后预览';
     $('timelineDuration').textContent=`预计 ${seconds(duration)} 秒 · ${clips.length} 片段`;
     const maxWidth=Math.max(105, Math.min(250, 800/Math.max(1,clips.length)));
     $('timeline').innerHTML=layout(clips).map(({clip,index,length,start}) => {
       const source=state.sources[clip.source_id]; const isAsset=source && source.kind==='asset';
-      return `<button class="timeline-clip ${isAsset?'asset':''} ${clip.id===state.selectedClip?'selected':''}" draggable="true" data-clip-id="${esc(clip.id)}" style="width:${Math.max(105,Math.min(280,maxWidth+Math.log2(Math.max(1,length/1000))*7))}px" title="${esc(sourceTitle(source))}"><span class="clip-index">${time(start)}</span><strong>${isAsset?'▧':'▤'} ${esc(sourceTitle(source))}</strong><small>${seconds(clip.start_ms)}—${seconds(clip.end_ms)} 秒${clip.mute?' · 静音':''}</small>${clip.transition==='fade'&&index<clips.length-1?'<span class="transition-mark" title="0.3 秒交叉淡化">⋈</span>':''}</button>`;
+      return `<button class="timeline-clip ${isAsset?'asset':''} ${clip.id===state.selectedClip?'selected':''}" draggable="true" data-clip-id="${esc(clip.id)}" style="width:${Math.max(105,Math.min(280,maxWidth+Math.log2(Math.max(1,length/1000))*7))}px" title="${esc(sourceTitle(source))}"><span class="clip-index">${time(start)}</span><strong>${isAsset?'▧':'▤'} ${esc(sourceTitle(source))}</strong><small>${seconds(clip.start_ms)}—${seconds(clip.end_ms)} 秒${clip.mute?' · 静音':''}${clip.mirror?' · 镜像':''}</small>${clip.transition==='fade'&&index<clips.length-1?'<span class="transition-mark" title="0.3 秒交叉淡化">⋈</span>':''}</button>`;
     }).join('') || '<div class="timeline-empty">添加剧集后开始剪辑</div>';
-    const errors=clips.length ? validateClips(clips,state.sources) : [];
+    const errors=[...currentIssues(),...(clips.length?validateClips(clips,state.sources):[])];
     $('validationErrors').textContent=errors.join('；'); $('validationErrors').classList.toggle('hidden',!errors.length);
     $('totalTime').textContent=time(duration); $('playhead').max=Math.max(1,duration); state.playMs=Math.min(state.playMs,Math.max(0,duration)); updatePlayhead(); renderInspector();syncEditorLocks();
   }
@@ -224,13 +252,14 @@
     const clip=selectedClip(); $('emptyInspector').classList.toggle('hidden',!!clip); $('clipInspector').classList.toggle('hidden',!clip);
     if (!clip) { $('clipKind').textContent='未选择'; return; }
     const source=state.sources[clip.source_id]; const isAsset=source && source.kind==='asset';
-    $('clipKind').textContent=isAsset?'素材':'剧集'; $('clipTitle').textContent=sourceTitle(source); $('sourceDuration').textContent=`原长 ${seconds(durationOf(source))} 秒`;
+    $('clipKind').textContent=isAsset?(source.library_kind==='free_episode'?'免费集':'素材'):'在线剧集'; $('clipTitle').textContent=sourceTitle(source); $('sourceDuration').textContent=`原长 ${seconds(durationOf(source))} 秒`;
     $('clipStart').value=(clip.start_ms/1000).toFixed(3); $('clipEnd').value=(clip.end_ms/1000).toFixed(3);
     for(const id of ['trimStart','trimEnd']) $(id).max=durationOf(source)||clip.end_ms;
     $('trimStart').value=clip.start_ms; $('trimEnd').value=clip.end_ms; $('clipSound').checked=!clip.mute;
     $('clipTransition').value=clip.transition; $('clipTransition').disabled=clip===currentDrama().clips[currentDrama().clips.length-1];
     $('removeEpisode').classList.toggle('hidden',isAsset);
-    document.querySelectorAll('[data-fit]').forEach(button => button.classList.toggle('active',button.dataset.fit===clip.fit));
+    document.querySelectorAll('[data-fit]').forEach(button=>button.classList.toggle('active',button.dataset.fit===clip.fit));
+    $('clipMirror').checked=!!clip.mirror;$('protectSubtitles').checked=clip.subtitle_band!==null;$('protectSubtitles').disabled=!clip.mirror;const band=effectiveBand({...clip,mirror:true})||{top:960,bottom:1280};$('subtitleTop').value=band.top;$('subtitleBottom').value=band.bottom;$('subtitleControls').classList.toggle('hidden',!clip.mirror||clip.subtitle_band===null);renderBandOverlay();
   }
   function selectClip(id, seek = true) {
     stopPreview(); state.selectedClip=id; renderEditor();
@@ -238,44 +267,39 @@
     if (seek && segment) { state.playMs=segment.start; updatePlayhead(); previewAt(state.playMs,false).catch(error=>toast(error.message,true)); }
   }
   function updateClip(patch) { const clip=selectedClip(); if (!clip) return; changed(()=>Object.assign(clip,patch)); previewAt(state.playMs,false).catch(()=>{}); }
-  function updatePlayhead() { $('playTime').textContent=time(state.playMs); $('playhead').value=state.playMs; }
-  function stopPreview() { state.playing=false; previewGeneration++; cancelAnimationFrame(state.playTick); $('previewA').pause(); $('previewB').pause(); $('playPreview').textContent='▶'; $('playPreview').setAttribute('aria-label','播放时间线'); }
+  function updatePlayhead() { renderBandOverlay(); $('playTime').textContent=time(state.playMs); $('playhead').value=state.playMs; }
+  function stopPreview(preserveLayers=false) { previewLayers.forEach(layer=>{cancelLayer(layer);if(!preserveLayers)layer.active=false;});state.playing=false; previewGeneration++; cancelAnimationFrame(state.playTick); $('previewA').pause(); $('previewB').pause(); $('playPreview').textContent='▶'; $('playPreview').setAttribute('aria-label','播放时间线'); }
   let previewGeneration=0;
-  async function previewAt(position, play) {
-    const generation=++previewGeneration; const drama=currentDrama(); if (!drama) return;
-    const segments=layout(drama.clips).filter(segment=>position>=segment.start && position<segment.end);
-    if (!segments.length) return;
-    if (demo) { $('previewMessage').textContent=`模拟预览 · ${sourceTitle(state.sources[segments[0].clip.source_id])}`; return; }
-    const sources=await Promise.all(segments.map(segment=>ensureSource(segment.clip.source_id)));
-    if (generation!==previewGeneration) return;
-    const videos=[$('previewA'),$('previewB')]; const both=segments.length===2;
-    for (let i=0;i<2;i++) {
-      const video=videos[i]; const segment=segments[i];
-      if (!segment) { video.pause(); video.style.opacity=0; continue; }
-      const source=sources[i]; const url=source.preview_url;
+  async function previewAt(position,play){
+    const generation=++previewGeneration,drama=currentDrama();if(!drama)return;
+    const segments=layout(drama.clips).filter(segment=>position>=segment.start&&position<segment.end);renderBandOverlay();if(!segments.length)return;
+    if(demo){$('previewMessage').textContent=`模拟预览 · ${sourceTitle(state.sources[segments[0].clip.source_id])}`;return;}
+    const sources=await Promise.all(segments.map(segment=>ensureSource(segment.clip.source_id)));if(generation!==previewGeneration)return;
+    const both=segments.length===2;
+    for(let index=0;index<2;index++){
+      const layer=layerAt(index),video=layer.video,segment=segments[index];if(!segment){video.pause();layer.active=false;layer.canvas.style.opacity=0;cancelLayer(layer);continue;}
+      const source=sources[index],url=source.preview_url;layer.active=true;layer.clip=segment.clip;layer.source=source;layer.project=state.project;layer.unitId=drama.id;
       if(source.expires_at)$('previewExpiry').textContent=` 当前链接有效至 ${new Date(expiryTime(source.expires_at)).toLocaleTimeString('zh-CN')}，届时自动续签。`;
-      if (!url) { $('previewPlaceholder').classList.remove('hidden'); $('previewMessage').textContent=source.status==='ready'?'此来源暂未提供浏览器预览':'媒体校验中，完成后可预览'; video.pause(); video.style.opacity=0; continue; }
-      if (video.dataset.sourceId!==segment.clip.source_id || video.dataset.previewUrl!==url) { video.src=url; video.dataset.sourceId=segment.clip.source_id; video.dataset.previewUrl=url; }
+      if(!url){layer.active=false;cancelLayer(layer);video.removeAttribute('src');delete video.dataset.sourceId;delete video.dataset.previewUrl;video.load();$('previewPlaceholder').classList.remove('hidden');$('previewMessage').textContent='此来源暂未提供浏览器预览，可继续编辑和保存';video.pause();layer.canvas.style.opacity=0;continue;}
+      if(video.dataset.sourceId!==segment.clip.source_id||video.dataset.previewUrl!==url){cancelLayer(layer);video.src=url;video.dataset.sourceId=segment.clip.source_id;video.dataset.previewUrl=url;}
       const localTime=toFrame(segment.clip.start_ms)/30+(position-segment.start)/1000;
-      if (!Number.isFinite(video.currentTime) || Math.abs(video.currentTime-localTime)>.22 || !play) { try { video.currentTime=localTime; } catch (_) {} }
-      const fade=both?Math.min(1,Math.max(0,(position-segments[1].start)/FADE_MS)):1;
-      video.style.opacity=both?(i===0?1:fade):1; video.style.objectFit=segment.clip.fit;
-      video.volume=segment.clip.mute?0:(both?(i===0?1-fade:fade):1); video.muted=segment.clip.mute;
-      $('previewPlaceholder').classList.add('hidden');
-      if (play) video.play().catch(()=>{}); else video.pause();
+      if(!Number.isFinite(video.currentTime)||Math.abs(video.currentTime-localTime)>(play?.22:.001)){try{video.currentTime=localTime;}catch(_){}}
+      const fade=both?Math.min(1,Math.max(0,(position-segments[1].start)/FADE_MS)):1;layer.canvas.style.opacity=both?(index===0?1:fade):1;video.volume=segment.clip.mute?0:(both?(index===0?1-fade:fade):1);video.muted=segment.clip.mute;
+      if(drawPreviewLayer(layer))$('previewPlaceholder').classList.add('hidden');
+      if(play){video.play().catch(()=>{});startLayerFrames(layer);}else video.pause();
     }
   }
   async function playPreview() {
-    if(state.playing) { stopPreview(); return; }
+    if(state.playing) { stopPreview(true); return; }
     const drama=currentDrama(); if(!drama||!drama.clips.length) return toast('先添加剧集再预览');
     const errors=validateClips(drama.clips,state.sources); if(errors.length) return toast(errors[0],true);
     if(state.playMs>=totalDuration(drama.clips)) state.playMs=0;
     state.playing=true; state.playOrigin=performance.now()-state.playMs; $('playPreview').textContent='Ⅱ'; $('playPreview').setAttribute('aria-label','暂停时间线');
     let lastDraw=-1000;
-    const tick=now=> { if(!state.playing)return; state.playMs=Math.min(totalDuration(drama.clips),now-state.playOrigin); updatePlayhead(); if(now-lastDraw>85){lastDraw=now;previewAt(state.playMs,true).catch(error=>{stopPreview();toast(error.message,true);});} if(state.playMs>=totalDuration(drama.clips)){stopPreview();return;} state.playTick=requestAnimationFrame(tick); };
+    const tick=now=> { if(!state.playing)return; state.playMs=Math.min(totalDuration(drama.clips),now-state.playOrigin); updatePlayhead(); if(now-lastDraw>85){lastDraw=now;previewAt(state.playMs,true).catch(error=>{stopPreview();toast(error.message,true);});} if(state.playMs>=totalDuration(drama.clips)){stopPreview(true);return;} state.playTick=requestAnimationFrame(tick); };
     state.playTick=requestAnimationFrame(tick);
   }
-  function serializeProject(project=state.project) { return { name:project.name, asset_id:project.asset_id, dramas:clone(project.dramas).map(drama=>({...drama,app_id:String(drama.app_id),content_id:String(drama.content_id)})) }; }
+  function serializeProject(project=state.project){return draftForSave(project);}
   function canonical(value){if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}';return JSON.stringify(value);}
   async function saveProject(explicit=true) {
     clearTimeout(state.saveTimer);
@@ -290,7 +314,7 @@
       try{saved=item(await api(projectId?`${ROOT}/projects/${encodeURIComponent(projectId)}`:`${ROOT}/projects`,{method:projectId?'PATCH':'POST',body:projectId?{...data,expected_version:state.project.version}:{...data,operation_id:state.pendingCreate.operation_id}}));}
       catch(error){if(projectId&&(error.status===409||!error.status)){const remote=item(await api(`${ROOT}/projects/${encodeURIComponent(projectId)}`));if(canonical(serializeProject(remote))===canonical(data))saved=remote;else throw error;}else throw error;}
       if(state.project!==savingProject)return saved;
-      state.project.id=saved.id;state.project.version=saved.version;state.operationId=null;state.pendingCreate=null;state.conflicted=false;$('saveCopy').classList.add('hidden');
+      state.project.id=saved.id;state.project.version=saved.version;state.project.issues=saved.issues||[];state.operationId=null;state.pendingCreate=null;state.conflicted=false;$('saveCopy').classList.add('hidden');
       if(state.revision===revision)state.dirty=false;
       $('saveStatus').textContent=state.dirty?'有未保存修改':`已自动保存 · v${saved.version}`;
        loadProjects().catch(error=>toast(`草稿已保存，但项目列表刷新失败：${error.message}`,true));if(explicit)toast('草稿已保存');return state.project;
@@ -302,7 +326,7 @@
     const request=(async()=>{const response=await api(`${ROOT}/projects`);state.projects=response.items||[];renderProjectPicker();})();state.projectsLoading=request;
     try{return await request;}finally{if(state.projectsLoading===request)state.projectsLoading=null;}
   }
-  function renderProjectPicker(){$('projectPicker').innerHTML='<option value="">打开项目…</option>'+state.projects.map(project=>`<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('');}
+  function renderProjectPicker(){$('projectPicker').innerHTML='<option value="">打开项目…</option>'+state.projects.map(project=>`<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('');$('projectPicker').value=state.project.id||'';}
   async function flushDraft(){
     if(demo)return;
     // Finish a queued save and edits made while that request was in flight before leaving this project.
@@ -315,8 +339,8 @@
       await flushDraft();if(requestSeq!==state.projectLoadSeq)return;stopPreview();
       const project=demo?clone(state.projects.find(entry=>entry.id===id)):item(await api(`${ROOT}/projects/${encodeURIComponent(id)}`));
       if(!project||requestSeq!==state.projectLoadSeq)return;
-      state.project=project;state.activeDrama=0;state.selectedClip=null;state.undo=[];state.dirty=false;state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.conflicted=false;state.sourceLoadFailed=false;
-      const ids=[...new Set([project.asset_id,...project.dramas.flatMap(drama=>drama.clips.map(clip=>clip.source_id))].filter(Boolean))];
+      state.project=adaptProject(project);state.selectedUnits=new Set(project.dramas.map(unit=>unit.id));state.renderIssues=[];state.activeDrama=0;state.selectedClip=null;state.undo=[];state.dirty=false;state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.conflicted=false;state.sourceLoadFailed=false;
+      const ids=[...new Set(project.dramas.flatMap(drama=>drama.clips.map(clip=>clip.source_id)).filter(Boolean))];
       const missing=ids.filter(sourceId=>!durationOf(state.sources[sourceId]));state.sourceLoading=missing.length>0;state.projectOpening=0;
       $('saveStatus').textContent=missing.length?`项目已打开，正在加载媒体信息 0/${missing.length}…`:`已保存 · v${project.version}`;renderEditor();setView('editor');
       let loaded=0;const errors=[];
@@ -328,27 +352,46 @@
       // The previous project can remain visible if opening its successor fails.
       // Its old source-loader is obsolete, so expose an explicit retry instead of
       // leaving controls locked behind that abandoned loader's generation.
-      const retainedIds=[state.project.asset_id,...state.project.dramas.flatMap(drama=>drama.clips.map(clip=>clip.source_id))].filter(Boolean);
+      const retainedIds=state.project.dramas.flatMap(drama=>drama.clips.map(clip=>clip.source_id)).filter(Boolean);
       state.sourceLoading=false;state.sourceLoadFailed=retainedIds.some(sourceId=>!durationOf(state.sources[sourceId]));
       $('saveStatus').textContent=`打开项目失败：${error.message}${state.sourceLoadFailed?'；当前项目媒体信息未载入，请点击重试载入':''}`;
     }throw error;}
     finally{if(requestSeq===state.projectLoadSeq){state.projectOpening=0;$('projectPicker').removeAttribute('aria-busy');syncEditorLocks();}}
   }
   async function renderProject(){
-    const errors=state.project.dramas.flatMap(drama=>validateClips(drama.clips,state.sources).map(error=>`${drama.title}：${error}`));
-    if(errors.length)return toast(errors[0],true);
-    if(demo){state.tasks=state.project.dramas.map((drama,index)=>({id:`demo-task-${index}`,drama_title:drama.title,status:'queued',stage:'模拟排队',progress:0,created_at:new Date().toISOString()}));renderTasks();setView('tasks');return toast('模拟制作任务已生成，不会调用 GPU');}
-    if(editingLocked())return toast('项目媒体信息尚未就绪，请稍候');state.renderSubmitting=true;syncEditorLocks();
-    const project=state.project;
-    try{await flushDraft();if(project!==state.project)return;const operation=state.renderOperation||(state.renderOperation=uid());await api(`${ROOT}/projects/${encodeURIComponent(project.id)}/render`,{method:'POST',body:{operation_id:operation,expected_version:project.version}});toast('已加入制作队列，每部剧分别出片');setView('tasks');await loadTasks();}finally{state.renderSubmitting=false;renderEditor();}
+    const unitIds=state.project.dramas.filter(unit=>state.selectedUnits.has(unit.id)).map(unit=>unit.id);
+    if(!unitIds.length)return toast('请勾选要制作的资源单元');
+    if(demo){state.tasks=state.project.dramas.filter(unit=>unitIds.includes(unit.id)).map(unit=>({id:`demo-task-${unit.id}`,unit_id:unit.id,series_code:unit.series_code,drama_title:unitTitle(unit),status:'queued',stage:'模拟排队',created_at:new Date().toISOString()}));renderTasks();setView('tasks');return toast('模拟制作任务已生成，不会调用 GPU');}
+    if(editingLocked())return;state.renderSubmitting=true;syncEditorLocks();const project=state.project;
+    const submit=async pending=>{try{return await api(pending.path,{method:'POST',body:pending.body});}catch(error){if(error.status===409&&error.code==='project_version_conflict'){if(state.pendingRender===pending)state.pendingRender=null;state.renderOperation=null;error.message='项目版本已更新，请重新打开项目后再制作。';}throw error;}};
+    try{
+      await flushDraft();if(project!==state.project)return;
+      let result;
+      if(state.pendingRender){
+        const pending=state.pendingRender;
+        const prior=await submit(pending);
+        if(state.pendingRender===pending)state.pendingRender=null;
+        if(pending.project_id===project.id&&pending.body.expected_version===project.version&&canonical(pending.body.unit_ids)===canonical(unitIds))result=prior;
+      }
+      if(!result){const operation=state.renderOperation||(state.renderOperation=uid());const pending={project_id:project.id,path:`${ROOT}/projects/${encodeURIComponent(project.id)}/render`,body:{operation_id:operation,expected_version:project.version,unit_ids:[...unitIds]}};state.pendingRender=pending;result=await submit(pending);if(state.pendingRender===pending)state.pendingRender=null;}
+      state.renderIssues=result.issues||(result.results||[]).filter(row=>row.status==='invalid').map(row=>({unit_id:row.unit_id,code:row.code,message:row.message}));
+      state.renderOperation=null;
+      const failed=new Set(state.renderIssues.map(issue=>issue.unit_id));state.selectedUnits=failed;
+      if(state.renderIssues.length){toast(`已受理 ${(result.items||[]).length} 个单元；${failed.size} 个单元待调整，草稿已保留`,true);const first=state.project.dramas.findIndex(unit=>failed.has(unit.id));if(first>=0)state.activeDrama=first;}
+      else{toast('已加入制作队列，各单元分别出片');setView('tasks');}
+      await loadTasks();
+    }finally{state.renderSubmitting=false;renderEditor();}
   }
+
   const assetLoads=new Map();
   async function loadAssets(append=false){
-    if(demo){renderAssets();return;}const query=$('assetSearch').value,offset=append?state.assets.length:0,key=`${query}:${offset}`;
+    if(demo){renderAssets();return;}
+    const query=$('assetSearch').value,kind=state.libraryKind,resource=state.libraryResource?.series_code||'',offset=append?state.assets.length:0,key=`${kind}:${resource}:${query}:${offset}`;
     if(assetLoads.has(key))return assetLoads.get(key);const sequence=++state.assetsLoadSeq;
-    const request=(async()=>{const response=await api(`${ROOT}/assets?q=${encodeURIComponent(query)}&status=all&limit=60&offset=${offset}`);if(sequence!==state.assetsLoadSeq||query!==$('assetSearch').value)return;state.assets=append?state.assets.concat(response.items||[]):response.items||[];state.assetsTotal=response.total||state.assets.length;rememberSources(state.assets);renderAssets();})();assetLoads.set(key,request);
+    const request=(async()=>{const response=await api(`${ROOT}/assets?q=${encodeURIComponent(query)}&library_kind=${kind}&series_code=${encodeURIComponent(resource)}&status=all&limit=60&offset=${offset}`);if(sequence!==state.assetsLoadSeq||kind!==state.libraryKind||query!==$('assetSearch').value||resource!==(state.libraryResource?.series_code||''))return;state.assets=append?state.assets.concat(response.items||[]):response.items||[];state.assetsTotal=response.total??state.assets.length;rememberSources(state.assets);renderAssets();})();assetLoads.set(key,request);
     try{return await request;}finally{if(assetLoads.get(key)===request)assetLoads.delete(key);}
   }
+
   const statusLabel=status=>({uploading:'上传中',uploaded:'待校验',probing:'媒体校验中',ready:'可剪辑',failed:'失败',deleted:'已删除',unprobed:'待校验',queued:'排队中',queued_gpu:'GPU 排队中',submitting:'正在提交',running:'处理中',recovery_required:'等待恢复',resume_queued:'等待核实恢复',preparing:'准备素材',starting:'准备制作',connecting:'连接制作服务',waiting_gpu_capacity:'等待制作资源',waiting_media:'等待预览处理',downloading:'下载素材',normalizing:'处理片段',concatenating:'拼接制作',rendering:'制作中',rendering_random:'制作中',rendering_intro:'制作片头',waiting_cover:'等待封面',removing_bgm:'处理背景音乐',uploading_output:'上传成片',verifying:'校验成片',verification:'校验成片',prefetching:'预下载素材',prefetched:'素材已就绪',completed:'制作完成',succeeded:'制作完成',unknown:'正在核实结果',cancelled:'已取消'}[status]||(typeof status==='string'&&/[\u3400-\u9fff]/.test(status)?status:status?'处理中':'等待状态'));
   function taskProgressText(task){
     const stage=task.stage||task.status,label=statusLabel(stage),progress=task.progress;
@@ -373,13 +416,18 @@
     // every clip/file. Do not convert them (or metrics.percent) to job percent.
     return detail.length?`${label} · 当前阶段：${detail.join('；')}`:label;
   }
+  function resourceLabel(resource){return resource?.series_code?`${resource.english_title||resource.title||'英文名待补充'} · ${resource.series_code}`:'待关联资源';}
   function renderAssets(){
-    $('assetCount').textContent=state.assetsTotal||state.assets.length;
-    $('assetGrid').innerHTML=state.assets.map(asset=>`<article class="asset-card"><div class="asset-thumb">${asset.thumbnail_url?`<img src="${esc(asset.thumbnail_url)}" alt="" loading="lazy">`:'<span class="asset-symbol">▧</span>'}<span class="duration">${durationOf(asset)?`${seconds(durationOf(asset))} 秒`:esc(statusLabel(asset.status))}</span></div><div class="asset-meta"><strong title="${esc(asset.name)}">${esc(asset.name)}</strong><p>${esc(statusLabel(asset.status))} · ${bytes(asset.size_bytes||0)}</p>${asset.error_message?`<p class="danger">${esc(asset.error_message)}</p>`:''}<div class="asset-actions"><button class="button" data-preview-asset="${esc(asset.id)}" ${asset.status!=='ready'?'disabled':''}>预览</button><button class="button" data-pick-asset="${esc(asset.id)}" ${asset.status!=='ready'?'disabled':''}>用于剪辑</button>${asset.can_manage&&['uploaded','probing','failed'].includes(asset.status)?`<button class="button" data-probe-asset="${esc(asset.id)}">核实媒体校验</button>`:''}${asset.can_manage?`<button class="text-button" data-rename-asset="${esc(asset.id)}">改名</button><button class="text-button danger" data-delete-asset="${esc(asset.id)}">删除</button>`:''}</div></div></article>`).join('')||'<div class="empty">暂无素材，上传一个视频开始创作。</div>';
-    $('assetPicker').innerHTML=state.assets.filter(asset=>asset.status==='ready').map(asset=>`<button data-pick-asset="${esc(asset.id)}"><strong>▧ ${esc(asset.name)}</strong><small>${seconds(durationOf(asset))} 秒 · ${asset.metadata.width} × ${asset.metadata.height}</small></button>`).join('')||'<div class="empty">暂无通过校验的素材，请先上传。</div>';
+    $(state.libraryKind==='free_episode'?'freeCount':'assetCount').textContent=demo?state.assets.filter(asset=>(asset.library_kind||'material')===state.libraryKind&&(!state.libraryResource||asset.series_code===state.libraryResource.series_code)).length:(state.assetsTotal??state.assets.length);
+    $('libraryResourceFilter').textContent=state.libraryResource?resourceLabel(state.libraryResource):'按资源筛选';$('clearLibraryResource').classList.toggle('hidden',!state.libraryResource);
+    $('uploadResourceLabel').textContent=state.uploadResource?resourceLabel(state.uploadResource):'新上传必选一个资源';
+    const list=demo?state.assets.filter(asset=>(asset.library_kind||'material')===state.libraryKind&&(!state.libraryResource||asset.series_code===state.libraryResource.series_code)):state.assets;
+    $('assetGrid').innerHTML=list.map(asset=>`<article class="asset-card"><div class="asset-thumb">${asset.thumbnail_url?`<img src="${esc(asset.thumbnail_url)}" alt="" loading="lazy">`:'<span class="asset-symbol">▧</span>'}<span class="duration">${durationOf(asset)?`${seconds(durationOf(asset))} 秒`:esc(statusLabel(asset.status))}</span></div><div class="asset-meta"><strong title="${esc(asset.name)}">${esc(asset.name)}</strong><p class="resource-tag">${esc(resourceLabel(asset))}</p><p>${esc(statusLabel(asset.status))} · ${bytes(asset.size_bytes||0)}</p>${asset.error_message?`<p class="danger">${esc(asset.error_message)}</p>`:''}<div class="asset-actions"><button class="button" data-preview-asset="${esc(asset.id)}" ${asset.status!=='ready'?'disabled':''}>预览</button><button class="button" data-use-asset="${esc(asset.id)}" ${asset.status!=='ready'?'disabled':''}>用于剪辑</button>${asset.can_manage&&['uploaded','probing','failed'].includes(asset.status)?`<button class="button" data-probe-asset="${esc(asset.id)}">核实媒体校验</button>`:''}${asset.can_manage?`<button class="text-button" data-tag-asset="${esc(asset.id)}">资源标签</button><button class="text-button" data-rename-asset="${esc(asset.id)}">改名</button><button class="text-button danger" data-delete-asset="${esc(asset.id)}">删除</button>`:''}</div></div></article>`).join('')||'<div class="empty">暂无匹配视频，可选择资源后上传。</div>';
     $('loadMoreAssets').classList.toggle('hidden',state.assets.length>=state.assetsTotal);
   }
-  function pickAsset(id){const asset=state.assets.find(entry=>entry.id===id);if(!asset||asset.status!=='ready')return;const old=state.project.asset_id;if(old&&old!==id&&state.project.dramas.some(drama=>drama.clips.some(clip=>clip.source_id===old)))return toast('当前时间线已使用原素材，请先删除对应素材片段或新建项目',true);changed(()=>{state.project.asset_id=id;});$('assetDialog').close();setView('editor');}
+  function pickAsset(id){const asset=state.sources[id];if(!asset||asset.status!=='ready'||!currentDrama())return;if(asset.series_code!==currentDrama().series_code)return toast('请选择当前资源的视频',true);state.insertSourceId=id;$('assetDialog').close();showInsert();}
+  function useAsset(id){const asset=state.sources[id];if(!asset?.series_code)return toast('请先为此视频补充资源标签',true);let unit=state.project.dramas.find(unit=>unit.series_code===asset.series_code);changed(()=>{if(!unit){unit={id:uid(),series_code:asset.series_code,title:asset.english_title||asset.name,clips:[]};state.project.dramas.push(unit);state.selectedUnits.add(unit.id);}state.activeDrama=state.project.dramas.indexOf(unit);unit.clips.push(newClip(asset));normalizeLast(unit.clips);});setView('editor');}
+
   async function previewAsset(id){const source=await ensureSource(id,true);if(demo){toast('模拟素材不含真实视频文件');return;}openMedia(source.name,source.preview_url,source.preview_expires_at||source.expires_at);}
   async function probeAsset(id){
     if(demo)return toast('模拟素材已通过校验');const source=await ensureSource(id,true);if(source.status==='ready'){await loadAssets();return toast('素材已通过媒体校验');}
@@ -412,13 +460,14 @@
     $('taskCount').textContent=state.tasks.length;
     $('taskList').innerHTML=state.tasks.map(task=>{const material=materialUploadView(task);return `<article class="task-card"><div class="task-icon">▷</div><div class="task-info"><strong>${esc(task.drama_title||task.title||task.id)}</strong><p>${esc(task.id)} · ${task.created_at?new Date(expiryTime(task.created_at)).toLocaleString('zh-CN'):''}</p>${task.error_message?`<p class="danger">${esc(task.error_message)}</p>`:''}${task.output&&task.output.metadata?`<p>720 × 1280 · ${seconds(task.output.metadata.duration_ms)} 秒 · MP4</p>`:''}${material.detail}</div><div><div class="task-status ${esc(task.status)}">${esc(statusLabel(task.status))}</div><p class="micro">${esc(taskProgressText(task))}</p></div><div class="task-actions">${material.action}${task.output?`<button class="button small" data-preview-task="${esc(task.id)}">预览</button><button class="button small" data-download-task="${esc(task.id)}">下载</button>`:''}${['failed','unknown','recovery_required'].includes(task.status)?`<button class="button small" data-resume-task="${esc(task.id)}">核实并重试</button>`:''}</div></article>`;}).join('')||'<div class="empty">还没有制作任务。完成剪辑后，点击“制作成片”。</div>';
   }
-  async function uploadMaterialTask(id){
+  async function uploadMaterialTask(id,variant=null){
     if(demo)return toast('模拟预览不会上传至素材库');
     const task=state.tasks.find(entry=>String(entry.id)===String(id));
     if(!task||!task.output||!['completed','succeeded'].includes(task.status)||task.material_upload||state.materialUploadSubmitting.has(String(id)))return;
+    if(task.series_code&&!variant){await openMaterialVariants(task);return;}
     state.materialUploadSubmitting.add(String(id));renderTasks();
     try{
-      const upload=item(await api(`${ROOT}/tasks/${encodeURIComponent(id)}/material-source`,{method:'POST',body:{}}));
+      const upload=item(await api(`${ROOT}/tasks/${encodeURIComponent(id)}/material-source`,{method:'POST',body:variant?{app_id:variant.app_id,content_id:variant.content_id}:{}}));
       if(!upload||!upload.status)throw new Error('提交回执无效，结果需要核实');
       const current=state.tasks.find(entry=>String(entry.id)===String(id));if(current)current.material_upload=upload;
       if(upload.status==='succeeded'&&upload.material_id)toast(`素材已入库，素材 ID：${upload.material_id}`);
@@ -437,49 +486,20 @@
   function catalogCurrent(session, sequence=state.catalogLoadSeq) { return $('dramaDialog').open && session===state.catalogSessionSeq && sequence===state.catalogLoadSeq; }
   function pendingCurrent(intent) {
     const drama=state.catalog[state.selectedCatalog];
-    return !!(intent && state.pendingAdd===intent && !intent.completed && $('dramaDialog').open && intent.session===state.catalogSessionSeq && intent.project===state.project && intent.projectSeq===state.projectLoadSeq && drama && String(drama.app_id)===String(intent.drama.app_id) && String(drama.content_id)===String(intent.drama.content_id));
+    return !!(intent && state.pendingAdd===intent && !intent.completed && $('dramaDialog').open && intent.session===state.catalogSessionSeq && intent.project===state.project && intent.projectSeq===state.projectLoadSeq && drama && String(drama.app_id)===String(intent.drama.app_id) && String(drama.content_id)===String(intent.drama.content_id)&&state.project.dramas.some(unit=>unit.id===intent.unit_id&&unit.series_code===intent.series_code));
   }
   function cancelPendingAdd(message='已取消自动添加。已排队的媒体校验会继续，可重新选择后添加。') {
     if(!state.pendingAdd)return;state.pendingAdd=null;renderEpisodes();setCatalogStatus(message);
   }
   function closeCatalogSession() { cancelPendingAdd();state.catalogSessionSeq++;state.catalogLoadSeq++; }
-  function renderProducts() {
-    const selected=$('productPicker').value;
-    $('productPicker').innerHTML='<option value="">选择产品</option>'+(state.catalogProducts||[]).map(product=>`<option value="${esc(product.app_id||product.id)}">${esc(product.label||product.app||product.name||product.app_name||product.title||product.app_id)}</option>`).join('');
-    if((state.catalogProducts||[]).some(product=>String(product.app_id||product.id)===selected))$('productPicker').value=selected;
+  async function openCatalog(button=$('onlineSources')) {
+    const unit=currentDrama();if(!unit?.series_code)return toast('请先选择当前单元的目标资源');
+    if(!$('dramaDialog').open){state.catalogSessionSeq++;$('dramaDialog').showModal();}
+    state.catalogTargetUnit=unit.id;const session=state.catalogSessionSeq,sequence=++state.catalogLoadSeq;state.selectedCatalog=null;state.catalog=[];state.episodes=[];renderEpisodes();setCatalogStatus('正在加载该资源的产品和语言版本…',false,true);
+    try{const response=demo?{items:[{app_id:'demo-product',content_id:'demo-101',title:unit.title,language:'en',country:'US'}]}:await api(`${ROOT}/catalog/resource-variants?series_code=${encodeURIComponent(unit.series_code)}`);if(!catalogCurrent(session,sequence))return;state.catalog=(response.items||[]).map(variant=>({...variant,series_code:unit.series_code}));renderCatalog();setCatalogStatus(state.catalog.length?'选择产品和语言版本，再勾选在线剧集。':'该资源暂无在线剧版本，仍可使用上传视频制作。');}catch(error){if(catalogCurrent(session,sequence))setCatalogStatus(`目录暂不可用：${error.message}。不影响草稿保存或已上传视频制作。`,true);}
   }
-  async function openCatalog(button=$('addDrama')) {
-    if(editingLocked())return toast('项目媒体信息尚未载入，请稍候');
-    if(!$('dramaDialog').open){state.catalogSessionSeq++;$('dramaDialog').showModal();setCatalogStatus(`最多 ${state.config.max_dramas} 部短剧；选择剧集后可自动校验并添加。`);}
-    const session=state.catalogSessionSeq;
-    if(demo){$('productPicker').innerHTML='<option value="demo-product">模拟产品</option>';await searchDramas();return;}
-    if(state.catalogProducts){renderProducts();$('productPicker').disabled=false;return;}
-    setCatalogStatus('正在加载产品…',false,true);$('productPicker').disabled=true;
-    return withBusy(`catalog-open:${session}`,button,'加载中…',async()=>{try{
-      const response=await api(`${ROOT}/catalog/products`);state.catalogProducts=response.items||[];
-      if(session!==state.catalogSessionSeq||!$('dramaDialog').open)return;renderProducts();setCatalogStatus('请选择产品，输入完整剧 ID 或至少 2 字的剧名前缀。');
-    }catch(error){if(session===state.catalogSessionSeq&&$('dramaDialog').open)setCatalogStatus(`产品加载失败：${error.message}。关闭后重新打开可重试。`,true);throw error;}
-    finally{if(session===state.catalogSessionSeq)$('productPicker').disabled=false;}});
-  }
-  async function searchDramas() {
-    const appId=$('productPicker').value,query=$('dramaSearch').value.trim(),session=state.catalogSessionSeq,key=`catalog-search:${session}:${appId}:${query}`;
-    if(state.catalogSearch&&state.catalogSearch.key===key&&state.catalogSearch.sequence===state.catalogLoadSeq)return state.catalogSearch.promise;
-    cancelPendingAdd('已更换搜索条件，本次自动添加已取消。');
-    const requestSeq=++state.catalogLoadSeq;state.selectedCatalog=null;state.catalog=[];state.episodes=[];renderEpisodes();
-    $('catalogEpisodes').innerHTML='<div class="empty">选择左侧短剧，加载剧集。</div>';
-    if(!appId){$('catalogDramas').innerHTML='<div class="empty">请先选择产品。</div>';setCatalogStatus('请先选择产品。');return;}
-    if(!demo&&(!query||(Array.from(query).length<2&&!/^\d+$/.test(query)))){$('catalogDramas').innerHTML='<div class="empty">请输入完整剧 ID，或至少 2 字的剧名前缀后搜索。</div>';setCatalogStatus('请输入完整剧 ID，或至少 2 字的剧名前缀。');return;}
-    if(query.length>100){setCatalogStatus('搜索内容最多 100 字。',true);return;}
-    $('catalogDramas').innerHTML='<div class="empty">正在查找短剧…</div>';setCatalogStatus('正在查找短剧…',false,true);
-    const request=withBusy(`${key}:${requestSeq}`,$('searchDramas'),'搜索中…',async()=>{
-      try{
-        const dramas=demo?[{app_id:appId,content_id:'demo-101',title:'风起时，遇见你'},{app_id:appId,content_id:'demo-102',title:'她的第二人生'}]:(await api(`${ROOT}/catalog/dramas?app_id=${encodeURIComponent(appId)}&q=${encodeURIComponent(query)}`)).items||[];
-        if(!catalogCurrent(session,requestSeq))return;state.catalog=dramas;renderCatalog();setCatalogStatus(dramas.length?`找到 ${dramas.length} 部短剧，请选择所需剧集。`:'未找到短剧，请调整剧名或 ID。');
-      }catch(error){if(catalogCurrent(session,requestSeq)){$('catalogDramas').innerHTML='<div class="empty">搜索失败，请重试。</div>';setCatalogStatus(`搜索失败：${error.message}`,true);}throw error;}
-    });state.catalogSearch={key,sequence:requestSeq,promise:request};
-    try{return await request;}finally{if(state.catalogSearch&&state.catalogSearch.promise===request)state.catalogSearch=null;}
-  }
-  function renderCatalog(){$('catalogDramas').innerHTML=state.catalog.map((drama,index)=>`<button data-catalog-index="${index}" class="${state.selectedCatalog===index?'active':''}"><strong>${esc(drama.title||drama.name)}</strong><small>ID ${esc(drama.content_id)}</small></button>`).join('')||'<div class="empty">未找到短剧</div>';}
+
+  function renderCatalog(){$('catalogDramas').innerHTML=state.catalog.map((drama,index)=>`<button data-catalog-index="${index}" class="${state.selectedCatalog===index?'active':''}"><strong>${esc(drama.title||drama.name)}</strong><small>${esc(drama.app||drama.app_id)} · ${esc(drama.language||'语言待确认')} · ${esc(drama.content_id)}</small></button>`).join('')||'<div class="empty">未找到短剧</div>';}
   async function selectCatalog(index) {
     const drama=state.catalog[index];if(!drama)return;
     cancelPendingAdd('已切换短剧，本次自动添加已取消。');
@@ -487,7 +507,7 @@
     $('catalogEpisodes').innerHTML='<div class="empty">正在加载剧集…</div>';setCatalogStatus(`正在加载“${drama.title||drama.name}”的剧集…`,false,true);
     try{
       const episodes=demo?[1,2,3,4].map(number=>({id:`${drama.content_id}-ep-${number}`,source_id:`${drama.content_id}-ep-${number}`,kind:'episode',name:`第 ${number} 集`,episode_number:number,app_id:drama.app_id,content_id:drama.content_id,status:'ready',metadata:{duration_ms:45000+number*7000,width:720,height:1280,has_audio:true}})):(await api(`${ROOT}/catalog/episodes?app_id=${encodeURIComponent(drama.app_id)}&content_id=${encodeURIComponent(drama.content_id)}`)).items||[];
-      if(!catalogCurrent(session,requestSeq))return;state.episodes=episodes;rememberSources(episodes);renderEpisodes();setCatalogStatus(episodes.length?'勾选需要的剧集后点击添加；未就绪剧集将自动校验。':'该短剧暂无可用剧集。');
+      if(!catalogCurrent(session,requestSeq))return;state.episodes=episodes.map(source=>({...source,series_code:source.series_code||drama.series_code}));rememberSources(state.episodes);renderEpisodes();setCatalogStatus(episodes.length?'勾选需要的剧集后点击添加；未就绪剧集将自动校验。':'该短剧暂无可用剧集。');
     }catch(error){if(catalogCurrent(session,requestSeq)){$('catalogEpisodes').innerHTML='<div class="empty">剧集加载失败，点击短剧可重试。</div>';setCatalogStatus(`剧集加载失败：${error.message}`,true);}throw error;}
   }
   function renderEpisodes() {
@@ -516,14 +536,11 @@
   }
   function finishPendingAdd(intent) {
     if(!pendingCurrent(intent)||intent.phase==='preparing'||!intent.ids.every(sourceReady)||editingLocked())return false;
-    const drama=intent.drama,existingDrama=state.project.dramas.find(entry=>String(entry.app_id)===String(drama.app_id)&&String(entry.content_id)===String(drama.content_id));
-    if(!existingDrama&&state.project.dramas.length>=state.config.max_dramas){failPendingAdd(intent,`每批最多 ${state.config.max_dramas} 部短剧`);return false;}
-    const existingSources=new Set((existingDrama&&existingDrama.clips||[]).map(clip=>clip.source_id)),newIds=intent.ids.filter(id=>!existingSources.has(id));
-    if((existingDrama&&existingDrama.clips.length||0)+newIds.length>300){failPendingAdd(intent,'每部短剧最多 300 个片段，请减少所选剧集');return false;}
-    intent.completed=true;state.pendingAdd=null;renderEpisodes();
-    if(newIds.length)changed(()=>{let target=existingDrama;if(!target){target={app_id:drama.app_id,content_id:drama.content_id,title:drama.title||drama.name,clips:[]};state.project.dramas.push(target);}newIds.forEach(id=>target.clips.push(newClip(state.sources[id])));normalizeLast(target.clips);state.activeDrama=state.project.dramas.indexOf(target);});
-    $('dramaDialog').close();toast(newIds.length?'已添加所选剧集，可在时间线上切割':'所选剧集已在项目中，无需重复添加');return true;
+    const target=state.project.dramas.find(unit=>unit.id===intent.unit_id);if(!target)return false;
+    if(target.clips.length+intent.ids.length>300){failPendingAdd(intent,'每个单元最多 300 个片段，请减少选择');return false;}
+    intent.completed=true;state.pendingAdd=null;renderEpisodes();changed(()=>{intent.ids.forEach(id=>target.clips.push(newClip(state.sources[id])));normalizeLast(target.clips);state.activeDrama=state.project.dramas.indexOf(target);});$('dramaDialog').close();toast('已添加所选剧集，可继续插入或剪辑');return true;
   }
+
   const unknownProbeSubmissions=new Set(),probeSubmissions=new Map(),taskResumeRequests=new Map(),hiddenProbeTasks=new Set();
   function resumeTaskRequest(taskId){
     if(taskResumeRequests.has(taskId))return taskResumeRequests.get(taskId);
@@ -615,28 +632,20 @@
     if(!finishPendingAdd(intent))pendingProgress(intent);
   }
   async function addEpisodes() {
-    if(state.pendingAdd)return;
-    const ids=Array.from(document.querySelectorAll('.episode-select:checked')).map(input=>input.value),drama=state.catalog[state.selectedCatalog];
-    if(!ids.length){setCatalogStatus('请勾选所需剧集后添加。',true);return;}if(!drama)return;
-    if(editingLocked()){setCatalogStatus('项目媒体信息尚未载入，请稍候。',true);return;}
-    const existingDrama=state.project.dramas.find(entry=>String(entry.app_id)===String(drama.app_id)&&String(entry.content_id)===String(drama.content_id));
-    if(!existingDrama&&state.project.dramas.length>=state.config.max_dramas){setCatalogStatus(`每批最多 ${state.config.max_dramas} 部短剧`,true);return;}
-    const existing=new Set((existingDrama&&existingDrama.clips||[]).map(clip=>clip.source_id));
-    if((existingDrama&&existingDrama.clips.length||0)+ids.filter(id=>!existing.has(id)).length>300){setCatalogStatus('每部短剧最多 300 个片段，请减少所选剧集。',true);return;}
-    const intent={project:state.project,projectSeq:state.projectLoadSeq,session:state.catalogSessionSeq,drama:{...drama},ids:[...new Set(ids)],phase:'preparing',completed:false};state.pendingAdd=intent;
-    renderEpisodes();pendingProgress(intent);
-    try{
-      const unready=intent.ids.filter(id=>!sourceReady(id));if(unready.length)await prepareEpisodeSources(unready,intent);
-      if(!pendingCurrent(intent))return;intent.phase='waiting';if(!finishPendingAdd(intent))pendingProgress(intent);
-    }catch(error){failPendingAdd(intent,error.message);}
+    if(state.pendingAdd)return;const ids=Array.from(document.querySelectorAll('.episode-select:checked')).map(input=>input.value),drama=state.catalog[state.selectedCatalog],unit=state.project.dramas.find(entry=>entry.id===state.catalogTargetUnit);
+    if(!ids.length){setCatalogStatus('请勾选所需剧集后添加。',true);return;}if(!drama||!unit)return;
+    if(unit.clips.length+ids.length>300){setCatalogStatus('每个单元最多 300 个片段。',true);return;}
+    const intent={project:state.project,projectSeq:state.projectLoadSeq,session:state.catalogSessionSeq,unit_id:unit.id,series_code:unit.series_code,drama:{...drama},ids:[...new Set(ids)],phase:'preparing',completed:false};state.pendingAdd=intent;renderEpisodes();pendingProgress(intent);
+    try{const unready=intent.ids.filter(id=>!sourceReady(id));if(unready.length)await prepareEpisodeSources(unready,intent);if(!pendingCurrent(intent))return;intent.phase='waiting';if(!finishPendingAdd(intent))pendingProgress(intent);}catch(error){failPendingAdd(intent,error.message);}
   }
+
   async function pollUpdates() {
     if(!state.ready||document.hidden)return;if(state.polling)return state.polling;
     const work=(async()=>{
       const hadRecoveries=state.probeRecoveries.size>0,intent=state.pendingAdd;
       const jobs=[(async()=>{try{if(hadRecoveries)await refreshProbeRecoveries(intent);await refreshPendingAdd(intent);}catch(error){if(pendingCurrent(intent))setCatalogStatus(`查询校验进度失败：${error.message}。稍后自动核实，也可取消等待。`,true);}})()];
       if(state.activeView==='tasks')jobs.push(loadTasks());
-      if(state.activeView==='library'&&(hadRecoveries||state.assets.some(asset=>['uploading','uploaded','probing'].includes(asset.status))))jobs.push(loadAssets());
+      if(['library','free'].includes(state.activeView)&&(hadRecoveries||state.assets.some(asset=>['uploading','uploaded','probing'].includes(asset.status))))jobs.push(loadAssets());
       await Promise.allSettled(jobs);
     })();state.polling=work;
     try{await work;}finally{if(state.polling===work)state.polling=null;}
@@ -650,7 +659,7 @@
   async function cosPut(url,headers,blob,upload,partNumber){
     return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();upload.requests.add(xhr);xhr.open('PUT',url);xhr.withCredentials=false;Object.entries(headers||{}).forEach(([name,value])=>xhr.setRequestHeader(name,value));xhr.upload.onprogress=event=>{if(event.lengthComputable){upload.progress[partNumber]=event.loaded;upload.percent=Math.min(99,100*(upload.completedBytes+Object.values(upload.progress).reduce((a,b)=>a+b,0))/upload.file.size);renderUploads();}};xhr.onload=()=>{upload.requests.delete(xhr);if(xhr.status>=200&&xhr.status<300)resolve(xhr.getResponseHeader('ETag'));else{const error=new Error(`COS 分片上传失败 (${xhr.status})`);error.status=xhr.status;reject(error);}};xhr.onerror=()=>{upload.requests.delete(xhr);reject(new Error('COS 上传网络中断；重新选择同一文件可续传'));};xhr.onabort=()=>{upload.requests.delete(xhr);reject(new Error('上传已取消'));};xhr.timeout=10*60*1000;xhr.ontimeout=()=>{upload.requests.delete(xhr);reject(new Error('分片上传超时，重新选择文件可续传'));};xhr.send(blob);});
   }
-  async function uploadFile(file){
+  async function uploadFile(file,uploadContext={library_kind:state.libraryKind,resource:state.uploadResource}){
     if(demo)return toast('模拟预览不会上传文件，请在正式页面上传');if(!file.size||file.size>state.config.max_file_bytes)return toast(`${file.name}：文件应大于 0 且不超过 ${bytes(state.config.max_file_bytes)}`,true);
     const key=fileFingerprint(file);if(state.uploads.has(key)&&!state.uploads.get(key).done)return toast('此文件正在上传');
     const upload={key,file,requests:new Set(),progress:{},completedBytes:0,percent:0,message:'准备直传 COS…',done:false,cancelled:false};state.uploads.set(key,upload);renderUploads();
@@ -658,7 +667,7 @@
     try{
       let session;
       if(saved&&saved.id){try{session=item(await api(`${ROOT}/uploads/${encodeURIComponent(saved.id)}`));}catch(error){if(error.status!==404)throw error;}}
-      if(!session||['aborted','failed','expired'].includes(session.status)){if(state.config.intake_enabled===false&&!(saved&&saved.operation_id&&!session))throw new Error('新上传已暂停，已有上传仍可继续');saved={operation_id:!session&&saved&&saved.operation_id?saved.operation_id:uid()};storeUpload(key,saved);session=item(await api(`${ROOT}/uploads`,{method:'POST',body:{operation_id:saved.operation_id,name:file.name,size_bytes:file.size,content_type:file.type||'application/octet-stream'}}));storeUpload(key,{id:session.id,operation_id:saved.operation_id});}
+      if(!session||['aborted','failed','expired'].includes(session.status)){if(state.config.intake_enabled===false&&!(saved&&saved.operation_id&&!session))throw new Error('新上传已暂停，已有上传仍可继续');const identity=saved?.resource?{library_kind:saved.library_kind,resource:saved.resource}:uploadContext;if(!identity.resource?.series_code)throw new Error('请选择上传视频的资源标签');saved={operation_id:!session&&saved&&saved.operation_id?saved.operation_id:uid(),...identity};storeUpload(key,saved);session=item(await api(`${ROOT}/uploads`,{method:'POST',body:{operation_id:saved.operation_id,name:file.name,size_bytes:file.size,content_type:file.type||'application/octet-stream',library_kind:saved.library_kind,series_code:saved.resource.series_code}}));storeUpload(key,{...saved,id:session.id});}
       upload.sessionId=session.id;
       if(upload.cancelled){await api(`${ROOT}/uploads/${encodeURIComponent(session.id)}/abort`,{method:'POST',body:{}});throw new Error('上传已取消');}
       if(['completed','ready','probing'].includes(session.status)){upload.message='文件已上传，正在媒体校验';upload.percent=100;upload.done=true;storeUpload(key,null);renderUploads();await loadAssets();return;}
@@ -678,12 +687,11 @@
   }
   async function cancelUpload(key){const upload=state.uploads.get(key);if(!upload||upload.done)return;upload.cancelled=true;upload.requests.forEach(xhr=>xhr.abort());if(upload.sessionId)await api(`${ROOT}/uploads/${encodeURIComponent(upload.sessionId)}/abort`,{method:'POST',body:{}});storeUpload(key,null);upload.done=true;upload.message='上传已取消';renderUploads();}
   function seedDemo(){
-    const asset={id:'demo-asset',source_id:'demo-asset',kind:'asset',name:'悬念开场 · 她终于回来了.mp4',status:'ready',can_manage:true,size_bytes:23445567,metadata:{duration_ms:8000,width:1080,height:1920,has_audio:true}};
-    const sources=[asset,{id:'demo-asset-2',source_id:'demo-asset-2',kind:'asset',name:'情绪特写 · 城市夜色.mp4',status:'ready',can_manage:true,size_bytes:14873612,metadata:{duration_ms:12000,width:1920,height:1080,has_audio:true}}];
-    for(const title of ['demo-101','demo-102'])for(let n=1;n<=3;n++)sources.push({id:`${title}-ep-${n}`,source_id:`${title}-ep-${n}`,kind:'episode',name:`第 ${n} 集`,episode_number:n,status:'ready',metadata:{duration_ms:60000,width:720,height:1280,has_audio:true}});
-    state.assets=sources.filter(source=>source.kind==='asset');state.assetsTotal=2;rememberSources(sources);
-    state.project={id:'demo-project',name:'悬念开场 · 批量剪辑 01',asset_id:asset.id,version:1,dramas:[{app_id:'demo-product',content_id:'demo-101',title:'风起时，遇见你',clips:[newClip(asset,{end_ms:5000,transition:'fade'}),newClip(state.sources['demo-101-ep-1'],{start_ms:2500,end_ms:14800}),newClip(state.sources['demo-101-ep-1'],{start_ms:26000,end_ms:41000,transition:'fade'}),newClip(state.sources['demo-101-ep-2'],{start_ms:4000,end_ms:22300})]},{app_id:'demo-product',content_id:'demo-102',title:'她的第二人生',clips:[newClip(asset,{end_ms:5000}),newClip(state.sources['demo-102-ep-1'],{end_ms:24000}),newClip(state.sources['demo-102-ep-2'],{start_ms:15000,end_ms:38000})]}]};
-    state.projects=[clone(state.project)];state.selectedClip=state.project.dramas[0].clips[1].id;state.tasks=[{id:'demo-completed-task',drama_title:'风起时，遇见你',status:'completed',stage:'completed',progress:1,created_at:new Date().toISOString(),output:{metadata:{duration_ms:43800}}}];$('saveStatus').textContent='模拟草稿 · 仅本页';$('previewMessage').textContent='演示画面，正式素材校验后可播放';renderProjectPicker();renderAssets();renderTasks();renderEditor();
+    const sources=[{id:'demo-asset',kind:'asset',library_kind:'material',series_code:'21481',english_title:'Love & Revenge of Malos',name:'悬念开场.mp4',status:'ready',can_manage:true,size_bytes:23445567,metadata:{duration_ms:8000,width:1080,height:1920,has_audio:true}},{id:'demo-free',kind:'asset',library_kind:'free_episode',series_code:'21481',english_title:'Love & Revenge of Malos',name:'免费集 1–5.mp4',status:'ready',can_manage:true,size_bytes:148736120,metadata:{duration_ms:360000,width:720,height:1280,has_audio:true}},{id:'demo-asset-2',kind:'asset',library_kind:'material',series_code:'21482',english_title:'Her Second Life',name:'情绪特写.mp4',status:'ready',can_manage:true,size_bytes:14873612,metadata:{duration_ms:12000,width:1920,height:1080,has_audio:true}}].map(source=>({...source,source_id:source.id}));
+    rememberSources(sources);state.assets=sources;state.assetsTotal=3;$('freeCount').textContent=1;
+    state.project=adaptProject({schema_version:2,id:'demo-project',name:'资源剪辑体验',version:1,units:[{id:'unit_demo1',series_code:'21481',title:'Love & Revenge of Malos',clips:[newClip(sources[0],{end_ms:5000,transition:'fade'}),newClip(sources[1],{start_ms:12000,end_ms:30000,mirror:true,subtitle_band:{top:960,bottom:1280}})]},{id:'unit_demo2',series_code:'21482',title:'Her Second Life',clips:[newClip(sources[2])]}]});
+    state.selectedUnits=new Set(state.project.dramas.map(unit=>unit.id));state.projects=[clone(state.project)];state.selectedClip=state.project.dramas[0].clips[1].id;state.playMs=4700;
+    state.tasks=[{id:'demo-completed-task',series_code:'21481',unit_id:'unit_demo1',drama_title:'Love & Revenge of Malos',status:'completed',stage:'completed',progress:1,created_at:new Date().toISOString(),output:{metadata:{duration_ms:22700}}}];$('saveStatus').textContent='模拟草稿 · 仅本页';$('previewMessage').textContent='演示画面，正式素材校验后可播放';renderProjectPicker();renderAssets();renderTasks();renderEditor();
   }
   function bind(){
     const run=fn=>event=>{try{return Promise.resolve(fn(event)).catch(error=>toast(error.message,true));}catch(error){toast(error.message,true);return Promise.resolve();}};
@@ -695,14 +703,17 @@
     $('projectName').addEventListener('change',()=>changed(()=>{state.project.name=$('projectName').value.trim()||'未命名剪辑项目';}));
     $('projectPicker').addEventListener('change',run(event=>openProject(event.target.value)));
     $('retryProjectSources').addEventListener('click',run(()=>withBusy('retryProjectSources',$('retryProjectSources'),'正在载入…',()=>openProject(state.project.id))));
-    $('newProject').addEventListener('click',run(()=>withBusy('newProject',$('newProject'),'正在新建…',async()=>{if(state.renderSubmitting)return;cancelPendingAdd();const sequence=++state.projectLoadSeq;state.projectOpening=sequence;syncEditorLocks();try{await flushDraft();if(sequence!==state.projectLoadSeq)return;stopPreview();clearTimeout(state.saveTimer);state.project={name:'未命名剪辑项目',asset_id:'',dramas:[]};state.activeDrama=0;state.selectedClip=null;state.undo=[];state.dirty=false;state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.sourceLoading=false;state.sourceLoadFailed=false;$('saveStatus').textContent='尚未保存';}finally{if(sequence===state.projectLoadSeq){state.projectOpening=0;renderEditor();}}})));
+    $('newProject').addEventListener('click',run(()=>withBusy('newProject',$('newProject'),'正在新建…',async()=>{if(state.renderSubmitting)return;cancelPendingAdd();const sequence=++state.projectLoadSeq;state.projectOpening=sequence;syncEditorLocks();try{await flushDraft();if(sequence!==state.projectLoadSeq)return;stopPreview();clearTimeout(state.saveTimer);state.project={schema_version:2,name:'未命名剪辑项目',dramas:[]};state.selectedUnits=new Set();state.renderIssues=[];state.activeDrama=0;state.selectedClip=null;state.undo=[];state.dirty=false;state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.sourceLoading=false;state.sourceLoadFailed=false;$('saveStatus').textContent='尚未保存';}finally{if(sequence===state.projectLoadSeq){state.projectOpening=0;renderEditor();}}})));
     $('saveProject').addEventListener('click',run(()=>withBusy('saveProject',$('saveProject'),'正在保存…',()=>saveProject())));$('renderProject').addEventListener('click',run(()=>withBusy('renderProject',$('renderProject'),'正在提交…',renderProject)));
-    $('saveCopy').addEventListener('click',run(()=>withBusy('saveCopy',$('saveCopy'),'正在另存…',async()=>{cancelPendingAdd();if(state.saving)await state.saving.catch(()=>{});const copy=serializeProject();copy.name=(copy.name||'剪辑项目').slice(0,115)+' · 副本';state.project=copy;state.projectLoadSeq++;state.revision++;state.undo=[];state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.conflicted=false;state.dirty=true;renderEditor();await saveProject(true);})));
-    $('undoEdit').addEventListener('click',()=>{if(!state.undo.length)return;stopPreview();const id=state.project.id,version=state.project.version;state.project={...state.undo.pop(),id,version};state.dirty=true;state.revision++;state.renderOperation=null;state.activeDrama=Math.max(0,Math.min(state.activeDrama,state.project.dramas.length-1));renderEditor();scheduleSave();});
-    $('chooseAsset').addEventListener('click',run(()=>withBusy('chooseAsset',$('chooseAsset'),'正在加载…',async()=>{$('assetDialog').showModal();$('assetPicker').innerHTML='<div class="empty" role="status">正在加载共享素材…</div>';try{await loadAssets();}catch(error){$('assetPicker').innerHTML=`<div class="empty danger" role="status">素材加载失败：${esc(error.message)}。关闭后重新打开可重试。</div>`;throw error;}})));
-    $('goUpload').addEventListener('click',()=>{$('assetDialog').close();setView('library');});
-    $('addDrama').addEventListener('click',run(()=>openCatalog($('addDrama'))));$('addDramaBottom').addEventListener('click',run(()=>openCatalog($('addDramaBottom'))));$('searchDramas').addEventListener('click',run(searchDramas));$('productPicker').addEventListener('change',run(searchDramas));$('dramaSearch').addEventListener('keydown',run(event=>event.key==='Enter'?searchDramas():null));$('addEpisodes').addEventListener('click',run(addEpisodes));
-    $('dramaList').addEventListener('click',event=>{const remove=event.target.closest('[data-remove-drama]');if(remove){changed(()=>{state.project.dramas.splice(Number(remove.dataset.removeDrama),1);state.activeDrama=Math.max(0,Math.min(state.activeDrama,state.project.dramas.length-1));});return;}const button=event.target.closest('[data-drama-index]');if(button){stopPreview();state.activeDrama=Number(button.dataset.dramaIndex);state.selectedClip=null;state.playMs=0;renderEditor();previewAt(0,false).catch(()=>{});}});
+    $('saveCopy').addEventListener('click',run(()=>withBusy('saveCopy',$('saveCopy'),'正在另存…',async()=>{cancelPendingAdd();if(state.saving)await state.saving.catch(()=>{});const copy=adaptProject(serializeProject());copy.name=(copy.name||'剪辑项目').slice(0,115)+' · 副本';state.project=copy;state.projectLoadSeq++;state.revision++;state.undo=[];state.operationId=null;state.pendingCreate=null;state.renderOperation=null;state.conflicted=false;state.dirty=true;renderEditor();await saveProject(true);})));
+    $('undoEdit').addEventListener('click',()=>{if(!state.undo.length)return;stopPreview();const id=state.project.id,version=state.project.version;state.project={...state.undo.pop(),id,version};state.dirty=true;state.revision++;state.renderOperation=null;state.activeDrama=Math.max(0,Math.min(state.activeDrama,state.project.dramas.length-1));renderEditor();previewAt(state.playMs,false).catch(()=>{});scheduleSave();});
+    $('chooseAsset').addEventListener('click',run(()=>openSources()));$('insertAsset').addEventListener('click',run(()=>openSources()));
+    $('goUpload').addEventListener('click',()=>{$('assetDialog').close();setView(state.pickerKind==='free_episode'?'free':'library');});
+    $('addDrama').addEventListener('click',()=>openResources({kind:'new-unit'}));$('addDramaBottom').addEventListener('click',()=>openResources({kind:'new-unit'}));$('changeUnitResource').addEventListener('click',()=>currentDrama()&&openResources({kind:'unit',unit_id:currentDrama().id}));
+    $('onlineSources').addEventListener('click',run(()=>{$('assetDialog').close();return openCatalog();}));$('addEpisodes').addEventListener('click',run(addEpisodes));
+    document.querySelectorAll('[data-source-kind]').forEach(button=>button.addEventListener('click',run(()=>{state.pickerKind=button.dataset.sourceKind;return openSources();})));
+    $('insertSelectedSources').addEventListener('click',()=>{const ids=Array.from(document.querySelectorAll('.source-pick:checked')).map(input=>input.value);if(!ids.length)return toast('请先勾选视频');changed(()=>{const unit=currentDrama();ids.forEach(id=>unit.clips.push(newClip(state.sources[id])));normalizeLast(unit.clips);});$('assetDialog').close();});
+        $('dramaList').addEventListener('click',event=>{const selection=event.target.closest('[data-render-unit]');if(selection){if(selection.checked)state.selectedUnits.add(selection.dataset.renderUnit);else state.selectedUnits.delete(selection.dataset.renderUnit);state.renderOperation=null;return;}const remove=event.target.closest('[data-remove-drama]');if(remove){changed(()=>{state.project.dramas.splice(Number(remove.dataset.removeDrama),1);state.activeDrama=Math.max(0,Math.min(state.activeDrama,state.project.dramas.length-1));});return;}const button=event.target.closest('[data-drama-index]');if(button){stopPreview();state.activeDrama=Number(button.dataset.dramaIndex);state.selectedClip=null;state.playMs=0;renderEditor();previewAt(0,false).catch(()=>{});}});
     $('catalogDramas').addEventListener('click',run(event=>{const button=event.target.closest('[data-catalog-index]');if(button)return selectCatalog(Number(button.dataset.catalogIndex));}));
     $('timeline').addEventListener('click',event=>{const button=event.target.closest('[data-clip-id]');if(button)selectClip(button.dataset.clipId);});
     let dragged=null;$('timeline').addEventListener('dragstart',event=>{const button=event.target.closest('[data-clip-id]');if(button){dragged=button.dataset.clipId;event.dataTransfer.setData('text/plain',dragged);event.dataTransfer.effectAllowed='move';}});$('timeline').addEventListener('dragover',event=>event.preventDefault());$('timeline').addEventListener('drop',event=>{event.preventDefault();const button=event.target.closest('[data-clip-id]');if(!button||!dragged)return;changed(()=>{const clips=currentDrama().clips;currentDrama().clips=move(clips,clips.findIndex(clip=>clip.id===dragged),clips.findIndex(clip=>clip.id===button.dataset.clipId));});dragged=null;});
@@ -714,28 +725,128 @@
     $('splitClip').addEventListener('click',run(()=>{const clip=selectedClip();if(!clip)return;const segment=layout(currentDrama().clips).find(entry=>entry.clip.id===clip.id);const at=clip.start_ms+state.playMs-segment.start;const result=split(currentDrama().clips,clip.id,at);changed(()=>{currentDrama().clips=result;});}));
     $('removeClip').addEventListener('click',()=>{if(!selectedClip())return;changed(()=>{currentDrama().clips=normalizeLast(currentDrama().clips.filter(clip=>clip.id!==state.selectedClip));});});
     $('removeEpisode').addEventListener('click',()=>{const clip=selectedClip();if(!clip)return;changed(()=>{currentDrama().clips=normalizeLast(currentDrama().clips.filter(entry=>entry.source_id!==clip.source_id));});});
-    $('insertAsset').addEventListener('click',showInsert);$('confirmInsert').addEventListener('click',confirmInsert);
-    $('applyCommon').addEventListener('click',run(()=>{const asset=selectedAsset();if(!$('commonPosition').value||!state.project.dramas.length)return;const assetClip=asset?newClip(asset):null;const dramas=applyCommon(state.project.dramas,assetClip,$('commonPosition').value,$('commonTransition').value,asset&&asset.source_id);changed(()=>{state.project.dramas=dramas;});toast('已应用公共设置，逐剧剪切点保持不变');}));
+    $('confirmInsert').addEventListener('click',confirmInsert);
+    $('applyCommon').addEventListener('click',run(()=>{if(!state.project.dramas.length)return;const dramas=applyCommon(state.project.dramas,null,'none',$('commonTransition').value,null);changed(()=>{state.project.dramas=dramas;});toast('已应用公共设置，逐剧剪切点保持不变');}));
     $('playPreview').addEventListener('click',run(playPreview));$('playhead').addEventListener('input',()=>{stopPreview();state.playMs=Number($('playhead').value);updatePlayhead();previewAt(state.playMs,false).catch(error=>toast(error.message,true));});$('resetPlay').addEventListener('click',()=>{stopPreview();state.playMs=0;updatePlayhead();previewAt(0,false).catch(()=>{});});
     for(const id of ['previewA','previewB'])$(id).addEventListener('error',()=>{if($(id).src){stopPreview();$('previewPlaceholder').classList.remove('hidden');$('previewMessage').textContent='此视频暂无法在浏览器播放，请刷新预览链接或等待代理完成';}});
     $('mediaDialog').addEventListener('close',()=>{$('mediaPlayer').pause();$('mediaPlayer').removeAttribute('src');$('mediaPlayer').load();});
     $('refreshTasks').addEventListener('click',run(()=>withBusy('refreshTasks',$('refreshTasks'),'正在刷新…',loadTasks)));$('loadMoreAssets').addEventListener('click',run(()=>withBusy('loadMoreAssets',$('loadMoreAssets'),'正在加载…',()=>loadAssets(true))));let searchTimer;$('assetSearch').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadAssets().catch(error=>toast(error.message,true)),300);});
-    $('uploadButton').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('fileInput').click();}});$('fileInput').addEventListener('change',()=>{Array.from($('fileInput').files).reduce((promise,file)=>promise.then(()=>uploadFile(file)),Promise.resolve());$('fileInput').value='';});
-    for(const eventName of ['dragenter','dragover'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.add('drag-over');});for(const eventName of ['dragleave','drop'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.remove('drag-over');if(eventName==='drop')Array.from(event.dataTransfer.files).reduce((promise,file)=>promise.then(()=>uploadFile(file)),Promise.resolve());});
+    $('uploadButton').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('fileInput').click();}});$('fileInput').addEventListener('change',()=>{queueFiles(Array.from($('fileInput').files));$('fileInput').value='';});
+    for(const eventName of ['dragenter','dragover'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.add('drag-over');});for(const eventName of ['dragleave','drop'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.remove('drag-over');if(eventName==='drop')queueFiles(Array.from(event.dataTransfer.files));});
     document.addEventListener('click',run(async event=>{
-      const button=event.target.closest('[data-pick-asset],[data-preview-asset],[data-probe-asset],[data-rename-asset],[data-delete-asset],[data-preview-task],[data-download-task],[data-resume-task],[data-upload-material-task],[data-refresh-material-task],[data-cancel-upload]');if(!button)return;
-      const action=Object.keys(button.dataset).find(key=>['pickAsset','previewAsset','probeAsset','renameAsset','deleteAsset','previewTask','downloadTask','resumeTask','uploadMaterialTask','refreshMaterialTask','cancelUpload'].includes(key));
+      const button=event.target.closest('[data-use-asset],[data-tag-asset],[data-pick-asset],[data-preview-asset],[data-probe-asset],[data-rename-asset],[data-delete-asset],[data-preview-task],[data-download-task],[data-resume-task],[data-upload-material-task],[data-refresh-material-task],[data-cancel-upload]');if(!button)return;
+      const action=Object.keys(button.dataset).find(key=>['useAsset','tagAsset','pickAsset','previewAsset','probeAsset','renameAsset','deleteAsset','previewTask','downloadTask','resumeTask','uploadMaterialTask','refreshMaterialTask','cancelUpload'].includes(key));
       const label={previewAsset:'正在加载…',previewTask:'正在加载…',downloadTask:'获取链接…',probeAsset:'正在核实…',resumeTask:'正在核实恢复…',uploadMaterialTask:'正在提交…',refreshMaterialTask:'正在刷新…',renameAsset:'正在保存…',deleteAsset:'正在移除…',cancelUpload:'正在取消…'}[action];
       return withBusy(`${action}:${button.dataset[action]}`,button,label,async()=>{
-      if(button.dataset.pickAsset)return pickAsset(button.dataset.pickAsset);if(button.dataset.previewAsset)return previewAsset(button.dataset.previewAsset);if(button.dataset.probeAsset)return probeAsset(button.dataset.probeAsset);if(button.dataset.previewTask)return taskOutput(button.dataset.previewTask,false);if(button.dataset.downloadTask)return taskOutput(button.dataset.downloadTask,true);if(button.dataset.uploadMaterialTask)return uploadMaterialTask(button.dataset.uploadMaterialTask);if(button.dataset.refreshMaterialTask)return loadTasks();if(button.dataset.cancelUpload)return cancelUpload(button.dataset.cancelUpload);
+      if(button.dataset.useAsset)return useAsset(button.dataset.useAsset);if(button.dataset.tagAsset)return openResources({kind:'tag',asset_id:button.dataset.tagAsset});if(button.dataset.pickAsset)return pickAsset(button.dataset.pickAsset);if(button.dataset.previewAsset)return previewAsset(button.dataset.previewAsset);if(button.dataset.probeAsset)return probeAsset(button.dataset.probeAsset);if(button.dataset.previewTask)return taskOutput(button.dataset.previewTask,false);if(button.dataset.downloadTask)return taskOutput(button.dataset.downloadTask,true);if(button.dataset.uploadMaterialTask)return uploadMaterialTask(button.dataset.uploadMaterialTask);if(button.dataset.refreshMaterialTask)return loadTasks();if(button.dataset.cancelUpload)return cancelUpload(button.dataset.cancelUpload);
       if(button.dataset.resumeTask){if(demo)return toast('模拟模式不会提交重试');await resumeTaskRequest(button.dataset.resumeTask);await loadTasks();return;}
       const id=button.dataset.renameAsset||button.dataset.deleteAsset;const asset=state.assets.find(entry=>entry.id===id);if(!asset)return;
       if(button.dataset.renameAsset){const name=prompt('素材名称',asset.name);if(!name||!name.trim())return;if(demo)asset.name=name.trim();else await api(`${ROOT}/assets/${encodeURIComponent(id)}`,{method:'PATCH',body:{name:name.trim()}});}
       else{if(!confirm(`从共享素材库移除“${asset.name}”？已有制作任务引用的文件仍会保留。`))return;if(demo)state.assets=state.assets.filter(entry=>entry.id!==id);else await api(`${ROOT}/assets/${encodeURIComponent(id)}`,{method:'DELETE'});}await loadAssets();
       });
     }));
+    bindResources(run);bindMirror(run);
     global.addEventListener('beforeunload',event=>{if(!demo&&(state.dirty||Array.from(state.uploads.values()).some(upload=>!upload.done))){event.preventDefault();event.returnValue='';}});
   }
+  function openResources(purpose){
+    state.resourcePurpose={...purpose,project:state.project};state.resourceDialogSeq++;state.resourceSearchSeq++;state.resourceResults=[];$('resourceSearch').value='';$('resourceResults').innerHTML='<div class="empty">输入完整资源 ID，或英文剧名开头后搜索。</div>';$('resourceStatus').textContent='资源名称使用英语剧名称；名称待补充时仍可按 ID 选择。';$('resourceDialogTitle').textContent=({tag:'修改资源标签',filter:'按资源筛选',upload:'选择上传资源',unit:'更换目标资源','new-unit':'添加目标资源'})[purpose.kind]||'选择资源';$('resourceDialog').showModal();$('resourceSearch').focus();
+  }
+  async function searchResources(){
+    const query=$('resourceSearch').value.trim(),session=state.resourceDialogSeq,sequence=++state.resourceSearchSeq;
+    if(!query){$('resourceResults').innerHTML='<div class="empty">请输入资源 ID 或英文剧名。</div>';return;}
+    $('resourceResults').innerHTML='<div class="empty" role="status">正在搜索资源…</div>';$('resourceStatus').textContent='正在搜索…';
+    try{const response=demo?{items:[{series_code:'21481',english_title:'Love & Revenge of Malos',english_title_status:'matched'},{series_code:'21482',english_title:'Her Second Life',english_title_status:'matched'}]}:await api(`${ROOT}/catalog/resources?q=${encodeURIComponent(query)}`);if(session!==state.resourceDialogSeq||sequence!==state.resourceSearchSeq||!$('resourceDialog').open)return;state.resourceResults=response.items||[];$('resourceResults').innerHTML=state.resourceResults.map((resource,index)=>`<button data-select-resource="${index}"><strong>${esc(resource.english_title||'英文名待补充 / 核实')}</strong><small>资源 ID：${esc(resource.series_code)}</small></button>`).join('')||'<div class="empty">未找到资源，请使用准确 ID 或英文剧名开头。</div>';$('resourceStatus').textContent=`找到 ${state.resourceResults.length} 个资源，点击即可选择。`;}
+    catch(error){if(session===state.resourceDialogSeq&&sequence===state.resourceSearchSeq){$('resourceResults').innerHTML='<div class="empty">资源查询暂不可用，可调整条件后重试。</div>';$('resourceStatus').textContent=error.message;}}
+  }
+  async function selectResource(index){
+    const resource=state.resourceResults[index],purpose=state.resourcePurpose;if(!resource||!purpose)return;
+    if(['new-unit','unit'].includes(purpose.kind)&&purpose.project!==state.project)return;
+    if(purpose.kind==='new-unit'){
+      if(state.project.dramas.length>=state.config.max_dramas)return toast(`每项目最多 ${state.config.max_dramas} 个单元`,true);
+      changed(()=>{const unit={id:uid(),series_code:resource.series_code,title:resource.english_title||resource.series_code,clips:[]};state.project.dramas.push(unit);state.selectedUnits.add(unit.id);state.activeDrama=state.project.dramas.length-1;});
+    }else if(purpose.kind==='unit'){
+      const unit=state.project.dramas.find(entry=>entry.id===purpose.unit_id);if(!unit)return;cancelPendingAdd();changed(()=>{unit.series_code=resource.series_code;unit.title=resource.english_title||resource.series_code;});
+    }else if(purpose.kind==='filter'){state.libraryResource=resource;await loadAssets();}
+    else if(purpose.kind==='upload'){state.uploadResource=resource;renderAssets();}
+    else if(purpose.kind==='tag'){
+      if(demo){const source=state.sources[purpose.asset_id];Object.assign(source,{series_code:resource.series_code,english_title:resource.english_title});const row=state.assets.find(asset=>asset.id===purpose.asset_id);if(row)Object.assign(row,source);}
+      else{const source=item(await api(`${ROOT}/assets/${encodeURIComponent(purpose.asset_id)}`,{method:'PATCH',body:{series_code:resource.series_code}}));rememberSources([source]);}
+      await loadAssets();renderEditor();toast('资源标签已更新；已提交任务保持原样');
+    }
+    $('resourceDialog').close();if(purpose.afterSelect)purpose.afterSelect(resource);
+  }
+  async function openSources(){
+    const unit=currentDrama();if(!unit?.series_code){toast('先选择当前制作单元的目标资源');if(unit)openResources({kind:'unit',unit_id:unit.id});else openResources({kind:'new-unit'});return;}
+    if(!$('assetDialog').open)$('assetDialog').showModal();$('sourcePickerTitle').textContent=unitTitle(unit);$('sourcePickerResource').textContent=`资源 ID：${unit.series_code} · 可以多选并重复插入`;
+    document.querySelectorAll('[data-source-kind]').forEach(button=>button.classList.toggle('active',button.dataset.sourceKind===state.pickerKind));
+    const sequence=++state.pickerSeq,kind=state.pickerKind,unitId=unit.id,project=state.project;$('assetPicker').innerHTML='<div class="empty" role="status">正在加载该资源的视频…</div>';state.pickerItems=[];
+    try{const response=demo?{items:Object.values(state.sources).filter(source=>source.kind==='asset'&&source.series_code===unit.series_code&&(source.library_kind||'material')===kind)}:await api(`${ROOT}/assets?library_kind=${kind}&series_code=${encodeURIComponent(unit.series_code)}&status=all&limit=100&offset=0`);if(sequence!==state.pickerSeq||project!==state.project||unitId!==currentDrama()?.id||!$('assetDialog').open)return;state.pickerItems=response.items||[];rememberSources(state.pickerItems);renderSourcePicker(response.total);}
+    catch(error){if(sequence===state.pickerSeq)$('assetPicker').innerHTML=`<div class="empty danger">${esc(error.message)}，可以切换分组或重新打开重试。</div>`;}
+  }
+  function renderSourcePicker(total){
+    $('assetPicker').innerHTML=state.pickerItems.map(source=>`<label class="source-option"><input type="checkbox" class="source-pick" value="${esc(source.id||source.source_id)}" ${source.status!=='ready'?'disabled':''}><span><strong>${esc(sourceTitle(source))}</strong><small>${esc(statusLabel(source.status))}${durationOf(source)?` · ${seconds(durationOf(source))} 秒`:''}</small></span><button class="button small" type="button" data-preview-asset="${esc(source.id)}" ${source.status!=='ready'?'disabled':''}>预览</button><button class="button small" type="button" data-pick-asset="${esc(source.id)}" ${source.status!=='ready'?'disabled':''}>截取插入</button></label>`).join('')||'<div class="empty">该资源暂无此类视频，可切换来源或前往上传。</div>';
+    if(total>state.pickerItems.length)$('assetPicker').innerHTML+='<p class="micro">已展示前 100 条，可在对应栏目按名称查找并点击“用于剪辑”。</p>';
+  }
+  function queueFiles(files){
+    if(!files.length)return;const context={library_kind:state.libraryKind,resource:state.uploadResource};const existing=uploadStore();
+    const start=resource=>files.reduce((promise,file)=>promise.then(()=>uploadFile(file,{...context,resource})),Promise.resolve());
+    if(!context.resource&&files.some(file=>!existing[fileFingerprint(file)]?.id&&!existing[fileFingerprint(file)]?.resource)){openResources({kind:'upload',afterSelect:start});return;}start(context.resource);
+  }
+  async function openMaterialVariants(task){
+    const sequence=++state.variantSeq;state.variantTask=task;state.materialVariants=[];$('variantTitle').textContent=`${task.drama_title||task.series_code} · 选择入库归属`;$('variantSelect').innerHTML='<option value="">正在加载…</option>';$('variantStatus').textContent='选择此成片对应的来源产品和语言剧版本。';$('confirmVariant').disabled=true;$('variantDialog').showModal();
+    try{const response=await api(`${ROOT}/catalog/resource-variants?series_code=${encodeURIComponent(task.series_code)}`);if(sequence!==state.variantSeq||!$('variantDialog').open)return;state.materialVariants=response.items||[];$('variantSelect').innerHTML='<option value="">选择来源产品 / 语言版本</option>'+state.materialVariants.map((variant,index)=>`<option value="${index}">${esc(variant.app||variant.app_id)} · ${esc(variant.language)} · ${esc(variant.country)} · ${esc(variant.content_id)}</option>`).join('');$('variantStatus').textContent=state.materialVariants.length?'英文资源名不代表视频语言，请选择成片实际对应版本。':'暂未找到语言版本，仍可预览和下载成片。';}
+    catch(error){if(sequence===state.variantSeq)$('variantStatus').textContent=`目录暂不可用：${error.message}。仍可预览和下载成片。`;}
+  }
+  function bindResources(run){
+    $('searchResources').addEventListener('click',run(searchResources));$('resourceSearch').addEventListener('keydown',run(event=>event.key==='Enter'?searchResources():null));
+    $('resourceResults').addEventListener('click',run(event=>{const button=event.target.closest('[data-select-resource]');if(button)return withBusy('selectResource',button,'正在选择…',()=>selectResource(Number(button.dataset.selectResource)));}));
+    $('resourceDialog').addEventListener('close',()=>{state.resourceDialogSeq++;state.resourceSearchSeq++;state.resourcePurpose=null;});
+    $('libraryResourceFilter').addEventListener('click',()=>openResources({kind:'filter'}));$('clearLibraryResource').addEventListener('click',run(()=>{state.libraryResource=null;return loadAssets();}));$('chooseUploadResource').addEventListener('click',()=>openResources({kind:'upload'}));
+    $('assetDialog').addEventListener('close',()=>{state.pickerSeq++;});
+    $('variantDialog').addEventListener('close',()=>{state.variantSeq++;state.variantTask=null;});$('variantSelect').addEventListener('change',()=>{$('confirmVariant').disabled=$('variantSelect').value==='';});
+    $('confirmVariant').addEventListener('click',run(()=>{const task=state.variantTask,variant=state.materialVariants[Number($('variantSelect').value)];if(!task||!variant||$('variantSelect').value==='')return;$('variantDialog').close();return uploadMaterialTask(task.id,variant);}));
+  }
+
+  const previewLayers=[];
+  function layerAt(index){
+    if(previewLayers[index])return previewLayers[index];const video=$(index?'previewB':'previewA'),canvas=$(index?'canvasB':'canvasA'),scratch=document.createElement('canvas');scratch.width=720;scratch.height=1280;canvas.width=720;canvas.height=1280;
+    const layer={video,canvas,scratch,clip:null,source:null,active:false,frameRequest:null,raf:null,token:0};previewLayers[index]=layer;
+    for(const event of ['loadeddata','seeked'])video.addEventListener(event,()=>{if(layer.active&&!video.seeking&&drawPreviewLayer(layer))$('previewPlaceholder').classList.add('hidden');});return layer;
+  }
+  function cancelLayer(layer){layer.token++;if(layer.frameRequest!==null&&layer.video.cancelVideoFrameCallback)layer.video.cancelVideoFrameCallback(layer.frameRequest);if(layer.raf!==null)cancelAnimationFrame(layer.raf);layer.frameRequest=null;layer.raf=null;}
+  function drawPreviewLayer(layer){
+    const {video,canvas,scratch,clip,source}=layer;if(!layer.active||!clip||layer.project!==state.project||layer.unitId!==currentDrama()?.id||state.activeView!=='editor'||video.seeking||!video.videoWidth||!video.videoHeight||video.readyState<2||(video.currentSrc&&video.currentSrc!==video.src))return false;
+    const original=scratch.getContext?.('2d'),display=canvas.getContext?.('2d');if(!original||!display)return false;
+    const geometry=source.preview_geometry||{},rect=geometry.content_rect||{x:0,y:0,width:geometry.width||video.videoWidth,height:geometry.height||video.videoHeight};
+    const ratioX=video.videoWidth/(geometry.width||video.videoWidth),ratioY=video.videoHeight/(geometry.height||video.videoHeight);
+    const width=geometry.display_width||source.metadata?.display_width||source.metadata?.width||rect.width,height=geometry.display_height||source.metadata?.display_height||source.metadata?.height||rect.height;
+    const dest=fitRectangle(width,height,clip.fit);
+    original.setTransform(1,0,0,1,0,0);original.fillStyle='#000';original.fillRect(0,0,720,1280);
+    original.drawImage(video,rect.x*ratioX,rect.y*ratioY,rect.width*ratioX,rect.height*ratioY,dest.x,dest.y,dest.width,dest.height);
+    display.setTransform(1,0,0,1,0,0);display.clearRect(0,0,720,1280);display.save();if(clip.mirror){display.translate(720,0);display.scale(-1,1);}display.drawImage(scratch,0,0);display.restore();
+    const band=effectiveBand(clip);if(band&&band.bottom>band.top)display.drawImage(scratch,0,band.top,720,band.bottom-band.top,0,band.top,720,band.bottom-band.top);
+    return true;
+  }
+  function startLayerFrames(layer){
+    if(layer.frameRequest!==null||layer.raf!==null)return;const token=layer.token;
+    const frame=()=>{layer.frameRequest=null;layer.raf=null;if(!layer.active||token!==layer.token)return;drawPreviewLayer(layer);if(!state.playing)return;if(layer.video.requestVideoFrameCallback)layer.frameRequest=layer.video.requestVideoFrameCallback(frame);else layer.raf=requestAnimationFrame(frame);};
+    if(layer.video.requestVideoFrameCallback)layer.frameRequest=layer.video.requestVideoFrameCallback(frame);else layer.raf=requestAnimationFrame(frame);
+  }
+  function renderBandOverlay(){
+    const clip=selectedClip(),band=clip&&effectiveBand(clip),overlay=$('subtitleOverlay');const layoutClip=currentDrama()&&layout(currentDrama().clips).find(segment=>segment.clip.id===clip?.id);const visible=!!band&&!!layoutClip&&state.playMs>=layoutClip.start&&state.playMs<layoutClip.end;
+    overlay.classList.toggle('hidden',!visible);if(visible){overlay.style.top=`${band.top/1280*100}%`;overlay.style.height=`${(band.bottom-band.top)/1280*100}%`;}
+  }
+  function bindMirror(run){
+    $('clipMirror').addEventListener('change',()=>{const clip=selectedClip();if(!clip)return;updateClip({mirror:$('clipMirror').checked,...(clip.subtitle_band===undefined?{subtitle_band:{top:960,bottom:1280}}:{})});});
+    $('protectSubtitles').addEventListener('change',()=>updateClip({subtitle_band:$('protectSubtitles').checked?{top:960,bottom:1280}:null}));
+    const setBand=()=>{const top=Math.round(Number($('subtitleTop').value)/2)*2,bottom=Math.round(Number($('subtitleBottom').value)/2)*2;if(!Number.isFinite(top)||!Number.isFinite(bottom)||top<0||bottom>1280||bottom<=top)return toast('字幕区域需在 0–1280 内，底边须大于顶边',true);updateClip({subtitle_band:{top,bottom}});};
+    $('subtitleTop').addEventListener('change',setBand);$('subtitleBottom').addEventListener('change',setBand);
+    let dragging=null;
+    const overlay=$('subtitleOverlay');overlay.addEventListener('pointerdown',event=>{const clip=selectedClip(),band=clip&&effectiveBand(clip);if(!band||editingLocked())return;event.preventDefault();stopPreview(true);snapshot();dragging={clip,band:{...band},clientY:event.clientY,edge:event.target.dataset.bandEdge||'move',height:$('videoFrame').getBoundingClientRect().height,pointerId:event.pointerId};overlay.setPointerCapture?.(event.pointerId);});
+    overlay.addEventListener('pointermove',event=>{if(!dragging||event.pointerId!==dragging.pointerId)return;const delta=Math.round((event.clientY-dragging.clientY)/dragging.height*1280/2)*2;let {top,bottom}=dragging.band;if(dragging.edge==='top')top=Math.max(0,Math.min(bottom-2,top+delta));else if(dragging.edge==='bottom')bottom=Math.min(1280,Math.max(top+2,bottom+delta));else{const height=bottom-top;top=Math.max(0,Math.min(1280-height,top+delta));bottom=top+height;}dragging.clip.subtitle_band={top,bottom};$('subtitleTop').value=top;$('subtitleBottom').value=bottom;renderBandOverlay();previewLayers.forEach(drawPreviewLayer);});
+    const finish=event=>{if(!dragging||event.pointerId!==dragging.pointerId)return;overlay.releasePointerCapture?.(event.pointerId);dragging=null;state.project.schema_version=2;state.revision++;state.dirty=true;state.renderOperation=null;renderEditor();scheduleSave();};overlay.addEventListener('pointerup',finish);overlay.addEventListener('pointercancel',finish);
+  }
+
   async function init(){
     bind();
     if(demo){state.auth={authenticated:true,user:{name:'创作体验',role:'admin',tenant_key:'demo'}};$('demoBanner').classList.remove('hidden');}
@@ -743,7 +854,7 @@
     await global.QuickNav.render({container:'#quickNav',auth:state.auth,activeKey:'videoEditing'});global.UiTopbar.render({auth:state.auth,userCard:'#userCard',authButton:'#authButton',refreshButton:'#refreshPage'});
     if(!state.auth.authenticated){$('loginGate').classList.remove('hidden');return;}
     if(demo){$('pageRoot').classList.remove('hidden');seedDemo();state.ready=true;return;}
-    try{state.config={...state.config,...item(await api(`${ROOT}/config`))};const notices=[];if(state.config.intake_enabled===false||state.config.enabled===false)notices.push('新上传、媒体校验和制作提交已暂停；已有上传可续传，历史项目和成片仍可查看。');if(state.config.worker_configured===false)notices.push('制作服务尚未配置，暂不能提交 GPU 制作。');if(state.config.cos_configured===false)notices.push('COS 尚未配置，暂不能上传新素材。');$('configNotice').textContent=notices.join(' ');$('configNotice').classList.toggle('hidden',!notices.length);$('uploadLimits').textContent=`单个文件最大 ${bytes(state.config.max_file_bytes)} · 支持分片续传 · 视频直接进入 COS`;$('catalogStatus').textContent=`最多 ${state.config.max_dramas} 部短剧`;$('pageRoot').classList.remove('hidden');await Promise.all([loadAssets(),loadProjects(),loadTasks()]);renderEditor();state.ready=true;}
+    try{state.config={...state.config,...item(await api(`${ROOT}/config`))};const notices=[];if(state.config.intake_enabled===false||state.config.enabled===false)notices.push('新上传、媒体校验和制作提交已暂停；已有上传可续传，历史项目和成片仍可查看。');if(state.config.worker_configured===false)notices.push('制作服务尚未配置，暂不能提交 GPU 制作。');if(state.config.cos_configured===false)notices.push('COS 尚未配置，暂不能上传新素材。');$('configNotice').textContent=notices.join(' ');$('configNotice').classList.toggle('hidden',!notices.length);$('uploadLimits').textContent=`单个文件最大 ${bytes(state.config.max_file_bytes)} · 支持分片续传 · 视频直接进入 COS`;$('catalogStatus').textContent=`最多 ${state.config.max_dramas} 部短剧`;$('pageRoot').classList.remove('hidden');const initial=await Promise.allSettled([loadAssets(),loadProjects(),loadTasks()]);renderEditor();state.ready=true;const failed=initial.find(result=>result.status==='rejected');if(failed)toast(`部分列表暂未加载：${failed.reason.message}，仍可编辑和保存草稿`,true);}
     catch(error){$('loginGate').innerHTML=`<strong>暂时无法打开视频剪辑</strong><p>${esc(error.message)}</p>`;$('loginGate').classList.remove('hidden');$('pageRoot').classList.add('hidden');}
     setInterval(pollUpdates,3000);
   }

@@ -54,5 +54,31 @@ class RouteTests(unittest.TestCase):
         with patch('features.video_editing.routes.get_service') as factory:
             self.assertTrue(handle(h,'POST',self.app));factory.assert_not_called()
 
+    def test_resource_id_with_slashes_is_passed_as_query_value(self):
+        lookup=Mock(return_value=[])
+        service=SimpleNamespace(catalog=SimpleNamespace(resource_variants=lookup))
+        with patch('features.video_editing.routes.get_service',return_value=service):
+            handle(Handler('/api/video-editing/catalog/resource-variants?series_code=%7Bv3404%2Fl144250%2F%7D'),'GET',self.app)
+        lookup.assert_called_once_with('{v3404/l144250/}')
+        self.assertEqual(self.replies[0][0],200)
+
+    def test_asset_filters_and_retag_fields_forwarded(self):
+        listing=Mock(return_value={'items':[],'total':0});mutate=Mock(return_value={})
+        service=SimpleNamespace(assets=listing,mutate_asset=mutate)
+        with patch('features.video_editing.routes.get_service',return_value=service):
+            handle(Handler('/api/video-editing/assets?library_kind=free_episode&series_code=21481'),'GET',self.app)
+            handle(Handler('/api/video-editing/assets/va_'+'a'*32,{'series_code':'21481'}),'PATCH',self.app)
+        self.assertEqual(listing.call_args.args[-2:],('free_episode','21481'))
+        self.assertEqual(mutate.call_args.kwargs['series_code'],'21481')
+        self.assertIsNone(mutate.call_args.kwargs['name'])
+
+    def test_material_source_variant_payload_forwarded(self):
+        enqueue=Mock(return_value={})
+        service=SimpleNamespace(material_source=SimpleNamespace(enqueue=enqueue))
+        payload={'app_id':'1479','content_id':'abc123'}
+        with patch('features.video_editing.routes.get_service',return_value=service):
+            handle(Handler('/api/video-editing/tasks/ve_'+'b'*32+'/material-source',payload),'POST',self.app)
+        self.assertEqual(enqueue.call_args.args[2],payload)
+
 
 if __name__=='__main__':unittest.main()

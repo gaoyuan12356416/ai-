@@ -68,7 +68,29 @@ class Store:
             CREATE INDEX IF NOT EXISTS ve_task_status ON ve_task(status,created_at,id);
             CREATE INDEX IF NOT EXISTS ve_batch_project_created ON ve_batch(project_id,created_at);
             CREATE TABLE IF NOT EXISTS ve_lease(name TEXT PRIMARY KEY,holder TEXT NOT NULL,expires_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS ve_unit_render(project_id TEXT NOT NULL,project_version INTEGER NOT NULL,
+              unit_id TEXT NOT NULL,task_id TEXT NOT NULL UNIQUE,
+              PRIMARY KEY(project_id,project_version,unit_id));
             ''')
+            # Additive migration: never rewrite projects, frozen recipes or jobs.
+            db.execute('BEGIN IMMEDIATE')
+            try:
+                columns={row[1] for row in db.execute('PRAGMA table_info(ve_source)')}
+                added=False
+                for column,default in (('library_kind','material'),('series_code','')):
+                    if column not in columns:
+                        db.execute("ALTER TABLE ve_source ADD COLUMN "+column+" TEXT NOT NULL DEFAULT '"+default+"'")
+                        added=True
+                if added:
+                    for row in db.execute('SELECT id,data FROM ve_source').fetchall():
+                        data=json.loads(row['data'])
+                        db.execute('UPDATE ve_source SET library_kind=?,series_code=? WHERE id=?',
+                                   (data.get('library_kind','material'),data.get('series_code',''),row['id']))
+                db.execute('CREATE INDEX IF NOT EXISTS ve_source_resource_library ON ve_source(kind,series_code,library_kind,status,created_at)')
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=20, isolation_level=None)
@@ -112,6 +134,9 @@ class Store:
     def insert(self, kind, values, db):
         values = dict(values)
         values.setdefault('created_at', now()); values.setdefault('updated_at', now())
+        if kind=='source':
+            values['library_kind']=values.get('data',{}).get('library_kind','material')
+            values['series_code']=values.get('data',{}).get('series_code','')
         values['data'] = encode(values.get('data', {}))
         fields = tuple(values)
         db.execute('INSERT INTO '+self.table(kind)+' ('+','.join(fields)+') VALUES ('+','.join('?' for _ in fields)+')', tuple(values[f] for f in fields))
@@ -119,8 +144,11 @@ class Store:
     def update(self, kind, record_id, values, db):
         values = dict(values); values['updated_at'] = now()
         if 'data' in values:
+            if kind=='source':
+                values['library_kind']=values['data'].get('library_kind','material')
+                values['series_code']=values['data'].get('series_code','')
             values['data'] = encode(values['data'])
-        require(set(values) <= {'name','status','data','version','updated_at'}, 'invalid_update', '更新字段无效')
+        require(set(values) <= {'name','status','data','version','updated_at','library_kind','series_code'}, 'invalid_update', '更新字段无效')
         db.execute('UPDATE '+self.table(kind)+' SET '+','.join(f+'=?' for f in values)+' WHERE id=?', (*values.values(), record_id))
 
     def list(self, kind, where='1=1', args=(), limit=100, offset=0):

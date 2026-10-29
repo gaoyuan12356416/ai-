@@ -1,6 +1,7 @@
 """Read-only adapter for the existing product/drama catalog."""
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import signal
@@ -12,6 +13,30 @@ import requests
 
 from . import VideoEditingError, require
 from .store import owner
+
+
+RESOURCE_PLACEHOLDERS = {'', '0', '-', '资源id'}
+
+
+def resource_code(value):
+    """Resource identifiers are opaque catalog strings, not URL path parts."""
+    require(isinstance(value, str), 'resource_required', '请选择短剧资源')
+    value = value.strip()
+    require(0 < len(value) <= 64 and value.casefold() not in RESOURCE_PLACEHOLDERS and
+            not any(ord(c) < 32 or ord(c) == 127 for c in value),
+            'resource_invalid', '短剧资源 ID 无效')
+    return value
+
+
+def _literal(value):
+    # Keep the indexed column unmodified; use a matching connection collation.
+    return 'CONVERT(0x' + str(value).encode('utf-8').hex() + ' USING utf8mb4) COLLATE utf8mb4_unicode_ci'
+
+
+def _language(value):
+    value = str(value or '').strip().lower().replace('_', '-')
+    value = {'zh-hant': 'zh-tw', 'zh-hans': 'zh-cn', 'jp': 'ja', 'kr': 'ko', 'vn': 'vi', 'cz': 'cs'}.get(value, value)
+    return value if value in {'zh-tw', 'zh-cn'} else value.split('-')[0]
 
 
 class Catalog:
@@ -66,6 +91,140 @@ class Catalog:
     def require_product(self,app_id):
         require(str(app_id) in {str(p.get('app_id','')) for p in self.products()},'product_not_available','产品不在当前可用目录中',403)
 
+    def _info_table(self):
+        database = str(getattr(self.app, 'ADMIN_MAPPING_MYSQL_DATABASE', '') or self.app.DB_NAME)
+        require(re.fullmatch(r'[A-Za-z0-9_]+', database), 'catalog_configuration_invalid', '资源目录配置无效', 503)
+        return '`' + database + '`.`ads_drama_info`'
+
+    def _info_rows(self, fields, where, *, index='scoo', limit=1001):
+        columns = ','.join("'" + key + "'," + expression for key, expression in fields.items())
+        rows = self._query('SELECT /*+ MAX_EXECUTION_TIME(5000) */ DISTINCT HEX(JSON_OBJECT(' + columns +
+                           ')) FROM ' + self._info_table() + ' FORCE INDEX (`' + index + '`) WHERE ' +
+                           where + ' LIMIT ' + str(limit))
+        try:
+            return [json.loads(bytes.fromhex(row[0]).decode('utf-8')) for row in rows]
+        except (ValueError, TypeError, IndexError, UnicodeError):
+            raise VideoEditingError('catalog_response_invalid', '资源目录返回内容无效，请稍后重试', 503) from None
+
+    @staticmethod
+    def _resource_summary(code, rows):
+        titles = {str(row.get('english_title') or '').strip() for row in rows}
+        titles.discard('')
+        return {'series_code': code, 'english_title': next(iter(titles)) if len(titles) == 1 else '',
+                'english_title_status': 'matched' if len(titles) == 1 else 'ambiguous' if titles else 'missing'}
+
+    def _resource_rows(self, code):
+        literal = _literal(code)
+        # The first comparison uses scoo; the binary check preserves ID case.
+        return self._info_rows({'series_code': 'series_code',
+                               'english_title': "CASE WHEN LOWER(language)='en' THEN TRIM(name) ELSE '' END"},
+                              'series_code=' + literal + ' AND BINARY series_code=BINARY ' + literal, limit=4)
+
+    def resource(self, series_code):
+        code = resource_code(series_code)
+        rows = self._resource_rows(code)
+        require(rows, 'resource_not_found', '未找到此短剧资源，请重新搜索选择', 404)
+        return self._resource_summary(code, rows)
+
+    def resources(self, query):
+        require(isinstance(query, str), 'query_required', '请输入资源 ID 或英文剧名前缀')
+        query = query.strip()
+        require(0 < len(query) <= 100 and not any(ord(c) < 32 or ord(c) == 127 for c in query),
+                'query_required', '请输入资源 ID 或英文剧名前缀（最多 100 字）')
+        # Exact IDs take priority even when they contain punctuation or spaces.
+        if len(query) <= 64 and query.casefold() not in RESOURCE_PLACEHOLDERS:
+            rows = self._resource_rows(query)
+            if rows:
+                return [self._resource_summary(query, rows)]
+        require(len(query) >= 2, 'query_required', '英文剧名前缀至少输入两个字')
+        prefix = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        candidates = self._info_rows({'series_code': 'series_code'},
+            "LOWER(language)='en' AND series_code NOT IN ('','0','-','资源ID') AND name LIKE " + _literal(prefix),
+            index='name', limit=51)
+        codes = []
+        for row in candidates:
+            code = str(row.get('series_code') or '').strip()
+            if code and code not in codes:
+                codes.append(resource_code(code))
+            if len(codes) >= 50:
+                break
+        if not codes:
+            return []
+        # Resolve all English titles of each match, rather than hiding conflicts
+        # when only one of a resource's English names matched the prefix.
+        titles = self._info_rows({'series_code': 'series_code', 'english_title': 'TRIM(name)'},
+            "LOWER(language)='en' AND series_code IN (" + ','.join(_literal(code) for code in codes) + ')')
+        require(len(titles) <= 1000, 'catalog_result_too_large', '资源名称结果过多，请使用完整资源 ID', 503)
+        return [self._resource_summary(code, [row for row in titles if row.get('series_code') == code]) for code in codes]
+
+    def _variant_rows(self, where, *, index='scoo'):
+        rows = self._info_rows({'app_id': 'CAST(app_id AS CHAR)', 'content_id': 'content_id',
+                               'series_code': 'series_code', 'title': 'TRIM(name)',
+                               'language': 'language', 'country': 'country'}, where, index=index)
+        require(len(rows) <= 1000, 'catalog_result_too_large', '资源版本过多，请缩小选择范围', 503)
+        result = []
+        for row in rows:
+            row = {key: str(value or '').strip() for key, value in row.items()}
+            row['language'] = _language(row.get('language'))
+            row['country'] = row.get('country', '').upper()
+            if row not in result:
+                result.append(row)
+        return result
+
+    def resource_variants(self, series_code):
+        code = resource_code(series_code)
+        literal = _literal(code)
+        rows = self._variant_rows('series_code=' + literal + ' AND BINARY series_code=BINARY ' + literal)
+        require(rows, 'resource_not_found', '未找到此短剧资源，请重新搜索选择', 404)
+        groups = {}
+        for row in rows:
+            groups.setdefault((row.get('app_id'), row.get('content_id')), []).append(row)
+        # A problematic language version does not hide the resource's other
+        # valid versions. A direct selection is revalidated by variant().
+        variants = [self._unique_variant(items) for items in groups.values()]
+        return sorted((row for row in variants if row and row.get('app_id') and row.get('content_id')),
+                      key=lambda row: (row['app_id'], row['language'], row['content_id']))
+
+    @staticmethod
+    def _unique_variant(rows):
+        identities = {tuple(row.get(key, '') for key in ('app_id', 'content_id', 'series_code', 'language', 'country')) for row in rows}
+        if len(identities) != 1:
+            return None
+        result = dict(rows[0])
+        titles = {row.get('title', '') for row in rows}
+        titles.discard('')
+        result['title'] = next(iter(titles)) if len(titles) == 1 else ''
+        result['title_status'] = 'matched' if len(titles) == 1 else 'ambiguous' if titles else 'missing'
+        return result
+
+    def variant(self, app_id, content_id, series_code=None):
+        app_id, content_id = str(app_id).strip(), str(content_id).strip()
+        require(re.fullmatch(r'[1-9][0-9]{0,18}', app_id) and 0 < len(content_id) <= 64 and
+                not any(ord(c) < 32 or ord(c) == 127 for c in content_id), 'drama_invalid', '剧目版本无效')
+        literal = _literal(content_id)
+        rows = self._variant_rows('app_id=' + app_id + ' AND content_id=' + literal +
+                                  ' AND BINARY content_id=BINARY ' + literal, index='ac')
+        require(rows, 'drama_not_found', '未找到此剧目版本', 404)
+        row = self._unique_variant(rows)
+        require(row is not None, 'drama_metadata_ambiguous', '此剧目版本的资源或语言归属不唯一，请选择其他版本', 409)
+        row['series_code'] = resource_code(row.get('series_code'))
+        if series_code is not None:
+            require(row['series_code'] == resource_code(series_code), 'drama_resource_mismatch', '所选剧目版本不属于当前资源', 409)
+        return row
+
+    def source_resource(self, app_id, content_id):
+        app_id, content_id = str(app_id).strip(), str(content_id).strip()
+        require(re.fullmatch(r'[1-9][0-9]{0,18}', app_id) and 0 < len(content_id) <= 64 and
+                not any(ord(c) < 32 or ord(c) == 127 for c in content_id), 'drama_invalid', '剧目版本无效')
+        literal = _literal(content_id)
+        rows = self._info_rows({'series_code': 'series_code'}, 'app_id=' + app_id +
+                              ' AND content_id=' + literal + ' AND BINARY content_id=BINARY ' + literal,
+                              index='ac', limit=3)
+        require(rows, 'drama_not_found', '未找到此剧目版本', 404)
+        codes = {str(row.get('series_code') or '').strip() for row in rows}
+        require(len(codes) == 1, 'drama_resource_ambiguous', '此剧目对应多个短剧资源，请核对资源归属', 409)
+        return {'series_code': resource_code(next(iter(codes)))}
+
     def dramas(self,app_id,query):
         app_id=str(app_id).strip(); query=str(query).strip()
         require(re.fullmatch(r'[A-Za-z0-9._-]{1,128}',app_id),'product_required','请选择产品')
@@ -98,6 +257,15 @@ class Catalog:
                 'drama_invalid','剧目编号无效')
         self.require_product(app_id)
         rows=self._bounded_app_function('fetch_drama_episodes')(str(content_id),app_id=str(app_id))
+        resource = {}
+        try:
+            resource = self.source_resource(app_id, content_id)
+            try:
+                resource.update(self.resource(resource['series_code']))
+            except VideoEditingError:
+                pass
+        except VideoEditingError:
+            pass
         result=[]
         with self.store.transaction() as db:
             for item in rows:
@@ -111,8 +279,15 @@ class Catalog:
                     self.store.insert('source',{'id':sid,'kind':'episode','owner':owner(actor),
                         'name':str(item.get('drama_name',''))+' 第'+str(item['episode_number'])+'集','status':'unprobed',
                         'data':{'app_id':str(app_id),'content_id':str(content_id),'episode_number':int(item['episode_number']),
-                                'title':str(item.get('drama_name','')),'url':url,'identity':{},'metadata':{}}},db)
+                                'title':str(item.get('drama_name','')),'url':url,'identity':{},'metadata':{},
+                                **({'series_code':resource['series_code'],'english_title':resource.get('english_title','')} if resource else {})}},db)
                     row=self.store.get('source',sid,db)
+                elif resource:
+                    data = dict(row['data'])
+                    data.update(series_code=resource['series_code'], english_title=resource.get('english_title',''))
+                    if data != row['data']:
+                        self.store.update('source',sid,{'data':data},db)
+                        row=self.store.get('source',sid,db)
                 result.append(row)
         return result
 
