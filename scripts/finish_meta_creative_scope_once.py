@@ -19,6 +19,26 @@ LEDGER = Path('/mnt/data-disk/fb-ad-asset-delete/tasks.sqlite3')
 SESSIONS = Path('/root/drama_material_service/data/drama_material_jobs.sqlite3')
 
 
+def refresh_job(http, url):
+    # A restarted API lazily recovers dead owners on its first asset request.
+    # Polling SQLite alone would leave the monitor waiting on an orphan forever.
+    for attempt in range(3):
+        try:
+            http.get(url, params={'page': 1, 'page_size': 1}, timeout=30).raise_for_status()
+            return
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == 2:
+                raise
+            time.sleep(2)
+
+
+def retryable_recheck(metadata):
+    error = metadata.get('error', {})
+    return (error.get('code') == 'source_unavailable' and error.get('retryable') is True or
+            not error and metadata.get('status') == 'interrupted' and
+            metadata.get('step') == '核验进程已中断，进度保留，请人工重新核验；未自动恢复删除')
+
+
 def read(sql, values=(), path=LEDGER):
     with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)) as conn:
         conn.row_factory = sqlite3.Row
@@ -87,6 +107,7 @@ def main():
             counts = read('SELECT kind,status,count(*) AS count FROM fb_asset_delete_v2_objects WHERE job_id=? GROUP BY kind,status', (args.job,))
             save(stage=action, request_id=request_id, object_counts=counts, recheck=metadata.get('recheck'))
             time.sleep(30)
+            refresh_job(http, url)
             rows = read('SELECT * FROM '+table+' WHERE request_id=?', (request_id,))
         save(stage=action+'_finished', request_id=request_id, operation_status=rows[0]['status'])
         return rows[0]['status']
@@ -108,8 +129,7 @@ def main():
         if state == 'completed':
             break
         prior = read('SELECT metadata FROM fb_asset_delete_v2_rechecks WHERE request_id=?', (args.operation+'-'+suffix,))[0]
-        error = json.loads(prior['metadata']).get('error', {})
-        if error.get('code') != 'source_unavailable' or error.get('retryable') is not True or attempt == 2:
+        if not retryable_recheck(json.loads(prior['metadata'])) or attempt == 2:
             break
         save(stage='retrying_interrupted_reads', next_attempt=attempt+2)
         time.sleep(15)
@@ -117,7 +137,9 @@ def main():
     # No Ad/Video retry: only Creative objects released by this recheck run.
     pending = read("SELECT 1 FROM fb_asset_delete_v2_objects WHERE job_id=? AND kind='creative' AND status='pending' LIMIT 1", (args.job,))
     if pending:
-        operation('execute', 'fb_asset_delete_v2_runs', 'creative', {'phases': ['creative']})
+        execution = operation('execute', 'fb_asset_delete_v2_runs', 'creative', {'phases': ['creative'], 'only_pending': True})
+        assert execution in ('completed', 'partial'), 'Creative execution interrupted; inspect receipts before resuming'
+    assert not read("SELECT 1 FROM fb_asset_delete_v2_objects WHERE job_id=? AND kind='creative' AND status IN ('pending','in_progress') LIMIT 1", (args.job,)), 'Unstarted Creatives remain'
     counts = read('SELECT kind,status,count(*) AS count FROM fb_asset_delete_v2_objects WHERE job_id=? GROUP BY kind,status', (args.job,))
     status = read('SELECT status FROM fb_asset_delete_v2_jobs WHERE job_id=?', (args.job,))[0]['status']
     save(stage='finished', status=status, object_counts=counts)

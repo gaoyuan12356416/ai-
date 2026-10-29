@@ -10,7 +10,7 @@ import requests
 import deploy_meta_asset_recovery as rollout
 from deploy_meta_delete_throughput import require_api_stopped
 from deploy_meta_pending_resume import BASE, FILES, no_writes
-from finish_meta_creative_scope_once import read, SESSIONS
+from finish_meta_creative_scope_once import read, SESSIONS, refresh_job
 
 
 def main():
@@ -59,7 +59,8 @@ def main():
         backup = args.deployed_backup.resolve()
         assert rollout.ROOT in backup.parents
         plan = json.loads((backup/'plan.json').read_text())
-        assert Path(plan['release']).resolve() == release
+        assert {row['source'] for row in plan['files']} == set(FILES)
+        assert all(rollout.digest(release/row['source']) == row['after'] for row in plan['files'])
         assert all(rollout.digest(Path(row['target'])) == row['after'] for row in plan['files'])
     else:
         rollout.BASE, rollout.BASELINE_HASHES, rollout.FILES, rollout.idle = BASE, {}, FILES, no_writes
@@ -125,6 +126,7 @@ def main():
         counts = read("SELECT status,count(*) AS count FROM fb_asset_delete_v2_objects WHERE job_id=? AND kind='video' GROUP BY status", (args.job,))
         save(stage='executing_pending_video', run_id=runs[0]['run_id'], video_counts=counts)
         time.sleep(30)
+        refresh_job(http, url)
         runs = read('SELECT * FROM fb_asset_delete_v2_runs WHERE request_id=?', (request_id,))
     pending = read("SELECT COUNT(*) AS n FROM fb_asset_delete_v2_objects WHERE job_id=? AND kind='video' AND status='pending'", (args.job,))[0]['n']
     save(stage='video_run_finished', run_status=runs[0]['status'], pending=pending)

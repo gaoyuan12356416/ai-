@@ -25,7 +25,7 @@ task's products, and submits an explicitly authorized execution through the main
 API so all DELETEs share its existing budget. It never repeats an unknown write
 or changes the operation ID. Results and SQLite evidence stay on the data disk.
 
-Validation: 365 Python module tests, 19 actual-source DOM tests, syntax checks,
+Validation: 368 Python module tests, two operator-continuation tests, 19 actual-source DOM tests, syntax checks,
 and a real-browser local 15,000-object fixture. No fixture test sends a deletion.
 Live operator execution and final receipts are separate acceptance evidence.
 
@@ -166,3 +166,55 @@ The pending-recovery layer rolls back with
 the main API is stopped and all writes are idle, followed by
 `bash RELEASE/scripts/safe_restart_drama_api.sh`. Roll back this layer before
 the a717 reference/approval layer, and retain the live ledger throughout.
+
+## Deployed pending recovery and interrupted monitor handling (18:10 CST)
+
+Runtime `2f202a00434cdac948def67dcdab26fa61487591` was deployed at 17:55:46
+after all asset writes and rechecks were idle. Only source/service/store changed;
+the main API restarted from PID 1866164 to 1942336. Health and real-owner detail
+returned 200, all three hashes matched, and object states, attempts, receipts and
+Video account attempts were unchanged. Backup:
+`/mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T095244Z-2f202a00434c`.
+Evidence is `pending-api-deployment.json` in the operational audit directory.
+
+The earlier recheck stopped at checked=2,432/released=2,343 after a MySQL 2013
+connection loss in the exact four-product ACL query. The source now applies its
+existing bounded transport-error retries to each fresh ACL read. It never caches
+permissions or retries an authorization denial. All 368 module tests passed
+locally and on the server.
+
+A separate API restart at 17:58:50 interrupted the v3 read-only recheck after
+97 checks and eight further releases. The initiator remains unconfirmed. The
+three scoped runtime hashes still match 2f; new API PID is 1946048. A real-owner
+GET recovered the dead recheck owner as interrupted, preserving all progress.
+The one-time monitor now polls this bounded GET as well as SQLite, so a restart
+cannot leave it waiting forever on a stale running row. It allows at most three
+read-only passes for known process/transport interruptions. Authorization errors
+and uncertain DELETEs are not retried. Creative execution is pending-only and a
+second write interruption cannot be reported as finished. Two focused tests
+verify GET-only bounded retries and rejection of unknown or authorization errors.
+
+The resumed operation prefix is `scope-recovery-20261029-reference-v4`.
+All 1,278 exact approvals are already persisted: do not resubmit the manifest
+when restoring a recheck. The Video recovery prefix remains
+`scope-recovery-20261029-video-pending-v1`; no run has yet been submitted for it.
+Its `--deployed-backup` option verifies both the current runtime and the selected
+release against the deployment hashes, avoiding another API restart.
+
+The ordered pipeline is Creative continuation, first GET-only full account
+inventory, pending-only Video execution, then a new final inventory. Completion
+requires `pending-video-recovery.json` and `video-absence-audit-final.json` both
+finished and no pending/in-progress objects. Failed DELETEs, separate absence
+evidence and unknown outcomes retain their distinct meanings.
+
+Latest-layer rollback, only with all writes/rechecks idle:
+
+```bash
+systemctl stop drama-material-api.service
+python3 /mnt/data-disk/meta-ad-asset-delete/release-2f202a00434c/scripts/deploy_meta_pending_resume.py rollback /mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T095244Z-2f202a00434c
+bash /mnt/data-disk/meta-ad-asset-delete/release-2f202a00434c/scripts/safe_restart_drama_api.sh
+```
+
+For a full layered rollback, apply this before the a717 reference backup
+(`recovery-backup-20261029T091821Z-a7176fbebe30`) and the original 16eb backup.
+Never restore an old ledger over the current deletion evidence.
