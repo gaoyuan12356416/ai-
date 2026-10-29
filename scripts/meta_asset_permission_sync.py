@@ -711,12 +711,35 @@ def validate_recovery(manifest):
         raise ValueError("recovery_parent_manifest_changed")
     events = [json.loads(line) for line in (parent/"journal.jsonl").read_text().splitlines()]
     pause = next((e for e in reversed(events) if e["event"] == "bm_paused"), None)
-    intent = next((e for e in reversed(events) if e["event"] == "intent" and e["key"] == recovery["key"]), None)
-    if not pause or not intent or pause["key"] != recovery["key"] or pause["at"] != recovery["restricted_at"]:
+    prior_key = recovery.get("prior_restricted_key", recovery["key"])
+    if prior_key != recovery["key"]:
+        # A new explicit account-pool request may make one same-actor account
+        # probe. It cannot reopen the previous Page run or include other assets.
+        scope = manifest.get("input_scope", {})
+        assets = manifest.get("assets", [])
+        if (recovery.get("mode") != "explicit_account_pool_probe" or
+                manifest.get("permission_profile") != "basic_ads" or scope.get("type") != "account_pools" or
+                not assets or any(a["kind"] != "account" or not a.get("pool_ids") or
+                    not set(a["pool_ids"]).issubset(set(scope.get("pool_ids", []))) for a in assets) or
+                recovery["key"] not in {"account:"+a["asset_id"] for a in assets}):
+            raise ValueError("invalid_scoped_account_probe")
+    intent = next((e for e in reversed(events) if e["event"] == "intent" and e["key"] == prior_key), None)
+    if not pause or not intent or pause["key"] != prior_key or pause["at"] != recovery["restricted_at"]:
         raise ValueError("recovery_does_not_match_latest_restriction")
     if intent["actor"]["credential_id"] != recovery["actor_credential_id"] or intent["actor"]["fingerprint"] != recovery["actor_fingerprint"] or intent["target_id"] != recovery["target_id"]:
         raise ValueError("recovery_actor_or_target_changed")
     return recovery
+
+
+def pool_membership_current(db, asset):
+    if not asset.get("pool_ids"):
+        return True
+    pools = sorted(set(asset["pool_ids"]))
+    marks = ','.join(['%s'] * len(pools))
+    rows = db.query("SELECT group_id,platform,deleted_at,account_status FROM ads_alternative_accounts "
+                    "WHERE group_id IN ("+marks+") AND account_id IN (%s,%s)",
+                    tuple(pools)+("act_"+asset["asset_id"],asset["asset_id"]))
+    return any(r['platform']==0 and r['deleted_at']==0 and r['account_status']==1 for r in rows)
 
 
 def verify_after(graph, admin, target, asset, target_id, bm):
@@ -903,6 +926,8 @@ def execute(args, db, graph, credentials):
                     raw_id = ("act_" if a["kind"] == "account" else "") + a["asset_id"]
                     backend = db.assets(a["kind"], [raw_id]).get(a["asset_id"])
                     state, reason = eligibility(a["kind"], live, backend)
+                    if state == "normal" and not pool_membership_current(db, a):
+                        state, reason = "unknown", "removed_or_disabled_in_selected_pools"
                     if state != "normal":
                         result = {"status": "skipped", "reason": reason}
                         break
