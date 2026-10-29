@@ -8,28 +8,37 @@ import subprocess
 
 from features.drama_synthesis.async_runtime import process_launch, record_process, clear_process
 from features.drama_synthesis.gpu import run_render_with_progress
-from .recipe import FPS, FADE_FRAMES, error, output_frames
+from .recipe import FPS, FADE_FRAMES, LEGACY_PROFILE, PROFILE, error, output_frames
 
 
 def _seconds(frames):
     return "%.9f" % (frames / FPS)
 
 
-def encoder_args(encoder="h264_nvenc"):
+def encoder_args(encoder="h264_nvenc", *, compact=False):
     if encoder == "h264_nvenc":
+        if compact:
+            return ["-c:v", encoder, "-preset", "p6", "-rc", "vbr", "-cq", "26", "-b:v", "0"]
         return ["-c:v", encoder, "-preset", "p4", "-rc", "vbr", "-cq", "21", "-b:v", "0"]
     if encoder == "libx264":
+        if compact:
+            return ["-c:v", encoder, "-preset", "medium", "-crf", "24"]
         return ["-c:v", encoder, "-preset", "veryfast", "-crf", "20"]
     raise error("video_editing_encoder_invalid", "剪辑编码器配置无效", 503)
 
 
-def output_args(encoder):
-    return [*encoder_args(encoder), "-maxrate", "6M", "-bufsize", "12M", "-pix_fmt", "yuv420p", "-r", str(FPS),
+def output_args(encoder, *, profile=LEGACY_PROFILE, final=False):
+    # Only the final v2 export trades bitrate for size. Intermediate media and
+    # every frozen v1 job keep their original encoding and checkpoint meaning.
+    compact = profile == PROFILE and final
+    return [*encoder_args(encoder, compact=compact), "-maxrate", "3M" if compact else "6M",
+            "-bufsize", "6M" if compact else "12M", "-pix_fmt", "yuv420p", "-r", str(FPS),
             "-fps_mode", "cfr", "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
             "-video_track_timescale", "15360", "-movflags", "+faststart"]
 
 
-def build_normalize_command(source, clip, output, *, has_audio, ffmpeg="ffmpeg", encoder="h264_nvenc"):
+def build_normalize_command(source, clip, output, *, has_audio, ffmpeg="ffmpeg", encoder="h264_nvenc",
+                            profile=LEGACY_PROFILE, final=False):
     count = clip["end_frame"] - clip["start_frame"]
     duration = _seconds(count)
     fit = ("scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,"
@@ -46,10 +55,12 @@ def build_normalize_command(source, clip, output, *, has_audio, ffmpeg="ffmpeg",
         audio = "anullsrc=r=48000:cl=stereo,atrim=duration=%s,asetpts=PTS-STARTPTS[a]" % duration
     return [ffmpeg, "-hide_banner", "-nostdin", "-y", "-ss", _seconds(clip["start_frame"]),
             "-i", str(source), "-filter_complex_threads", "1", "-filter_complex", video + ";" + audio,
-            "-map", "[v]", "-map", "[a]", "-t", duration, *output_args(encoder), str(output)]
+            "-map", "[v]", "-map", "[a]", "-t", duration,
+            *output_args(encoder, profile=profile, final=final), str(output)]
 
 
-def build_assemble_command(paths, recipe, output, *, ffmpeg="ffmpeg", encoder="h264_nvenc"):
+def build_assemble_command(paths, recipe, output, *, ffmpeg="ffmpeg", encoder="h264_nvenc",
+                           profile=LEGACY_PROFILE, final=False):
     if len(paths) != len(recipe["clips"]) or not paths:
         raise error()
     command = [ffmpeg, "-hide_banner", "-nostdin", "-y"]
@@ -80,7 +91,8 @@ def build_assemble_command(paths, recipe, output, *, ffmpeg="ffmpeg", encoder="h
     filters += ["[%s]trim=end_frame=%d,setpts=N/(30*TB),format=yuv420p[outv]" % (video, length),
                 "[%s]apad,atrim=duration=%s,asetpts=PTS-STARTPTS[outa]" % (audio, _seconds(length))]
     command += ["-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
-                "-map", "[outv]", "-map", "[outa]", "-t", _seconds(length), *output_args(encoder), str(output)]
+                "-map", "[outv]", "-map", "[outa]", "-t", _seconds(length),
+                *output_args(encoder, profile=profile, final=final), str(output)]
     return command
 
 

@@ -416,7 +416,8 @@ class EditingService:
                 path = work / ("clip-%04d.mp4" % index)
                 count = clip["end_frame"] - clip["start_frame"]
                 command = build_normalize_command(sources[clip["source_id"]], clip, path,
-                    has_audio=infos[clip["source_id"]]["has_audio"], ffmpeg=self.config.ffmpeg, encoder=self.config.encoder)
+                    has_audio=infos[clip["source_id"]]["has_audio"], ffmpeg=self.config.ffmpeg, encoder=self.config.encoder,
+                    profile=recipe["profile"], final=len(recipe["clips"]) == 1)
                 self._local_render(path, local_state / ("clip-%04d.local.json" % index),
                     {"fingerprint": fingerprint, "clip_id": clip["id"]}, command, count / 30,
                     diagnostic_context=diagnostic_context)
@@ -431,7 +432,8 @@ class EditingService:
                     self._local_render(output, local_state / (group["name"] + ".local.json"),
                         {"fingerprint": fingerprint, "kind": group["name"]},
                         build_assemble_command([segments[name] for name in group["inputs"]], group["recipe"], output,
-                            ffmpeg=self.config.ffmpeg, encoder=self.config.encoder), group["frames"] / 30,
+                            ffmpeg=self.config.ffmpeg, encoder=self.config.encoder,
+                            profile=recipe["profile"], final=group["name"] == final_name), group["frames"] / 30,
                         diagnostic_context=diagnostic_context)
                     validate_output(probe_media(output, ffprobe=self.config.ffprobe), group["frames"])
                     segments[group["name"]] = output

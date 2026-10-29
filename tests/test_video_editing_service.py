@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from features.video_editing import VideoEditingError
-from features.video_editing.recipe import recipe_fingerprint
+from features.video_editing.recipe import LEGACY_PROFILE, PROFILE, recipe_fingerprint
 from features.video_editing.catalog import Catalog
 from features.video_editing.store import Store,owner
 from features.video_editing.service import Service
@@ -88,6 +88,35 @@ class ServiceTests(unittest.TestCase):
         changed=self.draft();changed['dramas'][0]['clips'][1]['end_ms']=7000;changed['expected_version']=1
         self.service.save_project(changed,ACTOR,p['id']);self.service.mutate_asset(A,ACTOR,delete=True)
         self.assertEqual(self.service.task(task['id'],ACTOR)['data']['payload'],frozen)
+    def test_new_renders_use_compact_profile_without_rewriting_legacy_batches_or_probes(self):
+        project=self.project()
+        with patch.object(self.service,'export_profile',LEGACY_PROFILE):
+            old=self.render(project)
+        frozen=copy.deepcopy(self.service.task(old['id'],ACTOR)['data']['payload'])
+        self.assertEqual(frozen['recipe']['profile'],LEGACY_PROFILE)
+        self.assertEqual(self.render(project)['id'],old['id'])
+        self.assertEqual(self.service.task(old['id'],ACTOR)['data']['payload'],frozen)
+        changed=self.service.save_project({**self.draft(),'expected_version':1},ACTOR,project['id'])
+        new=self.service.render(project['id'],{'operation_id':'compact_render_2','expected_version':changed['version']},ACTOR)['items'][0]
+        self.assertEqual(self.service.task(new['id'],ACTOR)['data']['payload']['recipe']['profile'],PROFILE)
+        with self.store.transaction() as db:self.store.update('source',A,{'status':'uploaded'},db)
+        source=self.service.enqueue_probe(A,ACTOR)
+        self.assertEqual(self.store.get('task',source['data']['probe_task_id'])['data']['payload']['recipe']['profile'],LEGACY_PROFILE)
+    def test_export_default_rollback_keeps_frozen_compact_tasks_and_validates_configuration(self):
+        project=self.project();compact=self.render(project)
+        frozen=copy.deepcopy(self.service.task(compact['id'],ACTOR)['data']['payload'])
+        with patch.dict(os.environ,{'VIDEO_EDITING_EXPORT_PROFILE':LEGACY_PROFILE}):
+            rollback=Service(self.store,self.service.uploads)
+        self.assertEqual(rollback.config()['profile'],LEGACY_PROFILE)
+        self.assertEqual(rollback.task(compact['id'],ACTOR)['data']['payload'],frozen)
+        self.assertEqual(rollback.render(project['id'],{'operation_id':'render_op_1','expected_version':1},ACTOR)['items'][0]['id'],compact['id'])
+        changed=rollback.save_project({**self.draft(),'expected_version':1},ACTOR,project['id'])
+        legacy=rollback.render(project['id'],{'operation_id':'rollback_render_2','expected_version':changed['version']},ACTOR)['items'][0]
+        self.assertEqual(rollback.task(legacy['id'],ACTOR)['data']['payload']['recipe']['profile'],LEGACY_PROFILE)
+        self.assertEqual(rollback.task(compact['id'],ACTOR)['data']['payload'],frozen)
+        with patch.dict(os.environ,{'VIDEO_EDITING_EXPORT_PROFILE':'unsupported'}):
+            with self.assertRaises(VideoEditingError) as caught:Service(self.store,self.service.uploads)
+        self.assertEqual(caught.exception.code,'video_editing_export_profile_invalid')
     def test_render_idempotence_and_one_task_per_drama(self):
         p=self.project();first=self.render(p);second=self.render(p)
         self.assertEqual(first['id'],second['id']);self.assertEqual(self.store.list('task')[1],1)

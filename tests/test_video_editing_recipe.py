@@ -2,7 +2,7 @@ import copy
 import unittest
 
 from features.drama_synthesis.core import DramaSynthesisError
-from features.video_editing.recipe import (PROFILE, validate_recipe, recipe_fingerprint,
+from features.video_editing.recipe import (LEGACY_PROFILE, PROFILE, validate_recipe, recipe_fingerprint,
     payload_fingerprint, output_frames, ms_to_frame)
 
 
@@ -16,6 +16,22 @@ def fixture():
 
 
 class RecipeTests(unittest.TestCase):
+    def test_legacy_profile_keeps_existing_hash_and_compact_profile_is_distinct(self):
+        legacy = fixture(); legacy["profile"] = LEGACY_PROFILE
+        compact = copy.deepcopy(legacy); compact["profile"] = PROFILE
+        self.assertEqual(validate_recipe(legacy)["profile"], LEGACY_PROFILE)
+        self.assertEqual(validate_recipe(compact)["profile"], PROFILE)
+        self.assertEqual(recipe_fingerprint(legacy), "26ce1f5a98d1ff3cc2ea672950b9b9bfce9d327def43c03d46aefb026d31cef3")
+        payload = {"job_id": "ve_" + "a" * 32, "task_type": "video_editing_v1", "operation": "render", "recipe": legacy}
+        self.assertEqual(payload_fingerprint(payload), "d9690eb2c5c03a0948e20ecbb962965f5ab41e840c79eba15a42acd336490767")
+        self.assertNotEqual(recipe_fingerprint(legacy), recipe_fingerprint(compact))
+        for profile in (LEGACY_PROFILE, PROFILE):
+            probe = fixture(); probe.update(profile=profile, clips=[])
+            self.assertEqual(validate_recipe(probe, "probe")["profile"], profile)
+        for profile in ("video-editing-720-v3", None, []):
+            invalid = fixture(); invalid["profile"] = profile
+            with self.assertRaises(DramaSynthesisError): validate_recipe(invalid)
+
     def test_cutting_and_frame_rounding_are_deterministic(self):
         value = validate_recipe(fixture())
         self.assertEqual((value["clips"][0]["start_frame"], output_frames(value)), (30, 30))

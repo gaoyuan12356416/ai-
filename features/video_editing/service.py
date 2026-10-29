@@ -11,8 +11,8 @@ from . import VideoEditingError, require
 from .catalog import Catalog, probe_identity
 from .store import Store, can_manage, encode, identifier, now, owner
 from .uploads import Uploads, MAX_BYTES, PART_BYTES
+from .recipe import LEGACY_PROFILE, PROFILE
 
-PROFILE='video-editing-720-v1'
 MAX_DRAMAS=20
 TERMINAL={'completed','failed','cancelled'}
 
@@ -31,6 +31,8 @@ class Service:
         self.material_source=MaterialSource(self)
         self.gpu_url,self.gpu_token=gpu_url.rstrip('/'),gpu_token
         self._intake_enabled=bool(intake_enabled)
+        self.export_profile=os.environ.get('VIDEO_EDITING_EXPORT_PROFILE',PROFILE).strip()
+        require(self.export_profile in (LEGACY_PROFILE,PROFILE),'video_editing_export_profile_invalid','剪辑导出配置无效',503)
 
     @property
     def intake_enabled(self):
@@ -40,7 +42,7 @@ class Service:
         require(self.intake_enabled,'video_editing_intake_disabled','新剪辑任务已暂停，已有任务仍可查询和恢复',503)
 
     def config(self):
-        return {'enabled':self.intake_enabled,'intake_enabled':self.intake_enabled,'max_file_bytes':MAX_BYTES,'part_size':PART_BYTES,'max_dramas':MAX_DRAMAS,'profile':PROFILE,
+        return {'enabled':self.intake_enabled,'intake_enabled':self.intake_enabled,'max_file_bytes':MAX_BYTES,'part_size':PART_BYTES,'max_dramas':MAX_DRAMAS,'profile':self.export_profile,
                 'worker_configured':bool(self.gpu_url and self.gpu_token),'cos_configured':bool(self.uploads.client and self.uploads.bucket)}
 
     def signed_url(self,artifact,download=False):
@@ -130,7 +132,7 @@ class Service:
             if source['status'] in {'ready','probing'}: return source
             # One source has at most one active probe, even across operators.
             task_id=identifier('ve_')
-            recipe={'version':1,'profile':PROFILE,'sources':[{'source_id':sid,'kind':source['kind'],'url':d['url'],
+            recipe={'version':1,'profile':LEGACY_PROFILE,'sources':[{'source_id':sid,'kind':source['kind'],'url':d['url'],
                     'identity':d['identity']}],'clips':[]}
             from .recipe import validate_recipe
             recipe=validate_recipe(recipe,operation='probe')
@@ -286,7 +288,7 @@ class Service:
                 for sid in dict.fromkeys(c['source_id'] for c in clips):
                     source=self.source(sid,actor,db,ready=True); d=source['data']; meta=d['metadata']
                     sources.append({'source_id':sid,'kind':source['kind'],'url':d['url'],'identity':d['identity'],**meta})
-                recipe=validate_recipe({'version':1,'profile':PROFILE,'sources':sources,'clips':clips},operation='render')
+                recipe=validate_recipe({'version':1,'profile':self.export_profile,'sources':sources,'clips':clips},operation='render')
                 task_operation=internal_op+'_'+str(index)
                 prior=self.store.row(db.execute('SELECT * FROM ve_task WHERE owner=? AND operation_id=?',(record_owner,task_operation)).fetchone())
                 if prior:
