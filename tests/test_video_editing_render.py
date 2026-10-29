@@ -9,7 +9,7 @@ import re
 from unittest import mock
 from pathlib import Path
 
-from features.video_editing.recipe import validate_recipe, PROFILE, output_frames
+from features.video_editing.recipe import validate_recipe, LEGACY_PROFILE, PROFILE, output_frames
 from features.video_editing.render import build_normalize_command, build_assemble_command, assembly_layers, probe_media, run_ffmpeg, validate_output
 from features.video_editing.gpu_integration import EditingService, Config
 from scripts.test_drama_synthesis_gpu_cache import FakeMultipartCos
@@ -25,6 +25,18 @@ def recipe_fixture():
 
 
 class RenderTests(unittest.TestCase):
+    def test_compact_profile_preserves_intermediates_and_legacy_encoder_arguments(self):
+        clip=validate_recipe(recipe_fixture())["clips"][0]
+        for encoder in ("h264_nvenc", "libx264"):
+            legacy=build_normalize_command("in.mp4",clip,"out.mp4",has_audio=True,encoder=encoder)
+            for profile, final in ((LEGACY_PROFILE,True),(PROFILE,False)):
+                self.assertEqual(legacy,build_normalize_command("in.mp4",clip,"out.mp4",has_audio=True,
+                    encoder=encoder,profile=profile,final=final))
+            compact=build_normalize_command("in.mp4",clip,"out.mp4",has_audio=True,encoder=encoder,profile=PROFILE,final=True)
+            self.assertEqual(compact[compact.index("-maxrate")+1],"3M")
+            self.assertEqual(compact[compact.index("-filter_complex")+1],legacy[legacy.index("-filter_complex")+1])
+            self.assertEqual(compact[compact.index("-t")+1],legacy[legacy.index("-t")+1])
+
     def test_large_timeline_bounds_decoders_and_preserves_total_frames(self):
         recipe = recipe_fixture()
         recipe["clips"] = [{"id": str(i), "source_id": "s", "start_ms": 0, "end_ms": 1000,
@@ -106,6 +118,50 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(diagnostic["context"], context)
             self.assertNotIn("private_diagnostic_test_filter", json.dumps(diagnostic))
             self.assertFalse(state.exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
+    def test_real_service_compacts_singleton_or_last_layer_only_and_replays(self):
+        class Cos:
+            def __init__(self): self.objects = {}
+            def __getattr__(self, name):
+                if name == "get_bucket_versioning": return lambda **kw: {}
+                def call(**kwargs):
+                    instance = self.objects.setdefault(kwargs["Key"], FakeMultipartCos())
+                    return getattr(instance, name)(**kwargs)
+                return call
+        with tempfile.TemporaryDirectory(prefix="video-editing-compact-") as root:
+            root=Path(root); source=root/"source.mp4"; cos=Cos()
+            subprocess.run(["ffmpeg","-v","error","-y","-f","lavfi","-i",
+                "testsrc2=size=160x120:rate=25:duration=0.6","-c:v","libx264","-preset","ultrafast",str(source)],
+                check=True,capture_output=True)
+            data=source.read_bytes(); sha=hashlib.sha256(data).hexdigest()
+            item={"source_id":"s","kind":"asset","url":"https://b.cos.ap-hongkong.myqcloud.com/video-editing/v1/source.mp4",
+                  "identity":{"bucket":"b","key":"video-editing/v1/source.mp4","size_bytes":len(data),"sha256":sha},
+                  "duration_ms":600,"width":160,"height":120,"has_audio":False}
+            def download(row,path,**_kwargs):
+                Path(path).write_bytes(data)
+                return {"path":str(path),"sha256":sha,"size_bytes":len(data)}
+            config=Config(root/"work",root/"state","b","ap-hongkong",encoder="libx264",reserve_bytes=0)
+            service=EditingService(config,lambda:cos)
+            for index,(profile,count) in enumerate(((LEGACY_PROFILE,1),(PROFILE,1),(PROFILE,13))):
+                with self.subTest(profile=profile,clips=count):
+                    payload={"job_id":"ve_"+str(index+1)*32,"task_type":"video_editing_v1","operation":"render",
+                        "recipe":{"version":1,"profile":profile,"sources":[item],"clips":[
+                            {"id":str(i),"source_id":"s","start_ms":0,"end_ms":600,
+                             "transition":"fade" if count>1 and i==0 else "cut"} for i in range(count)]}}
+                    with mock.patch("features.video_editing.gpu_integration.verified_source_download",side_effect=download), \
+                         mock.patch.object(service,"_local_render",wraps=service._local_render) as renders:
+                        result=service.execute(payload)
+                        commands=[call.args[3] for call in renders.call_args_list]
+                        compact=[command for command in commands if command[command.index("-crf")+1]=="24"]
+                        self.assertEqual(len(commands),16 if count==13 else 1)
+                        self.assertEqual(len(compact),1 if profile==PROFILE else 0)
+                        if compact:self.assertEqual(compact[0],commands[-1])
+                        self.assertEqual(result["artifact"]["duration_ms"],7500 if count==13 else 600)
+                        # The same frozen recipe returns the existing receipt,
+                        # without applying the current default a second time.
+                        self.assertEqual(service.execute(payload),result)
+                        self.assertEqual(renders.call_count,len(commands))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
     def test_real_service_probe_render_private_receipts_cleanup_and_replay(self):

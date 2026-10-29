@@ -10,7 +10,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from features.drama_synthesis.core import DramaSynthesisError
 
 TASK_TYPE = "video_editing_v1"
-PROFILE = "video-editing-720-v1"
+LEGACY_PROFILE = "video-editing-720-v1"
+PROFILE = "video-editing-720-v2"
 FPS = 30
 FADE_FRAMES = 9
 # Numeric safety bound, not a social-publishing duration policy. Actual admission
@@ -93,7 +94,8 @@ def ms_to_frame(value):
 def validate_recipe(recipe, operation="render"):
     if operation not in {"probe", "render"} or not isinstance(recipe, dict):
         raise error()
-    if recipe.get("version") != 1 or type(recipe.get("version")) is not int or recipe.get("profile") != PROFILE:
+    profile = recipe.get("profile")
+    if recipe.get("version") != 1 or type(recipe.get("version")) is not int or profile not in (LEGACY_PROFILE, PROFILE):
         raise error()
     raw_sources, raw_clips = recipe.get("sources"), recipe.get("clips")
     if not isinstance(raw_sources, list) or not 1 <= len(raw_sources) <= 128 or not isinstance(raw_clips, list):
@@ -120,7 +122,7 @@ def validate_recipe(recipe, operation="render"):
     if operation == "probe":
         if len(sources) != 1 or raw_clips:
             raise error()
-        return {"version": 1, "profile": PROFILE, "sources": sources, "clips": []}
+        return {"version": 1, "profile": profile, "sources": sources, "clips": []}
     if not 1 <= len(raw_clips) <= 512:
         raise error()
     lookup, clips, clip_ids = {s["source_id"]: s for s in sources}, [], set()
@@ -149,7 +151,7 @@ def validate_recipe(recipe, operation="render"):
         outgoing = FADE_FRAMES if clip["transition"] == "fade" else 0
         if clip["end_frame"] - clip["start_frame"] < incoming + outgoing:
             raise error("video_editing_transition_too_long", "片段 %s 长度不足以容纳两侧0.3秒过渡" % clip["id"])
-    recipe = {"version": 1, "profile": PROFILE, "sources": sources, "clips": clips}
+    recipe = {"version": 1, "profile": profile, "sources": sources, "clips": clips}
     if output_frames(recipe) > MAX_DURATION_MS * FPS // 1000:
         raise error("video_editing_duration_limit", "成片时长超出剪辑参数可表示范围")
     return recipe
