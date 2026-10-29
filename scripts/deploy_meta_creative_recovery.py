@@ -1,0 +1,26 @@
+"""Scoped recovery of interrupted checks and receipt-backed missing videos."""
+import argparse
+from pathlib import Path
+import deploy_meta_asset_recovery as rollout
+from deploy_meta_delete_throughput import require_api_stopped
+from deploy_meta_preview_scale import no_writes
+
+BASE = '2f202a00434cdac948def67dcdab26fa61487591'
+FILES = ['features/fb_ad_asset_delete/'+name+'.py' for name in ('graph', 'service')]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=('prepare', 'apply', 'rollback'))
+    parser.add_argument('path', type=Path)
+    args = parser.parse_args()
+    rollout.BASE, rollout.BASELINE_HASHES, rollout.FILES, rollout.idle = BASE, {}, FILES, no_writes
+    if args.mode == 'prepare':
+        rollout.prepare(args.path)
+    else:
+        require_api_stopped()
+        rollout.switch(args.path, args.mode == 'rollback')
+
+
+if __name__ == '__main__':
+    main()

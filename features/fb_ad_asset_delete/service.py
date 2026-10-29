@@ -187,8 +187,27 @@ class Service:
             return "视频引用索引：已读取 %s 条源记录%s" % (format(done, ","), "，完整读取结束" if total else "，正在完整读取")
         return "核验 Creative 共享引用：%d / %d" % (done, total)
 
+    @staticmethod
+    def _deleted_video_accounts(job):
+        """Only this frozen job's confirmed account receipts explain missing videos."""
+        receipts = defaultdict(set)
+        for obj in job["objects"]:
+            if obj["kind"] != "video":
+                continue
+            for row in obj.get("video_account_results", []):
+                result, aid = row.get("result") or {}, str(row.get("account_id", ""))
+                confirmed = (row.get("status") == "deleted" and result.get("success") is True or
+                             row.get("status") == "already_deleted" and result.get("confirmed_absent") is True)
+                if (confirmed and aid in obj.get("account_ids", []) and
+                        result.get("delete_scope") == "ad_account_video" and
+                        str(result.get("account_id", "")) == aid and
+                        str(result.get("video_id", "")) == obj["object_id"]):
+                    receipts[aid].add(obj["object_id"])
+        return dict(receipts)
+
     def _preview_inspect(self, entries, allowed_ads, progress, on_result=None, check_references=False,
-                         authorize=None, on_checked=None, deleted_creatives=None, allowed_ads_for=None):
+                         authorize=None, on_checked=None, deleted_creatives=None, allowed_ads_for=None,
+                         deleted_video_accounts=None):
         """Bounded account workers, independent clients, and one-use GET batches."""
         groups, stop, result_lock = defaultdict(list), threading.Event(), threading.Lock()
         checked = [0]
@@ -197,6 +216,7 @@ class Service:
 
         def work(accounts, objects):
             graph = self.graph_factory()
+            graph.deleted_video_accounts = deleted_video_accounts or {}
             graph.response_observer = lambda metadata: self.execution_budget.observe(accounts, metadata)
             graph.request_guard = lambda: self.execution_budget.wait(accounts, stop)
             try:
@@ -215,6 +235,8 @@ class Service:
                                 state, proof = graph.inspect(obj, allowed_ads_for(obj) if allowed_ads_for else allowed_ads, deleted_creatives=deleted_creatives,
                                                              check_references=check_references)
                             except AssetError as exc:
+                                if exc.code == "execution_stopped":
+                                    raise  # Keep unexamined objects' original reasons on a stopped read.
                                 with result_lock:
                                     self._block(obj, exc.code, exc.message)
                                     obj["result"] = self._error_result(exc)
@@ -423,6 +445,7 @@ class Service:
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
             approved_parents = {o["key"]: self._approved_parent_ids(job, o) for o in job["objects"] if o["kind"] == "creative"}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
+            deleted_video_accounts = self._deleted_video_accounts(job)
             for phase in phases:
                 self._allowed(self.authorize(session), job)
                 self.store.update_job(job_id, current_phase=phase, execution_concurrency=self.execution_budget.concurrency)
@@ -450,6 +473,7 @@ class Service:
 
                 def nodes(accounts, entries):
                     graph = self._worker_graph(accounts, stop, session, job)
+                    graph.deleted_video_accounts = deleted_video_accounts
                     try:
                         for obj in entries:
                             with self.execution_budget.operation(accounts, stop):
@@ -686,6 +710,7 @@ class Service:
         # for exact frozen Creatives. Their own ownership and other references
         # still need fresh checks; Ad execution and replacement IDs are unchanged.
         retryable = {"reference_check_incomplete", "shared_outside_scope", "source_unavailable",
+                     "execution_stopped", "creative_video_changed",
                      "read_unavailable", "video_owner_unverified", "video_index_incomplete",
                      "video_index_expired", "video_index_malformed", "video_index_unavailable",
                      "video_index_building", "video_index_disk_full", "video_index_too_large", "video_reference_unverified"}
@@ -736,7 +761,8 @@ class Service:
                         verify.append(obj)
                 self._preview_inspect(verify, allowed_ads, lambda data: None, check_references=True,
                     authorize=authorize, on_checked=record, deleted_creatives=deleted_creatives,
-                    allowed_ads_for=lambda obj: allowed_ads | approved_parents.get(obj["key"], set()))
+                    allowed_ads_for=lambda obj: allowed_ads | approved_parents.get(obj["key"], set()),
+                    deleted_video_accounts=self._deleted_video_accounts(job))
             self.store.update_recheck(operation_id, status="completed", checked=checked, released=released,
                 step="核验完成：%d 个通过，%d 个仍阻止。执行需另行确认" % (released, len(blocked)-released))
         except Exception as exc:

@@ -59,9 +59,11 @@ def main():
         backup = args.deployed_backup.resolve()
         assert rollout.ROOT in backup.parents
         plan = json.loads((backup/'plan.json').read_text())
-        assert {row['source'] for row in plan['files']} == set(FILES)
+        expected_files = set(FILES) | {'features/fb_ad_asset_delete/graph.py'}
+        assert {row['source'] for row in plan['files']} and {row['source'] for row in plan['files']} <= expected_files
         assert all(rollout.digest(release/row['source']) == row['after'] for row in plan['files'])
         assert all(rollout.digest(Path(row['target'])) == row['after'] for row in plan['files'])
+        assert all(rollout.digest(release/name) == rollout.digest(rollout.LIVE/name) for name in expected_files)
     else:
         rollout.BASE, rollout.BASELINE_HASHES, rollout.FILES, rollout.idle = BASE, {}, FILES, no_writes
         captured = io.StringIO()

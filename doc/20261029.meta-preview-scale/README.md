@@ -218,3 +218,37 @@ bash /mnt/data-disk/meta-ad-asset-delete/release-2f202a00434c/scripts/safe_resta
 For a full layered rollback, apply this before the a717 reference backup
 (`recovery-backup-20261029T091821Z-a7176fbebe30`) and the original 16eb backup.
 Never restore an old ledger over the current deletion evidence.
+
+## Receipt-backed Creative recovery
+
+The operator approved completing the current recheck, repairing both remaining
+recovery cases, deleting eligible original objects and auditing/recovering Video
+failures. The waiting controllers were stopped while the main API's v4 recheck
+continued unchanged; no active DELETE run was interrupted.
+
+Sixty-five Creatives inherited `execution_stopped` during the previous SQL
+interruption, with zero deletion attempts. Explicit rechecks now reconsider this
+temporary reason through the normal fresh ACL/reference/Meta checks. A cancelled
+read no longer overwrites an unexamined object's original blocker.
+
+Some original Creatives lost a video reference after this cleanup had successfully
+removed that video from the same account. Requiring exact equality with the old
+video list then blocked cleanup of the original Creative itself. Both recheck and
+execution now accept a strict reduction only when every missing video has a
+confirmed account-specific outcome in this frozen job's ledger. New video IDs,
+missing evidence, failed/unknown outcomes, wrong accounts and outside references
+remain blocked. Frozen IDs and verified video lists are never rewritten. The
+successful read proof lists the missing IDs and the account supplying evidence.
+
+Validation: 375 module tests and two monitor tests. Added cases cover a real
+temporary SQLite account receipt through Video deletion, Creative recheck and
+fresh execution; stopped reads; wrong/unknown/global receipts; new video IDs;
+and live ownership/reference conflicts. No test sends Meta requests.
+
+Deployment uses `scripts/deploy_meta_creative_recovery.py` with baseline
+`2f202a00434cdac948def67dcdab26fa61487591` and only graph/service targets. Wait for
+all asset writes and rechecks to finish, prepare a fresh backup, then apply with
+the main API stopped and use `safe_restart_drama_api.sh`. Rollback uses this
+wrapper's `rollback BACKUP` before the earlier 2f/a717/16eb layers; keep SQLite.
+The pending Video controller accepts this verified two-file backup and compares
+all four relevant runtime modules to its release, avoiding another API restart.

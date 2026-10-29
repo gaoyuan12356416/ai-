@@ -60,6 +60,7 @@ class GraphClient:
         self.credential_contexts = {}
         self.video_credential_creatives = {}
         self.preview_nodes = {}
+        self.deleted_video_accounts = {}
 
     @staticmethod
     def _usage_metrics(value):
@@ -519,7 +520,13 @@ class GraphClient:
         if kind == "creative":
             proof["video_ids"] = creative_video_ids(data)
             if "verified_video_ids" in obj and set(proof["video_ids"]) != set(obj["verified_video_ids"]):
-                raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览", detail=self.credential_context(obj))
+                actual, expected = set(proof["video_ids"]), set(obj["verified_video_ids"])
+                aid = account_id(data.get("account_id", ""))
+                missing = expected - actual
+                confirmed = self.deleted_video_accounts.get(aid, set())
+                if actual - expected or not missing.issubset(confirmed):
+                    raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览", detail=self.credential_context(obj))
+                proof.update(missing_video_ids_confirmed_deleted=sorted(missing), video_deletion_account_id=aid)
         return "pending", proof
 
     @staticmethod
