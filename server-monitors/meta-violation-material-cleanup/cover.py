@@ -64,7 +64,7 @@ def report_body(batch, counts, global_counts=None):
 
 
 def notify_completed(store, audit, config, include_pending=False):
-    # Batch completions no longer send. Only the 09:30 daily timer delivers.
+    # Batch completions no longer send. Only the periodic summary timer delivers.
     # Keep historical notices/frozen bodies intact for receipt reconciliation.
     return
 
@@ -295,7 +295,7 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('command', choices=('scan', 'work', 'preview', 'status', 'notify'))
     parser.add_argument('--once', action='store_true')
-    parser.add_argument('--dry-run', action='store_true', help='Preview daily notice without sending')
+    parser.add_argument('--dry-run', action='store_true', help='Preview configured summary window without sending')
     parser.add_argument('--max-ads', type=int, default=256)
     parser.add_argument('--preview-dir', help='Reuse only an isolated completed preview scan; refresh all write-time sources/Graph reads')
     args = parser.parse_args()

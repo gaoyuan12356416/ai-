@@ -1,5 +1,5 @@
 [Unit]
-Description=Deliver last 24 hours of Meta cover execution at 09:30 Beijing
+Description=Deliver rolling 24-hour Meta cover execution summary every four hours
 Wants=network-online.target
 After=network-online.target
 RequiresMountsFor=/mnt/data-disk/meta-violation-material-cleanup

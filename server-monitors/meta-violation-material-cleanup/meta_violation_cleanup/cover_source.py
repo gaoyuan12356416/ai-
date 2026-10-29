@@ -119,13 +119,18 @@ class CoverSource(SqlSource):
             c['creative_id'] = c.get('old_creative_id', c.get('creative_id'))
         result = {}
         for part in _chunks(candidates, 64):
-            contexts = current_contexts(self, part)
-            mids = sorted({str(mid) for c in part for mid in c.get('material_ids', [])})
-            metadata = self.material_metadata(mids) if mids else {}
-            wanted = {(str(c['root_id']), str(metadata[mid].get('data_source_id') or '').strip(),
-                       str(metadata[mid].get('language') or '').strip().casefold())
-                      for c in part for mid in map(str, c.get('material_ids', [])) if mid in metadata}
-            covers = self.drama_covers({k for k in wanted if k[1] and k[2]}) if wanted else []
+            # Keep the three bounded source reads in one short FIFO snapshot.
+            # Opening a fresh gated mysql process for each read dominates the
+            # query time and can mix lineage, material and cover versions. The
+            # snapshot ends before Graph work, and the next wave opens anew.
+            with self.snapshot():
+                contexts = current_contexts(self, part)
+                mids = sorted({str(mid) for c in part for mid in c.get('material_ids', [])})
+                metadata = self.material_metadata(mids) if mids else {}
+                wanted = {(str(c['root_id']), str(metadata[mid].get('data_source_id') or '').strip(),
+                           str(metadata[mid].get('language') or '').strip().casefold())
+                          for c in part for mid in map(str, c.get('material_ids', [])) if mid in metadata}
+                covers = self.drama_covers({k for k in wanted if k[1] and k[2]}) if wanted else []
             for c in part:
                 out = dict(c, validated=False)
                 ctx = contexts[(str(c['ad_id']), str(c['creative_id']))]

@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -59,7 +59,8 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(data['timings']['enqueue_to_bind']['mean_seconds'], 7200)
         self.assertEqual(data['timings']['bind_verification']['mean_seconds'], 10)
         self.assertEqual(data['timings']['replacement_total']['mean_seconds'], 7210)
-        self.assertIn('尚无独立埋点', daily.report_body(data))
+        self.assertIn('账本阶段历时', daily.report_body(data))
+        self.assertNotIn('尚无独立埋点', daily.report_body(data))
 
     def test_summary_nearest_rank_p95_and_empty(self):
         self.assertEqual(daily.summary([])['mean_seconds'], None)
@@ -120,10 +121,147 @@ class DailyTests(unittest.TestCase):
 
     def test_timer_has_no_minute_or_boot_trigger(self):
         timer = (Path(cover.__file__).parent / 'deploy/meta-cover-notify.timer').read_text()
-        self.assertIn('OnCalendar=*-*-* 09:30:00 Asia/Shanghai', timer)
+        self.assertIn('OnCalendar=*-*-* 01,05,09,13,17,21:30:00 Asia/Shanghai', timer)
         self.assertIn('Persistent=false', timer)
         self.assertNotIn('OnBootSec=', timer)
         self.assertNotIn('OnUnitActiveSec=', timer)
+
+    def test_four_hour_window_is_anchored_in_beijing_and_handles_midnight(self):
+        for hour in (1, 5, 9, 13, 17, 21):
+            at = self.at.replace(hour=hour)
+            start, end = daily.window(at, 4)
+            self.assertEqual(end, at)
+            self.assertEqual(end - start, timedelta(hours=24))
+            self.assertEqual(daily.window(at - timedelta(microseconds=1), 4)[1], end - timedelta(hours=4))
+            self.assertEqual(daily.window(at.astimezone(timezone.utc), 4), (start, end))
+        start, end = daily.window(self.at.replace(hour=0), 4)
+        self.assertEqual(end.isoformat(), '2026-10-28T21:30:00+08:00')
+        self.assertEqual(start.isoformat(), '2026-10-27T21:30:00+08:00')
+        self.assertEqual(daily.window(self.at, 4, 4)[0], self.at - timedelta(hours=4))
+
+    def periodic_config(self):
+        return dict(self.config, cover_report_hours=4, cover_report_lookback_hours=24,
+                    cover_report_feishu_config='group-fixture',
+                    cover_report_recipient={'receive_id_type': 'chat_id',
+                                            'receive_id': 'oc_b633b6fba2c78f43ef1ebacd314d518c'})
+
+    def test_periodic_send_freezes_window_destination_and_uses_dedicated_config(self):
+        config, calls, audit = self.periodic_config(), [], self.audit
+        class Sender:
+            def __init__(self, runtime, path, destination):
+                calls.append((path, destination))
+            def send(self, run_id, phase, body):
+                audit.claim_notice(run_id, phase, body)
+                audit.start_notice(run_id, phase)
+                audit.finish_notice(run_id, phase, 'sent', {'message_id': 'fixture'})
+                return {'message_id': 'fixture'}
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), \
+             patch.object(daily, 'worker_state', lambda: {}), patch.object(daily, 'Notifier', Sender):
+            first = daily.notify_daily(config, audit, self.at)
+            repeat = daily.notify_daily(config, audit, self.at + timedelta(hours=3))
+            following = daily.notify_daily(config, audit, self.at + timedelta(hours=4))
+        self.assertEqual(first['run_id'], 'cover-periodic-4h-20261029T0930')
+        self.assertEqual(repeat['run_id'], first['run_id'])
+        self.assertNotEqual(following['run_id'], first['run_id'])
+        self.assertEqual(calls, [('group-fixture', config['cover_report_recipient'])] * 2)
+        frozen = audit.load_artifact(first['run_id'], 'daily-summary.json')
+        self.assertEqual(frozen['recipient'], config['cover_report_recipient'])
+        self.assertEqual(frozen['data']['window_start'], '2026-10-28T09:30:00+08:00')
+        self.assertIn('每4小时汇总', frozen['body'])
+        self.assertIn('每4小时播报一次，汇总近24小时', frozen['body'])
+
+    def test_periodic_unknown_is_not_replayed_and_daily_receipt_is_preserved(self):
+        for run_id in ('cover-daily-20261029', 'cover-periodic-4h-20261029T0930'):
+            self.audit.begin(run_id, 'run', {})
+            self.audit.claim_notice(run_id, 'end', 'frozen')
+            self.audit.start_notice(run_id, 'end')
+            self.audit.finish_notice(run_id, 'end', 'unknown', {})
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), patch.object(daily, 'Notifier') as sender:
+            result = daily.notify_daily(self.periodic_config(), self.audit, self.at)
+        sender.assert_not_called()
+        self.assertEqual(result['delivery'], 'unknown')
+        self.assertEqual(self.audit.notice('cover-daily-20261029', 'end')['status'], 'unknown')
+
+    def test_failed_frozen_period_cannot_be_rerouted(self):
+        config = self.periodic_config()
+        run_id = 'cover-periodic-4h-20261029T0930'
+        self.audit.begin(run_id, 'run', {})
+        self.audit.artifact(run_id, 'daily-summary.json', {'body': 'frozen', 'data': {},
+                                                         'recipient': config['cover_report_recipient']})
+        self.audit.claim_notice(run_id, 'end', 'frozen')
+        self.audit.finish_notice(run_id, 'end', 'failed', {'request_sent': False})
+        config['cover_report_recipient'] = {'receive_id_type': 'chat_id', 'receive_id': 'oc_different'}
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), patch.object(daily, 'Notifier') as sender:
+            with self.assertRaisesRegex(ValueError, 'frozen_notification_recipient_changed'):
+                daily.notify_daily(config, self.audit, self.at)
+        sender.assert_not_called()
+
+    def test_terminal_period_keeps_frozen_recipient_after_group_change_without_sending(self):
+        config = self.periodic_config()
+        original = dict(config['cover_report_recipient'])
+        run_id = 'cover-periodic-4h-20261029T0930'
+        self.audit.begin(run_id, 'run', {})
+        self.audit.artifact(run_id, 'daily-summary.json', {'body': 'frozen', 'data': {},
+                                                         'recipient': original})
+        self.audit.claim_notice(run_id, 'end', 'frozen')
+        self.audit.start_notice(run_id, 'end')
+        self.audit.finish_notice(run_id, 'end', 'sent', {'message_id': 'old-group-message'})
+        config['cover_report_recipient'] = {'receive_id_type': 'chat_id', 'receive_id': 'oc_newgroup'}
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), patch.object(daily, 'Notifier') as sender:
+            result = daily.notify_daily(config, self.audit, self.at)
+        sender.assert_not_called()
+        self.assertEqual(result['delivery'], 'sent')
+        self.assertEqual(result['recipient'], original)
+        self.assertEqual(result['requested_recipient'], config['cover_report_recipient'])
+        self.assertFalse(result['recipient_matches_requested'])
+
+    def test_terminal_missing_artifact_does_not_infer_current_periodic_destination(self):
+        run_id = 'cover-periodic-4h-20261029T0930'
+        self.audit.begin(run_id, 'run', {})
+        self.audit.claim_notice(run_id, 'end', 'frozen')
+        self.audit.start_notice(run_id, 'end')
+        self.audit.finish_notice(run_id, 'end', 'unknown', {})
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), patch.object(daily, 'Notifier') as sender:
+            result = daily.notify_daily(self.periodic_config(), self.audit, self.at)
+        sender.assert_not_called()
+        self.assertIsNone(result['recipient'])
+        self.assertFalse(result['recipient_matches_requested'])
+
+    def test_invalid_interval_does_not_create_a_notice(self):
+        for hours in (0, 3, 4.0, True, '4'):
+            with self.subTest(hours=hours), self.assertRaisesRegex(ValueError, 'invalid_cover_report_hours'):
+                daily.notify_daily(dict(self.config, cover_report_hours=hours), self.audit, self.at)
+        self.assertEqual(self.audit.list(), [])
+        for hours in (0, 3, 4.0, True, '24'):
+            with self.subTest(lookback_hours=hours), self.assertRaisesRegex(ValueError, 'invalid_cover_report_lookback_hours'):
+                daily.notify_daily(dict(self.config, cover_report_lookback_hours=hours), self.audit, self.at)
+        self.assertEqual(self.audit.list(), [])
+
+    def test_performance_is_weighted_and_attributed_by_completed_cycle(self):
+        folder = self.root / 'performance'
+        folder.mkdir()
+        cycles = []
+        for at, n, total, seconds, successes in (
+                ('2026-10-29T05:30:00+08:00', 2, 20, 60, 8),
+                ('2026-10-29T09:29:59+08:00', 3, 15, 40, 2),
+                ('2026-10-29T09:30:00+08:00', 1, 999, 1, 99)):
+            cycles.append({'at': at, 'started_at': '2026-10-29T01:00:00+08:00',
+                           'result': {'seconds': seconds, 'tasks': {'succeeded': successes},
+                                      'timings': {'source_prepare': {'count': n, 'total_seconds': total}}}})
+        cycles.append({'at': '2026-10-29T08:00:00+08:00', 'result': {'seconds': 1000, 'tasks': {}}})
+        (folder / '20261029.jsonl').write_text('\n'.join(json.dumps(x) for x in cycles) + '\n{partial', encoding='utf-8')
+        result = daily.collect_performance(self.root, *daily.window(self.at, 4, 4))
+        self.assertEqual(result['cycles'], 2)
+        self.assertEqual(result['successes'], 10)
+        self.assertEqual(result['success_per_hour'], 360)
+        self.assertEqual(result['timings']['source_prepare'], {'n': 5, 'mean_seconds': 7})
+        self.assertEqual(result['read_errors'], 1)
+        data = daily.collect(self.store.path, *daily.window(self.at, 4, 4))
+        data.update(report_hours=4, performance=result)
+        body = daily.report_body(data)
+        self.assertIn('周期可能跨窗', body)
+        self.assertIn('360.00 条/小时', body)
+        self.assertIn('样本可能不完整', body)
 
 
 if __name__ == '__main__':

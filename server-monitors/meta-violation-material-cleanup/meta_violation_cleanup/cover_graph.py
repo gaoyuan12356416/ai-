@@ -28,6 +28,9 @@ COVER_CREATIVE_FIELDS = ','.join(sorted(_CREATIVE_TOP_FIELDS | {
 })) + ',adlabels{id}'
 REFERENCE_FIELDS = 'id,account_id,status,effective_status,creative{id}'
 REFERENCE_STATUSES = CURRENT_STATUSES + ('ARCHIVED',)
+# Fewer round trips for large accounts. This is only a requested page size:
+# _pages must still follow every validated continuation, even on short pages.
+REFERENCE_PAGE_SIZE = 500
 
 
 class _BudgetedSession:
@@ -220,7 +223,7 @@ class CoverGraph(GraphClient):
         account = self._account(account_id)
         found = {}
         for rows in self._pages('act_' + account + '/ads', user_id,
-                               {'fields': REFERENCE_FIELDS, 'limit': 100,
+                               {'fields': REFERENCE_FIELDS, 'limit': REFERENCE_PAGE_SIZE,
                                 'effective_status': json.dumps(REFERENCE_STATUSES)}):
             for row in rows:
                 identifier = _object_id(row.get('id'))

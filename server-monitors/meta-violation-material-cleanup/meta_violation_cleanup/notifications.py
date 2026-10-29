@@ -1,5 +1,6 @@
 """Send start/end notices with durable, non-replayable uncertain outcomes."""
 import json
+import re
 import threading
 from pathlib import Path
 from . import feishu_transport
@@ -7,16 +8,29 @@ from .runtime import RuntimeLedgerError, digest
 
 _LOCK = threading.Lock()
 _RECIPIENT = 'ou_62fed22c4918524e48ded4eab8b82b1e'
+DEFAULT_RECIPIENT = {'receive_id_type': 'open_id', 'receive_id': _RECIPIENT}
 MAX_MESSAGE_BYTES = 100000
 
 
-def _payload_size(text, uuid='0' * 32):
-    return len(feishu_transport.encode_payload(feishu_transport.text_payload(_RECIPIENT, text, uuid)))
+def recipient(value=None):
+    value = DEFAULT_RECIPIENT if value is None else value
+    if not isinstance(value, dict) or set(value) != {'receive_id_type', 'receive_id'}:
+        raise ValueError('invalid_notification_recipient')
+    if not isinstance(value['receive_id_type'], str):
+        raise ValueError('invalid_notification_recipient')
+    prefix = {'open_id': 'ou_', 'chat_id': 'oc_'}.get(value['receive_id_type'])
+    if not prefix or not isinstance(value['receive_id'], str) or not re.fullmatch(prefix + r'[A-Za-z0-9]{1,96}', value['receive_id']):
+        raise ValueError('invalid_notification_recipient')
+    return dict(value)
 
 
-def _split_body(body):
+def _payload_size(text, uuid='0' * 32, receive_id=_RECIPIENT):
+    return len(feishu_transport.encode_payload(feishu_transport.text_payload(receive_id, text, uuid)))
+
+
+def _split_body(body, receive_id=_RECIPIENT):
     """Preserve every character; measure the real two-level JSON wire format."""
-    if _payload_size(body) <= MAX_MESSAGE_BYTES:
+    if _payload_size(body, receive_id=receive_id) <= MAX_MESSAGE_BYTES:
         return [body]
     segments = []
     offset = 0
@@ -26,7 +40,7 @@ def _split_body(body):
         low, high = 0, min(len(body) - offset, MAX_MESSAGE_BYTES)
         while low < high:
             middle = (low + high + 1) // 2
-            if _payload_size(reserve + body[offset:offset + middle]) <= MAX_MESSAGE_BYTES:
+            if _payload_size(reserve + body[offset:offset + middle], receive_id=receive_id) <= MAX_MESSAGE_BYTES:
                 low = middle
             else:
                 high = middle - 1
@@ -47,14 +61,15 @@ def _split_body(body):
 
 
 class Notifier:
-    def __init__(self, runtime, config_path):
+    def __init__(self, runtime, config_path, expected_recipient=None):
         self.runtime = runtime
         self.path = Path(config_path)
+        self.recipient = recipient(expected_recipient)
 
     def _config(self):
         config = json.loads(self.path.read_text(encoding='utf-8'))
-        if (not isinstance(config, dict) or config.get('receive_id_type') != 'open_id'
-                or config.get('receive_id') != _RECIPIENT):
+        if (not isinstance(config, dict)
+                or any(config.get(key) != value for key, value in self.recipient.items())):
             raise ValueError('unexpected_notification_recipient')
         for key in ('app_id', 'app_secret'):
             if not isinstance(config.get(key), str) or not config[key].strip():
@@ -73,7 +88,7 @@ class Notifier:
             # Reuse the stored plan/body across retries and code releases.
             self.runtime._check_notice_parts(run_id, phase, saved)
         else:
-            texts = _split_body(notice['body'])
+            texts = _split_body(notice['body'], self.recipient['receive_id'])
             if len(texts) == 1:
                 return self._send_single(run_id, phase, notice['body'])
             if '-part-' in phase:

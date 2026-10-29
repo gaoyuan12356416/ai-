@@ -1,6 +1,6 @@
 ---
 name: meta-violation-material-cleanup
-description: Maintain the hourly Meta violation-material cover replacement and one-attempt old Creative cleanup for DramaWave and HotDrama on CPU 43.166.187.96, including durable queues, shared object locks, and Feishu summaries to 郜远. Do not use the disabled legacy Ad deletion workflow for this contract.
+description: Maintain the hourly Meta violation-material cover replacement and one-attempt old Creative cleanup for DramaWave and HotDrama on CPU 43.166.187.96, including durable queues, shared object locks, and Feishu summaries to the configured authorized recipient. Do not use the disabled legacy Ad deletion workflow for this contract.
 ---
 
 # Meta violation-material cover replacement
@@ -33,7 +33,7 @@ Source: GitHub gaoyuan12356416/ai-, server-monitors/meta-violation-material-clea
 
 Create/reuse a cover Creative, verify it, update only the original Ad's creative field, and read back the binding and unchanged parameters. Only confirmed successful replacement queues the old Creative; success and cleanup admission commit atomically. A created Creative with failed binding does not authorize old Creative deletion.
 
-Deduplicate cleanup by account and old Creative. Finish related replacements, check known references hourly, then merge complete account inventories covering all nondeleted Ads including archived. Any remaining reference, unreadable page, unknown outcome or unresolved appeal blocks deletion. Never expand Ad modification scope solely to clear references.
+Deduplicate cleanup by account and old Creative. Finish related replacements, check known references hourly, then merge complete account inventories covering all nondeleted Ads including archived. Reference inventories request 500 rows per page to reduce HTTP overhead; follow every returned pagination cursor, preserve identity/status/duplicate/page-completeness checks, and never treat a partial or failed inventory as absence of references. Any remaining reference, unreadable page, unknown outcome or unresolved appeal blocks deletion. Never expand Ad modification scope solely to clear references.
 
 Hold shared object reservations through final reference verification and deletion. Commit the shared and local once-delete intent before sending. This workflow sends at most one DELETE per old Creative across Ads/batches/restarts. Historical success receipts are reusable; unknown fences take precedence. An unrelated old definite failure does not consume this newly approved post-replacement attempt.
 
@@ -41,7 +41,7 @@ Definite failure is not automatically retried. Unknown writes are reconciled rea
 
 ## Concurrency and storage
 
-Use 32 execution workers. All GET/POST/DELETE share Graph initial/max in-flight 32, per-account 2, total request starts 24/second; respect platform cooldowns and reduce later concurrency. From 2026-10-29 the cover worker enables gradual recovery (+2 per 20 seconds with fresh pressure below 60) after throttling. Prepare each wave on the owner thread only after global cooldown, bounded by current concurrency, worker count and two tasks per account; re-evaluate each wave. Keep the 30-second source freshness check before every write. SQL/FIFO preparation stays on the owner thread; release SQL before Graph waits. Use read-only FIFO Gate with SQL_GATE_BYPASS=0 and verified @@read_only=1. Never bypass through direct drivers or mysql.real.
+Use 32 execution workers. All GET/POST/DELETE share Graph initial/max in-flight 32, per-account 2, total request starts 24/second; respect platform cooldowns and reduce later concurrency. From 2026-10-29 the cover worker enables gradual recovery (+2 per 20 seconds with fresh pressure below 60) after throttling. Prepare each wave on the owner thread only after global cooldown, bounded by current concurrency, worker count and two tasks per account; re-evaluate each wave. Keep the 30-second source freshness check before every write. SQL/FIFO preparation stays on the owner thread; current lineage, material metadata and drama covers share one short read-only snapshot per wave, then release SQL before Graph waits. Open a new snapshot for every later wave; do not cache write-time sources across waves. Use read-only FIFO Gate with SQL_GATE_BYPASS=0 and verified @@read_only=1. Never bypass through direct drivers or mysql.real.
 
 Continue immediately while queued work makes progress, back off two seconds on all-deferred waves, and idle for 30 seconds only with no ready Ads. LegacyPriorityWindow is a cooperative handoff: drain, release the shared lock, wait until the old job's priority window ends, then reacquire. Unexpected process failures use systemd Restart=on-failure; durable write pauses return status 78 and RestartPreventExitStatus=78 keeps them stopped. Never clear a pause or unknown fence as part of automatic restart. Per-cycle phase/HTTP/wait metrics are persisted under runtime/performance/YYYYMMDD.jsonl without payloads or credentials; write failures in this auxiliary telemetry are logged, not a business halt.
 
@@ -55,7 +55,7 @@ From this release's module directory, use cover.py --config <runtime>/config.jso
 - work --once --max-ads 256: approved natural-hit first cohort.
 - work: continuous worker; requires cover_live_enabled=true.
 - status: read counters without recovering tasks.
-- notify: send the latest completed 09:30-to-09:30 daily window once; `--dry-run` previews without sending.
+- notify: send one frozen rolling-24-hour summary at the latest four-hour Beijing reporting boundary; `--dry-run` previews without sending. Missing report settings retain the historical daily behavior.
 
 New units: meta-cover-scan.service/.timer, meta-cover-worker.service, meta-cover-notify.service/.timer. Scan timer runs every hour. Do not assume a unit is enabled from its file; verify systemctl state. cover-write-paused.json is durable stop evidence for unexpected parameter changes or write risks; investigate before resuming.
 
@@ -70,3 +70,9 @@ For the 2026-10-29 report-only release, use the existing prepare backup followed
 The subsequently authorized throughput repair uses the same prepare backup then deploy/install_cover_worker.py apply. Validate a bounded natural backlog cohort with work --once, then enable/start the existing continuous worker. Preserve the daily 09:30 notifier and old deletion timer state. Compare throughput using identical round-time denominators and report task execution timings separately from historical queue age. See doc/20261029.meta-cover-throughput/README.md.
 
 Stop new admissions and drain in-flight operations on rollback. Restore code/config/units while keeping current ledgers and additive shared guards so unknown fences remain effective. Never overwrite progress with an old SQLite backup. Deleted Creative IDs cannot be restored by switching old code or rebinding the old ID. Deployment and real-write claims require current server receipts; local tests alone do not establish completion.
+
+## Source/reference optimization and four-hour reporting (2026-10-29)
+
+The user authorized another measured optimization, deployment and report routing change. Source preparation reuses one short FIFO read-only snapshot per wave instead of opening three separate sessions; no lifetime cache or SQL gate bypass. Reference pagination increases from 100 to 500 only after read-only complete-inventory comparisons; all account/status/archived/completeness and delete freshness/write-once rules remain. Compare old/new with identical read-only source and account samples, then validate bounded natural live tasks and full-cycle throughput; report sample-size and workload differences.
+
+The requested recipient is Feishu chat oc_b633b6fba2c78f43ef1ebacd314d518c. The new report schedule is every four hours at Beijing 01:30/05:30/09:30/13:30/17:30/21:30, each summarizing the preceding 24-hour half-open window, preserving the user's original near-day summary requirement. Set cover_report_hours=4 and cover_report_lookback_hours=24 separately. This supersedes the once-daily schedule above. Preserve historical daily/batch notices and unknown-send fences. Use a dedicated recipient config; do not edit the shared old private-recipient credential file. Freeze window/body/destination and deduplicate that window and destination. Deployment may send the latest completed reporting boundary once to verify actual delivery, then the timer owns subsequent reporting boundaries.

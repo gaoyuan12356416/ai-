@@ -173,9 +173,31 @@ class CoverGraphTests(unittest.TestCase):
         graph, session, _ = self.client([Response(page1), Response(page2)])
         rows = graph.list_reference_ads('100', '1')
         self.assertEqual([r['id'] for r in rows], ['10', '11'])
+        self.assertEqual(session.calls[0][2]['params']['limit'], 500)
         self.assertIn('ARCHIVED', json.loads(session.calls[0][2]['params']['effective_status']))
         self.assertEqual(session.calls[1][2]['params']['after'], 'next')
+        self.assertEqual(session.calls[1][2]['params']['limit'], 500)
         self.assertNotIn('DELETED', REFERENCE_STATUSES)
+
+    def test_large_reference_page_still_checks_archived_tail_and_identity(self):
+        page1 = {'data': [ad(str(1000 + i)) for i in range(500)],
+                 'paging': {'next': 'https://graph.facebook.com/v25.0/act_100/ads?after=tail'}}
+        page2 = {'data': [ad('2000', '20', 'ARCHIVED')]}
+        graph, session, budget = self.client([Response(page1), Response(page2)])
+        rows = graph.list_reference_ads('100', '1')
+        self.assertEqual(len(rows), 501)
+        self.assertEqual(rows[-1]['status'], 'ARCHIVED')
+        self.assertEqual(budget.accounts, ['100', '100'])
+        graph, _, _ = self.client([Response(page1),
+            Response({'data': [dict(ad('2000'), account_id='101')]})])
+        with self.assertRaisesRegex(GraphError, 'different account'):
+            graph.list_reference_ads('100', '1')
+
+    def test_changed_duplicate_across_reference_pages_is_incomplete(self):
+        page1 = {'data': [ad()], 'paging': {'next': 'https://graph.facebook.com/v25.0/act_100/ads?after=tail'}}
+        graph, _, _ = self.client([Response(page1), Response({'data': [ad(creative='21')]})])
+        with self.assertRaisesRegex(GraphError, 'changed during pagination'):
+            graph.list_reference_ads('100', '1')
 
     def test_reference_incomplete_never_returns_partial_success(self):
         page = {'data': [ad()], 'paging': {'next': 'https://graph.facebook.com/v25.0/act_100/ads?after=next'}}

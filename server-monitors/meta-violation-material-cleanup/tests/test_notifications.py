@@ -58,6 +58,41 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(state['status'], 'failed')
         self.assertFalse(json.loads(state['receipt'])['request_sent'])
 
+    def test_explicit_group_recipient_uses_chat_id_and_retains_once_delivery(self):
+        destination = {'receive_id_type': 'chat_id', 'receive_id': 'oc_b633b6fba2c78f43ef1ebacd314d518c'}
+        config = json.loads(self.config.read_text())
+        config.update(destination)
+        self.config.write_text(json.dumps(config))
+        notifier = notifications.Notifier(self.runtime, self.config, destination)
+        urls = []
+        def send(url, payload, token=None):
+            urls.append(url)
+            return self.transport(url, payload, token)
+        with patch.object(feishu_transport, 'post_json', side_effect=send):
+            first = notifier.send('run-1', 'end', 'group report')
+            self.assertEqual(notifier.send('run-1', 'end', 'changed'), first)
+        self.assertEqual(len(self.messages), 1)
+        self.assertEqual(self.messages[0]['receive_id'], destination['receive_id'])
+        self.assertIn('receive_id_type=chat_id', urls[-1])
+
+    def test_recipient_config_mismatch_is_unsent_and_default_stays_personal(self):
+        destination = {'receive_id_type': 'chat_id', 'receive_id': 'oc_b633b6fba2c78f43ef1ebacd314d518c'}
+        notifier = notifications.Notifier(self.runtime, self.config, destination)
+        with patch.object(feishu_transport, 'post_json') as post:
+            with self.assertRaisesRegex(RuntimeError, 'not_confirmed'):
+                notifier.send('run-1', 'end', 'group report')
+        post.assert_not_called()
+        self.assertFalse(json.loads(self.runtime.notice('run-1', 'end')['receipt'])['request_sent'])
+        self.assertEqual(self.notifier.recipient, notifications.DEFAULT_RECIPIENT)
+
+    def test_invalid_recipient_rejected_without_touching_notice(self):
+        for recipient in ({}, {'receive_id_type': [], 'receive_id': 'oc_group'},
+                          {'receive_id_type': 'chat_id', 'receive_id': 'ou_wrong'},
+                          {'receive_id_type': 'email', 'receive_id': 'user@example.com'}):
+            with self.subTest(recipient=recipient), self.assertRaisesRegex(ValueError, 'invalid_notification_recipient'):
+                notifications.Notifier(self.runtime, self.config, recipient)
+        self.assertIsNone(self.runtime.notice('run-1', 'end'))
+
     def test_authentication_failure_can_retry_original_message(self):
         with patch.object(feishu_transport, 'post_json', side_effect=TimeoutError('secret-error')):
             with self.assertRaisesRegex(RuntimeError, '^notification_not_confirmed$'):

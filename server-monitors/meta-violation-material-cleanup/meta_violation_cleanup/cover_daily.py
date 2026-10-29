@@ -1,4 +1,4 @@
-"""One frozen 09:30 Beijing report; reads execution ledgers without mutations."""
+"""Frozen Beijing reporting windows; reads execution ledgers without mutations."""
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import json
@@ -7,16 +7,30 @@ from pathlib import Path
 import sqlite3
 import subprocess
 
-from .notifications import Notifier
+from .notifications import Notifier, recipient
 from .runtime import CST, process_lock
 
 
-def window(at=None):
+def report_settings(config):
+    hours = config.get('cover_report_hours', 24)
+    if type(hours) is not int or hours not in (4, 24):
+        raise ValueError('invalid_cover_report_hours')
+    lookback_hours = config.get('cover_report_lookback_hours', 24)
+    if type(lookback_hours) is not int or lookback_hours not in (4, 24):
+        raise ValueError('invalid_cover_report_lookback_hours')
+    return hours, lookback_hours, recipient(config.get('cover_report_recipient'))
+
+
+def window(at=None, hours=24, lookback_hours=24):
+    if type(hours) is not int or hours not in (4, 24):
+        raise ValueError('invalid_cover_report_hours')
+    if type(lookback_hours) is not int or lookback_hours not in (4, 24):
+        raise ValueError('invalid_cover_report_lookback_hours')
     at = (at or datetime.now(CST)).astimezone(CST)
-    end = at.replace(hour=9, minute=30, second=0, microsecond=0)
-    if at < end:
-        end -= timedelta(days=1)
-    return end - timedelta(days=1), end
+    anchor = at.replace(hour=9, minute=30, second=0, microsecond=0)
+    interval = timedelta(hours=hours)
+    end = anchor + ((at - anchor) // interval) * interval
+    return end - timedelta(hours=lookback_hours), end
 
 
 def summary(values):
@@ -108,6 +122,62 @@ def collect(path, start, end):
         db.close()
 
 
+def collect_performance(root, start, end):
+    """Optional timing evidence, attributed by completed cycle, not event time."""
+    keys = ('source_prepare', 'reference_scan', 'ad_attempt_succeeded')
+    totals = {key: [0, 0.] for key in keys}
+    cycles = successes = errors = 0
+    seconds = 0.
+    day = start.date()
+    while day <= end.date():
+        path = Path(root) / 'performance' / (day.strftime('%Y%m%d') + '.jsonl')
+        day += timedelta(days=1)
+        if not path.exists():
+            continue
+        try:
+            with path.open(encoding='utf-8') as stream:
+                for line in stream:
+                    try:
+                        cycle = json.loads(line)
+                        at = datetime.fromisoformat(cycle['at'])
+                        if at.tzinfo is None:
+                            raise ValueError('naive_cycle_time')
+                        if not start <= at < end:
+                            continue
+                        result = cycle['result']
+                        # Exclude empty idle polls from execution throughput.
+                        counts = list(result.get('tasks', {}).values()) + list(result.get('deletions', {}).values())
+                        if not any(type(value) is int and value > 0 for value in counts):
+                            continue
+                        duration_s, successful = result['seconds'], result.get('tasks', {}).get('succeeded', 0)
+                        if (type(duration_s) not in (int, float) or not math.isfinite(duration_s) or duration_s <= 0
+                                or type(successful) is not int or successful < 0):
+                            raise ValueError('invalid_cycle_metrics')
+                        metrics = {}
+                        for key in keys:
+                            metric = result.get('timings', {}).get(key, {})
+                            n, total = metric.get('count', 0), metric.get('total_seconds', 0)
+                            if (type(n) is not int or n < 0 or type(total) not in (int, float)
+                                    or not math.isfinite(total) or total < 0):
+                                raise ValueError('invalid_phase_metrics')
+                            metrics[key] = (n, total)
+                        cycles += 1
+                        successes += successful
+                        seconds += duration_s
+                        for key, (n, total) in metrics.items():
+                            totals[key][0] += n
+                            totals[key][1] += total
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        errors += 1
+        except (OSError, UnicodeError):
+            errors += 1
+    return {'cycles': cycles, 'successes': successes, 'seconds': round(seconds, 3),
+            'success_per_hour': round(successes * 3600 / seconds, 2) if seconds else None,
+            'read_errors': errors,
+            'timings': {key: {'n': n, 'mean_seconds': round(total / n, 3) if n else None}
+                        for key, (n, total) in totals.items()}}
+
+
 def duration(seconds):
     if seconds is None:
         return '无样本'
@@ -123,9 +193,15 @@ def report_body(data):
     ct, cd = data['current_tasks'], data['current_deletions']
     start, end = (datetime.fromisoformat(data[k]).strftime('%m-%d %H:%M')
                   for k in ('window_start', 'window_end'))
-    lines = ['Meta 违规素材封面替换｜每日汇总',
+    hours = data.get('report_hours', 24)
+    lookback_hours = data.get('report_lookback_hours',
+                             int(elapsed(data['window_start'], data['window_end']) / 3600))
+    title = '每日汇总' if hours == 24 else '每%d小时汇总' % hours
+    cadence = ('每天 09:30 播报一次' if hours == 24 else '每%d小时播报一次' % hours)
+    cadence += '，汇总近%d小时' % lookback_hours
+    lines = ['Meta 违规素材封面替换｜' + title,
              '统计窗口：%s 至 %s（北京时间，前含后不含）' % (start, end),
-             '范围：DramaWave / HotDrama；每天 09:30 播报一次',
+             '范围：DramaWave / HotDrama；' + cadence,
              '新增达标素材 %d；新增关联广告 %d' % (data['new_materials'], data['new_ads']),
              '扫描：完成 %d 批，异常 %d 批' % (data['scan_completed'], data['scan_failed']),
              '执行异常批次：%d' % data['worker_errors'],
@@ -152,19 +228,47 @@ def report_body(data):
         metric = data['timings'][key]
         lines.append('%s：%s / %s / %d' % (
             label, duration(metric['mean_seconds']), duration(metric['p95_seconds']), metric['n']))
-    lines.extend(['各行样本不同且包含等待/重叠，不可相加；纯API及前置校验耗时尚无独立埋点。',
-                  '明确失败不自动重试；未知结果只读核实。'])
+    lines.append('上表为账本阶段历时，各行样本不同且包含等待/重叠，不可相加。')
+    performance = data.get('performance')
+    if performance and performance['cycles']:
+        lines.append('实际执行样本：%d 个完成周期，成功 %d 条；含清理执行吞吐 %.2f 条/小时。' % (
+            performance['cycles'], performance['successes'], performance['success_per_hour']))
+        for key, label in (('source_prepare', '来源准备，每波'),
+                           ('reference_scan', '旧Creative引用扫描，每账户'),
+                           ('ad_attempt_succeeded', '成功广告工作线程处理，不含排队/来源准备/后续清理')):
+            metric = performance['timings'][key]
+            lines.append('%s：平均 %s，样本 %d' % (label, duration(metric['mean_seconds']), metric['n']))
+        lines.append('按本窗口内完成且有任务/清理结果的周期纳入，周期可能跨窗；成功数与上方事件窗口口径不同，吞吐不含周期间等待。')
+    else:
+        lines.append('实际执行样本：本窗口暂无完整周期计时，不能据此推算吞吐。')
+    if performance and performance['read_errors']:
+        lines.append('性能记录读取异常 %d 次，执行样本可能不完整。' % performance['read_errors'])
+    lines.append('明确失败不自动重试；未知结果只读核实。')
     return '\n'.join(lines)
 
 
 def notify_daily(config, audit, at=None, dry_run=False):
     root = Path(config['runtime_dir'])
-    start, end = window(at)
-    run_id = 'cover-daily-' + end.strftime('%Y%m%d')
+    hours, lookback_hours, destination = report_settings(config)
+    start, end = window(at, hours, lookback_hours)
+    # Keep every old daily notice/UUID intact. The periodic namespace cannot
+    # collide with daily receipts or another completed window on the same day.
+    run_id = ('cover-daily-' + end.strftime('%Y%m%d') if hours == 24 else
+              'cover-periodic-%dh-' % hours + end.strftime('%Y%m%dT%H%M'))
     with process_lock(root / 'cover-notify.lock'):
         existing = audit.notice(run_id, 'end')
         if not dry_run and existing and existing['status'] in ('sent', 'sending', 'unknown'):
-            return {'run_id': run_id, 'delivery': existing['status']}
+            try:
+                frozen = audit.load_artifact(run_id, 'daily-summary.json')
+                delivered_to = (recipient(frozen.get('recipient'))
+                                if 'recipient' in frozen or hours == 24 else None)
+            except (ValueError, TypeError, AttributeError):
+                # Historical daily sends were hard-bound to the personal ID.
+                # A periodic receipt without its artifact cannot prove a target.
+                delivered_to = recipient() if hours == 24 else None
+            return {'run_id': run_id, 'delivery': existing['status'],
+                    'recipient': delivered_to, 'requested_recipient': destination,
+                    'recipient_matches_requested': delivered_to == destination}
         try:
             frozen = audit.load_artifact(run_id, 'daily-summary.json')
         except ValueError:
@@ -172,12 +276,22 @@ def notify_daily(config, audit, at=None, dry_run=False):
                 raise  # Never silently replace an already attempted body.
             data = collect(root / 'cover.sqlite3', start, end)
             data['worker_state'] = worker_state()
-            frozen = {'data': data, 'body': report_body(data)}
+            data['report_hours'] = hours
+            data['report_lookback_hours'] = lookback_hours
+            data['performance'] = collect_performance(root, start, end)
+            frozen = {'data': data, 'body': report_body(data), 'recipient': destination}
             if not dry_run:
-                audit.begin(run_id, 'run', {'policy_version': '20261029-cover-daily'})
+                audit.begin(run_id, 'run', {'policy_version': '20261029-cover-periodic',
+                                           'report_hours': hours, 'report_lookback_hours': lookback_hours,
+                                           'recipient': destination})
                 audit.artifact(run_id, 'daily-summary.json', frozen)
+        # Existing daily artifacts predate destination metadata and belong to
+        # the original personal recipient. Never reroute a frozen/failed send.
+        if recipient(frozen.get('recipient')) != destination:
+            raise ValueError('frozen_notification_recipient_changed')
         if dry_run:
             return dict(frozen, run_id=run_id, delivery='dry_run')
-        receipt = Notifier(audit, config['feishu_config']).send(run_id, 'end', frozen['body'])
+        feishu_config = config.get('cover_report_feishu_config', config['feishu_config'])
+        receipt = Notifier(audit, feishu_config, destination).send(run_id, 'end', frozen['body'])
         audit.update(run_id, status='completed', window_start=start.isoformat(), window_end=end.isoformat())
         return {'run_id': run_id, 'delivery': 'sent', 'receipt': receipt}
