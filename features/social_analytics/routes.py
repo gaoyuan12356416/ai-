@@ -133,16 +133,12 @@ def scoped_facebook_source(app, start, end, site, catalog=None):
     return result, fetched
 
 
-def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False,
-                 catalog_snapshot=None):
+def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
     params = parameters(query)
     # Content provenance is independent of permission scope. HTTP keeps the
     # authenticated tenant/owner actor; only scheduled collection is global.
-    if catalog_snapshot is not None and actor.get('_system_report') is not True:
-        raise ReportError('冻结归属快照仅供内部采集', 400)
-    catalog, catalog_errors = (catalog_snapshot if catalog_snapshot is not None
-                               else read_catalogs(app, params["platforms"]))
+    catalog, catalog_errors = read_catalogs(app, params["platforms"])
     metrics, errors, fetched = [], {}, []
     query_coverage, scoped_sources = {}, []
     web_scoped = ai_backend_only and actor.get("_system_report") is not True
