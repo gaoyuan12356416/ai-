@@ -278,3 +278,30 @@ systemctl stop drama-material-api.service
 python3 /mnt/data-disk/meta-ad-asset-delete/release-3dfaa0e7face/scripts/deploy_meta_creative_recovery.py rollback /mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T110522Z-3dfaa0e7face
 bash /mnt/data-disk/meta-ad-asset-delete/release-3dfaa0e7face/scripts/safe_restart_drama_api.sh
 ```
+
+## 20:07 restart and scoped continuation
+
+The main API was orderly stopped/restarted at 20:07:37 CST (PID2277601);
+the initiating actor is unconfirmed. Runtime graph/service/source/store hashes
+still match release3df. Creative v5 was interrupted after 4,408 DELETE successes,
+with 5,207 pending, one read-blocked object and six unknown outcomes. All three
+one-time controllers stopped rather than treating interrupted execution as done.
+
+GET-only reconciliation of the ten unknown Creative/Video objects completed at
+20:15 (`restart-200737-reconciliation.json`, zero DELETEs). Two Creatives returned
+explicit DELETED status; two Videos were absent from complete account inventories.
+Four Creatives remained readable and two Video reads were inconclusive; these
+six remain unknown and are excluded from execution. Original DELETE attempts and
+receipts are retained. Video parent `deleted` aggregates account completion and
+must not be reported as a new DELETE receipt when child evidence is only absence.
+
+The existing controllers were resumed at 20:18 without deployment or API restart.
+V6 recheck `7cc5be8648ea4cee802d3b33be84d347` checked1,279/released1; the1,278
+Ads blocked by changed Creative remain blocked. Creative run
+`67bd9ab3f8724e1dbb197f3811442e6b`, request
+`scope-recovery-20261029-reference-v6-creative`, executes only5,208 pending
+Creatives. The Video prefix remains `scope-recovery-20261029-video-pending-v1`;
+the first full audit, pending Videos and final audit still follow this run.
+Prior controller snapshots have `-before-v6.json` suffixes in the audit directory.
+The task remains in progress; selective failure recovery and final exports are
+still required after these stages.
