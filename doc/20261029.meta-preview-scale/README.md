@@ -39,3 +39,29 @@ Rollback: with execution idle, stop `drama-material-api.service`, run
 `python3 RELEASE/scripts/deploy_meta_preview_scale.py rollback BACKUP`, then
 `bash RELEASE/scripts/safe_restart_drama_api.sh`. Keep the live SQLite ledger.
 Restoring code never restores old task states or repeats DELETEs.
+
+## Production verification
+
+Deployed `16eb6d9e8277983264da8cac1e87b5ff3d1b990e` to
+`43.166.187.96:/root/drama_material_service` at 2026-10-29 15:40 CST.
+Only the main API restarted (PID 1339234 → 1594216); the independent
+read-only recovery worker remained alive. All eight target hashes, including
+the two public static copies, match the verified release. Public HTML and JS
+return 200 with the new cache version. Owner-authenticated detail reads return
+200, and the old main-process preview correctly recovers as interrupted.
+
+Backup: `/mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T073951Z-16eb6d9e8277`.
+API/public acceptance JSON is stored there. Deployment preserved the existing
+360,020 object attempts, 332,381 receipts and 1,080 video-account attempts.
+These are deployment checks, separate from subsequent operator-authorized
+cleanup receipts.
+
+Exact rollback, only after deletion/recheck workers are idle:
+
+```bash
+systemctl stop drama-material-api.service
+python3 /mnt/data-disk/meta-ad-asset-delete/release-16eb6d9e8277/scripts/deploy_meta_preview_scale.py rollback /mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T073951Z-16eb6d9e8277
+bash /mnt/data-disk/meta-ad-asset-delete/release-16eb6d9e8277/scripts/safe_restart_drama_api.sh
+```
+
+Do not restore the evidence SQLite copy.
