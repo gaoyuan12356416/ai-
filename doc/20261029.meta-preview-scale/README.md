@@ -352,3 +352,30 @@ module changed, mainAPI PID2295582 remained, and Video run
 GET audit with `systemctl stop meta-scope-complete-audit-20261029.service`; do not
 stop pending Video deletion or restore the ledger. New audit output is additional
 evidence, not permission to retry uncertain deletes.
+
+## Pending account recovery after an interrupted Video parent
+
+At 2026-10-30 00:30 Beijing time, the first pending-only Video run had no
+pending parents, but 174 failed parents still contained 1,689 pending account
+rows. All 1,689 had zero account attempts. Evidence is
+`unstarted-video-account-analysis.json` in the fixed scope audit directory;
+its key hash is `2ab453dcc35564d1bd0bd4380ecc35747c8027bc37670ee374a0f08c6853a650`.
+
+The account adapter's `only_pending=true` selection now includes a failed
+Video parent when its recorded frozen children contain pending work. The
+existing child filter processes only pending accounts. Previous failure,
+success and unknown child rows are preserved; unknown, blocked and successful
+parents are not newly eligible. The legacy global-node adapter and Ad/Creative
+selection retain their previous behavior. Stable request IDs remain idempotent.
+No schema or approval change is required. Completion checks must include both
+parent objects and Video-account rows.
+
+Two SQLite/mock-Graph regression tests reproduce interruption after mixed
+success/failure, confirm only the unsent account executes, preserve prior rows,
+prove repeated requests do not resend, and retain the unknown-parent fence.
+The scoped rollout is `scripts/deploy_meta_pending_accounts.py`: prepare an
+exact GitHub release against runtime3df, stop only the idle main API, apply its
+single service.py change, then use the existing worker-aware API start script.
+Rollback with the same script's `rollback BACKUP` while idle, preserving the
+live SQLite ledger. This change is prepared for deployment after the active
+complete Video audit finishes; it has not yet been deployed or executed.

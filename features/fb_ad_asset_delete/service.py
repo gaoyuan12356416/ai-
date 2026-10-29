@@ -449,12 +449,17 @@ class Service:
             for phase in phases:
                 self._allowed(self.authorize(session), job)
                 self.store.update_job(job_id, current_phase=phase, execution_concurrency=self.execution_budget.concurrency)
-                objects = [o for o in job["objects"] if o["kind"] == phase and
-                           (o["status"] == "pending" if only_pending else
-                            o["status"] in ("pending", "failed") or phase == "video" and o["status"] == "blocked")]
                 probe = self.graph_factory()
                 account_mode = phase == "video" and callable(getattr(probe, "prepare_video_account_delete", None))
                 self._close_graph(probe)
+                # Interrupted account work can leave a failed parent with untouched
+                # children. Resume those children; the account filter below still
+                # excludes every previous failure, success and unknown outcome.
+                objects = [o for o in job["objects"] if o["kind"] == phase and
+                           ((o["status"] == "pending" or account_mode and o["status"] == "failed" and
+                             any(a["status"] == "pending" for a in o.get("video_account_results", [])))
+                            if only_pending else
+                            o["status"] in ("pending", "failed") or phase == "video" and o["status"] == "blocked")]
                 if account_mode:
                     self._run_video_phase(job, run_id, objects, session, stop, only_pending=only_pending)
                     continue
