@@ -32,6 +32,8 @@ def main():
     def query(sql,timeout):
         with SOURCE_READ_SLOTS:
             return app.ad_control_run_mysql(sql,timeout_seconds=timeout,via_stdin=True)
+    assert str(app.MYSQL_HOST)=='101.32.56.53' and str(app.MYSQL_PORT)=='63350'
+    assert query('SELECT @@read_only',10)==[['1']]
     source=SqlSource(query,schema=app.AD_CONTROL_DB_NAME)
     with sqlite3.connect('file:/mnt/data-disk/fb-ad-asset-delete/tasks.sqlite3?mode=ro',uri=True) as conn:
         objects=[]
