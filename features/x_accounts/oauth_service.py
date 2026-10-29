@@ -974,14 +974,13 @@ def complete_authorization(code, raw_state):
                     ).fetchone()
                 finally:
                     conn.close()
-            if existing_row and not same_owner(existing_row, actor):
-                raise ServiceError("x_account_owned_by_other", "该X账号已由其他后台用户管理", 409)
+            owner_changed = existing_row is not None and not same_owner(existing_row, actor)
             previous_token = None
             if token_file.exists():
                 try:
                     previous_token = token_file.read_bytes()
                 except OSError:
-                    # Completing OAuth for the same owner is an explicit
+                    # Completing OAuth is an explicit
                     # credential replacement. An unreadable stale token must
                     # not discard the newly exchanged credential; if the DB
                     # commit later fails, the new file is removed below.
@@ -1017,6 +1016,7 @@ def complete_authorization(code, raw_state):
                 "username", "display_name", "profile_image_url", "token_store_key", "token_type", "scopes_json",
                 "status", "last_authorized_at", "access_expires_at", "last_token_refresh_at", "last_verified_at",
                 "last_error_at", "last_error", "authorized_by_user_id", "authorized_by_name", "authorized_by_email",
+                "owner_tenant_key", "owner_user_id", "owner_name", "owner_email",
                 "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
                 "verified", "protected", "subscription_type", "location", "x_created_at", "profile_synced_at", "disconnected_at",
                 "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name", "updated_at",
@@ -1034,6 +1034,21 @@ def complete_authorization(code, raw_state):
                             ),
                             values,
                         )
+                        if owner_changed:
+                            # Commit old/new ownership evidence with the update.
+                            # X identity is verified above; other operations keep
+                            # their existing owner/permission checks.
+                            conn.executemany(
+                                "INSERT INTO x_oauth_event(event_type,outcome,x_user_id,actor_user_id,"
+                                "actor_tenant_key,actor_name,error_code,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                                [
+                                    ("ownership_transfer", "released", x_user_id,
+                                     existing_row["owner_user_id"], existing_row["owner_tenant_key"],
+                                     existing_row["owner_name"], "", timestamp),
+                                    ("ownership_transfer", "acquired", x_user_id,
+                                     actor["user_id"], actor["tenant_key"], actor["name"], "", timestamp),
+                                ],
+                            )
                         conn.commit()
                     finally:
                         conn.close()

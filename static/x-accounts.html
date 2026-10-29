@@ -104,7 +104,7 @@
 
         <section class="panel">
           <div class="section-head">
-            <div><h2>我的 X 账号</h2><p>API 切换后，请将“待重新授权”的账号逐个重新登录授权。使用原 X 账号即可保留运营归属、发布设置和历史记录；短期 Token 到期会自动续期。</p></div>
+            <div><h2>我的 X 账号</h2><p>谁完成授权，X 账号就归属谁；原发布设置和历史记录保留。授权时请确认 X 页面显示的是要操作的账号。短期 Token 到期会自动续期。</p></div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
               <button id="reloadAccounts" class="button" type="button">刷新列表</button>
               <button id="authorizeAccount" class="button primary" type="button" disabled>登录 / 重新授权 X 账号</button>
@@ -193,7 +193,19 @@
         if (!result) return;
         const notice = el("oauthNotice");
         notice.classList.toggle("error", result !== "success");
-        el("oauthNoticeText").textContent = result === "success" ? "X账号授权成功，列表已更新。" : "X账号授权未完成或已失败，请重新发起授权。";
+        const errors = {
+          x_account_suspended: "该 X 账号已被 X 平台暂停。请先登录 X 处理账号限制或申诉，恢复后再重新授权。",
+          oauth_denied: "本次 X 授权未获同意或已取消，请重新发起并在 X 页面完成授权。",
+          invalid_request: "本次授权链接已失效、已使用或信息不完整，请从此页重新发起授权。",
+          x_token_revoked: "X 授权凭据已失效，请重新发起授权。",
+          x_post_rate_limited: "X API 触发限流或用量上限，请稍后重新授权；持续出现时请联系管理员检查 API 额度。",
+          x_upstream_error: "X API 暂时无法完成授权，请稍后重新发起授权。",
+          x_accounts_unavailable: "后台暂时未能保存 X 授权，请稍后重试。",
+          x_account_owned_by_other: "此前授权被旧的账号归属规则拦截。现在可重新授权，完成后账号将归属当前后台用户。"
+        };
+        const reason = params.get("reason");
+        const message = Object.prototype.hasOwnProperty.call(errors, reason) ? errors[reason] : "X账号授权未完成，请重新发起授权；如再次失败，请联系管理员。";
+        el("oauthNoticeText").textContent = result === "success" ? "X账号授权成功，账号已归属当前后台用户，列表已更新。" : message;
         notice.classList.remove("hidden");
         history.replaceState({}, "", location.pathname);
       }

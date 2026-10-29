@@ -9,10 +9,12 @@ with the previously running Client ID. Existing disabled accounts stay disabled.
 
 Both account pages show the current API name and distinguish 已授权 from
 待重新授权. The personal page supplies a login action; the global list can filter
-pending accounts. A completed OAuth callback for the same owner and X user
-updates the same row, retaining its ID, owner, language, publish approval,
-configured schedules and all publication history. A different owner cannot
-take over an account.
+pending accounts. Under the operator's 2026-10-29 rule, any user allowed to
+open the authorization page may complete X OAuth. The account belongs to the
+backend user who completes authorization, even if previously owned by someone
+else. The same X user updates the same row, retaining its ID, language, publish
+approval, configured schedules and all publication history. Ownership changes
+are audited atomically; see `doc/x-reauth-ownership/README.md`.
 
 The production balance monitor reads the running service's application and
 checks its configured Client ID hash. Its optional app-only billing bearer

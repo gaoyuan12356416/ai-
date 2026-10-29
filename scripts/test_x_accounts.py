@@ -530,8 +530,9 @@ class XAccountsTestCase(unittest.TestCase):
             (3, 2),
         )
 
-    def test_different_owner_cannot_overwrite_existing_account_or_token(self):
+    def test_successful_reauthorization_transfers_owner_preserving_account_settings(self):
         original = self.complete(username="original", actor=self.owner)
+        service.set_account_drama_language(original["id"], "ja", self.admin)
         token_file = service.token_path(original["x_user_id"])
         original_token = token_file.read_bytes()
         _result, state = self.new_state(self.other_owner)
@@ -543,22 +544,59 @@ class XAccountsTestCase(unittest.TestCase):
         }
         account = {"data": {"id": original["x_user_id"], "username": "takeover", "name": "Takeover"}}
         with mock.patch.object(service, "token_request", return_value=takeover_token), mock.patch.object(service, "user_request", return_value=account):
-            with self.assertRaises(service.ServiceError) as caught:
-                service.complete_authorization("takeover-code", state)
-        self.assertEqual(caught.exception.code, "x_account_owned_by_other")
-        self.assertEqual(token_file.read_bytes(), original_token)
+            service.complete_authorization("takeover-code", state)
+        self.assertNotEqual(token_file.read_bytes(), original_token)
         current = service.find_account(original["id"])
-        self.assertEqual(current["username"], "original")
-        self.assertEqual(current["owner_user_id"], self.owner["user_id"])
-        self.assertEqual(current["authorized_by_user_id"], self.owner["user_id"])
+        self.assertEqual(current["id"], original["id"])
+        self.assertEqual(current["username"], "takeover")
+        self.assertEqual(current["owner_user_id"], self.other_owner["user_id"])
+        self.assertEqual(current["owner_name"], self.other_owner["name"])
+        self.assertEqual(current["owner_email"], self.other_owner["email"])
+        self.assertEqual(current["authorized_by_user_id"], self.other_owner["user_id"])
+        self.assertEqual(current["drama_language"], "ja")
+        self.assertTrue(current["publish_approved"])
+        self.assertEqual(current["first_authorized_at"], original["first_authorized_at"])
+        self.assertEqual(service.list_accounts(self.owner, "mine")["items"], [])
+        self.assertEqual(service.list_accounts(self.other_owner, "mine")["items"][0]["id"], original["id"])
+        with self.assertRaises(service.ServiceError):
+            service.logout_account(original["id"], self.owner)
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            events = conn.execute("SELECT outcome,actor_user_id FROM x_oauth_event WHERE event_type='ownership_transfer' ORDER BY id").fetchall()
+        self.assertEqual(events, [("released", self.owner["user_id"]), ("acquired", self.other_owner["user_id"])])
 
         _result, cross_tenant_state = self.new_state(self.same_user_other_tenant)
         with mock.patch.object(service, "token_request", return_value=takeover_token), mock.patch.object(service, "user_request", return_value=account):
-            with self.assertRaises(service.ServiceError) as cross_tenant_caught:
-                service.complete_authorization("cross-tenant-code", cross_tenant_state)
-        self.assertEqual(cross_tenant_caught.exception.code, "x_account_owned_by_other")
-        self.assertEqual(token_file.read_bytes(), original_token)
-        self.assertEqual(service.find_account(original["id"])["owner_tenant_key"], self.owner["tenant_key"])
+            service.complete_authorization("cross-tenant-code", cross_tenant_state)
+        self.assertEqual(service.find_account(original["id"])["owner_tenant_key"], self.same_user_other_tenant["tenant_key"])
+
+    def test_failed_reauthorization_preserves_owner_token_and_transfer_audit(self):
+        original = self.complete(actor=self.owner)
+        token_file = service.token_path(original["x_user_id"])
+        before = token_file.read_bytes()
+        _result, state = self.new_state(self.other_owner)
+        with mock.patch.object(service, "token_request", return_value={"access_token": "new-access"}), \
+             mock.patch.object(service, "user_request", side_effect=service.ServiceError("x_account_suspended", "suspended", 409)):
+            with self.assertRaises(service.ServiceError):
+                service.complete_authorization("new-code", state)
+        self.assertEqual(service.find_account(original["id"])["owner_user_id"], self.owner["user_id"])
+        self.assertEqual(token_file.read_bytes(), before)
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_oauth_event WHERE event_type='ownership_transfer'").fetchone()[0], 0)
+
+    def test_transfer_audit_and_owner_roll_back_together_on_storage_failure(self):
+        original = self.complete(actor=self.owner)
+        token_file = service.token_path(original["x_user_id"])
+        before = token_file.read_bytes()
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            conn.execute("CREATE TRIGGER fail_transfer BEFORE INSERT ON x_oauth_event WHEN NEW.event_type='ownership_transfer' BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END")
+        with self.assertRaises(service.ServiceError):
+            self.complete(actor=self.other_owner, username="replacement")
+        current = service.find_account(original["id"])
+        self.assertEqual(current["owner_user_id"], self.owner["user_id"])
+        self.assertEqual(current["username"], original["username"])
+        self.assertEqual(token_file.read_bytes(), before)
+        with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_oauth_event WHERE event_type='ownership_transfer'").fetchone()[0], 0)
 
     def test_profile_metrics_are_nullable_and_refresh_on_verify(self):
         item = self.complete(
@@ -842,9 +880,10 @@ class XAccountsTestCase(unittest.TestCase):
         }
         account = {"data": {"id": "777777777", "username": "legacy", "name": "Legacy"}}
         with mock.patch.object(service, "token_request", return_value=token), mock.patch.object(service, "user_request", return_value=account):
-            with self.assertRaises(service.ServiceError) as legacy_conflict:
-                service.complete_authorization("legacy-code", state)
-        self.assertEqual(legacy_conflict.exception.code, "x_account_owned_by_other")
+            restored = service.complete_authorization("legacy-code", state)
+        self.assertEqual(restored["owner_tenant_key"], self.owner["tenant_key"])
+        self.assertEqual(restored["owner_user_id"], self.owner["user_id"])
+        self.assertFalse(restored["publish_approved"])
 
     def test_publish_approval_defaults_off_and_admin_controls_effective_eligibility(self):
         item = self.complete(
@@ -1220,7 +1259,7 @@ class XAccountsTestCase(unittest.TestCase):
         self.assertEqual(restored["username"], "after_logout")
         self.assertEqual(restored["first_authorized_at"], first_authorized_at)
         self.assertEqual(restored["disconnected_at"], "")
-        self.assertEqual(restored["owner_name"], self.owner["name"])
+        self.assertEqual(restored["owner_name"], "Owner Renamed")
         self.assertEqual(restored["authorized_by_name"], "Owner Renamed")
         restored_token = service.token_path(restored["x_user_id"]).read_bytes()
         self.assertNotEqual(restored_token, old_token)
