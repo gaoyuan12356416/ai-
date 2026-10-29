@@ -6,6 +6,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from . import VideoEditingError, require
+from .catalog import resource_code
 from .store import can_manage, encode, identifier, now, owner
 
 MAX_BYTES = 8 * 1024**3
@@ -25,6 +26,7 @@ class Uploads:
     def __init__(self, store, client, bucket, region, prefix='video-editing/v1'):
         self.store, self.client, self.bucket, self.region = store, client, bucket, region
         self.prefix = prefix.strip('/')
+        self.resource_resolver = None
 
     def configured(self):
         require(self.client is not None and self.bucket and self.region, 'cos_not_configured', 'COS 尚未配置，不能上传', 503)
@@ -56,6 +58,8 @@ class Uploads:
         return {'id': row['id'], 'asset_id': row['asset_id'], 'status': row['status'], 'name': d['name'],
                 'size_bytes': d['size_bytes'], 'part_size': PART_BYTES, 'part_count': d['part_count'],
                 'uploaded_parts': d.get('uploaded_parts', []), 'created_at': row['created_at'],
+                'library_kind': d.get('library_kind', 'material'), 'series_code': d.get('series_code', ''),
+                'english_title': d.get('english_title', ''),
                 'expires_at': d.get('expires_at'), 'error_code': d.get('error_code', '')}
 
     def create(self, payload, actor, *, allow_create=True):
@@ -69,19 +73,45 @@ class Uploads:
         content_type = str(payload.get('content_type', '')).lower()
         require(content_type in {'video/mp4','video/quicktime','video/webm','video/x-matroska','video/x-msvideo','video/mpeg','application/octet-stream'}, 'video_type_invalid', '请上传视频文件')
         identity = {'name': name, 'size_bytes': size, 'content_type': content_type}
-        with self.store.transaction() as db:
+        def existing(db):
             found = db.execute('SELECT * FROM ve_upload WHERE owner=? AND operation_id=?', (owner(actor), operation)).fetchone()
-            if found:
-                row = self.store.row(found)
-                require(all(row['data'][k] == v for k,v in identity.items()), 'operation_conflict', '同一上传操作的文件已变化', 409)
+            if not found:
+                return None
+            row = self.store.row(found)
+            require(all(row['data'][k] == v for k,v in identity.items()), 'operation_conflict', '同一上传操作的文件已变化', 409)
+            for field, default in (('library_kind', 'material'), ('series_code', '')):
+                if field in payload:
+                    supplied = payload[field].strip() if field == 'series_code' and isinstance(payload[field], str) else payload[field]
+                    require(supplied == row['data'].get(field, default), 'operation_conflict', '同一上传操作的资源或栏目已变化', 409)
+            return row
+        # Old and uncertain sessions must remain recoverable even when the
+        # catalog is unavailable or the new upload-tag fields were not sent.
+        with self.store.transaction() as db:
+            row = existing(db)
+            if row:
                 return row
-            require(allow_create,'video_editing_intake_disabled','新剪辑上传已暂停，已有上传可继续核查',503)
+        require(allow_create,'video_editing_intake_disabled','新剪辑上传已暂停，已有上传可继续核查',503)
+        library_kind = payload.get('library_kind')
+        require(library_kind in {'material', 'free_episode'}, 'library_kind_invalid', '请选择素材库或免费集栏目')
+        code = resource_code(payload.get('series_code'))
+        require(callable(self.resource_resolver), 'resource_catalog_unavailable', '资源目录暂不可用，请稍后重试', 503)
+        resource = self.resource_resolver(code)
+        require(isinstance(resource, dict) and resource.get('series_code') == code,
+                'resource_catalog_invalid', '资源目录返回内容无效，请重新搜索选择', 503)
+        tags = {'library_kind': library_kind, 'series_code': code,
+                'english_title': str(resource.get('english_title') or '')[:255]}
+        with self.store.transaction() as db:
+            # Another request may have initialized the same operation while
+            # this request was resolving the catalog; never create a second COS upload.
+            row = existing(db)
+            if row:
+                return row
             upload_id, asset_id = identifier('vu_'), identifier('va_')
             key = self.prefix+'/sources/'+asset_id+'/source'
-            data = {**identity, 'key': key, 'bucket': self.bucket, 'part_count': math.ceil(size/PART_BYTES),
+            data = {**identity, **tags, 'key': key, 'bucket': self.bucket, 'part_count': math.ceil(size/PART_BYTES),
                     'parts': {}, 'uploaded_parts': [], 'expires_at': now()+7*86400, 'upload_id': ''}
             self.store.insert('source', {'id':asset_id,'kind':'asset','owner':owner(actor),'name':name,'status':'uploading',
-                'data':{'size_bytes':size,'content_type':content_type,'identity':{'bucket':self.bucket,'key':key,'size_bytes':size},'upload_session_id':upload_id,
+                'data':{**tags,'size_bytes':size,'content_type':content_type,'identity':{'bucket':self.bucket,'key':key,'size_bytes':size},'upload_session_id':upload_id,
                         'owner_user_id':str(actor['user_id']),'owner_name':str(actor.get('name',''))}}, db)
             self.store.insert('upload', {'id':upload_id,'owner':owner(actor),'operation_id':operation,'asset_id':asset_id,'status':'initializing','data':data}, db)
         try:

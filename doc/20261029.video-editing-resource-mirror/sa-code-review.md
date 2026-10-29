@@ -1,0 +1,3 @@
+# 代码审查
+
+独立资源工作流复核projects_v2：发现recipe错误类型未被局部捕获，已修复为同时处理VideoEditingError与DramaSynthesisError（BUG-001）。省略unit/clip ID时改为稳定默认编号，避免创建操作重放时draft_hash变化。渲染审查保留v1指纹、compact导出profile及代理几何。独立前端QA修复旧解码回调、源缺失时旧画面残留、FFmpeg偶数几何对齐、暂停拖动和撤销预览；独立部署审查修复已启动GPU但隧道未启动时的恢复路径。最终集成、NVENC和生产验收已通过，见测试报告。

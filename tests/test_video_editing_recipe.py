@@ -2,8 +2,8 @@ import copy
 import unittest
 
 from features.drama_synthesis.core import DramaSynthesisError
-from features.video_editing.recipe import (PROFILE, validate_recipe, recipe_fingerprint,
-    payload_fingerprint, output_frames, ms_to_frame)
+from features.video_editing.recipe import (LEGACY_PROFILE, PROFILE, validate_recipe, recipe_fingerprint,
+    payload_fingerprint, output_frames, ms_to_frame, preview_geometry)
 
 
 def fixture():
@@ -16,6 +16,74 @@ def fixture():
 
 
 class RecipeTests(unittest.TestCase):
+    def test_legacy_fingerprints_remain_exact(self):
+        value = fixture(); value["profile"] = LEGACY_PROFILE
+        self.assertEqual(recipe_fingerprint(value), "26ce1f5a98d1ff3cc2ea672950b9b9bfce9d327def43c03d46aefb026d31cef3")
+        payload = {"job_id": "ve_" + "a" * 32, "task_type": "video_editing_v1", "operation": "render", "recipe": value}
+        self.assertEqual(payload_fingerprint(payload), "d9690eb2c5c03a0948e20ecbb962965f5ab41e840c79eba15a42acd336490767")
+        self.assertNotIn("mirror", validate_recipe(value)["clips"][0])
+        self.assertNotIn("subtitle_band", validate_recipe(value)["clips"][0])
+
+    def test_live_compact_fingerprints_and_both_profile_version_combinations(self):
+        value = fixture()
+        self.assertEqual(recipe_fingerprint(value), "910e935fb51bd9a054acb2a19bf36dd02d9ad4c005853e2b362af4eb705c8979")
+        payload = {"job_id": "ve_" + "a" * 32, "task_type": "video_editing_v1", "operation": "render", "recipe": value}
+        self.assertEqual(payload_fingerprint(payload), "ecb47995714e57a01cdbd92bdb6837b5d1928d032f74e60e6ed0a65b2b8baad9")
+        hashes = set()
+        for profile in (LEGACY_PROFILE, PROFILE):
+            for version in (1, 2):
+                with self.subTest(profile=profile, version=version):
+                    recipe = fixture(); recipe.update(profile=profile, version=version)
+                    if version == 2: recipe["clips"][0]["mirror"] = True
+                    normalized = validate_recipe(recipe)
+                    self.assertEqual((normalized["profile"], normalized["version"]), (profile, version))
+                    self.assertEqual(validate_recipe(normalized), normalized)
+                    hashes.add(recipe_fingerprint(recipe))
+            probe = fixture(); probe.update(profile=profile, clips=[])
+            self.assertEqual(validate_recipe(probe, "probe")["profile"], profile)
+        self.assertEqual(len(hashes), 4)
+        for profile in ("video-editing-720-v3", None, []):
+            invalid = fixture(); invalid["profile"] = profile
+            with self.assertRaises(DramaSynthesisError): validate_recipe(invalid)
+
+    def test_v2_mirror_defaults_band_and_preserves_explicit_off(self):
+        value = fixture(); value["version"] = 2
+        value["clips"][0]["mirror"] = True
+        normalized = validate_recipe(value)
+        self.assertEqual(normalized["clips"][0]["subtitle_band"], {"top": 960, "bottom": 1280})
+        self.assertEqual(validate_recipe(normalized), normalized)
+        original_hash = recipe_fingerprint(value)
+        value["clips"][0]["subtitle_band"] = None
+        self.assertIsNone(validate_recipe(value)["clips"][0]["subtitle_band"])
+        self.assertNotEqual(recipe_fingerprint(value), original_hash)
+        value["clips"][0].update(mirror=False, subtitle_band={"top": 2, "bottom": 300})
+        self.assertEqual(validate_recipe(value)["clips"][0]["subtitle_band"], {"top": 2, "bottom": 300})
+        self.assertNotEqual(recipe_fingerprint(value), original_hash)
+        payload = {"job_id": "ve_" + "a" * 32, "task_type": "video_editing_v1", "operation": "render", "recipe": value}
+        self.assertEqual(payload_fingerprint(payload), payload_fingerprint({**payload, "recipe": validate_recipe(value)}))
+
+    def test_v2_rejects_invalid_effects_and_keeps_probes_v1(self):
+        for patch in ({"mirror": 1}, {"mirror": "true"}, {"subtitle_band": {}},
+                      {"subtitle_band": {"top": 960, "bottom": 1280, "x": 1}},
+                      *({"subtitle_band": {"top": t, "bottom": b}} for t, b in
+                        ((-2, 1280), (961, 1280), (960, 1279), (960, 1282), (960, 960), (True, 1280), (0, 0)))):
+            with self.subTest(patch=patch):
+                value = fixture(); value["version"] = 2; value["clips"][0].update(patch)
+                with self.assertRaises(DramaSynthesisError): validate_recipe(value)
+        value = fixture(); value.update(version=2, clips=[])
+        with self.assertRaises(DramaSynthesisError): validate_recipe(value, "probe")
+
+    def test_preview_geometry_recovers_proxy_content_and_square_pixel_shape(self):
+        legacy = {"width": 1920, "height": 1080, "sample_aspect_ratio": "1:1"}
+        self.assertEqual(preview_geometry(legacy, proxy=True)["content_rect"],
+                         {"x": 0, "y": 436, "width": 720, "height": 406})
+        rotated = {"width": 480, "height": 640, "sample_aspect_ratio": "4:3", "rotation": 90}
+        self.assertEqual(preview_geometry(rotated)["display_width"], 360)
+        self.assertEqual(preview_geometry(rotated, proxy=True)["content_rect"],
+                         {"x": 0, "y": 0, "width": 720, "height": 1280})
+        self.assertEqual(preview_geometry({"width": 720, "height": 480, "sample_aspect_ratio": "4:3"})["display_width"], 960)
+        self.assertIsNone(preview_geometry({}))
+
     def test_cutting_and_frame_rounding_are_deterministic(self):
         value = validate_recipe(fixture())
         self.assertEqual((value["clips"][0]["start_frame"], output_frames(value)), (30, 30))

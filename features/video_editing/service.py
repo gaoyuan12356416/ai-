@@ -11,8 +11,8 @@ from . import VideoEditingError, require
 from .catalog import Catalog, probe_identity
 from .store import Store, can_manage, encode, identifier, now, owner
 from .uploads import Uploads, MAX_BYTES, PART_BYTES
+from .recipe import LEGACY_PROFILE, PROFILE
 
-PROFILE='video-editing-720-v1'
 MAX_DRAMAS=20
 TERMINAL={'completed','failed','cancelled'}
 
@@ -27,10 +27,13 @@ class Service:
     def __init__(self,store,uploads,app=None,gpu_url='',gpu_token='',intake_enabled=True):
         self.store,self.uploads,self.app=store,uploads,app
         self.catalog=Catalog(store,app) if app is not None else None
+        self.uploads.resource_resolver=self.catalog.resource if self.catalog else None
         from .material_source import MaterialSource
         self.material_source=MaterialSource(self)
         self.gpu_url,self.gpu_token=gpu_url.rstrip('/'),gpu_token
         self._intake_enabled=bool(intake_enabled)
+        self.export_profile=os.environ.get('VIDEO_EDITING_EXPORT_PROFILE',PROFILE).strip()
+        require(self.export_profile in (LEGACY_PROFILE,PROFILE),'video_editing_export_profile_invalid','剪辑导出配置无效',503)
 
     @property
     def intake_enabled(self):
@@ -40,8 +43,9 @@ class Service:
         require(self.intake_enabled,'video_editing_intake_disabled','新剪辑任务已暂停，已有任务仍可查询和恢复',503)
 
     def config(self):
-        return {'enabled':self.intake_enabled,'intake_enabled':self.intake_enabled,'max_file_bytes':MAX_BYTES,'part_size':PART_BYTES,'max_dramas':MAX_DRAMAS,'profile':PROFILE,
-                'worker_configured':bool(self.gpu_url and self.gpu_token),'cos_configured':bool(self.uploads.client and self.uploads.bucket)}
+        return {'enabled':self.intake_enabled,'intake_enabled':self.intake_enabled,'max_file_bytes':MAX_BYTES,'part_size':PART_BYTES,'max_dramas':MAX_DRAMAS,'profile':self.export_profile,
+                'worker_configured':bool(self.gpu_url and self.gpu_token),'cos_configured':bool(self.uploads.client and self.uploads.bucket),
+                'draft_schema_version':2,'resource_library':True,'mirror_subtitle_band':True}
 
     def signed_url(self,artifact,download=False):
         if not artifact or not artifact.get('key') or not self.uploads.client:
@@ -55,17 +59,18 @@ class Service:
         except Exception:
             return ''
 
-    def source(self,sid,actor,db=None,ready=False):
+    def source(self,sid,actor,db=None,ready=False,check_product=True):
         row=self.store.get('source',sid,db)
         require(row and row['status']!='deleted' and (row['kind']=='episode' or row['status']=='ready' or can_manage(row,actor)),
                 'source_not_found','素材不存在或尚不可使用',404)
-        if row['kind']=='episode' and self.catalog is not None:
+        if row['kind']=='episode' and self.catalog is not None and check_product:
             self.catalog.require_product(row['data'].get('app_id',''))
         if ready:
             require(row['status']=='ready','source_not_ready','请等待所有素材校验完成',409)
         return row
 
     def source_dto(self,row,actor):
+        from .recipe import preview_geometry
         d=row['data']; identity=d.get('identity',{})
         preview=d.get('preview') or (identity if row['kind']=='asset' else {})
         result={'id':row['id'],'source_id':row['id'],'kind':row['kind'],'name':row['name'],'status':row['status'],
@@ -76,6 +81,9 @@ class Service:
                 'expires_at':now()+900,
                 'probe_task_id':d.get('probe_task_id',''),
                 'error_code':d.get('error_code',''),'error_message':d.get('error_message','')}
+        result.update(library_kind=d.get('library_kind','material'),series_code=d.get('series_code',''),
+                      english_title=d.get('english_title',''),english_title_status=d.get('english_title_status','missing'),
+                      preview_geometry=preview_geometry(d.get('metadata',{}),proxy=bool(d.get('preview'))))
         for k in ('app_id','content_id','episode_number','title'):
             if k in d: result[k]=d[k]
         # Shared sources expose media progress, never another owner's task payload.
@@ -91,8 +99,13 @@ class Service:
         if row['kind']=='episode' and not result['preview_url'] and row['status']=='ready': result['preview_url']=d.get('url','')
         return result
 
-    def assets(self,actor,query='',status='',limit=50,offset=0):
+    def assets(self,actor,query='',status='',limit=50,offset=0,library_kind='',series_code=''):
         conditions=["kind='asset'","status<>'deleted'"]; args=[]
+        if library_kind:
+            require(library_kind in {'material','free_episode'},'library_kind_invalid','素材栏目无效')
+            conditions.append('library_kind=?');args.append(library_kind)
+        if series_code:
+            conditions.append('series_code=?');args.append(str(series_code))
         if status=='all':
             if not actor.get('is_admin'):
                 conditions.append("(status='ready' OR owner=?)");args.append(owner(actor))
@@ -103,16 +116,32 @@ class Service:
         rows,total=self.store.list('source',' AND '.join(conditions),tuple(args),min(100,max(1,int(limit))),max(0,int(offset)))
         return {'items':[self.source_dto(r,actor) for r in rows],'total':total}
 
-    def mutate_asset(self,sid,actor,name=None,delete=False):
+    def mutate_asset(self,sid,actor,name=None,delete=False,series_code=None,library_kind=None):
+        original=self.source(sid,actor)
+        require(original['kind']=='asset' and can_manage(original,actor),'permission_denied','仅上传者或管理员可以管理素材',403)
+        resource=None
+        if series_code is not None and not delete:
+            require(self.catalog is not None,'catalog_unavailable','资源目录暂不可用',503)
+            resource=self.catalog.resource(series_code)
+        if library_kind is not None:require(library_kind in {'material','free_episode'},'library_kind_invalid','素材栏目无效')
         with self.store.transaction() as db:
             row=self.source(sid,actor,db)
             require(row['kind']=='asset' and can_manage(row,actor),'permission_denied','仅上传者或管理员可以管理素材',403)
             if delete:
                 self.store.update('source',sid,{'status':'deleted'},db)
             else:
-                name=str(name or '').strip()
-                require(0<len(name)<=240 and not any(ord(c)<32 for c in name),'name_invalid','素材名称无效')
-                self.store.update('source',sid,{'name':name},db)
+                changes={}
+                if name is not None:
+                    name=str(name).strip()
+                    require(0<len(name)<=240 and not any(ord(c)<32 for c in name),'name_invalid','素材名称无效')
+                    changes['name']=name
+                if resource is not None or library_kind is not None:
+                    data=copy.deepcopy(row['data'])
+                    if resource is not None:data.update(resource)
+                    if library_kind is not None:data['library_kind']=library_kind
+                    changes['data']=data
+                require(changes,'asset_update_required','请选择需要修改的字段')
+                self.store.update('source',sid,changes,db)
             row=self.store.get('source',sid,db)
         return self.source_dto(row,actor)
 
@@ -130,7 +159,7 @@ class Service:
             if source['status'] in {'ready','probing'}: return source
             # One source has at most one active probe, even across operators.
             task_id=identifier('ve_')
-            recipe={'version':1,'profile':PROFILE,'sources':[{'source_id':sid,'kind':source['kind'],'url':d['url'],
+            recipe={'version':1,'profile':LEGACY_PROFILE,'sources':[{'source_id':sid,'kind':source['kind'],'url':d['url'],
                     'identity':d['identity']}],'clips':[]}
             from .recipe import validate_recipe
             recipe=validate_recipe(recipe,operation='probe')
@@ -155,13 +184,20 @@ class Service:
         require(row and can_manage(row,actor),'project_not_found','剪辑项目不存在',404)
         return row
 
-    @staticmethod
-    def project_dto(row):
-        return {**row['data'],'id':row['id'],'name':row['name'],'version':row['version'],
+    def project_dto(self,row,actor=None,upgrade=False):
+        result={**row['data'],'id':row['id'],'name':row['name'],'version':row['version'],
                 'created_at':row['created_at'],'updated_at':row['updated_at']}
+        if actor is not None:
+            from .projects_v2 import draft_issues,upgrade_units
+            if row['data'].get('schema_version')==2:result['issues']=draft_issues(self,row['data'],actor)
+            elif upgrade:result['upgrade_units']=upgrade_units(self,row)
+        return result
 
     def validate_draft(self,payload,actor):
         require(isinstance(payload,dict),'draft_invalid','剪辑内容无效')
+        if payload.get('schema_version')==2:
+            from .projects_v2 import normalize_draft
+            return normalize_draft(payload)
         require(not(set(payload)-{'name','asset_id','dramas','expected_version','operation_id'}),'draft_fields_invalid','剪辑内容包含未知字段')
         name=str(payload.get('name','')).strip()
         require(0<len(name)<=120,'name_invalid','请输入项目名称（最多120字）')
@@ -211,12 +247,12 @@ class Service:
                     previous=db.execute('SELECT * FROM ve_project_operation WHERE owner=? AND operation_id=?',(owner(actor),op)).fetchone()
                     if previous:
                         require(previous['draft_hash']==draft_hash,'operation_conflict','同一创建操作的剪辑内容已变化',409)
-                        return self.project_dto(self.project(previous['project_id'],actor,db))
+                        return self.project_dto(self.project(previous['project_id'],actor,db),actor)
                 pid=identifier('vp_')
                 self.store.insert('project',{'id':pid,'owner':owner(actor),'name':draft['name'],'version':1,'data':draft},db)
                 if op:db.execute('INSERT INTO ve_project_operation(owner,operation_id,project_id,draft_hash) VALUES(?,?,?,?)',(owner(actor),op,pid,draft_hash))
             row=self.project(pid,actor,db)
-        return self.project_dto(row)
+        return self.project_dto(row,actor)
 
     def _render_batch_result(self,batch,actor,db):
         require(batch is not None,'batch_not_found','制作批次不存在，请联系管理员核查',409)
@@ -233,6 +269,13 @@ class Service:
                    (actor_owner,op,pid,version,batch['id'],now()))
 
     def render(self,pid,payload,actor):
+        project=self.project(pid,actor)
+        expected=payload.get('expected_version')
+        saved=self.store.get('project_version','vv_'+hashlib.sha256((pid+':'+str(expected)).encode()).hexdigest()[:32])
+        draft=saved['data'] if saved else project['data']
+        if draft.get('schema_version')==2:
+            from .projects_v2 import render_units
+            return render_units(self,pid,payload,actor)
         op=operation_id(payload.get('operation_id'))
         actor_owner=owner(actor);expected=payload.get('expected_version')
         from .recipe import validate_recipe
@@ -286,7 +329,7 @@ class Service:
                 for sid in dict.fromkeys(c['source_id'] for c in clips):
                     source=self.source(sid,actor,db,ready=True); d=source['data']; meta=d['metadata']
                     sources.append({'source_id':sid,'kind':source['kind'],'url':d['url'],'identity':d['identity'],**meta})
-                recipe=validate_recipe({'version':1,'profile':PROFILE,'sources':sources,'clips':clips},operation='render')
+                recipe=validate_recipe({'version':1,'profile':self.export_profile,'sources':sources,'clips':clips},operation='render')
                 task_operation=internal_op+'_'+str(index)
                 prior=self.store.row(db.execute('SELECT * FROM ve_task WHERE owner=? AND operation_id=?',(record_owner,task_operation)).fetchone())
                 if prior:
@@ -328,6 +371,7 @@ class Service:
                     'thumbnail_url':self.signed_url(result.get('thumbnail') or {}),'metadata':{k:artifact[k] for k in ('duration_ms','width','height','fps','has_audio') if k in artifact}}
             output['expires_at']=now()+900
         return {'id':row['id'],'project_id':row['project_id'],'kind':row['kind'],'status':row['status'],'drama_title':d.get('drama_title',''),
+                'unit_id':d.get('unit_id',''),'series_code':d.get('series_code',''),'english_title':d.get('english_title',''),
                 'batch_id':d.get('batch_id',''),'project_version_id':d.get('project_version_id',''),'output_id':d.get('output_id',''),
                 'stage':d.get('stage',row['status']),'progress':d.get('progress',0),'error_code':d.get('error_code',''),
                 'error_message':d.get('error_message',''),'output':output,

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.parse import urlsplit,urlunsplit,parse_qsl
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from features.video_editing import VideoEditingError
 from features.video_editing.store import Store
@@ -56,8 +56,12 @@ class UploadTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store=Store(Path(self.tmp.name)/'state.sqlite3');self.cos=FakeCos()
         self.uploads=Uploads(self.store,self.cos,'bucket','ap-hongkong')
+        self.uploads.resource_resolver=Mock(side_effect=lambda code:{'series_code':code,'english_title':'Canonical English Title'})
+    def payload(self,size=12,**extra):
+        return {'operation_id':'operation_1','name':'source.mp4','size_bytes':size,'content_type':'video/mp4',
+                'library_kind':'material','series_code':'21481',**extra}
     def create(self,size=12):
-        return self.uploads.create({'operation_id':'operation_1','name':'source.mp4','size_bytes':size,'content_type':'video/mp4'},ACTOR)
+        return self.uploads.create(self.payload(size),ACTOR)
     def signed(self,row,body=b'hello world!'):
         md5=base64.b64encode(hashlib.md5(body).digest()).decode()
         result=self.uploads.sign(row['id'],1,{'content_md5':md5},ACTOR)
@@ -75,6 +79,46 @@ class UploadTests(unittest.TestCase):
     def test_create_idempotent_and_content_conflict(self):
         a=self.create();b=self.create();self.assertEqual(a['id'],b['id']);self.assertEqual(len(self.cos.initializations),1)
         with self.assertRaises(VideoEditingError):self.create(13)
+    def test_free_episode_upload_preserves_verified_resource_and_column(self):
+        row=self.uploads.create(self.payload(library_kind='free_episode',english_title='Untrusted input'),ACTOR)
+        source=self.store.get('source',row['asset_id'])
+        self.assertEqual(source['kind'],'asset')
+        for record in (row,source):
+            self.assertEqual(record['data']['library_kind'],'free_episode')
+            self.assertEqual(record['data']['series_code'],'21481')
+            self.assertEqual(record['data']['english_title'],'Canonical English Title')
+        self.assertNotIn('episode_number',source['data'])
+        self.assertEqual(self.uploads.dto(row)['library_kind'],'free_episode')
+    def test_new_upload_requires_verified_resource_and_column_before_cos(self):
+        for payload in (self.payload(series_code=''),self.payload(library_kind='other')):
+            with self.assertRaises(VideoEditingError):self.uploads.create(payload,ACTOR)
+        self.uploads.resource_resolver.side_effect=VideoEditingError('resource_not_found','Not found',404)
+        with self.assertRaises(VideoEditingError):self.create()
+        self.assertEqual(self.cos.initializations,[])
+        self.assertEqual(self.store.list('upload')[1],0)
+    def test_existing_session_replay_does_not_need_catalog_or_new_fields(self):
+        row=self.create()
+        self.uploads.resource_resolver.side_effect=AssertionError('must not resolve existing session')
+        payload=self.payload();payload.pop('series_code');payload.pop('library_kind')
+        self.assertEqual(self.uploads.create(payload,ACTOR,allow_create=False)['id'],row['id'])
+        self.assertEqual(len(self.cos.initializations),1)
+    def test_replayed_tag_changes_are_conflicts(self):
+        self.create()
+        for payload in (self.payload(series_code='21482'),self.payload(library_kind='free_episode')):
+            with self.assertRaises(VideoEditingError) as caught:self.uploads.create(payload,ACTOR)
+            self.assertEqual(caught.exception.code,'operation_conflict')
+        self.assertEqual(len(self.cos.initializations),1)
+    def test_actual_legacy_session_without_tags_can_replay(self):
+        row=self.create()
+        with self.store.transaction() as db:
+            data=dict(row['data'])
+            for field in ('library_kind','series_code','english_title'):data.pop(field,None)
+            self.store.update('upload',row['id'],{'data':data},db)
+        self.uploads.resource_resolver.side_effect=AssertionError('legacy replay must not resolve')
+        payload=self.payload();payload.pop('series_code');payload.pop('library_kind')
+        replay=self.uploads.create(payload,ACTOR)
+        self.assertEqual(replay['id'],row['id'])
+        self.assertEqual(self.uploads.dto(replay)['series_code'],'')
     def test_same_user_other_tenant_denied(self):
         row=self.create()
         for actor in (OTHER,{**ACTOR,'tenant_key':'other'}):

@@ -29,7 +29,7 @@ def handle(handler,method,app_module):
         q=lambda k,default='':query.get(k,[default])[0]
         answer=None
         if method=='GET' and path=='/config':answer={'item':service.config()}
-        elif method=='GET' and path=='/assets':answer=service.assets(actor,q('q'),q('status'),int(q('limit','50')),int(q('offset','0')))
+        elif method=='GET' and path=='/assets':answer=service.assets(actor,q('q'),q('status'),int(q('limit','50')),int(q('offset','0')),q('library_kind'),q('series_code'))
         elif method=='GET' and path=='/uploads':
             rows,total=service.store.list('upload',"owner=? AND status NOT IN ('completed','aborted')",(owner(actor),),100)
             answer={'items':[service.uploads.dto(r) for r in rows],'total':total}
@@ -41,9 +41,12 @@ def handle(handler,method,app_module):
             elif method=='POST' and len(parts)==3 and parts[2] in {'complete','reconcile'}:answer={'item':service.complete_upload(uid,actor,reconcile=parts[2]=='reconcile')}
             elif method=='POST' and len(parts)==3 and parts[2]=='abort':answer={'item':service.uploads.dto(service.uploads.abort(uid,actor))}
         elif re.fullmatch(r'/assets/va_[0-9a-f]{32}',path) and method in {'PATCH','DELETE'}:
-            answer={'item':service.mutate_asset(path.split('/')[-1],actor,name=body.get('name'),delete=method=='DELETE')}
+            answer={'item':service.mutate_asset(path.split('/')[-1],actor,name=body.get('name'),delete=method=='DELETE',
+                                               series_code=body.get('series_code'),library_kind=body.get('library_kind'))}
         elif re.fullmatch(r'/sources/(?:va_|vep_)[0-9a-f]{32}',path) and method=='GET':answer={'item':service.source_dto(service.source(path.split('/')[-1],actor),actor)}
         elif path=='/catalog/products' and method=='GET':answer={'items':service.catalog.products()}
+        elif path=='/catalog/resources' and method=='GET':answer={'items':service.catalog.resources(q('q'))}
+        elif path=='/catalog/resource-variants' and method=='GET':answer={'items':service.catalog.resource_variants(q('series_code'))}
         elif path=='/catalog/dramas' and method=='GET':answer={'items':service.catalog.dramas(q('app_id'),q('q'))}
         elif path=='/catalog/episodes' and method=='GET':answer={'items':[service.source_dto(r,actor) for r in service.catalog.episodes(q('app_id'),q('content_id'),actor)]}
         elif path=='/catalog/probe' and method=='POST':
@@ -56,7 +59,7 @@ def handle(handler,method,app_module):
         elif path=='/projects' and method=='POST':answer={'item':service.save_project(body,actor)}
         elif re.fullmatch(r'/projects/vp_[0-9a-f]{32}(?:/render)?',path):
             pid=path.split('/')[2]
-            if method=='GET' and not path.endswith('/render'):answer={'item':service.project_dto(service.project(pid,actor))}
+            if method=='GET' and not path.endswith('/render'):answer={'item':service.project_dto(service.project(pid,actor),actor,upgrade=True)}
             elif method=='PATCH' and not path.endswith('/render'):answer={'item':service.save_project(body,actor,pid)}
             elif method=='POST' and path.endswith('/render'):answer=service.render(pid,body,actor)
         elif path=='/tasks' and method=='GET':
@@ -67,7 +70,7 @@ def handle(handler,method,app_module):
             tid=path.split('/')[2]
             if method=='GET' and len(path.split('/'))==3:answer={'item':service.task_dto(service.task(tid,actor))}
             elif method=='POST' and path.endswith('/resume'):answer={'item':service.resume(tid,actor)}
-            elif method=='POST' and path.endswith('/material-source'):answer={'item':service.material_source.enqueue(tid,actor)}
+            elif method=='POST' and path.endswith('/material-source'):answer={'item':service.material_source.enqueue(tid,actor,body)}
         require(answer is not None,'not_found','接口不存在',404)
         app_module.json_response(handler,200,answer,no_store=True)
     except VideoEditingError as exc:

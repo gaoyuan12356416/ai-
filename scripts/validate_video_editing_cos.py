@@ -4,7 +4,8 @@
 Supply one JSON object on stdin, capture stdout in a subprocess pipe, and never
 log the sign response. Examples (all operations require a stable run_id):
   {"op":"create","run_id":"canary_20261022","operation_id":"asset_001",
-   "name":"asset.mp4","size_bytes":18000000,"content_type":"video/mp4"}
+   "name":"asset.mp4","size_bytes":18000000,"content_type":"video/mp4",
+   "library_kind":"material","series_code":"21481"}
   {"op":"sign","run_id":"canary_20261022","upload_id":"vu_...",
    "part_number":1,"content_md5":"..."}
   {"op":"reconcile|complete|abort","run_id":"canary_20261022","upload_id":"vu_..."}
@@ -109,6 +110,7 @@ def dispatch(payload,app,root):
     require(bucket and region and secret_id and secret_key,'cos_not_configured','COS 配置不完整',503)
     conf=CosConfig(Region=region,SecretId=secret_id,SecretKey=secret_key,Scheme='https',Timeout=30,KeepAlive=False)
     uploads=Uploads(store,CosS3Client(conf,retry=0),bucket,region,'video-editing/validation/'+run_id)
+    uploads.resource_resolver=Catalog(store,app).resource
     if op=='create':row=uploads.create(payload,actor)
     elif op=='sign':
         from features.video_editing import uploads as uploads_module

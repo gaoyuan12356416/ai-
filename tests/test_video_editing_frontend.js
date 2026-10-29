@@ -6,6 +6,15 @@ const model = require('../static/video-editing.js');
 const clip = (id, source_id, start_ms, end_ms, transition='cut') => ({ id, source_id, start_ms, end_ms, transition, fit:'contain', mute:false });
 const source = (duration_ms=20000) => ({ status:'ready', metadata:{duration_ms} });
 
+test('preview geometry follows verified FFmpeg even-pixel scaling and chroma offsets',()=>{
+  assert.deepEqual(model.fitRectangle(1920,1080,'contain'),{x:0,y:436,width:720,height:406});
+  assert.deepEqual(model.fitRectangle(638,480,'contain'),{x:0,y:368,width:720,height:542});
+  assert.deepEqual(model.fitRectangle(640,480,'cover'),{x:-492,y:-0,width:1706,height:1280});
+  assert.deepEqual(model.fitRectangle(1920,1080,'cover'),{x:-778,y:-0,width:2276,height:1280});
+  assert.deepEqual(model.effectiveBand({mirror:true,subtitle_band:{top:959,bottom:1279}}),{top:960,bottom:1280});
+  assert.equal(model.effectiveBand({mirror:true,subtitle_band:null}),null);
+});
+
 test('COS Content-MD5 matches independent crypto oracle across padding boundaries and full 16 MiB parts', () => {
   for (const length of [0,1,3,55,56,57,63,64,65,127,128,129,16384,16777216]) {
     const bytes=Buffer.alloc(length);for(let i=0;i<length;i++)bytes[i]=(i*17+113)%256;
@@ -89,4 +98,25 @@ test('episode progress distinguishes queue, bytes, processing and ready state',(
   assert.equal(model.probeDisplay({status:'probing',probe_progress:{stage:'downloading',download_bytes:10,total_bytes:0}}).percent,null);
   assert.match(model.probeDisplay({status:'probing',probe_progress:{status:'unknown',stage:'downloading'}}).text,/核实/);
   assert.match(model.probeDisplay({status:'ready',metadata:{duration_ms:103733},probe_progress:{stage:'downloading'}}).text,/103.733 秒 · 已就绪/);
+});
+
+test('v2 draft serialization retains incomplete units, multiple assets and mirror settings without a global asset',()=>{
+  const units=[{id:'unit_a',series_code:'{v3404/l144250/}',title:'English title',clips:[{...clip('a','asset1',0,1000),mirror:true,subtitle_band:{top:800,bottom:1000}},clip('b','asset2',0,2000)]},{id:'unit_b',series_code:'',title:'',clips:[]}];
+  const project={schema_version:2,name:'Draft',dramas:units,asset_id:'stale',units:[{id:'stale'}]};
+  const saved=model.draftForSave(project);
+  assert.deepEqual(Object.keys(saved).sort(),['name','schema_version','units']);assert.deepEqual(saved.units,units);assert.equal(saved.units[1].series_code,'');
+  saved.units[0].clips[0].subtitle_band.top=400;assert.equal(units[0].clips[0].subtitle_band.top,800);
+});
+
+test('old drafts use read-only upgrade units and preserve unresolvable timelines',()=>{
+  const old={name:'Old',dramas:[{app_id:'2310',content_id:'DramaA',title:'A',clips:[clip('a','legacy',1,9000)]}]};
+  const units=model.projectUnits(old);assert.equal(units[0].id,'unit_legacy_0');assert.equal(units[0].series_code,'');assert.deepEqual(units[0].clips,old.dramas[0].clips);assert.equal(old.schema_version,undefined);
+  const upgraded=model.projectUnits({...old,upgrade_units:[{id:'unit_old',series_code:'21481',title:'English A',clips:old.dramas[0].clips}]});assert.equal(upgraded[0].series_code,'21481');
+});
+
+test('split keeps mirror and subtitle band independently on both halves',()=>{
+  const original={...clip('a','source',0,10000),mirror:true,subtitle_band:{top:800,bottom:1000}};
+  const cuts=model.split([original],'a',5000);assert.ok(cuts.every(c=>c.mirror));assert.deepEqual(cuts.map(c=>c.subtitle_band),[{top:800,bottom:1000},{top:800,bottom:1000}]);assert.equal(original.end_ms,10000);
+  assert.deepEqual(model.effectiveBand({mirror:true}),{top:960,bottom:1280});assert.equal(model.effectiveBand({mirror:true,subtitle_band:null}),null);assert.equal(model.effectiveBand({mirror:false}),null);
+  assert.deepEqual(model.effectiveBand({mirror:true,subtitle_band:{top:801,bottom:1001}}),{top:802,bottom:1002});
 });

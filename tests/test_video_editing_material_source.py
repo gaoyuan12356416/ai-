@@ -126,6 +126,64 @@ class MaterialSourceTests(unittest.TestCase):
         self.assertEqual(item['status'],'queued')
         return self.store.get('material_upload',OUTPUT_ID)
 
+    def _v2_task(self):
+        with self.store.transaction() as db:
+            task=self.store.get('task',TASK_ID,db)
+            task['data'].update(schema_version=2,series_code='21481',english_title='English Resource Title')
+            task['data'].pop('app_id');task['data'].pop('content_id')
+            self.store.update('task',TASK_ID,{'data':task['data']},db)
+        self.service.catalog=mock.Mock()
+        self.service.catalog.variant.return_value={'app_id':'1479','content_id':'EN_VARIANT','series_code':'21481',
+                                                   'title':'English Resource Title','language':'EN','country':'us'}
+
+    def test_v2_uploaded_only_output_requires_explicit_target_version(self):
+        self._v2_task()
+        with self.assertRaises(VideoEditingError) as caught:self.material.enqueue(TASK_ID,ACTOR)
+        self.assertEqual(caught.exception.code,'material_variant_required')
+        self.assertIsNone(self.store.get('material_upload',OUTPUT_ID))
+        self.service.catalog.variant.assert_not_called()
+        self.assertEqual(self.http.post_calls,[])
+
+    def test_v2_wrong_resource_target_is_rejected_before_ledger(self):
+        self._v2_task()
+        self.service.catalog.variant.side_effect=VideoEditingError('drama_resource_mismatch','Wrong resource',409)
+        with self.assertRaises(VideoEditingError) as caught:
+            self.material.enqueue(TASK_ID,ACTOR,{'app_id':'1479','content_id':'WRONG'})
+        self.assertEqual(caught.exception.code,'drama_resource_mismatch')
+        self.service.catalog.variant.assert_called_once_with('1479','WRONG',series_code='21481')
+        self.assertIsNone(self.store.get('material_upload',OUTPUT_ID))
+
+    def test_v2_selected_info_version_is_frozen_without_source_episodes_or_task_mutation(self):
+        self._v2_task()
+        task_before=self.store.get('task',TASK_ID)['data']
+        with mock.patch.object(self.catalog,'drama',side_effect=AssertionError('v2 must not require episode rows')):
+            answer=self.material.enqueue(TASK_ID,ACTOR,{'app_id':'1479','content_id':'EN_VARIANT'})
+        row=self.store.get('material_upload',OUTPUT_ID)
+        self.assertEqual(row['data']['request']['content_id'],'EN_VARIANT')
+        self.assertEqual(row['data']['request']['app_id'],3214)
+        self.assertEqual(row['data']['request']['country'],'US')
+        self.assertEqual(row['data']['request']['language'],'en')
+        self.assertEqual(answer['source_variant']['series_code'],'21481')
+        self.assertEqual(answer['source_variant']['app_id'],'1479')
+        self.assertEqual(self.store.get('task',TASK_ID)['data'],task_before)
+        self.service.catalog.variant.side_effect=AssertionError('existing ledger must win')
+        self.assertEqual(self.material.enqueue(TASK_ID,ACTOR,{'app_id':'979','content_id':'CHANGED'}),answer)
+        self.assertEqual(self.material.enqueue(TASK_ID,ACTOR),answer)
+        self.assertEqual(self.store.get('material_upload',OUTPUT_ID)['data']['request']['content_id'],'EN_VARIANT')
+        self.assertEqual(self.http.post_calls,[])
+
+    def test_v2_missing_country_or_unknown_language_only_blocks_material_ingestion(self):
+        self._v2_task()
+        for override,code in (({'country':''},'drama_country_unknown'),({'language':'xx'},'drama_language_unknown')):
+            original=dict(self.service.catalog.variant.return_value)
+            self.service.catalog.variant.return_value={**original,**override}
+            with self.assertRaises(VideoEditingError) as caught:
+                self.material.enqueue(TASK_ID,ACTOR,{'app_id':'1479','content_id':'EN_VARIANT'})
+            self.assertEqual(caught.exception.code,code)
+            self.service.catalog.variant.return_value=original
+        self.assertIsNone(self.store.get('material_upload',OUTPUT_ID))
+        self.assertEqual(self.store.get('task',TASK_ID)['status'],'completed')
+
     def _formal(self,row):
         request=row['data']['request']
         return {'id':456789,'product':PRODUCT_NAME,'type':2,'data_source_id':request['content_id'],

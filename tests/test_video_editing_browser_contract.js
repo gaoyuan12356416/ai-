@@ -72,7 +72,8 @@ async function catalogFixture(override=async()=>null){
   const app=await browser(async(url,options,calls)=>{
     const result=await override(url,options,calls,fixture);if(result)return result;
     const method=options.method||'GET',body=options.body&&JSON.parse(options.body);
-    if(url.endsWith('/catalog/products'))return response({items:[{app_id:'2310',label:'DramaWave'}]});
+    if(url.includes('/catalog/resources?'))return response({items:[{series_code:'21481',english_title:'Test English Drama'}]});
+    if(url.includes('/catalog/resource-variants?'))return response({items:dramas});
     if(url.includes('/catalog/dramas?'))return response({items:dramas});
     if(url.includes('/catalog/episodes?'))return response({items:[...sources.values()].filter(source=>source.content_id===new URL(url,'https://test').searchParams.get('content_id'))});
     if(url.endsWith('/catalog/probe')){probes.push(body.source_ids);for(const id of body.source_ids)Object.assign(sources.get(id),{status:'probing',probe_task_id:`probe_${id}`});return response({items:body.source_ids.map(id=>sources.get(id))});}
@@ -84,86 +85,19 @@ async function catalogFixture(override=async()=>null){
     if(url.endsWith('/projects/vp_async'))return response({item:project});
     if(url.endsWith('/projects'))return response({items:project?[project]:[]});
   });
-  return Object.assign(app,fixture,{async selectDrama(index=0){await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='DramaAlpha';await app.field('searchDramas').click();await app.clickData({catalogIndex:String(index)},'catalogDramas');}});
+  return Object.assign(app,fixture,{async selectDrama(index=0){if(app.field('dramaCount').textContent==='0 部'){await app.field('addDrama').click();app.field('resourceSearch').value='21481';await app.field('searchResources').click();await app.clickData({selectResource:'0'},'resourceResults');}await app.field('onlineSources').click();await app.clickData({catalogIndex:String(index)},'catalogDramas');}});
 }
-
-test('asset chooser opens with visible feedback before its delayed fetch and suppresses a second click',async()=>{
-  const gate=deferred();let reads=0;
-  const app=await browser(async url=>url.includes('/assets?')&&++reads===2?gate.promise:null);
-  const opening=app.field('chooseAsset').click();const repeated=app.field('chooseAsset').click();await settle();
-  try{
-    assert.equal(app.field('assetDialog').open,true);
-    assert.match(app.field('assetPicker').innerHTML,/加载|读取/);
-    assert.equal(app.field('chooseAsset').getAttribute('aria-busy'),'true');
-    assert.equal(app.field('chooseAsset').disabled,true);assert.equal(reads,2);
-  }finally{gate.resolve(response({items:[],total:0}));await Promise.all([opening,repeated]);}
-  assert.notEqual(app.field('chooseAsset').getAttribute('aria-busy'),'true');assert.equal(app.field('chooseAsset').disabled,false);
-});
-
-test('catalog product failure keeps the open dialog actionable and releases its immediate busy state',async()=>{
-  const gate=deferred();let reads=0;
-  const app=await browser(async url=>url.endsWith('/catalog/products')?(reads++,gate.promise):null);
-  const opening=app.field('addDrama').click();const repeated=app.field('addDramaBottom').click();await settle();
-  try{
-    assert.equal(app.field('dramaDialog').open,true);assert.equal(reads,1);
-    assert.equal(app.field('addDrama').getAttribute('aria-busy'),'true');assert.equal(app.field('addDrama').disabled,true);
-    assert.match(app.field('catalogStatus').textContent,/加载|读取/);
-  }finally{gate.resolve(response({code:'catalog_unavailable',error:'产品目录暂不可用'},503));await Promise.all([opening,repeated]);}
-  assert.equal(app.field('dramaDialog').open,true);assert.equal(app.field('addDrama').disabled,false);
-  assert.notEqual(app.field('addDrama').getAttribute('aria-busy'),'true');assert.equal(app.field('toast').classList.contains('hidden'),false);
-  assert.match(app.field('toast').textContent,/产品目录暂不可用/);
-});
-
-test('newer search wins out of order and clearing the product invalidates a still-running search',async()=>{
-  const gates=new Map();const app=await catalogFixture(async url=>{if(!url.includes('/catalog/dramas?'))return null;const query=new URL(url,'https://test').searchParams.get('q');const gate=deferred();gates.set(query,gate);return gate.promise;});
-  await app.field('addDrama').click();app.field('productPicker').value='2310';
-  app.field('dramaSearch').value='Alpha';const first=app.field('dramaSearch').emit('keydown',{key:'Enter'});await settle();
-  assert.match(app.field('catalogDramas').innerHTML,/正在|加载|搜索|查找/);
-  app.field('dramaSearch').value='Beta';const second=app.field('dramaSearch').emit('keydown',{key:'Enter'});await settle();
-  gates.get('Beta').resolve(response({items:[{app_id:'2310',content_id:'Beta',title:'较新结果'}]}));await second;
-  gates.get('Alpha').resolve(response({items:[{app_id:'2310',content_id:'Alpha',title:'过时结果'}]}));await first;
-  assert.match(app.field('catalogDramas').innerHTML,/较新结果/);assert.doesNotMatch(app.field('catalogDramas').innerHTML,/过时结果/);
-  app.field('dramaSearch').value='Gamma';const last=app.field('dramaSearch').emit('keydown',{key:'Enter'});await settle();
-  app.field('productPicker').value='';await app.field('productPicker').emit('change');
-  gates.get('Gamma').resolve(response({items:[{app_id:'2310',content_id:'Gamma',title:'已清空产品的结果'}]}));await last;
-  assert.doesNotMatch(app.field('catalogDramas').innerHTML,/已清空产品的结果/);assert.equal(app.field('addEpisodes').disabled,true);
-});
-
-test('newer selected drama wins when its episode response arrives before the old drama',async()=>{
-  const alpha=deferred(),beta=deferred();const app=await catalogFixture(async url=>url.includes('/catalog/episodes?')?(url.includes('DramaAlpha')?alpha.promise:beta.promise):null);
-  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='Drama';await app.field('searchDramas').click();
-  const first=app.clickData({catalogIndex:'0'},'catalogDramas');await settle();
-  assert.match(app.field('catalogEpisodes').innerHTML,/正在|加载/);assert.equal(app.field('addEpisodes').disabled,true);
-  const second=app.clickData({catalogIndex:'1'},'catalogDramas');await settle();
-  beta.resolve(response({items:[app.sources.get('vep_async_4')]}));await second;
-  alpha.resolve(response({items:[app.sources.get('vep_async_1')]}));await first;
-  assert.match(app.field('catalogEpisodes').innerHTML,/vep_async_4/);assert.doesNotMatch(app.field('catalogEpisodes').innerHTML,/vep_async_1/);
-});
-
-test('returning to an in-flight search reuses its read but makes that query the newest user intent',async()=>{
-  const gates={Alpha:deferred(),Beta:deferred()},reads={Alpha:0,Beta:0};
-  const app=await catalogFixture(async url=>{if(!url.includes('/catalog/dramas?'))return null;const query=new URL(url,'https://test').searchParams.get('q');reads[query]++;return gates[query].promise;});
-  await app.field('addDrama').click();app.field('productPicker').value='2310';
-  app.field('dramaSearch').value='Alpha';const first=app.field('dramaSearch').emit('keydown',{key:'Enter'});await settle();
-  app.field('dramaSearch').value='Beta';const second=app.field('dramaSearch').emit('keydown',{key:'Enter'});await settle();
-  app.field('dramaSearch').value='Alpha';const third=app.field('dramaSearch').emit('keydown',{key:'Enter'});await settle();
-  gates.Beta.resolve(response({items:[{app_id:'2310',content_id:'Beta',title:'已离开的乙查询'}]}));await second;
-  assert.doesNotMatch(app.field('catalogDramas').innerHTML,/已离开的乙查询/);
-  gates.Alpha.resolve(response({items:[{app_id:'2310',content_id:'Alpha',title:'最终选择的甲查询'}]}));await Promise.all([first,third]);
-  assert.deepEqual(reads,{Alpha:1,Beta:1});assert.match(app.field('catalogDramas').innerHTML,/最终选择的甲查询/);
-  assert.doesNotMatch(app.field('catalogDramas').innerHTML,/已离开的乙查询/);
-});
 
 test('one click waits for all three probes and adds them exactly once without another confirmation',async()=>{
   const app=await catalogFixture();await app.selectDrama();app.checkEpisodes(['vep_async_1','vep_async_2','vep_async_3']);
   const first=app.field('addEpisodes').click(),second=app.field('addEpisodes').click();await Promise.all([first,second]);
   assert.equal(app.probes.length,1);assert.equal(app.field('addEpisodes').disabled,true);assert.equal(app.field('addEpisodes').getAttribute('aria-busy'),'true');
   assert.equal(app.field('cancelAddEpisodes').classList.contains('hidden'),false);assert.match(app.field('catalogStatus').textContent,/自动添加/);
-  app.ready(1);await app.poll();assert.match(app.field('catalogStatus').textContent,/1\s*\/\s*3/);assert.equal(app.field('dramaCount').textContent,'0 部');
-  app.ready(2);await app.poll();assert.match(app.field('catalogStatus').textContent,/2\s*\/\s*3/);assert.equal(app.field('dramaCount').textContent,'0 部');
+  app.ready(1);await app.poll();assert.match(app.field('catalogStatus').textContent,/1\s*\/\s*3/);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
+  app.ready(2);await app.poll();assert.match(app.field('catalogStatus').textContent,/2\s*\/\s*3/);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
   app.ready(3);await app.poll();await settle();assert.equal(app.field('dramaCount').textContent,'1 部');assert.equal(app.field('dramaDialog').open,false);
   await app.poll();await app.field('saveProject').click();assert.equal(app.probes.length,1);
-  assert.deepEqual(app.saved.at(-1).dramas[0].clips.map(clip=>clip.source_id),['vep_async_1','vep_async_2','vep_async_3']);
+  assert.deepEqual(app.saved.at(-1).units[0].clips.map(clip=>clip.source_id),['vep_async_1','vep_async_2','vep_async_3']);
 });
 
 for(const action of ['close','escape','cancel'])test(`pending episode addition cannot mutate ${action==='cancel'?'the current':'a new'} project after ${action}`,async()=>{
@@ -175,8 +109,8 @@ for(const action of ['close','escape','cancel'])test(`pending episode addition c
   assert.notEqual(app.field('addEpisodes').getAttribute('aria-busy'),'true');
   if(action!=='cancel')await app.field('newProject').click();app.ready(1,2,3);
   gate.resolve(response({items:[1,2,3].map(n=>app.sources.get(`vep_async_${n}`))}));await adding;await app.poll();await settle();
-  assert.equal(app.field('projectName').value,'未命名剪辑项目');assert.equal(app.field('dramaCount').textContent,'0 部');
-  assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.equal(app.saved.length,0);
+  assert.equal(app.field('projectName').value,'未命名剪辑项目');assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
+  assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.ok(app.saved.every(project=>project.units.every(unit=>unit.clips.length===0)));
   if(action!=='cancel')assert.equal(app.field('dramaDialog').open,false);
 });
 
@@ -185,9 +119,9 @@ test('lost probe response requires an explicit retry that reconciles the source 
     if(url.endsWith('/catalog/probe')){posts++;for(const id of JSON.parse(options.body).source_ids)Object.assign(fixture.sources.get(id),{status:'probing',probe_task_id:`accepted_${id}`});throw new Error('response lost after server acceptance');}return null;
   });
   await app.selectDrama();app.checkEpisodes(['vep_async_1','vep_async_2','vep_async_3']);await app.field('addEpisodes').click();
-  for(let i=0;i<3;i++)await app.poll();assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'0 部');
+  for(let i=0;i<3;i++)await app.poll();assert.equal(posts,1);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
   assert.match(app.field('catalogStatus').textContent,/核实|确认|未知|等待|稍后/);
-  app.ready(1,2,3);await app.poll();await settle();assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'0 部');
+  app.ready(1,2,3);await app.poll();await settle();assert.equal(posts,1);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
   await app.field('addEpisodes').click();await settle();assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'1 部');
 });
 
@@ -197,7 +131,7 @@ test('probe polling stays single-flight and one failed episode never causes part
   await app.selectDrama();app.checkEpisodes(['vep_async_1','vep_async_2','vep_async_3']);await app.field('addEpisodes').click();delay=true;
   const first=app.poll(),second=app.poll();await settle();assert.ok(gates.length<=3);assert.ok(maxActive<=3);
   app.ready(1,2);Object.assign(app.sources.get('vep_async_3'),{status:'failed',error_message:'无法读取视频信息'});for(const {gate}of gates)gate.resolve();await Promise.all([first,second]);delay=false;await app.poll();
-  assert.equal(app.field('dramaCount').textContent,'0 部');assert.equal(app.probes.length,1);assert.equal(app.resumes.length,0);
+  assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.equal(app.probes.length,1);assert.equal(app.resumes.length,0);
   assert.match(app.field('catalogStatus').textContent,/3|第3集/);assert.match(app.field('catalogStatus').textContent,/失败|无法读取/);
 });
 
@@ -222,12 +156,12 @@ for(const outcome of ['partial-4xx','malformed-2xx'])test(`a ${outcome} probe re
     return outcome==='partial-4xx'?response({code:'source_not_available',error:'后续来源暂不可用'},400):response({items:[fixture.sources.get('vep_async_1')]});
   });
   await app.selectDrama();app.checkEpisodes(['vep_async_1','vep_async_2','vep_async_3']);await app.field('addEpisodes').click();
-  await app.poll();assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'0 部');
+  await app.poll();assert.equal(posts,1);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
   assert.equal(app.field('addEpisodes').disabled,false,'an incomplete write response must stop automatic continuation');
   const reads=app.calls.filter(call=>call.url.includes('/sources/')).length;
   await app.field('addEpisodes').click();await app.poll();
   assert.ok(app.calls.filter(call=>call.url.includes('/sources/')).length>reads,'explicit retry must read back uncertain sources');
-  assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'0 部');assert.match(app.field('catalogStatus').textContent,/核实|未知|暂不重复|确认/);
+  assert.equal(posts,1);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.match(app.field('catalogStatus').textContent,/核实|未知|暂不重复|确认/);
 });
 
 test('re-adding the same source after cancellation joins its outstanding probe write instead of submitting again',async()=>{
@@ -238,21 +172,9 @@ test('re-adding the same source after cancellation joins its outstanding probe w
   const second=app.field('addEpisodes').click().then(()=>{secondFinished=true;});await settle();
   try{assert.equal(posts,1);assert.equal(secondFinished,false);assert.equal(app.field('addEpisodes').disabled,true);assert.equal(app.field('cancelAddEpisodes').classList.contains('hidden'),false);}
   finally{Object.assign(app.sources.get('vep_async_1'),{status:'probing',probe_task_id:'ve_original_submission'});gate.resolve(response({items:[app.sources.get('vep_async_1')]}));await Promise.all([first,second]);}
-  assert.equal(app.field('dramaCount').textContent,'0 部');assert.equal(app.field('dramaDialog').open,true);
+  assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.equal(app.field('dramaDialog').open,true);
   app.ready(1);await app.poll();await app.field('saveProject').click();
-  assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'1 部');assert.deepEqual(app.saved.at(-1).dramas[0].clips.map(clip=>clip.source_id),['vep_async_1']);
-});
-
-for(const phase of ['search','episodes'])test(`closing and reopening the catalog rejects the previous dialog's delayed ${phase}`,async()=>{
-  const gate=deferred();const app=await catalogFixture(async url=>phase==='search'&&url.includes('/catalog/dramas?')?gate.promise:phase==='episodes'&&url.includes('/catalog/episodes?')?gate.promise:null);
-  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='DramaAlpha';
-  let old;
-  if(phase==='search')old=app.field('searchDramas').click();
-  else{await app.field('searchDramas').click();old=app.clickData({catalogIndex:'0'},'catalogDramas');}
-  await settle();await app.closeDialog('dramaDialog');await app.field('addDrama').click();
-  gate.resolve(response({items:phase==='search'?[{app_id:'2310',content_id:'stale',title:'旧弹窗结果'}]:[{...app.sources.get('vep_async_1'),name:'旧弹窗剧集'}]}));await old;await settle();
-  assert.equal(app.field('dramaDialog').open,true);assert.equal(app.field('addEpisodes').disabled,true);
-  assert.doesNotMatch(app.field('catalogDramas').innerHTML,/旧弹窗结果/);assert.doesNotMatch(app.field('catalogEpisodes').innerHTML,/旧弹窗剧集|vep_async_1/);
+  assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'1 部');assert.deepEqual(app.saved.at(-1).units[0].clips.map(clip=>clip.source_id),['vep_async_1']);
 });
 
 test('task resume gives immediate feedback and a response loss never triggers an automatic retry',async()=>{
@@ -269,7 +191,7 @@ test('task resume gives immediate feedback and a response loss never triggers an
 test('transient source reads keep a selected pending addition intact without resubmitting probes',async()=>{
   let fail=false;const app=await catalogFixture(async url=>{if(fail&&url.includes('/sources/'))throw new Error('temporary source lookup outage');return null;});
   await app.selectDrama();app.checkEpisodes(['vep_async_1','vep_async_2','vep_async_3']);await app.field('addEpisodes').click();fail=true;
-  await app.poll();assert.equal(app.field('dramaCount').textContent,'0 部');assert.equal(app.field('addEpisodes').disabled,true);
+  await app.poll();assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.equal(app.field('addEpisodes').disabled,true);
   assert.equal(app.field('cancelAddEpisodes').classList.contains('hidden'),false);assert.match(app.field('catalogStatus').textContent,/核实|稍后|网络|暂|等待/);
   fail=false;app.ready(1,2,3);await app.poll();await settle();assert.equal(app.probes.length,1);assert.equal(app.field('dramaCount').textContent,'1 部');
 });
@@ -280,14 +202,14 @@ test('unknown probe submission stays fenced across dialog cancellation even if t
   await app.closeDialog('dramaDialog');await app.selectDrama();app.checkEpisodes(['vep_async_1']);
   const reads=app.calls.filter(call=>call.url.endsWith('/sources/vep_async_1')).length;await app.field('addEpisodes').click();await app.poll();
   assert.ok(app.calls.filter(call=>call.url.endsWith('/sources/vep_async_1')).length>reads);
-  assert.equal(posts,1);assert.equal(app.field('dramaCount').textContent,'0 部');assert.match(app.field('catalogStatus').textContent,/核实|确认|未知|发起人|管理员/);
+  assert.equal(posts,1);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.match(app.field('catalogStatus').textContent,/核实|确认|未知|发起人|管理员/);
 });
 
 for(const status of [403,404])test(`an existing probe hidden by HTTP ${status} never permits a replacement probe`,async()=>{
   let reads=0;const app=await catalogFixture(async url=>{if(url.endsWith('/tasks/ve_private')){reads++;return response({code:'task_not_found',error:'该校验任务不可见'},status);}return null;});
   Object.assign(app.sources.get('vep_async_1'),{status:'failed',probe_task_id:'ve_private'});
   await app.selectDrama();app.checkEpisodes(['vep_async_1']);await app.field('addEpisodes').click();await app.poll();
-  assert.ok(reads>0);assert.equal(app.probes.length,0);assert.equal(app.resumes.length,0);assert.equal(app.field('dramaCount').textContent,'0 部');
+  assert.ok(reads>0);assert.equal(app.probes.length,0);assert.equal(app.resumes.length,0);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
   assert.match(app.field('catalogStatus').textContent,/权限|发起人|管理员|不可见|核实/);
 });
 
@@ -295,7 +217,7 @@ for(const status of [403,404])test(`a shared probing episode tolerates its hidde
   let privateReads=0;const app=await catalogFixture(async url=>{if(url.includes('/tasks/')){privateReads++;return response({code:'task_not_found',error:'不可见'},status);}return null;});
   Object.assign(app.sources.get('vep_async_1'),{status:'probing',probe_task_id:'ve_someone_else'});
   await app.selectDrama();app.checkEpisodes(['vep_async_1']);await app.field('addEpisodes').click();await app.poll();
-  assert.ok(privateReads>0);assert.equal(app.probes.length,0);assert.equal(app.field('dramaCount').textContent,'0 部');assert.equal(app.field('addEpisodes').disabled,true);
+  assert.ok(privateReads>0);assert.equal(app.probes.length,0);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);assert.equal(app.field('addEpisodes').disabled,true);
   const hiddenReads=privateReads;await app.poll();await app.poll();assert.equal(privateReads,hiddenReads,'a known hidden task should not be queried on every source poll');
   app.ready(1);await app.poll();await settle();assert.equal(app.field('dramaCount').textContent,'1 部');assert.equal(app.probes.length,0);assert.equal(app.resumes.length,0);
 });
@@ -310,14 +232,14 @@ for(const terminal of ['unknown','recovery_required'])test(`a readable original 
   Object.assign(app.sources.get('vep_async_1'),{status:'probing',probe_task_id:taskId});
   await app.selectDrama();app.checkEpisodes(['vep_async_1']);await app.field('addEpisodes').click();assert.equal(resumes,0);
   taskStatus=terminal;await app.poll();assert.equal(app.field('addEpisodes').disabled,false);assert.match(app.field('catalogStatus').textContent,/核实|恢复/);
-  await app.poll();await app.poll();assert.equal(resumes,0);assert.equal(app.probes.length,0);assert.equal(app.field('dramaCount').textContent,'0 部');
+  await app.poll();await app.poll();assert.equal(resumes,0);assert.equal(app.probes.length,0);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
   const first=app.field('addEpisodes').click(),second=app.field('addEpisodes').click();await Promise.all([first,second]);
   assert.equal(resumes,1);assert.equal(app.field('addEpisodes').disabled,true);assert.equal(app.probes.length,0);
-  taskStatus='running';await app.poll();assert.equal(resumes,1);assert.equal(app.field('dramaCount').textContent,'0 部');
+  taskStatus='running';await app.poll();assert.equal(resumes,1);assert.doesNotMatch(app.field('timeline').innerHTML,/data-clip-id/);
   taskStatus='completed';app.ready(1);await app.poll();await settle();assert.equal(app.field('dramaCount').textContent,'1 部');assert.equal(resumes,1);assert.equal(app.probes.length,0);
 });
 
-test('opening a project shows its timeline before slow source reads while keeping editing and rendering locked',async()=>{
+test('opening a project leaves editing and saving available while source metadata loads',async()=>{
   const projectGate=deferred(),sourceGate=deferred();let renders=0;
   const project={id:'vp_source_loading',name:'媒体加载中的项目',version:3,asset_id:'va_loading',dramas:[{app_id:'2310',content_id:'DramaAlpha',title:'加载中的短剧',clips:[{id:'clip_loading',source_id:'vep_loading',start_ms:0,end_ms:10000,fit:'contain',mute:false,transition:'cut'}]}]};
   const app=await browser(async(url,options)=>{
@@ -332,8 +254,7 @@ test('opening a project shows its timeline before slow source reads while keepin
   projectGate.resolve(response({item:project}));await settle();
   try{
     assert.equal(app.field('projectName').value,project.name);assert.match(app.field('timeline').innerHTML,/clip_loading/);
-    assert.match(app.field('saveStatus').textContent,/已打开.*媒体信息/);assert.equal(app.field('trimStart').disabled,true);assert.equal(app.field('renderProject').disabled,true);
-    await app.field('renderProject').click();assert.equal(renders,0);
+    assert.match(app.field('saveStatus').textContent,/已打开.*媒体信息/);assert.equal(app.field('trimStart').disabled,false);assert.equal(app.field('saveProject').disabled,false);assert.equal(app.field('renderProject').disabled,false);
   }finally{sourceGate.resolve();await opening;}
   assert.equal(app.field('trimStart').disabled,false);assert.equal(app.field('renderProject').disabled,false);
   assert.notEqual(app.field('projectPicker').getAttribute('aria-busy'),'true');assert.match(app.field('saveStatus').textContent,/v3/);
@@ -370,23 +291,6 @@ test('edits made during first save are flushed before a new project replaces the
   assert.equal(remote.name,'edited while saving');assert.equal(remote.version,2);
   assert.equal(app.field('projectName').value,'未命名剪辑项目');
   assert.equal(app.calls.filter(call=>call.options.method==='POST').length,1);
-});
-
-test('catalog product choices use the existing product label and retain its app identifier',async()=>{
-  const app=await browser(async url=>url.endsWith('/catalog/products')?response({items:[{app_id:'2310',app:'DramaWave',label:'DramaWave | 美国 | 英语'},{app_id:'8123',app:'HotDrama'}]}):null);
-  await app.field('addDrama').click();const markup=app.field('productPicker').innerHTML;
-  assert.match(markup,/<option value="2310">DramaWave \| 美国 \| 英语<\/option>/);
-  assert.match(markup,/<option value="8123">HotDrama<\/option>/);
-});
-
-test('real catalog never sends an unbounded empty or single-character name search',async()=>{
-  const app=await browser(async url=>url.includes('/catalog/dramas?')?response({items:[]}):null);
-  app.field('productPicker').value='2310';await app.field('productPicker').emit('change');
-  app.field('dramaSearch').value='她';await app.field('searchDramas').click();
-  assert.equal(app.calls.filter(call=>call.url.includes('/catalog/dramas?')).length,0);
-  app.field('dramaSearch').value='她的';await app.field('searchDramas').click();
-  const requests=app.calls.filter(call=>call.url.includes('/catalog/dramas?'));
-  assert.equal(requests.length,1);assert.match(requests[0].url,new RegExp(`q=${encodeURIComponent('她的')}`));
 });
 
 test('actual GPU metric DTOs show clip time, transferred bytes and steps as stage progress, never total percent',async()=>{
@@ -429,76 +333,6 @@ test('numeric task progress stays compatible while invalid or incomplete metric 
   const app=await browser(async url=>url.endsWith('/tasks')?response({items:tasks,total:tasks.length}):null);
   const labels=Array.from(app.field('taskList').innerHTML.matchAll(/<p class="micro">([^<]*)<\/p>/g),match=>match[1]);
   assert.deepEqual(labels,['制作中 · 50%','制作中 · 42%','制作完成 · 100%','制作中','下载素材 · 当前阶段：已下载 1.0 MiB','制作中']);
-});
-
-test('real event workflow keeps two dramas independent through probe, editing, batch submit and refreshed output links',async()=>{
-  const id=(prefix,n)=>prefix+String(n).padStart(32,'0');
-  const asset={id:id('va_',1),source_id:id('va_',1),kind:'asset',name:'共享素材',status:'ready',can_manage:true,metadata:{duration_ms:8000,width:1920,height:1080,has_audio:true},preview_url:'https://cos.example.test/asset',expires_at:Math.floor(Date.now()/1000)+900};
-  const dramas=[{app_id:'2310',content_id:'AbCd123456',title:'第一部'},{app_id:'2310',content_id:'XyZ0987654',title:'第二部'}];
-  const source=(n,drama)=>({id:id('vep_',n),source_id:id('vep_',n),kind:'episode',...drama,name:`${drama.title}第${n}集`,episode_number:n,status:n===3?'ready':'unprobed',metadata:n===3?{duration_ms:30000,width:720,height:1280,has_audio:true}:{},preview_url:`https://cos.example.test/episode-${n}`,expires_at:Math.floor(Date.now()/1000)+900});
-  const sources=new Map([asset,...[1,2,3].map(n=>source(n,dramas[n===3?1:0]))].map(s=>[s.id,s]));
-  const projectId=id('vp_',1),submissions=[],batches=new Map();let remote=null,tasks=[];
-  const app=await browser(async(url,options)=>{
-    const method=options.method||'GET',body=options.body&&JSON.parse(options.body);
-    if(url.includes('/assets?'))return response({items:[asset],total:1});
-    if(url.endsWith('/catalog/products'))return response({items:[{app_id:'2310',app:'DramaWave',label:'DramaWave · 英语'}]});
-    if(url.includes('/catalog/dramas?'))return response({items:dramas});
-    if(url.includes('/catalog/episodes?')){const contentId=new URL(url,'https://local.test').searchParams.get('content_id');return response({items:[...sources.values()].filter(s=>s.content_id===contentId)});}
-    if(url.endsWith('/catalog/probe')){assert.deepEqual(body.source_ids,[id('vep_',1),id('vep_',2)]);const items=body.source_ids.map(sid=>{const s=sources.get(sid);s.status='probing';s.probe_task_id=id('ve_',100+s.episode_number);return s;});return response({items});}
-    if(url.includes('/sources/'))return response({item:sources.get(url.split('/').at(-1))});
-    if(url.endsWith('/projects')&&method==='POST'){assert.deepEqual(Object.keys(body).sort(),['asset_id','dramas','name','operation_id']);remote={...body,id:projectId,version:1};delete remote.operation_id;return response({item:remote});}
-    if(url.endsWith(`/projects/${projectId}`)&&method==='PATCH'){assert.equal(body.expected_version,remote.version);remote={...body,id:projectId,version:remote.version+1};delete remote.expected_version;return response({item:remote});}
-    if(url.endsWith('/projects'))return response({items:remote?[remote]:[],total:remote?1:0});
-    if(url.endsWith(`/projects/${projectId}/render`)){assert.equal(body.expected_version,remote.version);submissions.push(body);if(!batches.has(body.operation_id)){const batch_id=id('vb_',batches.size+1),project_version_id=id('vv_',remote.version);tasks=remote.dramas.map((drama,index)=>({id:id('ve_',index+1),project_id:projectId,batch_id,project_version_id,output_id:id('vo_',index+1),drama_title:drama.title,status:'queued',stage:'queued',progress:0,output:null}));batches.set(body.operation_id,JSON.parse(JSON.stringify({batch_id,project_version_id,items:tasks,draft:remote})));}return response(batches.get(body.operation_id));}
-    if(url.endsWith('/tasks'))return response({items:tasks,total:tasks.length});
-    if(url.includes('/tasks/')){const task=tasks.find(t=>t.id===url.split('/').at(-1));assert.ok(task);return response({item:{...task,status:'completed',stage:'completed',progress:100,output:{id:task.output_id,preview_url:'https://cos.example.test/output-fresh',download_url:'https://cos.example.test/download-fresh',expires_at:Math.floor(Date.now()/1000)+900,metadata:{duration_ms:27000,width:720,height:1280,fps:30,has_audio:true}}}});}
-  });
-  const clips=()=>Array.from(app.field('timeline').innerHTML.matchAll(/data-clip-id="([^"]+)"/g),match=>match[1]);
-  const chooseClip=async index=>{await app.clickData({clipId:clips()[index]},'timeline');await tick();};
-  const change=async(id,value)=>{app.field(id).value=value;await app.field(id).emit('change');};
-  const seek=async milliseconds=>{app.field('playhead').value=milliseconds;await app.field('playhead').emit('input');await tick();};
-  await app.rename('两剧验收');await app.clickData({pickAsset:asset.id});
-  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='AbCd123456';await app.field('searchDramas').click();
-  await app.clickData({catalogIndex:'0'},'catalogDramas');app.checkEpisodes([id('vep_',1),id('vep_',2)]);await app.field('addEpisodes').click();
-  assert.equal(app.field('dramaCount').textContent,'0 部');assert.match(app.field('catalogStatus').textContent,/媒体校验/);
-  for(const n of [1,2])Object.assign(sources.get(id('vep_',n)),{status:'ready',metadata:{duration_ms:30000,width:720,height:1280,has_audio:n===1}});
-  await app.poll();await settle();assert.equal(app.field('dramaCount').textContent,'1 部');
-  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='XyZ0987654';await app.field('searchDramas').click();await app.clickData({catalogIndex:'1'},'catalogDramas');app.checkEpisodes([id('vep_',3)]);await app.field('addEpisodes').click();
-  assert.equal(app.field('dramaCount').textContent,'2 部');
-  app.field('commonPosition').value='start';app.field('commonTransition').value='cut';await app.field('applyCommon').click();
-  await app.clickData({dramaIndex:'0'},'dramaList');await chooseClip(1);await change('clipStart',2);await change('clipEnd',20);
-  await seek(12000);await app.field('splitClip').click();await chooseClip(2);await seek(15000);await app.field('splitClip').click();await chooseClip(2);await app.field('removeClip').click();
-  await chooseClip(3);await app.field('moveLeft').click();await app.field('removeEpisode').click();assert.equal(clips().length,3);await app.field('undoEdit').click();assert.equal(clips().length,4);
-  await chooseClip(1);await app.field('insertAsset').click();app.field('insertStart').value=.5;app.field('insertEnd').value=1.5;app.field('insertPosition').value='after';await app.field('confirmInsert').click();await app.fit('cover');app.field('clipSound').checked=false;await app.field('clipSound').emit('change');
-  app.field('commonPosition').value='none';app.field('commonTransition').value='fade';await app.field('applyCommon').click();
-  await app.field('saveProject').click();assert.ok(remote);const frozen=JSON.parse(JSON.stringify(remote));
-  assert.deepEqual(remote.dramas[0].clips.filter(c=>c.source_id===id('vep_',1)).map(c=>[c.start_ms,c.end_ms]),[[2000,6000],[9000,20000]]);
-  assert.deepEqual(remote.dramas[1].clips.map(c=>[c.source_id,c.start_ms,c.end_ms]),[[asset.id,0,8000],[id('vep_',3),0,30000]]);
-  assert.equal(remote.dramas[0].clips.filter(c=>c.source_id===asset.id).length,2);
-  assert.ok(remote.dramas[0].clips.some(c=>c.source_id===asset.id&&c.fit==='cover'&&c.mute&&c.start_ms===500));
-  assert.equal(remote.dramas[0].clips.at(-1).transition,'cut');assert.equal(app.field('validationErrors').textContent,'');
-  await app.field('renderProject').click();assert.equal(tasks.length,2);assert.match(app.field('taskList').innerHTML,/第一部/);assert.match(app.field('taskList').innerHTML,/第二部/);
-  await app.field('renderProject').click();assert.equal(submissions[1].operation_id,submissions[0].operation_id);assert.equal(batches.size,1);
-  await app.clickData({previewTask:tasks[0].id});assert.equal(app.field('mediaPlayer').src,'https://cos.example.test/output-fresh');assert.equal(app.field('mediaDialog').open,true);assert.match(app.field('mediaExpiry').textContent,/链接有效期至/);
-  await app.clickData({downloadTask:tasks[0].id});assert.equal(app.createdElements.at(-1).href,'https://cos.example.test/download-fresh');assert.equal(app.createdElements.at(-1).rel,'noopener noreferrer');
-  await app.field('undoEdit').click();await app.field('renderProject').click();assert.equal(batches.size,2);assert.notEqual(submissions.at(-1).operation_id,submissions[0].operation_id);assert.ok(submissions.at(-1).expected_version>submissions[0].expected_version);assert.deepEqual(batches.get(submissions[0].operation_id).draft,frozen);
-});
-
-test('adding episodes resumes the original probe and keeps tracking even while the source remains failed',async()=>{
-  const source={id:'vep_waiting',source_id:'vep_waiting',kind:'episode',app_id:'2310',content_id:'AbCd123456',status:'failed',name:'第1集',metadata:{},probe_task_id:'ve_original'};let resumed=false,probeStatus='unknown';
-  const app=await browser(async(url,options)=>{
-    if(url.endsWith('/catalog/products'))return response({items:[{app_id:'2310',app:'DramaWave'}]});
-    if(url.includes('/catalog/dramas?'))return response({items:[{app_id:'2310',content_id:'AbCd123456',title:'待校验剧'}]});
-    if(url.includes('/catalog/episodes?'))return response({items:[source]});
-    if(url.endsWith('/tasks/ve_original'))return response({item:{id:'ve_original',status:probeStatus,kind:'probe'}});
-    if(url.endsWith('/tasks/ve_original/resume')){assert.equal(options.method,'POST');resumed=true;probeStatus='resume_queued';return response({item:{id:'ve_original',status:probeStatus,kind:'probe'}});}
-    if(url.endsWith('/sources/vep_waiting'))return response({item:source});
-  });
-  await app.field('addDrama').click();app.field('productPicker').value='2310';app.field('dramaSearch').value='AbCd123456';await app.field('searchDramas').click();await app.clickData({catalogIndex:'0'},'catalogDramas');app.checkEpisodes([source.id]);await app.field('addEpisodes').click();
-  assert.equal(resumed,true);assert.equal(app.calls.some(call=>call.url.endsWith('/catalog/probe')),false);assert.match(app.field('catalogStatus').textContent,/恢复/);
-  await app.poll();assert.equal(app.field('dramaCount').textContent,'0 部');
-  probeStatus='completed';source.status='ready';source.metadata={duration_ms:10000,width:720,height:1280};await app.poll();await settle();
-  assert.equal(app.field('dramaCount').textContent,'1 部');assert.equal(app.field('dramaDialog').open,false);
 });
 
 test('actual expires_at refreshes a timeline source and leaving the project rejects its late preview response',async()=>{
@@ -665,4 +499,96 @@ test('demo completed task shows upload action but cannot call the business API',
   await app.clickData({uploadMaterialTask:'demo-completed-task'});
   assert.match(app.field('toast').textContent,/模拟预览不会上传至素材库/);
   assert.equal(app.calls.some(call=>call.url.includes('/material-source')),false);
+});
+
+async function resourceFixture(override=async()=>null){
+  const resources=[{series_code:'{v3404/l144250/}',english_title:'Love & Revenge',english_title_status:'matched'},{series_code:'21482',english_title:'Her Second Life',english_title_status:'matched'}];
+  const assets=[{id:'va_free',source_id:'va_free',kind:'asset',library_kind:'free_episode',series_code:resources[0].series_code,english_title:resources[0].english_title,name:'Free compilation',status:'ready',can_manage:true,size_bytes:2000,metadata:{duration_ms:15000,width:720,height:1280,has_audio:true}},{id:'va_material',source_id:'va_material',kind:'asset',library_kind:'material',series_code:resources[0].series_code,english_title:resources[0].english_title,name:'Hook',status:'ready',can_manage:true,size_bytes:1000,metadata:{duration_ms:5000,width:1920,height:1080,has_audio:true}}];
+  const writes=[],renderRequests=[];let remote=null;
+  const app=await browser(async(url,options,calls)=>{
+    const custom=await override(url,options,calls,{resources,assets,remote,writes,renderRequests});if(custom)return custom;
+    const body=options.body&&JSON.parse(options.body),method=options.method||'GET';
+    if(url.includes('/catalog/resources?'))return response({items:resources});
+    if(url.includes('/catalog/resource-variants?'))return response({items:[{app_id:'1479',content_id:'EnDrama',language:'en',country:'US',title:'English drama'}]});
+    if(url.includes('/assets?')){const query=new URL(url,'https://local').searchParams;return response({items:assets.filter(asset=>(!query.get('library_kind')||asset.library_kind===query.get('library_kind'))&&(!query.get('series_code')||asset.series_code===query.get('series_code'))),total:1});}
+    if(url.includes('/sources/'))return response({item:assets.find(asset=>asset.id===url.split('/').at(-1))});
+    if(url.endsWith('/projects')&&method==='POST'){remote={...body,id:'vp_resources',version:1};delete remote.operation_id;writes.push(body);return response({item:remote});}
+    if(url.endsWith('/projects/vp_resources')&&method==='PATCH'){remote={...body,id:'vp_resources',version:remote.version+1};delete remote.expected_version;writes.push(body);return response({item:remote});}
+    if(url.endsWith('/projects/vp_resources'))return response({item:remote});
+    if(url.endsWith('/projects'))return response({items:remote?[remote]:[]});
+    if(url.endsWith('/render')){renderRequests.push(body);return response({items:body.unit_ids.map(id=>({id:'ve_'+id,unit_id:id})),results:body.unit_ids.map(id=>({unit_id:id,status:'accepted',task_id:'ve_'+id})),issues:[]});}
+  });
+  return Object.assign(app,{resources,assets,writes,renderRequests,async addUnit(index=0){await app.field('addDrama').click();app.field('resourceSearch').value=resources[index].series_code;await app.field('searchResources').click();await app.clickData({selectResource:String(index)},'resourceResults');},checkSources(ids){const inputs=app.field('assetPicker').querySelectorAll('.source-pick');assert.ok(ids.every(id=>inputs.some(input=>input.value===id)));for(const input of inputs)input.checked=ids.includes(input.value);}});
+}
+
+test('resource search takes newest intent, encodes opaque IDs and ignores closed-dialog responses',async()=>{
+  const gates=new Map();const app=await browser(async url=>{if(!url.includes('/catalog/resources?'))return null;const q=new URL(url,'https://test').searchParams.get('q'),gate=deferred();gates.set(q,gate);return gate.promise;});
+  await app.field('addDrama').click();app.field('resourceSearch').value='Old';const first=app.field('searchResources').click();await settle();app.field('resourceSearch').value='{v3404/l144250/}';const second=app.field('searchResources').click();await settle();
+  gates.get('{v3404/l144250/}').resolve(response({items:[{series_code:'{v3404/l144250/}',english_title:'Newest'}]}));await second;gates.get('Old').resolve(response({items:[{series_code:'1',english_title:'Stale'}]}));await first;
+  assert.match(app.field('resourceResults').innerHTML,/Newest/);assert.doesNotMatch(app.field('resourceResults').innerHTML,/Stale/);assert.ok(app.calls.some(call=>call.url.includes('%7Bv3404%2Fl144250%2F%7D')));
+  app.field('resourceSearch').value='Closed';const last=app.field('searchResources').click();await settle();await app.closeDialog('resourceDialog');gates.get('Closed').resolve(response({items:[{series_code:'2',english_title:'Closed result'}]}));await last;assert.doesNotMatch(app.field('resourceResults').innerHTML,/Closed result/);
+});
+
+test('resource lookup failure stays local and an empty project still saves',async()=>{
+  const app=await resourceFixture(async url=>url.includes('/catalog/resources?')?response({error:'目录暂不可用'},503):null);
+  await app.field('addDrama').click();app.field('resourceSearch').value='Love';await app.field('searchResources').click();assert.equal(app.field('resourceDialog').open,true);assert.match(app.field('resourceStatus').textContent,/目录暂不可用/);await app.closeDialog('resourceDialog');await app.rename('Saved without directory');await app.field('saveProject').click();assert.equal(app.writes.at(-1).schema_version,2);assert.deepEqual(app.writes.at(-1).units,[]);
+});
+
+test('four tabs isolate free videos from materials and resource-first chooser permits uploaded-only output',async()=>{
+  const app=await resourceFixture();assert.match(html,/data-view="editor"[^>]*>工作台/);assert.match(html,/data-view="free"/);
+  await app.clickData({view:'free'});await settle();assert.match(app.field('assetGrid').innerHTML,/Free compilation/);assert.doesNotMatch(app.field('assetGrid').innerHTML,/>Hook</);await app.clickData({view:'library'});await settle();assert.match(app.field('assetGrid').innerHTML,/>Hook</);assert.doesNotMatch(app.field('assetGrid').innerHTML,/Free compilation/);
+  await app.addUnit();await app.field('chooseAsset').click();app.checkSources(['va_free']);await app.field('insertSelectedSources').click();await app.field('saveProject').click();
+  assert.equal(app.writes.at(-1).units.length,1);assert.deepEqual(app.writes.at(-1).units[0].clips.map(clip=>clip.source_id),['va_free']);assert.equal(app.writes.at(-1).asset_id,undefined);
+  await app.field('renderProject').click();assert.equal(app.renderRequests.length,1);assert.equal(app.renderRequests[0].unit_ids.length,1);
+});
+
+test('one resource unit accepts repeated free and material video references with independent trims',async()=>{
+  const app=await resourceFixture();await app.addUnit();await app.field('chooseAsset').click();app.checkSources(['va_free']);await app.field('insertSelectedSources').click();await app.field('chooseAsset').click();await app.clickData({sourceKind:'material'});app.checkSources(['va_material']);await app.field('insertSelectedSources').click();
+  await app.field('chooseAsset').click();app.checkSources(['va_material']);await app.field('insertSelectedSources').click();await app.field('saveProject').click();const clips=app.writes.at(-1).units[0].clips;
+  assert.deepEqual(clips.map(clip=>clip.source_id),['va_free','va_material','va_material']);assert.equal(new Set(clips.map(clip=>clip.id)).size,3);
+});
+
+test('changing resource preserves existing clips and mirror split/undo settings in v2 drafts',async()=>{
+  const app=await resourceFixture();await app.addUnit();await app.field('chooseAsset').click();app.checkSources(['va_free']);await app.field('insertSelectedSources').click();
+  app.field('clipMirror').checked=true;await app.field('clipMirror').emit('change');app.field('subtitleTop').value=800;app.field('subtitleBottom').value=1100;await app.field('subtitleTop').emit('change');app.field('playhead').value=5000;await app.field('playhead').emit('input');await app.field('splitClip').click();await app.field('saveProject').click();
+  assert.ok(app.writes.at(-1).units[0].clips.every(clip=>clip.mirror&&clip.subtitle_band.top===800));assert.equal(app.writes.at(-1).units[0].clips.length,2);
+  await app.field('undoEdit').click();await app.field('changeUnitResource').click();app.field('resourceSearch').value='21482';await app.field('searchResources').click();await app.clickData({selectResource:'1'},'resourceResults');await app.field('saveProject').click();
+  const unit=app.writes.at(-1).units[0];assert.equal(unit.series_code,'21482');assert.equal(unit.clips.length,1);assert.equal(unit.clips[0].source_id,'va_free');assert.match(app.field('validationErrors').textContent,/其他资源/);
+});
+
+test('invalid unit does not block accepted unit and next explicit submission selects only invalid units',async()=>{
+  let attempts=0;const app=await resourceFixture(async(url,options,_calls,fixture)=>{if(!url.endsWith('/render'))return null;const body=JSON.parse(options.body);fixture.renderRequests.push(body);attempts++;return response({items:[{id:'ve_valid',unit_id:body.unit_ids[0]}],results:[],issues:attempts===1?[{unit_id:body.unit_ids[1],code:'unit_incomplete',message:'第二个单元暂无片段'}]:[]});});
+  await app.addUnit(0);await app.addUnit(1);await app.field('renderProject').click();assert.equal(app.renderRequests[0].unit_ids.length,2);assert.match(app.field('validationErrors').textContent,/暂无片段/);await app.field('renderProject').click();assert.deepEqual(app.renderRequests[1].unit_ids,[app.renderRequests[0].unit_ids[1]]);assert.notEqual(app.renderRequests[0].operation_id,app.renderRequests[1].operation_id);
+});
+
+test('lost render response keeps original operation and selected units until reconciled',async()=>{
+  let attempts=0;const app=await resourceFixture(async(url,options,_calls,fixture)=>{if(!url.endsWith('/render'))return null;const body=JSON.parse(options.body);fixture.renderRequests.push(body);if(++attempts===1)throw new Error('response lost');return response({items:[],results:[],issues:[]});});
+  await app.addUnit();await app.field('renderProject').click();await app.field('renderProject').click();assert.equal(attempts,2);assert.deepEqual(app.renderRequests[0],app.renderRequests[1]);
+});
+
+test('resource-task material intake asks for product and language only at intake click',async()=>{
+  const task={id:'ve_resource',series_code:'{v3404/l144250/}',unit_id:'u1',status:'completed',drama_title:'English display title',output:{id:'vo1',metadata:{duration_ms:3000}}};let posted;
+  const app=await browser(async(url,options)=>{if(url.endsWith('/tasks'))return response({items:[task]});if(url.includes('/catalog/resource-variants?'))return response({items:[{app_id:'1479',content_id:'SpanishDrama',language:'es',country:'MX'}]});if(url.endsWith('/material-source')){posted=JSON.parse(options.body);return response({item:{status:'queued'}});}});
+  assert.equal(app.calls.some(call=>call.url.includes('resource-variants')),false);await app.clickData({uploadMaterialTask:task.id});assert.equal(app.field('variantDialog').open,true);assert.equal(posted,undefined);app.field('variantSelect').value='0';await app.field('variantSelect').emit('change');await app.field('confirmVariant').click();assert.deepEqual(posted,{app_id:'1479',content_id:'SpanishDrama'});
+});
+
+test('unknown render replays the frozen request before submitting an edited project version',async()=>{
+  let attempts=0;const app=await resourceFixture(async(url,options,_calls,fixture)=>{if(!url.endsWith('/render'))return null;const body=JSON.parse(options.body);fixture.renderRequests.push(body);if(++attempts===1)throw new Error('response lost');return response({items:[],results:[],issues:[]});});
+  await app.addUnit();await app.field('renderProject').click();await app.addUnit(1);await app.field('renderProject').click();
+  assert.equal(attempts,3);assert.deepEqual(app.renderRequests[1],app.renderRequests[0]);assert.equal(app.renderRequests[2].unit_ids.length,2);assert.notEqual(app.renderRequests[2].operation_id,app.renderRequests[0].operation_id);assert.ok(app.renderRequests[2].expected_version>app.renderRequests[0].expected_version);
+});
+
+test('new free upload waits for a real resource selection and freezes its category and opaque ID',async()=>{
+  let created;const app=await resourceFixture(async(url,options)=>{if(url.endsWith('/uploads')&&options.method==='POST'){created=JSON.parse(options.body);return response({item:{id:'vu_new',status:'completed'}});}});
+  await app.clickData({view:'free'});const file=new Blob(['sample'],{type:'video/mp4'});Object.assign(file,{name:'Free compilation.mp4',lastModified:123});app.field('fileInput').files=[file];await app.field('fileInput').emit('change');await settle();
+  assert.equal(created,undefined);assert.equal(app.field('resourceDialog').open,true);
+  app.field('resourceSearch').value='{v3404/l144250/}';await app.field('searchResources').click();await app.clickData({selectResource:'0'},'resourceResults');await settle();
+  assert.equal(created.library_kind,'free_episode');assert.equal(created.series_code,'{v3404/l144250/}');assert.equal(created.name,'Free compilation.mp4');assert.ok(created.operation_id);
+});
+
+test('explicit pre-write project version conflict releases only the rejected render request after reopening',async()=>{
+  let attempts=0;const app=await resourceFixture(async(url,options,_calls,fixture)=>{if(!url.endsWith('/render'))return null;const body=JSON.parse(options.body);fixture.renderRequests.push(body);if(++attempts===1){fixture.remote.version++;return response({code:'project_version_conflict',error:'项目版本冲突'},409);}return response({items:[],results:[],issues:[]});});
+  await app.addUnit();await app.field('renderProject').click();assert.match(app.field('toast').textContent,/重新打开项目/);
+  app.field('projectPicker').value='vp_resources';await app.field('projectPicker').emit('change');await app.field('renderProject').click();
+  assert.equal(attempts,2);assert.ok(app.renderRequests[1].expected_version>app.renderRequests[0].expected_version);assert.notEqual(app.renderRequests[1].operation_id,app.renderRequests[0].operation_id);
 });
