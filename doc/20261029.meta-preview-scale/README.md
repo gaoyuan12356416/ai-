@@ -252,3 +252,29 @@ the main API stopped and use `safe_restart_drama_api.sh`. Rollback uses this
 wrapper's `rollback BACKUP` before the earlier 2f/a717/16eb layers; keep SQLite.
 The pending Video controller accepts this verified two-file backup and compares
 all four relevant runtime modules to its release, avoiding another API restart.
+
+This layer was deployed as `3dfaa0e7face434642f6ee982d26fc04bef5efcf` at 19:06
+CST, after the existing v4 recheck completed at 19:01 (8,582 checked, 7,111
+released). Backup:
+`/mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T110522Z-3dfaa0e7face`.
+Only the main API restarted (1946048 -> 2111068). Both target hashes, health 200
+and owner detail 200/50 rows passed. Full row digests for 34,454 objects, 5,334
+object attempts, 2,761 receipts, 4,767 Video-account rows and 3,078 account attempts
+remained identical. Evidence: `creative-recovery-deployment.json` in the audit
+directory and the backup's `post-deploy-acceptance.json`.
+
+All 375 module tests and two continuation tests passed locally and on the CPU
+server. A live read-only probe used fresh source and Meta references for three
+original blocked Creatives; all passed with matching account removal evidence,
+30 GETs, zero DELETEs and zero ledger writes (`creative-recovery-live-read-probe.json`).
+The resumed Creative prefix is `scope-recovery-20261029-reference-v5`; the
+Video prefix remains `scope-recovery-20261029-video-pending-v1`. Both controllers
+now run release3dfaa0e7face. First full Video audit retains release825002529fc7.
+
+Latest rollback, only after every asset write/recheck is idle:
+
+```bash
+systemctl stop drama-material-api.service
+python3 /mnt/data-disk/meta-ad-asset-delete/release-3dfaa0e7face/scripts/deploy_meta_creative_recovery.py rollback /mnt/data-disk/meta-ad-asset-delete/recovery-backup-20261029T110522Z-3dfaa0e7face
+bash /mnt/data-disk/meta-ad-asset-delete/release-3dfaa0e7face/scripts/safe_restart_drama_api.sh
+```
