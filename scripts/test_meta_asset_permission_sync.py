@@ -162,7 +162,7 @@ class PolicyTests(unittest.TestCase):
 
 
 class ExecuteTests(unittest.TestCase):
-    def run_scenario(self, response, resume=False, recovery=False, readback_status="pending_verification"):
+    def run_scenario(self, response, resume=False, recovery=False, readback_status="pending_verification", basic=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = Path(tmp.name)
@@ -171,6 +171,10 @@ class ExecuteTests(unittest.TestCase):
         manifest = {"complete": True, "business_id": m.DEFAULT_BM, "code_version": "preview-version",
                     "identities": {"source": {"local_user_id": 803, "meta_id": "s"},
                                    "target": {"local_user_id": 916, "meta_id": "t"}}, "assets": assets}
+        if basic:
+            manifest.update(format_version=3, permission_profile='basic_ads')
+            for a in assets:
+                a.update(permission_profile='basic_ads', desired_tasks=['ADVERTISE','ANALYZE'])
         m.write_json(path / "manifest.json", manifest)
         digest = hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
         (path / "manifest.sha256").write_text(digest)
@@ -196,7 +200,8 @@ class ExecuteTests(unittest.TestCase):
                    patch.object(m, "verify_identity", side_effect=identity),
                    patch.object(m, "discover_admins", return_value=credentials[2:]),
                    patch.object(m, "read_assignment", return_value={"tasks": ["ADVERTISE"]}),
-                   patch.object(m, "live_asset", return_value={"account_status": 1, "user_tasks": sorted(m.ACCOUNT_TASKS)}),
+                   patch.object(m, "current_share_grant", return_value={"permitted_tasks":['ADVERTISE','ANALYZE']}),
+                   patch.object(m, "live_asset", return_value={"account_status": 1, "user_tasks": sorted(m.BASIC_AD_TASKS if basic else m.ACCOUNT_TASKS)}),
                    patch.object(m, "verify_after", return_value={"status": readback_status, "reason": "test_readback"}),
                    patch.object(m.time, "sleep"), patch.object(m, "emit")]
         for p in patches: p.start()
@@ -212,6 +217,19 @@ class ExecuteTests(unittest.TestCase):
         self.assertTrue(summary["bm_paused"])
         self.assertEqual(summary["unattempted"], 1)
         self.assertEqual(journal.results()["account:1"]["status"], "restricted")
+
+    def test_basic_execution_grants_only_basic_tasks_without_manage(self):
+        posts, summary, journal = self.run_scenario({'ok':True,'http':200,'data':{'success':True}},
+                                                   readback_status='verified', basic=True)
+        self.assertEqual(len(posts),2)
+        self.assertTrue(all(json.loads(p[3]['tasks'])==['ADVERTISE','ANALYZE'] for p in posts))
+        self.assertFalse(summary['bm_paused'])
+
+    def test_basic_recovery_368_keeps_entire_bm_paused(self):
+        posts, summary, journal = self.run_scenario({'ok':False,'http':400,'error':{'code':368}},
+                                                   recovery=True, basic=True)
+        self.assertEqual(len(posts),1)
+        self.assertTrue(summary['bm_paused'])
 
     def test_ambiguous_write_has_no_automatic_retry(self):
         posts, summary, journal = self.run_scenario({"ok": False, "http": 599, "transport_error": "Timeout"})

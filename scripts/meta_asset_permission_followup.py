@@ -2,6 +2,7 @@
 """Read-only reconciliation using BM share grants and same-edge task evidence."""
 import argparse
 import collections
+import csv
 import hashlib
 import json
 import subprocess
@@ -18,29 +19,30 @@ def tasks_equal(left, right):
             and set(left['tasks']) == set(right['tasks']))
 
 
-def delegation(kind, live, share, owned, bm):
+def delegation(kind, live, share, owned, bm, profile='full_control'):
     owner = (live.get('business') or {}).get('id')
     if owner == bm or (owner is None and owned):
         return True, 'bm_owns_asset'
     if share is None or not isinstance(share.get('permitted_tasks'), list):
         return None, 'bm_share_grant_unavailable'
-    full = m.full_access(kind, share['permitted_tasks'])
-    return full, 'bm_shared_full_control' if full else 'owner_shared_without_full_control'
+    sufficient = m.meets_requirements(kind, share['permitted_tasks'], profile)
+    return sufficient, 'bm_shared_required_tasks' if sufficient else 'owner_shared_without_required_tasks'
 
 
 def classify(row, source, source_admin, target, target_admin, source_visible, target_visible, grant, owned):
     kind = row['kind']
+    profile = row.get('permission_profile', 'full_control')
     row.update(source_tasks=(source or {}).get('tasks'), before_tasks=(target or {}).get('tasks') or [],
                target_assigned=target is not None, target_visible=target_visible,
                bm_permitted_tasks=(grant or {}).get('permitted_tasks'))
-    row['desired_tasks'] = sorted(set(row['before_tasks']) | m.expected_tasks(kind, row['before_tasks']))
-    if kind == 'page' and not row['before_tasks'] and any(x.startswith('PROFILE_PLUS_') for x in (row['bm_permitted_tasks'] or [])) and m.full_access('page', row['bm_permitted_tasks']):
+    row['desired_tasks'] = sorted(set(row['before_tasks']) | m.required_tasks(kind, row['before_tasks'], profile, row['bm_permitted_tasks']))
+    if profile == 'full_control' and kind == 'page' and not row['before_tasks'] and any(x.startswith('PROFILE_PLUS_') for x in (row['bm_permitted_tasks'] or [])) and m.full_access('page', row['bm_permitted_tasks']):
         row['desired_tasks'] = ['PROFILE_PLUS_FULL_CONTROL']
     state, reason = m.eligibility(kind, row['source_live'], row['backend'])
     if state != 'normal':
         row.update(category=state, reason=reason)
         return row
-    can, proof = delegation(kind, row['source_live'], grant, owned, row['business_id'])
+    can, proof = delegation(kind, row['source_live'], grant, owned, row['business_id'], profile)
     row.update(delegable=can, delegation_proof=proof)
     if not source_visible or not source or not isinstance(source.get('tasks'), list):
         row.update(category='unknown', reason='source_access_or_assignment_unconfirmed')
@@ -48,8 +50,12 @@ def classify(row, source, source_admin, target, target_admin, source_visible, ta
     if (target is not None) != target_visible or (target is not None and not isinstance(target.get('tasks'), list)):
         row.update(category='unknown', reason='target_access_or_assignment_unconfirmed')
         return row
-    difference = 'already_sufficient' if target and m.full_access(kind, target['tasks']) else 'insufficient' if target else 'missing'
+    difference = 'already_sufficient' if target and m.meets_requirements(kind, target['tasks'], profile) else 'insufficient' if target else 'missing'
     row['difference'] = difference
+    if profile == 'basic_ads' and difference == 'already_sufficient':
+        # Existing usable grants do not need transfer authority or any write.
+        row.update(category='already_sufficient', reason='verified_basic_ad_access')
+        return row
     if can is False:
         row.update(category='unknown' if difference == 'already_sufficient' else 'not_delegable',
                    reason='full_target_tasks_conflict_with_bm_share' if difference == 'already_sufficient' else proof)
@@ -58,8 +64,24 @@ def classify(row, source, source_admin, target, target_admin, source_visible, ta
     elif not tasks_equal(source, source_admin) or not tasks_equal(target, target_admin):
         row.update(category='unknown', reason='same_edge_admin_task_disagreement')
     else:
-        row.update(category=difference, reason='verified_full_access' if difference == 'already_sufficient' else 'needs_full_access')
+        row.update(category=difference, reason='verified_required_access' if difference == 'already_sufficient' else 'needs_required_access')
     return row
+
+
+def load_scope_csv(path):
+    path = Path(path)
+    raw = path.read_bytes()
+    scoped = {'account': {}, 'page': {}}
+    with path.open(encoding='utf-8-sig', newline='') as handle:
+        for row in csv.DictReader(handle):
+            kind, key = row.get('类型'), m.normalized_id(row.get('资产ID', ''))
+            if kind not in scoped or not key.isdigit() or key in scoped[kind]:
+                raise ValueError('invalid_or_duplicate_scope_asset')
+            scoped[kind][key] = row.get('名称', '')
+    if not any(scoped.values()):
+        raise ValueError('empty_scope_csv')
+    return scoped, {'sha256': hashlib.sha256(raw).hexdigest(),
+                    'filename': path.name, 'counts': {k: len(v) for k, v in scoped.items()}}
 
 
 def prior_restriction(path):
@@ -92,6 +114,17 @@ def audit(args):
     restriction = prior_restriction(Path(args.prior_run).resolve())
     prior_manifest = json.loads((Path(args.prior_run)/'manifest.json').read_text())
     prior_page_ids = sorted(a['asset_id'] for a in prior_manifest['assets'] if a['kind']=='page')
+    profile = getattr(args, 'permission_profile', 'full_control')
+    scope, scope_proof = load_scope_csv(args.scope_csv) if getattr(args, 'scope_csv', None) else (None, None)
+    if profile == 'basic_ads' and scope is None:
+        raise ValueError('basic_ads_requires_explicit_csv_scope')
+    context = {'profile': profile, 'scope': scope_proof}
+    context_path = directory/'input-context.json'
+    if context_path.exists() and json.loads(context_path.read_text()) != context:
+        raise ValueError('audit_context_changed_use_new_run_directory')
+    m.write_json(context_path, context)
+    if scope:
+        prior_page_ids = sorted(scope['page'])
     db = m.Database(args.credential_config)
     try:
         credentials, graph = db.credentials(), m.Graph(args.graph_version)
@@ -130,8 +163,8 @@ def audit(args):
             part = {}
             if kind == 'account':
                 for side, c in [('source', source), ('target', target)]:
-                    part[side + '_visible'] = snapshot(kind + '_' + side + '_visible', lambda: m.mapping(graph.rows('me/' + direct, c, 'id')))
-                ids = sorted(part['source_visible'])
+                    part[side + '_visible'] = snapshot(kind + '_' + side + '_visible', lambda: m.mapping(graph.rows('me/' + direct, c, 'id,account_status,user_tasks' if profile == 'basic_ads' else 'id')))
+                ids = sorted(scope[kind] if scope else part['source_visible'])
             else:
                 # Follow-up is bounded to the original frozen Page universe.
                 # Current own-token assignments plus individual Page business
@@ -156,7 +189,7 @@ def audit(args):
             parts[kind] = part
         assets = []
         for kind, part in parts.items():
-            for key in sorted(set(part['scope_ids']) | set(part['source_self'])):
+            for key in sorted(set(part['scope_ids']) if scope else set(part['scope_ids']) | set(part['source_self'])):
                 sr = part['source_self'].get(key)
                 row = {'kind': kind, 'asset_id': key, 'business_id': args.business,
                        'name': (sr or part['source_visible'].get(key) or {}).get('name', ''),
@@ -165,8 +198,23 @@ def audit(args):
                        'source_admin_tasks': (part['source_admin'].get(key) or {}).get('tasks'),
                        'target_admin_tasks': (part['target_admin'].get(key) or {}).get('tasks'),
                        'checked_at': m.now()}
+                if profile == 'basic_ads':
+                    row['permission_profile'] = profile
+                    row['target_live'] = part['target_visible'].get(key)
+                    row['name'] = row['name'] or scope[kind].get(key, '')
+                if kind == 'account' and key not in shares[kind] and row['source_live'] and m.eligibility(kind, row['source_live'], row['backend'])[0] == 'normal':
+                    try:
+                        grant = m.current_share_grant(graph, admin, source, row, row['source_live'], args.business)
+                        if grant:
+                            shares[kind][key] = grant
+                    except m.GraphError as exc:
+                        if m.error_kind(exc.response) in ('restricted', 'rate_limited'):
+                            raise
+                        row['share_read_error'] = m.safe_response(exc.response)
                 assets.append(classify(row, sr, part['source_admin'].get(key), part['target_self'].get(key), part['target_admin'].get(key),
                                        key in part['source_visible'], key in part['target_visible'], shares[kind].get(key), key in owned))
+                if profile == 'basic_ads' and kind == 'account' and row['category'] == 'already_sufficient' and not m.meets_requirements(kind, (row['target_live'] or {}).get('user_tasks'), profile):
+                    row.update(category='unknown', reason='target_live_tasks_disagree')
         admins = m.discover_admins(graph, credentials, args.business, users, directory)
         pending = [a for a in assets if a['reason'] == 'same_edge_admin_task_disagreement']
         for c in admins:
@@ -187,7 +235,7 @@ def audit(args):
             for a in pending:
                 key = a['asset_id']
                 if a['kind'] == 'page' and tasks_equal(parts['page']['source_self'].get(key), ps.get(key)) and tasks_equal(parts['page']['target_self'].get(key), pt.get(key)):
-                    a.update(category=a['difference'], reason='verified_full_access' if a['difference']=='already_sufficient' else 'needs_full_access',
+                    a.update(category=a['difference'], reason='verified_required_access' if a['difference']=='already_sufficient' else 'needs_required_access',
                              corroborating_admin_id=c['id'], source_admin_tasks=(ps.get(key) or {}).get('tasks'), target_admin_tasks=(pt.get(key) or {}).get('tasks'))
             pending = [a for a in pending if a['category'] == 'unknown']
         manifest = {'format_version': 2, 'created_at': m.now(), 'code_version': args.code_version,
@@ -198,6 +246,9 @@ def audit(args):
                     'page_scope': 'prior_frozen_page_ids_revalidated_individually',
                     'delegation_evidence': 'current_owned_business_or_bm_client_asset_permitted_tasks',
                     'counts': {kind: dict(collections.Counter(a['category'] for a in assets if a['kind']==kind)) for kind in ('account','page')}}
+        if profile == 'basic_ads':
+            manifest.update(format_version=3, permission_profile=profile, input_scope=scope_proof,
+                            page_scope='exact_input_csv_ids', account_scope='exact_input_csv_ids')
         m.write_json(directory/'manifest.json', manifest)
         digest = hashlib.sha256((directory/'manifest.json').read_bytes()).hexdigest()
         (directory/'manifest.sha256').write_text(digest+'\n')
@@ -212,6 +263,8 @@ def main():
     parser.add_argument('--run-dir', required=True)
     parser.add_argument('--prior-run', required=True)
     parser.add_argument('--code-version', required=True)
+    parser.add_argument('--permission-profile', choices=['full_control', 'basic_ads'], default='full_control')
+    parser.add_argument('--scope-csv')
     parser.add_argument('--business', default=m.DEFAULT_BM)
     parser.add_argument('--graph-version', default='v26.0')
     parser.add_argument('--credential-config', default='/root/codex_test/authorize_fb_accounts_to_user913_20260819.py')

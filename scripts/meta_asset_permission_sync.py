@@ -27,6 +27,7 @@ PAGE_PROFILE_TASKS = {"PROFILE_PLUS_MANAGE", "PROFILE_PLUS_ADVERTISE", "PROFILE_
                       "PROFILE_PLUS_CREATE_CONTENT", "PROFILE_PLUS_MESSAGING", "PROFILE_PLUS_MODERATE",
                       "PROFILE_PLUS_MANAGE_LEADS", "PROFILE_PLUS_REVENUE", "PROFILE_PLUS_FACEBOOK_ACCESS"}
 DEFAULT_BM = "163392938074395"
+BASIC_AD_TASKS = {"ADVERTISE", "ANALYZE"}
 BLOCK_CODES = {368}
 RATE_CODES = {4, 17, 32, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006}
 
@@ -61,6 +62,29 @@ def full_access(kind, tasks):
     if kind == "page" and ("PROFILE_PLUS_FULL_CONTROL" in tasks or PAGE_PROFILE_TASKS.issubset(tasks)):
         return True
     return expected_tasks(kind, tasks).issubset(tasks)
+
+
+def required_tasks(kind, existing=(), profile="full_control", shared=()):
+    if profile == "full_control":
+        return expected_tasks(kind, existing)
+    if profile != "basic_ads":
+        raise ValueError("unknown_permission_profile")
+    # Keep the current task model; for a new assignment use the shared model.
+    model = existing or shared or ()
+    if kind == "page" and any(str(t).startswith("PROFILE_PLUS_") for t in model):
+        return {"PROFILE_PLUS_ADVERTISE", "PROFILE_PLUS_ANALYZE"}
+    return set(BASIC_AD_TASKS)
+
+
+def meets_requirements(kind, tasks, profile="full_control"):
+    if profile == "full_control":
+        return full_access(kind, tasks)
+    if profile != "basic_ads":
+        raise ValueError("unknown_permission_profile")
+    tasks = set(tasks or ())
+    return (BASIC_AD_TASKS.issubset(tasks) or
+            (kind == "page" and ("PROFILE_PLUS_FULL_CONTROL" in tasks or
+             {"PROFILE_PLUS_ADVERTISE", "PROFILE_PLUS_ANALYZE"}.issubset(tasks))))
 
 
 def eligibility(kind, live, db):
@@ -647,6 +671,23 @@ def assignment_equal(left, right):
             and set(left["tasks"]) == set(right["tasks"]))
 
 
+def read_target_before(graph, target, asset, target_id, bm, admin_before):
+    if asset.get("permission_profile") != "basic_ads" or asset["kind"] != "account" or admin_before is not None:
+        return read_assignment(graph, target, asset, target_id, bm)
+    # An unassigned account rejects the target's account-side read (code 200).
+    # Absence must instead come from a completely paged own-user edge. Reuse
+    # it for at most 60 seconds; the admin-side edge is always read afresh.
+    cache = getattr(graph, "_own_account_assignments", {})
+    identity = (target_id, public_credential(target)["fingerprint"])
+    entry = cache.get(identity)
+    if entry is None or time.monotonic() - entry[0] > 60:
+        rows = mapping(graph.rows(target_id + "/assigned_ad_accounts", target, "id,tasks"))
+        entry = (time.monotonic(), rows)
+        cache[identity] = entry
+        graph._own_account_assignments = cache
+    return entry[1].get(asset["asset_id"])
+
+
 def current_share_grant(graph, admin, source, asset, live, bm):
     if (live.get("business") or {}).get("id") == bm:
         return {"id": bm, "owned": True}
@@ -679,12 +720,13 @@ def validate_recovery(manifest):
 
 
 def verify_after(graph, admin, target, asset, target_id, bm):
+    profile = asset.get("permission_profile", "full_control")
     assignment = read_assignment(graph, admin, asset, target_id, bm)
-    if not assignment or not full_access(asset["kind"], assignment.get("tasks")):
-        return {"status": "pending_verification", "reason": "full_tasks_not_observed",
+    if not assignment or not meets_requirements(asset["kind"], assignment.get("tasks"), profile):
+        return {"status": "pending_verification", "reason": "required_tasks_not_observed",
                 "after_tasks": (assignment or {}).get("tasks", [])}
     live = live_asset(graph, target, asset)
-    if asset["kind"] == "account" and not full_access("account", live.get("user_tasks")):
+    if asset["kind"] == "account" and not meets_requirements("account", live.get("user_tasks"), profile):
         return {"status": "pending_verification", "reason": "target_token_tasks_not_full",
                 "after_tasks": assignment["tasks"]}
     if asset["kind"] == "page":
@@ -692,7 +734,7 @@ def verify_after(graph, admin, target, asset, target_id, bm):
         rows = graph.rows(target_id + "/assigned_pages", target, "id,tasks",
                           {"business": bm, "pages": json.dumps([int(asset["asset_id"])])})
         direct = rows.get(asset["asset_id"])
-        if not direct or not full_access("page", direct.get("tasks")):
+        if not direct or not meets_requirements("page", direct.get("tasks"), profile):
             return {"status": "pending_verification", "reason": "target_token_page_tasks_not_full",
                     "after_tasks": assignment["tasks"]}
     return {"status": "verified", "reason": "admin_and_target_readback_passed", "after_tasks": assignment["tasks"]}
@@ -744,6 +786,13 @@ def execute(args, db, graph, credentials):
     manifest = json.loads(manifest_path.read_text())
     if not manifest["complete"] or manifest["business_id"] != args.business:
         raise ValueError("incomplete_or_wrong_business_manifest")
+    profile = manifest.get("permission_profile", "full_control")
+    for asset in manifest["assets"]:
+        if asset.get("permission_profile", "full_control") != profile:
+            raise ValueError("asset_permission_profile_mismatch")
+        required = required_tasks(asset["kind"], asset.get("before_tasks"), profile, asset.get("bm_permitted_tasks"))
+        if profile == "basic_ads" and set(asset["desired_tasks"]) != set(asset.get("before_tasks") or ()) | required:
+            raise ValueError("basic_profile_would_add_unrequested_permissions")
     recovery = validate_recovery(manifest)
     journal = Journal(directory, digest)
     if args.command == "execute" and journal.events:
@@ -846,7 +895,7 @@ def execute(args, db, graph, credentials):
                         checked_actors.add(c["id"])
                     before = read_assignment(graph, c, a, target_id, args.business)
                     if manifest.get("format_version", 1) >= 2:
-                        before_self = read_assignment(graph, target, a, target_id, args.business)
+                        before_self = read_target_before(graph, target, a, target_id, args.business, before)
                         if not assignment_equal(before, before_self):
                             journal.append("admin_target_assignment_disagrees", key=key, actor=public_credential(c))
                             continue
@@ -857,14 +906,17 @@ def execute(args, db, graph, credentials):
                     if state != "normal":
                         result = {"status": "skipped", "reason": reason}
                         break
-                    if before and full_access(a["kind"], before.get("tasks")) and not recovery_pending:
+                    if before and meets_requirements(a["kind"], before.get("tasks"), profile):
+                        if recovery_pending:
+                            result = {"status": "skipped", "reason": "recovery_asset_already_sufficient_no_redundant_write"}
+                            break
                         result = verify_after(graph, c, target, a, target_id, args.business)
-                        result["reason"] = "already_full_before_write"
+                        result["reason"] = "already_sufficient_before_write"
                         break
                     # Shared assets must still be delegable by this acting administrator.
                     if a["kind"] == "account":
                         actor = live_asset(graph, c, a)
-                        if "MANAGE" not in (actor.get("user_tasks") or []):
+                        if (profile == "full_control" and "MANAGE" not in (actor.get("user_tasks") or [])) or (profile == "basic_ads" and not meets_requirements("account", actor.get("user_tasks"), profile)):
                             journal.append("admin_not_delegable", key=key, actor=public_credential(c))
                             continue
                     source_assignment = read_assignment(graph, c, a, manifest["identities"]["source"]["meta_id"], args.business)
@@ -874,8 +926,8 @@ def execute(args, db, graph, credentials):
                             journal.append("admin_source_assignment_disagrees", key=key, actor=public_credential(c))
                             continue
                         share = current_share_grant(graph, c, source, a, live, args.business)
-                        if not share or not (share.get("owned") or full_access(a["kind"], share.get("permitted_tasks"))):
-                            result = {"status": "skipped", "reason": "current_bm_full_control_not_proven"}
+                        if not share or not (share.get("owned") or meets_requirements(a["kind"], share.get("permitted_tasks"), profile)):
+                            result = {"status": "skipped", "reason": "current_bm_required_tasks_not_proven"}
                             break
                     if not source_assignment:
                         # A BM administrator's asset visibility may be narrower
@@ -901,7 +953,8 @@ def execute(args, db, graph, credentials):
                     result = {"status": "unknown", "reason": "preflight_read_failed", "error": safe_response(exc.response)}
                     break
                 current = set((before or {}).get("tasks") or [])
-                desired = sorted(current | set(a["desired_tasks"]))
+                desired = sorted(current | (required_tasks(a["kind"], current, profile, a.get("bm_permitted_tasks"))
+                                           if profile == "basic_ads" else set(a["desired_tasks"])))
                 rotation.before_write(c)
                 journal.append("intent", key=key, actor=public_credential(c), target_id=target_id,
                                before_assigned=before is not None, before_tasks=sorted(current), desired_tasks=desired,
