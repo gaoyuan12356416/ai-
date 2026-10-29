@@ -38,3 +38,32 @@ after reserving the first, so the same materials cannot be allocated twice.
 
 Validation includes the real broker SQL dialect, transient recovery/non-retry,
 metadata ambiguity preservation, error redaction, and atomic/idempotent recovery.
+
+## Production acceptance
+
+- Runtime commit: `2fa432e7600f767185093daa257843e202cca70c`, deployed on
+  `43.166.187.96` at 2026-10-29 12:17 Beijing time.
+- Release: `/mnt/data-disk/fb-video-publish/releases/group-query-2fa432e`.
+- Backup: `/mnt/data-disk/fb-video-publish/backups/group-query-20261029T041645Z-2fa432e7/manifest.json`.
+- Six installed hashes match. Main API, FB sidecar, group scheduler, manual
+  worker and the temporarily paused prepare timer are active. Existing video
+  and group facts were compared before service reopening; no database restore
+  or migration occurred. The first attempt exited before replacing files while
+  GPU work was active; existing jobs completed normally before activation.
+- Post-deployment real-source check: 100/100 materials valid, zero errors;
+  the resource read returned 21 byte-distinct metadata records.
+- Explicit recovery created two separate runs with 234 and 159 tasks. Original
+  failed runs, schedule revision and effective time are unchanged. A repeated
+  read of each deterministic operation returned its original batch; no duplicate
+  material assignments exist. Fifteen pool materials already belonged to older
+  automatic tasks (nine planned, six skipped) and retained the existing policy.
+- At 12:20 Beijing, 22 were confirmed published, one had exhausted eight Page
+  authorizations with explicit Meta 368/190 refusals, and 370 were still queued,
+  executing or processing at Meta. Enqueueing is not completion. Result follow-up
+  tracks only these accepted batches and never automatically retries unknowns.
+
+Exact code-only rollback:
+
+```sh
+python3 /mnt/data-disk/fb-video-publish/releases/group-query-2fa432e/scripts/deploy_fb_group_query_repair.py --rollback /mnt/data-disk/fb-video-publish/backups/group-query-20261029T041645Z-2fa432e7/manifest.json
+```
