@@ -40,8 +40,19 @@ def main():
     app = importlib.util.module_from_spec(spec)
     sys.modules['app'] = app
     spec.loader.exec_module(app)
+    # Live features can be a regular package, which outranks a release's
+    # namespace directory. Bind only this package to the verified release.
+    package = 'features.fb_ad_asset_delete'
+    assert not any(name == package or name.startswith(package+'.') for name in sys.modules), 'Asset package was imported before release binding'
+    package_root = Path(__file__).resolve().parents[1]/'features/fb_ad_asset_delete'
+    package_spec = importlib.util.spec_from_file_location(package,package_root/'__init__.py',submodule_search_locations=[str(package_root)])
+    package_module = importlib.util.module_from_spec(package_spec)
+    sys.modules[package] = package_module
+    package_spec.loader.exec_module(package_module)
     from features.fb_ad_asset_delete import bridge
     from features.fb_ad_asset_delete.core import actor_key
+    assert Path(bridge.__file__).resolve().parent == package_root
+    print(json.dumps({'release':str(package_root.parent.parent)}),flush=True)
     service = bridge.get_service(app.__dict__)
     original = service.store.get_job(args.source_job, include_objects=False)
     assert set(args.products) <= {p['id'] for p in original['products']}
