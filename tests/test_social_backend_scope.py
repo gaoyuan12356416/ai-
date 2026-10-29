@@ -100,6 +100,66 @@ class BackendScopeTests(unittest.TestCase):
         self.assertIn("BINARY adset_id,BINARY ad_id", query.call_args.args[1])
         self.assertEqual(rows[0]["adset_id"], "page")
 
+    def test_web_windows_are_disjoint_and_keep_exact_source_proof(self):
+        from features.social_analytics import routes
+        seen = []
+        def query(app, sql, limit):
+            import re
+            first, last = re.search("dt BETWEEN '([^']+)' AND '([^']+)'", sql).groups()
+            self.assertIn("BINARY adset_id IN", sql)
+            self.assertIn("GROUP BY dt,BINARY campaign_id,BINARY adset_id,BINARY ad_id", sql)
+            self.assertIn("UNION ALL", sql)
+            self.assertEqual(app["SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS"], 12000)
+            seen.append((first, last))
+            return [metric(date=first)]
+        with patch.object(routes, "query_source_rows", side_effect=query):
+            rows, _ = facebook_source({"SOCIAL_ANALYTICS_RANGE_WORKERS": 2},
+                "2026-10-22", "2026-10-28", "2049", [("6", "page", "material")])
+        self.assertEqual(sorted(seen), [("2026-10-22", "2026-10-25"), ("2026-10-26", "2026-10-28")])
+        self.assertEqual({row["date"] for row in rows}, {"2026-10-22", "2026-10-26"})
+
+    def test_failed_facebook_window_never_returns_partial_success(self):
+        from features.social_analytics import routes
+        def query(app, sql, limit):
+            if "2026-10-26" in sql:
+                raise ReportError("failed window", 503)
+            return [metric(date="2026-10-22")]
+        with patch.object(routes, "query_source_rows", side_effect=query):
+            with self.assertRaisesRegex(ReportError, "failed window"):
+                facebook_source({"SOCIAL_ANALYTICS_RANGE_WORKERS": 2},
+                    "2026-10-22", "2026-10-28", "2049", [("6", "page", "material")])
+
+    def test_facebook_combined_window_limit_is_not_bypassed(self):
+        from features.social_analytics import routes
+        def query(app, sql, limit):
+            first = "2026-10-26" if "2026-10-26" in sql else "2026-10-22"
+            return [metric(date=first, cid="6"), metric(date=first, cid="7")]
+        with patch.object(routes, "query_source_rows", side_effect=query), patch.object(routes, "MAX_ROWS", 3):
+            with self.assertRaisesRegex(ReportError, "上限"):
+                facebook_source({"SOCIAL_ANALYTICS_RANGE_WORKERS": 2},
+                    "2026-10-22", "2026-10-28", "2049", [("6", "page", "material"), ("7", "page", "material")])
+
+    def test_candidate_page_read_cannot_accept_cross_tuple_or_case_collision(self):
+        from features.social_analytics import routes
+        candidates = [metric(cid="AbC", ad_id="one"), metric(cid="xyz", ad_id="two"),
+                      metric(cid="AbC", ad_id="two", cents=90000),
+                      metric(cid="abc", ad_id="one", cents=80000),
+                      metric(cid="AbC", adset_id="Page", ad_id="one", cents=70000),
+                      metric(cid="", adset_id="", ad_id="", cents=0, _coverage_only=1)]
+        allowed = [("AbC", "page", "one"), ("xyz", "page", "two")]
+        with patch.object(routes, "query_source_rows", return_value=candidates):
+            rows, _ = facebook_source({}, DAY, DAY, "2049", allowed)
+        self.assertEqual(sum(row["revenue_cents"] for row in rows), 200)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(any(row.get("_coverage_only") for row in rows))
+
+    def test_candidate_overflow_fails_before_exact_tuple_filter(self):
+        from features.social_analytics import routes
+        with patch.object(routes, "MAX_ROWS", 1), patch.object(routes, "query_source_rows",
+                return_value=[metric(cid="outside"), metric(cid="also-outside")]):
+            with self.assertRaisesRegex(ReportError, "上限"):
+                facebook_source({}, DAY, DAY, "2049", [("6", "page", "material")])
+
 
 if __name__ == "__main__":
     unittest.main()

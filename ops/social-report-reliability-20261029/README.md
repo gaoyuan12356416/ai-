@@ -30,3 +30,13 @@ The deployer checks all live preimage hashes, backs up every modified/new path, 
 Rollback: `python3 ops/social-report-reliability-20261029/rollback.py`. Preimages and original collector link are in `/mnt/data-disk/social-report-repair-20261029/deploy-backup/deployment.json`. Rollback restores code/static files and collector link, then safely restarts the API. Existing publisher state, report ledger, timers and source data remain in place.
 
 SQLite lock rationale: https://www.sqlite.org/howtocorrupt.html#posix_advisory_locks_canceled_by_a_separate_thread_doing_close_
+
+## Facebook follow-up validation
+
+The deployed all-channel weekly check revealed an independent MySQL 3024 timeout on legacy Facebook site 2049. The frozen candidate list contained 15,772 exact campaign/Page/material tuples. Adding prefilters or changing tuple encoding did not reliably solve the latency, so the index/encoding experiments were not deployed.
+
+The follow-up instead reads bounded exact Page candidates grouped by all three binary IDs within disjoint, at-most-four-day windows, then checks exact campaign/Page/material tuple membership using a Python set before returning any metric, with at most two concurrent gated reads and the unchanged shared 40 s deadline. Any failed window fails the whole source. The combined 50,000 metric-row cap is checked across windows; coverage sentinels retain dates independently of content traffic. Internal scheduled/global queries keep the existing path.
+
+229 Python regressions pass (including partial-window failure, combined cap and source-proof checks); 72 browser checks pass. Cold UTC Oct 22–28 all-channel report completes in 39.006 s, all three channels complete, zero missing or unverified dates. The screenshot YouTube month is already complete with exact pre-change totals. All 9,748 Facebook legacy source rows (including coverage sentinels) match the original exact-tuple query byte-for-byte after normalization. Cross-tuple, case-collision and pre-filter candidate-overflow tests protect the source boundary.
+
+For the narrow follow-up, push and fetch the exact revision then run `python3 ops/social-report-reliability-20261029/deploy_followup.py --commit <fetched-commit>` and the API's existing safe restart helper. Only `features/social_analytics/backend_scope.py` changes live; the collector and its schedule stay unchanged. Follow-up preimages are in `/mnt/data-disk/social-report-repair-20261029/deploy-backup-followup/deployment.json`. The updated `rollback.py` restores both stages before a single safe API restart.

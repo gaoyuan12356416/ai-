@@ -1,6 +1,8 @@
 """AI-backend source boundary; ownership is still resolved by campaign ID."""
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 from .adapters import source_key
 from .report import FIELDS, ReportError, add, campaign_index, empty, resolve
@@ -17,6 +19,42 @@ def eligible(row, day):
 
 def facebook_source(app, start, end, site, allowed_sources=None):
     from .routes import MAX_ROWS, metric_sql, query_source_rows
+    # Broad web reads must not put a month of legacy Page/material matches in
+    # one statement. Keep the exact triple verification within each disjoint
+    # four-day window; fail the whole source if any window fails or overflows.
+    if allowed_sources is not None and (date.fromisoformat(end) - date.fromisoformat(start)).days >= 4:
+        settings = dict(app)
+        settings["SOCIAL_ANALYTICS_QUERY_DEADLINE"] = min(
+            settings.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")), time.monotonic() + 40)
+        workers = min(2, max(1, int(settings.get("SOCIAL_ANALYTICS_RANGE_WORKERS", 1))))
+        if workers > 1:
+            settings["SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS"] = max(
+                12000, int(settings.get("SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS", 8000)))
+        periods = []
+        first, last = date.fromisoformat(start), date.fromisoformat(end)
+        while first <= last:
+            stop = min(last, first + timedelta(days=3))
+            periods.append((first.isoformat(), stop.isoformat()))
+            first = stop + timedelta(days=1)
+
+        def read_window(period):
+            if time.monotonic() >= settings["SOCIAL_ANALYTICS_QUERY_DEADLINE"]:
+                raise ReportError("效果查询时间预算已用完；本次不按零统计", 503)
+            return facebook_source(settings, *period, site, allowed_sources=allowed_sources)
+
+        result, fetched = [], []
+        def collect(chunks):
+            for rows, timestamp in chunks:
+                result.extend(rows)
+                fetched.append(timestamp)
+                if sum(not row.get("_coverage_only") for row in result) > MAX_ROWS:
+                    raise ReportError("数据量超过在线查询上限，请缩小日期范围", 400)
+        if workers == 1:
+            collect(map(read_window, periods))
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="social-fb-effects") as executor:
+                collect(executor.map(read_window, periods))
+        return result, min(fetched)
     # Filtering after a campaign-only SUM is too late: legacy FB and AI tasks
     # share short numeric campaign IDs. Retain the frozen URL's source IDs.
     sql = metric_sql(start, end, "facebook", site).replace(
@@ -29,9 +67,14 @@ def facebook_source(app, start, end, site, allowed_sources=None):
         # Reduce the read using globally frozen candidates, never viewer filters;
         # restrict() still resolves ownership and confirms the publication date.
         literal = lambda value: "0x" + str(value).encode("utf-8").hex()
-        tuples = ["(" + ",".join(literal(value) for value in triple) + ")" for triple in allowed_sources]
-        predicate = ("(BINARY campaign_id,BINARY adset_id,BINARY ad_id) IN (" + ",".join(tuples) + ")"
-                     if tuples else "1=0")
+        # A large row-tuple IN causes expensive repeated comparisons on the
+        # replica. Read bounded Page candidates, grouped by all three exact IDs,
+        # then verify membership with an exact Python tuple set before any row
+        # can leave this source boundary. Never SUM by campaign alone.
+        allowed_sources = {tuple(str(value) for value in triple) for triple in allowed_sources}
+        pages = sorted({triple[1] for triple in allowed_sources})
+        predicate = ("BINARY adset_id IN (" + ",".join(literal(page) for page in pages) + ")"
+                     if pages else "1=0")
         sql = sql.replace("GROUP BY dt,BINARY campaign_id", "AND " + predicate + " GROUP BY dt,BINARY campaign_id")
         # Source-day existence must survive even if no backend content had any
         # traffic. A zero-valued sentinel is removed by restrict, retaining only
@@ -57,6 +100,10 @@ def facebook_source(app, start, end, site, allowed_sources=None):
         add(empty(), row)
         seen.add(key)
         row.update(platform="facebook", site_id=site)
+    if allowed_sources is not None:
+        rows = [row for row in rows if row.get("_coverage_only") or
+                (str(row.get("campaign_id") or ""), str(row.get("adset_id") or ""),
+                 str(row.get("ad_id") or "")) in allowed_sources]
     return rows, datetime.now(timezone.utc).isoformat()
 
 

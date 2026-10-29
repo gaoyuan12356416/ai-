@@ -125,8 +125,9 @@ class WebBackendScopeTests(unittest.TestCase):
             self.assertEqual(query.call_count, 2)
             sql = query.call_args_list[0].args[1]
             self.assertIn("UNION ALL", sql)
-            self.assertIn("(BINARY campaign_id,BINARY adset_id,BINARY ad_id) IN", sql)
-            self.assertIn("0x" + "other".encode().hex(), sql)  # all tenants before ACL
+            self.assertIn("BINARY adset_id IN", sql)
+            self.assertIn("GROUP BY dt,BINARY campaign_id,BINARY adset_id,BINARY ad_id", sql)
+            self.assertIn("0x" + "page".encode().hex(), sql)  # Page candidates, exact tuples verified after read
             self.assertNotIn("0x" + "failed".encode().hex(), sql)
             self.assertEqual(rows[0]["date"], DAY)
         finally:
