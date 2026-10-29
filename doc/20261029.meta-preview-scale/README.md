@@ -305,3 +305,12 @@ the first full audit, pending Videos and final audit still follow this run.
 Prior controller snapshots have `-before-v6.json` suffixes in the audit directory.
 The task remains in progress; selective failure recovery and final exports are
 still required after these stages.
+
+A further orderly API restart occurred at20:21:21 (PID2295582; actor still
+unconfirmed). V6 stopped during shared-reference batch86/104, with zero object
+attempts and no new unknown outcomes. Four runtime hashes still matched3df.
+After verifying the ledger, the same controllers resumed under the new stable
+prefix `scope-recovery-20261029-reference-v7`, preserving all5,208 pending
+Creatives. Evidence is `restart-202121-recovery.json`; snapshots before this
+resume use `-before-v7.json`. This recovery did not restart or deploy the API.
+Other API restarts must be coordinated while this process-owned execution runs.
