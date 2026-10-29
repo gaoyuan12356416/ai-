@@ -340,3 +340,15 @@ audit, to finish. The new audit is a separate GET-only process; no production
 module deployment or API restart is required. Keep the prior audit files.
 Five targeted inventory tests and two existing continuation tests cover transient
 page retry, permissions, partial evidence, invalid pagination and receipt labels.
+
+Audit release `04b0fc92225ba564a53527b59912d46812b15422` was pushed, fetched and
+validated on CPU43.166.187.96 at
+`/mnt/data-disk/meta-ad-asset-delete/release-04b0fc92225b` (all seven tests pass on
+both hosts). Unit `meta-scope-complete-audit-20261029` waits for the original
+pending controller. Evidence `complete-audit-release.json` includes file hashes
+and prior audit release paths. Original scripts/reports are retained; no live API
+module changed, mainAPI PID2295582 remained, and Video run
+`0b37748ae7c24f62821ede4f5aeefe2c` continued running. Rollback only this independent
+GET audit with `systemctl stop meta-scope-complete-audit-20261029.service`; do not
+stop pending Video deletion or restore the ledger. New audit output is additional
+evidence, not permission to retry uncertain deletes.
