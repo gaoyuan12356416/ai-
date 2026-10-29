@@ -184,7 +184,7 @@ def main():
         save(MONITOR / 'data/state.json', {'version': 1, 'scope': 'production', 'previous_state_backup': str(backup / 'monitor-state.json')})
         for rel in FILES:
             main = Path('/root/drama_material_service') / rel
-            if main.exists():
+            if main.exists() and rel != 'features/x_accounts/oauth_service.py':
                 dst = backup / 'main' / rel; dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(main, dst); atomic_copy(SOURCE / rel, main)
             if rel.startswith('static/'):
