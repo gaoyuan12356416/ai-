@@ -366,6 +366,35 @@ class Store:
         with self._transaction(False) as conn:
             return self._job_data(conn, self._require(conn, "jobs", "job_id", job_id), include_objects)
 
+    def get_job_page(self, job_id, page=1, page_size=50, kind="", status=""):
+        """Read counts and one page in one snapshot, without decoding all payloads."""
+        with self._transaction(False) as conn:
+            data = self._job_data(conn, self._require(conn, "jobs", "job_id", job_id), False)
+            terms, args = ["job_id=?"], [job_id]
+            if kind:
+                terms.append("kind=?")
+                args.append(kind)
+            if status:
+                # Historical blocked Videos remain directly executable.
+                terms.append("(CASE WHEN kind='video' AND status='blocked' THEN 'pending' ELSE status END)=?")
+                args.append(status)
+            where = " AND ".join(terms)
+            total = conn.execute("SELECT COUNT(*) FROM fb_asset_delete_v2_objects WHERE " + where, args).fetchone()[0]
+            objects = [self._object_data(row) for row in conn.execute(
+                "SELECT * FROM fb_asset_delete_v2_objects WHERE " + where + " ORDER BY ordinal LIMIT ? OFFSET ?",
+                args + [page_size, (page - 1) * page_size])]
+            videos = [obj["key"] for obj in objects if obj["kind"] == "video"]
+            accounts = {}
+            if videos:
+                for row in conn.execute("SELECT * FROM fb_asset_delete_v2_video_accounts WHERE job_id=? AND object_key IN (" +
+                        ",".join("?" for _ in videos) + ") ORDER BY object_key,ordinal", [job_id] + videos):
+                    accounts.setdefault(row["object_key"], []).append(self._video_account_data(row))
+            for obj in objects:
+                if obj["kind"] == "video":
+                    obj["video_account_results"] = accounts.get(obj["key"], [])
+            data.update(objects=objects, total=total, page=page, page_size=page_size)
+            return data
+
     def list_jobs(self, actor=None, limit=30):
         limit = max(1, min(int(limit), 500))
         with self._transaction(False) as conn:

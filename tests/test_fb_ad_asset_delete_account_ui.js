@@ -186,8 +186,8 @@ test("ordinary confirmation submits only frozen preview, phases and the request 
 test("HTML keeps the ordinary three phases and the retired navigation version", () => {
   assert.equal((page.match(/type="checkbox"/g) || []).length, 3);
   assert.ok(page.includes("quick-nav.js?v=20260915retired"));
-  assert.ok(page.includes("fb-post-ad-delete.css?v=20260915-meta-video-account-delete"));
-  assert.ok(page.includes("fb-post-ad-delete.js?v=20260916-meta-video-token-routing"));
+  assert.ok(page.includes("fb-post-ad-delete.css?v=20260919-preview-reliability"));
+  assert.ok(page.includes("fb-post-ad-delete.js?v=20261029-preview-scale"));
   assert.ok(!page.includes("Video 阶段删除视频对象"));
   assert.ok(page.includes("广告账户视频素材"));
 });

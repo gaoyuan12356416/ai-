@@ -61,7 +61,7 @@ class Service:
 
     @staticmethod
     def _counts(job):
-        if "objects" in job:
+        if "objects" in job and "object_counts" not in job:
             job["summary"], job["phase_results"] = summary(job["objects"])
         else:
             totals = dict.fromkeys(STATUSES, 0)
@@ -98,18 +98,12 @@ class Service:
         return {"items": [self._public(j) for j in rows if all(p["id"] in permitted for p in j["products"])]}
 
     def detail(self, session, job_id, page=1, page_size=50, kind="", status=""):
-        job = self.store.get_job(job_id)
-        self._allowed(session, job)
         if kind and kind not in PHASES or status and status not in STATUSES:
             raise AssetError("invalid_filter", "明细筛选条件无效")
         page, page_size = max(1, int(page)), max(1, min(100, int(page_size)))
-        data = self._public(job)
-        # Historical blocked Video rows retain their audit state until claimed,
-        # but operator filters must match the page's current pending count.
-        objects = [o for o in data["objects"] if (not kind or o["kind"] == kind) and
-                   (not status or ("pending" if o["video_direct_eligible"] else o["status"]) == status)]
-        data.update(total=len(objects), page=page, page_size=page_size, objects=objects[(page-1)*page_size:page*page_size])
-        return data
+        job = self.store.get_job_page(job_id, page, page_size, kind, status)
+        self._allowed(session, job)
+        return self._public(job)
 
     def preview(self, session, payload):
         input_type, ids, product_ids = normalize_input(payload)
@@ -182,6 +176,46 @@ class Service:
             return "视频引用索引：已读取 %s 条源记录%s" % (format(done, ","), "，完整读取结束" if total else "，正在完整读取")
         return "核验 Creative 共享引用：%d / %d" % (done, total)
 
+    def _preview_inspect(self, entries, allowed_ads, progress, on_result=None, check_references=False):
+        """Bounded account workers, independent clients, and one-use GET batches."""
+        groups, stop, result_lock = defaultdict(list), threading.Event(), threading.Lock()
+        checked = [0]
+        for obj in entries:
+            groups[tuple(sorted(obj.get("account_ids", [])))].append(obj)
+
+        def work(accounts, objects):
+            graph = self.graph_factory()
+            graph.response_observer = lambda metadata: self.execution_budget.observe(accounts, metadata)
+            graph.request_guard = lambda: self.execution_budget.wait(accounts, stop)
+            try:
+                for offset in range(0, len(objects), 50):
+                    part = objects[offset:offset + 50]
+                    with self.execution_budget.operation(accounts, stop):
+                        prefetch = getattr(graph, "prefetch_preview_nodes", None)
+                        if callable(prefetch):
+                            prefetch(part)
+                        for obj in part:
+                            try:
+                                state, proof = graph.inspect(obj, allowed_ads, check_references=check_references)
+                            except AssetError as exc:
+                                with result_lock:
+                                    self._block(obj, exc.code, exc.message)
+                                    obj["result"] = self._error_result(exc)
+                            else:
+                                with result_lock:
+                                    obj.update(status=state, result=proof)
+                                    if on_result:
+                                        on_result(obj, proof)
+                            with result_lock:
+                                checked[0] += 1
+                                progress(dict(stage="references_meta" if check_references else "verify", kind=obj["kind"],
+                                    checked=checked[0], total=len(entries),
+                                    message="%s：%d / %d" % ("核验共享引用" if check_references else "核验" + ("广告" if obj["kind"] == "ad" else "素材"), checked[0], len(entries))))
+            finally:
+                self._close_graph(graph)
+
+        self._parallel_groups(groups, work, stop)
+
     def _build_preview(self, job_id):
         try:
             job = self.store.get_job(job_id)
@@ -201,8 +235,6 @@ class Service:
             self.store.update_job(job_id, preview_step="查找精确关联的 Meta 广告", dramas=dramas, blockers=blockers)
             ads, issues = self.source.resolve_ads(dramas, job["products"], progress=progress)
             blockers.extend(issues)
-            if len(ads) > 10000:
-                raise AssetError("too_many_ads", "命中超过 10,000 个 Ad，请缩小范围")
             objects = {}
             defaults = {p["id"]: p.get("default_user") for p in job["products"]}
 
@@ -237,41 +269,33 @@ class Service:
                     add("creative", ad["creative_id"], ad)
                 for vid in ad.get("video_ids", []):
                     add("video", vid, ad)
-            graph = self.graph_factory()
+            ads_by_id, ads_by_creative = defaultdict(list), defaultdict(list)
+            for ad in ads:
+                ads_by_id[ad["ad_id"]].append(ad)
+                if ad.get("creative_id"):
+                    ads_by_creative[str(ad["creative_id"])].append(ad)
             allowed_ads = {o["object_id"] for o in objects.values() if o["kind"] == "ad" and o["status"] != "blocked"}
             self.store.update_job(job_id, preview_step="核验 Meta 对象及广告账户关系",
                                   preview_progress={"stage": "verify", "message": "核验 Meta 对象及广告账户关系"})
             # Verify ads first so changed creatives cannot authorize deleting the
             # old source record's assets. Freeze any discovered video IDs here.
             for kind in ("ad", "creative"):
-                verified_count = 0
-                verification_total = sum(1 for obj in objects.values() if obj["kind"] == kind and obj["status"] != "blocked")
-                for obj in list(objects.values()):
-                    if obj["kind"] != kind or obj["status"] == "blocked":
-                        continue
-                    try:
-                        state, proof = graph.inspect(obj, allowed_ads, check_references=False)
-                        obj.update(status=state, result=proof)
-                        if kind == "ad" and proof.get("creative_id") and not obj["creative_ids"]:
-                            for ad in ads:
-                                if ad["ad_id"] == obj["object_id"]:
-                                    ad["creative_id"] = proof["creative_id"]
-                                    obj["creative_ids"] = [proof["creative_id"]]
-                                    add("creative", proof["creative_id"], ad)
-                        if kind == "creative":
-                            obj["account_verified"] = True
-                            obj["verified_video_ids"] = proof.get("video_ids", [])
-                            obj["video_ids"] = sorted(set(obj["video_ids"]) | set(proof.get("video_ids", [])))
-                            for ad in ads:
-                                if str(ad.get("creative_id")) == obj["object_id"]:
-                                    for vid in proof.get("video_ids", []):
-                                        add("video", vid, ad)
-                    except AssetError as exc:
-                        self._block(obj, exc.code, exc.message)
-                        obj["result"] = self._error_result(exc)
-                    verified_count += 1
-                    progress(dict(stage="verify", kind=kind, checked=verified_count, total=verification_total,
-                        message="核验%s：%d / %d" % ("广告" if kind == "ad" else "素材", verified_count, verification_total)))
+                entries = [obj for obj in objects.values() if obj["kind"] == kind and obj["status"] != "blocked"]
+                def supplement(obj, proof):
+                    if kind == "ad" and proof.get("creative_id") and not obj["creative_ids"]:
+                        for ad in ads_by_id[obj["object_id"]]:
+                            ad["creative_id"] = proof["creative_id"]
+                            obj["creative_ids"] = [proof["creative_id"]]
+                            ads_by_creative[proof["creative_id"]].append(ad)
+                            add("creative", proof["creative_id"], ad)
+                    if kind == "creative":
+                        obj["account_verified"] = True
+                        obj["verified_video_ids"] = proof.get("video_ids", [])
+                        obj["video_ids"] = sorted(set(obj["video_ids"]) | set(proof.get("video_ids", [])))
+                        for ad in ads_by_creative[obj["object_id"]]:
+                            for vid in proof.get("video_ids", []):
+                                add("video", vid, ad)
+                self._preview_inspect(entries, allowed_ads, progress, supplement)
             # Creative retains ownership checks. Matched Video IDs are frozen
             # for direct deletion, independently of Meta read availability.
             bad_ads = {o["object_id"] for o in objects.values() if o["kind"] == "ad" and o["status"] == "blocked"}
@@ -293,15 +317,8 @@ class Service:
                 except AssetError as exc:
                     for obj in kind_assets:
                         self._block(obj, exc.code, exc.message)
-            for obj in assets:
-                if obj["status"] != "pending":
-                    continue
-                try:
-                    state, proof = graph.inspect(obj, allowed_ads)
-                    obj.update(status=state, result=proof)
-                except AssetError as exc:
-                    self._block(obj, exc.code, exc.message)
-                    obj["result"] = self._error_result(exc)
+            self._preview_inspect([obj for obj in assets if obj["status"] == "pending"],
+                                  allowed_ads, progress, check_references=True)
             ordered = sorted(objects.values(), key=lambda o: (PHASES.index(o["kind"]), o["object_id"]))
             self.store.update_job(job_id, status="ready", objects=ordered, dramas=dramas, blockers=blockers,
                                   preview_step="预览完成", preview_progress={"stage": "complete", "message": "预览完成"}, preview_completed_at=now())

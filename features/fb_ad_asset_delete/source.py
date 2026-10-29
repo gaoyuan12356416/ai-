@@ -3,6 +3,8 @@ import hashlib
 import logging
 import re
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .core import AssetError, account_id, content_markers, stored_ids, stored_ids_complete, stored_video_ids, creative_video_ids
 from .video_index import ReferenceRows
 
@@ -178,6 +180,29 @@ class SqlSource:
         candidate lineage is checked again when full records are fetched and
         the service must still perform its current Meta verification.
         """
+        if len(target_by_product) > 1:
+            results, states, completed, lock = {}, {}, set(), threading.Lock()
+            def scan(pid, targets):
+                def report(data):
+                    with lock:
+                        states[pid] = data
+                        if progress:
+                            scanned = sum(item.get("scanned_rows", 0) for item in states.values())
+                            candidates = sum(item.get("candidate_rows", 0) for item in states.values())
+                            progress(dict(data, products_total=len(target_by_product), products_done=len(completed),
+                                scanned_rows=scanned, candidate_rows=candidates,
+                                message="已核对 %d/%d 个产品，扫描 %d 条广告，找到 %d 条候选记录" %
+                                        (len(completed), len(target_by_product), scanned, candidates)))
+                rows = self._scan_ad_candidates({pid: targets}, materials, source_links, report)
+                with lock:
+                    completed.add(pid)
+                report(dict(states.get(pid, {}), candidate_rows=len(rows)))
+                return rows
+            with ThreadPoolExecutor(max_workers=min(4, len(target_by_product)), thread_name_prefix="meta-preview-source") as pool:
+                futures = [pool.submit(scan, pid, targets) for pid, targets in target_by_product.items()]
+                for future in as_completed(futures):
+                    results.update(future.result())
+            return results
         candidates, scanned, retries = {}, 0, 0
         product_ids = sorted(target_by_product)
         total = len(product_ids)
@@ -236,8 +261,6 @@ class SqlSource:
                             set(stored_ids(row["source_ids_raw"])) & source_ids or
                             content_markers(row["ad_name"], row["campaign_name"]) & target_ids):
                         candidates[str(rid)] = dict(row, product_id=pid)
-                        if len(candidates) > 10000:
-                            raise AssetError("too_many_ads", "命中超过 10,000 条 Ad 记录，请缩小范围")
                 product_scanned += len(rows)
                 scanned += len(rows)
                 if product_scanned > expected:

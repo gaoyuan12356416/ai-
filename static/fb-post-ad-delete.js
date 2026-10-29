@@ -27,7 +27,7 @@
     auth: null, permitted: false, products: [], productsLoaded: false, selectedProducts: new Set(),
     job: null, activeJobId: null, jobs: [], formGeneration: 0, boundGeneration: -1,
     query: { page: 1, kind: "", status: "" }, displayedQuery: { page: 1, kind: "", status: "" }, detailSeq: 0, detailBusy: false,
-    previewBusy: false, executing: false, reconciling: false, rechecking: false, historyBusy: false,
+    previewBusy: false, executing: false, reconciling: false, rechecking: false, historyBusy: false, detailController: null,
     poll: null, pollErrors: 0, pollBlocked: false, previewRetry: null, previewAttempts: 0, pendingPreview: null,
     confirmation: null, blockedSeq: 0, pendingAction: null, pendingRecheck: null, storageKey: "",
   };
@@ -64,8 +64,7 @@
       hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
     }).format(date);
   }
-  async function api(path, options = {}) {
-    const controller = new AbortController();
+  async function api(path, options = {}, controller = new AbortController()) {
     const timer = setTimeout(() => controller.abort(), 30000);
     let response;
     try {
@@ -116,7 +115,7 @@
   function retryablePreview(job = state.job) {
     const error = job && job.error || {};
     return incompletePreview(job) && job.status === "failed" && (error.retryable === true ||
-      error.retryable !== false && ["source_unavailable", "preview_interrupted", "preview_failed"].includes(error.code));
+      error.code === "too_many_ads" || error.retryable !== false && ["source_unavailable", "preview_interrupted", "preview_failed"].includes(error.code));
   }
   function previewScope(job) {
     return { input_type: job.input_type, ids: list(job.ids).map(str), product_ids: list(job.products).map(product => str(product.id)) };
@@ -182,7 +181,7 @@
   function updateControls() {
     const busy = actionBusy();
     const selected = phases();
-    $("previewBtn").disabled = !state.permitted || !state.productsLoaded || busy || jobBusy() || !!state.pendingPreview || !!state.pendingAction || !!state.pendingRecheck;
+    $("previewBtn").disabled = !state.permitted || !state.productsLoaded || busy || (jobBusy() && !dirty()) || !!state.pendingPreview || !!state.pendingAction || !!state.pendingRecheck;
     $("previewBtn").textContent = state.previewBusy ? "正在提交预览…" : "预览匹配对象 →";
     show("previewRequestNotice", !!state.pendingPreview);
     $("resolvePreviewRequestBtn").disabled = !state.permitted || state.previewBusy;
@@ -461,7 +460,7 @@
     if (state.pollBlocked || !state.activeJobId || state.job && ((!jobBusy() && !state.pollErrors) || state.activeJobId !== state.job.job_id)) return;
     state.poll = setTimeout(async () => {
       state.poll = null;
-      if (document.hidden || state.executing || state.rechecking || state.detailBusy) { schedulePoll(); return; }
+      if (document.hidden || state.executing || state.rechecking || state.detailController) { schedulePoll(); return; }
       try { await loadJob(state.activeJobId, { polling: true, hydrate: !state.job }); }
       catch (_) { /* loadJob preserves the task and schedules the next read. */ }
     }, retryDelay(state.pollErrors));
@@ -484,6 +483,9 @@
   async function loadJob(jobId, options = {}) {
     if (!jobId) return;
     const seq = ++state.detailSeq;
+    if (state.detailController) state.detailController.abort();
+    const controller = new AbortController();
+    state.detailController = controller;
     const generation = state.formGeneration;
     const previousStatus = state.job && state.job.job_id === jobId ? state.job.status : null;
     const previousRecheckStatus = state.job && state.job.job_id === jobId && state.job.recheck ? state.job.recheck.status : null;
@@ -496,10 +498,10 @@
       $("kindFilter").value = "";
       $("statusFilter").value = "";
     }
-    state.detailBusy = true;
+    state.detailBusy = !options.polling;
     updateControls();
     try {
-      const job = await api(detailPath(jobId));
+      const job = await api(detailPath(jobId), {}, controller);
       if (seq !== state.detailSeq || state.activeJobId !== jobId) return;
       if (!job || str(job.job_id) !== str(jobId)) throw new Error("任务响应不完整，正在重新读取状态。");
       state.pollErrors = 0;
@@ -517,6 +519,7 @@
       if (!options.polling) message("actionError", "");
       if ((previousStatus && previousStatus !== job.status) || previousRecheckStatus !== (job.recheck && job.recheck.status || null)) loadJobs().catch(() => {});
     } catch (error) {
+      if (seq !== state.detailSeq) return;
       if (seq === state.detailSeq) {
         state.pollErrors += 1;
         state.pollBlocked = error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
@@ -530,7 +533,7 @@
       }
       throw error;
     } finally {
-      if (seq === state.detailSeq) { state.detailBusy = false; updateControls(); schedulePoll(); }
+      if (seq === state.detailSeq) { state.detailController = null; state.detailBusy = false; updateControls(); schedulePoll(); }
     }
   }
   async function preview() {
@@ -596,6 +599,8 @@
       state.pollErrors = 0;
       state.pollBlocked = false;
       ++state.detailSeq;
+      if (state.detailController) state.detailController.abort();
+      state.detailController = null;
       state.detailBusy = false;
       state.activeJobId = job.job_id;
       persistActive(job.job_id);
