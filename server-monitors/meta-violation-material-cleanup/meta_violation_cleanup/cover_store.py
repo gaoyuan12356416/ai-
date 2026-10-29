@@ -90,6 +90,7 @@ _SCHEMA = (
         action TEXT NOT NULL, created_at TEXT NOT NULL, details TEXT NOT NULL)''',
     'CREATE INDEX IF NOT EXISTS tasks_ready ON tasks(status,batch_id,id)',
     'CREATE INDEX IF NOT EXISTS tasks_waiting ON tasks(status,next_check_at,id)',
+    'CREATE INDEX IF NOT EXISTS tasks_creative_status ON tasks(account_id,old_creative_id,status)',
     'CREATE INDEX IF NOT EXISTS deletions_ready ON deletions(status,next_check_at)',
     'CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id,id)',
 )
@@ -431,7 +432,20 @@ class CoverStore:
 
     def pending_deletions(self, limit=1000):
         with self._tx(False) as db:
-            return [_row(r) for r in db.execute("SELECT * FROM deletions WHERE status IN ('pending','waiting_references','reference_scan_incomplete') AND (next_check_at IS NULL OR next_check_at<=?) ORDER BY created_at LIMIT ?", (now(), int(limit)))]
+            # The independent cleanup lane must not repeatedly scan an account
+            # while known replacements of the same Creative are still pending.
+            # This is only a scheduling filter; complete Meta reference checks,
+            # reservations and the once-delete intent remain mandatory.
+            return [_row(r) for r in db.execute('''SELECT d.* FROM deletions d
+                WHERE d.status IN ('pending','waiting_references','reference_scan_incomplete')
+                  AND (d.next_check_at IS NULL OR d.next_check_at<=?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tasks t JOIN batches b ON b.id=t.batch_id
+                    WHERE t.account_id=d.account_id AND t.old_creative_id=d.creative_id
+                      AND t.status IN ('pending','in_progress','waiting_review','unknown')
+                      AND NOT (b.status='failed' AND t.status='pending'
+                               AND t.request_sent=0 AND t.stage='queued'))
+                ORDER BY d.created_at LIMIT ?''', (now(), int(limit)))]
 
     def get_deletion(self, account_id, creative_id):
         with self._tx(False) as db:

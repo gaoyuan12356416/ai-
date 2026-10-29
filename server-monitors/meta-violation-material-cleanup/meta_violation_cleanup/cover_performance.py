@@ -58,11 +58,14 @@ def timed(name):
     return decorate
 
 
+_RECORD_LOCK = threading.Lock()
+
+
 def record_cycle(root, metrics):
     folder = Path(root) / 'performance'
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / (datetime.now(CST).strftime('%Y%m%d') + '.jsonl')
-    with path.open('a', encoding='utf-8') as stream:
+    with _RECORD_LOCK, path.open('a', encoding='utf-8') as stream:
         stream.write(json.dumps(metrics, ensure_ascii=False, separators=(',', ':')) + '\n')
 
 

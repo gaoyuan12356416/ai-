@@ -5,7 +5,7 @@ own Graph client, one shared governor, and transaction-scoped durable claims.
 This module never deletes an Ad or retries a sent mutation.
 """
 from collections import Counter, defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from copy import deepcopy
 import hashlib
 import threading
@@ -354,7 +354,13 @@ class CoverWorker:
                                                         reason='bind_failed', request_sent=result.get('request_sent', False)))
             try:
                 actual = graph.get_cover_ad(task['ad_id'], user, task['account_id'])
-                if _binding(actual) != new_id and result['status'] == 'unknown':
+                # An accepted POST and an immediate GET are not atomic. If
+                # Meta still returns the original binding, quarantine only
+                # this task for read-only reconciliation; never resend it or
+                # mistake propagation delay for a global parameter change.
+                if _binding(actual) != new_id and (
+                        _binding(actual) == task['old_creative_id'] or result['status'] == 'unknown'):
+                    uncertain_bind = True
                     return self._finish(task, 'unknown', dict(intent, bind_result=result,
                         reason='binding_result_unknown', request_sent=True, ad_snapshot=actual))
                 # Meta may not materialize effective_object_story_id until
@@ -418,11 +424,42 @@ class CoverWorker:
             raise ValueError('invalid_max_ads')
         started = self.clock()
         tasks = deque(_fair(self.store.ready_tasks(limit=max_ads * 4)))
-        outputs = []
-        selected = 0
+        outputs, prepared = [], deque()
+        selected = refreshes = 0
+        preparations, batch_sizes, active_accounts = Counter(), Counter(), Counter()
+        futures = {}
+
+        def completed(done):
+            for future in done:
+                task = futures.pop(future)
+                active_accounts[task['account_id']] -= 1
+                try:
+                    outputs.append(future.result())
+                except Exception:
+                    self._halt('worker_future_failed')
+                    raise
+
+        def expired(task):
+            # A task has not been claimed or submitted yet. Refresh its source
+            # once; a persistently slow source must not spin inside this cycle.
+            nonlocal selected, refreshes
+            if preparations[task['id']] < 2:
+                tasks.appendleft(task)
+                refreshes += 1
+            else:
+                selected += 1
+                if self.store.claim_task(task['id']):
+                    outputs.append(self._defer(task, {'reason': 'cover_context_expired',
+                                                     'request_sent': False}))
+                else:
+                    outputs.append({'task_id': task['id'], 'status': 'not_claimed'})
+
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            while tasks and selected < max_ads:
+            while tasks or prepared or futures:
+                completed([future for future in futures if future.done()])
                 if self.stopped():
+                    break
+                if selected >= max_ads and not futures:
                     break
                 if self.governor is not None:
                     try:
@@ -430,41 +467,78 @@ class CoverWorker:
                             self.governor.wait_ready(self.stopped)
                     except RequestNotSent:
                         break
-                # Prepare only work that can start now. Re-evaluate after each
-                # wave because pressure may have changed the shared budget.
                 budget = self.governor.snapshot() if self.governor is not None else {}
-                capacity = min(self.batch_size, self.workers,
-                               budget.get('concurrency_limit', self.workers), max_ads - selected)
-                per_account = budget.get('per_account_limit', 2)
-                wave, deferred, accounts = [], deque(), Counter()
-                while tasks and len(wave) < capacity:
-                    task = tasks.popleft()
-                    if accounts[task['account_id']] >= per_account:
-                        deferred.append(task)
+                capacity = max(1, min(self.workers, budget.get('concurrency_limit', self.workers)))
+                per_account = max(1, min(2, budget.get('per_account_limit', 2)))
+
+                # Fill every free slot immediately from a bounded fresh buffer;
+                # one slow account no longer holds the rest of an entire wave.
+                for _ in range(len(prepared)):
+                    task, context = prepared.popleft()
+                    if self.clock() - context['_prepared_at'] > self.ttl:
+                        expired(task)
+                    elif (selected < max_ads and len(futures) < capacity
+                          and active_accounts[task['account_id']] < per_account):
+                        if self.stopped():
+                            prepared.appendleft((task, context))
+                            break
+                        futures[pool.submit(self._execute, task, context)] = task
+                        active_accounts[task['account_id']] += 1
+                        selected += 1
                     else:
-                        wave.append(task)
-                        accounts[task['account_id']] += 1
-                tasks.extendleft(reversed(deferred))
-                selected += len(wave)
-                # This is deliberately before thread submission: no worker may
-                # consume a FIFO SQL session or mix source snapshots.
-                with self.timings.measure('source_prepare'):
-                    prepared = self.source.prepare_candidates(wave)
-                at = self.clock()
-                futures = {}
-                for task in wave:
-                    context = deepcopy(prepared.get(str(task['id'])) or
-                                       {'validated': False, 'error': {'code': 'prepared_context_missing'}})
-                    context['_prepared_at'] = at
-                    futures[pool.submit(self._execute, task, context)] = task
-                for future in as_completed(futures):
-                    try:
-                        outputs.append(future.result())
-                    except Exception:
-                        self._halt('worker_future_failed')
-                        raise
-        with self.timings.measure('cleanup_phase'):
-            deletion = self.process_deletions() if process_deletes and not self.stopped() else []
+                        prepared.append((task, context))
+
+                # Source reads stay on this caller thread and overlap submitted
+                # Graph work. Prepare for free execution slots plus one bounded
+                # window (<=32) ahead; submission leaves at most that buffer.
+                buffered_accounts = Counter(task['account_id'] for task, _ in prepared)
+                free_slots = max(0, capacity - len(futures))
+                size = min(64, self.batch_size, capacity + free_slots - len(prepared),
+                           max_ads - selected - len(prepared))
+                batch, deferred = [], deque()
+                # Consume the existing buffer before opening another SQL
+                # snapshot. Topping it up after each completion would turn a
+                # large batch into many single-Ad source queries. An unfilled
+                # execution slot may still need a different account prepared.
+                needs_source = not prepared or free_slots > 0
+                if needs_source and size > 0 and not self.stopped():
+                    while tasks and len(batch) < size:
+                        task = tasks.popleft()
+                        account_capacity = per_account + max(
+                            0, per_account - active_accounts[task['account_id']])
+                        if buffered_accounts[task['account_id']] >= account_capacity:
+                            deferred.append(task)
+                        else:
+                            batch.append(task)
+                            buffered_accounts[task['account_id']] += 1
+                    tasks.extendleft(reversed(deferred))
+                if batch:
+                    at = self.clock()
+                    with self.timings.measure('source_prepare'):
+                        contexts = self.source.prepare_candidates(batch)
+                    batch_sizes[len(batch)] += 1
+                    for task in batch:
+                        preparations[task['id']] += 1
+                        context = deepcopy(contexts.get(str(task['id'])) or
+                                           {'validated': False, 'error': {'code': 'prepared_context_missing'}})
+                        # CoverSource stamps the start of its SQL snapshot. The
+                        # fallback also includes preparation time, never resets
+                        # TTL to the end of a slow query.
+                        context.setdefault('_prepared_at', at)
+                        prepared.append((task, context))
+                    continue
+                if futures:
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    completed(done)
+                elif not prepared or selected >= max_ads:
+                    break
+            # Stop/handoff still drains submitted tasks and retains their exact
+            # receipts. Buffered, unclaimed tasks remain pending for next time.
+            completed(list(futures))
+        deletion = []
+        if process_deletes:
+            with self.timings.measure('cleanup_phase'):
+                deletion = self.process_deletions() if not self.stopped() else []
         governors = {id(g.governor): g.governor for g in self.clients if hasattr(g, 'governor')}
         metrics = [g.snapshot() for g in governors.values()]
         return {'tasks': dict(Counter(item['status'] for item in outputs)),
@@ -472,6 +546,10 @@ class CoverWorker:
                 'task_results': outputs, 'deletion_results': deletion,
                 'governor': metrics[0] if len(metrics) == 1 else metrics,
                 'timings': self.timings.snapshot(),
+                'source_prepare_tasks': sum(preparations.values()),
+                'source_prepare_batches': sum(batch_sizes.values()),
+                'source_prepare_batch_sizes': dict(batch_sizes),
+                'prepared_context_refreshes': refreshes,
                 'defer_reasons': dict(Counter(item.get('result', {}).get('reason', 'unspecified')
                     for item in outputs if item['status'] == 'pending')),
                 'seconds': round(self.clock() - started, 3),

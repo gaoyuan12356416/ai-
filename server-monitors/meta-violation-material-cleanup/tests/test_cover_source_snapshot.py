@@ -95,6 +95,21 @@ class CoverSnapshotTests(unittest.TestCase):
             self.assertEqual(self.make_source().prepare_candidates([]), {})
         popen.assert_not_called()
 
+    def test_freshness_starts_before_sql_snapshot_not_after_queries(self):
+        source = self.make_source()
+        clock = [10.]
+        original = source.material_metadata
+        def delayed(ids):
+            clock[0] = 45.
+            return original(ids)
+        with patch.object(sql_source.subprocess, 'Popen', return_value=self.process()), \
+             patch('meta_violation_cleanup.cover_source.time.monotonic', side_effect=lambda: clock[0]), \
+             patch.object(source, 'material_metadata', side_effect=delayed):
+            result = source.prepare_candidates([self.task()])['1']
+        self.assertTrue(result['validated'])
+        self.assertEqual(result['_prepared_at'], 10.)
+        self.assertGreater(clock[0] - result['_prepared_at'], 30.)
+
 
 if __name__ == '__main__':
     unittest.main()

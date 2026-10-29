@@ -122,12 +122,31 @@ def collect(path, start, end):
         db.close()
 
 
+def _active_seconds(intervals):
+    """Union wall intervals: concurrent ads and cleanup are never added twice."""
+    seconds = 0.
+    previous = None
+    for left, right in sorted(intervals):
+        if previous is None:
+            previous = [left, right]
+        elif left <= previous[1]:
+            previous[1] = max(previous[1], right)
+        else:
+            seconds += (previous[1] - previous[0]).total_seconds()
+            previous = [left, right]
+    if previous is not None:
+        seconds += (previous[1] - previous[0]).total_seconds()
+    return seconds
+
+
 def collect_performance(root, start, end):
-    """Optional timing evidence, attributed by completed cycle, not event time."""
-    keys = ('source_prepare', 'reference_scan', 'ad_attempt_succeeded')
+    """Completed-cycle samples; throughput uses the union of active intervals."""
+    keys = ('source_prepare', 'reference_scan', 'ad_attempt_succeeded',
+            'ad_preflight', 'creative_prepare_verify', 'ad_bind_verify',
+            'creative_delete_verify', 'graph_budget_wait', 'http_get', 'http_post', 'http_delete')
     totals = {key: [0, 0.] for key in keys}
     cycles = successes = errors = 0
-    seconds = 0.
+    intervals, lanes = [], {}
     day = start.date()
     while day <= end.date():
         path = Path(root) / 'performance' / (day.strftime('%Y%m%d') + '.jsonl')
@@ -145,14 +164,24 @@ def collect_performance(root, start, end):
                         if not start <= at < end:
                             continue
                         result = cycle['result']
-                        # Exclude empty idle polls from execution throughput.
+                        # Empty polls do not count as active execution.
                         counts = list(result.get('tasks', {}).values()) + list(result.get('deletions', {}).values())
                         if not any(type(value) is int and value > 0 for value in counts):
                             continue
                         duration_s, successful = result['seconds'], result.get('tasks', {}).get('succeeded', 0)
+                        deleted = result.get('deletions', {}).get('deleted_verified', 0)
+                        lane = cycle.get('lane', 'legacy')
                         if (type(duration_s) not in (int, float) or not math.isfinite(duration_s) or duration_s <= 0
-                                or type(successful) is not int or successful < 0):
+                                or type(successful) is not int or successful < 0
+                                or type(deleted) is not int or deleted < 0
+                                or lane not in ('legacy', 'ads', 'cleanup')):
                             raise ValueError('invalid_cycle_metrics')
+                        # Old started_at includes credential/lease/reconciliation
+                        # time, so anchor legacy durations at completion instead.
+                        left = (datetime.fromisoformat(cycle['execution_started_at'])
+                                if lane != 'legacy' else at - timedelta(seconds=duration_s))
+                        if left.tzinfo is None or left >= at:
+                            raise ValueError('invalid_cycle_interval')
                         metrics = {}
                         for key in keys:
                             metric = result.get('timings', {}).get(key, {})
@@ -163,17 +192,27 @@ def collect_performance(root, start, end):
                             metrics[key] = (n, total)
                         cycles += 1
                         successes += successful
-                        seconds += duration_s
+                        intervals.append((left, at))
+                        item = lanes.setdefault(lane, {'cycles': 0, 'successes': 0, 'deleted': 0, 'seconds': 0.})
+                        item['cycles'] += 1
+                        item['successes'] += successful
+                        item['deleted'] += deleted
+                        item['seconds'] += duration_s
                         for key, (n, total) in metrics.items():
                             totals[key][0] += n
                             totals[key][1] += total
-                    except (ValueError, TypeError, KeyError, AttributeError):
+                    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
                         errors += 1
         except (OSError, UnicodeError):
             errors += 1
+    seconds = _active_seconds(intervals)
+    for item in lanes.values():
+        item['success_per_hour'] = round(item['successes'] * 3600 / item['seconds'], 2)
+        item['deletions_per_hour'] = round(item['deleted'] * 3600 / item['seconds'], 2)
+        item['seconds'] = round(item['seconds'], 3)
     return {'cycles': cycles, 'successes': successes, 'seconds': round(seconds, 3),
             'success_per_hour': round(successes * 3600 / seconds, 2) if seconds else None,
-            'read_errors': errors,
+            'throughput_basis': 'active_interval_union', 'lanes': lanes, 'read_errors': errors,
             'timings': {key: {'n': n, 'mean_seconds': round(total / n, 3) if n else None}
                         for key, (n, total) in totals.items()}}
 
@@ -231,8 +270,15 @@ def report_body(data):
     lines.append('上表为账本阶段历时，各行样本不同且包含等待/重叠，不可相加。')
     performance = data.get('performance')
     if performance and performance['cycles']:
-        lines.append('实际执行样本：%d 个完成周期，成功 %d 条；含清理执行吞吐 %.2f 条/小时。' % (
+        lines.append('实际执行样本：%d 个完成周期，成功 %d 条；活跃执行时间吞吐 %.2f 条/小时。' % (
             performance['cycles'], performance['successes'], performance['success_per_hour']))
+        lane_labels = {'ads': '广告替换', 'cleanup': '旧Creative清理', 'legacy': '旧串行执行'}
+        for lane, metric in performance.get('lanes', {}).items():
+            lines.append('%s：%d 个周期，执行 %s，广告成功 %d，确认删除 %d。' % (
+                lane_labels[lane], metric['cycles'], duration(metric['seconds']),
+                metric['successes'], metric['deleted']))
+        if performance.get('throughput_basis') == 'active_interval_union':
+            lines.append('广告与清理独立执行；吞吐分母取活跃周期时间并集，并行耗时不重复相加。')
         for key, label in (('source_prepare', '来源准备，每波'),
                            ('reference_scan', '旧Creative引用扫描，每账户'),
                            ('ad_attempt_succeeded', '成功广告工作线程处理，不含排队/来源准备/后续清理')):

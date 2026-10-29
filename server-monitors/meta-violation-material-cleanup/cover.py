@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hourly discovery and independent cover-replacement worker."""
 import argparse
+from collections import Counter
 from datetime import datetime
 import json
 import os
@@ -25,6 +26,7 @@ from meta_violation_cleanup.cover_payload import build_payload, payload_key, Pay
 from meta_violation_cleanup.graph import GraphError
 from meta_violation_cleanup.runtime import Runtime, CST, process_lock, legacy_delete_lock, now, digest, LegacyPriorityWindow
 from meta_violation_cleanup.cover_performance import idle_delay, record_cycle
+from meta_violation_cleanup.cover_pipeline import run_lanes
 from meta_violation_cleanup.notifications import Notifier
 from meta_violation_cleanup.runner import safe_error
 from meta_violation_cleanup.throttle import Governor
@@ -195,65 +197,117 @@ def preview(config, stop, limit, reuse_dir=None):
 
 def work(config, store, audit, stop, once, max_ads):
     from meta_violation_cleanup.cover_worker import CoverWorker
+    from run import CliError
     if config.get('cover_live_enabled') is not True:
         raise RuntimeError('cover_live_disabled')
-    shared = Store(config['shared_ledger'])
-    store.recover_inflight()
     pause = Path(config['runtime_dir']) / 'cover-write-paused.json'
     if pause.exists():
         raise CoverWritePaused('cover_writes_paused_requires_review')
+    cleanup_workers = config.get('cover_cleanup_workers', 4)
+    if type(cleanup_workers) is not int or not 1 <= cleanup_workers <= 4:
+        raise ValueError('invalid_cover_cleanup_workers')
+    shared = Store(config['shared_ledger'])
     governor = Governor(maximum=32, per_account=2, rps=24, initial_limit=32, ramp_up=True)
-    next_reconcile = 0
-    recovered_reservations = False
-    while not stop():
+    recovered = False
+
+    def make_worker(lane, stopped):
+        # SQL snapshots and Graph clients belong to the calling lane. The two
+        # stores open a fresh SQLite connection for every transaction; audit's
+        # long-lived connection is used only by this coordinator thread.
         source = CoverSource(config)
-        worker = None
-        result = {}
-        cycle_started = time.monotonic()
-        cycle_started_at = now()
         try:
             tokens = source.credentials()
+            factory = lambda: CoverGraph(tokens, version=config.get('graph_version', 'v25.0'),
+                                         governor=governor, stop=stopped)
+            lane_config = dict(config)
+            if lane == 'cleanup':
+                lane_config['execution_workers'] = cleanup_workers
+            worker = CoverWorker(lane_config, store, source, factory, shared,
+                                 stop=stopped, governor=governor)
+            return source, worker
+        except BaseException:
+            source.close()
+            raise
+
+    def cycle(lane, stopped):
+        # Do not open SQL/credential sessions for empty polling cycles.
+        ready = store.ready_tasks(limit=1) if lane == 'ads' else store.pending_deletions(limit=1)
+        if not ready:
+            return 1 if lane == 'cleanup' else 30
+        cycle_started, cycle_started_at = time.monotonic(), datetime.now(CST).isoformat()
+        source, worker = make_worker(lane, stopped)
+        try:
+            started, started_at = time.monotonic(), datetime.now(CST).isoformat()
+            if lane == 'ads':
+                result = worker.run_once(max_ads=max_ads, process_deletes=False)
+            else:
+                with worker.timings.measure('cleanup_phase'):
+                    outputs = worker.process_deletions()
+                result = {'tasks': {}, 'deletions': dict(Counter(item['status'] for item in outputs)),
+                          'timings': worker.timings.snapshot(),
+                          'seconds': round(time.monotonic() - started, 6),
+                          'halted': worker.halted.is_set(), 'halt_reason': worker.halt_reason}
+            finished_at = datetime.now(CST).isoformat()
+            metrics = {'lane': lane, 'at': finished_at, 'started_at': cycle_started_at,
+                       'execution_started_at': started_at,
+                       'cycle_seconds': round(time.monotonic() - cycle_started, 3),
+                       'result': {k: v for k, v in result.items()
+                                  if k not in ('task_results', 'deletion_results')},
+                       'governor': governor.snapshot()}
+            print(json.dumps(metrics, ensure_ascii=False), flush=True)
+            try:
+                record_cycle(config['runtime_dir'], metrics)
+            except OSError as exc:
+                print(json.dumps({'performance_record_error': safe_error(exc)}), flush=True)
+            if result.get('halted'):
+                raise CliError(result.get('halt_reason') or 'cover_worker_halted')
+            if lane == 'cleanup':
+                return 0 if store.pending_deletions(limit=1) else 1
+            return idle_delay(result, bool(store.ready_tasks(limit=1)))
+        finally:
+            worker.close()
+            source.close()
+
+    while not stop():
+        try:
             with legacy_delete_lock(config['legacy_lock'], stop) as lease:
-                def stopped():
+                def guarded_stop():
+                    if pause.exists():
+                        raise CoverWritePaused('cover_writes_paused_requires_review')
                     if stop():
                         return True
-                    try:
-                        lease.check()
-                        return False
-                    except InterruptedError:
-                        return True
-                factory = lambda: CoverGraph(tokens, version=config.get('graph_version', 'v25.0'),
-                                             governor=governor, stop=stopped)
-                worker = CoverWorker(config, store, source, factory, shared, stop=stopped, governor=governor)
-                if not recovered_reservations:
-                    recovered = worker.recover_reservations()
-                    recovered_reservations = True
-                    if recovered:
-                        print(json.dumps({'reservation_recovery': recovered}), flush=True)
-                if time.monotonic() >= next_reconcile:
+                    lease.check()
+                    return False
+
+                # There are no lane threads here. Never recover or reconcile
+                # while a live lane may own a reservation or save a receipt.
+                if not recovered:
+                    store.recover_inflight()
+                source, worker = make_worker('reconcile', stop)
+                try:
+                    if not recovered:
+                        restored = worker.recover_reservations()
+                        recovered = True
+                        if restored:
+                            print(json.dumps({'reservation_recovery': restored}), flush=True)
                     reconciled = worker.reconcile_unknown(limit=1000)
-                    next_reconcile = time.monotonic() + 3600
                     if reconciled:
                         print(json.dumps({'reconciliation': reconciled}), flush=True)
-                result = worker.run_once(max_ads=max_ads, process_deletes=True)
-                metrics = {'at': now(), 'started_at': cycle_started_at,
-                           'cycle_seconds': round(time.monotonic() - cycle_started, 3),
-                           'result': {k:v for k,v in result.items() if k not in ('task_results','deletion_results')},
-                           'governor': governor.snapshot()}
-                print(json.dumps(metrics, ensure_ascii=False), flush=True)
-                try:
-                    record_cycle(config['runtime_dir'], metrics)
-                except OSError as exc:
-                    print(json.dumps({'performance_record_error': safe_error(exc)}), flush=True)
-                if result.get('halted'):
-                    from run import CliError
-                    raise CliError(result.get('halt_reason') or 'cover_worker_halted')
+                    if worker.halted.is_set():
+                        raise CliError(worker.halt_reason or 'cover_worker_halted')
+                finally:
+                    worker.close()
+                    source.close()
+                run_lanes(cycle, guarded_stop, once=once)
+                # run_lanes drains BOTH lanes before this shared lease exits,
+                # including the 09:55-10:05 priority handoff and shutdown.
         except LegacyPriorityWindow:
             print(json.dumps({'at': now(), 'handoff': 'legacy_priority_window'}), flush=True)
-            # Re-enter the lock, wait out the priority window, then reacquire.
             if once:
                 break
             continue
+        except CoverWritePaused:
+            raise
         except InterruptedError:
             if not stop():
                 raise
@@ -261,33 +315,25 @@ def work(config, store, audit, stop, once, max_ads):
         except Exception as exc:
             bid = batch_id('cover-error')
             failure = safe_error(exc)
-            audit.begin(bid, 'run', {'policy_version': '20261028-cover-v1'})
+            audit.begin(bid, 'run', {'policy_version': '20261029-cover-pipeline'})
             audit.artifact(bid, 'write-pause.json', failure)
             with pause.open('w', encoding='utf-8') as fp:
                 json.dump({'batch_id': bid, 'at': now(), 'error': failure}, fp)
                 fp.flush()
                 os.fsync(fp.fileno())
-            directory = os.open(str(pause.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            if os.name != 'nt':
+                directory = os.open(str(pause.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
             store.begin_batch(bid, {})
             store.fail_batch(bid, failure)
             notify_completed(store, audit, config)
             raise CoverWritePaused('cover_writes_paused_requires_review') from exc
-        finally:
-            if worker:
-                worker.close()
-            source.close()
         notify_completed(store, audit, config, include_pending=True)
         if once:
             break
-        delay = idle_delay(result, bool(store.ready_tasks(limit=1)))
-        for _ in range(delay):
-            if stop():
-                break
-            time.sleep(1)
 
 
 def main():

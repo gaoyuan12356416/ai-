@@ -123,6 +123,7 @@ class CoverSource(SqlSource):
             # Opening a fresh gated mysql process for each read dominates the
             # query time and can mix lineage, material and cover versions. The
             # snapshot ends before Graph work, and the next wave opens anew.
+            prepared_at = time.monotonic()
             with self.snapshot():
                 contexts = current_contexts(self, part)
                 mids = sorted({str(mid) for c in part for mid in c.get('material_ids', [])})
@@ -132,7 +133,7 @@ class CoverSource(SqlSource):
                           for c in part for mid in map(str, c.get('material_ids', [])) if mid in metadata}
                 covers = self.drama_covers({k for k in wanted if k[1] and k[2]}) if wanted else []
             for c in part:
-                out = dict(c, validated=False)
+                out = dict(c, validated=False, _prepared_at=prepared_at)
                 ctx = contexts[(str(c['ad_id']), str(c['creative_id']))]
                 identity = material_identity(ctx.get('rows'), ctx.get('sources'), ctx.get('scope'), c['creative_id'])
                 matching = [r for r in ctx.get('rows', []) if str(r.get('creative_id')) == c['creative_id']]

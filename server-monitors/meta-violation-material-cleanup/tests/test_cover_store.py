@@ -43,6 +43,33 @@ class CoverStoreTests(unittest.TestCase):
         self.assertEqual(set(self.store.triggered_materials()),{'400'})
         self.assertEqual(self.store.triggered_materials()['400']['window_start'],'2026-10-25')
 
+    def test_cleanup_waits_for_same_creative_replacements_without_mutating_queue(self):
+        self.succeeded()
+        self.store.begin_batch('b2', {})
+        self.store.enqueue('b2', dict(self.candidate, ad_id='201'))
+        self.store.seal_batch('b2')
+        other = self.store.ready_tasks()[0]
+        self.assertEqual(self.store.pending_deletions(), [])
+        self.assertEqual(self.store.get_delete('100', '300')['status'], 'pending')
+        self.store.claim_task(other['id'])
+        self.assertEqual(self.store.pending_deletions(), [])
+        self.store.mark_task_write(other['id'], intent={'new_creative_id': '302'})
+        self.store.finish_task(other['id'], 'unknown', {'new_creative_id': '302'})
+        self.assertEqual(self.store.pending_deletions(), [])
+        self.store.finish_task(other['id'], 'succeeded',
+                               {'new_creative_id': '302', 'confirmed_binding': True})
+        self.assertEqual(len(self.store.pending_deletions()), 1)
+
+    def test_failed_scan_or_other_account_does_not_hold_cleanup(self):
+        self.succeeded()
+        self.store.begin_batch('b2', {})
+        self.store.enqueue('b2', dict(self.candidate, ad_id='201'))
+        self.store.fail_batch('b2', {'reason': 'scan_interrupted'})
+        self.store.begin_batch('b3', {})
+        self.store.enqueue('b3', dict(self.candidate, ad_id='202', account_id='101'))
+        self.store.seal_batch('b3')
+        self.assertEqual(len(self.store.pending_deletions()), 1)
+
     def test_concurrent_enqueue_and_claim_are_unique(self):
         with ThreadPoolExecutor(max_workers=32) as pool:
             answers = list(pool.map(lambda _:self.store.enqueue('b1',self.candidate),range(64)))

@@ -2,6 +2,8 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -20,7 +22,7 @@ class PrefetchTests(unittest.TestCase):
     enqueue = fixtures.WorkerTests.enqueue
     worker = fixtures.WorkerTests.worker
 
-    def test_limit_one_prepares_fresh_context_for_each_slow_task(self):
+    def test_limit_one_bounds_fresh_prefetch_for_slow_tasks(self):
         clock = [0.]
         ads = [ad(str(10+i), str(20+i), str(100+i)) for i in range(8)]
         old = [creative(str(20+i), str(100+i)) for i in range(8)]
@@ -36,21 +38,36 @@ class PrefetchTests(unittest.TestCase):
         graph = SlowGraph(ads, old)
         result = self.worker(graph, clock=lambda: clock[0], governor=governor).run_once(process_deletes=False)
         self.assertEqual(result['tasks'], {'succeeded': 8})
-        self.assertEqual([len(x) for x in self.source.calls], [1] * 8)
+        self.assertTrue(all(1 <= len(x) <= 2 for x in self.source.calls))
+        self.assertEqual(sum(map(len, self.source.calls)), 8)
         self.assertEqual(result['defer_reasons'], {})
         self.assertEqual(result['timings']['ad_attempt_succeeded']['count'], 8)
         self.assertEqual(sum(x[0] == 'bind' for x in graph.calls), 8)
 
-    def test_prefetch_rechecks_governor_after_each_wave_and_caps_account_queue(self):
+    def test_prefetch_rechecks_governor_before_dispatch_after_preparation(self):
         ads = [ad(str(10+i), str(20+i), str(100+i % 3)) for i in range(10)]
         self.enqueue(ads)
         governor = MagicMock()
-        governor.snapshot.side_effect = [{'concurrency_limit': 32, 'per_account_limit': 2}] + [
-            {'concurrency_limit': 1, 'per_account_limit': 2}] * 10
+        snapshots = [0]
+        def budget():
+            snapshots[0] += 1
+            return {'concurrency_limit': 32 if snapshots[0] == 1 else 1,
+                    'per_account_limit': 2}
+        governor.snapshot.side_effect = budget
         worker = self.worker(Graph(ads, []), governor=governor)
-        with patch.object(worker, '_execute', lambda task, context: {'task_id': task['id'], 'status': 'failed'}):
+        active, peak, lock = [0], [0], threading.Lock()
+        def execute(task, context):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(.005)
+            with lock:
+                active[0] -= 1
+            return {'task_id': task['id'], 'status': 'failed'}
+        with patch.object(worker, '_execute', execute):
             worker.run_once(process_deletes=False)
-        self.assertEqual([len(x) for x in self.source.calls], [6, 1, 1, 1, 1])
+        self.assertEqual(peak[0], 1)
+        self.assertEqual([len(x) for x in self.source.calls], [10])
         self.assertEqual(len({x for part in self.source.calls for x in part}), 10)
 
 
@@ -100,17 +117,20 @@ class RecoveryTests(unittest.TestCase):
                     raise LegacyPriorityWindow('legacy_priority_window')
                 yield MagicMock()
             class Worker:
-                def __init__(self, *args, **kwargs): pass
+                def __init__(self, *args, **kwargs):
+                    self.halted = threading.Event()
+                    self.halt_reason = ''
                 def recover_reservations(self): return {}
                 def reconcile_unknown(self, **kwargs): return {}
                 def run_once(self, **kwargs):
                     done[0] = True
-                    return {'tasks': {'succeeded': 1}}
+                    return {'tasks': {'succeeded': 1}, 'seconds': .01}
                 def close(self): pass
             config = {'cover_live_enabled': True, 'runtime_dir': tmp, 'shared_ledger': 'unused',
                       'legacy_lock': 'unused'}
             store = MagicMock()
-            store.ready_tasks.return_value = []
+            store.ready_tasks.return_value = [{'id': 1}]
+            store.pending_deletions.return_value = []
             with patch.object(cover, 'Store'), patch.object(cover, 'CoverSource'), \
                  patch.object(cover, 'legacy_delete_lock', lease), \
                  patch('meta_violation_cleanup.cover_worker.CoverWorker', Worker):
