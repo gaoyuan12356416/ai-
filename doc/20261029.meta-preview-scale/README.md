@@ -25,7 +25,7 @@ task's products, and submits an explicitly authorized execution through the main
 API so all DELETEs share its existing budget. It never repeats an unknown write
 or changes the operation ID. Results and SQLite evidence stay on the data disk.
 
-Validation: 358 Python module tests, 19 actual-source DOM tests, syntax checks,
+Validation: 359 Python module tests, 19 actual-source DOM tests, syntax checks,
 and a real-browser local 15,000-object fixture. No fixture test sends a deletion.
 Live operator execution and final receipts are separate acceptance evidence.
 
@@ -65,3 +65,38 @@ bash /mnt/data-disk/meta-ad-asset-delete/release-16eb6d9e8277/scripts/safe_resta
 ```
 
 Do not restore the evidence SQLite copy.
+
+## Creative references and durable continuation
+
+A large verified Creative set also exposed a 60-second source-reference timeout.
+Verified references now split by exact account and at most 500 Creative IDs,
+using at most four source readers. Cross-product references remain in the query;
+unverified identities retain the original fallback. A live read-only probe
+checked 8,377 Creatives across 127 accounts in 60.051 seconds, with 2,563 source
+references and no out-of-scope Ad references. Meta verification is still required.
+Blocked-object rechecks now use the existing bounded account GET workers, with
+fresh authorization for each object and unchanged frozen IDs and write fences.
+
+The follow-up release is `56b14d17c3dc42def600b2b22f8b763b3c83976c`.
+As of 2026-10-29 16:47 CST it is staged, not yet loaded by the main API: the
+operator-authorized Video phase is still running. The one-time
+`meta-scope-continuation-20261029.service` waits for that run and every other
+asset deletion/recheck to settle, backs up and replaces only source/service,
+restarts only the main API, verifies hashes/health, then submits the frozen
+recheck and Creative-only continuation through the normal API with stable IDs.
+It has `Restart=no`; failures require checking the ledger before resuming.
+The controller JSON records the actual commit, backup, PID and deployment stage.
+
+The one-time `meta-scope-video-audit-20261029.service` waits for this continuation,
+then uses GET-only complete account-video inventories to distinguish absent,
+still-present and unverified associations after failed DELETEs. It preserves
+the original DELETE ledger and writes a separate evidence file; an error alone
+never becomes success. Script release: `825002529fc7bbd0552db4bd341b91c0c27b11c3`.
+Neither service installs a timer or a recurring deletion job.
+
+For this reference layer, use `scripts/deploy_meta_reference_scale.py prepare`
+and the controller's recorded backup. To roll back after execution is idle,
+stop the main API, run the same release's
+`scripts/deploy_meta_reference_scale.py rollback BACKUP`, then restart with
+`scripts/safe_restart_drama_api.sh`. Roll back this layer before attempting the
+earlier full preview rollback. Retain the current SQLite database throughout.
