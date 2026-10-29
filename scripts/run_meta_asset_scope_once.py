@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import requests
 
 
 def main():
@@ -77,12 +78,31 @@ def main():
     save(stage='preview_finished',status=job['status'],summary=job['summary'],error=job.get('error'),phase_results=job['phase_results'])
     if not args.execute or job['status'] not in ('ready','partial','completed','interrupted'):
         return
-    result = service.execute(session,job['job_id'],dict(preview_id=job['preview_id'],request_id=args.operation+'-execute',phases=['creative','ad','video']))
-    save(stage='executing',run=result)
-    while pending:
-        fn, values = pending.pop(0)
-        fn(*values)
-    job = service.detail(session,job['job_id'])
+    # The main API owns the process-wide deletion budget. This worker performs
+    # only reads and submits one normal idempotent execution request to it.
+    payload = dict(preview_id=job['preview_id'],request_id=args.operation+'-execute',phases=['creative','ad','video'])
+    save(stage='submitting_execution',execute_request_id=payload['request_id'])
+    try:
+        response = requests.post('http://127.0.0.1:8787/api/fb-post-ad-delete/jobs/'+job['job_id']+'/execute',
+            json=payload,headers={'Origin':'https://ai.yingliangads.com','Host':'ai.yingliangads.com'},
+            cookies={app.SESSION_COOKIE_NAME:session['session_token']},timeout=30,allow_redirects=False)
+        result = response.json()
+        if response.status_code != 202:
+            save(stage='execution_rejected',http_status=response.status_code,error=result)
+            return
+        save(stage='executing',run=result)
+    except (requests.RequestException, ValueError):
+        save(stage='execution_response_unknown')
+    while True:
+        job = service._public(service.store.get_job(job['job_id'],include_objects=False))
+        runs = [run for run in job.get('runs',[]) if run.get('request_id')==payload['request_id']]
+        if not runs:
+            save(stage='execution_unconfirmed',status=job['status'])
+            return
+        if runs[-1]['status'] != 'running':
+            break
+        save(stage='executing',status=job['status'],summary=job['summary'],phase_results=job['phase_results'])
+        time.sleep(30)
     save(stage='finished',status=job['status'],summary=job['summary'],phase_results=job['phase_results'])
 
 
