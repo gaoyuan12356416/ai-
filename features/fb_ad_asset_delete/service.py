@@ -172,6 +172,8 @@ class Service:
     @staticmethod
     def _error_result(exc):
         result = {"code": exc.code, "message": exc.message, "checked_at": now()}
+        if hasattr(exc, "retryable"):
+            result["retryable"] = exc.retryable is True
         if getattr(exc, "detail", None):
             result["detail"] = copy.deepcopy(exc.detail)
             for key in ("credential_user_id", "account_diagnostic"):

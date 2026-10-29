@@ -6,7 +6,7 @@ from deploy_meta_delete_throughput import require_api_stopped
 from deploy_meta_preview_scale import no_writes
 
 BASE = 'a7176fbebe308138b66213b7356ef99bde9522ab'
-FILES = ['features/fb_ad_asset_delete/'+name+'.py' for name in ('service', 'store')]
+FILES = ['features/fb_ad_asset_delete/'+name+'.py' for name in ('source', 'service', 'store')]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

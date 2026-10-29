@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--job', required=True)
     parser.add_argument('--operation', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--deployed-backup', type=Path)
     args = parser.parse_args()
     root, release = args.output.parent, Path(__file__).resolve().parents[1]
     assert Path('/mnt/data-disk').resolve() in root.resolve().parents
@@ -54,20 +55,27 @@ def main():
     pid = subprocess.check_output(['systemctl','show','drama-material-api','-p','MainPID','--value'], text=True).strip()
     env = dict(x.split(b'=',1) for x in Path('/proc/'+pid+'/environ').read_bytes().split(b'\0') if b'=' in x)
     assert env.get(b'DRAMA_JOB_USE_WORKER',b'').lower() in (b'1',b'true',b'yes',b'on')
-    rollout.BASE, rollout.BASELINE_HASHES, rollout.FILES, rollout.idle = BASE, {}, FILES, no_writes
-    captured = io.StringIO()
-    with redirect_stdout(captured):
-        rollout.prepare(release)
-    plan = json.loads(captured.getvalue())
-    backup = Path(plan['backup'])
-    save(stage='prepared', backup=str(backup), commit=plan['commit'], before_pid=pid)
-    no_writes()
-    subprocess.run(['systemctl','stop','drama-material-api'], check=True)
-    try:
-        require_api_stopped()
-        rollout.switch(backup)
-    finally:
-        subprocess.run(['bash',str(release/'scripts/safe_restart_drama_api.sh')], check=True)
+    if args.deployed_backup:
+        backup = args.deployed_backup.resolve()
+        assert rollout.ROOT in backup.parents
+        plan = json.loads((backup/'plan.json').read_text())
+        assert Path(plan['release']).resolve() == release
+        assert all(rollout.digest(Path(row['target'])) == row['after'] for row in plan['files'])
+    else:
+        rollout.BASE, rollout.BASELINE_HASHES, rollout.FILES, rollout.idle = BASE, {}, FILES, no_writes
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            rollout.prepare(release)
+        plan = json.loads(captured.getvalue())
+        backup = Path(plan['backup'])
+        save(stage='prepared', backup=str(backup), commit=plan['commit'], before_pid=pid)
+        no_writes()
+        subprocess.run(['systemctl','stop','drama-material-api'], check=True)
+        try:
+            require_api_stopped()
+            rollout.switch(backup)
+        finally:
+            subprocess.run(['bash',str(release/'scripts/safe_restart_drama_api.sh')], check=True)
     for attempt in range(30):
         try:
             if requests.get('http://127.0.0.1:8787/api/ui/topbar', timeout=5).status_code == 200:
@@ -79,7 +87,7 @@ def main():
         raise RuntimeError('Main API health failed; no execution submitted')
     deployed = json.loads((backup/'plan.json').read_text())
     assert all(rollout.digest(Path(row['target'])) == row['after'] for row in deployed['files'])
-    save(stage='verified', after_pid=subprocess.check_output(['systemctl','show','drama-material-api','-p','MainPID','--value'], text=True).strip(), health_status=200)
+    save(stage='verified', backup=str(backup), commit=plan['commit'], after_pid=subprocess.check_output(['systemctl','show','drama-material-api','-p','MainPID','--value'], text=True).strip(), health_status=200)
     actor = json.loads(job['actor'])
     session = read('SELECT session_token FROM drama_admin_session WHERE tenant_key=? AND user_id=? AND expires_at>? ORDER BY expires_at DESC LIMIT 1',
                    (actor[0],actor[1],int(time.time())), SESSIONS)

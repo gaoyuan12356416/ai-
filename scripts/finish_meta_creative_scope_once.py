@@ -32,6 +32,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--creative-approval', type=Path)
+    parser.add_argument('--controller-state', type=Path)
     args = parser.parse_args()
     assert Path('/mnt/data-disk').resolve() in args.output.resolve().parents
     job = read('SELECT * FROM fb_asset_delete_v2_jobs WHERE job_id=?', (args.job,))[0]
@@ -93,7 +94,25 @@ def main():
     save(stage='validated')
     if not args.execute:
         return
-    state = operation('recheck', 'fb_asset_delete_v2_rechecks', 'recheck', approval_payload)
+    if args.controller_state:
+        assert args.controller_state.resolve().parent == args.output.resolve().parent
+        controller = json.loads(args.controller_state.read_text())
+        assert controller['job_id'] == args.job and controller['stage'] in ('verified', 'resuming_recheck')
+        controller.update(stage='resuming_recheck', resume_operation=args.operation, updated_at=int(time.time()))
+        temp = args.controller_state.with_suffix('.tmp')
+        temp.write_text(json.dumps(controller, ensure_ascii=False, indent=2))
+        temp.replace(args.controller_state)
+    for attempt in range(3):
+        suffix = 'recheck'+('-'+str(attempt+1) if attempt else '')
+        state = operation('recheck', 'fb_asset_delete_v2_rechecks', suffix, approval_payload if not attempt else {})
+        if state == 'completed':
+            break
+        prior = read('SELECT metadata FROM fb_asset_delete_v2_rechecks WHERE request_id=?', (args.operation+'-'+suffix,))[0]
+        error = json.loads(prior['metadata']).get('error', {})
+        if error.get('code') != 'source_unavailable' or error.get('retryable') is not True or attempt == 2:
+            break
+        save(stage='retrying_interrupted_reads', next_attempt=attempt+2)
+        time.sleep(15)
     assert state == 'completed', 'Read-only recheck interrupted; no execution submitted'
     # No Ad/Video retry: only Creative objects released by this recheck run.
     pending = read("SELECT 1 FROM fb_asset_delete_v2_objects WHERE job_id=? AND kind='creative' AND status='pending' LIMIT 1", (args.job,))
@@ -102,6 +121,11 @@ def main():
     counts = read('SELECT kind,status,count(*) AS count FROM fb_asset_delete_v2_objects WHERE job_id=? GROUP BY kind,status', (args.job,))
     status = read('SELECT status FROM fb_asset_delete_v2_jobs WHERE job_id=?', (args.job,))[0]['status']
     save(stage='finished', status=status, object_counts=counts)
+    if args.controller_state:
+        controller.update(stage='finished', updated_at=int(time.time()))
+        temp = args.controller_state.with_suffix('.tmp')
+        temp.write_text(json.dumps(controller, ensure_ascii=False, indent=2))
+        temp.replace(args.controller_state)
 
 
 if __name__ == '__main__':

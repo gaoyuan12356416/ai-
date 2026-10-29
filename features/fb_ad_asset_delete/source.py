@@ -107,7 +107,7 @@ class SqlSource:
                 JOIN {s}.admin_role_apps ara ON ara.id=aru.role_app_id
                 WHERE aru.user_id={uid} AND (ara.is_all=1 OR FIND_IN_SET(CAST(a.id AS CHAR),REPLACE(ara.values,' ',''))))""".format(s=self.schema, uid=q(sub_id))
         selection = " AND a.id IN " + inside(ids) if ids is not None else ""
-        rows = self.read("""SELECT CAST(a.id AS CHAR),a.name,CAST(a.app_type AS CHAR),
+        rows = self._preview_read("""SELECT CAST(a.id AS CHAR),a.name,CAST(a.app_type AS CHAR),
             CAST(CASE WHEN a.app_type=14 THEN a.id ELSE COALESCE(p.id,0) END AS CHAR),
             CASE WHEN a.app_type=14 THEN a.name ELSE COALESCE(p.name,'') END,
             CAST(COALESCE(a.default_user,0) AS CHAR)
