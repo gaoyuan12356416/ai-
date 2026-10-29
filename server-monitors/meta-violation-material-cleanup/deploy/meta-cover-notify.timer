@@ -1,10 +1,10 @@
 [Unit]
-Description=Check changed Meta cover batch summaries
+Description=Daily Meta cover execution summary at 09:30 Beijing
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
-AccuracySec=5s
+OnCalendar=*-*-* 09:30:00 Asia/Shanghai
+Persistent=false
+AccuracySec=1s
 Unit=meta-cover-notify.service
 
 [Install]

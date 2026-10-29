@@ -53,14 +53,16 @@ From this release's module directory, use cover.py --config <runtime>/config.jso
 - work --once --max-ads 256: approved natural-hit first cohort.
 - work: continuous worker; requires cover_live_enabled=true.
 - status: read counters without recovering tasks.
-- notify: notification recovery only.
+- notify: send the latest completed 09:30-to-09:30 daily window once; `--dry-run` previews without sending.
 
 New units: meta-cover-scan.service/.timer, meta-cover-worker.service, meta-cover-notify.service/.timer. Scan timer runs every hour. Do not assume a unit is enabled from its file; verify systemctl state. cover-write-paused.json is durable stop evidence for unexpected parameter changes or write risks; investigate before resuming.
 
-Per-batch Feishu summaries go to 郜远 and distinguish replacement success/failure/unknown, Creative deletion success/failure/unknown, references deferred, review waits and backlog. First cohort can notify while the full scan has pending work. Pure waiting rehoming/resource counters do not resend an unchanged outcome. Late deletion/reconciliation changes produce a new stable end-N phase. Preserve frozen body, UUID and receipts; sending/unknown notices are not blindly replayed.
+As of 2026-10-29, Feishu summaries to 郜远 run once daily at 09:30 Asia/Shanghai and cover the preceding 24-hour half-open window. Disable batch-completion sends from both scanner and worker. Count actual outcome events once per object inside the window, including older tasks completed today, rather than summing batch totals. Label live backlog/review/unknown counts with their snapshot timestamp. Include average/P95/sample count for available ledger stages; queue/reference waits are not pure API execution times and overlapping rows cannot be added. Freeze body/data under cover-daily-YYYYMMDD and reuse the existing end notice phase/UUID/receipt; sending/unknown notices are not replayed. Preserve old batch notices for audit. The timer has no boot/minute/catch-up trigger.
 
 ## Deployment and rollback
 
 Use deploy/install_cover.py prepare/apply/rollback from the exact GitHub release. For subsequent cover-only code fixes, prepare --active-ledgers-only may preserve the unmodified legacy ledger in place only after proving its switch false and its service/timer inactive and disabled; it still takes fresh consistent backups of both cover ledgers and the shared deletion ledger, config and units. Existing full historical backups remain untouched. Test locally, commit/push, fetch exact SHA, back up code/config/units/ledgers, and verify before activation. Keep the old deletion timer off. First live cohort is at most 256 naturally matching Ads; validate actual throughput/rate limits, parameter readbacks, deletion receipts and Feishu before continuing.
+
+For the 2026-10-29 report-only release, use the existing prepare backup followed by deploy/install_cover_report.py apply/rollback. This switches only the code link and notification units; it preserves execution config and does not restart the API or resume a stopped worker. Require idle scanner/worker before switching so no loaded old code can send batch notices. See doc/20261029.meta-cover-daily-report/README.md.
 
 Stop new admissions and drain in-flight operations on rollback. Restore code/config/units while keeping current ledgers and additive shared guards so unknown fences remain effective. Never overwrite progress with an old SQLite backup. Deleted Creative IDs cannot be restored by switching old code or rebinding the old ID. Deployment and real-write claims require current server receipts; local tests alone do not establish completion.

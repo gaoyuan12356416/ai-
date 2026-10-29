@@ -59,11 +59,9 @@ def report_body(batch, counts, global_counts=None):
 
 
 def notify_completed(store, audit, config, include_pending=False):
-    try:
-        with process_lock(Path(config['runtime_dir']) / 'cover-notify.lock'):
-            _notify_completed(store, audit, config, include_pending)
-    except BlockingIOError:
-        return  # Another notifier owns the same durable delivery queue.
+    # Batch completions no longer send. Only the 09:30 daily timer delivers.
+    # Keep historical notices/frozen bodies intact for receipt reconciliation.
+    return
 
 
 def _notify_completed(store, audit, config, include_pending=False):
@@ -276,9 +274,12 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('command', choices=('scan', 'work', 'preview', 'status', 'notify'))
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--dry-run', action='store_true', help='Preview daily notice without sending')
     parser.add_argument('--max-ads', type=int, default=256)
     parser.add_argument('--preview-dir', help='Reuse only an isolated completed preview scan; refresh all write-time sources/Graph reads')
     args = parser.parse_args()
+    if args.dry_run and args.command != 'notify':
+        parser.error('--dry-run is only supported for notify')
     config = load_config(args.config)
     validate_paths(config)
     root = Path(config['runtime_dir'])
@@ -288,12 +289,18 @@ def main():
     if args.command == 'preview':
         preview(config, event.is_set, min(max(args.max_ads, 1), 256), args.preview_dir)
         return 0
+    if args.command == 'notify':
+        from meta_violation_cleanup.cover_daily import notify_daily
+        audit = Runtime(root / 'cover-audit')
+        try:
+            print(json.dumps(notify_daily(config, audit, dry_run=args.dry_run), ensure_ascii=False))
+        finally:
+            audit.close()
+        return 0
     store, audit = CoverStore(root / 'cover.sqlite3'), Runtime(root / 'cover-audit')
     try:
         if args.command == 'status':
             print(json.dumps({'counts': store.stats(), 'batches': store.get_batches(5)}, ensure_ascii=False))
-        elif args.command == 'notify':
-            notify_completed(store, audit, config)
         elif args.command == 'scan':
             with process_lock(root / 'cover-scan.lock'):
                 do_scan(config, store, audit, event.is_set)
