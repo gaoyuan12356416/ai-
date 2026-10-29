@@ -1,5 +1,5 @@
 [Unit]
-Description=Meta cover replacement and one-attempt Creative cleanup
+Description=Independent Meta cover replacement and Creative cleanup lanes
 Wants=network-online.target
 After=network-online.target
 RequiresMountsFor=/mnt/data-disk/meta-violation-material-cleanup /mnt/data-disk/fb-ad-asset-delete

@@ -145,6 +145,38 @@ class Graph:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_accepted_bind_stale_readback_is_isolated_and_never_replayed(self):
+        original = ad()
+        self.enqueue([original])
+
+        class StaleBindingGraph(Graph):
+            stale = True
+
+            def get_cover_ad(self, aid, user, account):
+                value = super().get_cover_ad(aid, user, account)
+                if self.stale and aid in self.bound:
+                    value['creative'] = copy.deepcopy(original['creative'])
+                return value
+
+        graph = StaleBindingGraph([original], [creative()])
+        worker = self.worker(graph)
+        result = worker.run_once(max_ads=1, process_deletes=False)
+        self.assertFalse(result['halted'])
+        task = self.store.get_task(1)
+        self.assertEqual(task['status'], 'unknown')
+        self.assertTrue(task['request_sent'])
+        self.assertEqual(task['result']['reason'], 'binding_result_unknown')
+        self.assertEqual(self.store.stats()['deletions'], {})
+        self.assertTrue(any(r['status'] == 'unknown' for r in self.shared.cover_reservations()))
+        worker.run_once(max_ads=1, process_deletes=False)
+        self.assertEqual(worker.reconcile_unknown()['unresolved_tasks'], 1)
+        self.assertEqual(sum(c[0] == 'bind' for c in graph.calls), 1)
+        graph.stale = False
+        self.assertEqual(worker.reconcile_unknown()['tasks_confirmed'], 1)
+        self.assertEqual(self.store.get_task(1)['status'], 'succeeded')
+        self.assertEqual(sum(c[0] == 'bind' for c in graph.calls), 1)
+        self.assertEqual(self.store.get_delete('100', '20')['status'], 'pending')
+
     def test_missing_derived_tracking_is_unknown_then_reconciled_without_second_bind(self):
         original=ad();original['tracking_specs'].append(
             {'action.type':['post_engagement'],'page':['7'],'post':['9']})

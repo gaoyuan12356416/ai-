@@ -263,6 +263,48 @@ class DailyTests(unittest.TestCase):
         self.assertIn('360.00 条/小时', body)
         self.assertIn('样本可能不完整', body)
 
+    def test_parallel_lane_intervals_are_unioned_and_old_records_still_count(self):
+        folder = self.root / 'performance'
+        folder.mkdir()
+        records = [
+            {'lane': 'ads', 'at': '2026-10-29T08:01:00+08:00',
+             'execution_started_at': '2026-10-29T08:00:00+08:00',
+             'result': {'seconds': 60, 'tasks': {'succeeded': 8}}},
+            {'lane': 'cleanup', 'at': '2026-10-29T08:01:30+08:00',
+             'execution_started_at': '2026-10-29T08:00:30+08:00',
+             'result': {'seconds': 60, 'deletions': {'deleted_verified': 6}}},
+            {'at': '2026-10-29T07:01:00+08:00',
+             'started_at': '2026-10-29T06:00:00+08:00',
+             'result': {'seconds': 10, 'tasks': {'succeeded': 2}}},
+        ]
+        (folder / '20261029.jsonl').write_text('\n'.join(json.dumps(r) for r in records), encoding='utf-8')
+        result = daily.collect_performance(self.root, *daily.window(self.at, 4, 4))
+        self.assertEqual(result['seconds'], 100)  # 90 overlapping seconds + 10 old seconds.
+        self.assertEqual(result['success_per_hour'], 360)
+        self.assertEqual(result['cycles'], 3)
+        self.assertEqual(result['lanes']['cleanup']['deleted'], 6)
+        self.assertEqual(result['lanes']['ads']['seconds'], 60)
+        self.assertEqual(result['lanes']['legacy']['seconds'], 10)
+        self.assertEqual(result['read_errors'], 0)
+        data = daily.collect(self.store.path, *daily.window(self.at, 4, 4))
+        data['performance'] = result
+        self.assertIn('并行耗时不重复相加', daily.report_body(data))
+
+    def test_lane_with_missing_or_invalid_execution_interval_is_reported_incomplete(self):
+        folder = self.root / 'performance'
+        folder.mkdir()
+        records = [
+            {'lane': 'ads', 'at': '2026-10-29T08:01:00+08:00',
+             'result': {'seconds': 60, 'tasks': {'succeeded': 8}}},
+            {'lane': 'cleanup', 'at': '2026-10-29T08:01:30+08:00',
+             'execution_started_at': '2026-10-29T08:02:00+08:00',
+             'result': {'seconds': 60, 'deletions': {'deleted_verified': 6}}},
+        ]
+        (folder / '20261029.jsonl').write_text('\n'.join(json.dumps(r) for r in records), encoding='utf-8')
+        result = daily.collect_performance(self.root, *daily.window(self.at, 4, 4))
+        self.assertEqual(result['cycles'], 0)
+        self.assertEqual(result['read_errors'], 2)
+
 
 if __name__ == '__main__':
     unittest.main()
