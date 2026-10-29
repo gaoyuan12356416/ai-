@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import re
 import signal
 import subprocess
@@ -16,6 +17,9 @@ from .templates import TemplateError
 
 SQL_SLOTS = threading.BoundedSemaphore(2)
 MAX_RESULT_BYTES = 16 * 1024 * 1024
+SOURCE_ERROR_CODES = {"source_busy", "source_query_failed", "source_query_timeout", "source_connection_failed",
+                      "source_result_too_large", "source_readonly_check_failed", "source_query_rejected"}
+LOG = logging.getLogger(__name__)
 
 
 class GatedReadOnlyMySQL:
@@ -115,12 +119,20 @@ class GatedReadOnlyMySQL:
             process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        start_new_session=True)
-            output, _ = process.communicate(timeout=25)
+            output, stderr = process.communicate(timeout=25)
             if process.returncode:
-                raise ValueError()
+                match = re.search(br"ERROR\s+([0-9]{3,5})\b", stderr or b"")
+                errno = int(match.group(1)) if match else 0
+                code = ("source_query_timeout" if errno == 3024 else "source_connection_failed"
+                        if errno in {2002, 2003, 2006, 2013} else "source_query_failed")
+                LOG.warning("fb_source_mysql_failure errno=%s returncode=%s", errno, process.returncode)
+                raise TemplateError(code, "只读数据查询暂不可用，请稍后重试", 503)
             return self._decode(output)
         except TemplateError:
             raise
+        except subprocess.TimeoutExpired:
+            LOG.warning("fb_source_query_timeout seconds=25")
+            raise TemplateError("source_query_timeout", "只读数据查询超时，请稍后重试", 503) from None
         except (OSError, ValueError, subprocess.SubprocessError):
             # Never include command, stderr or SQL/token output in exceptions.
             raise TemplateError("source_query_failed", "只读数据查询暂不可用，请稍后重试", 503) from None
@@ -179,6 +191,8 @@ class BrokerReadOnlyMySQL:
                         if len(body) > MAX_RESULT_BYTES:
                             raise TemplateError("source_result_too_large", "数据源返回超过安全范围", 503)
                     data = json.loads(body)
+                    if isinstance(data, dict) and response.status_code == 503 and data.get("code") in SOURCE_ERROR_CODES:
+                        raise TemplateError(data["code"], "只读数据查询暂不可用，请稍后重试", 503)
                     if response.status_code != 200 or not isinstance(data, dict) or data.get("ok") is not True:
                         raise ValueError()
                     rows = data.get("items")

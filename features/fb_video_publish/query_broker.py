@@ -9,7 +9,7 @@ import json
 import os
 import re
 
-from .runtime_source import GatedReadOnlyMySQL
+from .runtime_source import GatedReadOnlyMySQL, SOURCE_ERROR_CODES
 from .templates import TemplateError
 
 PATH = "/internal/fb-video-publish/query"
@@ -151,6 +151,11 @@ def dispatch(handler, app):
         }
         items = GatedReadOnlyMySQL(trusted).select(sql, params)
         respond(200, {"ok": True, "items": items})
+    except TemplateError as exc:
+        # TemplateError inherits ValueError. Handle runtime failures first so a
+        # database timeout is not mislabeled as an invalid operator request.
+        code = exc.code if exc.code in SOURCE_ERROR_CODES else "source_query_failed"
+        respond(503, {"ok": False, "code": code, "message": "只读数据源暂不可用"})
     except (ValueError, UnicodeError, KeyError, TypeError):
         handler.close_connection = True
         respond(400, {"ok": False, "code": "source_query_rejected", "message": "内部只读请求无效"})

@@ -6,6 +6,7 @@ It still uses the existing FIFO SQL adapter and current Page authorization.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -25,6 +26,8 @@ QUERY_BATCH_SIZE = 100
 MAX_SCOPE_ROWS = 20000
 MAX_METADATA_ROWS = 10000
 ID_RE = re.compile(r"[1-9][0-9]{0,30}")
+TRANSIENT_SOURCE_CODES = {"source_busy", "source_query_failed", "source_query_timeout", "source_connection_failed"}
+LOG = logging.getLogger(__name__)
 
 
 def _chunks(values):
@@ -65,12 +68,22 @@ class GroupPoolSource:
         return mysql
 
     def _select(self, sql, params, *, maximum):
-        try:
-            rows = self.mysql.select(sql, list(params))
-        except Exception:
-            # Database exceptions can include SQL, connection settings or token
-            # values. None of those belong in per-item API errors or batch logs.
-            raise SourceError("group_pool_source_unavailable", "素材池只读数据源查询失败，请稍后重试", 503) from None
+        # Retry only a classified transient SELECT failure, once. Never retry
+        # validation, invalid source data or any platform publication here.
+        for attempt in range(2):
+            try:
+                rows = self.mysql.select(sql, list(params))
+                break
+            except Exception as exc:
+                code = getattr(exc, "code", "")
+                safe_code = code if code in TRANSIENT_SOURCE_CODES else "source_error"
+                stage = next((name for name in ("ads_drama_resource", "ads_drama_info", "ads_custom_source",
+                    "ads_facebook_page_group_ins") if name in sql), "page_scope")
+                LOG.warning("group_pool_source_failure stage=%s code=%s attempt=%s", stage, safe_code, attempt + 1)
+                if attempt == 0 and code in TRANSIENT_SOURCE_CODES:
+                    continue
+                raise SourceError("group_pool_source_unavailable",
+                    "素材池只读数据源查询失败（" + stage + "/" + safe_code + "）", 503) from None
         if not isinstance(rows, list) or len(rows) > maximum or any(not isinstance(row, Mapping) for row in rows):
             raise SourceError("group_pool_source_too_large", "素材池来源结果超过安全范围或格式无效", 503)
         return rows
@@ -284,13 +297,13 @@ class GroupPoolSource:
     def _metadata(self, content_ids):
         slots = ",".join("%s" for _ in content_ids)
         resources = self._select(f"""
-            SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(r.content_id AS CHAR) content_id,
-                   CAST(r.app_id AS CHAR) app_id,COALESCE(r.series_code,'') series_code,
-                   COALESCE(r.language,'') language,COALESCE(r.name,'') drama_name,
-                   COALESCE(r.`desc`,'') drama_description
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT BINARY CAST(r.content_id AS CHAR) content_id,
+                   BINARY CAST(r.app_id AS CHAR) app_id,BINARY COALESCE(r.series_code,'') series_code,
+                   BINARY COALESCE(r.language,'') language,BINARY COALESCE(r.name,'') drama_name,
+                   BINARY COALESCE(r.`desc`,'') drama_description
               FROM `{self.mysql.schema}`.ads_drama_resource r FORCE INDEX(content_id)
              WHERE r.app_id=1479 AND r.content_id IN ({slots})
-             ORDER BY r.id LIMIT 10001
+             LIMIT 10001
         """, content_ids, maximum=MAX_METADATA_ROWS)
         releases = self._select(f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(d.content_id AS CHAR) content_id,
