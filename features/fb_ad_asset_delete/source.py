@@ -402,28 +402,45 @@ class SqlSource:
                 continue
             relevant = [o for o in objects if o["kind"] == kind]
             verified = kind == "creative" and all(o.get("account_verified") and len(o.get("account_ids", [])) == 1 for o in relevant)
-            condition = "creative_id IN %s" % inside(ids)
+            conditions = []
             if verified:
-                accounts = {a for o in relevant for a in o["account_ids"]}
-                condition += " AND ad_account_id IN %s" % inside(sorted(accounts | {"act_" + a for a in accounts}))
+                by_account = {}
+                for obj in relevant:
+                    by_account.setdefault(obj["account_ids"][0], set()).add(obj["object_id"])
+                for aid, creative_ids in sorted(by_account.items()):
+                    for part in chunks(sorted(creative_ids), 500):
+                        conditions.append("creative_id IN %s AND ad_account_id IN %s" %
+                                          (inside(part), inside([aid, "act_" + aid])))
+            else:
+                conditions.append("creative_id IN %s" % inside(ids))
             index = "ad_account_id" if verified else "PRIMARY"
             if progress:
-                progress(kind, 0, 1)
-            rows = self.read("SELECT ad_id,product,ad_account_id,creative_id,video_id FROM %s.ads_facebook_auto_created_data FORCE INDEX (%s) WHERE (status IS NULL OR status<>'DELETED') AND (%s) LIMIT 100001" % (self.schema, index, condition),
-                ("ad_id", "product_id", "account_id", "creative_id", "video_ids_raw"), 60 if verified else 180)
-            if len(rows) > 100000:
-                raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，相关素材暂不能删除")
+                progress(kind, 0, len(conditions))
+            def read_references(condition):
+                rows = self.read("SELECT ad_id,product,ad_account_id,creative_id,video_id FROM %s.ads_facebook_auto_created_data FORCE INDEX (%s) WHERE (status IS NULL OR status<>'DELETED') AND (%s) LIMIT 100001" % (self.schema, index, condition),
+                    ("ad_id", "product_id", "account_id", "creative_id", "video_ids_raw"), 60 if verified else 180)
+                if len(rows) > 100000:
+                    raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，相关素材暂不能删除")
+                return rows
+            rows = []
+            with ThreadPoolExecutor(max_workers=min(4, len(conditions)), thread_name_prefix="meta-reference-source") as pool:
+                futures = [pool.submit(read_references, condition) for condition in conditions]
+                for done, future in enumerate(as_completed(futures), 1):
+                    rows.extend(future.result())
+                    if len(rows) > 100000:
+                        raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，相关素材暂不能删除")
+                    if progress:
+                        progress(kind, done, len(conditions))
+            id_set = set(ids)
             for row in rows:
                 if kind == "video" and not stored_ids_complete(row["video_ids_raw"]):
                     raise AssetError("reference_check_incomplete", "共享视频引用记录无法完整解析，不能排除范围外引用")
                 found = {row["creative_id"]} if kind == "creative" else set(stored_ids(row["video_ids_raw"]))
-                for oid in found & set(ids):
+                for oid in found & id_set:
                     key = (kind + ":" + oid, str(row["ad_id"]), str(row["product_id"]), str(row["account_id"]))
                     if key not in seen:
                         seen.add(key)
                         refs.append(dict(row, key=key[0]))
-            if progress:
-                progress(kind, 1, 1)
         return refs
 
     def validate_reference_snapshot(self, refs):

@@ -176,7 +176,8 @@ class Service:
             return "视频引用索引：已读取 %s 条源记录%s" % (format(done, ","), "，完整读取结束" if total else "，正在完整读取")
         return "核验 Creative 共享引用：%d / %d" % (done, total)
 
-    def _preview_inspect(self, entries, allowed_ads, progress, on_result=None, check_references=False):
+    def _preview_inspect(self, entries, allowed_ads, progress, on_result=None, check_references=False,
+                         authorize=None, on_checked=None, deleted_creatives=None):
         """Bounded account workers, independent clients, and one-use GET batches."""
         groups, stop, result_lock = defaultdict(list), threading.Event(), threading.Lock()
         checked = [0]
@@ -191,12 +192,17 @@ class Service:
                 for offset in range(0, len(objects), 50):
                     part = objects[offset:offset + 50]
                     with self.execution_budget.operation(accounts, stop):
+                        if authorize:
+                            authorize()
                         prefetch = getattr(graph, "prefetch_preview_nodes", None)
                         if callable(prefetch):
                             prefetch(part)
                         for obj in part:
+                            if authorize:
+                                authorize()
                             try:
-                                state, proof = graph.inspect(obj, allowed_ads, check_references=check_references)
+                                state, proof = graph.inspect(obj, allowed_ads, deleted_creatives=deleted_creatives,
+                                                             check_references=check_references)
                             except AssetError as exc:
                                 with result_lock:
                                     self._block(obj, exc.code, exc.message)
@@ -207,6 +213,8 @@ class Service:
                                     if on_result:
                                         on_result(obj, proof)
                             with result_lock:
+                                if on_checked:
+                                    on_checked(obj)
                                 checked[0] += 1
                                 progress(dict(stage="references_meta" if check_references else "verify", kind=obj["kind"],
                                     checked=checked[0], total=len(entries),
@@ -665,7 +673,6 @@ class Service:
         try:
             job = self.store.get_job(job_id)
             self._allowed(self.authorize(session), job)
-            graph = self.graph_factory()
             blocked = [o for o in job["objects"] if o["status"] == "blocked" and o["kind"] != "video"]
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
@@ -682,22 +689,30 @@ class Service:
                     except AssetError as exc:
                         ref_error = exc
                 outside = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
-                for obj in objects:
+                candidate_keys = {obj["key"] for obj in candidates}
+                verify = []
+                def authorize():
                     self._allowed(self.authorize(session), job)
-                    if obj in candidates:
-                        try:
-                            if ref_error:
-                                raise ref_error
-                            if obj["key"] in outside:
-                                raise GraphError("shared_outside_scope", "仍有范围外广告引用该素材，保持阻止")
-                            state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
-                        except AssetError as exc:
-                            state, result = "blocked", self._error_result(exc)
-                        self.store.recheck_object(operation_id, obj["key"], state, result)
-                        released += state != "blocked"
+                def record(obj):
+                    nonlocal checked, released
+                    self.store.recheck_object(operation_id, obj["key"], obj["status"], obj["result"])
+                    released += obj["status"] != "blocked"
                     checked += 1
                     self.store.update_recheck(operation_id, checked=checked, released=released,
                         step="已核验 %d / %d 个阻止项；%d 个通过，尚未执行删除" % (checked, len(blocked), released))
+                for obj in objects:
+                    if obj["key"] not in candidate_keys:
+                        checked += 1
+                    elif ref_error or obj["key"] in outside:
+                        authorize()
+                        error = ref_error or GraphError("shared_outside_scope", "仍有范围外广告引用该素材，保持阻止")
+                        self._block(obj, error.code, error.message)
+                        obj["result"] = self._error_result(error)
+                        record(obj)
+                    else:
+                        verify.append(obj)
+                self._preview_inspect(verify, allowed_ads, lambda data: None, check_references=True,
+                    authorize=authorize, on_checked=record, deleted_creatives=deleted_creatives)
             self.store.update_recheck(operation_id, status="completed", checked=checked, released=released,
                 step="核验完成：%d 个通过，%d 个仍阻止。执行需另行确认" % (released, len(blocked)-released))
         except Exception as exc:
