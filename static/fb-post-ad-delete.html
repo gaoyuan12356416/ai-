@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light" />
   <title>Meta 剧集广告删除 - AI自动后台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260915-meta-video-account-delete" />
+  <link rel="stylesheet" href="/fb-post-ad-delete.css?v=20260919-preview-reliability" />
   <link rel="stylesheet" href="/ui-topbar.css?v=20260915-meta-assets-standard-shell" />
 </head>
 <body>
@@ -38,6 +38,8 @@
         <div class="workflow" aria-label="操作流程"><span><b>1</b>选择剧集与产品</span><i aria-hidden="true">→</i><span><b>2</b>预览匹配对象</span><i aria-hidden="true">→</i><span><b>3</b>确认分阶段删除</span></div>
         <div id="requestNotice" class="notice warning hidden" role="status"><div><strong>执行请求的响应尚未确认</strong><p id="requestNoticeText"></p></div><button class="btn" id="resolveRequestBtn" type="button">核对执行请求</button></div>
         <div id="recheckRequestNotice" class="notice warning hidden" role="status"><div><strong>重新核验请求的响应尚未确认</strong><p id="recheckRequestText"></p></div><button class="btn" id="resolveRecheckRequestBtn" type="button">核对核验请求</button></div>
+        <div id="previewRequestNotice" class="notice info hidden" role="status"><div><strong>正在提交或恢复预览</strong><p id="previewRequestText"></p></div><button class="btn" id="resolvePreviewRequestBtn" type="button">立即重试</button></div>
+        <div id="connectionNotice" class="notice warning hidden" role="status" aria-live="polite"></div>
         <section class="panel scope-panel" aria-labelledby="scopeTitle">
           <div class="panel-head"><div><h2 id="scopeTitle">查询删除范围</h2><p>只处理明确选中的投放产品，包含历史广告及已下架剧集。</p></div><span class="tag neutral">Meta 渠道</span></div>
           <div class="panel-body form-grid">
@@ -70,6 +72,7 @@
           <div class="panel-head"><div><div class="heading-with-badge"><h2 id="resultTitle">预览与执行</h2><span id="jobStatus" class="tag neutral"></span></div><p id="jobMeta" class="job-meta"></p></div><button class="btn small" id="refreshJobBtn" type="button">刷新任务</button></div>
           <div class="panel-body result-body">
             <div id="jobNotice" class="notice info hidden" role="status"></div>
+            <div id="retryPreviewHelp" class="notice warning hidden"><div><strong>预览清单尚未生成</strong><p>重新预览会沿用此任务原有的剧集与产品范围，不受上方输入修改影响。完成后仍需单独确认删除。</p></div><button class="btn" id="retryPreviewBtn" type="button">重新预览</button></div>
             <div id="recheckNotice" class="notice info recheck-notice hidden" role="status" aria-live="polite"><div><strong id="recheckTitle"></strong><p id="recheckStep"></p><p id="recheckSummary"></p><progress id="recheckProgress" max="1" aria-label="重新核验进度"></progress><p id="recheckError"></p></div></div>
             <div id="staleNotice" class="notice warning hidden" role="status">输入范围已变更，请重新预览后执行。下方仍展示上一次任务的结果。</div>
             <div id="legacyNotice" class="notice info hidden">此为历史任务，仅保留只读记录。请使用上方查询范围建立新任务。</div>
@@ -119,6 +122,6 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/ui-topbar.js?v=20260915-meta-assets-v2"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
-  <script src="/fb-post-ad-delete.js?v=20260916-meta-video-token-routing"></script>
+  <script src="/fb-post-ad-delete.js?v=20261029-preview-scale"></script>
 </body>
 </html>

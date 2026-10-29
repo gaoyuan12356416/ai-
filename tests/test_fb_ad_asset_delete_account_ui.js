@@ -36,7 +36,7 @@ function harness(respond = () => { throw new Error("Unexpected API call"); }) {
       return { ok: true, status: 200, text: async () => JSON.stringify(result) };
     },
   });
-  const hook = "globalThis.ui = { state, diagnosticDetails, videoAccountResults, videoAccountDetails, renderObjects, renderJob, openConfirmation, confirmExecution, sendExecution, canExecute, canRecheck, selectedEligible };";
+  const hook = "globalThis.ui = { state, diagnosticDetails, videoAccountResults, videoAccountDetails, renderObjects, renderJob, openConfirmation, confirmExecution, sendExecution, canExecute, canRecheck, selectedEligible, loadJob, updateControls, retryablePreview };";
   const marker = '  document.addEventListener("DOMContentLoaded", init);';
   assert.ok(source.includes(marker));
   vm.runInContext(source.replace(marker, hook), context);
@@ -186,8 +186,8 @@ test("ordinary confirmation submits only frozen preview, phases and the request 
 test("HTML keeps the ordinary three phases and the retired navigation version", () => {
   assert.equal((page.match(/type="checkbox"/g) || []).length, 3);
   assert.ok(page.includes("quick-nav.js?v=20260915retired"));
-  assert.ok(page.includes("fb-post-ad-delete.css?v=20260915-meta-video-account-delete"));
-  assert.ok(page.includes("fb-post-ad-delete.js?v=20260916-meta-video-token-routing"));
+  assert.ok(page.includes("fb-post-ad-delete.css?v=20260919-preview-reliability"));
+  assert.ok(page.includes("fb-post-ad-delete.js?v=20261029-preview-scale"));
   assert.ok(!page.includes("Video 阶段删除视频对象"));
   assert.ok(page.includes("广告账户视频素材"));
 });
@@ -210,4 +210,39 @@ test("failed selection details retain the intended queue identity", () => {
     credential_publish_queue_id: '<img src=x>', credential_default_token: "1", credential_user_id: "999" } }));
   assert.ok(html.includes("产品默认 Token") && html.includes("999"));
   assert.ok(html.includes("&lt;img src=x&gt;") && !html.includes("<img"));
+});
+
+test("background reads keep controls responsive and a newer read cancels stale work", async () => {
+  let releaseOld;
+  const data = job();
+  const h = harness((url, options) => {
+    if (!releaseOld) return new Promise(resolve => { releaseOld = resolve; });
+    return { ...data, updated_at: '2026-10-29T08:00:00Z' };
+  });
+  authorize(h.ui, data);
+  const old = h.ui.loadJob(data.job_id, { polling: true });
+  assert.equal(h.ui.state.detailBusy, false);
+  assert.equal(h.element('refreshJobBtn').disabled, false);
+  await h.ui.loadJob(data.job_id);
+  assert.equal(h.requests[0].options.signal.aborted, true);
+  releaseOld({ ...data, updated_at: '2026-10-28T08:00:00Z' });
+  await old;
+  assert.equal(h.ui.state.job.updated_at, '2026-10-29T08:00:00Z');
+  assert.equal(h.ui.state.detailController, null);
+});
+
+test("edited scope can start a separate preview while existing work stays in history", () => {
+  const h = harness();
+  authorize(h.ui, job({ status:'previewing' }));
+  h.ui.updateControls();
+  assert.equal(h.element('previewBtn').disabled, true);
+  h.ui.state.formGeneration += 1;
+  h.ui.updateControls();
+  assert.equal(h.element('previewBtn').disabled, false);
+  assert.equal(h.ui.canExecute(), false);
+});
+
+test("old ten-thousand-limit failures offer an explicit fresh preview", () => {
+  const h = harness();
+  assert.equal(h.ui.retryablePreview(job({status:'failed',error:{code:'too_many_ads',retryable:false}})),true);
 });

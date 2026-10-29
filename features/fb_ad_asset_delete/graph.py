@@ -59,6 +59,8 @@ class GraphClient:
         self.tokens, self.inventory_cache, self.video_library_cache = {}, {}, {}
         self.credential_contexts = {}
         self.video_credential_creatives = {}
+        self.preview_nodes = {}
+        self.deleted_video_accounts = {}
 
     @staticmethod
     def _usage_metrics(value):
@@ -112,7 +114,11 @@ class GraphClient:
             pass
 
     def request(self, method, path, token, params=None, timeout=None, deadline=None):
-        if not re.fullmatch(r"(?:act_)?[1-9][0-9]{0,31}(?:/(?:ads|advideos))?", path):
+        multi_read = (method == "GET" and path == "" and isinstance(params, dict) and
+                      set(params) == {"ids", "fields"} and
+                      params.get("fields") in (AD_FIELDS, CREATIVE_FIELDS) and
+                      re.fullmatch(r"[1-9][0-9]{0,31}(?:,[1-9][0-9]{0,31}){0,49}", str(params.get("ids", ""))))
+        if not multi_read and not re.fullmatch(r"(?:act_)?[1-9][0-9]{0,31}(?:/(?:ads|advideos))?", path):
             raise GraphError("invalid_graph_path", "Meta 请求对象无效")
         if callable(self.request_guard):
             self.request_guard()
@@ -387,10 +393,42 @@ class GraphClient:
             "；".join(notes + ["使用原冻结候选用户的 User Token，继续单次删除"])[:800])
         return token, fallback
 
+    def prefetch_preview_nodes(self, objects):
+        """One-use GET data for a preview chunk; execution never prefetches."""
+        self.preview_nodes.clear()
+        groups = {}
+        for obj in objects:
+            groups.setdefault((obj["kind"], self._credential_key(obj)), []).append(obj)
+        for (kind, _), entries in groups.items():
+            if kind not in ("ad", "creative"):
+                continue
+            fields = AD_FIELDS if kind == "ad" else CREATIVE_FIELDS
+            for offset in range(0, len(entries), 50):
+                part = entries[offset:offset + 50]
+                try:
+                    token = self.credential(part[0])
+                    data = self.request("GET", "", token, {"ids": ",".join(meta_id(o["object_id"]) for o in part), "fields": fields})
+                except GraphError:
+                    # An unsupported multi-read or one inaccessible node must
+                    # not hide readable siblings. The normal GET is read-only.
+                    continue
+                for obj in part:
+                    node = data.get(obj["object_id"]) if isinstance(data, dict) else None
+                    if not isinstance(node, dict):
+                        continue
+                    if isinstance(node.get("error"), dict):
+                        detail = safe_error_detail(node["error"], token)
+                        detail.update(self.credential_context(obj))
+                        node = GraphError(detail.get("code", "read_unavailable"), detail.get("message", "Meta 读取未完成"), detail=detail)
+                    self.preview_nodes[(kind, obj["object_id"], fields)] = node
+
     def read_node(self, obj, fields):
+        prefetched = self.preview_nodes.pop((obj.get("kind"), obj["object_id"], fields), None)
+        if isinstance(prefetched, GraphError):
+            raise prefetched
         token = self.credential(obj)
         try:
-            data = self.request("GET", meta_id(obj["object_id"]), token, {"fields": fields})
+            data = prefetched if prefetched is not None else self.request("GET", meta_id(obj["object_id"]), token, {"fields": fields})
         except GraphError as exc:
             exc.detail.update(self.credential_context(obj))
             raise
@@ -482,7 +520,13 @@ class GraphClient:
         if kind == "creative":
             proof["video_ids"] = creative_video_ids(data)
             if "verified_video_ids" in obj and set(proof["video_ids"]) != set(obj["verified_video_ids"]):
-                raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览", detail=self.credential_context(obj))
+                actual, expected = set(proof["video_ids"]), set(obj["verified_video_ids"])
+                aid = account_id(data.get("account_id", ""))
+                missing = expected - actual
+                confirmed = self.deleted_video_accounts.get(aid, set())
+                if actual - expected or not missing.issubset(confirmed):
+                    raise GraphError("creative_video_changed", "Creative 当前视频关系与冻结预览不一致，请重新预览", detail=self.credential_context(obj))
+                proof.update(missing_video_ids_confirmed_deleted=sorted(missing), video_deletion_account_id=aid)
         return "pending", proof
 
     @staticmethod

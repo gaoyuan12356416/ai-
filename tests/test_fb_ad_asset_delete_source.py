@@ -258,11 +258,11 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["reason"] for row in rows))
 
-    def test_too_many_ad_candidates_stop_instead_of_returning_partial_scope(self):
+    def test_large_ad_scope_is_complete_across_the_former_limit(self):
         source = FixtureSource(ads=[ad(str(n), str(10000 + n)) for n in range(1, 10002)])
-        with self.assertRaises(AssetError) as error:
-            self.resolve(source)
-        self.assertEqual(error.exception.code, "too_many_ads")
+        rows, _ = self.resolve(source)
+        self.assertEqual(len(rows), 10001)
+        self.assertEqual({r['ad_id'] for r in rows}, {str(10000 + n) for n in range(1, 10002)})
 
     def test_shared_references_include_other_products_and_match_complete_video_ids(self):
         references = [dict(ad_id="9001", product_id="999", account_id="555", creative_id="2001", video_ids_raw='["3001","30010"]'),

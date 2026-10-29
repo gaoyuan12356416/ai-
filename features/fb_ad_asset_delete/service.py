@@ -60,8 +60,17 @@ class Service:
         return selected
 
     @staticmethod
+    def _approved_parent_ids(job, obj):
+        approval = obj.get("changed_parent_ad_approval") or {}
+        if (obj.get("kind") != "creative" or approval.get("job_id") != job["job_id"] or
+                approval.get("preview_id") != job["preview_id"] or approval.get("object_key") != obj["key"]):
+            return set()
+        ids = set(approval.get("ad_ids") or [])
+        return ids if ids <= set(obj.get("ad_ids") or []) else set()
+
+    @staticmethod
     def _counts(job):
-        if "objects" in job:
+        if "objects" in job and "object_counts" not in job:
             job["summary"], job["phase_results"] = summary(job["objects"])
         else:
             totals = dict.fromkeys(STATUSES, 0)
@@ -98,18 +107,12 @@ class Service:
         return {"items": [self._public(j) for j in rows if all(p["id"] in permitted for p in j["products"])]}
 
     def detail(self, session, job_id, page=1, page_size=50, kind="", status=""):
-        job = self.store.get_job(job_id)
-        self._allowed(session, job)
         if kind and kind not in PHASES or status and status not in STATUSES:
             raise AssetError("invalid_filter", "明细筛选条件无效")
         page, page_size = max(1, int(page)), max(1, min(100, int(page_size)))
-        data = self._public(job)
-        # Historical blocked Video rows retain their audit state until claimed,
-        # but operator filters must match the page's current pending count.
-        objects = [o for o in data["objects"] if (not kind or o["kind"] == kind) and
-                   (not status or ("pending" if o["video_direct_eligible"] else o["status"]) == status)]
-        data.update(total=len(objects), page=page, page_size=page_size, objects=objects[(page-1)*page_size:page*page_size])
-        return data
+        job = self.store.get_job_page(job_id, page, page_size, kind, status)
+        self._allowed(session, job)
+        return self._public(job)
 
     def preview(self, session, payload):
         input_type, ids, product_ids = normalize_input(payload)
@@ -169,6 +172,8 @@ class Service:
     @staticmethod
     def _error_result(exc):
         result = {"code": exc.code, "message": exc.message, "checked_at": now()}
+        if hasattr(exc, "retryable"):
+            result["retryable"] = exc.retryable is True
         if getattr(exc, "detail", None):
             result["detail"] = copy.deepcopy(exc.detail)
             for key in ("credential_user_id", "account_diagnostic"):
@@ -181,6 +186,76 @@ class Service:
         if kind == "video":
             return "视频引用索引：已读取 %s 条源记录%s" % (format(done, ","), "，完整读取结束" if total else "，正在完整读取")
         return "核验 Creative 共享引用：%d / %d" % (done, total)
+
+    @staticmethod
+    def _deleted_video_accounts(job):
+        """Only this frozen job's confirmed account receipts explain missing videos."""
+        receipts = defaultdict(set)
+        for obj in job["objects"]:
+            if obj["kind"] != "video":
+                continue
+            for row in obj.get("video_account_results", []):
+                result, aid = row.get("result") or {}, str(row.get("account_id", ""))
+                confirmed = (row.get("status") == "deleted" and result.get("success") is True or
+                             row.get("status") == "already_deleted" and result.get("confirmed_absent") is True)
+                if (confirmed and aid in obj.get("account_ids", []) and
+                        result.get("delete_scope") == "ad_account_video" and
+                        str(result.get("account_id", "")) == aid and
+                        str(result.get("video_id", "")) == obj["object_id"]):
+                    receipts[aid].add(obj["object_id"])
+        return dict(receipts)
+
+    def _preview_inspect(self, entries, allowed_ads, progress, on_result=None, check_references=False,
+                         authorize=None, on_checked=None, deleted_creatives=None, allowed_ads_for=None,
+                         deleted_video_accounts=None):
+        """Bounded account workers, independent clients, and one-use GET batches."""
+        groups, stop, result_lock = defaultdict(list), threading.Event(), threading.Lock()
+        checked = [0]
+        for obj in entries:
+            groups[tuple(sorted(obj.get("account_ids", [])))].append(obj)
+
+        def work(accounts, objects):
+            graph = self.graph_factory()
+            graph.deleted_video_accounts = deleted_video_accounts or {}
+            graph.response_observer = lambda metadata: self.execution_budget.observe(accounts, metadata)
+            graph.request_guard = lambda: self.execution_budget.wait(accounts, stop)
+            try:
+                for offset in range(0, len(objects), 50):
+                    part = objects[offset:offset + 50]
+                    with self.execution_budget.operation(accounts, stop):
+                        if authorize:
+                            authorize()
+                        prefetch = getattr(graph, "prefetch_preview_nodes", None)
+                        if callable(prefetch):
+                            prefetch(part)
+                        for obj in part:
+                            if authorize:
+                                authorize()
+                            try:
+                                state, proof = graph.inspect(obj, allowed_ads_for(obj) if allowed_ads_for else allowed_ads, deleted_creatives=deleted_creatives,
+                                                             check_references=check_references)
+                            except AssetError as exc:
+                                if exc.code == "execution_stopped":
+                                    raise  # Keep unexamined objects' original reasons on a stopped read.
+                                with result_lock:
+                                    self._block(obj, exc.code, exc.message)
+                                    obj["result"] = self._error_result(exc)
+                            else:
+                                with result_lock:
+                                    obj.update(status=state, result=proof)
+                                    if on_result:
+                                        on_result(obj, proof)
+                            with result_lock:
+                                if on_checked:
+                                    on_checked(obj)
+                                checked[0] += 1
+                                progress(dict(stage="references_meta" if check_references else "verify", kind=obj["kind"],
+                                    checked=checked[0], total=len(entries),
+                                    message="%s：%d / %d" % ("核验共享引用" if check_references else "核验" + ("广告" if obj["kind"] == "ad" else "素材"), checked[0], len(entries))))
+            finally:
+                self._close_graph(graph)
+
+        self._parallel_groups(groups, work, stop)
 
     def _build_preview(self, job_id):
         try:
@@ -201,8 +276,6 @@ class Service:
             self.store.update_job(job_id, preview_step="查找精确关联的 Meta 广告", dramas=dramas, blockers=blockers)
             ads, issues = self.source.resolve_ads(dramas, job["products"], progress=progress)
             blockers.extend(issues)
-            if len(ads) > 10000:
-                raise AssetError("too_many_ads", "命中超过 10,000 个 Ad，请缩小范围")
             objects = {}
             defaults = {p["id"]: p.get("default_user") for p in job["products"]}
 
@@ -237,41 +310,33 @@ class Service:
                     add("creative", ad["creative_id"], ad)
                 for vid in ad.get("video_ids", []):
                     add("video", vid, ad)
-            graph = self.graph_factory()
+            ads_by_id, ads_by_creative = defaultdict(list), defaultdict(list)
+            for ad in ads:
+                ads_by_id[ad["ad_id"]].append(ad)
+                if ad.get("creative_id"):
+                    ads_by_creative[str(ad["creative_id"])].append(ad)
             allowed_ads = {o["object_id"] for o in objects.values() if o["kind"] == "ad" and o["status"] != "blocked"}
             self.store.update_job(job_id, preview_step="核验 Meta 对象及广告账户关系",
                                   preview_progress={"stage": "verify", "message": "核验 Meta 对象及广告账户关系"})
             # Verify ads first so changed creatives cannot authorize deleting the
             # old source record's assets. Freeze any discovered video IDs here.
             for kind in ("ad", "creative"):
-                verified_count = 0
-                verification_total = sum(1 for obj in objects.values() if obj["kind"] == kind and obj["status"] != "blocked")
-                for obj in list(objects.values()):
-                    if obj["kind"] != kind or obj["status"] == "blocked":
-                        continue
-                    try:
-                        state, proof = graph.inspect(obj, allowed_ads, check_references=False)
-                        obj.update(status=state, result=proof)
-                        if kind == "ad" and proof.get("creative_id") and not obj["creative_ids"]:
-                            for ad in ads:
-                                if ad["ad_id"] == obj["object_id"]:
-                                    ad["creative_id"] = proof["creative_id"]
-                                    obj["creative_ids"] = [proof["creative_id"]]
-                                    add("creative", proof["creative_id"], ad)
-                        if kind == "creative":
-                            obj["account_verified"] = True
-                            obj["verified_video_ids"] = proof.get("video_ids", [])
-                            obj["video_ids"] = sorted(set(obj["video_ids"]) | set(proof.get("video_ids", [])))
-                            for ad in ads:
-                                if str(ad.get("creative_id")) == obj["object_id"]:
-                                    for vid in proof.get("video_ids", []):
-                                        add("video", vid, ad)
-                    except AssetError as exc:
-                        self._block(obj, exc.code, exc.message)
-                        obj["result"] = self._error_result(exc)
-                    verified_count += 1
-                    progress(dict(stage="verify", kind=kind, checked=verified_count, total=verification_total,
-                        message="核验%s：%d / %d" % ("广告" if kind == "ad" else "素材", verified_count, verification_total)))
+                entries = [obj for obj in objects.values() if obj["kind"] == kind and obj["status"] != "blocked"]
+                def supplement(obj, proof):
+                    if kind == "ad" and proof.get("creative_id") and not obj["creative_ids"]:
+                        for ad in ads_by_id[obj["object_id"]]:
+                            ad["creative_id"] = proof["creative_id"]
+                            obj["creative_ids"] = [proof["creative_id"]]
+                            ads_by_creative[proof["creative_id"]].append(ad)
+                            add("creative", proof["creative_id"], ad)
+                    if kind == "creative":
+                        obj["account_verified"] = True
+                        obj["verified_video_ids"] = proof.get("video_ids", [])
+                        obj["video_ids"] = sorted(set(obj["video_ids"]) | set(proof.get("video_ids", [])))
+                        for ad in ads_by_creative[obj["object_id"]]:
+                            for vid in proof.get("video_ids", []):
+                                add("video", vid, ad)
+                self._preview_inspect(entries, allowed_ads, progress, supplement)
             # Creative retains ownership checks. Matched Video IDs are frozen
             # for direct deletion, independently of Meta read availability.
             bad_ads = {o["object_id"] for o in objects.values() if o["kind"] == "ad" and o["status"] == "blocked"}
@@ -293,15 +358,8 @@ class Service:
                 except AssetError as exc:
                     for obj in kind_assets:
                         self._block(obj, exc.code, exc.message)
-            for obj in assets:
-                if obj["status"] != "pending":
-                    continue
-                try:
-                    state, proof = graph.inspect(obj, allowed_ads)
-                    obj.update(status=state, result=proof)
-                except AssetError as exc:
-                    self._block(obj, exc.code, exc.message)
-                    obj["result"] = self._error_result(exc)
+            self._preview_inspect([obj for obj in assets if obj["status"] == "pending"],
+                                  allowed_ads, progress, check_references=True)
             ordered = sorted(objects.values(), key=lambda o: (PHASES.index(o["kind"]), o["object_id"]))
             self.store.update_job(job_id, status="ready", objects=ordered, dramas=dramas, blockers=blockers,
                                   preview_step="预览完成", preview_progress={"stage": "complete", "message": "预览完成"}, preview_completed_at=now())
@@ -317,6 +375,9 @@ class Service:
 
     def execute(self, session, job_id, payload):
         phases = normalize_phases(payload.get("phases"))
+        only_pending = payload.get("only_pending", False)
+        if not isinstance(only_pending, bool):
+            raise AssetError("invalid_execution_filter", "only_pending 必须为布尔值")
         request_id = str(payload.get("request_id") or "")
         if not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", request_id):
             raise AssetError("invalid_request_id", "执行请求标识无效，请刷新页面后重试")
@@ -324,14 +385,14 @@ class Service:
             raise AssetError("frozen_preview_only", "执行仅接受预览清单，不能追加对象 ID")
         job = self.store.get_job(job_id)
         self._allowed(session, job)
-        run = self.store.claim_run(job_id, str(payload.get("preview_id") or ""), actor_key(session), phases, request_id)
+        run = self.store.claim_run(job_id, str(payload.get("preview_id") or ""), actor_key(session), phases, request_id, only_pending=only_pending)
         if not run["duplicate"]:
             try:
-                self.spawn(self._run, job_id, run["run_id"], phases, copy.deepcopy(session))
+                self.spawn(self._run, job_id, run["run_id"], phases, copy.deepcopy(session), only_pending)
             except Exception:
                 self.store.finish_run(run["run_id"], "interrupted", {"message": "后台执行线程未启动，请人工恢复"})
                 raise AssetError("worker_unavailable", "后台执行未启动，进度已保留，请人工恢复", 503) from None
-        return {k: run[k] for k in ("job_id", "run_id", "status", "duplicate")}
+        return {k: run[k] for k in ("job_id", "run_id", "status", "duplicate", "only_pending")}
 
     def _parallel_groups(self, groups, work, stop):
         errors, error_lock = [], threading.Lock()
@@ -377,29 +438,38 @@ class Service:
         if callable(close):
             close()
 
-    def _run(self, job_id, run_id, phases, session):
+    def _run(self, job_id, run_id, phases, session, only_pending=False):
         stop = threading.Event()
         try:
             job = self.store.get_job(job_id)
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
+            approved_parents = {o["key"]: self._approved_parent_ids(job, o) for o in job["objects"] if o["kind"] == "creative"}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
+            deleted_video_accounts = self._deleted_video_accounts(job)
             for phase in phases:
                 self._allowed(self.authorize(session), job)
                 self.store.update_job(job_id, current_phase=phase, execution_concurrency=self.execution_budget.concurrency)
-                objects = [o for o in job["objects"] if o["kind"] == phase and
-                           (o["status"] in ("pending", "failed") or phase == "video" and o["status"] == "blocked")]
                 probe = self.graph_factory()
                 account_mode = phase == "video" and callable(getattr(probe, "prepare_video_account_delete", None))
                 self._close_graph(probe)
+                # Interrupted account work can leave a failed parent with untouched
+                # children. Resume those children; the account filter below still
+                # excludes every previous failure, success and unknown outcome.
+                objects = [o for o in job["objects"] if o["kind"] == phase and
+                           ((o["status"] == "pending" or account_mode and o["status"] == "failed" and
+                             any(a["status"] == "pending" for a in o.get("video_account_results", [])))
+                            if only_pending else
+                            o["status"] in ("pending", "failed") or phase == "video" and o["status"] == "blocked")]
                 if account_mode:
-                    self._run_video_phase(job, run_id, objects, session, stop)
+                    self._run_video_phase(job, run_id, objects, session, stop, only_pending=only_pending)
                     continue
                 refs_error, outside_keys = None, set()
                 if phase == "creative":
                     try:
                         refs = self.source.shared_references(objects, progress=lambda kind, done, total:
                             self.store.update_job(job_id, execution_step=self._reference_step(kind, done, total)))
-                        outside_keys = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
+                        outside_keys = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads and
+                                        str(r["ad_id"]) not in approved_parents.get(r["key"], set())}
                     except AssetError as exc:
                         refs_error = exc
                 groups, successes, success_lock = defaultdict(list), set(), threading.Lock()
@@ -408,6 +478,7 @@ class Service:
 
                 def nodes(accounts, entries):
                     graph = self._worker_graph(accounts, stop, session, job)
+                    graph.deleted_video_accounts = deleted_video_accounts
                     try:
                         for obj in entries:
                             with self.execution_budget.operation(accounts, stop):
@@ -434,7 +505,8 @@ class Service:
                                             raise refs_error
                                         if obj["key"] in outside_keys:
                                             raise GraphError("shared_outside_scope", "执行前发现范围外广告引用该素材，已阻止")
-                                        state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
+                                        permitted_refs = allowed_ads | approved_parents.get(obj["key"], set())
+                                        state, result = graph.inspect(obj, permitted_refs, deleted_creatives)
                                         if state == "pending":
                                             # Revalidate after reads, immediately before the write.
                                             self._allowed(self.authorize(session), job)
@@ -472,7 +544,7 @@ class Service:
             except Exception:
                 pass  # restart recovery fences the durable active claim
 
-    def _run_video_phase(self, job, run_id, objects, session, stop):
+    def _run_video_phase(self, job, run_id, objects, session, stop, only_pending=False):
         job_id = job["job_id"]
         groups, initialized, init_lock = defaultdict(list), {}, threading.Lock()
         remaining, finished = {}, set()
@@ -524,7 +596,7 @@ class Service:
                         if not claimed:
                             continue
                         current = next(r for r in self.store.video_account_results(job_id, obj["key"]) if r["account_id"] == aid)
-                        if current["status"] not in ("pending", "failed"):
+                        if current["status"] not in (("pending",) if only_pending else ("pending", "failed")):
                             account_done(obj, aid)
                             continue
                         prepared, error = None, None
@@ -620,7 +692,7 @@ class Service:
         return {"job_id": job_id, "checked": checked, "read_only": True}
 
     def recheck(self, session, job_id, payload):
-        if set(payload) - {"preview_id", "request_id"}:
+        if set(payload) - {"preview_id", "request_id", "approved_changed_parent_creative_keys"}:
             raise AssetError("frozen_preview_only", "重新核验仅使用原任务固定清单，不能追加或修改对象")
         request_id = str(payload.get("request_id") or "")
         if not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", request_id):
@@ -628,7 +700,8 @@ class Service:
         job = self.store.get_job(job_id)
         self._allowed(session, job)
         result = self.store.claim_recheck(job_id, str(payload.get("preview_id") or ""), actor_key(session), request_id,
-                                         sum(o["status"] == "blocked" and o["kind"] != "video" for o in job["objects"]))
+                                         sum(o["status"] == "blocked" and o["kind"] != "video" for o in job["objects"]),
+                                         approved_changed_parent_creative_keys=payload.get("approved_changed_parent_creative_keys"))
         if not result["duplicate"]:
             try:
                 self.spawn(self._recheck, job_id, result["operation_id"], copy.deepcopy(session))
@@ -638,9 +711,11 @@ class Service:
         return result
 
     def _recheck(self, job_id, operation_id, session):
-        # Ownership/lineage conflicts still require a new preview. Read/transient
-        # reference blockers alone are eligible for clearing on this frozen list.
+        # An explicit audited exception can waive a changed parent Ad relation
+        # for exact frozen Creatives. Their own ownership and other references
+        # still need fresh checks; Ad execution and replacement IDs are unchanged.
         retryable = {"reference_check_incomplete", "shared_outside_scope", "source_unavailable",
+                     "execution_stopped", "creative_video_changed",
                      "read_unavailable", "video_owner_unverified", "video_index_incomplete",
                      "video_index_expired", "video_index_malformed", "video_index_unavailable",
                      "video_index_building", "video_index_disk_full", "video_index_too_large", "video_reference_unverified"}
@@ -648,15 +723,16 @@ class Service:
         try:
             job = self.store.get_job(job_id)
             self._allowed(self.authorize(session), job)
-            graph = self.graph_factory()
             blocked = [o for o in job["objects"] if o["status"] == "blocked" and o["kind"] != "video"]
             allowed_ads = {o["object_id"] for o in job["objects"] if o["kind"] == "ad" and o["status"] != "blocked"}
+            approved_parents = {o["key"]: self._approved_parent_ids(job, o) for o in blocked}
             deleted_creatives = {o["object_id"] for o in job["objects"] if o["kind"] == "creative" and o["status"] in TERMINAL_SUCCESS}
             for phase in PHASES:
                 objects = [o for o in blocked if o["kind"] == phase]
                 if not objects:
                     continue
-                candidates = [o for o in objects if o.get("result", {}).get("code") in retryable]
+                candidates = [o for o in objects if o.get("result", {}).get("code") in retryable or
+                              o.get("result", {}).get("code") == "ad_ownership_unverified" and approved_parents[o["key"]]]
                 ref_error, refs = None, []
                 if phase != "ad" and candidates:
                     try:
@@ -664,23 +740,34 @@ class Service:
                             self.store.update_recheck(operation_id, step=self._reference_step(kind, done, total)))
                     except AssetError as exc:
                         ref_error = exc
-                outside = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads}
-                for obj in objects:
+                outside = {r["key"] for r in refs if str(r["ad_id"]) not in allowed_ads and
+                           str(r["ad_id"]) not in approved_parents.get(r["key"], set())}
+                candidate_keys = {obj["key"] for obj in candidates}
+                verify = []
+                def authorize():
                     self._allowed(self.authorize(session), job)
-                    if obj in candidates:
-                        try:
-                            if ref_error:
-                                raise ref_error
-                            if obj["key"] in outside:
-                                raise GraphError("shared_outside_scope", "仍有范围外广告引用该素材，保持阻止")
-                            state, result = graph.inspect(obj, allowed_ads, deleted_creatives)
-                        except AssetError as exc:
-                            state, result = "blocked", self._error_result(exc)
-                        self.store.recheck_object(operation_id, obj["key"], state, result)
-                        released += state != "blocked"
+                def record(obj):
+                    nonlocal checked, released
+                    self.store.recheck_object(operation_id, obj["key"], obj["status"], obj["result"])
+                    released += obj["status"] != "blocked"
                     checked += 1
                     self.store.update_recheck(operation_id, checked=checked, released=released,
                         step="已核验 %d / %d 个阻止项；%d 个通过，尚未执行删除" % (checked, len(blocked), released))
+                for obj in objects:
+                    if obj["key"] not in candidate_keys:
+                        checked += 1
+                    elif ref_error or obj["key"] in outside:
+                        authorize()
+                        error = ref_error or GraphError("shared_outside_scope", "仍有范围外广告引用该素材，保持阻止")
+                        self._block(obj, error.code, error.message)
+                        obj["result"] = self._error_result(error)
+                        record(obj)
+                    else:
+                        verify.append(obj)
+                self._preview_inspect(verify, allowed_ads, lambda data: None, check_references=True,
+                    authorize=authorize, on_checked=record, deleted_creatives=deleted_creatives,
+                    allowed_ads_for=lambda obj: allowed_ads | approved_parents.get(obj["key"], set()),
+                    deleted_video_accounts=self._deleted_video_accounts(job))
             self.store.update_recheck(operation_id, status="completed", checked=checked, released=released,
                 step="核验完成：%d 个通过，%d 个仍阻止。执行需另行确认" % (released, len(blocked)-released))
         except Exception as exc:

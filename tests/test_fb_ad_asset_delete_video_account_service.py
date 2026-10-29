@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from features.fb_ad_asset_delete.core import PHASES
+from features.fb_ad_asset_delete.core import PHASES, actor_key
 from features.fb_ad_asset_delete.graph import GraphClient
 from features.fb_ad_asset_delete.source import SqlSource, q
 from features.fb_ad_asset_delete.service import Service
@@ -236,6 +236,53 @@ class VideoAccountServiceTests(unittest.TestCase):
         self.execute(job, request_id=request_id)
         self.assertCountEqual(self.writes(), [("DELETE_ACCOUNT", "444", "301"), ("DELETE_ACCOUNT", "555", "301"), ("DELETE_ACCOUNT", "444", "301")])
         self.assertEqual(self.video(final)["status"], "deleted")
+
+    def interrupted_accounts(self, first_status="failed"):
+        job = self.preview(("444", "555", "666"))
+        key = self.video(job)["key"]
+        run = self.store.claim_run(job["job_id"], job["preview_id"], actor_key(SESSION), ["video"], uuid.uuid4().hex)
+        self.store.claim_object(job["job_id"], key, run["run_id"])
+        self.store.begin_video_accounts(job["job_id"], key, run["run_id"])
+        graph = AccountGraph(self.state, self.store)
+        for aid, status in (("444", first_status), ("555", "deleted")):
+            _, context = graph.prepare_video_account_delete(self.video(job), aid)
+            claim = self.store.claim_video_account(job["job_id"], key, run["run_id"], aid, context)
+            result = dict(context, delete_scope="ad_account_video", account_id=aid, video_id="301",
+                          success=status == "deleted", code="original_outcome")
+            self.store.finish_video_account(job["job_id"], key, run["run_id"], aid,
+                                           claim["account_attempt_id"], status, result)
+        self.store.finish_run(run["run_id"], "interrupted")
+        return self.store.get_job(job["job_id"])
+
+    def test_pending_only_resumes_children_of_failed_parent_without_retrying_settled_accounts(self):
+        job = self.interrupted_accounts()
+        before = self.video(job)
+        self.assertEqual(before["status"], "failed")
+        self.assertEqual([r["status"] for r in before["video_account_results"]], ["failed", "deleted", "pending"])
+        payload = dict(preview_id=job["preview_id"], phases=["video"], only_pending=True, request_id=uuid.uuid4().hex)
+        self.service.execute(SESSION, job["job_id"], payload)
+        self.workers.run_next()
+        after = self.video(self.store.get_job(job["job_id"]))
+        self.assertEqual(self.writes(), [("DELETE_ACCOUNT", "666", "301")])
+        self.assertEqual(after["status"], "failed")
+        self.assertEqual(after["video_account_results"][:2], before["video_account_results"][:2])
+        self.assertEqual(after["video_account_results"][2]["status"], "deleted")
+        self.assertTrue(self.service.execute(SESSION, job["job_id"], payload)["duplicate"])
+        payload["request_id"] = uuid.uuid4().hex
+        self.service.execute(SESSION, job["job_id"], payload)
+        self.workers.run_next()
+        self.assertEqual(self.video(self.store.get_job(job["job_id"])), after)
+        self.assertEqual(self.writes(), [("DELETE_ACCOUNT", "666", "301")])
+
+    def test_pending_only_does_not_release_unknown_parent_even_with_pending_children(self):
+        job = self.interrupted_accounts("unknown")
+        before = self.video(job)
+        self.assertEqual(before["status"], "unknown")
+        self.service.execute(SESSION, job["job_id"], dict(preview_id=job["preview_id"],
+            phases=["video"], only_pending=True, request_id=uuid.uuid4().hex))
+        self.workers.run_next()
+        self.assertEqual(self.video(self.store.get_job(job["job_id"])), before)
+        self.assertEqual(self.writes(), [])
 
     def test_account_a_receipt_never_skips_account_b_in_new_task(self):
         self.execute(self.preview(("444",)))

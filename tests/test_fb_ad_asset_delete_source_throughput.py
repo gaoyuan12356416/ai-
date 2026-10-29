@@ -1,14 +1,28 @@
 """Fresh, bounded source lookups; all SQL executes against synthetic local data."""
 import re
 import sqlite3
+import subprocess
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from features.fb_ad_asset_delete.core import AssetError
 from features.fb_ad_asset_delete.source import SqlSource, q
 
 
 class SelectedProductQueryTests(unittest.TestCase):
+    def test_fresh_acl_retries_connection_loss_but_never_sql_permission_denials(self):
+        row = ('301', 'App', '14', '301', 'App', '803')
+        for code, expected_calls in ((2013, 2), (1142, 1)):
+            with self.subTest(code=code), patch('features.fb_ad_asset_delete.source.time.sleep'):
+                query = Mock(side_effect=[subprocess.CalledProcessError(1, ['mysql'], stderr='ERROR '+str(code)+' query failed'), [row]])
+                source = SqlSource(query)
+                if code == 2013:
+                    self.assertEqual(source.selected_products({'role':'admin'}, ['301'])[0]['id'], '301')
+                else:
+                    with self.assertRaises(AssetError):
+                        source.selected_products({'role':'admin'}, ['301'])
+                self.assertEqual(query.call_count, expected_calls)
+
     def test_selected_ids_are_filtered_in_sql_and_keep_requested_order(self):
         query = Mock(return_value=[("301", "App", "14", "301", "App", "803"),
                                    ("401", "W2A", "10000", "301", "App", "804")])

@@ -3,6 +3,8 @@ import hashlib
 import logging
 import re
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .core import AssetError, account_id, content_markers, stored_ids, stored_ids_complete, stored_video_ids, creative_video_ids
 from .video_index import ReferenceRows
 
@@ -105,7 +107,7 @@ class SqlSource:
                 JOIN {s}.admin_role_apps ara ON ara.id=aru.role_app_id
                 WHERE aru.user_id={uid} AND (ara.is_all=1 OR FIND_IN_SET(CAST(a.id AS CHAR),REPLACE(ara.values,' ',''))))""".format(s=self.schema, uid=q(sub_id))
         selection = " AND a.id IN " + inside(ids) if ids is not None else ""
-        rows = self.read("""SELECT CAST(a.id AS CHAR),a.name,CAST(a.app_type AS CHAR),
+        rows = self._preview_read("""SELECT CAST(a.id AS CHAR),a.name,CAST(a.app_type AS CHAR),
             CAST(CASE WHEN a.app_type=14 THEN a.id ELSE COALESCE(p.id,0) END AS CHAR),
             CASE WHEN a.app_type=14 THEN a.name ELSE COALESCE(p.name,'') END,
             CAST(COALESCE(a.default_user,0) AS CHAR)
@@ -178,6 +180,29 @@ class SqlSource:
         candidate lineage is checked again when full records are fetched and
         the service must still perform its current Meta verification.
         """
+        if len(target_by_product) > 1:
+            results, states, completed, lock = {}, {}, set(), threading.Lock()
+            def scan(pid, targets):
+                def report(data):
+                    with lock:
+                        states[pid] = data
+                        if progress:
+                            scanned = sum(item.get("scanned_rows", 0) for item in states.values())
+                            candidates = sum(item.get("candidate_rows", 0) for item in states.values())
+                            progress(dict(data, products_total=len(target_by_product), products_done=len(completed),
+                                scanned_rows=scanned, candidate_rows=candidates,
+                                message="已核对 %d/%d 个产品，扫描 %d 条广告，找到 %d 条候选记录" %
+                                        (len(completed), len(target_by_product), scanned, candidates)))
+                rows = self._scan_ad_candidates({pid: targets}, materials, source_links, report)
+                with lock:
+                    completed.add(pid)
+                report(dict(states.get(pid, {}), candidate_rows=len(rows)))
+                return rows
+            with ThreadPoolExecutor(max_workers=min(4, len(target_by_product)), thread_name_prefix="meta-preview-source") as pool:
+                futures = [pool.submit(scan, pid, targets) for pid, targets in target_by_product.items()]
+                for future in as_completed(futures):
+                    results.update(future.result())
+            return results
         candidates, scanned, retries = {}, 0, 0
         product_ids = sorted(target_by_product)
         total = len(product_ids)
@@ -236,8 +261,6 @@ class SqlSource:
                             set(stored_ids(row["source_ids_raw"])) & source_ids or
                             content_markers(row["ad_name"], row["campaign_name"]) & target_ids):
                         candidates[str(rid)] = dict(row, product_id=pid)
-                        if len(candidates) > 10000:
-                            raise AssetError("too_many_ads", "命中超过 10,000 条 Ad 记录，请缩小范围")
                 product_scanned += len(rows)
                 scanned += len(rows)
                 if product_scanned > expected:
@@ -379,28 +402,45 @@ class SqlSource:
                 continue
             relevant = [o for o in objects if o["kind"] == kind]
             verified = kind == "creative" and all(o.get("account_verified") and len(o.get("account_ids", [])) == 1 for o in relevant)
-            condition = "creative_id IN %s" % inside(ids)
+            conditions = []
             if verified:
-                accounts = {a for o in relevant for a in o["account_ids"]}
-                condition += " AND ad_account_id IN %s" % inside(sorted(accounts | {"act_" + a for a in accounts}))
+                by_account = {}
+                for obj in relevant:
+                    by_account.setdefault(obj["account_ids"][0], set()).add(obj["object_id"])
+                for aid, creative_ids in sorted(by_account.items()):
+                    for part in chunks(sorted(creative_ids), 500):
+                        conditions.append("creative_id IN %s AND ad_account_id IN %s" %
+                                          (inside(part), inside([aid, "act_" + aid])))
+            else:
+                conditions.append("creative_id IN %s" % inside(ids))
             index = "ad_account_id" if verified else "PRIMARY"
             if progress:
-                progress(kind, 0, 1)
-            rows = self.read("SELECT ad_id,product,ad_account_id,creative_id,video_id FROM %s.ads_facebook_auto_created_data FORCE INDEX (%s) WHERE (status IS NULL OR status<>'DELETED') AND (%s) LIMIT 100001" % (self.schema, index, condition),
-                ("ad_id", "product_id", "account_id", "creative_id", "video_ids_raw"), 60 if verified else 180)
-            if len(rows) > 100000:
-                raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，相关素材暂不能删除")
+                progress(kind, 0, len(conditions))
+            def read_references(condition):
+                rows = self.read("SELECT ad_id,product,ad_account_id,creative_id,video_id FROM %s.ads_facebook_auto_created_data FORCE INDEX (%s) WHERE (status IS NULL OR status<>'DELETED') AND (%s) LIMIT 100001" % (self.schema, index, condition),
+                    ("ad_id", "product_id", "account_id", "creative_id", "video_ids_raw"), 60 if verified else 180)
+                if len(rows) > 100000:
+                    raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，相关素材暂不能删除")
+                return rows
+            rows = []
+            with ThreadPoolExecutor(max_workers=min(4, len(conditions)), thread_name_prefix="meta-reference-source") as pool:
+                futures = [pool.submit(read_references, condition) for condition in conditions]
+                for done, future in enumerate(as_completed(futures), 1):
+                    rows.extend(future.result())
+                    if len(rows) > 100000:
+                        raise AssetError("reference_check_incomplete", "共享引用数量超出核验上限，相关素材暂不能删除")
+                    if progress:
+                        progress(kind, done, len(conditions))
+            id_set = set(ids)
             for row in rows:
                 if kind == "video" and not stored_ids_complete(row["video_ids_raw"]):
                     raise AssetError("reference_check_incomplete", "共享视频引用记录无法完整解析，不能排除范围外引用")
                 found = {row["creative_id"]} if kind == "creative" else set(stored_ids(row["video_ids_raw"]))
-                for oid in found & set(ids):
+                for oid in found & id_set:
                     key = (kind + ":" + oid, str(row["ad_id"]), str(row["product_id"]), str(row["account_id"]))
                     if key not in seen:
                         seen.add(key)
                         refs.append(dict(row, key=key[0]))
-            if progress:
-                progress(kind, 1, 1)
         return refs
 
     def validate_reference_snapshot(self, refs):

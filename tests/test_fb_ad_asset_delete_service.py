@@ -521,6 +521,121 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.statuses(job)["video:301"], "deleted")
         self.assertNotIn(True, self.source.fresh_checks)
 
+    def changed_parent_preview(self):
+        self.graph.ad_creatives['101'] = '999'
+        self.graph.inspect_errors['ad:101'] = GraphError('creative_changed', 'Parent changed')
+        return self.preview()
+
+    def approve_changed_parent(self, job, keys=None, run=True):
+        result = self.service.recheck(SESSION, job['job_id'], dict(
+            preview_id=job['preview_id'], request_id='explicit-parent-approval-123456',
+            approved_changed_parent_creative_keys=['creative:201'] if keys is None else keys))
+        if run and not result['duplicate']:
+            self.workers.run_next()
+        return result
+
+    def test_explicit_parent_approval_deletes_only_old_creative_and_is_idempotent(self):
+        job = self.changed_parent_preview()
+        self.begin_recheck(job)
+        self.assertEqual(self.statuses(job)['creative:201'], 'blocked')
+        self.source.references = [dict(key='creative:201', ad_id='101', product_id='1')]
+        self.approve_changed_parent(job)
+        self.assertEqual(self.statuses(job)['creative:201'], 'pending')
+        self.assertEqual(self.graph.deleted_keys(), [])
+        self.execute(job, ('creative',))
+        self.assertEqual(self.graph.deleted_keys(), ['creative:201'])
+        self.assertEqual(self.statuses(job)['ad:101'], 'blocked')
+        self.assertNotIn('creative:999', self.statuses(job))
+        fresh = self.store.get_job(job['job_id'])
+        old = next(o for o in fresh['objects'] if o['key'] == 'creative:201')
+        self.assertEqual(old['changed_parent_ad_approval']['ad_ids'], ['101'])
+        self.assertEqual(old['changed_parent_ad_approval']['actor'], actor_key(SESSION))
+        self.assertTrue(self.approve_changed_parent(job)['duplicate'])
+        with self.assertRaises(StoreError):
+            self.approve_changed_parent(job, keys=[])
+
+    def test_parent_approval_cannot_include_other_types_or_unfrozen_keys(self):
+        job = self.changed_parent_preview()
+        for keys in (['ad:101'], ['creative:999'], ['creative:201', 'creative:999'], ['creative:201', 'creative:201']):
+            with self.subTest(keys=keys), self.assertRaises(StoreError):
+                self.approve_changed_parent(job, keys=keys)
+        fresh = self.store.get_job(job['job_id'])
+        self.assertFalse(any(o.get('changed_parent_ad_approval') for o in fresh['objects']))
+        self.assertEqual(self.graph.deleted_keys(), [])
+
+    def test_parent_approval_requires_verified_creative_and_exact_parent_reason(self):
+        for failure in ('creative_unreadable', 'parent_account_mismatch', 'creative_unknown'):
+            with self.subTest(failure=failure):
+                self.new_environment()
+                if failure == 'creative_unreadable':
+                    self.graph.inspect_errors['creative:201'] = GraphError('read_unavailable', 'No proof')
+                job = self.changed_parent_preview()
+                if failure != 'creative_unreadable':
+                    for obj in job['objects']:
+                        if failure == 'parent_account_mismatch' and obj['key'] == 'ad:101':
+                            obj['result']['code'] = 'account_mismatch'
+                        if failure == 'creative_unknown' and obj['key'] == 'creative:201':
+                            obj['status'] = 'unknown'
+                    self.store.update_job(job['job_id'], objects=job['objects'])
+                with self.assertRaises(StoreError):
+                    self.approve_changed_parent(job)
+                self.assertEqual(self.graph.deleted_keys(), [])
+
+    def test_parent_approval_keeps_outside_source_references_blocked(self):
+        job = self.changed_parent_preview()
+        self.source.references = [dict(key='creative:201', ad_id='999', product_id='outside')]
+        self.approve_changed_parent(job)
+        self.assertEqual(self.statuses(job)['creative:201'], 'blocked')
+        self.assertEqual(self.graph.deleted_keys(), [])
+
+    def test_parent_approval_still_checks_current_creative_account_and_meta_references(self):
+        for code in ('account_mismatch', 'shared_outside_scope', 'creative_video_changed'):
+            with self.subTest(code=code):
+                self.new_environment()
+                job = self.changed_parent_preview()
+                self.approve_changed_parent(job, run=False)
+                self.graph.inspect_errors['creative:201'] = GraphError(code, 'Fresh verification rejected')
+                self.workers.run_next()
+                self.assertEqual(self.statuses(job)['creative:201'], 'blocked')
+                self.assertEqual(self.graph.deleted_keys(), [])
+
+    def test_parent_approval_does_not_waive_new_outside_references_at_execution(self):
+        job = self.changed_parent_preview()
+        self.approve_changed_parent(job)
+        self.source.references = [dict(key='creative:201', ad_id='999', product_id='outside')]
+        self.execute(job, ('creative',))
+        self.assertEqual(self.statuses(job)['creative:201'], 'blocked')
+        self.assertEqual(self.graph.deleted_keys(), [])
+
+    def test_pending_only_resume_preserves_failed_and_unknown_attempts(self):
+        self.source.ads = [ad(1), ad(2), ad(3)]
+        job = self.preview()
+        run = self.store.claim_run(job['job_id'], job['preview_id'], actor_key(SESSION), ['video'], 'interrupted-video-123456')
+        for key, status in [('video:301', 'failed'), ('video:302', 'unknown')]:
+            self.store.claim_object(job['job_id'], key, run['run_id'])
+            self.store.finish_object(job['job_id'], key, run['run_id'], status, {'code': 'original_outcome'})
+        self.store.finish_run(run['run_id'], 'interrupted')
+        before = self.store.get_job(job['job_id'])
+        result = self.execute(job, ('video',), request_id='pending-only-video-123456', extra={'only_pending': True})
+        self.assertTrue(result['only_pending'])
+        self.assertEqual(self.graph.deleted_keys(), ['video:303'])
+        self.assertEqual(self.statuses(job)['video:301'], 'failed')
+        self.assertEqual(self.statuses(job)['video:302'], 'unknown')
+        after = self.store.get_job(job['job_id'])
+        for key in ('video:301', 'video:302'):
+            self.assertEqual(next(o for o in before['objects'] if o['key'] == key),
+                             next(o for o in after['objects'] if o['key'] == key))
+        self.assertTrue(self.execute(job, ('video',), request_id='pending-only-video-123456', extra={'only_pending': True})['duplicate'])
+        with self.assertRaises(StoreError):
+            self.execute(job, ('video',), request_id='pending-only-video-123456')
+
+    def test_pending_only_filter_rejects_non_boolean_values_before_execution(self):
+        job = self.preview()
+        for value in ('true', 1, None):
+            with self.subTest(value=value), self.assertRaises(AssetError):
+                self.execute(job, ('video',), extra={'only_pending': value})
+        self.assertEqual(self.graph.events, [])
+
 
 if __name__ == "__main__":
     unittest.main()
