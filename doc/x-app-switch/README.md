@@ -102,8 +102,27 @@ Lisa mention and a strict USD 10 threshold. The actual monitor service exited
 successfully. No low-balance message was sent because the threshold was not met;
 the new group's actual send has not been exercised by a live low-balance event.
 
-**Publication acceptance remains pending.** The user will have an operator
-reauthorize an account and notify this chat. No new-App production Post was
-created in this acceptance phase. After notification, verify the new grant and
-unchanged ownership/settings, then reconcile one new normal publication with
-its ledger and X readback. Do not reuse historical or unknown attempts.
+Publication acceptance completed after the user reported an operator's new
+authorization and explicitly requested continuation of the test. The account
+retained its original ID, owner, language and publish approval, with an active
+Lisa-bound grant, complete scopes, refresh capability and token-confirmed
+Premium status. Actual refresh-token rotation was not needed for this test.
+
+Exactly one new 65.447-second English video, absent from the pool, prior queues
+and reservations, entered the normal durable manual publisher. It completed
+at 11:17:21 Asia/Shanghai, with one attempt and no unknown outcome. Official
+X readback returned HTTP 200; Post ID, author, body and video attachment matched
+the ledger. Body comparison expanded X's returned URL entities and removed only
+the API-added media URL. The public short wrapper returned HTTP 200 and its
+destination matched the frozen tracking URL. Material and Post IDs were unique.
+
+The final account projection is 1 authorized, 98 pending reauthorization and
+4 disabled. The authorized account is eligible for its existing publishing
+configuration; other accounts still require their owners' normal OAuth login.
+No recurring schedule was added or changed by the canary.
+
+At 11:20:11 Asia/Shanghai the production monitor returned USD 109.75 (prepaid
+105.00, free 4.75), with no read failures. The hourly timer remains active and
+the low-credit group alert was not triggered. Runtime code remains the deployed
+commit above; later commits only record acceptance. Detailed private evidence
+is under the maintenance directory and local audit directory for this switch.
