@@ -8,7 +8,7 @@ import subprocess
 
 from features.drama_synthesis.async_runtime import process_launch, record_process, clear_process
 from features.drama_synthesis.gpu import run_render_with_progress
-from .recipe import FPS, FADE_FRAMES, LEGACY_PROFILE, PROFILE, error, output_frames
+from .recipe import FPS, FADE_FRAMES, LEGACY_PROFILE, PROFILE, error, normalize_mirror, output_frames, preview_geometry
 
 
 def _seconds(frames):
@@ -47,6 +47,21 @@ def build_normalize_command(source, clip, output, *, has_audio, ffmpeg="ffmpeg",
     video = ("[0:v:0]setpts=PTS-STARTPTS,scale=trunc(iw*sar/2)*2:ih,setsar=1,%s,setsar=1,"
              "fps=30,tpad=stop_mode=clone:stop_duration=0.1,trim=end_frame=%d,"
              "settb=1/30,setpts=N,format=yuv420p[v]" % (fit, count))
+    effect = normalize_mirror(clip)
+    if effect["mirror"]:
+        # Split only after fit/fps/trim so both branches use the same frame and
+        # canvas. The entire original band (including its background) stays
+        # readable; no OCR or separate subtitle decoder is involved.
+        video = video[:-3] + "[normalized]"
+        band = effect["subtitle_band"]
+        if band is None:
+            video += ";[normalized]hflip[v]"
+        else:
+            top, height = band["top"], band["bottom"] - band["top"]
+            video += (";[normalized]split=2[mirror_source][subtitle_source];"
+                      "[mirror_source]hflip[mirrored];"
+                      "[subtitle_source]crop=720:%d:0:%d[subtitle_band];"
+                      "[mirrored][subtitle_band]overlay=0:%d:shortest=1[v]" % (height, top, top))
     if has_audio and not clip["mute"]:
         audio = ("[0:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,"
                  "aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration=%s,"
@@ -152,7 +167,7 @@ def probe_media(path, *, ffprobe="ffprobe"):
             rotation = int(side.get("rotation", rotation))
         if rotation % 180:
             width, height = height, width
-        return {"duration_ms": int(round(duration * 1000)), "width": width, "height": height,
+        result = {"duration_ms": int(round(duration * 1000)), "width": width, "height": height,
                 "fps": round(fps, 6), "has_audio": audio is not None,
                 "video_codec": str(video.get("codec_name", "")),
                 "audio_codec": str((audio or {}).get("codec_name", "")),
@@ -160,7 +175,11 @@ def probe_media(path, *, ffprobe="ffprobe"):
                 "container_brand": str(data["format"].get("tags", {}).get("major_brand", "")).strip(),
                 "pixel_format": str(video.get("pix_fmt", "")),
                 "sample_aspect_ratio": str(video.get("sample_aspect_ratio", "1:1")),
+                "rotation": rotation % 360,
                 "audio_duration_ms": int(round(float((audio or {}).get("duration") or duration) * 1000)) if audio else 0}
+        geometry = preview_geometry(result)
+        result.update({k: geometry[k] for k in ("display_width", "display_height")})
+        return result
     except (ValueError, KeyError, TypeError, StopIteration, ZeroDivisionError):
         raise error("video_editing_probe_failed", "视频没有可处理的画面或时长") from None
 

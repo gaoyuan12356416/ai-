@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from fractions import Fraction
 import hashlib
 import json
 import re
@@ -91,11 +92,75 @@ def ms_to_frame(value):
     return (integer(value) * FPS + 500) // 1000
 
 
+def normalize_mirror(clip):
+    """The protected band is measured on the final 720 x 1280 canvas.
+
+    Keep this separate from the v1 contract: adding default effect fields to
+    historical normalized recipes would invalidate their durable fingerprints.
+    """
+    mirror = clip.get("mirror", False)
+    if type(mirror) is not bool:
+        raise error()
+    band = clip.get("subtitle_band", {"top": 960, "bottom": 1280} if mirror else None)
+    if band is not None:
+        if not isinstance(band, dict) or set(band) != {"top", "bottom"}:
+            raise error()
+        top = integer(band["top"], 0, 1278)
+        bottom = integer(band["bottom"], 2, 1280)
+        if top >= bottom or top % 2 or bottom % 2:
+            raise error()
+        band = {"top": top, "bottom": bottom}
+    return {"mirror": mirror, "subtitle_band": band}
+
+
+def preview_geometry(metadata, *, proxy=False):
+    """Describe the content inside existing contain-normalized preview files.
+
+    Legacy probe records contain already-rotated dimensions but no rotation
+    field. They remain usable; new probes also freeze the square-pixel shape
+    actually used by the renderer, including the inverted SAR after rotation.
+    This presentation metadata is deliberately outside recipe identity.
+    """
+    try:
+        width, height = int(metadata["width"]), int(metadata["height"])
+        if not 0 < width <= 16384 or not 0 < height <= 16384:
+            return None
+        display_width, display_height = metadata.get("display_width"), metadata.get("display_height")
+        if type(display_width) is not int or type(display_height) is not int or min(display_width, display_height) <= 0:
+            try:
+                sar = Fraction(str(metadata.get("sample_aspect_ratio", "1:1")).replace(":", "/"))
+                if sar <= 0:
+                    sar = Fraction(1)
+            except (ValueError, ZeroDivisionError):
+                sar = Fraction(1)
+            if int(metadata.get("rotation", 0)) % 180:
+                sar = 1 / sar
+            display_width = max(2, (width * sar.numerator // sar.denominator) // 2 * 2)
+            display_height = height
+        if not proxy:
+            return {"is_proxy": False, "width": width, "height": height,
+                    "content_rect": {"x": 0, "y": 0, "width": width, "height": height},
+                    "display_width": display_width, "display_height": display_height}
+        # FFmpeg includes the divisor INSIDE av_rescale: round to the nearest
+        # multiple of two (ties upward), not nearest pixel followed by floor.
+        # YUV420 padding also aligns its offsets to the 2px chroma grid.
+        even_nearest = lambda n, d: (n + d) // (2 * d) * 2
+        w = max(2, min(720, even_nearest(1280 * display_width, display_height)))
+        h = max(2, min(1280, even_nearest(720 * display_height, display_width)))
+        return {"is_proxy": True, "width": 720, "height": 1280,
+                "content_rect": {"x": (720 - w) // 4 * 2, "y": (1280 - h) // 4 * 2,
+                                 "width": w, "height": h},
+                "display_width": display_width, "display_height": display_height}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
 def validate_recipe(recipe, operation="render"):
     if operation not in {"probe", "render"} or not isinstance(recipe, dict):
         raise error()
+    version = recipe.get("version")
     profile = recipe.get("profile")
-    if recipe.get("version") != 1 or type(recipe.get("version")) is not int or profile not in (LEGACY_PROFILE, PROFILE):
+    if type(version) is not int or version not in (1, 2) or profile not in (LEGACY_PROFILE, PROFILE):
         raise error()
     raw_sources, raw_clips = recipe.get("sources"), recipe.get("clips")
     if not isinstance(raw_sources, list) or not 1 <= len(raw_sources) <= 128 or not isinstance(raw_clips, list):
@@ -120,7 +185,7 @@ def validate_recipe(recipe, operation="render"):
             row["has_audio"] = source["has_audio"]
         sources.append(row)
     if operation == "probe":
-        if len(sources) != 1 or raw_clips:
+        if version != 1 or len(sources) != 1 or raw_clips:
             raise error()
         return {"version": 1, "profile": profile, "sources": sources, "clips": []}
     if not 1 <= len(raw_clips) <= 512:
@@ -144,6 +209,8 @@ def validate_recipe(recipe, operation="render"):
         clips.append({"id": cid, "source_id": sid, "start_ms": start, "end_ms": end,
                       "start_frame": start_frame, "end_frame": end_frame,
                       "fit": fit, "mute": mute, "transition": transition})
+        if version == 2:
+            clips[-1].update(normalize_mirror(clip))
     if clips[-1]["transition"] != "cut":
         raise error("video_editing_last_transition", "最后一个片段不能设置过渡")
     for index, clip in enumerate(clips):
@@ -151,7 +218,7 @@ def validate_recipe(recipe, operation="render"):
         outgoing = FADE_FRAMES if clip["transition"] == "fade" else 0
         if clip["end_frame"] - clip["start_frame"] < incoming + outgoing:
             raise error("video_editing_transition_too_long", "片段 %s 长度不足以容纳两侧0.3秒过渡" % clip["id"])
-    recipe = {"version": 1, "profile": profile, "sources": sources, "clips": clips}
+    recipe = {"version": version, "profile": profile, "sources": sources, "clips": clips}
     if output_frames(recipe) > MAX_DURATION_MS * FPS // 1000:
         raise error("video_editing_duration_limit", "成片时长超出剪辑参数可表示范围")
     return recipe

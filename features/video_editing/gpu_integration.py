@@ -97,7 +97,8 @@ def public_result(value, payload):
         if not isinstance(metadata, dict) or type(metadata.get("duration_ms")) is not int or metadata["duration_ms"] <= 0:
             raise runtime.runtime_error("gpu_result_cache_unverified")
         result["metadata"] = {k: metadata[k] for k in ("duration_ms", "width", "height", "fps", "has_audio", "video_codec", "audio_codec", "audio_duration_ms",
-                                                      "format_name", "container_brand", "pixel_format", "sample_aspect_ratio") if k in metadata}
+                                                      "format_name", "container_brand", "pixel_format", "sample_aspect_ratio",
+                                                      "rotation", "display_width", "display_height") if k in metadata}
         if value.get("artifact"):
             result["artifact"] = _artifact(value["artifact"], uploaded=False)
         result["thumbnail"] = _artifact(value.get("thumbnail"))

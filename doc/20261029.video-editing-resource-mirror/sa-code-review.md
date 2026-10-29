@@ -1,0 +1,3 @@
+# 代码审查
+
+独立资源工作流复核projects_v2：发现recipe错误类型未被局部捕获，已修复为同时处理VideoEditingError与DramaSynthesisError（BUG-001）。省略unit/clip ID时改为稳定默认编号，避免创建操作重放时draft_hash变化。渲染审查要求保留v1指纹、compact导出profile及代理几何。剩余集成与发布检查见测试报告。
