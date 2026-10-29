@@ -73,3 +73,37 @@ same-account reauthorization preserving IDs/ownership/language/approval, strict
 legacy-token handling, disabled-account preservation, balance queries without
 authorized users, strict USD 10 threshold/rearming, and real Feishu mention
 payload/receipt. Existing OAuth and monitor regression suites also apply.
+
+## Production acceptance, 2026-10-29
+
+The user confirmed that the isolated App tested on October 19 is Lisa's App
+and authorized production replacement. Runtime code
+`6092f5c7c897fdf098ee4f15488b764ec71e2621` was fetched from GitHub and deployed
+at approximately 11:00 Asia/Shanghai. All 101 focused/OAuth/monitor tests passed
+on the CPU server. Both HTML scripts passed syntax validation.
+
+An in-flight old-App video was allowed to complete before cutover (one attempt,
+published receipt present). The cutover preserved all publication ledgers and
+restored the original scheduler/timer states. The OAuth sidecar, Auto service,
+main API and pool scheduler are healthy. Private rollback evidence is in the
+backup manifest named by the deployment; rollback constraints above still apply.
+
+The authenticated browser shows Lisa API, 103 total accounts, 0 authorized,
+99 pending reauthorization and 4 disabled. The pending filter returns 99 rows.
+Of the 99, 96 were previously active and 3 had pre-existing errors; a new grant
+does not establish that an X-suspended account can publish. Existing disabled
+accounts remain disabled. The normal login flow reaches the expected Lisa App
+consent page with the original scopes and callback.
+
+The production-bound official credit query returned USD 109.97 at 11:00:47
+Asia/Shanghai (prepaid 105.00, free 4.97). The existing CPU systemd timer checks
+hourly. Its private configuration now targets the requested group with a real
+Lisa mention and a strict USD 10 threshold. The actual monitor service exited
+successfully. No low-balance message was sent because the threshold was not met;
+the new group's actual send has not been exercised by a live low-balance event.
+
+**Publication acceptance remains pending.** The user will have an operator
+reauthorize an account and notify this chat. No new-App production Post was
+created in this acceptance phase. After notification, verify the new grant and
+unchanged ownership/settings, then reconcile one new normal publication with
+its ledger and X readback. Do not reuse historical or unknown attempts.
