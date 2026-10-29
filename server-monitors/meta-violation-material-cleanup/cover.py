@@ -23,10 +23,15 @@ from meta_violation_cleanup.cover_store import CoverStore
 from meta_violation_cleanup.cover_graph import CoverGraph
 from meta_violation_cleanup.cover_payload import build_payload, payload_key, PayloadError
 from meta_violation_cleanup.graph import GraphError
-from meta_violation_cleanup.runtime import Runtime, CST, process_lock, legacy_delete_lock, now, digest
+from meta_violation_cleanup.runtime import Runtime, CST, process_lock, legacy_delete_lock, now, digest, LegacyPriorityWindow
+from meta_violation_cleanup.cover_performance import idle_delay, record_cycle
 from meta_violation_cleanup.notifications import Notifier
 from meta_violation_cleanup.runner import safe_error
 from meta_violation_cleanup.throttle import Governor
+
+
+class CoverWritePaused(RuntimeError):
+    exit_status = 78
 
 
 def batch_id(prefix='cover'):
@@ -196,13 +201,16 @@ def work(config, store, audit, stop, once, max_ads):
     store.recover_inflight()
     pause = Path(config['runtime_dir']) / 'cover-write-paused.json'
     if pause.exists():
-        raise RuntimeError('cover_writes_paused_requires_review')
-    governor = Governor(maximum=32, per_account=2, rps=24, initial_limit=32, ramp_up=False)
+        raise CoverWritePaused('cover_writes_paused_requires_review')
+    governor = Governor(maximum=32, per_account=2, rps=24, initial_limit=32, ramp_up=True)
     next_reconcile = 0
     recovered_reservations = False
     while not stop():
         source = CoverSource(config)
         worker = None
+        result = {}
+        cycle_started = time.monotonic()
+        cycle_started_at = now()
         try:
             tokens = source.credentials()
             with legacy_delete_lock(config['legacy_lock'], stop) as lease:
@@ -216,7 +224,7 @@ def work(config, store, audit, stop, once, max_ads):
                         return True
                 factory = lambda: CoverGraph(tokens, version=config.get('graph_version', 'v25.0'),
                                              governor=governor, stop=stopped)
-                worker = CoverWorker(config, store, source, factory, shared, stop=stopped)
+                worker = CoverWorker(config, store, source, factory, shared, stop=stopped, governor=governor)
                 if not recovered_reservations:
                     recovered = worker.recover_reservations()
                     recovered_reservations = True
@@ -228,12 +236,24 @@ def work(config, store, audit, stop, once, max_ads):
                     if reconciled:
                         print(json.dumps({'reconciliation': reconciled}), flush=True)
                 result = worker.run_once(max_ads=max_ads, process_deletes=True)
-                metrics = {'at': now(), 'result': {k:v for k,v in result.items() if k not in ('task_results','deletion_results')},
+                metrics = {'at': now(), 'started_at': cycle_started_at,
+                           'cycle_seconds': round(time.monotonic() - cycle_started, 3),
+                           'result': {k:v for k,v in result.items() if k not in ('task_results','deletion_results')},
                            'governor': governor.snapshot()}
                 print(json.dumps(metrics, ensure_ascii=False), flush=True)
+                try:
+                    record_cycle(config['runtime_dir'], metrics)
+                except OSError as exc:
+                    print(json.dumps({'performance_record_error': safe_error(exc)}), flush=True)
                 if result.get('halted'):
                     from run import CliError
                     raise CliError(result.get('halt_reason') or 'cover_worker_halted')
+        except LegacyPriorityWindow:
+            print(json.dumps({'at': now(), 'handoff': 'legacy_priority_window'}), flush=True)
+            # Re-enter the lock, wait out the priority window, then reacquire.
+            if once:
+                break
+            continue
         except InterruptedError:
             if not stop():
                 raise
@@ -255,7 +275,7 @@ def work(config, store, audit, stop, once, max_ads):
             store.begin_batch(bid, {})
             store.fail_batch(bid, failure)
             notify_completed(store, audit, config)
-            raise
+            raise CoverWritePaused('cover_writes_paused_requires_review') from exc
         finally:
             if worker:
                 worker.close()
@@ -263,7 +283,8 @@ def work(config, store, audit, stop, once, max_ads):
         notify_completed(store, audit, config, include_pending=True)
         if once:
             break
-        for _ in range(60):
+        delay = idle_delay(result, bool(store.ready_tasks(limit=1)))
+        for _ in range(delay):
             if stop():
                 break
             time.sleep(1)
@@ -317,4 +338,4 @@ if __name__ == '__main__':
         sys.exit(main())
     except Exception as exc:
         print(json.dumps({'error': safe_error(exc)}, ensure_ascii=False), file=sys.stderr)
-        sys.exit(1)
+        sys.exit(getattr(exc, 'exit_status', 1))

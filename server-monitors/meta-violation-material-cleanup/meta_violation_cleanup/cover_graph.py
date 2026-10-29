@@ -5,6 +5,7 @@ Every mutation requires a durable before_send callback after its slot is held.
 Transport-level retries are disabled and writes are never replayed here.
 """
 import json
+import time
 import requests
 
 from .cover_payload import TOP_PRESERVE, TOP_UNSUPPORTED, creation_payload
@@ -38,7 +39,11 @@ class _BudgetedSession:
 
     def request(self, method, *args, **kwargs):
         method = method.upper()
+        timings = getattr(self, 'timings', None)
+        queued = time.monotonic()
         with self.governor.slot(self.account, self.stop):
+            if timings:
+                timings.add('graph_budget_wait', time.monotonic() - queued)
             if method in ('POST', 'DELETE'):
                 if not callable(self.before_send):
                     raise RequestNotSent('durable_write_guard_required')
@@ -49,7 +54,12 @@ class _BudgetedSession:
                 # Set before the call: an exception from requests cannot prove
                 # the remote endpoint did not receive this request.
                 self.request_sent = True
-            response = self.session.request(method, *args, **kwargs)
+            started = time.monotonic()
+            try:
+                response = self.session.request(method, *args, **kwargs)
+            finally:
+                if timings:
+                    timings.add('http_' + method.lower(), time.monotonic() - started)
             self.governor.observe(response, self.account)
             return response
 

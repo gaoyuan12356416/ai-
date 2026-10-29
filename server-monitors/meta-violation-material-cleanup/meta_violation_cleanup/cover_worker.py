@@ -17,6 +17,7 @@ from .cover_store import CoverStoreError
 from .graph import GraphError
 from .policy import _feedback_empty
 from .throttle import RequestNotSent
+from .cover_performance import Timings, timed
 
 
 _WAITING = {'DISAPPROVED', 'PENDING_REVIEW', 'IN_PROCESS', 'PREAPPROVED'}
@@ -73,10 +74,12 @@ def _fair(rows):
 
 class CoverWorker:
     def __init__(self, config, store, source, graph_factory, shared_store,
-                 stop=lambda: False, clock=time.monotonic):
+                 stop=lambda: False, clock=time.monotonic, governor=None):
         self.config, self.store, self.source = config, store, source
         self.graph_factory, self.shared = graph_factory, shared_store
         self.external_stop, self.clock = stop, clock
+        self.governor = governor
+        self.timings = Timings(clock)
         self.halted = threading.Event()
         self.halt_reason = ''
         self.local = threading.local()
@@ -100,6 +103,8 @@ class CoverWorker:
     def _graph(self):
         if not hasattr(self.local, 'graph'):
             self.local.graph = self.graph_factory()
+            if hasattr(self.local.graph, 'http'):
+                self.local.graph.http.timings = self.timings
             with self.mutex:
                 self.clients.append(self.local.graph)
         return self.local.graph
@@ -248,6 +253,7 @@ class CoverWorker:
             self.store.finish_resource(key, result['status'], result)
             return dict(result, resource_key=key)
 
+    @timed('ad_attempt')
     def _execute(self, task, context):
         if not self.store.claim_task(task['id']):
             return {'task_id': task['id'], 'status': 'not_claimed'}
@@ -256,6 +262,7 @@ class CoverWorker:
         uncertain_bind = False
         graph = self._graph()
         result = {}
+        phase, phase_at = 'ad_preflight', self.clock()
         try:
             self._before(context)
             if context.get('validated') is not True:
@@ -291,6 +298,8 @@ class CoverWorker:
             payload = build_payload(old, context['cover_url'])
             if not payload.get('name'):
                 payload['name'] = 'cover-' + payload_key(task['account_id'], payload)[:24]
+            self.timings.add(phase, self.clock() - phase_at)
+            phase, phase_at = 'creative_prepare_verify', self.clock()
             resource = self._resource(graph, task, context, payload)
             if resource['status'] != 'accepted':
                 return self._finish(task, 'unknown' if resource['status'] == 'unknown' else 'failed',
@@ -300,6 +309,8 @@ class CoverWorker:
             if new_id == task['old_creative_id']:
                 self._halt('replacement_creative_unchanged')
                 return self._finish(task, 'failed', {'reason': 'replacement_creative_unchanged', 'request_sent': False})
+            self.timings.add(phase, self.clock() - phase_at)
+            phase, phase_at = 'ad_bind_verify', self.clock()
             self._before(context)
             reservation = self.shared.reserve_cover_resources(owner, task['account_id'],
                 ad_id=task['ad_id'], creative_ids=(task['old_creative_id'], new_id))
@@ -392,6 +403,7 @@ class CoverWorker:
                 dict(saved.get('result') or {}, reason='worker_or_ledger_error',
                      error=_error(exc), request_sent=uncertain_bind))
         finally:
+            self.timings.add(phase, self.clock() - phase_at)
             if reserved:
                 try:
                     self.shared.release_cover_resources(owner, unknown=uncertain_bind)
@@ -405,16 +417,39 @@ class CoverWorker:
         if not isinstance(max_ads, int) or not 1 <= max_ads <= 100000:
             raise ValueError('invalid_max_ads')
         started = self.clock()
-        tasks = list(_fair(self.store.ready_tasks(limit=max_ads * 4)))[:max_ads]
+        tasks = deque(_fair(self.store.ready_tasks(limit=max_ads * 4)))
         outputs = []
+        selected = 0
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            for offset in range(0, len(tasks), self.batch_size):
+            while tasks and selected < max_ads:
                 if self.stopped():
                     break
-                wave = tasks[offset:offset + self.batch_size]
+                if self.governor is not None:
+                    try:
+                        with self.timings.measure('admission_wait'):
+                            self.governor.wait_ready(self.stopped)
+                    except RequestNotSent:
+                        break
+                # Prepare only work that can start now. Re-evaluate after each
+                # wave because pressure may have changed the shared budget.
+                budget = self.governor.snapshot() if self.governor is not None else {}
+                capacity = min(self.batch_size, self.workers,
+                               budget.get('concurrency_limit', self.workers), max_ads - selected)
+                per_account = budget.get('per_account_limit', 2)
+                wave, deferred, accounts = [], deque(), Counter()
+                while tasks and len(wave) < capacity:
+                    task = tasks.popleft()
+                    if accounts[task['account_id']] >= per_account:
+                        deferred.append(task)
+                    else:
+                        wave.append(task)
+                        accounts[task['account_id']] += 1
+                tasks.extendleft(reversed(deferred))
+                selected += len(wave)
                 # This is deliberately before thread submission: no worker may
                 # consume a FIFO SQL session or mix source snapshots.
-                prepared = self.source.prepare_candidates(wave)
+                with self.timings.measure('source_prepare'):
+                    prepared = self.source.prepare_candidates(wave)
                 at = self.clock()
                 futures = {}
                 for task in wave:
@@ -428,16 +463,21 @@ class CoverWorker:
                     except Exception:
                         self._halt('worker_future_failed')
                         raise
-        deletion = self.process_deletions() if process_deletes and not self.stopped() else []
+        with self.timings.measure('cleanup_phase'):
+            deletion = self.process_deletions() if process_deletes and not self.stopped() else []
         governors = {id(g.governor): g.governor for g in self.clients if hasattr(g, 'governor')}
         metrics = [g.snapshot() for g in governors.values()]
         return {'tasks': dict(Counter(item['status'] for item in outputs)),
                 'deletions': dict(Counter(item['status'] for item in deletion)),
                 'task_results': outputs, 'deletion_results': deletion,
                 'governor': metrics[0] if len(metrics) == 1 else metrics,
+                'timings': self.timings.snapshot(),
+                'defer_reasons': dict(Counter(item.get('result', {}).get('reason', 'unspecified')
+                    for item in outputs if item['status'] == 'pending')),
                 'seconds': round(self.clock() - started, 3),
                 'halted': self.halted.is_set(), 'halt_reason': self.halt_reason}
 
+    @timed('reference_scan')
     def _scan_references(self, group):
         """Batch known blockers, then read one complete inventory per account."""
         account, user = group[0]['account_id'], group[0]['user_id']
@@ -582,6 +622,7 @@ class CoverWorker:
         # object errors never constitute deletion proof.
         return graph.reconcile('creative', creative, user, account)
 
+    @timed('creative_delete_verify')
     def _delete_one(self, row, checked_at):
         account, creative, user = row['account_id'], row['creative_id'], row['user_id']
         owner = 'cover-delete:' + account + ':' + creative

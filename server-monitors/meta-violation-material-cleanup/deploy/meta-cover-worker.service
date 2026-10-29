@@ -14,7 +14,9 @@ Environment=SQL_GATE_BYPASS=0
 ExecStart=/usr/bin/env python3 cover.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json work --max-ads 256
 KillSignal=SIGINT
 TimeoutStopSec=180
-Restart=no
+Restart=on-failure
+RestartSec=15s
+RestartPreventExitStatus=78
 UMask=0077
 
 [Install]

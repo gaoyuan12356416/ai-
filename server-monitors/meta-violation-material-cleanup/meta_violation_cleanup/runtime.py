@@ -119,6 +119,10 @@ def _legacy_priority(t=None):
     return (t.hour == 9 and t.minute >= 55) or (t.hour == 10 and t.minute < 5)
 
 
+class LegacyPriorityWindow(InterruptedError):
+    """Cooperative handoff, not a worker failure or a write-pause reason."""
+
+
 class _LegacyLease:
     def __init__(self, stop):
         self.stop = stop
@@ -128,7 +132,7 @@ class _LegacyLease:
             raise InterruptedError('stopping')
         if _legacy_priority():
             # The caller drains the current request and releases the lock.
-            raise InterruptedError('legacy_priority_window')
+            raise LegacyPriorityWindow('legacy_priority_window')
 
 
 @contextmanager
