@@ -27,11 +27,11 @@
 在指定 GitHub release 的 `server-monitors/meta-violation-material-cleanup` 目录中运行，`<release>` 和 `<backup>` 均替换为安装器核对后的绝对路径：
 
 ```bash
-python3 deploy/install_cover.py prepare <release> --active-ledgers-only
+python3 deploy/install_cover_worker.py prepare <release>
 python3 deploy/install_cover_worker.py apply <backup>
 ```
 
-`--active-ledgers-only` 前提是旧清理 service/timer 已停用，安装器会核对并备份活动共享/封面账本，旧历史账本保留原位。`apply` 切换代码和 worker unit，不重启主 API。
+本次使用固定 scope=cover-worker-only 的窄 prepare，不接受 --active-ledgers-only：始终一致备份 cover.sqlite3、cover-audit/runs.sqlite3、共享 tasks.sqlite3 三份活动账本，旧历史账本保留原位。它要求三个封面服务空闲、旧清理配置/服务/timer停用；候选和当前封面 Store 文件必须完全同 hash，API 的 11 个封面预约/一次删除/事务/claim 方法与 3 个辅助函数 AST 必须兼容。只允许无关 API 方法变更，不替换 API，不运行共享 schema 迁移，不中断无关删除任务。原通用安装器和它的全局活跃任务保护保持原样。apply 复验上述边界，再切换代码和 worker/通知 unit，不重启主 API。
 
 精确回滚入口：
 
@@ -41,3 +41,4 @@ python3 <release>/server-monitors/meta-violation-material-cleanup/deploy/install
 ```
 
 安装器回滚保留最新账本并保持执行停止。核对状态和未决结果后，才决定是否启动旧 worker。实际 SHA、备份路径和验证结果待部署后填写。
+共享账本约1.9GB，窄prepare使用SQLite online backup分步复制（pages=256、busy sleep=0.05）并执行integrity_check，缩短单步读锁占用，允许无关任务在备份期间继续写。每份SQLite备份各自一致，不声称多个文件构成同一跨库瞬时快照；它们仅为审计备份，不作为回滚恢复输入。

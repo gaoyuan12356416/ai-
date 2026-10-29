@@ -31,3 +31,8 @@ Linux候选验证、GitHub提交/拉取hash、备份/回滚路径、暂停样本
 ## 主代理完整本地回归
 
 主代理实际运行 `python -m unittest discover -s tests`：728 项，36.047 秒，OK（1 项跳过）；compileall 和 git diff --check 通过。随后补入的低水位查询修复另经独立 scheduler 7 项测试通过。Linux 候选和生产部署尚未执行，当前结论仅为本地验证完成。
+## 窄部署路径评审与候选Linux验证
+
+通用prepare因另一后台删除任务活跃及API无关查询/审批方法已演进而拒绝；这不要求暂停其他任务。本次新增worker专用prepare，仅封面模块切换，原通用部署gate不修改。静态审查确认：candidate/current封面Store精确同hash，API相关封面保护AST比较在prepare前后及apply复验；不实例化共享Store、不修改API或业务账本，只做一致快照备份。rollback仅恢复代码链接/units，保留备份后新增回执。
+
+独立运行 test_cover_worker_install.py：5项通过，包括无关active任务可保留、候选Store变化拒绝、封面service活跃拒绝、API保护变化拒绝、回滚不覆盖新回执。主代理报告候选业务release55d706f在Linux运行完整728项全部通过，无跳过。新窄部署代码尚待对应候选服务器验证与真实切换，生产仍未验收。
