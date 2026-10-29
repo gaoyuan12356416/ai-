@@ -314,3 +314,29 @@ prefix `scope-recovery-20261029-reference-v7`, preserving all5,208 pending
 Creatives. Evidence is `restart-202121-recovery.json`; snapshots before this
 resume use `-before-v7.json`. This recovery did not restart or deploy the API.
 Other API restarts must be coordinated while this process-owned execution runs.
+
+## Complete Video audit after pending execution
+
+Creative v7 finished naturally with no pending/in-progress objects. The first
+audit visited145 account/credential groups, but12 credentialed accounts could
+not finish within the60-second scan budget. Its historical `deletion_receipt`
+category also includes prior account-absence confirmations; use the underlying
+ledger to distinguish those from actual DELETE success receipts.
+
+The standalone audit now reads every recorded Video/account pair, preserving
+its original state and receipt basis separately from the fresh inventory result.
+Each account has a600-second bounded scan,20-second page requests and up to three
+attempts of a transiently failed GET page. Finished pages remain in memory;
+permission errors are not retried, pagination/size guards remain, and incomplete
+reads can only prove sightings, never absence. No cursors, URLs or tokens are
+stored in progress. An interrupted process starts a fresh inventory. Active-page
+progress is visible without editing any ledger or original deletion response.
+
+Run the new release's `scripts/audit_meta_scope_video_absence.py` with
+`--after-pending-controller --job 4fd7fe672fed584b82461e47c24b1961 --output
+/mnt/data-disk/meta-ad-asset-delete/scope-recovery-20261029-brands-v2/video-absence-audit-complete.json`.
+It waits for the existing pending Video controller, including its old final
+audit, to finish. The new audit is a separate GET-only process; no production
+module deployment or API restart is required. Keep the prior audit files.
+Five targeted inventory tests and two existing continuation tests cover transient
+page retry, permissions, partial evidence, invalid pagination and receipt labels.
