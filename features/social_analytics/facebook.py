@@ -770,6 +770,11 @@ def read_facebook(app):
                             if pool_owner["status"] == "frozen":
                                 identity.update(obj(pool_owner["identity_json"]))
                                 identity["owner_source"] = "pool_item_added_by"
+                                # Classification is a read-time view of the same
+                                # frozen pool proof; retain historical identities.
+                                kind = obj(pool_owner["evidence_json"])["source_kind"]
+                                identity.update(link_type=kind, link_type_label={
+                                    "pool": "Page 素材池", "group_pool": "组素材池"}[kind])
                         if record["status"] == "frozen":
                             # Use immutable evidence, never today's Page owner or
                             # campaign text, to separate reused legacy IDs.

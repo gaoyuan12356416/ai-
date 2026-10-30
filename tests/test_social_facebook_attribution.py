@@ -121,6 +121,7 @@ class FacebookAttributionTests(unittest.TestCase):
         self.assertEqual({row["owner_label"] for row in catalog}, {"郜远"})
         self.assertEqual({row["sub_user_id"] for row in catalog}, {"248"})
         self.assertEqual({row["site_id"] for row in catalog}, {"2049", "2310"})
+        self.assertEqual({row["link_type"] for row in catalog}, {"auto_template", "manual"})
         self.assertEqual({row["channel"] for row in catalog}, {"facebook:999"})
         self.assertEqual({row["drama_label"] for row in catalog}, {"English Drama"})
         self.assertTrue(all(row["publications"][0]["date"] == "2026-10-19" for row in catalog))
@@ -157,6 +158,7 @@ class FacebookAttributionTests(unittest.TestCase):
             self.assertEqual(before[key], after[key])
         new = next(row for row in self.read(LATER)[0] if row["site_id"] == "2310")
         self.assertEqual(new["owner"], "editor")
+        self.assertEqual((new["link_type"], new["link_type_label"]), ("group_pool", "组素材池"))
         self.assertEqual(new["sub_user_id"], "248")
         self.assertEqual(len(new["publications"]), 1)
         self.change("UPDATE drama_admin_user SET name='Renamed',tenant_key='elsewhere' WHERE user_id='editor'", path=self.users)
@@ -166,7 +168,48 @@ class FacebookAttributionTests(unittest.TestCase):
     def test_page_pool_uses_exact_item_uploader(self):
         self.add_pool_source("pool")
         self.run_collect()
-        self.assertEqual(next(row for row in self.read()[0] if row["site_id"] == "2310")["owner"], "editor")
+        new = next(row for row in self.read()[0] if row["site_id"] == "2310")
+        self.assertEqual(new["owner"], "editor")
+        self.assertEqual((new["link_type"], new["link_type_label"]), ("pool", "Page 素材池"))
+
+    def test_pool_breakdown_preserves_totals_filters_csv_and_visibility(self):
+        from features.social_analytics import report
+        self.add_pool_source()
+        self.run_collect()
+        before = self.saved("2310")
+        catalog, errors, metadata = self.read()
+        self.assertFalse(errors)
+        metrics = [dict(platform="facebook", site_id=row["site_id"], campaign_id=row["key"][0],
+                        date="2026-10-19", clicks=11, views=17, installs=3, conversions=1,
+                        revenue_cents=123, refund_cents=2) for row in catalog]
+        actor = dict(tenant_key="tenant-A", user_id="creator", role="admin")
+        query = dict(start=["2026-10-19"], end=["2026-10-19"], platform=["facebook"],
+                     group_by=["link_type"])
+
+        def build(rows, user=actor, **filters):
+            return report.summarize(rows, metrics, user, report.parameters(dict(query, **filters)),
+                                    NOW, source_metadata=metadata)
+
+        result = build(catalog)
+        legacy = copy.deepcopy(catalog)
+        for row in legacy:
+            if row["site_id"] == "2310":
+                row.update(link_type="manual", link_type_label="手动发布")
+        self.assertEqual(result["totals"], build(legacy)["totals"])
+        self.assertTrue(result["quality"]["complete"])
+        self.assertEqual({row["link_type"] for row in result["all_rows"]}, {"auto_template", "group_pool"})
+        pool = build(catalog, link_type=["group_pool"])
+        self.assertEqual(pool["totals"]["published_count"], 1)
+        self.assertEqual(pool["totals"]["links"], 1)
+        self.assertEqual(pool["totals"]["revenue_cents"], 123)
+        self.assertEqual(pool["totals"]["clicks"], 11)
+        self.assertEqual(build(catalog, link_type=["manual"])["totals"]["published_count"], 0)
+        self.assertIn("组素材池", report.csv_export(pool).decode("utf-8-sig"))
+        self.assertIn(dict(value="group_pool", label="组素材池"),
+                      report.options(catalog, actor)["options"]["link_type"])
+        self.assertEqual(build(catalog, dict(actor, role="user"))["totals"]["published_count"], 1)
+        self.assertEqual(build(catalog, dict(actor, tenant_key="elsewhere"))["all_rows"], [])
+        self.assertEqual(before, self.saved("2310"))
 
     def test_pool_binding_mismatch_does_not_fall_back_to_scheduler(self):
         self.add_pool_source()

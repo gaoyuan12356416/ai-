@@ -71,7 +71,7 @@ def parameters(query):
         filters[key] = set(values)
     if filters["platform"] - set(PLATFORMS):
         raise ReportError("渠道尚未接入")
-    if filters["link_type"] - {"auto", "manual", "auto_template", "system"}:
+    if filters["link_type"] - {"auto", "manual", "auto_template", "system", "pool", "group_pool"}:
         raise ReportError("链接类型无效")
     search = one("search", "").strip()
     if len(search) > 200 or any(ord(c) < 32 for c in search):
