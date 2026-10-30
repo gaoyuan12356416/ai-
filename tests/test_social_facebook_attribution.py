@@ -126,6 +126,80 @@ class FacebookAttributionTests(unittest.TestCase):
         self.assertTrue(all(row["publications"][0]["date"] == "2026-10-19" for row in catalog))
         self.assertTrue(all(value["freshness"] == "fresh" for value in meta.values()))
 
+    def add_pool_source(self, kind="group_pool"):
+        with database(self.source) as conn:
+            conn.execute("ALTER TABLE fb_video_task ADD COLUMN source_kind TEXT DEFAULT 'manual'")
+            conn.execute("ALTER TABLE fb_video_task ADD COLUMN pool_instance_id TEXT DEFAULT ''")
+            saved = copy.deepcopy(self.snapshot)
+            item = dict(id=7, tenant_key="tenant-A", material_id="55", added_by="editor",
+                        task_id=NEW_ID, batch_id="batch", created_at_utc=CREATED)
+            if kind == "group_pool":
+                saved[kind] = dict(run_id=3)
+                write_table(conn, "fb_group_pool_item", [item], ("id",))
+                write_table(conn, "fb_group_pool_reservation", [dict(tenant_key="tenant-A", material_id="55",
+                    item_id=7, run_id=3, task_id=NEW_ID)], ("item_id", "run_id"))
+                write_table(conn, "fb_group_pool_run", [dict(id=3, tenant_key="tenant-A", batch_id="batch")], ("id",))
+            else:
+                saved[kind] = dict(item_id=7, config_instance_id="pool-config")
+                item.update(page_id="999", config_instance_id="pool-config")
+                write_table(conn, "fb_video_pool_item", [item], ("id",))
+            conn.execute("UPDATE fb_video_task SET source_kind=?,pool_instance_id='pool-config',snapshot_json=?",
+                         (kind, json.dumps(saved)))
+
+    def test_pool_owner_repairs_existing_frozen_history_without_changing_publisher_evidence(self):
+        self.run_collect()
+        before = self.saved("2310")
+        self.add_pool_source()
+        result = self.run_collect(LATER)
+        self.assertEqual(result["status"], "complete")
+        after = self.saved("2310")
+        for key in ("identity_json", "evidence_json", "evidence_hash", "publications_json", "frozen_at"):
+            self.assertEqual(before[key], after[key])
+        new = next(row for row in self.read(LATER)[0] if row["site_id"] == "2310")
+        self.assertEqual(new["owner"], "editor")
+        self.assertEqual(new["sub_user_id"], "248")
+        self.assertEqual(len(new["publications"]), 1)
+        self.change("UPDATE drama_admin_user SET name='Renamed',tenant_key='elsewhere' WHERE user_id='editor'", path=self.users)
+        self.run_collect(LATER)
+        self.assertEqual(next(row for row in self.read(LATER)[0] if row["site_id"] == "2310")["owner_label"], "编辑人")
+
+    def test_page_pool_uses_exact_item_uploader(self):
+        self.add_pool_source("pool")
+        self.run_collect()
+        self.assertEqual(next(row for row in self.read()[0] if row["site_id"] == "2310")["owner"], "editor")
+
+    def test_pool_binding_mismatch_does_not_fall_back_to_scheduler(self):
+        self.add_pool_source()
+        self.change("UPDATE fb_group_pool_reservation SET item_id=8")
+        self.assertEqual(self.run_collect()["status"], "partial")
+        new = next(row for row in self.read()[0] if row["site_id"] == "2310")
+        self.assertEqual(new["owner"], "")
+        self.assertEqual(len(new["publications"]), 1)
+
+    def test_pool_owner_change_is_sticky_conflict(self):
+        self.add_pool_source()
+        self.run_collect()
+        self.change("UPDATE fb_group_pool_item SET added_by='runner'")
+        self.run_collect(LATER)
+        self.assertEqual(next(row for row in self.read(LATER)[0] if row["site_id"] == "2310")["owner"], "")
+        self.change("UPDATE fb_group_pool_item SET added_by='editor'")
+        self.run_collect(LATER)
+        self.assertEqual(next(row for row in self.read(LATER)[0] if row["site_id"] == "2310")["owner"], "")
+
+    def test_unknown_pool_task_gains_owner_but_no_success(self):
+        self.add_pool_source()
+        self.change("UPDATE fb_video_task SET status='unknown',unknown_outcome=1")
+        self.run_collect()
+        new = next(row for row in self.read()[0] if row["site_id"] == "2310")
+        self.assertEqual(new["owner"], "editor")
+        self.assertFalse(new["publications"])
+
+    def test_pool_missing_or_cross_tenant_owner_remains_unassigned(self):
+        self.add_pool_source()
+        self.change("UPDATE drama_admin_user SET tenant_key='tenant-B' WHERE user_id='editor'", path=self.users)
+        self.run_collect()
+        self.assertEqual(next(row for row in self.read()[0] if row["site_id"] == "2310")["owner"], "")
+
     def test_initial_empty_new_source_is_complete_not_failure(self):
         self.change("DELETE FROM fb_video_task")
         self.change("DELETE FROM fb_video_link")

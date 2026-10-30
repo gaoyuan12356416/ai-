@@ -195,9 +195,12 @@ def _read_old(conn):
 
 
 def _read_new(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fb_video_task)")}
+    pool_columns = ",source_kind,pool_instance_id" if "source_kind" in columns else ""
     tasks = rows(conn, "fb_video_task", "task_id,batch_id,tenant_key,owner_user_id,page_id,material_id,"
                  "content_id,status,snapshot_json,ledger_id,long_url,short_url,graph_post_id,unknown_outcome,"
-                 "created_at_utc,updated_at_utc")
+                 "created_at_utc,updated_at_utc" + pool_columns)
+    pool_owners = _read_pool_owners(conn, tasks)
     links = index(rows(conn, "fb_video_link", "id,task_id,long_url,short_url,created_at_utc"), "id")
     batches = index(rows(conn, "fb_video_batch",
                          "batch_id,tenant_key,owner_user_id,owner_name,operation_id,created_at_utc"), "batch_id")
@@ -219,10 +222,107 @@ def _read_new(conn):
                         snapshot=saved, link=links.get(str(task["ledger_id"])),
                         batch=batches.get(str(task["batch_id"])))
         facts = take(task, "status graph_post_id unknown_outcome updated_at_utc")
-        result.append(dict(record_id=str(task["task_id"]), evidence=evidence, facts=facts))
+        record = dict(record_id=str(task["task_id"]), evidence=evidence, facts=facts)
+        if task["task_id"] in pool_owners:
+            record["pool_owner"] = pool_owners[task["task_id"]]
+        result.append(record)
     if {str(task["ledger_id"]) for task in tasks} != set(links):
         raise AttributionError("orphan_link_ledger")
     return result
+
+
+def _read_pool_owners(conn, tasks):
+    """Bind contribution ownership to the exact reserved pool item, never a name.
+
+    Publisher identity and URLs remain unchanged. Keep this evidence separate
+    from the existing immutable publisher ledger so historical rows need no reset.
+    """
+    result = {}
+    for kind, table in (("pool", "fb_video_pool_item"), ("group_pool", "fb_group_pool_item")):
+        selected = [task for task in tasks if task.get("source_kind") == kind]
+        if not selected:
+            continue
+        try:
+            fields = "id,tenant_key,material_id,added_by,task_id,batch_id,created_at_utc"
+            if kind == "pool":
+                fields += ",page_id,config_instance_id"
+            items = defaultdict(list)
+            for item in rows(conn, table, fields):
+                if item["task_id"]:
+                    items[str(item["task_id"])].append(item)
+            reservations = runs = None
+            if kind == "group_pool":
+                reservations = index(rows(conn, "fb_group_pool_reservation",
+                    "tenant_key,material_id,item_id,run_id,task_id"), "task_id")
+                runs = index(rows(conn, "fb_group_pool_run", "id,tenant_key,batch_id"), "id")
+        except (sqlite3.Error, AttributionError):
+            result.update({task["task_id"]: {"error": "pool_owner_source_unavailable"} for task in selected})
+            continue
+        for task in selected:
+            try:
+                matches = items[str(task["task_id"])]
+                if len(matches) != 1:
+                    raise AttributionError("pool_item_binding_not_unique")
+                item = matches[0]
+                same(item["task_id"], task["task_id"])
+                same(item["tenant_key"], task["tenant_key"])
+                same(item["material_id"], task["material_id"])
+                same(item["batch_id"], task["batch_id"])
+                required(item["added_by"])
+                saved = obj(task["snapshot_json"])
+                proof = dict(source_kind=kind, item=item)
+                if kind == "pool":
+                    frozen = obj(saved.get("pool"))
+                    same(item["id"], frozen["item_id"])
+                    same(item["page_id"], task["page_id"])
+                    same(item["config_instance_id"], task["pool_instance_id"], frozen["config_instance_id"])
+                else:
+                    frozen = obj(saved.get("group_pool"))
+                    reservation = reservations[str(task["task_id"])]
+                    same(reservation["item_id"], item["id"])
+                    same(reservation["task_id"], task["task_id"])
+                    same(reservation["material_id"], task["material_id"])
+                    same(reservation["tenant_key"], task["tenant_key"])
+                    run_id = same(reservation["run_id"], frozen["run_id"])
+                    run = runs[run_id]
+                    same(run["tenant_key"], task["tenant_key"])
+                    same(run["batch_id"], task["batch_id"])
+                    proof.update(reservation=reservation, run=run)
+                result[task["task_id"]] = proof
+            except (AttributionError, KeyError, TypeError) as exc:
+                result[task["task_id"]] = {"error": exc.code if isinstance(exc, AttributionError)
+                                          else "pool_item_binding_invalid"}
+    return result
+
+
+def _freeze_pool_owner(conn, record, users, now):
+    record_id = record["record_id"]
+    previous = conn.execute("SELECT * FROM social_facebook_pool_owner WHERE record_id=?", (record_id,)).fetchone()
+    proof = record.get("pool_owner")
+    if proof is None and previous is None:
+        return
+    observed = digest(proof)
+    if previous and previous["frozen_at"]:
+        if previous["status"] == "conflict" or observed != previous["evidence_hash"]:
+            conn.execute("UPDATE social_facebook_pool_owner SET status='conflict',"
+                         "error_code='pool_owner_evidence_changed',observed_hash=?,observed_at=? WHERE record_id=?",
+                         (observed, now, record_id))
+        return
+    identity, status, error, frozen_at = {}, "frozen", "", now
+    try:
+        if not proof or proof.get("error"):
+            raise AttributionError((proof or {}).get("error", "pool_owner_source_missing"))
+        item = proof["item"]
+        identity = user_identity(users, item["added_by"], item["tenant_key"])
+    except (AttributionError, KeyError, TypeError) as exc:
+        status, frozen_at = "unresolved", ""
+        error = exc.code if isinstance(exc, AttributionError) else "pool_owner_identity_invalid"
+    conn.execute("""INSERT INTO social_facebook_pool_owner VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(record_id) DO UPDATE SET evidence_json=excluded.evidence_json,
+        evidence_hash=excluded.evidence_hash,identity_json=excluded.identity_json,
+        status=excluded.status,error_code=excluded.error_code,frozen_at=excluded.frozen_at,
+        observed_hash=excluded.observed_hash,observed_at=excluded.observed_at""",
+        (record_id, canonical(proof), observed, canonical(identity), status, error, frozen_at, observed, now))
 
 
 def source_snapshot(path):
@@ -447,6 +547,10 @@ def schema(conn):
           site_id TEXT PRIMARY KEY,last_attempt_at TEXT NOT NULL,last_success_at TEXT NOT NULL,
           last_full_at TEXT NOT NULL,status TEXT NOT NULL,error_code TEXT NOT NULL,
           row_count INTEGER NOT NULL,conflict_count INTEGER NOT NULL,source_hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS social_facebook_pool_owner(
+          record_id TEXT PRIMARY KEY,evidence_json TEXT NOT NULL,evidence_hash TEXT NOT NULL,
+          identity_json TEXT NOT NULL,status TEXT NOT NULL,error_code TEXT NOT NULL,
+          frozen_at TEXT NOT NULL,observed_hash TEXT NOT NULL,observed_at TEXT NOT NULL);
     """)
     existing = [row[0] for row in conn.execute("SELECT version FROM social_facebook_schema")]
     if not existing:
@@ -573,13 +677,17 @@ def collect(fb_db=DEFAULT_FB_DB, users_db=DEFAULT_USERS_DB, ledger=DEFAULT_LEDGE
                     raise AttributionError("source_duplicate_identity")
                 for record in records:
                     changed += _upsert_record(conn, site, record, users, now) != "reused"
+                    if site == "2310":
+                        _freeze_pool_owner(conn, record, users, now)
                 for previous in conn.execute("SELECT record_id,status FROM social_facebook_identity WHERE site_id=?", (site,)).fetchall():
                     if previous["record_id"] not in ids and previous["status"] != "conflict":
                         conn.execute("""UPDATE social_facebook_identity SET status='conflict',
                             error_code='source_record_missing',status_at=? WHERE site_id=? AND record_id=?""",
                                      (now, site, previous["record_id"]))
                         changed += 1
-                conflicts = conn.execute("SELECT COUNT(*) FROM social_facebook_identity WHERE site_id=? AND status<>'frozen'",
+                conflicts = conn.execute("SELECT COUNT(*) FROM social_facebook_identity i WHERE site_id=? AND "
+                                         "(status<>'frozen' OR (site_id='2310' AND EXISTS (SELECT 1 FROM "
+                                         "social_facebook_pool_owner p WHERE p.record_id=i.record_id AND p.status<>'frozen')))",
                                          (site,)).fetchone()[0]
                 state = "partial" if conflicts else "complete"
                 conn.execute("""INSERT INTO social_facebook_source VALUES(?,?,?,?,?,?,?,?,?)
@@ -629,6 +737,7 @@ def read_facebook(app):
         with readonly(path) as conn:
             if [row[0] for row in conn.execute("SELECT version FROM social_facebook_schema")] != [VERSION]:
                 raise AttributionError("ledger_version_unsupported")
+            pool_owners = index(rows(conn, "social_facebook_pool_owner", "*"), "record_id")
             for site in SITES:
                 key = "facebook:" + site
                 try:
@@ -655,6 +764,12 @@ def read_facebook(app):
                             raise AttributionError("ledger_identity_invalid")
                         identity["publications"] = json.loads(record["publications_json"])
                         identity["attribution_status"] = record["status"]
+                        pool_owner = pool_owners.get(record["record_id"]) if site == "2310" else None
+                        if pool_owner and record["status"] == "frozen":
+                            identity["attribution_status"] = pool_owner["status"]
+                            if pool_owner["status"] == "frozen":
+                                identity.update(obj(pool_owner["identity_json"]))
+                                identity["owner_source"] = "pool_item_added_by"
                         if record["status"] == "frozen":
                             # Use immutable evidence, never today's Page owner or
                             # campaign text, to separate reused legacy IDs.
@@ -662,7 +777,7 @@ def read_facebook(app):
                             fields = parse_link(evidence["task"]["long_url"], site, record["record_id"])
                             identity["effect_source"] = {
                                 "adset_id": fields["af_adset_id"], "ad_id": fields["af_ad_id"]}
-                        if record["status"] != "frozen":
+                        if identity["attribution_status"] != "frozen":
                             # Keep confirmed facts so the common engine can
                             # expose publication conflicts instead of fake zero.
                             identity.update(owner="", owner_label="待归属")
