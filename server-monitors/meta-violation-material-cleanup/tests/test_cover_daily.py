@@ -82,6 +82,8 @@ class DailyTests(unittest.TestCase):
         audit, sent = self.audit, []
         class Sender:
             def __init__(self, *args): pass
+            def send_card(self, run_id, phase, card):
+                return self.send(run_id, phase, json.dumps(card, ensure_ascii=False))
             def send(self, run_id, phase, body):
                 audit.claim_notice(run_id, phase, body)
                 audit.start_notice(run_id, phase)
@@ -150,6 +152,8 @@ class DailyTests(unittest.TestCase):
         class Sender:
             def __init__(self, runtime, path, destination):
                 calls.append((path, destination))
+            def send_card(self, run_id, phase, card):
+                return self.send(run_id, phase, json.dumps(card, ensure_ascii=False))
             def send(self, run_id, phase, body):
                 audit.claim_notice(run_id, phase, body)
                 audit.start_notice(run_id, phase)
@@ -169,6 +173,39 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(frozen['data']['window_start'], '2026-10-28T09:30:00+08:00')
         self.assertIn('每4小时汇总', frozen['body'])
         self.assertIn('每4小时播报一次，汇总近24小时', frozen['body'])
+        self.assertIn('card', frozen)
+
+    def test_card_keeps_warnings_visible_and_timings_in_collapsed_details(self):
+        data = daily.collect(self.store.path, *daily.window(self.at))
+        data.update(worker_state={'ActiveState': 'failed'}, worker_errors=2,
+                    tasks={'succeeded': 4371, 'failed': 68, 'unknown': 2},
+                    current_tasks={'unknown': 6, 'waiting_review': 957})
+        card = daily.report_card(data)
+        panels = [e for e in card['elements'] if e['tag'] == 'collapsible_panel']
+        self.assertEqual(len(panels), 1)
+        self.assertFalse(panels[0]['expanded'])
+        visible = json.dumps([e for e in card['elements'] if e['tag'] != 'collapsible_panel'], ensure_ascii=False)
+        self.assertIn('4,371', visible)
+        self.assertIn('失败 **68**', visible)
+        self.assertIn('未决未知 **6**', visible)
+        self.assertIn('执行异常 2', visible)
+        self.assertIn('进程运行异常', visible)
+        self.assertNotIn('P95', visible)
+        self.assertIn('无样本', visible)
+        self.assertIn('P95', json.dumps(panels, ensure_ascii=False))
+        self.assertIn('不可相加', visible)
+
+    def test_existing_failed_text_report_keeps_original_format(self):
+        config, run_id = self.periodic_config(), 'cover-periodic-4h-20261029T0930'
+        self.audit.begin(run_id, 'run', {})
+        self.audit.artifact(run_id, 'daily-summary.json', {
+            'body': 'original text', 'data': {}, 'recipient': config['cover_report_recipient']})
+        self.audit.claim_notice(run_id, 'end', 'original text')
+        self.audit.finish_notice(run_id, 'end', 'failed', {'request_sent': False})
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), patch.object(daily, 'Notifier') as sender:
+            daily.notify_daily(config, self.audit, self.at)
+        sender.return_value.send.assert_called_once_with(run_id, 'end', 'original text')
+        sender.return_value.send_card.assert_not_called()
 
     def test_periodic_unknown_is_not_replayed_and_daily_receipt_is_preserved(self):
         for run_id in ('cover-daily-20261029', 'cover-periodic-4h-20261029T0930'):

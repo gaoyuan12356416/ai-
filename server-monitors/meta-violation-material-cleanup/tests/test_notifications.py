@@ -58,6 +58,37 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(state['status'], 'failed')
         self.assertFalse(json.loads(state['receipt'])['request_sent'])
 
+    def test_card_auth_failure_retry_uses_frozen_json_uuid_and_deduplicates(self):
+        card = {'elements': [{'tag': 'markdown', 'content': '原始内容'}]}
+        with patch.object(feishu_transport, 'post_json', side_effect=TimeoutError()):
+            with self.assertRaises(RuntimeError):
+                self.notifier.send_card('run-1', 'end', card)
+        old = self.runtime.notice('run-1', 'end')
+        self.assertEqual(old['status'], 'failed')
+        with patch.object(feishu_transport, 'post_json', side_effect=self.transport):
+            receipt = self.notifier.send_card('run-1', 'end', {'elements': []})
+            self.assertEqual(self.notifier.send_card('run-1', 'end', card), receipt)
+        self.assertEqual(len(self.messages), 1)
+        self.assertEqual(self.messages[0]['msg_type'], 'interactive')
+        self.assertEqual(json.loads(self.messages[0]['content']), card)
+        self.assertEqual(self.messages[0]['uuid'], old['uuid'])
+
+    def test_card_unknown_never_retries_or_falls_back_to_text(self):
+        def timeout(url, payload, token=None):
+            if '/auth/' in url:
+                return {'code': 0, 'tenant_access_token': 'test-token'}
+            self.messages.append(payload)
+            raise TimeoutError()
+        with patch.object(feishu_transport, 'post_json', side_effect=timeout):
+            with self.assertRaises(RuntimeError):
+                self.notifier.send_card('run-1', 'end', {'elements': []})
+        self.assertEqual(self.runtime.notice('run-1', 'end')['status'], 'unknown')
+        with patch.object(feishu_transport, 'post_json') as post:
+            with self.assertRaisesRegex(RuntimeError, 'unknown_requires_reconciliation'):
+                self.notifier.send_card('run-1', 'end', {'elements': []})
+        post.assert_not_called()
+        self.assertEqual(len(self.messages), 1)
+
     def test_explicit_group_recipient_uses_chat_id_and_retains_once_delivery(self):
         destination = {'receive_id_type': 'chat_id', 'receive_id': 'oc_b633b6fba2c78f43ef1ebacd314d518c'}
         config = json.loads(self.config.read_text())

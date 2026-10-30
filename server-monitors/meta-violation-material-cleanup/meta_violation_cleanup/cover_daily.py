@@ -293,6 +293,82 @@ def report_body(data):
     return '\n'.join(lines)
 
 
+def report_card(data):
+    """Compact default view; retain the complete frozen report in one panel."""
+    t, d = data['tasks'], data['deletions']
+    ct, cd = data['current_tasks'], data['current_deletions']
+    hours = data.get('report_hours', 24)
+    lookback = data.get('report_lookback_hours',
+                       int(elapsed(data['window_start'], data['window_end']) / 3600))
+    start, end = (datetime.fromisoformat(data[k]).strftime('%m-%d %H:%M')
+                  for k in ('window_start', 'window_end'))
+    state = data.get('worker_state', {}).get('ActiveState', 'unavailable')
+    state_label = {'active': '运行中', 'inactive': '已停止', 'failed': '运行异常',
+                   'activating': '启动中', 'deactivating': '停止中'}.get(state, '状态未获取')
+    performance = data.get('performance') or {}
+    warnings = []
+    for value, label in ((data['scan_failed'], '扫描异常'),
+                         (data['worker_errors'], '执行异常'),
+                         (performance.get('read_errors', 0), '性能记录读取异常')):
+        if value:
+            warnings.append('%s %d' % (label, value))
+    if state != 'active':
+        warnings.append('进程' + state_label)
+
+    def md(content):
+        return {'tag': 'markdown', 'content': content}
+
+    def note(content):
+        return {'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': content}]}
+
+    def fields(items):
+        return {'tag': 'div', 'fields': [
+            {'is_short': True, 'text': {'tag': 'lark_md', 'content': content}}
+            for content in items]}
+
+    def mean(key):
+        return duration(data['timings'][key]['mean_seconds'])
+
+    elements = [
+        note('%s → %s（北京）\nDramaWave / HotDrama · %s' % (
+            start, end, '每天 09:30 播报' if hours == 24 else '每%d小时播报' % hours)),
+        fields(['替换成功\n**{:,} 条**'.format(t.get('succeeded', 0)),
+                '旧 Creative 清理\n**{:,} 个**'.format(d.get('deleted_verified', 0))]),
+        md('广告：失败 **%d** · 未知 **%d** · 跳过 %d\n清理：失败 **%d** · 未知 **%d**' % (
+            t.get('failed', 0), t.get('unknown', 0), t.get('obsolete', 0) + t.get('blocked', 0),
+            d.get('failed', 0) + d.get('delete_failed', 0),
+            d.get('unknown', 0) + d.get('delete_unknown', 0))),
+        {'tag': 'hr'},
+        md('**当前进度 · %s**\n积压 **%d** · 执行中 **%d** · 待审核 **%d**\n未决未知 **%d** · 清理暂缓 %d' % (
+            state_label, ct.get('pending', 0), ct.get('in_progress', 0), ct.get('waiting_review', 0),
+            ct.get('unknown', 0), cd.get('waiting_references', 0) + cd.get('reference_scan_incomplete', 0))),
+        {'tag': 'hr'},
+        md('**流程耗时 · 平均**'),
+        fields(['① 扫描入队 / 批\n**%s**' % mean('scan'),
+                '② 排队与准备\n**%s**' % mean('enqueue_to_bind')]),
+        fields(['③ 绑定确认\n**%s**' % mean('bind_verification'),
+                '④ 旧 Creative 清理\n**%s**' % mean('cleanup_latency')]),
+        note('入队→替换成功：%s。含排队/审核/引用等待；清理独立运行，各项不可相加。' % mean('replacement_total')),
+    ]
+    if warnings:
+        elements.append(md('⚠️ ' + ' · '.join(warnings)))
+    elements.extend([
+        {'tag': 'collapsible_panel', 'expanded': False,
+         'header': {'title': {'tag': 'plain_text', 'content': '展开明细 · P95 / 样本 / 统计口径'},
+                    'icon': {'tag': 'standard_icon', 'token': 'down-small-ccm_outlined', 'size': '16px 16px'},
+                    'icon_position': 'right', 'icon_expanded_angle': -180},
+         'border': {'color': 'grey', 'corner_radius': '5px'},
+         'padding': '8px', 'elements': [md(report_body(data))]},
+        note('新增素材 %d · 关联广告 %d · 完成扫描 %d 批\n快照 %s（北京） · 未知结果仅核实' % (
+            data['new_materials'], data['new_ads'], data['scan_completed'],
+            datetime.fromisoformat(data['snapshot_at']).astimezone(CST).strftime('%m-%d %H:%M'))),
+    ])
+    return {'config': {'wide_screen_mode': True},
+            'header': {'template': 'blue', 'title': {'tag': 'plain_text',
+                       'content': 'Meta 违规封面替换｜近%d小时' % lookback}},
+            'elements': elements}
+
+
 def notify_daily(config, audit, at=None, dry_run=False):
     root = Path(config['runtime_dir'])
     hours, lookback_hours, destination = report_settings(config)
@@ -325,9 +401,10 @@ def notify_daily(config, audit, at=None, dry_run=False):
             data['report_hours'] = hours
             data['report_lookback_hours'] = lookback_hours
             data['performance'] = collect_performance(root, start, end)
-            frozen = {'data': data, 'body': report_body(data), 'recipient': destination}
+            frozen = {'data': data, 'body': report_body(data), 'card': report_card(data),
+                      'recipient': destination}
             if not dry_run:
-                audit.begin(run_id, 'run', {'policy_version': '20261029-cover-periodic',
+                audit.begin(run_id, 'run', {'policy_version': '20261030-cover-card',
                                            'report_hours': hours, 'report_lookback_hours': lookback_hours,
                                            'recipient': destination})
                 audit.artifact(run_id, 'daily-summary.json', frozen)
@@ -338,6 +415,9 @@ def notify_daily(config, audit, at=None, dry_run=False):
         if dry_run:
             return dict(frozen, run_id=run_id, delivery='dry_run')
         feishu_config = config.get('cover_report_feishu_config', config['feishu_config'])
-        receipt = Notifier(audit, feishu_config, destination).send(run_id, 'end', frozen['body'])
+        notifier = Notifier(audit, feishu_config, destination)
+        # Old frozen reports keep their original text format, body and UUID.
+        receipt = (notifier.send_card(run_id, 'end', frozen['card']) if 'card' in frozen else
+                   notifier.send(run_id, 'end', frozen['body']))
         audit.update(run_id, status='completed', window_start=start.isoformat(), window_end=end.isoformat())
         return {'run_id': run_id, 'delivery': 'sent', 'receipt': receipt}
