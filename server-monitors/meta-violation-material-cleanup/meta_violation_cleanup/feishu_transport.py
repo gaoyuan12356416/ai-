@@ -71,3 +71,10 @@ def send_text(receive_id_type, receive_id, text):
     token = get_tenant_access_token()
     url = BASE_URL + '/im/v1/messages?' + parse.urlencode({'receive_id_type': receive_id_type})
     return post_json(url, text_payload(receive_id, text), token=token)
+
+
+def send_card(receive_id_type, receive_id, card):
+    token = get_tenant_access_token()
+    url = BASE_URL + '/im/v1/messages?' + parse.urlencode({'receive_id_type': receive_id_type})
+    return post_json(url, {'receive_id': receive_id, 'msg_type': 'interactive',
+                           'content': json.dumps(card, ensure_ascii=False)}, token=token)

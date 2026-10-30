@@ -128,7 +128,12 @@ class Notifier:
                 raise
             raise RuntimeError('notification_not_confirmed') from None
 
-    def _send_single(self, run_id, phase, body):
+    def send_card(self, run_id, phase, card):
+        # Freeze the format alongside the body; retries use the original JSON.
+        body = json.dumps({'msg_type': 'interactive', 'card': card}, ensure_ascii=False)
+        return self._send_single(run_id, phase, body, message_type='interactive')
+
+    def _send_single(self, run_id, phase, body, message_type='text'):
         notice = self.runtime.claim_notice(run_id, phase, body)
         if notice['status'] == 'sent':
             return json.loads(notice['receipt'])
@@ -142,6 +147,12 @@ class Notifier:
             raise RuntimeError('notification_unknown_requires_reconciliation')
         message_attempted = False
         try:
+            card = None
+            if message_type == 'interactive':
+                envelope = json.loads(notice['body'])
+                if envelope.get('msg_type') != 'interactive' or not isinstance(envelope.get('card'), dict):
+                    raise ValueError('invalid_frozen_card')
+                card = envelope['card']
             config = self._config()
             with _LOCK:
                 old_app_id = feishu_transport.APP_ID
@@ -162,8 +173,12 @@ class Notifier:
 
                 feishu_transport.post_json = post
                 try:
-                    response = feishu_transport.send_text(
-                        config['receive_id_type'], config['receive_id'], notice['body'])
+                    if message_type == 'interactive':
+                        response = feishu_transport.send_card(
+                            config['receive_id_type'], config['receive_id'], card)
+                    else:
+                        response = feishu_transport.send_text(
+                            config['receive_id_type'], config['receive_id'], notice['body'])
                 finally:
                     feishu_transport.post_json = original
                     feishu_transport.APP_ID = old_app_id
