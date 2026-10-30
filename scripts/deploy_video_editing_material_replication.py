@@ -197,8 +197,14 @@ def build_plan(commit, overrides=None):
 
 
 def state(unit):
-    value = run('systemctl', 'show', unit, '-p', 'ActiveState', '-p', 'MainPID', '-p', 'UnitFileState')
-    return dict(line.split('=', 1) for line in value.splitlines() if '=' in line)
+    result = subprocess.run(('systemctl', 'show', unit, '-p', 'LoadState', '-p', 'ActiveState',
+                             '-p', 'MainPID', '-p', 'UnitFileState'),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    properties = dict(line.split('=', 1) for line in result.stdout.decode('utf-8').splitlines() if '=' in line)
+    # systemd versions differ on the exit status for a not-yet-installed unit.
+    require(result.returncode == 0 or unit == WORKER and properties.get('LoadState') == 'not-found',
+            'service_state_unavailable:' + unit)
+    return properties
 
 
 def protected_state():

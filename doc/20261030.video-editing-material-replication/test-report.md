@@ -4,10 +4,10 @@
 
 ## 已执行本地证据
 
-- 部署代理执行：`python -m unittest discover -s tests -p test_video_editing_material_replication_deploy.py -v`，14 项通过，覆盖只读预检、SHA/白名单、WAL 在线备份、迁移保留旧数据、局部失败恢复、回滚保留新记录、旧 worker PID、marker 开放及丢回执核对。
+- 部署代理执行：`python -m unittest discover -s tests -p test_video_editing_material_replication_deploy.py -v`，15 项通过，覆盖只读预检、SHA/白名单、WAL 在线备份、迁移保留旧数据、局部失败恢复、回滚保留新记录、旧 worker PID、marker 开放及丢回执核对。
 - 本机没有 pytest；原 pytest 命令报 No module named pytest，随后采用项目已有 unittest，不需要新增依赖。
 - 后端最终合并回归：`python -m unittest discover -s tests -p 'test_video_editing*.py' -q`，270 项，1 项跳过，其余通过。
-- 主代理执行历史导入专项 6 项、部署专项 14 项，均通过；命令为 `python -m unittest discover -s tests -p test_video_editing_replication_import.py` 及上文部署测试。
+- 主代理执行历史导入专项 6 项、部署专项 15 项，均通过；命令为 `python -m unittest discover -s tests -p test_video_editing_replication_import.py` 及上文部署测试。
 - 前端执行 `node --test tests/test_video_editing_frontend.js tests/test_video_editing_browser_contract.js`，75 项通过，包含历史成功记录后的新请求失败及未知结果状态。
 - `git diff --check` 已执行，无空白错误；仅 Windows LF/CRLF 提示。发布脚本读取 git show 原始字节。
 

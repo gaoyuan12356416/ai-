@@ -2,6 +2,7 @@ from contextlib import closing, contextmanager
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -270,6 +271,13 @@ class MaterialReplicationDeployTests(unittest.TestCase):
         with patch.object(deploy, 'protected_state', return_value=after):
             with self.assertRaisesRegex(RuntimeError, 'protected_worker_changed'):
                 deploy.check_protected(before)
+
+    def test_missing_new_worker_state_is_allowed_but_missing_api_is_not(self):
+        result = SimpleNamespace(returncode=1, stdout=b'LoadState=not-found\nActiveState=inactive\nMainPID=0\n')
+        with patch.object(deploy.subprocess, 'run', return_value=result):
+            self.assertEqual(deploy.state(deploy.WORKER)['LoadState'], 'not-found')
+            with self.assertRaisesRegex(RuntimeError, 'service_state_unavailable'):
+                deploy.state(deploy.API)
 
 
 if __name__ == '__main__':
