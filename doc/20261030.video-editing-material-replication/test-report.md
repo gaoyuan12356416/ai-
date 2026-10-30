@@ -1,6 +1,6 @@
 # 测试报告
 
-日期：2026-10-30。状态：本地回归与评审完成，生产发布证据待发布后补充。
+日期：2026-10-30。状态：本地回归、评审、生产部署及历史复用验收完成，入口已开放。
 
 ## 已执行本地证据
 
@@ -22,15 +22,29 @@
 
 上述是本地正式页面与测试接口的证据，不是已登录生产浏览器验收。生产浏览器当前未登录。
 
-## 生产验证待补
+## 生产部署与验收
 
-- 已推送 GitHub SHA、CPU 独立 checkout SHA、白名单文件读回。
-- 数据盘挂载、SQLite backup、迁移副本证据、真实备份 manifest。
-- 主 API/新 worker 与原 worker PID/状态。
-- 历史导入 dry-run/apply/重复导入、实际 actor 进程内 API 链路、同键复用和冲突证据；应无新增生产请求。
-- 公共未登录接口 401 与公开静态文件校验。不得把公共 401 标成授权业务验证。
-- 开放 marker 时间与精确回滚命令。
+- 运行提交：`4cff9d3a10af861d4d42184a5deee2f57d4a1461`；GitHub 已推送，CPU 从同 SHA 的独立 checkout 安装。后续文档提交不改变运行代码。
+- 开放时间：2026-10-30 14:55:00 +08:00。入口 `https://ai.yingliangads.com/video-editing.html` → 制作任务 → 素材复刻。
+- 备份：`/mnt/data-disk/video-editing/backups/material-replication-20261030T065100Z-4cff9d3a10af`。含代码 manifest、SQLite 一致副本及迁移演练副本；演练旧表逐表校验不变。数据盘 UUID 符合要求，预检可用约 520.88 GiB。
+- 14 个目标文件/配置均与 manifest 一致；公共 HTML/JS/CSS 三文件 HTTP 200 且 SHA256 与运行文件相同。未登录历史 GET 返回 401。
+- 主 API PID 3810696、新复刻 worker PID 3810821 均 active；原渲染 worker PID 1946356、原入库 worker PID 2053482 保持不变。
+- 仅新 worker 进程包含 B 组凭据；主 API 进程不包含 A_GROUP_TASK_CREATE_TOKEN。配置存在不等于重新验证外部凭据，本次不发送新生产请求。
+- dry-run、首次导入和重复导入均通过。账本始终仅两条：gaoyuan/rejected；susiqi/accepted（B 任务 1732014、素材任务 2080677）。两次导入返回相同 ID；没有 pending/submitting，没有新提交记录。
+- 实际管理员身份从本地用户表核实。保持磁盘入口关闭，在独立进程内覆盖 enabled，禁止新账本行插入并封锁全部 requests HTTP，再调用真实 service 和只读剧目目录：resource_id=28331、source=en、duration_ms=1789867、归属 susiqi，目录返回 20 个去重语言候选。
+- 原请求的新 operation 复用记录 `vmr_35480764a29a4109bef5a946e596c5b3` / 任务 1732014；同 operation 再次返回同记录。相同 B 键改 operator=gaoyuan 返回原 susiqi 任务及归属差异。HTTP 调用 0，仅新增两条操作别名映射。
+- 开放后复核：账本 accepted=1/rejected=1，historical=2，非历史提交=0。母任务、成片、原入库三行与部署前备份完全一致；所有服务 active，运行文件散列一致。
+
+备份目录中的独立证据：`history-import-first.json`、`history-import-repeat.json`、`acceptance-history-reuse.json`、`public-readback-before-enable.json`、`final-readback.json`。
+
+## 精确回滚入口
+
+```bash
+python3 -B /mnt/data-disk/video-editing/releases/4cff9d3a10af861d4d42184a5deee2f57d4a1461/scripts/deploy_video_editing_material_replication.py --rollback /mnt/data-disk/video-editing/backups/material-replication-20261030T065100Z-4cff9d3a10af/manifest.json
+```
+
+该命令关闭入口、停止新增 worker 并恢复本次代码，保留当前 SQLite 新账本及所有回执；不要用 SQLite 备份覆盖运行库。
 
 ## 限制与发布建议
 
-本次功能只提供提交回执和历史，不监测成品或回推。真实新任务请求不作为自动回归的一部分。待最终回归、关闭部署、历史导入及复用验证均完成后，按已授权计划开放入口；未完成前不声称生产发布成功。
+本次功能只提供提交回执和历史，不监测成品或回推。真实新任务请求未作为自动回归的一部分。生产浏览器未登录，业务验收采用上述真实身份/真实目录/真实账本的进程内服务链路；响应式交互采用正式静态代码和隔离测试接口，不能等同于已登录生产浏览器全流程验收。

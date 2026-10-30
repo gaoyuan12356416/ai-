@@ -8,10 +8,12 @@
 
 ## 验证
 
-Python + 原生 JavaScript 项目使用 pytest、Node 浏览器契约测试与语法检查替代 Maven。部署测试入口：
+Python + 原生 JavaScript 项目使用 unittest、Node 浏览器契约测试与语法检查。部署测试入口：
 `python -m unittest discover -s tests -p test_video_editing_material_replication_deploy.py -v`。
 
 最终命令、结果与限制写入 test-report.md。发布完成证据须含 GitHub SHA、服务器 checkout SHA、备份目录、服务状态、页面读回和历史复用结果。
+
+实施完成：代码、测试、独立评审、GitHub 推送、CPU 关闭部署、历史导入和复用验收均已完成；2026-10-30 14:55 +08:00 开放。运行提交及备份路径见 test-report.md。
 
 ## 分工
 
