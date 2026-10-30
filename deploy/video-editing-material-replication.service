@@ -1,0 +1,25 @@
+[Unit]
+Description=Video editing material replication acceptance outbox
+After=network.target drama-material-api.service
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=/root/drama_material_service/.env
+EnvironmentFile=/etc/drama-synthesis/cpu.env
+EnvironmentFile=/etc/video-editing/video-editing.env
+# This credential file belongs only to this worker, never the main API service.
+EnvironmentFile=/etc/drama-material-service/a-group-expansion.env
+ExecStart=/usr/bin/python3 /root/drama_material_service/scripts/video_editing_material_replication_worker.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=75
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

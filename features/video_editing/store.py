@@ -64,6 +64,20 @@ class Store:
             CREATE TABLE IF NOT EXISTS ve_material_upload(id TEXT PRIMARY KEY,output_id TEXT NOT NULL UNIQUE,task_id TEXT NOT NULL UNIQUE,
               owner TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS ve_material_upload_status ON ve_material_upload(status,updated_at,output_id);
+            CREATE TABLE IF NOT EXISTS ve_material_replication(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,output_id TEXT NOT NULL,
+              owner TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,b_dedup_key TEXT NOT NULL,
+              import_source TEXT UNIQUE,status TEXT NOT NULL,data TEXT NOT NULL,
+              created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(owner,operation_id));
+            CREATE INDEX IF NOT EXISTS ve_material_replication_task ON ve_material_replication(task_id,created_at,id);
+            CREATE INDEX IF NOT EXISTS ve_material_replication_dispatch ON ve_material_replication(status,created_at,id);
+            CREATE INDEX IF NOT EXISTS ve_material_replication_dedup ON ve_material_replication(b_dedup_key,status);
+            CREATE TABLE IF NOT EXISTS ve_material_replication_operation(owner TEXT NOT NULL,operation_id TEXT NOT NULL,
+              task_id TEXT NOT NULL,payload_hash TEXT NOT NULL,record_id TEXT NOT NULL,data TEXT NOT NULL,
+              created_at INTEGER NOT NULL,PRIMARY KEY(owner,operation_id));
+            CREATE INDEX IF NOT EXISTS ve_material_replication_operation_record ON ve_material_replication_operation(record_id);
+            CREATE INDEX IF NOT EXISTS ve_material_replication_operation_task ON ve_material_replication_operation(task_id,record_id);
+            CREATE TABLE IF NOT EXISTS ve_material_replication_metadata(task_id TEXT PRIMARY KEY,data TEXT NOT NULL,
+              created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS ve_source_kind_status ON ve_source(kind,status,updated_at);
             CREATE INDEX IF NOT EXISTS ve_task_status ON ve_task(status,created_at,id);
             CREATE INDEX IF NOT EXISTS ve_batch_project_created ON ve_batch(project_id,created_at);
@@ -122,7 +136,7 @@ class Store:
 
     @staticmethod
     def table(kind):
-        require(kind in {'source', 'upload', 'project', 'task', 'project_version', 'batch', 'output', 'material_upload'}, 'invalid_record', '记录类型无效')
+        require(kind in {'source', 'upload', 'project', 'task', 'project_version', 'batch', 'output', 'material_upload', 'material_replication'}, 'invalid_record', '记录类型无效')
         return 've_' + kind
 
     def get(self, kind, record_id, db=None):

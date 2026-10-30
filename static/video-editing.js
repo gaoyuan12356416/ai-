@@ -126,7 +126,25 @@
     if(fit==='cover'){const w=Math.max(720,proportionalWidth),h=Math.max(1280,proportionalHeight);return {x:-Math.floor((w-720)/4)*2,y:-Math.floor((h-1280)/4)*2,width:w,height:h};}
     const w=Math.min(720,proportionalWidth),h=Math.min(1280,proportionalHeight);return {x:Math.floor((720-w)/4)*2,y:Math.floor((1280-h)/4)*2,width:w,height:h};
   }
-  const model = { projectUnits,draftForSave,effectiveBand,fitRectangle, FADE_MS, toFrame, layout, totalDuration, validateClips, split, move, applyCommon, md5Base64, probeDisplay };
+  const replicationTaskLabels={1:'多语种复刻',3:'竞品复刻',4:'爆款反转复刻'};
+  const replicationAudioLabels={0:'无配音',1:'人工配音',2:'AI 配音'};
+  function replicationTimeMs(value){const match=/^(\d{2}):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?$/.exec(String(value||''));return match?((+match[1]*3600 + +match[2]*60 + +match[3])*1000 + +(match[4]||'').padEnd(3,'0')):null;}
+  function validateReplicationInput(payload,context){
+    if(!context?.enabled)return context?.disabled_reason||'此成片暂不可复刻';
+    if(![1,3,4].includes(payload.task_type)||![0,1,2].includes(payload.audio_type)||![1,2].includes(payload.target_material_type))return '请选择完整的制作选项';
+    if(!Array.isArray(payload.target_langs)||!payload.target_langs.length)return '请至少选择 1 个目标语种';
+    const allowed=new Set((context.target_languages||[]).map(language=>language.code));
+    if(payload.target_langs.some(code=>!allowed.has(code)))return '目标语种列表已变化，请重新打开后选择';
+    if(context.can_change_operator&&!String(payload.operator||'').trim())return '请填写成品归属账号';
+    if(!context.can_change_operator&&(!context.default_operator||context.operator_error))return context.operator_error||'素材创建人的归属账号尚未配置';
+    if(payload.target_material_type===2){const start=replicationTimeMs(payload.descant_start_time),end=replicationTimeMs(payload.descant_end_time),duration=Number(context.source?.duration_ms);if(start===null||end===null)return '请填写解说起止时间，格式为 00:00:00，可附带毫秒';if(start>=end||!Number.isFinite(duration)||duration<=0||end>duration)return '解说开始时间须早于结束时间，且结束时间不能超过母素材时长';}
+    return '';
+  }
+  function replicationReceipt(record){
+    const states={pending:['等待提交','pending','请求已登记，尚未确认受理。'],submitting:['正在提交','pending','正在等待接口回执，请勿重复提交。'],accepted:[record?.upstream_status==='waiting_download'?'已受理 · 受理时：待转存':'已受理','accepted','此处仅展示受理回执，成品生成和素材库回推结果尚未查询。'],partial:['部分语种已受理','warning','仅有效语种已受理；不支持语种未创建制作任务。'],rejected:['提交失败','danger','本次请求未受理，请按失败原因处理。'],unknown_outcome:['结果待核实','warning','暂不能确认是否受理，请先核实记录，避免重复生产。']};
+    const [label,tone,message]=states[record?.status]||['状态待核实','warning','尚未获得可确认的受理状态。'];return {label,tone,message};
+  }
+  const model = { replicationTimeMs,validateReplicationInput,replicationReceipt,projectUnits,draftForSave,effectiveBand,fitRectangle, FADE_MS, toFrame, layout, totalDuration, validateClips, split, move, applyCommon, md5Base64, probeDisplay };
   if (typeof module !== 'undefined' && module.exports) module.exports = model;
   if (!global.document) return;
   global.VideoEditingModel = model;
@@ -154,7 +172,7 @@
         const response = await fetch(path, { credentials:'same-origin', cache:'no-store', ...options, ...(controller?{signal:controller.signal}:{}), headers });
         let payload;try{payload=await response.json();}catch(error){throw new Error(read?'查询响应无效，请重试':'提交回执无效，结果需要核实');}
         if(timedOut)throw new Error('查询超时，请重试');
-        if (!response.ok) { const error = new Error(payload.error || `请求失败 (${response.status})`); error.status=response.status; error.code=payload.code; throw error; }
+        if (!response.ok) { const error = new Error(payload.error || `请求失败 (${response.status})`); error.status=response.status; error.code=payload.code; error.payload=payload; throw error; }
         return payload;
       }catch(error){if(timedOut)throw new Error('查询超时，请重试');throw error;}
       finally{if(timeout!==null)clearTimeout(timeout);}
@@ -438,7 +456,7 @@
   function openMedia(title,url,expires){if(!url)return toast('预览链接暂不可用，请稍后刷新重试',true);$('mediaTitle').textContent=title||'视频预览';$('mediaPlayer').src=url;$('mediaExpiry').textContent=expires?`链接有效期至 ${new Date(expiryTime(expires)).toLocaleString('zh-CN')}。过期后重新打开即可刷新。`:'临时签名链接，过期后请重新打开。';$('mediaDialog').showModal();}
   async function loadTasks(){
     if(demo){renderTasks();return;}if(state.tasksLoading)return state.tasksLoading;
-    const request=(async()=>{const response=await api(`${ROOT}/tasks`);state.tasks=response.items||[];renderTasks();})();state.tasksLoading=request;
+    const request=(async()=>{const response=await api(`${ROOT}/tasks`);state.tasks=response.items||[];state.tasks.forEach(task=>{if(task.material_replication?.summary)reconcileReplicationOperation(task.id,[task.material_replication.summary]);});renderTasks();if(replication.taskId)updateReplicationForm();})();state.tasksLoading=request;
     try{return await request;}finally{if(state.tasksLoading===request)state.tasksLoading=null;}
   }
   const materialUploadLabels={queued:'等待上传',copying:'正在准备 COS 成片',submitting:'正在提交素材库',verifying:'正在核实素材 ID',succeeded:'已上传',failed:'上传失败',unknown_outcome:'结果待核实'};
@@ -456,9 +474,157 @@
     const action=!pending&&['failed','unknown_outcome'].includes(status)?`<button class="button small" data-refresh-material-task="${esc(task.id)}">刷新状态</button>`:'';
     return {detail,action};
   }
+  const replication={taskId:null,context:null,selected:new Set(),sequence:0,loading:false,operations:new Map(),historyTaskId:null,historySequence:0};
+  function replicationPath(id,historyOnly=false){return `${ROOT}/tasks/${encodeURIComponent(id)}/material-replication${historyOnly?'?history_only=1':''}`;}
+  function replicationOperationKey(id){const user=state.auth?.user||{};return `video-editing:replication:${user.tenant_key||''}:${user.id||user.username||user.name||''}:${id}`;}
+  function pendingReplication(id){
+    if(replication.operations.has(String(id)))return replication.operations.get(String(id));
+    try{const saved=JSON.parse(global.sessionStorage?.getItem(replicationOperationKey(id))||'null');if(saved?.payload?.operation_id&&saved.taskId===String(id)){saved.phase=['conflict','awaiting'].includes(saved.phase)?saved.phase:'unknown';replication.operations.set(String(id),saved);return saved;}}catch(error){/* Storage is optional; the in-memory operation remains authoritative. */}
+    return null;
+  }
+  function saveReplicationOperation(id,operation){
+    if(operation)replication.operations.set(String(id),operation);else replication.operations.delete(String(id));
+    try{if(operation)global.sessionStorage?.setItem(replicationOperationKey(id),JSON.stringify(operation));else global.sessionStorage?.removeItem(replicationOperationKey(id));}catch(error){/* Browser storage may be unavailable. */}
+  }
+  function replicationAvailability(task){
+    if(!['completed','succeeded'].includes(task.status))return {enabled:false,reason:'成片制作完成并入库后可复刻'};
+    if(task.material_replication?.enabled)return {enabled:true,reason:''};
+    return {enabled:false,reason:task.material_replication?.disabled_reason||(!task.material_upload?.material_id?'请先将成片上传至素材库':'复刻入口暂不可用，请刷新任务')};
+  }
+  function replicationCardView(task){
+    const available=replicationAvailability(task),meta=task.material_replication||{},record=meta.summary;
+    const button=`<button class="button small replication-launch" data-replicate-task="${esc(task.id)}" ${available.enabled?'':`disabled title="${esc(available.reason)}"`}>素材复刻</button>`;
+    const history=meta.count?`<button class="text-button" data-replication-history="${esc(task.id)}">复刻记录 (${esc(meta.count)})</button>`:'';
+    const detail=record?`<div class="replication-card-receipt"><span>复刻回执</span><strong class="${replicationReceipt(record).tone}">${esc(replicationReceipt(record).label)}</strong><span>${esc(replicationLanguageText(record.target_langs))} · 归属 ${esc(record.operator||'待核实')}${record.historical?' · 历史导入记录':''}</span><span class="micro">成品与回推结果未查询</span>${history}</div>`:history?`<div class="replication-card-receipt">${history}</div>`:'';
+    return {action:button,detail,hint:available.enabled?'':`<p class="micro replication-disabled">${esc(available.reason)}</p>`};
+  }
+  function replicationLanguageText(codes){return Array.isArray(codes)&&codes.length?codes.map(code=>{const language=replication.context?.target_languages?.find(entry=>entry.code===code);return language?`${language.name} ${code}`:String(code);}).join('、'):'无';}
+  function replicationConfigurationText(record){return `${replicationTaskLabels[record.task_type]||'类型待核实'} · ${replicationAudioLabels[record.audio_type]||'配音待核实'} · ${Number(record.target_material_type)===2?`解说 ${record.descant_start_time||'待填写'}–${record.descant_end_time||'待填写'}`:'非解说'} · ${record.no_bgm?'母素材无背景音乐':'未标记无背景音乐'}`;}
+  function replicationRecordHtml(record){
+    const view=replicationReceipt(record),error=typeof record.error==='string'?record.error:record.error?JSON.stringify(record.error):'';
+    const recordedAt=record.submitted_at||record.created_at,recordedTime=recordedAt?new Date(expiryTime(recordedAt)):null,timeText=recordedTime&&Number.isFinite(recordedTime.getTime())?recordedTime.toLocaleString('zh-CN'):'';
+    return `<article class="replication-record"><div class="replication-record-heading"><strong class="${view.tone}">${esc(view.label)}</strong><span>${esc(timeText)}</span></div><p>${record.b_task_id?`任务号 ${esc(record.b_task_id)}`:'尚未获得制作任务号'} · 归属 ${esc(record.operator||'待核实')}${record.historical?' · 历史导入回执':''}</p><p>${esc(replicationConfigurationText(record))}</p><p>申请语种：${esc(replicationLanguageText(record.target_langs))}</p><p>有效语种：${['unknown_outcome','pending','submitting'].includes(record.status)?'待核实':esc(replicationLanguageText(record.effective_langs))}${record.unsupported_langs?.length?` · 不支持：${esc(replicationLanguageText(record.unsupported_langs))}`:''}</p>${error?`<p class="danger">${esc(error)}</p>`:''}<p>${esc(view.message)}</p>${record.operation_id?`<p class="micro">请求标识：${esc(record.operation_id)}</p>`:''}</article>`;
+  }
+  function replicationChoice(name,fallback){return document.querySelector(`[name="${name}"]:checked`)?.value||fallback;}
+  function replicationPayload(){
+    const payload={task_type:Number(replicationChoice('replicationTaskType','1')),audio_type:Number(replicationChoice('replicationAudioType','0')),target_material_type:Number(replicationChoice('replicationMaterialType','1')),target_langs:[...replication.selected],no_bgm:$('replicationNoBgm').checked};
+    if(replication.context?.can_change_operator)payload.operator=$('replicationOperator').value.trim();
+    if(payload.target_material_type===2){payload.descant_start_time=$('replicationStart').value.trim();payload.descant_end_time=$('replicationEnd').value.trim();}
+    return payload;
+  }
+  function replicationError(message){$('replicationError').textContent=message||'';$('replicationError').classList.toggle('hidden',!message);if(message)$('replicationError').scrollIntoView?.({block:'nearest'});}
+  function renderReplicationLanguages(){
+    const query=$('replicationSearch').value.trim().toLowerCase(),languages=replication.context?.target_languages||[];
+    const visible=languages.filter(language=>`${language.name} ${language.code}`.toLowerCase().includes(query));
+    $('replicationLanguages').innerHTML=visible.map(language=>`<label class="replication-language ${replication.selected.has(language.code)?'is-selected':''}"><input type="checkbox" data-replication-language="${esc(language.code)}" ${replication.selected.has(language.code)?'checked':''}><span>${esc(language.name)}</span><small>${esc(language.code)}</small></label>`).join('')||'<p class="micro">没有匹配的目标语种。</p>';
+    $('replicationSelected').innerHTML=[...replication.selected].map(code=>`<button type="button" class="replication-chip" data-remove-replication-language="${esc(code)}" aria-label="移除 ${esc(code)}">${esc(replicationLanguageText([code]))} ×</button>`).join('')||'<span class="micro">尚未选择目标语种，可选择与母素材相同的语种。</span>';
+    $('replicationLanguageCount').textContent=String(replication.selected.size);
+  }
+  function updateReplicationForm(){
+    const payload=replicationPayload(),context=replication.context,operation=pendingReplication(replication.taskId),sending=operation?.phase==='sending';
+    $('replicationFields').disabled=replication.loading||!context?.enabled||!!operation;
+    $('replicationSubmit').disabled=replication.loading||!context?.enabled||!!operation;
+    $('replicationSubmit').textContent=sending?'正在提交…':'提交素材复刻';
+    $('replicationSubmit').setAttribute('aria-busy',String(sending));
+    $('replicationNarration').classList.toggle('hidden',payload.target_material_type!==2);
+    $('replicationSummaryTitle').textContent=`${replicationTaskLabels[payload.task_type]} · 1 条母素材 × ${payload.target_langs.length} 个目标语种`;
+    $('replicationSummaryDetail').textContent=`${replicationConfigurationText(payload)} · 归属 ${context?.can_change_operator?payload.operator||'待填写':context?.default_operator||'待配置'} · ${replicationLanguageText(payload.target_langs)}`;
+    const notes=[];if(payload.audio_type!==0)notes.push('有配音制作需具备对应语种的配音资源。');if([3,4].includes(payload.task_type)&&payload.audio_type===0)notes.push('竞品或爆款反转复刻选择无配音时，需完整字幕与剧集资源。');if(payload.target_material_type===2)notes.push('解说制作需目标语种支持解说。');notes.push('目标语种是否支持，以正式接口返回为准。');$('replicationSupport').textContent=notes.join(' ');
+    $('replicationPending').classList.toggle('hidden',!operation);
+    $('replicationPendingText').textContent=operation?`${sending?'正在等待受理回执':operation.phase==='awaiting'?'请求已登记，等待接口受理':'此请求结果尚待核实，已保留原参数'}。原请求：${replicationConfigurationText(operation.payload)} · ${replicationLanguageText(operation.payload.target_langs)} · 归属 ${operation.payload.operator||context?.default_operator||'素材创建人'}。请求标识：${operation.payload.operation_id}`:'';
+    $('replicationReplay').disabled=!operation||operation.phase!=='unknown';
+    $('replicationVerify').disabled=!operation||sending;
+    document.querySelectorAll('[data-replication-choice]').forEach(input=>input.closest('label')?.classList.toggle('is-selected',input.checked));
+  }
+  function showReplicationReceipt(record,response={}){
+    const conflict=response.conflict||record.conflict,reused=response.reused||record.reused,fields=response.conflict_fields||record.conflict_fields||[];
+    let notice='';
+    if(conflict)notice=`<div class="replication-conflict" role="alert"><strong>已存在的任务与本次参数不同</strong><p>以下展示旧任务，本次新参数未生效。</p>${fields.map(field=>`<p>${esc(({task_type:'复刻类型',audio_type:'配音方式',target_material_type:'成品类型',operator:'归属',no_bgm:'母素材无背景音乐',descant_start_time:'解说开始时间',descant_end_time:'解说结束时间'})[field.field]||field.field)}：原值 ${esc(typeof field.previous==='object'?JSON.stringify(field.previous):field.previous)} → 本次 ${esc(typeof field.requested==='object'?JSON.stringify(field.requested):field.requested)}</p>`).join('')}</div>`;
+    else if(reused)notice='<p class="replication-conflict">已复用已有任务，本次未创建新任务。</p>';
+    $('replicationReceipt').innerHTML=notice+replicationRecordHtml(record);$('replicationReceipt').classList.remove('hidden');
+  }
+  async function openReplication(id){
+    if(demo)return toast('演示模式不可提交素材复刻');
+    const sequence=++replication.sequence;replication.taskId=String(id);replication.context=null;replication.loading=true;replication.selected=new Set();
+    for(const [name,value]of [['replicationTaskType','1'],['replicationAudioType','0'],['replicationMaterialType','1']])document.querySelectorAll(`[name="${name}"]`).forEach(input=>input.checked=input.value===value);
+    $('replicationOperator').value='';$('replicationStart').value='';$('replicationEnd').value='';$('replicationSearch').value='';$('replicationNoBgm').checked=false;$('replicationReceipt').classList.add('hidden');replicationError('');$('replicationSource').textContent='正在加载母素材与可用语种…';$('replicationRoleNote').textContent='';
+    renderReplicationLanguages();updateReplicationForm();if(!$('replicationDialog').open)$('replicationDialog').showModal();$('replicationBody').scrollTop=0;
+    try{
+      const context=item(await api(replicationPath(id)));if(sequence!==replication.sequence||replication.taskId!==String(id))return;
+      replication.context=context;const source=context.source||{};
+      $('replicationSource').textContent=`${source.name||'母素材'} · 素材 ${source.material_id||'待入库'} · 剧资源 ${source.resource_id||'待关联'} · 源语种 ${source.source_language||'待确认'} · ${seconds(source.duration_ms)} 秒`;
+      $('replicationOperator').value=context.default_operator||'';$('replicationOperator').readOnly=!context.can_change_operator;
+      $('replicationRoleNote').textContent=context.operator_error|| (context.can_change_operator?'默认沿用素材创建人；管理员可修改成品归属账号。':'成品归属沿用素材创建人，只有管理员可修改。');
+      if(!context.enabled)replicationError(context.disabled_reason||'此成片暂不可复刻');
+      reconcileReplicationOperation(id,context.history||[]);renderReplicationLanguages();
+    }catch(error){if(sequence===replication.sequence)replicationError(`复刻信息加载失败：${error.message}`);}
+    finally{if(sequence===replication.sequence){replication.loading=false;updateReplicationForm();document.querySelector('[name="replicationTaskType"]:checked')?.focus({preventScroll:true});$('replicationBody').scrollTop=0;}}
+  }
+  function reconcileReplicationOperation(id,history){
+    const operation=pendingReplication(id);if(!operation)return;
+    const record=history.find(entry=>entry.operation_id===operation.payload.operation_id||(entry.operation_ids||[]).includes(operation.payload.operation_id));if(!record)return;
+    if(['accepted','partial','rejected'].includes(record.status))saveReplicationOperation(id,null);
+    else if(operation.phase!=='sending'&&operation.phase!=='conflict'){operation.phase=['pending','submitting'].includes(record.status)?'awaiting':'unknown';saveReplicationOperation(id,operation);}
+    if(replication.taskId===String(id)){
+      const reused=record.operation_id!==operation.payload.operation_id;
+      const conflict_fields=reused?['task_type','audio_type','target_material_type','operator','no_bgm','descant_start_time','descant_end_time'].filter(field=>Object.prototype.hasOwnProperty.call(operation.payload,field)&&String(record[field]??'')!==String(operation.payload[field]??'')).map(field=>({field,previous:record[field],requested:operation.payload[field]})):[];
+      showReplicationReceipt(record,{reused,conflict:conflict_fields.length>0,conflict_fields,...(operation.receiptFlags||{})});
+    }
+  }
+  async function verifyReplication(){
+    const id=replication.taskId,sequence=replication.sequence;
+    return withBusy(`replication-verify:${id}`,$('replicationVerify'),'正在核实…',async()=>{
+      const context=item(await api(replicationPath(id,true)));reconcileReplicationOperation(id,context.history||[]);
+      if(sequence!==replication.sequence)return;
+      if(pendingReplication(id))replicationError(pendingReplication(id).phase==='awaiting'?'请求已登记，仍在等待接口受理。请稍后核实记录。':'尚未获得最终受理回执。可继续核实记录；如需重放，只会使用已保留的原请求标识和参数。');else replicationError('');
+      updateReplicationForm();await loadTasks();
+    });
+  }
+  async function submitReplication(replay=false){
+    const id=replication.taskId,sequence=replication.sequence;if(!id||replication.loading||!replication.context?.enabled)return;
+    let operation=pendingReplication(id);if(['sending','conflict','awaiting'].includes(operation?.phase))return;
+    if(operation&&!replay){replicationError('请先核实上一次请求，或使用“重放原请求”。');return;}
+    if(!operation){
+      const payload=replicationPayload(),error=validateReplicationInput(payload,replication.context);if(error){replicationError(error);return;}
+      operation={taskId:String(id),phase:'sending',payload:{...clone(payload),operation_id:uid()}};
+    }else if(!replay)return;
+    operation.phase='sending';saveReplicationOperation(id,operation);replicationError('');updateReplicationForm();
+    const Controller=global.AbortController||(typeof AbortController==='function'?AbortController:null),controller=Controller?new Controller():null;
+    let timedOut=false;const timeout=controller?setTimeout(()=>{timedOut=true;controller.abort();},45000):null;
+    try{
+      const response=await api(replicationPath(id),{method:'POST',body:operation.payload,...(controller?{signal:controller.signal}:{})}),record=item(response);
+      if(!record||!['pending','submitting','accepted','partial','rejected','unknown_outcome'].includes(record.status))throw new Error('提交回执无效，结果需要核实');
+      const unresolved=['pending','submitting','unknown_outcome'].includes(record.status);operation.phase=['pending','submitting'].includes(record.status)?'awaiting':'unknown';
+      if(response.reused||record.reused||response.conflict||record.conflict)operation.receiptFlags={reused:!!(response.reused||record.reused),conflict:!!(response.conflict||record.conflict),conflict_fields:response.conflict_fields||record.conflict_fields||[]};
+      saveReplicationOperation(id,unresolved?operation:null);
+      if(sequence===replication.sequence){showReplicationReceipt(record,response);if(response.conflict||record.conflict)replicationError('已展示旧任务及参数差异，本次新参数未生效。');}
+      await loadTasks().catch(error=>toast(`受理回执已保存，任务列表刷新失败：${error.message}`,true));
+    }catch(error){
+      if(error.status===409){operation.phase='conflict';saveReplicationOperation(id,operation);if(sequence===replication.sequence)replicationError('请求标识与已登记参数冲突，草稿和原请求均已保留。请核实记录；不会自动更换请求标识或重新提交。');}
+      else if(error.status&&error.status<500&&error.status!==408&&error.status!==429){saveReplicationOperation(id,null);if(sequence===replication.sequence)replicationError(`提交失败：${error.message}`);}
+      else{operation.phase='unknown';saveReplicationOperation(id,operation);if(sequence===replication.sequence){showReplicationReceipt({...operation.payload,status:'unknown_outcome',operator:operation.payload.operator||replication.context.default_operator,effective_langs:[],unsupported_langs:[],error:'尚未获得可确认的受理回执'});replicationError(`${timedOut?'提交超时，受理结果尚未确认':error.message}。请先核实记录，系统不会自动重新提交。`);}}
+    }finally{if(timeout!==null)clearTimeout(timeout);if(replication.taskId===String(id))updateReplicationForm();}
+  }
+  async function openReplicationHistory(id){
+    if(demo)return toast('演示模式没有正式复刻记录');
+    const sequence=++replication.historySequence;replication.historyTaskId=String(id);$('replicationHistoryList').innerHTML='<p class="empty">正在加载复刻记录…</p>';if(!$('replicationHistoryDialog').open)$('replicationHistoryDialog').showModal();
+    try{const context=item(await api(replicationPath(id,true)));if(sequence!==replication.historySequence)return;const history=context.history||[];reconcileReplicationOperation(id,history);$('replicationHistoryList').innerHTML=history.map(replicationRecordHtml).join('')||'<p class="empty">暂无复刻记录。</p>';if(replication.taskId===String(id))updateReplicationForm();}
+    catch(error){if(sequence===replication.historySequence)$('replicationHistoryList').innerHTML=`<p class="danger">${esc(error.message)}</p>`;}
+  }
+  function bindReplication(run){
+    $('replicationForm').addEventListener('submit',run(event=>{event.preventDefault();return submitReplication();}));
+    $('replicationForm').addEventListener('change',event=>{const input=event.target;if(input.dataset.replicationLanguage){if(input.checked)replication.selected.add(input.dataset.replicationLanguage);else replication.selected.delete(input.dataset.replicationLanguage);renderReplicationLanguages();}replicationError('');updateReplicationForm();});
+    $('replicationForm').addEventListener('input',event=>{if(event.target.id==='replicationSearch')renderReplicationLanguages();else{replicationError('');updateReplicationForm();}});
+    $('replicationSelected').addEventListener('click',event=>{const button=event.target.closest('[data-remove-replication-language]');if(!button||pendingReplication(replication.taskId))return;replication.selected.delete(button.dataset.removeReplicationLanguage);renderReplicationLanguages();updateReplicationForm();});
+    $('replicationClearLanguages').addEventListener('click',()=>{replication.selected.clear();renderReplicationLanguages();updateReplicationForm();});
+    $('replicationVerify').addEventListener('click',run(verifyReplication));$('replicationReplay').addEventListener('click',run(()=>submitReplication(true)));
+    $('replicationViewHistory').addEventListener('click',run(()=>openReplicationHistory(replication.taskId)));$('replicationRefreshHistory').addEventListener('click',run(()=>openReplicationHistory(replication.historyTaskId)));
+    $('replicationDialog').addEventListener('close',()=>{replication.sequence++;});
+    $('replicationHistoryDialog').addEventListener('close',()=>{replication.historySequence++;});
+  }
   function renderTasks(){
     $('taskCount').textContent=state.tasks.length;
-    $('taskList').innerHTML=state.tasks.map(task=>{const material=materialUploadView(task);return `<article class="task-card"><div class="task-icon">▷</div><div class="task-info"><strong>${esc(task.drama_title||task.title||task.id)}</strong><p>${esc(task.id)} · ${task.created_at?new Date(expiryTime(task.created_at)).toLocaleString('zh-CN'):''}</p>${task.error_message?`<p class="danger">${esc(task.error_message)}</p>`:''}${task.output&&task.output.metadata?`<p>720 × 1280 · ${seconds(task.output.metadata.duration_ms)} 秒 · MP4</p>`:''}${material.detail}</div><div><div class="task-status ${esc(task.status)}">${esc(statusLabel(task.status))}</div><p class="micro">${esc(taskProgressText(task))}</p></div><div class="task-actions">${material.action}${task.output?`<button class="button small" data-preview-task="${esc(task.id)}">预览</button><button class="button small" data-download-task="${esc(task.id)}">下载</button>`:''}${['failed','unknown','recovery_required'].includes(task.status)?`<button class="button small" data-resume-task="${esc(task.id)}">核实并重试</button>`:''}</div></article>`;}).join('')||'<div class="empty">还没有制作任务。完成剪辑后，点击“制作成片”。</div>';
+    $('taskList').innerHTML=state.tasks.map(task=>{const material=materialUploadView(task),replica=replicationCardView(task);return `<article class="task-card"><div class="task-icon">▷</div><div class="task-info"><strong>${esc(task.drama_title||task.title||task.id)}</strong><p>${esc(task.id)} · ${task.created_at?new Date(expiryTime(task.created_at)).toLocaleString('zh-CN'):''}</p>${task.error_message?`<p class="danger">${esc(task.error_message)}</p>`:''}${task.output&&task.output.metadata?`<p>720 × 1280 · ${seconds(task.output.metadata.duration_ms)} 秒 · MP4</p>`:''}${material.detail}${replica.hint}</div><div><div class="task-status ${esc(task.status)}">${esc(statusLabel(task.status))}</div><p class="micro">${esc(taskProgressText(task))}</p></div><div class="task-actions">${material.action}${replica.action}${task.output?`<button class="button small" data-preview-task="${esc(task.id)}">预览</button><button class="button small" data-download-task="${esc(task.id)}">下载</button>`:''}${['failed','unknown','recovery_required'].includes(task.status)?`<button class="button small" data-resume-task="${esc(task.id)}">核实并重试</button>`:''}</div>${replica.detail}</article>`;}).join('')||'<div class="empty">还没有制作任务。完成剪辑后，点击“制作成片”。</div>';
   }
   async function uploadMaterialTask(id,variant=null){
     if(demo)return toast('模拟预览不会上传至素材库');
@@ -734,18 +900,18 @@
     $('uploadButton').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('click',()=>$('fileInput').click());$('uploadDrop').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('fileInput').click();}});$('fileInput').addEventListener('change',()=>{queueFiles(Array.from($('fileInput').files));$('fileInput').value='';});
     for(const eventName of ['dragenter','dragover'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.add('drag-over');});for(const eventName of ['dragleave','drop'])$('uploadDrop').addEventListener(eventName,event=>{event.preventDefault();$('uploadDrop').classList.remove('drag-over');if(eventName==='drop')queueFiles(Array.from(event.dataTransfer.files));});
     document.addEventListener('click',run(async event=>{
-      const button=event.target.closest('[data-use-asset],[data-tag-asset],[data-pick-asset],[data-preview-asset],[data-probe-asset],[data-rename-asset],[data-delete-asset],[data-preview-task],[data-download-task],[data-resume-task],[data-upload-material-task],[data-refresh-material-task],[data-cancel-upload]');if(!button)return;
-      const action=Object.keys(button.dataset).find(key=>['useAsset','tagAsset','pickAsset','previewAsset','probeAsset','renameAsset','deleteAsset','previewTask','downloadTask','resumeTask','uploadMaterialTask','refreshMaterialTask','cancelUpload'].includes(key));
+      const button=event.target.closest('[data-use-asset],[data-tag-asset],[data-pick-asset],[data-preview-asset],[data-probe-asset],[data-rename-asset],[data-delete-asset],[data-preview-task],[data-download-task],[data-resume-task],[data-upload-material-task],[data-refresh-material-task],[data-replicate-task],[data-replication-history],[data-cancel-upload]');if(!button)return;
+      const action=Object.keys(button.dataset).find(key=>['useAsset','tagAsset','pickAsset','previewAsset','probeAsset','renameAsset','deleteAsset','previewTask','downloadTask','resumeTask','uploadMaterialTask','refreshMaterialTask','replicateTask','replicationHistory','cancelUpload'].includes(key));
       const label={previewAsset:'正在加载…',previewTask:'正在加载…',downloadTask:'获取链接…',probeAsset:'正在核实…',resumeTask:'正在核实恢复…',uploadMaterialTask:'正在提交…',refreshMaterialTask:'正在刷新…',renameAsset:'正在保存…',deleteAsset:'正在移除…',cancelUpload:'正在取消…'}[action];
       return withBusy(`${action}:${button.dataset[action]}`,button,label,async()=>{
-      if(button.dataset.useAsset)return useAsset(button.dataset.useAsset);if(button.dataset.tagAsset)return openResources({kind:'tag',asset_id:button.dataset.tagAsset});if(button.dataset.pickAsset)return pickAsset(button.dataset.pickAsset);if(button.dataset.previewAsset)return previewAsset(button.dataset.previewAsset);if(button.dataset.probeAsset)return probeAsset(button.dataset.probeAsset);if(button.dataset.previewTask)return taskOutput(button.dataset.previewTask,false);if(button.dataset.downloadTask)return taskOutput(button.dataset.downloadTask,true);if(button.dataset.uploadMaterialTask)return uploadMaterialTask(button.dataset.uploadMaterialTask);if(button.dataset.refreshMaterialTask)return loadTasks();if(button.dataset.cancelUpload)return cancelUpload(button.dataset.cancelUpload);
+      if(button.dataset.replicateTask)return openReplication(button.dataset.replicateTask);if(button.dataset.replicationHistory)return openReplicationHistory(button.dataset.replicationHistory);if(button.dataset.useAsset)return useAsset(button.dataset.useAsset);if(button.dataset.tagAsset)return openResources({kind:'tag',asset_id:button.dataset.tagAsset});if(button.dataset.pickAsset)return pickAsset(button.dataset.pickAsset);if(button.dataset.previewAsset)return previewAsset(button.dataset.previewAsset);if(button.dataset.probeAsset)return probeAsset(button.dataset.probeAsset);if(button.dataset.previewTask)return taskOutput(button.dataset.previewTask,false);if(button.dataset.downloadTask)return taskOutput(button.dataset.downloadTask,true);if(button.dataset.uploadMaterialTask)return uploadMaterialTask(button.dataset.uploadMaterialTask);if(button.dataset.refreshMaterialTask)return loadTasks();if(button.dataset.cancelUpload)return cancelUpload(button.dataset.cancelUpload);
       if(button.dataset.resumeTask){if(demo)return toast('模拟模式不会提交重试');await resumeTaskRequest(button.dataset.resumeTask);await loadTasks();return;}
       const id=button.dataset.renameAsset||button.dataset.deleteAsset;const asset=state.assets.find(entry=>entry.id===id);if(!asset)return;
       if(button.dataset.renameAsset){const name=prompt('素材名称',asset.name);if(!name||!name.trim())return;if(demo)asset.name=name.trim();else await api(`${ROOT}/assets/${encodeURIComponent(id)}`,{method:'PATCH',body:{name:name.trim()}});}
       else{if(!confirm(`从共享素材库移除“${asset.name}”？已有制作任务引用的文件仍会保留。`))return;if(demo)state.assets=state.assets.filter(entry=>entry.id!==id);else await api(`${ROOT}/assets/${encodeURIComponent(id)}`,{method:'DELETE'});}await loadAssets();
       });
     }));
-    bindResources(run);bindMirror(run);
+    bindResources(run);bindMirror(run);bindReplication(run);
     global.addEventListener('beforeunload',event=>{if(!demo&&(state.dirty||Array.from(state.uploads.values()).some(upload=>!upload.done))){event.preventDefault();event.returnValue='';}});
   }
   function openResources(purpose){

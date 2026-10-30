@@ -6,6 +6,29 @@ const model = require('../static/video-editing.js');
 const clip = (id, source_id, start_ms, end_ms, transition='cut') => ({ id, source_id, start_ms, end_ms, transition, fit:'contain', mute:false });
 const source = (duration_ms=20000) => ({ status:'ready', metadata:{duration_ms} });
 
+test('replication validates actual source duration and target language membership without excluding source language',()=>{
+  const context={enabled:true,can_change_operator:true,source:{duration_ms:1789867,source_language:'en'},target_languages:[{code:'en'},{code:'es'}]};
+  const payload={task_type:1,audio_type:0,target_material_type:1,target_langs:['en'],operator:'owner',no_bgm:false};
+  assert.equal(model.validateReplicationInput(payload,context),'');
+  assert.match(model.validateReplicationInput({...payload,target_langs:[]},context),/至少选择/);
+  assert.match(model.validateReplicationInput({...payload,target_langs:['unsupported']},context),/列表已变化/);
+  assert.equal(model.replicationTimeMs('00:29:49.867'),1789867);
+  assert.equal(model.replicationTimeMs('00:60:00'),null);
+  const narration={...payload,target_material_type:2,descant_start_time:'00:00:00',descant_end_time:'00:29:49.867'};
+  assert.equal(model.validateReplicationInput(narration,context),'');
+  assert.match(model.validateReplicationInput({...narration,descant_end_time:'00:29:49.868'},context),/不得|不能/);
+  assert.match(model.validateReplicationInput({...narration,descant_start_time:'00:29:49.867'},context),/开始时间/);
+  assert.match(model.validateReplicationInput(payload,{...context,can_change_operator:false,default_operator:''}),/归属账号/);
+});
+
+test('replication receipt never treats accepted or source transfer as finished output',()=>{
+  assert.equal(model.replicationReceipt({status:'accepted',upstream_status:'waiting_download'}).label,'已受理 · 受理时：待转存');
+  assert.match(model.replicationReceipt({status:'accepted',upstream_status:'completed'}).message,/尚未查询/);
+  assert.equal(model.replicationReceipt({status:'unknown_outcome'}).label,'结果待核实');
+  assert.equal(model.replicationReceipt({status:'partial'}).label,'部分语种已受理');
+  assert.equal(model.replicationReceipt({status:'rejected'}).label,'提交失败');
+});
+
 test('preview geometry follows verified FFmpeg even-pixel scaling and chroma offsets',()=>{
   assert.deepEqual(model.fitRectangle(1920,1080,'contain'),{x:0,y:436,width:720,height:406});
   assert.deepEqual(model.fitRectangle(638,480,'contain'),{x:0,y:368,width:720,height:542});

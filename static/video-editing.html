@@ -6,7 +6,7 @@
   <meta name="referrer" content="same-origin">
   <title>视频剪辑 · AI 后台</title>
   <link rel="stylesheet" href="/ui-topbar.css">
-  <link rel="stylesheet" href="/video-editing.css?v=20261029-resource-mirror-1">
+  <link rel="stylesheet" href="/video-editing.css?v=20261030-material-replication-1">
 </head>
 <body>
   <div class="app">
@@ -34,7 +34,7 @@
           </div>
         </section>
         <section id="libraryView" class="view hidden"><div class="section-toolbar"><div><h2 id="libraryTitle">共享素材库</h2><p id="libraryDescription">原素材直接上传 COS，有权限的同事均可使用。</p></div><div class="toolbar-actions"><button id="libraryResourceFilter" class="button">按资源筛选</button><button id="clearLibraryResource" class="text-button hidden">清除筛选</button><input id="assetSearch" type="search" placeholder="搜索视频名称"><button id="uploadButton" class="button primary">↑ 上传本地素材</button></div></div><div class="upload-resource"><span class="label">上传资源标签</span><span id="uploadResourceLabel">新上传必选一个资源</span><button id="chooseUploadResource" class="button small">搜索并选择资源</button></div><input id="fileInput" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi" multiple hidden><div id="uploadDrop" class="upload-drop" tabindex="0" role="button" aria-label="拖入或选择本地视频"><span>＋</span><strong>拖入视频，开始上传</strong><p id="uploadLimits">单个文件最大 8 GiB · 支持分片续传 · 视频直接进入 COS</p></div><div id="uploadList" class="upload-list"></div><div class="library-note">刷新页面后，可重新选择同一原文件继续未完成上传。通过媒体校验后即可剪辑。</div><div id="assetGrid" class="asset-grid"></div><button id="loadMoreAssets" class="button hidden">加载更多素材</button></section>
-        <section id="tasksView" class="view hidden"><div class="section-toolbar"><div><h2>制作任务</h2><p>每部短剧独立制作，已完成的成片会保留。</p></div><button id="refreshTasks" class="button">刷新任务</button></div><div class="delivery-banner"><span class="delivery-icon">↗</span><div><strong>成片使用</strong><p>已完成的成片可预览、下载，也可逐条上传至【Drama-社媒专用素材】。外部制作接口待接入。</p></div><span class="small-tag">逐条上传</span></div><div id="taskList" class="task-list"></div></section>
+        <section id="tasksView" class="view hidden"><div class="section-toolbar"><div><h2>制作任务</h2><p>每部短剧独立制作，已完成的成片会保留。</p></div><button id="refreshTasks" class="button">刷新任务</button></div><div class="delivery-banner"><span class="delivery-icon">↗</span><div><strong>成片使用</strong><p>已完成的成片可预览、下载，也可逐条上传至【Drama-社媒专用素材】。成片入库后可提交素材复刻，受理回执单独展示。</p></div><span class="small-tag">逐条上传</span></div><div id="taskList" class="task-list"></div></section>
       </div>
     </main>
   </div>
@@ -44,7 +44,33 @@
   <dialog id="mediaDialog"><div class="dialog-head"><h2 id="mediaTitle">视频预览</h2><button data-close="mediaDialog" class="icon-button" aria-label="关闭">×</button></div><video id="mediaPlayer" controls playsinline></video><p id="mediaExpiry" class="micro"></p></dialog>
   <dialog id="resourceDialog"><div class="dialog-head"><h2 id="resourceDialogTitle">选择资源</h2><button data-close="resourceDialog" class="icon-button" aria-label="关闭">×</button></div><div class="resource-search"><input id="resourceSearch" type="search" maxlength="200" placeholder="完整资源 ID 或英文剧名开头"><button id="searchResources" class="button primary">搜索</button></div><div id="resourceResults" class="resource-results"></div><p id="resourceStatus" class="micro" role="status"></p></dialog>
   <dialog id="variantDialog"><div class="dialog-head"><h2 id="variantTitle">选择入库归属</h2><button data-close="variantDialog" class="icon-button" aria-label="关闭">×</button></div><label class="field-label">来源产品和语言剧版本<select id="variantSelect"><option value="">选择版本</option></select></label><p id="variantStatus" class="micro" role="status"></p><div class="dialog-foot"><button id="confirmVariant" class="button primary" disabled>上传至素材库</button></div></dialog>
+  <dialog id="replicationDialog" class="replication-dialog" aria-labelledby="replicationTitle">
+    <form id="replicationForm" novalidate>
+      <div class="dialog-head replication-head"><div><h2 id="replicationTitle">素材复刻</h2><p>选择复刻方式、配音与目标语种，继续制作新的素材。</p></div><button type="button" data-close="replicationDialog" class="icon-button" aria-label="关闭素材复刻">×</button></div>
+      <div id="replicationBody" class="replication-body">
+        <div id="replicationSource" class="replication-source"></div>
+        <fieldset id="replicationFields" class="replication-fields" disabled>
+          <section class="replication-section"><h3>1 <span>选择复刻方式</span></h3><p class="micro">三种制作方式共用下方参数，按素材需求选择。</p><div class="replication-type-grid">
+            <label class="replication-type is-selected"><input type="radio" name="replicationTaskType" data-replication-choice value="1" checked><span class="replication-type-copy"><strong>多语种复刻</strong><span>将已有成片制作成所选语种版本</span></span></label>
+            <label class="replication-type"><input type="radio" name="replicationTaskType" data-replication-choice value="3"><span class="replication-type-copy"><strong>竞品复刻</strong><span>以竞品素材为参考进行复刻制作</span></span></label>
+            <label class="replication-type"><input type="radio" name="replicationTaskType" data-replication-choice value="4"><span class="replication-type-copy"><strong>爆款反转复刻</strong><span>按爆款反转复刻类型提交制作</span></span></label>
+          </div></section>
+          <section class="replication-section"><h3>2 <span>设置制作选项</span></h3><div class="replication-options"><fieldset><legend>配音方式</legend><div class="replication-segments"><label><input type="radio" name="replicationAudioType" data-replication-choice value="0" checked>无配音</label><label><input type="radio" name="replicationAudioType" data-replication-choice value="1">人工配音</label><label><input type="radio" name="replicationAudioType" data-replication-choice value="2">AI 配音</label></div></fieldset><fieldset><legend>成品类型</legend><div class="replication-segments"><label><input type="radio" name="replicationMaterialType" data-replication-choice value="1" checked>非解说</label><label><input type="radio" name="replicationMaterialType" data-replication-choice value="2">解说</label></div></fieldset></div>
+          <div id="replicationNarration" class="replication-time-grid hidden"><label>解说开始时间<input id="replicationStart" type="text" placeholder="00:00:00" inputmode="text" aria-describedby="replicationTimeHelp"></label><label>解说结束时间<input id="replicationEnd" type="text" placeholder="00:00:00" inputmode="text" aria-describedby="replicationTimeHelp"></label><p id="replicationTimeHelp" class="micro">支持时:分:秒及毫秒，结束时间不得超过母素材时长。</p></div>
+          <label class="replication-bgm"><input id="replicationNoBgm" type="checkbox"><span>母素材无背景音乐<small>根据原始素材情况勾选，不代表移除背景音乐。</small></span></label><p id="replicationSupport" class="replication-support"></p></section>
+          <section class="replication-section"><div class="replication-section-heading"><h3>3 <span>选择目标语种</span></h3><span class="micro">已选 <b id="replicationLanguageCount">0</b> 个 <button type="button" id="replicationClearLanguages" class="text-button">清空</button></span></div><input id="replicationSearch" class="replication-search" type="search" placeholder="搜索语种或语言代码" aria-label="搜索目标语种"><div id="replicationLanguages" class="replication-language-grid" role="group" aria-label="目标语种"></div><div id="replicationSelected" class="replication-selected"></div></section>
+          <section class="replication-section replication-owner"><div><h3>4 <span>确认成品归属</span></h3><p id="replicationRoleNote" class="micro"></p></div><label>盈量账号<input id="replicationOperator" type="text" maxlength="80" autocomplete="off" readonly></label></section>
+        </fieldset>
+        <div class="replication-summary"><strong id="replicationSummaryTitle"></strong><p id="replicationSummaryDetail"></p></div>
+        <div id="replicationError" class="replication-error hidden" role="alert"></div>
+        <div id="replicationPending" class="replication-pending hidden"><p id="replicationPendingText"></p><div><button id="replicationVerify" type="button" class="button small">核实记录</button><button id="replicationReplay" type="button" class="button small">重放原请求</button></div><p class="micro">原请求标识和参数保持不变；不会自动重发。</p></div>
+        <div id="replicationReceipt" class="hidden" aria-live="polite"></div>
+      </div>
+      <div class="dialog-foot replication-foot"><button id="replicationViewHistory" type="button" class="text-button">查看复刻记录</button><div><button type="button" data-close="replicationDialog" class="button">关闭</button><button id="replicationSubmit" type="submit" class="button primary" disabled>提交素材复刻</button></div></div>
+    </form>
+  </dialog>
+  <dialog id="replicationHistoryDialog" class="replication-history-dialog" aria-labelledby="replicationHistoryTitle"><div class="dialog-head"><div><h2 id="replicationHistoryTitle">复刻记录</h2><p>展示已保存的受理回执，成品生成与回推进度尚未接入。</p></div><button type="button" data-close="replicationHistoryDialog" class="icon-button" aria-label="关闭复刻记录">×</button></div><div id="replicationHistoryList"></div><div class="dialog-foot"><button id="replicationRefreshHistory" type="button" class="button">刷新记录</button><button type="button" data-close="replicationHistoryDialog" class="button">关闭</button></div></dialog>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261029-resource-mirror-1"></script>
+  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261030-material-replication-1"></script>
 </body>
 </html>

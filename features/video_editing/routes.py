@@ -66,11 +66,13 @@ def handle(handler,method,app_module):
             where,args=("kind='render'",()) if actor['is_admin'] else ("kind='render' AND owner=?",(owner(actor),))
             rows,total=service.store.list('task',where,args,100)
             answer={'items':[service.task_dto(r) for r in rows],'total':total}
-        elif re.fullmatch(r'/tasks/ve_[0-9a-f]{32}(?:/(?:resume|material-source))?',path):
+        elif re.fullmatch(r'/tasks/ve_[0-9a-f]{32}(?:/(?:resume|material-source|material-replication))?',path):
             tid=path.split('/')[2]
             if method=='GET' and len(path.split('/'))==3:answer={'item':service.task_dto(service.task(tid,actor))}
             elif method=='POST' and path.endswith('/resume'):answer={'item':service.resume(tid,actor)}
             elif method=='POST' and path.endswith('/material-source'):answer={'item':service.material_source.enqueue(tid,actor,body)}
+            elif method=='GET' and path.endswith('/material-replication'):answer={'item':service.material_replication.context(tid,actor,history_only=q('history_only')=='1')}
+            elif method=='POST' and path.endswith('/material-replication'):answer={'item':service.material_replication.enqueue(tid,actor,body)}
         require(answer is not None,'not_found','接口不存在',404)
         app_module.json_response(handler,200,answer,no_store=True)
     except VideoEditingError as exc:

@@ -59,6 +59,7 @@ async function browser(handler,extras={}){
   return {elements,calls,timers,createdElements,field:id=>document.getElementById(id),dataElement:dataset=>nodes().find(el=>Object.entries(dataset).every(([key,value])=>el.dataset[key]===value)),rename:async name=>{const input=document.getElementById('projectName');input.value=name;await input.emit('change');},response,
     clickData:async(dataset,container)=>{const target=nodes().find(el=>Object.entries(dataset).every(([key,value])=>el.dataset[key]===value))||Object.assign(new Element(),{dataset});if(target.disabled)return;await target.click();return container?document.getElementById(container).emit('click',{target}):Promise.all((documentEvents.click||[]).map(fn=>fn({target,currentTarget:document})));},
     checkEpisodes(ids){const inputs=document.querySelectorAll('.episode-select');assert.ok(ids.every(id=>inputs.some(el=>el.value===id)),'selected episode must exist in rendered DOM');for(const el of inputs)el.checked=ids.includes(el.value);},
+    async selectRadio(name,value,formId){const inputs=document.querySelectorAll(`[name="${name}"]`);assert.ok(inputs.some(input=>input.value===value),'radio option exists in real markup');for(const input of inputs)input.checked=input.value===value;await document.getElementById(formId).emit('change',{target:inputs.find(input=>input.value===value)});},
     closeDialog:async(id,escape=false)=>{const dialog=document.getElementById(id);if(escape){const event={defaultPrevented:false,preventDefault(){this.defaultPrevented=true;}};await dialog.emit('cancel',event);if(!event.defaultPrevented)await dialog.close();}else await nodes().find(el=>el.dataset.close===id).click();await settle();},
     advance:milliseconds=>{now+=milliseconds;},fit:fit=>document.querySelectorAll('[data-fit]').find(el=>el.dataset.fit===fit).click(),poll:()=>Promise.all(intervals.filter(Boolean).map(fn=>fn())),
   };
@@ -591,4 +592,88 @@ test('explicit pre-write project version conflict releases only the rejected ren
   await app.addUnit();await app.field('renderProject').click();assert.match(app.field('toast').textContent,/重新打开项目/);
   app.field('projectPicker').value='vp_resources';await app.field('projectPicker').emit('change');await app.field('renderProject').click();
   assert.equal(attempts,2);assert.ok(app.renderRequests[1].expected_version>app.renderRequests[0].expected_version);assert.notEqual(app.renderRequests[1].operation_id,app.renderRequests[0].operation_id);
+});
+
+async function replicationFixture(override=async()=>null,admin=true){
+  const fixture={history:[],posts:[],contextReads:0,historyReads:0};
+  fixture.task={id:'ve_replication',drama_title:'Saved original',status:'completed',stage:'completed',progress:1,output:{metadata:{duration_ms:20000}},material_upload:{status:'succeeded',material_id:52},material_replication:{enabled:true,count:0,summary:null}};
+  fixture.context={enabled:true,source:{material_id:52,name:'Saved original',resource_id:'resource-abc',source_language:'en',duration_ms:20000},default_operator:'owner_from_server',can_change_operator:admin,target_languages:[{code:'en',name:'英语'},{code:'es',name:'西语'},{code:'pt',name:'葡语'}]};
+  const app=await browser(async(url,options,calls)=>{
+    if(url.includes('/material-replication')){
+      if(options.method==='POST')fixture.posts.push(JSON.parse(options.body));
+      else if(url.includes('history_only=1'))fixture.historyReads++;else fixture.contextReads++;
+      const custom=await override(url,options,fixture,calls);if(custom)return custom;
+      if(options.method==='POST'){
+        const body=JSON.parse(options.body),record={...body,id:'receipt-1',operator:body.operator||fixture.context.default_operator,status:'accepted',upstream_status:'waiting_download',b_task_id:'remote-17',effective_langs:body.target_langs,unsupported_langs:[]};fixture.history=[record];fixture.task.material_replication={enabled:true,count:1,summary:record};return response({item:record});
+      }
+      return response({item:{...fixture.context,history:fixture.history,summary:fixture.history[0]||null}});
+    }
+    if(url.endsWith('/tasks'))return response({items:[fixture.task,{id:'unfinished',status:'running'},{id:'not-in-library',status:'completed',output:{metadata:{duration_ms:1000}},material_replication:{enabled:false,disabled_reason:'请先入库'}}]});
+  });
+  return Object.assign(app,fixture,{async open(){await app.clickData({replicateTask:'ve_replication'});},async selectLanguage(code){const input=app.dataElement({replicationLanguage:code});assert.ok(input,'language option comes from context response');input.checked=true;await app.field('replicationForm').emit('change',{target:input});},submit(){return app.field('replicationForm').emit('submit');}});
+}
+
+test('replication opens only on eligible finished output, defaults to empty targets, and reads context only on demand',async()=>{
+  const app=await replicationFixture();assert.equal(app.contextReads,0);assert.equal(app.dataElement({replicateTask:'unfinished'}).disabled,true);assert.equal(app.dataElement({replicateTask:'not-in-library'}).disabled,true);assert.match(app.field('taskList').innerHTML,/请先入库/);
+  await app.open();assert.equal(app.field('replicationLanguageCount').textContent,'0');assert.equal(app.field('replicationOperator').value,'owner_from_server');assert.equal(app.field('replicationOperator').readOnly,false);
+  await app.submit();assert.equal(app.posts.length,0);assert.match(app.field('replicationError').textContent,/至少选择/);
+  await app.selectLanguage('en');await app.closeDialog('replicationDialog');await app.open();assert.equal(app.field('replicationLanguageCount').textContent,'0');
+  const reads=app.calls.filter(call=>call.url.endsWith('/material-replication')).length;assert.equal(reads,2);await app.poll();await app.poll();assert.equal(app.calls.filter(call=>call.url.endsWith('/material-replication')).length,reads);
+});
+
+test('replication single-flight freezes owner and allows source language while original completed status remains separate',async()=>{
+  const gate=deferred();const app=await replicationFixture(async(_url,options,fixture)=>{if(options.method==='POST'){await gate.promise;return response({item:{...fixture.posts[0],id:'receipt',status:'accepted',operator:fixture.posts[0].operator,effective_langs:['en'],unsupported_langs:[],b_task_id:'B-1',upstream_status:'waiting_download'}});}});
+  await app.open();await app.selectLanguage('en');app.field('replicationOperator').value='admin_changed';const first=app.submit();await settle();const second=app.submit();await second;
+  assert.equal(app.posts.length,1);assert.equal(app.field('replicationSubmit').disabled,true);assert.deepEqual(app.posts[0].target_langs,['en']);assert.equal(app.posts[0].operator,'admin_changed');assert.equal(app.posts[0].task_type,1);assert.equal(app.posts[0].audio_type,0);assert.equal(app.posts[0].target_material_type,1);assert.equal(app.posts[0].no_bgm,false);
+  gate.resolve();await first;assert.match(app.field('replicationReceipt').innerHTML,/待转存/);assert.match(app.field('replicationReceipt').innerHTML,/尚未查询/);assert.match(app.field('taskList').innerHTML,/制作完成 · 100%/);
+});
+
+test('member ownership is read-only and never sends a client operator override',async()=>{
+  const app=await replicationFixture(async()=>null,false);await app.open();assert.equal(app.field('replicationOperator').readOnly,true);app.field('replicationOperator').value='tampered';await app.selectLanguage('es');await app.submit();assert.equal(Object.hasOwn(app.posts[0],'operator'),false);
+});
+
+test('lost replication response never auto-posts and explicit replay uses exact original payload and operation',async()=>{
+  let attempts=0;const app=await replicationFixture(async(_url,options)=>{if(options.method==='POST'&&++attempts===1)throw new Error('connection lost');});await app.open();await app.selectLanguage('es');await app.submit();
+  assert.match(app.field('replicationReceipt').innerHTML,/结果待核实/);assert.equal(app.field('replicationSubmit').disabled,true);await app.poll();await app.poll();await app.field('replicationVerify').click();assert.equal(app.posts.length,1);
+  app.field('replicationOperator').value='new value must not apply';await app.submit();assert.equal(app.posts.length,1);await app.field('replicationReplay').click();assert.equal(app.posts.length,2);assert.deepEqual(app.posts[1],app.posts[0]);assert.equal(app.posts[1].operator,'owner_from_server');
+});
+
+test('read-only history resolves a lost reused operation through operation_ids without another POST',async()=>{
+  const app=await replicationFixture(async(_url,options,fixture)=>{if(options.method==='POST'){const request=fixture.posts[0];fixture.history=[{...request,id:'old-receipt',operation_id:'older-operation',operation_ids:['older-operation',request.operation_id],status:'accepted',operator:request.operator,effective_langs:['es'],unsupported_langs:[],b_task_id:'B-old'}];throw new Error('reply lost');}});
+  await app.open();await app.selectLanguage('es');await app.submit();await app.field('replicationVerify').click();assert.equal(app.posts.length,1);assert.equal(app.field('replicationPending').classList.contains('hidden'),true);assert.match(app.field('replicationReceipt').innerHTML,/复用已有任务/);assert.equal(app.calls.filter(call=>call.url.endsWith('/material-replication?history_only=1')).length,1);
+});
+
+test('replication 409 keeps the draft and frozen operation, and prevents new submit or replay',async()=>{
+  const app=await replicationFixture(async(_url,options)=>options.method==='POST'?response({error:'operation payload conflict'},409):null);await app.open();await app.selectLanguage('es');app.field('replicationOperator').value='draft_owner';await app.submit();
+  assert.match(app.field('replicationError').textContent,/草稿和原请求均已保留/);assert.equal(app.field('replicationOperator').value,'draft_owner');assert.equal(app.field('replicationReplay').disabled,true);await app.submit();await app.poll();assert.equal(app.posts.length,1);
+});
+
+test('reused conflicting receipt shows original task and parameter differences without claiming new settings applied',async()=>{
+  const app=await replicationFixture(async(_url,options,fixture)=>options.method==='POST'?response({item:{...fixture.posts[0],id:'old',task_type:3,operator:'original-owner',status:'accepted',b_task_id:'B-old',effective_langs:['es'],unsupported_langs:[]},reused:true,conflict:true,conflict_fields:[{field:'operator',previous:'original-owner',requested:'owner_from_server'}]}):null);
+  await app.open();await app.selectLanguage('es');await app.submit();assert.match(app.field('replicationReceipt').innerHTML,/本次新参数未生效/);assert.match(app.field('replicationReceipt').innerHTML,/original-owner/);assert.match(app.field('replicationReceipt').innerHTML,/B-old/);
+});
+
+test('narration range is validated before POST, and partial and rejected receipts remain explicit',async()=>{
+  const app=await replicationFixture(async(_url,options,fixture)=>options.method==='POST'?response({item:{...fixture.posts.at(-1),id:'partial',operator:'owner',status:'partial',effective_langs:['es'],unsupported_langs:['pt'],b_task_id:'B-partial'}}):null);await app.open();await app.selectLanguage('es');await app.selectLanguage('pt');await app.selectRadio('replicationMaterialType','2','replicationForm');app.field('replicationStart').value='00:00:00';app.field('replicationEnd').value='00:00:21';await app.submit();assert.equal(app.posts.length,0);assert.match(app.field('replicationError').textContent,/时长/);app.field('replicationEnd').value='00:00:20';await app.submit();assert.equal(app.posts[0].descant_end_time,'00:00:20');assert.match(app.field('replicationReceipt').innerHTML,/部分语种已受理/);assert.match(app.field('replicationReceipt').innerHTML,/不支持/);
+  const rejected=await replicationFixture(async(_url,options,fixture)=>options.method==='POST'?response({item:{...fixture.posts[0],id:'rejected',status:'rejected',operator:'owner',error:'账号未绑定',effective_langs:[],unsupported_langs:[]}}):null);await rejected.open();await rejected.selectLanguage('es');await rejected.submit();assert.match(rejected.field('replicationReceipt').innerHTML,/提交失败/);assert.match(rejected.field('replicationReceipt').innerHTML,/账号未绑定/);
+});
+
+test('pending replication is reconciled from existing task-list polling without context queries or a second POST',async()=>{
+  const app=await replicationFixture(async(_url,options,fixture)=>{if(options.method==='POST'){const record={...fixture.posts[0],id:'pending-receipt',status:'pending',operator:'owner',effective_langs:[],unsupported_langs:[]};fixture.task.material_replication={enabled:true,count:1,summary:record};fixture.history=[record];return response({item:record});}});await app.open();await app.selectLanguage('es');await app.submit();assert.equal(app.field('replicationReplay').disabled,true);assert.match(app.field('replicationPendingText').textContent,/请求已登记/);
+  const reads=app.calls.filter(call=>call.url.includes('/material-replication')&&!call.options.method).length;Object.assign(app.task.material_replication.summary,{status:'accepted',effective_langs:['es'],b_task_id:'B-finished-receipt'});await app.field('refreshTasks').click();assert.equal(app.field('replicationPending').classList.contains('hidden'),true);assert.equal(app.field('replicationSubmit').disabled,false);assert.equal(app.posts.length,1);assert.equal(app.calls.filter(call=>call.url.includes('/material-replication')&&!call.options.method).length,reads);assert.match(app.field('replicationReceipt').innerHTML,/B-finished-receipt/);
+});
+
+test('closing and reopening during an in-flight replication cannot leave stale busy controls after completion',async()=>{
+  const gate=deferred();const app=await replicationFixture(async(_url,options,fixture)=>{if(options.method==='POST'){await gate.promise;return response({item:{...fixture.posts[0],id:'receipt-after-reopen',status:'accepted',operator:'owner',effective_langs:['es'],unsupported_langs:[]}});}});await app.open();await app.selectLanguage('es');const submitting=app.submit();await settle();await app.closeDialog('replicationDialog');await app.open();assert.equal(app.field('replicationSubmit').disabled,true);assert.equal(app.field('replicationLanguageCount').textContent,'0');gate.resolve();await submitting;assert.equal(app.field('replicationSubmit').disabled,false);assert.equal(app.field('replicationPending').classList.contains('hidden'),true);assert.equal(app.posts.length,1);
+});
+
+for(const outcome of ['rejected','unknown_outcome'])test(`a newer ${outcome} replication remains visible over an older accepted historical task and updates its pending controls`,async()=>{
+  const historical={id:'history-1732014',operation_id:'older-history-operation',operation_ids:['older-history-operation'],historical:true,status:'accepted',operator:'owner',task_type:1,audio_type:0,target_material_type:1,no_bgm:false,target_langs:['es'],effective_langs:['es'],unsupported_langs:[],upstream_status:'waiting_download',b_task_id:'1732014'};
+  const app=await replicationFixture(async(_url,options,fixture)=>{if(options.method==='POST'){const record={...fixture.posts[0],id:'newer-different-target',historical:false,status:'pending',operator:'owner',effective_langs:[],unsupported_langs:[]};fixture.history=[record,...fixture.history];fixture.task.material_replication={enabled:true,count:fixture.history.length,summary:record};return response({item:record});}});
+  app.history.push(historical);app.task.material_replication={enabled:true,count:1,summary:historical};await app.field('refreshTasks').click();assert.match(app.field('taskList').innerHTML,/受理时：待转存/);
+  await app.open();await app.selectLanguage('pt');await app.submit();assert.equal(app.posts.length,1);assert.deepEqual(app.posts[0].target_langs,['pt']);assert.equal(app.field('replicationReplay').disabled,true);assert.match(app.field('taskList').innerHTML,/等待提交/);
+  Object.assign(app.task.material_replication.summary,{status:outcome,error:outcome==='rejected'?'归属账号未绑定':'接口响应中断'});await app.field('refreshTasks').click();
+  assert.match(app.field('taskList').innerHTML,outcome==='rejected'?/提交失败/:/结果待核实/);assert.match(app.field('taskList').innerHTML,/制作完成 · 100%/);assert.doesNotMatch(app.field('taskList').innerHTML,/受理时：待转存/);assert.equal(app.posts.length,1);
+  if(outcome==='rejected'){assert.equal(app.field('replicationPending').classList.contains('hidden'),true);assert.equal(app.field('replicationSubmit').disabled,false);assert.match(app.field('replicationReceipt').innerHTML,/归属账号未绑定/);}
+  else{assert.equal(app.field('replicationPending').classList.contains('hidden'),false);assert.equal(app.field('replicationSubmit').disabled,true);assert.equal(app.field('replicationReplay').disabled,false);assert.match(app.field('replicationReceipt').innerHTML,/接口响应中断/);}
 });

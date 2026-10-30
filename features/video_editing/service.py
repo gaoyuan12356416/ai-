@@ -30,6 +30,8 @@ class Service:
         self.uploads.resource_resolver=self.catalog.resource if self.catalog else None
         from .material_source import MaterialSource
         self.material_source=MaterialSource(self)
+        from .material_replication import MaterialReplication
+        self.material_replication=MaterialReplication(self)
         self.gpu_url,self.gpu_token=gpu_url.rstrip('/'),gpu_token
         self._intake_enabled=bool(intake_enabled)
         self.export_profile=os.environ.get('VIDEO_EDITING_EXPORT_PROFILE',PROFILE).strip()
@@ -376,6 +378,7 @@ class Service:
                 'stage':d.get('stage',row['status']),'progress':d.get('progress',0),'error_code':d.get('error_code',''),
                 'error_message':d.get('error_message',''),'output':output,
                 'material_upload':self.material_source.for_task(row),
+                'material_replication':self.material_replication.for_task(row),
                 'created_at':row['created_at'],'updated_at':row['updated_at']}
 
     def resume(self,tid,actor):
