@@ -52,7 +52,7 @@ async function browser(handler,extras={}){
     if(url.includes('/assets?')||url.endsWith('/projects')||url.endsWith('/tasks'))return response({items:[],total:0});
     throw new Error(`Unexpected request ${options.method||'GET'} ${url}`);
   };
-  const window={document,crypto:crypto.webcrypto,addEventListener(){},QuickNav:{render:async()=>{}},UiTopbar:{render(){},handleAuthAction:async()=>{}}};
+  const window={document,crypto:crypto.webcrypto,sessionStorage:extras.sessionStorage,addEventListener(){},QuickNav:{render:async()=>{}},UiTopbar:{render(){},handleAuthAction:async()=>{}}};
   class ClockDate extends Date{constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}}
   const context={window,document,fetch,URL,URLSearchParams,AbortController,Date:ClockDate,location:{search:'',pathname:'/video-editing.html'},performance:{now:()=>now},requestAnimationFrame:()=>0,cancelAnimationFrame(){},setInterval(fn){intervals.push(fn);return intervals.length;},clearInterval(id){intervals[id-1]=null;},setTimeout(fn){const id=nextTimer++;timers.set(id,fn);return id;},clearTimeout(id){timers.delete(id);},console,...extras};
   vm.runInNewContext(script,context,{filename:'video-editing.js'});for(let i=0;i<6;i++)await tick();
@@ -594,7 +594,7 @@ test('explicit pre-write project version conflict releases only the rejected ren
   assert.equal(attempts,2);assert.ok(app.renderRequests[1].expected_version>app.renderRequests[0].expected_version);assert.notEqual(app.renderRequests[1].operation_id,app.renderRequests[0].operation_id);
 });
 
-async function replicationFixture(override=async()=>null,admin=true){
+async function replicationFixture(override=async()=>null,admin=true,extras={}){
   const fixture={history:[],posts:[],contextReads:0,historyReads:0};
   fixture.task={id:'ve_replication',drama_title:'Saved original',status:'completed',stage:'completed',progress:1,output:{metadata:{duration_ms:20000}},material_upload:{status:'succeeded',material_id:52},material_replication:{enabled:true,count:0,summary:null}};
   fixture.context={enabled:true,source:{material_id:52,name:'Saved original',resource_id:'resource-abc',source_language:'en',duration_ms:20000},default_operator:'owner_from_server',can_change_operator:admin,target_languages:[{code:'en',name:'英语'},{code:'es',name:'西语'},{code:'pt',name:'葡语'}]};
@@ -609,7 +609,7 @@ async function replicationFixture(override=async()=>null,admin=true){
       return response({item:{...fixture.context,history:fixture.history,summary:fixture.history[0]||null}});
     }
     if(url.endsWith('/tasks'))return response({items:[fixture.task,{id:'unfinished',status:'running'},{id:'not-in-library',status:'completed',output:{metadata:{duration_ms:1000}},material_replication:{enabled:false,disabled_reason:'请先入库'}}]});
-  });
+  },extras);
   return Object.assign(app,fixture,{async open(){await app.clickData({replicateTask:'ve_replication'});},async selectLanguage(code){const input=app.dataElement({replicationLanguage:code});assert.ok(input,'language option comes from context response');input.checked=true;await app.field('replicationForm').emit('change',{target:input});},submit(){return app.field('replicationForm').emit('submit');}});
 }
 
@@ -676,4 +676,39 @@ for(const outcome of ['rejected','unknown_outcome'])test(`a newer ${outcome} rep
   assert.match(app.field('taskList').innerHTML,outcome==='rejected'?/提交失败/:/结果待核实/);assert.match(app.field('taskList').innerHTML,/制作完成 · 100%/);assert.doesNotMatch(app.field('taskList').innerHTML,/受理时：待转存/);assert.equal(app.posts.length,1);
   if(outcome==='rejected'){assert.equal(app.field('replicationPending').classList.contains('hidden'),true);assert.equal(app.field('replicationSubmit').disabled,false);assert.match(app.field('replicationReceipt').innerHTML,/归属账号未绑定/);}
   else{assert.equal(app.field('replicationPending').classList.contains('hidden'),false);assert.equal(app.field('replicationSubmit').disabled,true);assert.equal(app.field('replicationReplay').disabled,false);assert.match(app.field('replicationReceipt').innerHTML,/接口响应中断/);}
+});
+
+const categoryValues=['解说','二创','混剪','精剪','切片','image','Dramawave Post'];
+const replicationStorageKey='video-editing:replication:tenant:Tester:ve_replication';
+function memorySessionStorage(){const values=new Map();return {getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,String(value)),removeItem:key=>values.delete(key)};}
+async function chooseCategory(app,value){app.field('replicationCategory').value=value;await app.field('replicationForm').emit('change',{target:app.field('replicationCategory')});}
+
+test('material category offers all seven documented values, defaults to mixed editing, and resets on every opening',async()=>{
+  const app=await replicationFixture();await app.open();assert.equal(app.field('replicationCategory').value,'混剪');assert.match(app.field('replicationSummaryDetail').textContent,/素材分类：混剪/);assert.match(app.field('replicationCategory').innerHTML,/value="image">图片（image）/);
+  for(const category of categoryValues){await app.open();assert.equal(app.field('replicationCategory').value,'混剪');await app.selectLanguage('es');await chooseCategory(app,category);await app.submit();assert.equal(app.posts.at(-1).material_category,category);assert.match(app.field('replicationReceipt').textContent,/素材分类：/);}
+  await app.closeDialog('replicationDialog');await app.open();assert.equal(app.field('replicationCategory').value,'混剪');assert.equal(app.field('replicationLanguageCount').textContent,'0');
+  await app.selectLanguage('es');await chooseCategory(app,'invalid-category');const count=app.posts.length;await app.submit();assert.equal(app.posts.length,count);assert.match(app.field('replicationError').textContent,/素材分类/);
+});
+
+test('material category does not toggle narration or change member ownership permissions',async()=>{
+  const app=await replicationFixture(async()=>null,false);await app.open();await app.selectLanguage('es');await chooseCategory(app,'解说');assert.equal(app.field('replicationNarration').classList.contains('hidden'),true);await app.submit();assert.equal(app.posts[0].material_category,'解说');assert.equal(app.posts[0].target_material_type,1);assert.equal(Object.hasOwn(app.posts[0],'descant_start_time'),false);assert.equal(Object.hasOwn(app.posts[0],'operator'),false);
+  await app.open();await app.selectLanguage('es');await app.selectRadio('replicationMaterialType','2','replicationForm');assert.equal(app.field('replicationCategory').value,'混剪');app.field('replicationStart').value='00:00:00';app.field('replicationEnd').value='00:00:10';await app.submit();assert.equal(app.posts[1].material_category,'混剪');assert.equal(app.posts[1].target_material_type,2);assert.equal(app.posts[1].descant_end_time,'00:00:10');
+});
+
+test('a frozen legacy session request replays without adding material_category despite the new form default',async()=>{
+  const storage=memorySessionStorage(),payload={operation_id:'legacy-operation-123',task_type:1,audio_type:0,target_material_type:1,target_langs:['es'],operator:'legacy-owner',no_bgm:false};storage.setItem(replicationStorageKey,JSON.stringify({taskId:'ve_replication',phase:'unknown',payload}));
+  const app=await replicationFixture(async()=>null,true,{sessionStorage:storage});await app.open();assert.equal(app.field('replicationCategory').value,'混剪');assert.match(app.field('replicationPendingText').textContent,/素材分类：未指定（旧记录）/);assert.equal(app.field('replicationSubmit').disabled,true);await app.field('replicationReplay').click();assert.deepEqual(app.posts[0],payload);assert.equal(Object.hasOwn(app.posts[0],'material_category'),false);assert.match(app.field('replicationReceipt').textContent,/素材分类：未指定（旧记录）/);assert.equal(storage.getItem(replicationStorageKey),null);
+});
+
+test('a new pending category remains frozen across refresh and replay instead of following the reopened form default',async()=>{
+  const storage=memorySessionStorage();const first=await replicationFixture(async(_url,options)=>{if(options.method==='POST')throw new Error('reply lost');},true,{sessionStorage:storage});await first.open();await first.selectLanguage('es');await chooseCategory(first,'image');await first.submit();const frozen=JSON.parse(storage.getItem(replicationStorageKey));assert.equal(frozen.payload.material_category,'image');
+  const reopened=await replicationFixture(async()=>null,true,{sessionStorage:storage});await reopened.open();assert.equal(reopened.field('replicationCategory').value,'混剪');assert.match(reopened.field('replicationPendingText').textContent,/素材分类：图片（image）/);await reopened.field('replicationReplay').click();assert.deepEqual(reopened.posts[0],first.posts[0]);assert.equal(reopened.posts[0].material_category,'image');
+});
+
+test('category conflicts preserve an unspecified legacy task and show the explicit new value without claiming it applied',async()=>{
+  const app=await replicationFixture(async(_url,options,fixture)=>options.method==='POST'?response({item:{...fixture.posts[0],id:'legacy-category',material_category:null,status:'accepted',operator:'owner',effective_langs:['es'],unsupported_langs:[],b_task_id:'B-old'},reused:true,conflict:true,conflict_fields:[{field:'material_category',previous:null,requested:'混剪'}]}):null);await app.open();await app.selectLanguage('es');await app.submit();assert.match(app.field('replicationReceipt').textContent,/素材分类：原值 未指定（旧记录） → 本次 混剪/);assert.match(app.field('replicationReceipt').textContent,/本次新参数未生效/);assert.match(app.field('replicationReceipt').textContent,/素材分类：未指定（旧记录）/);
+});
+
+test('legacy history is not reinterpreted as mixed editing and readback detects a new explicit category mismatch',async()=>{
+  const app=await replicationFixture(async(_url,options,fixture)=>{if(options.method==='POST'){const request=fixture.posts[0];fixture.history=[{...request,id:'legacy-category-history',operation_id:'older-operation',operation_ids:['older-operation',request.operation_id],material_category:null,status:'accepted',operator:request.operator,effective_langs:['es'],unsupported_langs:[],b_task_id:'B-old'}];throw new Error('reply lost');}});await app.open();await app.selectLanguage('es');await chooseCategory(app,'Dramawave Post');await app.submit();await app.field('replicationVerify').click();assert.match(app.field('replicationReceipt').textContent,/素材分类：原值 未指定（旧记录） → 本次 Dramawave Post/);assert.match(app.field('replicationReceipt').textContent,/本次新参数未生效/);await app.field('replicationViewHistory').click();assert.match(app.field('replicationHistoryList').textContent,/素材分类：未指定（旧记录）/);assert.equal(app.posts.length,1);
 });

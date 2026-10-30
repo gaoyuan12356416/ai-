@@ -332,6 +332,9 @@ button[aria-busy="true"] { cursor: progress; }
 .replication-type:focus-within, .replication-language:focus-within { outline: 2px solid #9bb8f3; outline-offset: 2px; }
 .replication-options { display: grid; grid-template-columns: 1.2fr 1fr; gap: 22px; margin-top: 18px; }
 .replication-options legend { margin-bottom: 10px; color: #5d6c82; font-size: 13px; }
+.replication-category { display: grid; gap: 8px; margin-top: 20px; }
+.replication-category > label { color: #5d6c82; font-size: 13px; }
+.replication-category > select { width: min(100%, 330px); }
 .replication-segments { display: flex; flex-wrap: wrap; gap: 7px; }
 .replication-segments label { display: flex; align-items: center; gap: 6px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; cursor: pointer; }
 .replication-segments input, .replication-bgm input, .replication-language input { width: 15px; height: 15px; accent-color: var(--blue); }

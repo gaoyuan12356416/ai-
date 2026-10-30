@@ -21,14 +21,15 @@ from .store import encode, identifier, now, owner
 
 PROTECTED = {'pending', 'submitting', 'accepted', 'partial', 'unknown_outcome'}
 ENDPOINT = 'https://marketing.mydramawave.com/api/internal/material/a-group-task-create'
+MATERIAL_CATEGORIES = ('解说', '二创', '混剪', '精剪', '切片', 'image', 'Dramawave Post')
 LANGUAGE_NAMES = dict(en='英语', es='西班牙语', pt='葡萄牙语', fr='法语', de='德语', it='意大利语',
     ja='日语', ko='韩语', id='印尼语', th='泰语', vi='越南语', ar='阿拉伯语', tr='土耳其语',
     ru='俄语', pl='波兰语', cs='捷克语', ro='罗马尼亚语', el='希腊语',
     **{'zh-TW':'繁体中文', 'zh-CN':'简体中文'})
 INPUT_FIELDS = {'operation_id', 'task_type', 'audio_type', 'target_material_type', 'target_langs',
-                'operator', 'descant_start_time', 'descant_end_time', 'no_bgm'}
+                'operator', 'descant_start_time', 'descant_end_time', 'no_bgm', 'material_category'}
 CONFLICT_FIELDS = ('operator', 'resource_id', 'series_langs', 'target_material_type',
-                   'descant_start_time', 'descant_end_time', 'no_bgm', 'orig_materials')
+                   'descant_start_time', 'descant_end_time', 'no_bgm', 'orig_materials', 'material_category')
 
 
 def digest(value):
@@ -55,6 +56,12 @@ def account(value):
             not any(ord(c) < 32 or ord(c) == 127 for c in value),
             'replication_operator_invalid', '请输入有效的盈量账号')
     return value.strip()
+
+
+def material_category(value):
+    require(isinstance(value,str) and value in MATERIAL_CATEGORIES,
+            'replication_material_category_invalid', '请选择有效的成品素材分类')
+    return value
 
 
 def timecode(value):
@@ -85,6 +92,9 @@ def intent(payload):
     result['operator'] = account(payload['operator']) if payload.get('operator') is not None else None
     result['no_bgm'] = payload.get('no_bgm', False)
     require(type(result['no_bgm']) is bool, 'replication_option_invalid', '母素材无背景音乐选项无效')
+    # Preserve omission: adding B's current default would alter legacy operation hashes.
+    if 'material_category' in payload:
+        result['material_category'] = material_category(payload['material_category'])
     result['descant_start_time'] = result['descant_end_time'] = ''
     if result['target_material_type'] == 2:
         start, start_ms = timecode(payload.get('descant_start_time'))
@@ -104,6 +114,9 @@ def canonical_request(request):
     result['audio_type'] = result.get('audio_type', 0)
     result['target_material_type'] = result.get('target_material_type', 1)
     result['no_bgm'] = result.get('no_bgm', False)
+    # Frozen requests and historical import fingerprints must keep their original fields.
+    if 'material_category' in result:
+        result['material_category'] = material_category(result['material_category'])
     if result['target_material_type'] == 1:
         result.pop('descant_start_time', None); result.pop('descant_end_time', None)
     else:
@@ -113,7 +126,7 @@ def canonical_request(request):
 
 
 def b_key(request):
-    # B's documented key deliberately excludes operator/resource/narration/no_bgm.
+    # B's documented key excludes operator/resource/narration/no_bgm/material_category.
     return digest({'url':request['orig_materials'][0]['url'], 'audio_type':request['audio_type'],
                    'task_type':request['task_type'], 'target_langs':sorted(request['target_langs'])})
 
@@ -256,6 +269,7 @@ class MaterialReplication:
                 'operation_ids':[value['operation_id'] for value in operations], 'status':row['status'],
                 **{key:request.get(key, '') for key in ('operator','task_type','audio_type','target_material_type',
                     'descant_start_time','descant_end_time')}, 'no_bgm':request.get('no_bgm',False),
+                'material_category':request.get('material_category'),
                 'target_langs':request['target_langs'], 'effective_langs':data.get('effective_langs',[]),
                 'unsupported_langs':data.get('unsupported_langs',[]), 'upstream_status':data.get('upstream_status',''),
                 'upstream_item_status':data.get('upstream_item_status',''),

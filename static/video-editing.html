@@ -6,7 +6,7 @@
   <meta name="referrer" content="same-origin">
   <title>视频剪辑 · AI 后台</title>
   <link rel="stylesheet" href="/ui-topbar.css">
-  <link rel="stylesheet" href="/video-editing.css?v=20261030-material-replication-1">
+  <link rel="stylesheet" href="/video-editing.css?v=20261030-material-category-1">
 </head>
 <body>
   <div class="app">
@@ -56,6 +56,7 @@
             <label class="replication-type"><input type="radio" name="replicationTaskType" data-replication-choice value="4"><span class="replication-type-copy"><strong>爆款反转复刻</strong><span>按爆款反转复刻类型提交制作</span></span></label>
           </div></section>
           <section class="replication-section"><h3>2 <span>设置制作选项</span></h3><div class="replication-options"><fieldset><legend>配音方式</legend><div class="replication-segments"><label><input type="radio" name="replicationAudioType" data-replication-choice value="0" checked>无配音</label><label><input type="radio" name="replicationAudioType" data-replication-choice value="1">人工配音</label><label><input type="radio" name="replicationAudioType" data-replication-choice value="2">AI 配音</label></div></fieldset><fieldset><legend>成品类型</legend><div class="replication-segments"><label><input type="radio" name="replicationMaterialType" data-replication-choice value="1" checked>非解说</label><label><input type="radio" name="replicationMaterialType" data-replication-choice value="2">解说</label></div></fieldset></div>
+          <div class="replication-category"><label for="replicationCategory">素材分类</label><select id="replicationCategory" aria-describedby="replicationCategoryHelp"><option value="解说">解说</option><option value="二创">二创</option><option value="混剪" selected>混剪</option><option value="精剪">精剪</option><option value="切片">切片</option><option value="image">图片（image）</option><option value="Dramawave Post">Dramawave Post</option></select><p id="replicationCategoryHelp" class="micro">成品回推素材库时使用的分类，与解说/非解说选项独立。</p></div>
           <div id="replicationNarration" class="replication-time-grid hidden"><label>解说开始时间<input id="replicationStart" type="text" placeholder="00:00:00" inputmode="text" aria-describedby="replicationTimeHelp"></label><label>解说结束时间<input id="replicationEnd" type="text" placeholder="00:00:00" inputmode="text" aria-describedby="replicationTimeHelp"></label><p id="replicationTimeHelp" class="micro">支持时:分:秒及毫秒，结束时间不得超过母素材时长。</p></div>
           <label class="replication-bgm"><input id="replicationNoBgm" type="checkbox"><span>母素材无背景音乐<small>根据原始素材情况勾选，不代表移除背景音乐。</small></span></label><p id="replicationSupport" class="replication-support"></p></section>
           <section class="replication-section"><div class="replication-section-heading"><h3>3 <span>选择目标语种</span></h3><span class="micro">已选 <b id="replicationLanguageCount">0</b> 个 <button type="button" id="replicationClearLanguages" class="text-button">清空</button></span></div><input id="replicationSearch" class="replication-search" type="search" placeholder="搜索语种或语言代码" aria-label="搜索目标语种"><div id="replicationLanguages" class="replication-language-grid" role="group" aria-label="目标语种"></div><div id="replicationSelected" class="replication-selected"></div></section>
@@ -71,6 +72,6 @@
   </dialog>
   <dialog id="replicationHistoryDialog" class="replication-history-dialog" aria-labelledby="replicationHistoryTitle"><div class="dialog-head"><div><h2 id="replicationHistoryTitle">复刻记录</h2><p>展示已保存的受理回执，成品生成与回推进度尚未接入。</p></div><button type="button" data-close="replicationHistoryDialog" class="icon-button" aria-label="关闭复刻记录">×</button></div><div id="replicationHistoryList"></div><div class="dialog-foot"><button id="replicationRefreshHistory" type="button" class="button">刷新记录</button><button type="button" data-close="replicationHistoryDialog" class="button">关闭</button></div></dialog>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261030-material-replication-1"></script>
+  <script src="/quick-nav.js"></script><script src="/ui-topbar.js"></script><script src="/video-editing.js?v=20261030-material-category-1"></script>
 </body>
 </html>

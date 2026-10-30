@@ -29,6 +29,16 @@ test('replication receipt never treats accepted or source transfer as finished o
   assert.equal(model.replicationReceipt({status:'rejected'}).label,'提交失败');
 });
 
+test('material category accepts documented strings only and stays optional for frozen legacy requests',()=>{
+  const context={enabled:true,can_change_operator:true,source:{duration_ms:20000},target_languages:[{code:'es'}]};
+  const payload={task_type:1,audio_type:0,target_material_type:1,target_langs:['es'],operator:'owner',no_bgm:false};
+  for(const material_category of ['解说','二创','混剪','精剪','切片','image','Dramawave Post'])assert.equal(model.validateReplicationInput({...payload,material_category},context),'');
+  for(const material_category of ['',null,1,'Image','dramawave post','other'])assert.match(model.validateReplicationInput({...payload,material_category},context),/素材分类/);
+  assert.equal(model.validateReplicationInput(payload,context),'');
+  assert.equal(model.validateReplicationInput({...payload,material_category:'解说'},context),'');
+  assert.match(model.validateReplicationInput({...payload,material_category:'混剪',target_material_type:2},context),/解说起止时间/);
+});
+
 test('preview geometry follows verified FFmpeg even-pixel scaling and chroma offsets',()=>{
   assert.deepEqual(model.fitRectangle(1920,1080,'contain'),{x:0,y:436,width:720,height:406});
   assert.deepEqual(model.fitRectangle(638,480,'contain'),{x:0,y:368,width:720,height:542});

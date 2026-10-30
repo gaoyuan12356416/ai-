@@ -128,10 +128,13 @@
   }
   const replicationTaskLabels={1:'多语种复刻',3:'竞品复刻',4:'爆款反转复刻'};
   const replicationAudioLabels={0:'无配音',1:'人工配音',2:'AI 配音'};
+  const replicationCategories=['解说','二创','混剪','精剪','切片','image','Dramawave Post'];
+  function replicationCategoryLabel(value){return value==null||value===''?'未指定（旧记录）':value==='image'?'图片（image）':String(value);}
   function replicationTimeMs(value){const match=/^(\d{2}):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?$/.exec(String(value||''));return match?((+match[1]*3600 + +match[2]*60 + +match[3])*1000 + +(match[4]||'').padEnd(3,'0')):null;}
   function validateReplicationInput(payload,context){
     if(!context?.enabled)return context?.disabled_reason||'此成片暂不可复刻';
     if(![1,3,4].includes(payload.task_type)||![0,1,2].includes(payload.audio_type)||![1,2].includes(payload.target_material_type))return '请选择完整的制作选项';
+    if(Object.prototype.hasOwnProperty.call(payload,'material_category')&&!replicationCategories.includes(payload.material_category))return '请选择有效的素材分类';
     if(!Array.isArray(payload.target_langs)||!payload.target_langs.length)return '请至少选择 1 个目标语种';
     const allowed=new Set((context.target_languages||[]).map(language=>language.code));
     if(payload.target_langs.some(code=>!allowed.has(code)))return '目标语种列表已变化，请重新打开后选择';
@@ -495,11 +498,11 @@
     const available=replicationAvailability(task),meta=task.material_replication||{},record=meta.summary;
     const button=`<button class="button small replication-launch" data-replicate-task="${esc(task.id)}" ${available.enabled?'':`disabled title="${esc(available.reason)}"`}>素材复刻</button>`;
     const history=meta.count?`<button class="text-button" data-replication-history="${esc(task.id)}">复刻记录 (${esc(meta.count)})</button>`:'';
-    const detail=record?`<div class="replication-card-receipt"><span>复刻回执</span><strong class="${replicationReceipt(record).tone}">${esc(replicationReceipt(record).label)}</strong><span>${esc(replicationLanguageText(record.target_langs))} · 归属 ${esc(record.operator||'待核实')}${record.historical?' · 历史导入记录':''}</span><span class="micro">成品与回推结果未查询</span>${history}</div>`:history?`<div class="replication-card-receipt">${history}</div>`:'';
+    const detail=record?`<div class="replication-card-receipt"><span>复刻回执</span><strong class="${replicationReceipt(record).tone}">${esc(replicationReceipt(record).label)}</strong><span>${esc(replicationLanguageText(record.target_langs))} · 归属 ${esc(record.operator||'待核实')} · 素材分类：${esc(replicationCategoryLabel(record.material_category))}${record.historical?' · 历史导入记录':''}</span><span class="micro">成品与回推结果未查询</span>${history}</div>`:history?`<div class="replication-card-receipt">${history}</div>`:'';
     return {action:button,detail,hint:available.enabled?'':`<p class="micro replication-disabled">${esc(available.reason)}</p>`};
   }
   function replicationLanguageText(codes){return Array.isArray(codes)&&codes.length?codes.map(code=>{const language=replication.context?.target_languages?.find(entry=>entry.code===code);return language?`${language.name} ${code}`:String(code);}).join('、'):'无';}
-  function replicationConfigurationText(record){return `${replicationTaskLabels[record.task_type]||'类型待核实'} · ${replicationAudioLabels[record.audio_type]||'配音待核实'} · ${Number(record.target_material_type)===2?`解说 ${record.descant_start_time||'待填写'}–${record.descant_end_time||'待填写'}`:'非解说'} · ${record.no_bgm?'母素材无背景音乐':'未标记无背景音乐'}`;}
+  function replicationConfigurationText(record){return `${replicationTaskLabels[record.task_type]||'类型待核实'} · ${replicationAudioLabels[record.audio_type]||'配音待核实'} · ${Number(record.target_material_type)===2?`解说 ${record.descant_start_time||'待填写'}–${record.descant_end_time||'待填写'}`:'非解说'} · 素材分类：${replicationCategoryLabel(record.material_category)} · ${record.no_bgm?'母素材无背景音乐':'未标记无背景音乐'}`;}
   function replicationRecordHtml(record){
     const view=replicationReceipt(record),error=typeof record.error==='string'?record.error:record.error?JSON.stringify(record.error):'';
     const recordedAt=record.submitted_at||record.created_at,recordedTime=recordedAt?new Date(expiryTime(recordedAt)):null,timeText=recordedTime&&Number.isFinite(recordedTime.getTime())?recordedTime.toLocaleString('zh-CN'):'';
@@ -507,7 +510,7 @@
   }
   function replicationChoice(name,fallback){return document.querySelector(`[name="${name}"]:checked`)?.value||fallback;}
   function replicationPayload(){
-    const payload={task_type:Number(replicationChoice('replicationTaskType','1')),audio_type:Number(replicationChoice('replicationAudioType','0')),target_material_type:Number(replicationChoice('replicationMaterialType','1')),target_langs:[...replication.selected],no_bgm:$('replicationNoBgm').checked};
+    const payload={task_type:Number(replicationChoice('replicationTaskType','1')),audio_type:Number(replicationChoice('replicationAudioType','0')),target_material_type:Number(replicationChoice('replicationMaterialType','1')),material_category:$('replicationCategory').value,target_langs:[...replication.selected],no_bgm:$('replicationNoBgm').checked};
     if(replication.context?.can_change_operator)payload.operator=$('replicationOperator').value.trim();
     if(payload.target_material_type===2){payload.descant_start_time=$('replicationStart').value.trim();payload.descant_end_time=$('replicationEnd').value.trim();}
     return payload;
@@ -538,8 +541,9 @@
   }
   function showReplicationReceipt(record,response={}){
     const conflict=response.conflict||record.conflict,reused=response.reused||record.reused,fields=response.conflict_fields||record.conflict_fields||[];
+    const conflictValue=(field,value)=>field==='material_category'?replicationCategoryLabel(value):typeof value==='object'?JSON.stringify(value):value;
     let notice='';
-    if(conflict)notice=`<div class="replication-conflict" role="alert"><strong>已存在的任务与本次参数不同</strong><p>以下展示旧任务，本次新参数未生效。</p>${fields.map(field=>`<p>${esc(({task_type:'复刻类型',audio_type:'配音方式',target_material_type:'成品类型',operator:'归属',no_bgm:'母素材无背景音乐',descant_start_time:'解说开始时间',descant_end_time:'解说结束时间'})[field.field]||field.field)}：原值 ${esc(typeof field.previous==='object'?JSON.stringify(field.previous):field.previous)} → 本次 ${esc(typeof field.requested==='object'?JSON.stringify(field.requested):field.requested)}</p>`).join('')}</div>`;
+    if(conflict)notice=`<div class="replication-conflict" role="alert"><strong>已存在的任务与本次参数不同</strong><p>以下展示旧任务，本次新参数未生效。</p>${fields.map(field=>`<p>${esc(({task_type:'复刻类型',audio_type:'配音方式',target_material_type:'成品类型',material_category:'素材分类',operator:'归属',no_bgm:'母素材无背景音乐',descant_start_time:'解说开始时间',descant_end_time:'解说结束时间'})[field.field]||field.field)}：原值 ${esc(conflictValue(field.field,field.previous))} → 本次 ${esc(conflictValue(field.field,field.requested))}</p>`).join('')}</div>`;
     else if(reused)notice='<p class="replication-conflict">已复用已有任务，本次未创建新任务。</p>';
     $('replicationReceipt').innerHTML=notice+replicationRecordHtml(record);$('replicationReceipt').classList.remove('hidden');
   }
@@ -547,6 +551,7 @@
     if(demo)return toast('演示模式不可提交素材复刻');
     const sequence=++replication.sequence;replication.taskId=String(id);replication.context=null;replication.loading=true;replication.selected=new Set();
     for(const [name,value]of [['replicationTaskType','1'],['replicationAudioType','0'],['replicationMaterialType','1']])document.querySelectorAll(`[name="${name}"]`).forEach(input=>input.checked=input.value===value);
+    $('replicationCategory').value='混剪';
     $('replicationOperator').value='';$('replicationStart').value='';$('replicationEnd').value='';$('replicationSearch').value='';$('replicationNoBgm').checked=false;$('replicationReceipt').classList.add('hidden');replicationError('');$('replicationSource').textContent='正在加载母素材与可用语种…';$('replicationRoleNote').textContent='';
     renderReplicationLanguages();updateReplicationForm();if(!$('replicationDialog').open)$('replicationDialog').showModal();$('replicationBody').scrollTop=0;
     try{
@@ -567,7 +572,7 @@
     else if(operation.phase!=='sending'&&operation.phase!=='conflict'){operation.phase=['pending','submitting'].includes(record.status)?'awaiting':'unknown';saveReplicationOperation(id,operation);}
     if(replication.taskId===String(id)){
       const reused=record.operation_id!==operation.payload.operation_id;
-      const conflict_fields=reused?['task_type','audio_type','target_material_type','operator','no_bgm','descant_start_time','descant_end_time'].filter(field=>Object.prototype.hasOwnProperty.call(operation.payload,field)&&String(record[field]??'')!==String(operation.payload[field]??'')).map(field=>({field,previous:record[field],requested:operation.payload[field]})):[];
+      const conflict_fields=reused?['task_type','audio_type','target_material_type','material_category','operator','no_bgm','descant_start_time','descant_end_time'].filter(field=>Object.prototype.hasOwnProperty.call(operation.payload,field)&&String(record[field]??'')!==String(operation.payload[field]??'')).map(field=>({field,previous:record[field],requested:operation.payload[field]})):[];
       showReplicationReceipt(record,{reused,conflict:conflict_fields.length>0,conflict_fields,...(operation.receiptFlags||{})});
     }
   }

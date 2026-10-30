@@ -13,7 +13,10 @@ import unittest
 from unittest import mock
 
 from features.video_editing import VideoEditingError
-from features.video_editing.material_replication import MaterialReplicationWorker, ReplicationCatalog, receipt
+from features.video_editing.material_replication import (
+    MATERIAL_CATEGORIES, MaterialReplicationWorker, ReplicationCatalog,
+    b_key, canonical_request, digest, intent, receipt,
+)
 from features.video_editing.service import Service
 from features.video_editing.store import Store, owner
 from features.video_editing.uploads import Uploads
@@ -206,6 +209,117 @@ class MaterialReplicationTests(unittest.TestCase):
         for changes in ({'task_type':2},{'task_type':True},{'audio_type':'1'},{'audio_type':3},
                         {'target_material_type':0},{'no_bgm':1},{'target_langs':[]},{'target_langs':['fr']}):
             with self.subTest(changes=changes),self.assertRaises(VideoEditingError):self.enqueue(**changes)
+
+    def test_all_material_categories_pass_through_without_changing_production_options(self):
+        categories=('解说','二创','混剪','精剪','切片','image','Dramawave Post')
+        self.assertEqual(MATERIAL_CATEGORIES,categories)
+        for index,category in enumerate(categories):
+            with self.subTest(category=category):
+                task_type=(1,3,4)[index//3];audio_type=index%3
+                item=self.enqueue(operation_id='category-%s-request'%index,material_category=category,
+                                  task_type=task_type,audio_type=audio_type)
+                self.assertEqual(item['material_category'],category)
+                frozen=copy.deepcopy(self.row(item)['data']['request'])
+                self.assertEqual(canonical_request(frozen),frozen)
+                self.assertTrue(self.worker.tick())
+                sent=self.http.calls[-1][1]['json']
+                self.assertEqual(sent,frozen)
+                self.assertEqual(sent['material_category'],category)
+                self.assertEqual((sent['task_type'],sent['audio_type'],sent['target_material_type']),
+                                 (task_type,audio_type,1))
+                self.assertNotIn('descant_start_time',sent)
+                self.assertEqual(sent['orig_materials'][0]['name'],'Test material.mp4')
+                self.assertEqual(self.material.history(TASK)[0]['material_category'],category)
+        self.assertEqual(len(self.http.calls),7)
+
+    def test_material_category_rejects_aliases_coercion_and_whitespace(self):
+        for value in ('图片','Image','IMAGE','mix',' 混剪','混剪 ','Dramawave post','',None,0,True,[],{}):
+            with self.subTest(value=value),self.assertRaises(VideoEditingError) as caught:
+                self.enqueue(material_category=value)
+            self.assertEqual(caught.exception.code,'replication_material_category_invalid')
+            with self.assertRaises(VideoEditingError):
+                canonical_request({'series_langs':['en'],'target_langs':['es'],'material_category':value})
+        self.assertEqual(self.material.history(TASK),[])
+        self.assertEqual(self.http.calls,[])
+
+    def test_legacy_operation_and_request_hashes_keep_omitted_category(self):
+        _,params=intent(self.payload())
+        self.assertNotIn('material_category',params)
+        self.assertEqual(digest(params),'15b1e850225e59c510fe7a37d37575dbc575ab684a490d6f09fb43b9e73c0eb7')
+        item=self.enqueue();row=self.row(item)
+        self.assertEqual(row['request_hash'],'a7be4990d0765f8281a9b4730661afadf711255d5a16acc14192b9eba42837bc')
+        with closing(self.store.connect()) as db:
+            stored_hash=db.execute('SELECT payload_hash FROM ve_material_replication_operation WHERE operation_id=?',
+                                   ('operation-test-01',)).fetchone()[0]
+        self.assertEqual(stored_hash,'15b1e850225e59c510fe7a37d37575dbc575ab684a490d6f09fb43b9e73c0eb7')
+        self.assertIsNone(item['material_category'])
+        self.assertNotIn('material_category',row['data']['request'])
+        self.assertNotIn('material_category',canonical_request(row['data']['request']))
+        self.service.catalog.variant.side_effect=AssertionError('legacy replay must not requery')
+        self.marker.touch()
+        replay=self.enqueue()
+        self.assertEqual(replay['id'],item['id']);self.assertTrue(replay['reused'])
+        self.assertIsNone(replay['material_category'])
+
+    def test_legacy_pending_request_does_not_gain_category_at_dispatch(self):
+        item=self.enqueue();before=self.row(item)
+        self.worker.tick()
+        self.assertEqual(self.http.calls[0][1]['json'],before['data']['request'])
+        self.assertNotIn('material_category',self.http.calls[0][1]['json'])
+        self.assertEqual(self.row(item)['data']['request'],before['data']['request'])
+        self.assertEqual(self.row(item)['request_hash'],before['request_hash'])
+        self.assertIsNone(self.material.history(TASK)[0]['material_category'])
+
+    def test_category_change_with_same_operation_is_409(self):
+        self.enqueue(material_category='混剪')
+        with self.assertRaises(VideoEditingError) as caught:self.enqueue(material_category='精剪')
+        self.assertEqual(caught.exception.status,409)
+        self.assertEqual(caught.exception.code,'replication_operation_conflict')
+        with self.assertRaises(VideoEditingError):self.enqueue()
+        self.assertEqual(len(self.material.history(TASK)),1)
+        self.assertEqual(self.http.calls,[])
+
+    def test_category_change_same_b_key_conflicts_without_new_record(self):
+        first=self.enqueue(material_category='混剪')
+        request=self.row(first)['data']['request']
+        changed={**request,'material_category':'精剪'}
+        self.assertEqual(b_key(request),b_key(changed))
+        self.assertNotEqual(digest(request),digest(changed))
+        result=self.enqueue(operation_id='different-category',material_category='精剪')
+        self.assertEqual(result['id'],first['id']);self.assertTrue(result['conflict'])
+        self.assertEqual(result['material_category'],'混剪')
+        self.assertEqual(result['conflict_fields'],[{'field':'material_category','previous':'混剪','requested':'精剪'}])
+        self.assertEqual(len(self.material.history(TASK)),1)
+        replay=self.enqueue(operation_id='different-category',material_category='精剪')
+        self.assertEqual(replay['conflict_fields'],result['conflict_fields'])
+        self.assertEqual(self.http.calls,[])
+
+    def test_legacy_missing_category_is_not_relabelled_as_explicit_default(self):
+        first=self.enqueue();before=self.row(first)
+        result=self.enqueue(operation_id='explicit-new-default',material_category='混剪')
+        self.assertEqual(result['id'],first['id']);self.assertTrue(result['conflict'])
+        self.assertIsNone(result['material_category'])
+        self.assertEqual(result['conflict_fields'],[{'field':'material_category','previous':None,'requested':'混剪'}])
+        self.assertEqual(self.row(first),before)
+        self.assertEqual(len(self.material.history(TASK)),1)
+        with self.assertRaises(VideoEditingError) as caught:self.enqueue(material_category='混剪')
+        self.assertEqual(caught.exception.status,409)
+
+    def test_legacy_import_fingerprint_and_receipt_are_unchanged(self):
+        pending=self.enqueue();request=self.row(pending)['data']['request']
+        with self.store.transaction() as db:
+            db.execute('DELETE FROM ve_material_replication_operation');db.execute('DELETE FROM ve_material_replication')
+        body=accepted(request)
+        legacy_fingerprint=digest({'request':request,'response':body,'submitted_at':200,'override':None})
+        imported=self.material.import_history(TASK,request,body,import_source='legacy-category-absent#sha',submitted_at=200)
+        before=self.row(imported)
+        self.assertEqual(before['data']['import_fingerprint'],legacy_fingerprint)
+        self.assertEqual(before['request_hash'],'a7be4990d0765f8281a9b4730661afadf711255d5a16acc14192b9eba42837bc')
+        self.assertNotIn('material_category',before['data']['request'])
+        replay=self.material.import_history(TASK,request,body,import_source='legacy-category-absent#sha',submitted_at=200)
+        self.assertEqual(replay['id'],imported['id']);self.assertTrue(replay['reused'])
+        self.assertIsNone(replay['material_category']);self.assertEqual(self.row(imported),before)
+        self.assertEqual(self.http.calls,[])
 
     def test_narration_time_format_order_and_duration(self):
         for start,end in (('0:00:01','00:00:03'),('00:00:20','00:00:10'),('00:00:00','00:01:00.001')):
