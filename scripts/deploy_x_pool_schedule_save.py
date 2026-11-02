@@ -111,9 +111,13 @@ def apply(m, rollback=False, resume_drain=False):
     rescue_script = Path(m["backup"]) / "resume.sh"
     rescue_script.write_text("#!/bin/bash\n" + "\n".join("kill -CONT %d 2>/dev/null || true" % p for p in paused_pids)
                             + "\nsystemctl start " + " ".join((['x-auto-post-service.service'] if auto_active else []) + active_triggers) + "\n")
+    if base.run("systemctl", "show", rescue + ".timer", "-p", "LoadState", "--value") != "not-found":
+        base.run("systemctl", "stop", rescue + ".timer")
     base.run("systemd-run", "--quiet", "--unit=" + rescue, "--on-active=140m", "/bin/bash", str(rescue_script))
     if resume_drain:
-        base.run("systemctl", "stop", "x-pool-save-rescue-" + m["commit"][:8] + ".timer")
+        old_rescue = "x-pool-save-rescue-" + m["commit"][:8] + ".timer"
+        if base.run("systemctl", "show", old_rescue, "-p", "LoadState", "--value") != "not-found":
+            base.run("systemctl", "stop", old_rescue)
     switched = False
     try:
         if active_triggers:
