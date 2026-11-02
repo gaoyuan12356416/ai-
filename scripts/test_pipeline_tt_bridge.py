@@ -1,5 +1,6 @@
 """Offline native TT ledger/portable execution integration checks."""
 import copy
+import os
 import unittest
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -45,6 +46,9 @@ class ProductionRoutedExecutor(auto_fixtures.AutoPostExecutor):
 
 class RoutedTTBridgeTests(unittest.TestCase):
     def setUp(self):
+        approvals = patch.dict(os.environ, {"PIPELINE_TT_APPROVED_OUTRO_SHA256": "d" * 64,
+                                           "PIPELINE_TT_APPROVED_FONT_SHA256": "e" * 64})
+        approvals.start(); self.addCleanup(approvals.stop)
         self.fixture = auto_fixtures.TTAutoPostPublisherIntegrationTests()
         self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
         self.task = self.fixture.reserved_task(suffix="routed")
@@ -109,6 +113,38 @@ class RoutedTTBridgeTests(unittest.TestCase):
         self.assertEqual(self.fixture.store.get_task(self.task.id).as_dict(), before)
         with self.bridge.connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_tt_claim").fetchone()[0], 0)
+
+    def test_unapproved_or_unconfigured_assets_leave_automatic_task_unclaimed(self):
+        before = self.fixture.store.get_task(self.task.id).as_dict()
+        cases = [
+            ({"PIPELINE_TT_APPROVED_OUTRO_SHA256": ""}, self.job, "approval_missing"),
+            ({"PIPELINE_TT_APPROVED_FONT_SHA256": ""}, self.job, "approval_missing"),
+            ({}, dict(self.job, executor_capabilities=["asset:tt-outro:" + "a" * 64, "asset:tt-font:" + "e" * 64]), "not_approved"),
+            ({}, dict(self.job, executor_capabilities=["asset:tt-outro:" + "d" * 64, "asset:tt-font:" + "a" * 64]), "not_approved"),
+        ]
+        for approval, job, error in cases:
+            with self.subTest(approval=approval, error=error), patch.dict(os.environ, approval):
+                with self.assertRaisesRegex(AdapterError, "canonical_render_asset_" + error):
+                    self.bridge.reserve(job, self.claim)
+                self.assertEqual(self.fixture.store.get_task(self.task.id).as_dict(), before)
+                with self.bridge.connect() as conn:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_tt_claim").fetchone()[0], 0)
+
+    def test_existing_recipe_survives_approval_change_and_retry(self):
+        descriptor = self.bridge.reserve(self.job, self.claim)
+        retry = dict(self.job, generation=2, executor_capabilities=[])
+        with patch.dict(os.environ, {"PIPELINE_TT_APPROVED_OUTRO_SHA256": "", "PIPELINE_TT_APPROVED_FONT_SHA256": "a" * 64}):
+            self.assertEqual(self.bridge.reserve(retry, self.claim), descriptor)
+            self.bridge.complete(retry, {"preparation": self.result(descriptor)}, self.claim)
+        self.assertEqual(self.fixture.store.get_task(self.task.id).status, "ready")
+
+    def test_source_direct_freezes_the_actual_cpu_backend(self):
+        self.executor.test_routes[(self.task.template_id, self.task.template_version)] = replace(
+            self.route, media_profile_version="tt-post-source-direct-v1", source_trim_tail_seconds=0)
+        descriptor = self.bridge.reserve(self.job, self.claim)
+        self.assertEqual(descriptor["request"]["expected_profile"], "tt-post-source-direct-v1")
+        self.assertEqual(descriptor["required_capabilities"], ["prepare:tt", "backend:cpu", "profile:tt-post-source-direct-v1"])
+        self.assertEqual(self.bridge.reserve(dict(self.job, generation=2, executor_backend="gpu"), self.claim), descriptor)
 
     def test_other_source_uses_its_own_frozen_route_without_mutating_default(self):
         first = self.bridge.reserve(self.job, self.claim)
@@ -279,6 +315,30 @@ class PoolBridgeTests(unittest.TestCase):
         self.bridge.complete(job, {"preparation": prepared}, self.claim)
         self.assertEqual(self.bridge.reconcile(job)["status"], "ready")
         self.assertEqual(self.service.store.count_recurring_materials(account_id="101"), 1)
+
+    def test_intake_and_direct_assets_are_approved_before_native_claim(self):
+        self.service.media_profile_version = "tt-post-direct-outro-hevc-720x1280-v2"
+        intake = self.service.material_pool_add(self.fixture.recurring_material_payload())["item"]
+        jobs = [{"source_key": "tt:intake:%s" % intake["id"], "source_id": str(intake["id"]),
+                 "channel": "tt", "family": "intake", "stage": "prepare", "generation": 1}]
+        jobs.append(self.direct_task()[1])
+        for job in jobs:
+            before = self.bridge._native_dict(job)
+            cases = [
+                ({"PIPELINE_TT_APPROVED_OUTRO_SHA256": "", "PIPELINE_TT_APPROVED_FONT_SHA256": "e" * 64},
+                 ["asset:tt-outro:" + "d" * 64, "asset:tt-font:" + "e" * 64], "approval_missing"),
+                ({"PIPELINE_TT_APPROVED_OUTRO_SHA256": "d" * 64, "PIPELINE_TT_APPROVED_FONT_SHA256": "e" * 64}, [], "unavailable"),
+                ({"PIPELINE_TT_APPROVED_OUTRO_SHA256": "d" * 64, "PIPELINE_TT_APPROVED_FONT_SHA256": "e" * 64},
+                 ["asset:tt-outro:" + "a" * 64, "asset:tt-font:" + "e" * 64], "not_approved"),
+            ]
+            for approval, capabilities, error in cases:
+                with self.subTest(family=job["family"], error=error), patch.dict(os.environ, approval):
+                    with self.assertRaisesRegex(AdapterError, "canonical_render_asset_" + error):
+                        self.bridge.reserve(dict(job, executor_capabilities=capabilities), self.claim)
+                    self.assertEqual(self.bridge._native_dict(job), before)
+                    with self.bridge.connect() as conn:
+                        self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_tt_claim").fetchone()[0], 0)
+        self.assertEqual(self.fixture.gpu.prepare_jobs, [])
 
     def test_queue_native_policy_then_portable_init_and_receipt(self):
         queue = self.service.queue_create(service_fixtures.queue_payload(self.fixture.clock, "direct_post"))["item"]

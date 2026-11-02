@@ -86,12 +86,17 @@ def media_clone(owner, *, result=None, profile=None, trim=None, expected_request
 
 def outro_capabilities(job, profile):
     required = []
-    if "direct-outro" in profile and "executor_capabilities" in job:
+    if "direct-outro" in profile:
         for kind in ("outro", "font"):
-            matches = sorted({value for value in job["executor_capabilities"] if isinstance(value, str)
+            approved = os.environ.get("PIPELINE_TT_APPROVED_" + kind.upper() + "_SHA256", "").strip()
+            if not re.fullmatch(r"[a-f0-9]{64}", approved):
+                raise AdapterError("canonical_render_asset_approval_missing")
+            matches = sorted({value for value in job.get("executor_capabilities", []) if isinstance(value, str)
                 and re.fullmatch("asset:tt-" + kind + ":[a-f0-9]{64}", value)})
             if len(matches) != 1:
                 raise AdapterError("canonical_render_asset_unavailable")
+            if not secrets.compare_digest(matches[0], "asset:tt-" + kind + ":" + approved):
+                raise AdapterError("canonical_render_asset_not_approved")
             required.extend(matches)
     return required
 
@@ -250,13 +255,19 @@ class TTNativeBridge:
                 frozen = c.execute("SELECT * FROM pipeline_tt_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone() if job["stage"] == "prepare" else None
             if existing:
                 return self._stored(job, claim)[1]
-            if self.automatic and job["stage"] == "prepare" and not frozen:
-                executor = self.service.executor
-                route_for_task = getattr(executor, "_video_route_for_task", None)
-                profile = route_for_task(self._native(job)).media_profile_version if callable(route_for_task) else executor.media_profile_version
+            approved_assets = []
+            if job["stage"] == "prepare" and not frozen:
+                if self.automatic:
+                    executor = self.service.executor
+                    route_for_task = getattr(executor, "_video_route_for_task", None)
+                    profile = route_for_task(self._native(job)).media_profile_version if callable(route_for_task) else executor.media_profile_version
+                elif job["family"] in {"intake", "direct_test"}:
+                    profile = self._native_dict(job)["preparation_profile"]
+                else:
+                    raise AdapterError("tt_queue_is_publish_only")
                 # Missing node assets must not create a native claim with no
                 # persisted binding. Frozen generations keep their original caps.
-                outro_capabilities(job, profile)
+                approved_assets = outro_capabilities(job, profile)
             worker = "pipeline:%s:%s" % (claim.get("node_id", "node"), job["generation"])
             identity, native_token = int(job["source_id"]), ""
             if frozen and int(frozen["generation"]) >= int(job["generation"]):
@@ -365,8 +376,9 @@ class TTNativeBridge:
                 profile = descriptor["request"]["expected_profile"]
                 cpu_profiles = {"tt-post-h264-720x1280-v2", "tt-post-direct-clean-h264-720x1280-v1",
                                 "tt-post-direct-outro-h264-720x1280-v2", "tt-post-random-overlay-libx264-720x1280-v1"}
-                descriptor["required_capabilities"] = prepare_capabilities("tt", profile, "cpu" if profile in cpu_profiles else "gpu", job)
-                descriptor["required_capabilities"].extend(outro_capabilities(job, profile))
+                backend = job.get("executor_backend", "gpu") if profile == "tt-post-source-direct-v1" else "cpu" if profile in cpu_profiles else "gpu"
+                descriptor["required_capabilities"] = prepare_capabilities("tt", profile, backend, job)
+                descriptor["required_capabilities"].extend(approved_assets)
             if job["stage"] == "prepare" and "native_identity" not in descriptor:
                 current = self._native_dict(job)
                 descriptor["native_identity"] = {"material_id": str(current["material_id"]), "account_id": str(account_id)}
