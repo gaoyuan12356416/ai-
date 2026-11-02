@@ -139,6 +139,57 @@ class ProjectionTests(unittest.TestCase):
                 public_descriptor({"request":[{key:"private"}]})
 
 
+class XLegacyParentProjectionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = str(Path(self.tmp.name) / 'x.db')
+        self.auto_path = str(Path(self.tmp.name) / 'auto.db')
+        with sqlite3.connect(self.path, factory=ClosingConnection) as c:
+            c.executescript("""CREATE TABLE x_post_queue(id INTEGER PRIMARY KEY,status TEXT,account_id INTEGER,
+                random_template_enabled INTEGER,created_at TEXT);
+                INSERT INTO x_post_queue VALUES(5373,'queued',71,1,'2026-11-02T10:02:48+00:00');
+                INSERT INTO x_post_queue VALUES(5374,'queued',71,1,'2026-11-02T10:02:48+00:00');
+                CREATE TABLE x_post_publish_log(id INTEGER PRIMARY KEY,queue_id INTEGER,status TEXT,
+                    attempt_count INTEGER,unknown_outcome INTEGER,x_post_id TEXT,updated_at TEXT);
+                INSERT INTO x_post_publish_log VALUES(5305,5373,'reserved',0,0,'','2026-11-02T10:03:53+00:00');
+                CREATE TABLE x_post_random_template_preparation(queue_id INTEGER,status TEXT,result_json TEXT);
+                INSERT INTO x_post_random_template_preparation VALUES(5373,'frozen','{}');""")
+        with sqlite3.connect(self.auto_path, factory=ClosingConnection) as c:
+            c.executescript("""CREATE TABLE x_auto_template(id INTEGER PRIMARY KEY,owner_user_id TEXT,owner_tenant_key TEXT);
+                INSERT INTO x_auto_template VALUES(4,'owner','tenant');
+                CREATE TABLE x_auto_task(id INTEGER PRIMARY KEY,status TEXT,execution_queue_id INTEGER,
+                    template_id INTEGER,created_at TEXT,scheduled_at_utc TEXT,lease_expires_at_utc TEXT,
+                    claim_token TEXT,updated_at TEXT);
+                INSERT INTO x_auto_task VALUES(1861,'publishing',5373,4,'2026-11-02T09:00:00+00:00',
+                    '2026-11-02T09:00:00+00:00','2026-11-02T13:02:48+00:00','test-private-lease',
+                    '2026-11-02T10:02:48+00:00');""")
+        self.adapter = LedgerAdapter(LedgerSpec('x', 'queue', self.path, 'x_post_queue'),
+                                     SimpleNamespace(control_only=False), cross_paths={'x_auto': self.auto_path})
+
+    def test_exact_active_auto_child_is_preparing_without_publish_attempt(self):
+        offer = self.adapter.project(self.adapter.read(5373), now='2026-11-02T10:45:39Z')
+        self.assertEqual(offer['ancestor_source_keys'], ['x:auto:1861'])
+        self.assertEqual((offer['stage'], offer['status']), ('prepare', 'legacy_running'))
+        self.assertTrue(offer['legacy_inflight'])
+        self.assertTrue(offer['legacy_parent_inflight'])
+        self.assertEqual(offer['started_at'], '2026-11-02T10:02:48Z')
+        self.assertEqual(offer['source_attempt_count'], 0)
+        self.assertFalse(offer['pause_eligible'])
+        self.assertFalse(offer['execution_available'])
+        self.assertNotIn('test-private-lease', json.dumps(offer))
+
+    def test_sibling_and_expired_or_unclaimed_parent_do_not_inherit_inflight(self):
+        sibling = self.adapter.project(self.adapter.read(5374), now='2026-11-02T10:45:39Z')
+        self.assertEqual(sibling['status'], 'queued')
+        self.assertFalse(sibling['legacy_inflight'])
+        expired = self.adapter.project(self.adapter.read(5373), now='2026-11-02T14:00:00Z')
+        self.assertFalse(expired['legacy_inflight'])
+        with sqlite3.connect(self.auto_path, factory=ClosingConnection) as c:
+            c.execute("UPDATE x_auto_task SET claim_token=''")
+        self.assertFalse(self.adapter.project(self.adapter.read(5373), now='2026-11-02T10:45:39Z')['legacy_inflight'])
+
+
 class FakeFBStore:
     def __init__(self,path):
         self.path=path

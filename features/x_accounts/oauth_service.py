@@ -5400,6 +5400,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             request_body_limit = MAX_BODY_BYTES
+            from features.pipeline_dispatch.legacy_admission import handoff
+            dispatched = handoff("x", parsed.path)
+            if dispatched is not None:
+                self.send_json(200, dispatched)
+                return
             if parsed.path in {
                 "/internal/posts/daily-plan",
                 "/internal/posts/catchup-plan",

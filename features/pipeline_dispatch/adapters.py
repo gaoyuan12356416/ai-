@@ -98,7 +98,7 @@ def artifact_from(row):
             "sha256": str(prepared.get("sha256") or row.get("prepared_sha256") or row.get("prepared_output_sha256") or ""),
             "size": int(prepared.get("size_bytes") or row.get("prepared_size_bytes") or row.get("prepared_output_size") or 0),
             "duration_seconds": float(prepared.get("duration_seconds") or row.get("prepared_duration_seconds") or row.get("prepared_duration_sec") or 0),
-            "profile": str(prepared.get("profile") or row.get("prepared_profile") or ""),
+            "profile": str(prepared.get("profile") or row.get("prepared_profile") or row.get("preparation_profile") or ""),
             "mime": "video/mp4"}
 
 
@@ -128,6 +128,7 @@ def default_specs(paths):
     add("tt_auto", "tt", "auto", "tt_auto_task", module="tt_posts", page="/tt-auto-post-records.html")
     add("tt", "tt", "queue", "tt_post_queue", module="tt_posts", page="/tt-post-publish-logs.html")
     add("tt", "tt", "intake", "tt_post_material_intake", module="tt_posts", page="/tt-post-material-pool.html")
+    add("tt", "tt", "direct_test", "tt_post_direct_test", module="tt_posts", page="/tt-post-publish-logs.html")
     add("youtube", "youtube", "preparation", "youtube_auto_preparation", state="state", module="youtube_auto_publish", page="/youtube-publish.html")
     add("youtube", "youtube", "publish", "drama_youtube_publish", module="youtube_auto_publish", page="/youtube-publish.html")
     return result
@@ -157,6 +158,17 @@ class LedgerAdapter:
         row = conn.execute(f"SELECT * FROM {table} WHERE {identity}=?", (row_id,)).fetchone()
         return dict(row) if row else {}
 
+    @staticmethod
+    def _x_origin_execution(row, origin):
+        # X Auto owns the lease while its synchronous queue call renders on the
+        # GPU.  The child queue/log remain queued/reserved until the first X API
+        # operation; only this exact parent-child link proves active rendering.
+        origin = dict(origin)
+        row["legacy_parent_status"] = origin.get("status", "")
+        row["legacy_parent_lease_until"] = origin.get("lease_expires_at_utc", "")
+        row["legacy_parent_has_claim"] = bool(origin.get("claim_token"))
+        row["legacy_parent_started_at"] = origin.get("updated_at") or origin.get("selected_at_utc", "")
+
     def enrich(self, conn, raw):
         row = dict(raw)
         key = (self.spec.channel, self.spec.family)
@@ -170,6 +182,7 @@ class LedgerAdapter:
             if self.cross_paths.get("x_auto"):
                 origin = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE execution_queue_id=?", (row["id"],)).fetchall()
                 if len(origin) == 1:
+                    self._x_origin_execution(row, origin[0])
                     row["ancestor_source_keys"] = ["x:auto:" + str(origin[0]["id"])]
                     row["origin_created_at"] = origin[0]["created_at"]
                     row["scheduled_at"] = origin[0]["scheduled_at_utc"]
@@ -201,6 +214,7 @@ class LedgerAdapter:
                         and str(parent.get("template_version")) == str(origin["template_version"])
                         and str(row.get("account_id")) == str(origin["account_id"])
                         and str(row.get("material_id")) == str(origin["material_id"])):
+                    self._x_origin_execution(row, origin)
                     row["ancestor_source_keys"] = ["x:auto:" + str(origin["id"])]
                     row["origin_created_at"], row["scheduled_at"] = origin["created_at"], origin["scheduled_at_utc"]
                     template = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_template WHERE id=?", (origin["template_id"],)).fetchone()
@@ -276,6 +290,12 @@ class LedgerAdapter:
             # claim retries precede the platform boundary and are not publishes.
             attempts = int(bool(row.get("publish_started_at_utc") or row.get("publish_id")))
         started = state in INFLIGHT or row.get("ledger_status") in INFLIGHT or (spec.channel == "fb" and spec.family == "video" and row.get("prepare_state") == "preparing")
+        legacy_parent_inflight = (spec.channel == "x" and spec.family == "queue" and not terminal
+                                  and row.get("legacy_parent_status") in INFLIGHT
+                                  and bool(row.get("legacy_parent_has_claim"))
+                                  and bool(row.get("legacy_parent_lease_until"))
+                                  and stamp(row["legacy_parent_lease_until"]) > stamp(now))
+        started = started or legacy_parent_inflight
         artifact = artifact_from(row)
         stage = "prepare"
         if state in {"ready", "queued", "reserved"} or terminal:
@@ -297,6 +317,8 @@ class LedgerAdapter:
             stage = "prepare" if state in {"planned", "preparing"} or (terminal and not artifact["url"]) else "publish"
         if spec.channel == "tt" and spec.family == "intake":
             stage = "prepare"
+        if spec.channel == "tt" and spec.family == "direct_test":
+            stage = "publish" if state in {"ready", "publishing", "reconciling", "published", "unknown"} or artifact["url"] else "prepare"
         if spec.channel in {"x", "tt"} and spec.family == "auto":
             stage = "publish" if state in {"ready", "publishing", "reconciling", "unknown", "published"} or (terminal and artifact["url"]) or (state == "retry_wait" and row.get("claim_phase") in {"publish", "reconcile"}) else "prepare"
         if unknown or attempts or started:
@@ -331,7 +353,9 @@ class LedgerAdapter:
             projected_status = "completed"
         if row.get("canonical_held"):
             projected_status = "backlog_paused"
-        started_at = row.get("started_at_utc") or row.get("started_at") or row.get("claimed_at") or row.get("selected_at_utc")
+        started_at = row.get("started_at_utc") or row.get("started_at") or row.get("claimed_at_utc") or row.get("claimed_at") or row.get("selected_at_utc")
+        if legacy_parent_inflight and not started_at:
+            started_at = row.get("legacy_parent_started_at")
         finished_at = row.get("finished_at_utc") or row.get("finished_at") or row.get("completed_at_utc") or row.get("published_at_utc") or row.get("video_published_at_utc") or ((row.get("updated_at_utc") or row.get("updated_at")) if terminal or review_hold else "")
         return {"source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
@@ -344,8 +368,9 @@ class LedgerAdapter:
                 "source_created_at": stamp(row.get("origin_created_at") or row.get("created_at_utc") or row.get("created_at") or row.get("scheduled_at")) if (row.get("origin_created_at") or row.get("created_at_utc") or row.get("created_at") or row.get("scheduled_at")) else "",
                 "account_label": str(row.get("account_username") or row.get("username") or row.get("page_id") or row.get("channel_id") or ""),
                 "resource_keys": sorted(set(resources)),
-                "capabilities": [f"{stage}:{spec.channel}"] + (["profile:" + row["preparation_profile"]] if spec.channel == "tt" and spec.family == "intake" and stage == "prepare" and row.get("preparation_profile") else []), "payload": payload, "artifact": artifact,
+                "capabilities": [f"{stage}:{spec.channel}"] + (["profile:" + row["preparation_profile"]] if spec.channel == "tt" and spec.family in {"intake", "direct_test"} and stage == "prepare" and row.get("preparation_profile") else []), "payload": payload, "artifact": artifact,
                 "source_status": state, "details_url": spec.details_url, "legacy_inflight": bool(started),
+                "legacy_parent_inflight": bool(legacy_parent_inflight),
                 "source_attempt_count": attempts, "unknown_outcome": unknown, "reconcile_only": unknown or attempts > 0,
                 "status": projected_status,
                 "canonical_fingerprint": fingerprint,

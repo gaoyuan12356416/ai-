@@ -98699,6 +98699,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         "请求体必须是对象",
                         400,
                     )
+                if parsed.path == "/api/admin/tt-posts/test-publish":
+                    request_payload = {key: value for key, value in request_payload.items() if key not in {
+                        "_internal_actor", "actor", "actor_user_id", "actor_name", "user_id", "name",
+                        "created_by_user_id", "created_by_name", "owner_user_id", "owner_name",
+                        "tenant_key", "owner_tenant_key", "created_by_tenant_key",
+                    }}
+                    request_payload["_internal_actor"] = {
+                        "user_id": str(session.get("user_id") or ""),
+                        "name": str(session.get("name") or ""),
+                    }
                 if parsed.path.endswith("/batch"):
                     raw_targets = request_payload.get("targets")
                     for target in (

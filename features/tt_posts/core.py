@@ -4156,6 +4156,7 @@ class TTPostStore:
         now: Optional[Any] = None,
         lease_seconds: int = 900,
         limit: int = 10,
+        direct_test_id: Optional[Any] = None,
     ) -> List[DirectTestClaim]:
         worker = str(worker_id or "").strip()
         if not _WORKER_ID_RE.fullmatch(worker):
@@ -4166,6 +4167,7 @@ class TTPostStore:
             86400,
         )
         normalized_limit = _positive_int(limit, "预制作认领数量", 100)
+        exact_id = _positive_int(direct_test_id, "立即测试发布记录ID") if direct_test_id is not None else None
         current = _utc_datetime(
             now if now is not None else self._now_fn(),
             "当前时间",
@@ -4187,16 +4189,19 @@ class TTPostStore:
                 WHERE status='preparing' AND claim_phase='prepare'
                   AND lease_expires_at_utc<>''
                   AND lease_expires_at_utc<=?
+                  AND (? IS NULL OR id=?)
+                  AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:direct_test:'||tt_post_direct_test.id)
                 """,
-                (now_iso, now_iso),
+                (now_iso, now_iso, exact_id, exact_id),
             )
             candidates = conn.execute(
                 """
                 SELECT * FROM tt_post_direct_test
-                WHERE status='queued'
+                WHERE status='queued' AND (? IS NULL OR id=?)
+                  AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:direct_test:'||tt_post_direct_test.id)
                 ORDER BY created_at,id LIMIT ?
                 """,
-                (normalized_limit,),
+                (exact_id, exact_id, normalized_limit),
             ).fetchall()
             for row in candidates:
                 token = secrets.token_urlsafe(32)
@@ -4592,6 +4597,8 @@ class TTPostStore:
         )
         stale_quarantined = False
         with self._transaction() as conn:
+            if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", ('tt:direct_test:' + str(normalized_id),)).fetchone():
+                raise TTPostError("pipeline_task_paused", "该历史任务已暂停", 409)
             stale = conn.execute(
                 """
                 UPDATE tt_post_direct_test
@@ -4658,6 +4665,7 @@ class TTPostStore:
                     """
                     SELECT 1 FROM tt_post_queue
                     WHERE account_id=? AND status IN (%s)
+                      AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_queue.id)
                     LIMIT 1
                     """
                     % queue_placeholders,
@@ -4674,6 +4682,7 @@ class TTPostStore:
                     """
                     SELECT 1 FROM tt_post_schedule_run
                     WHERE account_id=? AND status IN (%s)
+                      AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_schedule_run.queue_id)
                     LIMIT 1
                     """
                     % run_placeholders,

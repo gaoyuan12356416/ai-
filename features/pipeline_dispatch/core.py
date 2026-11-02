@@ -281,7 +281,7 @@ class DispatchStore:
         if status not in ("queued", "ready", "completed", "published", "failed", "unknown", "legacy_running", "backlog_paused"):
             raise DispatchError("offer_status_invalid", status=400)
         with self.transaction() as c:
-            if stage == "publish" and not offer.get("legacy_inflight"):
+            if stage == "publish" and (not offer.get("legacy_inflight") or int(offer.get("source_attempt_count") or 0) > 0):
                 c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
             existing = c.execute("SELECT * FROM pipeline_job WHERE source_key=? AND stage=?", (offer["source_key"], stage)).fetchone()
             if offer.get("metadata_only") and not existing:
@@ -389,7 +389,7 @@ class DispatchStore:
             # Exact task lineage may be collected after its child. Close only
             # that graph; never infer exemptions from a shared batch/account.
             rows = c.execute("SELECT id,source_key,source_meta_json,grandfathered FROM pipeline_job WHERE channel=?", (channel,)).fetchall()
-            approved = {row["source_key"] for row in rows if row["grandfathered"]}
+            approved = set(map(str, grandfathered_source_keys)) | {row["source_key"] for row in rows if row["grandfathered"]}
             while True:
                 descendants = [row for row in rows if row["source_key"] not in approved and approved.intersection(json.loads(row["source_meta_json"]).get("ancestor_source_keys", []))]
                 if not descendants:

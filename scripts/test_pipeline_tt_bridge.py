@@ -172,6 +172,79 @@ class PoolBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.reconcile(job)["status"], "published")
         self.assertTrue(self.bridge.fail(job, self.claim, {"error_code": "late_failure"})["canonical_terminal"])
 
+    def direct_task(self, material_id='9001'):
+        if not hasattr(self, '_direct_config'):
+            self._direct_config = self.fixture.configure_auto(self.service)
+        config = self._direct_config
+        item = self.service.direct_test_create(self.fixture.direct_test_payload(
+            config['version'], material_id=material_id, key='dispatch-direct:' + material_id))['item']
+        return item, {'source_key': 'tt:direct_test:%s' % item['id'], 'source_id': str(item['id']),
+                      'channel': 'tt', 'family': 'direct_test', 'stage': 'prepare', 'generation': 1,
+                      'scheduled_at': item['created_at'], 'source_created_at': item['created_at']}
+
+    def prepare_direct(self):
+        item, job = self.direct_task()
+        descriptor = self.bridge.reserve(job, self.claim)
+        self.assertEqual(self.fixture.gpu.prepare_jobs, [])
+        request = descriptor['request']
+        self.assertEqual(request['expected_profile'], item['preparation_profile'])
+        result = self.fixture.gpu.prepare(job_id=request['job_id'],
+            material={'content_id': request['content_id'], 'source_media_url': request['source_url']},
+            source_trim_tail_seconds=request['source_trim_tail_seconds'], expected_profile=request['expected_profile'])
+        self.bridge.complete(job, {'preparation': result}, self.claim)
+        self.assertEqual(self.bridge.reconcile(job)['status'], 'ready')
+        job = dict(job, stage='publish', generation=2)
+        descriptor = self.bridge.reserve(job, self.claim)
+        self.assertEqual(self.fixture.gpu.publish_jobs, [])
+        self.assertEqual(descriptor['request']['post_info']['privacy_level'], 'PUBLIC_TO_EVERYONE')
+        self.assertFalse(descriptor['request']['post_info']['disable_comment'])
+        return job, descriptor
+
+    def test_direct_manual_preparation_publish_and_exact_receipts(self):
+        from features.pipeline_dispatch.adapters import LedgerAdapter, LedgerSpec
+        job, descriptor = self.prepare_direct()
+        operation = {'operation': 'tt_initialize_video', 'operation_id': 'direct-initialize',
+                     'account_resource': descriptor['account_resource'], 'request_sha256': 'a' * 64,
+                     'details': {'post_info': descriptor['request']['post_info'], 'video_url': descriptor['artifact']['url']}}
+        self.bridge.begin_operation(job, self.claim, operation)
+        self.bridge.checkpoint(job, self.claim, 'tt_initialized', {'publish_id': 'direct-publish'})
+        operation.update(operation='tt_fetch_status', operation_id='direct-status', details={'publish_id': 'direct-publish'})
+        self.bridge.begin_operation(job, self.claim, operation)
+        receipt = {'publish_id': 'direct-publish', 'status': 'PUBLISH_COMPLETE', 'post_ids': ['direct-post']}
+        self.bridge.checkpoint(job, self.claim, 'tt_status', receipt)
+        self.bridge.complete(job, receipt, self.claim)
+        row = self.service.store.get_direct_test(int(job['source_id']))
+        self.assertEqual((row['status'], row['publish_attempt_count']), ('published', 1))
+        self.assertEqual(self.fixture.gpu.publish_jobs, [])
+        adapter = LedgerAdapter(LedgerSpec('tt', 'direct_test', self.service.store.db_path, 'tt_post_direct_test'))
+        projected = adapter.project(adapter.read(job['source_id']))
+        self.assertEqual((projected['stage'], projected['status']), ('publish', 'published'))
+        self.assertEqual(projected['publish_id'], 'direct-publish')
+
+    def test_direct_unknown_blocks_reinit_and_accepts_only_late_matching_receipt(self):
+        job, descriptor = self.prepare_direct()
+        operation = {'operation': 'tt_initialize_video', 'operation_id': 'direct-lost-init',
+                     'account_resource': descriptor['account_resource'], 'request_sha256': 'b' * 64,
+                     'details': {'post_info': descriptor['request']['post_info'], 'video_url': descriptor['artifact']['url']}}
+        self.bridge.begin_operation(job, self.claim, operation)
+        self.bridge.fail(job, self.claim, {'error_code': 'connection_lost'})
+        self.assertEqual(self.bridge.reconcile(job)['status'], 'unknown')
+        with self.assertRaisesRegex(AdapterError, 'tt_reconcile_only'):
+            self.bridge.begin_operation(job, self.claim, dict(operation, operation_id='direct-another-init'))
+        self.bridge.checkpoint(job, self.claim, 'tt_initialized', {'publish_id': 'late-direct-publish'})
+        self.assertEqual(self.bridge.reconcile(job)['status'], 'reconciling')
+        self.assertEqual(self.service.store.get_direct_test(int(job['source_id']))['publish_attempt_count'], 1)
+
+    def test_direct_pause_keeps_reservation_and_exact_new_prepare_claim(self):
+        old, job = self.direct_task()
+        self.assertTrue(self.bridge.pause(job, self.fixture.clock().isoformat())['held'])
+        before = self.service.store.get_direct_test(old['id'])
+        fresh, fresh_job = self.direct_task('9002')
+        descriptor = self.bridge.reserve(fresh_job, self.claim)
+        self.assertEqual(descriptor['source_key'], fresh_job['source_key'])
+        self.assertEqual(self.service.store.get_direct_test(old['id']), before)
+        self.assertEqual(self.service.store.get_direct_test(fresh['id'])['status'], 'preparing')
+
 
 if __name__ == "__main__":
     unittest.main()

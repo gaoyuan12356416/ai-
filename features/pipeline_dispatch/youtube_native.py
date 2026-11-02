@@ -5,6 +5,7 @@ prevents legacy workers reclaiming a live or uncertain node operation.
 """
 import hashlib
 import json
+import os
 import re
 import secrets
 import threading
@@ -83,6 +84,12 @@ class YouTubeNativeBridge:
                 existing = conn.execute("SELECT 1 FROM pipeline_youtube_claim WHERE source_key=? AND stage=? AND generation=?", key).fetchone()
             if existing:
                 return self._stored(job, claim)[2]
+            # Inherit the original workers' admission switches. A claimed
+            # item may finish; turning a switch off prevents new claims only.
+            if os.environ.get("YOUTUBE_LIVE_ENABLED", "0") != "1":
+                raise AdapterError("youtube_publish_disabled")
+            if job["family"] == "preparation" and os.environ.get("YOUTUBE_AUTO_ENABLED", "0") != "1":
+                raise AdapterError("youtube_auto_disabled")
             with self.workflow.db() as conn:
                 if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", (job["source_key"],)).fetchone():
                     raise AdapterError("canonical_backlog_paused")
@@ -118,6 +125,8 @@ class YouTubeNativeBridge:
             else:
                 with self.workflow.db(True) as conn:
                     row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (job["source_id"],)).fetchone()
+                    if row and row["workflow"] == "reviewed_thumbnail" and os.environ.get("YOUTUBE_AUTO_ENABLED", "0") != "1":
+                        raise AdapterError("youtube_auto_disabled")
                     if row is None:
                         raise AdapterError("canonical_task_missing")
                     task = dict(row)

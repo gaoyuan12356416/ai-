@@ -2,6 +2,7 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -21,6 +22,9 @@ from features.youtube_auto_publish.service import YouTubeWorkflow
 
 class YouTubeNativeTests(unittest.TestCase):
     def setUp(self):
+        gates = patch.dict(os.environ, {"YOUTUBE_LIVE_ENABLED": "1", "YOUTUBE_AUTO_ENABLED": "1"})
+        gates.start()
+        self.addCleanup(gates.stop)
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         self.store = DramaSynthesisStore(root / "jobs.db")
@@ -80,6 +84,28 @@ class YouTubeNativeTests(unittest.TestCase):
         self.assertEqual(task["video_attempt_count"], 1)
         with self.assertRaises(AdapterError):
             self.bridge.reserve({**self.job, "generation": 2}, self.claim)
+
+    def test_disabled_worker_switches_block_new_claims_without_changing_native_task(self):
+        before = self.store.youtube_task(self.task['id'])
+        for environment, code in (({'YOUTUBE_LIVE_ENABLED': '0'}, 'youtube_publish_disabled'),
+                                  ({'YOUTUBE_AUTO_ENABLED': '0'}, 'youtube_auto_disabled')):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                with self.assertRaisesRegex(AdapterError, code):
+                    self.bridge.reserve(dict(self.job, generation=2), self.claim)
+                self.assertEqual(self.store.youtube_task(self.task['id']), before)
+                # Repeated descriptor delivery for the existing in-flight
+                # claim does not interrupt its upload/publication sequence.
+                self.assertEqual(self.bridge.reserve(self.job, self.claim), self.descriptor)
+
+    def test_legacy_publication_inherits_live_switch_without_auto_switch(self):
+        with patch.dict(os.environ, {'YOUTUBE_AUTO_ENABLED': '0'}):
+            task = self.store.enqueue_youtube(operation_id='legacy-gates-new', job_id='c' * 32,
+                content_id='content-new', app_id='1479', channel_local_id='1', channel_id='UC' + 'A' * 22,
+                youtube_account_id='1', source_kind='concat_video', source_url='https://media.example/new.mp4',
+                title='new', description_template='new', description_rendered='new', comment_text='hello',
+                duplicate_confirmed=False, scopes=('https://www.googleapis.com/auth/youtube.force-ssl',), operator_user_id='user1')
+            job = dict(self.job, source_id=str(task['id']), source_key='youtube:publish:' + str(task['id']))
+            self.assertEqual(self.bridge.reserve(job, self.claim)['mode'], 'legacy')
 
     def test_full_receipts_commit_same_video_and_comment_once(self):
         self.prepare_upload()

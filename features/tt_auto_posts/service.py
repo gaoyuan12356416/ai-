@@ -1320,6 +1320,11 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
                 "code": "tt_auto_internal_required",
                 "message": "拒绝访问",
             }
+        if self.command == "POST":
+            from features.pipeline_dispatch.legacy_admission import handoff
+            result = handoff("tt", path)
+            if result is not None:
+                return 200, result
         query = parse_qs(parsed.query, keep_blank_values=True)
         if self.command == "POST" and path.startswith("/internal/pipeline-dispatch/tt/"):
             if os.environ.get("PIPELINE_TT_CANONICAL_BRIDGE_ENABLED") != "1":

@@ -103,6 +103,19 @@ class DispatchCoreTests(unittest.TestCase):
         self.offer("x:auto:2",resource="x:account:2")
         self.assertIsNone(self.claim("cpu-main","1"))
 
+    def test_exact_frozen_parent_without_projection_still_exempts_its_child(self):
+        child=self.offer("x:queue:5373",stage="prepare",ancestor_source_keys=["x:auto:1861"])
+        sibling=self.offer("x:queue:5374",stage="prepare",ancestor_source_keys=["x:auto:1862"])
+        self.store.cutover("x",stamp(self.time),["x:auto:1861"])
+        self.assertTrue(self.store.get_job(child["id"])["grandfathered"])
+        self.assertEqual(self.store.get_job(sibling["id"])["status"],"backlog_paused")
+
+    def test_platform_upload_retires_completed_legacy_preparation(self):
+        prep=self.offer("x:queue:5375",stage="prepare",legacy_inflight=True)
+        publish=self.offer("x:queue:5375",stage="publish",legacy_inflight=True,source_attempt_count=1)
+        self.assertEqual(self.store.get_job(prep["id"])["status"],"completed")
+        self.assertEqual(self.store.get_job(publish["id"])["status"],"legacy_running")
+
     def test_third_node_enrollment_no_code_change(self):
         e=self.store.create_enrollment("third server",{"is_admin":True,"user_id":"admin"})
         auth=self.store.consume_enrollment(e["token"],"third-node")

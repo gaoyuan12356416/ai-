@@ -184,7 +184,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, status: int, payload: Mapping[str, Any]) -> None:
         safe = dict(payload)
-        if contains_sensitive_key(safe):
+        canonical_reply = (self.command == "POST" and urlsplit(self.path).path.startswith("/internal/pipeline-dispatch/fb/")
+                           and os.environ.get("PIPELINE_FB_CANONICAL_BRIDGE_ENABLED") == "1" and self.internal())
+        if contains_sensitive_key(safe) and not canonical_reply:
             status, safe = 500, {"ok": False, "code": "fb_auto_unsafe_response", "message": "服务拒绝输出敏感字段"}
         raw = json.dumps(safe, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status); self.send_header("Content-Type", "application/json; charset=UTF-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
@@ -236,6 +238,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/internal/fb-video-publish/"):
             if method != "POST" or not self.internal():
                 raise ServiceError("forbidden", "内部请求未授权", 403)
+            from features.pipeline_dispatch.legacy_admission import handoff
+            result = handoff("fb", parsed.path)
+            if result is not None:
+                self.send_json(200, result)
+                return
             if parsed.path in {"/internal/fb-video-publish/pool-start", "/internal/fb-video-publish/pool-tick", "/internal/fb-video-publish/group-pool-start", "/internal/fb-video-publish/group-pool-tick"}:
                 scheduler_name = "group_pool_scheduler" if "/group-pool-" in parsed.path else "video_pool_scheduler"
                 if not hasattr(self.runtime, scheduler_name):
@@ -255,6 +262,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/internal/"):
             if not self.internal(): raise ServiceError("forbidden", "内部请求未授权", 403)
+            if method == "POST":
+                from features.pipeline_dispatch.legacy_admission import handoff
+                result = handoff("fb", parsed.path)
+                if result is not None:
+                    self.send_json(200, result)
+                    return
             payload = self.read_json()
             if method == "POST" and parsed.path == "/internal/fb-auto-post/tick": result = self.runtime.tick()
             elif method == "POST" and parsed.path == "/internal/fb-auto-post/plan-next": result = self.runtime.plan_next(str(payload.get("worker_id") or "fb-auto-plan")[:120], int(payload.get("lease_seconds") or 1800))

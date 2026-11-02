@@ -2830,6 +2830,12 @@ class TTPostService:
         self,
         payload: Mapping[str, Any],
     ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise TTPostServiceError("invalid_request", "立即测试发布字段无效", 400)
+        payload = dict(payload)
+        actor = payload.pop("_internal_actor", {})
+        if not isinstance(actor, Mapping) or set(actor) - {"user_id", "name"}:
+            raise TTPostServiceError("invalid_request", "内部操作人身份无效", 400)
         required = {
             "source_account_id",
             "material_id",
@@ -3035,6 +3041,8 @@ class TTPostService:
             creator_username_snapshot=creator.get("creator_username"),
             creator_info_hash=_creator_info_hash(creator),
             creator_info_synced_at=synced_at,
+            actor_user_id=actor.get("user_id", ""),
+            actor_name=actor.get("name", ""),
         )
         kicked = self._kick_preparation_runner()
         return {
@@ -6791,6 +6799,11 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             return {"ok": True, "gates": service.gates.as_dict()}
         if not self._authorized():
             raise PermissionError
+        if self.command == "POST":
+            from features.pipeline_dispatch.legacy_admission import handoff
+            result = handoff("tt", path)
+            if result is not None:
+                return result
         if self.command == "POST" and path.startswith("/internal/pipeline-dispatch/tt/"):
             if os.environ.get("PIPELINE_TT_CANONICAL_BRIDGE_ENABLED") != "1":
                 raise TTPostServiceError("pipeline_bridge_disabled", "任务分配接口尚未启用", 503)

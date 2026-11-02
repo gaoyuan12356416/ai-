@@ -16,14 +16,25 @@ python scripts/deploy_pipeline_runtime.py prepare \
 The baseline format is the captured map of `lane/relative/path` to
 `runtime_path`, `sha256` (or `missing: true`). Every live hash is verified before
 and after preparing candidates. Symlink-based sidecars copy their entire live
-release, retaining private file ownership and modes. Directory-based runtimes
-stage only changed files. The stage path must remain available after cutover.
+release, retaining private file ownership and modes. The app always stages
+only changed files, including when its root is a symlink to a data disk: its
+databases and material directories are never copied and its root link is never
+replaced. Other directory-based runtimes also use file overlays. The stage
+path must remain available after a sidecar release cutover.
 
-The app's reviewed `app.py`, `static/index.html`, and `static/quick-nav.js` are
-copied exactly. Other existing files receive only the Git diff from the base to
+The app's reviewed `app.py`, `static/index.html`, `static/quick-nav.js`, and
+`scripts/youtube_auto_publish_worker.py` are copied exactly. The worker was
+captured from its existing production source before adding planner mode.
+Other existing files receive only the Git diff from the base to
 the selected commit; a conflict stops preparation. The new dispatch package
 and monitor assets are added. The legacy FB service's GPU prepare worker is
 deliberately excluded; node releases own that new implementation.
+
+Sidecar candidates live under `/mnt/data-disk/pipeline-dispatch-runtime`, whose
+parents allow the existing service identities to traverse them. Coordinator
+state and deployment manifests/backups retain private permissions. For an app
+increment already deployed at `5de5613`, use that commit as patch base and
+include every existing dispatch module and monitor asset in the raw baseline.
 
 The operator supplies a private controls file with the exact lane units and
 ledger paths. For example, replacing these paths/names with verified inventory:

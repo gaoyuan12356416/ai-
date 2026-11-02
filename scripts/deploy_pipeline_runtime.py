@@ -19,7 +19,7 @@ import tempfile
 
 
 BASE = "6700188"
-FULL_COPY = {"app.py", "static/index.html", "static/quick-nav.js"}
+FULL_COPY = {"app.py", "static/index.html", "static/quick-nav.js", "scripts/youtube_auto_publish_worker.py"}
 NODE_ONLY = {"features/fb_gpu/prepare_worker.py"}
 APP_ADDITIONS = {"static/pipeline-monitor.html", "static/pipeline-monitor.css", "static/pipeline-monitor.js"}
 
@@ -196,6 +196,7 @@ def prepare(source, commit, baseline_path, folder, *, base=BASE, lanes=None):
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(live, saved)
             target.parent.mkdir(parents=True, exist_ok=True)
+            newline_normalized = False
             if not existed or (lane == "app" and relative in FULL_COPY):
                 shutil.copy2(source_path, target)
                 strategy = "new" if not existed else "reviewed_full_copy"
@@ -205,18 +206,32 @@ def prepare(source, commit, baseline_path, folder, *, base=BASE, lanes=None):
                     continue
                 if not release_swap:
                     shutil.copy2(live, target)
+                # Git patches use repository LF context. Some live releases
+                # retained CRLF from their original checkout. Normalize only
+                # the candidate text; raw live hashes and backups stay exact.
+                raw = target.read_bytes()
+                if b"\r\n" in raw and b"\0" not in raw and b"GIT binary patch" not in patch:
+                    try:
+                        raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+                    else:
+                        target.write_bytes(raw.replace(b"\r\n", b"\n"))
+                        newline_normalized = True
                 # No 3-way guessing or whole-file fallback: any live conflict
                 # stops preparation and is reviewed before a new baseline.
                 try:
-                    run(["git", "apply", "--check", "--whitespace=nowarn", "-"], cwd=candidate, data=patch)
-                    run(["git", "apply", "--whitespace=nowarn", "-"], cwd=candidate, data=patch)
+                    git_apply = ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "apply"]
+                    run([*git_apply, "--check", "--whitespace=nowarn", "-"], cwd=candidate, data=patch)
+                    run([*git_apply, "--whitespace=nowarn", "-"], cwd=candidate, data=patch)
                 except RuntimeError:
                     raise RuntimeError("runtime_patch_conflict:" + lane + "/" + relative) from None
                 strategy = "base_to_commit_patch"
             if relative.endswith(".py"):
                 compile(target.read_bytes(), relative, "exec")
             item["files"][relative] = {"existed": existed, "before_sha256": sha(live) if existed else "",
-                                       "after_sha256": sha(target), "strategy": strategy}
+                                       "after_sha256": sha(target), "strategy": strategy,
+                                       "candidate_crlf_normalized": newline_normalized}
         item["status"] = "prepared"
         save(folder, manifest)
     # Detect a runtime change that happened while candidate copies were made.

@@ -22,12 +22,12 @@ class RuntimeOverlayTests(unittest.TestCase):
         source_file = self.source / self.relative
         source_file.parent.mkdir(parents=True)
         initial = '\n'.join('value_%d = %d' % (i, i) for i in range(30)) + '\n'
-        source_file.write_text(initial, encoding='utf-8')
+        source_file.write_bytes(initial.encode('utf-8'))
         deploy.run(['git', 'init', '-q'], cwd=self.source)
         deploy.run(['git', 'add', '.'], cwd=self.source)
         self.git_commit('base')
         self.base = deploy.run(['git', 'rev-parse', 'HEAD'], cwd=self.source).decode().strip()
-        source_file.write_text(initial.replace('value_10 = 10', 'value_10 = 100'), encoding='utf-8')
+        source_file.write_bytes(initial.replace('value_10 = 10', 'value_10 = 100').encode('utf-8'))
         package = self.source / 'features/pipeline_dispatch'
         package.mkdir(parents=True)
         (package / '__init__.py').write_text('VERSION = 1\n', encoding='utf-8')
@@ -69,6 +69,27 @@ class RuntimeOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'runtime_drift'):
             self.prepare()
         self.assertFalse(self.folder.exists())
+
+    def test_crlf_live_text_is_normalized_only_in_candidate_with_exact_backup(self):
+        raw = self.before.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+        self.live.write_bytes(raw)
+        self.baseline.write_text(json.dumps({'x/' + self.relative: {'runtime_path': str(self.live), 'sha256': deploy.sha(self.live)}}), encoding='utf-8')
+        self.prepare()
+        candidate = self.folder / 'candidates/x' / self.relative
+        backup = self.folder / 'backups/x' / self.relative
+        self.assertNotIn(b'\r\n', candidate.read_bytes())
+        self.assertIn(b'value_10 = 100\n', candidate.read_bytes())
+        self.assertIn(b'LIVE_ONLY = True\n', candidate.read_bytes())
+        self.assertEqual(self.live.read_bytes(), raw)
+        self.assertEqual(backup.read_bytes(), raw)
+        manifest = json.loads((self.folder / 'manifest.json').read_text())
+        record = manifest['lanes']['x']['files'][self.relative]
+        self.assertTrue(record['candidate_crlf_normalized'])
+        self.assertEqual(record['before_sha256'], deploy.sha(self.live))
+        with patch.object(deploy, 'assert_stopped'):
+            deploy.apply(self.folder, 'x', self.controls)
+            deploy.apply(self.folder, 'x', self.controls, rollback=True)
+        self.assertEqual(self.live.read_bytes(), raw)
 
     def test_busy_service_never_changes_runtime(self):
         self.prepare()

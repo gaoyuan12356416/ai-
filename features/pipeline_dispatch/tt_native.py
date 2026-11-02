@@ -72,7 +72,7 @@ class TTNativeBridge:
         return c
 
     def _key(self, job):
-        families = {"auto"} if self.automatic else {"queue", "intake"}
+        families = {"auto"} if self.automatic else {"queue", "intake", "direct_test"}
         if (job.get("channel") != "tt" or job.get("family") not in families
                 or job.get("source_key") != "tt:%s:%s" % (job.get("family"), job.get("source_id"))):
             raise AdapterError("tt_dispatch_source_invalid")
@@ -90,6 +90,8 @@ class TTNativeBridge:
             return self.store.get_task(int(job["source_id"]))
         if job["family"] == "intake":
             return self.store.get_material_intake(int(job["source_id"]))
+        if job["family"] == "direct_test":
+            return self.store.get_direct_test(int(job["source_id"]))
         return self.store.get_queue(int(job["source_id"]))
 
     def _native_dict(self, job):
@@ -129,6 +131,19 @@ class TTNativeBridge:
             raise AdapterError("tt_creator_info_changed")
         self.store.renew_claim(queue["id"], token, lease_seconds=10800)
         return svc._prepare_queue_short_link(queue, token)
+
+    def _direct_prepare_preflight(self, task):
+        # Same creator/settings gate as the existing manual preparation route.
+        # The immutable profile and trim are validated again at completion.
+        from features.tt_posts.core import TTPostAccountSettings
+        account = str(task["account_id"])
+        self.service.account_repository.get_public_account(account)
+        saved = self.store.get_account_settings(account, required=True)
+        settings = TTPostAccountSettings.from_mapping({key: saved[key] for key in (
+            "privacy_level", "allow_comment", "allow_duet", "allow_stitch", "brand_content_toggle",
+            "brand_organic_toggle", "is_aigc", "drama_language")})
+        creator = self.service.creator_info({"source_account_id": account})["item"]
+        self.service._assert_creator_settings(creator, settings)
 
     def reserve(self, job, claim):
         key = self._key(job)
@@ -173,6 +188,32 @@ class TTNativeBridge:
                         descriptor = {"kind": "tt_publish", "request": {"post_info": post_info(port.request["queue"])},
                                       "artifact": artifact_from(task.as_dict())}
                     account_id = task.account_id
+                elif job["family"] == "direct_test":
+                    if job["stage"] == "prepare":
+                        claims = self.store.claim_direct_test_prepare(worker, lease_seconds=10800, limit=1, direct_test_id=identity)
+                        if not claims:
+                            raise AdapterError("canonical_task_not_claimable")
+                        native_token, task = claims[0].reveal_claim_token(), claims[0].item
+                        self._direct_prepare_preflight(task)
+                        clone = copy.copy(self.service)
+                        clone.source_trim_tail_seconds = float(task["source_trim_tail_seconds"])
+                        descriptor = self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
+                            "material_id": task["material_id"], "content_id": task["content_id"],
+                            "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=task["preparation_profile"])
+                    else:
+                        native = self.store.claim_direct_test_publish(identity, worker, lease_seconds=10800)
+                        native_token, task = native.reveal_claim_token(), native.item
+                        clone, port = copy.copy(self.service), MediaPort(self.service.gpu_client)
+                        clone.gpu_client = port
+                        try:
+                            clone.direct_publish_claimed(identity, native_token)
+                        except BoundaryReached:
+                            pass
+                        if port.request is None:
+                            raise AdapterError("tt_publish_boundary_missing")
+                        descriptor = {"kind": "tt_publish", "request": {"post_info": post_info(port.request["queue"])},
+                                      "artifact": artifact_from(task)}
+                    account_id = task["account_id"]
                 elif job["family"] == "intake":
                     if job["stage"] != "prepare":
                         raise AdapterError("tt_intake_is_prepare_only")
@@ -238,7 +279,9 @@ class TTNativeBridge:
                     raise AdapterError("tt_reconcile_only")
                 if details != {"post_info": descriptor["request"]["post_info"], "video_url": descriptor["artifact"]["url"]}:
                     raise AdapterError("tt_operation_body_changed")
-                if not self.automatic:
+                if job["family"] == "direct_test":
+                    self.store.renew_direct_test_publish(int(job["source_id"]), stored["native_token"], lease_seconds=10800)
+                elif not self.automatic:
                     self.store.begin_publish(int(job["source_id"]), stored["native_token"], self.service.gates)
                 elif current["status"] != "publishing":
                     raise AdapterError("canonical_claim_stale")
@@ -284,6 +327,11 @@ class TTNativeBridge:
                     if not current.get("publish_id"):
                         self.store.transition_task(int(job["source_id"]), "reconciling", expected_statuses={"publishing", "unknown"},
                             claim_token=stored["native_token"], updates={"publish_id": publish_id, "unknown_outcome": False, "claim_phase": "reconcile"}, event_type="task_publish_id_recorded")
+                elif job["family"] == "direct_test":
+                    if current["status"] == "unknown":
+                        self.store.recover_direct_test_publish_id(int(job["source_id"]), publish_id)
+                    else:
+                        self.store.record_direct_test_publish_id(int(job["source_id"]), stored["native_token"], publish_id)
                 else:
                     if current["status"] == "unknown":
                         # This ID belongs to the durable single-init intent;
@@ -309,6 +357,10 @@ class TTNativeBridge:
                 event_type="task_published" if success else "task_publish_failed")
             self.service.executor._update_run(result.run_id)
             return result.as_dict()
+        if job["family"] == "direct_test":
+            if success:
+                return self.store.reconcile_direct_test_published(int(job["source_id"]), receipt["publish_id"], publish_url="")
+            return self.store.reconcile_direct_test_failed(int(job["source_id"]), receipt["publish_id"], remote_status="failed")
         if success:
             result = self.service._reconcile_published_with_cache(int(job["source_id"]), receipt["publish_id"], publish_url="")
         else:
@@ -331,6 +383,12 @@ class TTNativeBridge:
                     clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
                     result = clone._prepare(self._native(job), stored["native_token"])
                     clone._update_run(result.run_id)
+                elif job["family"] == "direct_test":
+                    clone = copy.copy(self.service)
+                    clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
+                    clone.source_trim_tail_seconds = request["source_trim_tail_seconds"]
+                    clone._kick_runner = lambda: False
+                    clone.direct_preparation_process(int(job["source_id"]), {"claim_token": stored["native_token"]})
                 else:
                     current, clone = self._native(job), copy.copy(self.service)
                     clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
@@ -363,6 +421,11 @@ class TTNativeBridge:
             self.service.executor._update_run(current.run_id)
         elif job["family"] == "intake":
             self.store.fail_material_intake(int(job["source_id"]), token, error_code=code, error_message=code, retry_at=None)
+        elif job["family"] == "direct_test":
+            if job["stage"] == "prepare":
+                self.store.fail_direct_test_prepare(int(job["source_id"]), token, error_code=code, error_message=code)
+            elif not self._native(job).get("publish_id"):
+                self.store.fail_direct_test_publish(int(job["source_id"]), token, error_code=code, error_message=code, publish_was_not_created=known_no_write)
         else:
             current = self._native(job)
             if current.get("publish_id"):
@@ -384,7 +447,8 @@ class TTNativeBridge:
 
     def reconcile(self, job):
         current = self._native_dict(job)
-        return {"status": current["status"], "publish_id": current.get("publish_id", ""), "unknown_outcome": bool(current.get("unknown_outcome"))}
+        return {"status": current["status"], "publish_id": current.get("publish_id", ""), "unknown_outcome": bool(current.get("unknown_outcome")),
+                "published_at": current.get("published_at_utc", "")}
 
     def pause(self, job, cutoff):
         from .canonical_holds import pause_row, SCHEMA
@@ -393,6 +457,7 @@ class TTNativeBridge:
             conn.execute(SCHEMA)
             conn.execute("BEGIN IMMEDIATE")
             table, allowed = ("tt_auto_task", {"pending", "reserved", "ready", "retry_wait"}) if self.automatic else (
+                ("tt_post_direct_test", {"queued", "ready"}) if job["family"] == "direct_test" else
                 ("tt_post_material_intake", {"queued", "retry_wait", "ready"}) if job["family"] == "intake" else ("tt_post_queue", {"scheduled"}))
             result = pause_row(conn, job, cutoff, table=table, identity="id", state="status", allowed=allowed,
                 additional_active=lambda row: bool(row.get("claim_token")) or row.get("claim_phase") == "reconcile")
