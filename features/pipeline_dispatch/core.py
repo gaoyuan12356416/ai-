@@ -15,6 +15,9 @@ from pathlib import Path
 CHANNELS = ("x", "fb", "tt", "youtube")
 STAGES = ("prepare", "publish")
 LEASE_SECONDS = 120
+# Serial long-form renders need hours to establish three completed samples.
+# Keep that evidence bounded while current resource pressure gates each increase.
+CAPACITY_SAMPLE_WINDOW = dt.timedelta(hours=6)
 DEFAULT_CAPACITY = {
     "hosts": {
         "cpu-main": {"prepare": {"target": 2, "ceiling": 4}, "publish": {"target": 2, "ceiling": 4}},
@@ -1034,7 +1037,7 @@ class DispatchStore:
                         pool["target"] = max(1 if pool["ceiling"] else 0, old - 1)
                         high = now
                     elif (not last or last <= stamp(self.clock() - dt.timedelta(seconds=300))) and cpu < 70 and available > .25:
-                        samples = c.execute("SELECT count(*) FROM pipeline_job WHERE node_id=? AND stage=? AND finished_at>=? AND status IN ('completed','published')", (node["node_id"], stage, stamp(self.clock() - dt.timedelta(minutes=30)))).fetchone()[0]
+                        samples = c.execute("SELECT count(*) FROM pipeline_job WHERE node_id=? AND stage=? AND finished_at>=? AND status IN ('completed','published')", (node["node_id"], stage, stamp(self.clock() - CAPACITY_SAMPLE_WINDOW))).fetchone()[0]
                         candidates = c.execute("SELECT channel,capabilities_json FROM pipeline_job WHERE stage=? AND status IN ('queued','ready') AND hold_reason='' AND scheduled_at<=?", (stage, now)).fetchall()
                         node_capabilities = set(json.loads(node["capabilities_json"]))
                         waiting = any(item["channel"] in config["enabled_channels"] and set(json.loads(item["capabilities_json"])).issubset(node_capabilities) for item in candidates)
