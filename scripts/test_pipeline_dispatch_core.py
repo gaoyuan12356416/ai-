@@ -119,7 +119,7 @@ class DispatchCoreTests(unittest.TestCase):
         self.offer("x:auto:new-pub")
         self.assertIsNone(self.claim(stage="prepare"))
         self.assertIsNone(self.claim("hk-gpu"))
-        self.offer("x:auto:legacy", stage="publish", status="published", source_status="published")
+        self.offer("x:auto:legacy", stage="publish", status="published", source_status="published", publish_id="confirmed-post")
         self.assertEqual(self.store.get_job(old["id"])["status"], "completed")
         self.assertIsNotNone(self.claim("hk-gpu"))
 

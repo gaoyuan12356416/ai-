@@ -275,6 +275,27 @@ class DispatchStore:
         # collector passes. Retire only fences whose canonical stage ended.
         c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id IN (SELECT id FROM pipeline_job WHERE source_key=? AND generation=0 AND status IN ('completed','published','failed'))", (source_key,))
 
+    def _close_terminal_preparation_observation(self, c, offer):
+        """A terminal native publication retires only an unclaimed observation."""
+        if (offer.get("stage") != "publish" or offer.get("status") not in ("published", "failed")
+                or offer.get("unknown_outcome") or offer.get("legacy_inflight")
+                or (offer.get("status") == "published" and not offer.get("publish_id"))):
+            return
+        old = c.execute("SELECT * FROM pipeline_job WHERE source_key=? AND stage='prepare'", (offer["source_key"],)).fetchone()
+        if (not old or old["generation"] != 0 or old["status"] not in ("queued", "ready", "legacy_running")
+                or old["claim_hash"] or old["external_intent"] or old["canonical_receipt"]):
+            return
+        history = c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_receipt WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_claim_history WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_checkpoint WHERE job_id=? LIMIT 1", (old["id"],) * 4).fetchone()
+        if history:
+            return
+        # This is an index correction, not a newly measured rendering result.
+        # Preserve existing timestamps; metadata_only excludes efficiency counts.
+        c.execute("UPDATE pipeline_job SET status='completed',hold_reason='metadata_only',updated_at=? WHERE id=?", (self.now(), old["id"]))
+        c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=?", (old["id"],))
+        c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND legacy=1", (old["id"],))
+        self.event(c, old["id"], "terminal_preparation_observation_closed",
+                   {"publication_status": offer["status"], "publish_id": offer.get("publish_id", ""), "previous_status": old["status"]}, self.now())
+
     def _converge_idle_legacy(self, c, existing, offer):
         """Retire a proven idle legacy observation, never a dispatch claim."""
         held = offer.get("status") == "backlog_paused" and offer.get("hold_reason") == "cutover_overdue"
@@ -358,7 +379,8 @@ class DispatchStore:
                              and bool(continuation.get("video_id")) and continuation.get("video_id") == offer.get("publish_id")
                              and bool(continuation.get("scheduled_at")))
         with self.transaction() as c:
-            if stage == "publish" and (not offer.get("legacy_inflight") or int(offer.get("source_attempt_count") or 0) > 0):
+            self._close_terminal_preparation_observation(c, offer)
+            if stage == "publish" and status not in ("published", "failed") and (not offer.get("legacy_inflight") or int(offer.get("source_attempt_count") or 0) > 0):
                 c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
             existing = c.execute("SELECT * FROM pipeline_job WHERE source_key=? AND stage=?", (offer["source_key"], stage)).fetchone()
             if offer.get("metadata_only") and not existing:
@@ -429,8 +451,6 @@ class DispatchStore:
                         c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND legacy=1", (existing["id"],))
                         c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=?", (existing["id"],))
                     existing = c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone()
-                if stage == "publish" and status in ("published", "failed"):
-                    c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
                 self._converge_idle_legacy(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
                 self._release_finished_legacy_resources(c, offer["source_key"])
                 return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
@@ -474,8 +494,6 @@ class DispatchStore:
                     # Several historical unknowns may share an account. Each
                     # remains a separate fence until every receipt is resolved.
                     c.execute("INSERT INTO pipeline_legacy_resource VALUES(?,?)", (resource, job_id))
-            if stage == "publish" and status in ("published", "failed"):
-                c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
             self._release_finished_legacy_resources(c, offer["source_key"])
             self.event(c, job_id, "offered", {"status": status}, now)
             return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), True)
