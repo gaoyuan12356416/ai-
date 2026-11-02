@@ -195,6 +195,7 @@ class TTNativeBridge:
                     if not executor.gates.is_open:
                         raise AdapterError("tt_live_gates_closed")
                     native = self.store.claim_next_executable_task(worker_id=worker, lease_seconds=10800,
+                        prepare_ahead_seconds=getattr(executor, "prepare_ahead_seconds", 0),
                         allowed_phases={"selection", "prepare"} if job["stage"] == "prepare" else {"publish"}, task_id=identity)
                     if native is None:
                         raise AdapterError("canonical_task_not_claimable")

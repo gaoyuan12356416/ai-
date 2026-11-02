@@ -1,6 +1,7 @@
 {
   "port": 18846,
   "db_path": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+  "preparation_policy": {"tt_auto_prepare_ahead_seconds": 14400},
   "paths": {
     "x": "/var/lib/x-post-automation/accounts.sqlite3",
     "x_auto": "/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3",

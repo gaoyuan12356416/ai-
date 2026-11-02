@@ -383,6 +383,17 @@ class DispatchStore:
                         return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
                 if self._rearm_youtube_revision(c, existing, offer, meta):
                     return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
+                if (stage == "prepare" and existing["generation"] == 0
+                        and existing["status"] in ("queued", "ready") and status in ("queued", "ready")
+                        and not existing["external_intent"] and not existing["claim_hash"]
+                        and not existing["canonical_receipt"] and offer.get("execution_available") is True
+                        and not offer.get("legacy_inflight") and not offer.get("unknown_outcome")
+                        and not offer.get("reconcile_only") and not offer.get("source_attempt_count")
+                        and not offer.get("publish_id") and existing["scheduled_at"] != scheduled):
+                    c.execute("UPDATE pipeline_job SET scheduled_at=?,updated_at=? WHERE id=?", (scheduled, now, existing["id"]))
+                    self.event(c, existing["id"], "preparation_eligibility_refreshed",
+                               {"before": existing["scheduled_at"], "after": scheduled,
+                                "publish_at": offer.get("cutover_due_at", "")}, now)
                 if existing["generation"] == 0 and not json.loads(existing["resource_keys_json"]) and offer.get("resource_keys"):
                     c.execute("UPDATE pipeline_job SET resource_keys_json=? WHERE id=?", (dumps(sorted(set(offer["resource_keys"]))), existing["id"]))
                 if offer.get("metadata_only") and not existing["generation"]:

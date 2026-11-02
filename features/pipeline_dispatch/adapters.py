@@ -150,9 +150,13 @@ def default_specs(paths):
 
 
 class LedgerAdapter:
-    def __init__(self, spec: LedgerSpec, driver=None, *, cross_paths=None):
+    def __init__(self, spec: LedgerSpec, driver=None, *, cross_paths=None, preparation_policy=None):
         self.spec, self.driver = spec, driver
         self.cross_paths = cross_paths or {}
+        self.preparation_policy = preparation_policy or {}
+        ahead = self.preparation_policy.get("tt_auto_prepare_ahead_seconds", 0)
+        if isinstance(ahead, bool) or not isinstance(ahead, int) or not 0 <= ahead <= 43200:
+            raise AdapterError("tt_auto_prepare_ahead_invalid")
         self.cursor_state = {"active": None, "history": None, "recent": None, "observed_active": [], "recent_complete": False, "history_complete": False}
 
     def connect(self):
@@ -391,12 +395,32 @@ class LedgerAdapter:
             version = row.get("version") or body.get("current_version")
             if isinstance(version, int) and not isinstance(version, bool) and version > 0:
                 source_revision = str(version) + ":" + str(body.get("generation_retry_id") or "")
+        publish_at = stamp(row.get("scheduled_at")) if row.get("scheduled_at") else ""
+        eligible_at = publish_at
+        if stage == "prepare" and not terminal and not review_hold:
+            created_at = row.get("origin_created_at") or row.get("created_at_utc") or row.get("created_at")
+            created_at = stamp(created_at) if created_at else publish_at
+            if spec.channel == "fb" and spec.family in {"auto", "video"}:
+                # Canonical planning already bounded eligible material selection.
+                # Both FB preparers may render a frozen future publication now.
+                retry_at = row.get("next_prepare_at_utc") if spec.family == "auto" else row.get("prepare_retry_at")
+                eligible_at = max(created_at, stamp(retry_at) if retry_at else "")
+            elif spec.channel == "tt" and spec.family == "auto":
+                if state in {"pending", "selecting"} and publish_at:
+                    ahead = self.preparation_policy.get("tt_auto_prepare_ahead_seconds", 0)
+                    eligible_at = max(created_at, stamp(datetime.fromisoformat(publish_at.replace("Z", "+00:00")) - timedelta(seconds=ahead)))
+                else:
+                    # A canonical reservation has already passed selection's
+                    # lookahead boundary; retries retain the native retry time.
+                    eligible_at = created_at
+                if row.get("next_attempt_at_utc"):
+                    eligible_at = max(eligible_at, stamp(row["next_attempt_at_utc"]))
         return {"source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
                 "source_revision": source_revision,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
-                "stage": stage, "scheduled_at": (stamp(now) if youtube_control_due(row) else adopt_schedule["scheduled_at"]) if adopt_schedule else (stamp(row.get("scheduled_at")) if row.get("scheduled_at") else ""),
-                "cutover_due_at": stamp(row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) if spec.channel == "youtube" and (row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) else "",
+                "stage": stage, "scheduled_at": (stamp(now) if youtube_control_due(row) else adopt_schedule["scheduled_at"]) if adopt_schedule else eligible_at,
+                "cutover_due_at": stamp(row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) if (row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) else "",
                 "owner_user_id": row.get("owner_user_id", ""), "owner_tenant_key": row.get("owner_tenant_key", ""),
                 "owner_namespace": row.get("owner_namespace", "session_user"), "native_owner_id": row.get("owner_user_id", ""), "owner_name": row.get("owner_name", ""),
                 "required_modules": [spec.module], "required_module": spec.module,
@@ -488,9 +512,9 @@ class AdapterRegistry:
         self.errors = {}
 
     @classmethod
-    def from_paths(cls, paths, drivers=None):
+    def from_paths(cls, paths, drivers=None, *, preparation_policy=None):
         drivers = drivers or {}
-        return cls(LedgerAdapter(spec, drivers.get((spec.channel, spec.family)), cross_paths=paths) for spec in default_specs(paths))
+        return cls(LedgerAdapter(spec, drivers.get((spec.channel, spec.family)), cross_paths=paths, preparation_policy=preparation_policy) for spec in default_specs(paths))
 
     def _adapter(self, job):
         try:

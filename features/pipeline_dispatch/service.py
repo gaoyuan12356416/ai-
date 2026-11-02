@@ -373,7 +373,10 @@ def build_registry(config):
         driver = RemoteCanonicalDriver(item["port"], item["prefix"], token, control_only=item.get("control_only", False))
         for family in item["families"]:
             drivers[(item["channel"], family)] = driver
-    return AdapterRegistry.from_paths(config.get("paths", {}), drivers)
+    policy = config.get("preparation_policy", {})
+    if not isinstance(policy, dict) or (("tt", "auto") in drivers and "tt_auto_prepare_ahead_seconds" not in policy):
+        raise ValueError("explicit TT auto preparation policy required")
+    return AdapterRegistry.from_paths(config.get("paths", {}), drivers, preparation_policy=policy)
 
 
 def main():
