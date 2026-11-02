@@ -2,9 +2,11 @@
 import contextlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from .schema import (CREATION_SOURCES, EFFECT_METRICS, MATERIAL_TYPES, PLATFORM_ACCOUNT,
@@ -12,7 +14,15 @@ from .schema import (CREATION_SOURCES, EFFECT_METRICS, MATERIAL_TYPES, PLATFORM_
 
 
 class CollectionError(RuntimeError):
-    pass
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def reader_failure(message, stderr):
+    # Classify only numeric connection errors. Never expose connector stderr or retry auth/query errors.
+    codes = {int(value) for value in re.findall(rb'ERROR\s+(\d+)', stderr)}
+    return CollectionError(message, retryable=bool(codes) and codes.issubset({1053, 1158, 1159, 1160, 1161, 2002, 2003, 2006, 2013}))
 
 
 def days_between(start, end):
@@ -53,7 +63,7 @@ class GatedReader:
         env.update(MYSQL_PWD=self.config['password'], SQL_GATE_JOB_NAME='socialkit-analytics',
                    SQL_GATE_WAIT_TIMEOUT_SECONDS='60', SQL_GATE_EXEC_TIMEOUT_SECONDS=str(self.timeout),
                    SQL_GATE_RETRY_DELAYS_SECONDS='')
-        sql = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=25000; "
+        sql = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=120000; "
                "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ; "
                "START TRANSACTION READ ONLY; SELECT @@read_only;\n" +
                ';\n'.join(statements) + ';\nROLLBACK;\n')
@@ -77,7 +87,12 @@ class GatedReader:
                         process.stdin.close()
                 input_thread = threading.Thread(target=write_input, daemon=True)
                 input_thread.start()
-                if process.stdout.readline().strip() != '1':
+                proof = process.stdout.readline().strip()
+                if proof != '1':
+                    if not proof:
+                        process.wait(timeout=10)
+                        errors.seek(0)
+                        raise reader_failure('internal read endpoint did not prove read_only=1', errors.read())
                     raise CollectionError('internal read endpoint did not prove read_only=1')
                 for line in process.stdout:
                     if line.strip():
@@ -87,7 +102,8 @@ class GatedReader:
                             raise CollectionError('internal source returned an invalid result') from None
                         yield value
                 if process.wait(timeout=10) != 0 or timed_out.is_set():
-                    raise CollectionError('internal source query failed or timed out')
+                    errors.seek(0)
+                    raise reader_failure('internal source query failed or timed out', errors.read())
             finally:
                 timer.cancel()
                 if process.poll() is None:
@@ -101,7 +117,15 @@ class GatedReader:
                     process.stdout.close()
 
     def query(self, statements):
-        return list(self.records(statements))
+        for attempt in range(3):
+            try:
+                return list(self.records(statements))
+            except CollectionError as exc:
+                if not exc.retryable or attempt == 2:
+                    raise
+                # Gate forwards stdout directly; discard the entire failed attempt before retrying.
+                print(json.dumps(dict(event='source_read_retry', attempt=attempt + 2)), flush=True)
+                time.sleep((2, 5)[attempt])
 
 
 def _income_metrics_sql():
@@ -274,7 +298,7 @@ def collect_days(reader, source, start, end):
     for day in days:
         # Exhaustion also checks the CLI exit status and releases the FIFO permit.
         # Both fact and control statements still share one readonly RR transaction.
-        records = list(reader.records(income_statements(day)))
+        records = reader.query(income_statements(day))
         current = []
         control = None
         for record in records:

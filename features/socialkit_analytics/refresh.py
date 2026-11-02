@@ -15,6 +15,16 @@ from .storage import (SnapshotBuilder, WarehouseWriter, atomic_json, cleanup_war
 
 DEFAULT_ROOT = '/mnt/data-disk/socialkit-analytics'
 BEIJING = timezone(timedelta(hours=8))
+SAFE_DIAGNOSTICS = frozenset({
+    'internal read endpoint did not prove read_only=1',
+    'internal source returned an invalid result',
+    'internal source query failed or timed out',
+    'income source control totals do not match grouped facts',
+    'ads_ai read replica verification did not match staged facts',
+    'not every requested source date completed',
+    'unexpected source result kind or order',
+    'source result dates are inconsistent',
+})
 
 
 def utc_now():
@@ -165,6 +175,9 @@ def run_refresh(env, root, start, end, *, reader=None, source=None, writer=None,
                 with contextlib.suppress(Exception):
                     writer.failed(version, error_code)
             status.update(refresh_status='failed', finished_at=utc_now(), error_code=error_code)
+            if isinstance(exc, CollectionError) and str(exc) in SAFE_DIAGNOSTICS:
+                # Only exact authored diagnostics are public, never arbitrary connector text.
+                status['error_message'] = str(exc)
             atomic_json(root / 'status.json', status)
             raise
 
@@ -182,7 +195,10 @@ def main(argv=None):
     try:
         result = run_refresh(load_environment(args.env_file), args.root, start, end)
     except Exception as exc:
-        print(json.dumps(dict(event='refresh_failed', error_code=type(exc).__name__)), flush=True)
+        failure = dict(event='refresh_failed', error_code=type(exc).__name__)
+        if isinstance(exc, CollectionError) and str(exc) in SAFE_DIAGNOSTICS:
+            failure['error_message'] = str(exc)
+        print(json.dumps(failure), flush=True)
         return 1
     print(json.dumps(dict(event='refresh_complete', version=result['version'], range=result['refresh_range'],
                           quality=result['quality'])), flush=True)

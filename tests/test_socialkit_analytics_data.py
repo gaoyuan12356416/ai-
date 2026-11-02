@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from features.socialkit_analytics.collector import (
-    CollectionError, Dimensions, collect_days, income_statements, mysql_settings,
+    CollectionError, Dimensions, GatedReader, collect_days, income_statements, mysql_settings, reader_failure,
 )
 from features.socialkit_analytics.refresh import default_range, run_refresh
 from features.socialkit_analytics.schema import EFFECT_METRICS, empty_common, row_key, stable_key
@@ -98,6 +98,7 @@ class CollectionTests(unittest.TestCase):
                         dict(kind='control', date=day, source_rows=1, source_updated_at='',
                              **{f: item[f] for f in EFFECT_METRICS})]
         class Reader:
+            query = GatedReader.query
             def records(self, statements):
                 day = '2026-10-31' if '2026-10-31' in statements[0] else '2026-11-01'
                 return iter(record for record in records if record['date'] == day)
@@ -126,6 +127,7 @@ class CollectionTests(unittest.TestCase):
         active = []
         testcase = self
         class Reader:
+            query = GatedReader.query
             def records(self, statements):
                 day = ['2026-10-31', '2026-11-01'][len(calls)]
                 testcase.assertEqual(tuple(statements), income_statements(day))
@@ -159,6 +161,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_trailing_reader_failure_cannot_yield_day(self):
         class Reader:
+            query = GatedReader.query
             def records(self, statements):
                 item = effect()
                 yield dict(item, kind='effect')
@@ -171,6 +174,45 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(CollectionError, 'trailing CLI failure'):
             next(collect_days(Reader(), Source(), '2026-11-01', '2026-11-01'))
 
+    def test_transient_reader_retry_discards_partial_days_and_is_bounded(self):
+        class Reader:
+            query = GatedReader.query
+            def __init__(self, failures=2):
+                self.calls = 0
+                self.failures = failures
+            def records(self, statements):
+                self.calls += 1
+                item = effect()
+                yield dict(item, kind='effect')
+                if self.calls <= self.failures:
+                    raise reader_failure('internal source query failed or timed out', b'ERROR 2013 (HY000)')
+                yield dict(kind='control', date=item['date'], source_rows=1, source_updated_at='',
+                           **{field: item[field] for field in EFFECT_METRICS})
+        class Source:
+            def dimensions(self):
+                return [], [], []
+            def links(self, codes):
+                return {}
+            def publications(self, day, teams):
+                return []
+        reader = Reader()
+        with patch('features.socialkit_analytics.collector.time.sleep') as sleep:
+            result = list(collect_days(reader, Source(), '2026-11-01', '2026-11-01'))
+        self.assertEqual(reader.calls, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 5])
+        self.assertEqual(len(result[0]['effects']), 1)
+        self.assertEqual(result[0]['effects'][0]['revenue_cents'], 1899)
+        failing_reader = Reader(failures=99)
+        with patch('features.socialkit_analytics.collector.time.sleep'):
+            with self.assertRaises(CollectionError):
+                failing_reader.query(income_statements('2026-11-01'))
+        self.assertEqual(failing_reader.calls, 3)
+
+    def test_auth_query_and_control_errors_are_not_retryable(self):
+        for code in (1045, 1064, 3024):
+            self.assertFalse(reader_failure('fixed safe error', ('ERROR %d (HY000)' % code).encode()).retryable)
+        self.assertFalse(CollectionError('income source control totals do not match grouped facts').retryable)
+
     def test_control_failure_is_not_empty_day(self):
         item = effect()
         record = dict(item, kind='effect')
@@ -178,6 +220,7 @@ class CollectionTests(unittest.TestCase):
                        **{f: item[f] for f in EFFECT_METRICS})
         control['revenue_cents'] += 1
         class Reader:
+            query = GatedReader.query
             def records(self, statements):
                 return iter([record, control])
         class Source:
