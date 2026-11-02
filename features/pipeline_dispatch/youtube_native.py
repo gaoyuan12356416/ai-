@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .adapters import AdapterError, obj
+from .adapters import AdapterError, obj, stamp, youtube_existing_schedule
 from .youtube_cover import image_bytes, inline_image
 from features.drama_synthesis.core import utc_now
 from features.youtube_auto_publish.service import encode, now
@@ -55,6 +55,13 @@ class YouTubeNativeBridge:
         if job.get("channel") != "youtube" or job.get("family") not in {"preparation", "publish"}:
             raise AdapterError("youtube_dispatch_source_invalid")
         return str(job["source_key"]), str(job["stage"]), int(job["generation"])
+
+    @staticmethod
+    def _continuation_descriptor(task, continuation, control):
+        descriptor = {"kind": "youtube_publish", "mode": "continuation", "continuation": dict(continuation), "account_resource": "youtube:channel:" + task["channel_id"], "request": {"video_id": task["video_id"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "comment_id": task["comment_id"], "publish_at": task["publish_at"]}}
+        if control:
+            descriptor["request"]["schedule_control"] = {"action": task["schedule_command"], "version": task["schedule_version"], "operation_id": task["schedule_operation_id"], "publish_at": task["publish_at"]}
+        return descriptor
 
     def _stored(self, job, claim):
         with self.workflow.db() as conn:
@@ -160,12 +167,19 @@ class YouTubeNativeBridge:
                         raise AdapterError("canonical_task_missing")
                     task = dict(row)
                     continuation = obj(job.get("payload")).get("continuation")
+                    adopting = False
                     if continuation:
                         control = task["status"] == "schedule_pending" and task["schedule_status"] == "control_pending" and task["schedule_command_status"] == "pending"
+                        if obj(job.get("payload")).get("adopt_existing_schedule") is True and not task["pipeline_dispatch_key"]:
+                            verified = youtube_existing_schedule(task, allow_control=True)
+                            history = conn.execute("SELECT 1 FROM pipeline_youtube_claim WHERE source_key=? UNION ALL SELECT 1 FROM pipeline_youtube_operation WHERE source_key=? UNION ALL SELECT 1 FROM pipeline_youtube_checkpoint WHERE source_key=? LIMIT 1", (job["source_key"],)*3).fetchone()
+                            if not verified or history or verified != continuation:
+                                raise AdapterError("youtube_existing_schedule_not_claimable")
+                            adopting = True
                         if (task["workflow"] != "reviewed_thumbnail" or task["unknown_outcome"]
-                                or task["pipeline_dispatch_key"] != job["source_key"]
+                                or (task["pipeline_dispatch_key"] != job["source_key"] and not adopting)
                                 or continuation.get("video_id") != task["video_id"] or not task["video_id"]
-                                or continuation.get("scheduled_at") != task["schedule_confirmed_publish_at"]
+                                or stamp(continuation.get("scheduled_at")) != stamp(task["schedule_confirmed_publish_at"])
                                 or (not control and task["schedule_confirmed_publish_at"] != task["publish_at"])
                                 or (not control and task["status"] not in {"scheduled", "published"})
                                 or (not control and task["schedule_status"] not in {"armed", "published"})
@@ -182,11 +196,17 @@ class YouTubeNativeBridge:
                     owner = "pipeline:" + str(job["id"]) + ":" + str(job["generation"])
                     task.update(lease_owner=owner, lease_generation=int(task["lease_generation"]) + 1)
                     conn.execute("UPDATE drama_youtube_publish SET status=?,lease_owner=?,lease_generation=?,lease_expires_at_utc=?,pipeline_dispatch_key=? WHERE id=?", (task["status"] if continuation else "validating", owner, task["lease_generation"], expiry(), job["source_key"], task["id"]))
+                    if adopting:
+                        # The old video and this first dispatch claim acquire
+                        # ownership in one SQLite transaction, with no upload.
+                        saved = {"id": task["id"], "lease_owner": owner, "lease_generation": task["lease_generation"]}
+                        descriptor = self._continuation_descriptor(task, continuation, control)
+                        descriptor["adopted_existing_schedule"] = True
+                        conn.execute("INSERT INTO pipeline_youtube_claim(source_key,stage,generation,claim_hash,task_json,descriptor_json) VALUES(?,?,?,?,?,?)", (*key, claim_hash(claim), encode(saved), encode(descriptor)))
+                        return descriptor
                 saved = {"id": task["id"], "lease_owner": owner, "lease_generation": task["lease_generation"]}
                 if continuation:
-                    descriptor = {"kind": "youtube_publish", "mode": "continuation", "continuation": dict(continuation), "account_resource": "youtube:channel:" + task["channel_id"], "request": {"video_id": task["video_id"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "comment_id": task["comment_id"], "publish_at": task["publish_at"]}}
-                    if control:
-                        descriptor["request"]["schedule_control"] = {"action": task["schedule_command"], "version": task["schedule_version"], "operation_id": task["schedule_operation_id"], "publish_at": task["publish_at"]}
+                    descriptor = self._continuation_descriptor(task, continuation, control)
                 else:
                     descriptor = {"kind": "youtube_publish", "mode": "legacy" if task["workflow"] == "legacy" else "reviewed", "account_resource": "youtube:channel:" + task["channel_id"], "request": {"title": task["title"], "description": task["description_rendered"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "publish_at": task["publish_at"]}, "artifact": {"url": task["source_url"], "identity_mode": "source_to_fingerprint", "mime": "video/mp4"}}
                     if task["workflow"] == "reviewed_thumbnail": descriptor["request"]["approved_cover"] = inline_image(content, mime)

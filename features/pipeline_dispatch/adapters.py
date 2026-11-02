@@ -76,6 +76,21 @@ def youtube_cancelled(row):
             and not row.get("unknown_outcome"))
 
 
+def youtube_existing_schedule(row, *, allow_control=False):
+    """An uploaded legacy appointment may enter only the GET/comment lane."""
+    control = allow_control and youtube_control_due(row)
+    confirmed = row.get("schedule_confirmed_publish_at")
+    if (row.get("workflow") != "reviewed_thumbnail" or row.get("privacy_status") != "public"
+            or row.get("pipeline_dispatch_key") or row.get("lease_owner") or row.get("unknown_outcome")
+            or row.get("_pipeline_history") or not row.get("video_id") or not confirmed
+            or (row.get("comment_attempt_count") and not row.get("comment_id"))
+            or (not control and (row.get("status") != "scheduled" or row.get("schedule_status") != "armed"
+                                or row.get("schedule_command_status") != "confirmed"
+                                or not row.get("publish_at") or stamp(confirmed) != stamp(row["publish_at"])))):
+        return None
+    return {"video_id": str(row["video_id"]), "scheduled_at": stamp(confirmed)}
+
+
 def public_descriptor(value):
     """Reject secret-bearing adapters instead of silently storing their secrets."""
     if isinstance(value, Mapping):
@@ -262,6 +277,11 @@ class LedgerAdapter:
             row["scheduled_at"] = row.get("created_at")
             row["cutover_due_at"] = body.get("publish_at") or row.get("created_at")
             row["channel_id"] = body.get("channel_id") or obj(body.get("channel")).get("channel_id", "")
+        elif key == ("youtube", "publish"):
+            source_key = "youtube:publish:" + str(row["id"])
+            row["_pipeline_history"] = any(
+                self._exists(conn, table) and conn.execute("SELECT 1 FROM " + table + " WHERE source_key=? LIMIT 1", (source_key,)).fetchone()
+                for table in ("pipeline_youtube_claim", "pipeline_youtube_operation", "pipeline_youtube_checkpoint"))
         row["owner_user_id"] = str(row.get("owner_user_id") or row.get("created_by_user_id") or row.get("owner") or row.get("operator_user_id") or parent.get("owner_user_id") or parent.get("created_by_user_id") or parent.get("actor_user_id") or parent.get("actor_user") or parent.get("user_id") or "")
         row["owner_tenant_key"] = str(row.get("owner_tenant_key") or row.get("tenant_key") or row.get("tenant") or parent.get("owner_tenant_key") or parent.get("created_by_tenant_key") or parent.get("actor_tenant_key") or parent.get("actor_tenant") or parent.get("tenant_key") or "")
         row["owner_name"] = str(row.get("owner_name") or row.get("created_by_name") or parent.get("created_by_name") or parent.get("created_name") or parent.get("actor_name") or "")
@@ -346,6 +366,9 @@ class LedgerAdapter:
         payload["canonical_fingerprint"] = fingerprint
         payload["source_attempt_count"] = attempts
         payload["reconcile_only"] = unknown or attempts > 0
+        adopt_schedule = youtube_existing_schedule(row, allow_control=True) if spec.channel == "youtube" and spec.family == "publish" else None
+        if adopt_schedule:
+            payload.update(continuation=adopt_schedule, adopt_existing_schedule=True)
         publish_id = str(row.get("publish_id") or row.get("post_id") or row.get("x_post_id") or row.get("graph_post_id") or row.get("video_id") or "")
         video_published = spec.channel == "youtube" and spec.family == "publish" and row.get("video_state") == "published" and bool(row.get("video_id"))
         skipped = state in {"no_candidate", "skipped", "duplicate", "cancelled", "canceled", "abandoned"} and not (publish_id or unknown or attempts)
@@ -354,6 +377,8 @@ class LedgerAdapter:
         projected_status = "queued" if pause_eligible else (("completed" if completed_preparation or skipped else ("published" if confirmed else "unknown" if state in {"published", "synced", "completed"} else "failed")) if terminal or review_hold else ("legacy_running" if started else ("unknown" if unknown or attempts else "queued")))
         if spec.channel == "youtube" and spec.family == "publish" and youtube_cancelled(row):
             projected_status = "completed"
+        if adopt_schedule:
+            projected_status = "ready"
         if row.get("canonical_held"):
             projected_status = "backlog_paused"
         started_at = row.get("started_at_utc") or row.get("started_at") or row.get("claimed_at_utc") or row.get("claimed_at") or row.get("selected_at_utc")
@@ -370,7 +395,7 @@ class LedgerAdapter:
                 "source_revision": source_revision,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
-                "stage": stage, "scheduled_at": stamp(row.get("scheduled_at")) if row.get("scheduled_at") else "",
+                "stage": stage, "scheduled_at": (stamp(now) if youtube_control_due(row) else adopt_schedule["scheduled_at"]) if adopt_schedule else (stamp(row.get("scheduled_at")) if row.get("scheduled_at") else ""),
                 "cutover_due_at": stamp(row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) if spec.channel == "youtube" and (row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) else "",
                 "owner_user_id": row.get("owner_user_id", ""), "owner_tenant_key": row.get("owner_tenant_key", ""),
                 "owner_namespace": row.get("owner_namespace", "session_user"), "native_owner_id": row.get("owner_user_id", ""), "owner_name": row.get("owner_name", ""),
@@ -393,7 +418,7 @@ class LedgerAdapter:
                 "source_attempt_count": attempts, "observation_only": terminal or review_hold or isolated_youtube, "metadata_only": bridged_auto or skipped or isolated_youtube,
                 "pause_eligible": not isolated_youtube and (pause_eligible or (not terminal and not unknown and not started and not attempts)),
                 "hold_reason": "cutover_overdue" if row.get("canonical_held") else "canonical_isolated_workflow" if isolated_youtube else "canonical_link_pending" if blocked_link else "canonical_review_or_enqueue" if review_hold else "",
-                "execution_available": self.driver is not None and not getattr(self.driver, "control_only", False) and not terminal and not review_hold and not isolated_youtube and not unknown and not started and not attempts and not blocked_link and not row.get("canonical_held")}
+                "execution_available": self.driver is not None and not getattr(self.driver, "control_only", False) and not terminal and not review_hold and not isolated_youtube and not unknown and not started and (not attempts or bool(adopt_schedule)) and not blocked_link and not row.get("canonical_held")}
 
     def scan(self, limit=200, now=None):
         limit = max(1, min(int(limit), 5000))

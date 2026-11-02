@@ -320,6 +320,14 @@ class DispatchStore:
         status = offer.get("status", "queued")
         if status not in ("queued", "ready", "completed", "published", "failed", "unknown", "legacy_running", "backlog_paused"):
             raise DispatchError("offer_status_invalid", status=400)
+        continuation = offer.get("payload", {}).get("continuation") or {}
+        adopting_schedule = (channel == "youtube" and stage == "publish" and offer.get("family") == "publish"
+                             and offer.get("payload", {}).get("adopt_existing_schedule") is True
+                             and status == "ready" and offer.get("execution_available") is True
+                             and offer.get("source_status") in ("scheduled", "schedule_pending")
+                             and not offer.get("legacy_inflight") and not offer.get("unknown_outcome")
+                             and bool(continuation.get("video_id")) and continuation.get("video_id") == offer.get("publish_id")
+                             and bool(continuation.get("scheduled_at")))
         with self.transaction() as c:
             if stage == "publish" and (not offer.get("legacy_inflight") or int(offer.get("source_attempt_count") or 0) > 0):
                 c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
@@ -330,6 +338,20 @@ class DispatchStore:
                 return None  # Planning a queue is not a completed media render.
             if existing:
                 meta = json.loads(existing["source_meta_json"])
+                if adopting_schedule and existing["generation"] == 0 and not existing["external_intent"] and existing["status"] in ("unknown", "completed", "queued"):
+                    try:
+                        proof = json.loads(existing["canonical_receipt"] or "{}")
+                    except (ValueError, TypeError):
+                        proof = {"invalid": True}
+                    proof_matches = isinstance(proof, dict) and (not proof or (proof.get("status") == "scheduled" and proof.get("source_key") == offer["source_key"] and proof.get("publish_id") == continuation["video_id"]))
+                    history = c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_receipt WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_claim_history WHERE job_id=? LIMIT 1", (existing["id"],)*3).fetchone()
+                    if proof_matches and not history:
+                        meta.update({k: offer[k] for k in ("canonical_fingerprint", "source_attempt_count", "legacy_inflight", "reconcile_only", "execution_available") if k in offer})
+                        c.execute("UPDATE pipeline_job SET status='ready',hold_reason='',payload_json=?,source_meta_json=?,scheduled_at=?,started_at='',finished_at='',updated_at=? WHERE id=?", (dumps(offer["payload"]), dumps(meta), scheduled, now, existing["id"]))
+                        c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=?", (existing["id"],))
+                        c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND legacy=1", (existing["id"],))
+                        self.event(c,existing["id"],"existing_youtube_schedule_offered",{"video_id":continuation["video_id"]},now)
+                        return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
                 if self._rearm_youtube_revision(c, existing, offer, meta):
                     return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
                 if existing["generation"] == 0 and not json.loads(existing["resource_keys_json"]) and offer.get("resource_keys"):
@@ -382,7 +404,7 @@ class DispatchStore:
             hold = ""
             if offer.get("execution_available") is False:
                 hold = str(offer.get("hold_reason") or "adapter_unavailable")
-            if cutoff and stamp(offer.get("cutover_due_at") or scheduled) <= cutoff and created <= cutoff and not grandfathered and status in ("queued", "ready"):
+            if cutoff and stamp(offer.get("cutover_due_at") or scheduled) <= cutoff and created <= cutoff and not grandfathered and not adopting_schedule and status in ("queued", "ready"):
                 status, hold = "backlog_paused", "cutover_overdue"
             if offer.get("legacy_inflight"):
                 status = "legacy_running"
