@@ -7,7 +7,7 @@ description: 查询 SocialKit 发布记录与社媒收入效果，使用已发�
 
 ## 默认入口
 
-优先使用 AI 后台 `/socialkit-analytics.html` 或 CPU 服务器已经发布的本地快照。网页/API 需要 Feishu 登录及 `socialkit_analytics` 模块权限；管理员和获授权用户查看全部报表数据，不按个人归属推断权限。
+优先使用 AI 后台 [SocialKit 效果报表](https://ai.yingliangads.com/socialkit-analytics.html) 或 CPU 服务器已经发布的本地快照。网页/API 需要 Feishu 登录及 `socialkit_analytics` 模块权限；管理员和获授权用户查看全部报表数据，不按个人归属推断权限。
 
 本技能的只读入口复用已配置的 CPU SSH helper，不需要再次提供密码：
 
@@ -35,3 +35,5 @@ python <skill-dir>/scripts/query_report.py --view publications --group-by produc
 仅在快照缺失、口径核验或用户明确要求源数据时读取 [schema-and-query.md](references/schema-and-query.md)。连接路线使用 `server-43-166-187-96` 技能；保持凭据在 CPU 进程内，禁止查询或复制账号令牌字段。
 
 本技能默认只读。源数据查询不改变任务状态，不修复收入、不启用刷新、不发送通知。若请求变成维护报表或部署，转入对应的后台维护与部署流程，不因调用查询技能而扩大写入范围。
+
+实现、验收与回滚记录见 [仓库维护文档](https://github.com/gaoyuan12356416/ai-/tree/codex/socialkit-analytics-20261102/doc/20261102.socialkit-analytics)。2026-11-02 交付功能提交为 `86e0b0dca9d01719121251334ced099797157211`；查询时仍以当前发布版本及其时间戳为准，不把交付快照当作永不变化的数据。
