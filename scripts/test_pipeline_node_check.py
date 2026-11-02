@@ -8,9 +8,29 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.pipeline_node_check import load_environment, validate_node, encode_sample
 from types import SimpleNamespace
+from scripts import test_tt_gpu_worker as tt_fixture
+from features.pipeline_dispatch.tt_profiles import select_config
 
 
 class NodeCheckTests(unittest.TestCase):
+    def test_new_outro_profile_has_targeted_real_pipeline_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = tt_fixture.make_random_overlay_config(root)
+            from dataclasses import replace
+            base = replace(base, fixed_outro_sha256=tt_fixture.worker._file_sha256(base.fixed_outro_path)[0])
+            base = select_config(base, tt_fixture.worker.RANDOM_OVERLAY_CPU_PROFILE, 'cpu')
+            profile = tt_fixture.worker.DIRECT_OUTRO_H264_PROFILE
+            env = {'PIPELINE_EXECUTORS': 'tt_prepare', 'PIPELINE_RENDER_PROFILES': base.profile + ',' + profile}
+            with patch.dict(os.environ, env), patch('scripts.pipeline_node_check.hardware_inventory', return_value={}), patch.object(tt_fixture.worker.WorkerConfig, 'from_env', return_value=base), patch.object(tt_fixture.worker, 'TTPostGPUProcessor', side_effect=lambda config, **kw: SimpleNamespace(config=config)), patch('scripts.pipeline_node_check.encode_sample', return_value=root / 'sample.mp4'), patch('scripts.pipeline_node_check.encode_outro_sample', return_value=root / 'outro.mp4') as outro:
+                report = validate_node({'state_root': temp, 'node_id': 'cpu-fixture', 'backend': 'cpu'}, encode=True, encode_profiles=[profile])
+            self.assertEqual(outro.call_count, 1)
+            self.assertEqual(outro.call_args.args[0].profile, profile)
+            self.assertTrue(outro.call_args.kwargs['cpu'])
+            encoded = [row for row in report['checks'] if row.get('encode_verified')]
+            self.assertEqual([row['profile'] for row in encoded], [profile])
+            self.assertTrue(encoded[0]['outro_transition_verified'])
+
     def test_nvenc_diagnostic_uses_supported_production_frame_size(self):
         with tempfile.TemporaryDirectory() as temp, patch('scripts.pipeline_node_check.subprocess.run', side_effect=[SimpleNamespace(), SimpleNamespace(stdout='{"streams":[{"codec_name":"h264"}]}')]) as run:
             encode_sample('ffmpeg', 'ffprobe', 'h264_nvenc', Path(temp), cpu=False)

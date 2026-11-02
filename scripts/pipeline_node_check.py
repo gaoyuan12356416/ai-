@@ -57,6 +57,33 @@ def encode_sample(ffmpeg, ffprobe, encoder, directory, *, cpu):
     return target
 
 
+def encode_outro_sample(config, directory, *, cpu):
+    """Exercise the approved outro, font and actual transition locally only."""
+    from features.tt_gpu.worker import build_outro_filter, build_normalize_command, build_phone_match_command
+    from features.pipeline_dispatch.tt_profiles import asset_capabilities
+    asset_capabilities(config)
+    source = encode_sample(config.ffmpeg_bin, config.ffprobe_bin, config.video_encoder, directory, cpu=cpu)
+    title, tutorial = directory / "diagnostic-id.txt", directory / "diagnostic-tutorial.txt"
+    title.write_text("DRAMA ID: LOCAL DIAGNOSTIC", encoding="utf-8")
+    tutorial.write_text("LOCAL ENCODE CHECK", encoding="utf-8")
+    normalized = directory / (config.profile + "-outro.mp4")
+    target = directory / (config.profile + "-transition.mp4")
+    probe = subprocess.run([config.ffprobe_bin, "-v", "error", "-show_streams", "-of", "json", str(config.fixed_outro_path)], capture_output=True, text=True, check=True, timeout=30)
+    has_audio = any(row.get("codec_type") == "audio" for row in json.loads(probe.stdout).get("streams", []))
+    commands = [build_normalize_command(config, config.fixed_outro_path, normalized,
+        {"has_audio": has_audio}, build_outro_filter(config, title, tutorial), output_duration=1),
+        build_phone_match_command(config, source, normalized, target, 1, 1, source_has_audio=False, logo_path=None)]
+    for command in commands:
+        subprocess.run(cpu_thread_command(command) if cpu else command, capture_output=True, check=True, timeout=120)
+    result = subprocess.run([config.ffprobe_bin, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)], capture_output=True, text=True, check=True, timeout=30)
+    value = json.loads(result.stdout)
+    video = next((row for row in value.get("streams", []) if row.get("codec_type") == "video"), {})
+    expected_codec = "hevc" if config.video_encoder == "hevc_nvenc" else "h264"
+    if video.get("codec_name") != expected_codec or (video.get("width"), video.get("height")) != (720, 1280) or not 1 <= float(value.get("format", {}).get("duration", 0)) <= 2:
+        raise ValueError("outro_encode_probe_mismatch")
+    return target
+
+
 def cos_roundtrip(config, source, node_id):
     """Private, uniquely named diagnostic object; never a platform submission."""
     from qcloud_cos import CosConfig, CosS3Client
@@ -77,7 +104,7 @@ def cos_roundtrip(config, source, node_id):
     return {"read_write_verified": True, "diagnostic_removed": cleaned, **({} if cleaned else {"diagnostic_key": key})}
 
 
-def validate_node(config, *, encode=False, cos_check=False):
+def validate_node(config, *, encode=False, cos_check=False, encode_profiles=None):
     inventory = hardware_inventory()
     enabled = {x.strip() for x in os.environ.get("PIPELINE_EXECUTORS", "").split(",") if x.strip()}
     if not enabled or enabled - set(NodeExecutors.PREPARE + NodeExecutors.PUBLISH):
@@ -105,24 +132,43 @@ def validate_node(config, *, encode=False, cos_check=False):
         profiles.add(processor.config.profile)
         checks.append({"executor": kind, "profile": processor.config.profile, "assets_verified": bool(getattr(processor, "assets", None) or getattr(processor.config, "random_overlay_assets", None))})
     declared = {x.strip() for x in os.environ.get("PIPELINE_RENDER_PROFILES", "").split(",") if x.strip()}
+    if "tt_prepare" in enabled:
+        from features.pipeline_dispatch.tt_profiles import PROFILE_SPECS, asset_capabilities
+        for profile in sorted(declared & set(PROFILE_SPECS)):
+            processor = executor._processor("tt_prepare", profile)
+            if profile != processors["tt_prepare"].config.profile:
+                processors["tt_prepare:" + profile] = processor
+            profiles.add(processor.config.profile)
+            checks.append({"executor": "tt_prepare", "profile": profile,
+                           "assets_verified": True, "asset_capabilities": sorted(asset_capabilities(processor.config)),
+                           "formal_publish_eligible": processor.config.direct_post_eligible()})
     if declared - profiles:
         raise ValueError("advertised_profile_not_supported")
+    if encode_profiles and set(encode_profiles) - profiles:
+        raise ValueError("diagnostic_profile_not_supported")
     os.environ["PIPELINE_RENDER_PROFILES"] = ",".join(sorted(profiles))
     if encode or cos_check:
         with tempfile.TemporaryDirectory(prefix="node-diagnostic-", dir=config["state_root"]) as temp:
             directory, samples = Path(temp), {}
             for name, processor in processors.items():
                 cfg = processor.config
+                if encode_profiles and cfg.profile not in encode_profiles:
+                    continue
+                if getattr(cfg, "media_mode", "") == "source_direct":
+                    checks.append({"executor": name, "profile": cfg.profile, "passthrough": True})
+                    continue
                 binary = str(getattr(cfg, "ffmpeg_bin", getattr(cfg, "ffmpeg", "")))
                 probe = str(getattr(cfg, "ffprobe_bin", getattr(cfg, "ffprobe", "")))
                 encoder = "libx264" if config["backend"] == "cpu" else getattr(cfg, "video_encoder", "h264_nvenc")
                 sample_key = (binary, encoder)
                 if sample_key not in samples:
                     samples[sample_key] = encode_sample(binary, probe, encoder, directory, cpu=config["backend"] == "cpu")
+                if getattr(cfg, "media_mode", "") == "direct_outro":
+                    samples[sample_key] = encode_outro_sample(cfg, directory, cpu=config["backend"] == "cpu")
                 if config["backend"] == "gpu" and (getattr(cfg, "compositor_backend", "") == "opencl_fused_contain_v1" or name == "x_random"):
                     from features.random_gpu.compositor import preflight
                     preflight(binary, encoder, directory)
-                checks.append({"executor": name, "encode_verified": True, "encoder": encoder, "cpu_threads": 4 if config["backend"] == "cpu" else None})
+                checks.append({"executor": name, "profile": cfg.profile, "encode_verified": True, "outro_transition_verified": getattr(cfg, "media_mode", "") == "direct_outro", "encoder": encoder, "cpu_threads": 4 if config["backend"] == "cpu" else None})
                 if cos_check:
                     checks.append({"executor": name, "cos": cos_roundtrip(cfg, samples[sample_key], config["node_id"])})
     return {"ok": True, "node_id": config["node_id"], "inventory": inventory, "capabilities": executor.capabilities(), "checks": checks}
@@ -132,6 +178,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", action="append", default=[], help="absolute private env file, applied in order")
     parser.add_argument("--encode", action="store_true", help="encode a one-second local diagnostic; no platform write")
+    parser.add_argument("--encode-profile", action="append", default=[], help="limit encode/COS diagnostics to an exact verified profile")
     parser.add_argument("--cos-check", action="store_true", help="write/head/delete only a new private diagnostic COS object")
     parser.add_argument("--enroll", metavar="PRIVATE_CONFIG_PATH")
     parser.add_argument("--run", action="store_true", help="start workers only after all checks pass")
@@ -145,8 +192,10 @@ def main():
             os.environ.pop("PIPELINE_NODE_CONFIG")
         config = configuration()
         Path(config["state_root"]).mkdir(parents=True, exist_ok=True, mode=0o700)
-        report = validate_node(config, encode=args.encode, cos_check=args.cos_check)
+        report = validate_node(config, encode=args.encode, cos_check=args.cos_check, encode_profiles=args.encode_profile)
         if args.enroll:
+            if args.encode_profile:
+                raise ValueError("enrollment_requires_all_profile_checks")
             if not args.encode or not args.cos_check:
                 raise ValueError("enrollment_requires_encode_and_cos_checks")
             report["enrollment"] = enroll_node(args.enroll)

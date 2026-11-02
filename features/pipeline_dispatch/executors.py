@@ -210,6 +210,7 @@ class NodeExecutors:
         self.factories = factories or {}
         self.platform_clients = platform_clients or {}
         self.processors = {}
+        self.asset_identity_cache = {}
         self.work_root = Path(config["state_root"]) / "media"
         self.work_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -222,6 +223,21 @@ class NodeExecutors:
         kinds = {kind for kind in supported if kind in enabled}
         stages = {("prepare" if kind in self.PREPARE else "publish") + ":" + kind.split("_", 1)[0] for kind in kinds}
         profiles = {"profile:" + name.strip() for name in os.environ.get("PIPELINE_RENDER_PROFILES", "").split(",") if name.strip()}
+        routed_assets = set()
+        if "tt_prepare" in kinds:
+            from .tt_profiles import PROFILE_SPECS, supported_profiles
+            allowed = supported_profiles(self.config["backend"])
+            for capability in tuple(profiles):
+                profile = capability.removeprefix("profile:")
+                if profile not in PROFILE_SPECS:
+                    continue
+                if profile not in allowed:
+                    # CPU FB has its own libx264 profile. Never advertise a GPU
+                    # TT profile merely because another adapter uses its name.
+                    profiles.discard(capability)
+                    continue
+                config = self._processor("tt_prepare", profile).config
+                routed_assets.update(self._tt_asset_capabilities(config))
         catalogs = set()
         for channel, variable in (("x", "X_POST_RANDOM_TEMPLATE_MANIFEST_SHA256"),
                                   ("fb", "FB_PAGE_GPU_RANDOM_OVERLAY_MANIFEST_SHA256"),
@@ -229,7 +245,23 @@ class NodeExecutors:
             fingerprint = os.environ.get(variable, "").strip().lower()
             if "prepare:" + channel in stages and re.fullmatch(r"[a-f0-9]{64}", fingerprint):
                 catalogs.add("catalog:" + channel + ":" + fingerprint)
-        return sorted(kinds | stages | profiles | catalogs | {"backend:" + self.config["backend"]})
+        return sorted(kinds | stages | profiles | catalogs | routed_assets | {"backend:" + self.config["backend"]})
+
+    def _tt_asset_capabilities(self, config):
+        from .tt_profiles import asset_capabilities
+        if config.media_mode != "direct_outro":
+            return set()
+        paths = (Path(config.fixed_outro_path), Path(config.font_file))
+        signature = []
+        for path in paths:
+            info = path.stat()
+            signature.append((str(path), info.st_ino, info.st_size, info.st_mtime_ns, path.is_symlink()))
+        signature = tuple(signature)
+        key = (signature, config.fixed_outro_sha256)
+        if key not in self.asset_identity_cache:
+            self.asset_identity_cache.clear()
+            self.asset_identity_cache[key] = asset_capabilities(config)
+        return set(self.asset_identity_cache[key])
 
     def execute(self, job, context):
         payload = dict(job.get("payload") or {})
@@ -243,9 +275,10 @@ class NodeExecutors:
             return self.prepare(kind, payload, context)
         return getattr(self, kind)(payload, job.get("artifact") or payload.get("artifact"), context)
 
-    def _processor(self, kind):
-        if kind in self.processors:
-            return self.processors[kind]
+    def _processor(self, kind, profile=None):
+        cache_key = (kind, profile) if kind == "tt_prepare" and profile else kind
+        if cache_key in self.processors:
+            return self.processors[cache_key]
         if kind in self.factories:
             processor = self.factories[kind]()
         elif kind in {"x_random", "x_repair"}:
@@ -274,7 +307,12 @@ class NodeExecutors:
             processor = PrepareProcessor(WorkerConfig.from_env(), runner=render)
         elif kind == "tt_prepare":
             from features.tt_gpu.worker import WorkerConfig, TTPostGPUProcessor
+            from .tt_profiles import TTProfileError, select_config
             config = WorkerConfig.from_env()
+            try:
+                config = select_config(config, profile or config.profile, self.config["backend"])
+            except TTProfileError as exc:
+                raise ExecutionError(str(exc)) from None
             if config.storage_backend != "cos":
                 raise ExecutionError("portable_artifact_requires_cos")
             if self.config["backend"] == "cpu" and config.video_encoder != "libx264":
@@ -284,22 +322,31 @@ class NodeExecutors:
             processor = TTPostGPUProcessor(config, runner=runner)
         else:
             raise ExecutionError("preparation_executor_not_configured")
-        self.processors[kind] = processor
+        self.processors[cache_key] = processor
         return processor
 
     def _validate_frozen_catalog(self, kind, payload):
         required = {value for value in payload.get("required_capabilities", [])
-                    if isinstance(value, str) and value.startswith("catalog:")}
+                    if isinstance(value, str) and value.startswith(("catalog:", "asset:"))}
         if not required:
             return  # Existing X descriptors also validate their request manifest.
         if not required.issubset(set(self.capabilities())):
             raise ExecutionError("frozen_catalog_mismatch")
         channel = kind.split("_", 1)[0]
+        profile = (payload.get("request") or {}).get("expected_profile") if kind == "tt_prepare" else None
+        if kind == "tt_prepare" and any(value.startswith("asset:") for value in required):
+            from .tt_profiles import TTProfileError, asset_capabilities
+            try:
+                actual_assets = asset_capabilities(self._processor(kind, profile).config)
+            except TTProfileError as exc:
+                raise ExecutionError(str(exc)) from None
+            if not {value for value in required if value.startswith("asset:")}.issubset(actual_assets):
+                raise ExecutionError("frozen_outro_assets_mismatch")
         expected = {value.split(":", 2)[2] for value in required if value.startswith("catalog:" + channel + ":")}
         if not expected:
             return
         name = "x_random" if kind == "x_preflight" else kind
-        processor = self._processor(name)
+        processor = self._processor(name, profile)
         assets = getattr(processor, "assets", None) or getattr(processor.config, "random_overlay_assets", None)
         actual = assets.get("manifest_sha256") if isinstance(assets, dict) else None
         if len(expected) != 1 or actual not in expected:
@@ -315,8 +362,8 @@ class NodeExecutors:
             if request.get("action") == "enqueue":
                 return {"status": "ready", "enqueue": True}
             return self.youtube_prepare(request, context, recovery_only=bool(payload.get("recovery_only")))
-        processor = self._processor(kind)
         expected_profile = request.get("expected_profile") or request.get("profile")
+        processor = self._processor(kind, expected_profile if kind == "tt_prepare" else None)
         if expected_profile and getattr(processor.config, "profile", "") != expected_profile:
             raise ExecutionError("frozen_renderer_profile_mismatch")
         result = self._prepare_processor(kind, processor, request, context)
