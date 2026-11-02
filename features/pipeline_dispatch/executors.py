@@ -6,7 +6,7 @@ publication state. This module performs actual local compute/network work.
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import base64
 import io
@@ -584,8 +584,26 @@ class NodeExecutors:
                 fingerprint = {"method": method, "path": path, "body_sha256": hashlib.sha256(body or b"").hexdigest()}
                 stage = "create_post" if path == "/2/tweets" else ("platform_processing" if method == "GET" else "platform_upload") if "/media/" in path else "repost"
                 context.phase(stage)
-                with context.operation("x:" + method + ":" + path.split("?")[0], fingerprint, account_resource=account, write=method != "GET") as credential:
-                    response = super()._request(method, path, credential["access_token"], body, content_type, expected, operation, unknown)
+                # Reuse XApiClient's one exact media-only 401 retry. Each token
+                # comes from a distinct permit; the native authority binds the
+                # retry to the original account/request and permits it once.
+                with ExitStack() as credentials:
+                    original_operation_id = None
+                    def token_provider(*, verify_now=False):
+                        nonlocal original_operation_id
+                        details = dict(fingerprint)
+                        if verify_now:
+                            details["media_401_retry_of"] = original_operation_id
+                        credential = credentials.enter_context(context.operation("x:" + method + ":" + path.split("?")[0], details,
+                            account_resource=account, write=method != "GET"))
+                        if not verify_now:
+                            original_operation_id = context.last_operation_id
+                        return credential["access_token"]
+                    self.access_token_provider = token_provider
+                    try:
+                        response = super()._request(method, path, "broker", body, content_type, expected, operation, unknown)
+                    finally:
+                        self.access_token_provider = None
                 if path == "/2/media/upload/initialize":
                     initialized = response.get("data", {})
                     context.checkpoint("x_media_initialized", {"media_id": initialized.get("id") or initialized.get("media_id"), "operation_id": context.last_operation_id})

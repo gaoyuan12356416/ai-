@@ -38,6 +38,9 @@ class XNativeBridge:
               CREATE TABLE IF NOT EXISTS pipeline_x_operation (
                 operation_id TEXT PRIMARY KEY,source_key TEXT NOT NULL,generation INTEGER NOT NULL,
                 operation TEXT NOT NULL,request_sha256 TEXT NOT NULL,created_at TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS pipeline_x_media_retry (
+                original_operation_id TEXT PRIMARY KEY,retry_operation_id TEXT NOT NULL UNIQUE,
+                source_key TEXT NOT NULL,generation INTEGER NOT NULL,UNIQUE(source_key,generation));
               CREATE TABLE IF NOT EXISTS pipeline_x_checkpoint (
                 source_key TEXT NOT NULL,generation INTEGER NOT NULL,phase TEXT NOT NULL,
                 receipt_json TEXT NOT NULL,PRIMARY KEY(source_key,generation,phase));
@@ -86,7 +89,7 @@ class XNativeBridge:
             raise AdapterError("x_dispatch_claim_conflict")
         return dict(row), obj(row["descriptor_json"])
 
-    def account(self, queue, target=False):
+    def account(self, queue, target=False, *, verify_now=False):
         relay = queue.get("delivery_mode") == posts.PREMIUM_RELAY_REPOST_MODE
         identity = int(queue["account_id"] if target or not relay else queue["relay_account_id"])
         duration = float(queue.get("preflight_duration") or 0)
@@ -94,7 +97,9 @@ class XNativeBridge:
         with self.connect() as c:
             parent = c.execute("SELECT trigger_source FROM x_post_manual_run WHERE id=?", (queue.get("manual_run_id"),)).fetchone()
         actor = self.r.AUTO_TEMPLATE_ACTOR if parent and parent[0] == "auto_template" else self.r.CANARY_ACTOR
-        verified = self.r.verify_account(identity, actor, "all", only_refresh_required=not premium,
+        # New claims verify identity explicitly. Per-request credentials retain
+        # the original refresh-required rule, including long-video accounts.
+        verified = self.r.verify_account(identity, actor, "all", only_refresh_required=not verify_now,
                                          preserve_transient_status=True, require_publish_approved=True)
         if verified.get("status") != "active" or verified.get("publish_approved") is not True or int(verified.get("id", 0)) != identity:
             raise AdapterError("x_account_not_publishable")
@@ -190,7 +195,7 @@ class XNativeBridge:
             if log["status"] != "reserved" or log["attempt_count"] or log["unknown_outcome"]:
                 raise AdapterError("x_existing_attempt_requires_reconciliation")
             self._parent(queue, log)
-            source_id, _, source = self.account(queue, target=pending_route)
+            source_id, _, source = self.account(queue, target=pending_route, verify_now=True)
             prep = PreparationStore(self.r.POST_DB_PATH)
             frozen = prep.get(queue["id"]) if queue.get("random_template_enabled") else None
             if job["stage"] == "prepare":
@@ -265,18 +270,38 @@ class XNativeBridge:
             method, path = details.get("method"), details.get("path", "")
             if method not in ("POST", "GET") or not (path == "/2/tweets" or re.fullmatch(r"/2/media/upload(?:/initialize|/[A-Za-z0-9_.:-]+/(?:append|finalize)|\?.+)?", path) or re.fullmatch(r"/2/users/[0-9]+/retweets", path)):
                 raise AdapterError("x_operation_route_denied")
+            retry_of = details.get("media_401_retry_of")
+            if retry_of is not None:
+                if (not isinstance(retry_of, str) or not 1 <= len(retry_of) <= 200
+                        or not path.startswith("/2/media/")
+                        or set(details) != {"method", "path", "body_sha256", "media_401_retry_of"}):
+                    raise AdapterError("x_media_retry_invalid")
+                fingerprint = hashlib.sha256(canonical({key: details[key] for key in ("method", "path", "body_sha256")}).encode()).hexdigest()
+                with self.connect() as c:
+                    original = c.execute("SELECT * FROM pipeline_x_operation WHERE operation_id=?", (retry_of,)).fetchone()
+                    used = c.execute("SELECT 1 FROM pipeline_x_media_retry WHERE original_operation_id=? OR retry_operation_id=? OR (source_key=? AND generation=?)", (retry_of, retry_of, job["source_key"], job["generation"])).fetchone()
+                if (not original or used or original["source_key"] != job["source_key"]
+                        or original["generation"] != job["generation"]
+                        or original["operation"] != "x:" + method + ":" + path.split("?")[0]
+                        or original["request_sha256"] != fingerprint):
+                    raise AdapterError("x_media_retry_invalid")
             target = "/retweets" in path
-            identity, actor, account = self.account(queue, target=target)
+            identity, actor, account = self.account(queue, target=target, verify_now=retry_of is not None)
             if operation.get("account_resource") != "x:account:" + str(identity):
                 raise AdapterError("x_operation_account_changed")
             self._parent(queue, log)
             if path == "/2/media/upload/initialize":
-                if method != "POST" or log["status"] != "reserved" or log["attempt_count"] or log["unknown_outcome"]:
+                with self.connect() as c:
+                    initialized = c.execute("SELECT 1 FROM pipeline_x_checkpoint WHERE source_key=? AND generation=? AND phase='x_media_initialized'", (job["source_key"], job["generation"])).fetchone()
+                retryable = retry_of is not None and log["status"] == "media_uploading" and log["attempt_count"] == 1 and not initialized
+                untouched = retry_of is None and log["status"] == "reserved" and not log["attempt_count"]
+                if method != "POST" or not (retryable or untouched) or log["unknown_outcome"]:
                     raise AdapterError("x_upload_already_started")
                 expected = json.dumps({"media_type": descriptor["artifact"]["mime"], "total_bytes": descriptor["artifact"]["size"], "media_category": descriptor["request"]["media_category"]}, separators=(",", ":")).encode()
                 if details.get("body_sha256") != hashlib.sha256(expected).hexdigest():
                     raise AdapterError("x_upload_identity_changed")
-                self.store.mark_publishing(log["id"])
+                if not retryable:
+                    self.store.mark_publishing(log["id"])
             elif path == "/2/tweets":
                 if method != "POST" or log["status"] != "post_creating" or log["unknown_outcome"] or not log["x_media_id"]:
                     raise AdapterError("x_media_receipt_required")
@@ -304,6 +329,8 @@ class XNativeBridge:
                 if c.execute("SELECT 1 FROM pipeline_x_operation WHERE operation_id=?", (operation["operation_id"],)).fetchone():
                     raise AdapterError("operation_already_started")
                 c.execute("INSERT INTO pipeline_x_operation VALUES(?,?,?,?,?,?)", (operation["operation_id"], job["source_key"], job["generation"], operation["operation"], operation["request_sha256"], posts.utc_now()))
+                if retry_of is not None:
+                    c.execute("INSERT INTO pipeline_x_media_retry VALUES(?,?,?,?)", (retry_of, operation["operation_id"], job["source_key"], job["generation"]))
             with self.r.publish_credentials(identity, actor, "all") as (_, token):
                 return {"credentials": {"access_token": token}}
 
