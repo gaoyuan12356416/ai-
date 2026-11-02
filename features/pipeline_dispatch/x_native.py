@@ -484,7 +484,20 @@ class XNativeBridge:
         with self.lock, self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT q.status,COALESCE(l.attempt_count,0) attempts,COALESCE(l.unknown_outcome,0) uncertain,COALESCE(l.status,'') log_status FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id WHERE q.id=?", (int(job["source_id"]),)).fetchone()
-            if not row or row["status"] != "queued" or row["attempts"] or row["uncertain"] or row["log_status"] not in ("", "reserved") or c.execute("SELECT 1 FROM pipeline_x_claim WHERE source_key=?", (job["source_key"],)).fetchone():
+            untouched_status = bool(row and row["status"] == "queued")
+            if row and row["status"] == "waiting_relay":
+                # This native state precedes relay assignment and every X write.
+                # Reuse the canonical consistency check: exact scheduled-drama
+                # route, frozen media, no publish log and no repost ledger.
+                queue = c.execute("SELECT * FROM x_post_queue WHERE id=?", (int(job["source_id"]),)).fetchone()
+                try:
+                    route = self.store._assert_drama_duration_route_consistency(c, queue)
+                except posts.XPostError:
+                    raise AdapterError("canonical_task_not_untouched")
+                untouched_status = bool(route and route["route_state"] == posts.DRAMA_ROUTE_WAITING_RELAY
+                    and not c.execute("SELECT 1 FROM pipeline_x_operation WHERE source_key=?", (job["source_key"],)).fetchone()
+                    and not c.execute("SELECT 1 FROM pipeline_x_checkpoint WHERE source_key=?", (job["source_key"],)).fetchone())
+            if not row or not untouched_status or row["attempts"] or row["uncertain"] or row["log_status"] not in ("", "reserved") or c.execute("SELECT 1 FROM pipeline_x_claim WHERE source_key=?", (job["source_key"],)).fetchone():
                 raise AdapterError("canonical_task_not_untouched")
             previous = c.execute("SELECT cutoff FROM pipeline_canonical_hold WHERE source_key=?", (job["source_key"],)).fetchone()
             if previous and previous[0] != cutoff:

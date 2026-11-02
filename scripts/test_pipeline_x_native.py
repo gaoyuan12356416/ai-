@@ -223,6 +223,63 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(self.bridge.store.get_queue(queue["id"])["status"], "queued")
         with self.assertRaises(AdapterError): self.bridge.reserve(job, job)
 
+    def waiting_relay_queue(self):
+        from scripts.test_x_post_multi_schedule_store import XPostMultiScheduleStoreTests
+        fixture = XPostMultiScheduleStoreTests()
+        fixture.store, fixture.db_path = self.bridge.store, self.runtime.POST_DB_PATH
+        fixture.save_schedule("drama", [2], ["09:00"])
+        pool = fixture.add_drama(content_id="WAIT-RELAY")
+        candidate = fixture.duration_pending_drama_candidate(pool, 2)
+        fixture.claim_schedule_slot("2026-07-27", "09:00")
+        plan = fixture.store.create_schedule_plan("drama", "2026-07-27", "09:00", 2, [candidate])
+        queue_id = plan["queues"][0]["id"]
+        fixture.store.resolve_drama_duration_route(queue_id,
+            fixture.duration_media_evidence(candidate, 1201.0, 77), False, [])
+        return fixture.store.get_queue(queue_id)
+
+    def test_waiting_relay_pause_retains_native_route_and_material_assignment(self):
+        queue = self.waiting_relay_queue()
+        job = self.job(queue, "publish")
+        job.pop("generation")
+        with self.bridge.connect() as conn:
+            before = [tuple(r) for r in conn.execute("SELECT * FROM x_post_drama_pool")]
+            route = [tuple(r) for r in conn.execute("SELECT * FROM x_post_drama_delivery_route")]
+        for _ in range(2):
+            self.assertTrue(self.bridge.pause(job, "2026-11-02T11:17:02Z")["held"])
+        self.assertEqual(self.bridge.store.get_queue(queue["id"]), queue)
+        with self.bridge.connect() as conn:
+            self.assertEqual([tuple(r) for r in conn.execute("SELECT * FROM x_post_drama_pool")], before)
+            self.assertEqual([tuple(r) for r in conn.execute("SELECT * FROM x_post_drama_delivery_route")], route)
+            for table in ("x_post_publish_log", "x_post_repost_ledger", "pipeline_x_claim", "pipeline_x_operation", "pipeline_x_checkpoint"):
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM " + table).fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_canonical_hold").fetchone()[0], 1)
+
+    def test_waiting_relay_pause_rejects_log_repost_claim_operation_and_missing_route(self):
+        queue = self.waiting_relay_queue()
+        job = self.job(queue, "publish")
+        # Inject inconsistent historical evidence in this isolated SQLite fixture;
+        # production route triggers also reject these combinations.
+        with self.bridge.connect() as conn:
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall():
+                conn.execute('DROP TRIGGER "' + row[0].replace('"', '""') + '"')
+        cases = (
+            ("INSERT INTO x_post_publish_log(queue_id,account_id,status,attempt_count,created_at,updated_at) VALUES(?,2,'reserved',0,'now','now')", (queue["id"],)),
+            ("INSERT INTO x_post_repost_ledger(queue_id,run_date,target_account_id,relay_account_id,status,source_attempt_count,source_post_id,created_at,updated_at) VALUES(?,'2026-07-27',2,3,'source_published',1,'123456','now','now')", (queue["id"],)),
+            ("INSERT INTO pipeline_x_claim VALUES(?,'prepare',1,'hash',?,0,'{}')", (job["source_key"], queue["id"])),
+            ("INSERT INTO pipeline_x_operation VALUES('op',?,1,'post','hash','now')", (job["source_key"],)),
+            ("INSERT INTO pipeline_x_checkpoint VALUES(?,1,'x_source_published','{}')", (job["source_key"],)),
+            ("DELETE FROM x_post_drama_delivery_route WHERE queue_id=?", (queue["id"],)),
+        )
+        for sql, params in cases:
+            with self.subTest(sql=sql), self.bridge.connect() as conn:
+                conn.execute(sql, params)
+                conn.commit()
+                with self.assertRaisesRegex(AdapterError, "canonical_task_not_untouched"):
+                    self.bridge.pause(job, "2026-11-02T11:17:02Z")
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_canonical_hold").fetchone()[0], 0)
+                for table in ("x_post_publish_log", "x_post_repost_ledger", "pipeline_x_claim", "pipeline_x_operation", "pipeline_x_checkpoint"):
+                    conn.execute("DELETE FROM " + table)
+
     def test_cutover_projection_without_generation_reaches_http_pause_and_persists_hold(self):
         from features.pipeline_dispatch import x_native
         from features.pipeline_dispatch.adapters import AdapterRegistry, LedgerAdapter, LedgerSpec
