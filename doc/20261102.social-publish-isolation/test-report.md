@@ -5,4 +5,6 @@
 
 最终调度定向回归 240 项通过；转发、Auto bridge 与 X sidecar 53 项通过。额外扩展到未修改的个人素材查询 gateway 时有 4 个原有失败；在修改前 35a910f 完整源码独立重跑同一组 9 项，复现相同 1 failure + 3 errors，属于旧测试夹具与线上 sources.py 读回格式不匹配。本次不修改/部署 sources.py 或其 gateway。
 
-最终修改全部纳入后：517 项测试通过，1 项环境相关跳过（Windows 下依赖 Linux 的部署检查）。生产 drain 需考虑 X 常驻的 YouTube share worker，空闲线程数为 2；另查其队列无 queued/publishing。
+最终修改全部纳入后：517 项核心回归：516 项通过，1 项环境相关跳过（Windows 下依赖 Linux 的部署检查）。生产 drain 需考虑 X 常驻的 YouTube share worker，空闲线程数为 2；另查其队列无 queued/publishing。
+
+补充全失败预检情况后，手动入口 11 项通过。17:19 生产验收完成，三个 sidecar 健康 200，14 个运行文件与 GitHub 一致，原触发器状态恢复，5,196 条保护记录无变化，4 个 Auto 工作槽推进原任务，新确认发布 1 条。

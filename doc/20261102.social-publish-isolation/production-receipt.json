@@ -1,0 +1,138 @@
+{
+  "summary": "修复已上线，独立工作槽已领取原待办，历史成功与未知结果未重发。",
+  "checked_at": "2026-11-02T17:19:18+08:00",
+  "commit": "b4d81b30fda15d33e21b16f426b6cbeeab9b8e10",
+  "release": "/mnt/data-disk/social-publish-isolation-20261102/x-b4d81b30fda15d33e21b16f426b6cbeeab9b8e10",
+  "backup": "/mnt/data-disk/social-publish-isolation-20261102/backup-20261102T085448Z",
+  "verification": {
+    "部署状态": "complete",
+    "健康检查": {
+      "8810": 200,
+      "18833": 200,
+      "18831": 200
+    },
+    "运行文件与 GitHub 一致": 14,
+    "触发器恢复": "与原状态一致；原关闭项仍关闭",
+    "成功/待核对记录数量": 5196,
+    "切换前后指纹一致": true,
+    "恢复后历史保护记录变化": 0,
+    "X Auto 活跃工作槽": 4,
+    "上线后新确认发布": 1
+  },
+  "progress": {
+    "原 611 条待办的当前状态": [
+      {
+        "status": "no_candidate",
+        "count": 7
+      },
+      {
+        "status": "pending",
+        "count": 600
+      },
+      {
+        "status": "publishing",
+        "count": 4
+      }
+    ],
+    "Auto 当前执行": [
+      {
+        "id": 1856,
+        "account_id": "123",
+        "status": "publishing",
+        "claim_worker": "x-auto-post-runner-primary-2"
+      },
+      {
+        "id": 1859,
+        "account_id": "73",
+        "status": "publishing",
+        "claim_worker": "x-auto-post-runner-primary-3"
+      },
+      {
+        "id": 1858,
+        "account_id": "74",
+        "status": "publishing",
+        "claim_worker": "x-auto-post-runner-primary-4"
+      },
+      {
+        "id": 1857,
+        "account_id": "70",
+        "status": "publishing",
+        "claim_worker": "x-auto-post-runner-primary-1"
+      }
+    ],
+    "新启动的 X 执行记录": [
+      {
+        "queue_id": 5363,
+        "account_id": 22,
+        "schedule_run_id": null,
+        "manual_run_id": 1377,
+        "status": "published",
+        "attempt_count": 1,
+        "updated_at": "2026-11-02T09:17:53Z"
+      },
+      {
+        "queue_id": 5342,
+        "account_id": 21,
+        "schedule_run_id": 1026,
+        "manual_run_id": null,
+        "status": "reserved",
+        "attempt_count": 0,
+        "updated_at": "2026-11-02T09:15:13Z"
+      },
+      {
+        "queue_id": 5343,
+        "account_id": 11,
+        "schedule_run_id": 1026,
+        "manual_run_id": null,
+        "status": "reserved",
+        "attempt_count": 0,
+        "updated_at": "2026-11-02T09:15:19Z"
+      },
+      {
+        "queue_id": 5364,
+        "account_id": 70,
+        "schedule_run_id": null,
+        "manual_run_id": 1391,
+        "status": "reserved",
+        "attempt_count": 0,
+        "updated_at": "2026-11-02T09:16:23Z"
+      },
+      {
+        "queue_id": 5365,
+        "account_id": 74,
+        "schedule_run_id": null,
+        "manual_run_id": 1393,
+        "status": "reserved",
+        "attempt_count": 0,
+        "updated_at": "2026-11-02T09:16:48Z"
+      },
+      {
+        "queue_id": 5366,
+        "account_id": 73,
+        "schedule_run_id": null,
+        "manual_run_id": 1394,
+        "status": "reserved",
+        "attempt_count": 0,
+        "updated_at": "2026-11-02T09:17:19Z"
+      },
+      {
+        "queue_id": 5367,
+        "account_id": 123,
+        "schedule_run_id": null,
+        "manual_run_id": 1392,
+        "status": "reserved",
+        "attempt_count": 0,
+        "updated_at": "2026-11-02T09:17:51Z"
+      },
+      {
+        "queue_id": 5368,
+        "account_id": 16,
+        "schedule_run_id": null,
+        "manual_run_id": 1378,
+        "status": "media_uploading",
+        "attempt_count": 1,
+        "updated_at": "2026-11-02T09:19:02Z"
+      }
+    ]
+  }
+}
