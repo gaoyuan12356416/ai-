@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.pipeline_dispatch import views
@@ -106,6 +107,33 @@ class PhaseMetricsTests(unittest.TestCase):
         metric = self.metric('fb', 'platform_confirmation_wait', actor)
         self.assertEqual((metric['samples'], metric['p50_seconds']), (1, 10))
         self.assertEqual(self.metric('fb', 'platform_confirmation_wait')['samples'], 2)
+
+    def test_confirmation_query_bounds_recent_scoped_publications_before_event_lookup(self):
+        for index, owner in enumerate(('alice', 'alice', 'alice', 'bob')):
+            job = self.claim('bounded-' + str(index), owner=owner)
+            self.store.checkpoint(job, 'checkpoint-bounded-' + str(index), 'fb_publish_attempt', {'kind': 'success', 'post_id': '123'}, canonical_verified=True)
+            self.now += dt.timedelta(seconds=10)
+            self.finish(job)
+        with self.store.transaction() as conn:
+            conn.executemany("INSERT INTO pipeline_event(job_id,event_type,details_json,created_at) VALUES(?,?,?,?)",
+                             [(job['id'], 'heartbeat', '{}', '2026-01-01T00:00:00Z')] * 1000)
+        original_connect = self.store.connect
+        statements = []
+        def traced_connect():
+            conn = original_connect()
+            conn.set_trace_callback(statements.append)
+            return conn
+        actor = {'is_admin': False, 'user_id': 'alice', 'tenant_key': 'tenant', 'allowed_channels': ['fb'], 'allowed_modules': ['fb_video_publish']}
+        with mock.patch.object(self.store, 'connect', traced_connect), mock.patch.object(views, 'MAX_TIMING_SAMPLES', 2):
+            metric = self.metric('fb', 'platform_confirmation_wait', actor)
+        # The newest publication belongs to Bob; apply owner scope before LIMIT.
+        self.assertEqual((metric['samples'], metric['p50_seconds']), (2, 10))
+        statement = next(sql for sql in statements if sql.startswith('WITH recent AS'))
+        with contextlib.closing(original_connect()) as conn:
+            plan = [row[3] for row in conn.execute('EXPLAIN QUERY PLAN ' + statement)]
+        self.assertTrue(any('SEARCH f USING INDEX pipeline_publication_time' in step and 'published_at>' in step and 'published_at<' in step for step in plan), plan)
+        self.assertTrue(any('SEARCH e USING INDEX pipeline_event_job_type' in step and 'job_id=? AND event_type=?' in step for step in plan), plan)
+        self.assertFalse(any('SCAN e' in step or 'AUTOMATIC' in step for step in plan), plan)
 
 
 if __name__ == '__main__': unittest.main()

@@ -212,7 +212,21 @@ def _summary(conn, scope, args, common, sources, channels, start, end, now):
     # FB pulls a URL after accepting the POST. This interval includes its fetch,
     # processing and our reconciliation cadence, not pure platform processing.
     # Old checkpoints have only a hash; never guess their post identity.
-    confirmation_rows = conn.execute("SELECT j.id,j.generation,f.publish_id,f.published_at,e.details_json,p.checkpoint_id,p.generation checkpoint_generation,p.received_at FROM pipeline_job j JOIN pipeline_publication f ON f.source_key=j.source_key JOIN pipeline_event e ON e.job_id=j.id AND e.event_type='checkpoint' JOIN pipeline_checkpoint p ON p.job_id=j.id AND p.checkpoint_id=json_extract(e.details_json,'$.checkpoint_id') WHERE " + efficiency_scope + " AND j.channel='fb' AND j.stage='publish' AND p.phase='fb_publish_attempt' ORDER BY f.published_at DESC,p.received_at ASC LIMIT ?", efficiency_args + [MAX_TIMING_SAMPLES * 8]).fetchall()
+    # Bound the publication window before touching the growing event history.
+    # LIMIT also prevents SQLite from flattening this into an event-table scan.
+    confirmation_rows = conn.execute(
+        "WITH recent AS (SELECT j.id,j.generation,f.publish_id,f.published_at "
+        "FROM pipeline_publication f INDEXED BY pipeline_publication_time "
+        "JOIN pipeline_job j ON j.id=f.job_id WHERE f.channel='fb' "
+        "AND f.published_at>=? AND f.published_at<=? AND " + scope +
+        " AND j.channel='fb' AND j.stage='publish' AND j.hold_reason<>'metadata_only' "
+        "ORDER BY f.published_at DESC LIMIT ?) "
+        "SELECT j.id,j.generation,j.publish_id,j.published_at,e.details_json,p.checkpoint_id,"
+        "p.generation checkpoint_generation,p.received_at FROM recent j "
+        "JOIN pipeline_event e INDEXED BY pipeline_event_job_type ON e.job_id=j.id AND e.event_type='checkpoint' "
+        "JOIN pipeline_checkpoint p ON p.job_id=j.id AND p.checkpoint_id=json_extract(e.details_json,'$.checkpoint_id') "
+        "WHERE p.phase='fb_publish_attempt' ORDER BY j.published_at DESC,p.received_at ASC LIMIT ?",
+        [hour, end] + args + [MAX_TIMING_SAMPLES, MAX_TIMING_SAMPLES * 8]).fetchall()
     confirmations = {}
     for row in confirmation_rows:
         evidence = json.loads(row["details_json"])

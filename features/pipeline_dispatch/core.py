@@ -199,6 +199,7 @@ class DispatchStore:
             CREATE TABLE IF NOT EXISTS pipeline_event (
               id INTEGER PRIMARY KEY, job_id INTEGER, event_type TEXT NOT NULL,
               details_json TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS pipeline_event_job_type ON pipeline_event(job_id,event_type,id);
             CREATE TABLE IF NOT EXISTS pipeline_phase_metric (
               job_id INTEGER NOT NULL, generation INTEGER NOT NULL, phase TEXT NOT NULL,
               seconds REAL NOT NULL, bytes INTEGER, created_at TEXT NOT NULL,
