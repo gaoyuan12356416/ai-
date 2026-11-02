@@ -1,13 +1,139 @@
 """Offline native TT ledger/portable execution integration checks."""
+import copy
 import unittest
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from datetime import timedelta
 from unittest.mock import patch
-from features.pipeline_dispatch.tt_native import TTNativeBridge
+from features.pipeline_dispatch.tt_native import TTNativeBridge, MediaPort
 from features.pipeline_dispatch.adapters import AdapterError, public_descriptor
 from scripts import test_tt_auto_post_publisher as auto_fixtures
 from scripts import test_tt_posts_core as queue_fixtures
 from scripts import test_tt_posts_service as service_fixtures
+
+
+@dataclass(frozen=True)
+class ProductionVideoRoute:
+    gpu_client: object
+    media_profile_version: str
+    source_trim_tail_seconds: float
+
+
+class ProductionRoutedExecutor(auto_fixtures.AutoPostExecutor):
+    """Production selects a frozen route before entering prepare/publish logic.
+
+    Keep the real native validation and SQLite transitions, but select their
+    client/profile/trim through the production frozen-dataclass call path.
+    """
+    def _video_route_for_task(self, task):
+        return self.test_routes[(task.template_id, task.template_version)]
+
+    def routed(self, task):
+        route = self._video_route_for_task(task)
+        clone = copy.copy(self)
+        clone.gpu_client = route.gpu_client
+        clone.media_profile_version = route.media_profile_version
+        clone.source_trim_tail_seconds = route.source_trim_tail_seconds
+        return clone
+
+    def _prepare(self, task, claim_token=None):
+        return super(ProductionRoutedExecutor, self.routed(task))._prepare(task, claim_token)
+
+    def _publish(self, task, claim_token=None):
+        return super(ProductionRoutedExecutor, self.routed(task))._publish(task, claim_token)
+
+
+class RoutedTTBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = auto_fixtures.TTAutoPostPublisherIntegrationTests()
+        self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+        self.task = self.fixture.reserved_task(suffix="routed")
+        self.default_gpu, self.route_gpu = auto_fixtures.FakeGPU(), auto_fixtures.FakeGPU()
+        self.executor = self.fixture.executor(self.default_gpu)
+        self.executor.__class__ = ProductionRoutedExecutor
+        self.executor.media_profile_version = "tt-post-random-overlay-hevc-720x1280-v3"
+        self.route = ProductionVideoRoute(self.route_gpu, "tt-post-direct-outro-hevc-720x1280-v2", 4.333333)
+        self.executor.test_routes = {(self.task.template_id, self.task.template_version): self.route}
+        self.bridge = TTNativeBridge(SimpleNamespace(store=self.fixture.store, executor=self.executor), automatic=True)
+        self.job = {"source_key": "tt:auto:%s" % self.task.id, "source_id": str(self.task.id),
+                    "channel": "tt", "family": "auto", "stage": "prepare", "generation": 1, "executor_backend": "cpu",
+                    "executor_capabilities": ["asset:tt-outro:" + "d" * 64, "asset:tt-font:" + "e" * 64, "catalog:tt:" + "f" * 64]}
+        self.claim = {"claim_token": "r" * 32, "node_id": "cpu-main"}
+        for client in (self.default_gpu, self.route_gpu):
+            for method in ("prepare", "publish", "reconcile"):
+                boundary = patch.object(client, method, side_effect=AssertionError("legacy media HTTP boundary crossed"))
+                boundary.start(); self.addCleanup(boundary.stop)
+
+    def result(self, descriptor):
+        request = descriptor["request"]
+        return auto_fixtures.FakeGPU().prepare(job_id=request["job_id"],
+            material={"content_id": request["content_id"]}, expected_profile=request["expected_profile"])
+
+    def test_frozen_route_intercepts_reserve_completion_publish_and_repeat(self):
+        descriptor = self.bridge.reserve(self.job, self.claim)
+        self.assertEqual(descriptor["request"]["expected_profile"], "tt-post-direct-outro-h264-720x1280-v2")
+        self.assertEqual(descriptor["request"]["source_trim_tail_seconds"], 4.333333)
+        self.assertEqual(descriptor["native_route"]["profile"], self.route.media_profile_version)
+        self.assertIn("profile:tt-post-direct-outro-h264-720x1280-v2", descriptor["required_capabilities"])
+        self.assertIn("asset:tt-outro:" + "d" * 64, descriptor["required_capabilities"])
+        self.assertIn("asset:tt-font:" + "e" * 64, descriptor["required_capabilities"])
+        self.assertNotIn("catalog:tt:" + "f" * 64, descriptor["required_capabilities"])
+        self.assertEqual(self.bridge.reserve(self.job, self.claim), descriptor)
+        receipt = {"preparation": self.result(descriptor)}
+        self.bridge.complete(self.job, receipt, self.claim)
+        self.assertTrue(self.bridge.complete(self.job, receipt, self.claim)["idempotent"])
+        publish = dict(self.job, stage="publish", generation=2)
+        published_descriptor = self.bridge.reserve(publish, self.claim)
+        self.assertEqual(self.bridge.reserve(publish, self.claim), published_descriptor)
+        self.assertEqual(self.fixture.store.get_task(self.task.id).status, "publishing")
+        self.assertEqual(len(self.route_gpu.creator_calls), 1)
+        self.assertEqual(self.default_gpu.creator_calls, [])
+        self.assertIs(self.executor._video_route_for_task(self.task), self.route)
+        self.assertIs(self.route.gpu_client, self.route_gpu)
+        self.assertFalse(isinstance(self.executor.gpu_client, MediaPort))
+        public_descriptor(published_descriptor)
+
+    def test_cross_generation_keeps_route_profile_and_rejects_changed_route(self):
+        descriptor = self.bridge.reserve(self.job, self.claim)
+        retry = dict(self.job, generation=2, executor_backend="gpu")
+        self.assertEqual(self.bridge.reserve(retry, self.claim), descriptor)
+        self.executor.test_routes[(self.task.template_id, self.task.template_version)] = replace(self.route, source_trim_tail_seconds=0)
+        with self.assertRaisesRegex(AdapterError, "tt_frozen_video_route_changed"):
+            self.bridge.complete(retry, {"preparation": self.result(descriptor)}, self.claim)
+        self.assertEqual(self.fixture.store.get_task(self.task.id).status, "preparing")
+
+    def test_missing_outro_assets_fail_before_native_claim_or_render(self):
+        before = self.fixture.store.get_task(self.task.id).as_dict()
+        with self.assertRaisesRegex(AdapterError, "canonical_render_asset_unavailable"):
+            self.bridge.reserve(dict(self.job, executor_capabilities=["catalog:tt:" + "f" * 64]), self.claim)
+        self.assertEqual(self.fixture.store.get_task(self.task.id).as_dict(), before)
+        with self.bridge.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_tt_claim").fetchone()[0], 0)
+
+    def test_other_source_uses_its_own_frozen_route_without_mutating_default(self):
+        first = self.bridge.reserve(self.job, self.claim)
+        self.bridge.complete(self.job, {"preparation": self.result(first)}, self.claim)
+        publish = dict(self.job, stage="publish", generation=2)
+        descriptor = self.bridge.reserve(publish, self.claim)
+        operation = {"operation": "tt_initialize_video", "operation_id": "route-first-init",
+            "account_resource": descriptor["account_resource"], "request_sha256": "c" * 64,
+            "details": {"post_info": descriptor["request"]["post_info"], "video_url": descriptor["artifact"]["url"]}}
+        self.bridge.begin_operation(publish, self.claim, operation)
+        self.bridge.checkpoint(publish, self.claim, "tt_initialized", {"publish_id": "first-route-post"})
+        operation.update(operation="tt_fetch_status", operation_id="route-first-status", details={"publish_id": "first-route-post"})
+        self.bridge.begin_operation(publish, self.claim, operation)
+        receipt = {"publish_id": "first-route-post", "status": "PUBLISH_COMPLETE", "post_ids": ["123"]}
+        self.bridge.checkpoint(publish, self.claim, "tt_status", receipt)
+        self.bridge.complete(publish, receipt, self.claim)
+        second = self.fixture.reserved_task(suffix="other-route")
+        self.executor.test_routes[(second.template_id, second.template_version)] = replace(self.route,
+            media_profile_version="tt-post-random-overlay-hevc-720x1280-v3", source_trim_tail_seconds=0)
+        job = dict(self.job, source_id=str(second.id), source_key="tt:auto:%s" % second.id)
+        descriptor = self.bridge.reserve(job, self.claim)
+        self.assertEqual(descriptor["request"]["expected_profile"], "tt-post-random-overlay-libx264-720x1280-v1")
+        self.assertEqual(descriptor["request"]["source_trim_tail_seconds"], 0)
+        self.assertNotEqual(descriptor["request"]["job_id"], first["request"]["job_id"])
+        self.assertEqual(self.executor._video_route_for_task(self.task), self.route)
 
 
 class TTBridgeTests(unittest.TestCase):

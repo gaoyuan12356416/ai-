@@ -12,6 +12,7 @@ import re
 import secrets
 import sqlite3
 import threading
+from dataclasses import is_dataclass, replace
 from urllib.parse import urlsplit
 
 from .adapters import AdapterError, ClosingConnection, artifact_from, obj, public_descriptor
@@ -25,14 +26,22 @@ class BoundaryReached(Exception):
 
 
 class MediaPort:
-    def __init__(self, delegate, result=None):
+    def __init__(self, delegate, result=None, expected_request=None):
         self.delegate, self.result, self.request = delegate, result, None
+        self.expected_request, self.route_identity = expected_request, None
 
     def creator_info(self, **kwargs):
         return self.delegate.creator_info(**kwargs)
 
     def prepare(self, **kwargs):
         self.request = kwargs
+        if self.expected_request is not None:
+            material = kwargs.get("material") or {}
+            actual = {"job_id": kwargs.get("job_id"), "content_id": material.get("content_id"),
+                "source_url": material.get("source_media_url") or material.get("media_url"),
+                "source_trim_tail_seconds": kwargs.get("source_trim_tail_seconds"), "expected_profile": kwargs.get("expected_profile")}
+            if actual != self.expected_request:
+                raise AdapterError("tt_frozen_prepare_request_changed")
         if self.result is not None:
             return self.result
         raise BoundaryReached()
@@ -41,6 +50,49 @@ class MediaPort:
         # Never retain the temporarily opened account credential.
         self.request = {k: v for k, v in kwargs.items() if k != "access_token"}
         raise BoundaryReached()
+
+
+def media_clone(owner, *, result=None, profile=None, trim=None, expected_request=None, expected_route=None):
+    """Intercept both legacy direct clients and frozen production route clients."""
+    clone, port = copy.copy(owner), MediaPort(owner.gpu_client, result, expected_request)
+    clone.gpu_client = port
+    if profile is not None:
+        clone.media_profile_version = profile
+    if trim is not None:
+        clone.source_trim_tail_seconds = trim
+    route_for_task = getattr(owner, "_video_route_for_task", None)
+    if callable(route_for_task):
+        def routed(task):
+            route = route_for_task(task)
+            identity = {"profile": route.media_profile_version, "source_trim_tail_seconds": route.source_trim_tail_seconds}
+            if expected_route is not None and identity != expected_route:
+                raise AdapterError("tt_frozen_video_route_changed")
+            port.delegate, port.route_identity = route.gpu_client, identity
+            changes = {"gpu_client": port}
+            if profile is not None:
+                changes["media_profile_version"] = profile
+            if trim is not None:
+                changes["source_trim_tail_seconds"] = trim
+            if is_dataclass(route):
+                return replace(route, **changes)
+            copied = copy.copy(route)
+            for key, value in changes.items():
+                setattr(copied, key, value)
+            return copied
+        clone._video_route_for_task = routed
+    return clone, port
+
+
+def outro_capabilities(job, profile):
+    required = []
+    if "direct-outro" in profile and "executor_capabilities" in job:
+        for kind in ("outro", "font"):
+            matches = sorted({value for value in job["executor_capabilities"] if isinstance(value, str)
+                and re.fullmatch("asset:tt-" + kind + ":[a-f0-9]{64}", value)})
+            if len(matches) != 1:
+                raise AdapterError("canonical_render_asset_unavailable")
+            required.extend(matches)
+    return required
 
 
 def post_info(queue):
@@ -99,10 +151,7 @@ class TTNativeBridge:
         return item.as_dict() if hasattr(item, "as_dict") else dict(item)
 
     def _prepare_descriptor(self, owner, call, *, profile=None):
-        clone, port = copy.copy(owner), MediaPort(owner.gpu_client)
-        clone.gpu_client = port
-        if profile:
-            clone.media_profile_version = profile
+        clone, port = media_clone(owner, profile=profile)
         try:
             call(clone)
         except BoundaryReached:
@@ -111,9 +160,12 @@ class TTNativeBridge:
             raise AdapterError("tt_media_boundary_missing")
         request = port.request
         material = request["material"]
-        return {"kind": "tt_prepare", "request": {"job_id": request["job_id"], "content_id": material["content_id"],
+        descriptor = {"kind": "tt_prepare", "request": {"job_id": request["job_id"], "content_id": material["content_id"],
                 "source_url": material.get("source_media_url") or material.get("media_url"),
                 "source_trim_tail_seconds": request["source_trim_tail_seconds"], "expected_profile": request["expected_profile"]}}
+        if port.route_identity is not None:
+            descriptor["native_route"] = port.route_identity
+        return descriptor
 
     def _queue_preflight(self, queue, token):
         from features.tt_posts.core import TTPostPolicy
@@ -184,6 +236,13 @@ class TTNativeBridge:
                 frozen = c.execute("SELECT * FROM pipeline_tt_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone() if job["stage"] == "prepare" else None
             if existing:
                 return self._stored(job, claim)[1]
+            if self.automatic and job["stage"] == "prepare" and not frozen:
+                executor = self.service.executor
+                route_for_task = getattr(executor, "_video_route_for_task", None)
+                profile = route_for_task(self._native(job)).media_profile_version if callable(route_for_task) else executor.media_profile_version
+                # Missing node assets must not create a native claim with no
+                # persisted binding. Frozen generations keep their original caps.
+                outro_capabilities(job, profile)
             worker = "pipeline:%s:%s" % (claim.get("node_id", "node"), job["generation"])
             identity, native_token = int(job["source_id"]), ""
             if frozen and int(frozen["generation"]) >= int(job["generation"]):
@@ -206,6 +265,8 @@ class TTNativeBridge:
                         # Only unfrozen automatic work selects the explicit H264
                         # profile; an already frozen intake profile stays intact.
                         profile = executor.media_profile_version
+                        if callable(getattr(executor, "_video_route_for_task", None)):
+                            profile = executor._video_route_for_task(task).media_profile_version
                         if job.get("executor_backend") == "cpu":
                             profile = {"tt-post-hevc-720x1280-v2": "tt-post-h264-720x1280-v2",
                                 "tt-post-direct-clean-hevc-720x1280-v1": "tt-post-direct-clean-h264-720x1280-v1",
@@ -213,8 +274,7 @@ class TTNativeBridge:
                                 "tt-post-random-overlay-hevc-720x1280-v3": "tt-post-random-overlay-libx264-720x1280-v1"}.get(profile, profile)
                         descriptor = frozen_descriptor or self._prepare_descriptor(executor, lambda clone: clone._prepare(task, native_token), profile=profile)
                     else:
-                        clone, port = copy.copy(executor), MediaPort(executor.gpu_client)
-                        clone.gpu_client = port
+                        clone, port = media_clone(executor)
                         try:
                             clone._publish(task, native_token)
                         except BoundaryReached:
@@ -239,8 +299,7 @@ class TTNativeBridge:
                     else:
                         native = self.store.claim_direct_test_publish(identity, worker, lease_seconds=10800)
                         native_token, task = native.reveal_claim_token(), native.item
-                        clone, port = copy.copy(self.service), MediaPort(self.service.gpu_client)
-                        clone.gpu_client = port
+                        clone, port = media_clone(self.service)
                         try:
                             clone.direct_publish_claimed(identity, native_token)
                         except BoundaryReached:
@@ -293,6 +352,7 @@ class TTNativeBridge:
                 cpu_profiles = {"tt-post-h264-720x1280-v2", "tt-post-direct-clean-h264-720x1280-v1",
                                 "tt-post-direct-outro-h264-720x1280-v2", "tt-post-random-overlay-libx264-720x1280-v1"}
                 descriptor["required_capabilities"] = prepare_capabilities("tt", profile, "cpu" if profile in cpu_profiles else "gpu", job)
+                descriptor["required_capabilities"].extend(outro_capabilities(job, profile))
             if job["stage"] == "prepare" and "native_identity" not in descriptor:
                 current = self._native_dict(job)
                 descriptor["native_identity"] = {"material_id": str(current["material_id"]), "account_id": str(account_id)}
@@ -423,21 +483,19 @@ class TTNativeBridge:
                 prepared = receipt.get("preparation") or receipt.get("result") or receipt
                 request = descriptor["request"]
                 if self.automatic:
-                    clone = copy.copy(self.service.executor)
-                    clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
-                    clone.source_trim_tail_seconds = request["source_trim_tail_seconds"]
+                    clone, _ = media_clone(self.service.executor, result=prepared, profile=request["expected_profile"],
+                        trim=request["source_trim_tail_seconds"], expected_request=request, expected_route=descriptor.get("native_route"))
                     result = clone._prepare(self._native(job), stored["native_token"])
                     clone._update_run(result.run_id)
                 elif job["family"] == "direct_test":
-                    clone = copy.copy(self.service)
-                    clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
-                    clone.source_trim_tail_seconds = request["source_trim_tail_seconds"]
+                    clone, _ = media_clone(self.service, result=prepared, profile=request["expected_profile"],
+                        trim=request["source_trim_tail_seconds"], expected_request=request)
                     clone._kick_runner = lambda: False
                     clone.direct_preparation_process(int(job["source_id"]), {"claim_token": stored["native_token"]})
                 else:
-                    current, clone = self._native(job), copy.copy(self.service)
-                    clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
-                    clone.source_trim_tail_seconds = request["source_trim_tail_seconds"]
+                    current = self._native(job)
+                    clone, _ = media_clone(self.service, result=prepared, profile=request["expected_profile"],
+                        trim=request["source_trim_tail_seconds"], expected_request=request)
                     result = clone._prepare_resolved({"material_id": current["material_id"], "content_id": current["content_id"], "source_media_url": current["source_media_url"]}, gpu_job_id=current["gpu_job_id"])
                     self.store.complete_material_intake(int(job["source_id"]), stored["native_token"], gpu_job_id=result["gpu_job_id"],
                         prepared_media_url=result["prepared_media_url"], prepared_output_sha256=result["output_sha256"],
