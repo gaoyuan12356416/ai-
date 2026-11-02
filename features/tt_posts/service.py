@@ -6151,6 +6151,7 @@ class TTPostService:
         rows = self.store.list_direct_tests(
             status="reconciling",
             limit=_positive_int(limit, "立即测试核对数量", 100),
+            exclude_pipeline_owned=True,
         )
         return {
             "items": [self._direct_test_api_item(row) for row in rows],

@@ -2024,6 +2024,8 @@ class TTAutoPostStore:
         prepare_ahead_seconds: Any = 0,
         allowed_phases: Optional[Iterable[Any]] = None,
         task_id: Optional[int] = None,
+        legacy_reconcile_only: bool = False,
+        after_task_id: int = 0,
     ) -> Optional[TaskClaim]:
         """Claim the next safe phase, including expired-crash recovery.
 
@@ -2067,8 +2069,13 @@ class TTAutoPostStore:
                     "tt_auto_claim_phases_invalid", "claim phases are invalid", 400
                 )
         lease_expires = (current_dt + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+        if legacy_reconcile_only and phase_filter != {"reconcile"}:
+            raise TTAutoPostStoreError("tt_auto_claim_phases_invalid", "readback may only claim reconciliation", 400)
         active_placeholders = ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES)
         with self._transaction() as conn:
+            has_pipeline_claims = legacy_reconcile_only and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_tt_claim'"
+            ).fetchone() is not None
             candidates = conn.execute(
                 """
                 SELECT * FROM tt_auto_task
@@ -2101,6 +2108,7 @@ class TTAutoPostStore:
                     OR (status='retry_wait' AND claim_phase='reconcile')
                 )
                 ORDER BY
+                    CASE WHEN ?=1 THEN id ELSE 0 END,
                     CASE
                         WHEN status='ready' THEN 0
                         WHEN status IN ('publishing','reconciling','unknown') THEN 1
@@ -2112,11 +2120,23 @@ class TTAutoPostStore:
                     template_id ASC,
                     id ASC
                 """,
-                (prepare_cutoff, *([current] * 9), self.execution_not_before_utc),
+                (prepare_cutoff, *([current] * 9), self.execution_not_before_utc, int(legacy_reconcile_only)),
             )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
                 candidate_id = int(candidate["id"])
+                if legacy_reconcile_only:
+                    # Check admission atomically with the native lease. This
+                    # path can only query an existing legacy platform receipt.
+                    if (candidate_id <= after_task_id or not str(candidate["publish_id"] or "")
+                            or str(candidate["lease_expires_at_utc"] or "") > current
+                            or str(candidate["claim_worker"] or "").startswith("pipeline:")):
+                        continue
+                    if has_pipeline_claims and conn.execute(
+                        "SELECT 1 FROM pipeline_tt_claim WHERE source_key=? LIMIT 1",
+                        ("tt:auto:" + str(candidate_id),),
+                    ).fetchone():
+                        continue
                 if task_id is not None and candidate_id != int(task_id):
                     continue
                 candidate_status = str(candidate["status"])
@@ -2186,7 +2206,7 @@ class TTAutoPostStore:
                         (str(other["scheduled_at_utc"]), int(other["id"]))
                         for other in others
                     ]
-                    if min(ordering) != (str(candidate["scheduled_at_utc"]), candidate_id):
+                    if not legacy_reconcile_only and min(ordering) != (str(candidate["scheduled_at_utc"]), candidate_id):
                         continue
                 selected = candidate
                 break

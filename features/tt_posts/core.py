@@ -4078,6 +4078,7 @@ class TTPostStore:
         status: Any = None,
         limit: int = 500,
         offset: int = 0,
+        exclude_pipeline_owned: bool = False,
     ) -> List[Dict[str, Any]]:
         normalized_limit = _positive_int(limit, "立即测试发布列表数量", 1000)
         normalized_offset = _nonnegative_int(
@@ -4103,9 +4104,11 @@ class TTPostStore:
                 )
             clauses.append("status=?")
             params.append(normalized_status)
-        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
         params.extend((normalized_limit, normalized_offset))
         with contextlib.closing(_connect(self.db_path)) as conn:
+            if exclude_pipeline_owned and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_tt_claim'").fetchone():
+                clauses.append("NOT EXISTS(SELECT 1 FROM pipeline_tt_claim p WHERE p.source_key='tt:direct_test:'||tt_post_direct_test.id)")
+            where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
             rows = conn.execute(
                 """
                 SELECT * FROM tt_post_direct_test%s
@@ -9197,13 +9200,16 @@ class TTPostStore:
     def list_reconciling(self, *, limit: int = 100) -> List[Dict[str, Any]]:
         normalized_limit = _positive_int(limit, "核对任务数量", 100)
         with contextlib.closing(_connect(self.db_path)) as conn:
+            pipeline_filter = ""
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_tt_claim'").fetchone():
+                pipeline_filter = " AND NOT EXISTS(SELECT 1 FROM pipeline_tt_claim p WHERE p.source_key='tt:queue:'||tt_post_queue.id)"
             rows = conn.execute(
                 """
                 SELECT * FROM tt_post_queue
-                WHERE status='reconciling' AND publish_id<>''
+                WHERE status='reconciling' AND publish_id<>'' %s
                 ORDER BY updated_at,id
                 LIMIT ?
-                """,
+                """ % pipeline_filter,
                 (normalized_limit,),
             ).fetchall()
         return [_public_queue(row) for row in rows]

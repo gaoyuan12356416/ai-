@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically reconcile existing TikTok automatic publish IDs
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=2min
+AccuracySec=5s
+Unit=tt-auto-post-reconcile.service
+
+[Install]
+WantedBy=timers.target

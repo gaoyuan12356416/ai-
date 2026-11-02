@@ -1,0 +1,30 @@
+[Unit]
+Description=Read back existing TikTok automatic publish IDs without publishing
+After=network-online.target tt-auto-post-service.service
+Wants=network-online.target
+Requires=tt-auto-post-service.service
+
+[Service]
+Type=oneshot
+User=tt-post
+Group=tt-post
+WorkingDirectory=/opt/tt-auto-post/current
+EnvironmentFile=/etc/tt-auto-post.env
+EnvironmentFile=/etc/tt-auto-post.secrets
+ExecStart=/usr/bin/python3 /opt/tt-auto-post/current/scripts/tt_auto_post_reconcile.py
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/opt/tt-auto-post/current
+ReadWritePaths=/run/tt-auto-post
+UMask=0077
+TimeoutStartSec=45min
+KillMode=mixed
