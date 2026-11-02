@@ -46,6 +46,7 @@ class YouTubeHandoffTests(unittest.TestCase):
                 before=self.rows(fixture)
                 offered=parent.project(parent.read("old-preparation"),fixture.now)
                 self.assertEqual((offered["status"],offered["legacy_inflight"],offered["execution_available"]),("completed",False,False))
+                self.assertFalse(offered["pause_eligible"])
                 plan=control.plan("youtube",stamp(fixture.now))
                 self.assertEqual(plan["paused_source_keys"],[])
                 self.assertEqual(control.apply(plan["plan_id"],plan["sha256"])["status"],"held")
@@ -83,6 +84,38 @@ class YouTubeHandoffTests(unittest.TestCase):
         control.apply(plan["plan_id"],plan["sha256"])
         with self.assertRaisesRegex(DispatchError,"legacy_items_still_running"):
             control.enable(plan["plan_id"],plan["sha256"])
+
+    def test_same_held_plan_enables_after_expired_handoff_without_pausing_old_parents(self):
+        for status in ("published", "unknown", "scheduled"):
+            with self.subTest(child_status=status):
+                fixture,parent,control=self.case(status,lease=4102444800)
+                with fixture.workflow.db(True) as conn:
+                    body=json.loads(conn.execute("SELECT body FROM youtube_auto_preparation WHERE id='old-preparation'").fetchone()[0])
+                    body['publish_at']=stamp(fixture.now-timedelta(days=1))
+                    conn.execute("UPDATE youtube_auto_preparation SET body=? WHERE id='old-preparation'",(json.dumps(body),))
+                plan=control.plan('youtube',stamp(fixture.now))
+                self.assertEqual(plan['paused_source_keys'],[])
+                self.assertEqual(control.apply(plan['plan_id'],plan['sha256'])['status'],'held')
+                with self.assertRaisesRegex(DispatchError,'legacy_items_still_running'):
+                    control.enable(plan['plan_id'],plan['sha256'])
+                with fixture.workflow.db(True) as conn:
+                    conn.execute("UPDATE youtube_auto_preparation SET lease_until=0 WHERE id='old-preparation'")
+                before=self.rows(fixture)
+                # This overdue completed parent was absent from the original
+                # pause set. The same plan must now enable without new holds.
+                self.assertTrue(control.enable(plan['plan_id'],plan['sha256'])['enabled'])
+                self.assertEqual(self.rows(fixture),before)
+                with fixture.dispatch.transaction() as conn:
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM pipeline_cutover_plan').fetchone()[0],1)
+                    parent_job=conn.execute("SELECT status FROM pipeline_job WHERE source_key='youtube:preparation:old-preparation'").fetchone()
+                    self.assertEqual(parent_job['status'],'completed')
+                    if status=='unknown':
+                        child=conn.execute('SELECT id,status FROM pipeline_job WHERE source_key=? AND stage=?',(fixture.source_key,'publish')).fetchone()
+                        self.assertEqual(child['status'],'unknown')
+                        self.assertGreater(conn.execute('SELECT COUNT(*) FROM pipeline_legacy_resource WHERE job_id=?',(child['id'],)).fetchone()[0],0)
+                with fixture.workflow.db() as conn:
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM pipeline_youtube_claim').fetchone()[0],0)
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM pipeline_youtube_operation').fetchone()[0],0)
 
 
 if __name__=="__main__":unittest.main()

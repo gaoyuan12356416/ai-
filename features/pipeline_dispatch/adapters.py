@@ -317,6 +317,7 @@ class LedgerAdapter:
             # claim retries precede the platform boundary and are not publishes.
             attempts = int(bool(row.get("publish_started_at_utc") or row.get("publish_id")))
         started = state in INFLIGHT or row.get("ledger_status") in INFLIGHT or (spec.channel == "fb" and spec.family == "video" and row.get("prepare_state") == "preparing")
+        youtube_handoff_complete = False
         if (spec.channel == "youtube" and spec.family == "preparation" and state == "uploading"
                 and row.get("_youtube_publication_handoff") and "lease_until" in row):
             # The approved-cover workflow keeps this parent label after enqueue.
@@ -325,6 +326,7 @@ class LedgerAdapter:
             try:
                 if stamp(float(row.get("lease_until") or 0)) <= stamp(now):
                     started = False
+                    youtube_handoff_complete = True
             except (TypeError, ValueError, OverflowError):
                 pass  # An invalid lease is not proof that legacy work ended.
         legacy_parent_inflight = (spec.channel == "x" and spec.family == "queue" and not terminal
@@ -453,7 +455,7 @@ class LedgerAdapter:
                 "video_published_at": stamp(row["video_published_at_utc"]) if video_published and row.get("video_published_at_utc") else "",
                 "continuation_due": spec.channel == "youtube" and spec.family == "publish" and youtube_control_due(row),
                 "source_attempt_count": attempts, "observation_only": terminal or review_hold or isolated_youtube, "metadata_only": bridged_auto or skipped or isolated_youtube,
-                "pause_eligible": not isolated_youtube and (pause_eligible or (not terminal and not unknown and not started and not attempts)),
+                "pause_eligible": not isolated_youtube and not youtube_handoff_complete and (pause_eligible or (not terminal and not unknown and not started and not attempts)),
                 "hold_reason": "cutover_overdue" if row.get("canonical_held") else "canonical_isolated_workflow" if isolated_youtube else "canonical_link_pending" if blocked_link else "canonical_review_or_enqueue" if review_hold else "",
                 "execution_available": self.driver is not None and not getattr(self.driver, "control_only", False) and not terminal and not review_hold and not isolated_youtube and not unknown and not started and (not attempts or bool(adopt_schedule)) and not blocked_link and not row.get("canonical_held")}
 
