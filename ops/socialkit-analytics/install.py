@@ -107,6 +107,7 @@ def install(commit):
         writes[RUNTIME/'static'/name]=content;writes[WEB/name]=content
     for name in ('socialkit-analytics-refresh.service','socialkit-analytics-refresh.timer'):
         writes[Path('/etc/systemd/system')/name]=(HERE/name).read_bytes()
+    writes[Path('/etc/nginx/default.d/socialkit-analytics.conf')]=(HERE/'nginx.conf').read_bytes()
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     backup=DATA/'backups'/stamp;backup.mkdir(parents=True,exist_ok=False);os.chmod(backup,0o700)
     manifest={'commit':commit,'release':str(RELEASE),'files':[],'old_current':None}
@@ -123,6 +124,7 @@ def install(commit):
     current.parent.mkdir(parents=True,exist_ok=True)
     temp=current.with_name('.current-'+stamp);os.symlink(str(RELEASE),temp);os.replace(temp,current)
     subprocess.run(['python3','-m','py_compile',str(RUNTIME/'app.py')],check=True)
+    subprocess.run(['nginx','-t'],check=True)
     subprocess.run(['systemctl','daemon-reload'],check=True)
     print(json.dumps({'commit':commit,'backup':str(backup),'release':str(RELEASE),'restart_required':'drama-material-api.service','timer_enabled':False}))
 
@@ -146,6 +148,8 @@ def rollback(manifest_path):
         temp=current.with_name('.current-rollback');os.symlink(manifest['old_current'],temp);os.replace(temp,current)
     elif current.is_symlink():current.unlink()
     subprocess.run(['systemctl','daemon-reload'],check=True)
+    subprocess.run(['nginx','-t'],check=True)
+    subprocess.run(['systemctl','reload','nginx'],check=True)
     subprocess.run(['systemctl','restart','drama-material-api.service'],check=True)
     print('Code restored; report facts and snapshots preserved.')
 
