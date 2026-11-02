@@ -89,29 +89,31 @@ def restore_code(m):
     base.switch(Path(m["previous_release"]))
 
 
-def apply(m, rollback=False):
+def apply(m, rollback=False, resume_drain=False):
     expected = Path(m["release"] if rollback else m["previous_release"])
     assert base.CURRENT.resolve() == expected, "release changed; rebase before deploying"
     if not rollback:
         check_baseline(expected)
         for target, digest in m["external"].items():
             assert (base.digest(Path(target)) if Path(target).exists() else None) == digest, "external drift"
-    active_triggers = [u for u in base.TRIGGERS if base.state(u) == "active"]
-    auto_active = base.state("x-auto-post-service.service") == "active"
-    paused_pids = []
+    active_triggers = m["triggers"] if resume_drain else [u for u in base.TRIGGERS if base.state(u) == "active"]
+    auto_active = resume_drain or base.state("x-auto-post-service.service") == "active"
+    paused_pids = list(m["paused_pids"]) if resume_drain else []
     m["triggers"] = active_triggers
-    rescue = "x-pool-save-rescue-" + m["commit"][:8]
+    rescue = "x-pool-save-rescue-" + m["commit"][:8] + ("-continued" if resume_drain else "")
     # Recovery is also available if the SSH session or deployment process dies.
     for unit in PAUSABLE:
         pid = int(base.run("systemctl", "show", unit, "-p", "MainPID", "--value") or 0)
-        if pid:
+        if pid and pid not in paused_pids:
             paused_pids.append(pid)
     m["paused_pids"] = paused_pids
     write_manifest(m)
     rescue_script = Path(m["backup"]) / "resume.sh"
     rescue_script.write_text("#!/bin/bash\n" + "\n".join("kill -CONT %d 2>/dev/null || true" % p for p in paused_pids)
                             + "\nsystemctl start " + " ".join((['x-auto-post-service.service'] if auto_active else []) + active_triggers) + "\n")
-    base.run("systemd-run", "--quiet", "--unit=" + rescue, "--on-active=12m", "/bin/bash", str(rescue_script))
+    base.run("systemd-run", "--quiet", "--unit=" + rescue, "--on-active=140m", "/bin/bash", str(rescue_script))
+    if resume_drain:
+        base.run("systemctl", "stop", "x-pool-save-rescue-" + m["commit"][:8] + ".timer")
     switched = False
     try:
         if active_triggers:
@@ -125,7 +127,7 @@ def apply(m, rollback=False):
         # The OAuth Sidecar stays up throughout this drain.
         if auto_active:
             base.run("systemctl", "stop", "--no-block", "x-auto-post-service.service")
-        deadline, last_note = time.monotonic() + 600, 0
+        deadline, last_note = time.monotonic() + 8000, 0
         while base.state("x-auto-post-service.service") in {"active", "deactivating", "activating"} or not assert_quiet():
             if time.monotonic() >= deadline:
                 raise RuntimeError("accepted requests still running; restored publishers without cutover")
@@ -185,8 +187,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest")
     parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--resume-drain", action="store_true")
     args = parser.parse_args()
     if args.manifest:
-        apply(json.loads(Path(args.manifest).read_text()), args.rollback)
+        apply(json.loads(Path(args.manifest).read_text()), args.rollback, args.resume_drain)
     else:
         stage()
