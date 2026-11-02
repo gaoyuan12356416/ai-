@@ -16,6 +16,7 @@ import uuid
 
 from .client import CoordinatorClient, CoordinatorError
 from .credentials import open_credentials
+from .diagnostics import exception_failure_fields
 
 CLAIM_FIELDS = ("job_id", "generation", "claim_token", "node_id", "worker_id")
 
@@ -192,7 +193,7 @@ def execute_claim(job, client, outbox, seal_key, executor):
             code = str(getattr(exc, "code", "pipeline_execution_failed"))[:120]
             unknown = bool(getattr(exc, "unknown_outcome", getattr(exc, "unknown", context.write_started)))
             context.phase("failed")
-            payload = {**context.identity, "receipt_id": receipt_id, "error_code": code, "unknown_outcome": unknown, "metrics": context.metrics, **context.rate_limit}
+            payload = {**context.identity, "receipt_id": receipt_id, "error_code": code, "unknown_outcome": unknown, "metrics": context.metrics, **context.rate_limit, **exception_failure_fields(exc)}
             route = "jobs/fail"
         outbox.put(route, payload, receipt_id)
         try:

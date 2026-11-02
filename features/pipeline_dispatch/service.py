@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .core import DispatchStore, DispatchError, dumps
+from .diagnostics import failure_fields
 
 
 class Coordinator:
@@ -295,10 +296,16 @@ class Coordinator:
             return accept(response)
         if action == "jobs/fail":
             job = self.store.validate_receipt_claim(payload)
+            # Repeat sanitization at the authority boundary. Node-supplied HTTP
+            # status is never trusted independently of the normalized message.
+            failure = failure_fields(payload.get("error_message"))
+            safe_payload = {key: value for key, value in payload.items()
+                            if key not in ("error_message", "upstream_http_status")}
+            safe_payload.update(failure)
             self.store.record_execution_metrics(payload, payload.get("metrics", {}))
             self.store.record_cooldown(payload, payload)
             native_fail = getattr(self.registry, "fail", None)
-            verified = native_fail(job, payload) if native_fail else {}
+            verified = native_fail(job, safe_payload) if native_fail else {}
             observed = self.registry.reconcile(job)
             proof = observed.get("canonical_receipt", {})
             if observed.get("metadata_only"):
@@ -307,12 +314,12 @@ class Coordinator:
                 self.store.record_publication(job["id"], proof, canonical_verified=True)
             if verified.get("canonical_terminal"):
                 reconciled = self.registry.reconcile(job)
-                self.store.fail(payload, "canonical_receipt_reconciliation", unknown=True)
+                self.store.fail(payload, "canonical_receipt_reconciliation", message=failure.get("error_message", ""), unknown=True)
                 response = self.store.reconcile_native(job["id"], reconciled)
                 if reconciled.get("continuation"):
                     self.store.rearm_schedule(payload, reconciled["continuation"], (delivery_id,payload,response))
                 return accept(response)
-            return accept(self.store.fail(payload, payload.get("error_code", "execution_failed"), unknown=payload.get("unknown_outcome", False), canonical_no_write=verified.get("canonical_no_write", False)))
+            return accept(self.store.fail(payload, payload.get("error_code", "execution_failed"), message=failure.get("error_message", ""), unknown=payload.get("unknown_outcome", False), canonical_no_write=verified.get("canonical_no_write", False)))
         raise DispatchError("not_found", status=404)
 
 
