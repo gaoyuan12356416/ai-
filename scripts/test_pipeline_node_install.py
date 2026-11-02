@@ -2,10 +2,38 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from scripts.pipeline_node_install import plan, unit_text, tunnel_text, immutable
+from unittest.mock import patch
+from types import SimpleNamespace
+from scripts.pipeline_node_install import plan, unit_text, tunnel_text, immutable, configure_tls_ca, read_environment
 
 
 class NodeInstallTests(unittest.TestCase):
+    def test_default_ca_comes_from_the_new_venv_and_worker_can_read_it(self):
+        env = {}
+        bundle = '/opt/pipeline-dispatch/venvs/new/lib/python3.10/site-packages/certifi/cacert.pem'
+        with patch('scripts.pipeline_node_install.command', return_value=bundle) as command:
+            configure_tls_ca(env, '/opt/pipeline-dispatch/venvs/new')
+        self.assertEqual(env['SSL_CERT_FILE'], bundle)
+        args = command.call_args.args[0]
+        self.assertEqual(args[:4], ['runuser', '-u', 'pipeline-worker', '--'])
+        self.assertEqual(args[4], Path('/opt/pipeline-dispatch/venvs/new/bin/python'))
+        self.assertIn('os.access', args[-1])
+
+    def test_explicit_ca_setting_is_preserved_without_replacement(self):
+        for value in ('/etc/private/custom-ca.pem', ''):
+            env = {'SSL_CERT_FILE': value, 'SSL_CERT_DIR': '/etc/custom-certs'}
+            with patch('scripts.pipeline_node_install.command') as command:
+                configure_tls_ca(env, '/unused')
+            command.assert_not_called()
+            self.assertEqual(env, {'SSL_CERT_FILE': value, 'SSL_CERT_DIR': '/etc/custom-certs'})
+
+    def test_private_source_environment_preserves_explicit_ca_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'node.env'
+            path.write_text('SSL_CERT_FILE=/etc/custom-ca.pem\nSSL_CERT_DIR=/etc/custom-certs\nUNRELATED=ignored\n')
+            with patch.object(Path, 'stat', return_value=SimpleNamespace(st_mode=0o100600)):
+                self.assertEqual(read_environment([path]), {'SSL_CERT_FILE': '/etc/custom-ca.pem', 'SSL_CERT_DIR': '/etc/custom-certs'})
+
     def spec(self):
         return {"node_id": "arbitrary-node-3", "sha": "a" * 40, "backend": "cpu", "state_root": "/data/pipeline-dispatch"}
 

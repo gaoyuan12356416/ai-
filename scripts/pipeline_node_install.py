@@ -81,7 +81,7 @@ def read_environment(paths):
             if not sep or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
                 raise ValueError("source_environment_syntax")
             # Only renderer/COS settings; never import central account secrets.
-            if not key.startswith(("X_POST_", "FB_PAGE_GPU_", "TT_POST_GPU_", "TT_POST_DEFAULT_", "TT_POST_URL_", "RANDOM_OVERLAY_", "COS_", "YOUTUBE_AUTO_CODEX_", "CODEX_HOME")):
+            if key not in {"SSL_CERT_FILE", "SSL_CERT_DIR"} and not key.startswith(("X_POST_", "FB_PAGE_GPU_", "TT_POST_GPU_", "TT_POST_DEFAULT_", "TT_POST_URL_", "RANDOM_OVERLAY_", "COS_", "YOUTUBE_AUTO_CODEX_", "CODEX_HOME")):
                 continue
             if any(word in key for word in ("REFRESH_TOKEN", "ACCESS_TOKEN", "CLIENT_SECRET", "COOKIE")):
                 raise ValueError("central_credential_in_node_source")
@@ -91,6 +91,16 @@ def read_environment(paths):
                 value = words[0]
             values[key] = value
     return values
+
+
+def configure_tls_ca(environment, venv):
+    """Portable Python may retain an inaccessible build-host OpenSSL path."""
+    if "SSL_CERT_FILE" in environment:
+        return  # Preserve explicit trust configuration; doctor validates it.
+    bundle = command(["runuser", "-u", "pipeline-worker", "--", Path(venv) / "bin/python", "-c",
+                      "import certifi,os; p=certifi.where(); assert os.path.isfile(p) and os.access(p,os.R_OK); print(p)"])
+    absolute(bundle)
+    environment["SSL_CERT_FILE"] = bundle
 
 
 def immutable(path, data, mode=0o600):
@@ -199,6 +209,7 @@ def stage(spec, info):
     if not (venv / ".requirements.sha256").is_file(): raise ValueError("venv_install_incomplete")
     environment = read_environment(spec.get("environment_files", []))
     environment.update({str(k): str(v) for k, v in spec.get("environment", {}).items()})
+    configure_tls_ca(environment, venv)
     catalogs = stage_catalogs(spec, info)
     if catalogs:
         active_sha = spec.get("active_catalog_sha256") or next(iter(catalogs))

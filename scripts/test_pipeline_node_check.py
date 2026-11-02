@@ -6,13 +6,26 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.pipeline_node_check import load_environment, validate_node, encode_sample, validate_outro_probe, encode_x_repair_sample
+from scripts.pipeline_node_check import load_environment, validate_node, encode_sample, validate_outro_probe, encode_x_repair_sample, validate_tls_trust
 from types import SimpleNamespace
 from scripts import test_tt_gpu_worker as tt_fixture
 from features.pipeline_dispatch.tt_profiles import select_config
 
 
 class NodeCheckTests(unittest.TestCase):
+    def test_tls_preflight_rejects_empty_default_trust_store_before_work(self):
+        with patch('scripts.pipeline_node_check.ssl.create_default_context', return_value=SimpleNamespace(get_ca_certs=lambda: [])):
+            with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'PIPELINE_EXECUTORS': 'x_share_publish'}), patch('scripts.pipeline_node_check.hardware_inventory', return_value={}):
+                with self.assertRaisesRegex(ValueError, 'tls_ca_empty'):
+                    validate_node({'state_root': temp, 'node_id': 'portable-python', 'backend': 'gpu'})
+
+    def test_tls_preflight_accepts_loaded_ca_and_rejects_unreadable_bundle(self):
+        with patch('scripts.pipeline_node_check.ssl.create_default_context', return_value=SimpleNamespace(get_ca_certs=lambda: [{}, {}])):
+            self.assertEqual(validate_tls_trust(), {'default_ca_count': 2})
+        with patch('scripts.pipeline_node_check.ssl.create_default_context', side_effect=PermissionError('private path')):
+            with self.assertRaisesRegex(ValueError, 'tls_ca_unavailable'):
+                validate_tls_trust()
+
     def test_node_enrollment_checks_complete_x_repair_pipeline(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

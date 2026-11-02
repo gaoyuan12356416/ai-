@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -144,11 +145,24 @@ def cos_roundtrip(config, source, node_id):
     return {"read_write_verified": True, "diagnostic_removed": cleaned, **({} if cleaned else {"diagnostic_key": key})}
 
 
+def validate_tls_trust():
+    """Offline check of the actual default urllib/HTTPS trust context."""
+    try:
+        context = ssl.create_default_context()
+        count = len(context.get_ca_certs())
+    except (OSError, ssl.SSLError):
+        raise ValueError("tls_ca_unavailable") from None
+    if not count:
+        raise ValueError("tls_ca_empty")
+    return {"default_ca_count": count}
+
+
 def validate_node(config, *, encode=False, cos_check=False, encode_profiles=None):
     inventory = hardware_inventory()
     enabled = {x.strip() for x in os.environ.get("PIPELINE_EXECUTORS", "").split(",") if x.strip()}
     if not enabled or enabled - set(NodeExecutors.PREPARE + NodeExecutors.PUBLISH):
         raise ValueError("executor_configuration_invalid")
+    tls = validate_tls_trust()
     for module in ("requests", "PIL"):
         importlib.import_module(module)
     from features.tt_gpu.credentials import _aesgcm
@@ -213,7 +227,7 @@ def validate_node(config, *, encode=False, cos_check=False, encode_profiles=None
                 checks.append({"executor": name, "profile": cfg.profile, "encode_verified": True, "outro_transition_verified": getattr(cfg, "media_mode", "") == "direct_outro", "repair_pipeline_verified": name == "x_repair", "encoder": encoder, "cpu_threads": 4 if config["backend"] == "cpu" else None})
                 if cos_check:
                     checks.append({"executor": name, "cos": cos_roundtrip(cfg, samples[sample_key], config["node_id"])})
-    return {"ok": True, "node_id": config["node_id"], "inventory": inventory, "capabilities": executor.capabilities(), "checks": checks}
+    return {"ok": True, "node_id": config["node_id"], "inventory": inventory, "capabilities": executor.capabilities(), "checks": checks, "tls": tls}
 
 
 def main():
