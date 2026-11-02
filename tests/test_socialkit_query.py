@@ -63,6 +63,70 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(r['totals']['unmatched_installs'],1)
         self.assertEqual(r['totals']['unmatched_revenue_cents'],0)
 
+    def test_only_grouped_account_and_drama_labels_are_aggregated(self):
+        conn, manifest, _ = query.snapshot(self.root)
+        statements = []
+        conn.set_trace_callback(statements.append)
+        try:
+            parsed = query.parameters(self.params(view='effects'), manifest)
+            for groups, expected_names in [(['country'], ()),
+                    (['account'], ('account_name', 'external_account_id')),
+                    (['account', 'drama'], ('account_name', 'external_account_id', 'drama_name', 'drama_content_id'))]:
+                query._query(conn, 'effects', parsed, groups)
+                sql = next(statement for statement in reversed(statements) if statement.startswith('SELECT'))
+                for name in ('account_name', 'external_account_id', 'drama_name', 'drama_content_id'):
+                    self.assertEqual('MIN(%s)' % name in sql, name in expected_names)
+        finally:
+            conn.close()
+        report = query.report(self.root, self.params(view='effects', group_by=['account', 'drama']))
+        assigned = next(row for row in report['rows'] if row['account'])
+        self.assertEqual(assigned['labels'], {'account': '=formula', 'drama': '剧 A'})
+        self.assertEqual(assigned['external_account_id'], 'a')
+        self.assertEqual(assigned['drama_content_id'], 'abc')
+
+    def test_request_reuses_group_aggregates_without_trend_mutation(self):
+        for group in ('platform', 'date'):
+            with patch.object(query, '_combined', wraps=query._combined) as combined:
+                report = query.report(self.root, self.params(view='effects', group_by=[group]))
+            group_calls = [tuple(call.args[2]) for call in combined.call_args_list]
+            self.assertEqual(len(group_calls), 4)
+            self.assertEqual(len(group_calls), len(set(group_calls)))
+            self.assertTrue(all('source_status' not in row for row in report['all_rows']))
+            self.assertTrue(all('source_status' not in row for row in report['ranking']))
+            self.assertTrue(all('source_status' in row for row in report['trend']))
+
+    def test_unmatched_request_cache_preserves_filtered_rows_links_and_metrics(self):
+        conn = sqlite3.connect(str(self.root / 'snapshots/v1.sqlite3'))
+        conn.row_factory = sqlite3.Row
+        unmatched = dict(conn.execute("SELECT * FROM effects WHERE matched=0").fetchone())
+        variants = [
+            dict(date='2026-10-31', revenue_cents=100, clicks=4, installs=2),
+            dict(site_id='999', country='CA', account_name='Needle', revenue_cents=200, clicks=3, installs=3),
+            dict(site_id='999', country='CA', device_os='android', account_name='Needle', revenue_cents=300, clicks=5, installs=4),
+        ]
+        for index, change in enumerate(variants):
+            self.insert(conn, 'effects', 'unmatched'+str(index), EFFECT_FIELDS, dict(unmatched, **change))
+        conn.commit(); conn.close()
+        scenarios = [
+            ({}, (4, 2, 600, 10)),
+            ({'country':['US']}, (2, 1, 100, 3)),
+            ({'country':['CA'], 'device_os':['android']}, (1, 1, 300, 4)),
+            ({'platform':['unattributed'], 'search':'needle'}, (2, 1, 500, 7)),
+            ({'country':['absent']}, (0, 0, 0, 0)),
+        ]
+        for filters, expected in scenarios:
+            params = dict(start='2026-10-31', end='2026-11-01', view='effects', group_by=['country','device_os'], **filters)
+            report = query.report(self.root, params)
+            totals = report['totals']
+            self.assertEqual(tuple(totals[key] for key in ('unmatched_rows','unmatched_links','unmatched_revenue_cents','unmatched_installs')), expected)
+            for key in ('unmatched_rows','unmatched_revenue_cents','unmatched_installs'):
+                self.assertEqual(sum(row[key] for row in report['all_rows']), totals[key])
+                self.assertEqual(sum(row.get(key, 0) for row in report['trend']), totals[key])
+            # Distinct site+code keys must not be summed across country/device groups.
+            if not filters:
+                self.assertEqual(sum(row['unmatched_links'] for row in report['all_rows']), 3)
+                self.assertEqual(totals['unmatched_links'], 2)
+
     def test_snapshot_pinning_keeps_old_export_after_switch(self):
         self.make_snapshot('v2',2500)
         old=query.report(self.root,self.params(version='v1'))

@@ -73,6 +73,10 @@ def snapshot(root=DEFAULT_ROOT, version=None):
     conn = sqlite3.connect("file:" + quote(path.as_posix(), safe="/:") + "?mode=ro&immutable=1", uri=True, timeout=3)
     conn.row_factory = sqlite3.Row
     try:
+        # These connection-local settings never modify the immutable database.
+        # Keep grouping temporary data in memory and cap mapped file pages at 128 MiB.
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA mmap_size=134217728")
         stored = conn.execute("SELECT value FROM metadata WHERE key='manifest'").fetchone()
         if stored:
             recorded = json.loads(stored[0])
@@ -174,9 +178,13 @@ def _label(dim, value, record=None):
     return LABELS.get(dim, {}).get(str(value), str(value) if value != "" else "未归属／未提供")
 
 
-def _query(conn, table, params, groups):
+def _query(conn, table, params, groups, context=None):
+    context = {} if context is None else context
     fields = EFFECT_FIELDS if table == "effects" else PUBLICATION_FIELDS
-    columns = {r[1] for r in conn.execute("PRAGMA table_info(" + table + ")")}
+    column_cache = context.setdefault("columns", {})
+    if table not in column_cache:
+        column_cache[table] = {r[1] for r in conn.execute("PRAGMA table_info(" + table + ")")}
+    columns = column_cache[table]
     where, args = ["date >= ?", "date <= ?"], [params["start"], params["end"]]
     for key, values in params["filters"].items():
         where.append(key + " IN (" + ",".join("?" for _ in values) + ")")
@@ -185,17 +193,38 @@ def _query(conn, table, params, groups):
         where.append("(instr(lower(drama_name),lower(?))>0 OR instr(lower(drama_content_id),lower(?))>0 OR instr(lower(account_name),lower(?))>0)")
         args.extend([params["search"]] * 3)
     selections = list(groups) + ["COALESCE(SUM(%s),0) AS %s" % (f, f) if f in columns else "0 AS " + f for f in fields]
-    for name in ("account_name", "external_account_id", "drama_name", "drama_content_id"):
+    label_fields = (("account_name", "external_account_id") if "account" in groups else ()) + (("drama_name", "drama_content_id") if "drama" in groups else ())
+    for name in label_fields:
         selections.append("MIN(%s) AS %s" % (name, name))
     if table == "effects":
         selections.append("COUNT(DISTINCT CASE WHEN short_code<>'' THEN short_code END) AS link_count")
-        selections.append("COALESCE(SUM(CASE WHEN matched=0 THEN 1 ELSE 0 END),0) AS unmatched_rows")
-        selections.append("COUNT(DISTINCT CASE WHEN matched=0 THEN CAST(length(site_id) AS TEXT)||':'||site_id||short_code END) AS unmatched_links")
-        selections += ["COALESCE(SUM(CASE WHEN matched=0 THEN %s ELSE 0 END),0) AS unmatched_%s" % (f, f) for f in EFFECT_FIELDS if f in columns]
+        if "unmatched" not in context:
+            # Apply exactly the same SQL filters/search once. Usually only a few
+            # unmatched rows remain; do not evaluate eight CASE aggregates for
+            # every matched fact again in every chart/group query.
+            unknown_fields = [f for f in COMMON + EFFECT_DIMS + ("site_id", "short_code") + EFFECT_FIELDS if f in columns]
+            unknown_sql = "SELECT " + ",".join(unknown_fields) + " FROM effects WHERE matched=0 AND " + " AND ".join(where)
+            context["unmatched"] = [dict(row) for row in conn.execute(unknown_sql, args)]
+        unmatched = {}
+        for row in context["unmatched"]:
+            key = tuple(row[group] for group in groups)
+            entry = unmatched.setdefault(key, dict(rows=0, links=set(), metrics={field: 0 for field in EFFECT_FIELDS}))
+            entry["rows"] += 1
+            entry["links"].add((row["site_id"], row["short_code"]))
+            for field in EFFECT_FIELDS:
+                entry["metrics"][field] += row.get(field, 0)
     sql = "SELECT " + ",".join(selections) + " FROM " + table + " WHERE " + " AND ".join(where)
     if groups:
         sql += " GROUP BY " + ",".join(groups)
-    return [dict(row) for row in conn.execute(sql, args)]
+    result = [dict(row) for row in conn.execute(sql, args)]
+    if table == "effects":
+        for row in result:
+            entry = unmatched.get(tuple(row[group] for group in groups))
+            row["unmatched_rows"] = entry["rows"] if entry else 0
+            row["unmatched_links"] = len(entry["links"]) if entry else 0
+            for field in EFFECT_FIELDS:
+                row["unmatched_" + field] = entry["metrics"][field] if entry else 0
+    return result
 
 
 def _finish(row, view):
@@ -217,11 +246,11 @@ def _finish(row, view):
     return row
 
 
-def _combined(conn, params, groups):
+def _combined(conn, params, groups, context=None):
     combined = {}
     tables = ("effects", "publications") if params["view"] == "overview" else (params["view"],)
     for table in tables:
-        for row in _query(conn, table, params, groups):
+        for row in _query(conn, table, params, groups, context):
             key = tuple(str(row.get(g, "")) for g in groups)
             dest = combined.setdefault(key, {g: row.get(g, "") for g in groups})
             for f, value in row.items():
@@ -284,14 +313,22 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
             if saved and time.monotonic() - saved[0] < 45:
                 response = json.loads(saved[1])
                 return _refresh_report_state(response, manifest, status)
-        totals = (_combined(conn, parsed, []) or [_finish({}, parsed["view"])])[0]
-        all_rows = _combined(conn, parsed, parsed["groups"])
+        aggregates, query_context = {}, {}
+        def aggregate(groups):
+            key = tuple(groups)
+            if key not in aggregates:
+                aggregates[key] = _combined(conn, parsed, groups, query_context)
+            # Trend source-status decoration and sorting must not mutate another
+            # consumer when its group dimensions are the same.
+            return [dict(row) for row in aggregates[key]]
+        totals = (aggregate([]) or [_finish({}, parsed["view"])])[0]
+        all_rows = aggregate(parsed["groups"])
         def sort_value(row):
             value = row.get("labels", {}).get(parsed["sort"], row.get(parsed["sort"]))
             return (value is not None, value if value is not None else 0, str(row.get("labels", {})))
         all_rows.sort(key=sort_value, reverse=parsed["direction"] == "desc")
         ranking = sorted(all_rows, key=lambda r: r.get(parsed["ranking_metric"]) or 0, reverse=True)[:10]
-        trendmap = {r["date"]: r for r in _combined(conn, parsed, ["date"])}
+        trendmap = {r["date"]: r for r in aggregate(["date"])}
         trend = []
         for day in parsed["dates"]:
             row = trendmap.get(day, dict(_finish({}, parsed["view"]), date=day, labels={"date": day}))
@@ -311,7 +348,7 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
                     totals[f] = None
         pages = max(1, math.ceil(len(all_rows) / parsed["page_size"]))
         page = min(parsed["page"], pages)
-        response = dict(meta=dict(version=manifest["version"], latest_version=manifest["latest_version"], generated_at=manifest.get("generated_at") or manifest.get("refreshed_at"), source_updated_at=manifest.get("source_updated_at"), view=parsed["view"], start=parsed["start"], end=parsed["end"], effect_timezone="UTC", publication_timezone="account_local", currency="USD", refresh_status=status, stale=_stale_status(status), missing_days=missing, partial=any(missing.values()), range=manifest.get("range"), quality=manifest.get("quality", {})), group_by=parsed["groups"], totals=totals, trend=trend, ranking=ranking, breakdowns={dim: sorted(_combined(conn, parsed, [dim]), key=lambda r:r.get("success" if parsed["view"] == "publications" else "revenue") or 0, reverse=True) for dim in ("platform", "product")}, rows=all_rows[(page-1)*parsed["page_size"]:page*parsed["page_size"]], all_rows=all_rows, pagination=dict(page=page, page_size=parsed["page_size"], pages=pages, total=len(all_rows)), parameters=parsed, metric_labels=METRICS, dimension_labels=DIMENSIONS)
+        response = dict(meta=dict(version=manifest["version"], latest_version=manifest["latest_version"], generated_at=manifest.get("generated_at") or manifest.get("refreshed_at"), source_updated_at=manifest.get("source_updated_at"), view=parsed["view"], start=parsed["start"], end=parsed["end"], effect_timezone="UTC", publication_timezone="account_local", currency="USD", refresh_status=status, stale=_stale_status(status), missing_days=missing, partial=any(missing.values()), range=manifest.get("range"), quality=manifest.get("quality", {})), group_by=parsed["groups"], totals=totals, trend=trend, ranking=ranking, breakdowns={dim: sorted(aggregate([dim]), key=lambda r:r.get("success" if parsed["view"] == "publications" else "revenue") or 0, reverse=True) for dim in ("platform", "product")}, rows=all_rows[(page-1)*parsed["page_size"]:page*parsed["page_size"]], all_rows=all_rows, pagination=dict(page=page, page_size=parsed["page_size"], pages=pages, total=len(all_rows)), parameters=parsed, metric_labels=METRICS, dimension_labels=DIMENSIONS)
         serialized = json.dumps(response, ensure_ascii=False)
         if len(serialized) <= 2_000_000:
             with _LOCK:

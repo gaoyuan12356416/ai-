@@ -2,6 +2,7 @@
 """Read the published SocialKit report through the saved CPU SSH helper."""
 import argparse
 import datetime
+import os
 import shlex
 import subprocess
 import sys
@@ -60,8 +61,16 @@ def main(argv=None):
     if not args.ssh_helper.is_file():
         p.error('Saved CPU SSH helper was not found; use --ssh-helper with its installed path')
     # Values are shell quoted once. Credentials remain inside the saved helper.
+    helper_env = dict(os.environ, PYTHONIOENCODING='utf-8')
     result = subprocess.run([sys.executable, str(args.ssh_helper), '--stdin', '--timeout', '60'],
-                            input=remote_command(args) + '\n', text=True, encoding='utf-8')
+                            input=(remote_command(args) + '\n').encode('utf-8'),
+                            stdout=subprocess.PIPE, env=helper_env)
+    output = result.stdout
+    if os.name == 'nt':
+        # The saved helper writes remote text through Windows stdout. Undo only
+        # that one LF translation, preserving the server's original CSV CRLF.
+        output = output.replace(b'\r\n', b'\n')
+    sys.stdout.buffer.write(output)
     return result.returncode
 
 
