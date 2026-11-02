@@ -109,6 +109,7 @@ def preparation_target(job, profile, *, automatic=False):
         "tt-post-direct-clean-hevc-720x1280-v1": "tt-post-direct-clean-h264-720x1280-v1",
         "tt-post-direct-outro-hevc-720x1280-v2": "tt-post-direct-outro-h264-720x1280-v2",
         "tt-post-random-overlay-hevc-720x1280-v3": "tt-post-random-overlay-libx264-720x1280-v1",
+        "tt-post-random-overlay-h264-720x1280-v3": "tt-post-random-overlay-libx264-720x1280-v1",
     }
     # Older callers did not provide a host. Retain their prior inference;
     # current coordinator calls always provide the actual selected backend.

@@ -54,6 +54,21 @@ class TTBackendBindingTests(unittest.TestCase):
                     self.assertEqual(fixture.bridge.reserve(dict(job, generation=2, executor_backend='cpu'), fixture.claim), descriptor)
                     self.assertEqual(fixture.fixture.gpu.prepare_jobs, [])
 
+    def test_new_cpu_automatic_random_variants_freeze_explicit_cpu_profile(self):
+        for profile in ('tt-post-random-overlay-hevc-720x1280-v3', 'tt-post-random-overlay-h264-720x1280-v3'):
+            with self.subTest(profile=profile):
+                fixture = fixtures.RoutedTTBridgeTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+                fixture.executor.test_routes[(fixture.task.template_id, fixture.task.template_version)] = replace(fixture.route, media_profile_version=profile, source_trim_tail_seconds=0)
+                descriptor = fixture.bridge.reserve(fixture.job, fixture.claim)
+                self.assertEqual(descriptor['request']['expected_profile'], 'tt-post-random-overlay-libx264-720x1280-v1')
+                self.assertEqual(descriptor['native_route']['profile'], profile)
+                self.assertIn('backend:cpu', descriptor['required_capabilities'])
+                self.assertEqual(fixture.bridge.reserve(dict(fixture.job, generation=2, executor_backend='gpu'), fixture.claim), descriptor)
+                self.assertEqual(fixture.route_gpu.prepare_calls, [])
+                # A saved intake/direct profile is never converted this way.
+                with self.assertRaisesRegex(AdapterError, 'canonical_render_profile_backend_mismatch'):
+                    preparation_target({'executor_backend': 'cpu'}, profile)
+
     def test_source_direct_supports_both_backends_without_transforming_profile(self):
         for family in ('intake', 'direct_test'):
             for backend in ('cpu', 'gpu'):
