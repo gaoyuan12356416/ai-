@@ -1,4 +1,4 @@
-interface:
-  display_name: "socalkite效果数据查询"
-  short_description: "查询SocialKit发布与收入效果，按平台、账号、剧目核对归因与数据口径"
-  default_prompt: "使用 $socalkite-effect-query 查询最近14天的SocialKit发布与收入表现。"
+interface:
+  display_name: "socalkite效果数据查询"
+  short_description: "查询SocialKit发布与收入效果，按平台、账号、剧目核对归因与数据口径"
+  default_prompt: "使用 $socalkite-effect-query 查询最近14天的SocialKit发布与收入表现。"
