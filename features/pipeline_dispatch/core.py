@@ -275,6 +275,35 @@ class DispatchStore:
         # collector passes. Retire only fences whose canonical stage ended.
         c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id IN (SELECT id FROM pipeline_job WHERE source_key=? AND generation=0 AND status IN ('completed','published','failed'))", (source_key,))
 
+    def _converge_idle_legacy(self, c, existing, offer):
+        """Retire a proven idle legacy observation, never a dispatch claim."""
+        held = offer.get("status") == "backlog_paused" and offer.get("hold_reason") == "cutover_overdue"
+        retrying = (existing["status"] == "legacy_running" and existing["stage"] == "prepare"
+                    and offer.get("status") in ("queued", "ready"))
+        if (not (held or retrying) or existing["generation"] != 0
+                or existing["status"] not in ("legacy_running", "queued", "ready")
+                or existing["external_intent"] or existing["claim_hash"] or existing["canonical_receipt"]
+                or offer.get("legacy_inflight") is not False or offer.get("source_attempt_count") != 0
+                or offer.get("unknown_outcome") or offer.get("reconcile_only") or offer.get("publish_id")):
+            return
+        history = c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_receipt WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_claim_history WHERE job_id=? LIMIT 1", (existing["id"],) * 3).fetchone()
+        if history:
+            return
+        status = offer["status"]
+        hold = str(offer.get("hold_reason") or ("adapter_unavailable" if offer.get("execution_available") is False else ""))
+        grandfathered = 0 if held else existing["grandfathered"]
+        cutoff = self.config(c)["cutovers"].get(existing["channel"])
+        if (cutoff and not grandfathered and existing["source_created_at"] <= cutoff
+                and stamp(offer.get("cutover_due_at") or existing["scheduled_at"]) <= cutoff):
+            status, hold = "backlog_paused", "cutover_overdue"
+        meta = json.loads(existing["source_meta_json"])
+        meta.update({key: offer[key] for key in ("canonical_fingerprint", "source_attempt_count", "legacy_inflight", "reconcile_only", "execution_available") if key in offer})
+        c.execute("UPDATE pipeline_job SET status=?,hold_reason=?,grandfathered=?,source_meta_json=?,updated_at=? WHERE id=?", (status, hold, grandfathered, dumps(meta), self.now(), existing["id"]))
+        # Release only this verified pre-dispatch observation's legacy fences.
+        c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=?", (existing["id"],))
+        c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND legacy=1", (existing["id"],))
+        self.event(c, existing["id"], "legacy_idle_observed", {"status": status, "source_status": offer.get("source_status", ""), "canonical_hold": held}, self.now())
+
     def _rearm_youtube_revision(self, c, existing, offer, meta):
         if existing["channel"] != "youtube" or existing["family"] != "preparation" or existing["stage"] != "prepare":
             return False
@@ -391,6 +420,7 @@ class DispatchStore:
                     existing = c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone()
                 if stage == "publish" and status in ("published", "failed"):
                     c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
+                self._converge_idle_legacy(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
                 self._release_finished_legacy_resources(c, offer["source_key"])
                 return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
             cutoff = self.config(c)["cutovers"].get(channel)
