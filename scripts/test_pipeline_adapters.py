@@ -320,13 +320,19 @@ class YouTubeContinuationProjectionTests(unittest.TestCase):
         self.assertFalse(result['metadata_only'])
         self.assertEqual(self.adapter.project(self.row)['status'], 'completed')
 
-    def test_legacy_unreviewed_workflow_is_observation_only(self):
+    def test_legacy_public_is_executable_but_unlisted_canary_stays_isolated(self):
         self.adapter.driver = SimpleNamespace(control_only=False)
-        self.row.update(status='queued', workflow='legacy', video_id='', video_attempt_count=0)
+        self.row.update(status='queued', workflow='legacy', privacy_status='public', video_id='', video_attempt_count=0)
+        projected = self.adapter.project(self.row)
+        self.assertTrue(projected['execution_available'])
+        self.assertFalse(projected['observation_only'])
+        self.row['privacy_status'] = 'unlisted'
         projected = self.adapter.project(self.row)
         self.assertFalse(projected['execution_available'])
         self.assertTrue(projected['observation_only'])
-        self.assertEqual(projected['hold_reason'], 'canonical_legacy_workflow')
+        self.assertTrue(projected['metadata_only'])
+        self.assertFalse(projected['pause_eligible'])
+        self.assertEqual(projected['hold_reason'], 'canonical_isolated_workflow')
 
     def test_future_visibility_is_not_old_backlog_but_upload_can_start_early(self):
         self.row.update(status='queued', video_id='', video_state='pending', scheduled_at='2026-11-02T00:00:00Z')
@@ -335,6 +341,27 @@ class YouTubeContinuationProjectionTests(unittest.TestCase):
         self.assertEqual(offer['cutover_due_at'], '2026-11-03T00:00:00Z')
         self.adapter.scan = lambda *args: [offer]
         self.assertEqual(self.registry.apply_cutover('youtube', '2026-11-02T12:00:00Z')['paused_source_keys'], [])
+
+    def test_future_cover_preparation_claims_now_and_is_not_historical_backlog(self):
+        from features.pipeline_dispatch.core import DispatchStore
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'native.db')
+            with sqlite3.connect(path, factory=ClosingConnection) as c:
+                c.execute('CREATE TABLE youtube_auto_preparation(id TEXT PRIMARY KEY,state TEXT,created_at TEXT,body TEXT)')
+                c.execute('INSERT INTO youtube_auto_preparation VALUES(?,?,?,?)', ('cover', 'queued_generation', '2026-11-02T00:00:00Z',
+                          json.dumps({'publish_at': '2026-11-03T00:00:00Z', 'channel_id': 'channel'})))
+            adapter = LedgerAdapter(LedgerSpec('youtube', 'preparation', path, 'youtube_auto_preparation', state='state'), SimpleNamespace(control_only=False))
+            offer = adapter.project(adapter.read('cover'))
+            self.assertEqual(offer['scheduled_at'], '2026-11-02T00:00:00Z')
+            self.assertEqual(offer['cutover_due_at'], '2026-11-03T00:00:00Z')
+            registry = AdapterRegistry([adapter])
+            self.assertEqual(registry.apply_cutover('youtube', '2026-11-02T12:00:00Z')['paused_source_keys'], [])
+            store = DispatchStore(Path(directory) / 'dispatch.db', clock=lambda: datetime(2026, 11, 2, 12, tzinfo=timezone.utc))
+            store.register_node('cpu-main', ['prepare:youtube'])
+            store.worker_heartbeat('cpu-main', 'cover-worker', 'prepare')
+            store.channel_enabled('youtube', True)
+            store.offer(offer)
+            self.assertEqual(store.claim('cpu-main', 'cover-worker', 'prepare')['job']['source_key'], 'youtube:preparation:cover')
 
 
 if __name__=='__main__':unittest.main()

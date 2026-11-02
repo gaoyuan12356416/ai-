@@ -245,7 +245,8 @@ class LedgerAdapter:
                     row["ancestor_source_keys"] = ["tt:intake:" + str(origin[0]["id"])]
         elif key == ("youtube", "preparation"):
             body = obj(row.get("body"))
-            row["scheduled_at"] = body.get("publish_at") or row.get("created_at")
+            row["scheduled_at"] = row.get("created_at")
+            row["cutover_due_at"] = body.get("publish_at") or row.get("created_at")
             row["channel_id"] = body.get("channel_id") or obj(body.get("channel")).get("channel_id", "")
         row["owner_user_id"] = str(row.get("owner_user_id") or row.get("created_by_user_id") or row.get("owner") or row.get("operator_user_id") or parent.get("owner_user_id") or parent.get("created_by_user_id") or parent.get("actor_user_id") or parent.get("actor_user") or parent.get("user_id") or "")
         row["owner_tenant_key"] = str(row.get("owner_tenant_key") or row.get("tenant_key") or row.get("tenant") or parent.get("owner_tenant_key") or parent.get("created_by_tenant_key") or parent.get("actor_tenant_key") or parent.get("actor_tenant") or parent.get("tenant_key") or "")
@@ -263,7 +264,8 @@ class LedgerAdapter:
         # Auto tasks bridged to canonical X queues must never generate a second job.
         bridged_auto = spec.channel == "x" and spec.family == "auto" and bool(row.get("execution_queue_id"))
         terminal = bridged_auto or state in TERMINAL or (spec.channel == "tt" and spec.family == "intake" and state == "ready")
-        legacy_youtube = spec.channel == "youtube" and spec.family == "publish" and row.get("workflow", "reviewed_thumbnail") != "reviewed_thumbnail"
+        isolated_youtube = spec.channel == "youtube" and spec.family == "publish" and (
+            row.get("workflow", "reviewed_thumbnail") not in {"reviewed_thumbnail", "legacy"} or row.get("privacy_status", "public") != "public")
         review_hold = spec.channel == "youtube" and spec.family == "preparation" and state not in {"queued_generation", "generating"} and not terminal
         pause_eligible = review_hold and state in {"review", "enqueue_pending"}
         source_id = str(row[spec.identity])
@@ -335,7 +337,7 @@ class LedgerAdapter:
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
                 "stage": stage, "scheduled_at": stamp(row.get("scheduled_at")) if row.get("scheduled_at") else "",
-                "cutover_due_at": stamp(row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) if spec.channel == "youtube" and spec.family == "publish" and (row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) else "",
+                "cutover_due_at": stamp(row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) if spec.channel == "youtube" and (row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) else "",
                 "owner_user_id": row.get("owner_user_id", ""), "owner_tenant_key": row.get("owner_tenant_key", ""),
                 "owner_namespace": row.get("owner_namespace", "session_user"), "native_owner_id": row.get("owner_user_id", ""), "owner_name": row.get("owner_name", ""),
                 "required_modules": [spec.module], "required_module": spec.module,
@@ -353,10 +355,10 @@ class LedgerAdapter:
                 "video_published": video_published,
                 "video_published_at": stamp(row["video_published_at_utc"]) if video_published and row.get("video_published_at_utc") else "",
                 "continuation_due": spec.channel == "youtube" and spec.family == "publish" and youtube_control_due(row),
-                "source_attempt_count": attempts, "observation_only": terminal or review_hold or legacy_youtube, "metadata_only": bridged_auto or skipped,
-                "pause_eligible": pause_eligible or (not terminal and not unknown and not started and not attempts),
-                "hold_reason": "cutover_overdue" if row.get("canonical_held") else "canonical_legacy_workflow" if legacy_youtube else "canonical_link_pending" if blocked_link else "canonical_review_or_enqueue" if review_hold else "",
-                "execution_available": self.driver is not None and not getattr(self.driver, "control_only", False) and not terminal and not review_hold and not legacy_youtube and not unknown and not started and not attempts and not blocked_link and not row.get("canonical_held")}
+                "source_attempt_count": attempts, "observation_only": terminal or review_hold or isolated_youtube, "metadata_only": bridged_auto or skipped or isolated_youtube,
+                "pause_eligible": not isolated_youtube and (pause_eligible or (not terminal and not unknown and not started and not attempts)),
+                "hold_reason": "cutover_overdue" if row.get("canonical_held") else "canonical_isolated_workflow" if isolated_youtube else "canonical_link_pending" if blocked_link else "canonical_review_or_enqueue" if review_hold else "",
+                "execution_available": self.driver is not None and not getattr(self.driver, "control_only", False) and not terminal and not review_hold and not isolated_youtube and not unknown and not started and not attempts and not blocked_link and not row.get("canonical_held")}
 
     def scan(self, limit=200, now=None):
         limit = max(1, min(int(limit), 5000))

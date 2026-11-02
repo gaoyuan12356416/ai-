@@ -22,6 +22,8 @@ ProtectSystem=strict
 ReadWritePaths=/mnt/data-disk/pipeline-dispatch
 ReadWritePaths=/var/lib/x-post-automation /mnt/data-disk/x-auto-post-publisher /mnt/data-disk/x-post-automation/youtube-shares
 ReadWritePaths=/mnt/data-disk/fb-auto-post-publisher /mnt/data-disk/tt-post-publisher /mnt/data-disk/tt-auto-post-publisher /root/drama_material_service/data
+# The deployed app's /root path is a symlink; adapters resolve SQLite URIs.
+ReadWritePaths=-/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/data
 
 [Install]
 WantedBy=multi-user.target
