@@ -76,6 +76,13 @@ class PoolScheduleSaveTests(unittest.TestCase):
         self.assertEqual(item["account_ids"], [])
         self.assertEqual(item["skipped_account_ids"], [96, 97])
 
+    def test_pending_publication_hold_keeps_selection_without_clearing_hold(self):
+        holds = {3: {"code": "x_post_account_needs_review"}}
+        with mock.patch.object(service.XPostStore, "schedule_account_blockers", return_value=holds):
+            item = self.save()
+        self.assertIn(3, item["account_ids"])
+        self.assertEqual(holds, {3: {"code": "x_post_account_needs_review"}})
+
     def test_invalid_or_unknown_accounts_still_fail_without_saving(self):
         for ids in ([1, 999], [96, 96], [True, 96], ["invalid", 96]):
             with self.subTest(ids=ids), self.assertRaises(oauth.ServiceError):

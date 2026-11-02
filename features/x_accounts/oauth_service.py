@@ -3526,7 +3526,12 @@ def save_post_schedule_request(payload, source_type, navigation_item):
         if source_type == "material":
             # Only trusted local account/ledger state may exclude an account.
             # Saving settings never refreshes tokens or calls X.
-            blocked = store.schedule_account_blockers(eligible_ids)
+            blocked = {
+                account_id for account_id, hold in store.schedule_account_blockers(eligible_ids).items()
+                if hold.get("code") in {"x_post_account_locked", "x_account_not_publishable"}
+            }
+            # An active upload also has a needs-review fence while X responds.
+            # Keep that healthy selection; execution still honors its fence.
             save_options["skippable_account_ids"] = [
                 int(account["id"]) for account in accounts
                 if not account.get("publish_eligible") or int(account["id"]) in blocked
