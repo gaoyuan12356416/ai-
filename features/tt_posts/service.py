@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import http.client
+import inspect
 import json
 import math
 import os
@@ -825,7 +826,13 @@ class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
     def _pool_candidate(self, material_id, source_date, **_x_options):
         # X manual-pool policy has evolved independently. Its relaxed image,
         # deletion/product/language options do not change TT eligibility.
-        return super()._pool_candidate(material_id, source_date,
+        shared = super()._pool_candidate
+        if tuple(inspect.signature(shared).parameters) == ("material_id", "source_date"):
+            # Isolated TT releases retain the original strict two-argument X
+            # validator. TT's own row loader still enforces video/nondeleted/
+            # duration <= 3600 before its product/language/violation checks.
+            return shared(material_id, source_date)
+        return shared(material_id, source_date,
             max_duration_seconds=TT_MAX_MATERIAL_DURATION_SECONDS,
             allow_images=False, allow_deleted_materials=False,
             require_dramawave_product=True, use_drama_language=False)
@@ -838,6 +845,8 @@ class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
             (SELECT COUNT(*) FROM `{schema}`.ads_twitter_violations x WHERE x.source_id=%s OR x.original_source_id=%s) AS twitter_count,
             (SELECT COUNT(*) FROM `{schema}`.ads_resource_audit a WHERE a.resource_id=%s) AS resource_audit_count
         """.format(schema=self.schema)
+        if tuple(inspect.signature(_cursor_row).parameters) == ("connection", "sql", "params"):
+            return _cursor_row(self.connection, sql, (material_id,) * 6)
         return _cursor_row(self.connection, sql, (material_id,) * 6, query_stage="material")
 
     def _pool_drama_rows(
