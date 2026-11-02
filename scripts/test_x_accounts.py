@@ -128,7 +128,7 @@ class XAccountsTestCase(unittest.TestCase):
             (1, 1),
             (0,),
             (-1,),
-            tuple(range(1, 52)),
+            tuple(range(1, service.MAX_DAILY_ACCOUNTS + 2)),
         ):
             with self.subTest(values=values), self.assertRaises(service.ServiceError):
                 service._daily_account_scope(values)

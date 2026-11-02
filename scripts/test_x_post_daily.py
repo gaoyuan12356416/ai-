@@ -490,7 +490,7 @@ class RunnerTests(unittest.TestCase):
             "0",
             "-1",
             "not-an-id",
-            ",".join(str(value) for value in range(1, 52)),
+            ",".join(str(value) for value in range(1, 202)),
         ):
             with self.subTest(raw=raw), self.assertRaises(DailyRunError):
                 _parse_account_ids(raw)
