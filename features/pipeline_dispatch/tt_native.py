@@ -101,6 +101,25 @@ def outro_capabilities(job, profile):
     return required
 
 
+def preparation_target(job, profile, *, automatic=False):
+    """Freeze the selected host, including profiles both encoders support."""
+    from .tt_profiles import supported_profiles
+    cpu_variants = {
+        "tt-post-hevc-720x1280-v2": "tt-post-h264-720x1280-v2",
+        "tt-post-direct-clean-hevc-720x1280-v1": "tt-post-direct-clean-h264-720x1280-v1",
+        "tt-post-direct-outro-hevc-720x1280-v2": "tt-post-direct-outro-h264-720x1280-v2",
+        "tt-post-random-overlay-hevc-720x1280-v3": "tt-post-random-overlay-libx264-720x1280-v1",
+    }
+    # Older callers did not provide a host. Retain their prior inference;
+    # current coordinator calls always provide the actual selected backend.
+    backend = job.get("executor_backend") or ("cpu" if profile in cpu_variants.values() else "gpu")
+    if automatic and backend == "cpu":
+        profile = cpu_variants.get(profile, profile)
+    if profile not in supported_profiles(backend):
+        raise AdapterError("canonical_render_profile_backend_mismatch")
+    return profile, backend
+
+
 def post_info(queue):
     return {"title": queue.get("caption", ""), "privacy_level": queue.get("privacy_level"),
             "disable_comment": not bool(queue.get("allow_comment")), "disable_duet": not bool(queue.get("allow_duet")),
@@ -255,7 +274,7 @@ class TTNativeBridge:
                 frozen = c.execute("SELECT * FROM pipeline_tt_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone() if job["stage"] == "prepare" else None
             if existing:
                 return self._stored(job, claim)[1]
-            approved_assets = []
+            approved_assets, selected_profile, selected_backend = [], None, None
             if job["stage"] == "prepare" and not frozen:
                 if self.automatic:
                     executor = self.service.executor
@@ -267,7 +286,8 @@ class TTNativeBridge:
                     raise AdapterError("tt_queue_is_publish_only")
                 # Missing node assets must not create a native claim with no
                 # persisted binding. Frozen generations keep their original caps.
-                approved_assets = outro_capabilities(job, profile)
+                selected_profile, selected_backend = preparation_target(job, profile, automatic=self.automatic)
+                approved_assets = outro_capabilities(job, selected_profile)
             worker = "pipeline:%s:%s" % (claim.get("node_id", "node"), job["generation"])
             identity, native_token = int(job["source_id"]), ""
             if frozen and int(frozen["generation"]) >= int(job["generation"]):
@@ -289,15 +309,7 @@ class TTNativeBridge:
                     if job["stage"] == "prepare":
                         # Only unfrozen automatic work selects the explicit H264
                         # profile; an already frozen intake profile stays intact.
-                        profile = executor.media_profile_version
-                        if callable(getattr(executor, "_video_route_for_task", None)):
-                            profile = executor._video_route_for_task(task).media_profile_version
-                        if job.get("executor_backend") == "cpu":
-                            profile = {"tt-post-hevc-720x1280-v2": "tt-post-h264-720x1280-v2",
-                                "tt-post-direct-clean-hevc-720x1280-v1": "tt-post-direct-clean-h264-720x1280-v1",
-                                "tt-post-direct-outro-hevc-720x1280-v2": "tt-post-direct-outro-h264-720x1280-v2",
-                                "tt-post-random-overlay-hevc-720x1280-v3": "tt-post-random-overlay-libx264-720x1280-v1"}.get(profile, profile)
-                        descriptor = frozen_descriptor or self._prepare_descriptor(executor, lambda clone: clone._prepare(task, native_token), profile=profile)
+                        descriptor = frozen_descriptor or self._prepare_descriptor(executor, lambda clone: clone._prepare(task, native_token), profile=selected_profile)
                     else:
                         clone, port = media_clone(executor)
                         try:
@@ -374,10 +386,7 @@ class TTNativeBridge:
             descriptor.update(source_key=job["source_key"], account_resource="tt:account:" + str(account_id), credential_ref=job["source_key"])
             if job["stage"] == "prepare" and not descriptor.get("required_capabilities"):
                 profile = descriptor["request"]["expected_profile"]
-                cpu_profiles = {"tt-post-h264-720x1280-v2", "tt-post-direct-clean-h264-720x1280-v1",
-                                "tt-post-direct-outro-h264-720x1280-v2", "tt-post-random-overlay-libx264-720x1280-v1"}
-                backend = job.get("executor_backend", "gpu") if profile == "tt-post-source-direct-v1" else "cpu" if profile in cpu_profiles else "gpu"
-                descriptor["required_capabilities"] = prepare_capabilities("tt", profile, backend, job)
+                descriptor["required_capabilities"] = prepare_capabilities("tt", profile, selected_backend, job)
                 descriptor["required_capabilities"].extend(approved_assets)
             if job["stage"] == "prepare" and "native_identity" not in descriptor:
                 current = self._native_dict(job)
