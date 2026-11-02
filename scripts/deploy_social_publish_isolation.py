@@ -69,8 +69,8 @@ def atomic_copy(source, target):
     temporary.replace(target)
 
 
-def ready(port):
-    for _ in range(30):
+def ready(port, attempts=30):
+    for _ in range(attempts):
         try:
             with urllib.request.urlopen('http://127.0.0.1:%s/health' % port, timeout=2) as response:
                 if response.status == 200:
@@ -208,7 +208,7 @@ def apply(folder, rollback=False):
     restore_triggers(manifest)
     # TT readiness includes active timers/path, which are intentionally paused
     # until all source/receipt checks have passed.
-    ready(18831)
+    ready(18831, attempts=90)  # automation probe caches the paused state for 60s
     manifest['status'] = 'rolled_back' if rollback else 'complete'
     save(folder, manifest)
     print(json.dumps({'status': manifest['status'], 'backup': str(folder), 'commit': manifest['commit'], 'protected': before}))
