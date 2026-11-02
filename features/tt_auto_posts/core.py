@@ -913,12 +913,17 @@ class TTAutoPostStore:
         db_path: Any,
         *,
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
+        execution_not_before_utc: Any = "",
     ):
         path = Path(str(db_path)).expanduser()
         if not path.is_absolute():
             raise TTAutoPostStoreError("tt_auto_db_path_invalid", "database path must be absolute", 500)
         self.db_path = str(path)
         self._now_fn = now_fn
+        self.execution_not_before_utc = (
+            _utc_datetime(execution_not_before_utc).isoformat(timespec="seconds")
+            if execution_not_before_utc else ""
+        )
         ensure_storage(path)
 
     def _now(self) -> datetime:
@@ -1894,6 +1899,20 @@ class TTAutoPostStore:
                     "is_aigc": bool(settings.get("is_aigc")),
                     "selection": selection,
                     "unknown_outcome": bool(item.get("unknown_outcome")),
+                    "force_close_allowed": (
+                        str(item.get("status") or "")
+                        in {
+                            "pending",
+                            "selecting",
+                            "reserved",
+                            "preparing",
+                            "retry_wait",
+                            "ready",
+                        }
+                        and not str(item.get("publish_id") or "")
+                        and not bool(item.get("unknown_outcome"))
+                        and str(item.get("claim_phase") or "") != "reconcile"
+                    ),
                 }
             )
             for key in (
@@ -2001,6 +2020,8 @@ class TTAutoPostStore:
         worker_id: Any,
         lease_seconds: Any,
         now: Optional[Any] = None,
+        prepare_ahead_seconds: Any = 0,
+        allowed_phases: Optional[Iterable[Any]] = None,
     ) -> Optional[TaskClaim]:
         """Claim the next safe phase, including expired-crash recovery.
 
@@ -2016,13 +2037,40 @@ class TTAutoPostStore:
             raise TTAutoPostStoreError("tt_auto_lease_invalid", "lease seconds is too large", 400)
         current_dt = self._now() if now is None else _utc_datetime(now)
         current = current_dt.isoformat(timespec="seconds")
+        ahead_seconds = _nonnegative_int(
+            prepare_ahead_seconds, "prepare ahead seconds"
+        )
+        if ahead_seconds > 43200:
+            raise TTAutoPostStoreError(
+                "tt_auto_prepare_ahead_invalid",
+                "prepare ahead seconds is too large",
+                400,
+            )
+        prepare_cutoff = (
+            current_dt + timedelta(seconds=ahead_seconds)
+        ).isoformat(timespec="seconds")
+        phase_filter = None
+        if allowed_phases is not None:
+            if isinstance(allowed_phases, (str, bytes)):
+                raise TTAutoPostStoreError(
+                    "tt_auto_claim_phases_invalid", "claim phases are invalid", 400
+                )
+            phase_filter = {
+                str(value or "").strip() for value in allowed_phases
+            }
+            if not phase_filter or not phase_filter.issubset(
+                {"selection", "prepare", "publish", "reconcile"}
+            ):
+                raise TTAutoPostStoreError(
+                    "tt_auto_claim_phases_invalid", "claim phases are invalid", 400
+                )
         lease_expires = (current_dt + timedelta(seconds=seconds)).isoformat(timespec="seconds")
         active_placeholders = ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES)
         with self._transaction() as conn:
             candidates = conn.execute(
                 """
                 SELECT * FROM tt_auto_task
-                WHERE
+                WHERE (
                     (status='pending' AND scheduled_at_utc<=?)
                     OR (status='selecting' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
@@ -2035,15 +2083,25 @@ class TTAutoPostStore:
                         AND (next_attempt_at_utc='' OR next_attempt_at_utc<=?)
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
                     )
-                    OR (status='ready' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
+                    OR (
+                        status='ready'
+                        AND scheduled_at_utc<=?
+                        AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
+                    )
                     OR (
                         status IN ('publishing','reconciling','unknown')
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
+                        AND (next_attempt_at_utc='' OR next_attempt_at_utc<=?)
                     )
+                ) AND (
+                    scheduled_at_utc>=?
+                    OR status IN ('publishing','reconciling','unknown')
+                    OR (status='retry_wait' AND claim_phase='reconcile')
+                )
                 ORDER BY
                     CASE
-                        WHEN status IN ('publishing','reconciling','unknown') THEN 0
-                        WHEN status='ready' THEN 1
+                        WHEN status='ready' THEN 0
+                        WHEN status IN ('publishing','reconciling','unknown') THEN 1
                         WHEN status IN ('reserved','preparing','retry_wait') THEN 2
                         ELSE 3
                     END,
@@ -2053,15 +2111,42 @@ class TTAutoPostStore:
                     id ASC
                 LIMIT 500
                 """,
-                (current, current, current, current, current, current, current, current),
+                (prepare_cutoff, *([current] * 9), self.execution_not_before_utc),
             ).fetchall()
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
                 candidate_id = int(candidate["id"])
                 candidate_status = str(candidate["status"])
+                candidate_previous_phase = str(candidate["claim_phase"] or "")
+                if candidate_status in {"pending", "selecting"}:
+                    candidate_phase = "selection"
+                elif candidate_status in {"reserved", "preparing"}:
+                    candidate_phase = "prepare"
+                elif candidate_status == "retry_wait":
+                    candidate_phase = candidate_previous_phase
+                    if candidate_phase not in {
+                        "selection", "prepare", "publish", "reconcile"
+                    }:
+                        candidate_phase = (
+                            "publish"
+                            if str(candidate["prepared_media_url"] or "")
+                            else "prepare"
+                            if str(candidate["material_id"] or "")
+                            else "selection"
+                        )
+                elif candidate_status == "ready":
+                    candidate_phase = "publish"
+                else:
+                    candidate_phase = "reconcile"
+                if (
+                    phase_filter is not None
+                    and candidate_phase not in phase_filter
+                ):
+                    continue
                 others = conn.execute(
                     """
-                    SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc
+                    SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc,
+                           publish_id,unknown_outcome,publish_attempt_count,claim_phase
                     FROM tt_auto_task
                     WHERE account_id=? AND id<>? AND status IN (%s)
                     ORDER BY scheduled_at_utc,id
@@ -2072,6 +2157,17 @@ class TTAutoPostStore:
                         *sorted(ACTIVE_ACCOUNT_TASK_STATUSES),
                     ),
                 ).fetchall()
+                # An unattempted archived task cannot silently resume or occupy
+                # a fresh day's account. Ambiguous writes and live leases remain
+                # account fences until their existing result is reconciled.
+                others = [other for other in others if (
+                    str(other["scheduled_at_utc"]) >= self.execution_not_before_utc
+                    or other["publish_id"] or other["unknown_outcome"]
+                    or other["publish_attempt_count"]
+                    or other["status"] in {"publishing", "reconciling", "unknown"}
+                    or other["claim_phase"] == "reconcile"
+                    or (other["claim_token"] and str(other["lease_expires_at_utc"]) > current)
+                )]
                 if candidate_status == "pending" and others:
                     continue
                 if candidate_status in ACTIVE_ACCOUNT_TASK_STATUSES and others:
@@ -2553,6 +2649,7 @@ class TTAutoPostStore:
         updates: Optional[Mapping[str, Any]] = None,
         event_type: Any = "task_status_changed",
         message: Any = "",
+        event_details: Optional[Mapping[str, Any]] = None,
     ) -> TaskRecord:
         normalized_id = _positive_int(task_id, "task id")
         target = str(to_status or "").strip()
@@ -2613,12 +2710,16 @@ class TTAutoPostStore:
                 "source_media_url",
                 "prepared_media_url",
                 "prepared_output_sha256",
+                "caption",
                 "publish_id",
             ):
                 stored_value = str(row[immutable_field] or "")
                 if immutable_field in supplied_updates and stored_value:
                     requested_value = str(supplied_updates[immutable_field] or "")
-                    if not secrets.compare_digest(stored_value, requested_value):
+                    if not secrets.compare_digest(
+                        stored_value.encode("utf-8"),
+                        requested_value.encode("utf-8"),
+                    ):
                         raise TTAutoPostStoreError(
                             "tt_auto_task_identity_immutable",
                             "%s cannot change once recorded" % immutable_field,
@@ -2740,8 +2841,91 @@ class TTAutoPostStore:
                 from_status=current,
                 to_status=target,
                 message=message,
+                details=event_details,
             )
             result = conn.execute("SELECT * FROM tt_auto_task WHERE id=?", (normalized_id,)).fetchone()
+        assert result is not None
+        return _task_from_row(result)
+
+    def force_close_task(self, task_id: Any, *, reason: Any) -> TaskRecord:
+        """Atomically terminalize a task that has not entered TikTok publish.
+
+        This operator path deliberately revokes an active worker claim.  A
+        worker that finishes selection or preparation afterwards will fail its
+        guarded transition instead of reviving the closed task.
+        """
+
+        normalized_id = _positive_int(task_id, "task id")
+        clean_reason = _bounded_text(reason, "force close reason", 500)
+        now = self._now_iso()
+        safe_statuses = {
+            "pending",
+            "selecting",
+            "reserved",
+            "preparing",
+            "retry_wait",
+            "ready",
+        }
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM tt_auto_task WHERE id=?", (normalized_id,)
+            ).fetchone()
+            if row is None:
+                raise TTAutoPostStoreError(
+                    "tt_auto_task_not_found", "task was not found", 404
+                )
+            current = str(row["status"])
+            if current == "canceled":
+                return _task_from_row(row)
+            if current == "published":
+                raise TTAutoPostStoreError(
+                    "tt_auto_task_already_published",
+                    "published task cannot be force closed",
+                    409,
+                )
+            if (
+                current not in safe_statuses
+                or str(row["publish_id"] or "")
+                or bool(row["unknown_outcome"])
+                or str(row["claim_phase"] or "") == "reconcile"
+            ):
+                raise TTAutoPostStoreError(
+                    "tt_auto_publish_reconcile_required",
+                    "task may only be closed before TikTok publishing starts",
+                    409,
+                )
+            conn.execute(
+                """
+                UPDATE tt_auto_task
+                SET status='canceled',updated_at=?,finished_at_utc=?,
+                    next_attempt_at_utc='',claim_phase='',claim_worker='',
+                    claim_token='',lease_expires_at_utc=''
+                WHERE id=?
+                """,
+                (now, now, normalized_id),
+            )
+            if str(row["material_id"] or ""):
+                conn.execute(
+                    """
+                    UPDATE tt_auto_material_ledger
+                    SET last_task_status='canceled',updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (now, normalized_id),
+                )
+            self._event(
+                conn,
+                run_id=int(row["run_id"]),
+                task_id=normalized_id,
+                event_type="task_force_closed",
+                created_at=now,
+                from_status=current,
+                to_status="canceled",
+                message=clean_reason,
+            )
+            result = conn.execute(
+                "SELECT * FROM tt_auto_task WHERE id=?", (normalized_id,)
+            ).fetchone()
         assert result is not None
         return _task_from_row(result)
 
