@@ -169,6 +169,8 @@ def apply(folder, rollback=False):
         run('systemctl', 'stop', unit)
     if not rollback:
         for index, path in enumerate(DBS):
+            if (folder / ('ledger-%s.sqlite3' % index)).exists():
+                continue
             with contextlib.closing(sqlite3.connect('file:' + path + '?mode=ro', uri=True)) as conn, contextlib.closing(sqlite3.connect(folder / ('ledger-%s.sqlite3' % index))) as target:
                 conn.backup(target)
                 assert target.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
@@ -197,13 +199,18 @@ def apply(folder, rollback=False):
     for unit in SIDES:
         if manifest['sides'][unit] == 'active':
             run('systemctl', 'start', unit)
-    ready(8810); ready(18833); ready(18831)
+    ready(8810); ready(18833)
     run('systemctl', 'restart', 'drama-material-api.service')
     assert protected_facts() == before, 'protected publication facts changed during cutover'
     manifest['protected_after'] = protected_facts()
-    manifest['status'] = 'rolled_back' if rollback else 'complete'
+    manifest['status'] = 'cutover_complete'
     save(folder, manifest)
     restore_triggers(manifest)
+    # TT readiness includes active timers/path, which are intentionally paused
+    # until all source/receipt checks have passed.
+    ready(18831)
+    manifest['status'] = 'rolled_back' if rollback else 'complete'
+    save(folder, manifest)
     print(json.dumps({'status': manifest['status'], 'backup': str(folder), 'commit': manifest['commit'], 'protected': before}))
 
 
