@@ -335,6 +335,7 @@ class LedgerAdapter:
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
                 "stage": stage, "scheduled_at": stamp(row.get("scheduled_at")) if row.get("scheduled_at") else "",
+                "cutover_due_at": stamp(row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) if spec.channel == "youtube" and spec.family == "publish" and (row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) else "",
                 "owner_user_id": row.get("owner_user_id", ""), "owner_tenant_key": row.get("owner_tenant_key", ""),
                 "owner_namespace": row.get("owner_namespace", "session_user"), "native_owner_id": row.get("owner_user_id", ""), "owner_name": row.get("owner_name", ""),
                 "required_modules": [spec.module], "required_module": spec.module,
@@ -574,7 +575,7 @@ class AdapterRegistry:
                     reconcile.append(key)
                 elif item["legacy_inflight"] or key in grandfathered:
                     inflight.append(key)
-                elif item["scheduled_at"] and item["scheduled_at"] <= cutoff:
+                elif (item.get("cutover_due_at") or item["scheduled_at"]) and (item.get("cutover_due_at") or item["scheduled_at"]) <= cutoff:
                     paused.append(key)
         return {"channel": channel, "cutoff": cutoff, "paused_source_keys": paused,
                 "grandfathered_source_keys": sorted(set(inflight) | grandfathered),

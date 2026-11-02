@@ -126,6 +126,7 @@ class YouTubeNativeTests(unittest.TestCase):
         self.claim = {"claim_token": "second-generation-token"}
         self.descriptor = self.bridge.reserve(self.job, self.claim)
         self.assertEqual(self.descriptor["mode"], "continuation")
+        self.assertEqual(self.descriptor["continuation"], verified["continuation"])
         for name in ("youtube_begin_resumable", "youtube_upload", "youtube_thumbnail", "youtube_visibility"):
             with self.assertRaises(AdapterError):
                 self.operation(name, {})
@@ -147,12 +148,76 @@ class YouTubeNativeTests(unittest.TestCase):
         with self.workflow.db(True) as conn:
             conn.execute("INSERT INTO youtube_auto_preparation(id,tenant,owner,operation_id,request_sha,state,version,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (identity, "tenant", "user", "operation-held", "sha", "review", 1, json.dumps(body), "2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z"))
         held = {"channel": "youtube", "family": "preparation", "source_id": identity, "source_key": "youtube:preparation:" + identity}
-        self.bridge.pause(held, "2026-11-02T00:00:00Z")
+        result = self.bridge.pause(held, "2026-11-02T00:00:00Z")
+        self.assertTrue(result["held"])
+        self.assertEqual(result, self.bridge.pause(held, "2026-11-02T00:00:00Z"))
+        with self.assertRaisesRegex(AdapterError, "canonical_hold_cutoff_conflict"):
+            self.bridge.pause(held, "2026-11-03T00:00:00Z")
         self.assertIsNone(self.workflow._claim())
         with self.workflow.db() as conn:
             row = conn.execute("SELECT state,body FROM youtube_auto_preparation WHERE id=?", (identity,)).fetchone()
         self.assertEqual(row["state"], "review")
         self.assertTrue(json.loads(row["body"])["versions"][0]["approved"])
+
+    def test_cutover_apply_and_enable_accept_real_youtube_pause_receipt(self):
+        from features.pipeline_dispatch.adapters import AdapterRegistry, LedgerAdapter, LedgerSpec
+        from features.pipeline_dispatch.core import DispatchStore
+        from features.pipeline_dispatch.cutover import Cutover
+        from features.pipeline_dispatch.service import Coordinator
+        identity = "d" * 32
+        body = {"id": identity, "status": "review", "current_version": 1, "publish_at": "2020-01-01T00:00:00Z", "versions": [{"approved": True}]}
+        with self.workflow.db(True) as conn:
+            conn.execute("INSERT INTO youtube_auto_preparation(id,tenant,owner,operation_id,request_sha,state,version,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (identity, "tenant", "user", "cutover-held", "sha", "review", 1, json.dumps(body), "2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z"))
+        adapter = LedgerAdapter(LedgerSpec("youtube", "preparation", str(self.store.db_path), "youtube_auto_preparation", state="state", module="youtube_auto_publish"), self.bridge)
+        dispatch = DispatchStore(Path(self.temp.name) / "dispatch.sqlite")
+        control = Cutover(Coordinator(dispatch, AdapterRegistry([adapter]), internal_token="i" * 32, master_key="m" * 32))
+        plan = control.plan("youtube", "2026-11-02T00:00:00Z")
+        self.assertEqual(plan["paused_source_keys"], ["youtube:preparation:" + identity])
+        for _ in range(2):
+            result = control.apply(plan["plan_id"], plan["sha256"])
+            self.assertEqual((result["status"], result["paused_count"], result["errors"]), ("held", 1, []))
+        self.assertTrue(control.enable(plan["plan_id"], plan["sha256"])["enabled"])
+        with self.workflow.db() as conn:
+            row = conn.execute("SELECT state,body FROM youtube_auto_preparation WHERE id=?", (identity,)).fetchone()
+        self.assertEqual(row["state"], "review")
+        self.assertTrue(json.loads(row["body"])["versions"][0]["approved"])
+
+    def test_pause_rechecks_native_creation_and_schedule_cutoff(self):
+        for number, (created, scheduled) in enumerate((("2099-01-01T00:00:00Z", "2020-01-01T00:00:00Z"), ("2020-01-01T00:00:00Z", "2099-01-01T00:00:00Z"))):
+            identity = (str(number + 4) * 32)
+            body = {"id": identity, "status": "review", "current_version": 1, "publish_at": scheduled}
+            with self.workflow.db(True) as conn:
+                conn.execute("INSERT INTO youtube_auto_preparation(id,tenant,owner,operation_id,request_sha,state,version,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (identity, "tenant", "user", "future-" + identity, "sha", "review", 1, json.dumps(body), created, created))
+            job = {"channel": "youtube", "family": "preparation", "source_id": identity, "source_key": "youtube:preparation:" + identity,
+                   "scheduled_at": "2020-01-01T00:00:00Z", "source_created_at": "2020-01-01T00:00:00Z"}
+            with self.assertRaisesRegex(AdapterError, "canonical_task_outside_cutoff"):
+                self.bridge.pause(job, "2026-11-02T00:00:00Z")
+        with self.workflow.db() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_canonical_hold").fetchone()[0], 0)
+
+    def test_future_scheduled_publish_not_held_but_can_prepare_upload_early(self):
+        from features.pipeline_dispatch.adapters import AdapterRegistry, LedgerAdapter, LedgerSpec
+        from features.pipeline_dispatch.core import DispatchStore, stamp
+        from features.pipeline_dispatch.cutover import Cutover
+        from features.pipeline_dispatch.service import Coordinator
+        task = self.store.enqueue_reviewed_youtube(preparation_id="prep-future", source_material_id="future-material",
+            approved_cover_path=str(Path(self.temp.name) / "cover.jpg"), approved_cover_sha256=self.cover_sha,
+            publish_at=self.task["publish_at"], operation_id="future-queued", job_id="e" * 32, content_id="future-content",
+            app_id="1479", channel_local_id="1", channel_id=self.task["channel_id"], youtube_account_id="1",
+            source_kind="custom_source", source_url="https://media.example/future.mp4", title="future", description_template="description",
+            description_rendered="description", comment_text="hello", duplicate_confirmed=False,
+            scopes=("https://www.googleapis.com/auth/youtube.force-ssl",), operator_user_id="user1")
+        adapter = LedgerAdapter(LedgerSpec("youtube", "publish", str(self.store.db_path), "drama_youtube_publish", module="youtube_auto_publish"), self.bridge)
+        dispatch = DispatchStore(Path(self.temp.name) / "dispatch-future.sqlite")
+        control = Cutover(Coordinator(dispatch, AdapterRegistry([adapter]), internal_token="i" * 32, master_key="m" * 32))
+        cutoff = stamp(datetime.now(timezone.utc))
+        source_key = "youtube:publish:" + str(task["id"])
+        offer = next(item for item in control.snapshot("youtube") if item["source_key"] == source_key)
+        self.assertLessEqual(stamp(offer["scheduled_at"]), cutoff)
+        self.assertGreater(stamp(offer["cutover_due_at"]), cutoff)
+        self.assertNotIn(source_key, control.plan("youtube", cutoff)["paused_source_keys"])
+        with self.assertRaisesRegex(AdapterError, "canonical_task_outside_cutoff"):
+            self.bridge.pause(offer, cutoff)
 
     def test_scheduled_cancel_uses_same_video_and_canonical_command_intent(self):
         self.prepare_upload()

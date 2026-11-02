@@ -53,7 +53,7 @@ class Cutover:
             if not found:
                 break
             exempt.update(found)
-        paused = [item for item in offers if item["source_key"] not in exempt and item.get("pause_eligible") and not item.get("reconcile_only") and stamp(item.get("scheduled_at") or cutoff) <= cutoff and stamp(item.get("source_created_at") or cutoff) <= cutoff]
+        paused = [item for item in offers if item["source_key"] not in exempt and item.get("pause_eligible") and not item.get("reconcile_only") and stamp(item.get("cutover_due_at") or item.get("scheduled_at") or cutoff) <= cutoff and stamp(item.get("source_created_at") or cutoff) <= cutoff]
         unknown = [item["source_key"] for item in offers if item.get("reconcile_only")]
         manifest = {"channel": channel, "cutoff": cutoff, "paused": paused, "grandfathered_source_keys": sorted(exempt), "reconcile_source_keys": sorted(set(unknown))}
         encoded = dumps(manifest)
@@ -114,7 +114,7 @@ class Cutover:
         for item in offers:
             if (item["source_key"] not in exempt and item.get("pause_eligible")
                     and not item.get("reconcile_only")
-                    and stamp(item.get("scheduled_at") or manifest["cutoff"]) <= manifest["cutoff"]
+                    and stamp(item.get("cutover_due_at") or item.get("scheduled_at") or manifest["cutoff"]) <= manifest["cutoff"]
                     and stamp(item.get("source_created_at") or manifest["cutoff"]) <= manifest["cutoff"]
                     and item.get("hold_reason") != "cutover_overdue"):
                 raise DispatchError("cutover_unplanned_backlog")

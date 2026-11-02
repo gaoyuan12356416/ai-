@@ -163,18 +163,19 @@ def prepare(source, commit, baseline_path, folder, *, base=BASE, lanes=None):
     save(folder, manifest)
     for lane, entry in plan.items():
         root = entry["root"]
+        release_swap = lane != "app" and root.is_symlink()
         candidate = folder / "candidates" / lane
         backup = folder / "backups" / lane
         candidate.parent.mkdir(exist_ok=True)
         backup.mkdir(parents=True)
         # app is a long-lived working tree with unrelated assets; stage only
         # its exact overlays. Sidecars retain their complete existing release.
-        if root.is_symlink():
+        if release_swap:
             shutil.copytree(root.resolve(), candidate, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
             preserve_tree_owners(root.resolve(), candidate)
         else:
             candidate.mkdir()
-        item = {"runtime_root": str(root), "previous_root": str(root.resolve()), "symlink": root.is_symlink(),
+        item = {"runtime_root": str(root), "previous_root": str(root.resolve()), "symlink": release_swap,
                 "candidate": str(candidate), "files": {}, "baseline": entry["records"], "status": "preparing"}
         manifest["lanes"][lane] = item
         additions = set(package) | (APP_ADDITIONS if lane == "app" else set())
@@ -202,7 +203,7 @@ def prepare(source, commit, baseline_path, folder, *, base=BASE, lanes=None):
                 patch = run(["git", "diff", "--binary", "--full-index", base, commit, "--", relative], cwd=source)
                 if not patch:
                     continue
-                if not root.is_symlink():
+                if not release_swap:
                     shutil.copy2(live, target)
                 # No 3-way guessing or whole-file fallback: any live conflict
                 # stops preparation and is reviewed before a new baseline.

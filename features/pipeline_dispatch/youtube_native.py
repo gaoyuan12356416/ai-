@@ -146,7 +146,7 @@ class YouTubeNativeBridge:
                     conn.execute("UPDATE drama_youtube_publish SET status=?,lease_owner=?,lease_generation=?,lease_expires_at_utc=?,pipeline_dispatch_key=? WHERE id=?", (task["status"] if continuation else "validating", owner, task["lease_generation"], expiry(), job["source_key"], task["id"]))
                 saved = {"id": task["id"], "lease_owner": owner, "lease_generation": task["lease_generation"]}
                 if continuation:
-                    descriptor = {"kind": "youtube_publish", "mode": "continuation", "account_resource": "youtube:channel:" + task["channel_id"], "request": {"video_id": task["video_id"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "comment_id": task["comment_id"], "publish_at": task["publish_at"]}}
+                    descriptor = {"kind": "youtube_publish", "mode": "continuation", "continuation": dict(continuation), "account_resource": "youtube:channel:" + task["channel_id"], "request": {"video_id": task["video_id"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "comment_id": task["comment_id"], "publish_at": task["publish_at"]}}
                     if control:
                         descriptor["request"]["schedule_control"] = {"action": task["schedule_command"], "version": task["schedule_version"], "operation_id": task["schedule_operation_id"], "publish_at": task["publish_at"]}
                 else:
@@ -429,21 +429,33 @@ class YouTubeNativeBridge:
         return result
 
     def pause(self, job, cutoff):
+        from .adapters import stamp
         if job.get("channel") != "youtube" or job.get("family") not in {"preparation", "publish"} or job.get("source_key") != "youtube:" + job["family"] + ":" + str(job.get("source_id")):
             raise AdapterError("youtube_dispatch_source_invalid")
+        if not cutoff:
+            raise AdapterError("canonical_hold_cutoff_required")
+        cutoff = stamp(cutoff)
+        held = {"held": True, "accepted": True, "paused": True, "source_key": job["source_key"], "cutoff": cutoff, "canonical_mutations": 0}
         with self._lock, self.workflow.db(True) as conn:
-            if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", (job["source_key"],)).fetchone():
-                return {"accepted": True, "paused": True}
+            existing = conn.execute("SELECT cutoff FROM pipeline_canonical_hold WHERE source_key=?", (job["source_key"],)).fetchone()
+            if existing:
+                if existing["cutoff"] != cutoff:
+                    raise AdapterError("canonical_hold_cutoff_conflict")
+                return held
             if job["family"] == "preparation":
                 row, body = self.workflow._row(conn, job["source_id"])
                 if row["state"] not in {"queued_generation", "review", "enqueue_pending"} or row["lease_until"] > time.time() or row["lease_token"].startswith("pipeline:") or self.workflow._ledger(body, conn):
                     raise AdapterError("canonical_task_already_started")
+                created, scheduled = row["created_at"], body.get("publish_at") or row["created_at"]
             else:
                 row = conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (job["source_id"],)).fetchone()
                 if row is None or row["status"] != "queued" or row["lease_owner"] or row["pipeline_dispatch_key"] or row["video_attempt_count"] or row["video_id"] or row["resumable_session_uri"] or row["unknown_outcome"]:
                     raise AdapterError("canonical_task_already_started")
-            conn.execute("INSERT INTO pipeline_canonical_hold VALUES(?,?,?)", (job["source_key"], str(cutoff), "backlog_paused"))
-            return {"accepted": True, "paused": True}
+                created, scheduled = row["created_at_utc"], row["publish_at"] or row["created_at_utc"]
+            if not created or not scheduled or stamp(created) > cutoff or stamp(scheduled) > cutoff:
+                raise AdapterError("canonical_task_outside_cutoff")
+            conn.execute("INSERT INTO pipeline_canonical_hold VALUES(?,?,?)", (job["source_key"], cutoff, "cutover_overdue"))
+            return held
 
     def dispatch(self, action, payload):
         job, claim = payload.get("job") or {}, payload.get("claim") or {}

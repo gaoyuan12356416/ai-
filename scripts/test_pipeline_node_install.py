@@ -22,6 +22,12 @@ class NodeInstallTests(unittest.TestCase):
         for change in ({"sha": "main"}, {"state_root": "/data/tt-post-gpu"}, {"install_root": "/opt/legacy"}, {"node_id": "x; reboot"}):
             with self.assertRaises(ValueError): plan({**self.spec(), **change})
 
+    def test_https_reuses_existing_github_credentials_without_inline_secret(self):
+        result = plan({**self.spec(), "repository": "https://github.com/owner/repo.git"})
+        self.assertEqual(result["repository"], "https://github.com/owner/repo.git")
+        with self.assertRaises(ValueError):
+            plan({**self.spec(), "repository": "https://secret@github.com/owner/repo.git"})
+
     def test_dedicated_forward_preserves_host_verification_and_new_port(self):
         spec = {**self.spec(), "tunnel": {"target": "limited@example.internal", "identity_file": "/etc/tunnel/id_ed25519", "known_hosts": "/etc/tunnel/known_hosts"}}
         plan(spec)

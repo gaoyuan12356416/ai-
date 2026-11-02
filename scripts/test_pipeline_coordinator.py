@@ -152,6 +152,48 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(self.service.route("/internal/pipeline/jobs/complete", receipt, self.auth)["duplicate"])
         self.assertEqual(self.store.get_job(next_claim["job_id"])["status"], "running")
 
+    def schedule_fixture(self):
+        self.store.channel_enabled("youtube", True)
+        self.store.register_node("cpu-main", ["publish:youtube", "backend:cpu"])
+        self.offer("youtube:publish:1", channel="youtube", capabilities=["publish:youtube"], resource_keys=["youtube:channel:1"])
+        claim = self.claim()
+        self.native.reconcile = lambda job: {"dispatch_completed": True, "canonical_receipt": {"source_key": job["source_key"], "publish_id": "video-1", "status": "scheduled"}, "continuation": {"video_id": "video-1", "scheduled_at": stamp(self.now + dt.timedelta(minutes=5))}}
+        return claim
+
+    def test_failure_after_confirmed_schedule_keeps_continuation(self):
+        claim = self.schedule_fixture()
+        self.native.fail = lambda *args: {"canonical_terminal": True}
+        request = {**claim, "receipt_id": "failed-local-after-confirmed", "error_code": "node_exception"}
+        self.assertTrue(self.service.route("/internal/pipeline/jobs/fail", request, self.auth)["accepted"])
+        self.assertEqual(self.store.get_job(claim["job_id"])["status"], "ready")
+        self.assertTrue(self.service.route("/internal/pipeline/jobs/fail", request, self.auth)["duplicate"])
+
+    def test_collector_recovers_schedule_then_old_generation_receipt_is_ack_only(self):
+        claim = self.schedule_fixture()
+        self.store.fail(claim, "lost_after_checkpoint", unknown=True)
+        self.service.scan()
+        self.assertEqual(self.store.get_job(claim["job_id"])["status"], "ready")
+        self.now += dt.timedelta(minutes=6)
+        self.store.register_node("cpu-main", ["publish:youtube", "backend:cpu"])
+        self.store.worker_heartbeat("cpu-main", "one", "publish")
+        # Preserve the continuation which a real canonical reserve returns.
+        self.native.reserve = lambda job, request: dict(job["payload"], kind="youtube_publish")
+        newer = self.claim()
+        self.assertEqual(newer["generation"], claim["generation"]+1)
+        for action in ("complete", "fail"):
+            old = {**claim, "receipt_id": "late-old-"+action, "result": {"video_id": "video-1"}}
+            self.assertTrue(self.service.route("/internal/pipeline/jobs/"+action, old, self.auth)["historical"])
+            self.assertEqual(self.store.get_job(newer["job_id"])["status"], "running")
+        forged = {**claim, "receipt_id": "forged", "claim_token": "wrong", "result": {"video_id": "video-1"}}
+        with self.assertRaises(DispatchError):
+            self.service.route("/internal/pipeline/jobs/complete", forged, self.auth)
+
+    def test_future_appointment_cutover_does_not_delay_early_upload(self):
+        self.offer("youtube:publish:early", channel="youtube", cutover_due_at=stamp(self.now+dt.timedelta(days=1)))
+        self.store.cutover("youtube", stamp(self.now))
+        with self.store.transaction() as c:
+            self.assertEqual(c.execute("SELECT status FROM pipeline_job WHERE source_key='youtube:publish:early'").fetchone()[0], "queued")
+
 
 if __name__ == "__main__":
     unittest.main()

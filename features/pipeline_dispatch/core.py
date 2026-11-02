@@ -134,6 +134,9 @@ class DispatchStore:
               pid INTEGER, draining INTEGER NOT NULL DEFAULT 0, last_seen_at TEXT NOT NULL,
               observation_json TEXT NOT NULL DEFAULT '{}',
               PRIMARY KEY(node_id,worker_id));
+            CREATE TABLE IF NOT EXISTS pipeline_claim_history (
+              job_id INTEGER NOT NULL,generation INTEGER NOT NULL,node_id TEXT NOT NULL,
+              worker_id TEXT NOT NULL,claim_hash TEXT NOT NULL,PRIMARY KEY(job_id,generation));
             CREATE TABLE IF NOT EXISTS pipeline_job (
               id INTEGER PRIMARY KEY, source_key TEXT NOT NULL, source_id TEXT NOT NULL,
               channel TEXT NOT NULL, family TEXT NOT NULL, batch_key TEXT NOT NULL,
@@ -292,6 +295,9 @@ class DispatchStore:
                 if stage == "prepare" and existing["status"] == "legacy_running" and not offer.get("legacy_inflight") and (offer.get("source_status") in ("ready", "review", "enqueue_pending", "completed") or offer.get("metadata_only")):
                     c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE id=? AND generation=0", (stamp(offer["finished_at"]) if offer.get("finished_at") else now, now, existing["id"]))
                 meta = json.loads(existing["source_meta_json"])
+                if offer.get("cutover_due_at"):
+                    meta["cutover_due_at"] = offer["cutover_due_at"]
+                    c.execute("UPDATE pipeline_job SET source_meta_json=? WHERE id=?", (dumps(meta), existing["id"]))
                 if offer.get("ancestor_source_keys"):
                     meta["ancestor_source_keys"] = list(offer["ancestor_source_keys"])
                     c.execute("UPDATE pipeline_job SET source_meta_json=? WHERE id=?", (dumps(meta), existing["id"]))
@@ -330,7 +336,7 @@ class DispatchStore:
             hold = ""
             if offer.get("execution_available") is False:
                 hold = str(offer.get("hold_reason") or "adapter_unavailable")
-            if cutoff and scheduled <= cutoff and created <= cutoff and not grandfathered and status in ("queued", "ready"):
+            if cutoff and stamp(offer.get("cutover_due_at") or scheduled) <= cutoff and created <= cutoff and not grandfathered and status in ("queued", "ready"):
                 status, hold = "backlog_paused", "cutover_overdue"
             if offer.get("legacy_inflight"):
                 status = "legacy_running"
@@ -347,7 +353,7 @@ class DispatchStore:
                 "started_at": stamp(offer["started_at"]) if offer.get("started_at") else "",
                 "finished_at": stamp(offer["finished_at"]) if offer.get("finished_at") else "",
                 "canonical_receipt": str(offer.get("canonical_receipt", "")),
-                "source_meta_json": dumps({k: offer[k] for k in ("canonical_fingerprint", "source_attempt_count", "legacy_inflight", "reconcile_only", "execution_available", "owner_namespace", "native_owner_id", "ancestor_source_keys") if k in offer}),
+                "source_meta_json": dumps({k: offer[k] for k in ("canonical_fingerprint", "source_attempt_count", "legacy_inflight", "reconcile_only", "execution_available", "owner_namespace", "native_owner_id", "ancestor_source_keys", "cutover_due_at") if k in offer}),
             }
             for key in JSON_FIELDS:
                 values[key + "_json"] = dumps(offer.get(key, [] if key in ("resource_keys", "capabilities") else {}))
@@ -391,9 +397,11 @@ class DispatchStore:
                 for row in descendants:
                     approved.add(row["source_key"])
                     c.execute("UPDATE pipeline_job SET grandfathered=1 WHERE channel=? AND source_key=?", (channel, row["source_key"]))
-            cur = c.execute("UPDATE pipeline_job SET status='backlog_paused',hold_reason='cutover_overdue',updated_at=? WHERE channel=? AND scheduled_at<=? AND source_created_at<=? AND status IN ('queued','ready') AND grandfathered=0 AND external_intent=0", (self.now(), channel, cutoff, cutoff))
+            eligible = c.execute("SELECT id,scheduled_at,source_meta_json FROM pipeline_job WHERE channel=? AND source_created_at<=? AND status IN ('queued','ready') AND grandfathered=0 AND external_intent=0", (channel,cutoff)).fetchall()
+            paused = [row["id"] for row in eligible if stamp(json.loads(row["source_meta_json"]).get("cutover_due_at") or row["scheduled_at"]) <= cutoff]
+            c.executemany("UPDATE pipeline_job SET status='backlog_paused',hold_reason='cutover_overdue',updated_at=? WHERE id=?", [(self.now(), identity) for identity in paused])
             self._save_config(c, config, {}, "cutover_frozen")
-            return {"paused": cur.rowcount, "cutoff": cutoff}
+            return {"paused": len(paused), "cutoff": cutoff}
 
     def create_enrollment(self, label, actor):
         if not actor.get("is_admin"):
@@ -531,6 +539,7 @@ class DispatchStore:
                 token, generation = secrets.token_urlsafe(32), row["generation"] + 1
                 expires = stamp(self.clock() + dt.timedelta(seconds=LEASE_SECONDS))
                 c.execute("UPDATE pipeline_job SET status='running',node_id=?,worker_id=?,generation=?,claim_hash=?,lease_expires_at=?,started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,updated_at=?,error_code='',error_message='' WHERE id=?", (node_id, worker_id, generation, digest(token), expires, now, now, row["id"]))
+                c.execute("INSERT INTO pipeline_claim_history VALUES(?,?,?,?,?)", (row["id"], generation, node_id, worker_id, digest(token)))
                 if stage == "publish":
                     for resource in resources:
                         c.execute("INSERT INTO pipeline_resource VALUES(?,?,?,0,0)", (resource, row["id"], generation))
@@ -597,6 +606,42 @@ class DispatchStore:
     def validate_receipt_claim(self, claim):
         with contextlib.closing(self.connect()) as c:
             return _job(self._validate_claim(c, claim, allow_expired=True), True)
+
+    def historical_receipt_claim(self, claim):
+        with contextlib.closing(self.connect()) as c:
+            current = c.execute("SELECT * FROM pipeline_job WHERE id=?", (claim.get("job_id"),)).fetchone()
+            if not current or current["generation"] <= claim.get("generation", 0):
+                return None
+            saved = c.execute("SELECT * FROM pipeline_claim_history WHERE job_id=? AND generation=?", (current["id"], claim.get("generation"))).fetchone()
+            if not saved or saved["node_id"] != claim.get("node_id") or saved["worker_id"] != claim.get("worker_id") or not secrets.compare_digest(saved["claim_hash"], digest(claim.get("claim_token", ""))):
+                raise DispatchError("claim_conflict")
+            # Only appointment continuations can advance a completed external
+            # operation's generation; expired preparations cannot use this path.
+            if current["channel"] != "youtube" or current["stage"] != "publish" or not json.loads(current["payload_json"]).get("continuation"):
+                raise DispatchError("historical_receipt_requires_reconciliation")
+            return _job(current, True)
+
+    def rearm_native_schedule(self, job, verified):
+        continuation = verified.get("continuation")
+        proof = verified.get("canonical_receipt", {})
+        if not continuation or not verified.get("dispatch_completed") or not proof.get("publish_id") or continuation.get("video_id") != proof["publish_id"]:
+            raise DispatchError("canonical_continuation_required")
+        with self.transaction() as c:
+            row = c.execute("SELECT * FROM pipeline_job WHERE id=?", (job["id"],)).fetchone()
+            if not row or proof.get("source_key") != row["source_key"] or row["generation"] != job["generation"]:
+                raise DispatchError("canonical_identity_conflict")
+            if not row["generation"] or row["status"] != "completed" or row["channel"] != "youtube" or row["stage"] != "publish":
+                return {"accepted": True, "unchanged": True}
+            descriptor = json.loads(row["payload_json"])
+            previous = descriptor.get("continuation")
+            if previous and previous.get("video_id") != continuation["video_id"]:
+                raise DispatchError("continuation_identity_conflict")
+            descriptor["continuation"] = dict(continuation)
+            due = max(stamp(continuation["scheduled_at"]), stamp(self.clock()+dt.timedelta(seconds=30)))
+            c.execute("UPDATE pipeline_job SET status='ready',scheduled_at=?,payload_json=?,external_intent=0,started_at='',finished_at='',updated_at=? WHERE id=?", (due,dumps(descriptor),self.now(),row["id"]))
+            c.execute("DELETE FROM pipeline_resource WHERE job_id=?", (row["id"],))
+            self.event(c,row["id"],"scheduled_continuation_recovered",{"video_id":continuation["video_id"]},self.now())
+            return {"accepted": True, "scheduled_at": due}
 
     def delivered(self, claim, delivery_id, request):
         if not delivery_id:

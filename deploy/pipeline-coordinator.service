@@ -16,9 +16,12 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 # The authority needs read access to each existing channel ledger. It writes
-# only its own dispatch database; native sidecars own platform credentials.
+# its own dispatch database; native ledgers are opened with mode=ro/query_only.
+# SQLite 3.26 must create WAL shared-memory files even for read-only readers.
 ProtectSystem=strict
 ReadWritePaths=/mnt/data-disk/pipeline-dispatch
+ReadWritePaths=/var/lib/x-post-automation /mnt/data-disk/x-auto-post-publisher /mnt/data-disk/x-post-automation/youtube-shares
+ReadWritePaths=/mnt/data-disk/fb-auto-post-publisher /mnt/data-disk/tt-post-publisher /mnt/data-disk/tt-auto-post-publisher /root/drama_material_service/data
 
 [Install]
 WantedBy=multi-user.target

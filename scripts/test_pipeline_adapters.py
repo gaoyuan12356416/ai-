@@ -328,5 +328,13 @@ class YouTubeContinuationProjectionTests(unittest.TestCase):
         self.assertTrue(projected['observation_only'])
         self.assertEqual(projected['hold_reason'], 'canonical_legacy_workflow')
 
+    def test_future_visibility_is_not_old_backlog_but_upload_can_start_early(self):
+        self.row.update(status='queued', video_id='', video_state='pending', scheduled_at='2026-11-02T00:00:00Z')
+        offer = self.adapter.project(self.row)
+        self.assertEqual(offer['scheduled_at'], '2026-11-02T00:00:00Z')
+        self.assertEqual(offer['cutover_due_at'], '2026-11-03T00:00:00Z')
+        self.adapter.scan = lambda *args: [offer]
+        self.assertEqual(self.registry.apply_cutover('youtube', '2026-11-02T12:00:00Z')['paused_source_keys'], [])
+
 
 if __name__=='__main__':unittest.main()

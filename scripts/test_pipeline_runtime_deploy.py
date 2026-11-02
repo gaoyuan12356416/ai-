@@ -1,5 +1,6 @@
 """Local-only overlay rehearsal: no systemd or production access."""
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -100,6 +101,45 @@ class RuntimeOverlayTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'candidate_changed'):
                 deploy.apply(self.folder, 'x', self.controls)
         self.assertEqual(self.live.read_bytes(), self.before)
+
+    def test_app_symlink_always_uses_file_overlay_and_never_copies_ledger(self):
+        actual = self.root / 'data-disk-app'
+        self.runtime.rename(actual)
+        try:
+            self.runtime.symlink_to(actual, target_is_directory=True)
+        except OSError:
+            if os.name != 'nt':
+                actual.rename(self.runtime)
+                raise
+            # Windows junctions need no symlink privilege. Make the helper see
+            # the same is_symlink result as Linux while retaining a real link.
+            deploy.run(['cmd', '/c', 'mklink', '/J', self.runtime, actual])
+            self.addCleanup(os.rmdir, self.runtime)
+            original = Path.is_symlink
+            patcher = patch.object(Path, 'is_symlink', lambda value: value == self.runtime or original(value))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        private = actual / 'data/ledger.sqlite3'
+        private.parent.mkdir()
+        private.write_bytes(b'live ledger must remain here')
+        (self.source / 'static').mkdir()
+        for relative in deploy.APP_ADDITIONS:
+            (self.source / relative).write_text('monitor', encoding='utf-8')
+        deploy.run(['git', 'add', '.'], cwd=self.source)
+        self.git_commit('monitor assets')
+        self.commit = deploy.run(['git', 'rev-parse', 'HEAD'], cwd=self.source).decode().strip()
+        self.baseline.write_text(json.dumps({'app/' + self.relative: {'runtime_path': str(self.live), 'sha256': deploy.sha(self.live)}}), encoding='utf-8')
+        self.prepare()
+        candidate = self.folder / 'candidates/app'
+        manifest = json.loads((self.folder / 'manifest.json').read_text())
+        self.assertFalse(manifest['lanes']['app']['symlink'])
+        self.assertFalse((candidate / 'data').exists())
+        controls = {'app': self.controls['x']}
+        with patch.object(deploy, 'assert_stopped'):
+            deploy.apply(self.folder, 'app', controls)
+        self.assertTrue(self.runtime.is_symlink())
+        self.assertEqual(self.runtime.resolve(), actual.resolve())
+        self.assertEqual(private.read_bytes(), b'live ledger must remain here')
 
 
 if __name__ == '__main__':

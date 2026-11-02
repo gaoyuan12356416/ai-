@@ -50,7 +50,7 @@ def plan(spec):
     if root.name != "pipeline-dispatch" or state.name != "pipeline-dispatch" or state == root or not (str(state).startswith("/data/") or str(state).startswith("/mnt/")):
         raise ValueError("dedicated_paths_required")
     repo = spec.get("repository", "git@github.com:gaoyuan12356416/ai-.git")
-    if not re.fullmatch(r"git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", repo):
+    if not re.fullmatch(r"(?:git@github\.com:|https://github\.com/)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", repo):
         raise ValueError("github_repository_required")
     tunnel = spec.get("tunnel")
     if tunnel:

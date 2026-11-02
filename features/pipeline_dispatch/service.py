@@ -68,6 +68,8 @@ class Coordinator:
                 if proof.get("publish_id") and (result.get("published") or proof.get("video_published")):
                     self.store.record_publication(job["id"], proof, canonical_verified=True)
                 self.store.reconcile_native(job["id"], result)
+                if result.get("continuation"):
+                    self.store.rearm_native_schedule(job, result)
             except Exception:
                 pass
         if hasattr(self.registry, "export_cursors"):
@@ -130,6 +132,20 @@ class Coordinator:
             delivered = self.store.delivered(payload, delivery_id, payload)
             if delivered:
                 return delivered
+            if action in ("jobs/complete", "jobs/fail"):
+                historical = self.store.historical_receipt_claim(payload)
+                if historical:
+                    observed = self.registry.reconcile(historical)
+                    proof = observed.get("canonical_receipt", {})
+                    expected = historical["payload"]["continuation"]["video_id"]
+                    supplied = payload.get("result", {}).get("video_id")
+                    if (proof.get("source_key") != historical["source_key"] or proof.get("publish_id") != expected
+                            or (supplied and supplied != expected)
+                            or not (observed.get("published") or observed.get("dispatch_completed"))):
+                        raise DispatchError("historical_receipt_requires_reconciliation")
+                    # The original generation's terminal outcome is already in
+                    # the native ledger. ACK delivery without touching its successor.
+                    return self.store.save_delivery(payload, delivery_id, payload, {"accepted": True, "historical": True})
         def accept(response):
             return self.store.save_delivery(payload, delivery_id, payload, response)
         if action == "nodes/register":
@@ -236,7 +252,10 @@ class Coordinator:
             if verified.get("canonical_terminal"):
                 reconciled = self.registry.reconcile(job)
                 self.store.fail(payload, "canonical_receipt_reconciliation", unknown=True)
-                return accept(self.store.reconcile_native(job["id"], reconciled))
+                response = self.store.reconcile_native(job["id"], reconciled)
+                if reconciled.get("continuation"):
+                    self.store.rearm_schedule(payload, reconciled["continuation"], (delivery_id,payload,response))
+                return accept(response)
             return accept(self.store.fail(payload, payload.get("error_code", "execution_failed"), unknown=payload.get("unknown_outcome", False), canonical_no_write=verified.get("canonical_no_write", False)))
         raise DispatchError("not_found", status=404)
 
