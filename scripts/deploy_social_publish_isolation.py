@@ -146,10 +146,18 @@ def apply(folder, rollback=False):
         assert all(state(u) not in {'active', 'activating'} for u in RUNNERS), 'stop triggers and drain runners first'
     else:
         assert manifest['status'] == 'draining'
-    busy = {u: state(u, 'TasksCurrent') for u in SIDES if state(u) == 'active' and state(u, 'TasksCurrent') != '1'}
+    # X has one permanent YouTube-share worker in addition to its HTTP main.
+    idle_tasks = {'x-post-automation.service': '2', 'x-auto-post-service.service': '1', 'tt-auto-post-service.service': '1'}
+    busy = {u: state(u, 'TasksCurrent') for u in SIDES if state(u) == 'active' and state(u, 'TasksCurrent') != idle_tasks[u]}
     if busy:
         print(json.dumps({'status': 'draining', 'sidecar_tasks': busy}))
         return
+    shares = Path('/mnt/data-disk/x-post-automation/youtube-shares/ledger.sqlite3')
+    if shares.exists():
+        with contextlib.closing(sqlite3.connect(shares.as_uri() + '?mode=ro', uri=True)) as conn:
+            if conn.execute("SELECT COUNT(*) FROM youtube_share_item WHERE status IN ('queued','publishing')").fetchone()[0]:
+                print(json.dumps({'status': 'draining', 'youtube_share_work': True}))
+                return
     for unit in manifest['paused']:
         # SIGTERM plus SIGCONT makes the paused caller exit. The sidecar has
         # already returned its receipt, so this cannot interrupt an X write.
