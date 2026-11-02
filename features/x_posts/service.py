@@ -33,6 +33,7 @@ from features.x_accounts.language import (
     same_drama_language,
 )
 from features.x_posts.account_blockers import read_account_publish_blockers
+from features.x_posts.account_limits import MAX_PUBLISH_ACCOUNTS
 from features.x_posts import duration_policy
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES, MAX_UPLOAD_SEGMENTS, video_byte_limit
 
@@ -72,7 +73,7 @@ DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 SQLITE_QUERY_BATCH_SIZE = 900
 MAX_DAILY_BATCH_SIZE = 50
-MAX_SCHEDULE_ACCOUNTS = 50
+MAX_SCHEDULE_ACCOUNTS = MAX_PUBLISH_ACCOUNTS
 MAX_RANDOM_DAILY_COUNT = 24
 RANDOM_PUBLISH_MIN_GAP_MINUTES = 60
 MAX_DRAMA_POOL_BATCH_DELETE_SIZE = 100
@@ -5448,6 +5449,7 @@ class XPostStore:
         actor=None,
         eligible_account_ids=None,
         now=None,
+        skippable_account_ids=None,
     ):
         source_type = _schedule_source_type(source_type)
         if not isinstance(payload, dict):
@@ -5466,6 +5468,13 @@ class XPostStore:
             payload.get("account_ids"),
             allow_empty=not enabled,
         )
+        skippable = set(_schedule_account_ids(
+            list(skippable_account_ids or []), allow_empty=True,
+        ))
+        skipped_account_ids = [value for value in account_ids if value in skippable]
+        account_ids = [value for value in account_ids if value not in skippable]
+        if skipped_account_ids and not account_ids:
+            enabled = False
         publish_times = _schedule_publish_times(
             payload.get("publish_times"),
             allow_empty=True,
@@ -5773,7 +5782,10 @@ class XPostStore:
                     timestamp,
                 )
             conn.commit()
-        return self.get_schedule_config(source_type, now=current_time)
+        item = self.get_schedule_config(source_type, now=current_time)
+        if skipped_account_ids:
+            item["skipped_account_ids"] = skipped_account_ids
+        return item
 
     def due_schedule_slots(self, now=None, grace_seconds=90, limit=100):
         from features.pipeline_dispatch.x_planning import enabled as dispatch_enabled, cutoff as dispatch_cutoff

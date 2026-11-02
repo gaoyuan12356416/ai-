@@ -1,5 +1,6 @@
 """Local-only overlay rehearsal: no systemd or production access."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -54,6 +55,74 @@ class RuntimeOverlayTests(unittest.TestCase):
     def prepare(self):
         with patch.object(deploy, 'verify_source', return_value=self.commit):
             return deploy.prepare(self.source, self.commit, self.baseline, self.folder, base=self.base)
+
+    def production_file_base(self, *, unchanged=False, crlf=False):
+        # Another release changed the adjacent context used by our old-base
+        # patch. Its exact version becomes this file's explicitly pinned base.
+        deploy.run(['git', 'checkout', '--detach', self.base], cwd=self.source)
+        source_file = self.source / self.relative
+        production = source_file.read_bytes().replace(b'\r\n', b'\n').replace(b'value_9 = 9', b'value_9 = 900') + b'LIVE_ONLY = True\n'
+        source_file.write_bytes(production)
+        deploy.run(['git', 'add', '.'], cwd=self.source)
+        self.git_commit('independent production fix')
+        base = deploy.run(['git', 'rev-parse', 'HEAD'], cwd=self.source).decode().strip()
+        deploy.run(['git', 'update-ref', 'refs/remotes/origin/verified-production', base], cwd=self.source)
+        source_file.write_bytes(production if unchanged else production.replace(b'value_10 = 10\n', b'value_10 = 100\n'))
+        package = self.source / 'features/pipeline_dispatch'
+        package.mkdir(parents=True, exist_ok=True)
+        (package / '__init__.py').write_text('VERSION = 1\n', encoding='utf-8')
+        deploy.run(['git', 'add', '.'], cwd=self.source)
+        self.git_commit('integrated dispatch')
+        self.commit = deploy.run(['git', 'rev-parse', 'HEAD'], cwd=self.source).decode().strip()
+        self.live.write_bytes(production.replace(b'\n', b'\r\n') if crlf else production)
+        self.before = self.live.read_bytes()
+        record = {'runtime_path': str(self.live), 'sha256': deploy.sha(self.live),
+                  'patch_base': base, 'patch_base_sha256': hashlib.sha256(production).hexdigest()}
+        self.baseline.write_text(json.dumps({'x/' + self.relative: record}), encoding='utf-8')
+        return record
+
+    def test_verified_file_base_preserves_production_fix_and_records_identity(self):
+        record = self.production_file_base(crlf=True)
+        self.prepare()
+        candidate = self.folder / 'candidates/x' / self.relative
+        self.assertEqual(candidate.read_bytes(), (self.source / self.relative).read_bytes())
+        self.assertIn(b'value_9 = 900\n', candidate.read_bytes())
+        self.assertIn(b'value_10 = 100\n', candidate.read_bytes())
+        self.assertEqual(self.live.read_bytes(), self.before)
+        result = json.loads((self.folder / 'manifest.json').read_text())['lanes']['x']['files'][self.relative]
+        self.assertEqual(result['strategy'], 'verified_file_base_patch')
+        self.assertEqual(result['patch_base'], record['patch_base'])
+        self.assertEqual(result['patch_base_sha256'], record['patch_base_sha256'])
+        self.assertEqual(result['patch_base_match'], 'crlf_normalized')
+
+    def test_verified_unchanged_dependency_is_audited_without_reapplying_addition(self):
+        record = self.production_file_base(unchanged=True)
+        self.prepare()
+        manifest = json.loads((self.folder / 'manifest.json').read_text())['lanes']['x']
+        self.assertNotIn(self.relative, manifest['files'])
+        self.assertEqual(manifest['verified_unchanged'][self.relative]['patch_base'], record['patch_base'])
+        self.assertEqual(self.live.read_bytes(), self.before)
+
+    def test_per_file_base_rejects_live_bytes_even_when_raw_capture_was_updated(self):
+        record = self.production_file_base()
+        self.live.write_bytes(self.live.read_bytes() + b'UNREVIEWED = True\n')
+        record['sha256'] = deploy.sha(self.live)
+        self.baseline.write_text(json.dumps({'x/' + self.relative: record}), encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, 'patch_base_live_hash_mismatch'):
+            self.prepare()
+
+    def test_per_file_base_rejects_wrong_declared_source_hash(self):
+        record = self.production_file_base()
+        record['patch_base_sha256'] = '0' * 64
+        self.baseline.write_text(json.dumps({'x/' + self.relative: record}), encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, 'patch_base_source_hash_mismatch'):
+            self.prepare()
+
+    def test_per_file_base_rejects_unfetched_commit(self):
+        self.production_file_base()
+        deploy.run(['git', 'update-ref', '-d', 'refs/remotes/origin/verified-production'], cwd=self.source)
+        with self.assertRaisesRegex(RuntimeError, 'patch_base_not_in_fetched_origin'):
+            self.prepare()
 
     def test_patch_preserves_independent_live_changes_and_leaves_runtime_untouched(self):
         result = self.prepare()

@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
@@ -143,6 +144,36 @@ def verify_baseline(plan):
                 raise RuntimeError("runtime_drift:" + lane + "/" + relative)
 
 
+def verified_patch_base(source, relative, record, live):
+    """An explicit per-file migration, pinned to fetched GitHub source and bytes."""
+    revision = record.get("patch_base")
+    declared = record.get("patch_base_sha256")
+    if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
+        raise RuntimeError("patch_base_commit_invalid:" + relative)
+    if not isinstance(declared, str) or not re.fullmatch(r"[a-f0-9]{64}", declared):
+        raise RuntimeError("patch_base_sha256_required:" + relative)
+    resolved = run(["git", "rev-parse", revision + "^{commit}"], cwd=source).decode().strip()
+    refs = run(["git", "for-each-ref", "--contains", resolved, "--format=%(refname)", "refs/remotes/origin"], cwd=source)
+    if resolved != revision or not refs.strip():
+        raise RuntimeError("patch_base_not_in_fetched_origin:" + relative)
+    original = run(["git", "show", revision + ":" + relative], cwd=source)
+    if hashlib.sha256(original).hexdigest() != declared:
+        raise RuntimeError("patch_base_source_hash_mismatch:" + relative)
+    current = live.read_bytes()
+    if current == original:
+        matching = "raw"
+    else:
+        try:
+            current.decode("utf-8")
+            original.decode("utf-8")
+        except UnicodeDecodeError:
+            raise RuntimeError("patch_base_live_hash_mismatch:" + relative) from None
+        if b"\0" in current or current.replace(b"\r\n", b"\n") != original:
+            raise RuntimeError("patch_base_live_hash_mismatch:" + relative)
+        matching = "crlf_normalized"
+    return {"patch_base": revision, "patch_base_sha256": declared, "patch_base_match": matching}
+
+
 def prepare(source, commit, baseline_path, folder, *, base=BASE, lanes=None):
     source, folder = Path(source).resolve(), Path(folder).resolve()
     commit = verify_source(source, commit)
@@ -197,12 +228,18 @@ def prepare(source, commit, baseline_path, folder, *, base=BASE, lanes=None):
                 shutil.copy2(live, saved)
             target.parent.mkdir(parents=True, exist_ok=True)
             newline_normalized = False
+            patch_audit = {}
             if not existed or (lane == "app" and relative in FULL_COPY):
                 shutil.copy2(source_path, target)
                 strategy = "new" if not existed else "reviewed_full_copy"
             else:
-                patch = run(["git", "diff", "--binary", "--full-index", base, commit, "--", relative], cwd=source)
+                if baseline_record and "patch_base" in baseline_record:
+                    patch_audit = verified_patch_base(source, relative, baseline_record, live)
+                effective_base = patch_audit.get("patch_base", base)
+                patch = run(["git", "diff", "--binary", "--full-index", effective_base, commit, "--", relative], cwd=source)
                 if not patch:
+                    if patch_audit:
+                        item.setdefault("verified_unchanged", {})[relative] = dict(patch_audit, before_sha256=sha(live))
                     continue
                 if not release_swap:
                     shutil.copy2(live, target)
@@ -226,12 +263,12 @@ def prepare(source, commit, baseline_path, folder, *, base=BASE, lanes=None):
                     run([*git_apply, "--whitespace=nowarn", "-"], cwd=candidate, data=patch)
                 except RuntimeError:
                     raise RuntimeError("runtime_patch_conflict:" + lane + "/" + relative) from None
-                strategy = "base_to_commit_patch"
+                strategy = "verified_file_base_patch" if patch_audit else "base_to_commit_patch"
             if relative.endswith(".py"):
                 compile(target.read_bytes(), relative, "exec")
             item["files"][relative] = {"existed": existed, "before_sha256": sha(live) if existed else "",
                                        "after_sha256": sha(target), "strategy": strategy,
-                                       "candidate_crlf_normalized": newline_normalized}
+                                       "candidate_crlf_normalized": newline_normalized, **patch_audit}
         item["status"] = "prepared"
         save(folder, manifest)
     # Detect a runtime change that happened while candidate copies were made.
