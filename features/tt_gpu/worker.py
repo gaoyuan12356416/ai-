@@ -2596,6 +2596,9 @@ def build_phone_match_command(
         [
             "-pix_fmt",
             "yuv420p",
+            # Concat plus fps_mode=cfr does not select the output frame rate.
+            "-r",
+            "30",
             "-fps_mode",
             "cfr",
             "-g",

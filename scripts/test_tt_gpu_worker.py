@@ -3672,6 +3672,8 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertIn("afade=t=out", graph)
         self.assertIn("adelay=33867|33867", graph)
         self.assertEqual(command[command.index("-b:a") + 1], "128k")
+        self.assertEqual(command[command.index("-r") + 1], "30")
+        self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
         self.assertNotIn("1080", graph)
         self.assertNotIn("-f concat", " ".join(command))
 

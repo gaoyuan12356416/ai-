@@ -5,6 +5,7 @@ This never calls a social-platform publishing API or changes a service unit.
 Credentials come from private environment files, never command-line values.
 """
 import argparse
+from fractions import Fraction
 import hashlib
 import importlib
 import json
@@ -57,6 +58,31 @@ def encode_sample(ffmpeg, ffprobe, encoder, directory, *, cpu):
     return target
 
 
+def validate_outro_probe(value, expected_codec):
+    """Check the actual transition delivery contract, not just encoder availability."""
+    streams = value.get("streams", [])
+    video = next((row for row in streams if row.get("codec_type") == "video"), {})
+    audio = next((row for row in streams if row.get("codec_type") == "audio"), {})
+    try:
+        valid = (
+            video.get("codec_name") == expected_codec
+            and (video.get("width"), video.get("height")) == (720, 1280)
+            and video.get("pix_fmt") == "yuv420p"
+            and Fraction(str(video.get("r_frame_rate", "0"))) == 30
+            and Fraction(str(video.get("avg_frame_rate", "0"))) == 30
+            and 1 <= float(value.get("format", {}).get("duration", 0)) <= 2
+            and audio.get("codec_name") == "aac"
+            and audio.get("profile") == "LC"
+            and int(audio.get("sample_rate", 0)) == 48000
+            and audio.get("channels") == 2
+            and audio.get("channel_layout") == "stereo"
+        )
+    except (ValueError, TypeError, ZeroDivisionError):
+        valid = False
+    if not valid:
+        raise ValueError("outro_encode_probe_mismatch")
+
+
 def encode_outro_sample(config, directory, *, cpu):
     """Exercise the approved outro, font and actual transition locally only."""
     from features.tt_gpu.worker import build_outro_filter, build_normalize_command, build_phone_match_command
@@ -77,10 +103,8 @@ def encode_outro_sample(config, directory, *, cpu):
         subprocess.run(cpu_thread_command(command) if cpu else command, capture_output=True, check=True, timeout=120)
     result = subprocess.run([config.ffprobe_bin, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)], capture_output=True, text=True, check=True, timeout=30)
     value = json.loads(result.stdout)
-    video = next((row for row in value.get("streams", []) if row.get("codec_type") == "video"), {})
     expected_codec = "hevc" if config.video_encoder == "hevc_nvenc" else "h264"
-    if video.get("codec_name") != expected_codec or (video.get("width"), video.get("height")) != (720, 1280) or not 1 <= float(value.get("format", {}).get("duration", 0)) <= 2:
-        raise ValueError("outro_encode_probe_mismatch")
+    validate_outro_probe(value, expected_codec)
     return target
 
 

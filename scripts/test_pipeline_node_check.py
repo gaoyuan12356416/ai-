@@ -6,13 +6,58 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.pipeline_node_check import load_environment, validate_node, encode_sample
+from scripts.pipeline_node_check import load_environment, validate_node, encode_sample, validate_outro_probe
 from types import SimpleNamespace
 from scripts import test_tt_gpu_worker as tt_fixture
 from features.pipeline_dispatch.tt_profiles import select_config
 
 
 class NodeCheckTests(unittest.TestCase):
+    def outro_probe(self, codec='h264'):
+        return {'streams': [
+            {'codec_type': 'video', 'codec_name': codec, 'width': 720, 'height': 1280,
+             'pix_fmt': 'yuv420p', 'r_frame_rate': '30/1', 'avg_frame_rate': '30/1'},
+            {'codec_type': 'audio', 'codec_name': 'aac', 'profile': 'LC',
+             'sample_rate': '48000', 'channels': 2, 'channel_layout': 'stereo'},
+        ], 'format': {'duration': '1.100000'}}
+
+    def test_outro_delivery_accepts_both_actual_encoder_contracts(self):
+        for codec in ('h264', 'hevc'):
+            with self.subTest(codec=codec):
+                validate_outro_probe(self.outro_probe(codec), codec)
+
+    def test_outro_delivery_rejects_reproduced_25fps_and_unknown_rates(self):
+        for codec in ('h264', 'hevc'):
+            for rate in ('25/1', '30000/1001', '0/0', '', None):
+                with self.subTest(codec=codec, rate=rate):
+                    value = self.outro_probe(codec)
+                    value['streams'][0].update(r_frame_rate=rate, avg_frame_rate=rate)
+                    with self.assertRaisesRegex(ValueError, 'outro_encode_probe_mismatch'):
+                        validate_outro_probe(value, codec)
+        value = self.outro_probe()
+        value['streams'][0]['avg_frame_rate'] = '25/1'
+        with self.assertRaisesRegex(ValueError, 'outro_encode_probe_mismatch'):
+            validate_outro_probe(value, 'h264')
+
+    def test_outro_delivery_requires_aac_lc_48k_stereo(self):
+        for field, bad in (('codec_name', 'mp3'), ('profile', 'HE-AAC'),
+                           ('sample_rate', '44100'), ('channels', 1), ('channel_layout', 'mono')):
+            with self.subTest(field=field):
+                value = self.outro_probe()
+                value['streams'][1][field] = bad
+                with self.assertRaisesRegex(ValueError, 'outro_encode_probe_mismatch'):
+                    validate_outro_probe(value, 'h264')
+        value = self.outro_probe()
+        value['streams'].pop()
+        with self.assertRaisesRegex(ValueError, 'outro_encode_probe_mismatch'):
+            validate_outro_probe(value, 'h264')
+
+    def test_outro_delivery_rejects_non_delivery_pixel_format(self):
+        value = self.outro_probe()
+        value['streams'][0]['pix_fmt'] = 'yuv444p'
+        with self.assertRaisesRegex(ValueError, 'outro_encode_probe_mismatch'):
+            validate_outro_probe(value, 'h264')
+
     def test_new_outro_profile_has_targeted_real_pipeline_diagnostic(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
