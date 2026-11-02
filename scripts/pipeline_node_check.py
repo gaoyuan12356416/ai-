@@ -108,6 +108,22 @@ def encode_outro_sample(config, directory, *, cpu):
     return target
 
 
+def encode_x_repair_sample(processor, directory, *, cpu):
+    """Exercise X's actual repair command and its node-specific runner locally."""
+    from features.x_posts.media_repair import build_ffmpeg_command
+    config = processor.config
+    source = encode_sample(config.ffmpeg_bin, config.ffprobe_bin,
+                           "libx264" if cpu else "h264_nvenc", directory, cpu=cpu)
+    target = directory / "x-repair-diagnostic.mp4"
+    command = build_ffmpeg_command(config, source, target,
+        {"output_duration": 1, "canvas": (720, 1280), "has_audio": False, "trim_applied": False})
+    processor.runner(command, capture_output=True, check=True, timeout=120)
+    result = subprocess.run([config.ffprobe_bin, "-v", "error", "-show_streams", "-show_format",
+                             "-of", "json", str(target)], capture_output=True, text=True, check=True, timeout=30)
+    validate_outro_probe(json.loads(result.stdout), "h264")
+    return target
+
+
 def cos_roundtrip(config, source, node_id):
     """Private, uniquely named diagnostic object; never a platform submission."""
     from qcloud_cos import CosConfig, CosS3Client
@@ -189,10 +205,12 @@ def validate_node(config, *, encode=False, cos_check=False, encode_profiles=None
                     samples[sample_key] = encode_sample(binary, probe, encoder, directory, cpu=config["backend"] == "cpu")
                 if getattr(cfg, "media_mode", "") == "direct_outro":
                     samples[sample_key] = encode_outro_sample(cfg, directory, cpu=config["backend"] == "cpu")
+                if name == "x_repair":
+                    samples[sample_key] = encode_x_repair_sample(processor, directory, cpu=config["backend"] == "cpu")
                 if config["backend"] == "gpu" and (getattr(cfg, "compositor_backend", "") == "opencl_fused_contain_v1" or name == "x_random"):
                     from features.random_gpu.compositor import preflight
                     preflight(binary, encoder, directory)
-                checks.append({"executor": name, "profile": cfg.profile, "encode_verified": True, "outro_transition_verified": getattr(cfg, "media_mode", "") == "direct_outro", "encoder": encoder, "cpu_threads": 4 if config["backend"] == "cpu" else None})
+                checks.append({"executor": name, "profile": cfg.profile, "encode_verified": True, "outro_transition_verified": getattr(cfg, "media_mode", "") == "direct_outro", "repair_pipeline_verified": name == "x_repair", "encoder": encoder, "cpu_threads": 4 if config["backend"] == "cpu" else None})
                 if cos_check:
                     checks.append({"executor": name, "cos": cos_roundtrip(cfg, samples[sample_key], config["node_id"])})
     return {"ok": True, "node_id": config["node_id"], "inventory": inventory, "capabilities": executor.capabilities(), "checks": checks}

@@ -137,6 +137,10 @@ def software_command(command):
     for flag in ("-rc","-cq","-spatial-aq","-temporal-aq","-aq-strength","-b_ref_mode"):
         while flag in result:
             pos=result.index(flag); del result[pos:pos+2]
+    # NVENC's high-quality tune is not a libx264 tune; retain CPU-valid tunes.
+    if "-tune" in result:
+        pos=result.index("-tune")
+        if pos+1<len(result) and result[pos+1]=="hq": del result[pos:pos+2]
     if "-preset" in result: result[result.index("-preset")+1]="veryfast"
     result[1:1]=["-threads","4","-filter_complex_threads","4","-filter_threads","4"]
     # Input -threads does not constrain the output encoder in FFmpeg.

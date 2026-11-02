@@ -6,13 +6,48 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.pipeline_node_check import load_environment, validate_node, encode_sample, validate_outro_probe
+from scripts.pipeline_node_check import load_environment, validate_node, encode_sample, validate_outro_probe, encode_x_repair_sample
 from types import SimpleNamespace
 from scripts import test_tt_gpu_worker as tt_fixture
 from features.pipeline_dispatch.tt_profiles import select_config
 
 
 class NodeCheckTests(unittest.TestCase):
+    def test_node_enrollment_checks_complete_x_repair_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            config = SimpleNamespace(ffmpeg_bin='ffmpeg', ffprobe_bin='ffprobe', profile='x-h264-libx264-720-duration-policy-v1')
+            processor = SimpleNamespace(config=config)
+            executor = SimpleNamespace(_processor=lambda kind: processor, capabilities=lambda: ['prepare:x'])
+            env = {'PIPELINE_EXECUTORS': 'x_preflight,x_repair', 'PIPELINE_RENDER_PROFILES': config.profile}
+            with patch.dict(os.environ, env), patch('scripts.pipeline_node_check.hardware_inventory', return_value={}), patch('scripts.pipeline_node_check.NodeExecutors', return_value=executor) as factory, patch('scripts.pipeline_node_check.encode_sample', return_value=directory / 'basic.mp4'), patch('scripts.pipeline_node_check.encode_x_repair_sample', return_value=directory / 'repair.mp4') as repair:
+                factory.PREPARE = ('x_preflight', 'x_repair')
+                factory.PUBLISH = ()
+                report = validate_node({'state_root': temp, 'node_id': 'cpu-fixture', 'backend': 'cpu'}, encode=True)
+            self.assertEqual(repair.call_count, 1)
+            self.assertIs(repair.call_args.args[0], processor)
+            self.assertTrue(repair.call_args.kwargs['cpu'])
+            self.assertTrue(next(row for row in report['checks'] if row.get('encode_verified'))['repair_pipeline_verified'])
+
+    def test_x_repair_diagnostic_executes_the_complete_repair_runner(self):
+        from features.fb_gpu.prepare_worker import software_command
+        import json
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            config = SimpleNamespace(ffmpeg_bin='ffmpeg', ffprobe_bin='ffprobe', max_output_bytes=500_000_000)
+            calls = []
+            def actual_cpu_runner(command, **kwargs):
+                calls.append(software_command(command))
+            processor = SimpleNamespace(config=config, runner=actual_cpu_runner)
+            with patch('scripts.pipeline_node_check.encode_sample', return_value=directory / 'source.mp4'), patch('scripts.pipeline_node_check.subprocess.run', return_value=SimpleNamespace(stdout=json.dumps(self.outro_probe()))):
+                encode_x_repair_sample(processor, directory, cpu=True)
+            self.assertEqual(len(calls), 1)
+            command = calls[0]
+            self.assertIn('libx264', command)
+            self.assertNotIn('hq', command)
+            self.assertIn('yadif=', command[command.index('-vf') + 1])
+            self.assertIn('anullsrc=channel_layout=stereo:sample_rate=48000', command)
+
     def outro_probe(self, codec='h264'):
         return {'streams': [
             {'codec_type': 'video', 'codec_name': codec, 'width': 720, 'height': 1280,

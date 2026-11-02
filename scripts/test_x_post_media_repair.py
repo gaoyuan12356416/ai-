@@ -177,6 +177,22 @@ def make_request(source=b"source-video", **overrides):
 
 
 class MediaRepairTests(unittest.TestCase):
+    def test_cpu_conversion_removes_only_nvenc_hq_tune(self):
+        from features.fb_gpu.prepare_worker import software_command
+        gpu = ['ffmpeg', '-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', 'out.mp4']
+        cpu = software_command(gpu)
+        self.assertNotIn('-tune', cpu)
+        self.assertEqual(gpu[gpu.index('-tune') + 1], 'hq')
+        self.assertEqual(cpu[cpu.index('-c:v') + 1], 'libx264')
+        for tune in ('film', 'animation', 'zerolatency'):
+            with self.subTest(tune=tune):
+                command = list(gpu)
+                command[command.index('-tune') + 1] = tune
+                result = software_command(command)
+                self.assertEqual(result[result.index('-tune') + 1], tune)
+        native_cpu = ['ffmpeg', '-c:v', 'libx264', '-tune', 'film', 'out.mp4']
+        self.assertEqual(software_command(native_cpu), native_cpu)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
