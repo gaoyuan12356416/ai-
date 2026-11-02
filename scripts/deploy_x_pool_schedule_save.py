@@ -21,7 +21,8 @@ FILES = ["features/x_posts/account_limits.py", "features/x_posts/service.py",
          "features/x_accounts/oauth_service.py", "scripts/x_post_daily_runner.py",
          "static/x-post-material-pool.html"]
 TESTS = ["scripts/test_x_pool_schedule_save.py", "scripts/test_x_pool_schedule_save_ui.js",
-         "scripts/test_x_accounts.py", "scripts/test_x_post_daily.py"]
+         "scripts/test_x_accounts.py", "scripts/test_x_post_daily.py",
+         "scripts/test_x_post_multi_schedule_store.py", "scripts/test_x_post_schedule_runner.py"]
 PAUSABLE = ["x-post-schedule.service", "x-post-manual.service", "x-post-daily.service",
             "x-post-catchup.service"]
 
