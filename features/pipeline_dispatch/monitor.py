@@ -164,8 +164,8 @@ def enrollment_payload(raw, actor):
     if not isinstance(raw, dict) or set(raw) - {"label"}:
         raise MonitorError("invalid_request", "服务器登记参数无效")
     label = raw.get("label")
-    if not isinstance(label, str) or not 1 <= len(label.strip()) <= 120:
-        raise MonitorError("invalid_request", "请填写服务器名称（最多120字）")
+    if not isinstance(label, str) or not 1 <= len(label.strip()) <= 100:
+        raise MonitorError("invalid_request", "请填写服务器名称（最多100字）")
     return {"actor": actor, "label": label.strip()}
 
 

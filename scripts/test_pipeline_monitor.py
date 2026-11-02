@@ -68,9 +68,12 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.dispatch("/api/pipeline-monitor/capacity")[0], 200)
         self.assertEqual(self.calls[-1][2]["host_id"], "gpu-third")
         self.handler.command = "POST"
-        self.handler._read_json = lambda: {"label": "GPU Third"}
+        self.handler._read_json = lambda: {"label": "G" * 100}
         self.assertEqual(self.dispatch("/api/pipeline-monitor/nodes/enroll")[0], 200)
         self.assertEqual(self.calls[-1][1], "/internal/pipeline-monitor/enroll")
+        self.handler._read_json = lambda: {"label": "G" * 101}
+        self.assertEqual(self.dispatch("/api/pipeline-monitor/nodes/enroll")[0], 400)
+        self.assertEqual(len(self.calls), 2)
 
     def test_navigation_is_additive_and_idempotent(self):
         original = [{"key": "old", "items": [{"key": "old", "enabled": False}]}]
