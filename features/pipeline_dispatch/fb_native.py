@@ -5,8 +5,6 @@ checks and stores. It issues a single fresh Page credential only after a
 durable attempt intent; no Graph write or video render happens in this module.
 """
 from __future__ import annotations
-import hashlib
-import json
 import re
 import secrets
 import threading
@@ -14,6 +12,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 from .adapters import AdapterError, obj, artifact_from, public_descriptor
+from .native_common import claim_hash, dump, prepare_capabilities
 from features.fb_auto_posts.publisher import GraphResult
 from features.fb_auto_posts.gpu import PROFILE
 from features.fb_auto_posts.core import utc_iso
@@ -22,28 +21,6 @@ from features.fb_video_publish.links import short_url, validate_long_url
 
 CPU_PROFILE = "fb-post-random-overlay-libx264-720x1280-v1"
 _INITIALIZE_LOCK = threading.Lock()
-
-def dump(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def claim_hash(claim):
-    token = str(claim.get("claim_token") or "")
-    if len(token) < 16:
-        raise AdapterError("dispatch_claim_invalid")
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
-def prepare_capabilities(channel, profile, backend, job):
-    required = ["prepare:" + channel, "backend:" + backend, "profile:" + profile]
-    if "executor_capabilities" in job and (channel == "fb" or "random-overlay" in profile):
-        catalogs = sorted({value for value in job["executor_capabilities"]
-                           if isinstance(value, str) and re.fullmatch("catalog:" + channel + ":[a-f0-9]{64}", value)})
-        if len(catalogs) != 1:
-            raise AdapterError("canonical_render_catalog_unavailable")
-        required.extend(catalogs)
-    return required
-
 
 class FBNativeBridge:
     def __init__(self, runtime):

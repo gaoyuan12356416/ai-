@@ -15,7 +15,7 @@ import threading
 from urllib.parse import urlsplit
 
 from .adapters import AdapterError, ClosingConnection, artifact_from, obj, public_descriptor
-from .fb_native import claim_hash, dump, prepare_capabilities
+from .native_common import claim_hash, dump, prepare_capabilities
 
 _INIT_LOCK = threading.Lock()
 
