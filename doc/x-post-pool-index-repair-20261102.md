@@ -20,3 +20,13 @@
 ## 回滚
 
 回滚代码只恢复备份的两个service.py，不覆盖任何SQLite业务记录。索引是非唯一的可逆性能结构，可保留；确需删除时，在有界数据库事务内执行 `DROP INDEX IF EXISTS idx_x_post_queue_material_lookup`，会恢复旧查询性能，不建议在繁忙期执行。不得恢复旧数据库覆盖已发生的素材入池、发布记录或Token更新。无需为本索引改变定时器、发布开关、账号状态或重启上传进程。
+
+
+## X Post素材池读取性能（2026-11-02）
+
+- 页面由当前应用代码验证为 `/x-post-material-pool.html`，列表及添加接口为 `/api/admin/x-posts/material-pool`，主API经loopback X侧车读取同一发布账本。
+- 素材池关联发布队列使用 `pool_item_id OR material_key`。旧索引 `idx_x_post_queue_material_key` 带 `WHERE material_key<>''`，原关联条件不能使用此部分索引，必须同时保留完整的非唯一索引 `idx_x_post_queue_material_lookup ON x_post_queue(material_key)`。不要在清理“重复索引”时删掉该完整索引。
+- 修复提交 `a28d8bbaee71681af50a289f15bc007081381582`，GitHub分支 `codex/x-pool-query-lockfix-20261102`。`ensure_storage`已幂等创建完整索引；冻结副本查询23.134秒降至0.029秒，首屏字段、分页和汇总完全一致。
+- 完整索引可在线建立，现有连接会重新规划查询；不要为此强制重启正在上传/创建帖子的X侧车。线上建索引事务必须有界，先备份，再检查索引列、非唯一及非部分属性，并验证零业务DML。
+- 不修改素材、队列、账号/Token、发布状态、去重保护或定时器。修复/回滚不恢复旧SQLite覆盖新业务事实。
+- 生产副本包含当前运行叠加功能，必须以当前release为底只替换核实过的service.py；其他文件不得随旧基线整包覆盖。部署文件、备份及回滚细节记录在本次COS报告和仓库 `doc/x-post-pool-index-repair-20261102.md`。
