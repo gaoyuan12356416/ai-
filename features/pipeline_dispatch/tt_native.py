@@ -12,6 +12,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import weakref
 from dataclasses import is_dataclass, replace
 from urllib.parse import urlsplit
 
@@ -106,7 +107,8 @@ class TTNativeBridge:
     def __init__(self, service, *, automatic=False):
         self.service, self.automatic = service, automatic
         self.store = service.store
-        self._lock = threading.RLock()
+        self._source_locks = weakref.WeakValueDictionary()
+        self._source_locks_guard = threading.Lock()
         with self.connect() as c:
             c.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_tt_claim(source_key TEXT,stage TEXT,generation INTEGER,
@@ -129,6 +131,18 @@ class TTNativeBridge:
                 or job.get("source_key") != "tt:%s:%s" % (job.get("family"), job.get("source_id"))):
             raise AdapterError("tt_dispatch_source_invalid")
         return job["source_key"], job["stage"], int(job["generation"])
+
+    def _source_lock(self, job):
+        # Active holders and waiters retain the lock; unused source entries
+        # disappear automatically instead of growing with the task history.
+        # Stage/generation share one source fence, including late callbacks.
+        source_key = self._key(job)[0]
+        with self._source_locks_guard:
+            lock = self._source_locks.get(source_key)
+            if lock is None:
+                lock = threading.RLock()
+                self._source_locks[source_key] = lock
+            return lock
 
     def _stored(self, job, claim):
         with self.connect() as c:
@@ -230,7 +244,7 @@ class TTNativeBridge:
 
     def reserve(self, job, claim):
         key = self._key(job)
-        with self._lock:
+        with self._source_lock(job):
             with self.connect() as c:
                 existing = c.execute("SELECT 1 FROM pipeline_tt_claim WHERE source_key=? AND stage=? AND generation=?", key).fetchone()
                 frozen = c.execute("SELECT * FROM pipeline_tt_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone() if job["stage"] == "prepare" else None
@@ -369,7 +383,7 @@ class TTNativeBridge:
             return descriptor
 
     def begin_operation(self, job, claim, operation):
-        with self._lock:
+        with self._source_lock(job):
             stored, descriptor = self._stored(job, claim)
             if job["stage"] != "publish":
                 raise AdapterError("tt_operation_invalid")
@@ -409,7 +423,7 @@ class TTNativeBridge:
             return {"canonical_intent": {"operation_id": operation_id, "source_key": job["source_key"]}, "credentials": {"access_token": token}}
 
     def checkpoint(self, job, claim, phase, receipt):
-        with self._lock:
+        with self._source_lock(job):
             stored, _ = self._stored(job, claim)
             with self.connect() as c:
                 operation = c.execute("SELECT * FROM pipeline_tt_operation WHERE source_key=? AND stage=? AND generation=? ORDER BY rowid DESC LIMIT 1", self._key(job)).fetchone()
@@ -473,7 +487,7 @@ class TTNativeBridge:
         return result
 
     def complete(self, job, receipt, claim):
-        with self._lock:
+        with self._source_lock(job):
             stored, descriptor = self._stored(job, claim)
             if stored["receipt_json"]:
                 if obj(stored["receipt_json"]) != receipt:
@@ -537,7 +551,7 @@ class TTNativeBridge:
             self.service._sync_recurring_queue_if_present(result)
 
     def fail(self, job, claim, receipt):
-        with self._lock:
+        with self._source_lock(job):
             stored, _ = self._stored(job, claim)
             current = self.reconcile(job)
             if current["status"] == "published" and current.get("publish_id"):
@@ -555,8 +569,8 @@ class TTNativeBridge:
 
     def pause(self, job, cutoff):
         from .canonical_holds import pause_row, SCHEMA
-        self._key(dict(job, stage=job.get("stage", "prepare"), generation=job.get("generation", 0)))
-        with self._lock, self.connect() as conn:
+        job = dict(job, stage=job.get("stage", "prepare"), generation=job.get("generation", 0))
+        with self._source_lock(job), self.connect() as conn:
             conn.execute(SCHEMA)
             conn.execute("BEGIN IMMEDIATE")
             table, allowed = ("tt_auto_task", {"pending", "reserved", "ready", "retry_wait"}) if self.automatic else (
