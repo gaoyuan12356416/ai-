@@ -1,0 +1,26 @@
+[Unit]
+Description=Distributed preparation and publication pull workers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pipeline-worker
+Group=pipeline-worker
+WorkingDirectory=/opt/pipeline-dispatch/current
+EnvironmentFile=-/etc/pipeline-node.sources.env
+EnvironmentFile=/etc/pipeline-node.env
+ExecStart=/opt/pipeline-dispatch/venv/bin/python /opt/pipeline-dispatch/current/scripts/pipeline_worker.py
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=infinity
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=-/mnt/data-disk/pipeline-dispatch -/data/pipeline-dispatch
+
+[Install]
+WantedBy=multi-user.target

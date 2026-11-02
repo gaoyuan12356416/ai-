@@ -202,5 +202,5 @@ def task_policy(conn, task):
     ids = [x[0] for x in conn.execute("SELECT id FROM fb_auto_task WHERE run_id=? ORDER BY id", (task["run_id"],))]
     if len(ids) != len(entries) or ids[seq - 1] != task["id"]:
         raise BatchError("Batch task set or order changed")
-    earlier = conn.execute("SELECT 1 FROM fb_auto_task WHERE run_id=? AND id<? AND status IN ('planned','preparing','ready','running') LIMIT 1", (task["run_id"], task["id"])).fetchone()
+    earlier = conn.execute("SELECT 1 FROM fb_auto_task WHERE run_id=? AND id<? AND status IN ('planned','preparing','ready','running') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||fb_auto_task.id) LIMIT 1", (task["run_id"], task["id"])).fetchone()
     return {"waive_drama_cooldown": manifest.get("waive_drama_cooldown") is True, "waiting_for_previous": bool(earlier)}

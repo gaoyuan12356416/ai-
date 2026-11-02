@@ -249,6 +249,8 @@ class AutoPostExecutor:
         now_fn=lambda: datetime.now(UTC),
         lease_seconds: int = 10800,
         max_concurrent_tasks: int = 1,
+        dispatch_enabled: bool = False,
+        dispatch_cutoff=None,
     ):
         if not callable(candidate_loader) or not callable(media_preflight):
             raise AutoPostExecutionError(
@@ -265,6 +267,8 @@ class AutoPostExecutor:
         self.now_fn = now_fn
         self.lease_seconds = int(lease_seconds)
         self.max_concurrent_tasks = int(max_concurrent_tasks)
+        self.dispatch_enabled = bool(dispatch_enabled)
+        self.dispatch_cutoff = dispatch_cutoff
         self._execute_slots = threading.BoundedSemaphore(self.max_concurrent_tasks)
         if not 120 <= self.lease_seconds <= 10800 or not 1 <= self.max_concurrent_tasks <= 4:
             raise AutoPostExecutionError(
@@ -443,18 +447,23 @@ class AutoPostExecutor:
         candidate["body_template"] = str(run.get("body_template") or task.body_template)
         candidate["source_type"] = "material"
         candidate["source_date"] = str(run.get("source_date") or "")
-        planned = dict(self.media_preflight(task, account, candidate))
+        if self.dispatch_enabled:
+            from features.pipeline_dispatch.x_planning import deferred_candidate
+            planned = deferred_candidate(account, candidate, 1, max(1, int(self._now().timestamp())))
+        else:
+            planned = dict(self.media_preflight(task, account, candidate))
         try:
             duration = float(planned.get("preflight_duration") or 0)
         except (TypeError, ValueError, OverflowError):
             duration = 0
-        if not 0 < duration <= AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS:
+        if not self.dispatch_enabled and not 0 < duration <= AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS:
             raise AutoPostExecutionError(
                 "x_auto_duration_out_of_range",
                 "automatic X video duration exceeds the supported upload limit",
                 409,
             )
-        self.bridge.storage_preflight()
+        if not self.dispatch_enabled:
+            self.bridge.storage_preflight()
         try:
             result = self.bridge.create_plan(int(run["id"]), planned)
         except XPostBridgeError as exc:
@@ -758,6 +767,17 @@ class AutoPostExecutor:
             task, self.bridge.query_run(task.execution_run_id)
         )
         queue = self._run_queue(run, task.execution_queue_id)
+        if self.dispatch_enabled and queue is not None:
+            # Distributed workers own preparation and publication. Read their
+            # canonical receipts without invoking legacy recover/publish paths.
+            if _queue_status(queue) in {"queued", "reserved", "preparing", "publishing", "waiting_relay"} and not queue.get("unknown_outcome"):
+                return self.store.transition_task(
+                    task.id, "retry_wait", expected_statuses={task.status}, claim_token=claim_token,
+                    updates={"claim_phase": "reconcile", "claim_worker": "", "claim_token": "",
+                             "lease_expires_at_utc": "", "next_attempt_at_utc": self._now() + timedelta(seconds=30),
+                             "error_code": "", "error_message": ""},
+                    event_type="task_x_dispatch_observed")
+            return self._terminal_from_run(task, run, claim_token)
         if queue is None:
             if str(run.get("status") or "") != "failed_preflight":
                 try:
@@ -1004,6 +1024,8 @@ class AutoPostExecutor:
                 lease_seconds=self.lease_seconds,
                 now=self._now(),
                 reconcile_only=reconcile_only,
+                publish_delegated=self.dispatch_enabled,
+                planning_cutoff=self.dispatch_cutoff if self.dispatch_enabled else None,
             )
             if claim is None:
                 result = {

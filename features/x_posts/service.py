@@ -5776,6 +5776,9 @@ class XPostStore:
         return self.get_schedule_config(source_type, now=current_time)
 
     def due_schedule_slots(self, now=None, grace_seconds=90, limit=100):
+        from features.pipeline_dispatch.x_planning import enabled as dispatch_enabled, cutoff as dispatch_cutoff
+        delegated = dispatch_enabled()
+        planning_boundary = dispatch_cutoff() if delegated else None
         current = now or datetime.now(BEIJING_TZ)
         if current.tzinfo is None:
             current = current.replace(tzinfo=BEIJING_TZ)
@@ -5866,6 +5869,8 @@ class XPostStore:
                 for row in random_plan_rows
             }
             for run_date, publish_time in slots:
+                if planning_boundary and datetime.fromisoformat(run_date + "T" + publish_time + ":00").replace(tzinfo=BEIJING_TZ) <= planning_boundary:
+                    continue
                 for row in configs:
                     config = self._schedule_config_item(row, now=current)
                     schedule_mode = config["schedule_mode"]
@@ -5941,7 +5946,7 @@ class XPostStore:
                 unresolved_drama_route_sql,
                 resolved_pre_attempt_drama_route_sql,
             )
-            stale_rows = conn.execute(
+            stale_rows = [] if delegated else conn.execute(
                 "SELECT id,run_date,publish_time FROM x_post_schedule_run "
                 "WHERE run_date<? AND status NOT IN (?,?,?,?,?) "
                 "AND NOT (status='claimed' AND queued_count=0) "
@@ -6022,6 +6027,16 @@ class XPostStore:
                     "(run_date=? AND publish_time=?)"
                 )
                 scope_values.extend((run_date, publish_time))
+            planning_sql = ""
+            planning_values = []
+            if delegated:
+                # The planner never resumes or repairs a queue owned by a
+                # live legacy publisher or a distributed node.
+                planning_sql = " AND NOT EXISTS (SELECT 1 FROM x_post_queue pq WHERE pq.schedule_run_id=x_post_schedule_run.id) "
+                if planning_boundary:
+                    boundary = planning_boundary.isoformat(timespec="seconds").replace("+00:00", "Z")
+                    planning_sql += " AND (created_at>? OR datetime(run_date||'T'||publish_time||':00+08:00')>datetime(?)) "
+                    planning_values = [boundary, boundary]
             scoped_runs_sql = (
                 "SELECT *,CASE WHEN %s THEN 1 ELSE 0 END AS "
                 "unresolved_drama_route,CASE WHEN %s THEN 1 ELSE 0 END AS "
@@ -6033,7 +6048,6 @@ class XPostStore:
                 "x_post_schedule_bound_drama_failed_media_recovery_audit a "
                 "WHERE a.schedule_run_id=x_post_schedule_run.id)) OR %s) "
                 "AND (status NOT IN (?,?,?,?,?) OR (status='needs_review' AND %s)) "
-                "ORDER BY run_date,publish_time,source_type,id"
                 % (
                     unresolved_drama_route_sql,
                     resolved_pre_attempt_drama_route_sql,
@@ -6042,10 +6056,10 @@ class XPostStore:
                     resumable_drama_route_sql,
                     resumable_queues,
                 )
-            )
+            ) + planning_sql + "ORDER BY run_date,publish_time,source_type,id"
             rows = conn.execute(
                 scoped_runs_sql,
-                (*scope_values, *terminal_status_values),
+                (*scope_values, *terminal_status_values, *planning_values),
             ).fetchall()
             rows = sorted(
                 rows,
@@ -9650,6 +9664,15 @@ class XPostStore:
     ):
         trigger_source = _manual_trigger_source(trigger_source)
         timestamp = utc_now()
+        from features.pipeline_dispatch.x_planning import enabled as dispatch_enabled, cutoff as dispatch_cutoff
+        planning_sql, planning_values = "", []
+        if dispatch_enabled():
+            planning_sql = " AND NOT EXISTS (SELECT 1 FROM x_post_queue pq WHERE pq.manual_run_id=x_post_manual_run.id) "
+            boundary = dispatch_cutoff()
+            if boundary:
+                boundary = boundary.isoformat(timespec="seconds").replace("+00:00", "Z")
+                planning_sql += " AND (created_at>? OR (publish_mode='scheduled' AND scheduled_at>?)) "
+                planning_values = [boundary, boundary]
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -9670,10 +9693,11 @@ class XPostStore:
                 "AND (sr.status IN ('needs_review','stopped') OR sr.unknown_count>0 "
                 "OR COALESCE(sl.unknown_outcome,0)=1 "
                 "OR sl.status IN ('post_creating','repost_creating'))) "
+                + planning_sql +
                 "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
                 "CASE WHEN publish_mode='scheduled' THEN scheduled_at "
                 "ELSE created_at END,created_at,id LIMIT 1",
-                (trigger_source, timestamp),
+                (trigger_source, timestamp, *planning_values),
             ).fetchone()
             if not row:
                 conn.commit()
@@ -10110,9 +10134,11 @@ class XPostStore:
                 require_compliance=True,
                 duration_policy_version=duration_policy.version(frozen),
                 copy_contract_version=int(frozen.get("copy_contract_version", 1)),
+                allow_deferred_media=os.environ.get("PIPELINE_X_DISPATCH_ENABLED") == "1",
             )
             if (
                 trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE
+                and not (os.environ.get("PIPELINE_X_DISPATCH_ENABLED") == "1" and values["media_validation_mode"] == MEDIA_VALIDATION_DEFERRED)
                 and (
                     float(values["preflight_duration"]) <= 0
                     or float(values["preflight_duration"])

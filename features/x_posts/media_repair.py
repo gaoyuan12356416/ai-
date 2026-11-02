@@ -1137,7 +1137,7 @@ class CosObjectStore:
             and secrets.compare_digest(remote_sha.strip().lower(), expected_sha256)
         )
 
-    def upload(self, key, local_path, sha256_value, size):
+    def upload(self, key, local_path, sha256_value, size, content_type="video/mp4"):
         existing = self.head(key)
         if existing is not None:
             if self.validate_head(existing, size, sha256_value):
@@ -1158,7 +1158,7 @@ class CosObjectStore:
                     MAXThread=self.config.cos_max_threads,
                     EnableMD5=True,
                     ACL="public-read",
-                    ContentType="video/mp4",
+                    ContentType=content_type,
                     Metadata={
                         "x-cos-meta-sha256": sha256_value,
                         "x-cos-meta-profile": self.config.profile,

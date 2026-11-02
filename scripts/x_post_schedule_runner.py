@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.pipeline_dispatch.x_planning import enabled as pipeline_dispatch_enabled, deferred_candidate, queue_handoff
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_posts.drama_selector import (  # noqa: E402
     DRAMAWAVE_APP_ID,
@@ -1457,7 +1458,8 @@ def _preflight_material_candidates(
     }
     relay_cache = {}
     work_root = Path(config.work_dir)
-    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
+    delegated = pipeline_dispatch_enabled()
+    if not delegated and (not work_root.exists() or not work_root.is_dir() or work_root.is_symlink()):
         raise ScheduleRunError(
             "schedule media work directory is unavailable",
             "x_post_storage_unavailable",
@@ -1491,10 +1493,10 @@ def _preflight_material_candidates(
             ) from None
         return relay_options[0]
 
-    with tempfile.TemporaryDirectory(
+    with (contextlib.nullcontext(None) if delegated else tempfile.TemporaryDirectory(
         prefix="x-post-schedule-material-", dir=str(work_root)
-    ) as temporary:
-        root = Path(temporary)
+    )) as temporary:
+        root = Path(temporary) if temporary else work_root
         for candidate in candidates:
             if callable(heartbeat):
                 heartbeat()
@@ -1576,7 +1578,7 @@ def _preflight_material_candidates(
                     relay = relay_for(language, target, material_id)
                     route_account = relay
                 try:
-                    item = _preflight_candidate(
+                    item = deferred_candidate(route_account, candidate, rank, timestamp, duration_hint=duration) if delegated else _preflight_candidate(
                         config,
                         candidate,
                         route_account,
@@ -1618,7 +1620,7 @@ def _preflight_material_candidates(
                     )
                 item.update(
                     {
-                        "media_validation_mode": "preflight",
+                        "media_validation_mode": "deferred" if delegated else "preflight",
                         "delivery_mode": "direct",
                         "relay_account_id": 0,
                         "relay_account_username": "",
@@ -2157,6 +2159,8 @@ def _heartbeat_best_effort(sidecar, identity, *, plan_attempt=False):
 
 
 def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
+    if pipeline_dispatch_enabled():
+        return queue_handoff(identity, queues, resumed=resumed)
     from scripts.x_post_dispatch import dispatch_queues
 
     def publish(queue):
@@ -2314,9 +2318,10 @@ def execute_schedule_tick(
             try:
                 _heartbeat_best_effort(sidecar, identity)
                 # Account publishers run concurrently; reserve their bounded media slots.
-                sidecar.preflight_storage(
-                    batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
-                )
+                if not pipeline_dispatch_enabled():
+                    sidecar.preflight_storage(
+                        batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
+                    )
                 skipped_accounts = []
                 accounts = _verify_accounts(
                     sidecar, identity["account_ids"], skip_blocked=True,
@@ -2384,9 +2389,10 @@ def execute_schedule_tick(
                     # deleting prepared candidates. Each repeat removes an account.
                     excluded_ids = {item["account_id"] for item in skipped_accounts}
                     accounts = [item for item in accounts if item["id"] not in excluded_ids]
-                sidecar.preflight_storage(
-                    batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
-                )
+                if not pipeline_dispatch_enabled():
+                    sidecar.preflight_storage(
+                        batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
+                    )
                 _heartbeat_best_effort(sidecar, identity)
             except Exception as exc:
                 audit = _record_schedule_failure_best_effort(
@@ -2474,7 +2480,7 @@ def execute_schedule_tick(
             batches.extend(result)
 
     return {
-        "status": (
+        "status": "dispatch_queued" if batches and all(item["status"] == "dispatch_queued" for item in batches) else (
             "stopped"
             if any(item["status"] == "stopped" for item in batches)
             else (
@@ -2517,6 +2523,7 @@ def main():
             "no_due",
             "skipped_before_start_date",
             "skipped_locked",
+            "dispatch_queued",
         } else 1
     except (
         CandidateSelectionError,

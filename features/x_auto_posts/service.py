@@ -1265,6 +1265,7 @@ def build_service_from_env(
             )
         return dict(planned[0])
 
+    from features.pipeline_dispatch.x_planning import enabled as dispatch_enabled, cutoff as dispatch_cutoff
     executor = AutoPostExecutor(
         store,
         selector,
@@ -1274,6 +1275,8 @@ def build_service_from_env(
         gates=AutoLiveGates.from_env(source),
         lease_seconds=lease_seconds,
         max_concurrent_tasks=_env_int(source, "X_AUTO_POST_WORKER_COUNT", 1, 1, 4),
+        dispatch_enabled=dispatch_enabled(source),
+        dispatch_cutoff=dispatch_cutoff(source),
     )
     return XAutoPostService(
         store,
@@ -1388,6 +1391,16 @@ class XAutoPostRequestHandler(BaseHTTPRequestHandler):
                 "message": "access denied",
             }
         query = parse_qs(parsed.query, keep_blank_values=True)
+        if self.command == "POST" and path == "/internal/pipeline-dispatch/x-auto/pause":
+            if os.environ.get("PIPELINE_X_CANONICAL_BRIDGE_ENABLED") != "1":
+                raise AutoPostServiceError("pipeline_x_bridge_disabled", "pipeline control is disabled", 403)
+            payload = self._body()
+            job = payload.get("job", {})
+            identity = _positive_id(job.get("source_id"), "task ID") if isinstance(job, dict) else 0
+            if (not identity or job.get("channel") != "x" or job.get("family") != "auto" or job.get("stage") != "prepare"
+                or job.get("source_key") != "x:auto:" + str(identity)):
+                raise AutoPostServiceError("pipeline_x_auto_identity_invalid", "task identity is invalid", 400)
+            return 200, service.store.pause_pipeline_task(identity, payload.get("cutoff"))
         if self.command == "GET" and path == X_AUTO_ADMIN_PREFIX + "/accounts":
             return 200, service.accounts()
         match = re.fullmatch(

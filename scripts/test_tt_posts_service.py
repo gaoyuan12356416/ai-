@@ -4652,7 +4652,7 @@ class MaterialResolverTests(unittest.TestCase):
         violations.assert_called_once_with("9001")
         tags.assert_called_once_with("9001")
         mapping.assert_called_once_with("ABCD1234", "English")
-        deploy_time.assert_called_once_with("ABCD1234", "English")
+        deploy_time.assert_called_once_with("ABCD1234", "English", canonical_language=False)
 
     def test_resolver_returns_specific_base_eligibility_errors(self):
         cases = (

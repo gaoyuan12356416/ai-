@@ -1,0 +1,21 @@
+{
+  "port": 18846,
+  "db_path": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+  "paths": {
+    "x": "/var/lib/x-post-automation/accounts.sqlite3",
+    "x_auto": "/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3",
+    "x_share": "/mnt/data-disk/x-post-automation/youtube-shares/ledger.sqlite3",
+    "fb": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
+    "tt": "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3",
+    "tt_auto": "/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3",
+    "youtube": "/root/drama_material_service/data/drama_material_jobs.sqlite3"
+  },
+  "drivers": [
+    {"channel": "x", "families": ["auto"], "port": 18833, "prefix": "/internal/pipeline-dispatch/x-auto", "token_env": "X_AUTO_POST_INTERNAL_TOKEN", "control_only": true},
+    {"channel": "x", "families": ["queue", "youtube_share"], "port": 8810, "prefix": "/internal/pipeline-dispatch/x", "token_env": "PIPELINE_X_CANONICAL_TOKEN"},
+    {"channel": "fb", "families": ["auto", "video"], "port": 18835, "prefix": "/internal/pipeline-dispatch/fb", "token_env": "FB_AUTO_POST_INTERNAL_TOKEN"},
+    {"channel": "tt", "families": ["queue", "intake"], "port": 18829, "prefix": "/internal/pipeline-dispatch/tt", "token_env": "TT_POST_INTERNAL_TOKEN"},
+    {"channel": "tt", "families": ["auto"], "port": 18831, "prefix": "/internal/pipeline-dispatch/tt", "token_env": "TT_AUTO_POST_INTERNAL_TOKEN"},
+    {"channel": "youtube", "families": ["preparation", "publish"], "port": 8787, "prefix": "/internal/pipeline-dispatch/youtube", "token_env": "PIPELINE_YOUTUBE_CANONICAL_TOKEN"}
+  ]
+}

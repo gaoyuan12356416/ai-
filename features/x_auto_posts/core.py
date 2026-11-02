@@ -547,6 +547,10 @@ def ensure_storage(db_path: Any) -> None:
                 """
                 BEGIN IMMEDIATE;
 
+                CREATE TABLE IF NOT EXISTS pipeline_canonical_hold (
+                    source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS x_auto_template (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -2162,6 +2166,30 @@ class XAutoPostStore:
             },
         }
 
+    def pause_pipeline_task(self, task_id: Any, cutoff: Any) -> Dict[str, Any]:
+        """Freeze an exact untouched planner task without releasing its media."""
+        identity = _positive_int(task_id, "task id")
+        boundary = _utc_iso(cutoff)
+        key = "x:auto:" + str(identity)
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM x_auto_task WHERE id=?", (identity,)).fetchone()
+            if (not row or row["status"] not in {"pending", "reserved", "retry_wait"}
+                or row["execution_queue_id"] or row["execution_run_id"] or row["execution_log_id"]
+                or row["preparation_attempt_count"] or row["publish_attempt_count"]
+                or row["unknown_outcome"] or row["publish_id"]
+                or (row["claim_token"] and row["lease_expires_at_utc"] and row["lease_expires_at_utc"] > self._now_iso())
+                or row["scheduled_at_utc"] > boundary or row["created_at"] > boundary):
+                raise XAutoPostStoreError("canonical_task_not_untouched", "task cannot be held", 409)
+            previous = conn.execute("SELECT cutoff FROM pipeline_canonical_hold WHERE source_key=?", (key,)).fetchone()
+            if previous and previous[0] != boundary:
+                raise XAutoPostStoreError("canonical_hold_conflict", "task already has another cutover", 409)
+            if not previous:
+                conn.execute("INSERT INTO pipeline_canonical_hold VALUES(?,?,'cutover_overdue')", (key, boundary))
+                self._event(conn, run_id=int(row["run_id"]), task_id=identity, event_type="pipeline_backlog_paused",
+                    created_at=self._now_iso(), from_status=str(row["status"]), to_status=str(row["status"]),
+                    details={"source_key": key, "cutoff": boundary})
+        return {"paused": True, "source_key": key}
+
     def claim_next_pending_task(
         self,
         *,
@@ -2184,11 +2212,13 @@ class XAutoPostStore:
                 FROM x_auto_task t
                 WHERE t.status='pending'
                   AND t.scheduled_at_utc<=?
+                  AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||t.id)
                   AND NOT EXISTS (
                       SELECT 1 FROM x_auto_task active
                       WHERE active.account_id=t.account_id
                         AND active.id<>t.id
                         AND active.status IN (%s)
+                        AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||active.id)
                   )
                 ORDER BY
                     t.trigger_priority ASC,
@@ -2239,6 +2269,8 @@ class XAutoPostStore:
         lease_seconds: Any,
         now: Optional[Any] = None,
         reconcile_only: bool = False,
+        publish_delegated: bool = False,
+        planning_cutoff: Optional[Any] = None,
     ) -> Optional[TaskClaim]:
         """Claim the next safe phase, including expired-crash recovery.
 
@@ -2260,6 +2292,7 @@ class XAutoPostStore:
             raise XAutoPostStoreError("x_auto_lease_invalid", "lease seconds is too large", 400)
         current_dt = self._now() if now is None else _utc_datetime(now)
         current = current_dt.isoformat(timespec="seconds")
+        planning_boundary = _utc_datetime(planning_cutoff).isoformat(timespec="seconds") if planning_cutoff is not None else ""
         lease_expires = (current_dt + timedelta(seconds=seconds)).isoformat(timespec="seconds")
         active_placeholders = ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES)
         with self._transaction() as conn:
@@ -2338,6 +2371,12 @@ class XAutoPostStore:
                 )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
+                if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", ("x:auto:" + str(candidate["id"]),)).fetchone():
+                    continue
+                if (planning_boundary and not candidate["execution_queue_id"]
+                    and str(candidate["scheduled_at_utc"]) <= planning_boundary
+                    and str(candidate["created_at"]) <= planning_boundary):
+                    continue
                 candidate_id = int(candidate["id"])
                 candidate_status = str(candidate["status"])
                 others = conn.execute(
@@ -2345,6 +2384,7 @@ class XAutoPostStore:
                     SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc
                     FROM x_auto_task
                     WHERE account_id=? AND id<>? AND status IN (%s)
+                      AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||x_auto_task.id)
                     ORDER BY scheduled_at_utc,id
                     """ % active_placeholders,
                     (
@@ -2413,6 +2453,9 @@ class XAutoPostStore:
             else:
                 phase = "reconcile"
                 target_status = "unknown" if previous_status in {"publishing", "unknown"} else "reconciling"
+
+            if publish_delegated and phase == "publish":
+                phase, target_status = "reconcile", "reconciling"
 
             token = secrets.token_urlsafe(32)
             assignments = [

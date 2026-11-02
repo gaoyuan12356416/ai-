@@ -515,6 +515,7 @@ class DramaSynthesisStore:
 
     def ensure_storage(self) -> None:
         statements = (
+            """CREATE TABLE IF NOT EXISTS pipeline_canonical_hold(source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL)""",
             """CREATE TABLE IF NOT EXISTS drama_synthesis_recipe(
                 job_id TEXT PRIMARY KEY, recipe_version INTEGER NOT NULL,
                 recipe_profile TEXT NOT NULL, recipe_sha256 TEXT NOT NULL,
@@ -589,7 +590,7 @@ class DramaSynthesisStore:
                 # Additive migration: old workers remain on the legacy lane.
                 for name, default in (("workflow", "legacy"), ("preparation_id", ""),
                         ("source_material_id", ""), ("approved_cover_path", ""),
-                        ("approved_cover_sha256", ""), ("reviewed_phase", "upload"),
+                        ("approved_cover_sha256", ""), ("reviewed_phase", "upload"), ("pipeline_dispatch_key", ""),
                         ("thumbnail_status", "pending"), ("processing_status", "pending"),
                         ("public_status", "pending"), ("publish_at", ""), ("initial_publish_at", ""),
                         ("schedule_status", "none"), ("schedule_command", ""),
@@ -1150,7 +1151,8 @@ class DramaSynthesisStore:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     f"""SELECT * FROM drama_youtube_publish
-                       WHERE {scope}
+                       WHERE {scope} AND pipeline_dispatch_key=''
+                         AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='youtube:publish:'||drama_youtube_publish.id)
                          AND (lease_owner='' OR lease_expires_at_utc='' OR lease_expires_at_utc<?)
                          AND {cadence}
                          AND ((unknown_outcome=0 AND (status IN ('queued','validating','downloading','uploading','submitted','processing')

@@ -220,6 +220,19 @@ class Handler(BaseHTTPRequestHandler):
                        self.read_json() if method == "POST" else None, parse_qs(parsed.query, keep_blank_values=True))
             self.send_json(200, result)
             return
+        if parsed.path.startswith("/internal/pipeline-dispatch/fb/"):
+            if method != "POST" or not self.internal():
+                raise ServiceError("forbidden", "内部请求未授权", 403)
+            if os.environ.get("PIPELINE_FB_CANONICAL_BRIDGE_ENABLED", "0") != "1":
+                raise ServiceError("pipeline_bridge_disabled", "任务分配接口尚未启用", 503)
+            from features.pipeline_dispatch.fb_native import handle_fb_dispatch
+            from features.pipeline_dispatch.adapters import AdapterError
+            try:
+                result = handle_fb_dispatch(self.runtime, parsed.path.rsplit("/", 1)[-1], self.read_json())
+            except AdapterError as exc:
+                raise ServiceError(exc.code, str(exc), 409) from None
+            self.send_json(200, result)
+            return
         if parsed.path.startswith("/internal/fb-video-publish/"):
             if method != "POST" or not self.internal():
                 raise ServiceError("forbidden", "内部请求未授权", 403)

@@ -1387,6 +1387,7 @@ def ensure_storage(db_path: Any) -> None:
         try:
             conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS pipeline_canonical_hold(source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS tt_post_material_pool (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     material_id TEXT NOT NULL UNIQUE,
@@ -5780,6 +5781,7 @@ class TTPostStore:
         *,
         now: Optional[Any] = None,
         lease_seconds: int = 120,
+        intake_id: Optional[int] = None,
     ) -> Optional[MaterialIntakeClaim]:
         worker = str(worker_id or "").strip()
         if not _WORKER_ID_RE.fullmatch(worker):
@@ -5807,7 +5809,7 @@ class TTPostStore:
                 """
                 SELECT candidate.*
                 FROM tt_post_material_intake candidate
-                WHERE (
+                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:intake:'||candidate.id) AND (
                         candidate.status='queued'
                         OR (
                             candidate.status='retry_wait'
@@ -5825,7 +5827,7 @@ class TTPostStore:
                   AND NOT EXISTS (
                         SELECT 1
                         FROM tt_post_material_intake prior
-                        WHERE prior.account_id=candidate.account_id
+                        WHERE prior.account_id=candidate.account_id AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:intake:'||prior.id)
                           AND prior.status IN (
                               'queued','preparing','retry_wait'
                           )
@@ -5837,10 +5839,11 @@ class TTPostStore:
                               )
                           )
                   )
+                  AND (? IS NULL OR candidate.id=?)
                 ORDER BY candidate.created_at,candidate.id
                 LIMIT 1
                 """,
-                (now_iso, now_iso),
+                (now_iso, now_iso, intake_id, intake_id),
             ).fetchone()
             if row is None:
                 return None
@@ -9236,6 +9239,7 @@ class TTPostStore:
         lease_seconds: int = 300,
         grace_seconds: int = 90,
         limit: int = 10,
+        queue_id: Optional[int] = None,
     ) -> List[QueueClaim]:
         """Claim due rows, terminalize missed rows and quarantine stale publishing."""
 
@@ -9264,10 +9268,10 @@ class TTPostStore:
                 SELECT * FROM tt_post_queue
                 WHERE status='publishing'
                   AND lease_expires_at_utc<>''
-                  AND lease_expires_at_utc<=?
+                  AND lease_expires_at_utc<=? AND (? IS NULL OR id=?)
                 ORDER BY id
                 """,
-                (now_iso,),
+                (now_iso, queue_id, queue_id),
             ).fetchall()
             for row in stale_publishing:
                 conn.execute(
@@ -9296,7 +9300,7 @@ class TTPostStore:
             missed = conn.execute(
                 """
                 SELECT * FROM tt_post_queue
-                WHERE scheduled_at_utc<?
+                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_queue.id) AND scheduled_at_utc<?
                   AND (
                     status='scheduled'
                     OR (
@@ -9305,9 +9309,10 @@ class TTPostStore:
                         AND lease_expires_at_utc<=?
                     )
                   )
+                  AND (? IS NULL OR id=?)
                 ORDER BY scheduled_at_utc,id
                 """,
-                (cutoff_iso, now_iso),
+                (cutoff_iso, now_iso, queue_id, queue_id),
             ).fetchall()
             for row in missed:
                 updated = conn.execute(
@@ -9345,7 +9350,7 @@ class TTPostStore:
             candidates = conn.execute(
                 """
                 SELECT * FROM tt_post_queue
-                WHERE scheduled_at_utc>=?
+                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_queue.id) AND scheduled_at_utc>=?
                   AND scheduled_at_utc<=?
                   AND (
                     status='scheduled'
@@ -9355,10 +9360,11 @@ class TTPostStore:
                         AND lease_expires_at_utc<=?
                     )
                   )
+                  AND (? IS NULL OR id=?)
                 ORDER BY scheduled_at_utc,id
                 LIMIT ?
                 """,
-                (cutoff_iso, now_iso, now_iso, limit),
+                (cutoff_iso, now_iso, now_iso, queue_id, queue_id, limit),
             ).fetchall()
             for row in candidates:
                 claim_token = secrets.token_urlsafe(32)

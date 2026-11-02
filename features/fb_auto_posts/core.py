@@ -94,7 +94,8 @@ class FBAutoPostStore:
 
     def ensure_storage(self) -> None:
         schema = """
-        CREATE TABLE IF NOT EXISTS fb_auto_template(
+        CREATE TABLE IF NOT EXISTS pipeline_canonical_hold(source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS fb_auto_template(
           id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'disabled',
           current_version INTEGER NOT NULL DEFAULT 1,owner_user_id TEXT NOT NULL DEFAULT '',scope_is_admin INTEGER NOT NULL DEFAULT 0,
           created_by TEXT NOT NULL DEFAULT '',created_name TEXT NOT NULL DEFAULT '',created_at_utc TEXT NOT NULL,updated_at_utc TEXT NOT NULL
@@ -548,7 +549,7 @@ class FBAutoPostStore:
                     page_ids=[page.page_id for page in page_rows],
                 )
             now_for_backlog = utc_iso(self.now_fn())
-            active = conn.execute("SELECT DISTINCT r.id FROM fb_auto_run r JOIN fb_auto_task x ON x.run_id=r.id WHERE r.template_id=? AND x.status IN ('planned','preparing','ready','running') AND x.planned_publish_at_utc<=? LIMIT 1", (template_id, now_for_backlog)).fetchone()
+            active = conn.execute("SELECT DISTINCT r.id FROM fb_auto_run r JOIN fb_auto_task x ON x.run_id=r.id WHERE r.template_id=? AND x.status IN ('planned','preparing','ready','running') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.planned_publish_at_utc<=? LIMIT 1", (template_id, now_for_backlog)).fetchone()
             if active:
                 error = StoreError("fb_auto_previous_run_backlog", "上一个时隙仍有Page任务未完成，本时隙不叠加", 409)
                 error.conflicts = [{"run_id": int(active[0]), "status": "backlog"}]
@@ -687,7 +688,7 @@ class FBAutoPostStore:
             if existing:
                 conn.commit()
                 return {"ok": True, "run_id": int(existing[0]), "idempotent": True}
-            active = conn.execute("SELECT DISTINCT r.id FROM fb_auto_run r JOIN fb_auto_task x ON x.run_id=r.id WHERE r.template_id=? AND x.status IN ('planned','preparing','ready','running') AND x.planned_publish_at_utc<=? LIMIT 1", (template_id, utc_iso(self.now_fn()))).fetchone()
+            active = conn.execute("SELECT DISTINCT r.id FROM fb_auto_run r JOIN fb_auto_task x ON x.run_id=r.id WHERE r.template_id=? AND x.status IN ('planned','preparing','ready','running') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.planned_publish_at_utc<=? LIMIT 1", (template_id, utc_iso(self.now_fn()))).fetchone()
             if active:
                 error = StoreError("fb_auto_previous_run_backlog", "上一个到期时隙仍有Page任务未完成，本时隙不叠加", 409)
                 error.conflicts = [{"run_id": int(active[0]), "status": "backlog"}]
@@ -765,35 +766,36 @@ class FBAutoPostStore:
         stale_runs = [
             int(item[0])
             for item in conn.execute(
-                "SELECT DISTINCT x.run_id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id JOIN fb_auto_template t ON t.id=x.template_id WHERE (x.status IN ('planned','ready') OR (x.status='preparing' AND x.lease_expires_at_utc<>'' AND x.lease_expires_at_utc<?)) AND (x.template_version<>t.current_version OR (r.trigger_type='auto' AND x.planned_publish_at_utc<?))",
+                "SELECT DISTINCT x.run_id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id JOIN fb_auto_template t ON t.id=x.template_id WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND (x.status IN ('planned','ready') OR (x.status='preparing' AND x.lease_expires_at_utc<>'' AND x.lease_expires_at_utc<?)) AND (x.template_version<>t.current_version OR (r.trigger_type='auto' AND x.planned_publish_at_utc<?))",
                 (now, cutoff),
             )
         ]
         conn.execute(
-            "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_template_version_changed',error_code='fb_auto_template_version_changed',error_message='模板已更新，旧版本任务不再制作或发布',lease_owner='',lease_expires_at_utc='',next_prepare_at_utc='',completed_at_utc=? WHERE id IN (SELECT x.id FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id WHERE (x.status IN ('planned','ready') OR (x.status='preparing' AND x.lease_expires_at_utc<>'' AND x.lease_expires_at_utc<?)) AND x.template_version<>t.current_version)",
+            "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_template_version_changed',error_code='fb_auto_template_version_changed',error_message='模板已更新，旧版本任务不再制作或发布',lease_owner='',lease_expires_at_utc='',next_prepare_at_utc='',completed_at_utc=? WHERE id IN (SELECT x.id FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND (x.status IN ('planned','ready') OR (x.status='preparing' AND x.lease_expires_at_utc<>'' AND x.lease_expires_at_utc<?)) AND x.template_version<>t.current_version)",
             (now, now),
         )
         conn.execute(
-            "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_task_too_late',error_code='fb_auto_task_too_late',error_message='自动发布已超过最大迟到宽限，不再制作或发布',lease_owner='',lease_expires_at_utc='',next_prepare_at_utc='',completed_at_utc=? WHERE id IN (SELECT x.id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id WHERE r.trigger_type='auto' AND (x.status IN ('planned','ready') OR (x.status='preparing' AND x.lease_expires_at_utc<>'' AND x.lease_expires_at_utc<?)) AND x.planned_publish_at_utc<?)",
+            "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_task_too_late',error_code='fb_auto_task_too_late',error_message='自动发布已超过最大迟到宽限，不再制作或发布',lease_owner='',lease_expires_at_utc='',next_prepare_at_utc='',completed_at_utc=? WHERE id IN (SELECT x.id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND r.trigger_type='auto' AND (x.status IN ('planned','ready') OR (x.status='preparing' AND x.lease_expires_at_utc<>'' AND x.lease_expires_at_utc<?)) AND x.planned_publish_at_utc<?)",
             (now, now, cutoff),
         )
         for run_id in stale_runs:
             self._refresh_run(conn, run_id, now)
 
-    def claim_prepare_next(self, worker_id: str, lease_seconds: int = 3600, *, max_late_seconds: int | None = None) -> Optional[Dict[str, Any]]:
+    def claim_prepare_next(self, worker_id: str, lease_seconds: int = 3600, *, max_late_seconds: int | None = None, task_id=None) -> Optional[Dict[str, Any]]:
         now_dt, now = self.now_fn(), utc_iso(self.now_fn())
         lease = utc_iso(now_dt + timedelta(seconds=lease_seconds))
         cutoff = self._late_cutoff(max_late_seconds)
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._expire_late_auto_work(conn, now, cutoff)
+            if task_id is None:
+                self._expire_late_auto_work(conn, now, cutoff)
             row = conn.execute(
-                "SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version JOIN fb_auto_run r ON r.id=x.run_id WHERE (((x.status='planned' AND (x.next_prepare_at_utc='' OR x.next_prepare_at_utc<=?)) OR (x.status='preparing' AND x.lease_expires_at_utc<?))) AND (r.trigger_type='manual' OR x.planned_publish_at_utc>=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1",
-                (now, now, cutoff),
+                "SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version JOIN fb_auto_run r ON r.id=x.run_id WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND (((x.status='planned' AND (x.next_prepare_at_utc='' OR x.next_prepare_at_utc<=?)) OR (x.status='preparing' AND x.lease_expires_at_utc<?))) AND (r.trigger_type='manual' OR x.planned_publish_at_utc>=?) AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1",
+                (now, now, cutoff, task_id, task_id),
             ).fetchone()
             if row is None:
                 conn.commit(); return None
-            if not prepare_available(conn, now, "auto", row["planned_publish_at_utc"]):
+            if task_id is None and not prepare_available(conn, now, "auto", row["planned_publish_at_utc"]):
                 conn.commit(); return None
             conn.execute("UPDATE fb_auto_task SET status='preparing',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=?", (worker_id, lease, now, int(row["id"])))
             conn.commit(); return dict(conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (int(row["id"]),)).fetchone())
@@ -874,23 +876,24 @@ class FBAutoPostStore:
             self._refresh_run(conn, int(row["run_id"]), utc_iso(self.now_fn())); conn.commit()
         return {"ok": True, "task_id": task_id, "status": "planned", "deferred": True, "next_prepare_at_utc": next_at}
 
-    def claim_next(self, worker_id: str, lease_seconds: int = 1200, *, max_late_seconds: int | None = None) -> Optional[Dict[str, Any]]:
+    def claim_next(self, worker_id: str, lease_seconds: int = 1200, *, max_late_seconds: int | None = None, task_id=None) -> Optional[Dict[str, Any]]:
         from .manual_batch import BatchError, task_policy
         now_dt, now = self.now_fn(), utc_iso(self.now_fn())
         lease = utc_iso(now_dt + timedelta(seconds=lease_seconds))
         cutoff = self._late_cutoff(max_late_seconds)
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._expire_late_auto_work(conn, now, cutoff)
+            if task_id is None:
+                self._expire_late_auto_work(conn, now, cutoff)
             invalid_runs = [
                 int(item[0])
                 for item in conn.execute(
-                    "SELECT DISTINCT run_id FROM fb_auto_task WHERE status='ready' AND (TRIM(prepared_at_utc)='' OR TRIM(prepared_media_url)='' OR media_url<>prepared_media_url OR prepared_media_url=source_media_url)"
+                    "SELECT DISTINCT run_id FROM fb_auto_task WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||fb_auto_task.id) AND (? IS NULL OR id=?) AND status='ready' AND (TRIM(prepared_at_utc)='' OR TRIM(prepared_media_url)='' OR media_url<>prepared_media_url OR prepared_media_url=source_media_url)", (task_id, task_id)
                 )
             ]
             conn.execute(
-                "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_prepared_contract_invalid',error_code='fb_auto_prepared_contract_invalid',error_message='成片审计契约不完整，已安全终止且不会发布',lease_owner='',lease_expires_at_utc='',completed_at_utc=? WHERE status='ready' AND (TRIM(prepared_at_utc)='' OR TRIM(prepared_media_url)='' OR media_url<>prepared_media_url OR prepared_media_url=source_media_url)",
-                (now,),
+                "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_prepared_contract_invalid',error_code='fb_auto_prepared_contract_invalid',error_message='成片审计契约不完整，已安全终止且不会发布',lease_owner='',lease_expires_at_utc='',completed_at_utc=? WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||fb_auto_task.id) AND (? IS NULL OR id=?) AND status='ready' AND (TRIM(prepared_at_utc)='' OR TRIM(prepared_media_url)='' OR media_url<>prepared_media_url OR prepared_media_url=source_media_url)",
+                (now, task_id, task_id),
             )
             for run_id in invalid_runs:
                 self._refresh_run(conn, run_id, now)
@@ -899,7 +902,7 @@ class FBAutoPostStore:
             due = conn.execute("""SELECT x.*,v.config_json
                 FROM fb_auto_task x JOIN fb_auto_template_version v
                 ON v.template_id=x.template_id AND v.version=x.template_version
-                WHERE x.status='ready' AND x.planned_publish_at_utc<=? ORDER BY x.id LIMIT 1000""", (now,)).fetchall()
+                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND x.planned_publish_at_utc<=? AND (? IS NULL OR x.id=?) ORDER BY x.id LIMIT 1000""", (now, task_id, task_id)).fetchall()
             for candidate in due:
                 # Manual reservations live in this same SQLite transaction domain.
                 # Keep existing auto tasks frozen while a manual Page hold exists.
@@ -943,7 +946,7 @@ class FBAutoPostStore:
                 if recent:
                     conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_drama_cooldown_at_publish',error_code='fb_auto_drama_cooldown_at_publish',completed_at_utc=? WHERE id=? AND status='ready'", (now,candidate['id']))
                     self._refresh_run(conn, int(candidate['run_id']), now)
-            rows = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version WHERE x.status='ready' AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND x.prepared_media_url<>x.source_media_url AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status IN ('running','submitted','unknown')) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now,)).fetchall()
+            rows = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND x.prepared_media_url<>x.source_media_url AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status IN ('running','submitted','unknown')) AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now, task_id, task_id)).fetchall()
             row = None
             for candidate in rows:
                 if manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True):
@@ -1030,12 +1033,12 @@ class FBAutoPostStore:
         with self.connect() as conn:
             conn.execute("INSERT INTO fb_auto_publish_attempt(task_id,sequence,credential_id,fb_user_id,result_kind,error_code,trace_id,created_at_utc) VALUES(?,?,?,?,?,?,?,?)", (task_id, sequence, str(credential_id)[:64], str(fb_user_id)[:64], result_kind, str(error_code)[:96], str(trace_id)[:128], utc_iso(self.now_fn())))
 
-    def claim_submitted(self, worker_id: str, lease_seconds: int = 1200) -> Optional[Dict[str, Any]]:
+    def claim_submitted(self, worker_id: str, lease_seconds: int = 1200, *, task_id=None) -> Optional[Dict[str, Any]]:
         now_dt, now = self.now_fn(), utc_iso(self.now_fn())
         lease = utc_iso(now_dt + timedelta(seconds=lease_seconds))
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM fb_auto_task WHERE status='submitted' AND (next_reconcile_at_utc='' OR next_reconcile_at_utc<=?) AND (lease_expires_at_utc='' OR lease_expires_at_utc<?) ORDER BY id LIMIT 1", (now, now)).fetchone()
+            row = conn.execute("SELECT * FROM fb_auto_task WHERE status='submitted' AND (next_reconcile_at_utc='' OR next_reconcile_at_utc<=?) AND (lease_expires_at_utc='' OR lease_expires_at_utc<?) AND (? IS NULL OR id=?) ORDER BY id LIMIT 1", (now, now, task_id, task_id)).fetchone()
             if row is None:
                 conn.commit(); return None
             if conn.execute("UPDATE fb_auto_task SET lease_owner=?,lease_expires_at_utc=? WHERE id=? AND status='submitted' AND (next_reconcile_at_utc='' OR next_reconcile_at_utc<=?) AND (lease_expires_at_utc='' OR lease_expires_at_utc<?)", (worker_id, lease, int(row["id"]), now, now)).rowcount != 1:

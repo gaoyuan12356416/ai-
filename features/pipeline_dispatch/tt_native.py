@@ -1,0 +1,420 @@
+"""TT ledger bridge: native policy/claims centrally, media and POST on a node.
+
+The existing media validators are reused through an injected result port. No
+render, upload or publication is proxied back to this process.
+"""
+from __future__ import annotations
+import copy
+import hashlib
+import json
+import os
+import re
+import secrets
+import sqlite3
+import threading
+from urllib.parse import urlsplit
+
+from .adapters import AdapterError, ClosingConnection, artifact_from, obj, public_descriptor
+from .fb_native import claim_hash, dump
+
+_INIT_LOCK = threading.Lock()
+
+
+class BoundaryReached(Exception):
+    pass
+
+
+class MediaPort:
+    def __init__(self, delegate, result=None):
+        self.delegate, self.result, self.request = delegate, result, None
+
+    def creator_info(self, **kwargs):
+        return self.delegate.creator_info(**kwargs)
+
+    def prepare(self, **kwargs):
+        self.request = kwargs
+        if self.result is not None:
+            return self.result
+        raise BoundaryReached()
+
+    def publish(self, **kwargs):
+        # Never retain the temporarily opened account credential.
+        self.request = {k: v for k, v in kwargs.items() if k != "access_token"}
+        raise BoundaryReached()
+
+
+def post_info(queue):
+    return {"title": queue.get("caption", ""), "privacy_level": queue.get("privacy_level"),
+            "disable_comment": not bool(queue.get("allow_comment")), "disable_duet": not bool(queue.get("allow_duet")),
+            "disable_stitch": not bool(queue.get("allow_stitch")), "brand_content_toggle": bool(queue.get("brand_content_toggle")),
+            "brand_organic_toggle": bool(queue.get("brand_organic_toggle")), "is_aigc": bool(queue.get("is_aigc"))}
+
+
+class TTNativeBridge:
+    def __init__(self, service, *, automatic=False):
+        self.service, self.automatic = service, automatic
+        self.store = service.store
+        self._lock = threading.RLock()
+        with self.connect() as c:
+            c.executescript("""
+            CREATE TABLE IF NOT EXISTS pipeline_tt_claim(source_key TEXT,stage TEXT,generation INTEGER,
+              claim_hash TEXT NOT NULL,native_token TEXT NOT NULL,descriptor_json TEXT NOT NULL,
+              receipt_json TEXT NOT NULL DEFAULT '',PRIMARY KEY(source_key,stage,generation));
+            CREATE TABLE IF NOT EXISTS pipeline_tt_operation(operation_id TEXT PRIMARY KEY,source_key TEXT,
+              stage TEXT,generation INTEGER,operation TEXT,request_sha256 TEXT,checkpoint_json TEXT NOT NULL DEFAULT '');
+            CREATE UNIQUE INDEX IF NOT EXISTS pipeline_tt_single_init ON pipeline_tt_operation(source_key)
+              WHERE operation='tt_initialize_video';
+            """)
+
+    def connect(self):
+        c = sqlite3.connect(self.store.db_path, timeout=30, factory=ClosingConnection)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _key(self, job):
+        families = {"auto"} if self.automatic else {"queue", "intake"}
+        if (job.get("channel") != "tt" or job.get("family") not in families
+                or job.get("source_key") != "tt:%s:%s" % (job.get("family"), job.get("source_id"))):
+            raise AdapterError("tt_dispatch_source_invalid")
+        return job["source_key"], job["stage"], int(job["generation"])
+
+    def _stored(self, job, claim):
+        with self.connect() as c:
+            stored = c.execute("SELECT * FROM pipeline_tt_claim WHERE source_key=? AND stage=? AND generation=?", self._key(job)).fetchone()
+        if stored is None or not secrets.compare_digest(stored["claim_hash"], claim_hash(claim)):
+            raise AdapterError("tt_dispatch_claim_mismatch")
+        return dict(stored), obj(stored["descriptor_json"])
+
+    def _native(self, job):
+        if self.automatic:
+            return self.store.get_task(int(job["source_id"]))
+        if job["family"] == "intake":
+            return self.store.get_material_intake(int(job["source_id"]))
+        return self.store.get_queue(int(job["source_id"]))
+
+    def _native_dict(self, job):
+        item = self._native(job)
+        return item.as_dict() if hasattr(item, "as_dict") else dict(item)
+
+    def _prepare_descriptor(self, owner, call, *, profile=None):
+        clone, port = copy.copy(owner), MediaPort(owner.gpu_client)
+        clone.gpu_client = port
+        if profile:
+            clone.media_profile_version = profile
+        try:
+            call(clone)
+        except BoundaryReached:
+            pass
+        if port.request is None:
+            raise AdapterError("tt_media_boundary_missing")
+        request = port.request
+        material = request["material"]
+        return {"kind": "tt_prepare", "request": {"job_id": request["job_id"], "content_id": material["content_id"],
+                "source_url": material.get("source_media_url") or material.get("media_url"),
+                "source_trim_tail_seconds": request["source_trim_tail_seconds"], "expected_profile": request["expected_profile"]}}
+
+    def _queue_preflight(self, queue, token):
+        from features.tt_posts.core import TTPostPolicy
+        from features.tt_posts.service import _creator_info_hash
+        svc = self.service
+        if queue.get("publish_mode") != "direct_post" or not svc.gates.is_open:
+            raise AdapterError("tt_live_gates_closed")
+        creator = svc._creator_recheck(str(queue["account_id"]), str(queue["gpu_job_id"]), int(queue["id"]), token)
+        policy = TTPostPolicy(privacy_level=str(queue["privacy_level"]), allow_comment=bool(queue["allow_comment"]),
+            allow_duet=bool(queue["allow_duet"]), allow_stitch=bool(queue["allow_stitch"]), brand_content_toggle=False,
+            brand_organic_toggle=False, user_consent=True, consent_version=str(queue["consent_version"]),
+            consented_at_utc=str(queue["consented_at_utc"]))
+        svc._assert_creator_policy(creator, policy)
+        if not secrets.compare_digest(_creator_info_hash(creator), str(queue.get("creator_info_hash") or "")):
+            raise AdapterError("tt_creator_info_changed")
+        self.store.renew_claim(queue["id"], token, lease_seconds=10800)
+        return svc._prepare_queue_short_link(queue, token)
+
+    def reserve(self, job, claim):
+        key = self._key(job)
+        with self._lock:
+            with self.connect() as c:
+                existing = c.execute("SELECT 1 FROM pipeline_tt_claim WHERE source_key=? AND stage=? AND generation=?", key).fetchone()
+            if existing:
+                return self._stored(job, claim)[1]
+            worker = "pipeline:%s:%s" % (claim.get("node_id", "node"), job["generation"])
+            identity, native_token = int(job["source_id"]), ""
+            try:
+                if self.automatic:
+                    executor = self.service.executor
+                    if not executor.gates.is_open:
+                        raise AdapterError("tt_live_gates_closed")
+                    native = self.store.claim_next_executable_task(worker_id=worker, lease_seconds=10800,
+                        allowed_phases={"selection", "prepare"} if job["stage"] == "prepare" else {"publish"}, task_id=identity)
+                    if native is None:
+                        raise AdapterError("canonical_task_not_claimable")
+                    native_token, task = native.reveal_claim_token(), native.task
+                    if native.claim_phase == "selection":
+                        task = executor._select(task, native_token)
+                    if job["stage"] == "prepare":
+                        # Only unfrozen automatic work selects the explicit H264
+                        # profile; an already frozen intake profile stays intact.
+                        profile = executor.media_profile_version
+                        if job.get("executor_backend") == "cpu":
+                            profile = {"tt-post-hevc-720x1280-v2": "tt-post-h264-720x1280-v2",
+                                "tt-post-direct-clean-hevc-720x1280-v1": "tt-post-direct-clean-h264-720x1280-v1",
+                                "tt-post-direct-outro-hevc-720x1280-v2": "tt-post-direct-outro-h264-720x1280-v2",
+                                "tt-post-random-overlay-hevc-720x1280-v3": "tt-post-random-overlay-libx264-720x1280-v1"}.get(profile, profile)
+                        descriptor = self._prepare_descriptor(executor, lambda clone: clone._prepare(task, native_token), profile=profile)
+                    else:
+                        clone, port = copy.copy(executor), MediaPort(executor.gpu_client)
+                        clone.gpu_client = port
+                        try:
+                            clone._publish(task, native_token)
+                        except BoundaryReached:
+                            pass
+                        if port.request is None:
+                            raise AdapterError("tt_publish_boundary_missing")
+                        descriptor = {"kind": "tt_publish", "request": {"post_info": post_info(port.request["queue"])},
+                                      "artifact": artifact_from(task.as_dict())}
+                    account_id = task.account_id
+                elif job["family"] == "intake":
+                    if job["stage"] != "prepare":
+                        raise AdapterError("tt_intake_is_prepare_only")
+                    native = self.store.claim_material_intake(worker, lease_seconds=10800, intake_id=identity)
+                    if native is None:
+                        raise AdapterError("canonical_task_not_claimable")
+                    task, native_token = native.item, native.reveal_claim_token()
+                    clone = copy.copy(self.service)
+                    clone.source_trim_tail_seconds = float(task["source_trim_tail_seconds"])
+                    descriptor = self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
+                        "material_id": str(task["material_id"]), "content_id": str(task["content_id"]),
+                        "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=task["preparation_profile"])
+                    account_id = task["account_id"]
+                else:
+                    if job["stage"] != "publish":
+                        raise AdapterError("tt_queue_is_publish_only")
+                    claims = self.store.claim_due(worker, lease_seconds=10800, grace_seconds=600, limit=1, queue_id=identity)
+                    if not claims:
+                        raise AdapterError("canonical_task_not_claimable")
+                    native_token = claims[0].reveal_claim_token()
+                    task = self._queue_preflight(claims[0].queue, native_token)
+                    descriptor = {"kind": "tt_publish", "request": {"post_info": post_info(task)}, "artifact": artifact_from(task)}
+                    # Queue fields use output_* rather than intake prepared_*.
+                    descriptor["artifact"].update(url=task.get("prepared_media_url") or task.get("media_url"),
+                        sha256=task.get("output_sha256") or task.get("prepared_output_sha256"),
+                        size=int(task.get("output_size") or task.get("media_size_bytes") or task.get("prepared_output_size") or 0))
+                    account_id = task["account_id"]
+            except Exception as exc:
+                if native_token:
+                    from features.tt_auto_posts.selector import NoEligibleMaterial
+                    if self.automatic and isinstance(exc, NoEligibleMaterial):
+                        current = self._native(job)
+                        result = self.service.executor._retry_or_fail(current, "selection", exc, native_token)
+                        self.service.executor._update_run(result.run_id)
+                    else:
+                        self._fail_native(job, native_token, getattr(exc, "code", "tt_preflight_failed"), known_no_write=True)
+                raise
+            descriptor.update(source_key=job["source_key"], account_resource="tt:account:" + str(account_id), credential_ref=job["source_key"])
+            if job["stage"] == "publish":
+                origin = "https://" + urlsplit(descriptor["artifact"]["url"]).netloc
+                configured = os.environ.get("TT_POST_GPU_VERIFIED_URL_PREFIX", "") or os.environ.get("PIPELINE_TT_VERIFIED_ORIGIN", "")
+                if configured and not descriptor["artifact"]["url"].startswith(configured):
+                    raise AdapterError("tt_publish_url_property_mismatch")
+                descriptor["request"]["verified_origin"] = origin
+            public_descriptor(descriptor)
+            with self.connect() as c:
+                c.execute("INSERT INTO pipeline_tt_claim(source_key,stage,generation,claim_hash,native_token,descriptor_json) VALUES(?,?,?,?,?,?)",
+                          (*key, claim_hash(claim), native_token, dump(descriptor)))
+            return descriptor
+
+    def begin_operation(self, job, claim, operation):
+        with self._lock:
+            stored, descriptor = self._stored(job, claim)
+            if job["stage"] != "publish":
+                raise AdapterError("tt_operation_invalid")
+            name = operation.get("operation")
+            details = operation.get("request") or operation.get("request_payload") or operation.get("details") or {}
+            current = self._native_dict(job)
+            if operation.get("account_resource") != descriptor["account_resource"]:
+                raise AdapterError("tt_operation_account_changed")
+            if name == "tt_initialize_video":
+                if current.get("publish_id") or current.get("unknown_outcome") or stored["receipt_json"]:
+                    raise AdapterError("tt_reconcile_only")
+                if details != {"post_info": descriptor["request"]["post_info"], "video_url": descriptor["artifact"]["url"]}:
+                    raise AdapterError("tt_operation_body_changed")
+                if not self.automatic:
+                    self.store.begin_publish(int(job["source_id"]), stored["native_token"], self.service.gates)
+                elif current["status"] != "publishing":
+                    raise AdapterError("canonical_claim_stale")
+            elif name == "tt_fetch_status":
+                if not current.get("publish_id") or details != {"publish_id": current["publish_id"]}:
+                    raise AdapterError("tt_publish_id_mismatch")
+            else:
+                raise AdapterError("tt_operation_invalid")
+            operation_id = str(operation.get("operation_id") or "")
+            if not re.fullmatch(r"[A-Za-z0-9:._-]{8,200}", operation_id):
+                raise AdapterError("operation_id_invalid")
+            try:
+                with self.connect() as c:
+                    c.execute("INSERT INTO pipeline_tt_operation(operation_id,source_key,stage,generation,operation,request_sha256) VALUES(?,?,?,?,?,?)",
+                              (operation_id, *self._key(job), name, operation.get("request_sha256", "")))
+            except sqlite3.IntegrityError:
+                raise AdapterError("operation_already_started") from None
+            source = self.service.executor.account_source if self.automatic else self.service.account_source
+            with source.publish_credentials(str(current["account_id"])) as credentials:
+                token = credentials.reveal_access_token()
+            return {"canonical_intent": {"operation_id": operation_id, "source_key": job["source_key"]}, "credentials": {"access_token": token}}
+
+    def checkpoint(self, job, claim, phase, receipt):
+        with self._lock:
+            stored, _ = self._stored(job, claim)
+            with self.connect() as c:
+                operation = c.execute("SELECT * FROM pipeline_tt_operation WHERE source_key=? AND stage=? AND generation=? ORDER BY rowid DESC LIMIT 1", self._key(job)).fetchone()
+            expected = "tt_initialize_video" if phase == "tt_initialized" else "tt_fetch_status" if phase == "tt_status" else ""
+            if not operation or operation["operation"] != expected:
+                raise AdapterError("tt_checkpoint_without_operation")
+            if operation["checkpoint_json"]:
+                if obj(operation["checkpoint_json"]) != receipt:
+                    raise AdapterError("receipt_conflict")
+                return {"canonical_checkpoint": True}
+            publish_id = str(receipt.get("publish_id") or "")
+            if not re.fullmatch(r"[A-Za-z0-9._~:+/-]{1,512}", publish_id):
+                raise AdapterError("tt_publish_id_invalid")
+            current = self._native_dict(job)
+            if current.get("publish_id") and current["publish_id"] != publish_id:
+                raise AdapterError("tt_publish_id_mismatch")
+            if phase == "tt_initialized":
+                if self.automatic:
+                    if not current.get("publish_id"):
+                        self.store.transition_task(int(job["source_id"]), "reconciling", expected_statuses={"publishing", "unknown"},
+                            claim_token=stored["native_token"], updates={"publish_id": publish_id, "unknown_outcome": False, "claim_phase": "reconcile"}, event_type="task_publish_id_recorded")
+                else:
+                    if current["status"] == "unknown":
+                        # This ID belongs to the durable single-init intent;
+                        # recovery never invokes the platform init again.
+                        self.store.recover_publish_id_from_gpu_ledger(int(job["source_id"]), publish_id)
+                    else:
+                        self.store.record_publish_id(int(job["source_id"]), stored["native_token"], publish_id)
+            elif receipt.get("status") in {"PUBLISH_COMPLETE", "FAILED"}:
+                self._terminal(job, stored, receipt)
+            with self.connect() as c:
+                c.execute("UPDATE pipeline_tt_operation SET checkpoint_json=? WHERE operation_id=?", (dump(receipt), operation["operation_id"]))
+            return {"canonical_checkpoint": True, "publish_id": publish_id}
+
+    def _terminal(self, job, stored, receipt):
+        success = receipt.get("status") == "PUBLISH_COMPLETE"
+        if self.automatic:
+            current = self._native_dict(job)
+            if current["status"] in {"published", "failed"}:
+                return current
+            result = self.store.transition_task(int(job["source_id"]), "published" if success else "failed", expected_statuses={"reconciling"},
+                claim_token=stored["native_token"], updates={"publish_id": receipt["publish_id"], "unknown_outcome": False,
+                    "claim_phase": "", "claim_worker": "", "claim_token": "", "lease_expires_at_utc": "", "error_code": "" if success else "tt_platform_failed"},
+                event_type="task_published" if success else "task_publish_failed")
+            self.service.executor._update_run(result.run_id)
+            return result.as_dict()
+        if success:
+            result = self.service._reconcile_published_with_cache(int(job["source_id"]), receipt["publish_id"], publish_url="")
+        else:
+            result = self.store.reconcile_failed(int(job["source_id"]), receipt["publish_id"], remote_status="failed")
+        self.service._sync_recurring_queue_if_present(result)
+        return result
+
+    def complete(self, job, receipt, claim):
+        with self._lock:
+            stored, descriptor = self._stored(job, claim)
+            if stored["receipt_json"]:
+                if obj(stored["receipt_json"]) != receipt:
+                    raise AdapterError("receipt_conflict")
+                return {"idempotent": True}
+            if job["stage"] == "prepare":
+                prepared = receipt.get("preparation") or receipt.get("result") or receipt
+                request = descriptor["request"]
+                if self.automatic:
+                    clone = copy.copy(self.service.executor)
+                    clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
+                    result = clone._prepare(self._native(job), stored["native_token"])
+                    clone._update_run(result.run_id)
+                else:
+                    current, clone = self._native(job), copy.copy(self.service)
+                    clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
+                    clone.source_trim_tail_seconds = request["source_trim_tail_seconds"]
+                    result = clone._prepare_resolved({"material_id": current["material_id"], "content_id": current["content_id"], "source_media_url": current["source_media_url"]}, gpu_job_id=current["gpu_job_id"])
+                    self.store.complete_material_intake(int(job["source_id"]), stored["native_token"], gpu_job_id=result["gpu_job_id"],
+                        prepared_media_url=result["prepared_media_url"], prepared_output_sha256=result["output_sha256"],
+                        prepared_output_size=result["output_size"], prepared_duration_sec=result["duration_sec"],
+                        source_trim_tail_seconds=result["source_trim_tail_seconds"], preparation_profile=result["profile"])
+            else:
+                with self.connect() as c:
+                    proof = c.execute("SELECT checkpoint_json FROM pipeline_tt_operation WHERE source_key=? AND stage=? AND generation=? AND operation='tt_fetch_status' ORDER BY rowid DESC LIMIT 1", self._key(job)).fetchone()
+                if proof is None or obj(proof["checkpoint_json"]) != receipt:
+                    raise AdapterError("tt_terminal_checkpoint_missing")
+                self._terminal(job, stored, receipt)
+            with self.connect() as c:
+                c.execute("UPDATE pipeline_tt_claim SET receipt_json=? WHERE source_key=? AND stage=? AND generation=?", (dump(receipt), *self._key(job)))
+            return self.reconcile(job)
+
+    def _fail_native(self, job, token, code, known_no_write):
+        if self.automatic:
+            current = self._native(job)
+            if current.status in {"published", "failed", "no_candidate", "canceled", "skipped"}:
+                return
+            # A publish ID always keeps the task in reconcile-only status.
+            status = "failed" if known_no_write else "reconciling" if current.publish_id else "unknown"
+            self.store.transition_task(current.id, status, expected_statuses={current.status}, claim_token=token,
+                updates={"error_code": code, "unknown_outcome": not known_no_write and not bool(current.publish_id),
+                         "claim_phase": "" if known_no_write else "reconcile", "claim_worker": "", "claim_token": "", "lease_expires_at_utc": ""}, event_type="pipeline_node_failed")
+            self.service.executor._update_run(current.run_id)
+        elif job["family"] == "intake":
+            self.store.fail_material_intake(int(job["source_id"]), token, error_code=code, error_message=code, retry_at=None)
+        else:
+            current = self._native(job)
+            if current.get("publish_id"):
+                return
+            result = self.store.mark_failed(int(job["source_id"]), token, error_code=code, error_message=code, publish_was_not_created=known_no_write)
+            self.service._sync_recurring_queue_if_present(result)
+
+    def fail(self, job, claim, receipt):
+        with self._lock:
+            stored, _ = self._stored(job, claim)
+            current = self.reconcile(job)
+            if current["status"] == "published" and current.get("publish_id"):
+                return {"canonical_terminal": True, "canonical_no_write": False, **current}
+            with self.connect() as c:
+                attempted = c.execute("SELECT 1 FROM pipeline_tt_operation WHERE source_key=? AND operation='tt_initialize_video'", (job["source_key"],)).fetchone()
+            safe = attempted is None
+            self._fail_native(job, stored["native_token"], str(receipt.get("error_code") or "node_execution_failed"), safe)
+            return {"canonical_no_write": safe, **self.reconcile(job)}
+
+    def reconcile(self, job):
+        current = self._native_dict(job)
+        return {"status": current["status"], "publish_id": current.get("publish_id", ""), "unknown_outcome": bool(current.get("unknown_outcome"))}
+
+    def pause(self, job, cutoff):
+        from .canonical_holds import pause_row, SCHEMA
+        self._key(dict(job, stage=job.get("stage", "prepare"), generation=job.get("generation", 0)))
+        with self._lock, self.connect() as conn:
+            conn.execute(SCHEMA)
+            conn.execute("BEGIN IMMEDIATE")
+            table, allowed = ("tt_auto_task", {"pending", "reserved", "ready", "retry_wait"}) if self.automatic else (
+                ("tt_post_material_intake", {"queued", "retry_wait", "ready"}) if job["family"] == "intake" else ("tt_post_queue", {"scheduled"}))
+            result = pause_row(conn, job, cutoff, table=table, identity="id", state="status", allowed=allowed,
+                additional_active=lambda row: bool(row.get("claim_token")) or row.get("claim_phase") == "reconcile")
+            conn.commit()
+            return result
+
+    def dispatch(self, action, payload):
+        if not isinstance(payload, dict) or set(payload) - {"job", "claim", "operation", "receipt", "phase", "cutoff"}:
+            raise AdapterError("canonical_bridge_payload_invalid")
+        job, claim = payload.get("job") or {}, payload.get("claim") or {}
+        if action == "reserve": return self.reserve(job, claim)
+        if action == "begin-operation": return self.begin_operation(job, claim, payload.get("operation") or {})
+        if action == "checkpoint": return self.checkpoint(job, claim, payload.get("phase"), payload.get("receipt") or {})
+        if action == "complete": return self.complete(job, payload.get("receipt") or {}, claim)
+        if action == "fail": return self.fail(job, claim, payload.get("receipt") or {})
+        if action == "reconcile": return self.reconcile(job)
+        if action == "pause": return self.pause(job, payload.get("cutoff"))
+        raise AdapterError("canonical_bridge_action_invalid")
+
+
+def handle_tt_dispatch(service, action, payload, *, automatic=False):
+    with _INIT_LOCK:
+        if not hasattr(service, "pipeline_dispatch_bridge"):
+            service.pipeline_dispatch_bridge = TTNativeBridge(service, automatic=automatic)
+    return service.pipeline_dispatch_bridge.dispatch(action, payload)

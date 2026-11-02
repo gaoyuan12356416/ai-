@@ -750,6 +750,10 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 
 
 import requests
+from features.cover_synthesis.resilience import (
+    UpstreamRateLimitError, is_rate_limit_error, retry_after_seconds,
+    run_with_rate_limit_retries,
+)
 
 from features.tt_drama_resolver import (
     InvalidContentIdError,
@@ -3648,6 +3652,7 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "video_editing": "视频剪辑",
     "x_video_publish": "X 个人视频发布",
     "fb_video_publish": "Facebook 视频批量发布", # FB_VIDEO_PUBLISH_INTEGRATION_V1
 
@@ -3681,6 +3686,7 @@ MODULE_PERMISSIONS = {
     "fb_page_posts": "Facebook Page 自动发布",
     "youtube_auto_publish": "YouTube 自动发布",
     "social_analytics": "社媒数据报表",
+    "socialkit_analytics": "SocialKit 效果报表",
 
 
 
@@ -3729,6 +3735,7 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "video_editing": False,
     "x_video_publish": False,
     "fb_video_publish": False,
     "drama_synthesis": False,
@@ -3743,6 +3750,7 @@ DEFAULT_USER_PERMISSIONS = {
     "fb_page_posts": False,
     "youtube_auto_publish": False,
     "social_analytics": False,
+    "socialkit_analytics": False,
     "settings": False,
 }
 
@@ -26351,6 +26359,8 @@ def upsert_job_record(job):
                     conn, job["job_id"], job["_fenced_lease"],
                     allow_done=(status_text == "done"),
                 )
+            from features.drama_job_identity import guard_new_job
+            guard_new_job(conn, job)
             conn.execute(
 
 
@@ -28855,7 +28865,14 @@ def fetch_job_row(job_id):
 
 
 
-def find_duplicate_job(app_id, content_id, exclude_job_id=None):
+def find_duplicate_job(app_id, content_id, episode_start, episode_end, exclude_job_id=None):
+    from features.drama_job_identity import find_duplicate
+    with JOB_DB_LOCK:
+        conn = get_job_db_connection()
+        try:
+            return find_duplicate(conn, app_id, content_id, episode_start, episode_end, exclude_job_id)
+        finally:
+            conn.close()
 
 
 
@@ -28887,7 +28904,6 @@ def find_duplicate_job(app_id, content_id, exclude_job_id=None):
 
 
 
-    rows = fetch_job_rows(app_id=str(app_id or ""), content_id=str(content_id or ""), page=1, page_size=200)["items"]
 
 
 
@@ -28919,7 +28935,6 @@ def find_duplicate_job(app_id, content_id, exclude_job_id=None):
 
 
 
-    jobs = [row for row in rows if not exclude_job_id or row["job_id"] != exclude_job_id]
 
 
 
@@ -28951,807 +28966,11 @@ def find_duplicate_job(app_id, content_id, exclude_job_id=None):
 
 
 
-    if not jobs:
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        return None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    jobs.sort(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        key=lambda item: (
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            status_rank(item.get("status")),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            clamp_progress(item.get("progress", 0)),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            item.get("updated_at", ""),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            item.get("created_at", ""),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        ),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        reverse=True,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    return jobs[0]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def ensure_no_duplicate_job(app_id, content_id, exclude_job_id=None):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    existing = find_duplicate_job(app_id, content_id, exclude_job_id=exclude_job_id)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if not existing:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        return None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if existing.get("status") == "failed":
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        raise ValueError(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            "相同剧 ID 和产品已存在失败任务，请直接点击重新制作继续执行。job_id=%s" % existing["job_id"]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    raise ValueError(
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        "相同剧 ID 和产品已存在任务，禁止重复创建。job_id=%s status=%s"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        % (existing["job_id"], existing["status"])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    )
+def ensure_no_duplicate_job(app_id, content_id, episode_start, episode_end, exclude_job_id=None):
+    from features.drama_job_identity import reject_duplicate
+    reject_duplicate(find_duplicate_job(app_id, content_id, episode_start, episode_end, exclude_job_id))
 
 
 
@@ -33013,6 +32232,8 @@ def process_screenshot_job(job):
             try:
                 generate_screenshot_via_codex_service_batch(job, source_path, batch_items)
             except Exception as exc:
+                if is_rate_limit_error(exc):
+                    raise
                 if is_screenshot_batch_fallback_error(exc):
                     logging.warning(
                         "screenshot batch failed; falling back to per-size generation: job=%s error=%s",
@@ -33089,6 +32310,8 @@ def process_screenshot_job(job):
                             )
                     return generate_one_once(item)
                 except Exception as exc:
+                    if is_rate_limit_error(exc):
+                        raise
                     last_error = exc
                     retrying_after_consistency_rejection = is_screenshot_source_consistency_rejection(exc)
                     if file_ready(public_output_path) and not retrying_after_consistency_rejection:
@@ -33256,7 +32479,18 @@ def run_screenshot_job_async(job):
 
                         )
 
-                    process_screenshot_job(job)
+                    def wait_for_rate_limit(delay, retry, limit):
+                        job["error_message"] = ""
+                        set_screenshot_job_progress(
+                            job, status="queued",
+                            progress=max(2, clamp_progress(job.get("progress", 0))),
+                            detail="上游请求限流，%d 秒后自动续跑（%d/%d），保留已完成尺寸"
+                            % (delay, retry, limit),
+                        )
+
+                    run_with_rate_limit_retries(
+                        lambda: process_screenshot_job(job), wait_for_rate_limit,
+                    )
 
                     return
 
@@ -56713,10 +55947,12 @@ def delete_session(session_token):
 
 
 def load_navigation_config():
+    from features.socialkit_analytics.navigation import ensure_navigation as ensure_socialkit_navigation
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
         from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
-        return filter_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))
+        from features.pipeline_dispatch.monitor import ensure_navigation as ensure_pipeline_navigation
+        return ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -66632,10 +65868,13 @@ def generate_screenshot_via_codex_service(job, source_path, items):
     except Exception:
         data = {"error": response.text.strip()}
     if response.status_code >= 400:
-        raise RuntimeError(
-            "codex screenshot service error (%s): %s"
-            % (response.status_code, data.get("error") or response.text.strip())
+        message = "codex screenshot service error (%s): %s" % (
+            response.status_code, data.get("error") or response.text.strip()
         )
+        if response.status_code == 429 or is_rate_limit_error(message):
+            delay = data.get("retry_after") or response.headers.get("Retry-After") or 60
+            raise UpstreamRateLimitError(message, retry_after_seconds(message, delay))
+        raise RuntimeError(message)
     if data.get("status") != "done":
         raise RuntimeError("codex screenshot service returned unexpected payload")
     record_screenshot_token_usage(job, data.get("token_usage") or data.get("usage"), "codex_screenshot_single")
@@ -66681,10 +65920,13 @@ def generate_screenshot_via_codex_service_batch(job, source_path, items):
     except Exception:
         data = {"error": response.text.strip()}
     if response.status_code >= 400:
-        raise RuntimeError(
-            "codex screenshot service error (%s): %s"
-            % (response.status_code, data.get("error") or response.text.strip())
+        message = "codex screenshot service error (%s): %s" % (
+            response.status_code, data.get("error") or response.text.strip()
         )
+        if response.status_code == 429 or is_rate_limit_error(message):
+            delay = data.get("retry_after") or response.headers.get("Retry-After") or 60
+            raise UpstreamRateLimitError(message, retry_after_seconds(message, delay))
+        raise RuntimeError(message)
     if data.get("status") != "done":
         raise RuntimeError("codex screenshot service returned unexpected payload")
     record_screenshot_token_usage(job, data.get("token_usage") or data.get("usage"), "codex_screenshot_batch")
@@ -80279,7 +79521,7 @@ def submit_job(payload, actor_session=None):
 
 
 
-    ensure_no_duplicate_job(app_id, content_id)
+    ensure_no_duplicate_job(app_id, content_id, episode_start, episode_end)
 
 
 
@@ -94210,6 +93452,34 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         actor["is_admin"] = actor["role"] == "admin"
         return actor
 
+    def _socialkit_analytics_actor(self, navigation_key="socialkitAnalytics"):
+        """Require a real Cookie even if legacy Feishu enforcement is disabled."""
+        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+        if not session or session.get("auth_type") == "api_token":
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not str(session.get("tenant_key") or "").strip() or not str(session.get("user_id") or "").strip():
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not has_module_permission(session, "socialkit_analytics"):
+            json_response(self, 403, {"error": "permission_denied", "module": "socialkit_analytics"}, no_store=True)
+            return None
+        try:
+            navigation = load_navigation_config()
+            keys = (navigation_key,) if isinstance(navigation_key, str) else navigation_key
+            accesses = [navigation_item_access(session, key, navigation) for key in keys]
+            access = next((item for item in accesses if item.get("allowed")), accesses[0])
+        except (OSError, ValueError, TypeError):
+            json_response(self, 503, {"error": "navigation_config_unavailable"}, no_store=True)
+            return None
+        if not access.get("allowed"):
+            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": navigation_key}, no_store=True)
+            return None
+        actor = {key: str(session.get(key) or "") for key in ("tenant_key", "user_id", "open_id", "name")}
+        actor["role"] = "admin" if session.get("role") == "admin" else "user"
+        actor["is_admin"] = actor["role"] == "admin"
+        return actor
+
     def _youtube_auto_json(self, max_bytes):
         """Bound body reads before parsing; reject ambiguous HTTP framing."""
         lengths = self.headers.get_all("Content-Length", [])
@@ -94966,9 +94236,17 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            import sys
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "GET", sys.modules[__name__])
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/x-video-publish" or parsed.path.startswith("/api/x-video-publish/"):
             from features.x_video_publish.gateway import dispatch
+            return dispatch(self, parsed, globals())
+        if parsed.path.startswith("/api/pipeline-monitor/"):
+            from features.pipeline_dispatch.monitor import dispatch
             return dispatch(self, parsed, globals())
         if parsed.path == "/api/fb-video-publish" or parsed.path.startswith("/api/fb-video-publish/"):
             from features.fb_video_publish.gateway import dispatch
@@ -94978,6 +94256,12 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in {
+            "/pipeline-monitor.html",
+            "/pipeline-monitor.css",
+            "/pipeline-monitor.js",
+            "/socialkit-analytics.html",
+            "/socialkit-analytics.js",
+            "/socialkit-analytics.css",
             "/fb-post-ad-delete.html",
             "/fb-post-ad-delete.css",
             "/fb-post-ad-delete.js",
@@ -95014,6 +94298,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             except OSError:
                 json_response(self, 404, {"error": "not_found"}, no_store=True)
             return
+
+        if parsed.path == "/api/socialkit-analytics" or parsed.path.startswith("/api/socialkit-analytics/"):
+            from features.socialkit_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
 
         if parsed.path == "/api/social-analytics" or parsed.path.startswith("/api/social-analytics/"):
             from features.social_analytics.routes import dispatch
@@ -98713,7 +98001,22 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
 
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            import sys
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "POST", sys.modules[__name__])
+            return
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/internal/pipeline-dispatch/youtube/"):
+            from features.pipeline_dispatch.native_gateway import dispatch_youtube
+            return dispatch_youtube(self, parsed.path, globals())
+        if parsed.path.startswith("/api/pipeline-monitor/"):
+            from features.pipeline_dispatch.monitor import dispatch
+            return dispatch(self, parsed, globals())
+        # FB_PAGE_MATERIAL_POOL_IDENTITY_V1
+        if parsed.path == "/internal/fb-video-publish/identity":
+            from features.fb_video_publish.identity_broker import dispatch
+            return dispatch(self, globals())
         if parsed.path in {"/internal/x-video-publish/identity", "/internal/x-video-publish/source"}:
             from features.x_video_publish.identity_broker import dispatch
             return dispatch(self, globals(), parsed.path.rsplit("/", 1)[-1])
@@ -98732,6 +98035,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
             return
+
+        if parsed.path == "/api/socialkit-analytics" or parsed.path.startswith("/api/socialkit-analytics/"):
+            from features.socialkit_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
 
         if parsed.path == "/api/social-analytics" or parsed.path.startswith("/api/social-analytics/"):
             from features.social_analytics.routes import dispatch
@@ -101350,6 +100657,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/pipeline-monitor/"):
+            from features.pipeline_dispatch.monitor import dispatch
+            return dispatch(self, parsed, globals())
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
             return
@@ -101397,6 +100707,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            import sys
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "DELETE", sys.modules[__name__])
+            return
         parsed = urlparse(self.path)
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
@@ -101918,6 +101233,14 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+        json_response(self, 404, {"error": "not_found"})
+
+    def do_PATCH(self):
+        if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
+            import sys
+            from features.video_editing.app_bridge import handle as video_editing_handle
+            video_editing_handle(self, "PATCH", sys.modules[__name__])
+            return
         json_response(self, 404, {"error": "not_found"})
 
 

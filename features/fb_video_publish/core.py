@@ -173,6 +173,7 @@ class Store:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript("""
+                CREATE TABLE IF NOT EXISTS pipeline_canonical_hold(source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS fb_video_page(
                   tenant_key TEXT NOT NULL,page_id TEXT NOT NULL,config_instance_id TEXT NOT NULL,
                   version INTEGER NOT NULL,language TEXT NOT NULL,caption_template TEXT NOT NULL,
@@ -538,7 +539,7 @@ class Store:
             conn.commit()
             return {"ok": True, "task": self.task_dto(conn.execute("SELECT * FROM fb_video_task WHERE task_id=?", (tid,)).fetchone())}
 
-    def claim(self, kind, worker_id):
+    def claim(self, kind, worker_id, *, task_id=None):
         now = stamp(self.now_fn())
         lease = uuid.uuid4().hex
         seconds = 10200 if kind == "prepare" else (1200 if kind in {"execute", "reconcile"} else 300)
@@ -546,32 +547,32 @@ class Store:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if kind == "prepare":
-                row = conn.execute("""SELECT * FROM fb_video_task WHERE status='queued' AND processing_mode='random_overlay'
+                row = conn.execute("""SELECT * FROM fb_video_task WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||fb_video_task.task_id) AND status='queued' AND processing_mode='random_overlay'
                     AND prepare_retry_at<=? AND (prepare_state='planned' OR (prepare_state='preparing' AND prepare_until<=?))
-                    ORDER BY planned_at_utc,sequence LIMIT 1""", (now, now)).fetchone()
-                if row is not None and not prepare_available(conn, now, "manual", row["planned_at_utc"]):
+                    AND (? IS NULL OR task_id=?) ORDER BY planned_at_utc,sequence LIMIT 1""", (now, now, task_id, task_id)).fetchone()
+                if row is not None and task_id is None and not prepare_available(conn, now, "manual", row["planned_at_utc"]):
                     conn.commit()
                     return None
             elif kind == "link":
-                row = conn.execute("""SELECT * FROM fb_video_task WHERE status='queued' AND link_state<>'ready'
-                    AND link_retry_at<=? AND (link_lease='' OR link_until<=?) ORDER BY planned_at_utc,sequence LIMIT 1""", (now, now)).fetchone()
+                row = conn.execute("""SELECT * FROM fb_video_task WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||fb_video_task.task_id) AND status='queued' AND link_state<>'ready'
+                    AND link_retry_at<=? AND (link_lease='' OR link_until<=?) AND (? IS NULL OR task_id=?) ORDER BY planned_at_utc,sequence LIMIT 1""", (now, now, task_id, task_id)).fetchone()
             elif kind == "reconcile":
                 row = conn.execute("""SELECT * FROM fb_video_task WHERE status='submitted' AND reconcile_at<=?
-                    AND (execution_lease='' OR execution_until<?) ORDER BY reconcile_at,sequence LIMIT 1""", (now, now)).fetchone()
+                    AND (execution_lease='' OR execution_until<?) AND (? IS NULL OR task_id=?) ORDER BY reconcile_at,sequence LIMIT 1""", (now, now, task_id, task_id)).fetchone()
             elif kind == "execute":
                 rows = conn.execute("""SELECT x.*,b.request_json AS batch_request_json FROM fb_video_task x
                     JOIN fb_video_batch b ON b.batch_id=x.batch_id
-                    WHERE x.status='queued' AND x.prepare_state='ready'
+                    WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||x.task_id) AND x.status='queued' AND x.prepare_state='ready'
                     AND x.link_state='ready' AND x.planned_at_utc<=? AND NOT EXISTS(
                       SELECT 1 FROM fb_video_task prev WHERE prev.batch_id=x.batch_id AND prev.page_id=x.page_id
-                      AND prev.page_sequence<x.page_sequence AND prev.status NOT IN ('published','failed','cancelled'))
+                      AND prev.page_sequence<x.page_sequence AND prev.status NOT IN ('published','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||prev.task_id))
                     AND NOT EXISTS(SELECT 1 FROM fb_video_task pp WHERE x.source_kind='pool'
                       AND pp.tenant_key=x.tenant_key AND pp.page_id=x.page_id AND pp.pool_sequence<x.pool_sequence
-                      AND pp.source_kind='pool' AND pp.status NOT IN ('published','failed','cancelled'))
+                      AND pp.source_kind='pool' AND pp.status NOT IN ('published','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||pp.task_id))
                     AND NOT EXISTS(SELECT 1 FROM fb_video_task gp WHERE x.source_kind='group_pool'
                       AND gp.tenant_key=x.tenant_key AND gp.page_id=x.page_id AND gp.source_kind='group_pool'
-                      AND gp.planned_at_utc<x.planned_at_utc AND gp.status NOT IN ('published','failed','cancelled'))
-                    ORDER BY x.planned_at_utc,x.sequence LIMIT 1000""", (now,)).fetchall()
+                      AND gp.planned_at_utc<x.planned_at_utc AND gp.status NOT IN ('published','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||gp.task_id))
+                    AND (? IS NULL OR x.task_id=?) ORDER BY x.planned_at_utc,x.sequence LIMIT 1000""", (now, task_id, task_id)).fetchall()
                 row = None
                 for candidate in rows:
                     if (automatic_block(conn, candidate["page_id"], execution=True)

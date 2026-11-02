@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.pipeline_dispatch.x_planning import enabled as pipeline_dispatch_enabled, deferred_candidate
 from features.x_posts.manual_preflight import PreparedManual
 from features.x_posts.selector import (  # noqa: E402
     select_manual_candidates,
@@ -450,8 +451,11 @@ def _manual_candidates(
             candidate = {**candidate, "body_template": run["body_template"],
                          "copy_contract_version": int(run.get("copy_contract_version", 1)),
                          "source_type": "material", "source_date": run["source_date"]}
-            prepared, rejected = _preflight_candidates(config, [candidate], [account_by_id[account_id]],
-                timestamp, downloader, prober, repair_client)
+            if pipeline_dispatch_enabled():
+                prepared, rejected = [deferred_candidate(account_by_id[account_id], candidate, len(planned) + 1, timestamp)], []
+            else:
+                prepared, rejected = _preflight_candidates(config, [candidate], [account_by_id[account_id]],
+                    timestamp, downloader, prober, repair_client)
             if rejected or len(prepared) != 1:
                 code, message = _manual_rejection_fields(rejected[0] if rejected else None,
                     "x_post_manual_media_preflight_failed", "所选视频未通过发布前检查")
@@ -510,9 +514,10 @@ def execute_manual_tick(
         return result
 
     try:
-        sidecar.preflight_storage(
-            config.storage_preflight_path, required_media_count=min(len(run["account_ids"]), config.publish_workers)
-        )
+        if not pipeline_dispatch_enabled():
+            sidecar.preflight_storage(
+                config.storage_preflight_path, required_media_count=min(len(run["account_ids"]), config.publish_workers)
+            )
         accounts = _verify_accounts(sidecar, run["account_ids"])
         candidates = _manual_candidates(
             config,
@@ -524,7 +529,7 @@ def execute_manual_tick(
             repair_client=repair_client,
             now=now,
         )
-        if candidates:
+        if candidates and not pipeline_dispatch_enabled():
             sidecar.preflight_storage(
                 config.storage_preflight_path, required_media_count=min(len(candidates), config.publish_workers)
             )

@@ -1,0 +1,12 @@
+# Existing production COS/HTTP stack; Pillow matches CPU's Python3.9 runtime.
+certifi==2026.4.22
+charset-normalizer==3.4.7
+cos_python_sdk_v5==1.9.42
+crcmod==1.7
+idna==3.13
+pycryptodome==3.23.0
+requests==2.32.5
+six==1.17.0
+urllib3==2.6.3
+xmltodict==1.0.4
+Pillow==11.3.0

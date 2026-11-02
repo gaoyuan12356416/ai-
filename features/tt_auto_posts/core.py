@@ -496,6 +496,7 @@ def ensure_storage(db_path: Any) -> None:
                 """
                 BEGIN IMMEDIATE;
 
+                CREATE TABLE IF NOT EXISTS pipeline_canonical_hold(source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS tt_auto_template (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -1964,12 +1965,12 @@ class TTAutoPostStore:
                 """
                 SELECT t.*
                 FROM tt_auto_task t
-                WHERE t.status='pending'
+                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:auto:'||t.id) AND t.status='pending'
                   AND t.scheduled_at_utc<=?
                   AND NOT EXISTS (
                       SELECT 1 FROM tt_auto_task active
                       WHERE active.account_id=t.account_id
-                        AND active.id<>t.id
+                        AND active.id<>t.id AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:auto:'||active.id)
                         AND active.status IN (%s)
                   )
                 ORDER BY
@@ -2022,6 +2023,7 @@ class TTAutoPostStore:
         now: Optional[Any] = None,
         prepare_ahead_seconds: Any = 0,
         allowed_phases: Optional[Iterable[Any]] = None,
+        task_id: Optional[int] = None,
     ) -> Optional[TaskClaim]:
         """Claim the next safe phase, including expired-crash recovery.
 
@@ -2070,7 +2072,7 @@ class TTAutoPostStore:
             candidates = conn.execute(
                 """
                 SELECT * FROM tt_auto_task
-                WHERE (
+                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:auto:'||tt_auto_task.id) AND (
                     (status='pending' AND scheduled_at_utc<=?)
                     OR (status='selecting' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
@@ -2115,6 +2117,8 @@ class TTAutoPostStore:
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
                 candidate_id = int(candidate["id"])
+                if task_id is not None and candidate_id != int(task_id):
+                    continue
                 candidate_status = str(candidate["status"])
                 candidate_previous_phase = str(candidate["claim_phase"] or "")
                 if candidate_status in {"pending", "selecting"}:
@@ -2147,7 +2151,7 @@ class TTAutoPostStore:
                     SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc,
                            publish_id,unknown_outcome,publish_attempt_count,claim_phase
                     FROM tt_auto_task
-                    WHERE account_id=? AND id<>? AND status IN (%s)
+                    WHERE account_id=? AND id<>? AND status IN (%s) AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:auto:'||tt_auto_task.id)
                     ORDER BY scheduled_at_utc,id
                     """ % active_placeholders,
                     (

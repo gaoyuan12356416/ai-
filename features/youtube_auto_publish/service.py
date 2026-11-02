@@ -38,6 +38,7 @@ class YouTubeWorkflow:
         self.root.mkdir(parents=True,exist_ok=True)
         with self.db() as c:
             c.executescript('''
+CREATE TABLE IF NOT EXISTS pipeline_canonical_hold(source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS youtube_auto_preparation(
  id TEXT PRIMARY KEY,tenant TEXT NOT NULL,owner TEXT NOT NULL,operation_id TEXT NOT NULL,
  request_sha TEXT NOT NULL,state TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0,
@@ -548,17 +549,17 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
 
     def _claim(self):
         with self.db(True) as c:
-            pending=c.execute("SELECT * FROM youtube_auto_preparation WHERE state IN ('queued_generation','review','enqueue_pending') AND lease_until<?",(time.time(),)).fetchall()
+            pending=c.execute("SELECT * FROM youtube_auto_preparation WHERE state IN ('queued_generation','review','enqueue_pending') AND lease_until<? AND lease_token NOT LIKE 'pipeline:%' AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='youtube:preparation:'||youtube_auto_preparation.id)",(time.time(),)).fetchall()
             for row in pending:
                 body=json.loads(row['body'])
                 if is_due(body.get('publish_at')) and not self._ledger(body,c):self._mark_schedule_missed(c,body,row['state'])
             # A interrupted generator is made visible for explicit retry; never silently make another paid generation.
-            expired=c.execute("SELECT * FROM youtube_auto_preparation WHERE state='generating' AND lease_until<?",(time.time(),)).fetchall()
+            expired=c.execute("SELECT * FROM youtube_auto_preparation WHERE state='generating' AND lease_until<? AND lease_token NOT LIKE 'pipeline:%' AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='youtube:preparation:'||youtube_auto_preparation.id)",(time.time(),)).fetchall()
             for row in expired:
                 body=json.loads(row['body']);body['error']={'code':'generation_interrupted','message':'封面生成中断，请重试'}
                 self._save(c,body,'generation_failed')
             c.execute("UPDATE youtube_auto_notification SET state='unknown',message='提醒发送结果待核查，可从任务列表审核' WHERE state='sending' AND lease_until<?",(time.time(),))
-            row=c.execute("SELECT * FROM youtube_auto_preparation WHERE state IN ('queued_generation','enqueue_pending') AND lease_until<? ORDER BY created_at LIMIT 1",(time.time(),)).fetchone()
+            row=c.execute("SELECT * FROM youtube_auto_preparation WHERE state IN ('queued_generation','enqueue_pending') AND lease_until<? AND lease_token NOT LIKE 'pipeline:%' AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='youtube:preparation:'||youtube_auto_preparation.id) ORDER BY created_at LIMIT 1",(time.time(),)).fetchone()
             if not row:return None
             body=json.loads(row['body']);token=uid();generation=row['state']=='queued_generation'
             body['status']='generating' if generation else 'enqueue_pending'

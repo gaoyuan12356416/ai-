@@ -16,11 +16,12 @@ from urllib.parse import urlsplit
 from . import media_repair as repair
 from . import duration_policy
 from features.fb_gpu.random_overlay import derive_recipe, load_asset_set, selected_asset_paths, validate_recipe
-from features.fb_gpu.prepare_worker import build_command
+from features.fb_gpu.prepare_worker import build_command, software_command
 from features.fb_gpu.render_process import RenderStalled, run_render
 from features.random_gpu.compositor import BACKEND
 
 PROFILE = "x-random-overlay-h264-720x1280-v1"
+CPU_PROFILE = "x-random-overlay-libx264-720x1280-v1"
 PREPARE_PATH = "/internal/x-post-random-template"
 FIELDS = frozenset(("job_key", "queue_id", "content_id", "source_url", "source_sha256",
                     "source_size", "source_duration", "profile", "asset_manifest_sha256", "max_duration_seconds"))
@@ -31,8 +32,9 @@ JOB = re.compile(r"x-random-v1-[a-f0-9]{64}\Z")
 def validate_request(raw, config):
     if not isinstance(raw, dict) or set(raw) not in (FIELDS, FIELDS | {"duration_policy_version"}):
         raise repair.MediaRepairError("x_random_request_invalid", "random video request fields invalid", 400)
+    expected_profile = CPU_PROFILE if config.profile == CPU_PROFILE else PROFILE
     if (type(raw["queue_id"]) is not int or not 0 < raw["queue_id"] < 2**63
-            or not JOB.fullmatch(str(raw["job_key"])) or raw["profile"] != PROFILE
+            or not JOB.fullmatch(str(raw["job_key"])) or raw["profile"] != expected_profile
             or not SHA.fullmatch(str(raw["source_sha256"]))
             or not SHA.fullmatch(str(raw["asset_manifest_sha256"]))
             or type(raw["source_size"]) is not int or not 0 < raw["source_size"] <= config.max_source_bytes
@@ -57,7 +59,9 @@ def validate_request(raw, config):
 
 
 def random_command(config, source, output, info, recipe, assets):
-    adapter = SimpleNamespace(ffmpeg=config.ffmpeg_bin, compositor_backend=BACKEND)
+    cpu = config.profile == CPU_PROFILE
+    adapter = SimpleNamespace(ffmpeg=config.ffmpeg_bin, compositor_backend="cpu_legacy" if cpu else BACKEND,
+                              video_encoder="libx264" if cpu else "h264_nvenc")
     command = build_command(adapter, source, output, info, recipe, assets)
     rate = repair.output_rate_control(config.max_output_bytes, info["duration"])
     command[command.index("-b:v") + 1] = "%sk" % rate["video_bitrate_kbps"]
@@ -67,9 +71,10 @@ def random_command(config, source, output, info, recipe, assets):
 
 
 class RandomTemplateProcessor:
-    def __init__(self, processor, *, asset_root, manifest_sha256, runner=run_render, assets=None):
+    def __init__(self, processor, *, asset_root, manifest_sha256, runner=run_render, assets=None, backend="gpu"):
         self.repair = processor
-        self.config = replace(processor.config, profile=PROFILE,
+        if backend not in {"gpu", "cpu"}: raise ValueError("invalid renderer backend")
+        self.config = replace(processor.config, profile=CPU_PROFILE if backend=="cpu" else PROFILE,
                               cos_prefix=processor.config.cos_prefix.rstrip("/") + "/random-template")
         self.runner = runner
         self.assets = assets or load_asset_set(Path(asset_root), manifest_sha256)
@@ -114,6 +119,7 @@ class RandomTemplateProcessor:
                    "scale=%s:%s:eval=frame,setsar=%s,fps=30" % (video["width"], video["height"], sar.replace(":", "/")),
                    "-c:v", "h264_nvenc", "-preset", "p5", "-cq", "18", "-b:v", "0", "-pix_fmt", "yuv420p",
                    "-c:a", "aac", "-af", "aresample=48000:async=1:first_pts=0", "-t", str(info["duration"]), str(normalized)]
+            if self.config.profile == CPU_PROFILE: cmd = software_command(cmd)
             self.runner(cmd, capture_output=True, text=True, timeout=remaining(), check=True)
             normalized_info = self._info(normalized)
             if abs(normalized_info["duration"] - info["duration"]) > 0.05:
@@ -143,7 +149,7 @@ class RandomTemplateProcessor:
                 recipe = saved["recipe"]
                 validate_recipe(recipe, self.assets)
             else:
-                recipe = derive_recipe(job_id=job, content_id=request["content_id"], profile=PROFILE,
+                recipe = derive_recipe(job_id=job, content_id=request["content_id"], profile=self.config.profile,
                                        source_url_sha256=hashlib.sha256(request["source_url"].encode()).hexdigest(), asset_set=self.assets)
                 saved = {"request": request, "recipe": recipe}
                 repair._atomic_write_manifest(manifest, saved)
@@ -173,7 +179,7 @@ class RandomTemplateProcessor:
                     digest, size = repair._file_sha256(output)
                     key = self.config.cos_prefix + "/" + job + "/" + digest + ".mp4"
                     self.cos.upload(key, output, digest, size)
-                    result = {"job_key": job, "queue_id": request["queue_id"], "profile": PROFILE,
+                    result = {"job_key": job, "queue_id": request["queue_id"], "profile": self.config.profile,
                               "source_sha256": request["source_sha256"], "source_size": request["source_size"],
                               "asset_manifest_sha256": request["asset_manifest_sha256"], "recipe": recipe,
                               "output_url": self.cos.url(key), "output_sha256": digest,

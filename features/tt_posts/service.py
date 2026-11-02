@@ -822,6 +822,24 @@ class MySQLSnapshotAccountRepository:
 class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
     """Keep shared safety checks while applying TikTok's duration ceiling."""
 
+    def _pool_candidate(self, material_id, source_date, **_x_options):
+        # X manual-pool policy has evolved independently. Its relaxed image,
+        # deletion/product/language options do not change TT eligibility.
+        return super()._pool_candidate(material_id, source_date,
+            max_duration_seconds=TT_MAX_MATERIAL_DURATION_SECONDS,
+            allow_images=False, allow_deleted_materials=False,
+            require_dramawave_product=True, use_drama_language=False)
+
+    def _violation_counts(self, material_id):
+        from features.x_posts.selector import _cursor_row
+        sql = """SELECT
+            (SELECT COUNT(*) FROM `{schema}`.ads_facebook_violations f WHERE f.source_id=%s) AS facebook_count,
+            (SELECT COUNT(*) FROM `{schema}`.ads_tiktok_violations t WHERE t.source_id=%s OR t.original_source_id=%s) AS tiktok_count,
+            (SELECT COUNT(*) FROM `{schema}`.ads_twitter_violations x WHERE x.source_id=%s OR x.original_source_id=%s) AS twitter_count,
+            (SELECT COUNT(*) FROM `{schema}`.ads_resource_audit a WHERE a.resource_id=%s) AS resource_audit_count
+        """.format(schema=self.schema)
+        return _cursor_row(self.connection, sql, (material_id,) * 6, query_stage="material")
+
     def _pool_drama_rows(
         self,
         content_id: str,
@@ -851,7 +869,7 @@ class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
             normalized_rows.append(item)
         return normalized_rows
 
-    def _pool_material_rows(self, material_id: str) -> List[Dict[str, Any]]:
+    def _pool_material_rows(self, material_id: str, *, allow_long_duration=False, max_duration_seconds=None) -> List[Dict[str, Any]]:
         sql = """
             SELECT
                 CAST(cs.id AS CHAR) AS material_id,
@@ -928,6 +946,26 @@ class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
                 "TT素材时长必须大于0秒且不超过%d秒"
                 % TT_MAX_MATERIAL_DURATION_SECONDS,
             )
+        from features.x_posts.selector import _integer, contains_dangerous_tag
+        counts = self._violation_counts(material_id)
+        try:
+            normalized = [_integer(counts.get(key), key) for key in
+                          ("facebook_count", "tiktok_count", "twitter_count", "resource_audit_count")]
+        except CandidateSelectionError:
+            raise PoolCandidateRejection("violation_check_invalid", "素材违规记录返回无效数据") from None
+        if any(normalized):
+            raise PoolCandidateRejection("material_has_violation", "素材存在违规记录")
+        for label, values in (("source_tag", [row.get("source_tag_name")]), ("tag", self._material_tags(material_id))):
+            for value in values:
+                if value in (None, ""):
+                    continue
+                try:
+                    unsafe = contains_dangerous_tag(value)
+                except CandidateSelectionError:
+                    raise PoolCandidateRejection("material_%s_invalid" % label, "素材标签无法核对") from None
+                if unsafe:
+                    raise PoolCandidateRejection("material_%s_unsafe" % label, "素材标签不符合发布条件")
+        row["material_is_deleted"] = is_delete
         return rows
 
 
@@ -6724,7 +6762,7 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _body(self) -> Dict[str, Any]:
+    def _body(self, *, pipeline=False) -> Dict[str, Any]:
         raw_length = str(self.headers.get("Content-Length") or "0")
         try:
             length = int(raw_length)
@@ -6741,7 +6779,7 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode("utf-8")) if raw else {}
         except (UnicodeError, ValueError):
             raise TTPostServiceError("invalid_request", "请求体不是有效JSON", 400) from None
-        if not isinstance(payload, dict) or _contains_sensitive_key(payload):
+        if not isinstance(payload, dict) or (not pipeline and _contains_sensitive_key(payload)):
             raise TTPostServiceError("invalid_request", "请求体包含无效字段", 400)
         return payload
 
@@ -6753,6 +6791,15 @@ class TTPostRequestHandler(BaseHTTPRequestHandler):
             return {"ok": True, "gates": service.gates.as_dict()}
         if not self._authorized():
             raise PermissionError
+        if self.command == "POST" and path.startswith("/internal/pipeline-dispatch/tt/"):
+            if os.environ.get("PIPELINE_TT_CANONICAL_BRIDGE_ENABLED") != "1":
+                raise TTPostServiceError("pipeline_bridge_disabled", "任务分配接口尚未启用", 503)
+            from features.pipeline_dispatch.tt_native import handle_tt_dispatch
+            from features.pipeline_dispatch.adapters import AdapterError
+            try:
+                return handle_tt_dispatch(service, path.rsplit("/", 1)[-1], self._body(pipeline=True))
+            except AdapterError as exc:
+                raise TTPostServiceError(exc.code, exc.code, 409) from None
         if self.command == "GET" and path == "/internal/tt-posts/code-resolve":
             query_params = urllib.parse.parse_qs(
                 parsed.query,

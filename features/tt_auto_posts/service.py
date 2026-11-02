@@ -1249,7 +1249,7 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
         return
 
     def _json(self, status: int, payload: Mapping[str, Any]) -> None:
-        if contains_sensitive_key(payload):
+        if contains_sensitive_key(payload) and not self.path.startswith("/internal/pipeline-dispatch/tt/"):
             status = 500
             payload = {
                 "ok": False,
@@ -1285,7 +1285,7 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
             )
         )
 
-    def _body(self) -> Dict[str, Any]:
+    def _body(self, *, pipeline=False) -> Dict[str, Any]:
         try:
             length = int(str(self.headers.get("Content-Length") or "0"))
         except ValueError:
@@ -1299,7 +1299,7 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
             value = json.loads(raw.decode("utf-8")) if raw else {}
         except (UnicodeError, ValueError):
             raise AutoPostServiceError("invalid_request", "请求体不是有效JSON", 400) from None
-        if not isinstance(value, dict) or contains_sensitive_key(value):
+        if not isinstance(value, dict) or (not pipeline and contains_sensitive_key(value)):
             raise AutoPostServiceError("invalid_request", "请求体包含无效字段", 400)
         return value
 
@@ -1321,6 +1321,15 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
                 "message": "拒绝访问",
             }
         query = parse_qs(parsed.query, keep_blank_values=True)
+        if self.command == "POST" and path.startswith("/internal/pipeline-dispatch/tt/"):
+            if os.environ.get("PIPELINE_TT_CANONICAL_BRIDGE_ENABLED") != "1":
+                raise AutoPostServiceError("pipeline_bridge_disabled", "任务分配接口尚未启用", 503)
+            from features.pipeline_dispatch.tt_native import handle_tt_dispatch
+            from features.pipeline_dispatch.adapters import AdapterError
+            try:
+                return 200, handle_tt_dispatch(service, path.rsplit("/", 1)[-1], self._body(pipeline=True), automatic=True)
+            except AdapterError as exc:
+                raise AutoPostServiceError(exc.code, exc.code, 409) from None
         if self.command == "GET" and path == TT_AUTO_ADMIN_PREFIX + "/accounts":
             return 200, service.accounts()
         if self.command == "GET" and path == TT_AUTO_ADMIN_PREFIX + "/templates":

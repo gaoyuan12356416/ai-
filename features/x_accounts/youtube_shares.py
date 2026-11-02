@@ -277,6 +277,9 @@ class YouTubeShares:
                         started_at REAL NOT NULL, finished_at REAL,
                         status TEXT NOT NULL, http_status INTEGER, post_id TEXT NOT NULL DEFAULT ''
                     );
+                    CREATE TABLE IF NOT EXISTS pipeline_canonical_hold (
+                        source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL
+                    );
                     """
                 )
                 conn.commit()
@@ -503,6 +506,7 @@ class YouTubeShares:
             row = conn.execute(
                 "SELECT i.id FROM youtube_share_item i JOIN youtube_share_run r ON r.id=i.run_id "
                 "WHERE i.status='queued' AND i.duplicate_of IS NULL AND i.attempted_at IS NULL "
+                "AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:youtube_share:'||i.id) "
                 "ORDER BY r.created_at,i.id LIMIT 1"
             ).fetchone()
             if not row:

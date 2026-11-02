@@ -1,0 +1,24 @@
+[Unit]
+Description=Social media preparation and publication coordinator
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pipeline-dispatch/current
+EnvironmentFile=/etc/pipeline-coordinator.env
+ExecStart=/opt/pipeline-dispatch/coordinator-venv/bin/python -m features.pipeline_dispatch.service --config /etc/pipeline-coordinator.json
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# The authority needs read access to each existing channel ledger. It writes
+# only its own dispatch database; native sidecars own platform credentials.
+ProtectSystem=strict
+ReadWritePaths=/mnt/data-disk/pipeline-dispatch
+
+[Install]
+WantedBy=multi-user.target

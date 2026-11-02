@@ -1643,7 +1643,8 @@ def youtube_share_request(action, payload):
     try:
         service = youtube_shares_service()
         result = getattr(service, action)(payload)
-        service.start_worker()
+        if os.environ.get("PIPELINE_X_DISPATCH_ENABLED") != "1":
+            service.start_worker()
         return result
     except YouTubeShareError as exc:
         raise ServiceError(exc.code, str(exc), exc.status) from None
@@ -3868,7 +3869,8 @@ def create_post_auto_template_plan_request(payload):
         raise ServiceError("invalid_request", "preflight_duration is invalid", 400) from None
     if not math.isfinite(duration) or duration < 0:
         raise ServiceError("invalid_request", "preflight_duration is invalid", 400)
-    if duration <= 0 or duration > AUTO_TEMPLATE_MAX_DURATION_SECONDS:
+    deferred_dispatch = os.environ.get("PIPELINE_X_DISPATCH_ENABLED") == "1" and candidate.get("media_validation_mode") == "deferred"
+    if not deferred_dispatch and (duration <= 0 or duration > AUTO_TEMPLATE_MAX_DURATION_SECONDS):
         raise ServiceError(
             "x_post_auto_template_duration_exceeded",
             "automatic X material exceeds the supported upload duration",
@@ -5261,6 +5263,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path.startswith("/internal/pipeline-dispatch/x/"):
+            from features.pipeline_dispatch.x_native import handle
+            return handle(self, sys.modules[__name__], parsed.path)
         if parsed.path.startswith("/internal/video-publish/"):
             from features.x_video_publish.runtime import dispatch
             return dispatch(self, sys.modules[__name__], parsed.path)
@@ -6003,7 +6008,8 @@ def serve():
     shares = None
     try:
         shares = youtube_shares_service()
-        shares.start_worker()
+        if os.environ.get("PIPELINE_X_DISPATCH_ENABLED") != "1":
+            shares.start_worker()
         print("X account sidecar listening on %s:%s" % (LISTEN_HOST, LISTEN_PORT), flush=True)
         server.serve_forever()
     finally:

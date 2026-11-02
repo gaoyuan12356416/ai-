@@ -98,6 +98,44 @@ def prepared_probe(duration, video_encoder="hevc_nvenc"):
     }
 
 
+def source_direct_probe(
+    duration,
+    *,
+    codec="h264",
+    codec_tag=None,
+    profile=None,
+    sample_rate="44100",
+):
+    normalized_codec = str(codec).lower()
+    if codec_tag is None:
+        codec_tag = "hvc1" if normalized_codec == "hevc" else "avc1"
+    if profile is None:
+        profile = "Main"
+    return {
+        "format": {"duration": str(duration)},
+        "streams": [
+            {
+                "avg_frame_rate": "30/1",
+                "codec_name": normalized_codec,
+                "codec_tag_string": codec_tag,
+                "codec_type": "video",
+                "height": 1280,
+                "pix_fmt": "yuv420p",
+                "profile": profile,
+                "r_frame_rate": "30/1",
+                "width": 720,
+            },
+            {
+                "channels": 2,
+                "codec_name": "aac",
+                "codec_type": "audio",
+                "profile": "LC",
+                "sample_rate": sample_rate,
+            },
+        ],
+    }
+
+
 class FakeRunner:
     def __init__(self, probes=None):
         self.probes = list(
@@ -353,6 +391,57 @@ def make_direct_outro_config(root, gates=False, **overrides):
     return replace(config, **overrides) if overrides else config
 
 
+def make_source_direct_config(root, gates=False, **overrides):
+    config = replace(
+        make_config(root, gates=gates),
+        default_source_trim_tail_seconds=0,
+        media_mode=worker.SOURCE_DIRECT_MEDIA_MODE,
+        profile=worker.SOURCE_DIRECT_PROFILE,
+    )
+    return replace(config, **overrides) if overrides else config
+
+
+def make_random_overlay_config(root, gates=False, **overrides):
+    root = Path(root)
+    asset_root = root / "random-overlay-assets"
+    asset_root.mkdir(exist_ok=True)
+    categories = {}
+    for category in ("border", "light", "opacity_video", "corners", "tint"):
+        suffix = ".png" if category in {"border", "tint"} else ".webm"
+        asset_index = 2 if category == "light" else 1
+        name = "%s-%02d%s" % (
+            category.replace("_", "-"),
+            asset_index,
+            suffix,
+        )
+        payload = ("asset:" + category).encode("ascii")
+        (asset_root / name).write_bytes(payload)
+        categories[category] = [
+            {
+                "media_type": (
+                    "image/png" if suffix == ".png" else "video/webm"
+                ),
+                "name": name,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        ]
+    manifest = {"categories": categories, "version": 1}
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8")
+    (asset_root / "manifest.json").write_bytes(raw)
+    manifest_sha = hashlib.sha256(raw).hexdigest()
+    config = replace(
+        make_config(root, gates=gates),
+        default_source_trim_tail_seconds=0,
+        media_mode=worker.RANDOM_OVERLAY_MEDIA_MODE,
+        profile=worker.RANDOM_OVERLAY_PROFILE,
+        random_overlay_root=asset_root,
+        random_overlay_manifest_sha256=manifest_sha,
+        random_overlay_assets=worker.load_asset_set(asset_root, manifest_sha),
+    )
+    return replace(config, **overrides) if overrides else config
+
+
 def make_manual_canary_config(root):
     return replace(
         make_config(root, gates=False),
@@ -436,6 +525,69 @@ def make_downloader(calls):
         }
 
     return download
+
+
+def make_pinned_connection(plans, calls):
+    plans = list(plans)
+
+    class FakePinnedResponse:
+        def __init__(self, plan):
+            self.status = int(plan.get("status", 200))
+            self.headers = dict(plan.get("headers") or {})
+            self._payload = plan.get("payload", b"")
+            self._read_error = plan.get("read_error")
+            self._read = False
+            self.closed = False
+
+        def read(self, _limit=-1):
+            if self._read_error is not None:
+                error = self._read_error
+                self._read_error = None
+                raise error
+            if self._read:
+                return b""
+            self._read = True
+            return self._payload
+
+        def close(self):
+            self.closed = True
+
+    class FakePinnedConnection:
+        def __init__(self, hostname, endpoint, *, timeout, context):
+            index = len(calls)
+            if index >= len(plans):
+                raise AssertionError("unexpected pinned connection")
+            self.plan = plans[index]
+            self.response = FakePinnedResponse(self.plan)
+            self.record = {
+                "context": context,
+                "endpoint": endpoint,
+                "hostname": hostname,
+                "request": None,
+                "timeout": timeout,
+            }
+            self.closed = False
+            calls.append(self.record)
+
+        def request(self, method, target, headers):
+            self.record["request"] = {
+                "headers": dict(headers),
+                "method": method,
+                "target": target,
+            }
+            error = self.plan.get("request_error")
+            if error is not None:
+                raise error
+
+        def getresponse(self):
+            return self.response
+
+        def close(self):
+            self.closed = True
+            self.record["connection_closed"] = True
+            self.record["response_closed"] = self.response.closed
+
+    return FakePinnedConnection
 
 
 def envelope(config, operation, token=TOKEN, job_id=JOB_ID):
@@ -558,6 +710,760 @@ def make_manual_canary_publish(config, **overrides):
 
 
 class TTGPUWorkerTests(unittest.TestCase):
+    @staticmethod
+    def _ipv4_record(address):
+        return (
+            worker.socket.AF_INET,
+            worker.socket.SOCK_STREAM,
+            worker.socket.IPPROTO_TCP,
+            "",
+            (address, 443),
+        )
+
+    @staticmethod
+    def _verified_tls_context():
+        return SimpleNamespace(
+            check_hostname=True,
+            verify_mode=worker.ssl.CERT_REQUIRED,
+        )
+
+    def test_trusted_source_resolution_allows_only_exact_host_address_pair(self):
+        trusted = (("media.example.com", "169.254.0.47"),)
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                (
+                    worker.socket.AF_INET,
+                    worker.socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("169.254.0.47", 443),
+                )
+            ],
+        ):
+            worker._resolve_public_host("media.example.com", trusted)
+            with self.assertRaises(worker.TTGPUError) as wrong_host:
+                worker._resolve_public_host("other.example.com", trusted)
+        self.assertEqual(wrong_host.exception.code, "source_url_not_allowed")
+
+    def test_resolver_returns_ordered_deduplicated_pinned_endpoints(self):
+        records = [
+            self._ipv4_record("8.8.8.8"),
+            self._ipv4_record("8.8.8.8"),
+            self._ipv4_record("1.1.1.1"),
+        ]
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=records,
+        ) as resolver:
+            endpoints = worker._resolve_public_host("media.example.com")
+        resolver.assert_called_once_with(
+            "media.example.com",
+            443,
+            type=worker.socket.SOCK_STREAM,
+        )
+        self.assertEqual(
+            [endpoint.address for endpoint in endpoints],
+            ["8.8.8.8", "1.1.1.1"],
+        )
+        self.assertEqual(
+            [endpoint.sockaddr for endpoint in endpoints],
+            [("8.8.8.8", 443), ("1.1.1.1", 443)],
+        )
+
+    def test_mixed_trusted_and_untrusted_resolution_rejects_before_connect(self):
+        config = replace(
+            make_config(self.root),
+            trusted_source_resolutions=(
+                ("media.example.com", "169.254.0.47"),
+            ),
+        )
+        destination = self.root / "mixed-resolution.mp4"
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                self._ipv4_record("169.254.0.47"),
+                self._ipv4_record("127.0.0.1"),
+            ],
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+        ) as connection:
+            with self.assertRaises(worker.TTGPUError) as caught:
+                worker.download_source(
+                    "https://media.example.com/material.mp4",
+                    destination,
+                    None,
+                    None,
+                    config,
+                )
+        self.assertEqual(caught.exception.code, "source_url_not_allowed")
+        connection.assert_not_called()
+        self.assertFalse(destination.exists())
+
+    def test_wrong_trusted_address_rejects_before_connect(self):
+        config = replace(
+            make_config(self.root),
+            trusted_source_resolutions=(
+                ("media.example.com", "169.254.0.47"),
+            ),
+        )
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[self._ipv4_record("169.254.0.48")],
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+        ) as connection:
+            with self.assertRaises(worker.TTGPUError) as caught:
+                worker.download_source(
+                    "https://media.example.com/material.mp4",
+                    self.root / "wrong-pin.mp4",
+                    None,
+                    None,
+                    config,
+                )
+        self.assertEqual(caught.exception.code, "source_url_not_allowed")
+        connection.assert_not_called()
+
+    def test_pinned_connection_uses_exact_ipv4_and_original_hostname_for_sni(self):
+        endpoint = worker._ResolvedSourceEndpoint(
+            family=worker.socket.AF_INET,
+            socktype=worker.socket.SOCK_STREAM,
+            proto=worker.socket.IPPROTO_TCP,
+            sockaddr=("169.254.0.47", 443),
+            address="169.254.0.47",
+        )
+        raw_socket = mock.Mock()
+        wrapped_socket = object()
+        context = mock.Mock(
+            check_hostname=True,
+            verify_mode=worker.ssl.CERT_REQUIRED,
+        )
+        context.wrap_socket.return_value = wrapped_socket
+        with mock.patch.object(
+            worker.socket,
+            "socket",
+            return_value=raw_socket,
+        ) as socket_factory, mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+        ) as resolver:
+            connection = worker._PinnedHTTPSConnection(
+                "media.example.com",
+                endpoint,
+                timeout=17,
+                context=context,
+            )
+            connection.connect()
+        resolver.assert_not_called()
+        socket_factory.assert_called_once_with(
+            worker.socket.AF_INET,
+            worker.socket.SOCK_STREAM,
+            worker.socket.IPPROTO_TCP,
+        )
+        raw_socket.settimeout.assert_called_once_with(17)
+        raw_socket.connect.assert_called_once_with(("169.254.0.47", 443))
+        context.wrap_socket.assert_called_once_with(
+            raw_socket,
+            server_hostname="media.example.com",
+        )
+        self.assertIs(connection.sock, wrapped_socket)
+
+    def test_pinned_connection_preserves_ipv6_sockaddr_flow_and_scope(self):
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                (
+                    worker.socket.AF_INET6,
+                    worker.socket.SOCK_STREAM,
+                    worker.socket.IPPROTO_TCP,
+                    "",
+                    ("2001:4860:4860::8888", 443, 19, 7),
+                )
+            ],
+        ):
+            endpoint = worker._resolve_public_host("media.example.com")[0]
+        self.assertEqual(
+            endpoint.sockaddr,
+            ("2001:4860:4860::8888", 443, 19, 7),
+        )
+        raw_socket = mock.Mock()
+        context = mock.Mock(
+            check_hostname=True,
+            verify_mode=worker.ssl.CERT_REQUIRED,
+        )
+        context.wrap_socket.return_value = object()
+        with mock.patch.object(
+            worker.socket,
+            "socket",
+            return_value=raw_socket,
+        ), mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+        ) as resolver:
+            connection = worker._PinnedHTTPSConnection(
+                "media.example.com",
+                endpoint,
+                timeout=9,
+                context=context,
+            )
+            connection.connect()
+        resolver.assert_not_called()
+        raw_socket.connect.assert_called_once_with(
+            ("2001:4860:4860::8888", 443, 19, 7)
+        )
+        context.wrap_socket.assert_called_once_with(
+            raw_socket,
+            server_hostname="media.example.com",
+        )
+
+    def test_pinned_https_uses_real_tls_original_sni_certificate_and_host(self):
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+        except ImportError:
+            self.skipTest("cryptography is unavailable for local TLS fixture")
+
+        now = datetime.now(timezone.utc)
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        ca_name = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, "TT GPU test CA")]
+        )
+        ca_cert = (
+            x509.CertificateBuilder()
+            .subject_name(ca_name)
+            .issuer_name(ca_name)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(hours=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), True)
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(
+                    ca_key.public_key()
+                ),
+                False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                    ca_key.public_key()
+                ),
+                False,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                True,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+        server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        server_name = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, "media.example.com")]
+        )
+        server_cert = (
+            x509.CertificateBuilder()
+            .subject_name(server_name)
+            .issuer_name(ca_name)
+            .public_key(server_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(hours=1))
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [x509.DNSName("media.example.com")]
+                ),
+                False,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+                False,
+            )
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(
+                    server_key.public_key()
+                ),
+                False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                    ca_key.public_key()
+                ),
+                False,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=True,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                True,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+        ca_path = self.root / "tls-test-ca.pem"
+        cert_path = self.root / "tls-test-server.pem"
+        key_path = self.root / "tls-test-server-key.pem"
+        ca_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+        cert_path.write_bytes(
+            server_cert.public_bytes(serialization.Encoding.PEM)
+        )
+        key_path.write_bytes(
+            server_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+
+        listener = worker.socket.socket(
+            worker.socket.AF_INET,
+            worker.socket.SOCK_STREAM,
+        )
+        listener.settimeout(5)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        server_context = worker.ssl.SSLContext(worker.ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(str(cert_path), str(key_path))
+        observed_sni = []
+        observed_request = []
+        server_errors = []
+
+        def record_sni(_socket, hostname, _context):
+            observed_sni.append(hostname)
+
+        server_context.set_servername_callback(record_sni)
+        payload = b"real-local-tls-provider-vip"
+
+        def serve_once():
+            try:
+                raw_socket, _address = listener.accept()
+                with server_context.wrap_socket(
+                    raw_socket,
+                    server_side=True,
+                ) as tls_socket:
+                    request = bytearray()
+                    while b"\r\n\r\n" not in request:
+                        chunk = tls_socket.recv(4096)
+                        if not chunk:
+                            break
+                        request.extend(chunk)
+                    observed_request.append(bytes(request))
+                    tls_socket.sendall(
+                        (
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Length: %s\r\n"
+                            "Connection: close\r\n\r\n" % len(payload)
+                        ).encode("ascii")
+                        + payload
+                    )
+            except Exception as exc:  # pragma: no cover - asserted below.
+                server_errors.append(repr(exc))
+            finally:
+                listener.close()
+
+        server_thread = threading.Thread(target=serve_once, daemon=True)
+        server_thread.start()
+        client_context = worker.ssl.create_default_context(cafile=str(ca_path))
+        endpoint = worker._ResolvedSourceEndpoint(
+            family=worker.socket.AF_INET,
+            socktype=worker.socket.SOCK_STREAM,
+            proto=worker.socket.IPPROTO_TCP,
+            sockaddr=("127.0.0.1", port),
+            address="127.0.0.1",
+        )
+        parsed = urllib.parse.urlsplit(
+            "https://media.example.com/video.mp4?version=9#ignored"
+        )
+        try:
+            with mock.patch.object(
+                worker.ssl,
+                "create_default_context",
+                return_value=client_context,
+            ), mock.patch.object(
+                worker.socket,
+                "getaddrinfo",
+            ) as resolver:
+                with worker._open_pinned_https_response(
+                    parsed,
+                    (endpoint,),
+                    {"User-Agent": "TT-GPU-TLS-Test"},
+                    5,
+                ) as response:
+                    self.assertEqual(response.read(), payload)
+            resolver.assert_not_called()
+        except worker.TTGPUError as exc:
+            server_thread.join(timeout=5)
+            self.fail(
+                "local TLS request failed: %s; server=%r"
+                % (exc.code, server_errors)
+            )
+        finally:
+            server_thread.join(timeout=5)
+            listener.close()
+        self.assertFalse(server_thread.is_alive())
+        self.assertEqual(server_errors, [])
+        self.assertEqual(observed_sni, ["media.example.com"])
+        request_text = observed_request[0].decode("iso-8859-1")
+        self.assertIn("GET /video.mp4?version=9 HTTP/1.1\r\n", request_text)
+        self.assertEqual(
+            request_text.lower().count("\r\nhost: media.example.com\r\n"),
+            1,
+        )
+        self.assertNotIn("127.0.0.1", request_text)
+
+    def test_download_pins_first_resolution_and_ignores_rebinding_answer(self):
+        payload = b"provider-vip-video"
+        digest = hashlib.sha256(payload).hexdigest()
+        calls = []
+        config = replace(
+            make_config(self.root),
+            trusted_source_resolutions=(
+                ("media.example.com", "169.254.0.47"),
+            ),
+        )
+        destination = self.root / "provider-vip.mp4"
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            side_effect=[
+                [self._ipv4_record("169.254.0.47")],
+                [self._ipv4_record("127.0.0.1")],
+            ],
+        ) as resolver, mock.patch.object(
+            worker.ssl,
+            "create_default_context",
+            return_value=self._verified_tls_context(),
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+            make_pinned_connection(
+                [
+                    {
+                        "headers": {"Content-Length": str(len(payload))},
+                        "payload": payload,
+                    }
+                ],
+                calls,
+            ),
+        ):
+            result = worker.download_source(
+                (
+                    "https://media.example.com/video/material.mp4"
+                    "?version=7#ignored-fragment"
+                ),
+                destination,
+                digest,
+                len(payload),
+                config,
+            )
+        self.assertEqual(resolver.call_count, 1)
+        self.assertEqual(result, {"sha256": digest, "size": len(payload)})
+        self.assertEqual(destination.read_bytes(), payload)
+        self.assertEqual(calls[0]["endpoint"].address, "169.254.0.47")
+        self.assertEqual(calls[0]["hostname"], "media.example.com")
+        self.assertEqual(
+            calls[0]["request"]["target"],
+            "/video/material.mp4?version=7",
+        )
+        self.assertEqual(
+            calls[0]["request"]["headers"]["Host"],
+            "media.example.com",
+        )
+        self.assertNotIn("169.254.0.47", calls[0]["request"]["headers"]["Host"])
+        self.assertTrue(calls[0]["connection_closed"])
+
+    def test_public_source_is_also_connected_through_pinned_endpoint(self):
+        payload = b"public-source"
+        calls = []
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[self._ipv4_record("8.8.8.8")],
+        ), mock.patch.object(
+            worker.ssl,
+            "create_default_context",
+            return_value=self._verified_tls_context(),
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+            make_pinned_connection([{"payload": payload}], calls),
+        ):
+            worker.download_source(
+                "https://media.example.com/public.mp4",
+                self.root / "public-source.mp4",
+                hashlib.sha256(payload).hexdigest(),
+                len(payload),
+                make_config(self.root),
+            )
+        self.assertEqual(calls[0]["endpoint"].address, "8.8.8.8")
+        self.assertEqual(
+            calls[0]["request"]["headers"]["Host"],
+            "media.example.com",
+        )
+
+    def test_multiple_validated_addresses_fail_over_before_body_read(self):
+        payload = b"second-endpoint"
+        calls = []
+
+        class Deadline:
+            def __init__(self):
+                self.stage_calls = []
+                self.values = iter((12, 5))
+
+            def stage_timeout(self, configured_timeout):
+                self.stage_calls.append(configured_timeout)
+                return next(self.values)
+
+            @staticmethod
+            def check():
+                return None
+
+        deadline = Deadline()
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                self._ipv4_record("8.8.8.8"),
+                self._ipv4_record("1.1.1.1"),
+            ],
+        ), mock.patch.object(
+            worker.ssl,
+            "create_default_context",
+            return_value=self._verified_tls_context(),
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+            make_pinned_connection(
+                [
+                    {"request_error": OSError("first endpoint unavailable")},
+                    {"payload": payload},
+                ],
+                calls,
+            ),
+        ):
+            worker.download_source(
+                "https://media.example.com/failover.mp4",
+                self.root / "failover.mp4",
+                hashlib.sha256(payload).hexdigest(),
+                len(payload),
+                make_config(self.root),
+                deadline,
+            )
+        self.assertEqual(
+            [item["endpoint"].address for item in calls],
+            ["8.8.8.8", "1.1.1.1"],
+        )
+        self.assertEqual([item["timeout"] for item in calls], [12, 5])
+        self.assertEqual(deadline.stage_calls, [30, 30])
+        self.assertTrue(calls[0]["connection_closed"])
+
+    def test_body_failure_does_not_replay_download_on_second_address(self):
+        calls = []
+        destination = self.root / "body-failure.mp4"
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                self._ipv4_record("8.8.8.8"),
+                self._ipv4_record("1.1.1.1"),
+            ],
+        ), mock.patch.object(
+            worker.ssl,
+            "create_default_context",
+            return_value=self._verified_tls_context(),
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+            make_pinned_connection(
+                [
+                    {"read_error": OSError("body interrupted")},
+                    {"payload": b"must-not-be-read"},
+                ],
+                calls,
+            ),
+        ):
+            with self.assertRaises(worker.TTGPUError) as caught:
+                worker.download_source(
+                    "https://media.example.com/body.mp4",
+                    destination,
+                    None,
+                    None,
+                    make_config(self.root),
+                )
+        self.assertEqual(caught.exception.code, "source_download_failed")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(destination.exists())
+
+    def test_tls_verification_failure_is_redacted_and_does_not_write(self):
+        calls = []
+        destination = self.root / "bad-certificate.mp4"
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[self._ipv4_record("8.8.8.8")],
+        ), mock.patch.object(
+            worker.ssl,
+            "create_default_context",
+            return_value=self._verified_tls_context(),
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+            make_pinned_connection(
+                [
+                    {
+                        "request_error": worker.ssl.SSLCertVerificationError(
+                            "hostname mismatch"
+                        )
+                    }
+                ],
+                calls,
+            ),
+        ):
+            with self.assertRaises(worker.TTGPUError) as caught:
+                worker.download_source(
+                    "https://media.example.com/tls.mp4",
+                    destination,
+                    None,
+                    None,
+                    make_config(self.root),
+                )
+        self.assertEqual(caught.exception.code, "source_download_failed")
+        self.assertNotIn("hostname mismatch", str(caught.exception))
+        self.assertFalse(destination.exists())
+
+    def test_unverified_tls_context_is_rejected_before_connect(self):
+        destination = self.root / "unsafe-context.mp4"
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[self._ipv4_record("8.8.8.8")],
+        ), mock.patch.object(
+            worker.ssl,
+            "create_default_context",
+            return_value=SimpleNamespace(
+                check_hostname=False,
+                verify_mode=worker.ssl.CERT_NONE,
+            ),
+        ), mock.patch.object(
+            worker,
+            "_PinnedHTTPSConnection",
+        ) as connection:
+            with self.assertRaises(worker.TTGPUError) as caught:
+                worker.download_source(
+                    "https://media.example.com/unsafe.mp4",
+                    destination,
+                    None,
+                    None,
+                    make_config(self.root),
+                )
+        self.assertEqual(caught.exception.code, "source_download_failed")
+        connection.assert_not_called()
+        self.assertFalse(destination.exists())
+
+    def test_http_redirects_are_rejected_without_following_location(self):
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                calls = []
+                destination = self.root / ("redirect-%s.mp4" % status)
+                with mock.patch.object(
+                    worker.socket,
+                    "getaddrinfo",
+                    return_value=[self._ipv4_record("8.8.8.8")],
+                ) as resolver, mock.patch.object(
+                    worker.ssl,
+                    "create_default_context",
+                    return_value=self._verified_tls_context(),
+                ), mock.patch.object(
+                    worker,
+                    "_PinnedHTTPSConnection",
+                    make_pinned_connection(
+                        [
+                            {
+                                "headers": {
+                                    "Location": "https://127.0.0.1/private"
+                                },
+                                "status": status,
+                            }
+                        ],
+                        calls,
+                    ),
+                ):
+                    with self.assertRaises(worker.TTGPUError) as caught:
+                        worker.download_source(
+                            "https://media.example.com/redirect.mp4",
+                            destination,
+                            None,
+                            None,
+                            make_config(self.root),
+                        )
+                self.assertEqual(caught.exception.code, "source_download_failed")
+                self.assertEqual(resolver.call_count, 1)
+                self.assertEqual(len(calls), 1)
+                self.assertFalse(destination.exists())
+
+    def test_trusted_source_resolution_does_not_allow_a_private_range(self):
+        trusted = (("media.example.com", "169.254.0.47"),)
+        with mock.patch.object(
+            worker.socket,
+            "getaddrinfo",
+            return_value=[
+                (
+                    worker.socket.AF_INET,
+                    worker.socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("10.0.0.8", 443),
+                )
+            ],
+        ):
+            with self.assertRaises(worker.TTGPUError) as rejected:
+                worker._resolve_public_host("media.example.com", trusted)
+        self.assertEqual(rejected.exception.code, "source_url_not_allowed")
+
+    def test_trusted_source_resolution_configuration_is_strict(self):
+        allowed = ("media.example.com",)
+        self.assertEqual(
+            worker._parse_trusted_source_resolutions(
+                "media.example.com=169.254.0.47",
+                allowed,
+            ),
+            (("media.example.com", "169.254.0.47"),),
+        )
+        for value in (
+            "other.example.com=169.254.0.47",
+            "media.example.com=10.0.0.0/8",
+            "media.example.com=43.132.105.206",
+            "media.example.com",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(worker.TTGPUError):
+                    worker._parse_trusted_source_resolutions(value, allowed)
+
     def test_default_prepared_output_ceiling_matches_tiktok_four_gib(self):
         self.assertEqual(
             worker.DEFAULT_MAX_OUTPUT_BYTES,
@@ -1011,6 +1917,30 @@ class TTGPUWorkerTests(unittest.TestCase):
         self.assertTrue(loaded_clean.direct_post_eligible())
         self.assertFalse(loaded_clean.brand_overlay_review_required())
         self.assertEqual(loaded_clean.preparation_transition(), "none")
+        with mock.patch.dict(
+            os.environ,
+            dict(
+                env,
+                TT_POST_GPU_MEDIA_MODE="source_direct",
+                TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS="0",
+            ),
+            clear=True,
+        ):
+            loaded_source_direct = worker.WorkerConfig.from_env()
+        self.assertEqual(
+            loaded_source_direct.media_mode,
+            worker.SOURCE_DIRECT_MEDIA_MODE,
+        )
+        self.assertEqual(
+            loaded_source_direct.profile,
+            worker.SOURCE_DIRECT_PROFILE,
+        )
+        self.assertTrue(loaded_source_direct.direct_post_eligible())
+        self.assertFalse(loaded_source_direct.uses_outro_pipeline())
+        self.assertEqual(
+            loaded_source_direct.preparation_transition(),
+            "none",
+        )
         direct_outro_env = dict(
             env,
             TT_POST_GPU_MEDIA_MODE="direct_outro",
@@ -1613,6 +2543,235 @@ class TTGPUWorkerTests(unittest.TestCase):
         )
         self.assertTrue(reused["reused"])
         self.assertEqual(len(calls), 1)
+
+    def test_random_overlay_prepare_freezes_recipe_and_reuses_it(self):
+        config = make_random_overlay_config(self.root)
+        runner = FakeRunner(
+            [
+                input_probe(28.5),
+                prepared_probe(28.5),
+            ]
+        )
+        calls = []
+        processor = self.processor(
+            config=config,
+            runner=runner,
+            downloader=make_downloader(calls),
+        )
+        request = make_prepare(
+            expected_profile=worker.RANDOM_OVERLAY_PROFILE,
+            source_trim_tail_seconds=0,
+        )
+        result = processor.prepare(request)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(
+            set(result["stage_timings_ms"]),
+            {
+                "asset_snapshot",
+                "download",
+                "source_probe",
+                "gpu_queue_wait",
+                "transcode",
+                "output_verify",
+                "upload",
+                "total",
+            },
+        )
+        self.assertEqual(result["profile"], worker.RANDOM_OVERLAY_PROFILE)
+        self.assertTrue(result["direct_post_eligible"])
+        recipe = result["random_overlay_recipe"]
+        self.assertEqual(
+            recipe["asset_set_sha256"],
+            config.random_overlay_manifest_sha256,
+        )
+        self.assertEqual(
+            set(recipe["assets"]),
+            {"border", "opacity_video", "corners", "tint"},
+        )
+        self.assertTrue(-2000 <= recipe["rotation_millidegrees"] <= 2000)
+        self.assertTrue(9800 <= recipe["scale_bp"] <= 10200)
+        self.assertTrue(100 <= recipe["tint_opacity_bp"] <= 1000)
+        self.assertNotIn("light", recipe["assets"])
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        self.assertEqual(manifest["version"], 7)
+        self.assertEqual(
+            manifest["request"]["random_overlay_recipe"],
+            recipe,
+        )
+        ffmpeg_commands = [
+            command
+            for command in runner.commands
+            if "ffmpeg" in Path(command[0]).name.lower()
+        ]
+        self.assertEqual(len(ffmpeg_commands), 1)
+        command = ffmpeg_commands[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[base][tint]", graph)
+        self.assertIn("[o1][opacity]", graph)
+        self.assertNotIn("[light]", graph)
+        self.assertIn("[o2][border]", graph)
+        self.assertIn("[o3][corners]", graph)
+        reused = processor.prepare(request)
+        self.assertTrue(reused["reused"])
+        self.assertEqual(
+            reused["stage_timings_ms"], result["stage_timings_ms"]
+        )
+        self.assertEqual(reused["random_overlay_recipe"], recipe)
+        self.assertEqual(len(calls), 1)
+
+    def test_source_direct_mirrors_exact_source_without_ffmpeg_and_publishes(self):
+        config = make_source_direct_config(self.root, gates=True)
+        runner = FakeRunner([source_direct_probe(97.756)])
+        calls = []
+        store = FakeObjectStore()
+        api = FakeTikTokAPI()
+        processor = self.processor(
+            config=config,
+            runner=runner,
+            downloader=make_downloader(calls),
+            object_store=store,
+            api=api,
+        )
+
+        prepared = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+
+        source_sha = hashlib.sha256(SOURCE_BYTES).hexdigest()
+        self.assertEqual(prepared["profile"], worker.SOURCE_DIRECT_PROFILE)
+        self.assertEqual(prepared["output_sha256"], source_sha)
+        self.assertEqual(prepared["output_size"], len(SOURCE_BYTES))
+        self.assertTrue(prepared["direct_post_eligible"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(store.upload_calls), 1)
+        self.assertEqual(store.upload_calls[0]["sha256"], source_sha)
+        self.assertTrue(store.upload_calls[0]["path"].endswith("source.mp4"))
+        self.assertFalse(
+            any(
+                "ffmpeg" in Path(command[0]).name.lower()
+                for command in runner.commands
+            )
+        )
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        self.assertEqual(manifest["version"], 6)
+        self.assertEqual(
+            manifest["request"]["media_mode"],
+            worker.SOURCE_DIRECT_MEDIA_MODE,
+        )
+        self.assertEqual(manifest["request"]["source_sha256"], source_sha)
+        self.assertEqual(
+            manifest["request"]["source_size"], len(SOURCE_BYTES)
+        )
+        self.assertEqual(manifest["request"]["source_trim_tail_seconds"], 0)
+
+        reused = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(reused["reused"])
+        self.assertEqual(len(calls), 1)
+
+        published = processor.publish(make_publish(config))
+        self.assertEqual(published["state"], "initialized")
+        self.assertEqual(len(api.init_calls), 1)
+        self.assertEqual(api.init_calls[0][2], prepared["output_url"])
+
+    def test_source_direct_accepts_hevc_hvc1_and_revalidates_manifest(self):
+        config = make_source_direct_config(self.root, gates=True)
+        api = FakeTikTokAPI()
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner(
+                [source_direct_probe(107.6, codec="hevc", sample_rate="44100")]
+            ),
+            downloader=make_downloader([]),
+            object_store=FakeObjectStore(),
+            api=api,
+        )
+
+        prepared = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+
+        self.assertEqual(prepared["probe"]["video_codec"], "hevc")
+        self.assertEqual(prepared["probe"]["video_codec_tag"], "hvc1")
+        self.assertEqual(prepared["probe"]["profile"], "main")
+        self.assertEqual(prepared["probe"]["audio_sample_rate"], 44100)
+        reused = processor.prepare(
+            make_prepare(
+                expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                source_trim_tail_seconds=0,
+            )
+        )
+        self.assertTrue(reused["reused"])
+        published = processor.publish(make_publish(config))
+        self.assertEqual(published["state"], "initialized")
+        self.assertEqual(len(api.init_calls), 1)
+        self.assertEqual(api.init_calls[0][2], prepared["output_url"])
+
+        manifest = worker._read_json(
+            processor._prepare_manifest_path(JOB_ID)
+        )
+        manifest["result"]["probe"]["video_codec_tag"] = "avc1"
+        with self.assertRaises(worker.TTGPUError) as caught:
+            worker._prepare_response(manifest, True, config, JOB_ID)
+        self.assertEqual(caught.exception.code, "prepared_media_invalid")
+
+    def test_source_direct_rejects_unsupported_or_mismatched_video_contract(self):
+        config = make_source_direct_config(self.root)
+        path = self.root / "source-direct-invalid.mp4"
+        path.write_bytes(SOURCE_BYTES)
+        cases = (
+            {"codec": "hevc", "codec_tag": "avc1", "profile": "Main"},
+            {"codec": "h264", "codec_tag": "hvc1", "profile": "High"},
+            {"codec": "vp9", "codec_tag": "vp09", "profile": "0"},
+            {"codec": "hevc", "codec_tag": "hvc1", "profile": "Main 10"},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(worker.TTGPUError) as caught:
+                    worker.validate_prepared_output(
+                        config,
+                        source_direct_probe(10, **case),
+                        path,
+                        1024 * 1024,
+                        10,
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "prepared_media_invalid",
+                )
+
+    def test_source_direct_rejects_trim_before_download(self):
+        config = make_source_direct_config(self.root)
+        calls = []
+        processor = self.processor(
+            config=config,
+            runner=FakeRunner([source_direct_probe(97.756)]),
+            downloader=make_downloader(calls),
+            object_store=FakeObjectStore(),
+        )
+        with self.assertRaises(worker.TTGPUError) as caught:
+            processor.prepare(
+                make_prepare(
+                    expected_profile=worker.SOURCE_DIRECT_PROFILE,
+                    source_trim_tail_seconds=1,
+                )
+            )
+        self.assertEqual(caught.exception.code, "source_direct_trim_forbidden")
+        self.assertEqual(calls, [])
 
     def test_direct_clean_prepared_manifest_reaches_formal_publish(self):
         config = make_direct_clean_config(self.root, gates=True)
@@ -3156,6 +4315,79 @@ class TTGPUWorkerTests(unittest.TestCase):
             "https://pull.example.com/video.mp4",
         )
 
+    def test_tiktok_api_default_constructor_uses_no_proxy_no_redirect_opener(self):
+        api = worker.TikTokContentPostingAPI()
+        self.assertIs(api.opener, worker._TIKTOK_NO_REDIRECT_OPENER)
+        proxy_handlers = [
+            handler
+            for handler in api.opener.handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        redirect_handlers = [
+            handler
+            for handler in api.opener.handlers
+            if isinstance(handler, worker._TikTokNoRedirect)
+        ]
+        # build_opener omits an empty ProxyHandler after it suppresses the
+        # environment-derived default, so no proxy-capable handler remains.
+        self.assertEqual(proxy_handlers, [])
+        self.assertEqual(len(redirect_handlers), 1)
+        self.assertIsNone(
+            redirect_handlers[0].redirect_request(
+                None,
+                None,
+                302,
+                "Found",
+                {},
+                "https://redirect.example.com/",
+            )
+        )
+
+    def test_worker_serve_initializes_default_tiktok_client_without_network(self):
+        config = make_config(self.root)
+        servers = []
+
+        class FakeControlServer:
+            def __init__(self, address, processor, internal_token):
+                self.address = address
+                self.processor = processor
+                self.internal_token = internal_token
+                self.closed = False
+                self.served = False
+                servers.append(self)
+
+            def serve_forever(self, poll_interval):
+                self.poll_interval = poll_interval
+                self.served = True
+
+            def server_close(self):
+                self.closed = True
+
+        with mock.patch.object(
+            worker.WorkerConfig,
+            "from_env",
+            return_value=config,
+        ), mock.patch.object(
+            worker,
+            "TTPostGPUHTTPServer",
+            FakeControlServer,
+        ):
+            worker.serve()
+        self.assertEqual(len(servers), 1)
+        server = servers[0]
+        self.assertEqual(server.address, (config.host, config.port))
+        self.assertEqual(server.internal_token, config.internal_token)
+        self.assertTrue(server.served)
+        self.assertTrue(server.closed)
+        self.assertIsInstance(
+            server.processor.tiktok_api,
+            worker.TikTokContentPostingAPI,
+        )
+        self.assertIs(
+            server.processor.tiktok_api.opener,
+            worker._TIKTOK_NO_REDIRECT_OPENER,
+        )
+
     def test_manifests_ledgers_and_config_repr_never_contain_token(self):
         config = make_direct_clean_config(self.root, gates=True)
         api = FakeTikTokAPI()
@@ -3216,6 +4448,8 @@ class TTGPUWorkerTests(unittest.TestCase):
             self.assertIn(name, env)
         self.assertNotIn("TT_POST_GPU_LIVE_API_ENABLED", env)
         self.assertNotIn("TT_POST_GPU_PUBLISH_ENABLED", env)
+        self.assertIn("source_direct", env)
+        self.assertIn("tt-post-source-direct-v1", env)
         nginx = (
             REPO_ROOT / "deploy" / "tt-post-gpu-media-nginx.conf.example"
         ).read_text(encoding="utf-8")
