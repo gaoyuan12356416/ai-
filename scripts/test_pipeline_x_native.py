@@ -223,6 +223,56 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(self.bridge.store.get_queue(queue["id"])["status"], "queued")
         with self.assertRaises(AdapterError): self.bridge.reserve(job, job)
 
+    def test_cutover_projection_without_generation_reaches_http_pause_and_persists_hold(self):
+        from features.pipeline_dispatch import x_native
+        from features.pipeline_dispatch.adapters import AdapterRegistry, LedgerAdapter, LedgerSpec
+        from features.pipeline_dispatch.core import DispatchStore
+        from features.pipeline_dispatch.cutover import Cutover
+        from features.pipeline_dispatch.service import Coordinator
+
+        queue = self.queue()
+        before = self.bridge.store.get_queue(queue["id"])
+        received = []
+        token = "t" * 32
+        runtime = self.runtime
+
+        class HTTPPauseDriver:
+            def pause(self, job, cutoff):
+                received.append(dict(job))
+                replies = []
+                handler = SimpleNamespace(headers={"Authorization": "Bearer " + token},
+                    read_json=lambda _limit: {"job": job, "cutoff": cutoff},
+                    send_json=lambda status, body: replies.append((status, body)))
+                x_native.handle(handler, runtime, "/internal/pipeline-dispatch/x/pause")
+                status, body = replies[0]
+                if status != 200:
+                    raise AdapterError(body["code"])
+                return body
+
+        adapter = LedgerAdapter(LedgerSpec("x", "queue", str(self.runtime.POST_DB_PATH), "x_post_queue", module="x_accounts"), HTTPPauseDriver())
+        central = DispatchStore(self.root / "cutover.sqlite")
+        control = Cutover(Coordinator(central, AdapterRegistry([adapter]), internal_token="i" * 32, master_key="m" * 32))
+        plan = control.plan("x", "2099-01-01T00:00:00Z")
+        self.assertEqual(plan["paused_source_keys"], ["x:queue:" + str(queue["id"])])
+        with mock.patch.object(x_native, "_BRIDGE", self.bridge), mock.patch.dict(os.environ, {
+                "PIPELINE_X_CANONICAL_BRIDGE_ENABLED": "1", "PIPELINE_X_CANONICAL_TOKEN": token}):
+            for _ in range(2):
+                held = control.apply(plan["plan_id"], plan["sha256"])
+                self.assertEqual((held["status"], held["paused_count"], held["errors"]), ("held", 1, []))
+        self.assertNotIn("generation", received[0])
+        self.assertNotIn("claim_token", received[0])
+        self.assertEqual(self.bridge.store.get_queue(queue["id"]), before)
+        with self.bridge.connect() as conn:
+            hold = conn.execute("SELECT source_key,cutoff,reason FROM pipeline_canonical_hold").fetchall()
+            self.assertEqual([tuple(row) for row in hold], [(plan["paused_source_keys"][0], plan["cutoff"], "cutover_overdue")])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_x_claim").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_x_operation").fetchone()[0], 0)
+        self.assertEqual(self.bridge.reconcile(received[0])["status"], "queued")
+        with self.assertRaises(AdapterError):
+            self.bridge.pause({**received[0], "source_key": "x:queue:wrong"}, plan["cutoff"])
+        with self.assertRaises(KeyError):
+            self.bridge.reserve(received[0], {})
+
     def test_coordinator_expired_lease_accepts_late_native_receipt_without_reclaim(self):
         from features.pipeline_dispatch.core import DispatchStore
         queue = self.queue(auto=True)

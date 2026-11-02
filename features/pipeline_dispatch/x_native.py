@@ -60,11 +60,15 @@ class XNativeBridge:
         finally:
             c.close()
 
-    def key(self, job):
+    @staticmethod
+    def identity(job):
         if (job.get("channel") != "x" or job.get("family") != "queue"
             or job.get("stage") not in {"prepare", "publish"}
             or job.get("source_key") != "x:queue:" + str(job.get("source_id"))):
             raise AdapterError("x_native_family_invalid")
+
+    def key(self, job):
+        self.identity(job)
         return job["source_key"], job["stage"], int(job["generation"])
 
     @staticmethod
@@ -467,14 +471,16 @@ class XNativeBridge:
         return {"canonical_no_write": not unknown}
 
     def reconcile(self, job):
-        self.key(job)
+        self.identity(job)
         queue = self.store.get_queue(int(job["source_id"]))
         with self.connect() as c:
             log = c.execute("SELECT status,x_post_id,unknown_outcome FROM x_post_publish_log WHERE queue_id=?", (queue["id"],)).fetchone()
         return dict(log) if log else {"status": queue["status"]}
 
     def pause(self, job, cutoff):
-        self.key(job)
+        # Cutover uses an unclaimed canonical projection. It has no execution
+        # generation; only execution operations may require a claim key.
+        self.identity(job)
         with self.lock, self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT q.status,COALESCE(l.attempt_count,0) attempts,COALESCE(l.unknown_outcome,0) uncertain,COALESCE(l.status,'') log_status FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id WHERE q.id=?", (int(job["source_id"]),)).fetchone()
