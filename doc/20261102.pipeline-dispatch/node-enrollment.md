@@ -14,7 +14,7 @@
   --encode --cos-check --enroll /etc/pipeline-node.credentials.json
 ```
 
-预检会加载原生renderer及素材manifest、编码一秒本地小样本、验证GPU OpenCL（若需要），并用全新唯一私有COS诊断对象检查上传和HEAD。仅删除该次创建的诊断对象；若原有COS账号没有删除权限，报告其key供维护，上传检查仍有效。预检不会创建社媒帖子、评论或触发收费封面生成。YouTube仅检查本机CLI和独立认证是否存在；首次实际封面仍按已审批的生成流程执行。
+预检会加载原生renderer及素材manifest，按各 profile 执行本地编码样本（X repair 使用实际完整命令，TT outro 使用真实片尾、字体及转场），验证GPU OpenCL（若需要），并用全新唯一私有COS诊断对象检查上传和HEAD。仅删除该次创建的诊断对象；若原有COS账号没有删除权限，报告其key供维护，上传检查仍有效。预检不会创建社媒帖子、评论或触发收费封面生成。YouTube仅检查本机CLI和独立认证是否存在；首次实际封面仍按已审批的生成流程执行。
 
 预检应以最终运行的 `pipeline-worker` 用户执行，确保FFmpeg、素材、Codex CLI及数据目录的权限与服务实际一致。若运维以root完成首次登记，启动前将新建的节点凭据文件及本节点新数据目录交给专用用户，凭据保持0600；不要更改旧服务数据目录的属主。systemd按顺序读取 `/etc/pipeline-node.sources.env`（可选私有素材/COS配置）与 `/etc/pipeline-node.env`。Codex CLI必须安装在该用户可执行、且不受 `ProtectHome=true` 屏蔽的路径。
 
@@ -32,10 +32,20 @@
 
 节点按渠道声明 `catalog:x:<sha>`、`catalog:fb:<sha>`、`catalog:tt:<sha>` 能力，来自各自已验证的 manifest 配置。制作领取冻结 backend、profile 和 catalog 能力；换机续跑仍须全部匹配。执行前再次核对实际加载的素材目录 manifest，防止同 profile 下悄悄换素材或配方。制作与发布均持有单条账号/Page/YouTube频道及共用转发账号资源锁；不同账号可以跨阶段并行，已完成制作的更早任务优先进入发布。
 
-TT生产renderer来源为GitHub commit `80acd8b4f082e121f8332dea2a34f23d739b1bb3`，本次只读抽取的worker.py、random_overlay.py及compositor.py与该commit的git blob完全一致。当前工作树与该release的共同祖先后TTworker未另有修改，因此精确引入其random/source_direct能力，再添加显式CPU随机profile；原GPU profile、随机配方和去重规则保持原实现。没有在生产机器热补丁。
+TT 按任务冻结的 profile 选择独立 renderer，不回退到全局随机模板。当前实现支持 CPU 5 个 profile（branded/clean/outro 的软件 H264、source_direct、CPU random），GPU 9 个 profile（branded/clean/outro 与 random 的 H264/HEVC、source_direct）；这是代码支持矩阵，不能代替新服务器的实际预检。source_direct 不编码，仍冻结实际领取节点的 backend。direct_outro 首次接单时，节点 `asset:tt-outro:<sha>`、`asset:tt-font:<sha>` 必须分别匹配 CPU 权威服务的 `PIPELINE_TT_APPROVED_OUTRO_SHA256`、`PIPELINE_TT_APPROVED_FONT_SHA256`；执行前重新计算真实文件 SHA，续代保持原已冻结的请求与能力。
+
+新服务器先做完整 `pipeline_node_install.py --verify`，再按需要用 `pipeline_node_check.py --encode --encode-profile tt-post-direct-outro-h264-720x1280-v2`（CPU）或 `--encode --encode-profile tt-post-direct-outro-hevc-720x1280-v2`（GPU）复核实际片尾、字体及原转场。参数仍需带该节点的正式 `--env` 文件；片尾预检必须实际运行 renderer 和 drawtext，普通一秒编码通过不能证明这些依赖可用。定向 profile 检查仅供定位/复验，不可代替 enrollment 所需的完整 `--encode --cos-check`；CLI 拒绝 `--encode-profile` 与 `--enroll` 组合。
+
+旧 GPU 1a83de8 的 doctor 未检出 direct_outro 实际输出 25fps，不能以当时返回成功作为 30fps 规格通过证据。新版样本检查输出编码、尺寸、两项帧率均为 30fps 及 AAC 音频；X CPU repair 则通过真实完整命令发现并排除 NVENC tune=hq 被错误带入 libx264 的问题。普通编码器 smoke test 不能代替这些路径。
+
+本次两节点 668d0b2 的安装器 verify 均完成实际 X repair 和 TT outro 严格 30fps/AAC 检查；CPU 5 个 TT profile、GPU 9 个 TT profile 已完成各自本机编码/COS 预检。CPU 缺少 drawtext 的问题由独立 root-owned TT binary 解决，原服务 binary 保留；CPU 于 15:08:13Z 激活，GPU 于 15:09:00Z 激活。新服务器仍须在最终服务身份下验证实际字体可读、批准哈希匹配及转场编码，不能凭既有节点通过或声明 profile 接单。
+
+上述 668d 编码/COS 检查未覆盖后来发现的 GPU 官方 API TLS 故障：服务身份下 urllib 默认 CA=0，OpenSSL 默认路径指向不可读的旧 root/miniconda。b349295 安装器将可读 CA 路径传给实际节点环境，doctor 拒绝空信任链；新节点须在最终服务身份、实际 Python/子进程环境中验证，不能只凭 requests/COS 成功推断 urllib 可用。GPU 于 15:25:10Z 激活 b349295、保留原 identity；15:25:22Z 使用实际进程环境核对默认 CA=120，X/TT 的 urllib 官方 HEAD 均为 404，TLS 验证保持开启。CPU 保持 668d0b2、未重启；该只读 TLS 检查不调用发布 API，不授权重试已 unknown 的任务。
+
+TT生产renderer来源为GitHub commit `80acd8b4f082e121f8332dea2a34f23d739b1bb3`，引入时只读抽取的worker.py、random_overlay.py及compositor.py与该commit的git blob完全一致。本次在该来源上精确引入 random/source_direct 能力、显式 CPU 随机 profile 及上述 30fps 修复；原随机配方和去重规则保持原实现。所有修复经 GitHub 提交部署，没有在生产机器热补丁。
 
 自动安装入口为 `scripts/pipeline_node_install.py --manifest /绝对路径/0600私有配置.json`。默认只 stage：从 GitHub 拉取精确40位SHA、建立该SHA独立venv、核对并复制指定catalog到新节点数据目录（或共享已有只读catalog）、生成私有env及本节点专用unit，不接任务、不启动worker。配置结构见 `deploy/pipeline-node.install.gpu.example.json`；CPU使用相同结构，backend改cpu、state_root改CPU数据盘、删除tunnel、python及FFmpeg填写本机路径，并应用CPU示例的profile、libx264/cpu_legacy与4线程配置。其他服务器只需新node_id、真实性能及工具配置。
 
-`--plan`只输出非敏感路径；`--verify`以最终pipeline-worker用户核对catalog、实际一秒编码和COS权限；`--verify --enroll`在验证通过后登记，token仅从私有文件读取。首次登记前将token文件与独立Codex auth授权给该专用用户。GPU enrollment只启动新增专用SSH转发unit，使用已有受限key及known_hosts，原隧道不改。`--activate`需要已验证及已登记，并拒绝替换正在运行的同名worker；更新前须先中央drain，待该节点所有在途任务完成。
+`--plan`只输出非敏感路径；`--verify`以最终pipeline-worker用户核对catalog、各 profile 的真实编码路径和COS权限；`--verify --enroll`在验证通过后登记，token仅从私有文件读取。首次登记前将token文件与独立Codex auth授权给该专用用户。GPU enrollment只启动新增专用SSH转发unit，使用已有受限key及known_hosts，原隧道不改。`--activate`需要已验证及已登记，并拒绝替换正在运行的同名worker；更新前须先中央drain，待该节点所有在途任务完成。
 
 协调器端口为18846；旧8846属于其他既有服务，不能占用或重启。已只读验证GPU受限SSH身份允许向CPU loopback18846转发（未监听时返回connection refused，非权限拒绝）。安装器及新unit只访问18846，不修改旧端口服务。依赖锁定在 `deploy/pipeline-node.requirements.txt`；上线前仍需在两机实际运行预检，离线mock测试不等于平台发帖验收。
