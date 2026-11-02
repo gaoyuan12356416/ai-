@@ -10,6 +10,7 @@ from scripts import test_tt_posts_service as pool_fixtures
 from scripts.tt_post_runner import TTPostSidecarClient, execute_runner_tick
 from scripts.tt_auto_post_reconcile import PATH, reconcile_once
 from features.pipeline_dispatch.legacy_admission import handoff
+from features.pipeline_dispatch.tt_readback import reconcile_next
 from features.tt_posts.service import GPUClientError
 
 
@@ -33,7 +34,7 @@ class LegacyTTReadbackTests(unittest.TestCase):
         for name in ("prepare", "creator_info", "publish"):
             setattr(gpu, name, Mock(side_effect=AssertionError("platform write/preparation forbidden")))
         executor = self.executor(gpu)
-        for name in ("execute_next", "_select", "_prepare", "_publish"):
+        for name in ("execute_next", "_select", "_prepare", "_publish", "_reconcile"):
             setattr(executor, name, Mock(side_effect=AssertionError("legacy execution forbidden")))
         return executor, gpu
 
@@ -44,13 +45,14 @@ class LegacyTTReadbackTests(unittest.TestCase):
     def test_pending_preserves_unknown_and_original_video_attempt(self):
         task = self.pending()
         executor, gpu = self.readback_executor({"publish_id":task.publish_id, "state":"processing"})
-        result = executor.reconcile_next("readback")
+        result = reconcile_next(executor, "readback")
         self.assertTrue(result["claimed"])
         final = self.store.get_task(task.id)
         self.assertEqual((final.status, final.unknown_outcome, self.attempts(final)), ("unknown",True,1))
         self.assertEqual(final.publish_id,task.publish_id)
         self.assertEqual(len(gpu.reconcile_calls),1)
         with self.store._transaction() as c:
+            self.assertEqual(c.execute("SELECT next_attempt_at_utc FROM tt_auto_task WHERE id=?",(task.id,)).fetchone()[0], (self.clock()+timedelta(minutes=5)).isoformat(timespec="seconds"))
             self.assertEqual(c.execute("SELECT claim_token FROM tt_auto_task WHERE id=?",(task.id,)).fetchone()[0],"")
 
     def test_confirmed_original_id_is_required_before_success_or_definite_failure(self):
@@ -58,7 +60,7 @@ class LegacyTTReadbackTests(unittest.TestCase):
             with self.subTest(outcome=outcome):
                 task = self.pending(suffix=outcome)
                 executor, _ = self.readback_executor({"publish_id":task.publish_id, "state":outcome})
-                executor.reconcile_next("readback")
+                reconcile_next(executor, "readback")
                 final = self.store.get_task(task.id)
                 self.assertEqual((final.status, final.unknown_outcome, self.attempts(final)),(expected,False,1))
 
@@ -69,7 +71,7 @@ class LegacyTTReadbackTests(unittest.TestCase):
             with self.subTest(remote=type(remote).__name__):
                 task = self.pending(suffix=str(index))
                 executor, _ = self.readback_executor(remote)
-                result = executor.reconcile_next("readback",after_task_id=task.id-1)
+                result = reconcile_next(executor, "readback",after_task_id=task.id-1)
                 self.assertTrue(result["claimed"])
                 final = self.store.get_task(task.id)
                 self.assertEqual((final.status,final.unknown_outcome,self.attempts(final)),("retry_wait",True,1))
@@ -84,7 +86,7 @@ class LegacyTTReadbackTests(unittest.TestCase):
             c.execute("CREATE TABLE pipeline_tt_claim(source_key TEXT)")
             c.execute("INSERT INTO pipeline_tt_claim VALUES(?)",("tt:auto:"+str(owned.id),))
         executor, gpu = self.readback_executor({"publish_id":"pub-known", "state":"published"})
-        self.assertFalse(executor.reconcile_next("readback")["claimed"])
+        self.assertFalse(reconcile_next(executor, "readback")["claimed"])
         self.assertEqual(gpu.reconcile_calls,[])
         for task in (missing,active,owned,interrupted_binding):
             self.assertEqual(self.store.get_task(task.id).status,"unknown")
@@ -93,8 +95,24 @@ class LegacyTTReadbackTests(unittest.TestCase):
         reserved = self.reserved_task(suffix="old-unstarted")
         task = self.pending(suffix="known")
         executor, _ = self.readback_executor({"publish_id":"pub-known", "state":"published"})
-        self.assertEqual(executor.reconcile_next("readback")["task"]["id"],task.id)
+        self.assertEqual(reconcile_next(executor, "readback")["task"]["id"],task.id)
         self.assertEqual(self.store.get_task(reserved.id).status,"reserved")
+
+    def test_runtime_frozen_video_route_and_published_code_sync_are_preserved(self):
+        task = self.pending(suffix="frozen-route")
+        executor, default_gpu = self.readback_executor({"publish_id":"wrong-default", "state":"published"})
+        frozen_gpu = fixtures.FakeGPU(reconcile_result={"publish_id":task.publish_id, "state":"published"})
+        default_gpu.reconcile = Mock(side_effect=AssertionError("default route must not be used"))
+        executor._video_route_for_task = Mock(return_value=SimpleNamespace(gpu_client=frozen_gpu))
+        executor._sync_code_state = Mock()
+        result = reconcile_next(executor, "readback")
+        self.assertEqual(result["task"]["status"], "published")
+        requested = executor._video_route_for_task.call_args.args[0]
+        self.assertEqual((requested.template_id, requested.template_version), (task.template_id, task.template_version))
+        default_gpu.reconcile.assert_not_called()
+        self.assertEqual(len(frozen_gpu.reconcile_calls), 1)
+        self.assertEqual(executor._sync_code_state.call_args.args[1], "published")
+        self.assertEqual(executor._sync_code_state.call_args.kwargs, {"best_effort":True})
 
 
 class ReadbackRunnerTests(unittest.TestCase):

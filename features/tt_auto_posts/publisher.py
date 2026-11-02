@@ -786,7 +786,7 @@ class AutoPostExecutor:
         )
 
     def _reconcile(
-        self, task: TaskRecord, claim_token: Optional[str] = None, *, preserve_unknown: bool = False
+        self, task: TaskRecord, claim_token: Optional[str] = None
     ) -> TaskRecord:
         job_id = _stable_gpu_job_id(task)
         with self.account_source.publish_credentials(task.account_id) as credentials:
@@ -848,15 +848,14 @@ class AutoPostExecutor:
                 },
                 event_type="task_reconciled_failed",
             )
-        pending_unknown = bool(preserve_unknown and task.unknown_outcome)
         return self.store.transition_task(
             task.id,
-            "unknown" if pending_unknown else "reconciling",
+            "reconciling",
             expected_statuses={task.status},
             claim_token=claim_token,
             updates={
                 "publish_id": returned_id,
-                "unknown_outcome": pending_unknown,
+                "unknown_outcome": False,
                 "claim_phase": "reconcile",
                 "claim_worker": "",
                 "claim_token": "",
@@ -960,36 +959,6 @@ class AutoPostExecutor:
                 "task": task.as_dict(),
                 "gates": self.gates.as_dict(),
             }
-        finally:
-            self._execute_slots.release()
-
-    def reconcile_next(self, worker_id: Any, *, after_task_id: int = 0) -> Dict[str, Any]:
-        """Query one existing legacy publish ID; never enter publishing code."""
-        worker = str(worker_id or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9._:@-]{1,128}", worker):
-            raise AutoPostExecutionError("tt_auto_worker_id_invalid", "执行器身份无效", 400)
-        if isinstance(after_task_id, bool) or not isinstance(after_task_id, int) or after_task_id < 0:
-            raise AutoPostExecutionError("tt_auto_reconcile_cursor_invalid", "核对游标无效", 400)
-        if not self._execute_slots.acquire(blocking=False):
-            return {"ok": True, "claimed": False, "busy": True}
-        try:
-            claim = self.store.claim_next_executable_task(
-                worker_id=worker, lease_seconds=self.lease_seconds, now=self._now(),
-                allowed_phases={"reconcile"}, legacy_reconcile_only=True, after_task_id=after_task_id,
-            )
-            if claim is None:
-                return {"ok": True, "claimed": False}
-            task, token = claim.task, claim.reveal_claim_token()
-            try:
-                task = self._reconcile(task, token, preserve_unknown=True)
-            except Exception as exc:
-                task = self._retry_or_fail(self.store.get_task(task.id), "reconcile", exc, token)
-            self._update_run(task.run_id)
-            # No frozen caption, token, URL, or source payload in this response.
-            return {"ok": True, "claimed": True, "task": {
-                "id": task.id, "status": task.status, "unknown_outcome": task.unknown_outcome,
-                "publish_id": task.publish_id, "error_code": task.error_code,
-            }}
         finally:
             self._execute_slots.release()
 

@@ -23,7 +23,9 @@ class SidecarDependencyTests(unittest.TestCase):
 import sqlite3, sys
 from types import SimpleNamespace
 from features.pipeline_dispatch.tt_native import TTNativeBridge
+from features.pipeline_dispatch.tt_readback import reconcile_next
 from features.pipeline_dispatch.adapters import AdapterError
+assert not any(name.startswith("features.tt_auto_posts") for name in sys.modules)
 db = "tt.sqlite3"
 with sqlite3.connect(db) as c:
     c.execute("CREATE TABLE tt_auto_task(id INTEGER PRIMARY KEY,status TEXT,scheduled_at_utc TEXT,created_at TEXT,claim_token TEXT,claim_phase TEXT,publish_attempt_count INTEGER,unknown_outcome INTEGER,publish_id TEXT)")

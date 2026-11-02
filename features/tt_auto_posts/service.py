@@ -1026,7 +1026,8 @@ class TTAutoPostService:
         payload = dict(raw)
         if "worker_id" not in payload or set(payload) - {"worker_id", "after_task_id"}:
             raise AutoPostServiceError("invalid_request", "核对参数无效", 400)
-        return self.executor.reconcile_next(payload["worker_id"], after_task_id=payload.get("after_task_id", 0))
+        from features.pipeline_dispatch.tt_readback import reconcile_next
+        return reconcile_next(self.executor, payload["worker_id"], after_task_id=payload.get("after_task_id", 0))
 
 
 def _required_env(source: Mapping[str, str], name: str) -> str:

@@ -53,6 +53,16 @@ guards. Set each baseline entry's `patch_base` and `patch_base_sha256` to its
 row above. The helper checks fetched origin ancestry and exact or normalized
 source hashes, records the per-file base, and refuses any unreviewed drift.
 
+The TT auto publisher remains the complete deployed file from
+`06090367b30d867fc5ed3ae2e2f5045ca203bff3`, SHA-256
+`da713109c6630fea1df7bba314053ee9f1ad9b837207a93ebf9a8785719a6afb`.
+Its existing template routes, code macros, preparation lookahead and run
+concurrency handling must remain intact. The dispatch increment from `9dc6d26`
+does not patch this file. Legacy readback instead lives in the lazily imported
+`features/pipeline_dispatch/tt_readback.py`; it uses the running publisher's
+frozen template route and stable job identity, preserves pending unknowns and
+the five-minute retry interval, and retains confirmed-publication code sync.
+
 The operator supplies a private controls file with the exact lane units and
 ledger paths. For example, replacing these paths/names with verified inventory:
 
