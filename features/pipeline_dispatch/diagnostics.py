@@ -6,6 +6,13 @@ from urllib.parse import unquote
 def safe_failure_message(value):
     if not isinstance(value, str):
         return ""
+    try:
+        return _sanitize_message(value)
+    except Exception:
+        return ""  # Optional diagnostics must never prevent the original receipt.
+
+
+def _sanitize_message(value):
     from features.x_posts.service import redact_text
     text = redact_text(unquote(value[:8192]), 8192)
     text = re.sub(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", "[redacted-url]", text)
@@ -37,5 +44,8 @@ def failure_fields(message):
 
 
 def exception_failure_fields(exc):
-    from features.x_posts.service import XPostError
-    return failure_fields(str(exc)) if type(exc) is XPostError else {}
+    try:
+        from features.x_posts.service import XPostError
+        return failure_fields(str(exc)) if type(exc) is XPostError else {}
+    except Exception:
+        return {}

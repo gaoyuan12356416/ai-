@@ -159,18 +159,20 @@ class ExecutionContext:
         if not resource:
             raise ValueError("operation account resource missing")
         binding = {"job_id": self.identity["job_id"], "generation": self.identity["generation"], "node_id": self.identity["node_id"], "account_resource": resource, "operation_id": operation_id, "request_sha256": request_sha}
-        response = self.client.post("jobs/begin-operation", {**self.identity, "operation_id": operation_id, "operation": operation, "request_sha256": request_sha, "account_resource": resource, "write": bool(write), "details": request_payload})
-        if response.get("credentials_exhausted"):
-            raise CoordinatorError("credentials_exhausted", 409)
-        if response.get("accepted") is False or not response.get("credential_envelope"):
-            raise CoordinatorError("operation_not_accepted", 409)
-        self.write_started = self.write_started or bool(write)
         try:
+            response = self.client.post("jobs/begin-operation", {**self.identity, "operation_id": operation_id, "operation": operation, "request_sha256": request_sha, "account_resource": resource, "write": bool(write), "details": request_payload})
+            if response.get("credentials_exhausted"):
+                raise CoordinatorError("credentials_exhausted", 409)
+            if response.get("accepted") is False or not response.get("credential_envelope"):
+                raise CoordinatorError("operation_not_accepted", 409)
+            self.write_started = self.write_started or bool(write)
             with open_credentials(response["credential_envelope"], self.seal_key, binding) as credentials:
                 yield credentials
         except Exception as exc:
             details = getattr(exc, "details", {}) or {}
-            if getattr(exc, "status", 0) == 429 or details.get("upstream_http_status") == 429:
+            if not isinstance(details, dict):
+                details = {}
+            if getattr(exc, "code", "") == "x_post_rate_limited" or getattr(exc, "status", 0) == 429 or details.get("upstream_http_status") == 429:
                 self.rate_limit = {"rate_limit_scope": "account", "account_resource": resource}
                 if isinstance(getattr(exc, "retry_after_seconds", None), (int, float)):
                     self.rate_limit["retry_after_seconds"] = max(1, min(86400, int(exc.retry_after_seconds)))

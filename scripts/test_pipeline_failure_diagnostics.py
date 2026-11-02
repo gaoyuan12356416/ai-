@@ -6,10 +6,13 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import builtins
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.pipeline_dispatch.diagnostics import exception_failure_fields, failure_fields
 from features.pipeline_dispatch.worker import ReceiptOutbox, execute_claim
+from features.pipeline_dispatch.client import CoordinatorError
 from features.x_posts.service import XPostError
 from scripts.test_pipeline_worker import Client, JOB, KEY
 from scripts import test_pipeline_coordinator as coordinator_fixture
@@ -93,6 +96,54 @@ class FailureDiagnostics(unittest.TestCase):
         quoted = XPostError('x_upstream_error', '失败(HTTP 403): forbidden client_secret="multiple private words"', 502)
         self.assertNotIn('private', exception_failure_fields(quoted)['error_message'])
         self.assertNotIn('words', exception_failure_fields(quoted)['error_message'])
+
+    def test_optional_import_or_formatter_failure_cannot_lose_unknown_receipt(self):
+        error = XPostError('x_upstream_error', 'safe detail', 502, unknown_outcome=True)
+        original_import = builtins.__import__
+        def unavailable(name, *args, **kwargs):
+            if name == 'features.x_posts.service':
+                raise ImportError('private import detail')
+            return original_import(name, *args, **kwargs)
+        class Executor:
+            def execute(self, job, context):
+                context.write_started = True
+                raise error
+        patches = [patch('builtins.__import__', side_effect=unavailable),
+                   patch('features.x_posts.service.redact_text', side_effect=RuntimeError('private formatter detail')),
+                   patch('features.x_posts.service.redact_text', return_value=None),
+                   patch.object(XPostError, '__str__', side_effect=RuntimeError('private str detail'))]
+        for boundary in patches:
+            with tempfile.TemporaryDirectory() as temp, boundary:
+                path = Path(temp) / 'outbox'
+                result = execute_claim(JOB, Client(), ReceiptOutbox(path), KEY, Executor())
+                self.assertEqual(result['error_code'], 'x_upstream_error')
+                self.assertTrue(result['unknown_outcome'])
+                self.assertNotIn('error_message', result)
+                with closing(sqlite3.connect(path)) as connection:
+                    self.assertEqual(connection.execute('SELECT count(*) FROM receipt_outbox').fetchone()[0], 1)
+
+    def test_broker_rate_limit_cools_only_bound_resource_and_keeps_write_state(self):
+        for code, status, expected in (('x_post_rate_limited', 409, True), ('coordinator_http_429', 429, True), ('x_upstream_error', 502, False)):
+            for started in (False, True):
+                class Broker(Client):
+                    def post(self, route, payload):
+                        if route == 'jobs/begin-operation':
+                            error = CoordinatorError(code, status)
+                            error.account_resource = 'x:untrusted-other-account'
+                            raise error
+                        return super().post(route, payload)
+                class Executor:
+                    def execute(self, job, context):
+                        context.write_started = started
+                        with context.operation('x.create', {'body_sha256': 'a' * 64}):
+                            raise AssertionError('broker rejection must not issue write credentials')
+                with tempfile.TemporaryDirectory() as temp:
+                    result = execute_claim(JOB, Broker(), ReceiptOutbox(Path(temp) / 'outbox'), KEY, Executor())
+                    self.assertEqual(result['unknown_outcome'], started)
+                    self.assertEqual('rate_limit_scope' in result, expected)
+                    if expected:
+                        self.assertEqual(result['rate_limit_scope'], 'account')
+                        self.assertEqual(result['account_resource'], JOB['payload']['account_resource'])
 
 
 if __name__ == '__main__': unittest.main()
