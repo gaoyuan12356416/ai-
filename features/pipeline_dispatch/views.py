@@ -204,9 +204,28 @@ def _summary(conn, scope, args, common, sources, channels, start, end, now):
     phase_rows = conn.execute("SELECT j.id,j.channel,j.stage,p.phase,p.seconds FROM pipeline_job j JOIN pipeline_phase_metric p ON p.job_id=j.id AND p.generation=j.generation LEFT JOIN pipeline_publication f ON f.source_key=j.source_key WHERE " + efficiency_scope + " ORDER BY COALESCE(NULLIF(f.published_at,''),j.finished_at) DESC LIMIT ?", efficiency_args + [MAX_TIMING_SAMPLES * 8]).fetchall()
     phase_samples = {}
     for row in phase_rows:
-        phase = phase_names.get(row["phase"])
+        phase = "platform_submit" if (row["channel"], row["stage"], row["phase"]) in {
+            ("fb", "publish", "publish"), ("tt", "publish", "publish_initialize")
+        } else phase_names.get(row["phase"])
         if phase:
             phase_samples.setdefault((row["channel"], row["stage"], phase), []).append(row["seconds"])
+    # FB pulls a URL after accepting the POST. This interval includes its fetch,
+    # processing and our reconciliation cadence, not pure platform processing.
+    # Old checkpoints have only a hash; never guess their post identity.
+    confirmation_rows = conn.execute("SELECT j.id,j.generation,f.publish_id,f.published_at,e.details_json,p.checkpoint_id,p.generation checkpoint_generation,p.received_at FROM pipeline_job j JOIN pipeline_publication f ON f.source_key=j.source_key JOIN pipeline_event e ON e.job_id=j.id AND e.event_type='checkpoint' JOIN pipeline_checkpoint p ON p.job_id=j.id AND p.checkpoint_id=json_extract(e.details_json,'$.checkpoint_id') WHERE " + efficiency_scope + " AND j.channel='fb' AND j.stage='publish' AND p.phase='fb_publish_attempt' ORDER BY f.published_at DESC,p.received_at ASC LIMIT ?", efficiency_args + [MAX_TIMING_SAMPLES * 8]).fetchall()
+    confirmations = {}
+    for row in confirmation_rows:
+        evidence = json.loads(row["details_json"])
+        submitted, published = _datetime(row["received_at"]), _datetime(row["published_at"])
+        if (evidence.get("kind") != "success" or evidence.get("phase") != "fb_publish_attempt"
+                or evidence.get("post_id") != row["publish_id"]
+                or evidence.get("generation") != row["generation"]
+                or row["checkpoint_generation"] != row["generation"]
+                or not submitted or not published or published < submitted):
+            continue
+        confirmations.setdefault(row["id"], (published - submitted).total_seconds())
+    if confirmations:
+        phase_samples[("fb", "publish", "platform_confirmation_wait")] = list(confirmations.values())
     for row in conn.execute("SELECT j.channel,j.stage,j.scheduled_at,j.started_at FROM pipeline_job j LEFT JOIN pipeline_publication f ON f.source_key=j.source_key WHERE " + efficiency_scope + " AND j.started_at<>'' ORDER BY COALESCE(NULLIF(f.published_at,''),j.finished_at) DESC LIMIT ?", efficiency_args + [MAX_TIMING_SAMPLES]):
         wait = _seconds(row["scheduled_at"], row["started_at"])
         if wait is not None:
@@ -214,9 +233,10 @@ def _summary(conn, scope, args, common, sources, channels, start, end, now):
     efficiency = []
     for channel in channels:
         for stage in STAGES:
-            for phase in ("download", "render", "artifact_transfer", "platform_upload", "platform_processing", "queue"):
+            for phase in ("download", "render", "artifact_transfer", "platform_submit", "platform_upload", "platform_processing", "platform_confirmation_wait", "queue"):
                 values = sorted(phase_samples.get((channel, stage, phase), []))
-                efficiency.append({"channel": channel, "stage": stage, "phase": phase, "samples": len(values), "p50_seconds": values[max(0, math.ceil(len(values) * .5) - 1)] if values else None, "p95_seconds": values[max(0, math.ceil(len(values) * .95) - 1)] if values else None})
+                applicable = not (phase == "platform_upload" and channel in ("fb", "tt") and stage == "publish" and not values)
+                efficiency.append({"channel": channel, "stage": stage, "phase": phase, "applicable": applicable, "samples": len(values), "p50_seconds": values[max(0, math.ceil(len(values) * .5) - 1)] if values else None, "p95_seconds": values[max(0, math.ceil(len(values) * .95) - 1)] if values else None})
     return dict(common, window={"start": start, "end": end, "timezone": "Asia/Shanghai"},
                 totals=totals, channels=list(by.values()), sources=sources, efficiency=efficiency)
 

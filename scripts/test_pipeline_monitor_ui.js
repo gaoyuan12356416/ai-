@@ -6,6 +6,12 @@ const ROOT = path.resolve(__dirname, ".."), OUT = process.env.PIPELINE_UI_OUTPUT
 const stamp = new Date().toISOString();
 const base = { generated_at: stamp, collected_at: stamp, stale: false, scope: "all", allowed_channels: ["x", "fb", "tt", "youtube"], warnings: [] };
 const summary = { ...base, totals: { queued: 22, preparing: 3, ready: 7, publishing: 4, prepared: 90, published: 76, failed: 2, unknown: 1, backlog_paused: 611 }, channels: ["x", "fb", "tt", "youtube"].flatMap(channel => ["prepare", "publish"].map(stage => ({ channel, stage, queued: 8, running: 2, ready: 4, completed: 21, failed: 1, unknown: 0, throughput_per_hour: 12, avg_duration_seconds: 321, p95_duration_seconds: null, oldest_wait_seconds: 45 }))), sources: [{ channel: "x", family: "自动模板", state: "healthy", collected_at: stamp }] };
+summary.efficiency = [
+  { channel: "fb", stage: "publish", phase: "platform_submit", samples: 1, p50_seconds: 17, p95_seconds: 17 },
+  { channel: "fb", stage: "publish", phase: "platform_upload", samples: 0, applicable: false },
+  { channel: "fb", stage: "publish", phase: "platform_confirmation_wait", samples: 1, p50_seconds: 250, p95_seconds: 250 },
+  { channel: "tt", stage: "publish", phase: "platform_processing", samples: 1, p50_seconds: 75, p95_seconds: 75 },
+];
 let capacity = { version: 1, hosts: ["cpu-main", "hk-gpu", "gpu-third"].flatMap(host_id => ["prepare", "publish"].map(stage => ({ host_id, stage, max_workers: host_id === "gpu-third" && stage === "prepare" ? 1 : 2, ceiling: 4 }))), global_publish_limit: 8, channel_limits: { x: 4, fb: 8, tt: 4, youtube: 2 } };
 let admin = true, failSummary = false, calls = [], writes = [];
 const workers = () => ({ ...base, capacity, items: ["cpu-main", "hk-gpu", "gpu-third"].map((host_id, i) => ({ host_id, label: ["CPU 服务器", "香港 GPU", "新增 GPU 服务器"][i], last_seen_at: stamp, stale: false, cpu_percent: 35, memory_used_bytes: 8e9, memory_total_bytes: 32e9, gpu_percent: i ? 65 : null, gpu_count: i ? 1 : 0, gpu_memory_used_bytes: i ? 3e9 : null, gpu_memory_total_bytes: i ? 16e9 : null, stages: ["prepare", "publish"].map(stage => ({ stage, max_workers: i === 2 && stage === "prepare" ? 1 : 2, ceiling: 4, alive_workers: i === 2 && stage === "prepare" ? 4 : 2, busy_workers: i === 2 && stage === "prepare" ? 3 : 1, idle_workers: 1, completed_today: 24, throughput_per_hour: 5 })) })), processes: [{ host_id: "gpu-third", worker_id: "prepare-1", stage: "prepare", pid: 12345, status: "busy", current_source_key: "x:auto:fixture-1", channel: "x", phase: "render", elapsed_seconds: 165, last_seen_at: stamp }, { host_id: "cpu-main", worker_id: "publish-1", stage: "publish", pid: 23456, status: "idle", elapsed_seconds: null, last_seen_at: stamp, idle_reason: "账号正在发布，等待下一条可领取任务" }] });
@@ -38,6 +44,10 @@ const server = http.createServer((req, res) => {
     for (const key of ["pipelineMonitor", "videoEditing", "aiImageDaily", "fbPostMaterialPool", "fbPostAdDelete", "socialkitAnalytics"]) assert.equal(await page.locator(`[data-quick-nav-key="${key}"]`).count(), 1);
     for (const group of ["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]) assert.equal(await page.locator(`[data-quick-nav-group="${group}"]`).count(), 0);
     assert.equal(await page.locator("#pmChannelRows tr").count(), 8);
+    const fbEfficiency = page.locator("#pmEfficiencyRows tr").filter({ hasText: "Facebook · 发布" });
+    assert.match(await fbEfficiency.innerText(), /17秒 \/ 17秒[\s\S]*不适用[\s\S]*未记录[\s\S]*4.2分 \/ 4.2分/);
+    assert.match(await page.locator("#pmEfficiencyRows tr").filter({ hasText: "TikTok · 发布" }).innerText(), /1.3分 \/ 1.3分/);
+    assert.match(await page.locator("#pmEfficiencyRows").locator("..").innerText(), /平台提交[\s\S]*平台确认等待/);
     assert.match(await page.locator("#pmProcessRows").innerText(), /新增 GPU 服务器[\s\S]*制作渲染/);
     assert.match(await page.locator("#pmProcessRows").innerText(), /账号正在发布/);
     const drainStage = page.locator('[data-worker-host="gpu-third"] [data-worker-stage="prepare"]');

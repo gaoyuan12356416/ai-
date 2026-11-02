@@ -827,7 +827,16 @@ class DispatchStore:
                     raise DispatchError("checkpoint_identity_conflict")
                 return {"accepted": True, "duplicate": True}
             c.execute("INSERT INTO pipeline_checkpoint VALUES(?,?,?,?,?,?)", (checkpoint_id, row["id"], row["generation"], str(phase)[:80], body_hash, self.now()))
-            self.event(c, row["id"], "checkpoint", {"phase": str(phase)[:80]}, self.now())
+            details = {"phase": str(phase)[:80]}
+            # The native adapter has already validated this exact receipt. Keep
+            # only the identity needed for read-only confirmation timing; the
+            # checkpoint table deliberately stores no raw platform response.
+            if row["channel"] == "fb" and row["stage"] == "publish" and phase == "fb_publish_attempt":
+                post_id = str(receipt.get("post_id") or "")
+                if receipt.get("kind") == "success" and post_id and len(post_id) <= 128 and all(char in "0123456789_" for char in post_id):
+                    details.update(generation=row["generation"], checkpoint_id=checkpoint_id,
+                                   post_id=post_id, kind="success")
+            self.event(c, row["id"], "checkpoint", details, self.now())
             return {"accepted": True, "duplicate": False}
 
     def complete(self, claim, receipt_id, result, canonical_verified=False):
