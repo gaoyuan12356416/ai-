@@ -253,9 +253,11 @@ class PersonalPublishTests(unittest.TestCase):
         log = self.legacy.reserve_log(queue_id)
         self.legacy.mark_failed(log["id"], "x_post_unknown_outcome", "ambiguous", unknown_outcome=True)
         self.assertEqual("needs_review", self.store.get_batch(ACTOR, batch["id"])["status"])
+        self.store.assert_run_publishable(batch["tasks"][1]["manual_run_id"], self.accounts["2"])
+        claim = self.legacy.claim_manual_run()
+        self.assertEqual(claim["run"]["id"], batch["tasks"][1]["manual_run_id"])
         with self.assertRaises(XPostError):
-            self.store.assert_run_publishable(batch["tasks"][1]["manual_run_id"], self.accounts["2"])
-        self.assertFalse(self.legacy.claim_manual_run()["found"])
+            self.store.assert_run_publishable(batch["tasks"][0]["manual_run_id"], self.accounts["1"])
         preview = self.preview([dict(self.rows()[0], material_id="503")])
         self.assertEqual("x_post_unknown_outcome", preview["rows"][0]["error_code"])
 
@@ -265,7 +267,7 @@ class PersonalPublishTests(unittest.TestCase):
             conn.execute("UPDATE x_post_manual_run SET status='stopped',error_code='x_rate_limit' WHERE id=?", (batch["tasks"][0]["manual_run_id"],))
             conn.commit()
         self.assertEqual("stopped", self.store.get_batch(ACTOR, batch["id"])["status"])
-        self.assertFalse(self.legacy.claim_manual_run()["found"])
+        self.assertEqual(self.legacy.claim_manual_run()["run"]["id"], batch["tasks"][1]["manual_run_id"])
 
     def test_distinct_next_batch_allowed_while_first_waits(self):
         self.commit(self.preview(self.rows()[:1]))
@@ -473,8 +475,9 @@ class PersonalPublishTests(unittest.TestCase):
         log = self.legacy.reserve_log(run["queues"][0]["id"])
         self.legacy.mark_failed(log["id"], "x_post_unknown_outcome", "ambiguous", unknown_outcome=True)
         with mock.patch.object(post_service, "ensure_storage", side_effect=AssertionError("runtime must not migrate")):
+            assert_personal_run_publishable(self.path, sibling["manual_run_id"], self.accounts["2"])
             with self.assertRaises(XPostError) as error:
-                assert_personal_run_publishable(self.path, sibling["manual_run_id"], self.accounts["2"])
+                assert_personal_run_publishable(self.path, first["manual_run_id"], self.accounts["1"])
             self.assertTrue(error.exception.unknown_outcome)
 
     def test_legacy_query_owner_rejection_needs_no_storage_initialization(self):

@@ -1,0 +1,13 @@
+{
+  "/opt/x-post-automation/current/features/x_posts/service.py": "76d94179d4d983c0443ac6d66b456c59d548355e7ce3857e1b952b6b046137bf",
+  "/opt/x-post-automation/current/features/x_video_publish/core.py": "7ee30fae86bcfb6d9b2f22190594526c4f0888e4fca182cf05dc9fa3fcacf579",
+  "/opt/x-post-automation/current/features/x_accounts/oauth_service.py": "7235b74709da53b47877ad95559da47dff8c3386b28a2a5b7778111e331b71a6",
+  "/opt/x-post-automation/current/features/x_auto_posts/core.py": "e53e2cfe1fb5f875ccc8069dd176229886ee2f2f55677f6b4b280a9d7f6f9338",
+  "/opt/x-post-automation/current/scripts/x_auto_post_runner.py": "a94862f3854ba8314f4d67e95778976ada9e28552215887947840f944897663c",
+  "/opt/x-post-automation/current/scripts/x_post_manual_runner.py": "b503ac14c2fde4e212b002bcf8d228731e5054320fda3daffe8c1052c5bd6a68",
+  "/opt/x-post-automation/current/scripts/x_post_schedule_runner.py": "d306e2fd8ba07e7a6a959bf281fd814530394dc7c7365ccd1d104347364c473f",
+  "/root/drama_material_service/features/x_posts/service.py": "1219a5ce6a917caf01b6e2f24768fbd8d64bd63bfc7a08f19af6779525c346b6",
+  "/root/drama_material_service/features/x_video_publish/core.py": "7ee30fae86bcfb6d9b2f22190594526c4f0888e4fca182cf05dc9fa3fcacf579",
+  "/opt/fb-auto-post/current/scripts/fb_auto_post_runner.py": "cc595f9e969b9be27d005159659716a24e8a69a69ccda1cbdfed0369d7b4a7a2",
+  "/opt/tt-auto-post/current/features/tt_auto_posts/core.py": "db0bdcb6e5029001ac6768ae6a5d14dfccd0d80d0e5225f9ce742f41fe4ed321"
+}

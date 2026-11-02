@@ -42,15 +42,15 @@ class XAutoPostDeployTests(unittest.TestCase):
         self.assertIn("X_AUTO_POST_EXECUTE_TIMEOUT=10200", env)
         self.assertIn("X_AUTO_POST_LEASE_SECONDS=10800", env)
 
-    def test_auto_and_existing_x_publishers_share_only_the_publish_lock(self):
+    def test_auto_uses_its_own_runner_lock(self):
         env = self.text("deploy/x-auto-post.env.example")
         runner = self.text("scripts/x_auto_post_runner.py")
         unit = self.text("deploy/x-auto-post-runner.service")
-        expected = "/run/x-post-daily/runner.lock"
+        expected = "/run/x-auto-post/runner.lock"
         self.assertIn("X_AUTO_POST_RUNNER_LOCK_PATH=" + expected, env)
         self.assertIn('"' + expected + '"', runner)
         self.assertIn("ReadWritePaths=/run/x-auto-post /run/x-post-daily", unit)
-        self.assertNotIn("/run/x-auto-post/runner.lock", env + runner + unit)
+        self.assertNotIn("X_AUTO_POST_RUNNER_LOCK_PATH=/run/x-post-daily/runner.lock", env)
 
     def test_sidecar_declares_and_checks_the_shared_ffprobe_dependency(self):
         env = self.text("deploy/x-auto-post.env.example")

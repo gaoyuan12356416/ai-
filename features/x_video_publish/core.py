@@ -197,13 +197,15 @@ def personal_task(conn, run_id):
     return dict(row) if row else None
 
 
-def personal_batch_held(conn, batch_id):
+def personal_batch_held(conn, batch_id, account_id=None):
     return conn.execute("""SELECT 1 FROM x_video_publish_task t
       JOIN x_post_manual_run r ON r.id=t.manual_run_id
       LEFT JOIN x_post_queue q ON q.manual_run_id=r.id
       LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
-      WHERE t.batch_id=? AND (r.status IN ('needs_review','stopped') OR r.unknown_count>0
-        OR COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating')) LIMIT 1""", (int(batch_id),)).fetchone() is not None
+      WHERE t.batch_id=? AND (? IS NULL OR t.account_id=?)
+        AND (r.status IN ('needs_review','stopped') OR r.unknown_count>0
+        OR COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating')) LIMIT 1""",
+        (int(batch_id), account_id, account_id)).fetchone() is not None
 
 
 @contextlib.contextmanager
@@ -252,8 +254,8 @@ def assert_personal_run_publishable(db_path, run_id, account=None, *, platform_a
         task = _readonly_personal_task(conn, run_id)
         if task is None:
             return None
-        if personal_batch_held(conn, task["batch_id"]):
-            raise XPostError("x_post_unknown_outcome", "本批次已暂停，请先核对已有发布结果", 409, True)
+        if personal_batch_held(conn, task["batch_id"], task["account_id"]):
+            raise XPostError("x_post_unknown_outcome", "该账号已暂停，请先核对已有发布结果", 409, True)
         if account is not None:
             _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"], platform_access=platform_access)
         return task
@@ -609,8 +611,8 @@ class PersonalStore:
             task = personal_task(conn, run_id)
             if task is None:
                 return None
-            if personal_batch_held(conn, task["batch_id"]):
-                raise XPostError("x_post_unknown_outcome", "本批次已暂停，请先核对已有发布结果", 409, True)
+            if personal_batch_held(conn, task["batch_id"], task["account_id"]):
+                raise XPostError("x_post_unknown_outcome", "该账号已暂停，请先核对已有发布结果", 409, True)
             if account is not None:
                 _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"], platform_access=platform_access)
             return task

@@ -2297,10 +2297,9 @@ class XAutoPostStore:
                             ELSE 2
                         END,
                         scheduled_at_utc,template_id,id
-                    LIMIT 500
                     """,
                     (current, current, current, current, current, current),
-                ).fetchall()
+                )
             else:
                 candidates = conn.execute(
                     """
@@ -2334,10 +2333,9 @@ class XAutoPostStore:
                     scheduled_at_utc ASC,
                     template_id ASC,
                     id ASC
-                LIMIT 500
                 """,
                     (current, current, current, current, current, current, current, current),
-                ).fetchall()
+                )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
                 candidate_id = int(candidate["id"])

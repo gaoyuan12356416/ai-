@@ -64,7 +64,7 @@ class FakeManualSidecar:
         self.calls.append(("claim",))
         return self.run
 
-    def preflight_storage(self, path):
+    def preflight_storage(self, path, **kwargs):
         self.calls.append(("storage", path))
         return {"ready": True}
 
@@ -260,9 +260,9 @@ class XPostManualRunnerTests(unittest.TestCase):
             )
         )
         result = self.execute(sidecar)
-        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["status"], "needs_review")
         self.assertTrue(result["results"][0]["unknown_outcome"])
-        self.assertEqual(sidecar.calls, [("claim",)])
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [802])
 
     def test_known_failure_continues_but_rate_limit_stops_remaining_accounts(self):
         queues = [queue(801, 71, 11, 1), queue(802, 71, 12, 2)]

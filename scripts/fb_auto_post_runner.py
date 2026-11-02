@@ -88,7 +88,13 @@ def drain(one, *, workers, max_tasks, max_seconds, terminal, monotonic=time.mono
             done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
             for future in done:
                 lane = pending.pop(future)
-                item = future.result()
+                try:
+                    item = future.result()
+                except Exception:
+                    # No receipt: leave the canonical task/lease untouched.
+                    # Retire this lane for this tick; other lanes keep draining.
+                    completed.append({"status": "request_unconfirmed", "lane": lane})
+                    continue
                 completed.append(item)
                 if item.get("status") != terminal and issued < max_tasks and monotonic() < deadline:
                     pending[pool.submit(one, lane)] = lane

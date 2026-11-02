@@ -222,7 +222,7 @@ class FakeSidecar:
             {"found": False, "run": None, "queues": []},
         )
 
-    def preflight_storage(self, path):
+    def preflight_storage(self, path, **kwargs):
         self.calls.append(("storage", path))
         return {"ready": True, "mounted": True, "atomic_write": True}
 
@@ -3258,7 +3258,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             [101],
         )
 
-    def test_unknown_frozen_queue_stops_without_another_publish_call(self):
+    def test_unknown_frozen_queue_holds_only_its_account(self):
         identity = due_item(source_type="drama", accounts=[11, 12])
         sidecar = FakeSidecar([identity])
         sidecar.existing[
@@ -3272,8 +3272,8 @@ class ScheduleRunnerTests(unittest.TestCase):
             ],
         }
         result = self.execute(sidecar)
-        self.assertEqual(result["status"], "stopped")
-        self.assertFalse(any(call[0] == "publish" for call in sidecar.calls))
+        self.assertEqual(result["status"], "completed_with_errors")
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [202])
         self.assertTrue(
             result["batches"][0]["results"][0]["unknown_outcome"]
         )
@@ -3298,7 +3298,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             [202],
         )
 
-    def test_frozen_rate_limited_queue_still_stops_later_queue(self):
+    def test_historical_rate_failure_does_not_stop_later_account(self):
         identity = due_item(source_type="drama", accounts=[11, 12])
         sidecar = FakeSidecar([identity])
         sidecar.existing[("drama", "2026-07-27", "10:00", 3)] = {
@@ -3318,8 +3318,8 @@ class ScheduleRunnerTests(unittest.TestCase):
 
         result = self.execute(sidecar)
 
-        self.assertEqual(result["status"], "stopped")
-        self.assertFalse(any(call[0] == "publish" for call in sidecar.calls))
+        self.assertEqual(result["status"], "completed_with_errors")
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [202])
 
     def test_before_start_date_is_a_noop(self):
         config = make_config(self.temporary.name)

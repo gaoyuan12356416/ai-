@@ -3607,6 +3607,7 @@ def _public_manual_run(item):
         "unknown_count",
         "error_code",
         "error_message",
+        "preflight_failures",
         "started_at",
         "finished_at",
         "created_at",
@@ -4047,39 +4048,42 @@ def create_post_manual_plan_request(payload):
         frozen = store.get_manual_run(run_id, "manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
-    if len(candidates) != len(frozen["account_ids"]):
-        raise ServiceError(
-            "x_post_manual_candidate_shortage",
-            "手动发布候选数量与冻结账号数量不一致",
-            409,
-        )
-    accounts = _manual_publish_accounts(list(frozen["account_ids"]))
+    failures = payload.get("preflight_failures")
+    if failures is not None:
+        from features.x_posts.manual_preflight import validate_partition
+        try:
+            failures = validate_partition(frozen["account_ids"], frozen["material_ids"], candidates, failures)
+        except XPostError as exc:
+            _raise_x_post_error(exc)
+    elif len(candidates) != len(frozen["account_ids"]):
+        raise ServiceError("x_post_manual_candidate_shortage", "候选数量与冻结账号数量不一致", 409)
     personal_task = _personal_run_guard(run_id)
     trusted = []
-    for candidate, account in zip(candidates, accounts):
+    for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
-        _require_candidate_duration_capability(candidate, account, frozen)
+        account_id = candidate["account_id"] if failures is not None else frozen["account_ids"][index]
+        try:
+            account = _manual_publish_accounts([account_id])[0]
+            _require_candidate_duration_capability(candidate, account, frozen)
+        except ServiceError as exc:
+            if failures is None or exc.status not in {403, 409}:
+                raise
+            failures.append({"account_id": account_id, "material_id": str(candidate["material_id"]),
+                             "error_code": exc.code, "error_message": clean_text(exc)})
+            continue
         item = dict(candidate)
         if personal_task is not None:
             item['account_drama_language'] = personal_task['drama_language']
             item['copy_contract_version'] = 2
-        item.update(
-            {
-                "account_id": int(account["id"]),
-                "account_username": str(account.get("username", "") or ""),
-                "page_name": str(
-                    account.get("display_name", "")
-                    or account.get("username", "")
-                    or ""
-                ),
-                "page_id": str(account.get("x_user_id", "") or ""),
-            }
-        )
+        item.update({"account_id": int(account["id"]), "account_username": str(account.get("username") or ""),
+                     "page_name": str(account.get("display_name") or account.get("username") or ""),
+                     "page_id": str(account.get("x_user_id") or "")})
         trusted.append(item)
-    preflight_post_storage_request(len(trusted))
+    if trusted:
+        preflight_post_storage_request(min(len(trusted), 4))
     try:
-        item = store.create_manual_plan(run_id, trusted, "manual")
+        item = store.create_manual_plan(run_id, trusted, "manual", preflight_failures=failures)
     except XPostError as exc:
         _raise_x_post_error(exc)
     return {"item": item}

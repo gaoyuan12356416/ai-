@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.x_posts.manual_preflight import PreparedManual
 from features.x_posts.selector import (  # noqa: E402
     select_manual_candidates,
     shanghai_now,
@@ -212,7 +214,7 @@ def _manual_queues(raw_queues, run_id, account_ids):
                 "unknown_outcome": unknown,
             }
         )
-    if queues and [item["account_id"] for item in queues] != account_ids:
+    if queues and [item["account_id"] for item in queues] != [account for account in account_ids if account in seen_accounts]:
         raise SidecarError(
             "x_post_manual_invalid_response",
             "Manual queue account order is inconsistent",
@@ -247,12 +249,17 @@ class ManualSidecarClient(SidecarClient):
     def create_plan(self, run_id, candidates, path=DEFAULT_PLAN_PATH):
         result = self.post(
             path,
-            {"run_id": int(run_id), "candidates": list(candidates)},
+            {"run_id": int(run_id), "candidates": list(candidates),
+             "preflight_failures": list(getattr(candidates, "preflight_failures", []))},
             write_may_have_happened=True,
         )
         item = result.get("item") if isinstance(result, dict) else None
         run = _manual_identity(item)
-        if run["id"] != int(run_id) or len(run["queues"]) != len(candidates):
+        requested = {int(item["account_id"]) for item in candidates}
+        queued = {int(item["account_id"]) for item in run["queues"]}
+        failed = {int(item["account_id"]) for item in run.get("preflight_failures", [])}
+        if (run["id"] != int(run_id) or not queued <= requested
+                or queued & failed or not requested <= queued | failed):
             raise SidecarError(
                 "x_post_manual_invalid_response",
                 "Created manual plan does not match the request",
@@ -383,15 +390,18 @@ def _record_failure_best_effort(sidecar, run_id, exc):
 
 
 def _verify_accounts(sidecar, account_ids):
-    accounts = [
-        _safe_account(sidecar.verify_account(account_id))
-        for account_id in account_ids
-    ]
-    if [int(item["id"]) for item in accounts] != list(account_ids):
-        raise ManualRunError(
-            "Verified accounts do not match the frozen manual request",
-            "x_post_manual_account_mismatch",
-        )
+    accounts = PreparedManual()
+    for account_id in account_ids:
+        try:
+            account = _safe_account(sidecar.verify_account(account_id))
+            if int(account["id"]) != account_id:
+                raise ManualRunError("Verified identity does not match frozen account", "x_post_manual_account_mismatch")
+            accounts.append(account)
+        except SidecarError as exc:
+            # This preflight never creates a Post. Keep the failure on this
+            # identity; unrelated verified accounts remain usable.
+            accounts.preflight_failures.append({"account_id": account_id,
+                "error_code": exc.code, "error_message": redact_text(str(exc), 240)})
     return accounts
 
 
@@ -420,57 +430,40 @@ def _manual_candidates(
         close = getattr(connection, "close", None)
         if callable(close):
             close()
-    if selector_rejections or len(candidates) != len(run["material_ids"]):
-        first = selector_rejections[0] if selector_rejections else {}
-        code, message = _manual_rejection_fields(
-            first,
-            "x_post_manual_source_preflight_failed",
-            "所选素材未通过发布前检查",
-        )
-        raise ManualRunError(
-            message,
-            code,
-        )
-    for candidate in candidates:
-        candidate["body_template"] = run["body_template"]
-        candidate["copy_contract_version"] = int(run.get("copy_contract_version", 1))
-        candidate["source_type"] = "material"
-        candidate["source_date"] = run["source_date"]
+    by_material = {str(item["material_id"]): item for item in candidates}
+    rejection_by_material = {str(item.get("material_id")): item for item in selector_rejections}
+    account_by_id = {int(item["id"]): item for item in accounts}
+    account_failures = {int(item["account_id"]): item for item in getattr(accounts, "preflight_failures", [])}
+    planned = PreparedManual()
     timestamp = max(1, int(shanghai_now(now).timestamp()))
-    planned, preflight_rejections = _preflight_candidates(
-        config,
-        candidates,
-        accounts,
-        timestamp,
-        downloader,
-        prober,
-        repair_client,
-    )
-    if preflight_rejections or len(planned) != len(accounts):
-        first = preflight_rejections[0] if preflight_rejections else {}
-        code, message = _manual_rejection_fields(
-            first,
-            "x_post_manual_media_preflight_failed",
-            "所选视频未通过发布前检查",
-        )
-        raise ManualRunError(
-            message,
-            code,
-        )
-    if {str(item.get("material_id")) for item in planned} != set(
-        run["material_ids"]
-    ):
-        raise ManualRunError(
-            "Preflight output does not contain the exact frozen material set",
-            "x_post_manual_material_mismatch",
-        )
-    if [int(item.get("account_id") or 0) for item in planned] != run[
-        "account_ids"
-    ]:
-        raise ManualRunError(
-            "Preflight output does not match the frozen account order",
-            "x_post_manual_account_mismatch",
-        )
+    for account_id, material_id in zip(run["account_ids"], run["material_ids"]):
+        failure = account_failures.get(account_id)
+        if failure is not None:
+            planned.preflight_failures.append({**failure, "material_id": material_id})
+            continue
+        try:
+            candidate = by_material.get(material_id)
+            if candidate is None:
+                code, message = _manual_rejection_fields(rejection_by_material.get(material_id),
+                    "x_post_manual_source_preflight_failed", "所选素材未通过发布前检查")
+                raise ManualRunError(message, code)
+            candidate = {**candidate, "body_template": run["body_template"],
+                         "copy_contract_version": int(run.get("copy_contract_version", 1)),
+                         "source_type": "material", "source_date": run["source_date"]}
+            prepared, rejected = _preflight_candidates(config, [candidate], [account_by_id[account_id]],
+                timestamp, downloader, prober, repair_client)
+            if rejected or len(prepared) != 1:
+                code, message = _manual_rejection_fields(rejected[0] if rejected else None,
+                    "x_post_manual_media_preflight_failed", "所选视频未通过发布前检查")
+                raise ManualRunError(message, code)
+            item = prepared[0]
+            if int(item.get("account_id") or 0) != account_id or str(item.get("material_id")) != material_id:
+                raise ManualRunError("Preflight pairing differs from the frozen request", "x_post_manual_material_mismatch")
+            planned.append(item)
+        except Exception as exc:
+            code, message = _failure_fields(exc)
+            planned.preflight_failures.append({"account_id": account_id, "material_id": material_id,
+                                              "error_code": code, "error_message": message})
     return planned
 
 
@@ -555,6 +548,9 @@ def execute_manual_tick(
             "failure_recorded": recorded,
         }
 
+    if not planned["queues"]:
+        return {"status": "failed_preflight", "manual_run_id": run["id"],
+                "preflight_failures": planned.get("preflight_failures", [])}
     result = _publish_frozen_queues(
         config,
         sidecar,
@@ -568,7 +564,7 @@ def execute_manual_tick(
 
 def main():
     try:
-        config = ScheduleConfig.from_env()
+        config = replace(ScheduleConfig.from_env(), lock_path=os.environ.get("X_POST_MANUAL_LOCK_PATH", "/run/x-post-daily/manual.lock"))
         with process_lock(config.lock_path) as acquired:
             if acquired is None:
                 result = {"status": "skipped_locked"}

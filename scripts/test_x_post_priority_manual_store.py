@@ -104,6 +104,31 @@ def drama_candidate(pool, account_id):
 
 
 class XPostPriorityManualStoreTests(unittest.TestCase):
+    def test_partial_preflight_freezes_original_pairs_and_audits_omitted_target(self):
+        run = self.store.create_manual_run(["101", "102"], [2, 3], "partial-test", ACTOR)
+        good = material_candidate(run, 3, "102")
+        failure = {"account_id": 2, "material_id": "101", "error_code": "x_token_missing", "error_message": "expired"}
+        planned = self.store.create_manual_plan(run["id"], [good], preflight_failures=[failure])
+        self.assertEqual([(q["account_id"], q["material_id"], q["candidate_rank"]) for q in planned["queues"]], [(3, "102", 2)])
+        self.assertEqual(planned["failed_count"], 1)
+        self.assertEqual(planned["expected_count"], 2)
+        self.assertEqual(planned["preflight_failures"][0]["account_id"], 2)
+        replay = self.store.create_manual_plan(run["id"], [good], preflight_failures=[failure])
+        self.assertEqual(replay["queues"][0]["id"], planned["queues"][0]["id"])
+        log = self.store.reserve_log(planned["queues"][0]["id"])
+        self.store.mark_failed(log["id"], "known_failure", "rejected", unknown_outcome=False)
+        finished = self.store.get_manual_run(run["id"])
+        self.assertEqual(finished["status"], "completed_with_errors")
+        self.assertEqual(finished["failed_count"], 2)
+
+    def test_all_failed_preflight_has_no_queue_and_is_terminal(self):
+        run = self.store.create_manual_run(["101"], [2], "all-failed", ACTOR)
+        planned = self.store.create_manual_plan(run["id"], [], preflight_failures=[{
+            "account_id": 2, "material_id": "101", "error_code": "x_token_missing", "error_message": "expired"}])
+        self.assertEqual(planned["queues"], [])
+        self.assertEqual(planned["status"], "failed_preflight")
+        self.assertFalse(self.store.claim_manual_run()["found"])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temporary.name) / "x-post.sqlite3"

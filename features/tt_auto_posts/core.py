@@ -2109,10 +2109,9 @@ class TTAutoPostStore:
                     scheduled_at_utc ASC,
                     template_id ASC,
                     id ASC
-                LIMIT 500
                 """,
                 (prepare_cutoff, *([current] * 9), self.execution_not_before_utc),
-            ).fetchall()
+            )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
                 candidate_id = int(candidate["id"])

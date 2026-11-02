@@ -801,7 +801,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             [3],
         )
 
-    def test_previous_day_claim_is_stopped_instead_of_auto_published(self):
+    def test_previous_day_unstarted_claim_keeps_exact_identity(self):
         self.save_schedule("material", [2], ["10:00"])
         claimed = self.store.due_schedule_slots(
             datetime(
@@ -830,16 +830,16 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             grace_seconds=90,
         )
 
-        self.assertEqual(next_day["items"], [])
+        self.assertEqual(next_day["items"], claimed["items"])
         frozen = self.store.query_schedule_plan(
             "material",
             "2026-07-26",
             "10:00",
         )
-        self.assertEqual(frozen["run"]["status"], "stopped")
+        self.assertEqual(frozen["run"]["status"], "claimed")
         self.assertEqual(
             frozen["run"]["error_code"],
-            "x_post_schedule_stale_claim",
+            "",
         )
 
     def test_active_schedule_heartbeat_prevents_cross_midnight_stale_race(self):
@@ -908,7 +908,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         expired = self.store.query_schedule_plan(
             "material", "2026-07-26", "23:44"
         )
-        self.assertEqual(expired["run"]["status"], "stopped")
+        self.assertEqual(expired["run"]["status"], "claimed")
 
     def test_plan_attempt_fence_is_exact_and_one_time(self):
         self.save_schedule("material", [2], ["10:00"])
@@ -975,6 +975,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             datetime(2026, 7, 27, 9, 0, 10, tzinfo=service.BEIJING_TZ),
             grace_seconds=90,
         )
+        # Reconcile a historical stopped row created by the previous release.
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("UPDATE x_post_schedule_run SET status='stopped',error_code='x_post_schedule_stale_claim',error_message='legacy stale claim',finished_at='2026-07-27T01:00:10Z' WHERE id=?", (run_id,))
+            conn.commit()
         now = datetime(2026, 7, 27, 9, 5, tzinfo=service.BEIJING_TZ)
         validated = self.store.recover_previous_day_stale_claim_schedule_run(
             run_id,
@@ -1175,7 +1179,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ),
             grace_seconds=90,
         )
-        self.assertEqual(just_outside_grace["items"], [])
+        self.assertEqual(just_outside_grace["items"], claimed["items"])
         still_leased = self.store.query_schedule_plan(
             "material",
             "2026-07-26",
@@ -1195,11 +1199,11 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             ),
             grace_seconds=90,
         )
-        self.assertEqual(expired["items"], [])
+        self.assertEqual(expired["items"], claimed["items"])
         stopped = self.store.query_schedule_plan(
             "material", "2026-07-26", "23:59"
         )
-        self.assertEqual(stopped["run"]["status"], "stopped")
+        self.assertEqual(stopped["run"]["status"], "claimed")
 
     def test_stale_drama_schedule_marks_pool_needs_review(self):
         self.save_schedule("drama", [2], ["10:00"])
@@ -1251,12 +1255,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             blocked["last_error_code"],
             "x_post_schedule_stale_claim",
         )
-        with self.assertRaises(service.XPostError) as unavailable:
-            self.store.available_drama_pool_items()
-        self.assertEqual(
-            unavailable.exception.code,
-            "x_post_drama_pool_needs_review",
-        )
+        self.assertEqual(self.store.available_drama_pool_items(), [])
 
     def test_unassigned_schedule_failure_does_not_classify_the_drama(self):
         self.save_schedule("drama", [2], ["10:00"])
@@ -2624,10 +2623,10 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.store.mark_publishing(first["id"])
         self.store.mark_failed(first["id"], "x_upstream_error", "HTTP 503", unknown_outcome=True)
         second = self._prepare_account_test_log(plan["queues"][1])
-        with self.assertRaises(service.XPostError) as rejected:
-            self.store.mark_publishing(second["id"])
-        self.assertEqual(rejected.exception.code, "x_post_unknown_outcome")
-        self.assertEqual(self.store.get_log(second["id"])["attempt_count"], 0)
+        self.store.mark_publishing(second["id"])
+        self.assertEqual(self.store.get_log(second["id"])["attempt_count"], 1)
+        with self.assertRaises(service.XPostError):
+            self.store.mark_publishing(first["id"])
 
     def test_material_fifo_capacity_uses_eligible_scope_without_skipping_unproven_row(self):
         self.save_schedule("material", [2, 3, 4], ["09:00"])
@@ -2736,9 +2735,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         self.publish_queue(first["queues"][0], 1, "owned-first")
         self._historical_account_failure(2)
         owned_before = next(item for item in self.store.query_drama_pool()["items"] if item["id"] == bound["id"])
-        with self.assertRaises(service.XPostError) as foreign_owner:
-            self.store.available_drama_pool_items(account_ids=[3])
-        self.assertEqual(foreign_owner.exception.code, "x_post_drama_owner_not_configured")
+        self.assertEqual([p["id"] for p in self.store.available_drama_pool_items(account_ids=[3])], [unbound["id"]])
         available = self.store.available_drama_pool_items(
             account_ids=[3], configured_account_ids=[2, 3],
         )
@@ -3902,8 +3899,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
 
     def test_unavailable_owner_does_not_hide_an_omitted_healthy_owner(self):
         self._unavailable_drama_owner_fixture()
-        for action in [lambda: self._owner_repair_save([4], [3, 4]),
-                       lambda: self.store.available_drama_pool_items(account_ids=[4])]:
+        for action in [lambda: self._owner_repair_save([4], [3, 4])]:
             with self.assertRaises(service.XPostError) as rejected:
                 action()
             self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
@@ -3916,8 +3912,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             conn.execute("UPDATE x_post_publish_log SET unknown_outcome=1 WHERE queue_id=?", (plan["queues"][0]["id"],))
             conn.commit()
         before = self._owner_repair_ledger()
-        for action in [lambda: self._owner_repair_save([3], [3]),
-                       lambda: self.store.available_drama_pool_items(account_ids=[3])]:
+        for action in [lambda: self._owner_repair_save([3], [3])]:
             with self.assertRaises(service.XPostError) as rejected:
                 action()
             self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
@@ -3946,9 +3941,8 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute("UPDATE x_authorized_account SET status='active' WHERE id=2")
             conn.commit()
-        with self.assertRaises(service.XPostError) as rejected:
-            self.store.available_drama_pool_items(account_ids=[3])
-        self.assertEqual(rejected.exception.code, "x_post_drama_owner_not_configured")
+        available = self.store.available_drama_pool_items(account_ids=[3])
+        self.assertTrue(all(p["candidate_account_id"] == 3 for p in available))
         self.assertEqual(self._owner_repair_ledger(), before)
 
     def test_enabled_schedule_cannot_remove_unfinished_drama_owner(self):
@@ -4096,15 +4090,12 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             for item in self.store.query_drama_pool()["items"]
         }[pool["content_id"]]
         self.assertEqual(blocked["status"], "needs_review")
-        with self.assertRaises(service.XPostError) as rejected:
-            self.store.create_schedule_plan(
-                "drama",
-                "2026-07-27",
-                "10:00",
-                2,
-                [self.drama_candidate(later_pool, 3, 1)],
-            )
-        self.assertEqual(rejected.exception.code, "x_post_drama_pool_needs_review")
+        continued = self.store.create_schedule_plan(
+            "drama", "2026-07-27", "10:00", 2,
+            [self.drama_candidate(later_pool, 3, 1)],
+        )
+        self.assertEqual(continued["queues"][0]["account_id"], 3)
+        self.assertNotIn(pool["id"], [p["id"] for p in self.store.available_drama_pool_items()])
 
     def test_drama_pool_batch_delete_is_atomic_and_returns_compact_items(self):
         first = self.add_drama(content_id="DELETE1")
@@ -6282,7 +6273,7 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
         )
 
         other = base_candidate(
-            2,
+            self.store.get_queue(fixture["relay_queue_id"])["account_id"],
             "ConcurrentTarget2",
             "9501",
             "ConcurrentTargetContent9501",

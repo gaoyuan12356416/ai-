@@ -9,6 +9,7 @@ the X sidecar, and publishes only queue identities returned by that plan.
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
 import hashlib
 import http.client
 import json
@@ -97,7 +98,7 @@ DEFAULT_MATERIAL_CHECK_PATH = "/internal/posts/material-pool/check"
 DEFAULT_STORAGE_PREFLIGHT_PATH = "/internal/posts/storage/preflight"
 DEFAULT_PUBLISH_PATH = "/internal/posts/queue/{queue_id}/publish"
 DEFAULT_WORK_DIR = "/mnt/data-disk/x-post-automation/daily-work"
-DEFAULT_LOCK_PATH = "/run/x-post-daily/runner.lock"
+DEFAULT_LOCK_PATH = "/run/x-post-daily/schedule.lock"
 MAX_DUE_BATCHES = 10
 MAX_POOL_SCAN = 1000
 SCHEDULE_MEDIA_DOWNLOAD_ATTEMPTS = 3
@@ -257,6 +258,8 @@ class ScheduleConfig:
     previous_day_deployed_commit: str = ""
     drama_duration_routing_enabled: bool = False
     duration_policy_version: int = 2
+    publish_workers: int = 1
+    batch_workers: int = 1
 
     @property
     def pool_check_path(self):
@@ -270,6 +273,8 @@ class ScheduleConfig:
             "X_POST_DAILY_MEDIA_ALLOWED_HOSTS",
         )
         return cls(
+            publish_workers=_env_int("X_POST_PUBLISH_WORKERS", "", 2, 1, 4),
+            batch_workers=_env_int("X_POST_SCHEDULE_BATCH_WORKERS", "", 2, 1, 2),
             internal_url=_env_value(
                 "X_POST_SCHEDULE_INTERNAL_URL",
                 "X_POST_DAILY_INTERNAL_URL",
@@ -2152,71 +2157,25 @@ def _heartbeat_best_effort(sidecar, identity, *, plan_attempt=False):
 
 
 def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
-    results = []
-    stopped = False
-    for queue in queues:
-        entry = {
-            "queue_id": queue["id"],
-            "account_id": queue["account_id"],
-            "status": queue["status"],
-        }
-        relay_repost_resume = bool(
-            queue.get("delivery_mode") == "premium_relay_repost"
-            and queue.get("repost_status") == "source_published"
-            and not queue.get("unknown_outcome")
-        )
-        if queue.get("unknown_outcome") or (
-            queue["status"] == "publishing" and not relay_repost_resume
-        ):
-            entry.update(
-                {
-                    "status": "needs_review",
-                    "unknown_outcome": True,
-                    "error_code": "x_post_unknown_outcome",
-                }
-            )
-            results.append(entry)
-            stopped = True
-            break
-        if queue["status"] == "published":
-            results.append(entry)
-            continue
-        if queue["status"] == "failed":
-            entry["error_code"] = (
-                queue.get("error_code") or "x_post_retry_requires_review"
-            )
-            results.append(entry)
-            if queue.get("error_code") == "x_post_rate_limited":
-                stopped = True
-                break
-            continue
+    from scripts.x_post_dispatch import dispatch_queues
+
+    def publish(queue):
+        entry = {"queue_id": queue["id"], "account_id": queue["account_id"], "status": queue["status"]}
         try:
-            published = sidecar.publish_queue(
-                config.publish_path_template, queue["id"]
-            )
+            published = sidecar.publish_queue(config.publish_path_template, queue["id"])
             entry["status"] = published["status"]
-            for key in (
-                "log_id",
-                "preview_url",
-                "delivery_mode",
-                "preflight_duration",
-                "error_code",
-            ):
+            for key in ("log_id", "preview_url", "delivery_mode", "preflight_duration", "error_code"):
                 if key in published:
                     entry[key] = published[key]
         except SidecarError as exc:
-            entry.update(
-                {
-                    "status": "failed",
-                    "error_code": exc.code,
-                    "unknown_outcome": exc.unknown_outcome,
-                }
-            )
-            if exc.status == 429 or exc.unknown_outcome:
-                stopped = True
-        results.append(entry)
-        if stopped:
-            break
+            entry.update(status="needs_review" if exc.unknown_outcome else "failed",
+                         error_code=exc.code, unknown_outcome=exc.unknown_outcome)
+            # X's generic rate response can describe a shared App limit. Stop
+            # new requests for this tick; independent account failures continue.
+            entry["shared_stop"] = exc.status == 429
+        return entry
+
+    results, stopped = dispatch_queues(queues, publish, workers=config.publish_workers)
     result_statuses = [item["status"] for item in results]
     return {
         "source_type": identity["source_type"],
@@ -2230,7 +2189,7 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
         "waiting_relay_count": sum(
             item["status"] == "waiting_relay" for item in results
         ),
-        "status": "stopped" if stopped else (
+        "status": "needs_review" if any(item.get("unknown_outcome") for item in results) else "stopped" if stopped else "running" if "queued" in result_statuses else (
             "published"
             if len(results) == len(queues)
             and all(status == "published" for status in result_statuses)
@@ -2314,194 +2273,205 @@ def execute_schedule_tick(
 
     batches = []
     retrying_downloader = _retrying_media_downloader(downloader)
-    for identity in accepted_due:
-        # Frozen state always wins. This query precedes token verification,
-        # source reads, media downloads, and GPU repair.
-        existing = sidecar.query_schedule_plan(
-            config.plan_query_path, identity
-        )
-        config = replace(config, duration_policy_version=duration_policy.version(existing["run"]) if existing["found"] else 2)
-        if existing["found"] and existing["queues"]:
-            result = _publish_frozen_queues(
-                config,
-                sidecar,
-                identity,
-                existing["queues"],
-                resumed=True,
+    def process_identity(identity):
+        local_results = []
+        def process():
+            # Frozen state always wins. This query precedes token verification,
+            # source reads, media downloads, and GPU repair.
+            existing = sidecar.query_schedule_plan(
+                config.plan_query_path, identity
             )
-            batches.append(result)
-            continue
-        if existing["found"] and existing["run"].get("plan_attempted_at"):
-            # The previous worker crossed the plan-write fence but did not
-            # leave queues. This successful ledger read makes it safe to
-            # terminalize; never reselect and issue another plan write.
-            exc = ScheduleRunError(
-                "上次计划创建结果未确认，已停止重复尝试",
-                "x_post_schedule_plan_unknown",
-            )
-            audit = _record_schedule_failure_best_effort(
-                sidecar, config, identity, exc
-            )
-            batches.append(_preflight_failure_result(identity, exc, audit))
-            continue
-        if existing["found"] and existing["run"].get("status") != "claimed":
-            raise ScheduleRunError(
-                "frozen schedule run has no queues",
-                "x_post_schedule_plan_incomplete",
-            )
-
-        try:
-            _heartbeat_best_effort(sidecar, identity)
-            # Preflight downloads are sequential and removed after each item;
-            # publishing also processes one queue at a time under the runner lock.
-            # Reserve one media slot instead of the legacy daily account fleet.
-            sidecar.preflight_storage(
-                config.storage_preflight_path, required_media_count=1
-            )
-            skipped_accounts = []
-            accounts = _verify_accounts(
-                sidecar, identity["account_ids"], skip_blocked=True,
-                skipped_accounts=skipped_accounts,
-            )
-            while True:
-                source_date = previous_source_date(current)
-                timestamp = max(1, int(current.timestamp()))
-                if identity["source_type"] == "material":
-                    material_loader_options = {
-                        "source_date": source_date,
-                        "connection_factory": connection_factory,
-                        "downloader": retrying_downloader,
-                        "prober": prober,
-                        "repair_client": repair_client,
-                        "timestamp": timestamp,
-                    }
-                    if material_candidate_loader is _material_candidates:
-                        material_loader_options["assignment_identity"] = identity
-                        material_loader_options["heartbeat"] = lambda: (
-                            _heartbeat_best_effort(sidecar, identity)
-                        )
-                    candidates = material_candidate_loader(
-                        config,
-                        sidecar,
-                        accounts,
-                        **material_loader_options,
-                    )
-                else:
-                    drama_scope_options = {}
-                    if drama_candidate_loader is _drama_candidates:
-                        drama_scope_options["configured_account_ids"] = identity["account_ids"]
-                    candidates = drama_candidate_loader(
-                        config,
-                        sidecar,
-                        accounts,
-                        source_date=source_date,
-                        connection_factory=connection_factory,
-                        downloader=downloader,
-                        prober=prober,
-                        repair_client=repair_client,
-                        timestamp=timestamp,
-                        **drama_scope_options,
-                    )
-                candidate_account_ids = [
-                    int(item["account_id"]) for item in candidates
-                ]
-                if not _is_ordered_account_subset(
-                    candidate_account_ids, identity["account_ids"]
-                ):
-                    raise ScheduleRunError(
-                        "candidate account order does not match frozen schedule",
-                        "x_post_schedule_account_mismatch",
-                    )
-                # Material preflight/repair may outlive an access token. Refresh
-                # the frozen subset immediately before the atomic plan transaction;
-                # each later publish also verifies its account.
-                rechecked = _verify_accounts(
-                    sidecar, candidate_account_ids, skip_blocked=True,
-                    skipped_accounts=skipped_accounts,
+            batch_config = replace(config, duration_policy_version=duration_policy.version(existing["run"]) if existing["found"] else 2)
+            if existing["found"] and existing["queues"]:
+                result = _publish_frozen_queues(
+                    batch_config,
+                    sidecar,
+                    identity,
+                    existing["queues"],
+                    resumed=True,
                 )
-                if len(rechecked) == len(candidate_account_ids):
-                    break
-                # No queue exists yet. Rebuild FIFO/language proofs instead of
-                # deleting prepared candidates. Each repeat removes an account.
-                excluded_ids = {item["account_id"] for item in skipped_accounts}
-                accounts = [item for item in accounts if item["id"] not in excluded_ids]
-            sidecar.preflight_storage(
-                config.storage_preflight_path, required_media_count=1
-            )
-            _heartbeat_best_effort(sidecar, identity)
-        except Exception as exc:
-            audit = _record_schedule_failure_best_effort(
-                sidecar,
-                config,
-                identity,
-                exc,
-            )
-            batches.append(
-                _preflight_failure_result(identity, exc, audit)
-            )
-            continue
-
-        try:
-            _heartbeat_best_effort(
-                sidecar, identity, plan_attempt=True
-            )
-            queues = sidecar.create_schedule_plan(
-                config.plan_path,
-                _plan_payload(identity, candidates),
-            )
-        except SidecarError as exc:
-            # A structured HTTP error proves the atomic transaction rolled
-            # back and must terminalize the claimed run. For a lost response,
-            # read the ledger first: publish only an already-frozen queue set;
-            # never reselect or issue a second plan write in this tick.
-            if exc.unknown_outcome:
-                try:
-                    reconciled = sidecar.query_schedule_plan(
-                        config.plan_query_path, identity
-                    )
-                except Exception:
-                    batches.append(
-                        {
-                            **_preflight_failure_result(identity, exc, None),
-                            "status": "stopped",
-                            "error_code": "x_post_schedule_plan_unknown",
-                            "error_message": "计划创建结果待核对，未继续发布",
-                        }
-                    )
-                    continue
-                if reconciled["found"] and reconciled["queues"]:
-                    result = _publish_frozen_queues(
-                        config,
-                        sidecar,
-                        identity,
-                        reconciled["queues"],
-                        resumed=True,
-                    )
-                    batches.append(result)
-                    continue
+                local_results.append(result)
+                return
+            if existing["found"] and existing["run"].get("plan_attempted_at"):
+                # The previous worker crossed the plan-write fence but did not
+                # leave queues. This successful ledger read makes it safe to
+                # terminalize; never reselect and issue another plan write.
                 exc = ScheduleRunError(
-                    "计划创建结果未确认，已停止重复尝试",
+                    "上次计划创建结果未确认，已停止重复尝试",
                     "x_post_schedule_plan_unknown",
                 )
-            audit = _record_schedule_failure_best_effort(
-                sidecar,
-                config,
-                identity,
-                exc,
+                audit = _record_schedule_failure_best_effort(
+                    sidecar, batch_config, identity, exc
+                )
+                local_results.append(_preflight_failure_result(identity, exc, audit))
+                return
+            if existing["found"] and existing["run"].get("status") != "claimed":
+                raise ScheduleRunError(
+                    "frozen schedule run has no queues",
+                    "x_post_schedule_plan_incomplete",
+                )
+
+            try:
+                _heartbeat_best_effort(sidecar, identity)
+                # Account publishers run concurrently; reserve their bounded media slots.
+                sidecar.preflight_storage(
+                    batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
+                )
+                skipped_accounts = []
+                accounts = _verify_accounts(
+                    sidecar, identity["account_ids"], skip_blocked=True,
+                    skipped_accounts=skipped_accounts,
+                )
+                while True:
+                    source_date = previous_source_date(current)
+                    timestamp = max(1, int(current.timestamp()))
+                    if identity["source_type"] == "material":
+                        material_loader_options = {
+                            "source_date": source_date,
+                            "connection_factory": connection_factory,
+                            "downloader": retrying_downloader,
+                            "prober": prober,
+                            "repair_client": repair_client,
+                            "timestamp": timestamp,
+                        }
+                        if material_candidate_loader is _material_candidates:
+                            material_loader_options["assignment_identity"] = identity
+                            material_loader_options["heartbeat"] = lambda: (
+                                _heartbeat_best_effort(sidecar, identity)
+                            )
+                        candidates = material_candidate_loader(
+                            batch_config,
+                            sidecar,
+                            accounts,
+                            **material_loader_options,
+                        )
+                    else:
+                        drama_scope_options = {}
+                        if drama_candidate_loader is _drama_candidates:
+                            drama_scope_options["configured_account_ids"] = identity["account_ids"]
+                        candidates = drama_candidate_loader(
+                            batch_config,
+                            sidecar,
+                            accounts,
+                            source_date=source_date,
+                            connection_factory=connection_factory,
+                            downloader=downloader,
+                            prober=prober,
+                            repair_client=repair_client,
+                            timestamp=timestamp,
+                            **drama_scope_options,
+                        )
+                    candidate_account_ids = [
+                        int(item["account_id"]) for item in candidates
+                    ]
+                    if not _is_ordered_account_subset(
+                        candidate_account_ids, identity["account_ids"]
+                    ):
+                        raise ScheduleRunError(
+                            "candidate account order does not match frozen schedule",
+                            "x_post_schedule_account_mismatch",
+                        )
+                    # Material preflight/repair may outlive an access token. Refresh
+                    # the frozen subset immediately before the atomic plan transaction;
+                    # each later publish also verifies its account.
+                    rechecked = _verify_accounts(
+                        sidecar, candidate_account_ids, skip_blocked=True,
+                        skipped_accounts=skipped_accounts,
+                    )
+                    if len(rechecked) == len(candidate_account_ids):
+                        break
+                    # No queue exists yet. Rebuild FIFO/language proofs instead of
+                    # deleting prepared candidates. Each repeat removes an account.
+                    excluded_ids = {item["account_id"] for item in skipped_accounts}
+                    accounts = [item for item in accounts if item["id"] not in excluded_ids]
+                sidecar.preflight_storage(
+                    batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
+                )
+                _heartbeat_best_effort(sidecar, identity)
+            except Exception as exc:
+                audit = _record_schedule_failure_best_effort(
+                    sidecar,
+                    batch_config,
+                    identity,
+                    exc,
+                )
+                local_results.append(
+                    _preflight_failure_result(identity, exc, audit)
+                )
+                return
+
+            try:
+                _heartbeat_best_effort(
+                    sidecar, identity, plan_attempt=True
+                )
+                queues = sidecar.create_schedule_plan(
+                    batch_config.plan_path,
+                    _plan_payload(identity, candidates),
+                )
+            except SidecarError as exc:
+                # A structured HTTP error proves the atomic transaction rolled
+                # back and must terminalize the claimed run. For a lost response,
+                # read the ledger first: publish only an already-frozen queue set;
+                # never reselect or issue a second plan write in this tick.
+                if exc.unknown_outcome:
+                    try:
+                        reconciled = sidecar.query_schedule_plan(
+                            batch_config.plan_query_path, identity
+                        )
+                    except Exception:
+                        local_results.append(
+                            {
+                                **_preflight_failure_result(identity, exc, None),
+                                "status": "stopped",
+                                "error_code": "x_post_schedule_plan_unknown",
+                                "error_message": "计划创建结果待核对，未继续发布",
+                            }
+                        )
+                        return
+                    if reconciled["found"] and reconciled["queues"]:
+                        result = _publish_frozen_queues(
+                            batch_config,
+                            sidecar,
+                            identity,
+                            reconciled["queues"],
+                            resumed=True,
+                        )
+                        local_results.append(result)
+                        return
+                    exc = ScheduleRunError(
+                        "计划创建结果未确认，已停止重复尝试",
+                        "x_post_schedule_plan_unknown",
+                    )
+                audit = _record_schedule_failure_best_effort(
+                    sidecar,
+                    batch_config,
+                    identity,
+                    exc,
+                )
+                local_results.append(_preflight_failure_result(identity, exc, audit))
+                return
+            if [queue["account_id"] for queue in queues] != candidate_account_ids:
+                raise ScheduleRunError(
+                    "created queue order does not match frozen schedule",
+                    "x_post_schedule_plan_mismatch",
+                )
+            result = _publish_frozen_queues(
+                batch_config, sidecar, identity, queues, resumed=False
             )
-            batches.append(_preflight_failure_result(identity, exc, audit))
-            continue
-        if [queue["account_id"] for queue in queues] != candidate_account_ids:
-            raise ScheduleRunError(
-                "created queue order does not match frozen schedule",
-                "x_post_schedule_plan_mismatch",
-            )
-        result = _publish_frozen_queues(
-            config, sidecar, identity, queues, resumed=False
-        )
-        if skipped_accounts:
-            result["skipped_accounts"] = skipped_accounts
-        batches.append(result)
+            if skipped_accounts:
+                result["skipped_accounts"] = skipped_accounts
+            local_results.append(result)
+        try:
+            process()
+        except Exception as exc:
+            local_results.append({"source_type": identity["source_type"], "run_date": identity["run_date"],
+                                  "publish_time": identity["publish_time"], "status": "needs_review",
+                                  "error_code": getattr(exc, "code", "x_post_batch_unavailable")})
+        return local_results
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=config.batch_workers) as pool:
+        for result in pool.map(process_identity, accepted_due):
+            batches.extend(result)
 
     return {
         "status": (

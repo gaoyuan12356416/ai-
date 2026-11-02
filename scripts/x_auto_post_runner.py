@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, Optional
@@ -91,7 +92,7 @@ class RunnerConfig:
             lock_path=str(
                 source.get(
                     "X_AUTO_POST_RUNNER_LOCK_PATH",
-                    "/run/x-post-daily/runner.lock",
+                    "/run/x-auto-post/runner.lock",
                 )
             ).strip(),
             scheduler_lock_path=str(
@@ -144,12 +145,12 @@ class RunnerConfig:
             raise RunnerError(
                 "x_auto_post_runner_config_invalid", "timeout is invalid"
             )
-        if not 1 <= self.worker_count <= 4 or self.max_tasks_per_worker != 1:
+        if not 1 <= self.worker_count <= 4 or not 1 <= self.max_tasks_per_worker <= 20:
             raise RunnerError(
                 "x_auto_post_runner_config_invalid", "worker limits are invalid"
             )
         for raw_lock, expected in (
-            (self.lock_path, "/run/x-post-daily/runner.lock"),
+            (self.lock_path, "/run/x-auto-post/runner.lock"),
             (self.scheduler_lock_path, "/run/x-auto-post/scheduler.lock"),
         ):
             # These paths are consumed by systemd on Linux.  Compare the literal
@@ -293,7 +294,10 @@ def execute_pending(config: RunnerConfig) -> list[list[Dict[str, Any]]]:
         worker_client = SidecarClient(config)
         worker_id = "%s-%d" % (config.worker_id, index)
         results = []
+        deadline = time.monotonic() + 900
         for _ in range(config.max_tasks_per_worker):
+            if time.monotonic() >= deadline:
+                break
             result = worker_client.post(
                 "/internal/x-auto-post/execute-next",
                 {"worker_id": worker_id},

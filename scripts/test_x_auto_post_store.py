@@ -35,6 +35,18 @@ class MutableClock:
 
 
 class AutoPostStoreTests(unittest.TestCase):
+    def test_more_than_500_held_candidates_do_not_hide_available_account(self):
+        template = self.create_template()
+        first = self.create_run(template, "held-first")
+        held = self.create_task(first)
+        with self.store._transaction() as conn:
+            conn.execute("UPDATE x_auto_task SET status='unknown',claim_token='held',lease_expires_at_utc='2030-01-01T00:00:00+00:00' WHERE id=?", (held.id,))
+        for index in range(501):
+            self.create_task(self.create_run(template, "held-%s" % index))
+        available = self.create_task(self.create_run(template, "available"), "641")
+        claim = self.store.claim_next_executable_task(worker_id="isolation-test", lease_seconds=1200)
+        self.assertEqual(claim.task.id, available.id)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
