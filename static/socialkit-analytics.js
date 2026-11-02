@@ -87,11 +87,10 @@
     if(kind!=='yesterday')start.setUTCDate(start.getUTCDate()-Number(kind)+1);
     $('#date-start').value=utc(start);$('#date-end').value=utc(end);dirty();
   }
-  async function latest({initial=false,quiet=false}={}) {
-    if(state.busy)return;state.busy=true;controls();if(!quiet)message('正在读取最新快照…');
+  async function latest({initial=false}={}) {
+    if(state.busy)return;state.busy=true;controls();message('正在读取最新快照…');
     try{
       const data=await request(API+'/options');
-      if(quiet&&state.options?.version===data.version&&JSON.stringify(state.options.refresh_status)===JSON.stringify(data.refresh_status)){state.busy=false;controls();return;}
       state.options=data;state.allowed=true;
       $('#scope-label').textContent='数据范围：全部 SocialKit 团队（已授权用户可见）';
       if(initial||!$('#date-end').value){const end=new Date((data.range?.end||utc(new Date()))+'T00:00:00Z');const start=new Date(end);start.setUTCDate(start.getUTCDate()-13);$('#date-start').value=utc(start);$('#date-end').value=utc(end);}
@@ -156,6 +155,5 @@
   $('#report-head').addEventListener('click',event=>{const key=event.target.closest('[data-sort]')?.dataset.sort;if(!key||state.dirty||state.busy)return;const p=new URLSearchParams(state.applied);p.set('direction',p.get('sort')===key&&p.get('direction')==='desc'?'asc':'desc');p.set('sort',key);p.set('page','1');void fetchReport(p);});
   $('#authButton').addEventListener('click',()=>{const auth=state.auth;if(auth?.authenticated)denied({status:401,message:'正在退出登录…'});void UiTopbar.handleAuthAction({auth,api:async(path,init)=>{const response=await fetch(path,{credentials:'same-origin',...init});return response.json();}});});
   async function init(){try{state.auth=await request('/api/ui/topbar');UiTopbar.render({auth:state.auth,userCard:'#userCard',authButton:'#authButton'});await Promise.resolve(QuickNav.render({container:'#quickNav',auth:state.auth,activeKey:'socialkitAnalytics'})).catch(()=>{});await latest({initial:true});}catch(error){message(error.message,'error');}}
-  setInterval(()=>{if(state.allowed&&!state.busy&&!state.dirty&&!document.hidden)void latest({quiet:true});},90000);
   void init();
 })();
