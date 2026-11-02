@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh SocialKit yesterday and recent 14 days at 11:00 Beijing
+
+[Timer]
+OnCalendar=*-*-* 11:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=socialkit-analytics-refresh.service
+
+[Install]
+WantedBy=timers.target

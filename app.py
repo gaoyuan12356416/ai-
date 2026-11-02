@@ -3681,6 +3681,7 @@ MODULE_PERMISSIONS = {
     "fb_page_posts": "Facebook Page 自动发布",
     "youtube_auto_publish": "YouTube 自动发布",
     "social_analytics": "社媒数据报表",
+    "socialkit_analytics": "SocialKit 效果报表",
 
 
 
@@ -3743,6 +3744,7 @@ DEFAULT_USER_PERMISSIONS = {
     "fb_page_posts": False,
     "youtube_auto_publish": False,
     "social_analytics": False,
+    "socialkit_analytics": False,
     "settings": False,
 }
 
@@ -56713,10 +56715,11 @@ def delete_session(session_token):
 
 
 def load_navigation_config():
+    from features.socialkit_analytics.navigation import ensure_navigation as ensure_socialkit_navigation
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
         from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
-        return filter_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))
+        return ensure_socialkit_navigation(filter_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle)))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94210,6 +94213,34 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         actor["is_admin"] = actor["role"] == "admin"
         return actor
 
+    def _socialkit_analytics_actor(self, navigation_key="socialkitAnalytics"):
+        """Require a real Cookie even if legacy Feishu enforcement is disabled."""
+        session = load_session(self._cookies().get(SESSION_COOKIE_NAME, ""))
+        if not session or session.get("auth_type") == "api_token":
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not str(session.get("tenant_key") or "").strip() or not str(session.get("user_id") or "").strip():
+            json_response(self, 401, {"error": "cookie_auth_required"}, no_store=True)
+            return None
+        if not has_module_permission(session, "socialkit_analytics"):
+            json_response(self, 403, {"error": "permission_denied", "module": "socialkit_analytics"}, no_store=True)
+            return None
+        try:
+            navigation = load_navigation_config()
+            keys = (navigation_key,) if isinstance(navigation_key, str) else navigation_key
+            accesses = [navigation_item_access(session, key, navigation) for key in keys]
+            access = next((item for item in accesses if item.get("allowed")), accesses[0])
+        except (OSError, ValueError, TypeError):
+            json_response(self, 503, {"error": "navigation_config_unavailable"}, no_store=True)
+            return None
+        if not access.get("allowed"):
+            json_response(self, 403, {"error": access.get("error", "navigation_item_unavailable"), "navigation_item": navigation_key}, no_store=True)
+            return None
+        actor = {key: str(session.get(key) or "") for key in ("tenant_key", "user_id", "open_id", "name")}
+        actor["role"] = "admin" if session.get("role") == "admin" else "user"
+        actor["is_admin"] = actor["role"] == "admin"
+        return actor
+
     def _youtube_auto_json(self, max_bytes):
         """Bound body reads before parsing; reject ambiguous HTTP framing."""
         lengths = self.headers.get_all("Content-Length", [])
@@ -94978,6 +95009,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in {
+            "/socialkit-analytics.html",
+            "/socialkit-analytics.js",
+            "/socialkit-analytics.css",
             "/fb-post-ad-delete.html",
             "/fb-post-ad-delete.css",
             "/fb-post-ad-delete.js",
@@ -95014,6 +95048,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             except OSError:
                 json_response(self, 404, {"error": "not_found"}, no_store=True)
             return
+
+        if parsed.path == "/api/socialkit-analytics" or parsed.path.startswith("/api/socialkit-analytics/"):
+            from features.socialkit_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
 
         if parsed.path == "/api/social-analytics" or parsed.path.startswith("/api/social-analytics/"):
             from features.social_analytics.routes import dispatch
@@ -98732,6 +98770,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
             return
+
+        if parsed.path == "/api/socialkit-analytics" or parsed.path.startswith("/api/socialkit-analytics/"):
+            from features.socialkit_analytics.routes import dispatch
+            return dispatch(self, parsed, globals())
 
         if parsed.path == "/api/social-analytics" or parsed.path.startswith("/api/social-analytics/"):
             from features.social_analytics.routes import dispatch

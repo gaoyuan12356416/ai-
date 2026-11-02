@@ -1,0 +1,77 @@
+-- Run once as a reviewed deployment on 101.32.56.53:63353/ads_ai.
+-- Runtime refresh performs no DDL. Source databases are never changed.
+
+CREATE TABLE IF NOT EXISTS socialkit_effect_daily (
+  version VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  row_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `date` DATE NOT NULL,
+  team_id BIGINT NOT NULL,
+  product VARCHAR(64) NOT NULL,
+  platform VARCHAR(32) NOT NULL,
+  account VARCHAR(768) NOT NULL,
+  account_name VARCHAR(255) NOT NULL,
+  external_account_id VARCHAR(512) NOT NULL,
+  drama VARCHAR(128) NOT NULL,
+  drama_name VARCHAR(200) NOT NULL,
+  drama_app_id BIGINT NOT NULL,
+  drama_content_id VARCHAR(64) NOT NULL,
+  site_id VARCHAR(10) NOT NULL,
+  short_code VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  country VARCHAR(32) NOT NULL,
+  device_os VARCHAR(16) NOT NULL,
+  material_type VARCHAR(32) NOT NULL,
+  creation_source VARCHAR(32) NOT NULL,
+  matched TINYINT NOT NULL,
+  clicks BIGINT NOT NULL,
+  views BIGINT NOT NULL,
+  installs BIGINT NOT NULL,
+  conversions BIGINT NOT NULL,
+  revenue_cents BIGINT NOT NULL,
+  refund_cents BIGINT NOT NULL,
+  dnu_revenue_cents BIGINT NOT NULL,
+  dnu_conversions BIGINT NOT NULL,
+  PRIMARY KEY (version,row_key),
+  KEY idx_socialkit_effect_day (`date`,version),
+  KEY idx_socialkit_effect_platform (`date`,platform,product)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SocialKit versioned daily effect facts, integer USD cents';
+
+CREATE TABLE IF NOT EXISTS socialkit_publish_daily (
+  version VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  row_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `date` DATE NOT NULL,
+  team_id BIGINT NOT NULL,
+  product VARCHAR(64) NOT NULL,
+  platform VARCHAR(32) NOT NULL,
+  account VARCHAR(768) NOT NULL,
+  account_name VARCHAR(255) NOT NULL,
+  external_account_id VARCHAR(512) NOT NULL,
+  drama VARCHAR(128) NOT NULL,
+  drama_name VARCHAR(200) NOT NULL,
+  drama_app_id BIGINT NOT NULL,
+  drama_content_id VARCHAR(64) NOT NULL,
+  task_id BIGINT NOT NULL,
+  language VARCHAR(32) NOT NULL,
+  account_country VARCHAR(64) NOT NULL,
+  reason VARCHAR(50) NOT NULL,
+  task_status INT NOT NULL,
+  planned BIGINT NOT NULL,
+  success BIGINT NOT NULL,
+  failed BIGINT NOT NULL,
+  tasks BIGINT NOT NULL,
+  PRIMARY KEY (version,row_key),
+  KEY idx_socialkit_publish_day (`date`,version),
+  KEY idx_socialkit_publish_platform (`date`,platform,product)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SocialKit account-local-date publication tasks, not joined to revenue rows';
+
+CREATE TABLE IF NOT EXISTS socialkit_refresh_runs (
+  version VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  range_start DATE NOT NULL,
+  range_end DATE NOT NULL,
+  started_at VARCHAR(40) NOT NULL,
+  finished_at VARCHAR(40) NOT NULL DEFAULT '',
+  manifest_json LONGTEXT NOT NULL,
+  error_code VARCHAR(100) NOT NULL DEFAULT '',
+  PRIMARY KEY (version),
+  KEY idx_socialkit_report_status (status,started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SocialKit refresh manifest and bounded failure state, local current.json is serving commit point';

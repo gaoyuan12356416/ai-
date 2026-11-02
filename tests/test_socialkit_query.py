@@ -1,0 +1,205 @@
+import csv
+import io
+import json
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.parse import urlparse
+
+from features.socialkit_analytics import query, routes
+from features.socialkit_analytics.schema import EFFECT_FIELDS, PUBLICATION_FIELDS, INTEGER_FIELDS, create_snapshot_schema
+
+
+class QueryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / 'snapshots').mkdir()
+        self.make_snapshot('v1', 1899)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def make_snapshot(self, version, cents, publish=True):
+        manifest = dict(version=version, database='snapshots/%s.sqlite3' % version, generated_at='2026-11-02T09:00:00Z', range={'start':'2026-10-31','end':'2026-11-01'}, coverage={kind:{'2026-10-31':'complete','2026-11-01':'complete'} for kind in ['effects','publications']})
+        conn = sqlite3.connect(str(self.root / manifest['database']))
+        create_snapshot_schema(conn)
+        common = dict(date='2026-11-01',team_id=2,product='Dramawave',platform='tiktok',account='[2,"tiktok","a"]',account_name='=formula',external_account_id='a',drama='[1479,"abc"]',drama_name='剧 A',drama_app_id=1479,drama_content_id='abc')
+        effect = {f:0 if f in INTEGER_FIELDS else '' for f in EFFECT_FIELDS}
+        effect.update(common,site_id='2236',short_code='AbC',country='US',device_os='ios',material_type='ordinary',creation_source='automatic_material',matched=1,clicks=3,views=5,installs=1,conversions=1,revenue_cents=cents,dnu_revenue_cents=cents,dnu_conversions=1)
+        self.insert(conn,'effects','effect',EFFECT_FIELDS,effect)
+        unassigned = dict(effect,short_code='bad',account='',account_name='',external_account_id='',drama='',drama_name='',drama_content_id='',platform='unattributed',product='',team_id=0,matched=0,clicks=0,views=0,installs=1,conversions=0,revenue_cents=0,dnu_revenue_cents=0,dnu_conversions=0)
+        self.insert(conn,'effects','unassigned',EFFECT_FIELDS,unassigned)
+        for task in range(3):
+            pub = {f:0 if f in INTEGER_FIELDS else '' for f in PUBLICATION_FIELDS}
+            pub.update(common,task_id=task+1,language='EN',account_country='US',reason='ADS_MATERIAL',task_status=3,planned=1,success=1,tasks=1)
+            self.insert(conn,'publications','task'+str(task),PUBLICATION_FIELDS,pub)
+        conn.execute('INSERT INTO metadata VALUES (?,?)',('manifest',json.dumps(manifest)))
+        conn.commit();conn.close()
+        if publish:
+            current=self.root/'current.json'
+            if current.exists():
+                (self.root/'previous.json').write_text(current.read_text(encoding='utf-8'),encoding='utf-8')
+            current.write_text(json.dumps(manifest),encoding='utf-8')
+
+    def insert(self,conn,table,key,fields,row):
+        conn.execute('INSERT INTO '+table+' (row_key,'+','.join(fields)+') VALUES ('+','.join('?' for _ in range(len(fields)+1))+')',[key]+[row[f] for f in fields])
+
+    def params(self,**extra):
+        return dict(start='2026-11-01',end='2026-11-01',**extra)
+
+    def test_separate_facts_do_not_multiply_revenue(self):
+        r=query.report(self.root,self.params())
+        self.assertEqual(r['totals']['revenue'],18.99)
+        self.assertEqual(r['totals']['success'],3)
+        self.assertEqual(r['totals']['installs'],2)
+        self.assertEqual(len(r['rows']),2)
+        self.assertEqual(sum(x['revenue'] for x in r['rows']),18.99)
+        self.assertEqual(r['totals']['unmatched_rows'],1)
+        self.assertEqual(r['totals']['unmatched_links'],1)
+        self.assertEqual(r['totals']['unmatched_installs'],1)
+        self.assertEqual(r['totals']['unmatched_revenue_cents'],0)
+
+    def test_snapshot_pinning_keeps_old_export_after_switch(self):
+        self.make_snapshot('v2',2500)
+        old=query.report(self.root,self.params(version='v1'))
+        new=query.report(self.root,self.params())
+        self.assertEqual(old['totals']['revenue'],18.99)
+        self.assertEqual(new['totals']['revenue'],25)
+        self.assertEqual(old['meta']['latest_version'],'v2')
+        self.assertIn('v1',query.export_csv(old).decode('utf-8-sig'))
+
+    def test_missing_version_returns_conflict(self):
+        with self.assertRaises(query.QueryError) as error:
+            query.report(self.root,self.params(version='gone'))
+        self.assertEqual(error.exception.status,409)
+
+    def test_completed_but_unpublished_snapshot_cannot_be_read(self):
+        self.make_snapshot('orphan',9999,publish=False)
+        with self.assertRaises(query.QueryError) as error:
+            query.report(self.root,self.params(version='orphan'))
+        self.assertEqual(error.exception.status,409)
+        self.assertEqual(query.report(self.root,self.params())['totals']['revenue'],18.99)
+
+    def test_default_precomputed_reads_skip_fact_queries_and_refresh_failure_state(self):
+        warmed=query.warm_snapshot(self.root,'v1')
+        self.assertEqual(len(warmed['files']),2)
+        (self.root/'status.json').write_text(json.dumps({'status':'failed','error':'new_failure'}))
+        original_connect=sqlite3.connect
+        class MetadataOnly:
+            def __init__(self,connection):self.connection=connection
+            @property
+            def row_factory(self):return self.connection.row_factory
+            @row_factory.setter
+            def row_factory(self,value):self.connection.row_factory=value
+            def execute(self,sql,*args):
+                if ' FROM effects' in sql or ' FROM publications' in sql:
+                    raise AssertionError('precomputed homepage must not query facts')
+                return self.connection.execute(sql,*args)
+            def close(self):self.connection.close()
+        with patch.object(query.sqlite3,'connect',side_effect=lambda *a,**kw:MetadataOnly(original_connect(*a,**kw))):
+            response=query.report(self.root,{})
+            selectors=query.options(self.root)
+        self.assertEqual(response['totals']['revenue'],18.99)
+        self.assertTrue(response['meta']['stale'])
+        self.assertEqual(selectors['refresh_status']['error'],'new_failure')
+
+    def test_nondefault_parameters_do_not_use_precomputed_homepage(self):
+        query.warm_snapshot(self.root,'v1')
+        filtered=query.report(self.root,dict(platform='unattributed'))
+        self.assertEqual(filtered['totals']['revenue'],0)
+        self.assertEqual(filtered['totals']['installs'],1)
+        self.assertEqual(filtered['parameters']['filters'],{'platform':['unattributed']})
+
+    def test_warming_failure_preserves_published_version(self):
+        before=(self.root/'current.json').read_bytes()
+        with patch.object(query.os,'replace',side_effect=OSError('disk unavailable')):
+            with self.assertRaises(OSError):query.warm_snapshot(self.root,'v1')
+        self.assertEqual(before,(self.root/'current.json').read_bytes())
+        self.assertEqual(query.report(self.root,{})['totals']['revenue'],18.99)
+        self.assertEqual(list((self.root/'precomputed').glob('*.tmp')),[])
+
+    def test_orphan_precomputed_files_never_bypass_publication_check(self):
+        warmed=query.warm_snapshot(self.root,'v1')
+        self.make_snapshot('orphan',9999,publish=False)
+        cache=json.loads(Path(warmed['files'][0]).read_text(encoding='utf-8'))
+        cache['version']='orphan';cache['payload']['meta']['version']='orphan'
+        (self.root/'precomputed/orphan-overview.json').write_text(json.dumps(cache),encoding='utf-8')
+        with self.assertRaises(query.QueryError) as error:
+            query.report(self.root,{'version':'orphan'})
+        self.assertEqual(error.exception.status,409)
+
+    def test_zero_synced_day_and_missing_day_are_distinct(self):
+        r=query.report(self.root,dict(start='2026-10-30',end='2026-11-01'))
+        self.assertIsNone(r['trend'][0]['revenue'])
+        self.assertEqual(r['trend'][1]['revenue'],0)
+        self.assertTrue(r['meta']['partial'])
+        self.assertEqual(r['totals']['revenue'],18.99)
+
+    def test_entirely_missing_range_is_unknown_not_zero(self):
+        r=query.report(self.root,dict(start='2026-10-29',end='2026-10-30'))
+        self.assertIsNone(r['totals']['revenue'])
+        self.assertIsNone(r['totals']['success'])
+
+    def test_reject_cross_fact_dimension_in_overview(self):
+        with self.assertRaises(query.QueryError):
+            query.report(self.root,self.params(country='US'))
+        with self.assertRaises(query.QueryError):
+            query.report(self.root,self.params(group_by='country'))
+        r=query.report(self.root,self.params(view='effects',country='US',group_by='country'))
+        self.assertEqual(r['totals']['revenue'],18.99)
+        self.assertIsNone(r['totals']['success'])
+
+    def test_literals_never_become_sql(self):
+        r=query.report(self.root,self.params(platform="tiktok' OR 1=1 --"))
+        self.assertEqual(r['totals']['revenue'],0)
+        with self.assertRaises(query.QueryError):
+            query.report(self.root,self.params(group_by='revenue;DROP TABLE effects'))
+
+    def test_csv_matches_groups_and_escapes_formulas(self):
+        r=query.report(self.root,self.params(group_by='account'))
+        rows=list(csv.reader(io.StringIO(query.export_csv(r).decode('utf-8-sig'))))
+        self.assertEqual(len(rows),len(r['all_rows'])+1)
+        self.assertEqual(rows[1][0],"'=formula")
+        self.assertEqual(rows[1][-3],'v1')
+
+    def test_failure_keeps_last_snapshot_and_marks_stale(self):
+        query.report(self.root,self.params())
+        (self.root/'status.json').write_text(json.dumps({'status':'failed','error':'source_timeout'}))
+        r=query.report(self.root,self.params())
+        self.assertTrue(r['meta']['stale'])
+        self.assertEqual(r['totals']['revenue'],18.99)
+
+    def test_query_does_not_mutate_sqlite(self):
+        before=(self.root/'snapshots/v1.sqlite3').read_bytes()
+        query.report(self.root,self.params())
+        query.options(self.root)
+        self.assertEqual(before,(self.root/'snapshots/v1.sqlite3').read_bytes())
+
+    def test_metadata_labels_and_filters(self):
+        opts=query.options(self.root)
+        self.assertEqual(opts['options']['material_type'][0]['label'],'普通／无素材')
+        r=query.report(self.root,self.params(view='publications',language='EN',group_by=['language','reason']))
+        self.assertEqual(r['totals']['success'],3)
+        self.assertIsNone(r['totals']['revenue'])
+
+    def test_route_auth_and_method_and_no_all_rows_json(self):
+        replies=[]
+        app={'SOCIALKIT_ANALYTICS_ROOT':str(self.root),'json_response':lambda h,status,data,**kw:replies.append((status,data))}
+        denied=SimpleNamespace(command='GET',_socialkit_analytics_actor=lambda:None)
+        routes.dispatch(denied,urlparse('/api/socialkit-analytics/report'),app)
+        self.assertEqual(replies,[])
+        handler=SimpleNamespace(command='POST',_socialkit_analytics_actor=lambda:{'role':'admin'})
+        routes.dispatch(handler,urlparse('/api/socialkit-analytics/report'),app)
+        self.assertEqual(replies[-1][0],405)
+        handler.command='GET'
+        routes.dispatch(handler,urlparse('/api/socialkit-analytics/report?start=2026-11-01&end=2026-11-01'),app)
+        self.assertEqual(replies[-1][0],200)
+        self.assertNotIn('all_rows',replies[-1][1])
+
+
+if __name__=='__main__':
+    unittest.main()

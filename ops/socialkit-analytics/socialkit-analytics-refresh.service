@@ -1,0 +1,21 @@
+[Unit]
+Description=SocialKit daily analytics snapshot refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/socialkit-analytics/current
+EnvironmentFile=/etc/socialkit-analytics.env
+Environment=PYTHONUNBUFFERED=1
+Environment=SOCIALKIT_ANALYTICS_ROOT=/mnt/data-disk/socialkit-analytics
+ExecStart=/usr/bin/flock -n /run/lock/socialkit-analytics-refresh.lock /usr/bin/python3 -m features.socialkit_analytics.refresh --root /mnt/data-disk/socialkit-analytics
+TimeoutStartSec=3600
+Nice=10
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

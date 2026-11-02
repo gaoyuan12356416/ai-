@@ -573,6 +573,7 @@
     xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
     socialAnalytics: "/social-analytics.html",
+    socialkitAnalytics: "/socialkit-analytics.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",
@@ -599,6 +600,37 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    // SocialKit has its own module; retain inherited permissions on old items.
+    let socialkitReports = normalized.find(group => group && group.key === "social_reports");
+    if (!socialkitReports) {
+      socialkitReports = cloneNav([DEFAULT_NAV.find(group => group.key === "social_reports")])[0];
+      normalized.push(socialkitReports);
+    }
+    if (!Array.isArray(socialkitReports.items)) socialkitReports.items = [];
+    const socialkitExists = normalized.some(group => Array.isArray(group.items) &&
+      group.items.some(item => item && item.key === "socialkitAnalytics"));
+    const customReportAcl = socialkitReports.module && (socialkitReports.module !== "social_analytics" ||
+      socialkitReports.items.some(item => item && item.module && item.module !== "social_analytics"));
+    if (!socialkitExists && customReportAcl) {
+      let separate = normalized.find(group => group && group.key === "socialkit_reports");
+      if (!separate) {
+        separate = {key: "socialkit_reports", label: "数据报表 · SocialKit", order: 51, items: []};
+        normalized.push(separate);
+      }
+      socialkitReports = separate;
+    }
+    if (!socialkitExists && socialkitReports.module === "social_analytics") {
+      socialkitReports.items.forEach(item => { if (!item.module) item.module = "social_analytics"; });
+      delete socialkitReports.module;
+    }
+    if (!socialkitExists) {
+      socialkitReports.items.push({key: "socialkitAnalytics", label: "SocialKit 效果报表",
+        description: "按平台、产品、账号和剧目查看每日发布与收入",
+        kind: "page", href: "/socialkit-analytics.html", module: "socialkit_analytics",
+        enabled: true, order: 30});
+    }
+
+
     // Migrate both saved server navigation and cached legacy navigation.
     let assetItem;
     normalized.forEach(group => {
