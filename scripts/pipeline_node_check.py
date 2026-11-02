@@ -47,7 +47,7 @@ def load_environment(path):
 
 def encode_sample(ffmpeg, ffprobe, encoder, directory, *, cpu):
     target = directory / ("sample-" + hashlib.sha256((ffmpeg + encoder).encode()).hexdigest()[:12] + ".mp4")
-    command = [ffmpeg, "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=128x128:rate=10:duration=1", "-an", "-c:v", encoder, "-pix_fmt", "yuv420p", "-t", "1", str(target)]
+    command = [ffmpeg, "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=10:duration=1", "-an", "-c:v", encoder, "-pix_fmt", "yuv420p", "-t", "1", str(target)]
     if cpu: command = cpu_thread_command(command)
     subprocess.run(command, capture_output=True, check=True, timeout=60)
     result = subprocess.run([ffprobe, "-v", "error", "-show_streams", "-of", "json", str(target)], capture_output=True, check=True, text=True, timeout=30)

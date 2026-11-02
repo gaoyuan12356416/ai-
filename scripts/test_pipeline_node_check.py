@@ -6,10 +6,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.pipeline_node_check import load_environment, validate_node
+from scripts.pipeline_node_check import load_environment, validate_node, encode_sample
+from types import SimpleNamespace
 
 
 class NodeCheckTests(unittest.TestCase):
+    def test_nvenc_diagnostic_uses_supported_production_frame_size(self):
+        with tempfile.TemporaryDirectory() as temp, patch('scripts.pipeline_node_check.subprocess.run', side_effect=[SimpleNamespace(), SimpleNamespace(stdout='{"streams":[{"codec_name":"h264"}]}')]) as run:
+            encode_sample('ffmpeg', 'ffprobe', 'h264_nvenc', Path(temp), cpu=False)
+            self.assertIn('testsrc2=size=720x1280:rate=10:duration=1', run.call_args_list[0].args[0])
     def test_environment_loader_never_executes_shell_text(self):
         with tempfile.TemporaryDirectory() as temp:
             env = Path(temp) / "private.env"
