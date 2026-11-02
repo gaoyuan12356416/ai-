@@ -96,10 +96,38 @@ class YouTubeNativeBridge:
             if job["family"] == "preparation":
                 with self.workflow.db(True) as conn:
                     row, task = self.workflow._row(conn, job["source_id"])
+                    previous = conn.execute("SELECT * FROM pipeline_youtube_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone()
+                    if previous:
+                        saved = obj(previous["task_json"])
+                        descriptor = obj(previous["descriptor_json"])
+                        retry_id = str(task.get("generation_retry_id") or "")
+                        new_intent = (row["state"] == "queued_generation" and task.get("current_version") == row["version"]
+                                      and (row["version"] > saved.get("version", 0)
+                                           or (row["version"] == saved.get("version") and retry_id
+                                               and retry_id != saved.get("retry_id", ""))))
+                        if int(previous["generation"]) >= int(job["generation"]):
+                            raise AdapterError("youtube_preparation_version_changed")
+                        if not new_intent:
+                            if (previous["receipt_json"] or row["state"] != "generating"
+                                    or row["lease_token"] != saved.get("lease_owner")
+                                    or row["version"] != saved.get("version") or task.get("current_version") != saved.get("version")
+                                    or retry_id != saved.get("retry_id", "")
+                                    or obj(task.get("reference_cover")).get("sha256") != saved.get("reference_sha256")):
+                                raise AdapterError("youtube_preparation_version_changed")
+                            owner = "pipeline:" + secrets.token_hex(16)
+                            conn.execute("UPDATE youtube_auto_preparation SET lease_token=?,lease_until=? WHERE id=?", (owner, time.time() + 120, task["id"]))
+                            saved["lease_owner"] = owner
+                            # A lost lease cannot authorize another paid model
+                            # call. Only recover a qualified persisted result.
+                            descriptor["recovery_only"] = True
+                            conn.execute("INSERT INTO pipeline_youtube_claim(source_key,stage,generation,claim_hash,task_json,descriptor_json) VALUES(?,?,?,?,?,?)", (*key, claim_hash(claim), encode(saved), encode(descriptor)))
+                            return descriptor
                     if row["state"] != "queued_generation" or row["lease_until"] > time.time() or row["lease_token"].startswith("pipeline:"):
                         raise AdapterError("youtube_preparation_not_claimable")
                     if is_due(task.get("publish_at")):
                         raise AdapterError("youtube_schedule_missed")
+                    if self.workflow._ledger(task, conn):
+                        raise AdapterError("youtube_preparation_already_enqueued")
                     owner = "pipeline:" + secrets.token_hex(16)
                     task["status"] = "generating"
                     conn.execute("UPDATE youtube_auto_preparation SET state='generating',body=?,lease_token=?,lease_until=? WHERE id=?", (encode(task), owner, time.time() + 120, task["id"]))
@@ -113,7 +141,8 @@ class YouTubeNativeBridge:
                         self.workflow._save(conn, task)
                         asset = self.workflow._asset(conn, reference["asset_id"], task["creator"])
                     descriptor = {"kind": "youtube_prepare", "request": {"action": "generate", "task": task, "reference_image": inline_image(Path(asset["path"]).read_bytes())}}
-                    saved = {"id": task["id"], "lease_owner": owner, "version": task["current_version"], "reference_sha256": reference["sha256"]}
+                    saved = {"id": task["id"], "lease_owner": owner, "version": task["current_version"],
+                             "retry_id": str(task.get("generation_retry_id") or ""), "reference_sha256": reference["sha256"]}
                 except Exception:
                     with self.workflow.db(True) as conn:
                         row, current = self.workflow._row(conn, task["id"])
@@ -367,6 +396,11 @@ class YouTubeNativeBridge:
                 if receipt.get("version") != saved["version"] or receipt.get("reference_sha256") != saved["reference_sha256"]:
                     raise AdapterError("youtube_preparation_version_changed")
                 data = image_bytes(receipt.get("cover"))
+                artifact = obj(receipt.get("artifact"))
+                if (artifact.get("sha256") != hashlib.sha256(data).hexdigest() or artifact.get("size") != len(data)
+                        or artifact.get("profile") != "youtube-cover-v1" or artifact.get("mime") != "image/jpeg"
+                        or not str(artifact.get("url", "")).startswith("https://")):
+                    raise AdapterError("youtube_cover_artifact_invalid")
                 with self.workflow.db() as conn:
                     current_row, body = self.workflow._row(conn, saved["id"])
                 if current_row["lease_token"] != saved["lease_owner"] or current_row["version"] != saved["version"]:
@@ -427,8 +461,14 @@ class YouTubeNativeBridge:
     def reconcile(self, job):
         if job["family"] == "preparation":
             with self.workflow.db() as conn:
-                row, _ = self.workflow._row(conn, job["source_id"])
-            return {"status": row["state"]}
+                row, body = self.workflow._row(conn, job["source_id"])
+                saved = conn.execute("SELECT receipt_json FROM pipeline_youtube_claim WHERE source_key=? AND stage='prepare' AND receipt_json<>'' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone()
+                receipt = obj(saved["receipt_json"]) if saved else {}
+            result = {"status": row["state"]}
+            if receipt.get("version") == row["version"] and row["state"] in {"review", "enqueue_pending", "uploading"}:
+                result["artifact"] = obj(receipt.get("artifact"))
+                result["preparation_completed"] = True
+            return result
         task = self.store.youtube_task(int(job["source_id"]))
         result = {key: task.get(key) for key in ("status", "video_id", "comment_id", "unknown_outcome", "schedule_status", "schedule_command_status")}
         if task["status"] == "scheduled" and task["schedule_status"] == "armed" and task["video_id"] and not task["unknown_outcome"]:

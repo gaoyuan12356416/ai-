@@ -2188,7 +2188,7 @@ class XAutoPostStore:
                 self._event(conn, run_id=int(row["run_id"]), task_id=identity, event_type="pipeline_backlog_paused",
                     created_at=self._now_iso(), from_status=str(row["status"]), to_status=str(row["status"]),
                     details={"source_key": key, "cutoff": boundary})
-        return {"paused": True, "source_key": key}
+        return {"held": True, "paused": True, "source_key": key, "cutoff": boundary}
 
     def claim_next_pending_task(
         self,

@@ -34,6 +34,17 @@ def claim_hash(claim):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def prepare_capabilities(channel, profile, backend, job):
+    required = ["prepare:" + channel, "backend:" + backend, "profile:" + profile]
+    if "executor_capabilities" in job and (channel == "fb" or "random-overlay" in profile):
+        catalogs = sorted({value for value in job["executor_capabilities"]
+                           if isinstance(value, str) and re.fullmatch("catalog:" + channel + ":[a-f0-9]{64}", value)})
+        if len(catalogs) != 1:
+            raise AdapterError("canonical_render_catalog_unavailable")
+        required.extend(catalogs)
+    return required
+
+
 class FBNativeBridge:
     def __init__(self, runtime):
         self.runtime = runtime
@@ -106,11 +117,55 @@ class FBNativeBridge:
             self.runtime.executor.short_link_writer(self.runtime.executor.short_link_root, int(task["id"]), long)
         return {"page_id": task["page_id"], "media_url": task["media_url"], "message": task["message_text"], "title": ""}
 
+    def _resume_preparation(self, job, previous):
+        """Fence only this source's previous authenticated prepare generation.
+
+        The coordinator issues a new generation only after its lease expires.
+        Native media leases are longer, so waiting for those would strand the
+        task. Never release a legacy/other task's claim or a publication lease.
+        """
+        old_task, descriptor = obj(previous["task_json"]), obj(previous["descriptor_json"])
+        store = self.runtime.store if job["family"] == "auto" else self.runtime.manual_worker.store
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if previous["receipt_json"]:
+                raise AdapterError("canonical_preparation_already_completed")
+            if conn.execute("SELECT 1 FROM pipeline_fb_operation WHERE source_key=? LIMIT 1", (job["source_key"],)).fetchone():
+                raise AdapterError("canonical_existing_publish_attempt")
+            if job["family"] == "auto":
+                row = conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (job["source_id"],)).fetchone()
+                if (row is None or row["status"] != "preparing" or row["lease_owner"] != old_task.get("lease_owner")
+                        or not str(row["lease_owner"]).startswith("pipeline:") or row["graph_post_id"]
+                        or conn.execute("SELECT 1 FROM fb_auto_publish_attempt WHERE task_id=? LIMIT 1", (job["source_id"],)).fetchone()):
+                    raise AdapterError("canonical_prepare_reclaim_conflict")
+                source = row["source_media_url"]
+                conn.execute("UPDATE fb_auto_task SET lease_expires_at_utc='' WHERE id=? AND lease_owner=?",
+                             (job["source_id"], old_task["lease_owner"]))
+            else:
+                row = conn.execute("SELECT * FROM fb_video_task WHERE task_id=?", (job["source_id"],)).fetchone()
+                if (row is None or row["status"] != "queued" or row["prepare_state"] != "preparing"
+                        or row["prepare_lease"] != old_task.get("claim_token") or row["execution_lease"]
+                        or not str(old_task.get("worker_id", "")).startswith("pipeline:")
+                        or conn.execute("SELECT 1 FROM fb_video_attempt WHERE task_id=? LIMIT 1", (job["source_id"],)).fetchone()):
+                    raise AdapterError("canonical_prepare_reclaim_conflict")
+                source = obj(row["snapshot_json"])["material"]["media_url"]
+                conn.execute("UPDATE fb_video_task SET prepare_until='' WHERE task_id=? AND prepare_lease=?",
+                             (job["source_id"], old_task["claim_token"]))
+            # Preserve the complete request, including template and selected source.
+            if any(str(row[key]) != str(old_task.get(key)) for key in ("gpu_job_id", "content_id", "material_id", "page_id")):
+                raise AdapterError("canonical_prepare_identity_changed")
+            old_source = old_task.get("source_media_url") if job["family"] == "auto" else obj(old_task["snapshot_json"])["material"]["media_url"]
+            if source != old_source:
+                raise AdapterError("canonical_prepare_identity_changed")
+            conn.commit()
+        return descriptor
+
     def reserve(self, job, claim):
         key = self._key(job)
         with self._lock:
             with self.runtime.store.connect() as conn:
                 previous = conn.execute("SELECT * FROM pipeline_fb_claim WHERE source_key=? AND stage=? AND generation=?", key).fetchone()
+                frozen = conn.execute("SELECT * FROM pipeline_fb_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone() if job["stage"] == "prepare" else None
             if previous:
                 return self._stored(job, claim)[2]
             if not self.runtime.executor.live_enabled:
@@ -118,6 +173,9 @@ class FBNativeBridge:
             worker_id = "pipeline:%s:%s" % (claim.get("node_id", job.get("node_id", "node")), job["generation"])
             stage, family = job["stage"], job["family"]
             identity = int(job["source_id"]) if family == "auto" else str(job["source_id"])
+            if frozen and int(frozen["generation"]) >= int(job["generation"]):
+                raise AdapterError("canonical_prepare_generation_stale")
+            frozen_descriptor = self._resume_preparation(job, frozen) if frozen else None
             if family == "auto":
                 task = (self.runtime.store.claim_prepare_next(worker_id, 10200, task_id=identity) if stage == "prepare"
                         else self.runtime.store.claim_next(worker_id, 1200, task_id=identity))
@@ -126,7 +184,9 @@ class FBNativeBridge:
             if task is None:
                 raise AdapterError("canonical_task_not_claimable")
             try:
-                if stage == "prepare":
+                if frozen_descriptor:
+                    descriptor = frozen_descriptor
+                elif stage == "prepare":
                     if family == "auto":
                         from features.fb_auto_posts.manual_batch import prepare_source_url, task_policy
                         with self.runtime.store.connect() as conn:
@@ -137,6 +197,7 @@ class FBNativeBridge:
                     profile = CPU_PROFILE if job.get("executor_backend") == "cpu" else PROFILE
                     descriptor = {"kind": "fb_prepare", "request": {"job_id": task["gpu_job_id"], "content_id": task["content_id"],
                                   "source_url": source, "source_trim_tail_seconds": 0, "video_template": task.get("video_template") or "random_overlay", "expected_profile": profile}}
+                    descriptor["required_capabilities"] = prepare_capabilities("fb", profile, "cpu" if profile == CPU_PROFILE else "gpu", job)
                 else:
                     request = self._auto_preflight(task) if family == "auto" else self._video_preflight(task)
                     descriptor = {"kind": "fb_publish", "request": request, "page_id": task["page_id"],

@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 from urllib.parse import urlsplit
+from urllib.parse import quote
 
 from .client import CoordinatorError
 
@@ -60,6 +61,146 @@ def cpu_thread_command(command):
     return result
 
 
+class COSArtifactStore:
+    """Private recovery receipt, written after qualification and before upload.
+
+    The locator excludes claim generation and host. A receipt alone is never
+    ready: the content-addressed object must pass COS HEAD identity checks.
+    """
+    MAX_RECEIPT = 4 * 1024 * 1024
+
+    def __init__(self, store, kind, request, *, source_key=""):
+        self.store, self.config, self.client = store, store.config, store.client
+        identity = request.get("job_id") or request.get("job_key")
+        if kind == "youtube_prepare":
+            task = request.get("task") or {}
+            identity = ":".join(str(task.get(name) or "") for name in ("id", "current_version", "generation_retry_id"))
+        if not identity:
+            raise ExecutionError("artifact_recovery_identity_missing")
+        configuration = {name: getattr(self.config, name, "") for name in (
+            "profile", "compositor_backend", "video_encoder", "asset_manifest_sha256", "random_overlay_manifest_sha256")}
+        self.binding = {"version": 1, "kind": kind, "identity": str(identity), "source_key": str(source_key),
+                        "request_sha256": self.digest(request), "configuration_sha256": self.digest(configuration)}
+        locator = self.digest({"kind": kind, "identity": str(identity)})
+        self.key = self.config.cos_prefix.rstrip("/") + "/pipeline-receipts/v1/" + locator + ".json"
+
+    @staticmethod
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+    @classmethod
+    def digest(cls, value):
+        return hashlib.sha256(cls.encoded(value)).hexdigest()
+
+    @staticmethod
+    def status(exc):
+        value = getattr(exc, "get_status_code", None)
+        try:
+            return int(value() if callable(value) else getattr(exc, "status_code", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _document(self, key):
+        try:
+            response = self.client.get_object(Bucket=self.config.cos_bucket, Key=key)
+        except Exception as exc:
+            if self.status(exc) == 404:
+                return None
+            raise ExecutionError("artifact_receipt_read_failed") from None
+        stream = response["Body"].get_raw_stream()
+        try:
+            raw = stream.read(self.MAX_RECEIPT + 1)
+        finally:
+            stream.close()
+        try:
+            if len(raw) > self.MAX_RECEIPT:
+                raise ValueError()
+            receipt = json.loads(raw)
+            if not isinstance(receipt, dict):
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise ExecutionError("artifact_receipt_conflict") from None
+        return receipt
+
+    def _read(self):
+        receipt = self._document(self.key)
+        if receipt is None:
+            return None
+        try:
+            if receipt.get("binding") != self.binding or receipt.get("result_sha256") != self.digest(receipt["result"]):
+                raise ValueError()
+            artifact = _artifact(receipt["result"].get("artifact") or receipt["result"])
+            key = receipt["object_key"]
+            expected_url = self.config.cos_domain.rstrip("/") + "/" + "/".join(quote(part, safe="-._~") for part in key.split("/"))
+            if not key.startswith(self.config.cos_prefix.rstrip("/") + "/") or "/../" in key or artifact["url"] != expected_url:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError, ExecutionError):
+            raise ExecutionError("artifact_receipt_conflict") from None
+        return receipt
+
+    def begin_generation(self):
+        """One paid generation per explicitly authorized task/version/retry.
+
+        A random invocation ID distinguishes our lost PUT acknowledgement from
+        another node winning the immutable intent. No existing intent is a
+        permission to call the generator again.
+        """
+        key = self.key[:-5] + ".generation-intent.json"
+        if self._document(key) is not None:
+            raise ExecutionError("youtube_generation_interrupted")
+        intent = {"binding": self.binding, "invocation_id": os.urandom(16).hex()}
+        try:
+            self.client.put_object(Bucket=self.config.cos_bucket, Key=key, Body=self.encoded(intent),
+                                   ACL="private", ContentType="application/json", EnableMD5=True,
+                                   ForbidOverwrite="true")
+        except Exception:
+            pass
+        # No generation may start until this invocation's intent is durable.
+        if self._document(key) != intent:
+            raise ExecutionError("youtube_generation_interrupted")
+
+    def recover(self):
+        receipt = self._read()
+        if receipt is None:
+            return None
+        artifact = _artifact(receipt["result"].get("artifact") or receipt["result"])
+        try:
+            head = self.client.head_object(Bucket=self.config.cos_bucket, Key=receipt["object_key"])
+        except Exception as exc:
+            if self.status(exc) == 404:
+                # Qualified locally does not prove a completed remote upload.
+                # Keep the original identity for reconciliation; never rerender.
+                raise ExecutionError("artifact_upload_incomplete") from None
+            raise ExecutionError("artifact_head_failed") from None
+        lowered = {str(k).lower().replace("_", "-"): v for k, v in head.items()}
+        try:
+            valid = int(lowered.get("content-length", -1)) == artifact["size"] and lowered.get("x-cos-meta-sha256") == artifact["sha256"]
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise ExecutionError("artifact_fingerprint_changed")
+        return receipt["result"]
+
+    def qualified(self, result, object_key):
+        _artifact(result.get("artifact") or result)
+        receipt = {"binding": self.binding, "object_key": object_key, "result": result, "result_sha256": self.digest(result)}
+        body = self.encoded(receipt)
+        if len(body) > self.MAX_RECEIPT:
+            raise ExecutionError("artifact_receipt_too_large")
+        existing = self._read()
+        if existing is None:
+            try:
+                self.client.put_object(Bucket=self.config.cos_bucket, Key=self.key, Body=body,
+                                       ACL="private", ContentType="application/json", EnableMD5=True,
+                                       ForbidOverwrite="true")
+            except Exception:
+                # Includes lost PUT acknowledgements: read the immutable facts.
+                pass
+            existing = self._read()
+        if existing != receipt:
+            raise ExecutionError("artifact_receipt_conflict")
+
+
 class NodeExecutors:
     PREPARE = ("x_preflight", "x_random", "x_repair", "fb_prepare", "tt_prepare", "youtube_prepare")
     PUBLISH = ("x_publish", "x_share_publish", "fb_publish", "tt_publish", "youtube_publish")
@@ -81,7 +222,14 @@ class NodeExecutors:
         kinds = {kind for kind in supported if kind in enabled}
         stages = {("prepare" if kind in self.PREPARE else "publish") + ":" + kind.split("_", 1)[0] for kind in kinds}
         profiles = {"profile:" + name.strip() for name in os.environ.get("PIPELINE_RENDER_PROFILES", "").split(",") if name.strip()}
-        return sorted(kinds | stages | profiles | {"backend:" + self.config["backend"]})
+        catalogs = set()
+        for channel, variable in (("x", "X_POST_RANDOM_TEMPLATE_MANIFEST_SHA256"),
+                                  ("fb", "FB_PAGE_GPU_RANDOM_OVERLAY_MANIFEST_SHA256"),
+                                  ("tt", "TT_POST_GPU_RANDOM_OVERLAY_MANIFEST_SHA256")):
+            fingerprint = os.environ.get(variable, "").strip().lower()
+            if "prepare:" + channel in stages and re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+                catalogs.add("catalog:" + channel + ":" + fingerprint)
+        return sorted(kinds | stages | profiles | catalogs | {"backend:" + self.config["backend"]})
 
     def execute(self, job, context):
         payload = dict(job.get("payload") or {})
@@ -139,7 +287,26 @@ class NodeExecutors:
         self.processors[kind] = processor
         return processor
 
+    def _validate_frozen_catalog(self, kind, payload):
+        required = {value for value in payload.get("required_capabilities", [])
+                    if isinstance(value, str) and value.startswith("catalog:")}
+        if not required:
+            return  # Existing X descriptors also validate their request manifest.
+        if not required.issubset(set(self.capabilities())):
+            raise ExecutionError("frozen_catalog_mismatch")
+        channel = kind.split("_", 1)[0]
+        expected = {value.split(":", 2)[2] for value in required if value.startswith("catalog:" + channel + ":")}
+        if not expected:
+            return
+        name = "x_random" if kind == "x_preflight" else kind
+        processor = self._processor(name)
+        assets = getattr(processor, "assets", None) or getattr(processor.config, "random_overlay_assets", None)
+        actual = assets.get("manifest_sha256") if isinstance(assets, dict) else None
+        if len(expected) != 1 or actual not in expected:
+            raise ExecutionError("frozen_catalog_mismatch")
+
     def prepare(self, kind, payload, context):
+        self._validate_frozen_catalog(kind, payload)
         context.phase("prepare")
         request = dict(payload.get("request") or {})
         if kind == "x_preflight":
@@ -147,18 +314,70 @@ class NodeExecutors:
         if kind == "youtube_prepare":
             if request.get("action") == "enqueue":
                 return {"status": "ready", "enqueue": True}
-            from .youtube_cover import generate_cover
-            return generate_cover(request, self.work_root, context, self.factories.get("youtube_prepare"))
+            return self.youtube_prepare(request, context, recovery_only=bool(payload.get("recovery_only")))
         processor = self._processor(kind)
-        expected_profile = request.get("expected_profile")
+        expected_profile = request.get("expected_profile") or request.get("profile")
         if expected_profile and getattr(processor.config, "profile", "") != expected_profile:
             raise ExecutionError("frozen_renderer_profile_mismatch")
-        with self._measure_processor(processor, context):
-            result = processor.repair(request) if kind == "x_repair" else processor.prepare(request)
+        result = self._prepare_processor(kind, processor, request, context)
         artifact = _artifact(result)
         artifact["backend"] = self.config["backend"]
-        context.check()
+        # A completed object remains a fact after lease loss. Let the durable
+        # outbox deliver it; the authority decides whether this claim can finish.
         return {"status": "ready", "artifact": artifact, "preparation": result}
+
+    def _prepare_processor(self, kind, processor, request, context):
+        store = getattr(processor, "cos", None) or getattr(processor, "object_store", None)
+        if store is None and callable(getattr(processor, "_object_store", None)):
+            store = processor._object_store()
+        journal = COSArtifactStore(store, kind, request, source_key=getattr(context, "job", {}).get("source_key", ""))
+        context.phase("artifact_recovery")
+        recovered = journal.recover()
+        if recovered is not None:
+            return recovered
+        previous = getattr(processor, "qualified_artifact", None)
+        processor.qualified_artifact = journal.qualified
+        try:
+            with self._measure_processor(processor, context):
+                result = processor.repair(request) if kind == "x_repair" else processor.prepare(request)
+            # Native local manifests created before this protocol are also
+            # exported once, after their own object-integrity verification.
+            if journal._read() is None:
+                artifact = _artifact(result)
+                prefix = store.config.cos_domain.rstrip("/") + "/"
+                if not artifact["url"].startswith(prefix):
+                    raise ExecutionError("artifact_origin_changed")
+                from urllib.parse import unquote
+                journal.qualified(result, unquote(artifact["url"][len(prefix):]))
+            return journal.recover()
+        finally:
+            processor.qualified_artifact = previous
+
+    def youtube_prepare(self, request, context, *, recovery_only=False):
+        from .youtube_cover import generate_cover, image_bytes
+        from features.x_posts.media_repair import WorkerConfig, CosObjectStore
+        store = self.factories["artifact_store"]() if "artifact_store" in self.factories else CosObjectStore(replace(WorkerConfig.from_env(), profile="youtube-cover-v1"))
+        journal = COSArtifactStore(store, "youtube_prepare", request, source_key=getattr(context, "job", {}).get("source_key", ""))
+        result = journal.recover()
+        if result is not None:
+            return result
+        if recovery_only:
+            raise ExecutionError("youtube_generation_interrupted")
+        context.check()
+        journal.begin_generation()
+        context.check()
+        result = generate_cover(request, self.work_root, context, self.factories.get("youtube_prepare"))
+        data = image_bytes(result["cover"])
+        sha = hashlib.sha256(data).hexdigest()
+        key = store.config.cos_prefix.rstrip("/") + "/youtube-cover/" + sha[:2] + "/" + sha + ".jpg"
+        result["artifact"] = {"url": store.url(key), "sha256": sha, "size": len(data), "mime": "image/jpeg", "profile": "youtube-cover-v1"}
+        journal.qualified(result, key)
+        context.phase("artifact_upload")
+        with tempfile.TemporaryDirectory(dir=self.work_root) as temp:
+            path = Path(temp) / "cover.jpg"
+            path.write_bytes(data)
+            store.upload(key, path, sha, len(data), content_type="image/jpeg")
+        return journal.recover()
 
     @contextmanager
     def _measure_processor(self, processor, context):
@@ -265,8 +484,7 @@ class NodeExecutors:
                 processor = self._processor("x_repair")
                 if repair_request.get("profile") != processor.config.profile:
                     raise ExecutionError("frozen_renderer_profile_mismatch")
-                with self._measure_processor(processor, context):
-                    repaired = processor.repair(repair_request)
+                repaired = self._prepare_processor("x_repair", processor, repair_request, context)
                 artifact = _artifact(repaired)
                 repaired_path = self._download(artifact, Path(temp) / "repaired.mp4", context)
                 probe = validate(repaired_path)
@@ -289,8 +507,7 @@ class NodeExecutors:
                 frozen = dict(request["random_request"])
                 frozen.update(source_url=artifact["url"], source_sha256=artifact["sha256"], source_size=artifact["size"], source_duration=artifact["duration_seconds"])
                 processor = self._processor("x_random")
-                with self._measure_processor(processor, context):
-                    prepared = processor.prepare(frozen)
+                prepared = self._prepare_processor("x_random", processor, frozen, context)
                 return {"status": "ready", "artifact": _artifact(prepared), "preparation": prepared}
             return {"status": "ready", **checkpoint, "probe": probe}
 

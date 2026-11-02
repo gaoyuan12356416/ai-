@@ -484,7 +484,7 @@ class XNativeBridge:
             if previous and previous[0] != cutoff:
                 raise AdapterError("canonical_hold_conflict")
             c.execute("INSERT OR IGNORE INTO pipeline_canonical_hold VALUES(?,?,'cutover_overdue')", (job["source_key"], cutoff))
-        return {"paused": True, "source_key": job["source_key"]}
+        return {"held": True, "paused": True, "source_key": job["source_key"], "cutoff": cutoff}
 
     def dispatch(self, action, payload):
         job, claim = payload.get("job", {}), payload.get("claim", {})

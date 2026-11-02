@@ -269,6 +269,46 @@ class DispatchStore:
             config["enabled_channels"] = sorted(channels)
             self._save_config(c, config, {}, "channel_enabled" if enabled else "channel_draining")
 
+    @staticmethod
+    def _release_finished_legacy_resources(c, source_key):
+        # A source can advance from old preparation to publication between
+        # collector passes. Retire only fences whose canonical stage ended.
+        c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id IN (SELECT id FROM pipeline_job WHERE source_key=? AND generation=0 AND status IN ('completed','published','failed'))", (source_key,))
+
+    def _rearm_youtube_revision(self, c, existing, offer, meta):
+        if existing["channel"] != "youtube" or existing["family"] != "preparation" or existing["stage"] != "prepare":
+            return False
+        revision = str(offer.get("source_revision") or "")
+        previous = str(meta.get("source_revision") or "")
+        if not previous:
+            task = json.loads(existing["payload_json"]).get("request", {}).get("task", {})
+            if task.get("current_version"):
+                previous = str(task["current_version"]) + ":" + str(task.get("generation_retry_id") or "")
+        def parsed(value):
+            import re
+            match = re.fullmatch(r"([1-9][0-9]*):([a-f0-9]{32})?", value)
+            return (int(match[1]), match[2] or "") if match else None
+        old, new = parsed(previous), parsed(revision)
+        if not old and new and offer.get("source_status") != "queued_generation":
+            meta["source_revision"] = revision
+            c.execute("UPDATE pipeline_job SET source_meta_json=? WHERE id=?", (dumps(meta), existing["id"]))
+            return False
+        newer = old and new and (new[0] > old[0] or (new[0] == old[0] and new[1] and new[1] != old[1]))
+        if not (newer and existing["status"] in ("completed", "failed") and not existing["external_intent"]
+                and existing["hold_reason"] != "cutover_overdue" and offer.get("source_status") == "queued_generation"
+                and offer.get("execution_available") is True and offer.get("status", "queued") in ("queued", "ready")
+                and not offer.get("hold_reason") and not offer.get("publish_id") and not offer.get("source_attempt_count")):
+            return False
+        meta.update(source_revision=revision, source_attempt_count=0, legacy_inflight=False, reconcile_only=False,
+                    canonical_fingerprint=offer.get("canonical_fingerprint", ""))
+        c.execute("UPDATE pipeline_job SET status='queued',hold_reason='',payload_json=?,artifact_json='{}',capabilities_json=?,resource_keys_json=?,source_meta_json=?,source_status='queued_generation',node_id='',worker_id='',claim_hash='',lease_expires_at='',started_at='',finished_at='',canonical_receipt='',error_code='',error_message='',scheduled_at=?,updated_at=? WHERE id=?",
+                  (dumps(offer.get("payload", {})), dumps(offer.get("capabilities", [])), dumps(offer.get("resource_keys", [])),
+                   dumps(meta), self.now(), self.now(), existing["id"]))
+        c.execute("DELETE FROM pipeline_resource WHERE job_id=?", (existing["id"],))
+        c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=?", (existing["id"],))
+        self.event(c, existing["id"], "youtube_revision_requested", {"previous_revision": previous, "source_revision": revision}, self.now())
+        return True
+
     def offer(self, offer):
         now = self.now()
         channel = channel_key(offer["channel"])
@@ -286,15 +326,20 @@ class DispatchStore:
             existing = c.execute("SELECT * FROM pipeline_job WHERE source_key=? AND stage=?", (offer["source_key"], stage)).fetchone()
             if offer.get("metadata_only") and not existing:
                 c.execute("UPDATE pipeline_job SET status='completed',hold_reason='metadata_only',finished_at=?,updated_at=? WHERE source_key=? AND generation=0 AND status IN ('queued','ready','legacy_running')", (now, now, offer["source_key"]))
+                self._release_finished_legacy_resources(c, offer["source_key"])
                 return None  # Planning a queue is not a completed media render.
             if existing:
+                meta = json.loads(existing["source_meta_json"])
+                if self._rearm_youtube_revision(c, existing, offer, meta):
+                    return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
+                if existing["generation"] == 0 and not json.loads(existing["resource_keys_json"]) and offer.get("resource_keys"):
+                    c.execute("UPDATE pipeline_job SET resource_keys_json=? WHERE id=?", (dumps(sorted(set(offer["resource_keys"]))), existing["id"]))
                 if offer.get("metadata_only") and not existing["generation"]:
                     c.execute("UPDATE pipeline_job SET status='completed',hold_reason='metadata_only',finished_at=?,updated_at=? WHERE id=? AND status<>'backlog_paused'", (now, now, existing["id"]))
                 if offer.get("continuation_due") and existing["channel"] == "youtube" and existing["status"] == "ready" and json.loads(existing["payload_json"]).get("continuation"):
                     c.execute("UPDATE pipeline_job SET scheduled_at=?,updated_at=? WHERE id=?", (now, now, existing["id"]))
                 if stage == "prepare" and existing["status"] == "legacy_running" and not offer.get("legacy_inflight") and (offer.get("source_status") in ("ready", "review", "enqueue_pending", "completed") or offer.get("metadata_only")):
                     c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE id=? AND generation=0", (stamp(offer["finished_at"]) if offer.get("finished_at") else now, now, existing["id"]))
-                meta = json.loads(existing["source_meta_json"])
                 if offer.get("cutover_due_at"):
                     meta["cutover_due_at"] = offer["cutover_due_at"]
                     c.execute("UPDATE pipeline_job SET source_meta_json=? WHERE id=?", (dumps(meta), existing["id"]))
@@ -315,7 +360,7 @@ class DispatchStore:
                     c.execute("UPDATE pipeline_job SET hold_reason='' WHERE id=? AND generation=0", (existing["id"],))
                 if existing["generation"] == 0 and (existing["status"] != "backlog_paused" or status in ("unknown", "legacy_running")) and status in ("completed", "published", "failed", "unknown", "legacy_running"):
                     c.execute("UPDATE pipeline_job SET status=?,started_at=?,finished_at=?,updated_at=?,canonical_receipt=? WHERE id=?", (status, stamp(offer["started_at"]) if offer.get("started_at") else existing["started_at"], stamp(offer["finished_at"]) if offer.get("finished_at") else existing["finished_at"], now, str(offer.get("canonical_receipt", "")), existing["id"]))
-                    if status in ("unknown", "legacy_running") and stage == "publish":
+                    if status in ("unknown", "legacy_running"):
                         for resource in offer.get("resource_keys", []):
                             c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, existing["id"]))
                     if status in ("completed", "published", "failed"):
@@ -324,6 +369,7 @@ class DispatchStore:
                     existing = c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone()
                 if stage == "publish" and status in ("published", "failed"):
                     c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
+                self._release_finished_legacy_resources(c, offer["source_key"])
                 return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
             cutoff = self.config(c)["cutovers"].get(channel)
             in_time = not cutoff or (offer.get("started_at") and stamp(offer["started_at"]) <= cutoff)
@@ -353,20 +399,21 @@ class DispatchStore:
                 "started_at": stamp(offer["started_at"]) if offer.get("started_at") else "",
                 "finished_at": stamp(offer["finished_at"]) if offer.get("finished_at") else "",
                 "canonical_receipt": str(offer.get("canonical_receipt", "")),
-                "source_meta_json": dumps({k: offer[k] for k in ("canonical_fingerprint", "source_attempt_count", "legacy_inflight", "reconcile_only", "execution_available", "owner_namespace", "native_owner_id", "ancestor_source_keys", "cutover_due_at") if k in offer}),
+                "source_meta_json": dumps({k: offer[k] for k in ("canonical_fingerprint", "source_attempt_count", "legacy_inflight", "reconcile_only", "execution_available", "owner_namespace", "native_owner_id", "ancestor_source_keys", "cutover_due_at", "source_revision") if k in offer}),
             }
             for key in JSON_FIELDS:
                 values[key + "_json"] = dumps(offer.get(key, [] if key in ("resource_keys", "capabilities") else {}))
             keys = list(values)
             cursor = c.execute("INSERT INTO pipeline_job(" + ",".join(keys) + ") VALUES(" + ",".join("?" for _ in keys) + ")", tuple(values[k] for k in keys))
             job_id = cursor.lastrowid
-            if status in ("legacy_running", "unknown") and stage == "publish":
+            if status in ("legacy_running", "unknown"):
                 for resource in sorted(set(offer.get("resource_keys", []))):
                     # Several historical unknowns may share an account. Each
                     # remains a separate fence until every receipt is resolved.
                     c.execute("INSERT INTO pipeline_legacy_resource VALUES(?,?)", (resource, job_id))
             if stage == "publish" and status in ("published", "failed"):
                 c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
+            self._release_finished_legacy_resources(c, offer["source_key"])
             self.event(c, job_id, "offered", {"status": status}, now)
             return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), True)
 
@@ -518,31 +565,32 @@ class DispatchStore:
                     blocked.append("capability_unavailable")
                     continue
                 resources = sorted(set(json.loads(row["resource_keys_json"])))
+                if not resources:
+                    blocked.append("account_identity_missing")
+                    continue  # All current channel work belongs to an account, Page, or YouTube channel.
+                if any(c.execute("SELECT 1 FROM pipeline_resource WHERE resource_key=? UNION ALL SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? LIMIT 1", (r, r)).fetchone() for r in resources):
+                    blocked.append("account_busy")
+                    continue
                 if stage == "publish":
                     if any(c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", (key, now)).fetchone() for key in resources + ["channel:" + row["channel"]]):
                         blocked.append("cooldown")
                         continue
-                    if not resources:
-                        blocked.append("account_identity_missing")
-                        continue  # A channel adapter must identify every write identity.
                     if c.execute("SELECT count(*) FROM pipeline_job WHERE channel=? AND stage='publish' AND status IN ('running','legacy_running')", (row["channel"],)).fetchone()[0] >= config["channel_limits"][row["channel"]]:
                         blocked.append("channel_limit")
                         continue
-                    if any(c.execute("SELECT 1 FROM pipeline_resource WHERE resource_key=? UNION ALL SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? LIMIT 1", (r, r)).fetchone() for r in resources):
-                        blocked.append("account_busy")
-                        continue
-                    # A later batch may not jump an earlier ready item of the same identity.
-                    earlier = c.execute("SELECT resource_keys_json FROM pipeline_job WHERE stage='publish' AND status IN ('queued','ready') AND hold_reason='' AND channel=? AND scheduled_at<=? AND (scheduled_at<? OR (scheduled_at=? AND id<?))", (row["channel"], now, row["scheduled_at"], row["scheduled_at"], row["id"])).fetchall()
-                    if any(set(resources).intersection(json.loads(r[0])) for r in earlier):
-                        blocked.append("account_ordering")
-                        continue
+                # A new preparation must also yield to an older ready publish
+                # of the same identity, otherwise a busy prep pool can keep
+                # reacquiring the account before its completed media is sent.
+                earlier = c.execute("SELECT resource_keys_json FROM pipeline_job WHERE stage='publish' AND status IN ('queued','ready') AND hold_reason='' AND channel=? AND scheduled_at<=? AND (scheduled_at<? OR (scheduled_at=? AND id<?))", (row["channel"], now, row["scheduled_at"], row["scheduled_at"], row["id"])).fetchall()
+                if any(set(resources).intersection(json.loads(r[0])) for r in earlier):
+                    blocked.append("account_ordering")
+                    continue
                 token, generation = secrets.token_urlsafe(32), row["generation"] + 1
                 expires = stamp(self.clock() + dt.timedelta(seconds=LEASE_SECONDS))
                 c.execute("UPDATE pipeline_job SET status='running',node_id=?,worker_id=?,generation=?,claim_hash=?,lease_expires_at=?,started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,updated_at=?,error_code='',error_message='' WHERE id=?", (node_id, worker_id, generation, digest(token), expires, now, now, row["id"]))
                 c.execute("INSERT INTO pipeline_claim_history VALUES(?,?,?,?,?)", (row["id"], generation, node_id, worker_id, digest(token)))
-                if stage == "publish":
-                    for resource in resources:
-                        c.execute("INSERT INTO pipeline_resource VALUES(?,?,?,0,0)", (resource, row["id"], generation))
+                for resource in resources:
+                    c.execute("INSERT INTO pipeline_resource VALUES(?,?,?,0,0)", (resource, row["id"], generation))
                 self.event(c, row["id"], "claimed", {"node_id": node_id, "worker_id": worker_id, "generation": generation}, now)
                 seq = c.execute("SELECT max(id) FROM pipeline_event").fetchone()[0]
                 for scope, item in ((stage, row["channel"]), (stage + ":" + row["channel"], row["batch_key"])):
@@ -575,6 +623,23 @@ class DispatchStore:
             if phase:
                 c.execute("UPDATE pipeline_worker SET last_seen_at=?,observation_json=? WHERE node_id=? AND worker_id=?", (self.now(), dumps({"phase": str(phase)[:80]}), row["node_id"], row["worker_id"]))
             return {"accepted": True, "lease_expires_at": expires}
+
+    def defer_unstarted(self, claim, required_capabilities, reason="capability_unavailable"):
+        """Pin an unstarted preparation to its frozen executor capabilities."""
+        if not isinstance(required_capabilities, list) or not required_capabilities or not all(
+                isinstance(value, str) and 0 < len(value) <= 120 for value in required_capabilities):
+            raise DispatchError("capabilities_invalid", status=400)
+        with self.transaction() as c:
+            row = self._validate_claim(c, claim)
+            if row["stage"] != "prepare" or row["external_intent"] or c.execute(
+                    "SELECT 1 FROM pipeline_operation WHERE job_id=? AND generation=? LIMIT 1",
+                    (row["id"], row["generation"])).fetchone():
+                raise DispatchError("operation_requires_reconciliation")
+            c.execute("UPDATE pipeline_job SET status='ready',capabilities_json=?,node_id='',worker_id='',claim_hash='',lease_expires_at='',started_at='',updated_at=?,error_code=?,error_message='' WHERE id=?",
+                      (dumps(sorted(set(required_capabilities))), self.now(), str(reason)[:120], row["id"]))
+            c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND generation=?", (row["id"], row["generation"]))
+            self.event(c, row["id"], "preparation_deferred", {"reason": str(reason)[:120], "required_capabilities": sorted(set(required_capabilities))}, self.now())
+            return {"accepted": True, "deferred": True, "idle_reason": str(reason)[:120]}
 
     def begin_operation(self, claim, operation):
         with self.transaction() as c:
@@ -609,14 +674,21 @@ class DispatchStore:
 
     def historical_receipt_claim(self, claim):
         with contextlib.closing(self.connect()) as c:
-            current = c.execute("SELECT * FROM pipeline_job WHERE id=?", (claim.get("job_id"),)).fetchone()
+            current = c.execute("SELECT * FROM pipeline_job WHERE id=?", (claim.get("job_id", claim.get("id")),)).fetchone()
             if not current or current["generation"] <= claim.get("generation", 0):
                 return None
             saved = c.execute("SELECT * FROM pipeline_claim_history WHERE job_id=? AND generation=?", (current["id"], claim.get("generation"))).fetchone()
             if not saved or saved["node_id"] != claim.get("node_id") or saved["worker_id"] != claim.get("worker_id") or not secrets.compare_digest(saved["claim_hash"], digest(claim.get("claim_token", ""))):
                 raise DispatchError("claim_conflict")
+            if current["stage"] == "prepare":
+                # This is authentication for read-only canonical reconciliation,
+                # not permission to complete or unlock the current generation.
+                historical = _job(current, True)
+                historical.update(generation=saved["generation"], node_id=saved["node_id"],
+                                  worker_id=saved["worker_id"], lease_expires_at="")
+                return historical
             # Only appointment continuations can advance a completed external
-            # operation's generation; expired preparations cannot use this path.
+            # publication's generation without permission to repeat its write.
             if current["channel"] != "youtube" or current["stage"] != "publish" or not json.loads(current["payload_json"]).get("continuation"):
                 raise DispatchError("historical_receipt_requires_reconciliation")
             return _job(current, True)

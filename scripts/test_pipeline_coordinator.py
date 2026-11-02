@@ -3,6 +3,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from features.pipeline_dispatch.core import DispatchStore, DispatchError, dumps, stamp
 from features.pipeline_dispatch.service import Coordinator
@@ -193,6 +194,77 @@ class CoordinatorTests(unittest.TestCase):
         self.store.cutover("youtube", stamp(self.now))
         with self.store.transaction() as c:
             self.assertEqual(c.execute("SELECT status FROM pipeline_job WHERE source_key='youtube:publish:early'").fetchone()[0], "queued")
+
+    def prepare_offer(self):
+        self.store.register_node("cpu-main", ["prepare:x", "publish:x", "backend:cpu"])
+        self.store.worker_heartbeat("cpu-main", "prep", "prepare")
+        return self.offer(stage="prepare", capabilities=["prepare:x"])
+
+    def prepared_native(self, source_key="x:queue:1"):
+        artifact = {"url": "https://cos.example/frozen.mp4", "sha256": "a" * 64, "size": 1024, "profile": "frozen-v1"}
+        offer = {"source_key": source_key, "source_id": "1", "channel": "x", "family": "queue", "stage": "publish",
+                 "artifact": artifact, "resource_keys": ["x:account:1"], "capabilities": ["publish:x"],
+                 "scheduled_at": stamp(self.now), "source_created_at": stamp(self.now), "source_status": "queued"}
+        return {"canonical_receipt": {"source_key": source_key, "status": "queued"}, "next_offer": offer, "dispatch_completed": True}
+
+    def test_reserved_frozen_capabilities_are_pinned_before_mismatched_node_can_execute(self):
+        item = self.prepare_offer()
+        descriptor = {"kind": "x_preflight", "required_capabilities": ["prepare:x", "backend:gpu", "profile:gpu-v1"], "request": {"recipe": "immutable"}}
+        self.native.reserve = Mock(return_value=descriptor)
+        response = self.service.route("/internal/pipeline/jobs/claim", {"node_id": "cpu-main", "worker_id": "prep", "stage": "prepare"}, self.auth)
+        self.assertEqual(response, {"job": None, "idle_reason": "capability_unavailable"})
+        frozen = self.store.get_job(item["id"])
+        self.assertEqual((frozen["status"], frozen["payload"]), ("ready", descriptor))
+        self.assertIsNone(self.store.claim("cpu-main", "prep", "prepare")["job"])
+        self.store.register_node("hk-gpu", descriptor["required_capabilities"])
+        self.store.worker_heartbeat("hk-gpu", "prep", "prepare")
+        result = self.service.route("/internal/pipeline/jobs/claim", {"node_id": "hk-gpu", "worker_id": "prep", "stage": "prepare"}, self.auth)["job"]
+        self.assertEqual((result["generation"], result["payload"]), (2, descriptor))
+
+    def test_committed_native_artifact_recovers_lost_ack_without_render_reservation(self):
+        item = self.prepare_offer()
+        observed = self.prepared_native()
+        self.native.reconcile = Mock(return_value=observed)
+        self.native.reserve = Mock(side_effect=AssertionError("must not render a committed artifact"))
+        result = self.service.route("/internal/pipeline/jobs/claim", {"node_id": "cpu-main", "worker_id": "prep", "stage": "prepare"}, self.auth)
+        self.assertEqual(result["idle_reason"], "canonical_preparation_recovered")
+        saved = self.store.get_job(item["id"])
+        self.assertEqual((saved["status"], saved["artifact"]), ("completed", observed["next_offer"]["artifact"]))
+        self.native.reserve.assert_not_called()
+        self.assertEqual(self.store.claim("cpu-main", "one", "publish")["job"]["artifact"], saved["artifact"])
+
+    def test_slow_native_reservation_never_delivers_expired_claim_to_renderer(self):
+        item = self.prepare_offer()
+        def slow_reservation(job, claim):
+            self.now += dt.timedelta(seconds=121)
+            return {"kind": "x_preflight", "request": {"recipe": "frozen"}}
+        self.native.reserve = slow_reservation
+        result = self.service.route("/internal/pipeline/jobs/claim", {"node_id": "cpu-main", "worker_id": "prep", "stage": "prepare"}, self.auth)
+        self.assertEqual(result, {"job": None, "idle_reason": "claim_expired_during_reservation"})
+        self.store.expire()
+        self.assertEqual(self.store.get_job(item["id"])["status"], "queued")
+
+    def test_old_prepare_receipt_ack_cannot_change_successor_publish_or_unlock_account(self):
+        item = self.prepare_offer()
+        first = self.store.claim("cpu-main", "prep", "prepare")["job"]
+        self.now += dt.timedelta(seconds=121)
+        self.store.register_node("cpu-main", ["prepare:x", "publish:x", "backend:cpu"])
+        self.store.worker_heartbeat("cpu-main", "prep", "prepare")
+        observed = self.prepared_native()
+        self.native.reconcile = Mock(return_value=observed)
+        self.service.route("/internal/pipeline/jobs/claim", {"node_id": "cpu-main", "worker_id": "prep", "stage": "prepare"}, self.auth)
+        self.store.worker_heartbeat("cpu-main", "one", "publish")
+        publication = self.store.claim("cpu-main", "one", "publish")["job"]
+        receipt = {"job_id": first["id"], **{key: first[key] for key in ("generation", "node_id", "worker_id", "claim_token")},
+                   "receipt_id": "old-prepared", "result": {"artifact": observed["next_offer"]["artifact"]}}
+        self.assertTrue(self.service.route("/internal/pipeline/jobs/complete", receipt, self.auth)["historical"])
+        self.assertEqual(self.store.get_job(item["id"])["generation"], 2)
+        self.assertEqual(self.store.get_job(publication["id"])["status"], "running")
+        with self.store.transaction() as conn:
+            self.assertEqual(conn.execute("SELECT job_id FROM pipeline_resource WHERE resource_key='x:account:1'").fetchone()[0], publication["id"])
+        bad = {**receipt, "receipt_id": "changed-prepared", "result": {"artifact": {**receipt["result"]["artifact"], "sha256": "b" * 64}}}
+        with self.assertRaises(DispatchError):
+            self.service.route("/internal/pipeline/jobs/complete", bad, self.auth)
 
 
 if __name__ == "__main__":

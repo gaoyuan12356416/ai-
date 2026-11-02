@@ -219,7 +219,7 @@ class NativeTests(unittest.TestCase):
     def test_pause_keeps_queue_and_material_reservation_but_blocks_claim(self):
         queue = self.queue()
         job = self.job(queue, "prepare")
-        self.bridge.pause(job, "2026-11-02T01:00:00Z")
+        self.assertTrue(self.bridge.pause(job, "2026-11-02T01:00:00Z")["held"])
         self.assertEqual(self.bridge.store.get_queue(queue["id"])["status"], "queued")
         with self.assertRaises(AdapterError): self.bridge.reserve(job, job)
 
@@ -314,7 +314,7 @@ class ShareNativeTests(unittest.TestCase):
 
     def test_share_pause_retains_native_duplicate_fence(self):
         job = self.job(1)
-        self.bridge.pause(job, "2026-11-02T01:00:00Z")
+        self.assertTrue(self.bridge.pause(job, "2026-11-02T01:00:00Z")["held"])
         with self.assertRaises(AdapterError): self.bridge.reserve(job, job)
         result = self.service.create({**self.payload, "operation_id": str(uuid.uuid4())})
         self.assertTrue(result["run"]["items"][0]["duplicate"])

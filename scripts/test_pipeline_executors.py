@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image
-from features.pipeline_dispatch.executors import NodeExecutors, ExecutionError, cpu_thread_command
+from features.pipeline_dispatch.executors import NodeExecutors, ExecutionError, COSArtifactStore, cpu_thread_command
 from features.pipeline_dispatch.youtube_cover import inline_image, generate_cover
 from features.fb_auto_posts.publisher import GraphResult
 from features.x_posts.service import HttpResponse, XPostError
@@ -33,12 +33,224 @@ class Context:
         yield {"access_token": "short-token", "credential_id": "credential-%d" % len(self.operations), "fb_user_id": "user1"}
 
 
+class MissingObject(Exception):
+    def get_status_code(self): return 404
+
+
+class MemoryCOS:
+    """Separate nodes share only objects, never local manifests or memory."""
+    def __init__(self):
+        self.objects, self.heads, self.puts = {}, {}, []
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects: raise MissingObject()
+        return {"Body": SimpleNamespace(get_raw_stream=lambda: io.BytesIO(self.objects[Key]))}
+    def put_object(self, **kwargs):
+        key = kwargs["Key"]
+        self.puts.append(kwargs)
+        if key in self.objects and kwargs.get("ForbidOverwrite") == "true": raise RuntimeError("exists")
+        self.objects[key] = kwargs["Body"]
+    def head_object(self, Bucket, Key):
+        if Key not in self.heads: raise MissingObject()
+        return self.heads[Key]
+
+
+class MemoryStore:
+    def __init__(self, client):
+        self.client = client
+        self.config = SimpleNamespace(cos_bucket="media", cos_prefix="prepared", cos_domain="https://media.example", profile="frozen-v1")
+    def url(self, key): return self.config.cos_domain + "/" + key
+    def upload(self, key, path, sha, size, **kwargs):
+        data = Path(path).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == sha and len(data) == size
+        self.client.objects[key] = data
+        self.client.heads[key] = {"Content-Length": str(size), "x-cos-meta-sha256": sha}
+
+
 class ExecutorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.config = {"state_root": self.temp.name, "backend": "cpu"}
         self.context = Context()
     def tearDown(self): self.temp.cleanup()
+
+    def test_uploaded_qualified_video_survives_hard_crash_and_moves_to_another_node(self):
+        for kind in ("fb_prepare", "tt_prepare", "x_random", "x_repair"):
+            with self.subTest(kind=kind):
+                cloud = MemoryCOS()
+                store = MemoryStore(cloud)
+                body = b"qualified-video"
+                sha = hashlib.sha256(body).hexdigest()
+                key = "prepared/" + sha + ".mp4"
+                request = {"job_id": "same-item", "job_key": "same-item", "source_url": "https://source.example/video", "expected_profile": "frozen-v1"}
+                result = {"output_url": store.url(key), "output_sha256": sha, "output_size": len(body), "profile": "frozen-v1", "probe": {"duration": 10}, "recipe": {"asset_set_sha256": "a" * 64, "choice": 7}}
+                renderer = SimpleNamespace(config=store.config, object_store=store)
+                calls = []
+                def render(frozen):
+                    calls.append("render")
+                    renderer.qualified_artifact(result, key)
+                    cloud.objects[key] = body
+                    cloud.heads[key] = {"Content-Length": len(body), "x-cos-meta-sha256": sha}
+                    raise SystemExit("node power lost before local manifest and central completion")
+                renderer.prepare = renderer.repair = render
+                first = NodeExecutors(self.config, factories={kind: lambda: renderer})
+                with self.assertRaises(SystemExit): first.prepare(kind, {"request": request}, self.context)
+                # Another process has no renderer state or local manifest.
+                other = SimpleNamespace(config=store.config, object_store=MemoryStore(cloud),
+                                        prepare=lambda _: self.fail("must not rerender"), repair=lambda _: self.fail("must not rerepair"))
+                second = NodeExecutors({**self.config, "state_root": str(Path(self.temp.name) / kind)}, factories={kind: lambda: other})
+                recovered = second.prepare(kind, {"request": request}, Context())
+                self.assertEqual(recovered["preparation"], result)
+                self.assertEqual(recovered["artifact"]["sha256"], sha)
+                self.assertEqual(calls, ["render"])
+                self.assertEqual(cloud.puts[0]["ACL"], "private")
+                self.assertNotIn(request["source_url"].encode(), cloud.puts[0]["Body"])
+
+    def test_receipt_requires_uploaded_identity_and_rejects_changed_request_or_recipe(self):
+        cloud, request = MemoryCOS(), {"job_id": "item-1", "expected_profile": "frozen-v1"}
+        store = MemoryStore(cloud)
+        sha, key = "a" * 64, "prepared/aaa.mp4"
+        result = {"output_url": store.url(key), "output_sha256": sha, "output_size": 5, "recipe": {"choice": 1}}
+        journal = COSArtifactStore(store, "fb_prepare", request, source_key="fb:auto:1")
+        journal.qualified(result, key)
+        with self.assertRaisesRegex(ExecutionError, "artifact_upload_incomplete"): journal.recover()
+        cloud.heads[key] = {"Content-Length": 5, "x-cos-meta-sha256": "b" * 64}
+        with self.assertRaisesRegex(ExecutionError, "artifact_fingerprint_changed"): journal.recover()
+        cloud.heads[key]["x-cos-meta-sha256"] = sha
+        self.assertEqual(journal.recover(), result)
+        changed = COSArtifactStore(store, "fb_prepare", {**request, "expected_profile": "other"}, source_key="fb:auto:1")
+        with self.assertRaisesRegex(ExecutionError, "artifact_receipt_conflict"): changed.recover()
+        wrong_owner = COSArtifactStore(store, "fb_prepare", request, source_key="fb:auto:2")
+        with self.assertRaisesRegex(ExecutionError, "artifact_receipt_conflict"): wrong_owner.recover()
+        tampered = json.loads(cloud.objects[journal.key]); tampered["result"]["recipe"]["choice"] = 2
+        cloud.objects[journal.key] = json.dumps(tampered).encode()
+        with self.assertRaisesRegex(ExecutionError, "artifact_receipt_conflict"): journal.recover()
+
+    def test_tt_native_callback_precedes_upload_and_preserves_full_random_contract(self):
+        from scripts import test_tt_gpu_worker as fixture
+        config = fixture.make_random_overlay_config(Path(self.temp.name))
+        store = fixture.FakeObjectStore()
+        renderer = fixture.worker.TTPostGPUProcessor(config,
+            runner=fixture.FakeRunner([fixture.input_probe(28.5), fixture.prepared_probe(28.5)]),
+            downloader=fixture.make_downloader([]), object_store=store)
+        captured, sequence = [], []
+        renderer.qualified_artifact = lambda result, key: (captured.append((result, key)), sequence.append("qualified"))
+        upload = store.upload
+        def checked_upload(*args, **kwargs):
+            self.assertEqual(sequence, ["qualified"])
+            sequence.append("upload")
+            return upload(*args, **kwargs)
+        store.upload = checked_upload
+        result = renderer.prepare(fixture.make_prepare(expected_profile=fixture.worker.RANDOM_OVERLAY_PROFILE, source_trim_tail_seconds=0))
+        self.assertEqual(sequence, ["qualified", "upload"])
+        self.assertEqual({k: result[k] for k in captured[0][0]}, captured[0][0])
+        self.assertEqual(captured[0][0]["random_overlay_recipe"], result["random_overlay_recipe"])
+        self.assertEqual(captured[0][0]["assets"], result["assets"])
+
+    def test_private_receipt_lost_put_ack_is_read_back_before_media_upload(self):
+        cloud, store = MemoryCOS(), None
+        store = MemoryStore(cloud)
+        put = cloud.put_object
+        def lost_ack(**kwargs): put(**kwargs); raise TimeoutError("lost ack")
+        cloud.put_object = lost_ack
+        journal = COSArtifactStore(store, "x_repair", {"job_key": "fixed"})
+        result = {"output_url": store.url("prepared/a.mp4"), "output_sha256": "a" * 64, "output_size": 1}
+        journal.qualified(result, "prepared/a.mp4")
+        self.assertEqual(len(cloud.puts), 1)
+        with self.assertRaisesRegex(ExecutionError, "artifact_upload_incomplete"): journal.recover()
+
+    def test_cover_uploaded_but_completion_lost_is_reused_without_paid_generation(self):
+        cloud, calls = MemoryCOS(), []
+        store = MemoryStore(cloud)
+        image = io.BytesIO(); Image.new("RGB", (640, 360)).save(image, format="JPEG")
+        raw = image.getvalue(); reference = inline_image(raw)
+        task = {"id": "a" * 32, "reference_cover": {"asset_id": "b" * 32, "sha256": reference["sha256"]}, "versions": [{"number": 1}], "current_version": 1}
+        def generate(*args): calls.append("paid-generation"); return raw
+        request = {"task": task, "reference_image": reference}
+        first = NodeExecutors(self.config, factories={"youtube_prepare": generate, "artifact_store": lambda: store})
+        result = first.prepare("youtube_prepare", {"request": request}, self.context)
+        # No coordinator completion was sent. A replacement host has only COS.
+        second = NodeExecutors({**self.config, "state_root": str(Path(self.temp.name) / "other")}, factories={"youtube_prepare": lambda *a: self.fail("duplicate paid generation"), "artifact_store": lambda: MemoryStore(cloud)})
+        recovered = second.prepare("youtube_prepare", {"request": request}, Context())
+        self.assertEqual(result, recovered)
+        self.assertEqual(calls, ["paid-generation"])
+        self.assertEqual(result["artifact"]["sha256"], result["cover"]["sha256"])
+        self.assertEqual(result["artifact"]["size"], result["cover"]["size"])
+        self.assertEqual(result["artifact"]["profile"], "youtube-cover-v1")
+
+    def test_cover_generation_intent_blocks_other_node_but_original_can_finish(self):
+        cloud, calls = MemoryCOS(), []
+        store = MemoryStore(cloud)
+        image = io.BytesIO(); Image.new("RGB", (640, 360)).save(image, format="JPEG")
+        raw = image.getvalue(); reference = inline_image(raw)
+        task = {"id": "a" * 32, "reference_cover": {"asset_id": "b" * 32, "sha256": reference["sha256"]}, "versions": [{"number": 1}], "current_version": 1}
+        request = {"task": task, "reference_image": reference}
+        second = NodeExecutors({**self.config, "state_root": str(Path(self.temp.name) / "replacement")}, factories={"youtube_prepare": lambda *a: self.fail("second paid generation"), "artifact_store": lambda: MemoryStore(cloud)})
+        def generate(*args):
+            calls.append("paid")
+            with self.assertRaisesRegex(ExecutionError, "youtube_generation_interrupted"):
+                second.prepare("youtube_prepare", {"request": request}, Context())
+            return raw
+        original = NodeExecutors(self.config, factories={"youtube_prepare": generate, "artifact_store": lambda: store})
+        result = original.prepare("youtube_prepare", {"request": request}, self.context)
+        self.assertEqual(second.prepare("youtube_prepare", {"request": request, "recovery_only": True}, Context()), result)
+        self.assertEqual(calls, ["paid"])
+        intent_puts = [p for p in cloud.puts if p["Key"].endswith(".generation-intent.json")]
+        self.assertEqual(len(intent_puts), 1)
+        self.assertEqual(intent_puts[0]["ACL"], "private")
+        self.assertEqual(intent_puts[0]["ForbidOverwrite"], "true")
+
+    def test_cover_hard_crash_requires_explicit_new_version_or_retry_identity(self):
+        cloud, calls = MemoryCOS(), []
+        image = io.BytesIO(); Image.new("RGB", (640, 360)).save(image, format="JPEG")
+        raw = image.getvalue(); reference = inline_image(raw)
+        task = {"id": "a" * 32, "reference_cover": {"asset_id": "b" * 32, "sha256": reference["sha256"]}, "versions": [{"number": 1}], "current_version": 1}
+        request = {"task": task, "reference_image": reference}
+        def interrupted(*args): calls.append("first-paid"); raise SystemExit("node disappeared")
+        original = NodeExecutors(self.config, factories={"youtube_prepare": interrupted, "artifact_store": lambda: MemoryStore(cloud)})
+        with self.assertRaises(SystemExit): original.prepare("youtube_prepare", {"request": request}, Context())
+        def generate(*args): calls.append("explicit-paid"); return raw
+        replacement = NodeExecutors({**self.config, "state_root": str(Path(self.temp.name) / "next")}, factories={"youtube_prepare": generate, "artifact_store": lambda: MemoryStore(cloud)})
+        with self.assertRaisesRegex(ExecutionError, "youtube_generation_interrupted"):
+            replacement.prepare("youtube_prepare", {"request": request}, Context())
+        self.assertEqual(calls, ["first-paid"])
+        # Existing explicit retry preserves version but freezes a new intent ID.
+        retry = {**request, "task": {**task, "generation_retry_id": "c" * 32}}
+        self.assertEqual(replacement.prepare("youtube_prepare", {"request": retry}, Context())["status"], "ready")
+        version_two = {**request, "task": {**task, "current_version": 2, "versions": [{"number": 1}, {"number": 2}]}}
+        self.assertEqual(replacement.prepare("youtube_prepare", {"request": version_two}, Context())["status"], "ready")
+        self.assertEqual(calls, ["first-paid", "explicit-paid", "explicit-paid"])
+
+    def test_cover_recovery_only_without_pointer_never_starts_generation(self):
+        cloud = MemoryCOS()
+        executor = NodeExecutors(self.config, factories={"youtube_prepare": lambda *a: self.fail("cannot pay during recovery"), "artifact_store": lambda: MemoryStore(cloud)})
+        request = {"task": {"id": "a" * 32, "current_version": 1}}
+        with self.assertRaisesRegex(ExecutionError, "youtube_generation_interrupted"):
+            executor.prepare("youtube_prepare", {"request": request, "recovery_only": True}, self.context)
+        self.assertEqual(cloud.puts, [])
+
+    def test_catalog_capabilities_are_channel_scoped_and_frozen_bytes_are_checked(self):
+        expected, changed = "a" * 64, "b" * 64
+        with patch.dict(os.environ, {"PIPELINE_EXECUTORS": "fb_prepare,tt_prepare,x_random",
+                "FB_PAGE_GPU_RANDOM_OVERLAY_MANIFEST_SHA256": expected,
+                "TT_POST_GPU_RANDOM_OVERLAY_MANIFEST_SHA256": expected,
+                "X_POST_RANDOM_TEMPLATE_MANIFEST_SHA256": expected}):
+            for kind, channel in (("fb_prepare", "fb"), ("tt_prepare", "tt"), ("x_random", "x")):
+                with self.subTest(kind=kind):
+                    processor = SimpleNamespace(config=SimpleNamespace(random_overlay_assets={"manifest_sha256": expected}),
+                                                assets={"manifest_sha256": expected})
+                    executor = NodeExecutors(self.config, factories={kind: lambda: processor})
+                    self.assertIn("catalog:" + channel + ":" + expected, executor.capabilities())
+                    payload = {"required_capabilities": ["catalog:" + channel + ":" + expected]}
+                    executor._validate_frozen_catalog(kind, payload)
+                    # Matching configuration strings cannot conceal a different
+                    # actual validated catalog supplied to the renderer.
+                    processor.assets["manifest_sha256"] = changed
+                    with self.assertRaisesRegex(ExecutionError, "frozen_catalog_mismatch"):
+                        executor.prepare(kind, payload, self.context)
+                    processor.assets["manifest_sha256"] = expected
+                    payload["required_capabilities"] = ["catalog:" + channel + ":" + changed]
+                    with self.assertRaisesRegex(ExecutionError, "frozen_catalog_mismatch"):
+                        executor.prepare(kind, payload, self.context)
 
     def test_fb_rotates_past_eight_definite_rejections(self):
         calls = []
@@ -186,7 +398,11 @@ class ExecutorTests(unittest.TestCase):
         repaired = b"compatible-video"
         output = {"output_url": "https://media.example/repaired.mp4", "output_sha256": hashlib.sha256(repaired).hexdigest(), "output_size": len(repaired), "profile": "cpu-profile", "probe": {"duration": 10}}
         def repair(request): calls.append(request); return output
-        processor = SimpleNamespace(config=SimpleNamespace(profile="cpu-profile"), repair=repair)
+        cloud = MemoryCOS(); store = MemoryStore(cloud)
+        store.config.profile = "cpu-profile"
+        output["output_url"] = store.url("prepared/repaired.mp4")
+        cloud.heads["prepared/repaired.mp4"] = {"Content-Length": len(repaired), "x-cos-meta-sha256": hashlib.sha256(repaired).hexdigest()}
+        processor = SimpleNamespace(config=store.config, object_store=store, repair=repair)
         executor = NodeExecutors(self.config, factories={"x_repair": lambda: processor})
         def download(url, path, **kwargs): path.write_bytes(original)
         def download_repaired(artifact, path, context): path.write_bytes(repaired); return path

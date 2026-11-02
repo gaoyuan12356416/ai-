@@ -178,11 +178,14 @@ class RandomTemplateProcessor:
                         raise repair.MediaRepairError("x_random_output_invalid", "random video duration or dimensions changed", 422)
                     digest, size = repair._file_sha256(output)
                     key = self.config.cos_prefix + "/" + job + "/" + digest + ".mp4"
-                    self.cos.upload(key, output, digest, size)
                     result = {"job_key": job, "queue_id": request["queue_id"], "profile": self.config.profile,
                               "source_sha256": request["source_sha256"], "source_size": request["source_size"],
                               "asset_manifest_sha256": request["asset_manifest_sha256"], "recipe": recipe,
                               "output_url": self.cos.url(key), "output_sha256": digest,
                               "output_size": size, "probe": probe}
+                    callback = getattr(self, "qualified_artifact", None)
+                    if callback is not None:
+                        callback(result, key)
+                    self.cos.upload(key, output, digest, size)
                     repair._atomic_write_manifest(manifest, {**saved, "result": result, "cos_key": key})
                     return result

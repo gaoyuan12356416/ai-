@@ -23,7 +23,7 @@ class AutoHoldTests(unittest.TestCase):
         self.store, self.task, self.clock = self.fixture.store, self.fixture.task, self.fixture.clock
 
     def test_pending_hold_blocks_both_claim_paths_without_dispatch_mode(self):
-        self.store.pause_pipeline_task(self.task.id, self.clock())
+        self.assertTrue(self.store.pause_pipeline_task(self.task.id, self.clock())["held"])
         self.store.pause_pipeline_task(self.task.id, self.clock())
         self.assertEqual(self.store.get_task(self.task.id).status, "pending")
         with mock.patch.dict(os.environ, {"PIPELINE_X_DISPATCH_ENABLED": "0"}):

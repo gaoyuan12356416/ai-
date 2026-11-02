@@ -5008,6 +5008,24 @@ class TTPostGPUProcessor:
             record_stage("output_verify", output_verify_started)
             storage_key = self._storage_key(job_id, output_sha)
             upload_started = self._monotonic_fn()
+            callback = getattr(self, "qualified_artifact", None)
+            if callback is not None:
+                qualified = {
+                    "job_id": job_id, "content_id": request["content_id"],
+                    "profile": self.config.profile, "output_url": self._object_store().url(storage_key),
+                    "output_sha256": output_sha, "output_size": output_size, "probe": safe_probe,
+                    "status": "ready", "storage_backend": self.config.storage_backend,
+                    "media_mode": self.config.media_mode, "transition": self.config.preparation_transition(),
+                    "brand_overlay_review_required": self.config.brand_overlay_review_required(),
+                    "direct_post_eligible": self.config.direct_post_eligible(), "reused": False,
+                }
+                if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+                    qualified["random_overlay_recipe"] = reuse_contract["random_overlay_recipe"]
+                    qualified["assets"] = {"asset_set_sha256": reuse_contract["asset_set_sha256"],
+                                           "selected": reuse_contract["random_overlay_recipe"].get("assets", {})}
+                elif self.config.media_mode == DIRECT_OUTRO_MEDIA_MODE:
+                    qualified["assets"] = {name: reuse_contract[name] for name in ("outro_sha256", "outro_size")}
+                callback(qualified, storage_key)
             reused = self._object_store().upload(
                 storage_key,
                 output_path,

@@ -1,8 +1,8 @@
 # 验证进展
 状态：协调器、默认监控首页和两台执行节点已部署；四渠道接单仍关闭，正在逐渠道切换前核对。
 
-`python -m unittest discover -s scripts -p 'test_pipeline*.py'`：212项通过（27.664秒）。覆盖两节点原子竞争、账号隔离、阶段公平、跨代迟到回执、未知锁保留、独立快照、权限与容量、单条切换及四渠道原账本桥接；包括TikTok手动发布归属、旧执行接口交接和YouTube审核后仅分配任务的流程。
-执行器与既有GPU renderer扩展174项通过；旧TT及渠道账本303项回归通过。Python3.9语法检查44个新增模块与脚本通过，git diff --check通过。
+`python -m unittest discover -s scripts -p 'test_pipeline*.py'`：257项通过（38.936秒）。覆盖两节点原子竞争、账号隔离、阶段公平、跨代迟到回执、未知锁保留、独立快照、权限与容量、单条切换及四渠道原账本桥接；包括TikTok手动发布归属、旧执行接口交接和YouTube审核后仅分配任务的流程。
+执行器与既有GPU renderer扩展174项通过；旧TT及渠道账本303项回归通过。Python3.9语法检查82个修改模块与脚本通过，git diff --check通过。
 
 Chrome本地桌面/移动、普通用户/管理员、三节点显示、自然排空、深链、现有SocialKit导航保留均通过。线上浏览器验证被计算机使用工具中止（无法可靠识别窗口URL），未恢复该操作；线上HTTP权限边界和静态部署已核对。
 
@@ -11,3 +11,5 @@ CPU和香港GPU均完成真实编码、冻结资源清单和COS写入/HEAD/清�
 既有X回归 `test_x_post_catchup_sidecar.test_drama_pool_readonly_http_hold_keeps_precise_business_error` 在本分支和原始6700188均失败（200空列表与预期409契约差异），未创建发布任务；相关函数未更改。记录为既有问题。
 
 待业务验收：逐渠道单条排空、暂停清单与未知结果保护，四渠道正常到期回执，双机实际制作与发布、跨机成片。YouTube当前没有符合正常新领取条件的任务，不额外创建测试帖子，真实业务验收需首个正常任务。
+
+补充故障验证：跨阶段账号/Page/频道/转发来源互斥、冻结 backend/profile/catalog、FB/TT 原生制作租约精确恢复、COS 合格成片指针与上传后崩溃、YouTube 付费生成 intent 和明确重试/审核新版本均通过。节点条件写入和私有对象策略仍须在最终版本实际 COS 小对象往返核验，不以 mock 代替该项。

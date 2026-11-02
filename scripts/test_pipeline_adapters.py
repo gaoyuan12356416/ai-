@@ -414,5 +414,21 @@ class YouTubeContinuationProjectionTests(unittest.TestCase):
             store.offer(offer)
             self.assertEqual(store.claim('cpu-main', 'cover-worker', 'prepare')['job']['source_key'], 'youtube:preparation:cover')
 
+    def test_cover_project_recovers_frozen_channel_identity_from_body(self):
+        adapter = LedgerAdapter(LedgerSpec('youtube', 'preparation', ':memory:', 'youtube_auto_preparation', state='state'), SimpleNamespace(control_only=False))
+        row = {'id': 'cover', 'state': 'queued_generation', 'created_at': '2026-11-02T00:00:00Z',
+               'body': json.dumps({'channel': {'channel_id': 'UC_frozen'}})}
+        self.assertEqual(adapter.project(row)['resource_keys'], ['youtube:channel:UC_frozen'])
+        row['body'] = '{}'
+        self.assertEqual(adapter.project(row)['resource_keys'], [])
+
+    def test_cover_revision_comes_from_native_version_and_explicit_retry_marker(self):
+        adapter = LedgerAdapter(LedgerSpec('youtube', 'preparation', ':memory:', 'youtube_auto_preparation', state='state'), SimpleNamespace(control_only=False))
+        row = {'id': 'cover', 'state': 'queued_generation', 'created_at': '2026-11-02T00:00:00Z',
+               'version': 2, 'body': json.dumps({'current_version': 2, 'generation_retry_id': 'd' * 32})}
+        self.assertEqual(adapter.project(row)['source_revision'], '2:' + 'd' * 32)
+        row['body'] = json.dumps({'current_version': 2})
+        self.assertEqual(adapter.project(row)['source_revision'], '2:')
+
 
 if __name__=='__main__':unittest.main()

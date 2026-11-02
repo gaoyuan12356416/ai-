@@ -543,6 +543,10 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             publish_id=body.get('publish_id')
             if not publish_id:
                 if body['status'] not in ('generation_failed','enqueue_failed'):raise WorkflowError('retry_unavailable','当前阶段不能重试',409)
+                if body['status']=='generation_failed':
+                    # An explicit owner/admin retry is a new paid-generation
+                    # intent. Automatic lease recovery never changes this ID.
+                    body['generation_retry_id']=uid()
                 body['error']={};self._save(c,body,'queued_generation' if body['status']=='generation_failed' else 'enqueue_pending')
         if publish_id:self.engine_store.retry_reviewed_youtube(int(publish_id))
         return self.get_task(actor,task_id)

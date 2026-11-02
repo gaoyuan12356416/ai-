@@ -334,8 +334,11 @@ class LedgerAdapter:
                     resources.append(f"{spec.channel}:account:{row[key]}")
         elif spec.channel == "fb" and row.get("page_id"):
             resources.append("fb:page:" + str(row["page_id"]))
-        elif spec.channel == "youtube" and row.get("channel_id"):
-            resources.append("youtube:channel:" + str(row["channel_id"]))
+        elif spec.channel == "youtube":
+            body = obj(row.get("body")) if spec.family == "preparation" else {}
+            identity = row.get("channel_id") or body.get("channel_id") or obj(body.get("channel")).get("channel_id")
+            if identity:
+                resources.append("youtube:channel:" + str(identity))
         payload = {"source_key": source_key, "native_id": source_id, "native_family": spec.family}
         # Rendering specifications are frozen by reserve(), after native checks.
         fingerprint_data = {key: row.get(key) for key in (spec.identity, "material_id", "content_id", "account_id", "page_id", "channel_id", "template_version", "gpu_job_id", "source_media_url", "material_url", "body_sha256")}
@@ -357,7 +360,14 @@ class LedgerAdapter:
         if legacy_parent_inflight and not started_at:
             started_at = row.get("legacy_parent_started_at")
         finished_at = row.get("finished_at_utc") or row.get("finished_at") or row.get("completed_at_utc") or row.get("published_at_utc") or row.get("video_published_at_utc") or ((row.get("updated_at_utc") or row.get("updated_at")) if terminal or review_hold else "")
+        source_revision = ""
+        if spec.channel == "youtube" and spec.family == "preparation":
+            body = obj(row.get("body"))
+            version = row.get("version") or body.get("current_version")
+            if isinstance(version, int) and not isinstance(version, bool) and version > 0:
+                source_revision = str(version) + ":" + str(body.get("generation_retry_id") or "")
         return {"source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
+                "source_revision": source_revision,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
                 "stage": stage, "scheduled_at": stamp(row.get("scheduled_at")) if row.get("scheduled_at") else "",

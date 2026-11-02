@@ -18,7 +18,7 @@
 
 预检应以最终运行的 `pipeline-worker` 用户执行，确保FFmpeg、素材、Codex CLI及数据目录的权限与服务实际一致。若运维以root完成首次登记，启动前将新建的节点凭据文件及本节点新数据目录交给专用用户，凭据保持0600；不要更改旧服务数据目录的属主。systemd按顺序读取 `/etc/pipeline-node.sources.env`（可选私有素材/COS配置）与 `/etc/pipeline-node.env`。Codex CLI必须安装在该用户可执行、且不受 `ProtectHome=true` 屏蔽的路径。
 
-通过后，由运维安装 `deploy/pipeline-node.service` 并按GitHub-first流程启动。也可在首次检查命令后加 `--run` 前台启动。服务收到SIGTERM仅停止接新单，等待已接任务及回执落盘后退出。中央降低并发上限时，节点也按同样规则缩容；提高上限会增加进程。每15秒刷新资源、进程与阶段状态。
+通过后，由运维安装 `deploy/pipeline-node.service` 并按GitHub-first流程启动。也可在首次检查命令后加 `--run` 前台启动。服务收到SIGTERM仅停止接新单，等待已接任务及回执落盘后退出。节点实际进程数跟随中央每阶段的 target；ceiling 只是管理员上限，提高上限后仍须等待自动调节增加 target。缩容只排空多余进程，不中断已接任务。每15秒刷新资源、进程与阶段状态。
 
 两个现有节点的配置来源（只读核对，迁移时不修改旧服务配置）：
 
@@ -29,6 +29,8 @@
 | TT | `/data/tt-post-gpu/config/{base,secrets}.env`、`/etc/random-overlay-subtemplates/tt-20260920.env` | `tt-post-random-overlay-hevc-720x1280-v3`、hevc_nvenc、opencl_fused_contain_v1；FFmpeg `/data/tt-post-gpu/ffmpeg/ffmpeg` |
 
 共同已核对catalog是 `/data/random-overlay-gpu/assets/catalog-b5df776a88bd`，manifest SHA256 `b5df776a88bdfa961e60f60d6076c6915f37c5fd5ed8ade973dc4be7205eea6c`。目录位置可不同，内容与哈希不能变；历史任务引用的其他catalog也必须保留到终态。`RANDOM_OVERLAY_ASSET_CATALOGS` 可登记多个不可变manifest，不能把新资源伪装成旧哈希。
+
+节点按渠道声明 `catalog:x:<sha>`、`catalog:fb:<sha>`、`catalog:tt:<sha>` 能力，来自各自已验证的 manifest 配置。制作领取冻结 backend、profile 和 catalog 能力；换机续跑仍须全部匹配。执行前再次核对实际加载的素材目录 manifest，防止同 profile 下悄悄换素材或配方。制作与发布均持有单条账号/Page/YouTube频道及共用转发账号资源锁；不同账号可以跨阶段并行，已完成制作的更早任务优先进入发布。
 
 TT生产renderer来源为GitHub commit `80acd8b4f082e121f8332dea2a34f23d739b1bb3`，本次只读抽取的worker.py、random_overlay.py及compositor.py与该commit的git blob完全一致。当前工作树与该release的共同祖先后TTworker未另有修改，因此精确引入其random/source_direct能力，再添加显式CPU随机profile；原GPU profile、随机配方和去重规则保持原实现。没有在生产机器热补丁。
 

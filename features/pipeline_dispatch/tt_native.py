@@ -15,7 +15,7 @@ import threading
 from urllib.parse import urlsplit
 
 from .adapters import AdapterError, ClosingConnection, artifact_from, obj, public_descriptor
-from .fb_native import claim_hash, dump
+from .fb_native import claim_hash, dump, prepare_capabilities
 
 _INIT_LOCK = threading.Lock()
 
@@ -145,15 +145,50 @@ class TTNativeBridge:
         creator = self.service.creator_info({"source_account_id": account})["item"]
         self.service._assert_creator_settings(creator, settings)
 
+    def _resume_preparation(self, job, previous):
+        """Revoke only the exact older pipeline prepare token, never publish."""
+        descriptor = obj(previous["descriptor_json"])
+        table = "tt_auto_task" if self.automatic else "tt_post_direct_test" if job["family"] == "direct_test" else "tt_post_material_intake"
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM " + table + " WHERE id=?", (job["source_id"],)).fetchone()
+            if previous["receipt_json"]:
+                raise AdapterError("canonical_preparation_already_completed")
+            if (row is None or row["status"] != "preparing" or row["claim_token"] != previous["native_token"]
+                    or not str(row["claim_worker"]).startswith("pipeline:")
+                    or ("claim_phase" in row.keys() and row["claim_phase"] != "prepare")
+                    or ("publish_id" in row.keys() and row["publish_id"])
+                    or ("publish_attempt_count" in row.keys() and row["publish_attempt_count"])
+                    or ("unknown_outcome" in row.keys() and row["unknown_outcome"])
+                    or conn.execute("SELECT 1 FROM pipeline_tt_operation WHERE source_key=? LIMIT 1", (job["source_key"],)).fetchone()):
+                raise AdapterError("canonical_prepare_reclaim_conflict")
+            request = descriptor["request"]
+            identity = descriptor.get("native_identity", {})
+            if (str(row["gpu_job_id"]) != str(request["job_id"]) or str(row["content_id"]) != str(request["content_id"])
+                    or row["source_media_url"] != request["source_url"]
+                    or descriptor["account_resource"] != "tt:account:" + str(row["account_id"])
+                    or (identity and str(row["material_id"]) != identity.get("material_id"))
+                    or ("source_trim_tail_seconds" in row.keys() and float(row["source_trim_tail_seconds"]) != float(request["source_trim_tail_seconds"]))
+                    or ("preparation_profile" in row.keys() and row["preparation_profile"] != request["expected_profile"])):
+                raise AdapterError("canonical_prepare_identity_changed")
+            conn.execute("UPDATE " + table + " SET lease_expires_at_utc='1970-01-01T00:00:00+00:00' WHERE id=? AND claim_token=?",
+                         (job["source_id"], previous["native_token"]))
+            conn.commit()
+        return descriptor
+
     def reserve(self, job, claim):
         key = self._key(job)
         with self._lock:
             with self.connect() as c:
                 existing = c.execute("SELECT 1 FROM pipeline_tt_claim WHERE source_key=? AND stage=? AND generation=?", key).fetchone()
+                frozen = c.execute("SELECT * FROM pipeline_tt_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone() if job["stage"] == "prepare" else None
             if existing:
                 return self._stored(job, claim)[1]
             worker = "pipeline:%s:%s" % (claim.get("node_id", "node"), job["generation"])
             identity, native_token = int(job["source_id"]), ""
+            if frozen and int(frozen["generation"]) >= int(job["generation"]):
+                raise AdapterError("canonical_prepare_generation_stale")
+            frozen_descriptor = self._resume_preparation(job, frozen) if frozen else None
             try:
                 if self.automatic:
                     executor = self.service.executor
@@ -175,7 +210,7 @@ class TTNativeBridge:
                                 "tt-post-direct-clean-hevc-720x1280-v1": "tt-post-direct-clean-h264-720x1280-v1",
                                 "tt-post-direct-outro-hevc-720x1280-v2": "tt-post-direct-outro-h264-720x1280-v2",
                                 "tt-post-random-overlay-hevc-720x1280-v3": "tt-post-random-overlay-libx264-720x1280-v1"}.get(profile, profile)
-                        descriptor = self._prepare_descriptor(executor, lambda clone: clone._prepare(task, native_token), profile=profile)
+                        descriptor = frozen_descriptor or self._prepare_descriptor(executor, lambda clone: clone._prepare(task, native_token), profile=profile)
                     else:
                         clone, port = copy.copy(executor), MediaPort(executor.gpu_client)
                         clone.gpu_client = port
@@ -197,7 +232,7 @@ class TTNativeBridge:
                         self._direct_prepare_preflight(task)
                         clone = copy.copy(self.service)
                         clone.source_trim_tail_seconds = float(task["source_trim_tail_seconds"])
-                        descriptor = self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
+                        descriptor = frozen_descriptor or self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
                             "material_id": task["material_id"], "content_id": task["content_id"],
                             "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=task["preparation_profile"])
                     else:
@@ -223,7 +258,7 @@ class TTNativeBridge:
                     task, native_token = native.item, native.reveal_claim_token()
                     clone = copy.copy(self.service)
                     clone.source_trim_tail_seconds = float(task["source_trim_tail_seconds"])
-                    descriptor = self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
+                    descriptor = frozen_descriptor or self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
                         "material_id": str(task["material_id"]), "content_id": str(task["content_id"]),
                         "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=task["preparation_profile"])
                     account_id = task["account_id"]
@@ -252,6 +287,14 @@ class TTNativeBridge:
                         self._fail_native(job, native_token, getattr(exc, "code", "tt_preflight_failed"), known_no_write=True)
                 raise
             descriptor.update(source_key=job["source_key"], account_resource="tt:account:" + str(account_id), credential_ref=job["source_key"])
+            if job["stage"] == "prepare" and not descriptor.get("required_capabilities"):
+                profile = descriptor["request"]["expected_profile"]
+                cpu_profiles = {"tt-post-h264-720x1280-v2", "tt-post-direct-clean-h264-720x1280-v1",
+                                "tt-post-direct-outro-h264-720x1280-v2", "tt-post-random-overlay-libx264-720x1280-v1"}
+                descriptor["required_capabilities"] = prepare_capabilities("tt", profile, "cpu" if profile in cpu_profiles else "gpu", job)
+            if job["stage"] == "prepare" and "native_identity" not in descriptor:
+                current = self._native_dict(job)
+                descriptor["native_identity"] = {"material_id": str(current["material_id"]), "account_id": str(account_id)}
             if job["stage"] == "publish":
                 origin = "https://" + urlsplit(descriptor["artifact"]["url"]).netloc
                 configured = os.environ.get("TT_POST_GPU_VERIFIED_URL_PREFIX", "") or os.environ.get("PIPELINE_TT_VERIFIED_ORIGIN", "")
@@ -381,6 +424,7 @@ class TTNativeBridge:
                 if self.automatic:
                     clone = copy.copy(self.service.executor)
                     clone.gpu_client, clone.media_profile_version = MediaPort(clone.gpu_client, prepared), request["expected_profile"]
+                    clone.source_trim_tail_seconds = request["source_trim_tail_seconds"]
                     result = clone._prepare(self._native(job), stored["native_token"])
                     clone._update_run(result.run_id)
                 elif job["family"] == "direct_test":

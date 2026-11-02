@@ -1446,7 +1446,6 @@ class MediaRepairProcessor:
                     500,
                 )
             cos_key = self._cos_key(request, output_sha256)
-            self.cos.upload(cos_key, output_path, output_sha256, output_size)
             output_url = self.cos.url(cos_key)
             result = {
                 "job_key": request["job_key"],
@@ -1456,6 +1455,10 @@ class MediaRepairProcessor:
                 "output_size": output_size,
                 "probe": probe,
             }
+            callback = getattr(self, "qualified_artifact", None)
+            if callback is not None:
+                callback(result, cos_key)
+            self.cos.upload(cos_key, output_path, output_sha256, output_size)
             manifest = {
                 "version": 4,
                 "status": "ready",

@@ -313,7 +313,13 @@ class PrepareProcessor:
                 render_seconds=round(time.monotonic()-render_started,3)
                 output_info=_probe(self.config,output); video=output_info["video"]
                 if video.get("codec_name")!="h264" or str(video.get("profile") or "").lower()!="high" or int(video.get("width") or 0)!=720 or int(video.get("height") or 0)!=1280: raise PrepareWorkerError("fb_gpu_output_contract_invalid","H264 output contract invalid",502)
-                output_sha,size=sha256_file(output); stored=self.object_store.upload(output,job,output_sha,size)
+                output_sha,size=sha256_file(output)
+                callback=getattr(self,"qualified_artifact",None)
+                if callback is not None:
+                    key=f"{self.config.cos_prefix}/{output_sha[:2]}/{output_sha}.mp4"
+                    url=self.config.cos_domain+"/"+"/".join(quote(part,safe="-._~") for part in key.split("/"))
+                    callback({"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":url,"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":key,"status":"ready","render_seconds":render_seconds},key)
+                stored=self.object_store.upload(output,job,output_sha,size)
                 result={"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":stored["url"],"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":stored["key"],"status":"ready","render_seconds":render_seconds}
                 tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":self.config.compositor_backend,"render_seconds":render_seconds},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
             finally: output.unlink(missing_ok=True)

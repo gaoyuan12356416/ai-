@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import signal
 import threading
@@ -31,6 +32,36 @@ class Coordinator:
             state = c.execute("SELECT value_json FROM pipeline_collector_state WHERE id=1").fetchone()
         if state and hasattr(registry, "restore_cursors"):
             registry.restore_cursors(json.loads(state[0]))
+
+    def recover_prepared(self, job):
+        """A native committed artifact survives loss of the coordinator ACK."""
+        if job["stage"] != "prepare":
+            return False
+        observed = self.registry.reconcile(job)
+        proof = observed.get("canonical_receipt", {})
+        offer = observed.get("next_offer") or {}
+        artifact = offer.get("artifact") or {}
+        if not artifact.get("sha256"):
+            artifact = (observed.get("result") or {}).get("artifact") or {}
+        qualified = (isinstance(artifact, dict)
+                     and isinstance(artifact.get("size"), int) and not isinstance(artifact.get("size"), bool)
+                     and artifact["size"] > 0 and isinstance(artifact.get("sha256"), str)
+                     and re.fullmatch(r"[a-f0-9]{64}", artifact["sha256"])
+                     and str(artifact.get("url", "")).startswith("https://"))
+        if (proof.get("source_key") != job["source_key"] or offer.get("source_key") != job["source_key"]
+                or observed.get("metadata_only") or observed.get("definitive_failure") or not qualified
+                or not (observed.get("dispatch_completed") or offer.get("stage") == "publish"
+                        or (observed.get("result") or {}).get("preparation_completed") is True)):
+            return False
+        frozen = job.get("payload", {})
+        expected = frozen.get("expected_profile") or frozen.get("request", {}).get("expected_profile")
+        if expected and artifact.get("profile") != expected:
+            raise DispatchError("canonical_artifact_profile_changed")
+        result = {"artifact": artifact, "canonical_receipt": dumps(proof), "dispatch_completed": True}
+        receipt_id = "native-prepared-%s-%s" % (job["id"], job["generation"])
+        self.store.complete(job, receipt_id, result, canonical_verified=True)
+        self.store.offer(offer)
+        return True
 
     def node_key(self, node_id, version=1):
         return base64.urlsafe_b64encode(hmac.new(self.master_key, (node_id + ":" + str(version)).encode(), hashlib.sha256).digest()).decode()
@@ -137,6 +168,19 @@ class Coordinator:
                 if historical:
                     observed = self.registry.reconcile(historical)
                     proof = observed.get("canonical_receipt", {})
+                    if historical["stage"] == "prepare":
+                        offer = observed.get("next_offer") or {}
+                        artifact = offer.get("artifact") or {}
+                        if not artifact.get("sha256"):
+                            artifact = (observed.get("result") or {}).get("artifact") or {}
+                        supplied = payload.get("result", {}).get("artifact") or {}
+                        if (action != "jobs/complete" or proof.get("source_key") != historical["source_key"]
+                                or not (observed.get("dispatch_completed") or offer.get("stage") == "publish"
+                                        or (observed.get("result") or {}).get("preparation_completed") is True)
+                                or not artifact.get("sha256") or not artifact.get("size") or not artifact.get("url")
+                                or any(supplied.get(key) != artifact.get(key) for key in ("sha256", "size", "url"))):
+                            raise DispatchError("historical_receipt_requires_reconciliation")
+                        return self.store.save_delivery(payload, delivery_id, payload, {"accepted": True, "historical": True})
                     expected = historical["payload"]["continuation"]["video_id"]
                     supplied = payload.get("result", {}).get("video_id")
                     if (proof.get("source_key") != historical["source_key"] or proof.get("publish_id") != expected
@@ -157,21 +201,33 @@ class Coordinator:
             job = response["job"]
             if job:
                 try:
+                    if self.recover_prepared(job):
+                        return {"job": None, "idle_reason": "canonical_preparation_recovered"}
                     with contextlib.closing(self.store.connect()) as c:
                         node = c.execute("SELECT capabilities_json FROM pipeline_node WHERE node_id=?", (node_id,)).fetchone()
                     capabilities = json.loads(node[0]) if node else []
                     job["executor_backend"] = "gpu" if "backend:gpu" in capabilities else "cpu"
+                    job["executor_capabilities"] = capabilities
                     descriptor = self.registry.reserve(job, job)
                     # Freeze the actual descriptor so subsequent operations are
                     # verified against the same body and artifact by native code.
                     with self.store.transaction() as c:
+                        self.store._validate_claim(c, job)
                         c.execute("UPDATE pipeline_job SET payload_json=?,artifact_json=? WHERE id=? AND generation=?", (dumps(descriptor), dumps(descriptor.get("artifact", job["artifact"])), job["id"], job["generation"]))
                         if descriptor.get("required_capabilities"):
                             c.execute("UPDATE pipeline_job SET capabilities_json=? WHERE id=? AND generation=?", (dumps(descriptor["required_capabilities"]), job["id"], job["generation"]))
                     job["payload"] = descriptor
                     job["artifact"] = descriptor.get("artifact", job["artifact"])
+                    required = descriptor.get("required_capabilities") or []
+                    if not set(required).issubset(capabilities):
+                        self.store.defer_unstarted(job, required)
+                        return {"job": None, "idle_reason": "capability_unavailable"}
                 except Exception as exc:
+                    if getattr(exc, "code", "") in {"claim_expired", "claim_conflict"}:
+                        return {"job": None, "idle_reason": "claim_expired_during_reservation"}
                     try:
+                        if self.recover_prepared(job):
+                            return {"job": None, "idle_reason": "canonical_preparation_recovered"}
                         observed = self.registry.reconcile(job)
                         if observed.get("metadata_only"):
                             self.store.skip(job, observed.get("canonical_receipt", {}), canonical_verified=True)

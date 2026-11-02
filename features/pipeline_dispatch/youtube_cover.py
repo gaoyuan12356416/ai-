@@ -50,7 +50,8 @@ def generate_cover(request, work_root, context, generator=None):
             handle.write(data)
     context.phase("cover_generation")
     result = (generator or generate_cover_factory(root))(task, task["versions"][-1])
-    context.check()
+    # Preserve a paid, completed generation even when the lease just expired.
+    # The executor persists its qualified bytes before returning to the outbox.
     raw = result if isinstance(result, bytes) else Path(result).read_bytes()
     background = decode_cover(raw, generated=True)
     if max(background.size) > 3840:
