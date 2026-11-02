@@ -47,7 +47,8 @@ class MemoryCOS:
     def put_object(self, **kwargs):
         key = kwargs["Key"]
         self.puts.append(kwargs)
-        if key in self.objects and kwargs.get("ForbidOverwrite") == "true": raise RuntimeError("exists")
+        if "ForbidOverwrite" in kwargs: raise ValueError("deployed COS SDK rejects this named parameter")
+        if key in self.objects and kwargs.get("Metadata", {}).get("x-cos-forbid-overwrite") == "true": raise RuntimeError("exists")
         self.objects[key] = kwargs["Body"]
     def head_object(self, Bucket, Key):
         if Key not in self.heads: raise MissingObject()
@@ -197,7 +198,7 @@ class ExecutorTests(unittest.TestCase):
         intent_puts = [p for p in cloud.puts if p["Key"].endswith(".generation-intent.json")]
         self.assertEqual(len(intent_puts), 1)
         self.assertEqual(intent_puts[0]["ACL"], "private")
-        self.assertEqual(intent_puts[0]["ForbidOverwrite"], "true")
+        self.assertEqual(intent_puts[0]["Metadata"]["x-cos-forbid-overwrite"], "true")
 
     def test_cover_hard_crash_requires_explicit_new_version_or_retry_identity(self):
         cloud, calls = MemoryCOS(), []

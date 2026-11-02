@@ -152,7 +152,7 @@ class COSArtifactStore:
         try:
             self.client.put_object(Bucket=self.config.cos_bucket, Key=key, Body=self.encoded(intent),
                                    ACL="private", ContentType="application/json", EnableMD5=True,
-                                   ForbidOverwrite="true")
+                                   Metadata={"x-cos-forbid-overwrite": "true"})
         except Exception:
             pass
         # No generation may start until this invocation's intent is durable.
@@ -192,7 +192,7 @@ class COSArtifactStore:
             try:
                 self.client.put_object(Bucket=self.config.cos_bucket, Key=self.key, Body=body,
                                        ACL="private", ContentType="application/json", EnableMD5=True,
-                                       ForbidOverwrite="true")
+                                       Metadata={"x-cos-forbid-overwrite": "true"})
             except Exception:
                 # Includes lost PUT acknowledgements: read the immutable facts.
                 pass
