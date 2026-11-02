@@ -99,7 +99,8 @@ class CollectionTests(unittest.TestCase):
                              **{f: item[f] for f in EFFECT_METRICS})]
         class Reader:
             def records(self, statements):
-                return iter(records)
+                day = '2026-10-31' if '2026-10-31' in statements[0] else '2026-11-01'
+                return iter(record for record in records if record['date'] == day)
         class Source:
             def __init__(self):
                 self.name_queries = []
@@ -119,6 +120,56 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(source.name_queries, [{(1479, 'only-this')}])
         self.assertEqual(result[1]['effects'][0]['drama_name'], 'only-this')
         self.assertEqual(result[1]['effects'][0]['revenue_cents'], 1899)
+
+    def test_each_day_releases_gate_before_attribution_and_yield(self):
+        calls = []
+        active = []
+        testcase = self
+        class Reader:
+            def records(self, statements):
+                day = ['2026-10-31', '2026-11-01'][len(calls)]
+                testcase.assertEqual(tuple(statements), income_statements(day))
+                calls.append(day)
+                active.append(day)
+                try:
+                    item = effect(day)
+                    yield dict(item, kind='effect')
+                    yield dict(kind='control', date=day, source_rows=1, source_updated_at='',
+                               **{field: item[field] for field in EFFECT_METRICS})
+                finally:
+                    active.remove(day)
+        class Source:
+            def dimensions(self):
+                return [], [], []
+            def links(self, codes):
+                testcase.assertEqual(active, [])
+                return {}
+            def publications(self, day, teams):
+                testcase.assertEqual(active, [])
+                return []
+        collection = collect_days(Reader(), Source(), '2026-10-31', '2026-11-01')
+        self.assertEqual(next(collection)['date'], '2026-10-31')
+        self.assertEqual(active, [])
+        self.assertEqual(calls, ['2026-10-31'])
+        self.assertEqual(next(collection)['date'], '2026-11-01')
+        self.assertEqual(active, [])
+        self.assertEqual(calls, ['2026-10-31', '2026-11-01'])
+        with self.assertRaises(StopIteration):
+            next(collection)
+
+    def test_trailing_reader_failure_cannot_yield_day(self):
+        class Reader:
+            def records(self, statements):
+                item = effect()
+                yield dict(item, kind='effect')
+                yield dict(kind='control', date=item['date'], source_rows=1, source_updated_at='',
+                           **{field: item[field] for field in EFFECT_METRICS})
+                raise CollectionError('trailing CLI failure')
+        class Source:
+            def dimensions(self):
+                return [], [], []
+        with self.assertRaisesRegex(CollectionError, 'trailing CLI failure'):
+            next(collect_days(Reader(), Source(), '2026-11-01', '2026-11-01'))
 
     def test_control_failure_is_not_empty_day(self):
         item = effect()

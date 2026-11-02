@@ -267,45 +267,46 @@ def control_totals(rows):
 
 
 def collect_days(reader, source, start, end):
-    """Yield one complete day at a time; a trailing CLI failure still aborts publication."""
+    """Release each day's gated RR read before external attribution or warehouse writes."""
     days = days_between(start, end)
     accounts, dramas, teams = source.dimensions()
     dimensions = Dimensions(accounts, dramas)
-    statements = [statement for day in days for statement in income_statements(day)]
-    current = []
-    seen = []
-    for record in reader.records(statements):
-        if record.get('kind') == 'effect':
-            current.append(record)
-        elif record.get('kind') == 'control':
-            day = record['date']
-            if day not in days or day in seen or any(row['date'] != day for row in current):
+    for day in days:
+        # Exhaustion also checks the CLI exit status and releases the FIFO permit.
+        # Both fact and control statements still share one readonly RR transaction.
+        records = list(reader.records(income_statements(day)))
+        current = []
+        control = None
+        for record in records:
+            if record.get('date') != day:
                 raise CollectionError('source result dates are inconsistent')
-            expected = {field: int(record[field]) for field in EFFECT_METRICS}
-            if control_totals(current) != expected:
-                raise CollectionError('income source control totals do not match grouped facts')
-            links = source.links(row['short_code'] for row in current)
-            required_names = {(int(link['drama_app_id']), str(link['drama_content_id'])) for link in links.values()}
-            missing_names = required_names - set(dimensions.dramas)
-            if missing_names:
-                names = source.drama_names(missing_names)
-                dimensions.dramas.update({(int(row['drama_app_id']), str(row['drama_content_id'])):
-                                         str(row['drama_name'] or row['drama_content_id']) for row in names})
-                # An unavailable display name must not change attribution or trigger repeated reads.
-                for key in missing_names:
-                    dimensions.dramas.setdefault(key, key[1])
-            effects = [dimensions.effect(row, links) for row in current]
-            publications = [dimensions.publication(row) for row in source.publications(day, teams)]
-            unknown = [row for row in effects if not row['matched']]
-            updated = str(record['source_updated_at'])
-            if updated:
-                updated = datetime.fromisoformat(updated).replace(tzinfo=timezone.utc).isoformat(timespec='seconds')
-            yield dict(date=day, effects=effects, publications=publications, totals=expected,
-                       source_rows=int(record['source_rows']), source_updated_at=updated,
-                       quality=dict(unmatched_rows=len(unknown), unmatched=control_totals(unknown)))
-            current = []
-            seen.append(day)
-        else:
-            raise CollectionError('unexpected source result kind')
-    if seen != days or current:
-        raise CollectionError('not every requested source date completed')
+            if record.get('kind') == 'effect' and control is None:
+                current.append(record)
+            elif record.get('kind') == 'control' and control is None:
+                control = record
+            else:
+                raise CollectionError('unexpected source result kind or order')
+        if control is None:
+            raise CollectionError('not every requested source date completed')
+        expected = {field: int(control[field]) for field in EFFECT_METRICS}
+        if control_totals(current) != expected:
+            raise CollectionError('income source control totals do not match grouped facts')
+        links = source.links(row['short_code'] for row in current)
+        required_names = {(int(link['drama_app_id']), str(link['drama_content_id'])) for link in links.values()}
+        missing_names = required_names - set(dimensions.dramas)
+        if missing_names:
+            names = source.drama_names(missing_names)
+            dimensions.dramas.update({(int(row['drama_app_id']), str(row['drama_content_id'])):
+                                     str(row['drama_name'] or row['drama_content_id']) for row in names})
+            # An unavailable display name must not change attribution or trigger repeated reads.
+            for key in missing_names:
+                dimensions.dramas.setdefault(key, key[1])
+        effects = [dimensions.effect(row, links) for row in current]
+        publications = [dimensions.publication(row) for row in source.publications(day, teams)]
+        unknown = [row for row in effects if not row['matched']]
+        updated = str(control['source_updated_at'])
+        if updated:
+            updated = datetime.fromisoformat(updated).replace(tzinfo=timezone.utc).isoformat(timespec='seconds')
+        yield dict(date=day, effects=effects, publications=publications, totals=expected,
+                   source_rows=int(control['source_rows']), source_updated_at=updated,
+                   quality=dict(unmatched_rows=len(unknown), unmatched=control_totals(unknown)))

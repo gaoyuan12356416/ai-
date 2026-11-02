@@ -71,6 +71,8 @@ WHERE team_id = %s AND schedule_date BETWEEN %s AND %s AND deleted_at = 0;
 
 先发现相关团队，再逐团队读取。收入表没有 `updated_at` 索引，也没有小时收入粒度：不要按更新时间水位扫全表，或把日汇总强行转换为北京时间日。默认任务重算最近 14 个日期，吸收迟到收入、退款和归因修正。
 
+收入按日进入 SQL Gate：同一天的分组事实与控制总额在同一个只读 REPEATABLE READ 事务中读取；完整收取结果并确认查询成功、释放 Gate 后，再查询该日短链/任务和写入中间表。不要跨外源查询或写仓等待占用 Gate。不同日期不是同一个收入数据库快照；整轮仍须所有日期完成并通过控制核验后才发布，任一天失败都保留旧完整版本。
+
 ## 快照核对与解释
 
 中间表为 `ads_ai.socialkit_effect_daily`、`socialkit_publish_daily`、`socialkit_refresh_runs`。批次版本规则以服务当前实现为准；优先使用报表 query 模块，避免绕开有效版本读取未完成批次。
