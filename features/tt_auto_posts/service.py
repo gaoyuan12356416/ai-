@@ -1022,13 +1022,6 @@ class TTAutoPostService:
             raise AutoPostServiceError("invalid_request", "执行器参数无效", 400)
         return self.executor.execute_next(payload.get("worker_id"))
 
-    def reconcile_next(self, raw: Mapping[str, Any]) -> Dict[str, Any]:
-        payload = dict(raw)
-        if "worker_id" not in payload or set(payload) - {"worker_id", "after_task_id"}:
-            raise AutoPostServiceError("invalid_request", "核对参数无效", 400)
-        from features.pipeline_dispatch.tt_readback import reconcile_next
-        return reconcile_next(self.executor, payload["worker_id"], after_task_id=payload.get("after_task_id", 0))
-
 
 def _required_env(source: Mapping[str, str], name: str) -> str:
     value = str(source.get(name, "") or "")
@@ -1388,8 +1381,6 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
             return 200, service.tick()
         if self.command == "POST" and path == "/internal/tt-auto-post/execute-next":
             return 200, service.execute_next(self._body())
-        if self.command == "POST" and path == "/internal/tt-auto-post/reconcile-next":
-            return 200, service.reconcile_next(self._body())
         raise AutoPostServiceError("not_found", "路由不存在", 404)
 
     def _handle(self) -> None:

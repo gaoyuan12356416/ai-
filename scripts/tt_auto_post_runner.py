@@ -149,7 +149,7 @@ class SidecarClient:
         if path not in {
             "/internal/tt-auto-post/tick",
             "/internal/tt-auto-post/execute-next",
-            "/internal/tt-auto-post/reconcile-next",
+            "/internal/pipeline-dispatch/tt/reconcile-legacy-next",
         }:
             raise RunnerError("tt_auto_post_runner_route_invalid", "route denied")
         body = json.dumps(

@@ -524,6 +524,16 @@ class TTNativeBridge:
 
 
 def handle_tt_dispatch(service, action, payload, *, automatic=False):
+    if action == "reconcile-legacy-next":
+        if not automatic:
+            raise AdapterError("canonical_bridge_action_invalid")
+        if (not isinstance(payload, dict) or "worker_id" not in payload
+                or set(payload) - {"worker_id", "after_task_id"}):
+            raise AdapterError("canonical_bridge_payload_invalid")
+        # Reuse the existing authenticated/flagged canonical namespace without
+        # constructing a native bridge or changing the deployed service routes.
+        from .tt_readback import reconcile_next
+        return reconcile_next(service.executor, payload["worker_id"], after_task_id=payload.get("after_task_id", 0))
     with _INIT_LOCK:
         if not hasattr(service, "pipeline_dispatch_bridge"):
             service.pipeline_dispatch_bridge = TTNativeBridge(service, automatic=automatic)

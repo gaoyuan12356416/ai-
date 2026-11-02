@@ -114,6 +114,48 @@ class LegacyTTReadbackTests(unittest.TestCase):
         self.assertEqual(executor._sync_code_state.call_args.args[1], "published")
         self.assertEqual(executor._sync_code_state.call_args.kwargs, {"best_effort":True})
 
+    def test_actual_auto_http_canonical_route_requires_auth_and_flag_before_readback(self):
+        from features.tt_auto_posts import service as auto_service
+        from scripts.test_pipeline_legacy_admission import handler, TOKEN
+
+        task = self.pending(suffix="canonical-http")
+        executor, gpu = self.readback_executor({"publish_id":task.publish_id, "state":"published"})
+        service = SimpleNamespace(executor=executor)
+        for authorized, enabled in ((False, True), (True, False), (True, True)):
+            request = handler(auto_service.TTAutoPostRequestHandler, PATH, {"worker_id":"readback"}, authorized)
+            request.server = SimpleNamespace(internal_token=TOKEN, tt_auto_service=service)
+            with patch.dict(os.environ, {"PIPELINE_TT_DISPATCH_ENABLED":"1", "PIPELINE_TT_CANONICAL_BRIDGE_ENABLED":"1" if enabled else "0"}), patch(
+                    "features.pipeline_dispatch.tt_native.TTNativeBridge", side_effect=AssertionError("readback must not construct bridge")):
+                if not authorized:
+                    self.assertEqual(request._dispatch()[0], 403)
+                    self.assertEqual(gpu.reconcile_calls, [])
+                elif not enabled:
+                    with self.assertRaises(auto_service.AutoPostServiceError) as error:
+                        request._dispatch()
+                    self.assertEqual(error.exception.code, "pipeline_bridge_disabled")
+                    self.assertEqual(gpu.reconcile_calls, [])
+                else:
+                    status, result = request._dispatch()
+                    self.assertEqual((status,result["task"]["status"]), (200,"published"))
+        self.assertEqual(len(gpu.reconcile_calls), 1)
+
+    def test_manual_http_canonical_route_and_extra_execution_fields_cannot_readback(self):
+        from features.tt_posts import service as manual_service
+        from features.pipeline_dispatch.tt_native import handle_tt_dispatch
+        from features.pipeline_dispatch.adapters import AdapterError
+        from scripts.test_pipeline_legacy_admission import handler, TOKEN
+
+        request = handler(manual_service.TTPostRequestHandler, PATH, {"worker_id":"readback"})
+        request.server = SimpleNamespace(internal_token=TOKEN, tt_service=SimpleNamespace())
+        with patch.dict(os.environ, {"PIPELINE_TT_DISPATCH_ENABLED":"1", "PIPELINE_TT_CANONICAL_BRIDGE_ENABLED":"1"}), patch(
+                "features.pipeline_dispatch.tt_native.TTNativeBridge", side_effect=AssertionError("must reject before bridge")):
+            with self.assertRaises(manual_service.TTPostServiceError) as error:
+                request._dispatch()
+            self.assertEqual(error.exception.code, "canonical_bridge_action_invalid")
+            for body in ({}, {"worker_id":"readback","job":{}}, {"worker_id":"readback","claim":{}}, []):
+                with self.assertRaises(AdapterError):
+                    handle_tt_dispatch(SimpleNamespace(), "reconcile-legacy-next", body, automatic=True)
+
 
 class ReadbackRunnerTests(unittest.TestCase):
     def test_pool_and_direct_readback_lists_exclude_pipeline_owned_not_ui_history(self):

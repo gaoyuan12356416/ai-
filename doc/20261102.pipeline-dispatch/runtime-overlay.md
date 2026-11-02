@@ -62,6 +62,12 @@ does not patch this file. Legacy readback instead lives in the lazily imported
 `features/pipeline_dispatch/tt_readback.py`; it uses the running publisher's
 frozen template route and stable job identity, preserves pending unknowns and
 the five-minute retry interval, and retains confirmed-publication code sync.
+Its fixed action is `/internal/pipeline-dispatch/tt/reconcile-legacy-next`,
+admitted only by the existing TT auto canonical bridge authentication and flag.
+The manual TT bridge rejects it. No new legacy service route is patched; both
+TT auto `service.py` and `publisher.py` have zero deployment delta from `9dc6d26`.
+The CLI's one-line runner allowlist addition preserves the live runner's
+separate preparation/publishing polling configuration.
 
 The operator supplies a private controls file with the exact lane units and
 ledger paths. For example, replacing these paths/names with verified inventory:

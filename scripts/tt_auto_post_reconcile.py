@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.tt_auto_post_runner import RunnerConfig, RunnerError, SidecarClient, exclusive_lock
 
-PATH = "/internal/tt-auto-post/reconcile-next"
+PATH = "/internal/pipeline-dispatch/tt/reconcile-legacy-next"
 
 
 def reconcile_once(config, *, limit=20, timeout=120, client=None):
