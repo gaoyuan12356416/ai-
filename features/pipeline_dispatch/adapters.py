@@ -281,6 +281,9 @@ class LedgerAdapter:
             row["scheduled_at"] = row.get("created_at")
             row["cutover_due_at"] = body.get("publish_at") or row.get("created_at")
             row["channel_id"] = body.get("channel_id") or obj(body.get("channel")).get("channel_id", "")
+            if row.get("state") == "uploading" and body.get("publish_id"):
+                child = self._parent(conn, "drama_youtube_publish", "id", body["publish_id"])
+                row["_youtube_publication_handoff"] = bool(child and str(child.get("preparation_id")) == str(row["id"]))
         elif key == ("youtube", "publish"):
             source_key = "youtube:publish:" + str(row["id"])
             row["_pipeline_history"] = any(
@@ -314,6 +317,16 @@ class LedgerAdapter:
             # claim retries precede the platform boundary and are not publishes.
             attempts = int(bool(row.get("publish_started_at_utc") or row.get("publish_id")))
         started = state in INFLIGHT or row.get("ledger_status") in INFLIGHT or (spec.channel == "fb" and spec.family == "video" and row.get("prepare_state") == "preparing")
+        if (spec.channel == "youtube" and spec.family == "preparation" and state == "uploading"
+                and row.get("_youtube_publication_handoff") and "lease_until" in row):
+            # The approved-cover workflow keeps this parent label after enqueue.
+            # Its exact child ledger owns upload/schedule/unknown state; a parent
+            # without an active lease is no longer an executing cover worker.
+            try:
+                if stamp(float(row.get("lease_until") or 0)) <= stamp(now):
+                    started = False
+            except (TypeError, ValueError, OverflowError):
+                pass  # An invalid lease is not proof that legacy work ended.
         legacy_parent_inflight = (spec.channel == "x" and spec.family == "queue" and not terminal
                                   and row.get("legacy_parent_status") in INFLIGHT
                                   and bool(row.get("legacy_parent_has_claim"))
