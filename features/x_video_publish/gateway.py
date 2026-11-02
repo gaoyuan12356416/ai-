@@ -67,7 +67,10 @@ def dispatch(handler,parsed,app):
         else:
             payload={}
         raw=parse_qs(parsed.query,keep_blank_values=True,strict_parsing=False)
-        if any(len(v)!=1 for v in raw.values()) or set(raw)-{'q','language','cursor','limit','state'}:
+        allowed_query = {'q','language','cursor','limit','state'}
+        if suffix == '/materials':
+            allowed_query.add('product')
+        if any(len(v)!=1 for v in raw.values()) or set(raw)-allowed_query:
             raise PublishingError('invalid_query','查询参数无效',400)
         query={k:v[0] for k,v in raw.items()}
         result=sidecar(handler.command,suffix,actor,payload,query)

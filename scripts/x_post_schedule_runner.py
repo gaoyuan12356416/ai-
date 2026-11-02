@@ -2352,7 +2352,12 @@ def execute_schedule_tick(
 
         try:
             _heartbeat_best_effort(sidecar, identity)
-            sidecar.preflight_storage(config.storage_preflight_path)
+            # Preflight downloads are sequential and removed after each item;
+            # publishing also processes one queue at a time under the runner lock.
+            # Reserve one media slot instead of the legacy daily account fleet.
+            sidecar.preflight_storage(
+                config.storage_preflight_path, required_media_count=1
+            )
             skipped_accounts = []
             accounts = _verify_accounts(
                 sidecar, identity["account_ids"], skip_blocked=True,
@@ -2420,7 +2425,9 @@ def execute_schedule_tick(
                 # deleting prepared candidates. Each repeat removes an account.
                 excluded_ids = {item["account_id"] for item in skipped_accounts}
                 accounts = [item for item in accounts if item["id"] not in excluded_ids]
-            sidecar.preflight_storage(config.storage_preflight_path)
+            sidecar.preflight_storage(
+                config.storage_preflight_path, required_media_count=1
+            )
             _heartbeat_best_effort(sidecar, identity)
         except Exception as exc:
             audit = _record_schedule_failure_best_effort(

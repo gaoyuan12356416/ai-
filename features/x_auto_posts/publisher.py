@@ -460,7 +460,26 @@ class AutoPostExecutor:
         except XPostBridgeError as exc:
             if not exc.unknown_outcome:
                 raise
-            result = self.bridge.query_run(int(run["id"]))
+            result = self._validate_run_identity(
+                task, self.bridge.query_run(int(run["id"]))
+            )
+            # The plan can reject a *previous* unknown Post on this account.
+            # Its unknown flag does not mean this task created a queue. Keep
+            # the historical hold, but terminate this zero-queue attempt with
+            # its real cause instead of retrying expensive preparation forever.
+            if (
+                (
+                    (exc.code == "x_post_unknown_outcome" and exc.status == 409)
+                    or (
+                        exc.code == "x_publish_unknown" and exc.status == 503
+                        and str(exc) == "所选账号存在待核对发布结果，已停止手动发布"
+                    )
+                )
+                and self._run_queue(result) is None
+            ):
+                raise AutoPostExecutionError(
+                    "x_post_account_needs_review", str(exc), 409
+                ) from None
         return self._validate_run_identity(task, result)
 
     def _confirm_reservation(self, task: TaskRecord, queue_id: int, claim_token: str) -> None:

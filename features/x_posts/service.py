@@ -16497,6 +16497,26 @@ class XPostStore:
             # and _sync_run/replay already treats that residual state as
             # unknown without rewriting an explicit response.
             unknown_outcome = bool(unknown_outcome)
+            # An account fence can refer to a different queue. If this log has
+            # not crossed the durable upload boundary, it is a known no-write
+            # failure; propagating the other queue's unknown flag self-blocks
+            # this account even after the original uncertainty is resolved.
+            if (
+                unknown_outcome
+                and code == "x_post_unknown_outcome"
+                and message == "所选账号存在待核对发布结果，已暂停后续发布"
+                and row["status"] == "reserved"
+                and int(row["attempt_count"] or 0) == 0
+                and not any(row[key] for key in (
+                    "x_media_id", "x_post_id", "x_post_url", "started_at", "published_at"
+                ))
+                and not conn.execute(
+                    "SELECT 1 FROM x_post_repost_ledger WHERE queue_id=?",
+                    (row["queue_id"],),
+                ).fetchone()
+            ):
+                unknown_outcome = False
+                code = "x_post_account_needs_review"
             queue = conn.execute(
                 "SELECT * FROM x_post_queue WHERE id=?",
                 (row["queue_id"],),

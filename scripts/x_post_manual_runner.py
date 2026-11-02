@@ -517,7 +517,9 @@ def execute_manual_tick(
         return result
 
     try:
-        sidecar.preflight_storage(config.storage_preflight_path)
+        sidecar.preflight_storage(
+            config.storage_preflight_path, required_media_count=len(run["account_ids"])
+        )
         accounts = _verify_accounts(sidecar, run["account_ids"])
         candidates = _manual_candidates(
             config,
@@ -529,7 +531,9 @@ def execute_manual_tick(
             repair_client=repair_client,
             now=now,
         )
-        sidecar.preflight_storage(config.storage_preflight_path)
+        sidecar.preflight_storage(
+            config.storage_preflight_path, required_media_count=len(candidates)
+        )
         planned = sidecar.create_plan(run["id"], candidates)
     except SidecarError as exc:
         if exc.unknown_outcome:

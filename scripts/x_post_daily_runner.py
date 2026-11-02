@@ -926,8 +926,11 @@ class SidecarClient:
             )
         return {"updated_count": updated_count}
 
-    def preflight_storage(self, path):
-        result = self.post(path, {})
+    def preflight_storage(self, path, required_media_count=None):
+        payload = {}
+        if required_media_count is not None:
+            payload["required_media_count"] = required_media_count
+        result = self.post(path, payload)
         item = result.get("item") if isinstance(result.get("item"), dict) else result
         if (
             not isinstance(item, dict)
