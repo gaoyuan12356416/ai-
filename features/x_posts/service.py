@@ -1131,6 +1131,15 @@ def preflight_post_storage(
     return {"ready": True, "mounted": True, "atomic_write": True}
 
 
+# The pool joins on pool_item_id OR material_key. Its material-key branch
+# cannot use the historical partial index without an explicit nonempty
+# predicate, so keep a full lookup index for existing reader processes too.
+POOL_MATERIAL_LOOKUP_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_x_post_queue_material_lookup "
+    "ON x_post_queue(material_key)"
+)
+
+
 def _connect(db_path):
     conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -2901,6 +2910,7 @@ def ensure_storage(db_path):
                 "CREATE INDEX IF NOT EXISTS idx_x_post_queue_material_key "
                 "ON x_post_queue(material_key) WHERE material_key<>''"
             )
+            conn.execute(POOL_MATERIAL_LOOKUP_INDEX_SQL)
             conn.execute("DROP INDEX IF EXISTS ux_x_post_queue_account_run_date")
             conn.execute(
                 "DROP INDEX IF EXISTS ux_x_post_queue_legacy_account_run_date"
