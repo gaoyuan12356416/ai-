@@ -8,6 +8,38 @@ from features.pipeline_dispatch.core import DispatchStore, stamp
 
 
 class LongTaskCapacityTests(unittest.TestCase):
+    def test_low_memory_drains_immediately_but_cpu_waits_and_active_claims_survive(self):
+        for cpu, available, shrink_at in ((30, .14, 0), (86, .7, 120)):
+            with self.subTest(cpu=cpu, available=available), tempfile.TemporaryDirectory() as directory:
+                clock = [dt.datetime(2026, 11, 2, 8, tzinfo=dt.timezone.utc)]
+                store = DispatchStore(Path(directory) / "pressure.sqlite", clock=lambda: clock[0])
+                store.channel_enabled("fb", True)
+                metrics = {"cpu_percent": cpu, "memory_available_fraction": available}
+                store.register_node("cpu-main", ["prepare:fb"], metrics)
+                claims = []
+                for index in range(3):
+                    store.offer({"source_key": "fb:auto:" + str(index), "source_id": str(index),
+                        "channel": "fb", "family": "auto", "stage": "prepare",
+                        "scheduled_at": stamp(clock[0]), "capabilities": ["prepare:fb"],
+                        "resource_keys": ["fb:page:" + str(index)]})
+                    store.worker_heartbeat("cpu-main", str(index), "prepare")
+                    if index < 2:
+                        claims.append(store.claim("cpu-main", str(index), "prepare")["job"])
+
+                for elapsed in range(0, shrink_at + 1, 60):
+                    clock[0] = dt.datetime(2026, 11, 2, 8, tzinfo=dt.timezone.utc) + dt.timedelta(seconds=elapsed)
+                    store.register_node("cpu-main", ["prepare:fb"], metrics)
+                    for claim in claims:
+                        self.assertTrue(store.heartbeat(claim)["accepted"])
+                    before = [store.get_job(claim["id"]) for claim in claims]
+                    store.adapt_capacity()
+                    self.assertEqual(store.config()["hosts"]["cpu-main"]["prepare"]["target"],
+                                     1 if elapsed >= shrink_at else 2)
+                    self.assertEqual([store.get_job(claim["id"]) for claim in claims], before)
+                self.assertTrue(all(store.get_job(claim["id"])["status"] == "running" for claim in claims))
+                store.worker_heartbeat("cpu-main", "2", "prepare")
+                self.assertIsNone(store.claim("cpu-main", "2", "prepare")["job"])
+
     def test_three_long_renders_allow_growth_but_keep_cooldown_and_sample_expiry(self):
         with tempfile.TemporaryDirectory() as directory:
             clock = [dt.datetime(2026, 11, 2, 8, tzinfo=dt.timezone.utc)]

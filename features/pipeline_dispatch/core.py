@@ -1034,7 +1034,9 @@ class DispatchStore:
                         pressure = pressure or metrics.get("gpu_percent", 0) > 95 or metrics.get("encoder_percent", 0) > 95 or metrics.get("gpu_memory_available_fraction", 1) < .1
                     high = (high or now) if pressure else ""
                     old = pool["target"]
-                    if high and high <= stamp(self.clock() - dt.timedelta(seconds=120)):
+                    # Low memory reduces admission at this evaluation; CPU/GPU
+                    # utilization still needs sustained pressure for two minutes.
+                    if available < .15 or (high and high <= stamp(self.clock() - dt.timedelta(seconds=120))):
                         pool["target"] = max(1 if pool["ceiling"] else 0, old - 1)
                         high = now
                     elif (not last or last <= stamp(self.clock() - dt.timedelta(seconds=300))) and cpu < 70 and available > .25:
