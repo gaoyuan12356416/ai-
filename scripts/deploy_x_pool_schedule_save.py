@@ -74,8 +74,15 @@ def stage():
 
 def assert_quiet():
     pid = base.run("systemctl", "show", "x-post-automation.service", "-p", "MainPID", "--value")
-    if len(list(Path("/proc", pid, "task").iterdir())) != 1:
+    # serve() always starts the persistent youtube-share-x worker alongside
+    # the HTTP server. It remains alive even with no accepted HTTP requests.
+    if len(list(Path("/proc", pid, "task").iterdir())) != 2:
         return False
+    env = dict(part.split(b"=", 1) for part in Path("/proc", pid, "environ").read_bytes().split(b"\0") if b"=" in part)
+    shares = Path(env.get(b"X_POST_STORAGE_ROOT", b"/mnt/data-disk/x-post-automation").decode()) / "youtube-shares/ledger.sqlite3"
+    with contextlib.closing(sqlite3.connect("file:" + str(shares) + "?mode=ro", uri=True)) as conn:
+        if conn.execute("SELECT COUNT(*) FROM youtube_share_item WHERE status IN ('queued','publishing')").fetchone()[0]:
+            return False
     with contextlib.closing(sqlite3.connect("file:" + str(base.POST_DB) + "?mode=ro", uri=True)) as conn:
         return conn.execute("SELECT COUNT(*) FROM x_post_queue WHERE status='publishing'").fetchone()[0] == 0
 
