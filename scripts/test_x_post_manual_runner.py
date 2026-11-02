@@ -195,6 +195,22 @@ class XPostManualRunnerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.config = make_config(self.temporary.name)
 
+    def test_all_preflight_failures_commit_audit_without_zero_storage_request(self):
+        from features.x_posts.manual_preflight import PreparedManual
+        sidecar = FakeManualSidecar(manual_run())
+        failures = [{"account_id": 11, "material_id": "501", "error_code": "x_token_missing"},
+                    {"account_id": 12, "material_id": "502", "error_code": "x_token_missing"}]
+        candidate_set = PreparedManual(failures=failures)
+        planned = {**manual_run(), "status": "failed_preflight", "preflight_failures": failures}
+        with mock.patch('scripts.x_post_manual_runner._manual_candidates', return_value=candidate_set), \
+             mock.patch.object(sidecar, 'create_plan', return_value=planned) as create, \
+             mock.patch.object(sidecar, 'preflight_storage') as storage:
+            result = self.execute(sidecar)
+        self.assertEqual(result["preflight_failures"], failures)
+        create.assert_called_once_with(71, candidate_set)
+        self.assertEqual(storage.call_count, 1)
+        self.assertGreater(storage.call_args.kwargs['required_media_count'], 0)
+
     def tearDown(self):
         self.temporary.cleanup()
 

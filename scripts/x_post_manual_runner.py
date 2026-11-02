@@ -3,7 +3,7 @@
 
 The browser only creates a frozen request. This runner performs every source,
 account, compliance and media check before atomically reserving queue rows, then
-publishes those rows one at a time through the existing token-owning sidecar.
+publishes independent accounts through the existing token-owning sidecar.
 """
 
 from __future__ import annotations
@@ -511,7 +511,7 @@ def execute_manual_tick(
 
     try:
         sidecar.preflight_storage(
-            config.storage_preflight_path, required_media_count=len(run["account_ids"])
+            config.storage_preflight_path, required_media_count=min(len(run["account_ids"]), config.publish_workers)
         )
         accounts = _verify_accounts(sidecar, run["account_ids"])
         candidates = _manual_candidates(
@@ -524,9 +524,10 @@ def execute_manual_tick(
             repair_client=repair_client,
             now=now,
         )
-        sidecar.preflight_storage(
-            config.storage_preflight_path, required_media_count=len(candidates)
-        )
+        if candidates:
+            sidecar.preflight_storage(
+                config.storage_preflight_path, required_media_count=min(len(candidates), config.publish_workers)
+            )
         planned = sidecar.create_plan(run["id"], candidates)
     except SidecarError as exc:
         if exc.unknown_outcome:
