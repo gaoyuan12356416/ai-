@@ -23,6 +23,7 @@ WORKER = 'drama-material-source.service'
 BASE_APP = '7f863ca1094dac54352485484dc40feda280adf579a77dbcfd8bae0d810ec6c7'
 BASE_HTML = '4ef6284b79abc495a27dcfd97f00f59c64f59ea96942efe958183cc69c85e121'
 BASE_RUNTIME = 'b2723e89478e30159800799cc186b0fb406828bff18df6ac342a6787e88cbf99'
+BASE_ALIAS = 'bcd901b3fe41929607d5d6ed018be6b4fa0b2e496d7b93e586e8a4b6e0b4cf9b'
 FILES = ['features/drama_synthesis/material_source.py', 'scripts/drama_material_source_worker.py']
 
 
@@ -61,7 +62,19 @@ def idle_api():
             require(count == 0, 'wait_for_active_jobs:' + table)
 
 
-def plan():
+def alias_plan():
+    source = (ROOT / 'static/drama-material-source.js').read_text()
+    changes = []
+    for target in (LIVE / 'static/drama-synthesis.html', PUBLIC.parent / 'drama-synthesis.html'):
+        require(sha(target) == BASE_ALIAS, 'synthesis_page_drift_requires_review')
+        changes.append((target, patch_html(target.read_text(), source).encode()))
+    return changes
+
+
+def plan(aliases_only=False):
+    if aliases_only:
+        require((LIVE / FILES[0]).read_bytes() == (ROOT / FILES[0]).read_bytes(), 'backend_feature_not_installed')
+        return alias_plan()
     require(sha(LIVE / 'app.py') == BASE_APP, 'main_api_drift_requires_review')
     require(sha(LIVE / 'static/index.html') == BASE_HTML and sha(PUBLIC) == BASE_HTML, 'html_drift_requires_review')
     # Reused contract must match the locally tested implementation.
@@ -83,7 +96,7 @@ def plan():
     unit = Path('/etc/systemd/system') / WORKER
     require(not unit.exists(), 'worker_unit_already_exists')
     changes.append((unit, (ROOT / 'deploy' / WORKER).read_bytes()))
-    return changes
+    return changes + alias_plan()
 
 
 def restore(manifest_path):
@@ -94,16 +107,19 @@ def restore(manifest_path):
         require(sha(row['path']) in {row['after'], row['before']}, 'rollback_target_changed:' + row['path'])
         if row['before']:
             require(sha(path.parent / row['backup']) == row['before'], 'backup_checksum_mismatch')
-    idle_api()
-    run('systemctl', 'disable', '--now', WORKER)
+    static_only = manifest.get('static_only', False)
+    if not static_only:
+        idle_api()
+        run('systemctl', 'disable', '--now', WORKER)
     for row in reversed(rows):
         target = Path(row['path'])
         if row['before']:
             atomic(target, (path.parent / row['backup']).read_bytes(), row['mode'])
         elif target.exists():
             target.unlink()
-    run('systemctl', 'daemon-reload')
-    run('systemctl', 'restart', API)
+    if not static_only:
+        run('systemctl', 'daemon-reload')
+        run('systemctl', 'restart', API)
     require(run('systemctl', 'is-active', API) == 'active', 'api_restart_failed')
     manifest['status'] = 'rolled_back_code_only'
     atomic(path, json.dumps(manifest, indent=2).encode(), 0o600)
@@ -114,6 +130,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--commit')
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--aliases-only', action='store_true')
     parser.add_argument('--rollback')
     args = parser.parse_args()
     require(run('findmnt', '-no', 'UUID', '/mnt/data-disk') == '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8', 'data_disk_not_mounted')
@@ -123,8 +140,9 @@ def main():
     require(not run('git', '-C', str(ROOT), 'status', '--porcelain'), 'dirty_release_checkout')
     ref = 'refs/heads/codex/drama-custom-material-upload-20261103'
     require(run('git', '-C', str(ROOT), 'ls-remote', 'origin', ref).split() == [args.commit, ref], 'commit_not_pushed')
-    changes = plan()
-    idle_api()
+    changes = plan(args.aliases_only)
+    if not args.aliases_only:
+        idle_api()
     if not args.apply:
         print(json.dumps({'status': 'ready', 'files': [str(p) for p, _ in changes]}))
         return
@@ -139,16 +157,17 @@ def main():
             shutil.copy2(target, backup / saved)
             require(sha(backup / saved) == before, 'backup_checksum_mismatch')
         rows.append({'path': str(target), 'before': before, 'after': digest(data), 'backup': saved, 'mode': mode})
-    manifest = {'commit': args.commit, 'status': 'prepared', 'files': rows}
+    manifest = {'commit': args.commit, 'status': 'prepared', 'static_only': args.aliases_only, 'files': rows}
     manifest_path = backup / 'manifest.json'
     atomic(manifest_path, json.dumps(manifest, indent=2).encode(), 0o600)
     for row in rows:
         require(sha(row['path']) == row['before'], 'file_changed_during_backup')
     for row, (_, data) in zip(rows, changes):
         atomic(row['path'], data, row['mode'])
-    run('systemctl', 'daemon-reload')
-    run('systemctl', 'enable', '--now', WORKER)
-    run('systemctl', 'restart', API)
+    if not args.aliases_only:
+        run('systemctl', 'daemon-reload')
+        run('systemctl', 'enable', '--now', WORKER)
+        run('systemctl', 'restart', API)
     require(run('systemctl', 'is-active', API) == 'active', 'api_restart_failed')
     require(run('systemctl', 'is-active', WORKER) == 'active', 'upload_worker_start_failed')
     require(all(sha(row['path']) == row['after'] for row in rows), 'deployed_hash_mismatch')
