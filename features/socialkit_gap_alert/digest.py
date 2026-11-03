@@ -193,7 +193,7 @@ def main(argv=None):
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--socialkit-root", default=DEFAULT_SOCIALKIT_ROOT)
     parser.add_argument("--comparison-file")
-    parser.add_argument("--env-file", action="append", default=[])
+    parser.add_argument("--env-file", dest="env_files", action="append", default=[])
     parser.add_argument("--feishu-config", default=DEFAULT_FEISHU_CONFIG)
     args = parser.parse_args(argv)
     try:

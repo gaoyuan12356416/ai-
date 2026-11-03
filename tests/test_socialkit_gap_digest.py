@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from features.post_daily_report.delivery import DefiniteFailure, DeliveryStore
 from features.socialkit_gap_alert.digest import run_digest, render_html, summary_card, totals
@@ -14,6 +14,15 @@ from tests.test_socialkit_gap_alert import NOW, report, event
 
 
 class DigestTests(unittest.TestCase):
+    def test_cli_preview_passes_actual_argument_names(self):
+        from features.socialkit_gap_alert.digest import main
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / 'comparison.json'
+            source.write_text(json.dumps(report()), encoding='utf-8')
+            with patch('builtins.print'):
+                self.assertEqual(main(['--root', root, '--comparison-file', str(source)]), 0)
+            self.assertFalse((Path(root) / 'digest-delivery.sqlite3').exists())
+
     def test_large_report_is_one_small_card_and_html_keeps_every_row(self):
         data = report([event(str(i), ['facebook', 'youtube', 'x'][i % 3]) for i in range(1000)])
         data['events'][0]['drama_name'] = '<script>alert("x")</script>&测试'
