@@ -13,6 +13,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import weakref
 from urllib.parse import urlsplit, parse_qs
 
 from .adapters import AdapterError, obj
@@ -28,7 +29,8 @@ class XNativeBridge:
     def __init__(self, runtime):
         self.r = runtime
         self.store = posts.XPostStore(runtime.POST_DB_PATH)
-        self.lock = threading.RLock()
+        self._source_locks = weakref.WeakValueDictionary()
+        self._source_locks_guard = threading.Lock()
         with self.connect() as c:
             c.executescript("""
               CREATE TABLE IF NOT EXISTS pipeline_x_claim (
@@ -73,6 +75,18 @@ class XNativeBridge:
     def key(self, job):
         self.identity(job)
         return job["source_key"], job["stage"], int(job["generation"])
+
+    def _source_lock(self, job):
+        # Network verification or relay selection for one queue must not hold
+        # up unrelated queues' checkpoints and durable completion receipts.
+        # All stages/generations of the same queue retain one native fence.
+        self.identity(job)
+        with self._source_locks_guard:
+            lock = self._source_locks.get(job["source_key"])
+            if lock is None:
+                lock = threading.RLock()
+                self._source_locks[job["source_key"]] = lock
+            return lock
 
     @staticmethod
     def claim_hash(claim):
@@ -179,7 +193,7 @@ class XNativeBridge:
         return {"url": queue["material_url"], "sha256": queue["preflight_sha256"], "size": queue["preflight_size"], "mime": "video/mp4", "duration_seconds": queue.get("preflight_duration", 0), "profile": queue.get("media_repair_profile", "source")}
 
     def reserve(self, job, claim):
-        with self.lock:
+        with self._source_lock(job):
             key = self.key(job)
             with self.connect() as c:
                 if c.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", (job["source_key"],)).fetchone():
@@ -198,6 +212,16 @@ class XNativeBridge:
             source_id, _, source = self.account(queue, target=pending_route, verify_now=True)
             prep = PreparationStore(self.r.POST_DB_PATH)
             frozen = prep.get(queue["id"]) if queue.get("random_template_enabled") else None
+            if job["stage"] == "prepare" and queue.get("random_template_enabled") and not frozen:
+                with self.connect() as c:
+                    previous = c.execute("SELECT descriptor_json FROM pipeline_x_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone()
+                    if previous:
+                        # Before the source checkpoint creates PreparationStore,
+                        # the first native claim already froze CPU/GPU profile
+                        # and the approved catalog. A new lease cannot change it.
+                        descriptor = obj(previous[0])
+                        c.execute("INSERT INTO pipeline_x_claim VALUES(?,?,?,?,?,?,?)", (*key, self.claim_hash(claim), queue["id"], log["id"], canonical(descriptor)))
+                        return descriptor
             if job["stage"] == "prepare":
                 if queue.get("media_validation_mode") == "deferred" or not queue.get("random_template_enabled"):
                     request = {"source_url": queue["material_url"], "source_sha256": queue.get("preflight_sha256", ""),
@@ -260,7 +284,7 @@ class XNativeBridge:
             return descriptor
 
     def begin_operation(self, job, claim, operation):
-        with self.lock:
+        with self._source_lock(job):
             record, descriptor = self.stored(job, claim)
             if job["stage"] != "publish":
                 raise AdapterError("x_publish_phase_required")
@@ -335,7 +359,7 @@ class XNativeBridge:
                 return {"credentials": {"access_token": token}}
 
     def checkpoint(self, job, claim, phase, receipt):
-        with self.lock:
+        with self._source_lock(job):
             record, descriptor = self.stored(job, claim)
             key = job["source_key"], job["generation"], phase
             encoded = canonical(receipt)
@@ -438,9 +462,13 @@ class XNativeBridge:
         elif queue.get("media_validation_mode") == "deferred":
             with self.connect() as c:
                 c.execute("BEGIN IMMEDIATE")
-                attempt = c.execute("SELECT attempt_count,unknown_outcome,status FROM x_post_publish_log WHERE queue_id=?", (queue["id"],)).fetchone()
-                if attempt and (attempt[0] or attempt[1] or attempt[2] != "reserved"):
+                attempt = c.execute("SELECT attempt_count,unknown_outcome,status,x_post_id FROM x_post_publish_log WHERE queue_id=?", (queue["id"],)).fetchone()
+                operation = c.execute("SELECT 1 FROM pipeline_x_operation WHERE source_key=? LIMIT 1", ("x:queue:" + str(queue["id"]),)).fetchone()
+                if operation or (attempt and (attempt[0] or attempt[1] or attempt[2] not in {"reserved", "failed"} or attempt[3])):
                     raise AdapterError("x_preflight_publish_already_started")
+                # A transport/lease failure can precede this exact frozen
+                # preparation's late receipt. Save its media evidence without
+                # clearing failure, incrementing attempts or making it runnable.
                 c.execute("UPDATE x_post_queue SET media_validation_mode='preflight',preflight_sha256=?,preflight_size=?,preflight_duration=?,updated_at=? WHERE id=? AND media_validation_mode='deferred'", (artifact["sha256"], artifact["size"], duration, posts.utc_now(), queue["id"]))
         with self.connect() as c:
             old = c.execute("SELECT artifact_json FROM pipeline_x_artifact WHERE queue_id=?", (queue["id"],)).fetchone()
@@ -453,7 +481,7 @@ class XNativeBridge:
             PreparationStore(self.r.POST_DB_PATH).freeze(queue["id"], random_request)
 
     def complete(self, job, receipt, claim):
-        with self.lock:
+        with self._source_lock(job):
             record, descriptor = self.stored(job, claim)
             if job["stage"] == "prepare":
                 result = receipt.get("preparation", {})
@@ -477,6 +505,10 @@ class XNativeBridge:
             return {"status": "published", "post_id": result["x_post_id"]}
 
     def fail(self, job, claim, receipt):
+        with self._source_lock(job):
+            return self._fail(job, claim, receipt)
+
+    def _fail(self, job, claim, receipt):
         record, _ = self.stored(job, claim)
         if not record["log_id"]:
             return {"canonical_no_write": True}
@@ -508,7 +540,7 @@ class XNativeBridge:
         # Cutover uses an unclaimed canonical projection. It has no execution
         # generation; only execution operations may require a claim key.
         self.identity(job)
-        with self.lock, self.connect() as c:
+        with self._source_lock(job), self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT q.status,COALESCE(l.attempt_count,0) attempts,COALESCE(l.unknown_outcome,0) uncertain,COALESCE(l.status,'') log_status FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id WHERE q.id=?", (int(job["source_id"]),)).fetchone()
             untouched_status = bool(row and row["status"] == "queued")

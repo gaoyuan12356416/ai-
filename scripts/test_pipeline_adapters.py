@@ -153,8 +153,8 @@ class XLegacyParentProjectionTests(unittest.TestCase):
                 CREATE TABLE x_post_publish_log(id INTEGER PRIMARY KEY,queue_id INTEGER,status TEXT,
                     attempt_count INTEGER,unknown_outcome INTEGER,x_post_id TEXT,updated_at TEXT);
                 INSERT INTO x_post_publish_log VALUES(5305,5373,'reserved',0,0,'','2026-11-02T10:03:53+00:00');
-                CREATE TABLE x_post_random_template_preparation(queue_id INTEGER,status TEXT,result_json TEXT);
-                INSERT INTO x_post_random_template_preparation VALUES(5373,'frozen','{}');""")
+                CREATE TABLE x_post_random_template_preparation(queue_id INTEGER,status TEXT,request_json TEXT,result_json TEXT);
+                INSERT INTO x_post_random_template_preparation VALUES(5373,'frozen','{}','{}');""")
         with sqlite3.connect(self.auto_path, factory=ClosingConnection) as c:
             c.executescript("""CREATE TABLE x_auto_template(id INTEGER PRIMARY KEY,owner_user_id TEXT,owner_tenant_key TEXT);
                 INSERT INTO x_auto_template VALUES(4,'owner','tenant');

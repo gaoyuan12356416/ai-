@@ -200,7 +200,7 @@ class LedgerAdapter:
         if key == ("x", "queue"):
             if self._exists(conn, "pipeline_x_artifact"):
                 frozen = conn.execute("SELECT artifact_json FROM pipeline_x_artifact WHERE queue_id=?", (row["id"],)).fetchone()
-                if frozen:
+                if frozen and not row.get("random_template_enabled"):
                     row["_dispatch_artifact"] = obj(frozen["artifact_json"])
             auto_owner = {}
             if self.cross_paths.get("x_auto"):
@@ -219,9 +219,17 @@ class LedgerAdapter:
                 row["started_at"] = log.get("started_at", "")
                 row["finished_at"] = log.get("published_at") or log.get("updated_at", "") if log.get("status") in TERMINAL else ""
             if self._exists(conn, "x_post_random_template_preparation"):
-                prep = conn.execute("SELECT status,result_json FROM x_post_random_template_preparation WHERE queue_id=?", (row["id"],)).fetchone()
-                if prep and prep["status"] == "ready":
+                prep = conn.execute("SELECT status,request_json,result_json FROM x_post_random_template_preparation WHERE queue_id=?", (row["id"],)).fetchone()
+                if row.get("random_template_enabled") and prep and prep["status"] == "ready":
+                    from features.x_posts.random_template import validate_receipt
                     result = obj(prep["result_json"])
+                    validate_receipt(obj(prep["request_json"]), result)
+                    # The portable source probe is input to this render, not
+                    # its finished output. Recovery and publish offers must use
+                    # the same validated final artifact as the native publisher.
+                    row["_dispatch_artifact"] = {"url": result["output_url"], "sha256": result["output_sha256"],
+                        "size": result["output_size"], "mime": "video/mp4", "duration_seconds": result["probe"]["duration"],
+                        "profile": result["profile"], "recipe": result["recipe"]}
                     row.update(random_prepared=True, prepared_media_url=result.get("output_url", ""),
                                prepared_sha256=result.get("output_sha256", ""), prepared_size_bytes=result.get("output_size", 0),
                                prepared_profile=result.get("profile", ""))
