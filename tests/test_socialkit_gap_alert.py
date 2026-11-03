@@ -173,6 +173,39 @@ class ComparisonTests(unittest.TestCase):
         record["excluded"] = True
         self.assertFalse(collector.unconfirmed_income_drama([record], {"2310": [metric]}, DAY))
 
+    def test_facebook_scoped_reads_keep_unconfirmed_income_and_exclude_unrelated(self):
+        from features.social_analytics import routes
+        from tests.test_social_backend_scope import link, metric
+        catalog = [link(cid="ok"), link(cid="unknown", published=False)]
+        catalog[0]["drama"] = "published"
+        catalog[1]["drama"] = "unconfirmed"
+        def query(app, sql, limit):
+            self.assertIn("UNION ALL", sql)
+            if "site_id='2049'" in sql:
+                self.assertIn("BINARY adset_id IN", sql)
+                return [metric(cid="ok", cents=123, date=DAY),
+                        metric(cid="unknown", cents=456, date=DAY),
+                        metric(cid="ok", cents=99999, adset_id="other-page", date=DAY)]
+            return [metric(cid="", cents=0, site_id="2310", date=DAY,
+                           adset_id="", ad_id="", _coverage_only=1)]
+        routes._cache.clear()
+        try:
+            with patch.object(collector, "read_catalogs", return_value=(catalog, {})), \
+                 patch.object(routes, "query_source_rows", side_effect=query) as queries:
+                channel = collector.own_channel({}, DAY, "facebook", NOW, enforce_fresh=False)
+            self.assertEqual(channel["amounts"], {"published": 123})
+            self.assertEqual(channel["blocked"], {"unconfirmed"})
+            self.assertEqual(queries.call_count, 2)  # source evidence reuses the exact same bounded reads.
+        finally:
+            routes._cache.clear()
+
+    def test_unconfirmed_source_option_is_internal_only(self):
+        from features.social_analytics.routes import build_report
+        from features.social_analytics.report import ReportError
+        with self.assertRaises(ReportError):
+            build_report({}, {"role": "admin"}, {"start": [DAY], "end": [DAY]},
+                         ai_backend_only=True, include_unconfirmed_sources=True)
+
     def test_failed_platform_does_not_block_healthy(self):
         candidates = [candidate(), candidate("x", "x")]
         def own_channel(app, day, platform, now, **kwargs):

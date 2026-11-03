@@ -145,13 +145,14 @@ def source(app, start, end, platform, site_id=None):
     return result, fetched
 
 
-def scoped_facebook_source(app, start, end, site, catalog=None):
+def scoped_facebook_source(app, start, end, site, catalog=None, *, include_unconfirmed=False):
     """Cache provenance-preserving reads separately from campaign-only reads."""
     from .backend_scope import eligible, facebook_source
     allowed = None if catalog is None else sorted({
         (str(row["key"][0]), row["effect_source"]["adset_id"], row["effect_source"]["ad_id"])
         for row in catalog if row["platform"] == "facebook" and row["site_id"] == site
-        and row.get("effect_source") and eligible(row, end) and not row.get("excluded")})
+        and row.get("effect_source") and (include_unconfirmed or eligible(row, end))
+        and not row.get("excluded")})
     fingerprint = hashlib.sha256(json.dumps(allowed, separators=(",", ":")).encode()).hexdigest()
     key = (start, end, "facebook_source_ids_v2", source_site("facebook", site), fingerprint)
     with _lock:
@@ -169,13 +170,15 @@ def scoped_facebook_source(app, start, end, site, catalog=None):
 
 
 def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False,
-                 catalog_snapshot=None):
+                 catalog_snapshot=None, include_unconfirmed_sources=False):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
     params = parameters(query)
     # Content provenance is independent of permission scope. HTTP keeps the
     # authenticated tenant/owner actor; only scheduled collection is global.
     if catalog_snapshot is not None and actor.get('_system_report') is not True:
         raise ReportError('冻结归属快照仅供内部采集', 400)
+    if include_unconfirmed_sources and actor.get('_system_report') is not True:
+        raise ReportError('未确认发布来源仅供内部采集', 400)
     catalog, catalog_errors = (catalog_snapshot if catalog_snapshot is not None
                                else read_catalogs(app, params["platforms"]))
     metrics, errors, fetched = [], {}, []
@@ -197,9 +200,11 @@ def build_report(app, actor, query, *, include_titles=False, export=False, ai_ba
         try:
             args = () if len(PLATFORMS[platform]["sources"]) == 1 else (spec["site_id"],)
             if ai_backend_only and platform == "facebook":
-                candidates = None if actor.get("_system_report") is True else catalog
+                candidates = (None if actor.get("_system_report") is True
+                              and not include_unconfirmed_sources else catalog)
+                options = {"include_unconfirmed": True} if include_unconfirmed_sources else {}
                 channel_rows, channel_fetched = scoped_facebook_source(
-                    app, params["start"], params["end"], spec["site_id"], candidates)
+                    app, params["start"], params["end"], spec["site_id"], candidates, **options)
             elif web_scoped and platform in {"youtube", "x"}:
                 from .scoped_metrics import campaign_scope, source as scoped_source
                 candidates = campaign_scope(catalog, actor, params, platform, spec["site_id"])

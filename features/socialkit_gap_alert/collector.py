@@ -114,11 +114,11 @@ def history(catalog):
     return {key: dict(count=len(value), last_date=max(value.values())) for key, value in result.items()}, blocked
 
 
-def source_times(app, day, platform, *, raw_sources=None):
+def source_times(app, day, platform, *, raw_sources=None, catalog=None):
     """Reuse the same collector cache populated by build_report, per source site."""
     values = {}
     for site in sorted(SITES[platform]):
-        rows, _ = (scoped_facebook_source(app, day, day, site) if platform == "facebook"
+        rows, _ = (scoped_facebook_source(app, day, day, site, catalog, include_unconfirmed=True) if platform == "facebook"
                    else source(app, day, day, platform, site))
         values[site] = max((str(row.get("updated_at") or "") for row in rows), default="")
         if raw_sources is not None:
@@ -168,13 +168,15 @@ def own_channel(app, day, platform, now, *, end=None, enforce_fresh=True):
         report = build_report(settings, {"role": "admin", "_system_report": True},
                           {"start": [current_day], "end": [current_day], "platform": [platform],
                            "group_by": ["platform,drama"], "page_size": ["100"]},
-                          ai_backend_only=True, catalog_snapshot=(catalog, errors))
+                          ai_backend_only=True, catalog_snapshot=(catalog, errors),
+                          include_unconfirmed_sources=platform == "facebook")
         quality = report["quality"]["platforms"][platform]
         if (quality["state"] != "complete" or quality["publication_status"] != "complete"
             or quality.get("unmatched_campaigns") or quality.get("publication_conflicts")):
             raise ComparisonUnavailable("own_source_or_attribution_incomplete")
         raw_sources = {}
-        daily_times[current_day] = source_times(settings, current_day, platform, raw_sources=raw_sources)
+        daily_times[current_day] = source_times(settings, current_day, platform,
+                                               raw_sources=raw_sources, catalog=catalog)
         blocked.update(unconfirmed_income_drama(catalog, raw_sources, current_day))
         if (enforce_fresh and current_day >= now.astimezone(timezone.utc).date().isoformat()
                 and not all(fresh(value, now) for value in daily_times[current_day].values())):
