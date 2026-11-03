@@ -195,6 +195,16 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(self.dump(self.central), before)
         self.assertEqual(len(list(self.backups.glob('*.sqlite3'))), 1)
 
+    def test_whole_row_drift_after_plan_is_not_silently_overwritten(self):
+        plan = self.plan()
+        with self.store.transaction() as c:
+            c.execute("UPDATE pipeline_job SET payload_json='{}' WHERE id=?", (plan['items'][0]['job_id'],))
+        before = self.dump(self.central)
+        with self.assertRaisesRegex(recovery.HandoffRejected, 'plan_state_drift'):
+            self.apply(plan)
+        self.assertEqual(self.dump(self.central), before)
+        self.assertFalse(self.backups.exists())
+
     def test_controller_uses_explicit_safe_ssh_and_never_transfers_credentials(self):
         plan = self.plan(); calls = []
         def run(command, **kwargs):

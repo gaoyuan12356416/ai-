@@ -146,7 +146,8 @@ def snapshot(c, native_path, scope, scope_sha, now):
             require(proof['required_capabilities'] and 'prepare:tt' in proof['required_capabilities'], 'frozen_capabilities_missing')
             proof.update(scheduled_at=job['scheduled_at'], native_scheduled_at=row['scheduled_at_utc'],
                          failed_events_sha256=sha(failures), claim_history_sha256=sha(history),
-                         material_reservation_sha256=sha(dict(reservation)), native_lease_until=row['lease_expires_at_utc'])
+                         material_reservation_sha256=sha(dict(reservation)), native_lease_until=row['lease_expires_at_utc'],
+                         central_row_sha256=sha(job), native_row_sha256=sha(row))
             proofs.append(proof)
     return {'items': proofs, 'node_ids': sorted(config['hosts']), 'tt_cutoff': config['cutovers']['tt']}
 
