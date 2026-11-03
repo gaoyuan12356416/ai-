@@ -247,7 +247,7 @@ class TTNativeBridge:
                 raise AdapterError("canonical_preparation_already_completed")
             if (row is None or row["status"] != "preparing" or row["claim_token"] != previous["native_token"]
                     or not str(row["claim_worker"]).startswith("pipeline:")
-                    or ("claim_phase" in row.keys() and row["claim_phase"] != "prepare")
+                    or ("claim_phase" in row.keys() and row["claim_phase"] not in ({"selection", "prepare"} if self.automatic else {"prepare"}))
                     or ("publish_id" in row.keys() and row["publish_id"])
                     or ("publish_attempt_count" in row.keys() and row["publish_attempt_count"])
                     or ("unknown_outcome" in row.keys() and row["unknown_outcome"])
@@ -262,7 +262,8 @@ class TTNativeBridge:
                     or ("source_trim_tail_seconds" in row.keys() and float(row["source_trim_tail_seconds"]) != float(request["source_trim_tail_seconds"]))
                     or ("preparation_profile" in row.keys() and row["preparation_profile"] != request["expected_profile"])):
                 raise AdapterError("canonical_prepare_identity_changed")
-            conn.execute("UPDATE " + table + " SET lease_expires_at_utc='1970-01-01T00:00:00+00:00' WHERE id=? AND claim_token=?",
+            phase = ",claim_phase='prepare'" if self.automatic else ""
+            conn.execute("UPDATE " + table + " SET lease_expires_at_utc='1970-01-01T00:00:00+00:00'" + phase + " WHERE id=? AND claim_token=?",
                          (job["source_id"], previous["native_token"]))
             conn.commit()
         return descriptor
@@ -311,6 +312,10 @@ class TTNativeBridge:
                         # Only unfrozen automatic work selects the explicit H264
                         # profile; an already frozen intake profile stays intact.
                         descriptor = frozen_descriptor or self._prepare_descriptor(executor, lambda clone: clone._prepare(task, native_token), profile=selected_profile)
+                        # A selection claim continues as the same frozen prepare
+                        # item; loss of the HTTP response must not reselect it.
+                        task = self.store.transition_task(identity, "preparing", expected_statuses={"preparing"},
+                            claim_token=native_token, updates={"claim_phase": "prepare"}, event_type="pipeline_preparation_frozen")
                     else:
                         clone, port = media_clone(executor)
                         try:

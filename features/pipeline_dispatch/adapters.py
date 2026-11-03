@@ -104,6 +104,11 @@ def public_descriptor(value):
     return value
 
 
+def canonical_fingerprint(row, identity):
+    fields = {key: row.get(key) for key in (identity, "material_id", "content_id", "account_id", "page_id", "channel_id", "template_version", "gpu_job_id", "source_media_url", "material_url", "body_sha256")}
+    return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def artifact_from(row):
     if row.get("_dispatch_artifact"):
         frozen = obj(row["_dispatch_artifact"])
@@ -380,8 +385,7 @@ class LedgerAdapter:
                 resources.append("youtube:channel:" + str(identity))
         payload = {"source_key": source_key, "native_id": source_id, "native_family": spec.family}
         # Rendering specifications are frozen by reserve(), after native checks.
-        fingerprint_data = {key: row.get(key) for key in (spec.identity, "material_id", "content_id", "account_id", "page_id", "channel_id", "template_version", "gpu_job_id", "source_media_url", "material_url", "body_sha256")}
-        fingerprint = hashlib.sha256(json.dumps(fingerprint_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        fingerprint = canonical_fingerprint(row, spec.identity)
         payload["canonical_fingerprint"] = fingerprint
         payload["source_attempt_count"] = attempts
         payload["reconcile_only"] = unknown or attempts > 0
@@ -520,6 +524,39 @@ class LedgerAdapter:
             row = conn.execute(f"SELECT * FROM {self.spec.table} WHERE {self.spec.identity}=?", (identity,)).fetchone()
             return self.enrich(conn, row) if row else None
 
+    def owns_frozen_tt_selection(self, row, job, claim, expected_fingerprint):
+        """Prove only our previously unselected TT task gained its frozen media."""
+        if ((self.spec.channel, self.spec.family, job.get("stage")) != ("tt", "auto", "prepare")
+                or row.get("status") != "preparing" or row.get("claim_phase") not in {"selection", "prepare"}
+                or not str(row.get("claim_worker", "")).startswith("pipeline:")
+                or row.get("unknown_outcome") or row.get("publish_attempt_count") or row.get("publish_id")):
+            return False
+        original = dict(row, gpu_job_id="", source_media_url="")
+        unselected = dict(original, material_id="", content_id="")
+        if expected_fingerprint not in {canonical_fingerprint(original, self.spec.identity), canonical_fingerprint(unselected, self.spec.identity)}:
+            return False  # No other identity change, including account/template, is allowed.
+        with self.connect() as conn:
+            if not self._exists(conn, "pipeline_tt_claim") or not self._exists(conn, "pipeline_tt_operation"):
+                return False
+            frozen = conn.execute("SELECT * FROM pipeline_tt_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone()
+            if (not frozen or frozen["receipt_json"] or frozen["generation"] > int(job["generation"])
+                    or not row.get("claim_token") or frozen["native_token"] != row["claim_token"]
+                    or conn.execute("SELECT 1 FROM pipeline_tt_operation WHERE source_key=? LIMIT 1", (job["source_key"],)).fetchone()):
+                return False
+            if (frozen["generation"] == int(job["generation"])
+                    and frozen["claim_hash"] != hashlib.sha256(str(claim.get("claim_token") or "").encode()).hexdigest()):
+                return False
+            descriptor = obj(frozen["descriptor_json"])
+        request, identity = obj(descriptor.get("request")), obj(descriptor.get("native_identity"))
+        return (descriptor.get("kind") == "tt_prepare" and descriptor.get("source_key") == job["source_key"]
+                and descriptor.get("account_resource") == "tt:account:" + str(row.get("account_id"))
+                and identity.get("account_id") == str(row.get("account_id"))
+                and identity.get("material_id") == str(row.get("material_id"))
+                and bool(request.get("job_id")) and request["job_id"] == row.get("gpu_job_id")
+                and bool(request.get("content_id")) and request["content_id"] == row.get("content_id")
+                and bool(request.get("source_url")) and request["source_url"] == row.get("source_media_url")
+                and bool(request.get("expected_profile")))
+
 
 class AdapterRegistry:
     def __init__(self, adapters=()):
@@ -556,7 +593,9 @@ class AdapterRegistry:
         current = adapter.project(row) if row else None
         if current is None or current.get("observation_only"):
             raise AdapterError("canonical_task_terminal_or_missing")
-        if current["canonical_fingerprint"] != job.get("canonical_fingerprint", obj(job.get("payload")).get("canonical_fingerprint", current["canonical_fingerprint"])):
+        expected_fingerprint = job.get("canonical_fingerprint", obj(job.get("payload")).get("canonical_fingerprint", current["canonical_fingerprint"]))
+        if (current["canonical_fingerprint"] != expected_fingerprint
+                and not adapter.owns_frozen_tt_selection(row, job, claim, expected_fingerprint)):
             raise AdapterError("canonical_identity_changed")
         continuation = self._verified_continuation(adapter, row, obj(job.get("payload")).get("continuation"), allow_control=True)
         if current["reconcile_only"] and not continuation:
