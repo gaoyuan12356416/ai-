@@ -1,7 +1,7 @@
 # Zero-write attribution recovery, 2026-11-03
 
 `scripts/recover_x_attribution_failures.py` admits only queues 5399, 5407,
-5486, 5544, 5550 and 5552 from the authorized November 2–3 incident. These
+5451, 5486, 5544, 5550 and 5552 from the authorized November 2–3 incident. These
 failed in native `_links()` before a publish claim, link freeze or X operation.
 The script never updates the native database, changes attempts, creates links,
 renders media, or calls X. It only changes the verified central publish job
@@ -31,6 +31,16 @@ connection is the supported explanation, not proof of a missing mapping.
 Current probes verify that this transient failure is no longer present. They
 do not guarantee future availability. A new failed probe blocks admission and
 records only safe HTTP status/error codes and the validated context hash.
+
+The later queue 5451 incident is separately anchored to log 5384, preparation
+job 31671, publish job 32082 generation 1, account 95 / manual run 1477, and
+failure time `2026-11-03T10:54:02.093+00:00`. A new failure or substituted log
+cannot receive another admission through this extension. At 11:18 UTC, the
+complete read-only snapshot passed; native attempt remained 0, with no links,
+Post, operation, publish claim or attribution freeze. CPU outbox held only
+acknowledged preflight, prepare completion and known attribution failure; HK
+outbox held no receipts for either job. The resolver returned valid HTTP 200
+at 11:18:57 UTC. All evidence must be collected again before apply.
 
 ## Operator sequence
 
@@ -71,3 +81,8 @@ pending/unknown/historical successful receipts, resolver identity and freshness,
 and central renderer receipt fields without relaxing artifact identity.
 
 No production apply was performed during this script's development.
+
+The exact 5451 extension passes 18 attribution/pre-Post integration tests,
+including a later generation remaining failed on repeated apply, original
+history/native state preservation, exact identity refusal, and rollback when
+the audit insert is interrupted.

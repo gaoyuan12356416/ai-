@@ -24,7 +24,14 @@ from features.x_posts.attribution import validate_context, build_url
 from scripts.recover_x_prepost_failures import media_facts, stable_job, backup, writable, node_evidence, validate_nodes
 from scripts.recover_pipeline_x_preparation import RecoveryRejected, require, read_connection, rows, date, document_hash, utcnow
 
-QUEUE_IDS = (5399, 5407, 5486, 5544, 5550, 5552)
+QUEUE_IDS = (5399, 5407, 5451, 5486, 5544, 5550, 5552)
+# A later failure is a separate, exact admission, not a license to reset any
+# subsequent attempt on this queue. Keep the original six incidents unchanged.
+EXACT_FAILURES = {5451: {
+    'log_id': 5384, 'prepare_job_id': 31671, 'publish_job_id': 32082,
+    'publish_generation': 1, 'finished_at': '2026-11-03T10:54:02.093+00:00',
+    'account_id': 95, 'manual_run_id': 1477,
+}}
 DAYS = ('2026-11-02', '2026-11-03')
 ERROR = 'x_attribution_resolution_unavailable'
 EVENT = 'audited_zero_write_attribution_recovery'
@@ -46,6 +53,11 @@ def snapshot(c, n, qid, now):
     jobs=rows(c,'SELECT * FROM pipeline_job WHERE source_key=? ORDER BY stage',(key,))
     require(len(jobs)==2 and {j['stage'] for j in jobs}=={'prepare','publish'},'dispatch_stages_changed')
     prep,pub=({j['stage']:j for j in jobs}[s] for s in ('prepare','publish'))
+    if qid in EXACT_FAILURES:
+        require({'log_id': log['id'], 'prepare_job_id': prep['id'], 'publish_job_id': pub['id'],
+                 'publish_generation': pub['generation'], 'finished_at': pub['finished_at'],
+                 'account_id': q['account_id'], 'manual_run_id': q['manual_run_id']}
+                == EXACT_FAILURES[qid], 'exact_failure_identity_changed')
     require(prep['status']=='completed' and pub['status']=='failed' and pub['generation']>0
             and pub['error_code']==ERROR and not pub['canonical_receipt'], 'dispatch_not_exact_failure')
     due=date(json.loads(pub['source_meta_json']).get('cutover_due_at') or pub['scheduled_at'])

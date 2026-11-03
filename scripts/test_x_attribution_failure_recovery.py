@@ -127,5 +127,49 @@ class AttributionRecoveryTests(unittest.TestCase):
         with self.assertRaises(recovery.RecoveryRejected):self.apply(plan)
         self.assertEqual(self.store.get_job(self.failed['id'])['status'],'failed')
 
+    def test_later_exact_incident_preserves_history_and_rejects_new_failure(self):
+        job=self.store.get_job(self.failed['id'])
+        with self.bridge.connect() as c:
+            log_id=c.execute('SELECT id FROM x_post_publish_log WHERE queue_id=?',(self.target['id'],)).fetchone()[0]
+        with self.store.transaction() as c:
+            prep_id=c.execute("SELECT id FROM pipeline_job WHERE source_key=? AND stage='prepare'",(self.failed['source_key'],)).fetchone()[0]
+            history=[tuple(row) for row in c.execute('SELECT * FROM pipeline_claim_history ORDER BY job_id,generation')]
+        exact={'log_id':log_id,'prepare_job_id':prep_id,'publish_job_id':job['id'],
+               'publish_generation':job['generation'],'finished_at':job['finished_at'],
+               'account_id':self.target['account_id'],'manual_run_id':self.target['manual_run_id']}
+        with mock.patch.object(recovery,'EXACT_FAILURES',{self.target['id']:exact}):
+            before=self.dump_native();plan=self.plan()
+            self.apply(plan)
+            retry=self.claim('publish')
+            self.store.fail(retry,recovery.ERROR,canonical_no_write=True)
+            # Reapplying the exact prior plan cannot reset this later generation.
+            self.apply(plan)
+            self.assertEqual(self.store.get_job(job['id'])['status'],'failed')
+            self.assertEqual(self.store.get_job(job['id'])['generation'],2)
+            self.assertEqual(self.dump_native(),before)
+            with self.assertRaisesRegex(recovery.RecoveryRejected,'exact_failure_identity_changed'):
+                self.plan()
+        with self.store.transaction() as c:
+            current=[tuple(row) for row in c.execute('SELECT * FROM pipeline_claim_history ORDER BY job_id,generation')]
+            self.assertTrue(all(row in current for row in history))
+
+    def test_exact_failure_anchor_change_and_transaction_interruption_refuse_reset(self):
+        plan=self.plan()
+        with mock.patch.object(recovery,'EXACT_FAILURES',{self.target['id']:dict(recovery.EXACT_FAILURES[5451])}):
+            with self.assertRaisesRegex(recovery.RecoveryRejected,'exact_failure_identity_changed'):
+                self.apply(plan)
+        before=self.dump_native();job=self.store.get_job(self.failed['id'])
+        with self.store.transaction() as c:
+            c.execute("CREATE TRIGGER interrupt_attribution_audit BEFORE INSERT ON pipeline_event "
+                      "WHEN NEW.event_type='"+recovery.EVENT+"' BEGIN SELECT RAISE(ABORT,'interrupt'); END")
+        with self.assertRaisesRegex(Exception,'interrupt'):
+            self.apply(plan)
+        self.assertEqual(self.store.get_job(self.failed['id']),job)
+        self.assertEqual(self.dump_native(),before)
+        with self.store.transaction() as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM pipeline_event WHERE event_type=?',(recovery.EVENT,)).fetchone()[0],0)
+            c.execute('DROP TRIGGER interrupt_attribution_audit')
+        self.apply(plan)
+
 
 if __name__=='__main__':unittest.main()
