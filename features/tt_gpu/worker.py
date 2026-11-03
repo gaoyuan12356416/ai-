@@ -1945,6 +1945,7 @@ def inspect_input(payload, max_duration):
         "duration": duration,
         "has_audio": bool(audios),
         "video": {key: video.get(key) for key in ('width', 'height', 'codec_name', 'pix_fmt',
+                  'r_frame_rate', 'avg_frame_rate', 'start_time', 'sample_aspect_ratio',
             'color_space', 'color_range', 'color_transfer', 'color_primaries', 'chroma_location', 'field_order')},
     }
 

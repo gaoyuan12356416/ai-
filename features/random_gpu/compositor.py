@@ -72,8 +72,8 @@ def _escape(path):
 
 def fuse_command(command, recipe, output, info=None):
     """Keep the existing delivery arguments and replace the CPU composition."""
-    from .gpu_pipeline import qualification, fuse_command as accelerated_command
-    if qualification(info) == 'qualified':
+    from .gpu_pipeline import qualification, source_qualification, fuse_command as accelerated_command
+    if qualification(info) == 'qualified' and source_qualification(command, info) == 'qualified':
         return accelerated_command(command, recipe, output, info)
     graph_index = command.index("-filter_complex")
     prefix = replace_asset_inputs(list(command[:graph_index]))
@@ -132,6 +132,8 @@ def preflight(ffmpeg, encoder, work_root):
     if encoder not in ("h264_nvenc", "hevc_nvenc"):
         raise ValueError("GPU compositor requires NVENC")
     Path(work_root).mkdir(parents=True, exist_ok=True)
+    from .gpu_pipeline import preflight as source_preflight
+    source_preflight(ffmpeg, encoder, work_root)
     with tempfile.TemporaryDirectory(prefix="compositor-preflight-", dir=work_root) as tmp:
         path = Path(tmp) / "preflight.cl"
         path.write_text(kernel_source({"rotation_millidegrees": 0, "scale_bp": 10000,

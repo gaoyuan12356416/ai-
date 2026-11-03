@@ -76,6 +76,16 @@ const server = http.createServer((req, res) => {
     await page.locator('form[data-host="gpu-third"][data-stage="prepare"] button[data-drain]').click();
     await page.waitForFunction(() => document.querySelector("#pmCapacityVersion").textContent.includes("2"));
     assert.deepEqual(writes[0], { expected_version: 1, host_id: "gpu-third", stage: "prepare", max_workers: 0 });
+    // Both stage forms accept live raises and lowers with the latest authority
+    // version. Backend tests separately prove active claims remain unchanged.
+    for (const [stage, value] of [["prepare", 6], ["publish", 4], ["prepare", 2], ["publish", 1]]) {
+      const form = page.locator(`form[data-host="hk-gpu"][data-stage="${stage}"]`);
+      const version = capacity.version;
+      await form.locator('input[name="max_workers"]').fill(String(value));
+      await form.locator('button[type="submit"]:not([data-drain])').click();
+      await page.waitForFunction(v => document.querySelector('#pmCapacityVersion').textContent.includes(String(v)), version + 1);
+      assert.deepEqual(writes.at(-1), { expected_version: version, host_id: "hk-gpu", stage, max_workers: value });
+    }
     await page.locator("#pmEnrollOpen").click(); assert.equal(await page.locator('#pmEnrollForm input[name="label"]').getAttribute("maxlength"), "100"); await page.locator('#pmEnrollForm input[name="label"]').fill("第三台服务器"); await page.locator('#pmEnrollForm button').click();
     await page.waitForFunction(() => document.querySelector("#pmEnrollmentConfig").textContent.includes("fixture-one-use-token"));
     assert.equal(await page.evaluate(() => Object.values(localStorage).some(v => v.includes("fixture-one-use-token"))), false);
