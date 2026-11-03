@@ -189,6 +189,12 @@ class ThrottleTests(unittest.TestCase):
         self.assertEqual(g.account_budget('100')['cooldown_seconds'],180)
         self.assertEqual(g.account_budget('200')['cooldown_seconds'],0)
         self.assertEqual(g.limit,32)
+        with self.assertRaises(RequestNotSent) as raised:
+            with g.slot('100',lambda:False):self.fail('cooling account acquired a slot')
+        self.assertEqual(raised.exception.code,'cover_account_cooldown')
+        self.assertEqual(g.active,0)
+        with g.slot('200',lambda:False):self.assertEqual(g.active,1)
+        self.assertEqual(g.account_budget('100')['cooldown_seconds'],180)
 
     def test_cover_global_and_unrecognized_scope_still_reduce_and_cool_down(self):
         for headers in ({'x-app-usage':'{"call_count":90}'},

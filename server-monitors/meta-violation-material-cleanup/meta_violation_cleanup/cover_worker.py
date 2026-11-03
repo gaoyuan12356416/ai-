@@ -24,7 +24,8 @@ _WAITING = {'DISAPPROVED', 'PENDING_REVIEW', 'IN_PROCESS', 'PREAPPROVED'}
 _CLEAR = {'ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'CAMPAIGN_PAUSED',
           'ARCHIVED', 'WITH_ISSUES', 'PENDING_BILLING_INFO'}
 _DEFER_CODES = {'cover_stopped', 'cover_context_expired', 'cancelled_before_request',
-                'cancelled_before_write', 'cover_shared_busy', 'cover_resource_busy'}
+                'cancelled_before_write', 'cover_shared_busy', 'cover_resource_busy',
+                'cover_account_cooldown'}
 
 
 def _error(exc):
@@ -859,7 +860,7 @@ class CoverWorker:
             except PayloadError:
                 self._halt('creative_parameters_changed')
                 counts['unresolved_resources'] += 1
-            except GraphError:
+            except (GraphError, RequestNotSent):
                 counts['unresolved_resources'] += 1
         for task in self.store.unknown_tasks(limit=limit):
             if self.stopped():
@@ -882,7 +883,7 @@ class CoverWorker:
                 self.store.finish_task(task['id'], 'succeeded', proof)
                 self.shared.release_cover_resources('cover-task:' + str(task['id']), verified=True)
                 counts['tasks_confirmed'] += 1
-            except (GraphError, PayloadError):
+            except (GraphError, PayloadError, RequestNotSent):
                 counts['unresolved_tasks'] += 1
         for row in self.store.unknown_deletions(limit=limit):
             if self.stopped():
@@ -901,6 +902,6 @@ class CoverWorker:
                     self.shared.finish_cover_delete(owner, account, creative, 'deleted_verified', proof)
                 self.shared.release_cover_resources(owner, verified=True)
                 counts['deletions_confirmed'] += 1
-            except GraphError:
+            except (GraphError, RequestNotSent):
                 counts['unresolved_deletions'] += 1
         return dict(counts)

@@ -43,6 +43,12 @@ class Governor:
             if stop():raise RequestNotSent('cancelled_before_request')
             with self.lock:
                 now=self.clock()
+                # Cover tasks must yield their worker during account cooldown,
+                # including cooldown learned between a write and its readback.
+                # A sleeping final task otherwise blocks the next entire batch.
+                if self.account_scoped_usage and now<self.account_until.get(account,0):
+                    self.metrics['account_cooldown_deferrals']+=1
+                    raise RequestNotSent('cover_account_cooldown')
                 ready=(now>=max(self.global_until,self.account_until.get(account,0),self.next_request)
                     and self.active<self.limit and self.accounts[account]<self.account_limits.get(account,self.per_account))
                 if ready:

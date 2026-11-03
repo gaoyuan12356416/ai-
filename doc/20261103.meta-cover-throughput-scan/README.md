@@ -21,6 +21,13 @@ allowing other accounts to progress without consuming stale prepared contexts.
 Metrics distinguish global usage, account throttling and skipped cooling
 accounts.
 
+Account cooldown also yields an already-started cover task before its next HTTP
+request. Otherwise a single post-bind readback waiting for a long account
+cooldown holds the end of a 256-task cycle and stalls unrelated queued accounts.
+Unsent writes defer; sent writes retain their receipt and become read-only
+reconciliation candidates. Cooldown during reconciliation remains unresolved
+without pausing all workers. No request is sent before the cooldown expires.
+
 ## Scan repair
 
 Live diagnostics reproduced MySQL 2013 during session initialization. The old

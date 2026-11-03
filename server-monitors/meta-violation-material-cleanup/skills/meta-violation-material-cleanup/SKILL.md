@@ -48,7 +48,9 @@ Cover execution scopes an exact-account BUC header to that account: usage at
 70% lowers its two-slot ceiling to one, below 60% restores it, and 85% retains
 the existing cooldown. App/unknown-scope pressure and explicit rate limits stay
 global; the 32-slot and 24-starts/second ceilings remain. Cooling accounts are
-skipped before SQL preparation. Scan evidence and reverse lookup each reuse a
+skipped before SQL preparation. A request encountering account cooldown yields
+the cover task instead of holding the entire cycle: unsent writes defer, sent
+writes retain receipts for GET-only reconciliation without replay. Scan evidence and reverse lookup each reuse a
 bounded read-only snapshot; a transient connection error may restart the entire
 failed scan once in a new batch, never splice partial pages or retry media writes.
 
