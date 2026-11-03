@@ -1,6 +1,6 @@
 # 部署与回滚
 
-当前部署进度（2026-11-03，恢复制作核对中）：协调器运行 `5b274ff`，独立 YouTube canonical bridge 运行 `c097f39`（loopback 18847），X/FB/TT 原生服务和两节点均为 `95fdaa4`。主 API PID 2281641 保持不变；原八条 outbox 已全部 ACK，pending=0。YouTube 按用户手动暂停保持 off，TT 维护恢复及 X/FB 恢复制作正在收尾，制作/发布 readback 待补，不能声称本轮四渠道业务全部验收。下列 11 月 2 日记录为历史基线，不代表今天的组件和业务终态；本轮最终业务验收见 [system-test-20261103.md](system-test-20261103.md)。
+当前部署进度（2026-11-03 03:24:16Z 核对）：协调器运行 `5b274ff`，独立 YouTube canonical bridge 运行 `c097f39`（loopback 18847），X/FB/TT 原生服务和两节点均为 `95fdaa4`。主 API PID 2281641 保持不变。TT/X/FB 已恢复，CPU 4 条、GPU 2 条共 6 条真实 render 在执行（TT 5、X 1）；YouTube 按用户手动暂停保持 off。含新增预检回执，CPU outbox 80/80 ACK、GPU 28/28 ACK，双方 pending=0。已确认制作恢复，未宣称新 TT 已发布或四渠道业务全部验收。下列 11 月 2 日记录为历史基线，不代表今天的组件和业务终态；本轮业务验收见 [system-test-20261103.md](system-test-20261103.md)。
 
 **11 月 2 日历史末态：**协调器、X 原生服务和 CPU 节点运行 668d0b2，GPU 节点运行 CA 修复版 b349295。四渠道于 2026-11-02 15:10:25Z 恢复接单，15:25:59Z 仍全部启用；旧触发器按原状态恢复，本次临时端口/防火墙规则全部清理。新流程已有 CPU/GPU 真实制作、Facebook 和 X 最终发布回执；TT unknown 保留，GPU TLS 修复后未重试原任务，TT/YouTube 完整业务验收待正常任务。以下组件版本来自实际部署核对，不能从本地 HEAD 推断其他线上组件。
 
@@ -16,7 +16,9 @@ TT 8 条已证明无执行的 selection 交接只作为部署排空的精确例�
 
 CPU/GPU 已升级同一份 `95fdaa4` 预检候选。原节点身份、state、原八条回执身份及内容保留；CPU 专用 TT binary 不变。CPU 5 / GPU 9 TT profiles、实际 X repair、strict outro 30fps/AAC、COS 预检通过。八条原回执已全部 ACK，双方 pending=0；两条 late preflight 曾返回 SQLite OperationalError，重交原事实成功，没有重执行，尚无证据确定具体锁原因。中央 31592/31595 只纠正 artifact 到已验证最终 SHA `ec9eb359…` / `4883f412…`，各一条审计事件，status/gen2 不变。
 
-YouTube 此前 4 条真实发布事实已经核实，本轮继续保持用户手动暂停，不等待六条封面补齐。恢复后的 TT 制作/发布及 X/FB 正常任务证据后续另记，不以服务 active 或回执 ACK 替代新业务最终回执。
+TT 于 03:22:13Z 恢复，X 于 03:23:06Z、FB 于 03:23:18Z enabled。03:24:16Z CPU 4 + GPU 2 共 6 条真实 render，独立 15 秒心跳持续跨越原 120 秒失租窗口；发布池各 2 个进程 idle/account_busy 等待成片或账号资源。YouTube 此前 4 条真实发布事实已经核实，本轮继续保持用户手动暂停，不等待六条封面补齐。当前证明制作恢复，制作完成与新 TT 发布最终回执仍待核对。
+
+同次只读监控 summary/workers/tasks 200，129/12/28ms，所有状态和唯一发布事实与账本匹配；普通用户 13/0 行、越权 0。原 17 条精确保留任务全部 unchanged，1,454 条原生 hold source key 集合不变且 0 被领取。证据为 `pipeline-monitor-after-repair.json`、`cpu-restored-runtime.json`、`gpu-restored-runtime.json`、`retained-after-repair.json`；不以服务 active 或回执 ACK 替代新业务最终回执。
 
 本轮回退仍须先关闭新领取并排空，在相应服务停止后用上述 manifest 的 `rollback` 恢复代码/配置。不得将部署备份数据库覆盖当前账本，不清理旧 outbox、publication、unknown、素材预留或历史暂停。
 

@@ -2,11 +2,11 @@
 
 本记录覆盖本轮监控/API/前端/权限/统计系统测试，以及随后定位的 FB 原生控制锁和回执重复投递问题。2026-11-03 10:00–10:07 CST 的线上部分全部只读：没有修改权限、容量、任务、预约或锁，没有发布/重试平台请求。前一天证据未覆盖，新增证据保存于本次私有工作目录 `work/acceptance-20261103/`。以下带 Z 的时间为 UTC，其余为北京时间。
 
-当前进度（2026-11-03 修复上线后、恢复制作核对中）：协调器已部署 `5b274ff`，X/FB/TT 原生服务和两节点为 `95fdaa4`，独立 YouTube 原生桥为 `c097f39`、监听 loopback 18847。主 API 进程保持不变。CPU/GPU 原八条 outbox 均已 ACK，pending=0。用户已手动暂停 YouTube，本轮保持 YouTube off；TT 维护恢复及 X/FB 恢复制作由根代理收尾，实际制作/发布 readback 待补。
+当前进度（2026-11-03 03:24:16Z 只读核对）：协调器 `5b274ff`、X/FB/TT 原生服务和两节点 `95fdaa4` 已恢复制作，CPU 4 条、GPU 2 条共 6 条真实 render（TT 5、X 1）。独立 YouTube 原生桥为 `c097f39`、loopback 18847，主 API 进程未变。TT 于 03:22:13Z 恢复，X / FB 分别于 03:23:06Z / 03:23:18Z enabled；YouTube 按用户手动暂停保持 off。原八条 outbox 均已 ACK；含新增预检回执，CPU 为 80/80 ACK、GPU 为 28/28 ACK，双方 pending=0。新 TT 制作完成与最终发布仍待自然回执，不能将正在编码记成已完成。
 
 完整 pipeline 套件在 `c097f39` 为 426 项通过（85.987s），TT worker 91 项通过（4.786s），监控 33 项及本地浏览器通过；后续 recipe 白名单修复 `5b274ff` 另有 44 项相关测试通过，未声称重新跑过 427 项完整套件，也不把各组相加。
 
-监控、权限和本地测试通过不等于完整业务验收通过。下文 10:00 的发布 0 / 制作完成 5 / 失败 96 是修复前历史快照，不代表当前总量。节点升级及原回执收敛已有下文证据，恢复制作后的正常业务结果另行补证；不能用 API 200、worker 心跳或编码探针替代平台最终回执。
+监控、权限和本地测试通过不等于完整业务验收通过。下文 10:00 的发布 0 / 制作完成 5 / 失败 96 是修复前历史快照，不代表当前总量。节点升级、原回执收敛和真实制作恢复已有下文证据，制作完成与新平台最终回执另行补证；不能用 API 200、worker 心跳或编码探针替代平台最终回执。
 
 ## 测试范围、方法与结果
 
@@ -120,8 +120,18 @@ BUG-006 的 `c097f39` 只在原历史 claim、原生最终成片及迟到回执 
 
 证据包括 `coordinator-5b274ff-deploy.json`、`x-final-artifact-exact-correction.json`、`x-late-artifact-corrected.json`、`cpu-original-receipt-response.json`、`gpu-original-receipt-response.json`、`read_native_final.json`、`native-*-apply-*.jsonl`、`read_fb_scope.json`、`stage-cpu-main-95fdaa4c4db0.json`、`stage-hk-gpu-95fdaa4c4db0-attempt2.json`、`tt-handoff-applied-84c6cb6758f64a58ab1da69b7c44aefe.json`。TT 正式计划 SHA 为 `659041517629132431e4c8459ce668912b3c97dc2711ebb1e223a139a50b5a31`，恢复前中央备份与原生未修改结果已保留。
 
+## 03:24Z 恢复制作与保护边界核对
+
+03:22:13Z 恢复 TT，随后 03:23:06Z 开启 X、03:23:18Z 开启 FB。03:24:16Z 双节点运行时读回与 03:24:35Z TT 业务核对证明 CPU 4 条、GPU 2 条真实 render 在执行，合计 TT 5 条、X 1 条；不是仅靠 worker 的 busy 标志判断。任务独立 15 秒心跳已持续跨越原 120 秒失租故障窗口。两台发布池各 2 个进程存活，此刻 idle/account_busy 等待成片或同账号资源，不代表发布进程缺失，也不证明新 TT 已发出。
+
+原八条回执全部已 ACK；新增预检事实继续正常入账，CPU outbox 80/80 ACK，GPU 28/28 ACK，双方 pending=0。没有清空 payload 或重新执行旧平台请求来消除积压。
+
+03:24:16Z 线上监控 summary/workers/tasks 均 HTTP200，耗时 129/12/28ms；8 类状态、唯一发布事实和动态节点与只读账本全部一致。两名普通用户分别可见 13/0 行，越权均为 0。此前冻结保留的 17 条精确旧任务全部 unchanged；1,454 条原生 hold 的 source key 集合不变，被领取数为 0。监控 backlog_paused 投影总量 1,456 与原生 hold 数为不同集合，分别按各自账本核对，不混用总数。
+
+证据：`pipeline-monitor-after-repair.json`、`cpu-restored-runtime.json`、`gpu-restored-runtime.json`、`retained-after-repair.json`。TT 交接已有独立只读、冻结身份和无执行证明；运维辅助 scratch 副本后缀探针的覆盖修正单独记录，不据此重启生产或重复执行交接。
+
 ## 仍需完成的业务验收
 
-本轮监控、前端及系统回归通过，协调器/原生桥/节点已上线，原八条回执收敛；当前优先恢复正常制作，实际 X/FB/TT 制作和发布 readback 待补，不能称四渠道新一轮完整业务验收通过。YouTube 此前已有 4 条经验证的真实最终发布事实，本轮用户已手动暂停 YouTube，保持 off，不为等齐六条封面而延迟恢复其他制作，也不因文档验收重新开启。未知回执仍需核对，失败不自动重试；精确八条 TT 无执行交接是另有审计授权的窄恢复，不推广到其他历史任务。
+本轮监控、前端及系统回归通过，协调器/原生桥/节点已上线，原八条回执收敛，双机 6 条真实制作已恢复；制作完成与新 TT 发布最终回执仍需核对，不能称四渠道新一轮完整业务验收通过。YouTube 此前已有 4 条经验证的真实最终发布事实，本轮用户已手动暂停 YouTube，保持 off，不为等齐六条封面而延迟恢复其他制作，也不因文档验收重新开启。未知回执仍需核对，失败不自动重试；精确八条 TT 无执行交接是另有审计授权的窄恢复，不推广到其他历史任务。
 
 关键证据：`pipeline-monitor-acceptance.json`、`monitor-public-auth.json`、`monitor-python.log`、`monitor-browser.log`、`ui/`、`business-full.json`、`fb-native-diagnosis.json`。证据原件留在私有工作目录；文档不保存 session、token、私有环境或签名 URL。
