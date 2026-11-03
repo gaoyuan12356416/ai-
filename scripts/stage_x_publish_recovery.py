@@ -27,13 +27,9 @@ FILES = {
     ],
     'coordinator': ['features/pipeline_dispatch/adapters.py',
         'features/pipeline_dispatch/x_prepost_recovery.py'],
-    'main': ['features/x_posts/service.py',
-        'features/pipeline_dispatch/x_manual_recovery.py',
-        'features/pipeline_dispatch/x_schedule_recovery.py'],
 }
 ROOTS = {'x': '/opt/x-post-automation/current',
-         'coordinator': '/opt/pipeline-dispatch/current',
-         'main': '/root/drama_material_service'}
+         'coordinator': '/opt/pipeline-dispatch/current'}
 
 
 def run(argv, cwd=None, data=None):
