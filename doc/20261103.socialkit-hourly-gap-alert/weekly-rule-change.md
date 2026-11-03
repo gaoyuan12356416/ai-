@@ -21,3 +21,15 @@
 确认现有部署安装器涉及的静态文件及 unit 无漂移后，运行 `python3 ops/socialkit-analytics/install_hourly.py --install COMMIT`，记录新备份 manifest。原小时 timer 在安装期间短暂停止，运行中刷新不强杀；安装后恢复。主 API、Nginx 和发布服务无需重启。上线后以新代码进行预览/正常小时周期核验。
 
 回滚使用新 release 的 `python3 ops/socialkit-analytics/install_hourly.py --verify-rollback MANIFEST` 核对，再执行 `--rollback MANIFEST`。只还原版本指针及安装器备份文件，保留快照、收入事实和投递账本，禁止重发未知结果。
+
+## 实际部署
+
+功能提交 `02c2b2dffc7a4c61e5019a3b740c19d2a412f213`，北京时间 2026-11-03 14:42 已从 GitHub 拉取并切换 `/opt/socialkit-analytics/current`。备份 `/mnt/data-disk/socialkit-analytics/backups/hourly-20261103T064200Z/manifest.json`，原 release `c56cc94f5cad6c9d5af3a81247bb9438f0965b74`。回滚验证通过。timer 已恢复 active/enabled，下一轮 15:00；本次仅预览，未立即发送或重发。
+
+在 CPU 上执行精确回滚：
+
+```sh
+cd /mnt/data-disk/socialkit-analytics/releases/02c2b2dffc7a4c61e5019a3b740c19d2a412f213
+python3 ops/socialkit-analytics/install_hourly.py --verify-rollback /mnt/data-disk/socialkit-analytics/backups/hourly-20261103T064200Z/manifest.json
+python3 ops/socialkit-analytics/install_hourly.py --rollback /mnt/data-disk/socialkit-analytics/backups/hourly-20261103T064200Z/manifest.json
+```
