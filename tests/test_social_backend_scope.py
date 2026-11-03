@@ -160,6 +160,20 @@ class BackendScopeTests(unittest.TestCase):
             with self.assertRaisesRegex(ReportError, "上限"):
                 facebook_source({}, DAY, DAY, "2049", [("6", "page", "material")])
 
+    def test_indexed_page_superset_still_requires_exact_case_and_source_tuple(self):
+        from features.social_analytics import routes
+        candidates = [metric(cid="AbC", ad_id="one"),
+                      metric(cid="abc", ad_id="one", cents=80000),
+                      metric(cid="AbC", adset_id="Page", ad_id="one", cents=70000),
+                      metric(cid="AbC", ad_id="two", cents=60000)]
+        with patch.object(routes, "query_source_rows", return_value=candidates) as query:
+            values, _ = facebook_source({}, DAY, DAY, "2049", [("AbC", "page", "one")], indexed_pages=True)
+        self.assertEqual(sum(row["revenue_cents"] for row in values), 100)
+        sql = query.call_args.args[1]
+        self.assertIn("FORCE INDEX(adset_dt)", sql)
+        self.assertIn("FORCE INDEX(sd)", sql)  # The separate date-coverage check retains its own index.
+        self.assertNotIn("BINARY adset_id IN", sql)
+
 
 if __name__ == "__main__":
     unittest.main()

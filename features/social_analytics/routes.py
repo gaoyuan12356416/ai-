@@ -160,7 +160,8 @@ def scoped_facebook_source(app, start, end, site, catalog=None, *, include_uncon
         if cached and time.monotonic() - cached[0] < TTL:
             _cache.move_to_end(key)
             return cached[1], cached[2]
-    result, fetched = facebook_source(app, start, end, site, allowed_sources=allowed)
+    options = {"indexed_pages": True} if include_unconfirmed else {}
+    result, fetched = facebook_source(app, start, end, site, allowed_sources=allowed, **options)
     with _lock:
         _cache[key] = (time.monotonic(), result, fetched)
         _cache.move_to_end(key)

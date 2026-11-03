@@ -182,7 +182,8 @@ class ComparisonTests(unittest.TestCase):
         def query(app, sql, limit):
             self.assertIn("UNION ALL", sql)
             if "site_id='2049'" in sql:
-                self.assertIn("BINARY adset_id IN", sql)
+                self.assertIn("FORCE INDEX(adset_dt)", sql)
+                self.assertIn("AND adset_id IN", sql)
                 return [metric(cid="ok", cents=123, date=DAY),
                         metric(cid="unknown", cents=456, date=DAY),
                         metric(cid="ok", cents=99999, adset_id="other-page", date=DAY)]

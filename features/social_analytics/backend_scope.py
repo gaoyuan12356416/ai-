@@ -17,7 +17,7 @@ def eligible(row, day):
     return any(fact["date"] <= day for fact in row.get("publications", []))
 
 
-def facebook_source(app, start, end, site, allowed_sources=None):
+def facebook_source(app, start, end, site, allowed_sources=None, *, indexed_pages=False):
     from .routes import MAX_ROWS, metric_sql, query_source_rows
     # Broad web reads must not put a month of legacy Page/material matches in
     # one statement. Keep the exact triple verification within each disjoint
@@ -40,7 +40,8 @@ def facebook_source(app, start, end, site, allowed_sources=None):
         def read_window(period):
             if time.monotonic() >= settings["SOCIAL_ANALYTICS_QUERY_DEADLINE"]:
                 raise ReportError("效果查询时间预算已用完；本次不按零统计", 503)
-            return facebook_source(settings, *period, site, allowed_sources=allowed_sources)
+            return facebook_source(settings, *period, site, allowed_sources=allowed_sources,
+                                   indexed_pages=indexed_pages)
 
         result, fetched = [], []
         def collect(chunks):
@@ -73,7 +74,12 @@ def facebook_source(app, start, end, site, allowed_sources=None):
         # can leave this source boundary. Never SUM by campaign alone.
         allowed_sources = {tuple(str(value) for value in triple) for triple in allowed_sources}
         pages = sorted({triple[1] for triple in allowed_sources})
-        predicate = ("BINARY adset_id IN (" + ",".join(literal(page) for page in pages) + ")"
+        # Internal seven-day comparison uses the existing (adset_id, dt) index.
+        # The indexed collation may yield a superset; the exact tuple check below
+        # still rejects case collisions, other sites and unrelated materials.
+        if indexed_pages:
+            sql = sql.replace("FORCE INDEX(sd)", "FORCE INDEX(adset_dt)")
+        predicate = (("adset_id" if indexed_pages else "BINARY adset_id") + " IN (" + ",".join(literal(page) for page in pages) + ")"
                      if pages else "1=0")
         sql = sql.replace("GROUP BY dt,BINARY campaign_id", "AND " + predicate + " GROUP BY dt,BINARY campaign_id")
         # Source-day existence must survive even if no backend content had any
