@@ -414,11 +414,11 @@ class YouTubeContinuationProjectionTests(unittest.TestCase):
             store.offer(offer)
             self.assertEqual(store.claim('cpu-main', 'cover-worker', 'prepare')['job']['source_key'], 'youtube:preparation:cover')
 
-    def test_cover_project_recovers_frozen_channel_identity_from_body(self):
+    def test_cover_resource_requires_frozen_channel_identity_but_is_task_scoped(self):
         adapter = LedgerAdapter(LedgerSpec('youtube', 'preparation', ':memory:', 'youtube_auto_preparation', state='state'), SimpleNamespace(control_only=False))
         row = {'id': 'cover', 'state': 'queued_generation', 'created_at': '2026-11-02T00:00:00Z',
                'body': json.dumps({'channel': {'channel_id': 'UC_frozen'}})}
-        self.assertEqual(adapter.project(row)['resource_keys'], ['youtube:channel:UC_frozen'])
+        self.assertEqual(adapter.project(row)['resource_keys'], ['youtube:cover:cover'])
         row['body'] = '{}'
         self.assertEqual(adapter.project(row)['resource_keys'], [])
 

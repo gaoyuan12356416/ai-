@@ -390,7 +390,11 @@ class LedgerAdapter:
             body = obj(row.get("body")) if spec.family == "preparation" else {}
             identity = row.get("channel_id") or body.get("channel_id") or obj(body.get("channel")).get("channel_id")
             if identity:
-                resources.append("youtube:channel:" + str(identity))
+                # Cover generation only writes this preparation's private asset.
+                # Historical uncertain uploads must fence new platform writes,
+                # without preventing the owner from generating/reviewing covers.
+                resources.append("youtube:cover:" + source_id if spec.family == "preparation"
+                                 else "youtube:channel:" + str(identity))
         payload = {"source_key": source_key, "native_id": source_id, "native_family": spec.family}
         # Rendering specifications are frozen by reserve(), after native checks.
         fingerprint = canonical_fingerprint(row, spec.identity)
