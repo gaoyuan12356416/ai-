@@ -150,6 +150,9 @@ class RecoveryTests(unittest.TestCase):
         unit = (Path(cover.__file__).parent / 'deploy/meta-cover-worker.service').read_text()
         self.assertIn('Restart=on-failure', unit)
         self.assertIn('RestartPreventExitStatus=78', unit)
+        self.assertIn('KillSignal=SIGINT', unit)
+        self.assertIn('KillMode=mixed', unit)
+        self.assertIn('TimeoutStopSec=180', unit)
 
     def test_timing_includes_failed_operation_and_record_has_no_write_payload(self):
         clock = [0.]

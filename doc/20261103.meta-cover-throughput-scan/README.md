@@ -36,6 +36,14 @@ top-ups while retaining overlap, the per-account limit and the unchanged
 30-second source freshness checks. A deterministic staggered-completion test
 covers two accounts using only four of the 32 global slots.
 
+The worker unit uses `KillSignal=SIGINT` with `KillMode=mixed`: first notify
+only the Python coordinator so it can drain active SQL children and write
+receipts. The existing 180-second timeout still escalates against the whole
+control group. The previous default control-group signal could interrupt a
+read-only mysql query with exit 130, turning an intentional stop into
+`sql_stream_incomplete` and a durable write pause. Transient acceptance units
+must use the same mixed kill mode. Keep genuine source/ledger pauses intact.
+
 ## Scan repair
 
 Live diagnostics reproduced MySQL 2013 during session initialization. The old

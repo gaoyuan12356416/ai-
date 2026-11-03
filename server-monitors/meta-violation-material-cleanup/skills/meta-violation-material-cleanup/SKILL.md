@@ -59,6 +59,12 @@ before SQL top-ups unless a ready account without buffered context can use a
 free execution slot. Global free slots alone do not justify another snapshot
 when account budgets are full. Keep source TTL and per-account limits unchanged.
 
+Worker and temporary acceptance units use KillSignal=SIGINT, KillMode=mixed and
+TimeoutStopSec=180. Signal the coordinator first so it drains mysql subprocesses;
+the default control-group SIGINT can produce mysql exit 130 and a false SQL
+failure pause. The timeout still kills remaining processes as a group. A pause
+may only be archived after its exact cause and current receipts are verified.
+
 Use 32 Ad execution workers. All GET/POST/DELETE in both lanes share one Graph governor: initial/max in-flight 32, per-account 2, total request starts 24/second; respect platform cooldowns and reduce later concurrency. The governor gradually recovers (+2 per 20 seconds with fresh pressure below 60) after throttling. The Ad lane fills free execution slots without waiting for an entire wave. The caller prepares at most 64 contexts per short SQL snapshot, bounded by current free slots plus one execution-capacity buffer; retained prefetched work is at most one capacity after submission. Keep two executing tasks per account, bounded ahead-of-time preparation, and the 30-second freshness check before every write. Freshness starts before SQL preparation, not when SQL returns. Expired unsubmitted contexts are re-read at most once per cycle, then safely deferred; no write is replayed. Use read-only FIFO Gate with SQL_GATE_BYPASS=0 and verified @@read_only=1. Never bypass through direct drivers or mysql.real.
 
 The existing meta-cover-worker.service owns two independent loops in one process: Ad replacement and old-Creative cleanup. Cleanup defaults to four workers (cover_cleanup_workers, range 1..4), consumes its durable queue independently, and never runs at the end of each Ad cycle. Both loops share the same governor and legacy lease, so they do not double request limits or deadlock on two exclusive legacy locks. Skip local cleanup candidates while related replacement tasks remain pending/in-progress/review/unknown, except provably unstarted rows in failed scans; this scheduling filter does not replace complete Meta inventory, object reservations, fresh checks or one-attempt deletion. Existing historical reference waits retain their next-check times.
