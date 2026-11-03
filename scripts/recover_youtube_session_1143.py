@@ -32,6 +32,13 @@ def environment(unit):
     os.environ.update({k.decode():v.decode() for k,v in (p.split(b'=',1) for p in Path('/proc/'+pid+'/environ').read_bytes().split(b'\0') if b'=' in p)})
 
 def main():
+    global TASK,JOB,SESSION_SHA,MEDIA_SHA,KEY,WORKER
+    task1124='--task=1124' in sys.argv
+    if task1124:
+        TASK,JOB=1124,31899
+        SESSION_SHA='476a4de52ae4bcb0fdbea81cd9ff1e5bfe839bdf6e3ee70b66c87199fc58d078'
+        MEDIA_SHA='4e4b81209983aee6f7e11d77adfad0f04a8aa2045cddc685e2d9da24367808aa'
+        KEY='youtube:publish:1124';WORKER='operator:youtube:1124:20261103'
     continuing='--continue-video' in sys.argv
     environment('pipeline-youtube-canonical.service')
     sys.path.insert(0,str(ROOT))
@@ -50,10 +57,10 @@ def main():
     client=ExistingSessionClient(timeout=120)
     store=DramaSynthesisStore(DB)
     original=store.youtube_task(TASK)
-    assert original['workflow']=='reviewed_thumbnail' and original['channel_id']=='UCG3uhAS2bql8ci71cQyrxkg'
+    assert original['workflow']=='reviewed_thumbnail' and original['channel_id']==('UCob-m2RgJLMQ9Jbfgi7n-qg' if task1124 else 'UCG3uhAS2bql8ci71cQyrxkg')
     assert original['status']=='unknown' and original['unknown_outcome']==1 and not original['lease_owner']
     assert original['pipeline_dispatch_key']==KEY and original['video_attempt_count']==1
-    assert original['source_sha256']==MEDIA_SHA and original['source_size']==199197353
+    assert original['source_sha256']==MEDIA_SHA and original['source_size']==(137762734 if task1124 else 199197353)
     assert original['video_id']==('JUI00EaF1Ew' if continuing else '')
     assert not original['comment_attempt_count'] and not original['comment_id'] and not original['publish_at']
     assert hashlib.sha256(original['resumable_session_uri'].encode()).hexdigest()==SESSION_SHA
@@ -78,13 +85,13 @@ def main():
     while True:
         with contextlib.closing(sqlite3.connect('file:'+str(BASE/'dispatch.sqlite3')+'?mode=ro',uri=True)) as d:
             config=json.loads(d.execute('SELECT config_json FROM pipeline_config WHERE id=1').fetchone()[0])
-            reserved=continuing and config['channel_limits']['youtube']==1 and (BASE/'youtube-queue-recovery-20261103T094659Z/manual-slot.json').is_file()
+            reserved=(continuing or task1124) and config['channel_limits']['youtube']==1
             assert 'youtube' not in config['enabled_channels'] or reserved,'pause_youtube_admission_first'
             running=d.execute("SELECT count(*) FROM pipeline_job WHERE channel='youtube' AND stage='publish' AND status='running'").fetchone()[0]
         if running < (2 if reserved else config['channel_limits']['youtube']):break
         assert time.monotonic()<deadline,'youtube_slots_not_drained'
         time.sleep(10)
-    backup=BASE/('youtube-session-1143-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+    backup=BASE/('youtube-session-'+str(TASK)+'-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     backup.mkdir(mode=0o700)
     with contextlib.closing(store._connect()) as source,contextlib.closing(sqlite3.connect(backup/'native-before.sqlite3')) as dest:
         source.backup(dest,pages=1000)
@@ -115,7 +122,14 @@ def main():
                 kind,value,tb=sys.exc_info()
                 print(json.dumps({'internal_type':kind.__name__ if kind else '', 'frames':[{'file':Path(x.filename).name,'line':x.lineno,'function':x.name} for x in traceback.extract_tb(tb)]}),flush=True)
             return super()._failure(*args,**kwargs)
-    engine=DiagnosticEngine(target,YouTubeCredentialRepository(readonly_runner(app),schema=app.DB_NAME),client,
+    class ReadRepository(YouTubeCredentialRepository):
+        def credential(self,**kwargs):
+            for attempt in range(2):
+                try:return super().credential(**kwargs)
+                except Exception as exc:
+                    if attempt or getattr(exc,'code','') not in ('material_query_failed','material_query_busy'):raise
+                    time.sleep(1)
+    engine=DiagnosticEngine(target,ReadRepository(readonly_runner(app),schema=app.DB_NAME),client,
         work_root=backup/'media',approved_cover_root=storage/'assets',
         allowed_source_hosts=tuple(x.strip().lower() for x in os.environ.get('DRAMA_YOUTUBE_SOURCE_HOSTS','').split(',') if x.strip()),media_executor=None)
     deadline=time.monotonic()+1200
