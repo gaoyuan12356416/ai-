@@ -579,11 +579,15 @@ class NodeExecutors:
 
     def x_publish(self, payload, artifact, context):
         from features.x_posts.service import XApiClient
+        from features.x_posts.media_limits import MAX_UPLOAD_SEGMENTS
         artifact = _artifact(artifact)
         request = dict(payload.get("request") or {})
         account = payload.get("source_account_resource") or payload["account_resource"]
         class BoundXClient(XApiClient):
             def _request(self, method, path, access_token, body=None, content_type=None, expected=200, operation="X API", unknown=False):
+                # Media transfer can be slow while the independent lease heartbeat
+                # stays healthy. Keep Post/Repost requests at their original timeout.
+                self.timeout = 120 if path.startswith("/2/media/") else 30
                 fingerprint = {"method": method, "path": path, "body_sha256": hashlib.sha256(body or b"").hexdigest()}
                 stage = "create_post" if path == "/2/tweets" else ("platform_processing" if method == "GET" else "platform_upload") if "/media/" in path else "repost"
                 context.phase(stage)
@@ -611,7 +615,11 @@ class NodeExecutors:
                     initialized = response.get("data", {})
                     context.checkpoint("x_media_initialized", {"media_id": initialized.get("id") or initialized.get("media_id"), "operation_id": context.last_operation_id})
                 return response
-        client = self.platform_clients.get("x_publish") or BoundXClient()
+        # A 4 MiB segment repeatedly exhausted the 30-second socket write budget
+        # on the production uplink. Small segments bound retransmission cost;
+        # very large media still stays within the existing segment-count limit.
+        chunk_bytes = max(1024 * 1024, (artifact["size"] + MAX_UPLOAD_SEGMENTS - 1) // MAX_UPLOAD_SEGMENTS)
+        client = self.platform_clients.get("x_publish") or BoundXClient(chunk_bytes=chunk_bytes)
         with tempfile.TemporaryDirectory(dir=self.work_root) as temp:
             media = self._download(artifact, Path(temp) / "media.bin", context)
             uploaded = client.upload_media("broker", media, media_type=artifact["mime"], media_category=request.get("media_category", "tweet_video"))

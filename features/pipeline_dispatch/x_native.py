@@ -99,6 +99,14 @@ class XNativeBridge:
         with self.connect() as c:
             row = c.execute("SELECT * FROM pipeline_x_claim WHERE source_key=? AND stage=? AND generation=?", self.key(job)).fetchone()
             latest = c.execute("SELECT MAX(generation) FROM pipeline_x_claim WHERE source_key=? AND stage=?", self.key(job)[:2]).fetchone()[0]
+            # An audited recovery revokes the old execution before its next
+            # claim exists; a delayed old failure must not undo admission.
+            from .x_prepost_recovery import TABLE
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone():
+                superseded = c.execute("SELECT 1 FROM " + TABLE + " WHERE source_key=? AND ((stage=? AND to_generation>?) OR (stage='publish' AND ?='prepare')) LIMIT 1",
+                                       (job['source_key'], job['stage'], job['generation'], job['stage'])).fetchone()
+                if superseded:
+                    raise AdapterError('x_dispatch_claim_conflict')
         if not row or latest != job["generation"] or not secrets.compare_digest(row["claim_hash"], self.claim_hash(claim)):
             raise AdapterError("x_dispatch_claim_conflict")
         return dict(row), obj(row["descriptor_json"])
@@ -206,7 +214,10 @@ class XNativeBridge:
             # planner has frozen the original media and account identity.
             pending_route = queue.get("delivery_mode") == "duration_pending"
             log = {"id": 0, "status": "reserved", "attempt_count": 0, "unknown_outcome": 0} if pending_route and job["stage"] == "prepare" else self.store.reserve_log(queue["id"])
-            if log["status"] != "reserved" or log["attempt_count"] or log["unknown_outcome"]:
+            from .x_prepost_recovery import authorization, digest
+            with self.connect() as c:
+                recovered = authorization(c, queue, log, job) if log["id"] else None
+            if log["status"] != "reserved" or (log["attempt_count"] and not recovered) or log["unknown_outcome"]:
                 raise AdapterError("x_existing_attempt_requires_reconciliation")
             self._parent(queue, log)
             source_id, _, source = self.account(queue, target=pending_route, verify_now=True)
@@ -263,6 +274,8 @@ class XNativeBridge:
                     descriptor = {"kind": "x_random", "request": request}
             else:
                 artifact = self.artifact(queue, frozen)
+                if recovered and digest(artifact) != recovered["artifact_sha256"]:
+                    raise AdapterError("x_recovery_artifact_changed")
                 media_limit = posts.DEFAULT_MAX_GIF_BYTES if artifact["mime"] == "image/gif" else posts.DEFAULT_MAX_IMAGE_BYTES if artifact["mime"].startswith("image/") else video_byte_limit(bool(source.get("long_video_publish_eligible")))
                 if type(artifact.get("size")) is not int or not 0 < artifact["size"] <= min(media_limit, self.r.POST_MAX_MEDIA_BYTES):
                     raise AdapterError("x_artifact_exceeds_account_limit")
@@ -317,14 +330,19 @@ class XNativeBridge:
             if path == "/2/media/upload/initialize":
                 with self.connect() as c:
                     initialized = c.execute("SELECT 1 FROM pipeline_x_checkpoint WHERE source_key=? AND generation=? AND phase='x_media_initialized'", (job["source_key"], job["generation"])).fetchone()
-                retryable = retry_of is not None and log["status"] == "media_uploading" and log["attempt_count"] == 1 and not initialized
+                retryable = retry_of is not None and log["status"] == "media_uploading" and log["attempt_count"] >= 1 and not initialized
                 untouched = retry_of is None and log["status"] == "reserved" and not log["attempt_count"]
-                if method != "POST" or not (retryable or untouched) or log["unknown_outcome"]:
+                from .x_prepost_recovery import authorization, mark_retry_uploading
+                with self.connect() as c:
+                    recovered = authorization(c, queue, log, job) if retry_of is None else None
+                if method != "POST" or not (retryable or untouched or recovered) or log["unknown_outcome"]:
                     raise AdapterError("x_upload_already_started")
                 expected = json.dumps({"media_type": descriptor["artifact"]["mime"], "total_bytes": descriptor["artifact"]["size"], "media_category": descriptor["request"]["media_category"]}, separators=(",", ":")).encode()
                 if details.get("body_sha256") != hashlib.sha256(expected).hexdigest():
                     raise AdapterError("x_upload_identity_changed")
-                if not retryable:
+                if recovered:
+                    mark_retry_uploading(self, job, log["id"])
+                elif not retryable:
                     self.store.mark_publishing(log["id"])
             elif path == "/2/tweets":
                 if method != "POST" or log["status"] != "post_creating" or log["unknown_outcome"] or not log["x_media_id"]:

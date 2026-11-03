@@ -245,6 +245,10 @@ class LedgerAdapter:
                 row.update({"publish_attempt_count": log.get("attempt_count", 0), "unknown_outcome": log.get("unknown_outcome", 0), "publish_id": log.get("x_post_id", ""), "ledger_status": log.get("status", ""), "execution_log_id": log.get("id")})
                 row["started_at"] = log.get("started_at", "")
                 row["finished_at"] = log.get("published_at") or log.get("updated_at", "") if log.get("status") in TERMINAL else ""
+                from .x_prepost_recovery import authorization
+                recovery = authorization(conn, raw, log)
+                if recovery:
+                    row["_prepost_recovery"] = {k: recovery[k] for k in ('to_generation', 'plan_sha256', 'artifact_sha256')}
             if self._exists(conn, "x_post_random_template_preparation"):
                 prep = conn.execute("SELECT status,request_json,result_json FROM x_post_random_template_preparation WHERE queue_id=?", (row["id"],)).fetchone()
                 if row.get("random_template_enabled") and prep and prep["status"] == "ready":
@@ -371,6 +375,7 @@ class LedgerAdapter:
         source_key = f"{spec.channel}:{spec.family}:{source_id}"
         unknown = bool(row.get("unknown_outcome")) or state in UNCERTAIN or row.get("ledger_status") in UNCERTAIN
         attempts = int(row.get("publish_attempt_count") or row.get("video_attempt_count") or 0)
+        recovery = obj(row.get("_prepost_recovery")) if (spec.channel, spec.family) == ('x', 'queue') else {}
         if spec.channel == "tt" and spec.family == "queue":
             # claim retries precede the platform boundary and are not publishes.
             attempts = int(bool(row.get("publish_started_at_utc") or row.get("publish_id")))
@@ -430,6 +435,7 @@ class LedgerAdapter:
             stage = "publish"
         if bridged_auto:
             stage, started, unknown, attempts = "prepare", False, False, 0
+        reconcile_only = unknown or (attempts > 0 and not recovery)
         resources = []
         if spec.channel in {"x", "tt"}:
             for key in ("account_id", "relay_account_id"):
@@ -451,7 +457,7 @@ class LedgerAdapter:
         fingerprint = canonical_fingerprint(row, spec.identity)
         payload["canonical_fingerprint"] = fingerprint
         payload["source_attempt_count"] = attempts
-        payload["reconcile_only"] = unknown or attempts > 0
+        payload["reconcile_only"] = reconcile_only
         adopt_schedule = youtube_existing_schedule(row, allow_control=True) if spec.channel == "youtube" and spec.family == "publish" else None
         if adopt_schedule:
             payload.update(continuation=adopt_schedule, adopt_existing_schedule=True)
@@ -460,7 +466,7 @@ class LedgerAdapter:
         skipped = state in {"no_candidate", "skipped", "duplicate", "cancelled", "canceled", "abandoned"} and not (publish_id or unknown or attempts)
         completed_preparation = stage == "prepare" and (bridged_auto or state in {"ready", "completed", "synced"} or review_hold)
         confirmed = stage == "publish" and state in {"published", "synced", "completed"} and bool(publish_id) and not unknown
-        projected_status = "queued" if pause_eligible else (("completed" if completed_preparation or skipped else ("published" if confirmed else "unknown" if state in {"published", "synced", "completed"} else "failed")) if terminal or review_hold else ("legacy_running" if started else ("unknown" if unknown or attempts else "queued")))
+        projected_status = "queued" if pause_eligible else (("completed" if completed_preparation or skipped else ("published" if confirmed else "unknown" if state in {"published", "synced", "completed"} else "failed")) if terminal or review_hold else ("legacy_running" if started else ("unknown" if reconcile_only else "queued")))
         if spec.channel == "youtube" and spec.family == "publish" and youtube_cancelled(row):
             projected_status = "completed"
         if adopt_schedule:
@@ -514,7 +520,8 @@ class LedgerAdapter:
                 "capabilities": [f"{stage}:{spec.channel}"] + (["profile:" + row["preparation_profile"]] if spec.channel == "tt" and spec.family in {"intake", "direct_test"} and stage == "prepare" and row.get("preparation_profile") else []), "payload": payload, "artifact": artifact,
                 "source_status": state, "details_url": spec.details_url, "legacy_inflight": bool(started),
                 "legacy_parent_inflight": bool(legacy_parent_inflight),
-                "source_attempt_count": attempts, "unknown_outcome": unknown, "reconcile_only": unknown or attempts > 0,
+                "source_attempt_count": attempts, "unknown_outcome": unknown, "reconcile_only": reconcile_only,
+                "prepost_recovery": recovery,
                 "status": projected_status,
                 "canonical_fingerprint": fingerprint,
                 "started_at": stamp(started_at) if started_at else "",
@@ -665,6 +672,8 @@ class AdapterRegistry:
         continuation = self._verified_continuation(adapter, row, obj(job.get("payload")).get("continuation"), allow_control=True)
         if current["reconcile_only"] and not continuation:
             raise AdapterError("canonical_reconciliation_required")
+        if current.get('prepost_recovery') and job.get('generation') != current['prepost_recovery']['to_generation']:
+            raise AdapterError('x_recovery_generation_changed')
         descriptor = adapter.driver.reserve(row, job, claim)
         public_descriptor(descriptor)
         return descriptor

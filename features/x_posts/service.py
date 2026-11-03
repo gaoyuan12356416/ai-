@@ -6096,8 +6096,14 @@ class XPostStore:
                 planning_sql = " AND NOT EXISTS (SELECT 1 FROM x_post_queue pq WHERE pq.schedule_run_id=x_post_schedule_run.id) "
                 if planning_boundary:
                     boundary = planning_boundary.isoformat(timespec="seconds").replace("+00:00", "Z")
-                    planning_sql += " AND (created_at>? OR datetime(run_date||'T'||publish_time||':00+08:00')>datetime(?)) "
+                    planning_sql += " AND (created_at>? OR datetime(run_date||'T'||publish_time||':00+08:00')>datetime(?)"
                     planning_values = [boundary, boundary]
+                    from features.pipeline_dispatch.x_schedule_recovery import authorized_run_ids
+                    authorized = authorized_run_ids(conn)
+                    if authorized:
+                        planning_sql += " OR id IN (" + ",".join("?" for _ in authorized) + ")"
+                        planning_values.extend(authorized)
+                    planning_sql += ") "
             scoped_runs_sql = (
                 "SELECT *,CASE WHEN %s THEN 1 ELSE 0 END AS "
                 "unresolved_drama_route,CASE WHEN %s THEN 1 ELSE 0 END AS "
@@ -9727,6 +9733,7 @@ class XPostStore:
         timestamp = utc_now()
         from features.pipeline_dispatch.x_planning import enabled as dispatch_enabled, cutoff as dispatch_cutoff
         planning_sql, planning_values = "", []
+        boundary = None
         if dispatch_enabled():
             planning_sql = " AND NOT EXISTS (SELECT 1 FROM x_post_queue pq WHERE pq.manual_run_id=x_post_manual_run.id) "
             boundary = dispatch_cutoff()
@@ -9736,6 +9743,19 @@ class XPostStore:
                 planning_values = [boundary, boundary]
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if boundary:
+                from features.pipeline_dispatch.x_manual_recovery import authorized_run_ids
+                authorized = authorized_run_ids(conn)
+                if authorized:
+                    # A scoped audit bypasses only the deployment date cutoff.
+                    # Queue ownership, future scheduling and unknown holds still
+                    # use the same canonical claim conditions below.
+                    planning_sql = planning_sql.replace(
+                        "(created_at>? OR (publish_mode='scheduled' AND scheduled_at>?))",
+                        "(created_at>? OR (publish_mode='scheduled' AND scheduled_at>?) "
+                        "OR id IN (%s))" % ",".join("?" for _ in authorized),
+                    )
+                    planning_values.extend(authorized)
             row = conn.execute(
                 "SELECT * FROM x_post_manual_run "
                 "WHERE trigger_source=? "
