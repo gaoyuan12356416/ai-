@@ -268,6 +268,26 @@ class TTNativeBridge:
             conn.commit()
         return descriptor
 
+    def _pending_account_busy(self, job):
+        """Classify a native pending-account fence without changing admission."""
+        if not self.automatic or job["stage"] != "prepare":
+            return False
+        from features.tt_auto_posts.core import ACTIVE_ACCOUNT_TASK_STATUSES
+        current, boundary = self.store._now_iso(), self.store.execution_not_before_utc
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM tt_auto_task WHERE id=?", (job["source_id"],)).fetchone()
+            if (row is None or row["status"] != "pending" or row["claim_token"]
+                    or row["publish_attempt_count"] or row["publish_id"] or row["unknown_outcome"]
+                    or conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", (job["source_key"],)).fetchone()):
+                return False
+            return conn.execute("""SELECT 1 FROM tt_auto_task other
+                WHERE account_id=? AND id<>? AND status IN (""" + ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES) + """)
+                  AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:auto:'||other.id)
+                  AND (scheduled_at_utc>=? OR publish_id<>'' OR unknown_outcome<>0 OR publish_attempt_count<>0
+                       OR status IN ('publishing','reconciling','unknown') OR claim_phase='reconcile'
+                       OR (claim_token<>'' AND lease_expires_at_utc>?)) LIMIT 1""",
+                (row["account_id"], row["id"], *sorted(ACTIVE_ACCOUNT_TASK_STATUSES), boundary, current)).fetchone() is not None
+
     def reserve(self, job, claim):
         key = self._key(job)
         with self._source_lock(job):
@@ -304,6 +324,8 @@ class TTNativeBridge:
                         prepare_ahead_seconds=getattr(executor, "prepare_ahead_seconds", 0),
                         allowed_phases={"selection", "prepare"} if job["stage"] == "prepare" else {"publish"}, task_id=identity)
                     if native is None:
+                        if self._pending_account_busy(job):
+                            raise AdapterError("canonical_account_busy")
                         raise AdapterError("canonical_task_not_claimable")
                     native_token, task = native.reveal_claim_token(), native.task
                     if native.claim_phase == "selection":

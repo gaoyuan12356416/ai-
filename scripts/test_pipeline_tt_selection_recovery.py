@@ -38,7 +38,7 @@ class TTSelectionRecoveryTests(unittest.TestCase):
         offer = adapter.project(adapter.read(task.id))
         job = dict(offer, generation=1, executor_backend='cpu')
         claim = {'claim_token': 'a' * 32, 'node_id': 'node-a'}
-        return SimpleNamespace(store=f.store, task=task, gpu=gpu, executor=executor,
+        return SimpleNamespace(fixture=f, store=f.store, task=task, gpu=gpu, executor=executor,
             bridge=bridge, registry=registry, adapter=adapter, offer=offer, job=job,
             claim=claim, selected_calls=selected_calls)
 
@@ -118,6 +118,46 @@ class TTSelectionRecoveryTests(unittest.TestCase):
             with self.subTest(generation=generation):
                 with self.assertRaisesRegex(AdapterError, 'canonical_identity_changed'):
                     f.registry.reserve(dict(f.job, generation=generation), dict(f.claim, claim_token=token))
+
+    def test_pending_same_account_fence_is_deferred_without_consuming_native(self):
+        for status in ('preparing', 'publishing', 'reconciling', 'unknown'):
+            with self.subTest(status=status):
+                f = self.fixture()
+                f.registry.reserve(f.job, f.claim)
+                with patch.object(f.store, 'reserve_material'):
+                    pending = f.fixture.reserved_task(suffix='waiting')
+                job = dict(f.job, source_id=str(pending.id), source_key='tt:auto:' + str(pending.id))
+                with f.bridge.connect() as conn:
+                    conn.execute('UPDATE tt_auto_task SET status=? WHERE id=?', (status, f.task.id))
+                    before = dict(conn.execute('SELECT * FROM tt_auto_task WHERE id=?', (pending.id,)).fetchone())
+                with self.assertRaisesRegex(AdapterError, '^canonical_account_busy$'):
+                    f.bridge.reserve(job, f.claim)
+                with f.bridge.connect() as conn:
+                    self.assertEqual(dict(conn.execute('SELECT * FROM tt_auto_task WHERE id=?', (pending.id,)).fetchone()), before)
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM pipeline_tt_claim WHERE source_key=?', (job['source_key'],)).fetchone()[0], 0)
+                self.assertEqual(f.gpu.prepare_calls + f.gpu.publish_calls, [])
+
+    def test_no_busy_classification_without_current_unheld_account_fence(self):
+        f = self.fixture()
+        with patch.object(f.store, 'claim_next_executable_task', return_value=None):
+            with self.assertRaisesRegex(AdapterError, '^canonical_task_not_claimable$'):
+                f.bridge.reserve(f.job, f.claim)
+        f.registry.reserve(f.job, f.claim)
+        with patch.object(f.store, 'reserve_material'):
+            pending = f.fixture.reserved_task(suffix='waiting')
+        job = dict(f.job, source_id=str(pending.id), source_key='tt:auto:' + str(pending.id))
+        with f.bridge.connect() as conn:
+            conn.execute("INSERT INTO pipeline_canonical_hold(source_key,cutoff,reason) VALUES(?,?,?)", (f.job['source_key'], '2026-08-05T10:00:00Z', 'historical'))
+        with patch.object(f.store, 'claim_next_executable_task', return_value=None):
+            with self.assertRaisesRegex(AdapterError, '^canonical_task_not_claimable$'):
+                f.bridge.reserve(job, f.claim)
+        with f.bridge.connect() as conn:
+            conn.execute('DELETE FROM pipeline_canonical_hold')
+            conn.execute("UPDATE tt_auto_task SET scheduled_at_utc='2000-01-01T00:00:00+00:00',claim_token='',lease_expires_at_utc='' WHERE id=?", (f.task.id,))
+        f.store.execution_not_before_utc='2026-08-01T00:00:00+00:00'
+        with patch.object(f.store, 'claim_next_executable_task', return_value=None):
+            with self.assertRaisesRegex(AdapterError, '^canonical_task_not_claimable$'):
+                f.bridge.reserve(job, f.claim)
 
 
 if __name__ == '__main__':
