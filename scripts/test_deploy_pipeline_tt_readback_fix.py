@@ -166,6 +166,69 @@ class DeploymentGuards(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), self.old); self.assertEqual(self.timers, self.before)
         self.assertFalse(any(cmd[-1] == deploy.UNIT for cmd in self.commands))
 
+    def test_verify_existing_writes_separate_report_without_original_audit_or_service_changes(self):
+        deploy.apply("b" * 40, self.old, self.new)
+        audit = next(self.root.glob("tt-readback-fix-*/deploy.json"))
+        prior = json.loads(audit.read_text()); prior.update(status="file_replaced", error="HTTPError")
+        audit.write_text(json.dumps(prior)); original = audit.read_bytes()
+        self.commands.clear()
+        with patch.object(deploy, "fetched_source", return_value=(self.old, self.new)):
+            result = deploy.verify_existing(audit)
+        self.assertEqual(audit.read_bytes(), original)
+        self.assertEqual(self.commands, [])
+        self.assertEqual(result["original_status"], "file_replaced")
+        self.assertEqual(result["original_error"], "HTTPError")
+        self.assertFalse(result["restarted"])
+        self.assertTrue(audit.with_name("postverify.json").is_file())
+
+
+class TakeoverHealthTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        native = Path(tmp.name) / "native.db"
+        with contextlib.closing(sqlite3.connect(native)) as c, c:
+            c.execute("CREATE TABLE tt_auto_task(id INTEGER,status TEXT,publish_id TEXT,unknown_outcome INTEGER,published_at_utc TEXT)")
+            c.execute("INSERT INTO tt_auto_task VALUES(987,'failed','',0,'')")
+        self.addCleanup(patch.stopall)
+        patch.object(deploy, "NATIVE_DB", native).start()
+        patch.object(deploy, "show", return_value="101").start()
+        self.env = {"PIPELINE_TT_DISPATCH_ENABLED": "1", "PIPELINE_TT_CANONICAL_BRIDGE_ENABLED": "1", "TT_AUTO_POST_INTERNAL_TOKEN": "test-only-bearer"}
+        patch.object(deploy, "process_contract", return_value=self.env).start()
+        self.body = {"service": "tt-auto-post", "ok": False, "automation": {"ready": False, "problems": ["tt-auto-post-runner.path:inactive"]},
+                     "gates": {key: True for key in ("direct_audit_approved", "is_open", "live_enabled", "url_property_verified")}}
+        self.receipt = {"status": "failed", "publish_id": "", "unknown_outcome": False, "published_at": ""}
+        self.native = native
+
+    def test_known_legacy_503_requires_exact_readonly_canonical_receipt(self):
+        before = self.native.read_bytes()
+        with patch.object(deploy, "request_json", side_effect=[(503, self.body), (200, self.receipt)]) as request:
+            result = deploy.health()
+        self.assertEqual(result["status"], 503)
+        self.assertTrue(result["canonical_readback"]["matches_native"])
+        self.assertEqual([call.args[0] for call in request.call_args_list], ["/health", "/internal/pipeline-dispatch/tt/reconcile"])
+        self.assertEqual(request.call_args_list[1].kwargs["payload"]["job"]["source_id"], "987")
+        self.assertEqual(before, self.native.read_bytes())
+        self.assertNotIn("test-only-bearer", json.dumps(result))
+
+    def test_200_still_requires_canonical_interface(self):
+        self.body.update(ok=True); self.body["automation"] = {"ready": True, "problems": []}
+        with patch.object(deploy, "request_json", side_effect=[(200, self.body), (409, {"code": "bridge_error"})]):
+            with self.assertRaisesRegex(RuntimeError, "canonical_readback_mismatch"): deploy.health()
+
+    def test_other_503_problems_or_missing_takeover_flags_are_rejected(self):
+        self.body["automation"]["problems"].append("database_unavailable")
+        with patch.object(deploy, "request_json", return_value=(503, self.body)) as request:
+            with self.assertRaisesRegex(RuntimeError, "unrecognized_health_failure"): deploy.health()
+            self.assertEqual(request.call_count, 1)
+        self.env["PIPELINE_TT_CANONICAL_BRIDGE_ENABLED"] = "0"
+        with patch.object(deploy, "request_json") as request:
+            with self.assertRaisesRegex(RuntimeError, "pipeline_takeover_not_enabled"): deploy.health()
+            request.assert_not_called()
+
+    def test_canonical_claim_and_legacy_readback_routes_are_not_probe_options(self):
+        for path in ("/internal/pipeline-dispatch/tt/reserve", "/internal/pipeline-dispatch/tt/reconcile-legacy-next"):
+            with self.assertRaisesRegex(RuntimeError, "non_readonly_probe_path"): deploy.request_json(path, payload={})
+
 
 if __name__ == "__main__":
     unittest.main()

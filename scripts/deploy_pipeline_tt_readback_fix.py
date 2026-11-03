@@ -18,6 +18,7 @@ import sqlite3
 import stat
 import subprocess
 import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -164,11 +165,98 @@ def wait_until(predicate, code, seconds=45):
 
 
 def health():
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open("http://127.0.0.1:18831/health", timeout=5) as response:
-        value = json.loads(response.read(65536))
-        need(response.status == 200 and value.get("ok") is True and value.get("service") == "tt-auto-post", "health_failed")
-    return {"status": 200, "service": "tt-auto-post", "ok": True}
+    pid = show(UNIT, "MainPID")
+    need(pid.isdigit() and int(pid) > 0, "native_pid_missing")
+    environ = process_contract(pid)
+    need(environ.get("PIPELINE_TT_DISPATCH_ENABLED") == "1" and
+         environ.get("PIPELINE_TT_CANONICAL_BRIDGE_ENABLED") == "1", "pipeline_takeover_not_enabled")
+    status, value = request_json("/health")
+    need(value.get("service") == "tt-auto-post", "health_service_mismatch")
+    gates = value.get("gates") or {}
+    need(all(gates.get(key) is True for key in ("direct_audit_approved", "is_open", "live_enabled", "url_property_verified")), "health_gates_closed")
+    automation = value.get("automation") or {}
+    problems = automation.get("problems")
+    if status == 200:
+        need(value.get("ok") is True and automation.get("ready") is True and problems == [], "health_failed")
+    else:
+        allowed = {"tt-auto-post-runner.path:inactive", "tt-auto-post-scheduler.timer:not_firing"}
+        need(status == 503 and value.get("ok") is False and automation.get("ready") is False and
+             isinstance(problems, list) and problems and all(isinstance(p, str) and p in allowed for p in problems), "unrecognized_health_failure")
+    proof = canonical_readback(environ.get("TT_AUTO_POST_INTERNAL_TOKEN", ""))
+    need(show(UNIT, "MainPID") == pid, "native_pid_changed_during_verify")
+    return {"status": status, "service": "tt-auto-post", "ok": True, "mode": "pipeline_takeover",
+            "legacy_automation_problems": problems, "canonical_readback": proof}
+
+
+def process_contract(pid):
+    # Never include the bearer or process environment in audit/output.
+    allowed = {b"PIPELINE_TT_DISPATCH_ENABLED", b"PIPELINE_TT_CANONICAL_BRIDGE_ENABLED", b"TT_AUTO_POST_INTERNAL_TOKEN"}
+    pairs = (part.split(b"=", 1) for part in (Path("/proc") / pid / "environ").read_bytes().split(b"\0") if b"=" in part)
+    return {key.decode(): value.decode() for key, value in pairs if key in allowed}
+
+
+def request_json(path, *, payload=None, token=""):
+    need(path in ("/health", "/internal/pipeline-dispatch/tt/reconcile"), "non_readonly_probe_path")
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs): return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    headers = {"Content-Type": "application/json"}
+    if token: headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request("http://127.0.0.1:18831" + path,
+        data=json.dumps(payload).encode() if payload is not None else None, headers=headers)
+    try: response = opener.open(request, timeout=10)
+    except urllib.error.HTTPError as exc: response = exc
+    with response:
+        raw = response.read(65537); need(len(raw) <= 65536, "health_response_too_large")
+        value = json.loads(raw); need(isinstance(value, dict), "health_response_invalid")
+        return response.status, value
+
+
+def canonical_readback(token):
+    need(bool(token), "canonical_bearer_missing")
+    def receipt():
+        with readonly_db(NATIVE_DB) as conn:
+            row = conn.execute("SELECT status,publish_id,unknown_outcome,published_at_utc FROM tt_auto_task WHERE id=987").fetchone()
+            need(row is not None and row["status"] == "failed" and not row["unknown_outcome"] and not row["publish_id"], "canonical_probe_task_not_terminal")
+            return {"status": row["status"], "publish_id": row["publish_id"] or "", "unknown_outcome": bool(row["unknown_outcome"]), "published_at": row["published_at_utc"] or ""}
+    before = receipt()
+    status, body = request_json("/internal/pipeline-dispatch/tt/reconcile", token=token,
+        payload={"job": {"channel": "tt", "family": "auto", "source_id": "987", "source_key": "tt:auto:987"}})
+    need(status == 200 and body == before and receipt() == before, "canonical_readback_mismatch")
+    return {"source_key": "tt:auto:987", "status": before["status"], "http_status": 200, "matches_native": True}
+
+
+def verify_existing(audit_path, commit=None):
+    audit_path = Path(audit_path).resolve()
+    need(audit_path.name == "deploy.json" and audit_path.parent.parent == DATA.resolve() and
+         re.fullmatch(r"tt-readback-fix-[0-9]{8}T[0-9]{6}-[a-f0-9]{8}", audit_path.parent.name), "unexpected_audit_path")
+    original = audit_path.read_bytes(); prior = json.loads(original)
+    commit = commit or prior.get("sha")
+    need(prior.get("sha") == commit and prior.get("expected_sha") == BASE and prior.get("file") == RELATIVE and
+         prior.get("runtime_root") == str(EXPECTED_ROOT), "audit_identity_mismatch")
+    need(prior.get("cleanup_errors") == [] and prior.get("gate_failsafe_cancelled") is True, "prior_cleanup_not_confirmed")
+    output = audit_path.parent / "postverify.json"; need(not output.exists(), "postverify_already_exists")
+    old, new = fetched_source(commit)
+    need(sha(old) == prior.get("old_sha256") and sha(new) == prior.get("new_sha256"), "audit_source_hash_mismatch")
+    backup = audit_path.parent / "tt_readback.py.before"
+    need(prior.get("backup") == str(backup) and backup.read_bytes() == old, "backup_mismatch")
+    runtime_check(new)
+    need(show(UNIT, "ActiveState") == "active" and listener(), "native_not_active_loopback")
+    pid = int(show(UNIT, "MainPID")); need(pid > 0 and pid != prior.get("old_pid"), "native_not_restarted")
+    marker = prior.get("gate_comment", ""); need(bool(re.fullmatch(r"tt-readback-[a-f0-9]{32}", marker)), "invalid_gate_identity")
+    rule = ["OUTPUT", "-d", "127.0.0.1", "-p", "tcp", "--dport", "18831", "-m", "conntrack", "--ctstate", "NEW",
+            "-m", "comment", "--comment", marker, "-j", "REJECT", "--reject-with", "tcp-reset"]
+    need(not gate_present(rule), "prior_gate_still_present")
+    need(set(prior.get("timers", {})) == set(TIMERS), "timer_scope_mismatch")
+    for unit, previous in prior["timers"].items():
+        need(show(unit, "ActiveState") == previous["active"] and show(unit, "UnitFileState") == previous["enabled"], "timer_not_restored")
+    proof = health()
+    need(show(UNIT, "MainPID") == str(pid) and audit_path.read_bytes() == original, "verify_identity_changed")
+    report = {"status": "verified_existing", "sha": commit, "audit": str(audit_path), "original_audit_sha256": sha(original),
+              "original_status": prior.get("status"), "original_error": prior.get("error"), "new_sha256": sha(new),
+              "old_pid": prior["old_pid"], "current_pid": pid, "health": proof, "verified_at": now().isoformat(), "restarted": False}
+    private_write(output, (json.dumps(report, indent=2) + "\n").encode())
+    return report
 
 
 def apply(commit, old, new):
@@ -277,10 +365,16 @@ def apply(commit, old, new):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sha", required=True)
+    parser.add_argument("--sha")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--verify-existing", metavar="DEPLOY_JSON")
     args = parser.parse_args()
     need(os.geteuid() == 0, "root_required")
+    if args.verify_existing:
+        need(not args.apply, "verify_cannot_apply")
+        print(json.dumps(verify_existing(args.verify_existing, args.sha)))
+        return
+    need(bool(args.sha), "exact_github_sha_required")
     old, new = fetched_source(args.sha)
     need(old != new, "readback_patch_missing")
     runtime_check(old); graceful_contract(); quiescent()
