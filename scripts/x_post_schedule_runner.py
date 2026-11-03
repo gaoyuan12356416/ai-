@@ -1808,6 +1808,7 @@ def _material_candidates(
     assignment_identity=None,
     stable_shuffler=_stable_shuffled,
     heartbeat=None,
+    allow_images=True,
 ):
     pool_options = {}
     if assignment_identity is not None:
@@ -1852,6 +1853,7 @@ def _material_candidates(
                     source_date,
                     limit=config.candidate_pool_limit,
                     schema=config.mysql_database,
+                    allow_images=allow_images,
                 )
             except CandidateQueryError:
                 # Preserve the frozen SQLite pool snapshot. Reconnect once and
@@ -1866,6 +1868,7 @@ def _material_candidates(
                     source_date,
                     limit=config.candidate_pool_limit,
                     schema=config.mysql_database,
+                    allow_images=allow_images,
                 )
             _record_pool_checks_best_effort(
                 sidecar,
@@ -2439,6 +2442,11 @@ def execute_schedule_tick(
                         }
                         if material_candidate_loader is _material_candidates:
                             material_loader_options["assignment_identity"] = identity
+                            # Only the original frozen run determines template
+                            # compatibility; skip known images before media work.
+                            material_loader_options["allow_images"] = not bool(
+                                (existing.get("run") or {}).get("random_template_enabled")
+                            )
                             material_loader_options["heartbeat"] = lambda: (
                                 _heartbeat_best_effort(sidecar, identity)
                             )

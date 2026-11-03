@@ -683,8 +683,9 @@ class ScheduleRunnerTests(unittest.TestCase):
                 )
                 return []
 
-        def hydrate(_connection, items, _source_date, *, limit, schema):
+        def hydrate(_connection, items, _source_date, *, limit, schema, allow_images):
             del schema
+            self.assertTrue(allow_images)
             selector_batches.append(
                 [str(item["material_id"]) for item in items]
             )

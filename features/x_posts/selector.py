@@ -923,7 +923,7 @@ class DramawaveCandidateSelector:
                 break
         return selected
 
-    def select_pool(self, pool_items, source_date, limit=3):
+    def select_pool(self, pool_items, source_date, limit=3, *, allow_images=True):
         """Hydrate the newest safe manual-pool items.
 
         Pool order is determined exclusively by ``created_at`` then ``id``.
@@ -1025,7 +1025,7 @@ class DramawaveCandidateSelector:
                 candidate = self._pool_candidate(
                     candidate_id,
                     source_date,
-                    allow_images=True,
+                    allow_images=allow_images,
                     allow_deleted_materials=True,
                     require_dramawave_product=False,
                     use_drama_language=True,
@@ -1209,6 +1209,8 @@ def select_pool_candidates(
     limit=3,
     schema=DEFAULT_SCHEMA,
     now=None,
+    *,
+    allow_images=True,
 ):
     """Hydrate manual-pool materials in newest-first order.
 
@@ -1223,6 +1225,7 @@ def select_pool_candidates(
         pool_items,
         source_date,
         limit=limit,
+        allow_images=allow_images,
     )
 
 
