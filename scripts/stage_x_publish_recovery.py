@@ -72,7 +72,7 @@ def tree(path):
 def stage(repo, commit, base, folder):
     repo, folder = Path(repo).resolve(), Path(folder)
     verify_source(repo, commit)
-    if len(base) != 40 or run(['git', 'rev-parse', base], cwd=repo).decode().strip() != base:
+    if len(base) != 40 or run(['git', 'rev-parse', base+'^{commit}'], cwd=repo).decode().strip() != base:
         raise ValueError('exact_base_required')
     folder.mkdir(mode=0o700, parents=True, exist_ok=False)
     report = {'commit': commit, 'base': base, 'status': 'prepared', 'lanes': {}}
