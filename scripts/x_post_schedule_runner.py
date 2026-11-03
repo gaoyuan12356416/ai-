@@ -19,6 +19,7 @@ import random
 import re
 import sys
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.x_posts.read_failures import read_failure
 from features.pipeline_dispatch.x_planning import enabled as pipeline_dispatch_enabled, deferred_candidate, queue_handoff
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_posts.drama_selector import (  # noqa: E402
@@ -173,6 +175,40 @@ class ScheduleAccountScopeChanged(ScheduleRunError):
     """Only the bounded, pre-write material account-scope loop may defer."""
 
 
+class ScheduleReadPreflightTransient(ScheduleRunError):
+    def __init__(self,details):
+        self.read_failure=details
+        super().__init__("只读预检瞬时故障，未尝试创建计划", "x_post_read_preflight_transient")
+
+
+def _transient_read_details(exc):
+    if isinstance(exc, (CandidateSelectionError, DramaQueryError, ScheduleReadPreflightTransient)):
+        return getattr(exc,"read_failure",None)
+    if isinstance(exc,SidecarError) and not exc.unknown_outcome:
+        if exc.code=="x_sidecar_unreachable" and exc.status==503:
+            return {"kind":"sidecar_read_network"}
+        if exc.code=="x_sidecar_http_error" and 500<=exc.status<=599:
+            return {"kind":"sidecar_read_http","http_status":exc.status}
+        # The old generic network message also represents malformed JSON, so it
+        # is deliberately excluded. This exact format carries real upstream HTTP.
+        match=re.fullmatch(r"X API请求失败（HTTP (5[0-9]{2})，[^\r\n]*）",str(exc))
+        if exc.code=="x_upstream_error" and exc.status==502 and match:
+            return {"kind":"x_account_read_http","http_status":int(match.group(1))}
+    return None
+
+
+def _readonly_preflight_call(call,*,reconnect=None):
+    """At most two calls, only around verified read-only preflight boundaries."""
+    for attempt in range(2):
+        try:return call()
+        except Exception as exc:
+            details=_transient_read_details(exc)
+            if not details:raise
+            if attempt:raise ScheduleReadPreflightTransient(details) from None
+            time.sleep(.25)
+            if reconnect is not None:reconnect()
+
+
 _SCOPE_WAIT_IDENTITY = (
     "id", "slot_key", "source_type", "run_date", "publish_time", "timezone",
     "config_version", "account_ids", "expected_count", "body_template",
@@ -180,11 +216,11 @@ _SCOPE_WAIT_IDENTITY = (
 )
 
 
-def _same_scope_wait_identity(before, after, *, snapshot=True):
+def _same_scope_wait_identity(before, after, *, snapshot=True, allow_drama=False):
     fields = _SCOPE_WAIT_IDENTITY + (("material_pool_snapshot_max_id",) if snapshot else ())
     return (isinstance(before, dict) and isinstance(after, dict)
             and all(k in before and k in after and before[k] == after[k] for k in fields)
-            and before["source_type"] == "material"
+            and before["source_type"] in (("material","drama") if allow_drama else ("material",))
             and type(before["id"]) is int and before["id"] > 0)
 
 
@@ -195,17 +231,18 @@ def _zero_write_claim(run):
                     for k in ("queued_count", "published_count", "failed_count", "unknown_count")))
 
 
-def _wait_for_account_scope(sidecar, config, identity, baseline):
+def _wait_for_account_scope(sidecar, config, identity, baseline, *, read_preflight=False):
     """No plan retry or failure write; prove the original empty run still exists."""
     latest = sidecar.query_schedule_plan(config.plan_query_path, identity)
     run = latest.get("run")
     if (latest.get("found") is not True or latest.get("queues") != []
-            or not _same_scope_wait_identity(baseline, run) or not _zero_write_claim(run)
-            or type(run.get("material_pool_snapshot_max_id")) is not int):
+            or not _same_scope_wait_identity(baseline, run,allow_drama=read_preflight) or not _zero_write_claim(run)
+            or not (type(run.get("material_pool_snapshot_max_id")) is int
+                    or (read_preflight and run.get("material_pool_snapshot_max_id") is None))):
         return False
     renewed = sidecar.heartbeat_schedule_run(DEFAULT_HEARTBEAT_PATH, identity, plan_attempt=False)
     return (renewed.get("heartbeat_recorded") is True and renewed.get("plan_attempt_recorded") is False
-            and _same_scope_wait_identity(baseline, renewed) and _zero_write_claim(renewed))
+            and _same_scope_wait_identity(baseline, renewed,allow_drama=read_preflight) and _zero_write_claim(renewed))
 
 
 def _env_value(name, fallback_name="", default=""):
@@ -1327,13 +1364,15 @@ def _preflight_failure_result(identity, exc, audit):
 def _open_source_connection(config, connection_factory):
     factory = connection_factory or _connect_from_config
     try:
-        return factory(config)
+        return _readonly_preflight_call(lambda:factory(config))
     except CandidateSelectionError:
         raise
-    except Exception:
+    except ScheduleReadPreflightTransient:
+        raise
+    except Exception as exc:
         # Driver connection errors can contain hosts, usernames or DSNs.
         # Keep the same safe operator contract as cursor query failures.
-        raise CandidateQueryError("source") from None
+        raise CandidateQueryError("source",read_failure=read_failure(exc)) from None
 
 
 def _close_source_connection(connection):
@@ -1363,7 +1402,7 @@ def _verify_accounts(sidecar, account_ids, *, skip_blocked=False, skipped_accoun
     skipped = []
     for account_id in account_ids:
         try:
-            verified.append(_safe_account(sidecar.verify_account(account_id)))
+            verified.append(_safe_account(_readonly_preflight_call(lambda:sidecar.verify_account(account_id))))
         except SidecarError as exc:
             if not skip_blocked or exc.unknown_outcome or exc.status != 409 or exc.code not in {
                 "x_post_account_needs_review", "x_post_account_locked",
@@ -1879,6 +1918,11 @@ def _drama_candidates(
     account_ids = [int(account["id"]) for account in accounts]
     connection = _open_source_connection(config, connection_factory)
 
+    def reconnect_source():
+        nonlocal connection
+        _close_source_connection(connection)
+        connection=_open_source_connection(config,connection_factory)
+
     def reject_unassigned(pool_item_id, content_id, code, message):
         result = sidecar.record_drama_pool_checks(
             config.drama_check_path,
@@ -1929,13 +1973,13 @@ def _drama_candidates(
             for pool_item in pool_items:
                 try:
                     candidates.extend(
-                        select_drama_pool_episodes(
+                        _readonly_preflight_call(lambda:select_drama_pool_episodes(
                             connection,
                             [pool_item],
                             account_ids=account_ids,
                             schema=config.mysql_database,
                             app_id=config.drama_app_id,
-                        )
+                        ),reconnect=reconnect_source)
                     )
                 except DramaPoolProgressChanged as exc:
                     pool_id = int(pool_item["id"])
@@ -2479,6 +2523,21 @@ def execute_schedule_tick(
                 local_results.append(result)
                 return
             except Exception as exc:
+                # A SidecarError from pool/audit mutation is not a read retry.
+                # Only explicit read wrappers or typed SELECT/connect failures
+                # may use this branch, never arbitrary same-code exceptions.
+                details=(_transient_read_details(exc) if isinstance(exc,
+                    (ScheduleReadPreflightTransient,CandidateSelectionError,DramaQueryError)) else None)
+                if details:
+                    try:
+                        waiting=_wait_for_account_scope(sidecar,batch_config,identity,scope_baseline,read_preflight=True)
+                    except Exception:
+                        waiting=False
+                    result=_preflight_failure_result(identity,exc,None)
+                    result.update(status="waiting_preflight" if waiting else "stopped",retry_next_tick=waiting,
+                                  read_failure=details,error_message="只读预检暂不可用，保留原批次等待下次调度" if waiting else "只读预检失败且未确认零写入状态，本轮停止并保留账本")
+                    local_results.append(result)
+                    return
                 audit = _record_schedule_failure_best_effort(
                     sidecar,
                     batch_config,
@@ -2581,8 +2640,9 @@ def execute_schedule_tick(
                         for item in batches
                     )
                     else (
-                        "waiting_account_state" if any(item["status"] == "waiting_account_state" for item in batches)
-                        and all(item["status"] in {"published", "dispatch_queued", "waiting_relay", "waiting_account_state"} for item in batches)
+                        ("waiting_preflight" if any(item["status"]=="waiting_preflight" for item in batches) else "waiting_account_state")
+                        if any(item["status"] in {"waiting_account_state","waiting_preflight"} for item in batches)
+                        and all(item["status"] in {"published", "dispatch_queued", "waiting_relay", "waiting_account_state", "waiting_preflight"} for item in batches)
                         else "completed_with_errors"
                     )
                 )
@@ -2613,6 +2673,7 @@ def main():
             "skipped_locked",
             "dispatch_queued",
             "waiting_account_state",
+            "waiting_preflight",
         } else 1
     except (
         CandidateSelectionError,

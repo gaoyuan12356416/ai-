@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from features.x_posts.source_duration import probe_source_duration
 from features.x_posts.service import XPostError
 from features.x_accounts.language import canonical_drama_language
+from features.x_posts.read_failures import read_failure
 
 
 SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -95,13 +96,14 @@ class CandidateQueryError(CandidateSelectionError):
         "deploy_time": "短剧可投放时间查询失败，请稍后重试",
     }
 
-    def __init__(self, query_stage="source"):
+    def __init__(self, query_stage="source", *, read_failure=None):
         normalized_stage = str(query_stage or "").strip().lower()
         if normalized_stage not in self._MESSAGES:
             normalized_stage = "source"
         self.query_stage = normalized_stage
         self.error_code = self.code
         self.error_message = self._MESSAGES[normalized_stage]
+        self.read_failure = read_failure
         super().__init__(self.error_message)
 
 
@@ -254,11 +256,11 @@ def _cursor_rows(connection, sql, params, *, query_stage="source"):
         return [dict(row) for row in rows]
     except CandidateSelectionError:
         raise
-    except Exception:
+    except Exception as exc:
         # The source exception can contain SQL text, connection details or
         # credentials.  Persist only a stable code, a bounded stage and the
         # corresponding operator-safe message.
-        raise CandidateQueryError(query_stage=query_stage) from None
+        raise CandidateQueryError(query_stage=query_stage,read_failure=read_failure(exc)) from None
     finally:
         close = getattr(cursor, "close", None)
         if callable(close):
@@ -1376,6 +1378,6 @@ def connect_read_only(
     except CandidateSelectionError:
         raise
     except Exception as exc:
-        raise CandidateSelectionError(
-            "read-only MySQL connection failed: %s" % type(exc).__name__
-        ) from None
+        error=CandidateSelectionError("read-only MySQL connection failed: %s" % type(exc).__name__)
+        error.read_failure=read_failure(exc)
+        raise error from None
