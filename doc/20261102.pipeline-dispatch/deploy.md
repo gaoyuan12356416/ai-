@@ -1,8 +1,26 @@
 # 部署与回滚
 
-最终运行状态：协调器、X 原生服务和 CPU 节点运行 668d0b2，GPU 节点运行 CA 修复版 b349295。四渠道于 2026-11-02 15:10:25Z 恢复接单，15:25:59Z 仍全部启用；旧触发器按原状态恢复，本次临时端口/防火墙规则全部清理。新流程已有 CPU/GPU 真实制作、Facebook 和 X 最终发布回执；TT unknown 保留，GPU TLS 修复后未重试原任务，TT/YouTube 完整业务验收待正常任务。以下组件版本来自实际部署核对，不能从本地 HEAD 推断其他线上组件。
+当前部署进度（2026-11-03，恢复制作核对中）：协调器运行 `5b274ff`，独立 YouTube canonical bridge 运行 `c097f39`（loopback 18847），X/FB/TT 原生服务和两节点均为 `95fdaa4`。主 API PID 2281641 保持不变；原八条 outbox 已全部 ACK，pending=0。YouTube 按用户手动暂停保持 off，TT 维护恢复及 X/FB 恢复制作正在收尾，制作/发布 readback 待补，不能声称本轮四渠道业务全部验收。下列 11 月 2 日记录为历史基线，不代表今天的组件和业务终态；本轮最终业务验收见 [system-test-20261103.md](system-test-20261103.md)。
 
-## 运行边界与版本记录
+**11 月 2 日历史末态：**协调器、X 原生服务和 CPU 节点运行 668d0b2，GPU 节点运行 CA 修复版 b349295。四渠道于 2026-11-02 15:10:25Z 恢复接单，15:25:59Z 仍全部启用；旧触发器按原状态恢复，本次临时端口/防火墙规则全部清理。新流程已有 CPU/GPU 真实制作、Facebook 和 X 最终发布回执；TT unknown 保留，GPU TLS 修复后未重试原任务，TT/YouTube 完整业务验收待正常任务。以下组件版本来自实际部署核对，不能从本地 HEAD 推断其他线上组件。
+
+## 11 月 3 日窄升级记录
+
+`c097f39` 完整 pipeline 426 项通过（85.987s），TT worker 91 项通过（4.786s）。随后 recipe 白名单修复 `5b274ff` 通过 44 项相关测试；未重复跑完整套件，不写成 427 项 full pass。协调器最终部署 `5b274ff5c328f228fcc95a9ebb443a7439823b98`，备份为 `/mnt/data-disk/pipeline-dispatch/backup-5b274ff5c3`。独立 YouTube 桥保持 `c097f39efde069b8e40d548a6cdab4337c0cff0c`，避免重启仍承载截图线程的主 API。
+
+原生候选目录 `/mnt/data-disk/pipeline-dispatch-runtime/native-95fdaa4c4d`，GitHub 提交 `95fdaa4c4db0ed19a465cb126d539274e95ea918`。X/FB/TT/TT auto 4 个 overlay lane 分别 11/15/12/12 个文件全部 after SHA 匹配，5 个原生服务 active。TT auto publisher 完整 SHA 为 `da713109c6630fea1df7bba314053ee9f1ad9b837207a93ebf9a8785719a6afb`，保留原生产代码。备份位于候选的 `backups/`；操作审计为 cutover 目录中的 `native-x-95fdaa4c4d.json`、`native-fb-95fdaa4c4d-resume.json`、`native-tt-95fdaa4c4d.json`。
+
+原 timer/path 恢复各自原状态，03:07:49Z 检查本轮临时 NEW TCP 规则为 0。FB 首次等待连接超时未覆盖代码，门禁已清理；唯一只读 metadata 查询自行完成，后续以 accepted=0、原生制作/发布=0 严格排空切换。未使用 metadata handler 例外，未中断该查询，未重置原 future due。
+
+TT 8 条已证明无执行的 selection 交接只作为部署排空的精确例外，原生 preparing 状态/冻结内容未动。另经专用审核计划与备份完成精确中央 failed→queued，generation 保持 2，caps/history/schedule 和原生 SHA 保持；这不是解除历史 hold、unknown 或恢复其他失败任务。
+
+CPU/GPU 已升级同一份 `95fdaa4` 预检候选。原节点身份、state、原八条回执身份及内容保留；CPU 专用 TT binary 不变。CPU 5 / GPU 9 TT profiles、实际 X repair、strict outro 30fps/AAC、COS 预检通过。八条原回执已全部 ACK，双方 pending=0；两条 late preflight 曾返回 SQLite OperationalError，重交原事实成功，没有重执行，尚无证据确定具体锁原因。中央 31592/31595 只纠正 artifact 到已验证最终 SHA `ec9eb359…` / `4883f412…`，各一条审计事件，status/gen2 不变。
+
+YouTube 此前 4 条真实发布事实已经核实，本轮继续保持用户手动暂停，不等待六条封面补齐。恢复后的 TT 制作/发布及 X/FB 正常任务证据后续另记，不以服务 active 或回执 ACK 替代新业务最终回执。
+
+本轮回退仍须先关闭新领取并排空，在相应服务停止后用上述 manifest 的 `rollback` 恢复代码/配置。不得将部署备份数据库覆盖当前账本，不清理旧 outbox、publication、unknown、素材预留或历史暂停。
+
+## 11 月 2 日运行边界与版本记录（历史基线）
 
 CPU 43.166.187.96，香港 GPU 43.154.250.89。CPU 数据目录 `/mnt/data-disk/pipeline-dispatch`，GPU 数据目录 `/data/pipeline-dispatch`。协调器监听 `127.0.0.1:18846`，远程节点经受保护连接访问；不开放公网，旧 8846 属于其他服务。
 
@@ -46,7 +64,7 @@ b349295 为安装器/doctor 的 CA 增量修复，相关 41 项与独立 45 项�
 
 制作领取时间与发布时间分别保留：FB 原计划器已生成的 planned/queued 随机任务可立即制作，仍遵守重试时间，不扩大原计划器预建范围。TT 自动任务使用协调器私有 JSON 的显式 `preparation_policy.tt_auto_prepare_ahead_seconds`；本次生产值 `TT_AUTO_POST_PREPARE_AHEAD_SECONDS=14400`，两处保持一致，原生桥继续将 executor 配置传给原领取校验。发布阶段不提前，`cutover_due_at` 始终为原发布时间。未领取 generation0 制作任务可刷新资格时间；已领取、暂停和 unknown 任务不重置。
 
-## 已完成的自然排空与当前业务核对
+## 11 月 2 日自然排空与业务核对（历史基线）
 
 21:13:15 通过 admin/stop-claims 暂停 X/FB/TT 新领取，剩余 3 条制作自然排空。21:39:35 只读快照为全部渠道关闭、中央 executing=0，两节点未 ACK 回执均为 0。此前新流程已完成 CPU 制作 3 条、GPU 制作 1 条及每节点各 1 条 Facebook 最终发布；这不是当前开关终态，后续以新快照为准。
 

@@ -2,7 +2,11 @@
 
 本记录覆盖本轮监控/API/前端/权限/统计系统测试，以及随后定位的 FB 原生控制锁和回执重复投递问题。2026-11-03 10:00–10:07 CST 的线上部分全部只读：没有修改权限、容量、任务、预约或锁，没有发布/重试平台请求。前一天证据未覆盖，新增证据保存于本次私有工作目录 `work/acceptance-20261103/`。以下带 Z 的时间为 UTC，其余为北京时间。
 
-当前结论：监控展示与账本一致，权限和本地前端测试通过；这不代表完整业务验收通过。10:00 的今天窗口内，中央原生发布事实为 0，制作完成为 5，失败为 96。业务执行仍有真实故障需要修复并等待正常任务验证，不能以 API 200、worker 心跳或编码探针替代平台最终回执。
+当前进度（2026-11-03 修复上线后、恢复制作核对中）：协调器已部署 `5b274ff`，X/FB/TT 原生服务和两节点为 `95fdaa4`，独立 YouTube 原生桥为 `c097f39`、监听 loopback 18847。主 API 进程保持不变。CPU/GPU 原八条 outbox 均已 ACK，pending=0。用户已手动暂停 YouTube，本轮保持 YouTube off；TT 维护恢复及 X/FB 恢复制作由根代理收尾，实际制作/发布 readback 待补。
+
+完整 pipeline 套件在 `c097f39` 为 426 项通过（85.987s），TT worker 91 项通过（4.786s），监控 33 项及本地浏览器通过；后续 recipe 白名单修复 `5b274ff` 另有 44 项相关测试通过，未声称重新跑过 427 项完整套件，也不把各组相加。
+
+监控、权限和本地测试通过不等于完整业务验收通过。下文 10:00 的发布 0 / 制作完成 5 / 失败 96 是修复前历史快照，不代表当前总量。节点升级及原回执收敛已有下文证据，恢复制作后的正常业务结果另行补证；不能用 API 200、worker 心跳或编码探针替代平台最终回执。
 
 ## 测试范围、方法与结果
 
@@ -36,7 +40,7 @@ node --check scripts/test_pipeline_monitor_ui.js
 
 浏览器采用已安装的 Chromium 1169，并显式设置 `PIPELINE_PLAYWRIGHT_PACKAGE`、`PIPELINE_CHROMIUM_EXECUTABLE`、`PIPELINE_UI_OUTPUT`。首次运行只因本地 1217 executable 不存在而失败，改用实际已安装 binary 后原测试及新增边界全部通过。未下载浏览器，未调用线上浏览器。桌面/移动/worker 截图已检查，位于 `ui/desktop.png`、`ui/mobile.png`、`ui/workers.png`；它们均为测试数据。
 
-本轮基线完整 pipeline 套件另有 352 项通过，66.626s（`pipeline-baseline-tests.txt`）。这是修复前基线结果，不宣称后续变更已经完成整套回归。
+本轮基线完整 pipeline 套件为 352 项通过，66.626s（`pipeline-baseline-tests.txt`）；最终候选 `c097f39` 完整套件为 426 项通过，85.987s，另有 TT worker 91 项通过，4.786s。精确 TT 交接审计工具共 10 项，覆盖完整 source row SHA、范围/新鲜节点证据/无执行证据校验与事务恢复。专项和完整套件有重复覆盖，不累加为总用例数。
 
 ## 统计与权限语义
 
@@ -46,7 +50,7 @@ node --check scripts/test_pipeline_monitor_ui.js
 - owner/tenant/module/channel 在汇总和分页前过滤，admin cache 不供个人复用；FB numeric owner 不绕过手动任务 tenant 隔离。分页不重、权限不足模块拒绝、API token 不替代 Cookie 权限。
 - 快照触发器缺失/安装中断能够事务回滚并重建；阶段回执及重复 checkpoint 仅计一次。历史 backfill 显示未完整提示并在收敛后不双计。
 
-## 10:00 线上状态快照
+## 10:00 修复前历史快照（非当前状态）
 
 协调器运行 `668d0b2d0d1a2111823ae3e819b850d2ae27f2b6`，X/FB/TT/YouTube 四渠道 enabled。采集快照生成时间为 02:00:03.864Z，最老来源采集时间 01:59:52.671Z，约 11 秒延迟。
 
@@ -73,7 +77,7 @@ node --check scripts/test_pipeline_monitor_ui.js
 
 `FBNativeBridge` 全局 RLock 将慢素材/权限预检与凭据读取串行化，使不同 Page 及其他来源迟到回执互相等待。窄修 `5c8f04d` 改为弱引用 source_key RLock：同一 source 的制作、发布、代次和迟到回执仍共用一把锁；不保留闲置历史锁，不改变 SQLite 原子领取、Page/跨 auto-video 防重、审批、冻结素材或现有预留。无新增非标准库依赖，仓库只读查询每次使用独立连接。
 
-新 `test_pipeline_fb_source_locks.py` 使用真实原生 SQLite，验证慢预检期间另一 Page 的迟到成功 checkpoint/complete 可以收敛，同 source 并发只领取一次，同 Page 和跨 auto-video 仍被原生 guard 阻止，跨代同源互斥与弱引用释放。连同既有 FB 回执/重领/暂停边界共 15 项通过，4.116s；py_compile/diff-check 通过。该提交仅本地代码与测试，部署状态另记；未改生产任何 failed/unknown/inflight，特别未触碰 CPU 正在制作的 `fb:video:da3d5890853b4188a62d9539836879b1`。
+新 `test_pipeline_fb_source_locks.py` 使用真实原生 SQLite，验证慢预检期间另一 Page 的迟到成功 checkpoint/complete 可以收敛，同 source 并发只领取一次，同 Page 和跨 auto-video 仍被原生 guard 阻止，跨代同源互斥与弱引用释放。连同既有 FB 回执/重领/暂停边界共 15 项通过，4.116s；py_compile/diff-check 通过。该修复已随 `95fdaa4` 原生候选于本轮部署；修复和部署均不重置 failed/unknown/inflight。诊断当时正在制作的 `fb:video:da3d5890853b4188a62d9539836879b1` 未被中断，当前业务状态以后续原回执核对为准。
 
 ## 回执投递并发与崩溃恢复
 
@@ -83,11 +87,11 @@ node --check scripts/test_pipeline_monitor_ui.js
 
 本地新增 11 项测试包括真实 spawn 三进程争抢、强制结束投递进程后的租约回收、慢调用跨进程续租、过期 owner 不得 ACK/释放新 owner、旧表迁移、前序阻塞、后台避让、退避、正向 ACK 和敏感错误过滤。连同 worker 与失败诊断共 35 项通过，7.619s。独立审查确认租约与退避逻辑，并补充了严格正向 ACK 回归。所有测试 client 均不访问网络，不重做执行任务。
 
-worker 接线与领取握手已提交于 `2f9e60c`，根代理报告共同 78 项回归通过；这不表示已部署。上线必须让同节点使用旧 outbox 实现的后台投递进程全部退出后，再由新实现接手共享数据库；旧实现不会识别新增 lease，混跑不能保证互斥。根代理已确认两节点自然停止新接，原八条 outbox 保留。不得删除原回执、重置失败/unknown，或借回执补交重新执行平台发布。
+worker 接线与领取握手提交为 `2f9e60c`，已包含在本轮候选中。两节点已停止旧进程并升级 `95fdaa4`；stage 前后原 outbox 身份及内容未变（当时 CPU pending 7、GPU pending 1），随后八条原事实均取得合法 ACK，双方 pending=0。两条 late preflight 首次补交曾返回 SQLite `OperationalError`，重交原事实后成功，没有重新执行任务；现存证据不足以断言具体 SQLite 锁持有者或锁冲突原因。旧实现不识别新增 lease，不能与新实现混跑。不得删除原回执、清 unknown 或借补交重新执行发布。
 
 ## 本轮确认的 BUG 索引
 
-现有 BUG-001 为历史暂停问题，本轮顺延新增独立记录。以下代码均已本地提交并有针对性回归，记录时尚未上线；最终部署和自然任务验收由根代理后续补充。
+现有 BUG-001 为历史暂停问题，本轮顺延新增独立记录。以下修复均已纳入最终回归。协调器、原生桥和节点均已部署，原回执已收敛；各 BUG 状态分别记录，不将组件上线等同于业务验收。
 
 | 编号 | 已确认问题 | 修复提交 |
 | --- | --- | --- |
@@ -95,15 +99,29 @@ worker 接线与领取握手已提交于 `2f9e60c`，根代理报告共同 78 �
 | [BUG-003](bugs/BUG-003.md) | X 全局控制锁阻塞无关 source 回执 | `2793af2`，进程保护测试 `575b08a` |
 | [BUG-004](bugs/BUG-004.md) | FB 全局控制锁跨 Page 串行化慢预检和回执 | `5c8f04d` |
 | [BUG-005](bugs/BUG-005.md) | 多进程共享 outbox 无投递租约/退避 | `6bca72b` + `2f9e60c` |
-| [BUG-006](bugs/BUG-006.md) | X random 成片被中央恢复为预检原片指纹 | `2793af2` |
+| [BUG-006](bugs/BUG-006.md) | X random 成片被中央恢复为预检原片指纹；迟到原回执纠正元数据与 recipe 白名单 | `2793af2` + `c097f39` + `5b274ff` |
 | [BUG-007](bugs/BUG-007.md) | TT 选材后 fingerprint 和 selection phase 不能按冻结身份重领 | `dede4bf` |
 | [BUG-008](bugs/BUG-008.md) | 已证明的 TT 原生账号占用被中央记为永久失败 | `6045458` + `2f9e60c` |
 | [BUG-009](bugs/BUG-009.md) | 缺少明确 accepted=true 的异常字典可导致假 ACK | `6bca72b` + `2f9e60c` |
 
-根代理共同 78 项和上述各专项存在重复覆盖，不能简单相加为总用例数。升级后的最终全套测试和平台回执仍需另记。BUG-006 已有中央 31592/31595 与节点原成片不一致的生产只读证据，但原生发布仍读取验证后的 random 最终结果，没有证据证明真实发错视频。
+共同 78 项、各专项和最终 426 项存在重复覆盖，不能简单相加为总用例数。平台业务回执仍需另记。BUG-006 已有中央 31592/31595 与节点原成片不一致的生产只读证据，但原生发布仍读取验证后的 random 最终结果，没有证据证明真实发错视频。
+
+## 本轮已完成的部署与精确交接
+
+- CPU 协调器为 `5b274ff5c328f228fcc95a9ebb443a7439823b98`，升级备份 `/mnt/data-disk/pipeline-dispatch/backup-5b274ff5c3`；独立 YouTube canonical bridge 为 `c097f39efde069b8e40d548a6cdab4337c0cff0c`、loopback 18847。主 API PID 2281641 未变；截图任务仍归 API 进程，不能因配置 `DRAMA_JOB_USE_WORKER=1` 就假定 API 可无损重启。
+- X/FB/TT 原生候选为 `95fdaa4c4db0ed19a465cb126d539274e95ea918`。03:07:49Z 只读复核 4 个 overlay lane 共 50 个文件，全部匹配 manifest after SHA；5 个原生服务 active。TT auto 现网 publisher SHA `da713109c6630fea1df7bba314053ee9f1ad9b837207a93ebf9a8785719a6afb` 保持不变。原 timer/path 状态已恢复，本轮临时 NEW TCP 规则为 0。
+- FB 第一次切换因唯一 metadata `plan-next` 连接未排空而停止在门禁阶段，没有停止原生服务或覆盖代码。失败门禁已精确移除。该请求涉及未来 due 867287 的只读候选扫描，02:59:54Z 自然回到 pending，run_id 仍空；03:05:59Z caller inactive、accepted connections 为 0。随后按严格无制作/发布/连接在途条件完成切换，实际未使用 metadata 例外，未 SIGTERM 此 planner，也未重置 due/lease。
+- 两节点均已升级 `95fdaa4`，保留身份、state、私有环境与 CPU 专用 TT FFmpeg 路径。stage 期间原 active manifest 不动，激活使用同一份预检候选；CPU 5 / GPU 9 个 TT profile 完整预检、实际 X repair、严格 TT outro 30fps/AAC 与 COS 通过。原八条回执已全部 ACK、pending=0；升级后的正常制作/发布结果单独验收。
+- 经独立计划、完整 row SHA 和双方节点新鲜 inactive 证据核对，TT exact 8 条无执行交接已由中央 failed 恢复 queued，generation 仍为 2：4544/4546/4549/4553/4554/4569/4570/4571（中央 31474/31476/31479/31483/31484/31625/31626/31627）。只改精确中央交接状态；原 caps/history/schedule、原生账本与文件 SHA 不变，没有执行制作或平台请求，没有推广到其他 failed/unknown。
+
+TT 时间采用原始 UTC 字符串一次换算：前五条原生交接时间为 **11 月 2 日 21:33Z = 11 月 3 日 05:33 CST**，后三条为 **11 月 3 日 00:43Z = 08:43 CST**。先前把 PowerShell 已转本地时间再次加 8 小时得到的 13:33/16:43 不采用，也不据此计算等待时长。
+
+BUG-006 的 `c097f39` 只在原历史 claim、原生最终成片及迟到回执 SHA/size/URL 全部吻合时纠正中央误存的 source artifact；不新建任务、不改变已完成代次、不重新制作/发布。后续 `5b274ff` 保留 `artifact_from` 白名单中的已验证 recipe，避免正确成片已入投影后配方被裁掉。03:19:58Z 对中央 31592/31595 精确纠正成功：最终 SHA 分别以 `ec9eb359` / `4883f412` 开头，各产生一条 `qualified_final_artifact_corrected` 审计事件；两条 completed/status 和 generation=2 不变，没有重做制作或发布。
+
+证据包括 `coordinator-5b274ff-deploy.json`、`x-final-artifact-exact-correction.json`、`x-late-artifact-corrected.json`、`cpu-original-receipt-response.json`、`gpu-original-receipt-response.json`、`read_native_final.json`、`native-*-apply-*.jsonl`、`read_fb_scope.json`、`stage-cpu-main-95fdaa4c4db0.json`、`stage-hk-gpu-95fdaa4c4db0-attempt2.json`、`tt-handoff-applied-84c6cb6758f64a58ab1da69b7c44aefe.json`。TT 正式计划 SHA 为 `659041517629132431e4c8459ce668912b3c97dc2711ebb1e223a139a50b5a31`，恢复前中央备份与原生未修改结果已保留。
 
 ## 仍需完成的业务验收
 
-本轮监控与前端系统测试通过，但截止上述快照，不能称完整业务验收完成。后续应依据根代理/渠道代理的实际平台回执和制作产物补齐 X/FB/TT/YouTube 的 CPU/GPU 矩阵、共性超时/租约/回执修复及升级后正常任务结果。未知回执必须先核对，失败不自动重试；不为补齐矩阵创建额外帖子、清锁或恢复历史任务。
+本轮监控、前端及系统回归通过，协调器/原生桥/节点已上线，原八条回执收敛；当前优先恢复正常制作，实际 X/FB/TT 制作和发布 readback 待补，不能称四渠道新一轮完整业务验收通过。YouTube 此前已有 4 条经验证的真实最终发布事实，本轮用户已手动暂停 YouTube，保持 off，不为等齐六条封面而延迟恢复其他制作，也不因文档验收重新开启。未知回执仍需核对，失败不自动重试；精确八条 TT 无执行交接是另有审计授权的窄恢复，不推广到其他历史任务。
 
 关键证据：`pipeline-monitor-acceptance.json`、`monitor-public-auth.json`、`monitor-python.log`、`monitor-browser.log`、`ui/`、`business-full.json`、`fb-native-diagnosis.json`。证据原件留在私有工作目录；文档不保存 session、token、私有环境或签名 URL。
