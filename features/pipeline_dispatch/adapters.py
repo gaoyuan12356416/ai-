@@ -468,6 +468,12 @@ class LedgerAdapter:
             projected_status = "completed"
         if adopt_schedule:
             projected_status = "ready"
+        confirmed_schedule = None
+        if (spec.channel == "youtube" and spec.family == "publish" and state == "scheduled"
+                and row.get("schedule_status") == "armed" and not unknown and not row.get("lease_owner")
+                and publish_id and row.get("publish_at")
+                and stamp(row.get("schedule_confirmed_publish_at") or "") == stamp(row["publish_at"])):
+            confirmed_schedule = {"video_id": publish_id, "scheduled_at": stamp(row["publish_at"])}
         if row.get("canonical_held"):
             projected_status = "backlog_paused"
         started_at = row.get("started_at_utc") or row.get("started_at") or row.get("claimed_at_utc") or row.get("claimed_at") or row.get("selected_at_utc")
@@ -504,6 +510,7 @@ class LedgerAdapter:
                 "backlog_authorization": row.get("_backlog_authorization"),
                 "backlog_ancestor_authorization": row.get("_backlog_ancestor_authorization"),
                 "source_revision": source_revision,
+                "confirmed_youtube_schedule": confirmed_schedule,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
                 "stage": stage, "scheduled_at": (stamp(now) if youtube_control_due(row) else adopt_schedule["scheduled_at"]) if adopt_schedule else eligible_at,

@@ -534,7 +534,11 @@ class DispatchStore:
                 # Canonical observations cannot reset a claim, failure, hold or write intent.
                 # They may escalate a failed admission to a native unknown outcome.
                 # Preserve the owning ledger's fence even if no permit reached a node.
-                if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"]:
+                parked_schedule = (channel == "youtube" and existing["status"] == "ready"
+                                   and not offer.get("unknown_outcome") and not offer.get("legacy_inflight")
+                                   and bool(offer.get("confirmed_youtube_schedule"))
+                                   and json.loads(existing["payload_json"]).get("continuation") == offer["confirmed_youtube_schedule"])
+                if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"] and not parked_schedule:
                     c.execute("UPDATE pipeline_job SET status='unknown',error_code='canonical_unknown_outcome',finished_at='',updated_at=? WHERE id=?", (now, existing["id"]))
                     for resource in offer.get("resource_keys", []):
                         c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, existing["id"]))

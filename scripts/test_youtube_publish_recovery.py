@@ -107,5 +107,30 @@ class RecoveryTests(unittest.TestCase):
             dispatch.offer(dict(offer,source_revision='999'))
             self.assertEqual(dispatch.get_job(central['id'])['status'],'unknown')
 
+    def test_confirmed_appointment_stays_parked_but_actual_unknown_is_fenced(self):
+        f=self.f
+        adapter=LedgerAdapter(LedgerSpec('youtube','publish',str(f.store.db_path),'drama_youtube_publish',module='youtube_auto_publish'),f.bridge)
+        due='2099-11-04T00:00:00Z'
+        with f.workflow.db(True) as c:
+            c.execute("UPDATE drama_youtube_publish SET status='scheduled',schedule_status='armed',publish_at=?,schedule_confirmed_publish_at=?,video_id='same_video1',video_attempt_count=1,lease_owner='',lease_expires_at_utc='' WHERE id=?",(due,due,f.task['id']))
+        offer=adapter.project(adapter.read(f.task['id']))
+        self.assertEqual(offer['status'],'unknown') # Attempt count alone is not a failed appointment.
+        continuation={'video_id':'same_video1','scheduled_at':due}
+        self.assertEqual(offer['confirmed_youtube_schedule'],continuation)
+        with tempfile.TemporaryDirectory() as root:
+            dispatch=DispatchStore(Path(root)/'d.db')
+            job=dispatch.offer(offer)
+            with dispatch.transaction() as c:
+                c.execute("UPDATE pipeline_job SET status='ready',generation=1,payload_json=?,scheduled_at=? WHERE id=?",(json.dumps({'continuation':continuation}),due,job['id']))
+                c.execute('DELETE FROM pipeline_legacy_resource WHERE job_id=?',(job['id'],))
+            for _ in range(3):dispatch.offer(offer)
+            saved=dispatch.get_job(job['id'])
+            self.assertEqual((saved['status'],saved['generation'],saved['scheduled_at']),('ready',1,due))
+            with closing(dispatch.connect()) as c:
+                self.assertFalse(c.execute('SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?',(job['id'],)).fetchone())
+            with f.workflow.db(True) as c:c.execute("UPDATE drama_youtube_publish SET status='unknown',unknown_outcome=1 WHERE id=?",(f.task['id'],))
+            dispatch.offer(adapter.project(adapter.read(f.task['id'])))
+            self.assertEqual(dispatch.get_job(job['id'])['status'],'unknown')
+
 
 if __name__ == '__main__': unittest.main()
