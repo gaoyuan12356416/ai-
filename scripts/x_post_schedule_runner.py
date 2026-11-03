@@ -181,6 +181,18 @@ class ScheduleReadPreflightTransient(ScheduleRunError):
         super().__init__("只读预检瞬时故障，未尝试创建计划", "x_post_read_preflight_transient")
 
 
+def _targeted_schedule_lock(config, identity):
+    """Shared with one incident operator; every future normal tick honors it."""
+    targets = {
+        ('drama', '2026-11-02', '16:28', 27): 1029,
+        ('drama', '2026-11-03', '08:44', 27): 1031,
+    }
+    rid = targets.get(tuple(identity.get(k) for k in ('source_type', 'run_date', 'publish_time', 'version')))
+    if rid is None:
+        return contextlib.nullcontext(True)
+    return process_lock(str(Path(config.lock_path).parent / ('schedule-targeted-%s.lock' % rid)))
+
+
 def _transient_read_details(exc):
     if isinstance(exc, (CandidateSelectionError, DramaQueryError, ScheduleReadPreflightTransient)):
         return getattr(exc,"read_failure",None)
@@ -2611,7 +2623,15 @@ def execute_schedule_tick(
                 result["skipped_accounts"] = skipped_accounts
             local_results.append(result)
         try:
-            process()
+            with _targeted_schedule_lock(config, identity) as acquired:
+                if acquired is None:
+                    local_results.append({
+                        "source_type": identity["source_type"], "run_date": identity["run_date"],
+                        "publish_time": identity["publish_time"], "status": "waiting_targeted_lock",
+                        "attempted_count": 0, "results": [],
+                    })
+                else:
+                    process()
         except Exception as exc:
             local_results.append({"source_type": identity["source_type"], "run_date": identity["run_date"],
                                   "publish_time": identity["publish_time"], "status": "needs_review",
@@ -2640,9 +2660,10 @@ def execute_schedule_tick(
                         for item in batches
                     )
                     else (
-                        ("waiting_preflight" if any(item["status"]=="waiting_preflight" for item in batches) else "waiting_account_state")
-                        if any(item["status"] in {"waiting_account_state","waiting_preflight"} for item in batches)
-                        and all(item["status"] in {"published", "dispatch_queued", "waiting_relay", "waiting_account_state", "waiting_preflight"} for item in batches)
+                        ("waiting_preflight" if any(item["status"]=="waiting_preflight" for item in batches) else
+                         "waiting_targeted_lock" if any(item["status"]=="waiting_targeted_lock" for item in batches) else "waiting_account_state")
+                        if any(item["status"] in {"waiting_account_state","waiting_preflight","waiting_targeted_lock"} for item in batches)
+                        and all(item["status"] in {"published", "dispatch_queued", "waiting_relay", "waiting_account_state", "waiting_preflight","waiting_targeted_lock"} for item in batches)
                         else "completed_with_errors"
                     )
                 )
@@ -2674,6 +2695,7 @@ def main():
             "dispatch_queued",
             "waiting_account_state",
             "waiting_preflight",
+            "waiting_targeted_lock",
         } else 1
     except (
         CandidateSelectionError,
