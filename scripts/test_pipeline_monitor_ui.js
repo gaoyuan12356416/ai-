@@ -45,6 +45,9 @@ const server = http.createServer((req, res) => {
     for (const key of ["pipelineMonitor", "videoEditing", "aiImageDaily", "fbPostMaterialPool", "fbPostAdDelete", "socialkitAnalytics"]) assert.equal(await page.locator(`[data-quick-nav-key="${key}"]`).count(), 1);
     for (const group of ["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]) assert.equal(await page.locator(`[data-quick-nav-group="${group}"]`).count(), 0);
     assert.equal(await page.locator("#pmChannelRows tr").count(), 8);
+    assert.match(await page.locator("#pmTotals .pm-stat").first().innerText(), /排队中\s*22/);
+    assert.equal(await page.locator('#pmStatus option[value="queued"]').innerText(), "排队中");
+    assert.match(await page.locator("#pmQueueNote").innerText(), /待选材、未到预约时间及账号等待[\s\S]*不代表当前可领取数/);
     const fbEfficiency = page.locator("#pmEfficiencyRows tr").filter({ hasText: "Facebook · 发布" });
     assert.match(await fbEfficiency.innerText(), /17秒 \/ 17秒[\s\S]*不适用[\s\S]*未记录[\s\S]*4.2分 \/ 4.2分/);
     assert.match(await page.locator("#pmEfficiencyRows tr").filter({ hasText: "TikTok · 发布" }).innerText(), /1.3分 \/ 1.3分/);

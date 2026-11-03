@@ -135,3 +135,12 @@ BUG-006 的 `c097f39` 只在原历史 claim、原生最终成片及迟到回执 
 本轮监控、前端及系统回归通过，协调器/原生桥/节点已上线，原八条回执收敛，双机 6 条真实制作已恢复；制作完成与新 TT 发布最终回执仍需核对，不能称四渠道新一轮完整业务验收通过。YouTube 此前已有 4 条经验证的真实最终发布事实，本轮用户已手动暂停 YouTube，保持 off，不为等齐六条封面而延迟恢复其他制作，也不因文档验收重新开启。未知回执仍需核对，失败不自动重试；精确八条 TT 无执行交接是另有审计授权的窄恢复，不推广到其他历史任务。
 
 关键证据：`pipeline-monitor-acceptance.json`、`monitor-public-auth.json`、`monitor-python.log`、`monitor-browser.log`、`ui/`、`business-full.json`、`fb-native-diagnosis.json`。证据原件留在私有工作目录；文档不保存 session、token、私有环境或签名 URL。
+
+
+## 14:11 排队统计文案澄清（待部署）
+
+总览、渠道表及状态筛选将 queued 的“待领取”统一改为“排队中”，并明确包含待选材、未到预约时间及账号等待，不等于当前可领取数。原 queued 状态值、计数、筛选请求、权限及调度规则不变；不添加未经验证的可领取数量。静态 JS 缓存版本更新为 `20261103queue1`。
+
+依据：`views._summary` 按原状态汇总，增量计数只排除 `metadata_only`，尚未执行的 Xauto `control_only` 父计划也在 queued 中。14:11:36 CST 只读快照的 198 条 Xauto queued 父项均为原生 pending，全部被同账号前项挡住；197 条对应 65 个 retry_wait/reconcile 前项，另 1 条对应 preparing 前项。这里只确认阻塞关系，前项是否应收敛仍由独立账本核对，不能据此宣称全部属于正常等待。证据为私有工作目录 `work/backlog-20261103/read_x_planner_waiting.json`。
+
+验证：现有本地浏览器契约检查总览仍显示原 fixture 数字 22、筛选仍使用 `queued`、说明文案可见；生产统计与任务未修改。

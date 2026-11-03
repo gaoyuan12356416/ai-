@@ -4,7 +4,7 @@
   const CHANNELS = { x: "X", fb: "Facebook", tt: "TikTok", youtube: "YouTube" };
   const STAGES = { prepare: "制作", publish: "发布" };
   const HOSTS = { "cpu-main": "CPU 服务器", "hk-gpu": "香港 GPU" };
-  const STATES = { queued: "待领取", pending: "待领取", running: "执行中", preparing: "制作中", publishing: "发布中", ready: "已就绪", completed: "制作完成", published: "发布成功", failed: "失败", unknown: "结果待核对", backlog_paused: "历史积压暂停", available: "正常", healthy: "正常", unavailable: "采集失败", offline: "离线", stale: "数据延迟", idle: "空闲", busy: "执行中", draining: "停止接单", legacy_running: "原流程执行中" };
+  const STATES = { queued: "排队中", pending: "排队中", running: "执行中", preparing: "制作中", publishing: "发布中", ready: "已就绪", completed: "制作完成", published: "发布成功", failed: "失败", unknown: "结果待核对", backlog_paused: "历史积压暂停", available: "正常", healthy: "正常", unavailable: "采集失败", offline: "离线", stale: "数据延迟", idle: "空闲", busy: "执行中", draining: "停止接单", legacy_running: "原流程执行中" };
   const PHASES = { download: "下载素材", probe: "校验素材", render: "制作渲染", upload_artifact: "保存成片", prepare: "制作", upload: "上传平台", media_uploading: "上传平台", processing: "平台处理", post_creating: "创建帖子", publish: "发布", reconcile: "核对回执", complete: "完成" };
   Object.assign(PHASES, { artifact_upload: "成片传输", artifact_transfer: "成片传输", platform_submit: "平台提交", publish_initialize: "平台提交", platform_upload: "平台上传", platform_processing: "平台处理", platform_confirmation_wait: "平台确认等待", queue: "排队", create_post: "创建帖子", completed: "完成" });
   const IDLE_REASONS = { no_eligible_task: "暂无到期可领取任务", capacity_limit: "已达到本机当前容量", account_busy: "相关账号正在执行或等待核对", channel_limit: "已达到渠道并发上限", global_publish_limit: "已达到全局发布上限", capability_unavailable: "待办所需能力与本机不匹配", channel_disabled: "渠道尚未启用新接单", node_offline: "节点心跳未就绪", draining: "停止接单，等待在途结束", worker_busy: "当前进程已有任务", account_ordering: "等待同账号前序任务", cooldown: "平台限流冷却中", awaiting_assignment: "等待调度" };
@@ -25,7 +25,7 @@
   function filters(tasks) { const values = { window: $("pmWindow").value, channel: $("pmChannel").value }; if (tasks) Object.assign(values, { stage: $("pmStage").value, status: $("pmStatus").value, host_id: $("pmHost").value, cursor, limit: "50" }); return new URLSearchParams(Object.entries(values).filter(([, v]) => v !== "")).toString(); }
   function totals(data) {
     const t = data.totals || {};
-    $("pmTotals").innerHTML = [["queued", "待领取", ""], ["preparing", "制作中", ""], ["ready", "待发布", ""], ["publishing", "发布中", ""], ["prepared", "制作完成", ""], ["published", "发布成功", "accent"], ["failed", "失败", ""], ["unknown", "结果待核对", "alert"], ["backlog_paused", "历史积压暂停", "alert"]].map(([key, label, style]) => `<article class="pm-stat ${style}"><span class="pm-stat-label">${label}</span><div class="pm-stat-value">${number(t[key])}</div></article>`).join("");
+    $("pmTotals").innerHTML = [["queued", "排队中", ""], ["preparing", "制作中", ""], ["ready", "待发布", ""], ["publishing", "发布中", ""], ["prepared", "制作完成", ""], ["published", "发布成功", "accent"], ["failed", "失败", ""], ["unknown", "结果待核对", "alert"], ["backlog_paused", "历史积压暂停", "alert"]].map(([key, label, style]) => `<article class="pm-stat ${style}"><span class="pm-stat-label">${label}</span><div class="pm-stat-value">${number(t[key])}</div></article>`).join("");
   }
   function renderSummary(data) {
     totals(data);
