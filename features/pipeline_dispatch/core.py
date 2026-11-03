@@ -264,14 +264,19 @@ class DispatchStore:
                   (version + 1, dumps(config), self.now()))
         self.event(c, None, kind, {"actor": actor.get("user_id", "system"), "version": version + 1}, self.now())
 
-    def channel_enabled(self, channel, enabled):
+    def channel_enabled(self, channel, enabled, *, preparation_only=False):
         channel = channel_key(channel)
+        if not isinstance(preparation_only, bool):
+            raise DispatchError("preparation_only_invalid", status=400)
         with self.transaction() as c:
             config = self.config(c)
             channels = set(config["enabled_channels"])
             channels.add(channel) if enabled else channels.discard(channel)
             config["enabled_channels"] = sorted(channels)
-            self._save_config(c, config, {}, "channel_enabled" if enabled else "channel_draining")
+            limited = set(config.get("preparation_only_channels", []))
+            limited.add(channel) if enabled and preparation_only else limited.discard(channel)
+            config["preparation_only_channels"] = sorted(limited)
+            self._save_config(c, config, {}, "channel_preparation_only" if enabled and preparation_only else "channel_enabled" if enabled else "channel_draining")
 
     @staticmethod
     def _release_finished_legacy_resources(c, source_key):
@@ -670,7 +675,8 @@ class DispatchStore:
                 if c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", ("job:" + str(row["id"]), now)).fetchone():
                     blocked.append("account_busy")
                     continue
-                if row["channel"] not in config["enabled_channels"]:
+                if (row["channel"] not in config["enabled_channels"]
+                        or (stage == "publish" and row["channel"] in config.get("preparation_only_channels", []))):
                     blocked.append("channel_disabled")
                     continue
                 if not set(json.loads(row["capabilities_json"])).issubset(capabilities):

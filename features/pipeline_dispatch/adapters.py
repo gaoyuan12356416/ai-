@@ -294,6 +294,15 @@ class LedgerAdapter:
             row["scheduled_at"] = row.get("created_at")
             row["cutover_due_at"] = body.get("publish_at") or row.get("created_at")
             row["channel_id"] = body.get("channel_id") or obj(body.get("channel")).get("channel_id", "")
+            if row.get("state") == "generating" and self._exists(conn, "pipeline_youtube_claim"):
+                claim = conn.execute("SELECT task_json FROM pipeline_youtube_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1",
+                                     ("youtube:preparation:" + str(row["id"]),)).fetchone()
+                saved = obj(claim[0]) if claim else {}
+                lease = str(row.get("lease_token") or "")
+                row["_youtube_dispatch_owned"] = bool(
+                    lease.startswith("pipeline:") and saved.get("id") == row["id"]
+                    and saved.get("lease_owner") == lease
+                    and saved.get("version") == row.get("version") == body.get("current_version"))
             if row.get("state") == "uploading" and body.get("publish_id"):
                 child = self._parent(conn, "drama_youtube_publish", "id", body["publish_id"])
                 row["_youtube_publication_handoff"] = bool(child and str(child.get("preparation_id")) == str(row["id"]))
@@ -330,6 +339,12 @@ class LedgerAdapter:
             # claim retries precede the platform boundary and are not publishes.
             attempts = int(bool(row.get("publish_started_at_utc") or row.get("publish_id")))
         started = state in INFLIGHT or row.get("ledger_status") in INFLIGHT or (spec.channel == "fb" and spec.family == "video" and row.get("prepare_state") == "preparing")
+        youtube_dispatch_owned = spec.channel == "youtube" and spec.family == "preparation" and bool(row.get("_youtube_dispatch_owned"))
+        if youtube_dispatch_owned:
+            # The dispatch job and generation journal already own this work.
+            # A lost descriptor must not prevent enabling its own recovery by
+            # being mistaken for a still-running pre-cutover legacy worker.
+            started = False
         youtube_handoff_complete = False
         if (spec.channel == "youtube" and spec.family == "preparation" and state == "uploading"
                 and row.get("_youtube_publication_handoff") and "lease_until" in row):
@@ -471,7 +486,7 @@ class LedgerAdapter:
                 "video_published_at": stamp(row["video_published_at_utc"]) if video_published and row.get("video_published_at_utc") else "",
                 "continuation_due": spec.channel == "youtube" and spec.family == "publish" and youtube_control_due(row),
                 "source_attempt_count": attempts, "observation_only": terminal or review_hold or isolated_youtube, "metadata_only": bridged_auto or skipped or isolated_youtube,
-                "pause_eligible": not isolated_youtube and not youtube_handoff_complete and (pause_eligible or (not terminal and not unknown and not started and not attempts)),
+                "pause_eligible": not isolated_youtube and not youtube_handoff_complete and not youtube_dispatch_owned and (pause_eligible or (not terminal and not unknown and not started and not attempts)),
                 "hold_reason": "cutover_overdue" if row.get("canonical_held") else "canonical_isolated_workflow" if isolated_youtube else "canonical_link_pending" if blocked_link else "canonical_review_or_enqueue" if review_hold else "",
                 "execution_available": self.driver is not None and not getattr(self.driver, "control_only", False) and not terminal and not review_hold and not isolated_youtube and not unknown and not started and (not attempts or bool(adopt_schedule)) and not blocked_link and not row.get("canonical_held")}
 

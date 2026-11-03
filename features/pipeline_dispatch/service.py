@@ -196,7 +196,7 @@ class Coordinator:
             if action == "admin/cutover-apply":
                 return controller.apply(payload.get("plan_id"), payload.get("sha256"))
             if action == "admin/cutover-enable":
-                return controller.enable(payload.get("plan_id"), payload.get("sha256"))
+                return controller.enable(payload.get("plan_id"), payload.get("sha256"), preparation_only=payload.get("preparation_only", False))
             raise DispatchError("not_found", status=404)
         node_id = payload.get("node_id")
         if not auth.get("internal") and auth.get("node_id") != node_id:
