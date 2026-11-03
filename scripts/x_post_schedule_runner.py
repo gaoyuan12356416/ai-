@@ -169,6 +169,45 @@ class ScheduleRunError(RuntimeError):
         super().__init__(redact_text(message, 240))
 
 
+class ScheduleAccountScopeChanged(ScheduleRunError):
+    """Only the bounded, pre-write material account-scope loop may defer."""
+
+
+_SCOPE_WAIT_IDENTITY = (
+    "id", "slot_key", "source_type", "run_date", "publish_time", "timezone",
+    "config_version", "account_ids", "expected_count", "body_template",
+    "schedule_mode", "created_at", "random_template_enabled", "duration_policy_version",
+)
+
+
+def _same_scope_wait_identity(before, after, *, snapshot=True):
+    fields = _SCOPE_WAIT_IDENTITY + (("material_pool_snapshot_max_id",) if snapshot else ())
+    return (isinstance(before, dict) and isinstance(after, dict)
+            and all(k in before and k in after and before[k] == after[k] for k in fields)
+            and before["source_type"] == "material"
+            and type(before["id"]) is int and before["id"] > 0)
+
+
+def _zero_write_claim(run):
+    return (isinstance(run, dict) and run.get("status") == "claimed"
+            and all(k in run and not run[k] for k in ("plan_attempted_at", "started_at", "finished_at", "error_code"))
+            and all(type(run.get(k)) is int and run[k] == 0
+                    for k in ("queued_count", "published_count", "failed_count", "unknown_count")))
+
+
+def _wait_for_account_scope(sidecar, config, identity, baseline):
+    """No plan retry or failure write; prove the original empty run still exists."""
+    latest = sidecar.query_schedule_plan(config.plan_query_path, identity)
+    run = latest.get("run")
+    if (latest.get("found") is not True or latest.get("queues") != []
+            or not _same_scope_wait_identity(baseline, run) or not _zero_write_claim(run)
+            or type(run.get("material_pool_snapshot_max_id")) is not int):
+        return False
+    renewed = sidecar.heartbeat_schedule_run(DEFAULT_HEARTBEAT_PATH, identity, plan_attempt=False)
+    return (renewed.get("heartbeat_recorded") is True and renewed.get("plan_attempt_recorded") is False
+            and _same_scope_wait_identity(baseline, renewed) and _zero_write_claim(renewed))
+
+
 def _env_value(name, fallback_name="", default=""):
     value = os.environ.get(name)
     if value is None and fallback_name:
@@ -2316,6 +2355,7 @@ def execute_schedule_tick(
                 )
 
             try:
+                scope_baseline = dict(existing["run"]) if existing["found"] else None
                 _heartbeat_best_effort(sidecar, identity)
                 # Account publishers run concurrently; reserve their bounded media slots.
                 if not pipeline_dispatch_enabled():
@@ -2352,6 +2392,15 @@ def execute_schedule_tick(
                             accounts,
                             **material_loader_options,
                         )
+                        if (planning_passes == 1 and scope_baseline is not None
+                                and scope_baseline.get("material_pool_snapshot_max_id") is None):
+                            # The first pool read freezes the server-owned boundary.
+                            # Capture that boundary once, before any scope rebuild.
+                            frozen = sidecar.query_schedule_plan(batch_config.plan_query_path, identity)
+                            if (frozen.get("found") is True and frozen.get("queues") == []
+                                    and _same_scope_wait_identity(scope_baseline, frozen.get("run"), snapshot=False)
+                                    and _zero_write_claim(frozen["run"])):
+                                scope_baseline = dict(frozen["run"])
                     else:
                         drama_scope_options = {}
                         if drama_candidate_loader is _drama_candidates:
@@ -2395,7 +2444,7 @@ def execute_schedule_tick(
                         if [item["id"] for item in rechecked] == [item["id"] for item in accounts]:
                             break
                         if planning_passes >= 3:
-                            raise ScheduleRunError(
+                            raise ScheduleAccountScopeChanged(
                                 "账号可用范围在预检期间持续变化，未尝试创建计划",
                                 "x_post_schedule_account_state_changed",
                             )
@@ -2415,6 +2464,20 @@ def execute_schedule_tick(
                         batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
                     )
                 _heartbeat_best_effort(sidecar, identity)
+            except ScheduleAccountScopeChanged as exc:
+                # Only this exact local pre-write exhaustion can wait. The fresh
+                # ledger and heartbeat must both retain the original empty run.
+                # A drift/lost read stops this tick without mutating its ledger.
+                try:
+                    waiting = _wait_for_account_scope(sidecar, batch_config, identity, scope_baseline)
+                except Exception:
+                    waiting = False
+                result = _preflight_failure_result(identity, exc, None)
+                result.update(status="waiting_account_state" if waiting else "stopped",
+                              error_message="账号占用持续变化，保留原冻结批次等待下次调度" if waiting else "未确认原批次仍未写入计划，本轮已停止并保留账本",
+                              retry_next_tick=waiting)
+                local_results.append(result)
+                return
             except Exception as exc:
                 audit = _record_schedule_failure_best_effort(
                     sidecar,
@@ -2517,7 +2580,11 @@ def execute_schedule_tick(
                         item["status"] in {"published", "waiting_relay"}
                         for item in batches
                     )
-                    else "completed_with_errors"
+                    else (
+                        "waiting_account_state" if any(item["status"] == "waiting_account_state" for item in batches)
+                        and all(item["status"] in {"published", "dispatch_queued", "waiting_relay", "waiting_account_state"} for item in batches)
+                        else "completed_with_errors"
+                    )
                 )
             )
         ),
@@ -2545,6 +2612,7 @@ def main():
             "skipped_before_start_date",
             "skipped_locked",
             "dispatch_queued",
+            "waiting_account_state",
         } else 1
     except (
         CandidateSelectionError,

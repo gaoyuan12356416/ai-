@@ -8,7 +8,7 @@
 
 采用两个账本的分阶段审计：先备份两库，将中央原 failed/gen0 加入不可领取的专用 hold；再原生设置 queued/reserved、插入一次性 generation 0→1 授权；最后中央 ready/gen0。应用本身保留 attempt_count=1 和原错误、开始时间，并保留所有历史。第一次正常 claim 才生成真实 generation 1 领取记录，initialize 前消费授权并增加 attempt_count 到 2。没有虚构旧 claim、操作或成功/失败回执。两个中间断点可用同一计划和新鲜节点证据继续，已完成计划重复执行只报告当前状态，不重新激活。
 
-需使用已部署的 179596a 或更新 X native/coordinator（已有精确恢复授权支持）。工具不修改 runtime、服务、并发、其他任务或全局 guard，也不会发送平台请求。生产先生成新 plan，再在 CPU/GPU 分别生成 node-evidence；路径均应在私有维护目录，权限 0600。CLI 只支持这一条，不接受扩大队列范围的参数：
+运行时须具备已验证的 generation 0→1 prepost 授权支持；当前 X native 为 179596a，coordinator 的既有 a97 版本已具备所需支持，无需因此重启 coordinator。工具不修改 runtime、服务、并发、其他任务或全局 guard，也不会发送平台请求。生产先生成新 plan，再在 CPU/GPU 分别生成 node-evidence；路径均应在私有维护目录，权限 0600。CLI 只支持这一条，不接受扩大队列范围的参数：
 
 ```bash
 python -B scripts/recover_x_legacy_initialize_5280.py plan \

@@ -2697,6 +2697,107 @@ class ScheduleRunnerTests(unittest.TestCase):
         self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
         self.assertFalse(any(call.kwargs.get("plan_attempt") for call in sidecar.heartbeat_schedule_run.call_args_list))
 
+    def scope_wait_fixture(self, freeze=True):
+        store = XPostStore(Path(self.temporary.name) / "scope-wait.sqlite3")
+        store.save_schedule_config("material", {
+            "enabled": True, "timezone": "Asia/Shanghai", "account_ids": [11, 12],
+            "publish_times": ["10:00"], "version": 1,
+        }, actor={"user_id": "test", "name": "Test"}, eligible_account_ids=[11, 12], now=self.now-timedelta(hours=1))
+        identity = store.due_schedule_slots(self.now)["items"][0]
+        store.add_pool_materials(["201"], actor={"user_id": "test", "name": "Test"}, validation_checks=[{"material_id":"201","error_code":""}])
+        if freeze:store.available_pool_items(1000,schedule_identity=identity)
+        sidecar=FakeSidecar([identity])
+        sidecar.query_schedule_plan=mock.Mock(side_effect=lambda path, ident:store.query_schedule_plan(ident['source_type'],ident['run_date'],ident['publish_time']))
+        sidecar.heartbeat_schedule_run=mock.Mock(side_effect=lambda path, ident, **kwargs:store.heartbeat_schedule_run(
+            ident['source_type'],ident['run_date'],ident['publish_time'],ident['version'],ident['account_ids'],**kwargs))
+        original=sidecar.verify_account;counts={}
+        def changing(aid):
+            account=original(aid);counts[aid]=counts.get(aid,0)+1
+            if aid==12 and counts[aid]%2:raise SidecarError('x_post_account_needs_review','changing hold',409)
+            return account
+        return store,sidecar,identity,changing,counts
+
+    def test_scope_exhaustion_retains_claim_and_next_tick_makes_one_plan(self):
+        store,sidecar,identity,changing,counts=self.scope_wait_fixture()
+        before=store.query_schedule_plan('material',identity['run_date'],identity['publish_time'])['run']
+        with mock.patch.object(sidecar,'verify_account',side_effect=changing):result=self.execute(sidecar)
+        self.assertEqual(result['status'],'waiting_account_state')
+        self.assertTrue(result['batches'][0]['retry_next_tick'])
+        self.assertFalse(result['batches'][0]['failure_recorded'])
+        self.assertEqual(counts[12],4)
+        self.assertFalse(any(c[0] in {'create','publish','failure'} for c in sidecar.calls))
+        after=store.query_schedule_plan('material',identity['run_date'],identity['publish_time'])['run']
+        self.assertEqual(after,before)
+        self.assertFalse(any(c.kwargs.get('plan_attempt') for c in sidecar.heartbeat_schedule_run.call_args_list))
+        self.execute(sidecar)
+        self.assertEqual(len([c for c in sidecar.calls if c[0]=='create']),1)
+
+    def test_scope_wait_captures_first_server_snapshot_without_adopting_new_items(self):
+        store,sidecar,identity,changing,counts=self.scope_wait_fixture(freeze=False)
+        snapshots=[]
+        def loader(config,client,accounts,**kwargs):
+            snapshots.append(store.available_pool_items(1000,schedule_identity=identity))
+            if len(snapshots)==1:
+                store.add_pool_materials(['202'],actor={'user_id':'test','name':'Test'},validation_checks=[{'material_id':'202','error_code':''}])
+            return candidate_loader(config,client,accounts,**kwargs)
+        with mock.patch.object(sidecar,'verify_account',side_effect=changing):result=self.execute(sidecar,material_candidate_loader=loader)
+        self.assertEqual(result['status'],'waiting_account_state')
+        self.assertEqual(len(snapshots),3)
+        self.assertTrue(all(s==snapshots[0] for s in snapshots))
+
+    def test_scope_wait_refuses_snapshot_identity_plan_fence_queue_and_unknown_drift(self):
+        store,sidecar,identity,changing,counts=self.scope_wait_fixture()
+        original_query=sidecar.query_schedule_plan.side_effect
+        for field,value in [('material_pool_snapshot_max_id',999),('body_template','changed'),('plan_attempted_at','write-started'),('unknown_count',1),('status','running')]:
+            with self.subTest(field=field):
+                counts.clear();calls=[]
+                def query(path,ident):
+                    result=original_query(path,ident);calls.append(1)
+                    if len(calls)>1:result['run'][field]=value
+                    return result
+                sidecar.query_schedule_plan.side_effect=query
+                with mock.patch.object(sidecar,'verify_account',side_effect=changing):result=self.execute(sidecar)
+                self.assertEqual(result['status'],'stopped')
+                self.assertFalse(result['batches'][0]['retry_next_tick'])
+        counts.clear();calls=[]
+        def queue_drift(path,ident):
+            result=original_query(path,ident);calls.append(1)
+            if len(calls)>1:result['queues']=[queue(501,11,1)]
+            return result
+        sidecar.query_schedule_plan.side_effect=queue_drift
+        with mock.patch.object(sidecar,'verify_account',side_effect=changing):result=self.execute(sidecar)
+        self.assertEqual(result['status'],'stopped')
+        self.assertFalse(any(c[0] in {'create','publish','failure'} for c in sidecar.calls))
+
+    def test_scope_wait_lost_fresh_read_or_renewal_stops_without_failure_write(self):
+        store,sidecar,identity,changing,counts=self.scope_wait_fixture()
+        original=sidecar.query_schedule_plan.side_effect;calls=[]
+        def unavailable(path,ident):
+            calls.append(1)
+            if len(calls)>1:raise SidecarError('x_upstream_error','read unavailable',503)
+            return original(path,ident)
+        sidecar.query_schedule_plan.side_effect=unavailable
+        with mock.patch.object(sidecar,'verify_account',side_effect=changing):result=self.execute(sidecar)
+        self.assertEqual(result['status'],'stopped')
+        self.assertFalse(any(c[0] in {'create','publish','failure'} for c in sidecar.calls))
+        sidecar.query_schedule_plan.side_effect=original;counts.clear()
+        heartbeat=sidecar.heartbeat_schedule_run.side_effect;beats=[]
+        def renewal(path,ident,**kwargs):
+            beats.append(1)
+            if len(beats)>1:raise SidecarError('x_upstream_error','renewal unavailable',503)
+            return heartbeat(path,ident,**kwargs)
+        sidecar.heartbeat_schedule_run.side_effect=renewal
+        with mock.patch.object(sidecar,'verify_account',side_effect=changing):result=self.execute(sidecar)
+        self.assertEqual(result['status'],'stopped')
+        self.assertFalse(any(c[0] in {'create','publish','failure'} for c in sidecar.calls))
+
+    def test_same_error_code_outside_bounded_scope_loop_is_not_deferred(self):
+        store,sidecar,identity,_,_=self.scope_wait_fixture()
+        loader=mock.Mock(side_effect=ScheduleRunError('another validation error','x_post_schedule_account_state_changed'))
+        result=self.execute(sidecar,material_candidate_loader=loader)
+        self.assertEqual(result['batches'][0]['status'],'failed_preflight')
+        self.assertTrue(any(c[0]=='failure' for c in sidecar.calls))
+
     def test_material_scope_rebuild_preserves_server_snapshot_and_original_run(self):
         store = XPostStore(Path(self.temporary.name) / "snapshot.sqlite3")
         store.save_schedule_config("material", {
