@@ -32,7 +32,7 @@ def notify(env, root, alert_root, version):
                '--socialkit-root', str(root), '--root', str(alert_root)]
     # Delivery owns its claims/receipts. A timeout is not permission to replay a card.
     completed = subprocess.run(command, env=env, capture_output=True, text=True,
-                               encoding='utf-8', timeout=600)
+                               encoding='utf-8', timeout=1200)
     result = dict(status='complete' if completed.returncode == 0 else 'failed',
                   returncode=completed.returncode)
     # Do not copy arbitrary child output or exceptions into public refresh status.

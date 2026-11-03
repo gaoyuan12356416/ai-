@@ -157,7 +157,8 @@ def unconfirmed_income_drama(catalog, raw_sources, day):
 def own_channel(app, day, platform, now, *, end=None, enforce_fresh=True):
     end = end or day
     settings = dict(app)
-    settings.update(SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + 150,
+    # Seven daily reads share one bounded budget. Keep each SQL capped at 20s.
+    settings.update(SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + (300 if end != day else 150),
                     SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                     SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2)
     catalog, errors = read_catalogs(settings, [platform])

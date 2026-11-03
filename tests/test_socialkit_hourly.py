@@ -109,7 +109,7 @@ class CoordinatorTests(unittest.TestCase):
         args, kwargs = run.call_args
         self.assertIn('--send', args[0])
         self.assertEqual(args[0][-6:], ['--version', 'the-version', '--socialkit-root', 'report-root', '--root', 'alert-root'])
-        self.assertEqual(kwargs['timeout'], 600)
+        self.assertEqual(kwargs['timeout'], 1200)
         self.assertEqual(result, {'status': 'failed', 'returncode': 2})
         self.assertNotIn('private', json.dumps(result))
 
