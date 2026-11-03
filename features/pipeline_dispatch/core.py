@@ -409,6 +409,22 @@ class DispatchStore:
                         return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
                 if self._rearm_youtube_revision(c, existing, offer, meta):
                     return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
+                if (channel == "youtube" and offer.get("family") == "preparation" and stage == "prepare"
+                        and existing["generation"] == 0 and existing["status"] == "queued"
+                        and not existing["hold_reason"] and not existing["external_intent"]
+                        and not existing["claim_hash"] and not existing["canonical_receipt"]
+                        and offer.get("source_status") == "queued_generation"
+                        and offer.get("execution_available") is True):
+                    # Refresh only never-claimed cover jobs from the old channel
+                    # resource. Running claims, publication and unknown locks stay
+                    # immutable; no historical task is retried by this migration.
+                    resources = ["youtube:cover:" + existing["source_id"]]
+                    previous = json.loads(existing["resource_keys_json"])
+                    if (offer.get("resource_keys") == resources and len(previous) == 1
+                            and previous[0].startswith("youtube:channel:")):
+                        c.execute("UPDATE pipeline_job SET resource_keys_json=?,updated_at=? WHERE id=?",
+                                  (dumps(resources), now, existing["id"]))
+                        self.event(c, existing["id"], "youtube_cover_resource_refreshed", {}, now)
                 if (stage == "prepare" and existing["generation"] == 0
                         and existing["status"] in ("queued", "ready") and status in ("queued", "ready")
                         and not existing["external_intent"] and not existing["claim_hash"]
