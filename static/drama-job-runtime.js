@@ -57,7 +57,8 @@
         const job = byId.get(el.getAttribute("data-drama-elapsed"));
         if (job) el.textContent = elapsed(job);
       });
-      const active = jobs.some(j => ACTIVE.has(j.status) || (j.remote_runtime && ["queued", "running"].includes(j.remote_runtime.status)));
+      const active = jobs.some(j => ACTIVE.has(j.status) || (j.remote_runtime && ["queued", "running"].includes(j.remote_runtime.status)) ||
+        (Array.isArray(j.material_source_uploads) && j.material_source_uploads.some(u => ["queued", "copying", "submitting", "verifying", "unknown_outcome"].includes(u.status))));
       if (!active || refreshing || Date.now() - lastFetch < 10000) return;
       refreshing = true;
       lastFetch = Date.now();

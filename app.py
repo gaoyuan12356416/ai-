@@ -14642,7 +14642,9 @@ def decorate_drama_synthesis_job(job):
         elif item.get("status") != "done":
             item["status_label"] = item["remote_progress"]["stage_label"]
         item["active_started_at"] = snapshot.get("first_started_at") or snapshot.get("started_at") or item.get("active_started_at")
-    return item
+    import sys
+    from features.drama_synthesis.material_source import decorate
+    return decorate(item, sys.modules[__name__])
 
 
 def drama_synthesis_error_payload(exc):
@@ -94148,6 +94150,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_GET(self):
+        # SYNTHESIS_MATERIAL_SOURCE_V1
+        if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
+            from features.drama_synthesis.material_source import handle
+            handle(self, "GET", __import__("sys").modules[__name__])
+            return
 
 
 
@@ -97895,6 +97902,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_POST(self):
+        # SYNTHESIS_MATERIAL_SOURCE_V1
+        if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
+            from features.drama_synthesis.material_source import handle
+            handle(self, "POST", __import__("sys").modules[__name__])
+            return
 
         if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
             from features.video_editing.app_bridge import handle as video_editing_handle

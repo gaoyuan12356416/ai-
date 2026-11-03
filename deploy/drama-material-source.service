@@ -1,0 +1,22 @@
+[Unit]
+Description=Completed synthesis video material library uploads
+After=network.target drama-material-api.service
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=/root/drama_material_service/.env
+EnvironmentFile=/etc/drama-synthesis/cpu.env
+ExecStart=/usr/bin/python3 /root/drama_material_service/scripts/drama_material_source_worker.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
