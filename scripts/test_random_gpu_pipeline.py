@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from features.random_gpu.gpu_pipeline import qualification, source_qualification, fuse_command, kernel_source
+from features.random_gpu.gpu_pipeline import qualification, source_qualification, fuse_command, kernel_source, nvenc_rgb_tail
 
 VIDEO = dict(width=720, height=1280, codec_name='h264', pix_fmt='yuv420p',
              color_space='bt709', color_range='tv', field_order='progressive')
@@ -38,14 +38,45 @@ class PipelineTests(unittest.TestCase):
             self.assertIn('h264_cuvid', result)
             self.assertEqual(result[result.index('-af')+1], tail[tail.index('-af')+1])
             self.assertEqual(result[result.index('-t')+1], '20')
-            self.assertEqual(result[result.index('-pix_fmt')+1], 'yuv420p')
-            self.assertNotIn('-rgb_mode', result)
-            self.assertIn('setparams=colorspace=bt709', graph)
+            self.assertEqual(result[result.index('-pix_fmt')+1], 'rgba')
+            self.assertEqual(result[result.index('-rgb_mode')+1], 'yuv420')
+            self.assertTrue(graph.endswith('hwdownload,format=rgba,setsar=1[v]'))
+            self.assertNotIn('format=yuv420p[v]', graph)
             self.assertEqual(result[result.index('-preset')+1], 'p5')
             self.assertTrue(list(Path(tmp).glob('gpu-fit-*.cl')))
             other = fuse_command(command+['-filter_complex','old']+tail, RECIPE, output,
                                  {'video':dict(VIDEO,width=1280,height=720)})
             self.assertIn('fit_yuv_contain', other[other.index('-filter_complex')+1])
+
+    def test_compatibility_sources_also_use_gpu_output_conversion(self):
+        from features.random_gpu.compositor import fuse_command as compose
+        with tempfile.TemporaryDirectory() as tmp, patch('features.random_gpu.compositor.replace_asset_inputs', side_effect=lambda x:x):
+            output = str(Path(tmp)/'out.mp4')
+            prefix = ['ffmpeg', '-i', 'source.mp4']
+            for name in ('border', 'opacity', 'corners', 'tint'):
+                prefix += ['-i', name+'.nut']
+            for encoder in ('h264_nvenc', 'hevc_nvenc', 'libx264'):
+                for enabled in ('0', '1'):
+                    tail = ['-map','[v]','-map','0:a:0','-c:a','aac','-c:v',encoder,'-pix_fmt','yuv420p','-t','20',output]
+                    with self.subTest(encoder=encoder, enabled=enabled), patch.dict(os.environ, {'RANDOM_GPU_PIPELINE_V2':enabled}):
+                        result = compose(prefix+['-filter_complex','old']+tail, RECIPE, output, {'video':dict(VIDEO, color_range='pc')})
+                        graph = result[result.index('-filter_complex')+1]
+                        gpu = enabled == '1' and encoder != 'libx264'
+                        self.assertEqual('format=yuv420p[v]' not in graph, gpu)
+                        self.assertEqual('-rgb_mode' in result, gpu)
+                        self.assertEqual(result[result.index('-pix_fmt')+1], 'rgba' if gpu else 'yuv420p')
+                        self.assertEqual(result[result.index('-map')+1], '[v]')
+                        self.assertEqual(result[result.index('-t')+1], '20')
+
+    def test_rgb_conversion_requires_hardware_and_keeps_encoded_420(self):
+        for encoder in ('h264_nvenc', 'hevc_nvenc'):
+            tail = ['-c:v',encoder,'-c:a','aac','-t','20','output.mp4']
+            result = nvenc_rgb_tail(tail)
+            self.assertEqual(result, nvenc_rgb_tail(result))
+            self.assertEqual(result[result.index('-rgb_mode')+1], 'yuv420')
+            self.assertEqual(tail[-1], result[-1])
+        with self.assertRaises(ValueError):
+            nvenc_rgb_tail(['-c:v','libx264','output.mp4'])
 
     def test_color_range_and_chroma_are_explicit(self):
         source=kernel_source(RECIPE, dict(VIDEO, color_range='pc', chroma_location='center'))

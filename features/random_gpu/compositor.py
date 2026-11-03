@@ -72,7 +72,7 @@ def _escape(path):
 
 def fuse_command(command, recipe, output, info=None):
     """Keep the existing delivery arguments and replace the CPU composition."""
-    from .gpu_pipeline import qualification, source_qualification, fuse_command as accelerated_command
+    from .gpu_pipeline import qualification, source_qualification, fuse_command as accelerated_command, nvenc_rgb_tail, rgb_output_enabled, write_provenance
     if qualification(info) == 'qualified' and source_qualification(command, info) == 'qualified':
         return accelerated_command(command, recipe, output, info)
     graph_index = command.index("-filter_complex")
@@ -118,13 +118,19 @@ def fuse_command(command, recipe, output, info=None):
     ]
     for index, label in enumerate(("border", "opacity", "corners", "tint"), start=1):
         graph.append("[%d:v]fps=30:start_time=0,settb=1/30,format=rgba,hwupload[%s]" % (index, label))
+    tail = list(command[graph_index + 2:])
+    gpu_output = rgb_output_enabled(tail)
     graph.append("[source][main][border][opacity][corners][tint]program_opencl=inputs=6:"
                  "size=720x1280:source='%s':kernel=compose_random_overlay_v2:"
-                 "shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1,"
-                 "format=yuv420p[v]" % _escape(target))
+                 "shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1%s[v]"
+                 % (_escape(target), '' if gpu_output else ',format=yuv420p'))
+    if gpu_output:
+        tail = nvenc_rgb_tail(tail)
+        write_provenance(output, recipe, (info or {}).get('video') or {}, code,
+                         implementation='hybrid-source-opencl-nvenc-rgb-v2')
     return [prefix[0], "-filter_complex_threads", "2", "-filter_threads", "2",
             "-init_hw_device", "opencl=ocl:0.0", "-filter_hw_device", "ocl", *inputs,
-            "-filter_complex", ";".join(graph), *command[graph_index + 2:]]
+            "-filter_complex", ";".join(graph), *tail]
 
 
 def preflight(ffmpeg, encoder, work_root):
@@ -132,7 +138,7 @@ def preflight(ffmpeg, encoder, work_root):
     if encoder not in ("h264_nvenc", "hevc_nvenc"):
         raise ValueError("GPU compositor requires NVENC")
     Path(work_root).mkdir(parents=True, exist_ok=True)
-    from .gpu_pipeline import preflight as source_preflight
+    from .gpu_pipeline import preflight as source_preflight, nvenc_rgb_tail, rgb_output_enabled
     source_preflight(ffmpeg, encoder, work_root)
     with tempfile.TemporaryDirectory(prefix="compositor-preflight-", dir=work_root) as tmp:
         path = Path(tmp) / "preflight.cl"
@@ -140,13 +146,16 @@ def preflight(ffmpeg, encoder, work_root):
                                        "tint_opacity_bp": 100,
                                        "source_overlay": {"version": 1, "opacity_bp": 500,
                                                           "scale_bp": 15000}}), encoding="utf-8")
+        tail = ["-map", "[v]", "-c:v", encoder, "-frames:v", "2", "-f", "null", "-"]
+        gpu_output = rgb_output_enabled(tail)
         graph = ("format=rgba,hwupload,split=6[a][b][c][d][e][f];"
                  "[a][b][c][d][e][f]program_opencl=inputs=6:size=720x1280:"
                  "source='%s':kernel=compose_random_overlay_v2,hwdownload,"
-                 "format=rgba,format=yuv420p[v]" % _escape(path))
+                 "format=rgba%s[v]" % (_escape(path), '' if gpu_output else ',format=yuv420p'))
+        if gpu_output:
+            tail = nvenc_rgb_tail(tail)
         subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-filter_complex_threads", "2",
                         "-filter_threads", "2", "-init_hw_device", "opencl=ocl:0.0",
                         "-filter_hw_device", "ocl", "-f", "lavfi", "-i", "color=s=64x64:r=30:d=0.1",
-                        "-filter_complex", graph, "-map", "[v]", "-c:v", encoder,
-                        "-frames:v", "2", "-f", "null", "-"],
+                        "-filter_complex", graph, *tail],
                        check=True, capture_output=True, timeout=45)
