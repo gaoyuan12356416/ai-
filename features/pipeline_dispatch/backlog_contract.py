@@ -57,16 +57,19 @@ def source_fingerprint(identity):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def disposition_record(conn, source_key, row):
+def disposition_record(conn, source_key, row, *, schema="main"):
     """Return None, resume, archive or blocked; reads only and fails closed.
 
 The absent table is the old-runtime compatibility case. A malformed, pending
 or changed authorization is blocked. Archive never admits work even if someone
 incorrectly removes its independent canonical hold.
 """
-    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_backlog_disposition'").fetchone():
+    if schema not in {"main", "pipeline_x_auto"}:
+        raise ValueError("backlog_schema_invalid")
+    prefix = schema + "."
+    if not conn.execute("SELECT 1 FROM " + prefix + "sqlite_master WHERE type='table' AND name='pipeline_backlog_disposition'").fetchone():
         return None
-    saved = conn.execute("SELECT plan_sha256,action,state,source_fingerprint,scheduled_at,created_at,details_json FROM pipeline_backlog_disposition WHERE source_key=?", (source_key,)).fetchone()
+    saved = conn.execute("SELECT plan_sha256,action,state,source_fingerprint,scheduled_at,created_at,details_json FROM " + prefix + "pipeline_backlog_disposition WHERE source_key=?", (source_key,)).fetchone()
     if saved is None:
         return None
     plan, action, state, fingerprint, scheduled, created, details = tuple(saved)
@@ -88,14 +91,14 @@ incorrectly removes its independent canonical hold.
                 or _stamp(created) != expected["created_at"]
                 or any(current.get(key) != value for key, value in expected.items())):
             return "blocked"
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_canonical_hold'").fetchone():
+        if not conn.execute("SELECT 1 FROM " + prefix + "sqlite_master WHERE type='table' AND name='pipeline_canonical_hold'").fetchone():
             return "blocked"
-        if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", (source_key,)).fetchone():
+        if conn.execute("SELECT 1 FROM " + prefix + "pipeline_canonical_hold WHERE source_key=?", (source_key,)).fetchone():
             return "blocked"
         return "resume"
     except (KeyError, TypeError, ValueError):
         return "blocked"
 
 
-def is_resume_authorized(conn, source_key, row):
-    return disposition_record(conn, source_key, row) == "resume"
+def is_resume_authorized(conn, source_key, row, *, schema="main"):
+    return disposition_record(conn, source_key, row, schema=schema) == "resume"

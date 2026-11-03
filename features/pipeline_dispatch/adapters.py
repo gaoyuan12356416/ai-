@@ -193,6 +193,24 @@ class LedgerAdapter:
         row["legacy_parent_has_claim"] = bool(origin.get("claim_token"))
         row["legacy_parent_started_at"] = origin.get("updated_at") or origin.get("selected_at_utc", "")
 
+    @staticmethod
+    def _backlog_proof(conn, source_key, native_row, *, schema="main"):
+        from .backlog_contract import disposition_record, source_fingerprint
+        action = disposition_record(conn, source_key, native_row, schema=schema)
+        if action not in {"resume", "archive"}:
+            return None
+        saved = conn.execute("SELECT plan_sha256,action,state,source_fingerprint,details_json FROM " + schema + ".pipeline_backlog_disposition WHERE source_key=?", (source_key,)).fetchone()
+        if saved is None or saved["action"] != action:
+            return None
+        identity = obj(saved["details_json"]).get("identity")
+        if (saved["state"] != "committed" or not isinstance(identity, dict)
+                or identity.get("source_key") != source_key
+                or not re.fullmatch(r"[a-f0-9]{64}", str(saved["plan_sha256"]))
+                or source_fingerprint(identity) != saved["source_fingerprint"]):
+            return None
+        return {"source_key": source_key, "action": action, "plan_sha256": saved["plan_sha256"],
+                "source_fingerprint": saved["source_fingerprint"], "identity": identity}
+
     def enrich(self, conn, raw):
         row = dict(raw)
         key = (self.spec.channel, self.spec.family)
@@ -212,6 +230,15 @@ class LedgerAdapter:
                     row["scheduled_at"] = origin[0]["scheduled_at_utc"]
                     template = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_template WHERE id=?", (origin[0]["template_id"],)).fetchone()
                     auto_owner = dict(template) if template else {}
+                    native_parent = dict(origin[0])
+                    if (str(native_parent.get("execution_queue_id")) == str(raw["id"])
+                            and native_parent.get("account_id") is not None and raw["account_id"] is not None
+                            and str(native_parent["account_id"]) == str(raw["account_id"])
+                            and native_parent.get("material_id") and dict(raw).get("material_id")
+                            and str(native_parent["material_id"]) == str(raw["material_id"])):
+                        proof = self._backlog_proof(conn, "x:auto:" + str(native_parent["id"]), native_parent, schema="pipeline_x_auto")
+                        if proof and proof["action"] == "resume":
+                            row["_backlog_ancestor_authorization"] = proof
             log = conn.execute("SELECT * FROM x_post_publish_log WHERE queue_id=?", (row["id"],)).fetchone() if self._exists(conn, "x_post_publish_log") else None
             if log:
                 log = dict(log)
@@ -319,6 +346,15 @@ class LedgerAdapter:
         if self._exists(conn, "pipeline_canonical_hold"):
             key = "%s:%s:%s" % (self.spec.channel, self.spec.family, row[self.spec.identity])
             row["canonical_held"] = bool(conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", (key,)).fetchone())
+        # Identity is verified against the untouched native row. X queue has
+        # no schedule column: use only its owning native parent's original
+        # schedule, before project() derives a preparation eligibility time.
+        native_identity = dict(raw)
+        if (self.spec.channel, self.spec.family) == ("x", "queue"):
+            native_identity["scheduled_at"] = row.get("scheduled_at")
+        proof = self._backlog_proof(conn, "%s:%s:%s" % (self.spec.channel, self.spec.family, raw[self.spec.identity]), native_identity)
+        if proof:
+            row["_backlog_authorization"] = proof
         return row
 
     def project(self, row, now=None):
@@ -462,6 +498,8 @@ class LedgerAdapter:
                 if row.get("next_attempt_at_utc"):
                     eligible_at = max(eligible_at, stamp(row["next_attempt_at_utc"]))
         return {"source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
+                "backlog_authorization": row.get("_backlog_authorization"),
+                "backlog_ancestor_authorization": row.get("_backlog_ancestor_authorization"),
                 "source_revision": source_revision,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
