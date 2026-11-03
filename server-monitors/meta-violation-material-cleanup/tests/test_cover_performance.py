@@ -48,6 +48,7 @@ class PrefetchTests(unittest.TestCase):
         ads = [ad(str(10+i), str(20+i), str(100+i % 3)) for i in range(10)]
         self.enqueue(ads)
         governor = MagicMock()
+        governor.account_budget.return_value = {'concurrency_limit': 2, 'cooldown_seconds': 0}
         snapshots = [0]
         def budget():
             snapshots[0] += 1

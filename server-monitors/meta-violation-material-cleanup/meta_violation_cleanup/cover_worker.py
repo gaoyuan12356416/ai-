@@ -428,6 +428,11 @@ class CoverWorker:
         selected = refreshes = 0
         preparations, batch_sizes, active_accounts = Counter(), Counter(), Counter()
         futures = {}
+        cooldown_accounts = set()
+
+        def account_budget(account):
+            method = getattr(self.governor, 'account_budget', None)
+            return method(account) if method else {'concurrency_limit': 2, 'cooldown_seconds': 0}
 
         def completed(done):
             for future in done:
@@ -475,10 +480,14 @@ class CoverWorker:
                 # one slow account no longer holds the rest of an entire wave.
                 for _ in range(len(prepared)):
                     task, context = prepared.popleft()
-                    if self.clock() - context['_prepared_at'] > self.ttl:
+                    account_state = account_budget(task['account_id'])
+                    if account_state['cooldown_seconds'] > 0:
+                        cooldown_accounts.add(task['account_id'])
+                        tasks.append(task)
+                    elif self.clock() - context['_prepared_at'] > self.ttl:
                         expired(task)
                     elif (selected < max_ads and len(futures) < capacity
-                          and active_accounts[task['account_id']] < per_account):
+                          and active_accounts[task['account_id']] < min(per_account, account_state['concurrency_limit'])):
                         if self.stopped():
                             prepared.appendleft((task, context))
                             break
@@ -504,8 +513,14 @@ class CoverWorker:
                 if needs_source and size > 0 and not self.stopped():
                     while tasks and len(batch) < size:
                         task = tasks.popleft()
-                        account_capacity = per_account + max(
-                            0, per_account - active_accounts[task['account_id']])
+                        account_state = account_budget(task['account_id'])
+                        if account_state['cooldown_seconds'] > 0:
+                            cooldown_accounts.add(task['account_id'])
+                            deferred.append(task)
+                            continue
+                        account_limit = min(per_account, account_state['concurrency_limit'])
+                        account_capacity = account_limit + max(
+                            0, account_limit - active_accounts[task['account_id']])
                         if buffered_accounts[task['account_id']] >= account_capacity:
                             deferred.append(task)
                         else:
@@ -550,6 +565,7 @@ class CoverWorker:
                 'source_prepare_batches': sum(batch_sizes.values()),
                 'source_prepare_batch_sizes': dict(batch_sizes),
                 'prepared_context_refreshes': refreshes,
+                'accounts_deferred_for_cooldown': len(cooldown_accounts),
                 'defer_reasons': dict(Counter(item.get('result', {}).get('reason', 'unspecified')
                     for item in outputs if item['status'] == 'pending')),
                 'seconds': round(self.clock() - started, 3),

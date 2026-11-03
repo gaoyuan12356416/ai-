@@ -15,6 +15,19 @@ class SchedulerTests(unittest.TestCase):
     enqueue = fixtures.WorkerTests.enqueue
     worker = fixtures.WorkerTests.worker
 
+    def test_cooling_account_is_skipped_before_sql_and_other_account_progresses(self):
+        ads=[ad('10','20','100'),ad('11','21','200')]
+        self.enqueue(ads)
+        governor=Governor(maximum=32,initial_limit=32,account_scoped_usage=True)
+        governor.account_until['100']=time.monotonic()+180
+        graph=Graph(ads,[creative('20','100'),creative('21','200')])
+        result=self.worker(graph,governor=governor).run_once(max_ads=2,process_deletes=False)
+        self.assertEqual(result['tasks'],{'succeeded':1})
+        self.assertEqual(self.source.calls,[[2]])
+        self.assertEqual(self.store.get_task(1)['status'],'pending')
+        self.assertEqual(result['accounts_deferred_for_cooldown'],1)
+        self.assertFalse(any(call[0]=='get_ad' and call[1]=='10' for call in graph.calls))
+
     def test_free_slot_is_refilled_while_first_ad_is_still_running(self):
         self.config['execution_workers'] = 2
         ads = [ad(str(10+i), str(20+i), str(100+i)) for i in range(4)]
