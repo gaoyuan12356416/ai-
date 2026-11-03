@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One admission of slot 1031 after the exact preceding 19 queues settle.
 
-plan and wait-plan are read-only. apply admits the original slot once; only the
-normal runner may preflight and create its queues. This never advances episodes.
+plan and wait-plan are read-only. wait-apply waits read-only, then admits the
+original slot once. Only the normal runner may preflight and create its queues.
 """
 import argparse
 import contextlib
@@ -303,9 +303,22 @@ def wait_plan(make_plan, seconds, interval, record, *, monotonic=time.monotonic,
         sleep(min(interval, remaining))
 
 
+def wait_apply(make_plan, apply_once, seconds, interval, record, **wait_options):
+    """A single delayed admission, never a loop around apply or publishing."""
+    saved = wait_plan(make_plan, seconds, interval, record, **wait_options)
+    if saved['snapshot']['state'] != 'ready':
+        record(dict(state='wait_timeout', plan_sha256=saved['plan_sha256'], applied=False))
+        return dict(run_id=RUN_ID, plan_sha256=saved['plan_sha256'], applied=False,
+                    timed_out=True, platform_called=False, admission_plan=saved)
+    # Durable ready evidence is written before the one permitted apply call.
+    # Any exception propagates to the CLI journal and ends this invocation.
+    record(dict(state='applying_once', plan_sha256=saved['plan_sha256'], admission_plan=saved))
+    return dict(apply_once(saved), admission_plan=saved)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=('plan', 'wait-plan', 'apply'))
+    p.add_argument('action', choices=('plan', 'wait-plan', 'wait-apply', 'apply'))
     for name in ('native', 'central', 'commit', 'service-path', 'repository', 'plan', 'expect-plan-sha256',
                  'backup-dir', 'actor', 'reason'): p.add_argument('--' + name)
     p.add_argument('--output', required=True)
@@ -329,6 +342,11 @@ def main():
                 result = apply(saved, a.expect_plan_sha256, a.backup_dir, a.actor, a.reason)
             elif a.action == 'wait-plan':
                 result = wait_plan(make, a.wait_seconds, a.poll_seconds, record)
+            elif a.action == 'wait-apply':
+                require(a.backup_dir and a.actor and a.actor.strip() and a.reason and a.reason.strip(),
+                        'backup_actor_reason_required')
+                apply_once = lambda saved: apply(saved, saved['plan_sha256'], a.backup_dir, a.actor, a.reason)
+                result = wait_apply(make, apply_once, a.wait_seconds, a.poll_seconds, record)
             else: result = make()
             record(dict(state=result.get('snapshot', {}).get('state'), plan_sha256=result.get('plan_sha256'),
                         applied=result.get('applied', False), finished=True))
@@ -342,7 +360,8 @@ def main():
             raise
         json.dump(document, stream, ensure_ascii=False, indent=2); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
     print(json.dumps(dict(run_id=RUN_ID, state=result.get('snapshot', {}).get('state'),
-        plan_sha256=result.get('plan_sha256'), applied=result.get('applied', False), platform_called=False)))
+        plan_sha256=result.get('plan_sha256'), applied=result.get('applied', False),
+        timed_out=result.get('timed_out', False), platform_called=False)))
 
 
 if __name__ == '__main__': main()

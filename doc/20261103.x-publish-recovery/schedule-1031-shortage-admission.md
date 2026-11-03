@@ -9,13 +9,31 @@
 `scripts/recover_x_schedule_1031_shortage.py` 仅支持这一次事件，所有生产操作均由主维护流程决定。
 
 - `plan` 和 `wait-plan` 只读两个 SQLite 库，不实例化会迁移数据库的 Store，不调用网络发布接口。
+- `wait-apply` 复用同一只读等待，ready 后将完整计划 fsync 到事件日志，恰好调用一次 apply。超时不调用 apply；任何异常或 CAS 拒绝均记录并退出，不重新等待、不重复准入、不调用发布。
 - 固定 19 条依赖的完整冻结身份；全部进入已知终态才允许 ready。成功须原生 Post 回执与中央 publication 一致；确定失败须原生 unknown=0、无 Post/Repost 许可、双账本一致、中央已结束且无 lease/resource。存在 Post 许可的失败留待独立回执核对，此工具不猜测。
 - 等待中保留 1031 的 failed_preflight。每轮复核原失败及两次审计；另一 actor 的任何改动立即拒绝。只等待正常依赖进展，最长 24 小时，每轮 1–60 秒。
 - 19 条结束后调用当前部署版本的只读 `_drama_assignment_candidates`，要求至少一项有效本地候选，保存全部冻结账号的候选/未选原因。普通 runner 仍须完成来源、账号、语言、媒体等正常预检；不要求重选其他剧或覆盖所有 35 个账号。
 - `apply` 必须显式提供 ready plan 的 SHA256。备份后，在原生 `BEGIN IMMEDIATE` 内重核完整快照，追加第三审计 `x_post_schedule_1031_shortage_resume_audit`，把原 slot 改为 claimed。提交前再次读取中央终态。数据库原有首次授权允许普通 runner 获取该原 slot。
 - 保留所有冻结日期、账号、模板、snapshot、原 plan 字段和前两次审计；不新建业务 slot、不推进 cursor、不清 unknown、不调用 plan/publish。第三审计拒绝 UPDATE、DELETE 和 INSERT OR REPLACE。相同 plan 重复 apply 为 no-op，绝不重置下一次执行。
 
-受控临时 oneshot 可只运行下列只读等待。`DEPLOYED_COMMIT` 必须是三个实际部署文件
+受控临时 oneshot 可使用一次性 `wait-apply`，无需到时再次手动触发；服务应设置 `Restart=no`，
+不要配置循环重跑。当前运行版本为 `19504a5ea47f33469cb2ab49bc1c9aea127a677d`，helper-only
+提交不改变这个 runtime proof。该命令只在全部条件满足时恢复原 slot，然后结束：
+
+```sh
+python3 -B scripts/recover_x_schedule_1031_shortage.py wait-apply \
+  --native /var/lib/x-post-automation/accounts.sqlite3 \
+  --central /mnt/data-disk/pipeline-dispatch/dispatch.sqlite3 \
+  --commit 19504a5ea47f33469cb2ab49bc1c9aea127a677d \
+  --service-path /opt/x-post-automation/current/features/x_posts/service.py \
+  --repository /mnt/data-disk/x-publish-recovery-20261103/source \
+  --wait-seconds 86400 --poll-seconds 30 \
+  --backup-dir "$PRIVATE_DIR/backups" --actor codex_x_recovery_20261103 \
+  --reason user_authorized_original_slot_after_1029_terminal \
+  --output "$PRIVATE_DIR/1031-wait-apply.json"
+```
+
+只需观察时仍可运行下列 `wait-plan`。`DEPLOYED_COMMIT` 必须是三个实际部署文件
 （service、account_blockers、runner）的完整 Git SHA；工具同时核对本地只读 selector 的字节。
 `SERVICE_PATH` 指实际当前部署的 service.py，不能用仓库副本冒充 runtime。
 输出及 `.events.jsonl` 为 0600 且不覆盖，逐轮 fsync 事件，拒绝/超时会留下证据。
@@ -47,4 +65,5 @@ python3 -B scripts/recover_x_schedule_1031_shortage.py apply \
 离线验证：`python -m unittest scripts.test_x_schedule_1031_shortage_recovery`。
 覆盖 19 个任一未完成、unknown/lease/resource/回执或账本不一致、确定 prepost 失败与 Post intent、
 外 actor 改动、无候选、正常账号 blocker、备份后漂移、提交前中央漂移、回滚、审计不可变、
-重复 apply、其他 slot/篡改 plan、部署漂移及只读等待到期/结束。无生产写入或发布测试。
+重复 apply、其他 slot/篡改 plan、部署漂移及只读等待到期/结束，以及 wait-apply 等待期间零调用、
+ready 后恰好一次准入、漂移和异常不重试、CLI 异常日志持久化。无生产写入或发布测试。

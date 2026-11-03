@@ -263,5 +263,73 @@ class ShortageRecoveryTests(unittest.TestCase):
         self.assertEqual(saved['snapshot']['state'], 'ready')
         self.assertEqual(self.row(1031)['status'], 'failed_preflight')
 
+    def test_wait_apply_timeout_never_calls_apply_or_changes_databases(self):
+        self.update("UPDATE x_post_queue SET status='queued' WHERE id=5633")
+        before = (self.db_dump(self.path), self.db_dump(self.central))
+        ticks = iter([0, 0, 2]); apply_once = mock.Mock(side_effect=AssertionError('must not apply'))
+        observations = []
+        result = recovery.wait_apply(self.plan, apply_once, 1, 1, observations.append,
+            monotonic=lambda: next(ticks), sleep=lambda seconds: None)
+        self.assertTrue(result['timed_out']); self.assertFalse(result['applied'])
+        apply_once.assert_not_called()
+        self.assertEqual(observations[-1]['state'], 'wait_timeout')
+        self.assertEqual((self.db_dump(self.path), self.db_dump(self.central)), before)
+
+    def test_wait_apply_waits_then_admits_exactly_once_and_stops(self):
+        self.update("UPDATE x_post_queue SET status='queued' WHERE id=5633")
+        observations = []; apply_once = mock.Mock(wraps=self.apply)
+        def settled(_seconds):
+            apply_once.assert_not_called()
+            self.assertEqual(self.row(1031)['status'], 'failed_preflight')
+            self.update("UPDATE x_post_queue SET status='published' WHERE id=5633")
+        result = recovery.wait_apply(self.plan, apply_once, 60, 1, observations.append,
+            monotonic=lambda: 0, sleep=settled)
+        apply_once.assert_called_once_with(result['admission_plan'])
+        self.assertTrue(result['applied']); self.assertFalse(result['platform_called'])
+        self.assertEqual(result['queues_created'], 0)
+        self.assertEqual(self.row(1031)['status'], 'claimed')
+        self.assertEqual([r['state'] for r in observations], ['waiting_dependencies', 'ready', 'applying_once'])
+
+    def test_wait_apply_drift_during_wait_stops_without_apply(self):
+        self.update("UPDATE x_post_queue SET status='queued' WHERE id=5633")
+        apply_once = mock.Mock(); observations = []
+        def actor(_seconds): self.update("UPDATE x_post_schedule_run SET updated_at='other actor' WHERE id=1031")
+        with self.assertRaises(recovery.RecoveryRejected):
+            recovery.wait_apply(self.plan, apply_once, 60, 1, observations.append,
+                monotonic=lambda: 0, sleep=actor)
+        apply_once.assert_not_called()
+        self.assertEqual(self.row(1031)['status'], 'failed_preflight')
+
+    def test_wait_apply_drift_after_ready_attempts_apply_once_without_retry(self):
+        attempts = []
+        def changed_then_apply(saved):
+            attempts.append(saved['plan_sha256'])
+            self.update("UPDATE x_post_schedule_run SET updated_at='other actor' WHERE id=1031")
+            return self.apply(saved)
+        with self.assertRaises(recovery.RecoveryRejected):
+            recovery.wait_apply(self.plan, changed_then_apply, 60, 1, lambda _: None)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(self.row(1031)['status'], 'failed_preflight')
+        with contextlib.closing(recovery.read_connection(self.path)) as n:
+            self.assertEqual(recovery.audit(n, recovery.TABLE, 1031), [])
+
+    def test_wait_apply_cli_records_exception_and_never_retries(self):
+        output = Path(self.temp.name) / 'oneshot.json'
+        argv = ['recovery', 'wait-apply', '--native', str(self.path), '--central', str(self.central),
+            '--commit', 'a' * 40, '--service-path', str(self.deployed / recovery.CODE_FILES[0]),
+            '--repository', self.temp.name, '--backup-dir', str(Path(self.temp.name) / 'backup'),
+            '--actor', 'operator', '--reason', 'one-time recovery', '--output', str(output)]
+        with mock.patch.object(recovery.sys, 'argv', argv), \
+                mock.patch.object(recovery, 'apply', side_effect=recovery.RecoveryRejected('injected_drift')) as apply_once, \
+                self.assertRaisesRegex(recovery.RecoveryRejected, 'injected_drift'):
+            recovery.main()
+        apply_once.assert_called_once()
+        document = json.loads(output.read_text(encoding='utf-8'))
+        events = [json.loads(line) for line in Path(str(output) + '.events.jsonl').read_text(encoding='utf-8').splitlines()]
+        self.assertTrue(document['rejected']); self.assertEqual(document['reason'], 'injected_drift')
+        self.assertEqual(events[-2]['state'], 'applying_once')
+        self.assertTrue(events[-1]['rejected'])
+        self.assertEqual(self.row(1031)['status'], 'failed_preflight')
+
 
 if __name__ == '__main__': unittest.main()
