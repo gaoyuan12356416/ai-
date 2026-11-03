@@ -819,6 +819,48 @@ class DispatchStore:
                 raise DispatchError("historical_receipt_requires_reconciliation")
             return _job(current, True)
 
+    def correct_recovered_source_artifact(self, claim, artifact, preparation, proof, *, canonical_verified=False):
+        """Correct the old X source-as-final projection, never its task outcome."""
+        if not canonical_verified:
+            raise DispatchError("canonical_receipt_required")
+        if not isinstance(preparation, dict):
+            return False
+        with self.transaction() as c:
+            row = c.execute("SELECT * FROM pipeline_job WHERE id=?", (claim.get("job_id", claim.get("id")),)).fetchone()
+            if (not row or row["channel"] != "x" or row["stage"] != "prepare"
+                    or row["status"] != "completed" or row["external_intent"]
+                    or row["generation"] <= claim.get("generation", 0)):
+                return False
+            saved = c.execute("SELECT * FROM pipeline_claim_history WHERE job_id=? AND generation=?", (row["id"], claim.get("generation"))).fetchone()
+            if (not saved or saved["node_id"] != claim.get("node_id") or saved["worker_id"] != claim.get("worker_id")
+                    or not secrets.compare_digest(saved["claim_hash"], digest(claim.get("claim_token", "")))):
+                raise DispatchError("claim_conflict")
+            old = json.loads(row["artifact_json"])
+            frozen = json.loads(row["payload_json"])
+            if (proof.get("source_key") != row["source_key"] or old.get("profile") != "source"
+                    or not str(artifact.get("profile", "")).startswith("x-random-overlay-")
+                    or frozen.get("kind") != "x_preflight"
+                    or frozen.get("request", {}).get("random_request", {}).get("profile") != artifact.get("profile")
+                    or not c.execute("SELECT 1 FROM pipeline_receipt WHERE receipt_id=? AND job_id=? AND generation=?",
+                                     ("native-prepared-%s-%s" % (row["id"], row["generation"]), row["id"], row["generation"])).fetchone()
+                    or c.execute("SELECT 1 FROM pipeline_resource WHERE job_id=?", (row["id"],)).fetchone()
+                    or c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? AND status='intent'", (row["id"],)).fetchone()):
+                return False
+            # The already-native-validated result binds both the original source
+            # and the final output; a mere node success flag cannot rewrite it.
+            if (not old.get("sha256") or not old.get("size")
+                    or preparation.get("source_sha256") != old["sha256"] or preparation.get("source_size") != old["size"]
+                    or any(preparation.get(left) != artifact.get(right) for left, right in
+                           (("output_sha256", "sha256"), ("output_size", "size"), ("output_url", "url"), ("profile", "profile"), ("recipe", "recipe")))
+                    or not artifact.get("recipe")):
+                return False
+            c.execute("UPDATE pipeline_job SET artifact_json=? WHERE id=?", (dumps(artifact), row["id"]))
+            self.event(c, row["id"], "qualified_final_artifact_corrected", {
+                "generation": row["generation"], "source_generation": claim["generation"],
+                "receipt_id": claim.get("receipt_id", ""), "old_sha256": old["sha256"],
+                "sha256": artifact["sha256"], "size": artifact["size"], "profile": artifact["profile"]}, self.now())
+            return True
+
     def rearm_native_schedule(self, job, verified):
         continuation = verified.get("continuation")
         proof = verified.get("canonical_receipt", {})

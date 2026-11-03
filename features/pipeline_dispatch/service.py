@@ -223,6 +223,8 @@ class Coordinator:
                                 or not artifact.get("sha256") or not artifact.get("size") or not artifact.get("url")
                                 or any(supplied.get(key) != artifact.get(key) for key in ("sha256", "size", "url"))):
                             raise DispatchError("historical_receipt_requires_reconciliation")
+                        self.store.correct_recovered_source_artifact(payload, artifact,
+                            payload.get("result", {}).get("preparation") or {}, proof, canonical_verified=True)
                         return self.store.save_delivery(payload, delivery_id, payload, {"accepted": True, "historical": True})
                     expected = historical["payload"]["continuation"]["video_id"]
                     supplied = payload.get("result", {}).get("video_id")
