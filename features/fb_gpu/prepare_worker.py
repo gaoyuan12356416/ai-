@@ -127,7 +127,7 @@ def build_command(config,source,output,info,recipe,assets):
     command += ["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
     if getattr(config,"video_encoder","h264_nvenc")=="libx264":
         command=software_command(command)
-    return fuse_command(command,recipe,output) if config.compositor_backend==BACKEND else command
+    return fuse_command(command,recipe,output,info) if config.compositor_backend==BACKEND else command
 
 def software_command(command):
     """Explicit CPU backend; never invoked as an automatic GPU error fallback."""

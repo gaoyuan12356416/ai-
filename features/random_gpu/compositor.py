@@ -70,8 +70,11 @@ def _escape(path):
     return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
 
-def fuse_command(command, recipe, output):
+def fuse_command(command, recipe, output, info=None):
     """Keep the existing delivery arguments and replace the CPU composition."""
+    from .gpu_pipeline import qualification, fuse_command as accelerated_command
+    if qualification(info) == 'qualified':
+        return accelerated_command(command, recipe, output, info)
     graph_index = command.index("-filter_complex")
     prefix = replace_asset_inputs(list(command[:graph_index]))
     source_indices = [index for index, value in enumerate(prefix) if value == "-i"]

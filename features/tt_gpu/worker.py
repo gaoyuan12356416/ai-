@@ -1944,6 +1944,8 @@ def inspect_input(payload, max_duration):
         "height": height,
         "duration": duration,
         "has_audio": bool(audios),
+        "video": {key: video.get(key) for key in ('width', 'height', 'codec_name', 'pix_fmt',
+            'color_space', 'color_range', 'color_transfer', 'color_primaries', 'chroma_location', 'field_order')},
     }
 
 
@@ -2464,7 +2466,7 @@ def build_random_overlay_command(
         ]
     )
     if config.compositor_backend == BACKEND:
-        return fuse_command(command, recipe, output_path)
+        return fuse_command(command, recipe, output_path, input_info)
     return command
 
 

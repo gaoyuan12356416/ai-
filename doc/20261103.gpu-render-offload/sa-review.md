@@ -1,0 +1,2 @@
+# Design review
+Self-review: driver/FFmpeg upgrade rejected as unnecessary rollout risk. Existing FFmpeg 7.1 OpenCL and NVENC RGBA supported. CUDA scale cannot convert YUV to RGB on this version. Explicit custom OpenCL fitting preserves existing compositor. CPU plane transfer remains; do not claim zero CPU. Require resolution-change, color, timestamps and audio checks. No changes to publication code.

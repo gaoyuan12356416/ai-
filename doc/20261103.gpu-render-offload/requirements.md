@@ -1,0 +1,2 @@
+# GPU source-stage offload
+Keep GPU prepare/publish 6/4 and CPU 4/6; frontend capacity stays authoritative. Move qualified SDR H264/HEVC 8-bit decoding to NVDEC, fitting and YUV/RGB conversion to OpenCL, RGB/YUV420 encoding conversion to NVENC. Keep recipe, audio processing, delivery profile, COS artifact identity and publication fencing. Feature default off until fixed-source quality, sync and resource validation passes. Unsupported sources use the existing implementation before execution selection. No YouTube changes.

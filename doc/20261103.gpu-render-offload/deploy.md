@@ -1,0 +1,2 @@
+# Deployment
+Not yet activated. Stage exact pushed SHA on HK GPU. Back up unit, private manifest/environment and capture active work/receipts. Stop old parent using audited SIGTERM drain with KillMode=mixed and TimeoutStopSec=infinity. Activate only after all children finish. Preserve credentials, outbox, artifact journals, capacities and all ledger state. Roll back by same drain procedure to old release 95fdaa4c4db0ed19a465cb126d539274e95ea918 with new pipeline flag disabled. Never kill FFmpeg or reset/requeue publishing.
