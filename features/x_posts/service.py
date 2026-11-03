@@ -20,10 +20,12 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -5098,10 +5100,47 @@ def _independent_queued_sql(parent, column):
     ) % (column, parent)
 
 
+_STORE_SCHEMA_IDENTITIES = {}
+_STORE_SCHEMA_LOCKS = weakref.WeakValueDictionary()
+_STORE_SCHEMA_LOCKS_GUARD = threading.Lock()
+
+
+def _storage_schema_identity(path):
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    # Query-side stores must not acquire a write lock just to check schema.
+    # Include SQLite's schema cookie so explicit migrations or dropped guards
+    # invalidate the cache, while ordinary task updates do not.
+    with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=30)) as conn:
+        version = conn.execute("PRAGMA schema_version").fetchone()[0]
+    return stat.st_dev, stat.st_ino, version
+
+
+def _ensure_store_storage(db_path):
+    path = Path(db_path).resolve()
+    key = str(path)
+    with _STORE_SCHEMA_LOCKS_GUARD:
+        lock = _STORE_SCHEMA_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _STORE_SCHEMA_LOCKS[key] = lock
+    with lock:
+        identity = _storage_schema_identity(path)
+        if identity is not None and _STORE_SCHEMA_IDENTITIES.get(key) == identity:
+            return
+        # Only remember a successful migration. Replacement files and schema
+        # changes are checked on every construction, including after failure.
+        _STORE_SCHEMA_IDENTITIES.pop(key, None)
+        ensure_storage(path)
+        _STORE_SCHEMA_IDENTITIES[key] = _storage_schema_identity(path)
+
+
 class XPostStore:
     def __init__(self, db_path):
         self.db_path = Path(db_path)
-        ensure_storage(self.db_path)
+        _ensure_store_storage(self.db_path)
 
     @staticmethod
     def _schedule_config_item(row, now=None):
