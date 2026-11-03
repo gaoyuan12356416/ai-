@@ -58,6 +58,11 @@ const server = http.createServer((req, res) => {
     assert.match(await page.locator('form[data-host="hk-gpu"][data-stage="prepare"]').innerText(), /手动[\s\S]*保存后按此并发接单/);
     assert.match(await page.locator('[data-worker-host="hk-gpu"] [data-worker-stage="prepare"]').innerText(), /当前目标 \/ 上限 · 手动/);
     assert.match(await page.locator('[data-worker-host="cpu-main"] [data-worker-stage="prepare"]').innerText(), /当前目标 \/ 上限 · 自动/);
+    // Missing telemetry stays unknown; never portray an unreported encoder as idle.
+    assert.match(await page.locator('[data-worker-host="hk-gpu"] .pm-worker-resources').innerText(), /GPU 运算使用率[\s\S]*视频编码器使用率\s*—/);
+    assert.doesNotMatch(await page.locator('[data-worker-host="cpu-main"] .pm-worker-resources').innerText(), /视频编码器使用率/);
+    await page.evaluate(snapshot => { snapshot.items[1].encoder_percent = 83; window.PipelineMonitor.renderWorkers(snapshot); }, workers());
+    assert.match(await page.locator('[data-worker-host="hk-gpu"] .pm-worker-resources').innerText(), /视频编码器使用率\s*83%/);
     assert.equal(await page.locator('#pmCapacityForms select[name="scaling_mode"]').count(), 0);
     assert.match(await drainStage.innerText(), /当前目标 \/ 上限[\s\S]*1 \/ 4/);
     assert.match(await drainStage.innerText(), /忙碌 \/ 空闲 \/ 存活[\s\S]*3 \/ 1 \/ 4/);
