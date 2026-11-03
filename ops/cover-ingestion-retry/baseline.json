@@ -1,0 +1,9 @@
+{
+  "app_sha256": "ee1cc62e97cc545929f2e0158ea77a8b771d2f6fa9741b04ff36cbb39dbe94fe",
+  "core_sha256": "53574c98d5ae472c86c22baf28a6011346e03378c7a5e685fbf33af932fb5838",
+  "functions": {
+    "notify_screenshot_ai_source_callback": "72ab946397881b6b6beafc46c09be1cbe15ac339b06ace25f85cd84ae3b8ecff",
+    "humanize_screenshot_failure_reason": "f1f35b2ce91662cd44c8123a40e32d3192734f403c400236daa020a7d5a58b5b",
+    "build_screenshot_failure_message": "d04d70bd392a979680fcbd0baf0c71f119037765b22debee35a7607fc5d9d2f0"
+  }
+}

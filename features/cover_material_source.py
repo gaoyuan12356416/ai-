@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import logging
 import math
 import os
 from pathlib import Path
@@ -35,6 +36,38 @@ COUNTRIES = set(("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF
 SPECS = (("square_1x1", "1:1"), ("landscape_1_91x1", "1.91:1"), ("portrait_4x5", "4:5"))
 CATALOG_CONNECTION_ERRORS = frozenset(("2002", "2003", "2006", "2013", "2055"))
 CATALOG_RETRY_DELAYS = (1, 3)
+IMAGE_RETRY_DELAYS = (1, 3)
+IMAGE_RETRY_HTTP = frozenset((408, 429, 500, 502, 503, 504))
+
+
+class ScreenshotMaterialIngestionError(RuntimeError):
+    def __init__(self, cause):
+        super().__init__("material_ingestion_failed: 素材入库失败；" + str(cause))
+
+
+class ImageFetchError(RuntimeError):
+    """Public image GET exhausted its bounded retries, before any intake POST."""
+
+
+def screenshot_ingestion_failure_reason(job, error_text):
+    """Classify the callback stage explicitly, with a narrow historical fallback."""
+    job = job or {}
+    reason = str(error_text or job.get("error_message") or "")
+    lower = reason.lower()
+    legacy_callback = (str(job.get("progress")) == "96"
+                       and "正在回传素材接口" in str(job.get("progress_detail", ""))
+                       and all(job.get(size + "_url") for size, _ in SPECS))
+    if "material_ingestion_failed:" not in lower and not legacy_callback:
+        return None
+    if "image_fetch_retry_exhausted" in lower:
+        return "图片已生成；读取已生成图片进行入库校验时网络超时或暂时不可用，3 次读取均失败。已有图片和成功入库记录已保留。"
+    if "material_source_pending:" in lower:
+        return "图片已生成，但部分素材尚未确认入库成功；已成功项会跳过，结果未知项先对账，不会直接重复上传。"
+    if "timed out" in lower or "timeout" in lower:
+        location = "读取 COS 图片进行入库校验" if ".cos." in lower else "素材入库处理"
+        return "图片已生成；%s时超时，入库未完成。已有图片和成功入库记录已保留。" % location
+    detail = reason.replace("material_ingestion_failed: ", "", 1).splitlines()[0][:200]
+    return "图片已生成，但素材入库未完成。已有图片和成功入库记录已保留。技术原因：" + detail
 
 
 def encoded(value):
@@ -124,15 +157,32 @@ def inspect_image(url, expected_sha="", expected_category="", session=None):
     if parts.scheme != "https" or parts.hostname not in allowed or not parts.path or parts.username:
         raise ValueError("untrusted_image_url")
     client = session or requests
-    with client.get(url, stream=True, timeout=(5, 40), allow_redirects=False) as response:
-        if response.status_code != 200:
-            raise ValueError("image_http_" + str(response.status_code))
-        buf = io.BytesIO()
-        for block in response.iter_content(65536):
-            buf.write(block)
-            if buf.tell() > 30 * 1024 * 1024:
-                raise ValueError("image_too_large")
-    raw = buf.getvalue()
+    for attempt in range(len(IMAGE_RETRY_DELAYS) + 1):
+        try:
+            with client.get(url, stream=True, timeout=(10, 40), allow_redirects=False) as response:
+                if response.status_code in IMAGE_RETRY_HTTP:
+                    raise ImageFetchError("image_http_" + str(response.status_code))
+                if response.status_code != 200:
+                    raise ValueError("image_http_" + str(response.status_code))
+                # A new buffer on each attempt discards partial transport output.
+                buf = io.BytesIO()
+                for block in response.iter_content(65536):
+                    buf.write(block)
+                    if buf.tell() > 30 * 1024 * 1024:
+                        raise ValueError("image_too_large")
+            raw = buf.getvalue()
+            break
+        except requests.exceptions.SSLError:
+            raise
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError, ImageFetchError) as exc:
+            code = str(exc) if isinstance(exc, ImageFetchError) else type(exc).__name__
+            if attempt == len(IMAGE_RETRY_DELAYS):
+                raise ImageFetchError("image_fetch_retry_exhausted: host=%s attempts=%d error=%s"
+                                      % (parts.hostname, attempt + 1, code)) from exc
+            logging.warning("cover image GET retry: host=%s attempt=%d/%d error=%s",
+                            parts.hostname, attempt + 1, len(IMAGE_RETRY_DELAYS) + 1, code)
+            time.sleep(IMAGE_RETRY_DELAYS[attempt])
     sha = hashlib.sha256(raw).hexdigest()
     if expected_sha and sha != expected_sha:
         raise ValueError("image_sha_changed")
