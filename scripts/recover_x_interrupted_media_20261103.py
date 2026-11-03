@@ -47,7 +47,8 @@ def validate(c,outbox):
   proofs.append({'job_id':jid,'queue_id':qid,'log_id':lid,'receipt_id':b['receipt_id'],'prior_media_attempts':attempts,'post_permits':0,'operations':ops,'queue_sha256':hashlib.sha256(json.dumps(q,sort_keys=True).encode()).hexdigest(),'artifact_sha256':hashlib.sha256(prep['artifact_json'].encode()).hexdigest()})
  return proofs
 def main():
- p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');args=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');p.add_argument('--parents-only',action='store_true');args=p.parse_args()
+ if args.parents_only:return restore_parents(args.apply)
  with contextlib.closing(connect(BASE/'dispatch.sqlite3')) as c,contextlib.closing(connect(OUTBOX)) as outbox:
   c.execute('attach database ? as native',(str(NATIVE),));proof=validate(c,outbox)
   print(json.dumps({'verified':proof,'apply':args.apply}),flush=True)
@@ -67,4 +68,30 @@ def main():
    c.execute("update pipeline_job set status='ready',source_status='queued',hold_reason='',node_id='',worker_id='',claim_hash='',lease_expires_at='',external_intent=0,started_at='',finished_at='',error_code='',error_message='',canonical_receipt='',updated_at=? where id=?",(now(),jid))
    c.execute('insert into pipeline_event(job_id,event_type,details_json,created_at) values(?,?,?,?)',(jid,'operator_no_post_recovery',json.dumps(item),now()))
   c.commit();print(json.dumps({'restored_original_jobs':[x['job_id'] for x in proof],'backup':str(backup)}),flush=True)
+def restore_parents(apply):
+ auto=Path('/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3')
+ with contextlib.closing(connect(BASE/'dispatch.sqlite3')) as c:
+  c.execute('attach database ? as native',(str(NATIVE),));c.execute('attach database ? as automatic',(str(auto),))
+  def check():
+   assert 'x' not in json.loads(c.execute('select config_json from pipeline_config where id=1').fetchone()[0])['enabled_channels'],'other_X_maintenance_must_still_be_draining'
+   for jid,qid,run,tid in ((32064,5452,1476,2642),(32065,5558,1604,2418)):
+    j=c.execute('select status,generation from pipeline_job where id=?',(jid,)).fetchone();assert tuple(j)==('ready',1)
+    assert c.execute("select 1 from pipeline_event where job_id=? and event_type='operator_no_post_recovery'",(jid,)).fetchone()
+    q=c.execute('select manual_run_id,status from native.x_post_queue where id=?',(qid,)).fetchone();assert tuple(q)==(run,'queued')
+    assert c.execute('select count(*) from native.x_post_queue where manual_run_id=?',(run,)).fetchone()[0]==1
+    p=c.execute('select status,error_code,trigger_source from native.x_post_manual_run where id=?',(run,)).fetchone();assert p['status'] in ('needs_review','completed_with_errors') and not p['error_code'] and p['trigger_source']=='auto_template'
+    t=c.execute('select status,execution_run_id,execution_queue_id,publish_id,claim_worker,error_code from automatic.x_auto_task where id=?',(tid,)).fetchone()
+    assert t['status']=='failed' and t['execution_run_id']==run and t['execution_queue_id']==qid and not t['publish_id'] and not t['claim_worker'] and t['error_code'] in ('pipeline_lease_lost','x_auto_publish_outcome_unknown')
+  check();print(json.dumps({'verified_parent_tasks':[2642,2418],'apply':apply}),flush=True)
+  if not apply:return
+  backup=BASE/('x-switch-parent-recovery-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'));backup.mkdir(mode=0o700)
+  for name,path in (('native',NATIVE),('auto',auto)):
+   with contextlib.closing(connect(path)) as src,contextlib.closing(sqlite3.connect(backup/(name+'-before.sqlite3'))) as dst:src.backup(dst,pages=1000)
+   (backup/(name+'-before.sqlite3')).chmod(0o600)
+  c.execute('begin immediate');check()
+  for jid,run,tid in ((32064,1476,2642),(32065,1604,2418)):
+   c.execute("update native.x_post_manual_run set status='running',queued_count=1,published_count=0,failed_count=0,unknown_count=0,finished_at='',updated_at=? where id=?",(now(),run))
+   c.execute("update automatic.x_auto_task set status='reconciling',unknown_outcome=0,error_code='',error_message='',finished_at_utc='',next_attempt_at_utc=?,updated_at=? where id=?",(now(),now(),tid))
+   c.execute('insert into pipeline_event(job_id,event_type,details_json,created_at) values(?,?,?,?)',(jid,'operator_parent_recovery',json.dumps({'native_run_id':run,'auto_task_id':tid,'mode':'readonly_reconcile_original_queue','backup':str(backup)}),now()))
+  c.commit();print(json.dumps({'original_parents_restored':2,'X_admission_unchanged':'disabled','backup':str(backup)}),flush=True)
 if __name__=='__main__':main()
