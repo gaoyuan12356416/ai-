@@ -63,7 +63,8 @@ def main():
     modules = ['scripts.test_pipeline_youtube_owned_resume', 'scripts.test_pipeline_youtube_canonical_service',
                'scripts.test_pipeline_backlog_native', 'scripts.test_pipeline_backlog_projection',
                'scripts.test_pipeline_backlog_release', 'scripts.test_pipeline_backlog_dispose',
-               'scripts.test_pipeline_x_storage_initialization']
+               'scripts.test_pipeline_x_storage_initialization', 'scripts.test_pipeline_capacity_modes',
+               'scripts.test_pipeline_failed_receipt_ack', 'scripts.test_pipeline_capacity_samples']
     tests = subprocess.run([sys.executable, '-m', 'unittest', *modules], cwd=checked,
                            capture_output=True, text=True, timeout=60)
     (backup / 'targeted-tests.log').write_text(tests.stdout + tests.stderr)

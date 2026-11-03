@@ -102,3 +102,77 @@ disposition, journal, holds, frozen artifacts and all publication history.
 
 Deployment and application are pending at the time of this design record;
 append actual SHAs, plan hashes, counts and business readback after execution.
+
+## Production execution and independent readback
+
+At12:11 Beijing, coordinator `b6e205a879ac14da4f2e4b61a950781e2d22f30d`
+passed61 targeted tests on production Linux/Python3.9 and replaced the previous
+version after HTTP handlers drained. The connection gate lasted1.009 seconds,
+was removed, and health returned200. Configuration was identical before/after.
+
+Native X/Xauto and TTauto received only the reviewed patches from `d69a369`,
+preserving all other production files, particularly TT publisher SHA
+`da713109c6630fea1df7bba314053ee9f1ad9b837207a93ebf9a8785719a6afb`.
+Operational helper `80152c7` handles an already-failed metadata oneshot and
+the service-listener startup race without repeating a successful restart.
+Both rendering node supervisor PIDs stayed unchanged. Accepted HTTP requests
+and platform uploads were not terminated. Temporary firewall rules are absent.
+
+Approved plan SHA:
+`fffafb8fb32f7449c7bb3980d6362627d6c389962c0ab63e2521d55b24bcc9f3`.
+All1,456 source actions committed with zero blocked items. At12:20:37,
+X/TT admission and the X metadata planner were restored. Independent readback
+confirmed281 resumes,1,175 archives, zero central paused backlog and1,173
+retained native holds. Both already-published ghosts retained exactly the
+original published rows and publication facts. Archived material, artifacts
+and associated ledgers match the backups.
+
+The18 TT index times became their approved preparation eligibility times;
+their native original publication appointments and frozen identities did not
+change. Four resumed X queues5348–5351 made their first generation-one claim
+and actually rendered on CPU(three) and GPU(one). The other GPU slot rendered
+TT simultaneously. This is resumed processing, not a claim that281 posts
+have already been published. One X account requires review and eight initial
+X selections had no eligible material; their normal business gates remain.
+
+Monitoring summary/workers/tasks returned200 in170/10/28ms. All displayed
+counters matched the ledger, unique success counting matched publication
+facts, and both tested ordinary users had zero out-of-scope rows.
+
+Backup/evidence locations on CPU43.166.187.96:
+
+- `/mnt/data-disk/pipeline-dispatch/backup-coordinator-20261103T041127Z`
+- `/mnt/data-disk/pipeline-dispatch/backlog-20261103/` (private plan, apply report,
+  per-database backup manifest, maintenance journal)
+- `/mnt/data-disk/pipeline-dispatch-runtime/backlog-native-d69a369660/`
+  (exact patch trees, original source/ledger backups, separate deployment attempts)
+
+## Explicit manual GPU capacity and duplicate failure acknowledgements
+
+The later user instruction explicitly requests GPU concurrency to follow the
+saved values. A one-time target raise was insufficient: automatic CPU-pressure
+control reduced it again. `59aa673` therefore adds explicit per-pool manual
+mode. GPU preparation2/publication4 will be configured manually; CPU retains
+automatic control. In manual mode, the existing numeric save changes the
+target to the saved ceiling; lower targets still allow in-flight work to finish.
+The page displays manual/automatic mode and uses its existing authenticated
+save payload, so the main API needs no restart. Explicit mode switching uses
+the protected coordinator administrator endpoint; no nonfunctional UI control
+or gateway bypass is introduced.
+
+`858d431` fixes the old X5458 failure receipt acknowledgement. The same claim,
+generation and error must already be failed with no external intent, operation,
+checkpoint, receipt, publication, canonical result or native-attempt evidence.
+Only an idempotent delivery acknowledgement is added; no task, resource fence,
+timestamp or performance sample is rewritten and no platform retry occurs.
+Eight real HTTP/SQLite cases and39 related tests passed. Manual capacity and
+existing adaptive behavior passed48 related tests plus local desktop/mobile
+browser checks. These two follow-up changes still require exact-version
+deployment/readback at this point in the record.
+
+Rollback procedure: stop new claims for affected channels, let active work and
+receipt delivery finish, then restore the prior code or native symlink from the
+named deployment manifests. Never restore an old database over current work.
+Keep dispositions, cancellation markers, receipts and material reservations.
+An older coordinator does not implement manual capacity, so do not revert it
+while assuming the manual-mode admission guarantee will remain active.
