@@ -144,17 +144,84 @@ def admission(lane):
 
 def accepted(port):return run(['ss','-Htn','state','established','sport','=',':'+str(port)]).strip()
 
+def audit_files(folder,lane):
+    first=folder/('apply-'+lane+'.json')
+    files=[first] if first.exists() else []
+    rest=[]
+    for path in folder.glob('apply-'+lane+'.attempt-*.json'):
+        match=re.fullmatch('apply-'+re.escape(lane)+r'\.attempt-([2-9][0-9]*|1[0-9]+)\.json',path.name)
+        need(match,'invalid_attempt_audit_name');rest.append((int(match[1]),path))
+    rest.sort();need(not rest or files,'initial_attempt_audit_missing')
+    need([n for n,_ in rest]==list(range(2,len(rest)+2)),'attempt_audit_gap')
+    return files+[p for _,p in rest]
+
+def exact_rules_absent(audit,lane):
+    expected_comment='backlog-'+lane+'-'+audit['commit'][:10]
+    for rule in audit.get('rules',[]):
+        need(rule==['OUTPUT','-d','127.0.0.1','-p','tcp','--dport',rule[6],'-m','conntrack','--ctstate','NEW','-m','comment','--comment',expected_comment,'-j','REJECT','--reject-with','tcp-reset']
+             and rule[6] in {str(p) for p in SPECS[lane]['ports']},'audit_rule_not_exact')
+        p=subprocess.run(['iptables','-w','5','-C',*rule],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+        need(p.returncode==1,'previous_admission_rule_present_or_unverifiable')
+
+def new_audit_path(folder,lane,manifest,entry):
+    files=audit_files(folder,lane)
+    if not files:return folder/('apply-'+lane+'.json'),None
+    need(Path(SPECS[lane]['root']).resolve()==Path(entry['previous_root']).resolve(),'retry_runtime_already_switched')
+    for path in files:
+        prior=json.loads(path.read_text())
+        need(prior.get('lane')==lane and prior.get('commit')==manifest['commit'],'previous_audit_identity_mismatch')
+        need(not prior.get('swapped') and prior.get('status') not in {'applied','xauto_stopped_pending_disposal','released_after_disposal'},'previous_attempt_already_applied')
+        need(prior.get('rules_removed_at') and prior.get('rule_cleanup_failed')==[],'previous_rule_cleanup_unproved')
+        exact_rules_absent(prior,lane)
+    return folder/('apply-'+lane+'.attempt-'+str(len(files)+1)+'.json'),{'path':str(files[-1]),'sha256':digest(files[-1])}
+
+def stop_metadata_caller(caller,ports):
+    need(show(caller,'LoadState')=='loaded','metadata_caller_missing')
+    need(not any(accepted(p) for p in ports),'metadata_caller_requests_still_running')
+    run(['systemctl','stop',caller])
+    need(show(caller,'MainPID')=='0','metadata_caller_pid_still_running')
+    state=show(caller,'ActiveState');reset=False
+    if state=='failed':
+        # Failed oneshot state survives systemctl stop. Clear only its unit
+        # result after proving there is no process or accepted native request.
+        need(not any(accepted(p) for p in ports) and show(caller,'MainPID')=='0','metadata_caller_not_quiescent')
+        run(['systemctl','reset-failed',caller]);reset=True
+    need(show(caller,'MainPID')=='0' and show(caller,'ActiveState')=='inactive','metadata_caller_not_stopped')
+    return {'unit':caller,'after_stop_state':state,'reset_failed':reset}
+
+def wait_listener(port):
+    deadline=time.monotonic()+10
+    while True:
+        if run(['ss','-Hltn','sport','=',':'+str(port)]).strip():return
+        need(time.monotonic()<deadline,'new_native_not_listening');time.sleep(.25)
+
+def verify_applied(folder,lane):
+    folder=Path(folder).resolve();manifest=json.loads((folder/'manifest.json').read_text());entry=manifest['lanes'][lane]
+    need(entry['status']=='applied' and Path(SPECS[lane]['root']).resolve()==Path(entry['candidate']).resolve(),'runtime_not_applied')
+    files=audit_files(folder,lane);need(files,'apply_audit_missing');audit_path=files[-1];audit=json.loads(audit_path.read_text())
+    need(audit.get('commit')==manifest['commit'] and audit.get('swapped') and audit.get('status') in {'applied','xauto_stopped_pending_disposal'},'applied_audit_invalid')
+    need(audit.get('rules_removed_at') and audit.get('rule_cleanup_failed')==[],'applied_rule_cleanup_unproved');exact_rules_absent(audit,lane)
+    need(tree(Path(entry['candidate']))==entry['after_tree'],'applied_source_drift')
+    for unit in (['x-post-automation.service'] if lane=='x' else SPECS[lane]['units']):need(show(unit,'ActiveState')=='active' and show(unit,'MainPID') not in ('','0'),'applied_native_not_active')
+    for port in ([8810] if lane=='x' else SPECS[lane]['ports']):wait_listener(port)
+    if lane=='x':need(show('x-auto-post-service.service','ActiveState')=='inactive' and show('x-auto-post-service.service','MainPID')=='0','xauto_not_held_for_disposal')
+    else:need(digest(Path(SPECS[lane]['root'])/'features/tt_auto_posts/publisher.py')==PUBLISHER_SHA,'publisher_changed')
+    audit.setdefault('completed_at',now());audit['verified_at']=now();save(audit_path,audit)
+    return {'status':audit['status'],'audit':str(audit_path),'services_restarted':False,'verified':True}
+
 def apply(folder,lane):
     folder=Path(folder).resolve();manifest=json.loads((folder/'manifest.json').read_text());entry=manifest['lanes'][lane];spec=SPECS[lane]
     need(entry['status']=='prepared','lane_not_prepared')
     need(tree(Path(entry['previous_root']))==entry['before_tree'],'runtime_tree_drift')
     need(tree(Path(entry['candidate']))==entry['after_tree'],'candidate_tree_drift')
     preserved=admission(lane)
-    audit_path=folder/('apply-'+lane+'.json');need(not audit_path.exists(),'audit_already_exists')
+    audit_path,previous=new_audit_path(folder,lane,manifest,entry)
     audit={'at':now(),'lane':lane,'commit':manifest['commit'],'preserved_prepare':preserved,'triggers':{},'rules':[],'stopped':[]}
+    if previous:audit['previous_attempt']=previous
     for unit in spec['triggers']:
         if show(unit,'LoadState')!='not-found':audit['triggers'][unit]=show(unit,'ActiveState')
-    save(audit_path,audit)
+    with os.fdopen(os.open(str(audit_path),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as f:
+        f.write(json.dumps(audit,indent=2)+'\n');f.flush();os.fsync(f.fileno())
     rules=[];swapped=False
     try:
         for unit in audit['triggers']:run(['systemctl','stop',unit])
@@ -176,8 +243,7 @@ def apply(folder,lane):
             # These two are metadata-only HTTP callers. The accepted request
             # is already gone; stop their idle/retry wrapper, never a handler.
             for caller in ['x-auto-post-runner.service','x-auto-post-scheduler.service']:
-                need(show(caller,'LoadState')=='loaded','metadata_caller_missing')
-                run(['systemctl','stop',caller]);need(show(caller,'MainPID')=='0' and show(caller,'ActiveState')=='inactive','metadata_caller_not_stopped')
+                audit.setdefault('metadata_callers',[]).append(stop_metadata_caller(caller,spec['ports']));save(audit_path,audit)
         for unit in spec['units']:
             run(['systemctl','stop',unit]);need(show(unit,'ActiveState')=='inactive','native_not_stopped');audit['stopped'].append(unit);save(audit_path,audit)
         need(tree(Path(entry['previous_root']))==entry['before_tree'],'runtime_changed_before_swap')
@@ -211,13 +277,13 @@ def apply(folder,lane):
         while show(unit,'ActiveState')=='activating' and time.monotonic()<deadline:time.sleep(.5)
         need(show(unit,'ActiveState')=='active','new_native_not_active')
     for port in ([8810] if lane=='x' else spec['ports']):
-        need(run(['ss','-Hltn','sport','=',':'+str(port)]).strip(),'new_native_not_listening')
+        wait_listener(port)
     if lane=='tt_auto':need(digest(Path(spec['root'])/'features/tt_auto_posts/publisher.py')==PUBLISHER_SHA,'publisher_changed')
     audit['completed_at']=now();save(audit_path,audit)
     return {'status':audit['status'],'audit':str(audit_path),'nodes_restarted':False,'coordinator_changed':False}
 
 def release_xauto(folder,plan_sha):
-    folder=Path(folder).resolve();audit_path=folder/'apply-x.json';audit=json.loads(audit_path.read_text())
+    folder=Path(folder).resolve();files=audit_files(folder,'x');need(files,'apply_audit_missing');audit_path=files[-1];audit=json.loads(audit_path.read_text())
     need(audit.get('status')=='xauto_stopped_pending_disposal','xauto_not_pending')
     need(re.fullmatch('[a-f0-9]{64}',plan_sha),'plan_hash_required')
     with contextlib.closing(db(DATA/'dispatch.sqlite3')) as c:
@@ -232,9 +298,10 @@ def release_xauto(folder,plan_sha):
     return {'status':audit['status'],'audit':str(audit_path)}
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['prepare','apply','release-xauto']);p.add_argument('--source');p.add_argument('--commit');p.add_argument('--folder');p.add_argument('--lane',choices=list(SPECS));p.add_argument('--plan-sha256');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['prepare','apply','verify-applied','release-xauto']);p.add_argument('--source');p.add_argument('--commit');p.add_argument('--folder');p.add_argument('--lane',choices=list(SPECS));p.add_argument('--plan-sha256');a=p.parse_args()
     if a.action=='prepare':need(a.source and a.commit,'source_commit_required');result=prepare(Path(a.source),a.commit)
     elif a.action=='apply':need(a.folder and a.lane,'folder_lane_required');result=apply(a.folder,a.lane)
+    elif a.action=='verify-applied':need(a.folder and a.lane,'folder_lane_required');result=verify_applied(a.folder,a.lane)
     else:need(a.folder and a.plan_sha256,'folder_plan_required');result=release_xauto(a.folder,a.plan_sha256)
     print(json.dumps(result))
 

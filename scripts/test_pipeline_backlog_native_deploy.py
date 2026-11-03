@@ -63,4 +63,55 @@ class NativeDeploymentTests(unittest.TestCase):
                 self.native.write_bytes(original)
 
 
+class DeploymentRetryTests(unittest.TestCase):
+    def test_failed_oneshot_with_zero_pid_is_reset_only_after_requests_finish(self):
+        state={'LoadState':'loaded','MainPID':'0','ActiveState':'failed'};commands=[]
+        def invoke(args):
+            commands.append(args)
+            if args[1]=='reset-failed':state['ActiveState']='inactive'
+            return b''
+        with patch.object(deploy,'show',side_effect=lambda u,k:state[k]),patch.object(deploy,'accepted',return_value=b''),patch.object(deploy,'run',side_effect=invoke):
+            result=deploy.stop_metadata_caller('x-auto-post-runner.service',[18833,8810])
+        self.assertTrue(result['reset_failed'])
+        self.assertEqual(commands,[['systemctl','stop','x-auto-post-runner.service'],['systemctl','reset-failed','x-auto-post-runner.service']])
+
+    def test_live_process_or_accepted_request_never_resets_failed(self):
+        for pid,accepted in [('12',b''),('0',b'accepted')]:
+            with self.subTest(pid=pid,accepted=accepted),patch.object(deploy,'show',side_effect=lambda u,k:{'LoadState':'loaded','MainPID':pid,'ActiveState':'failed'}[k]),patch.object(deploy,'accepted',return_value=accepted),patch.object(deploy,'run') as invoke:
+                with self.assertRaises(RuntimeError):deploy.stop_metadata_caller('x-auto-post-runner.service',[18833])
+                self.assertFalse(any(c.args[0][1]=='reset-failed' for c in invoke.call_args_list))
+
+    def test_attempt_two_preserves_original_audit_and_rejects_unsafe_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp);old=folder/'old';old.mkdir();first=folder/'apply-x.json'
+            audit={'lane':'x','commit':'a'*40,'rules_removed_at':'2026-11-03T04:13:45Z','rule_cleanup_failed':[],'rules':[]}
+            first.write_text(json.dumps(audit));original=first.read_bytes()
+            manifest={'commit':'a'*40};entry={'previous_root':str(old)}
+            with patch.dict(deploy.SPECS,{'x':{'root':str(old),'ports':[8810,18833]}}):
+                path,previous=deploy.new_audit_path(folder,'x',manifest,entry)
+                self.assertEqual(path.name,'apply-x.attempt-2.json');self.assertEqual(first.read_bytes(),original)
+                self.assertEqual(previous['sha256'],deploy.digest(first))
+                for updates in [{'swapped':True},{'rules_removed_at':''},{'rule_cleanup_failed':['failed']}]:
+                    first.write_text(json.dumps({**audit,**updates}))
+                    with self.assertRaises(RuntimeError):deploy.new_audit_path(folder,'x',manifest,entry)
+                first.write_bytes(original)
+                with self.assertRaisesRegex(RuntimeError,'retry_runtime_already_switched'):deploy.new_audit_path(folder,'x',manifest,{'previous_root':str(folder/'different')})
+
+    def test_listener_startup_delay_is_polled_without_restart(self):
+        with patch.object(deploy,'run',side_effect=[b'',b'',b'LISTEN 127.0.0.1:18831']) as invoke,patch.object(deploy.time,'sleep'):
+            deploy.wait_listener(18831)
+        self.assertEqual(invoke.call_count,3)
+        self.assertTrue(all(c.args[0][0]=='ss' for c in invoke.call_args_list))
+
+    def test_prior_firewall_rule_must_be_proved_absent(self):
+        from types import SimpleNamespace
+        rule=['OUTPUT','-d','127.0.0.1','-p','tcp','--dport','8810','-m','conntrack','--ctstate','NEW','-m','comment','--comment','backlog-x-aaaaaaaaaa','-j','REJECT','--reject-with','tcp-reset']
+        audit={'commit':'a'*40,'rules':[rule]}
+        with patch.object(deploy.subprocess,'run',return_value=SimpleNamespace(returncode=1)):
+            deploy.exact_rules_absent(audit,'x')
+        for code in [0,2]:
+            with self.subTest(code=code),patch.object(deploy.subprocess,'run',return_value=SimpleNamespace(returncode=code)):
+                with self.assertRaisesRegex(RuntimeError,'previous_admission_rule_present_or_unverifiable'):deploy.exact_rules_absent(audit,'x')
+
+
 if __name__=='__main__':unittest.main()
