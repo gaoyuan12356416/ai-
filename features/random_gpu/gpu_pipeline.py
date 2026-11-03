@@ -16,8 +16,44 @@ from fractions import Fraction
 from functools import lru_cache
 
 ENV = 'RANDOM_GPU_PIPELINE_V2'
-IMPLEMENTATION = 'nvdec-opencl-lanczos-nvenc-yuv-v1'
+IMPLEMENTATION = 'nvdec-opencl-lanczos-nvenc-rgb-v2'
 KERNEL = Path(__file__).with_name('gpu_fit.cl')
+
+
+def nvenc_rgb_tail(tail):
+    """Feed RGBA to NVENC's device CSC, keeping the encoded output YUV420.
+
+    The operator explicitly accepts NVENC's BT.601 RGB conversion. No software
+    RGB-to-YUV filter should remain, including for compatibility source paths.
+    Audio, bitrate, timing and recipe arguments belong to the original caller.
+    """
+    result = list(tail)
+    if result[result.index('-c:v') + 1] not in {'h264_nvenc', 'hevc_nvenc'}:
+        raise ValueError('gpu_pipeline_requires_nvenc')
+    if '-pix_fmt' in result:
+        result[result.index('-pix_fmt') + 1] = 'rgba'
+    else:
+        result[-1:-1] = ['-pix_fmt', 'rgba']
+    if '-rgb_mode' in result:
+        result[result.index('-rgb_mode') + 1] = 'yuv420'
+    else:
+        result[-1:-1] = ['-rgb_mode', 'yuv420']
+    return result
+
+
+def rgb_output_enabled(tail):
+    return (os.environ.get(ENV, '0') == '1' and '-c:v' in tail
+            and tail[tail.index('-c:v') + 1] in {'h264_nvenc', 'hevc_nvenc'})
+
+
+def write_provenance(output, recipe, video, code, implementation=IMPLEMENTATION):
+    record = {'implementation': implementation,
+              'output_conversion': 'nvenc_rgb_to_yuv420_bt601_operator_accepted',
+              'kernel_sha256': hashlib.sha256(code.encode()).hexdigest(),
+              'recipe_sha256': hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest(),
+              'source': {key: video.get(key) for key in ('codec_name', 'pix_fmt', 'width', 'height',
+                         'color_space', 'color_range', 'color_transfer', 'chroma_location')}}
+    Path(output).with_suffix('.renderer.json').write_text(json.dumps(record, sort_keys=True), encoding='utf-8')
 
 
 def qualification(info, environ=None):
@@ -114,12 +150,7 @@ def fuse_command(command, recipe, output, info):
     finally: temporary.unlink(missing_ok=True)
     # Local render provenance only. Frozen job/profile and artifact recovery
     # identity remain owned by their existing journals.
-    record = {'implementation': IMPLEMENTATION,
-              'kernel_sha256': hashlib.sha256(code.encode()).hexdigest(),
-              'recipe_sha256': hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest(),
-              'source': {key: video.get(key) for key in ('codec_name', 'pix_fmt', 'width', 'height',
-                         'color_space', 'color_range', 'color_transfer', 'chroma_location')}}
-    Path(output).with_suffix('.renderer.json').write_text(json.dumps(record, sort_keys=True), encoding='utf-8')
+    write_provenance(output, recipe, video, code)
     inputs, number = [], 0
     for position, value in enumerate(prefix[1:], start=1):
         if value == '-i':
@@ -135,12 +166,8 @@ def fuse_command(command, recipe, output, info):
             number += 1
         inputs.append(value)
     program = "program_opencl=inputs=4:size=720x1280:source='%s':kernel=" % _escape(target)
-    # FFmpeg 7.1 NVENC packed-RGB input forces BT.601. Keep the established
-    # final YUV conversion and source color descriptors until an equivalent
-    # GPU output conversion is proven; GPU handles the two source CSC/fits.
-    colors = ':'.join(key + '=' + (video.get(field) or 'unknown') for key, field in
-                     (('colorspace', 'color_space'), ('color_primaries', 'color_primaries'),
-                      ('color_trc', 'color_transfer')))
+    # The operator accepts the NVENC packed-RGB color conversion. Downloading
+    # RGBA is a transfer, not a CPU colorspace conversion; NVENC performs CSC.
     # At the delivery aspect ratio cover and contain are identical, including
     # rounding, offset and alpha. Share the exact fitted frame instead of
     # dispatching the same expensive GPU sampling operation twice.
@@ -156,10 +183,8 @@ def fuse_command(command, recipe, output, info):
     graph.append('[clockback][yback][uback][vback]' + program + 'fit_yuv_cover:shortest=1:eof_action=endall' + (',split=2[source][main]' if shared_fit else '[source]'))
     if not shared_fit:
         graph.append('[clockmain][ymain][umain][vmain]' + program + 'fit_yuv_contain:shortest=1:eof_action=endall[main]')
-    graph.append("[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size=720x1280:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1,setparams=%s,format=yuv420p[v]" % (_escape(target), colors))
-    tail = list(command[graph_index + 2:])
-    if tail[tail.index('-c:v') + 1] not in {'h264_nvenc', 'hevc_nvenc'}:
-        raise ValueError('gpu_pipeline_requires_nvenc')
+    graph.append("[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size=720x1280:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1[v]" % _escape(target))
+    tail = nvenc_rgb_tail(command[graph_index + 2:])
     return [prefix[0], '-filter_complex_threads', '2', '-filter_threads', '2',
             '-init_hw_device', 'opencl=ocl:0.0', '-filter_hw_device', 'ocl',
             *inputs, '-filter_complex', ';'.join(graph), *tail]
