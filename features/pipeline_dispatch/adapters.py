@@ -112,7 +112,7 @@ def canonical_fingerprint(row, identity):
 def artifact_from(row):
     if row.get("_dispatch_artifact"):
         frozen = obj(row["_dispatch_artifact"])
-        return {key: frozen[key] for key in ("url", "sha256", "size", "duration_seconds", "profile", "mime", "identity_mode") if key in frozen}
+        return {key: frozen[key] for key in ("url", "sha256", "size", "duration_seconds", "profile", "mime", "identity_mode", "recipe") if key in frozen}
     prepared = obj(row.get("prepared_json"))
     return {"url": str(prepared.get("media_url") or row.get("prepared_media_url") or ""),
             "sha256": str(prepared.get("sha256") or row.get("prepared_sha256") or row.get("prepared_output_sha256") or ""),

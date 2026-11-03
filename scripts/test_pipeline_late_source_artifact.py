@@ -92,4 +92,37 @@ class LateSourceArtifactTests(unittest.TestCase):
         before = self.snapshot(); self.assertTrue(self.deliver()['historical']); self.assertEqual(self.snapshot(), before)
 
 
+class ActualNativeLateArtifactTests(unittest.TestCase):
+    def test_real_native_projection_retains_recipe_and_corrects_old_completed_source(self):
+        from scripts.test_pipeline_x_recovery_concurrency import XRecoveryTests
+        native = XRecoveryTests('runTest'); native.setUp(); self.addCleanup(native.doCleanups)
+        queue = native.queue(random=True)
+        native_job, descriptor, source = native.preflight(queue)
+        _, registry = native.registry()
+        clock = [dt.datetime(2026,11,3,tzinfo=dt.timezone.utc)]
+        store = DispatchStore(native.root/'late-artifact.db', lambda: clock[0])
+        service = Coordinator(store, registry, internal_token='i'*32, master_key='m'*32)
+        store.register_node('cpu-main',['prepare:x']); store.channel_enabled('x',True)
+        store.worker_heartbeat('cpu-main','prepare','prepare')
+        store.offer({'source_key':native_job['source_key'],'source_id':str(queue['id']),'channel':'x','family':'queue',
+                     'stage':'prepare','capabilities':['prepare:x'],'resource_keys':['x:account:2'],'scheduled_at':stamp(clock[0]),'source_created_at':stamp(clock[0])})
+        original=store.claim('cpu-main','prepare','prepare')['job']
+        with store.transaction() as c:c.execute('UPDATE pipeline_job SET payload_json=? WHERE id=?',(dumps(descriptor),original['id']))
+        clock[0]+=dt.timedelta(seconds=121)
+        store.register_node('cpu-main',['prepare:x']);store.worker_heartbeat('cpu-main','prepare','prepare')
+        successor=store.claim('cpu-main','prepare','prepare')['job']
+        store.complete(successor,'native-prepared-%s-2'%original['id'],{'artifact':source,'canonical_receipt':'source-probe','dispatch_completed':True},canonical_verified=True)
+        final=native.rendered(queue);native.bridge.complete(native_job,final,native_job)
+        projected=registry.reconcile(original)['next_offer']['artifact']
+        self.assertEqual(projected['recipe'],final['preparation']['recipe'])
+        receipt={'job_id':original['id'],**{k:original[k] for k in ('generation','node_id','worker_id','claim_token')},'receipt_id':'native-final-late','result':final}
+        before=store.get_job(original['id'])
+        response=service.route('/internal/pipeline/jobs/complete',receipt,{'internal':True})
+        after=store.get_job(original['id'])
+        self.assertTrue(response['historical']);self.assertEqual(after['artifact'],projected)
+        before.pop('artifact');after.pop('artifact');self.assertEqual(after,before)
+        with store.transaction() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM pipeline_event WHERE event_type='qualified_final_artifact_corrected'").fetchone()[0],1)
+
+
 if __name__ == '__main__':unittest.main()
