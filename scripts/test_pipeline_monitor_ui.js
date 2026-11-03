@@ -13,13 +13,13 @@ summary.efficiency = [
   { channel: "tt", stage: "publish", phase: "platform_processing", samples: 1, p50_seconds: 75, p95_seconds: 75 },
 ];
 let capacity = { version: 1, hosts: ["cpu-main", "hk-gpu", "gpu-third"].flatMap(host_id => ["prepare", "publish"].map(stage => ({ host_id, stage, max_workers: host_id === "gpu-third" && stage === "prepare" ? 1 : 2, ceiling: 4 }))), global_publish_limit: 8, channel_limits: { x: 4, fb: 8, tt: 4, youtube: 2 } };
-let admin = true, failSummary = false, calls = [], writes = [];
+let admin = true, authenticated = true, failSummary = false, calls = [], writes = [];
 const workers = () => ({ ...base, capacity, items: ["cpu-main", "hk-gpu", "gpu-third"].map((host_id, i) => ({ host_id, label: ["CPU 服务器", "香港 GPU", "新增 GPU 服务器"][i], last_seen_at: stamp, stale: false, cpu_percent: 35, memory_used_bytes: 8e9, memory_total_bytes: 32e9, gpu_percent: i ? 65 : null, gpu_count: i ? 1 : 0, gpu_memory_used_bytes: i ? 3e9 : null, gpu_memory_total_bytes: i ? 16e9 : null, stages: ["prepare", "publish"].map(stage => ({ stage, max_workers: i === 2 && stage === "prepare" ? 1 : 2, ceiling: 4, alive_workers: i === 2 && stage === "prepare" ? 4 : 2, busy_workers: i === 2 && stage === "prepare" ? 3 : 1, idle_workers: 1, completed_today: 24, throughput_per_hour: 5 })) })), processes: [{ host_id: "gpu-third", worker_id: "prepare-1", stage: "prepare", pid: 12345, status: "busy", current_source_key: "x:auto:fixture-1", channel: "x", phase: "render", elapsed_seconds: 165, last_seen_at: stamp }, { host_id: "cpu-main", worker_id: "publish-1", stage: "publish", pid: 23456, status: "idle", elapsed_seconds: null, last_seen_at: stamp, idle_reason: "账号正在发布，等待下一条可领取任务" }] });
 const task = { id: 17, source_key: "fixture-task", source_id: "fixture-17", channel: "x", source_family: "自动模板", stage: "publish", status: "unknown", host_id: "gpu-third", worker_id: "publish-1", account_label: "<img src=x onerror=alert(1)>", owner_name: "测试运营", created_at: stamp, started_at: stamp, duration_seconds: null, wait_seconds: 20, detail_url: "javascript:alert(1)" };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://localhost"); calls.push(url.pathname + url.search);
   const send = (status, data) => { res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(data)); };
-  if (url.pathname === "/api/ui/topbar") return send(200, { authenticated: true, user: { is_admin: admin, name: "测试用户", role: admin ? "admin" : "user", permissions: { x_accounts: true } } });
+  if (url.pathname === "/api/ui/topbar") return send(200, { authenticated, user: { is_admin: admin, name: "测试用户", role: admin ? "admin" : "user", permissions: { x_accounts: true } } });
   if (url.pathname === "/api/navigation") return send(200, { items: [] });
   if (url.pathname === "/api/pipeline-monitor/summary") return failSummary ? send(503, { message: "测试采集失败，保留上次数据" }) : send(200, { ...summary, scope: admin ? "all" : "mine" });
   if (url.pathname === "/api/pipeline-monitor/workers") return send(200, admin ? workers() : { ...base, items: [], processes: [], visibility_message: "服务器全局明细仅管理员可见" });
@@ -63,23 +63,42 @@ const server = http.createServer((req, res) => {
     await page.locator('form[data-host="gpu-third"][data-stage="prepare"] button[data-drain]').click();
     await page.waitForFunction(() => document.querySelector("#pmCapacityVersion").textContent.includes("2"));
     assert.deepEqual(writes[0], { expected_version: 1, host_id: "gpu-third", stage: "prepare", max_workers: 0 });
-    await page.locator("#pmEnrollOpen").click(); await page.locator('#pmEnrollForm input[name="label"]').fill("第三台服务器"); await page.locator('#pmEnrollForm button').click();
+    await page.locator("#pmEnrollOpen").click(); assert.equal(await page.locator('#pmEnrollForm input[name="label"]').getAttribute("maxlength"), "100"); await page.locator('#pmEnrollForm input[name="label"]').fill("第三台服务器"); await page.locator('#pmEnrollForm button').click();
     await page.waitForFunction(() => document.querySelector("#pmEnrollmentConfig").textContent.includes("fixture-one-use-token"));
     assert.equal(await page.evaluate(() => Object.values(localStorage).some(v => v.includes("fixture-one-use-token"))), false);
     await page.locator("#pmEnrollClose").click(); assert.equal(await page.locator("#pmEnrollmentConfig").textContent(), "");
+    summary.stale = true; summary.warnings = ["测试来源超过采集时限"];
+    summary.sources[0].state = "stale";
+    await page.locator("#pmRefresh").click(); await page.waitForFunction(() => !document.querySelector("#pmWarnings").hidden);
+    assert.match(await page.locator("#pmWarnings").innerText(), /采集数据有延迟[\s\S]*测试来源超过采集时限/);
+    assert.match(await page.locator("#pmSources").innerText(), /数据延迟/);
+    assert.equal(await page.locator("#pmLiveDot").evaluate(el => el.classList.contains("stale")), true);
+    assert.match(await page.locator("#pmTotals").innerText(), /76/);
+    summary.stale = false; summary.warnings = []; summary.sources[0].state = "healthy";
     failSummary = true; await page.locator("#pmRefresh").click(); await page.waitForFunction(() => !document.querySelector("#pmError").hidden); assert.match(await page.locator("#pmTotals").innerText(), /76/);
     await page.setViewportSize({ width: 390, height: 844 }); await page.waitForTimeout(250); await page.screenshot({ path: path.join(OUT, "mobile.png"), fullPage: true });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert((await page.locator('#pmSidebar').boundingBox()).x < -200);
+    await page.locator("#pmShowNav").click(); await page.waitForFunction(() => document.querySelector("#pmSidebar").getBoundingClientRect().x >= 0);
+    await page.locator("#pmHideNav").click(); await page.waitForFunction(() => document.querySelector("#pmSidebar").getBoundingClientRect().x < -200);
     failSummary = false; admin = false; await page.reload(); await page.waitForFunction(() => document.querySelector("#pmScope").textContent === "我的任务");
     assert.equal(await page.locator("#pmEnrollOpen").isVisible(), false); assert.equal(await page.locator("#pmCapacitySection").isVisible(), false);
     await page.waitForSelector('[data-quick-nav-key="pipelineMonitor"]', { state: "attached" });
     for (const key of ["videoEditing", "aiImageDaily", "fbPostMaterialPool", "socialkitAnalytics"]) assert.equal(await page.locator(`[data-quick-nav-key="${key}"]`).count(), 0);
+    // The real timer must refresh while the visible personal page stays open.
+    const beforeTick = calls.filter(url => url.startsWith("/api/pipeline-monitor/summary?")).length;
+    const tickDeadline = Date.now() + 18000;
+    while (calls.filter(url => url.startsWith("/api/pipeline-monitor/summary?")).length === beforeTick && Date.now() < tickDeadline) await page.waitForTimeout(250);
+    assert(calls.filter(url => url.startsWith("/api/pipeline-monitor/summary?")).length > beforeTick);
+    authenticated = false; calls = []; await page.reload();
+    await page.waitForFunction(() => document.querySelector("#pmGate").textContent.includes("请先登录"));
+    assert.equal(await page.locator("#pmContent").isVisible(), false);
+    assert.equal(calls.some(url => url.startsWith("/api/pipeline-monitor/")), false);
     assert.deepEqual(errors, []);
     // Test the exact home decision from index.html without loading legacy task APIs.
     const html = fs.readFileSync(path.join(ROOT, "static/index.html"), "utf8"), match = html.match(/const homePath =[^]*?\n      }/); assert(match);
     assert(html.includes('/drama-job-runtime.js?v=20260828-async-v1'));
     for (const [pathname, hash, redirect] of [["/", "", true], ["/index.html", "", true], ["/", "#tasks", false], ["/", "#job/123", false], ["/drama-synthesis.html", "", false]]) { let next = ""; vm.runInNewContext(`(function(){${match[0]}})()`, { location: { pathname, hash, search: "?owner=fixture", replace: value => next = value } }); assert.equal(!!next, redirect); if (redirect) assert.equal(next, "/pipeline-monitor.html?owner=fixture"); }
-    console.log("pipeline monitor browser: admin/personal, 3 nodes, process phases, filters, drain, enrollment cleanup, stale preservation, escaping, mobile and home deep links passed");
+    console.log("pipeline monitor browser: admin/personal/login gate, 3 nodes, process phases, filters, drain, enrollment cleanup, delayed snapshots, failed-refresh preservation, 15s auto-refresh, escaping, mobile navigation and home deep links passed");
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; server.close(); });
