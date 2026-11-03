@@ -24,8 +24,14 @@
   }
   function filters(tasks) { const values = { window: $("pmWindow").value, channel: $("pmChannel").value }; if (tasks) Object.assign(values, { stage: $("pmStage").value, status: $("pmStatus").value, host_id: $("pmHost").value, cursor, limit: "50" }); return new URLSearchParams(Object.entries(values).filter(([, v]) => v !== "")).toString(); }
   function totals(data) {
-    const t = data.totals || {};
-    $("pmTotals").innerHTML = [["queued", "排队中", ""], ["preparing", "制作中", ""], ["ready", "待发布", ""], ["publishing", "发布中", ""], ["prepared", "制作完成", ""], ["published", "发布成功", "accent"], ["failed", "失败", ""], ["unknown", "结果待核对", "alert"], ["backlog_paused", "历史积压暂停", "alert"]].map(([key, label, style]) => `<article class="pm-stat ${style}"><span class="pm-stat-label">${label}</span><div class="pm-stat-value">${number(t[key])}</div></article>`).join("");
+    // totals.ready combines both stages. Use the already scoped channel rows
+    // so a ready preparation is never presented as a ready publication.
+    const readyFor = stage => {
+      const values = (data.channels || []).filter(row => row.stage === stage).map(row => row.ready).filter(value => typeof value === "number" && Number.isFinite(value));
+      return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+    };
+    const t = { ...(data.totals || {}), ready_prepare: readyFor("prepare"), ready_publish: readyFor("publish") };
+    $("pmTotals").innerHTML = [["queued", "排队中", ""], ["ready_prepare", "待制作", ""], ["preparing", "制作中", ""], ["ready_publish", "待发布", ""], ["publishing", "发布中", ""], ["prepared", "制作完成", ""], ["published", "发布成功", "accent"], ["failed", "失败", ""], ["unknown", "结果待核对", "alert"], ["backlog_paused", "历史积压暂停", "alert"]].map(([key, label, style]) => `<article class="pm-stat ${style}" data-stat-key="${key}"><span class="pm-stat-label">${label}</span><div class="pm-stat-value">${number(t[key])}</div></article>`).join("");
   }
   function renderSummary(data) {
     totals(data);

@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>制作与发布监测 · AI 自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css">
-  <link rel="stylesheet" href="/pipeline-monitor.css?v=20261102p2">
+  <link rel="stylesheet" href="/pipeline-monitor.css?v=20261103ready1">
 </head>
 <body>
 <div class="pm-app">
@@ -17,7 +17,7 @@
       <section class="pm-toolbar" aria-label="监测筛选"><div class="pm-actions"><label>统计范围<select id="pmWindow"><option value="today">今天（北京时间）</option><option value="hour">最近 1 小时</option><option value="day">最近 24 小时</option><option value="week">最近 7 天</option></select></label><label>渠道<select id="pmChannel"><option value="">全部可见渠道</option></select></label><span id="pmScope" class="pm-scope"></span></div><div class="pm-updated"><span id="pmLiveDot" class="pm-live-dot"></span><span id="pmUpdated">等待首个数据快照</span><small>每 15 秒刷新</small></div></section>
       <div id="pmWarnings" class="pm-notice" role="status" hidden></div>
       <section id="pmTotals" class="pm-totals" aria-label="任务概况"></section>
-      <p id="pmQueueNote" class="pm-muted">排队中包含待选材、未到预约时间及账号等待的任务，不代表当前可领取数。</p>
+      <p id="pmQueueNote" class="pm-muted">排队中包含待选材、未到预约时间及账号等待的任务，不代表当前可领取数。待制作、待发布分别统计对应阶段的已就绪任务，仍可能等待预约时间、渠道开启或账号空闲。</p>
       <section class="pm-panel"><div class="pm-section-head"><div><h2>渠道处理效率</h2><p class="pm-muted">完成量按所选时间统计；吞吐为最近 1 小时成功完成数。发布量以平台已确认的帖子或视频为准，已发视频的后续首评可能仍待核对。</p></div><span id="pmWindowLabel" class="pm-chip"></span></div><div class="pm-table-scroll"><table class="pm-table"><thead><tr><th>渠道 / 阶段</th><th>排队中</th><th>执行中</th><th>已就绪</th><th>已完成</th><th>失败 / 待核对</th><th>吞吐 / 小时</th><th>平均 / P95 耗时</th><th>最老等待</th></tr></thead><tbody id="pmChannelRows"><tr><td colspan="9" class="pm-empty">正在读取渠道数据…</td></tr></tbody></table></div></section>
       <section class="pm-panel"><div class="pm-section-head"><div><h2>各环节耗时</h2><p class="pm-muted">各环节耗时与吞吐统计最近 1 小时；成功率按所选时间。发布成功率 = 已确认发出 ÷（已确认发出 + 未发出的失败任务）；视频已发但首评失败仅计任务失败，仍待核对的流程单独展示。平台提交是提交请求耗时；Facebook / TikTok 由平台拉取视频，平台上传显示不适用。平台确认等待包含拉取、处理与轮询间隔；旧记录缺少可核对证据时显示未记录。</p></div></div><div class="pm-table-scroll"><table class="pm-table"><thead><tr><th>渠道 / 阶段</th><th>成功率</th><th>成功 / 小时</th><th>下载</th><th>渲染</th><th>成片传输</th><th>平台提交</th><th>平台上传</th><th>平台处理</th><th>平台确认等待<small>含拉取 / 处理 / 轮询</small></th><th>排队</th></tr></thead><tbody id="pmEfficiencyRows"></tbody></table></div></section>
       <section><div class="pm-section-head"><div><h2>服务器与执行进程</h2><p class="pm-muted">容量是允许同时接单的进程数；降低容量后，在途任务完成再退出。</p></div><button id="pmEnrollOpen" class="pm-button" hidden>接入新服务器</button></div><div id="pmWorkers" class="pm-workers"></div></section>
@@ -29,5 +29,5 @@
     </div>
   </main>
 </div>
-<script src="/ui-topbar.js"></script><script src="/quick-nav.js?v=20261102pipeline1"></script><script src="/pipeline-monitor.js?v=20261103gpu1"></script>
+<script src="/ui-topbar.js"></script><script src="/quick-nav.js?v=20261102pipeline1"></script><script src="/pipeline-monitor.js?v=20261103ready1"></script>
 </body></html>

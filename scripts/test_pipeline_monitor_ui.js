@@ -6,6 +6,9 @@ const ROOT = path.resolve(__dirname, ".."), OUT = process.env.PIPELINE_UI_OUTPUT
 const stamp = new Date().toISOString();
 const base = { generated_at: stamp, collected_at: stamp, stale: false, scope: "all", allowed_channels: ["x", "fb", "tt", "youtube"], warnings: [] };
 const summary = { ...base, totals: { queued: 22, preparing: 3, ready: 7, publishing: 4, prepared: 90, published: 76, failed: 2, unknown: 1, backlog_paused: 611 }, channels: ["x", "fb", "tt", "youtube"].flatMap(channel => ["prepare", "publish"].map(stage => ({ channel, stage, queued: 8, running: 2, ready: 4, completed: 21, failed: 1, unknown: 0, throughput_per_hour: 12, avg_duration_seconds: 321, p95_duration_seconds: null, oldest_wait_seconds: 45 }))), sources: [{ channel: "x", family: "自动模板", state: "healthy", collected_at: stamp }] };
+// Production regression: the old aggregate20 must not become "待发布20".
+summary.totals.ready = 20;
+summary.channels.forEach(row => row.ready = row.channel === "x" ? (row.stage === "prepare" ? 15 : 2) : row.channel === "youtube" && row.stage === "publish" ? 3 : 0);
 summary.efficiency = [
   { channel: "fb", stage: "publish", phase: "platform_submit", samples: 1, p50_seconds: 17, p95_seconds: 17 },
   { channel: "fb", stage: "publish", phase: "platform_upload", samples: 0, applicable: false },
@@ -46,6 +49,20 @@ const server = http.createServer((req, res) => {
     for (const group of ["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]) assert.equal(await page.locator(`[data-quick-nav-group="${group}"]`).count(), 0);
     assert.equal(await page.locator("#pmChannelRows tr").count(), 8);
     assert.match(await page.locator("#pmTotals .pm-stat").first().innerText(), /排队中\s*22/);
+    const readyCard = stage => page.locator(`[data-stat-key="ready_${stage}"] .pm-stat-value`);
+    assert.equal(await readyCard("prepare").innerText(), "15");
+    assert.equal(await readyCard("publish").innerText(), "5");
+    assert.equal(await page.locator("#pmTotals .pm-stat").count(), 10);
+    assert.match(await page.locator("#pmQueueNote").innerText(), /待制作、待发布分别统计对应阶段/);
+    // A channel-filtered/personal DTO cannot inherit the global ready total.
+    await page.evaluate(snapshot => window.PipelineMonitor.renderSummary(snapshot), { ...summary, allowed_channels: ["youtube"], channels: summary.channels.filter(row => row.channel === "youtube") });
+    assert.equal(await readyCard("prepare").innerText(), "0");
+    assert.equal(await readyCard("publish").innerText(), "3");
+    // Unknown stage rows remain unknown, not a misleading zero or aggregate.
+    await page.evaluate(snapshot => window.PipelineMonitor.renderSummary(snapshot), { ...summary, channels: summary.channels.map(row => ({ ...row, ready: null })) });
+    assert.equal(await readyCard("prepare").innerText(), "—");
+    assert.equal(await readyCard("publish").innerText(), "—");
+    await page.evaluate(snapshot => window.PipelineMonitor.renderSummary(snapshot), summary);
     assert.equal(await page.locator('#pmStatus option[value="queued"]').innerText(), "排队中");
     assert.match(await page.locator("#pmQueueNote").innerText(), /待选材、未到预约时间及账号等待[\s\S]*不代表当前可领取数/);
     const fbEfficiency = page.locator("#pmEfficiencyRows tr").filter({ hasText: "Facebook · 发布" });
