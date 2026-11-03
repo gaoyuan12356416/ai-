@@ -15,6 +15,11 @@ float sinc3(float x)
 
 float sample_plane(__read_only image2d_t plane, float2 position, float2 ratio)
 {
+    // Lanczos is an interpolating kernel: at an integer sample location and
+    // without downsampling only the center tap is nonzero. Native 720x1280
+    // sources need no 36-tap luma convolution on every frame.
+    if (all(ratio <= (float2)(1.0f)) && all(position == floor(position)))
+        return read_imagef(plane, point_edge, convert_int2(position)).x;
     float2 down = fmax(ratio, (float2)(1.0f));
     int2 first = convert_int2(floor(position - 3.0f * down)) + (int2)(1);
     int2 last = convert_int2(ceil(position + 3.0f * down));
