@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.pipeline_dispatch.adapters import canonical_fingerprint
-from features.pipeline_dispatch.x_prepost_recovery import TABLE as AUTH, encoded, queue_hash, log_hash
+from features.pipeline_dispatch.x_prepost_recovery import TABLE as AUTH, digest, encoded, queue_hash, log_hash
 from features.x_auto_posts.receipt_reconciliation import _connect, _ids
 from scripts.recover_x_prepost_failures import backup
 from scripts.recover_pipeline_x_preparation import RecoveryRejected, require, read_connection, rows, document_hash, utcnow
@@ -20,6 +20,13 @@ DAYS = ('2026-11-02', '2026-11-03')
 PREPOST = 'pipeline_x_prepost_recovery_apply'
 AUDIT = 'x_auto_receipt_tracking_resume_audit'
 UNIT = 'x-auto-post-service.service'
+SPECIAL_TASK = {'id': 2395, 'run_id': 414, 'execution_queue_id': 5524, 'execution_run_id': 1563,
+                'status': 'failed', 'unknown_outcome': 1}
+SPECIAL_TASK_SHA = '564433d5f9647f26544313c2ab5af7646b6903eeeb7b152eae8286f62dc6332b'
+SPECIAL_PLAN_SHA = '66167b334a1bb019987a4761a6d022bbf2f5f98b673b70f78262313797e02585'
+SPECIAL_JOB_ID = 31993
+SPECIAL_AUDIT = 'pipeline_x_5524_no_post_audit'
+SPECIAL_JOURNAL = 'pipeline_x_5524_reconciliation_apply'
 # Exact recovery plans already applied in this incident, not a failed-task policy.
 PREPOST_PLANS = frozenset((
     '06c5dade7a8d954e9e33bbf5907c3f3280498b6978afbafd18f0c39f5ec75c34',
@@ -80,13 +87,40 @@ def one(conn, sql, params=()):
     return found[0]
 
 
-def recovery_authority(c, n, queue, log):
+def reconciled_5524_authority(c, n, queue, log):
+    """Observe this reconciled native queue while retaining Auto's old unknown."""
+    require(exists(c, SPECIAL_AUDIT) and exists(n, SPECIAL_AUDIT) and exists(c, SPECIAL_JOURNAL) and exists(n, AUTH),
+            '5524_reconciliation_missing')
+    journal = one(c, 'SELECT * FROM '+SPECIAL_JOURNAL+' WHERE job_id=?', (SPECIAL_JOB_ID,))
+    require(journal['state'] == 'committed' and journal['plan_sha256'] == SPECIAL_PLAN_SHA, '5524_reconciliation_not_committed')
+    audits = [one(conn, 'SELECT * FROM '+SPECIAL_AUDIT+' WHERE job_id=?', (SPECIAL_JOB_ID,)) for conn in (c, n)]
+    plans = [json.loads(a['evidence_json'])['plan'] for a in audits]
+    require(all(a['plan_sha256'] == SPECIAL_PLAN_SHA for a in audits) and plans[0] == plans[1]
+            and plans[0]['kind'] == 'x_5524_verified_no_post' and document_hash(plans[0]) == SPECIAL_PLAN_SHA,
+            '5524_reconciliation_evidence_changed')
+    proof = plans[0]['proof']; prior = proof['log']
+    key = 'x:queue:'+str(queue['id'])
+    auth = one(n, 'SELECT * FROM '+AUTH+' WHERE source_key=?', (key,))
+    require((auth['stage'], auth['from_generation'], auth['to_generation'], auth['prior_attempts']) == ('publish', 1, 2, 1)
+            and auth['plan_sha256'] == SPECIAL_PLAN_SHA and auth['state'] in ('armed', 'consumed')
+            and json.loads(auth['proof_json']) == {'reconciliation': SPECIAL_AUDIT, 'original_proof': proof}
+            and prior['unknown_outcome'] == 1 and prior['attempt_count'] == 1 and prior['id'] == log['id']
+            and proof['queue']['id'] == queue['id'] and queue_hash(queue) == queue_hash(proof['queue']) == auth['queue_sha256']
+            and log_hash(log) == log_hash(prior) == auth['log_sha256'], '5524_reconciliation_authority_changed')
+    return {'kind': '5524_reconciled_unknown_observation', 'journal': journal, 'audits': audits,
+            'authorization': {k: v for k, v in auth.items() if k not in ('state', 'started_at')}}
+
+
+def recovery_authority(c, n, queue, log, *, reconciled_5524=False):
     key = 'x:queue:'+str(queue['id'])
     jobs = rows(c, 'SELECT * FROM pipeline_job WHERE source_key=? ORDER BY stage', (key,))
     require(jobs and all(j['channel'] == 'x' and j['family'] == 'queue' and j['source_id'] == str(queue['id'])
             and json.loads(j['source_meta_json']).get('canonical_fingerprint') == canonical_fingerprint(queue, 'id')
             and j['status'] != 'unknown' and not j['hold_reason'] for j in jobs), 'canonical_job_identity_or_hold')
     by_stage = {j['stage']: j for j in jobs}
+    if reconciled_5524:
+        require(by_stage['publish']['id'] == SPECIAL_JOB_ID, '5524_job_identity_changed')
+        return reconciled_5524_authority(c, n, queue, log)
     matches = []
     if exists(c, PREPOST) and exists(n, AUTH):
         for journal in rows(c, 'SELECT * FROM '+PREPOST+' WHERE source_key=?', (key,)):
@@ -121,7 +155,8 @@ def recovery_authority(c, n, queue, log):
 
 def inspect(auto, n, c, task_id):
     task = one(auto, 'SELECT * FROM x_auto_task WHERE id=?', (task_id,))
-    require(task['status'] == 'failed' and not task['unknown_outcome'] and not task['publish_id'], 'auto_not_known_failed')
+    special = all(task.get(k) == v for k, v in SPECIAL_TASK.items()) and digest(task) == SPECIAL_TASK_SHA
+    require(task['status'] == 'failed' and (not task['unknown_outcome'] or special) and not task['publish_id'], 'auto_not_known_failed')
     require(not any(task[k] for k in ('claim_token', 'claim_worker', 'lease_expires_at_utc')), 'auto_claim_present')
     require(task['execution_run_id'] and task['execution_queue_id'], 'original_execution_missing')
     run = one(auto, 'SELECT * FROM x_auto_run WHERE id=?', (task['run_id'],))
@@ -152,7 +187,7 @@ def inspect(auto, n, c, task_id):
     require(ledger['canonical_queue_id'] == queue['id'] and ledger['run_id'] == task['run_id']
             and ledger['template_id'] == task['template_id'] and str(ledger['material_id']) == str(task['material_id'])
             and str(ledger['content_id']) == str(task['content_id']), 'material_reservation_changed')
-    authority = recovery_authority(c, n, queue, log)
+    authority = recovery_authority(c, n, queue, log, reconciled_5524=special)
     native_identity = {'fingerprint': canonical_fingerprint(queue, 'id'), 'log_id': log['id'],
         'parent_id': parent['id'], 'body_sha256': task['body_sha256']}
     return {'task_id': task_id, 'task': task, 'run': run, 'ledger': ledger, 'native_identity': native_identity,
@@ -216,7 +251,7 @@ def apply(saved, backup_dir, actor):
                 evidence = {'previous': item, 'runtime': saved['runtime'], 'actor': actor, 'backup': saved_backup,
                     'plan_sha256': saved['plan_sha256'], 'purpose': 'observe_existing_canonical_queue_only'}
                 a.execute('INSERT INTO '+AUDIT+' VALUES(?,?,?,?)', (identity, saved['plan_sha256'], encoded(evidence), now))
-                count = a.execute("UPDATE x_auto_task SET status='retry_wait',claim_phase='reconcile',next_attempt_at_utc=?,finished_at_utc='',updated_at=? WHERE id=? AND status='failed' AND unknown_outcome=0 AND claim_token='' AND claim_worker='' AND lease_expires_at_utc=''", (now, now, identity)).rowcount
+                count = a.execute("UPDATE x_auto_task SET status='retry_wait',claim_phase='reconcile',next_attempt_at_utc=?,finished_at_utc='',updated_at=? WHERE id=? AND status='failed' AND unknown_outcome=? AND claim_token='' AND claim_worker='' AND lease_expires_at_utc=''", (now, now, identity, task['unknown_outcome'])).rowcount
                 require(count == 1, 'auto_compare_and_swap_failed')
                 a.execute("UPDATE x_auto_material_ledger SET last_task_status='retry_wait',updated_at=? WHERE task_id=?", (now, identity))
                 a.execute("INSERT INTO x_auto_event(run_id,task_id,event_type,from_status,to_status,message,details_json,created_at) VALUES(?,?,'task_receipt_tracking_resumed','failed','retry_wait','Observe original restored X queue; no publication request',?,?)", (task['run_id'], identity, encoded({'plan_sha256': saved['plan_sha256'], 'queue_id': task['execution_queue_id']}), now))

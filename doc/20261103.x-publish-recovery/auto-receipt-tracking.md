@@ -10,7 +10,17 @@
 - 必须匹配本次现场核验的 5 个 prepost plan hash（79 队列）之一，且中央 journal committed 与原生逐代授权 proof 完全一致；或者匹配本次 2 个归因恢复 plan hash（7 队列）的原子中央审计事件。其他恢复记录、未完成 staged 和未审计失败拒绝。
 - Auto execution_run/queue、原生唯一 manual parent/queue/log、账号、素材、content、模板版本、正文模板、材料预留完全一致。原 Auto execution_log_id 为空时独立绑定唯一原生日志但保持该字段为空；非空时必须与原日志 ID 相同。
 - 当前原生队列仍在正常处理，日志无 unknown/Post 成功，中央无 unknown/hold，原生和 Auto 无 canonical hold。已成功记录在 plan 中跳过；plan 后新成功也跳过并提示使用成功回执对账入口。新的未知或身份漂移使 apply 的 CAS 拒绝。
-- q5280 不在允许集合内，新的初始化 403 失败不重新放行。q5524 对应 Auto 2395 在 2026-11-03 的只读核验仍为 failed/unknown1，明确跳过，不因为其原生独立对账而宽泛清除 Auto unknown。
+- q5280 不在允许集合内，新的初始化 403 失败不重新放行。其他 unknown 拒绝；仅下面已完整独立对账的 Auto 2395 有保留 unknown 标记的精确观察分支。
+
+### Auto 2395 / q5524 的独立观察授权
+
+原生 q5524 的完整独立对账已由主流程提交，计划指纹固定为 `66167b334a1bb019987a4761a6d022bbf2f5f98b673b70f78262313797e02585`。Auto 2395/run414/parent1563 仍是 failed/unknown1，所以普通 unknown0 分支不会处理它。此精确分支同时要求：
+
+- Auto 完整原始行指纹与本次只读快照相同；不能借用该身份恢复后来的新错误。
+- 两库 q5524 append-only 审计保存相同完整原对账 plan，内容指纹与固定已提交计划一致；中央 journal 必须 committed。
+- 原生仅有该 source 的唯一 1→2、prior_attempts=1 授权，且授权 proof 与原完整对账一致；当前唯一 queue/log/parent、冻结正文和素材身份不变，原生没有新的 unknown 或成功记录。
+
+它仍只将 Auto 切换到 retry_wait/reconcile，**保留 Auto unknown_outcome=1**、原错误、全部 execution IDs 与历史。随后实际 dispatch runtime 只观察当前原队列；普通排队/上传观察不会清除该 unknown，唯一真实成功回执才通过既有 publisher 逻辑清除。新 native unknown、审计缺失/未提交/漂移或 Auto 行变化一律拒绝。没有新的平台发布授权，也没有对其他 unknown 开放例外。
 
 ## 实际 runtime 校验
 
@@ -52,3 +62,7 @@ python -m unittest scripts.test_x_auto_receipt_tracking scripts.test_x_auto_rece
 实现阶段未执行生产 apply，也未更改 runtime 或启停服务。生产计划、备份、实际恢复数量及最终回执由主部署流程验收。
 
 2026-11-03 组合 73 项通过，其中专项 12 项；追加原生冻结 queue/body 授权哈希校验后专项再次通过，编译通过。
+
+后续精确 2395 分支新增 4 项测试，验证保留 unknown 的 queued→published 观察且 publish/recover/record 调用为零、两库审计或 committed 缺失、原 Auto/新 native unknown 漂移、计划指纹替换拒绝。
+
+补充分支后的组合 77 项全部通过（专项 16 项），编译通过。
