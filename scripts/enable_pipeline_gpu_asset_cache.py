@@ -57,7 +57,7 @@ def main():
         'TT_POST_GPU_RANDOM_OVERLAY_ROOT', 'TT_POST_GPU_RANDOM_OVERLAY_MANIFEST_SHA256',
         'RANDOM_OVERLAY_ASSET_CATALOGS')
     env = {k: live_env[k] for k in keys if k in live_env}
-    env.update(PATH='/usr/bin:/bin', RANDOM_GPU_ASSET_CACHE_ROOT=cache)
+    env.update(PATH='/usr/sbin:/usr/bin:/sbin:/bin', RANDOM_GPU_ASSET_CACHE_ROOT=cache)
     code = ('import sys,json; sys.path.insert(0,' + repr(str(Path(__file__).resolve().parents[1])) + '); '
         'from features.random_gpu.asset_cache import validate_configured_cache; '
         'print(json.dumps(validate_configured_cache()))')
