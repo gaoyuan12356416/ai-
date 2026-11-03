@@ -11,6 +11,8 @@ import math
 import secrets
 import sqlite3
 from pathlib import Path
+from .backlog_release import offer_disposition
+from .backlog_contract import SCHEMA as BACKLOG_SCHEMA
 
 CHANNELS = ("x", "fb", "tt", "youtube")
 STAGES = ("prepare", "publish")
@@ -117,6 +119,7 @@ class DispatchStore:
     def migrate(self):
         with contextlib.closing(self.connect()) as c:
             c.execute("PRAGMA journal_mode=WAL")
+            c.execute(BACKLOG_SCHEMA)
             c.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_config (
               id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL,
@@ -388,10 +391,31 @@ class DispatchStore:
                              and bool(continuation.get("video_id")) and continuation.get("video_id") == offer.get("publish_id")
                              and bool(continuation.get("scheduled_at")))
         with self.transaction() as c:
+            backlog_action = offer_disposition(c, offer)
+            # Archived observations never become another executable phase.
+            # Retain real terminal publication facts for existing published rows.
+            if backlog_action == 'archive':
+                archived = c.execute("SELECT * FROM pipeline_job WHERE source_key=? AND stage=?", (offer['source_key'], stage)).fetchone()
+                return _job(archived, True) if archived else None
             self._close_terminal_preparation_observation(c, offer)
             if stage == "publish" and status not in ("published", "failed") and (not offer.get("legacy_inflight") or int(offer.get("source_attempt_count") or 0) > 0):
                 c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
             existing = c.execute("SELECT * FROM pipeline_job WHERE source_key=? AND stage=?", (offer["source_key"], stage)).fetchone()
+            if (existing and backlog_action == 'resume' and existing['status'] == 'backlog_paused'
+                    and existing['generation'] == 0 and not existing['external_intent']
+                    and not existing['claim_hash'] and not existing['canonical_receipt']
+                    and status in ('queued', 'ready') and offer.get('execution_available') is True
+                    and not any(offer.get(k) for k in ('legacy_inflight', 'unknown_outcome', 'reconcile_only', 'source_attempt_count', 'publish_id'))):
+                # A child may have been observed while its parent's two-ledger
+                # release was still pending. Only matching committed native and
+                # central authorization can admit that exact unclaimed child.
+                history = any(c.execute('SELECT 1 FROM ' + table + ' WHERE job_id=? LIMIT 1', (existing['id'],)).fetchone()
+                              for table in ('pipeline_claim_history', 'pipeline_operation', 'pipeline_checkpoint', 'pipeline_receipt', 'pipeline_delivery', 'pipeline_resource', 'pipeline_legacy_resource'))
+                if not history:
+                    c.execute("UPDATE pipeline_job SET status=?,hold_reason='',payload_json=?,artifact_json=?,capabilities_json=?,resource_keys_json=?,updated_at=? WHERE id=?",
+                              (status, dumps(offer.get('payload', {})), dumps(offer.get('artifact', {})), dumps(offer.get('capabilities', [])), dumps(offer.get('resource_keys', [])), now, existing['id']))
+                    self.event(c, existing['id'], 'backlog_authorized_phase_offered', {}, now)
+                    existing = c.execute('SELECT * FROM pipeline_job WHERE id=?', (existing['id'],)).fetchone()
             if offer.get("metadata_only") and not existing:
                 c.execute("UPDATE pipeline_job SET status='completed',hold_reason='metadata_only',finished_at=?,updated_at=? WHERE source_key=? AND generation=0 AND status IN ('queued','ready','legacy_running')", (now, now, offer["source_key"]))
                 self._release_finished_legacy_resources(c, offer["source_key"])
@@ -498,7 +522,7 @@ class DispatchStore:
             hold = ""
             if offer.get("execution_available") is False:
                 hold = str(offer.get("hold_reason") or "adapter_unavailable")
-            if cutoff and stamp(offer.get("cutover_due_at") or scheduled) <= cutoff and created <= cutoff and not grandfathered and not adopting_schedule and status in ("queued", "ready"):
+            if cutoff and stamp(offer.get("cutover_due_at") or scheduled) <= cutoff and created <= cutoff and not grandfathered and not adopting_schedule and backlog_action != 'resume' and status in ("queued", "ready"):
                 status, hold = "backlog_paused", "cutover_overdue"
             if offer.get("legacy_inflight"):
                 status = "legacy_running"
