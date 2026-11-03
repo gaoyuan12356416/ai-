@@ -297,9 +297,10 @@ class ReadOnlyRepositoryTests(unittest.TestCase):
         self.assertEqual(dramas[0].content_id, "C1")
         drama_sql, drama_params = drama_connection.cursor_value.executions[0]
         self.assertIn("i.release_status=%s", drama_sql)
+        self.assertIn("i.drama_status=%s", drama_sql)
         self.assertIn("i.deploy_time<=%s", drama_sql)
         self.assertIn("resource_type_v2 AS CHAR) IN (%s)", drama_sql)
-        self.assertEqual(drama_params, (1479, 1, "en", 0, 200, 50, "2"))
+        self.assertEqual(drama_params, (1479, 1, 3, "en", 0, 200, 50, "2"))
 
         material_repository, material_connection = mysql_repo(
             [

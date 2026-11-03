@@ -495,6 +495,7 @@ class ReadOnlyMySQLRepository:
         predicates = [
             "i.app_id=%s",
             "i.release_status=%s",
+            "i.drama_status=%s",
             "LOWER(TRIM(i.language))=LOWER(%s)",
             "i.deploy_time>%s",
             "i.deploy_time<=%s",
@@ -502,6 +503,7 @@ class ReadOnlyMySQLRepository:
         params: List[Any] = [
             self.app_id,
             1,
+            3,
             normalized_language,
             0,
             int(now_epoch),
