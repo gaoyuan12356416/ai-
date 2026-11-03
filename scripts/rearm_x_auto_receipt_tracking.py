@@ -111,7 +111,45 @@ def reconciled_5524_authority(c, n, queue, log):
             'authorization': {k: v for k, v in auth.items() if k not in ('state', 'started_at')}}
 
 
-def recovery_authority(c, n, queue, log, *, reconciled_5524=False):
+def matched_media_only_incident(task):
+    """Only the nine fixed, fully frozen Auto rows may retain unknown and observe."""
+    from scripts.reconcile_x_audited_media_only import incidents, contract
+    if task['status'] != 'failed' or task['unknown_outcome'] != 1:
+        return None
+    for incident in incidents().values():
+        if (task['id'], task['run_id'], task['execution_queue_id'], task['execution_run_id']) == (
+                incident['AUTO_TASK_ID'], incident['AUTO_RUN_ID'], incident['QID'], incident['PARENT_ID']):
+            if digest(task) == incident['AUTO_TASK_SHA256']:
+                return contract(incident['QID'])
+    return None
+
+
+def reconciled_media_only_authority(c, n, queue, log, incident):
+    from scripts.x_media_only_reconciliation import AuditedMediaOnlyReconciler
+    audit_table, journal_table, job_id = incident['AUDIT'], incident['JOURNAL'], incident['JOB_ID']
+    require(exists(c, audit_table) and exists(n, audit_table) and exists(c, journal_table) and exists(n, AUTH),
+            'media_only_reconciliation_missing')
+    journal = one(c, 'SELECT * FROM '+journal_table+' WHERE job_id=?', (job_id,))
+    require(journal['state'] == 'committed', 'media_only_reconciliation_not_committed')
+    audits = [one(conn, 'SELECT * FROM '+audit_table+' WHERE job_id=?', (job_id,)) for conn in (c, n)]
+    plans = [json.loads(a['evidence_json'])['plan'] for a in audits]
+    require(all(a['plan_sha256'] == journal['plan_sha256'] for a in audits) and plans[0] == plans[1]
+            and plans[0]['plan_sha256'] == journal['plan_sha256'], 'media_only_audit_disagrees')
+    AuditedMediaOnlyReconciler(incident).validate_saved_origin(plans[0])
+    proof = plans[0]['proof']; prior = proof['log']; key = 'x:queue:'+str(queue['id'])
+    auth = one(n, 'SELECT * FROM '+AUTH+' WHERE source_key=?', (key,))
+    require((auth['stage'], auth['from_generation'], auth['to_generation'], auth['prior_attempts']) == ('publish', 1, 2, 1)
+            and auth['plan_sha256'] == journal['plan_sha256'] and auth['state'] in ('armed', 'consumed')
+            and json.loads(auth['proof_json']) == {'reconciliation': audit_table, 'original_proof': proof}
+            and prior['id'] == log['id'] == incident['LOG_ID'] and proof['queue']['id'] == queue['id'] == incident['QID']
+            and queue_hash(queue) == queue_hash(proof['queue']) == auth['queue_sha256']
+            and log_hash(log) == log_hash(prior) == auth['log_sha256'], 'media_only_recovery_authority_changed')
+    return {'kind': 'audited_media_only_unknown_observation', 'incident_sha256': incident['INCIDENT_SHA'],
+            'journal': journal, 'audits': audits,
+            'authorization': {k: v for k, v in auth.items() if k not in ('state', 'started_at')}}
+
+
+def recovery_authority(c, n, queue, log, *, reconciled_5524=False, media_only_incident=None):
     key = 'x:queue:'+str(queue['id'])
     jobs = rows(c, 'SELECT * FROM pipeline_job WHERE source_key=? ORDER BY stage', (key,))
     require(jobs and all(j['channel'] == 'x' and j['family'] == 'queue' and j['source_id'] == str(queue['id'])
@@ -121,6 +159,9 @@ def recovery_authority(c, n, queue, log, *, reconciled_5524=False):
     if reconciled_5524:
         require(by_stage['publish']['id'] == SPECIAL_JOB_ID, '5524_job_identity_changed')
         return reconciled_5524_authority(c, n, queue, log)
+    if media_only_incident is not None:
+        require(by_stage['publish']['id'] == media_only_incident['JOB_ID'], 'media_only_job_identity_changed')
+        return reconciled_media_only_authority(c, n, queue, log, media_only_incident)
     matches = []
     if exists(c, PREPOST) and exists(n, AUTH):
         for journal in rows(c, 'SELECT * FROM '+PREPOST+' WHERE source_key=?', (key,)):
@@ -156,7 +197,8 @@ def recovery_authority(c, n, queue, log, *, reconciled_5524=False):
 def inspect(auto, n, c, task_id):
     task = one(auto, 'SELECT * FROM x_auto_task WHERE id=?', (task_id,))
     special = all(task.get(k) == v for k, v in SPECIAL_TASK.items()) and digest(task) == SPECIAL_TASK_SHA
-    require(task['status'] == 'failed' and (not task['unknown_outcome'] or special) and not task['publish_id'], 'auto_not_known_failed')
+    media_only = matched_media_only_incident(task) if task['unknown_outcome'] and not special else None
+    require(task['status'] == 'failed' and (not task['unknown_outcome'] or special or media_only is not None) and not task['publish_id'], 'auto_not_known_failed')
     require(not any(task[k] for k in ('claim_token', 'claim_worker', 'lease_expires_at_utc')), 'auto_claim_present')
     require(task['execution_run_id'] and task['execution_queue_id'], 'original_execution_missing')
     run = one(auto, 'SELECT * FROM x_auto_run WHERE id=?', (task['run_id'],))
@@ -187,7 +229,7 @@ def inspect(auto, n, c, task_id):
     require(ledger['canonical_queue_id'] == queue['id'] and ledger['run_id'] == task['run_id']
             and ledger['template_id'] == task['template_id'] and str(ledger['material_id']) == str(task['material_id'])
             and str(ledger['content_id']) == str(task['content_id']), 'material_reservation_changed')
-    authority = recovery_authority(c, n, queue, log, reconciled_5524=special)
+    authority = recovery_authority(c, n, queue, log, reconciled_5524=special, media_only_incident=media_only)
     native_identity = {'fingerprint': canonical_fingerprint(queue, 'id'), 'log_id': log['id'],
         'parent_id': parent['id'], 'body_sha256': task['body_sha256']}
     return {'task_id': task_id, 'task': task, 'run': run, 'ledger': ledger, 'native_identity': native_identity,

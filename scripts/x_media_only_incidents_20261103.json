@@ -1,0 +1,698 @@
+{
+  "items": [
+    {
+      "ACCOUNT_ID": 13,
+      "AUTO_RUN_ID": 419,
+      "AUTO_TASK_ID": 2669,
+      "AUTO_TASK_SHA256": "1a4f286815784f5cceeec2f5c0725bfe9444209c845d88c282a5c21501e7c595",
+      "CLAIM_SHA": "fd179d4b9fc86363c9743dc3c5c2d71acaf45af8aff73a139f583e27720afb50",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "987e5377567c00b2d6b357e229abf934c3d73a7b30aace22bcbaa968c228ea1f",
+        "central_ops": "49c56cbe60d4e86115913f4cb33c78864652be7a8945be0cbc770ded0776073d",
+        "claims": "1680fc6c7468f5ef3be3cf241f88998e82089624379a5b7d50f50fbf1539d3b8",
+        "history": "52d5bb320019cd3579443f308b69016e11f4cec1c926cf3b56302a2ed4232c69",
+        "log": "4e23b7038b0e890d39685727baf73fdf48ea0904d25b292510ae55ec07ae868f",
+        "native_checkpoints": "5ab8a058803c4015199dc73f8a95eb5b525b5e1930f3794c9f96c71912f3a3bd",
+        "native_ops": "a88aa5210ea06b645494968eb28e1e1a17d517932c908c7e68c5008996d5d2af",
+        "parent": "f8c0fc0ac5e582647605aa56e56d273eb020170738db5c449d7d5922ea59284a",
+        "queue": "b0cc6d3b0c5bd5d9c393ced1bded4efe5d94a8d4eb629e4f9d56771e931ea731"
+      },
+      "FROZEN_ARTIFACT_SHA256": "f469e07b3f3cb7d39bc1bc26016c5c21212d4792b3415c62961c7a9a099032eb",
+      "FROZEN_ARTIFACT_SIZE": 300346047,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "child_pids_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/rgba-cache-20261103T065802Z",
+      "HISTORY_FILES": {
+        "audit.json": "1d111147c7b21a2e6128718f7331865e49cc9f56b693c75de4af5c8cc753413e",
+        "install-manifest.before.json": "eebf2da83f98def9e7aed59d859d94001c7d54d0c51da5bbc8e97fec1a3734a1"
+      },
+      "HISTORY_PARENT_PID": 53734,
+      "HISTORY_RELEASE_KEY": "runtime_sha",
+      "JOB_ID": 31796,
+      "KEY": "x:queue:5485",
+      "LOG_ID": 5431,
+      "OP_COUNT": 60,
+      "PARENT_ID": 1519,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31795,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5485,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "3dbe0e91f31567cbeba4e3796b05615e6a4c5c3c95f6d296b9d06f9124ccd43b": [
+            "jobs/checkpoint",
+            "af1c20417804bc776d05655cf306bb357acb67a182e6cab3ca82ca7b734f6754",
+            "4ad56b2ae6b20d7f79fc4b3b55d8297910e782babd9d053d245497f37c0315cd"
+          ],
+          "aca61cb8303dcd25a4162d15650564ff10da02b95e22e6246b1b0a3b38d05158": [
+            "jobs/checkpoint",
+            "3ba1a683dd129f7d10c31a70cd38e4952090c472533d8bc7a16126f8aefca9e4",
+            "fb823241d83faff97525cbcd495a3215da3fc031c71cc4c92d49567ff8659e22"
+          ],
+          "c109411aaacb4a73bcd7409f7ee5504a": [
+            "jobs/fail",
+            "5d3f8a27bedcc68d9a10478197aecffbd652f7caa9fb859c6a78dc7c6ad648f3",
+            "ae671fe90b86ca977e9c99fedbce0df8f61e64f9595e00b8e909fc1bf60c1247"
+          ],
+          "c3aab89ac9d64dec823abe4011330168": [
+            "jobs/complete",
+            "88ad41d634bb021fd63bcfe5e88e9fa8a66539a57ddaaf88f497d5e72c6b9a74",
+            "44dd485d54ec0d142a9986011f8ada886993e09f76f4826e37376c8d656dbb80"
+          ]
+        }
+      },
+      "RECEIPT_ID": "c109411aaacb4a73bcd7409f7ee5504a",
+      "RECEIPT_SHA": "5d3f8a27bedcc68d9a10478197aecffbd652f7caa9fb859c6a78dc7c6ad648f3",
+      "RELEASE": "95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "88bbd4eb0e910a78645570c1b4f21c2534cff926904d96d66a1165158d1e27ac",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "WORKER": "hk-gpu-publish-1-1182c0fc",
+      "WORKER_PID": 87116
+    },
+    {
+      "ACCOUNT_ID": 2,
+      "AUTO_RUN_ID": 419,
+      "AUTO_TASK_ID": 2676,
+      "AUTO_TASK_SHA256": "4c72d5c06d1b663d064728a2504b8a15e6d37a9213ef30d59abf1397c5b1aaad",
+      "CLAIM_SHA": "3d3a733355fb6a1627fb1ede5a12058486b4540653d9983ec99cf3f619cceaa1",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "1df01fc875b8349504f10af7c3bf744987243659a2bc75ad6cf63f3a2a0e1ae3",
+        "central_ops": "1b238c1aed8ed03c19ac4e5561f345f5da75fce55bf09dc2995ca4f71139a297",
+        "claims": "42c15d99a67c56bd9f75ff2ebedc95a56fcd11252a7b71711a5b91d952030622",
+        "history": "757268d9d164109798200ff8ec1b6d67b2eb4b205df881af97e75630d53af552",
+        "log": "0002d08d434ce136214058117de3271b4070dda723166ec40dba2985e8e3d9e9",
+        "native_checkpoints": "5de338b32afb309d0c47e6805d1463fe8b5567373b0a7392b90a16b2e44f54a2",
+        "native_ops": "a8c28e9f779579533711e5777ecd91abbe4d519071ac107d69423b92ea13bcfc",
+        "parent": "f07451a13daef7ec2e4ecd159cc462eab76c2669d628d4669f8cfada4b92074f",
+        "queue": "a9283551ed5fe7f71f8636b408f76283591294c99be0463604072ca5d9ae95ba"
+      },
+      "FROZEN_ARTIFACT_SHA256": "f417a900119642b6e0111a89eea5dc00c60556451d97f55b08ccfae5df5f4ba5",
+      "FROZEN_ARTIFACT_SIZE": 269561295,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "child_pids_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/rgba-cache-20261103T065802Z",
+      "HISTORY_FILES": {
+        "audit.json": "1d111147c7b21a2e6128718f7331865e49cc9f56b693c75de4af5c8cc753413e",
+        "install-manifest.before.json": "eebf2da83f98def9e7aed59d859d94001c7d54d0c51da5bbc8e97fec1a3734a1"
+      },
+      "HISTORY_PARENT_PID": 53734,
+      "HISTORY_RELEASE_KEY": "runtime_sha",
+      "JOB_ID": 31800,
+      "KEY": "x:queue:5487",
+      "LOG_ID": 5433,
+      "OP_COUNT": 23,
+      "PARENT_ID": 1521,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31799,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5487,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "48ed9df6be0440c280435cc43799fcc7": [
+            "jobs/fail",
+            "29d11c15ffbdba9918363fb065c957997b7725a5009518fdea6a03481c53c56f",
+            "6a8eb280c39bc9cf7db2ab5950026191919548a0fd47266c2d0892fc6d429d68"
+          ],
+          "4b4bd44ecbf162722c0bffdbdaef21b5953f2c2903a6d2f75a5c8153b5af2739": [
+            "jobs/checkpoint",
+            "b162e5d1a42b9ef4801fb3ed10ee177f14405b966965a9c6c00622cad05bed55",
+            "b8c18d9d9ca5ec10c8aac3cda7f70f0c3c8f2adfc6838c339a75f8ac48f84e5e"
+          ],
+          "bcc836b103164f7ba8d697f3c5aff69c": [
+            "jobs/complete",
+            "ac6233f25a2509e32963821d38c571cdd4078463ff488029dcb0428cd2003fb6",
+            "18f92f50c5b6661c83e438dbd4aed13d617a7ca69babd4ab42ab8a15aa3014d3"
+          ],
+          "e87be0c0c4c46051df11fb799bbfc8e09400edabe32adb74378c78edc204dc78": [
+            "jobs/checkpoint",
+            "69b1d4ac426fbb28b474836099cfb6d1dee021bf5e64d50c6d4b46bf6160d6f8",
+            "0efeb3497822c7c1c3ae8720d11175baff4097da0ce5ddadc8f0d1148bb0288e"
+          ]
+        }
+      },
+      "RECEIPT_ID": "48ed9df6be0440c280435cc43799fcc7",
+      "RECEIPT_SHA": "29d11c15ffbdba9918363fb065c957997b7725a5009518fdea6a03481c53c56f",
+      "RELEASE": "95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "88bbd4eb0e910a78645570c1b4f21c2534cff926904d96d66a1165158d1e27ac",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "WORKER": "hk-gpu-publish-0-16996063",
+      "WORKER_PID": 53898
+    },
+    {
+      "ACCOUNT_ID": 11,
+      "AUTO_RUN_ID": 413,
+      "AUTO_TASK_ID": 2320,
+      "AUTO_TASK_SHA256": "175442fcb961148e91435d8a8d6a4eb72cf71da20de5e7fb72daec5eb8fc7d9f",
+      "CLAIM_SHA": "51f9e38f14b7988a05e4950513292e911ecc522e5dca6ddd0cdc2d1fe914e3f9",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "673b6385f05a0a5578dfdf56f32ebff7aaebbe819bf8a13eccdc3b1469e0be25",
+        "central_ops": "88141c00f2edb766622b97c4af64e5e1dd8c117b15cf7e0444183eda5e1d782e",
+        "claims": "9ecb0fcfcf863d3f7af98efa8243248817114dbc81b402143643d8a57e1170a6",
+        "history": "b762d0ef4fc6c5952dad154a7e94420f053d09e79a273bfc38912d55b8274c4e",
+        "log": "97d6cf49c9903ac9ea1fbc7f586db06440d4cf09c3635f1d83725d1f7aa6e977",
+        "native_checkpoints": "637f2e4f89fe9d2732d42425074de34afd1cb500d01de934e9c77eefc2415a9c",
+        "native_ops": "0b5bfef95ce6d48a592c6722b14ee60a469dbbaf3a2b52a3e3d629e0975f1f35",
+        "parent": "bb1fe8ad9618256275e5ca20da47e0da23cf04f12d4d44927f60bef491b95f62",
+        "queue": "242ec5c55ea51ea29a018e010a7f5f6b0809af45452acfc5ba866b7340c8ab56"
+      },
+      "FROZEN_ARTIFACT_SHA256": "a0fc68b545ef23e2e8f4e909ac6f75e38a816bc9242fc34d2b45259ad0556840",
+      "FROZEN_ARTIFACT_SIZE": 748914854,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "children_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/gpu-offload-20261103T084113Z",
+      "HISTORY_FILES": {
+        "audit.json": "50a0c8d6b81c796738577274b5999cf52a7b5e0c876eff2122ce7139fd23358a",
+        "install-manifest.before.json": "0d417030b574df1cc9658a958e69415661ccd2ecac0dadcb25802abf6e25f323",
+        "node.service.before": "abfdce8aa2624e2e7066adef167b7e8a65322cec955eed19e1604d78a070db6a"
+      },
+      "HISTORY_PARENT_PID": 150564,
+      "HISTORY_RELEASE_KEY": "previous_sha",
+      "JOB_ID": 31880,
+      "KEY": "x:queue:5501",
+      "LOG_ID": 5448,
+      "OP_COUNT": 104,
+      "PARENT_ID": 1536,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31847,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5501,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "7b0d1cd3a6372fd8b816efe02257fe1be1afd25dbad78e6435be34116011721b": [
+            "jobs/checkpoint",
+            "3e7e23f1c84c7db8e981d520e56943fc5d3ac1dd22799afc487f1de1e3a547de",
+            "11c644795f5d1211740526e413898c6adb8c3ad51915318cd727f8f2b0b50e0c"
+          ],
+          "9e8f83f254a743d29a66b13bdb140f37": [
+            "jobs/fail",
+            "b1f12ac5da7f9c3a5140104caf064684fccb85e15d02672eb9eb89667ce36538",
+            "bb570bb205045de0b81988d2df6d872f5b99a3e4a396d87cf3fe3708e5716977"
+          ],
+          "a6f89691cbefb0801cab17adbbf54138a544192a2d56fbf7e3af46ea3f82831c": [
+            "jobs/checkpoint",
+            "e380f3029a8b0a4d7440863c04e06866ff7c5045a5e9e470063826ef58bff00e",
+            "811bab5b823e606cb2c999e01219fcbb11cc404f4722a40772ea512a075c1665"
+          ],
+          "bfc0d3501ade481eb62acee694f22628": [
+            "jobs/complete",
+            "5525a473a7f995200f013831265ad5c23b99383556fea9a3db04a8ab10c74bf0",
+            "fe6b19b346fa03430be3c731303bd0bbfdcaf8164b6d4769efd7367a71a08d96"
+          ]
+        }
+      },
+      "RECEIPT_ID": "9e8f83f254a743d29a66b13bdb140f37",
+      "RECEIPT_SHA": "b1f12ac5da7f9c3a5140104caf064684fccb85e15d02672eb9eb89667ce36538",
+      "RELEASE": "95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "88bbd4eb0e910a78645570c1b4f21c2534cff926904d96d66a1165158d1e27ac",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "WORKER": "hk-gpu-publish-3-760028b4",
+      "WORKER_PID": 150699
+    },
+    {
+      "ACCOUNT_ID": 42,
+      "AUTO_RUN_ID": 413,
+      "AUTO_TASK_ID": 2319,
+      "AUTO_TASK_SHA256": "181026a9fdd047719faba2ec937f2642f9fad659d94fbb96dc708f298e29a67a",
+      "CLAIM_SHA": "d49c6a848059b688a7148adaada0822732d7f9aafc175ae02ba21480ec54581d",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "e9fe9d6c7962803ff6c32cdc2161138461082c1a3f635d880c4b7d19c7d4eb82",
+        "central_ops": "4165074e60d561327f26811b0bb7c08bca50050c3e46f6a972a626657b9529d4",
+        "claims": "1da629d78654e0c81d1376c0e2cc815e041a92970a07de6896596caaa5b98188",
+        "history": "0e562de124f8023ce5cec2bcaf4f19282fbdc8599c11de8420c1dc5f2a51fadc",
+        "log": "725baf38aa180fdc21857e15a89b42dea30ee05bb29cd0d89e46acfa2c8a5b4b",
+        "native_checkpoints": "35a34fae464ad0ab688af24149f55c3172023cb4a213c0a7589667938e3a0479",
+        "native_ops": "adebb6225d7f71071672ddd77f9f14ad0209655cd0580e0e6720ed0e4b9923dc",
+        "parent": "a57a8a0299cffda05c28bd82c1b4099e7ca69b71d74d48bde829c1690fcb2fa4",
+        "queue": "3a1af07ef30887fe37e04ae56bad5a4cd5ac56bb9cd18d37cc28ca4b4ad50520"
+      },
+      "FROZEN_ARTIFACT_SHA256": "1d386fc685fe8cf5d2c430a73a7f6fe95701afa6fd0cb02194c6c80b02eae03c",
+      "FROZEN_ARTIFACT_SIZE": 191022751,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "children_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/gpu-offload-20261103T084113Z",
+      "HISTORY_FILES": {
+        "audit.json": "50a0c8d6b81c796738577274b5999cf52a7b5e0c876eff2122ce7139fd23358a",
+        "install-manifest.before.json": "0d417030b574df1cc9658a958e69415661ccd2ecac0dadcb25802abf6e25f323",
+        "node.service.before": "abfdce8aa2624e2e7066adef167b7e8a65322cec955eed19e1604d78a070db6a"
+      },
+      "HISTORY_PARENT_PID": 150564,
+      "HISTORY_RELEASE_KEY": "previous_sha",
+      "JOB_ID": 31893,
+      "KEY": "x:queue:5508",
+      "LOG_ID": 5454,
+      "OP_COUNT": 23,
+      "PARENT_ID": 1543,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31870,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5508,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "004314b78e354230a12a463a0a294f94": [
+            "jobs/fail",
+            "a28c4fb0ef34d5881fce322791b1249771f933c2cca501421897a1b0e8bf28d2",
+            "8f791cb91876bdc3b22618e705dad649ce46bbc4f226f2583d850c40d424b748"
+          ],
+          "1a66a0fd42824b49a8b19de085531f87": [
+            "jobs/complete",
+            "bb9e106d42a6cc476445abb4f9fc12f23b94b13e97d928f8c6c474f4580897f5",
+            "9d00a6224301397be588649046fb5aef30f441eb4a49e8ab0072d85c15c98164"
+          ],
+          "8631fdc3dfe34fa4b2527c217c8779faa0de3b567ccf1fc7fb8f1fe095d7c812": [
+            "jobs/checkpoint",
+            "5393ea7d79791827a46f036abb0db3db319ec92a8dbecde2950dcc03ba08141f",
+            "4167f5dad203bd6642b03cb7d4970abfd0fa519a1751c6dd009dfca447720d16"
+          ],
+          "ca08f7a33c927841c52f5655a762e4a0ea06980a9dca816066b8f8dddce773b1": [
+            "jobs/checkpoint",
+            "6873d3c2ab6211cf454da1ff8030c3e8e1b03f3804576ad0b59fcddd0b62b495",
+            "6862454971c37c6d4b856889a198a31e6c6ae2e697a22d704c9ad306ce05215f"
+          ]
+        }
+      },
+      "RECEIPT_ID": "004314b78e354230a12a463a0a294f94",
+      "RECEIPT_SHA": "a28c4fb0ef34d5881fce322791b1249771f933c2cca501421897a1b0e8bf28d2",
+      "RELEASE": "95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "88bbd4eb0e910a78645570c1b4f21c2534cff926904d96d66a1165158d1e27ac",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "WORKER": "hk-gpu-publish-2-36541780",
+      "WORKER_PID": 150698
+    },
+    {
+      "ACCOUNT_ID": 78,
+      "AUTO_RUN_ID": 413,
+      "AUTO_TASK_ID": 2339,
+      "AUTO_TASK_SHA256": "16a58062daff97c0ced5752ee6e09b3d65bf86d4bfa79ce1a1e92427cc228528",
+      "CLAIM_SHA": "9a312b1656a5eedb4495bee51de64a3a45252176f9ffb806cc3bac8b8eafc803",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "c00f89b60e674ba8fd012cf18a66a24c3596ad718cd25c5203dc3d10ca2545aa",
+        "central_ops": "ad18bf2cba578b03dc14baa881aed49cad3e8c43dc88b4b0a53de10cbe27640a",
+        "claims": "8e67f683f01485f24c5cd8140cd260904cdc5a81beb6306b05172c230850bc84",
+        "history": "99e868a8cd06dfd335681aa21b0a45c09161b28a2d7f4a90f996f0efef766017",
+        "log": "24a998f14f0fd6afcbe3d5218b146f6781f5e0675cdc577c73805c45cc81d79b",
+        "native_checkpoints": "b12ebcaf80b97ac7ff29091b4fcff3541a0c306e9181e9c1c3c48d8592708dd6",
+        "native_ops": "ee8ae92aadfd4e3f637b3d40238130fc5c391f411ef87e9e6d4540a5323a3026",
+        "parent": "fee817f9a3ea17d328677eedaa2e2beb16bcd639a50c39f7741bbf99a7bdf554",
+        "queue": "cab98c01f8965d901d00e8779a53e45f9505c70a43b52b5b7bbff2f9fe3ee2e5"
+      },
+      "FROZEN_ARTIFACT_SHA256": "aa85aaa3ee7c4b580c2ac4f0157d424ebce75bf98d8b79467f019b588f8087b2",
+      "FROZEN_ARTIFACT_SIZE": 211490721,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "children_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/gpu-offload-20261103T085215Z",
+      "HISTORY_FILES": {
+        "audit.json": "32ea736c1fad56d67a650aaa3ee9caf9008c4cb40a1d9969715a0d6040ebc4cc",
+        "install-manifest.before.json": "0d417030b574df1cc9658a958e69415661ccd2ecac0dadcb25802abf6e25f323",
+        "node.service.before": "abfdce8aa2624e2e7066adef167b7e8a65322cec955eed19e1604d78a070db6a"
+      },
+      "HISTORY_PARENT_PID": 197624,
+      "HISTORY_RELEASE_KEY": "previous_sha",
+      "JOB_ID": 31990,
+      "KEY": "x:queue:5532",
+      "LOG_ID": 5471,
+      "OP_COUNT": 18,
+      "PARENT_ID": 1569,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31961,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5532,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "0ae8ac5fd301a26ebb4d6fac91bf09bb09cb0e4ca792ab1d28ceba33ecb6d84c": [
+            "jobs/checkpoint",
+            "b1ccb95cf47810fd8b4d02a273f54b9b6b9d4662dd643b47425bb7a7e7bd4734",
+            "ded29e06126794b0df0c175eae99429caa04e034532ed2d1176184b1f05286d2"
+          ],
+          "5f02f74849a94f948f81c91d7aad7255": [
+            "jobs/fail",
+            "faf10425f97566e5a35a1ad1f2de3d2951752f2dc2714648bb04dc38aa3206be",
+            "bcef25147d44af7c0297db849a29c3adfb81b963d02e56b7422eb9d6e842292a"
+          ],
+          "6a6d144a338243da95b7b780e4f8ca1b": [
+            "jobs/complete",
+            "5ab0658b181663ef10225af159cf47c9ebabf7978ad1733a984075d3060700ae",
+            "8d15bc5fb77f25e766a0b6e6a6e50df8001c07a74793637c5f69044dcf586203"
+          ],
+          "8328b6cd9e6fa736d448dc07b8c73c60ceb2cf2f1cd9414b0ce0699035f33aa3": [
+            "jobs/checkpoint",
+            "70ec447aa16292fc0a6049d674079df9b0f52335a8a69c8041c31971aa6ea39e",
+            "65c287f5300484dc80ebcffa9c727fe1c7374363a81bf6d7aa3371a987bfe7ab"
+          ]
+        }
+      },
+      "RECEIPT_ID": "5f02f74849a94f948f81c91d7aad7255",
+      "RECEIPT_SHA": "faf10425f97566e5a35a1ad1f2de3d2951752f2dc2714648bb04dc38aa3206be",
+      "RELEASE": "95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "88bbd4eb0e910a78645570c1b4f21c2534cff926904d96d66a1165158d1e27ac",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "WORKER": "hk-gpu-publish-3-b8b1d9db",
+      "WORKER_PID": 197862
+    },
+    {
+      "ACCOUNT_ID": 38,
+      "AUTO_RUN_ID": 413,
+      "AUTO_TASK_ID": 2316,
+      "AUTO_TASK_SHA256": "327dc005ecae7851c06ad2c1a1beae0eec1f0f4757f94c124021346d916709d6",
+      "CLAIM_SHA": "2f7f1352ef76f39ecd919bae0eaf579cfaf4665cdbfecf7d5d2dde3c5f7f9c48",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "25fb88575c3f0395043426e0b97fbd8812a3a50544bf359c84cf009b659f51f6",
+        "central_ops": "234498d96147a41dfc7bdf97c7f440193d4989ef8ecea5ade753767ff587841e",
+        "claims": "bbca3caeb30721d91011b48e85f88d6395d96c43a14b1b22fe2b05369e10bd65",
+        "history": "1d37de932f4ab351dc19f963453f5f61ab79b3d5e01bdd8e0a327f486db3ee86",
+        "log": "3af0beff7db8527f6d232ea054b6580e23248c347b739dbca19a1263f3e42e1f",
+        "native_checkpoints": "d9b79315e2640a60517342f4369d4036bd3a7d54205efe4af8909d24d5e92efc",
+        "native_ops": "921ebd36d944897dd8a19e972b870e5540a27acffec4abac448c078a9fe55bf8",
+        "parent": "58bf92bc8a4a0f09c5923e1ec59632dae33a7cfd0b8d93f41663181ca641636f",
+        "queue": "662a520c5caac78c9dcf33b8ebbd8f9cfd6e62aef601627ce5f0d6073c5da47c"
+      },
+      "FROZEN_ARTIFACT_SHA256": "cebcf78159b4d3afef4063f2111f1267f0de97cfeb5d7bdf0d523e95746d6a46",
+      "FROZEN_ARTIFACT_SIZE": 261572385,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "children_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/gpu-offload-20261103T085215Z",
+      "HISTORY_FILES": {
+        "audit.json": "32ea736c1fad56d67a650aaa3ee9caf9008c4cb40a1d9969715a0d6040ebc4cc",
+        "install-manifest.before.json": "0d417030b574df1cc9658a958e69415661ccd2ecac0dadcb25802abf6e25f323",
+        "node.service.before": "abfdce8aa2624e2e7066adef167b7e8a65322cec955eed19e1604d78a070db6a"
+      },
+      "HISTORY_PARENT_PID": 197624,
+      "HISTORY_RELEASE_KEY": "previous_sha",
+      "JOB_ID": 31992,
+      "KEY": "x:queue:5534",
+      "LOG_ID": 5472,
+      "OP_COUNT": 18,
+      "PARENT_ID": 1573,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31965,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5534,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "4b18fbb2adcd3432527b28f60c4d2affee931de1524ea0f462e16fe513c956bb": [
+            "jobs/checkpoint",
+            "f6be2d1be0497b3b829331403e2bf738430ebdf6c0f7621b6ba2f78d5fefa59e",
+            "7a139afe971ef13429be45e2ab0466cac7b0839eeecdaa483cbedb9ec4b33e61"
+          ],
+          "770e2cf1881f4df8b4c0ebf8238935e2": [
+            "jobs/complete",
+            "97ed8b37a40d05f9d235dbfea685fb77890a56d0516ce58e6e8805972eb41296",
+            "bd91f24c590f60430cda5bebf93bc688e9e041f70740a15d169bfc74653f0b64"
+          ],
+          "c8128502c3d44bed9180d914d85e18dd": [
+            "jobs/fail",
+            "b39575ab7b859516930467f380976e3778454d58b2930ffa4de24474c794dbc8",
+            "e94c289c683c0bb67c38e5afa9088685a176869ab7a126b9f92f843d5ebfedfc"
+          ],
+          "c9c1602a7f61def1d73056d99449756e9d7e034b46821845b1c6cce3baa4493f": [
+            "jobs/checkpoint",
+            "af85e5f50986dad6d98f317e4360a616bf48907fc6d8aab95b2592edb71cd4f6",
+            "c540df87dbc0ad6f5efe9251b14ee4b164f325063f887b5166410eab27ccc388"
+          ]
+        }
+      },
+      "RECEIPT_ID": "c8128502c3d44bed9180d914d85e18dd",
+      "RECEIPT_SHA": "b39575ab7b859516930467f380976e3778454d58b2930ffa4de24474c794dbc8",
+      "RELEASE": "95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "88bbd4eb0e910a78645570c1b4f21c2534cff926904d96d66a1165158d1e27ac",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "WORKER": "hk-gpu-publish-0-024bab8a",
+      "WORKER_PID": 197859
+    },
+    {
+      "ACCOUNT_ID": 15,
+      "AUTO_RUN_ID": 414,
+      "AUTO_TASK_ID": 2401,
+      "AUTO_TASK_SHA256": "4ae10e383654d9c28db82295c95535aee1744f9e265ef6b11d1418172bc93737",
+      "CLAIM_SHA": "8102d3f0eb9352178d6ffd1b7de53a9c7923ec43ed9acd5cf4d8435a048773f4",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "175f48ca75c73c76d7f8fc0c8332093c9e1fed4a0885457470537d89cd3a205c",
+        "central_ops": "c46ad36882bbfc03ecf29e13edacc06958fbc523b3daf18598fd68b820ffd5b0",
+        "claims": "b9f0a9ae485e59766f2edc81fe86d99372d2dbcb02a176f16477b87370c741c0",
+        "history": "c7e8a496c599ef4c7e498b9b07efa27aa31412da2a9eac7dc45409f883f69b5f",
+        "log": "f090ea6fd53c8c25f30a1b23a22aa9777130faef31bb5701f1c2e7b3da61abd0",
+        "native_checkpoints": "0e543c50802e4f65254e83c82d0cfc0b0b13587b3936ceebcd9bc83080dd9f5d",
+        "native_ops": "7f2eff36ac7030028efc7f7a56fabdeece14bb364efcd587b407e4170a8c6846",
+        "parent": "88bf35102b32029c28b08274e722420b93934a2749e40d7f438d0af2a95b594e",
+        "queue": "58c5246cf739cd8d87fa5ac4e3d351e0f0df055fd11c8f4efd7c2b13491b2010"
+      },
+      "FROZEN_ARTIFACT_SHA256": "f253df6b1154343e6ae03a50560a774b6938dda011448e3b6f3c09a96025bb52",
+      "FROZEN_ARTIFACT_SIZE": 480669190,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "children_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/gpu-offload-20261103T090605Z",
+      "HISTORY_FILES": {
+        "audit.json": "1fa01009a25a8be040ea0219efa481fb2163f977668e2d77ddcca44102e203a0",
+        "install-manifest.before.json": "b1788a8fe6e027dffa37f206e104b8bdf28e9a437533d1d4ccedf52addaa23a9",
+        "node.service.before": "7ffe0db0e10edfd1dbb4652edebe2e5bde93e36428688dbdf21ef81187f80e7e"
+      },
+      "HISTORY_PARENT_PID": 198369,
+      "HISTORY_RELEASE_KEY": "previous_sha",
+      "JOB_ID": 31994,
+      "KEY": "x:queue:5522",
+      "LOG_ID": 5474,
+      "OP_COUNT": 85,
+      "PARENT_ID": 1561,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31952,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5522,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "39b1c519e02eb0dfffc16c83a4889d395fe4bb14af81f72a4b7a47546f6e827a": [
+            "jobs/checkpoint",
+            "eae3079e8ad77c224651466d4f31ee38e12c3981531f94de8d4d04d1cb56056c",
+            "bb4fa9033408d529868a2df42ac966aa4e2d0576edc80c5fb713816dde49a3b9"
+          ],
+          "47a89eaeb14742b3b8c3c45343b0dcde": [
+            "jobs/complete",
+            "67d39b494064e1367acaa64a0b9e2d542b2e2d8a7463f2aacbf24d86fa9c9448",
+            "8b273f0a4fce2b61bd9ec6473ee73214ab90acd296a78c01ea13c6ebe9df6d6d"
+          ],
+          "67148e6503774496baddf834cdc2d441": [
+            "jobs/fail",
+            "2dfeed9d6254f50f193f9d7121d24db62433f408a4c106da45d1204721c12d0c",
+            "e6480bca491a27400658114ef5f9390b7f184ad3fc4be7d6dae3210a89d3c67a"
+          ],
+          "6d94d19d53143eaf294bbcf09a28833cc2186d4d7efc878c0eca77fbf4d16414": [
+            "jobs/checkpoint",
+            "c6242c3855b8cda3dc57b1739e779809ce2001e0ea2e9a3e954a7f993e14cd60",
+            "1001ec6c5a3da9d36be145d750c4663bf0c38d9f197c30ffa9d914781ce2444e"
+          ]
+        }
+      },
+      "RECEIPT_ID": "67148e6503774496baddf834cdc2d441",
+      "RECEIPT_SHA": "2dfeed9d6254f50f193f9d7121d24db62433f408a4c106da45d1204721c12d0c",
+      "RELEASE": "ec8984773c4bc33e832ec5ae483cb3dcad7482dc",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "62bc80ea7b1b552b9e95744b8d5757611b04504979b20728be4b93a863d4a163",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/ec8984773c4bc33e832ec5ae483cb3dcad7482dc",
+      "WORKER": "hk-gpu-publish-1-6d793de9",
+      "WORKER_PID": 198473
+    },
+    {
+      "ACCOUNT_ID": 45,
+      "AUTO_RUN_ID": 414,
+      "AUTO_TASK_ID": 2387,
+      "AUTO_TASK_SHA256": "6ac0c5713013a40d02c9641b48215ce26c51501c532e7f3699c33dfa8d7b04d6",
+      "CLAIM_SHA": "212f119dc896f6a6beda45d0b8c6593096f5333e02cc98b23e587af4150cf48a",
+      "ERROR_CODE": "pipeline_lease_lost",
+      "EXPECTED": {
+        "central_checkpoints": "b49fbc4761b5eb783d5e0fc57c053ad42631dea095ba1044e0809719ae49a518",
+        "central_ops": "acbe83509287b4e0c0906ec7cf2fe6f9ea47cbf48d815230887089a9d697cc3b",
+        "claims": "023f7e5ba042ab7add3c088cdc2ec95aa3701d8613ca1271f71bc74bd83caca7",
+        "history": "099be3bd3233a436042ff1a24d50191eac45393cd6bf7123b408568577593da0",
+        "log": "89ce8f052bcec63220b54ee4e309e82321d343dcf9c46d6da1949bcff7d73ab1",
+        "native_checkpoints": "c7188a69e12185e0817e88e91a50b288215e80ba5c8f63eb05c4b8398a0f1026",
+        "native_ops": "cfcf819a66eb1ce7d62fbc4e3b9f2879a85b3fd910bd0d4abea5b8b76c3ed93a",
+        "parent": "c556d6647f1b56ee6d5949b67218d1f8c334d46930d87ee87d44a1da12601cf3",
+        "queue": "a819c522524c8200c0260ef91c3333e0ea173d2b0e722dad5b2941fbc2bd5970"
+      },
+      "FROZEN_ARTIFACT_SHA256": "5f18896fab49131babd9f898bea6aa6bfd0d86495e3162609dabefb7da2bb8a0",
+      "FROZEN_ARTIFACT_SIZE": 645654139,
+      "HISTORY_AUDIT_FILE": "audit.json",
+      "HISTORY_CHILDREN_KEY": "children_before",
+      "HISTORY_DIR": "/data/pipeline-dispatch/maintenance/gpu-offload-20261103T090605Z",
+      "HISTORY_FILES": {
+        "audit.json": "1fa01009a25a8be040ea0219efa481fb2163f977668e2d77ddcca44102e203a0",
+        "install-manifest.before.json": "b1788a8fe6e027dffa37f206e104b8bdf28e9a437533d1d4ccedf52addaa23a9",
+        "node.service.before": "7ffe0db0e10edfd1dbb4652edebe2e5bde93e36428688dbdf21ef81187f80e7e"
+      },
+      "HISTORY_PARENT_PID": 198369,
+      "HISTORY_RELEASE_KEY": "previous_sha",
+      "JOB_ID": 31995,
+      "KEY": "x:queue:5523",
+      "LOG_ID": 5473,
+      "OP_COUNT": 134,
+      "PARENT_ID": 1562,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31953,
+      "PUBLISH_NODE": "hk-gpu",
+      "QID": 5523,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {},
+        "hk-gpu": {
+          "56f85639210baa59a95a7c40032fd530aeefccd05f57387b460686f0a3e9b52b": [
+            "jobs/checkpoint",
+            "0dc5a8e5621a3c4e692fb900e9cc8cc7f9897b08b0dfcd9978ab72e845b2ec70",
+            "345acb0ebd8bbd64f3483a5789cc7ff516b63fe9d24c66f1d24100e32610dcde"
+          ],
+          "8e4bbf0327ea4f45b5890817ffebb7d1": [
+            "jobs/complete",
+            "2345f576e5e752c3e39ecc0eb45d4d6688b552982d1c4d8b280764e3148c2de3",
+            "7fe9754a9b11ac5f290c852ebd030a1c79b032f6409adffe879186bf7192c892"
+          ],
+          "b11ecdcb53884c33ad69d6d2769eb66a": [
+            "jobs/fail",
+            "92df4eeece4f261132200068181e34a5b0213391c807ec4305254f59f67e9afc",
+            "a10be3a5c07949b03a67ae1fdbdcb8d24bc81253b205cfa3956dc7764314a29e"
+          ],
+          "bc2ee42cefe48cbaf38035fecf529e3c80399dc689b6956bcf00650883947711": [
+            "jobs/checkpoint",
+            "50bd7a810486e2ef08e939b6520676031efb32ba99f2e6c20f1fd81fc91d2682",
+            "956a1a1c020a0be2dd759d6f98e2a9e8c316ddacf86ecbcb508e8977f87e2a30"
+          ]
+        }
+      },
+      "RECEIPT_ID": "b11ecdcb53884c33ad69d6d2769eb66a",
+      "RECEIPT_SHA": "92df4eeece4f261132200068181e34a5b0213391c807ec4305254f59f67e9afc",
+      "RELEASE": "ec8984773c4bc33e832ec5ae483cb3dcad7482dc",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "62bc80ea7b1b552b9e95744b8d5757611b04504979b20728be4b93a863d4a163",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/opt/pipeline-dispatch/releases/ec8984773c4bc33e832ec5ae483cb3dcad7482dc",
+      "WORKER": "hk-gpu-publish-3-f862f303",
+      "WORKER_PID": 198475
+    },
+    {
+      "ACCOUNT_ID": 102,
+      "AUTO_RUN_ID": 417,
+      "AUTO_TASK_ID": 2650,
+      "AUTO_TASK_SHA256": "828937137cc3b0abd3c10ddc437ecaf4d03caa01be4f53a513524b7c01c2612d",
+      "CLAIM_SHA": "d02c6e26b4354f33a6fda18d087d544c9306b3c4c0f9add0324d952eda7985ae",
+      "ERROR_CODE": "coordinator_operation_failed",
+      "EXPECTED": {
+        "central_checkpoints": "cc28300fb9cad532a7bcbdf7ea2e332e045fc95d489001a1e033e0e9ec08ba1b",
+        "central_ops": "55f7635aff5e85171cb49f42dc0173642eaf8b60bc3cbb03fd3779176793bbbb",
+        "claims": "211a2d2c702c37782a2d9ef7761f09e3c9039e09f4f99297fe76e313065b119b",
+        "history": "40cc01530610b50c33295cf8266db7ae03fce6d9e1d94f828ac1ffad9acbe022",
+        "log": "4254927a29148b4ad682e0fee6e1917c4cffa47e55377494151a49dbac64f0f6",
+        "native_checkpoints": "3f29a92b3ce03a04c0267f4ad25aa5abb0621ebb4ff78a52fef1e3d8fe3bcf3a",
+        "native_ops": "bdc746f9a520193f68fbb429d6a3f5282fe101cb702c41d1dfd5ab9bd4fa78d6",
+        "parent": "253fd84452f06db7ab8dea79cf42c6f35bdadbad5d13a1c5c6acf22bcb2a8105",
+        "queue": "177a415c854496ab92dc8e64e61a50811188230e50edaea82ff08ba546d0237e"
+      },
+      "FROZEN_ARTIFACT_SHA256": "c8f07b7bbb6b3df693394a122738f60e6939921baf3afdc9c75208c6c639c428",
+      "FROZEN_ARTIFACT_SIZE": 503303561,
+      "HISTORY_AUDIT_FILE": "audit.before.json",
+      "HISTORY_CHILDREN_KEY": "children_before",
+      "HISTORY_DIR": "/mnt/data-disk/pipeline-node-cpu/pipeline-dispatch/maintenance/cpu-transport-20261103T102742791401Z",
+      "HISTORY_FILES": {
+        "audit.before.json": "87095bc17bf78364d32663ae493dc81b086dbdbbd8cd449067f34f7d502631f1",
+        "install-manifest.before.json": "bdc867344612d70d3ca1276c928e0069c990408223cdac89c1f031b4640b6db3",
+        "node.service.before": "98766e7a53b69f748e1cefe07a37b916a28a37d8b956a7349ec88e7dd5c8436b"
+      },
+      "HISTORY_PARENT_PID": 810922,
+      "HISTORY_RELEASE_KEY": "previous_sha",
+      "JOB_ID": 31719,
+      "KEY": "x:queue:5459",
+      "LOG_ID": 5392,
+      "OP_COUNT": 1,
+      "PARENT_ID": 1484,
+      "PREP_GENERATION": 1,
+      "PREP_ID": 31692,
+      "PUBLISH_NODE": "cpu-main",
+      "QID": 5459,
+      "RECEIPTS_BY_NODE": {
+        "cpu-main": {
+          "60f726647cb343929de68edc42ae0f22": [
+            "jobs/fail",
+            "97b95dae4c6025846f26cb0dcfb5363400e97a3479905418a392ca0fca381873",
+            "3e8f16979270f074e02f8f1f560932c3b9f59161db32fadc9a8cc4b8701bdd53"
+          ],
+          "bf23a9c525add89bf2c423723d0504274cdd2aa349eb1fd6fd54cfa451487f9a": [
+            "jobs/checkpoint",
+            "3923a8db2303dce138da08886e63a39436a39de4c3136901ab061ea15ddd2de7",
+            "27cf8a4a9360b77414077b6ceaede11e16323087b485244d02cfca0d1c4ab5ae"
+          ]
+        },
+        "hk-gpu": {
+          "1280aa3de28344abb85786e9e071b74d": [
+            "jobs/complete",
+            "90e52fd2031504d3de912dbbaa3ac59bf9e04527ec9afe7e73ab4a3070915416",
+            "52238fce8306d31d60359c01ac6a16d973c2bf7cf106eddbc9099908f6518eaa"
+          ],
+          "c304bc83f41547248572ee47c17ba20d46c6be682d6a95ffabd4980ff0410baa": [
+            "jobs/checkpoint",
+            "f9e4a7e6a91cf421c726507d3c7874b0cfc3ecaf221a5ad9452fabec6c6adbd4",
+            "b2038b8f9cfa3b5dd5bb79518c174d18493d5483334fa57a3a4e6b2b70c5dacd"
+          ]
+        }
+      },
+      "RECEIPT_ID": "60f726647cb343929de68edc42ae0f22",
+      "RECEIPT_SHA": "97b95dae4c6025846f26cb0dcfb5363400e97a3479905418a392ca0fca381873",
+      "RELEASE": "95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "RELEASE_FILES": {
+        "features/pipeline_dispatch/executors.py": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+        "features/pipeline_dispatch/worker.py": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+        "features/x_posts/service.py": "88bbd4eb0e910a78645570c1b4f21c2534cff926904d96d66a1165158d1e27ac",
+        "scripts/pipeline_worker.py": "1e3c275761de2ede97c7c04c4faa9808d3f78a0b9da478dc9d1d284d8f767e11"
+      },
+      "RELEASE_ROOT": "/mnt/data-disk/root-storage-20260915/rootfs/opt/pipeline-dispatch/releases/95fdaa4c4db0ed19a465cb126d539274e95ea918",
+      "WORKER": "cpu-main-publish-3-2dbfba31",
+      "WORKER_PID": 2060455
+    }
+  ],
+  "source_evidence_sha256": "7bbf74d54aab951ad0dc680ecd20f219de06d39851d421b9442caa7912d601a2",
+  "version": 1
+}

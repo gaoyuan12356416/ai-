@@ -10,7 +10,7 @@
 - 必须匹配本次现场核验的 5 个 prepost plan hash（79 队列）之一，且中央 journal committed 与原生逐代授权 proof 完全一致；或者匹配本次 2 个归因恢复 plan hash（7 队列）的原子中央审计事件。其他恢复记录、未完成 staged 和未审计失败拒绝。
 - Auto execution_run/queue、原生唯一 manual parent/queue/log、账号、素材、content、模板版本、正文模板、材料预留完全一致。原 Auto execution_log_id 为空时独立绑定唯一原生日志但保持该字段为空；非空时必须与原日志 ID 相同。
 - 当前原生队列仍在正常处理，日志无 unknown/Post 成功，中央无 unknown/hold，原生和 Auto 无 canonical hold。已成功记录在 plan 中跳过；plan 后新成功也跳过并提示使用成功回执对账入口。新的未知或身份漂移使 apply 的 CAS 拒绝。
-- q5280 不在允许集合内，新的初始化 403 失败不重新放行。其他 unknown 拒绝；仅下面已完整独立对账的 Auto 2395 有保留 unknown 标记的精确观察分支。
+- q5280 不在允许集合内，新的初始化 403 失败不重新放行。其他 unknown 拒绝；下面已完整独立对账的 Auto 2395，以及后续九条固定事故清单，在验证各自双库已提交的独立对账后才有保留 unknown 标记的精确观察分支。
 
 ### Auto 2395 / q5524 的独立观察授权
 
@@ -21,6 +21,8 @@
 - 原生仅有该 source 的唯一 1→2、prior_attempts=1 授权，且授权 proof 与原完整对账一致；当前唯一 queue/log/parent、冻结正文和素材身份不变，原生没有新的 unknown 或成功记录。
 
 它仍只将 Auto 切换到 retry_wait/reconcile，**保留 Auto unknown_outcome=1**、原错误、全部 execution IDs 与历史。随后实际 dispatch runtime 只观察当前原队列；普通排队/上传观察不会清除该 unknown，唯一真实成功回执才通过既有 publisher 逻辑清除。新 native unknown、审计缺失/未提交/漂移或 Auto 行变化一律拒绝。没有新的平台发布授权，也没有对其他 unknown 开放例外。
+
+后续九条固定事故使用同样的只读观察约束，另绑定独立清单里的 Auto 全行指纹、原执行六类完整证据指纹、双库相同的原 plan 和 committed journal。对应 task 为 2669、2676、2320、2319、2339、2316、2401、2387、2650；未先完成原生独立对账的记录不能进入观察。完整范围与命令见 [九条媒体阶段对账](nine-media-only-reconciliation.md)。
 
 ## 实际 runtime 校验
 

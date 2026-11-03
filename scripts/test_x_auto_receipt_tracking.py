@@ -274,4 +274,82 @@ class Exact5524ObservationTests(unittest.TestCase):
         self.assertFalse(self.case.plan()['items'])
 
 
+class FixedMediaOnlyObservationTests(unittest.TestCase):
+    def setUp(self):
+        from scripts import reconcile_x_audited_media_only as incidents
+        self.case=TrackingTests();self.case.setUp();self.addCleanup(self.case.doCleanups)
+        with self.case.store._transaction() as a:
+            a.execute('UPDATE x_auto_task SET unknown_outcome=1')
+            task=dict(a.execute('SELECT * FROM x_auto_task').fetchone())
+        with sqlite3.connect(self.case.native) as n:
+            n.row_factory=sqlite3.Row
+            queue=dict(n.execute('SELECT * FROM x_post_queue').fetchone());queue['status']='failed'
+            log=dict(n.execute('SELECT * FROM x_post_publish_log').fetchone());log.update(status='failed',unknown_outcome=1)
+        proof={'queue':queue,'log':log,'native_ops':[{'operation':'x:POST:/2/media/upload/initialize','generation':1}],
+               'central_ops':[{'operation':'x:POST:/2/media/upload/initialize','generation':1}],'claims':[],'history':[]}
+        frozen=copy.deepcopy(incidents.incidents()[5485])
+        frozen.update(QID=9002,LOG_ID=9003,PREP_ID=30,JOB_ID=31,ACCOUNT_ID=640,PARENT_ID=9001,KEY='x:queue:9002',
+            OP_COUNT=1,AUTO_TASK_ID=task['id'],AUTO_RUN_ID=task['run_id'],AUTO_TASK_SHA256=recovery.digest(task),
+            EXPECTED={k:recovery.digest(v) for k,v in proof.items() if k!='queue'})
+        frozen['EXPECTED']['queue']=recovery.queue_hash(queue)
+        for name,value in (('QUEUE_IDS',(9002,)),('incidents',lambda:{9002:copy.deepcopy(frozen)})):
+            p=mock.patch.object(incidents,name,value);p.start();self.addCleanup(p.stop)
+        contract=incidents.contract(9002)
+        original={'kind':incidents.KIND,'version':1,'incident_sha256':contract['INCIDENT_SHA'],'proof':proof}
+        original['plan_sha256']=recovery.document_hash(original);self.original=original
+        for path in (self.case.native,self.case.central):
+            with sqlite3.connect(path) as c:
+                c.execute('CREATE TABLE '+incidents.AUDIT+' (job_id INTEGER,plan_sha256 TEXT,evidence_json TEXT,created_at TEXT)')
+                c.execute('INSERT INTO '+incidents.AUDIT+' VALUES(31,?,?,?)',(original['plan_sha256'],encoded({'plan':original}),'2026-11-03T12:30:00Z'))
+        with sqlite3.connect(self.case.central) as c:
+            c.execute('CREATE TABLE '+incidents.JOURNAL+' (job_id INTEGER,plan_sha256 TEXT,state TEXT)')
+            c.execute('INSERT INTO '+incidents.JOURNAL+" VALUES(31,?,'committed')",(original['plan_sha256'],))
+        with sqlite3.connect(self.case.native) as n:
+            n.execute('UPDATE '+recovery.AUTH+' SET plan_sha256=?,proof_json=?',(original['plan_sha256'],encoded({'reconciliation':incidents.AUDIT,'original_proof':proof})))
+        self.incidents=incidents
+
+    def test_only_fixed_committed_incident_can_observe_with_unknown_preserved(self):
+        saved=self.case.plan();self.assertEqual(saved['items'][0]['authority']['kind'],'audited_media_only_unknown_observation')
+        self.case.apply(saved);task=self.case.store.get_task(self.case.task_id)
+        self.assertTrue(task.unknown_outcome)
+        bridge=publisher.FakeBridge(task)
+        forbidden=lambda *args,**kwargs:self.fail('must only observe original queue')
+        bridge.publish_queue=forbidden;bridge.recover_run=forbidden;bridge.record_failure=forbidden
+        executor=self.case.fixture._executor(bridge);executor.dispatch_enabled=True
+        first=executor.execute_next('observer');self.assertEqual(first['task']['status'],'retry_wait');self.assertTrue(first['task']['unknown_outcome'])
+        bridge.queue_status='published';self.case.fixture.clock.value+=timedelta(seconds=31)
+        second=executor.execute_next('observer');self.assertEqual(second['task']['status'],'published');self.assertFalse(second['task']['unknown_outcome'])
+        self.assertEqual(bridge.publish_calls,0);self.assertEqual(bridge.record_calls,0)
+
+    def test_staged_or_differing_audits_never_enable_observation(self):
+        with sqlite3.connect(self.case.central) as c:c.execute("UPDATE "+self.incidents.JOURNAL+" SET state='staged'")
+        self.assertFalse(self.case.plan()['items'])
+        with sqlite3.connect(self.case.central) as c:c.execute("UPDATE "+self.incidents.JOURNAL+" SET state='committed'")
+        with sqlite3.connect(self.case.native) as n:n.execute('UPDATE '+self.incidents.AUDIT+' SET plan_sha256=?',('f'*64,))
+        self.assertFalse(self.case.plan()['items'])
+
+    def test_original_unknown_fact_cannot_be_rewritten_in_both_audits(self):
+        forged=copy.deepcopy(self.original);forged['proof']['log']['unknown_outcome']=0
+        forged['plan_sha256']=recovery.document_hash(forged)
+        for path in (self.case.native,self.case.central):
+            with sqlite3.connect(path) as c:c.execute('UPDATE '+self.incidents.AUDIT+' SET plan_sha256=?,evidence_json=?',(forged['plan_sha256'],encoded({'plan':forged})))
+        with sqlite3.connect(self.case.central) as c:c.execute('UPDATE '+self.incidents.JOURNAL+' SET plan_sha256=?',(forged['plan_sha256'],))
+        self.assertFalse(self.case.plan()['items'])
+
+    def test_auto_snapshot_drift_or_new_native_unknown_remains_isolated(self):
+        saved=self.case.plan()
+        with self.case.store._transaction() as a:a.execute("UPDATE x_auto_task SET error_message='new unknown'")
+        self.assertFalse(self.case.plan()['items'])
+        with self.assertRaises(recovery.RecoveryRejected):self.case.apply(saved)
+        with self.case.store._transaction() as a:
+            a.execute('UPDATE x_auto_task SET error_message=?',(saved['items'][0]['task']['error_message'],))
+        with sqlite3.connect(self.case.native) as n:n.execute('UPDATE x_post_publish_log SET unknown_outcome=1')
+        self.assertFalse(self.case.plan()['items'])
+        self.assertTrue(self.case.store.get_task(self.case.task_id).unknown_outcome)
+
+    def test_reconciliation_plan_hash_cannot_be_substituted(self):
+        with sqlite3.connect(self.case.native) as n:n.execute('UPDATE '+recovery.AUTH+' SET plan_sha256=?',('f'*64,))
+        self.assertFalse(self.case.plan()['items'])
+
+
 if __name__ == '__main__': unittest.main()
