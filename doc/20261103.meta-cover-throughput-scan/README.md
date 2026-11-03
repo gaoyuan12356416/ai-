@@ -62,6 +62,15 @@ is replayed. SQL syntax/data errors and statement execution limits are not
 retried. Redacted SQL diagnostics now default to the runtime diagnostics
 directory, and batch failures retain diagnostic IDs and MySQL error numbers.
 
+The 16:00 scan exposed a separate MySQL 3024 statement limit in the composite
+`source_id >= '1' AND source_id < '2'` range. EXPLAIN estimated 44.7 million
+index entries; `LIMIT 2000` did not bound the work needed to find sparse matches.
+Split this dense prefix at 11 through 19 for both indexed source columns. All
+48 adjacent ranges retain the same snapshot, pagination and completeness
+checks, including whitespace/CSV/JSON and old publications. Keep the 120-second
+statement limit and fail/discard incomplete scans; do not retry a timed-out page
+or increase database limits. Boundary/tie fixtures cover the split without gaps.
+
 ## Validation and rollout
 
 Run the entire module test suite. Targeted regressions cover repeated account

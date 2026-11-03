@@ -9,7 +9,7 @@ from contextlib import contextmanager
 
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 from meta_violation_cleanup.indexed_source import material_rows
-from meta_violation_cleanup.sql_source import SqlSource
+from meta_violation_cleanup.sql_source import SqlSource, SqlSourceError, _quote
 from meta_violation_cleanup.policy import material_identity
 
 
@@ -61,9 +61,32 @@ class IndexedSourceTests(unittest.TestCase):
             material_identity([r],mapping,{'1479':'1479'},r['creative_id']))}
         self.assertEqual(expected,{str(n) for n in range(1,11)})
         self.assertTrue(expected<=found,expected-found)
-        self.assertEqual(metrics['composite_ranges'],30)
+        self.assertEqual(metrics['composite_ranges'],48)
         self.assertFalse(any('FORCE INDEX(idx_product)' in q for q in source.queries))
         source.db.close()
+
+    def test_dense_prefix_is_bounded_without_losing_boundary_or_duplicate_values(self):
+        source=FixtureSource()
+        self.addCleanup(source.db.close)
+        source.db.execute("INSERT INTO ads_source VALUES(101,3,'7')")
+        # Include ties that span pages, prefix boundaries, JSON and whitespace.
+        values=['1,7','10,7','11,7','11,7','11,7','110,7','12,7','13,7',
+                '14,7','15,7','16,7','17,7','18,7','19,7','199,7','2,7',
+                '[11,7]',' 11,7','\t19,7']
+        for n,value in enumerate(values,1):
+            source.db.execute('INSERT INTO ads_facebook_auto_created_data VALUES('+','.join('?' for _ in range(11))+')',
+                (n,str(1000+n),'1479','101',value,str(2000+n),'100','1','1','',''))
+        query=source.query
+        def bounded_query(sql):
+            # Model the observed server statement limit, not a connection fault.
+            for column in ('source_id','original_source_id'):
+                if column+'>='+_quote('1')+' AND '+column+'<'+_quote('2') in sql:
+                    raise SqlSourceError('sql_stream_incomplete')
+            return query(sql)
+        source.query=bounded_query
+        records,metrics=material_rows(source,{'7'},{'1479':'1479'})
+        self.assertEqual({r['id'] for r in records},{str(n) for n in range(1,len(values)+1)})
+        self.assertEqual(metrics['complex_publication_rows'],len(values))
 
 
 if __name__=='__main__':unittest.main()
