@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import secrets
 import threading
+import weakref
 from datetime import timedelta
 from urllib.parse import urlsplit
 
@@ -25,7 +26,8 @@ _INITIALIZE_LOCK = threading.Lock()
 class FBNativeBridge:
     def __init__(self, runtime):
         self.runtime = runtime
-        self._lock = threading.RLock()
+        self._source_locks = weakref.WeakValueDictionary()
+        self._source_locks_guard = threading.Lock()
         with runtime.store.connect() as conn:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_fb_claim(
@@ -47,6 +49,18 @@ class FBNativeBridge:
                 or job.get("source_key") != "fb:%s:%s" % (job.get("family"), job.get("source_id"))):
             raise AdapterError("fb_dispatch_source_invalid")
         return str(job["source_key"]), str(job["stage"]), int(job["generation"])
+
+    def _source_lock(self, job):
+        # Slow policy/credential reads on one source must not hold unrelated
+        # receipts. All stages and generations of a source share this fence;
+        # active holders/waiters keep it alive without retaining task history.
+        source_key = self._key(job)[0]
+        with self._source_locks_guard:
+            lock = self._source_locks.get(source_key)
+            if lock is None:
+                lock = threading.RLock()
+                self._source_locks[source_key] = lock
+            return lock
 
     def _stored(self, job, claim):
         with self.runtime.store.connect() as conn:
@@ -139,7 +153,7 @@ class FBNativeBridge:
 
     def reserve(self, job, claim):
         key = self._key(job)
-        with self._lock:
+        with self._source_lock(job):
             with self.runtime.store.connect() as conn:
                 previous = conn.execute("SELECT * FROM pipeline_fb_claim WHERE source_key=? AND stage=? AND generation=?", key).fetchone()
                 frozen = conn.execute("SELECT * FROM pipeline_fb_claim WHERE source_key=? AND stage='prepare' ORDER BY generation DESC LIMIT 1", (job["source_key"],)).fetchone() if job["stage"] == "prepare" else None
@@ -290,7 +304,7 @@ class FBNativeBridge:
     def begin_operation(self, job, claim, operation):
         if job["stage"] != "publish" or operation.get("operation") not in {"fb_video_publish", "fb_publish"}:
             raise AdapterError("fb_operation_invalid")
-        with self._lock:
+        with self._source_lock(job):
             stored, task, descriptor = self._stored(job, claim)
             if stored["receipt_json"]:
                 raise AdapterError("canonical_task_already_completed")
@@ -348,7 +362,7 @@ class FBNativeBridge:
                     "remaining_credentials": len(remaining) - 1}
 
     def complete(self, job, receipt, claim):
-        with self._lock:
+        with self._source_lock(job):
             stored, task, descriptor = self._stored(job, claim)
             if stored["receipt_json"]:
                 if obj(stored["receipt_json"]) != receipt:
@@ -402,7 +416,7 @@ class FBNativeBridge:
     def checkpoint(self, job, claim, phase, receipt):
         if phase != "fb_publish_attempt" or job["stage"] != "publish":
             raise AdapterError("fb_checkpoint_invalid")
-        with self._lock:
+        with self._source_lock(job):
             _, task, _ = self._stored(job, claim)
             with self.runtime.store.connect() as conn:
                 operation = conn.execute("SELECT * FROM pipeline_fb_operation WHERE operation_id=? AND source_key=? AND stage=? AND generation=?",
@@ -417,7 +431,7 @@ class FBNativeBridge:
             return {"canonical_checkpoint": True, "operation_id": operation["operation_id"], "source_key": job["source_key"]}
 
     def fail(self, job, claim, receipt):
-        with self._lock:
+        with self._source_lock(job):
             _, task, _ = self._stored(job, claim)
             current = self.reconcile(job)
             if current["status"] == "published" and current.get("graph_post_id"):
@@ -451,9 +465,10 @@ class FBNativeBridge:
 
     def pause(self, job, cutoff):
         from .canonical_holds import pause_row, SCHEMA
-        self._key(dict(job, generation=job.get("generation", 0), stage=job.get("stage", "prepare")))
+        lock_job = dict(job, generation=job.get("generation", 0), stage=job.get("stage", "prepare"))
+        self._key(lock_job)
         store = self.runtime.store if job["family"] == "auto" else self.runtime.manual_worker.store
-        with self._lock, store.connect() as conn:
+        with self._source_lock(lock_job), store.connect() as conn:
             conn.execute(SCHEMA)
             conn.execute("BEGIN IMMEDIATE")
             if job["family"] == "auto":
