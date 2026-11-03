@@ -31421,7 +31421,8 @@ def notify_screenshot_ai_source_callback(job, raise_on_error=False):
         except Exception:
             logging.exception("failed to write callback failure audit log")
         if raise_on_error:
-            raise
+            from features.cover_material_source import ScreenshotMaterialIngestionError
+            raise ScreenshotMaterialIngestionError(exc) from exc
         return {"failed": True, "error": str(exc)}
 
 
@@ -38396,6 +38397,10 @@ def screenshot_failed_size_labels(error_text):
 
 
 def humanize_screenshot_failure_reason(job, error_text):
+    from features.cover_material_source import screenshot_ingestion_failure_reason
+    ingestion_reason = screenshot_ingestion_failure_reason(job, error_text)
+    if ingestion_reason:
+        return ingestion_reason
     raw_reason = (
         str(error_text or "").strip()
         or str(job.get("error_message", "") or "").strip()
@@ -38441,15 +38446,20 @@ def humanize_screenshot_failure_reason(job, error_text):
 
 
 def build_screenshot_failure_message(job, error_text):
+    from features.cover_material_source import screenshot_ingestion_failure_reason
+    ingestion_failed = bool(screenshot_ingestion_failure_reason(job, error_text))
+    title = ("封面图片已生成，素材入库失败，已停止本轮重试。" if ingestion_failed
+             else "封面图片生成失败，系统已停止继续重试。")
     reason = humanize_screenshot_failure_reason(job, error_text)
     return (
-        "封面图合成任务失败，系统已停止继续重试。\n"
+        "%s\n"
         "剧名：%s\n"
         "content_id：%s\n"
         "job_id：%s\n"
         "失败原因：%s\n"
         "已生成尺寸：1.91:1=%s，1:1=%s，4:5=%s"
         % (
+            title,
             str(job.get("drama_name", "") or ""),
             str(job.get("content_id", "") or ""),
             str(job.get("job_id", "") or ""),

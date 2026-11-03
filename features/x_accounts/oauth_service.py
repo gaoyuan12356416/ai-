@@ -35,6 +35,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from features.x_posts import duration_policy  # noqa: E402
+from features.x_posts.account_limits import MAX_PUBLISH_ACCOUNTS
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import (  # noqa: E402
     DEFAULT_DRAMA_LANGUAGE,
@@ -66,7 +67,7 @@ MAX_DAILY_PLAN_BODY_BYTES = 2 * 1024 * 1024
 MAX_DAILY_CHECK_BODY_BYTES = 128 * 1024
 MAX_DRAMA_POOL_BODY_BYTES = 5 * 1024 * 1024
 MAX_ERROR_TEXT = 240
-MAX_DAILY_ACCOUNTS = 50
+MAX_DAILY_ACCOUNTS = MAX_PUBLISH_ACCOUNTS
 AUTO_TEMPLATE_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
 TRANSIENT_VERIFY_ERROR_CODES = frozenset(
     {
@@ -3513,18 +3514,35 @@ def save_post_schedule_request(payload, source_type, navigation_item):
             ).fetchall()
         finally:
             conn.close()
+    accounts = [row_to_item(row) for row in rows]
     eligible_ids = [
         int(account["id"])
-        for account in (row_to_item(row) for row in rows)
+        for account in accounts
         if account.get("publish_eligible")
     ]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
-        item = XPostStore(POST_DB_PATH).save_schedule_config(
+        store = XPostStore(POST_DB_PATH)
+        save_options = {}
+        if source_type == "material":
+            # Only trusted local account/ledger state may exclude an account.
+            # Saving settings never refreshes tokens or calls X.
+            blocked = {
+                account_id for account_id, hold in store.schedule_account_blockers(eligible_ids).items()
+                if hold.get("code") in {"x_post_account_locked", "x_account_not_publishable"}
+            }
+            # An active upload also has a needs-review fence while X responds.
+            # Keep that healthy selection; execution still honors its fence.
+            save_options["skippable_account_ids"] = [
+                int(account["id"]) for account in accounts
+                if not account.get("publish_eligible") or int(account["id"]) in blocked
+            ]
+        item = store.save_schedule_config(
             source_type,
             settings,
             actor,
             eligible_account_ids=eligible_ids,
+            **save_options,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
