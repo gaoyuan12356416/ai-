@@ -9,8 +9,9 @@ from unittest.mock import Mock, patch
 
 from scripts.test_pipeline_youtube_native import YouTubeNativeTests
 from features.drama_synthesis.youtube import YouTubeHTTPError
-from features.pipeline_dispatch.adapters import LedgerAdapter, LedgerSpec, AdapterRegistry
+from features.pipeline_dispatch.adapters import LedgerAdapter, LedgerSpec, AdapterRegistry, AdapterError
 from features.pipeline_dispatch.core import DispatchStore
+from features.youtube_auto_publish.templates import WorkflowError
 
 
 class RecoveryTests(unittest.TestCase):
@@ -52,6 +53,22 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(YouTubeHTTPError): f.prepare_upload()
         self.assertEqual(f.bridge.client.refresh_access_token.call_count,1)
         self.assertEqual(f.store.youtube_task(f.task['id'])['video_attempt_count'],0)
+
+    def test_credential_replica_failure_retries_reads_without_duplicating_intent(self):
+        f=self.f
+        original=f.workflow.channel_directory.repository.credential()
+        f.workflow.channel_directory.repository.credential=Mock(side_effect=[WorkflowError('material_query_failed','temporary'),original])
+        with patch('features.pipeline_dispatch.youtube_native.time.sleep'):f.prepare_upload()
+        self.assertEqual(f.workflow.channel_directory.repository.credential.call_count,2)
+        self.assertEqual(f.store.youtube_task(f.task['id'])['video_attempt_count'],1)
+
+    def test_exhausted_credential_lookup_has_specific_code_and_no_intent(self):
+        f=self.f
+        f.workflow.channel_directory.repository.credential=Mock(side_effect=WorkflowError('material_query_busy','temporary'))
+        with patch('features.pipeline_dispatch.youtube_native.time.sleep'):
+            with self.assertRaisesRegex(AdapterError,'youtube_credential_lookup_unavailable'):f.prepare_upload()
+        self.assertEqual(f.store.youtube_task(f.task['id'])['video_attempt_count'],0)
+        with f.workflow.db() as c:self.assertEqual(c.execute('SELECT count(*) FROM pipeline_youtube_operation').fetchone()[0],0)
 
     def test_queued_display_is_waiting_and_failure_remains_visible(self):
         f=self.f

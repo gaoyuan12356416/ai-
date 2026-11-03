@@ -1,3 +1,3 @@
 # Validation
 
-547 pipeline tests passed (131.716 s). After adding queued DTO projection, 20 focused recovery/native tests passed (3.984 s). Python compilation and git diff --check passed. Platform calls were mocked in tests; production readback evidence is separate. Linux preflight and publication acceptance pending.
+547 pipeline tests passed (131.716 s). After adding queued DTO projection, 20 focused recovery/native tests passed (3.984 s). Follow-up appointment preservation passed 91 adapter/core/native tests. Linux deployment preflight passed and 21 recovery/native tests passed on Python 3.9 (2.848 s). A subsequently observed read-only credential database failure is now retried twice before any operation intent; 30 recovery/canonical tests pass including exhaustion and exactly-one-intent cases. Python compilation and git diff --check passed. Platform calls are mocked in tests; live acceptance is recorded separately in deploy.md and the recovery backup records.
