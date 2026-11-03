@@ -10315,17 +10315,21 @@ class XPostStore:
                 "WHERE manual_run_id=? ORDER BY material_key",
                 (run_id,),
             ).fetchall()
+            recovered_reservation_admission = None
             if reservation_rows and (
                 {str(item["material_key"]) for item in reservation_rows}
                 != set(material_ids)
                 or any(str(item["state"]) != "active" for item in reservation_rows)
             ):
-                conn.rollback()
-                raise XPostError(
-                    "x_post_storage_conflict",
-                    "手动发布素材占用状态与冻结任务不一致",
-                    500,
-                )
+                from features.x_video_publish.recovery_1389 import validate_admission
+                recovered_reservation_admission = validate_admission(conn, run_id, prepared, failures)
+                if recovered_reservation_admission is None:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "手动发布素材占用状态与冻结任务不一致",
+                        500,
+                    )
             if str(run["status"]) not in {"queued", "running"}:
                 conn.rollback()
                 raise XPostError(
@@ -10419,6 +10423,9 @@ class XPostStore:
                 if personal is not None:
                     from features.x_video_publish.core import settle_personal_reservations
                     settle_personal_reservations(conn, run_id, timestamp)
+                if recovered_reservation_admission is not None:
+                    from features.x_video_publish.recovery_1389 import consume
+                    consume(conn, recovered_reservation_admission, timestamp)
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
                 raise XPostError(
