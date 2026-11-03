@@ -92,10 +92,11 @@ def counts():
 
 
 def ready(port):
+    path = '/api/ui/topbar' if port == 8787 else '/health'
     deadline = time.monotonic()+60
     while time.monotonic()<deadline:
         try:
-            with urllib.request.urlopen('http://127.0.0.1:%s/health'%port,timeout=3) as r:
+            with urllib.request.urlopen('http://127.0.0.1:%s%s'%(port,path),timeout=3) as r:
                 if r.status==200:return
         except Exception: pass
         time.sleep(1)
