@@ -48,11 +48,64 @@ class ComparisonTests(unittest.TestCase):
         events, pending = collector.compare(candidates, channels, DAY)
         self.assertFalse(pending)
         self.assertEqual({(e["platform"], e["drama"]) for e in events},
-                         {("facebook", "drama-1"), ("facebook", "different-id"), ("x", "drama-1")})
+                         {("facebook", "ours"), ("facebook", "negative"),
+                          ("facebook", "different-id"), ("x", "drama-1")})
         self.assertEqual(events[0]["state"], "no_confirmed_publication")  # stable drama ID sort
-        published = next(e for e in events if e["platform"] == "facebook" and e["drama"] == "drama-1")
-        self.assertEqual(published["history_success_count"], 2)
-        self.assertEqual(published["state"], "published_zero_income")
+        self.assertEqual(next(e for e in events if e["drama"] == "ours")["own_revenue_cents"], 1)
+
+    def test_revenue_threshold_is_inclusive_and_ratio_is_strict(self):
+        cases = [(999, 0, False), (1000, 0, True), (1000, 499, True),
+                 (1000, 500, False), (1000, 501, False), (1001, 500, True),
+                 (1000, 2000, False)]
+        for socialkit, ours, expected in cases:
+            with self.subTest(socialkit=socialkit, ours=ours):
+                channel = own({"drama-1": ours}, {"drama-1": {"count": 2, "last_date": "2020-01-01"}})
+                events, pending = collector.compare([candidate(income=socialkit)], {"facebook": channel}, DAY)
+                self.assertEqual(bool(events), expected)
+                self.assertFalse(pending)
+                if expected:
+                    self.assertEqual(events[0]["reasons"], ["large_revenue_gap"])
+                    self.assertEqual(events[0]["own_revenue_cents"], ours)
+                    self.assertEqual(events[0]["revenue_gap_cents"], socialkit - ours)
+
+    def test_unpublished_is_independent_and_both_reasons_make_one_event(self):
+        for income, ours, reasons in ((1, 100, ["no_confirmed_publication"]),
+                                     (1000, 499, ["no_confirmed_publication", "large_revenue_gap"])):
+            events, _ = collector.compare([candidate(income=income)], {"facebook": own({"drama-1": ours})}, DAY)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["reasons"], reasons)
+
+    def test_seven_complete_days_excludes_today_and_handles_year_boundary(self):
+        self.assertEqual(collector.comparison_period(DAY),
+                         dict(start="2026-10-27", end="2026-11-02", days=7, timezone="UTC"))
+        self.assertEqual(collector.comparison_period("2027-01-01")["start"], "2026-12-25")
+
+    def test_own_range_sums_days_and_fails_if_any_day_is_missing(self):
+        days = collector.date_range("2026-10-27", "2026-11-02")
+        seen = []
+        def build(settings, actor, query, **kwargs):
+            current = query["start"][0]
+            seen.append(current)
+            self.assertEqual(query["end"], [current])
+            return {"quality": {"platforms": {"x": {"state": "complete", "publication_status": "complete"}}},
+                    "all_rows": [dict(drama="d", data_status="complete", revenue_cents=100)]}
+        # Historical updated_at does not need to change hourly; all seven fresh reads must succeed.
+        with patch.object(collector, "read_catalogs", return_value=([], {})) as catalogs, \
+             patch.object(collector, "build_report", side_effect=build), \
+             patch.object(collector, "source_times", return_value={"2116": "2026-10-27 12:00:00"}):
+            channel = collector.own_channel({}, days[0], "x", NOW, end=days[-1])
+            self.assertEqual(channel["amounts"], {"d": 700})
+            self.assertEqual(seen, days)
+            self.assertEqual(catalogs.call_count, 1)
+            self.assertEqual(set(channel["source_updated_by_date"]), set(days))
+        good = build({}, {}, {"start": [days[0]], "end": [days[0]]})
+        bad = copy.deepcopy(good)
+        bad["quality"]["platforms"]["x"]["state"] = "partial"
+        with patch.object(collector, "read_catalogs", return_value=([], {})), \
+             patch.object(collector, "build_report", side_effect=[good, bad]), \
+             patch.object(collector, "source_times", return_value={"2116": "2026-10-27 12:00:00"}):
+            with self.assertRaisesRegex(collector.ComparisonUnavailable, "incomplete"):
+                collector.own_channel({}, days[0], "x", NOW, end=days[-1])
 
     def test_unknown_never_zero_and_other_platform_continues(self):
         events, pending = collector.compare([candidate(), candidate("bad"), candidate("x", "x")],
@@ -152,6 +205,30 @@ class ComparisonTests(unittest.TestCase):
             with self.assertRaises(collector.ComparisonUnavailable):
                 collector.socialkit_candidates(root, "v1", DAY, NOW + timedelta(hours=3))
 
+    def test_snapshot_seven_day_total_boundaries_completeness_and_freshness(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            conn = sqlite3.connect(root / "v1.sqlite3")
+            conn.execute("CREATE TABLE metadata(key TEXT,value TEXT)")
+            conn.execute("CREATE TABLE effects(date TEXT,platform TEXT,drama_app_id INTEGER,drama_content_id TEXT,drama_name TEXT,revenue_cents INTEGER,matched INTEGER)")
+            days = collector.date_range("2026-10-27", "2026-11-02")
+            conn.executemany("INSERT INTO effects VALUES(?,?,?,?,?,?,?)", [
+                (d, "facebook", 1479, "d", "name", 100, 1) for d in ["2026-10-26"] + days + [DAY]])
+            conn.commit(); conn.close()
+            details = {d: dict(state="complete", refreshed_at=NOW.isoformat(), source_updated_at=d + "T12:00:00Z") for d in days}
+            manifest = dict(version="v1", database="v1.sqlite3", date_manifest=details)
+            path = root / "current.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            rows, meta = collector.socialkit_candidates(root, "v1", days[0], NOW, end=days[-1])
+            self.assertEqual(rows[0]["revenue_cents"], 700)
+            self.assertEqual(set(meta["date_manifest"]), set(days))
+            with self.assertRaisesRegex(collector.ComparisonUnavailable, "stale"):
+                collector.socialkit_candidates(root, "v1", days[0], NOW + timedelta(hours=27), end=days[-1])
+            del details[days[3]]
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(collector.ComparisonUnavailable, "unavailable"):
+                collector.socialkit_candidates(root, "v1", days[0], NOW, end=days[-1])
+
 
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
@@ -228,11 +305,33 @@ class DeliveryTests(unittest.TestCase):
             raise DefiniteFailure("not accepted")
         deliver(self.store, report(), CHAT_ID, fail)
         changed = event(); changed.update(history_success_count=1, last_published_date=DAY,
-                                         state="published_zero_income")
+                                         socialkit_revenue_cents=1000, state="large_revenue_gap")
         result = deliver(self.store, report([changed]), CHAT_ID, self.sender)
         self.assertEqual(result["sent_cards"], 1)
         self.assertEqual([r["status"] for r in result["receipts"]].count("cancelled"), 1)
-        self.assertIn("已发布，今日未出收入", json.dumps(self.sent[0][0], ensure_ascii=False))
+        self.assertIn("近 7 个完整日收入差距较大", json.dumps(self.sent[0][0], ensure_ascii=False))
+
+    def test_new_rules_preserve_existing_same_day_receipts(self):
+        deliver(self.store, report(), CHAT_ID, self.sender)
+        upgraded = event()
+        upgraded.update(rule_version=collector.RULE_VERSION, period=collector.comparison_period(DAY),
+                        socialkit_revenue_cents=10000, own_revenue_cents=1000,
+                        history_success_count=1, state="large_revenue_gap", reasons=["large_revenue_gap"])
+        result = deliver(self.store, report([upgraded]), CHAT_ID, self.sender)
+        self.assertEqual(result["new_events"], 0)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_card_explains_window_reason_amount_and_ratio(self):
+        row = event()
+        row.update(socialkit_revenue_cents=10000, own_revenue_cents=2000,
+                   history_success_count=3, last_published_date="2026-01-01",
+                   state="large_revenue_gap", reasons=["large_revenue_gap"])
+        card = split_cards(report([row]), [row], CHAT_ID)[0][1]
+        content = json.dumps(card, ensure_ascii=False)
+        for expected in ("2026-10-27 至 2026-11-02", "不含当天", "$100.00", "$20.00", "$80.00", "20.00%",
+                         "近 7 个完整日收入差距较大", "全部历史"):
+            self.assertIn(expected, content)
+        self.assertNotIn("今日未出收入", content)
 
     def test_success_without_receipt_is_unknown(self):
         result = deliver(self.store, report(), CHAT_ID, lambda *args: {})

@@ -106,6 +106,7 @@ def run_alerts(*, socialkit_root=DEFAULT_SOCIALKIT_ROOT, root=DEFAULT_ROOT,
             incomplete = bool(report["pending"] or report["errors"] or outcome.get("held_cards") or outcome.get("failed_cards"))
             summary = dict(status="partial" if incomplete else "complete", mode="send" if send else "preview",
                            date=day, version=report["socialkit"]["version"], run_id=run_id,
+                           period=report.get("period"), rule_version=report.get("rule_version"),
                            candidate_events=len(report["events"]), pending=len(report["pending"]),
                            errors=report["errors"], path=str(folder), finished_at=datetime.now(timezone.utc).isoformat(),
                            **outcome)

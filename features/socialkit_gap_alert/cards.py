@@ -3,6 +3,8 @@ import json
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 
+from .collector import comparison_period
+
 LABELS = {"facebook": "Facebook", "youtube": "YouTube", "x": "X"}
 MAX_BYTES = 24000
 MAX_ITEMS = 10
@@ -27,19 +29,30 @@ def beijing_time(value):
 
 
 def make_card(report, events):
-    text = ["Dramawave · SocialKit 有收入，我方尚无收入",
-            "统计日：%s UTC（北京时间 08:00 切日）" % report["date"],
-            "SocialKit 源更新（北京时间）：%s" % beijing_time(report["socialkit"].get("source_updated_at")),
+    period = report.get("period") or comparison_period(report["date"])
+    text = ["Dramawave · 我方未发布或收入差距较大",
+            "收入区间：%s 至 %s UTC（最近 7 个完整日，不含当天）" % (period["start"], period["end"]),
+            "播报日期：%s UTC（北京时间 08:00 切日）" % report["date"],
+            "条件一：SocialKit 区间收入 > $0，且我方该平台全部历史未查到成功发布。",
+            "条件二：SocialKit 区间收入 ≥ $10，且我方区间收入 < SocialKit 的 50%。满足任一条件播报。",
+            "SocialKit 区间源最新更新（北京时间）：%s" % beijing_time(report["socialkit"].get("source_updated_at")),
             "比较采集（北京时间）：%s" % beijing_time(report["collected_at"]),
-            "收入为 USD 原始收入；当天数据仍会回传。"]
+            "收入为 USD 原始收入，不扣退款；历史数据可能回补。"]
     elements = [{"tag": "div", "text": {"tag": "plain_text", "content": "\n".join(text)}}]
     for event in events:
-        label = ("已发布，今日未出收入" if event["history_success_count"] else "未查到成功发布")
-        content = ("%s · %s\n剧目 ID：%s\nSocialKit %s ／ 我方 %s\n%s"
+        reasons = event.get("reasons") or [event["state"]]
+        label = "；".join({"no_confirmed_publication": "该平台全部历史未查到成功发布",
+                           "large_revenue_gap": "近 7 个完整日收入差距较大"}.get(reason, reason)
+                          for reason in reasons)
+        socialkit, own = event["socialkit_revenue_cents"], event["own_revenue_cents"]
+        ratio = format(Decimal(own) * 100 / Decimal(socialkit), ".2f") + "%"
+        content = ("%s · %s\n剧目 ID：%s\n近 7 日收入：SocialKit %s ／ 我方 %s\n命中原因：%s"
+                   "\n收入差额（SocialKit－我方）：%s；我方占比：%s"
                    "\n历史成功发布：%d；最近发布日期（UTC）：%s") % (
                        LABELS[event["platform"]], event["drama_name"], event["drama"],
                        dollars(event["socialkit_revenue_cents"]), dollars(event["own_revenue_cents"]),
-                       label, event["history_success_count"], event["last_published_date"] or "无")
+                       label, dollars(socialkit - own), ratio,
+                       event["history_success_count"], event["last_published_date"] or "无")
         elements.append({"tag": "hr"})
         elements.append({"tag": "div", "text": {"tag": "plain_text", "content": content}})
     own = report.get("own_source_updated_at", {})
@@ -47,7 +60,7 @@ def make_card(report, events):
              for site, value in sorted(own.get(p, {}).items())]
     if times:
         elements.append({"tag": "note", "elements": [{"tag": "plain_text",
-                         "content": "我方源更新（北京时间）：" + "；".join(times)}]})
+                         "content": "我方区间源最新更新（北京时间）：" + "；".join(times)}]})
     elements.append({"tag": "action", "actions": [
         {"tag": "button", "text": {"tag": "plain_text", "content": "SocialKit 效果报表"},
          "url": "https://ai.yingliangads.com/socialkit-analytics.html", "type": "default"},
