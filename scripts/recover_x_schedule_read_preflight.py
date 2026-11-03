@@ -18,6 +18,7 @@ from scripts.recover_x_schedule_scope_churn import verify_runner
 
 FIRST='x_post_schedule_zero_write_resume_audit'
 SECOND='x_post_schedule_scope_churn_resume_audit'
+EPISODE='x_post_schedule_episode_filter_retry_audit'
 TABLE='x_post_schedule_read_preflight_resume_audit'
 SCHEMA='''CREATE TABLE IF NOT EXISTS x_post_schedule_read_preflight_resume_audit (
  run_id INTEGER PRIMARY KEY,failed_at TEXT NOT NULL,identity_sha256 TEXT NOT NULL,
@@ -29,7 +30,8 @@ EXACT={
  1029:dict(failed_at='2026-11-03T11:59:14Z',error_code='x_post_drama_query_failed',snapshot=None,
      identity_sha256='4ee516ba46b0b9fa059e9e0611d47899eee15314d610da4dc3440e3bf2790ab7',
      run_sha256='a8b66715f6b09c41fc50605e244e64facb2dd1b00303eb023317a6aaf6af5e34',
-     audits={FIRST:'8771e758888223a13eedf749050544bb906fc0d2231995593c6d025acc844260'}),
+     audits={FIRST:'8771e758888223a13eedf749050544bb906fc0d2231995593c6d025acc844260',
+             EPISODE:'ec61e90c40fb6a57cf41d09ac346501de45e92641e608afc67c48be81b08a5d1'}),
  1034:dict(failed_at='2026-11-03T11:57:50Z',error_code='x_upstream_error',snapshot=4444,
      identity_sha256='5c33a45241b45be3552f6b42c9df18e4f7c8f8c65065c2d070039fe01c493a41',
      run_sha256='aeeca26185ef2c663f3abe32ac170484c18afbd281003d2e0b915f451e440da3',
@@ -67,7 +69,7 @@ def snapshot(c,ids):
         require(not c.execute('SELECT 1 FROM x_post_queue WHERE schedule_run_id=?',(rid,)).fetchone(),'schedule_queue_exists')
         require(not audit(c,TABLE,rid),'third_incident_recovery_exists')
         previous={}
-        for table in (FIRST,SECOND):
+        for table in (FIRST,SECOND,EPISODE):
             found=audit(c,table,rid)
             if table in anchor['audits']:
                 require(len(found)==1 and fingerprint(found[0])==anchor['audits'][table],'previous_recovery_audit_changed');previous[table]=found[0]

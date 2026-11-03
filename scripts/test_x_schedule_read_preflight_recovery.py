@@ -8,6 +8,7 @@ from unittest import mock
 from scripts import recover_x_schedule_read_preflight as recovery
 from scripts import recover_x_schedule_scope_churn as second
 from scripts import recover_x_zero_write_schedules as first
+from scripts import recover_x_drama_episode_selection as episode
 from scripts import test_x_zero_write_schedule_recovery as base
 
 
@@ -23,6 +24,10 @@ class ReadPreflightRecoveryTests(unittest.TestCase):
         initial=first.plan(self.path,[1029,1034],['2026-11-02','2026-11-03'])
         first.apply(self.path,initial,initial['plan_sha256'],Path(self.temp.name)/'first','operator','original recovery')
         self.update(second.SCHEMA)
+        self.update(episode.SCHEMA)
+        with contextlib.closing(recovery.read_connection(self.path)) as c:
+            original=dict(c.execute('SELECT * FROM '+recovery.FIRST+' WHERE run_id=1029').fetchone())
+        self.update('INSERT INTO '+recovery.EPISODE+' VALUES(?,?,?,?,?,?,?,?)',(1029,original['identity_sha256'],'episode-plan','operator','episode filter recovery','previous-time','previous-backup',json.dumps({'previous_failure':'episode selection'})))
         with contextlib.closing(recovery.read_connection(self.path)) as c:
             previous=dict(c.execute('SELECT * FROM '+recovery.FIRST+' WHERE run_id=1034').fetchone())
         self.update('INSERT INTO '+recovery.SECOND+' VALUES(?,?,?,?,?,?,?,?,?,?)',(1034,'previous-failure',previous['identity_sha256'],recovery.fingerprint(previous),'previous-plan','operator','second recovery','previous-time','previous-backup',json.dumps({'previous_failure':'scope churn'})))
@@ -33,7 +38,7 @@ class ReadPreflightRecoveryTests(unittest.TestCase):
             self.update("UPDATE x_post_schedule_run SET status='failed_preflight',error_code=?,error_message='unclassified old read error',finished_at=?,updated_at=? WHERE id=?",(code,failed,failed,rid))
             run=self.row(rid)
             with contextlib.closing(recovery.read_connection(self.path)) as c:
-                audits={t:recovery.fingerprint(recovery.audit(c,t,rid)[0]) for t in (recovery.FIRST,recovery.SECOND) if recovery.audit(c,t,rid)}
+                audits={t:recovery.fingerprint(recovery.audit(c,t,rid)[0]) for t in (recovery.FIRST,recovery.SECOND,recovery.EPISODE) if recovery.audit(c,t,rid)}
             anchors[rid]=dict(failed_at=failed,error_code=code,snapshot=run['material_pool_snapshot_max_id'],identity_sha256=recovery.fingerprint(recovery.identity(run)),run_sha256=recovery.fingerprint(run),audits=audits)
         patch=mock.patch.object(recovery,'EXACT',anchors);patch.start();self.addCleanup(patch.stop)
         root=Path(__file__).resolve().parents[1];self.deployed=Path(self.temp.name)/'runtime';blobs={}
@@ -46,7 +51,7 @@ class ReadPreflightRecoveryTests(unittest.TestCase):
     def plan(self,ids=None):return recovery.plan(self.path,ids or [1029,1034],'b'*40,self.runner,Path(self.temp.name))
     def apply(self,plan):return recovery.apply(self.path,plan,Path(self.temp.name)/'third','reviewer','one original zero-write recovery')
     def audits(self):
-        with contextlib.closing(recovery.read_connection(self.path)) as c:return {t:[dict(r) for r in c.execute('SELECT * FROM '+t)] for t in (recovery.FIRST,recovery.SECOND)}
+        with contextlib.closing(recovery.read_connection(self.path)) as c:return {t:[dict(r) for r in c.execute('SELECT * FROM '+t)] for t in (recovery.FIRST,recovery.SECOND,recovery.EPISODE)}
 
     def test_exact_once_preserves_both_predecessor_audits_and_queued_1039(self):
         previous=self.audits();other=self.row(1039);before={rid:self.row(rid) for rid in (1029,1034)}
@@ -65,6 +70,13 @@ class ReadPreflightRecoveryTests(unittest.TestCase):
     def test_any_previous_audit_change_blocks_without_overwriting_it(self):
         plan=self.plan();self.update('UPDATE '+recovery.SECOND+" SET reason='new reason' WHERE run_id=1034")
         with self.assertRaises(recovery.RecoveryRejected):self.apply(plan)
+        self.assertEqual(self.row(1029)['status'],'failed_preflight')
+
+    def test_episode_recovery_audit_missing_or_changed_also_blocks(self):
+        plan=self.plan();self.update('UPDATE '+recovery.EPISODE+" SET reason='changed' WHERE run_id=1029")
+        with self.assertRaises(recovery.RecoveryRejected):self.apply(plan)
+        self.update('DELETE FROM '+recovery.EPISODE+' WHERE run_id=1029')
+        with self.assertRaises(recovery.RecoveryRejected):self.plan()
         self.assertEqual(self.row(1029)['status'],'failed_preflight')
 
     def test_future_same_code_failure_queue_fence_unknown_and_identity_are_not_admitted(self):

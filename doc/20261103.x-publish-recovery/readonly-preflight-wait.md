@@ -15,7 +15,7 @@
 - features/x_posts/selector.py
 - features/x_posts/read_failures.py
 
-`recover_x_schedule_read_preflight.py` 是独立精确恢复工具，限当前 1029/1034 两次已知零写失败。完整原 run SHA、失败时间和冻结身份硬锚定；1029 引用首次审计，1034 同时引用首次和第二次审计，旧表不修改。新表 `x_post_schedule_read_preflight_resume_audit` 保存原错误、全部前审计、备份 SHA 和部署证据。备份后重新在事务内核验再 CAS claimed，重复同计划不重置后续进展。1039 已有 38 队列，明确排除。
+`recover_x_schedule_read_preflight.py` 是独立精确恢复工具，限当前 1029/1034 两次已知零写失败。完整原 run SHA、失败时间和冻结身份硬锚定；1029 引用首次审计和 11:50:49Z 的 `x_post_schedule_episode_filter_retry_audit`（完整行 SHA256 `ec61e90c40fb6a57cf41d09ac346501de45e92641e608afc67c48be81b08a5d1`），1034 同时引用首次和账号范围二次审计，旧表不修改。新表 `x_post_schedule_read_preflight_resume_audit` 保存原错误、全部前审计、备份 SHA 和部署证据。备份后重新在事务内核验再 CAS claimed，重复同计划不重置后续进展。1039 已有 38 队列，明确排除。
 
 ```bash
 python -B scripts/recover_x_schedule_read_preflight.py plan --db /var/lib/x-post-automation/accounts.sqlite3 \
