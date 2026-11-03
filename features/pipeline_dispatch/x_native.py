@@ -20,6 +20,7 @@ import urllib.request
 from urllib.parse import urlsplit, parse_qs
 
 from .adapters import AdapterError, obj
+from .diagnostics import failure_fields
 from features.x_posts import service as posts
 from features.x_posts import duration_policy
 from features.x_posts.media_limits import video_byte_limit
@@ -579,17 +580,20 @@ class XNativeBridge:
         if log["status"] == "published":
             return {"status": "published", "canonical_terminal": True}
         code = str(receipt.get("error_code", "pipeline_execution_failed"))[:120]
+        # The scheduler derives account locks from this canonical receipt.
+        # Preserve bounded, redacted diagnostics across the native boundary.
+        message = failure_fields(receipt.get("error_message")).get("error_message") or code
         unknown = bool(receipt.get("unknown_outcome")) or log["status"] in ("post_creating", "repost_creating")
         if unknown and log["status"] in ("post_creating", "repost_creating"):
             # Preserve the state required to accept this exact attempt's late
             # receipt. It remains quarantined and cannot receive new permits.
             with self.connect() as c:
-                c.execute("UPDATE x_post_publish_log SET unknown_outcome=1,error_code=?,error_message=?,updated_at=? WHERE id=?", (code, code, posts.utc_now(), log["id"]))
+                c.execute("UPDATE x_post_publish_log SET unknown_outcome=1,error_code=?,error_message=?,updated_at=? WHERE id=?", (code, message, posts.utc_now(), log["id"]))
             return {"canonical_no_write": False}
         if log["status"] == "reserved":
-            self.store.mark_failed_if_reserved(log["id"], code, code)
+            self.store.mark_failed_if_reserved(log["id"], code, message)
         else:
-            self.store.mark_failed(log["id"], code, code, unknown)
+            self.store.mark_failed(log["id"], code, message, unknown)
         return {"canonical_no_write": not unknown}
 
     def reconcile(self, job):
