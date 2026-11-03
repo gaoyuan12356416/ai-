@@ -20,7 +20,7 @@ def authorize(handler, app):
                 status = 403
                 if (session.get('user_id') == owner['user_id']
                         and session.get('tenant_key') == owner['tenant_key']
-                        and session.get('source') in ('feishu_web', 'feishu_js_sdk')):
+                        and session.get('source') in ('feishu_web', 'feishu_internal')):
                     with app['JOB_DB_LOCK']:
                         conn = app['get_job_db_connection']()
                         try:

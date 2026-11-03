@@ -43,6 +43,8 @@ class OwnerTests(unittest.TestCase):
         self.assertEqual(204, self.run_case({'user_id': 'owner', 'tenant_key': 'tenant', 'source': 'feishu_web', 'expires_at': time.time()+60}))
     def test_other_user(self):
         self.assertEqual(403, self.run_case({'user_id': 'other', 'tenant_key': 'tenant', 'source': 'feishu_web', 'expires_at': time.time()+60}))
+    def test_feishu_internal(self):
+        self.assertEqual(204, self.run_case({'user_id': 'owner', 'tenant_key': 'tenant', 'source': 'feishu_internal', 'expires_at': time.time()+60}))
     def test_wrong_tenant(self):
         self.assertEqual(403, self.run_case({'user_id': 'owner', 'tenant_key': 'other', 'source': 'feishu_web', 'expires_at': time.time()+60}))
     def test_service_token_denied(self):
