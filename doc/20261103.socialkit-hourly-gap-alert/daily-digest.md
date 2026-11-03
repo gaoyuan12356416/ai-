@@ -13,3 +13,5 @@
 安装使用 `ops/socialkit-analytics/install_hourly.py --install COMMIT`，仅切独立 release、报表静态资源及本功能四个 units。验证后恢复小时 timer，并 enable/start daily timer。主 API、社媒发布器无需重启。回滚先 verify-rollback 再 rollback 新备份 manifest；安装器停两个 timer，获取刷新与提醒锁，恢复旧指针/文件并关闭新 daily timer；保留所有快照和发送账本。若原小时 timer 因本次紧急暂停被记录为 inactive，回滚后由操作员显式恢复。回滚旧版本将恢复原小时分卡行为，故当前业务需求下应优先保持提醒暂停。
 
 验证：大规模单卡和完整 HTML、注入转义、预览无副作用、当天手发去重、隔天发送、未知回执不重试、明确失败冻结重试、上传失败不认领、跨日中止、小时刷新不发送、定时器无补跑；旧七日规则和归因测试继续通过。真实收入和群回执仅保存私有数据盘，禁止入公开 Git。
+
+部署完成：运行提交 `c409299d7177e67597f7384a0579bb2ee5f90370`，CPU 精确 release 指针已核验；今天手动汇总已发送并读取飞书消息确认，下一次每日 timer 为北京时间 2026-11-04 11:30。小时刷新 timer 已恢复。最终备份 `hourly-20261103T103131Z/manifest.json` 位于 `/mnt/data-disk/socialkit-analytics/backups/`；完整回退先使用该 manifest，再使用首次功能切换备份 `hourly-20261103T103001Z/manifest.json`，每步先 verify-rollback。保留旧账本和日报新账本。
