@@ -243,16 +243,28 @@ class DispatchStore:
             config = self.config(c)
             if patch.get("expected_version") != config["version"]:
                 raise DispatchError("capacity_version_conflict")
+            if "scaling_mode" in patch and ("host_id" not in patch or patch["scaling_mode"] not in ("auto", "manual")):
+                raise DispatchError("capacity_scaling_mode_invalid", status=400)
             if "host_id" in patch:
                 host, stage = patch["host_id"], patch.get("stage")
                 if host not in config["hosts"] or stage not in STAGES:
                     raise DispatchError("capacity_pool_invalid", status=400)
-                ceiling = _positive(patch.get("max_workers", patch.get("capacity")), True)
                 pool = config["hosts"][host][stage]
+                previous_mode = pool.get("scaling_mode", "auto")
+                mode = patch.get("scaling_mode", previous_mode)
+                ceiling = _positive(patch.get("max_workers", patch.get("capacity", pool["ceiling"] if "scaling_mode" in patch else None)), True)
                 pool["ceiling"] = ceiling
-                pool["target"] = min(pool["target"], ceiling)
-                if ceiling and pool["target"] == 0:
-                    pool["target"] = 1
+                pool["scaling_mode"] = mode
+                if mode == "manual":
+                    pool["target"] = ceiling
+                else:
+                    pool["target"] = min(pool["target"], ceiling)
+                    if ceiling and pool["target"] == 0:
+                        pool["target"] = 1
+                if mode != previous_mode:
+                    # A restored automatic pool starts a new pressure window;
+                    # observations from its prior automatic period do not apply.
+                    c.execute("DELETE FROM pipeline_capacity_sample WHERE node_id=? AND stage=?", (host, stage))
             if "global_publish_limit" in patch:
                 config["global_publish_limit"] = _positive(patch["global_publish_limit"], True)
             for channel, limit in patch.get("channel_limits", {}).items():
@@ -1138,6 +1150,8 @@ class DispatchStore:
                     continue
                 for stage in STAGES:
                     pool = config["hosts"][node["node_id"]][stage]
+                    if pool.get("scaling_mode", "auto") == "manual":
+                        continue
                     state = c.execute("SELECT * FROM pipeline_capacity_sample WHERE node_id=? AND stage=?", (node["node_id"], stage)).fetchone()
                     last = state["last_change"] if state else ""
                     high = state["high_since"] if state else ""

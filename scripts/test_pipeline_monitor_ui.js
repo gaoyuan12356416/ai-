@@ -14,6 +14,7 @@ summary.efficiency = [
 ];
 let capacity = { version: 1, hosts: ["cpu-main", "hk-gpu", "gpu-third"].flatMap(host_id => ["prepare", "publish"].map(stage => ({ host_id, stage, max_workers: host_id === "gpu-third" && stage === "prepare" ? 1 : 2, ceiling: 4 }))), global_publish_limit: 8, channel_limits: { x: 4, fb: 8, tt: 4, youtube: 2 } };
 let admin = true, authenticated = true, failSummary = false, calls = [], writes = [];
+capacity.hosts.filter(row => row.host_id === "hk-gpu").forEach(row => row.scaling_mode = "manual");
 const workers = () => ({ ...base, capacity, items: ["cpu-main", "hk-gpu", "gpu-third"].map((host_id, i) => ({ host_id, label: ["CPU 服务器", "香港 GPU", "新增 GPU 服务器"][i], last_seen_at: stamp, stale: false, cpu_percent: 35, memory_used_bytes: 8e9, memory_total_bytes: 32e9, gpu_percent: i ? 65 : null, gpu_count: i ? 1 : 0, gpu_memory_used_bytes: i ? 3e9 : null, gpu_memory_total_bytes: i ? 16e9 : null, stages: ["prepare", "publish"].map(stage => ({ stage, max_workers: i === 2 && stage === "prepare" ? 1 : 2, ceiling: 4, alive_workers: i === 2 && stage === "prepare" ? 4 : 2, busy_workers: i === 2 && stage === "prepare" ? 3 : 1, idle_workers: 1, completed_today: 24, throughput_per_hour: 5 })) })), processes: [{ host_id: "gpu-third", worker_id: "prepare-1", stage: "prepare", pid: 12345, status: "busy", current_source_key: "x:auto:fixture-1", channel: "x", phase: "render", elapsed_seconds: 165, last_seen_at: stamp }, { host_id: "cpu-main", worker_id: "publish-1", stage: "publish", pid: 23456, status: "idle", elapsed_seconds: null, last_seen_at: stamp, idle_reason: "账号正在发布，等待下一条可领取任务" }] });
 const task = { id: 17, source_key: "fixture-task", source_id: "fixture-17", channel: "x", source_family: "自动模板", stage: "publish", status: "unknown", host_id: "gpu-third", worker_id: "publish-1", account_label: "<img src=x onerror=alert(1)>", owner_name: "测试运营", created_at: stamp, started_at: stamp, duration_seconds: null, wait_seconds: 20, detail_url: "javascript:alert(1)" };
 const server = http.createServer((req, res) => {
@@ -22,7 +23,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/ui/topbar") return send(200, { authenticated, user: { is_admin: admin, name: "测试用户", role: admin ? "admin" : "user", permissions: { x_accounts: true } } });
   if (url.pathname === "/api/navigation") return send(200, { items: [] });
   if (url.pathname === "/api/pipeline-monitor/summary") return failSummary ? send(503, { message: "测试采集失败，保留上次数据" }) : send(200, { ...summary, scope: admin ? "all" : "mine" });
-  if (url.pathname === "/api/pipeline-monitor/workers") return send(200, admin ? workers() : { ...base, items: [], processes: [], visibility_message: "服务器全局明细仅管理员可见" });
+  if (url.pathname === "/api/pipeline-monitor/workers") { const snapshot = workers(); snapshot.items.filter(row => row.host_id === "hk-gpu").forEach(row => row.stages.forEach(stage => stage.scaling_mode = "manual")); return send(200, admin ? snapshot : { ...base, items: [], processes: [], visibility_message: "服务器全局明细仅管理员可见" }); }
   if (url.pathname === "/api/pipeline-monitor/tasks") return send(200, { ...base, items: [task], total: 1, next_cursor: "" });
   if (url.pathname === "/api/pipeline-monitor/capacity") { let raw = ""; req.on("data", b => raw += b); return req.on("end", () => { const body = JSON.parse(raw); writes.push(body); capacity = { ...capacity, version: capacity.version + 1 }; send(200, { capacity }); }); }
   if (url.pathname === "/api/pipeline-monitor/nodes/enroll") return send(200, { enrollment_id: "fixture-enrollment", token: "fixture-one-use-token", expires_at: new Date(Date.now() + 600000).toISOString() });
@@ -51,6 +52,10 @@ const server = http.createServer((req, res) => {
     assert.match(await page.locator("#pmProcessRows").innerText(), /新增 GPU 服务器[\s\S]*制作渲染/);
     assert.match(await page.locator("#pmProcessRows").innerText(), /账号正在发布/);
     const drainStage = page.locator('[data-worker-host="gpu-third"] [data-worker-stage="prepare"]');
+    assert.match(await page.locator('form[data-host="hk-gpu"][data-stage="prepare"]').innerText(), /手动[\s\S]*保存后按此并发接单/);
+    assert.match(await page.locator('[data-worker-host="hk-gpu"] [data-worker-stage="prepare"]').innerText(), /当前目标 \/ 上限 · 手动/);
+    assert.match(await page.locator('[data-worker-host="cpu-main"] [data-worker-stage="prepare"]').innerText(), /当前目标 \/ 上限 · 自动/);
+    assert.equal(await page.locator('#pmCapacityForms select[name="scaling_mode"]').count(), 0);
     assert.match(await drainStage.innerText(), /当前目标 \/ 上限[\s\S]*1 \/ 4/);
     assert.match(await drainStage.innerText(), /忙碌 \/ 空闲 \/ 存活[\s\S]*3 \/ 1 \/ 4/);
     assert.match(await drainStage.innerText(), /自然排空[\s\S]*当前 3 个任务继续完成/);

@@ -129,7 +129,7 @@ def _common(conn, actor, channels, now):
 def capacity_dto(config):
     return {"version": config["version"],
             "hosts": [{"host_id": host, "stage": stage, "max_workers": pool.get("target"),
-                       "ceiling": pool.get("ceiling")} for host, pools in sorted(config["hosts"].items())
+                       "ceiling": pool.get("ceiling"), "scaling_mode": pool.get("scaling_mode", "auto")} for host, pools in sorted(config["hosts"].items())
                       for stage, pool in pools.items() if stage in STAGES],
             "global_publish_limit": config.get("global_publish_limit"),
             "channel_limits": {c: config.get("channel_limits", {}).get(c) for c in CHANNELS}}
@@ -373,6 +373,7 @@ def _workers(conn, store, actor, common, now):
             group = [p for p in processes if p["host_id"] == host and p["stage"] == stage]
             stat = stats.get((host, stage), {})
             item["stages"].append({"stage": stage, "max_workers": pool.get("target"), "ceiling": pool.get("ceiling"),
+                                   "scaling_mode": pool.get("scaling_mode", "auto"),
                                    "alive_workers": sum(p["status"] != "offline" for p in group) if node else None,
                                    "busy_workers": sum(p["status"] == "busy" for p in group) if node else None,
                                    "idle_workers": sum(p["status"] == "idle" for p in group) if node else None,
