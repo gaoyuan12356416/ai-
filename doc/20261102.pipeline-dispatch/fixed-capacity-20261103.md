@@ -156,8 +156,12 @@ transition cleared automatically; no duplicate disposition or queue was made.
 Final 14:39 snapshot: configuration70, actual CPU4/6 and GPU6/4 live pools,
 CPU4 + GPU6 preparations executing. Of the six existing-artifact publications,
 5392/5394/5398 had unique real Post IDs at attempt1/unknown0; 5396/5458 remained
-in publication; 5395 had a platform error at attempt1/unknown0 and was not
-automatically resent. Remaining normal business work continues asynchronously.
+in publication; 5395 had an X append-stage network write timeout at
+attempt1/unknown0 and was not automatically resent. Its media initialization
+was recorded, but no finalize or create-Post operation occurred and no Post ID
+existed. There is no HTTP rejection evidence; this is an upload transport
+failure, not a GPU preparation failure. The final artifact remains preserved.
+Remaining normal business work continues asynchronously.
 All code was GitHub-first and all changes preserved running node supervisors.
 Skill context was unchanged: requested numeric capacities are operational
 configuration, and the reusable recovery behavior is documented in this repo.
