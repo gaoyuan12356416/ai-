@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
 
 ROOT=Path('/root/drama_material_service')
 BASE=Path('/mnt/data-disk/pipeline-dispatch')
@@ -31,6 +32,7 @@ def environment(unit):
     os.environ.update({k.decode():v.decode() for k,v in (p.split(b'=',1) for p in Path('/proc/'+pid+'/environ').read_bytes().split(b'\0') if b'=' in p)})
 
 def main():
+    continuing='--continue-video' in sys.argv
     environment('pipeline-youtube-canonical.service')
     sys.path.insert(0,str(ROOT))
     with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
@@ -52,14 +54,23 @@ def main():
     assert original['status']=='unknown' and original['unknown_outcome']==1 and not original['lease_owner']
     assert original['pipeline_dispatch_key']==KEY and original['video_attempt_count']==1
     assert original['source_sha256']==MEDIA_SHA and original['source_size']==199197353
-    assert not original['video_id'] and not original['comment_attempt_count'] and not original['comment_id'] and not original['publish_at']
+    assert original['video_id']==('JUI00EaF1Ew' if continuing else '')
+    assert not original['comment_attempt_count'] and not original['comment_id'] and not original['publish_at']
     assert hashlib.sha256(original['resumable_session_uri'].encode()).hexdigest()==SESSION_SHA
     with contextlib.closing(sqlite3.connect('file:'+str(BASE/'dispatch.sqlite3')+'?mode=ro',uri=True)) as d:
         row=d.execute('SELECT status,generation,source_key FROM pipeline_job WHERE id=?',(JOB,)).fetchone()
         assert row==('unknown',1,KEY)
         assert d.execute('SELECT 1 FROM pipeline_resource WHERE job_id=? AND quarantined=1',(JOB,)).fetchone()
     probe=client.query_upload(original['resumable_session_uri'],original['source_size'])
-    assert probe=={'state':'resume','next_byte':0},'upload_readback_changed'
+    if continuing:
+        assert probe=={'state':'submitted','video_id':original['video_id'],'next_byte':original['source_size']}
+        repository=YouTubeCredentialRepository(readonly_runner(app),schema=app.DB_NAME)
+        credential=repository.credential(app_id=original['app_id'],channel_local_id=original['channel_local_id'],account_id=original['youtube_account_id'],expected_channel_id=original['channel_id'])
+        token=client.refresh_access_token(credential);client.verify_channel_identity(token,original['channel_id'])
+        state=client.read_reviewed_video_state(token,original['video_id'],expected_channel_id=original['channel_id'])
+        assert state['state']=='succeeded' and state['visibility']=='private' and not state['preserved_status'].get('publishAt')
+    else:
+        assert probe=={'state':'resume','next_byte':0},'upload_readback_changed'
     print(json.dumps({'at':now(),'task_id':TASK,'original_session_sha256':SESSION_SHA,'readback':probe,'apply':'--apply' in sys.argv}),flush=True)
     if '--apply' not in sys.argv:return
     # Both normal workers and the operator obey the original YouTube limit.
@@ -67,9 +78,10 @@ def main():
     while True:
         with contextlib.closing(sqlite3.connect('file:'+str(BASE/'dispatch.sqlite3')+'?mode=ro',uri=True)) as d:
             config=json.loads(d.execute('SELECT config_json FROM pipeline_config WHERE id=1').fetchone()[0])
-            assert 'youtube' not in config['enabled_channels'],'pause_youtube_admission_first'
+            reserved=continuing and config['channel_limits']['youtube']==1 and (BASE/'youtube-queue-recovery-20261103T094659Z/manual-slot.json').is_file()
+            assert 'youtube' not in config['enabled_channels'] or reserved,'pause_youtube_admission_first'
             running=d.execute("SELECT count(*) FROM pipeline_job WHERE channel='youtube' AND stage='publish' AND status='running'").fetchone()[0]
-        if running < config['channel_limits']['youtube']:break
+        if running < (2 if reserved else config['channel_limits']['youtube']):break
         assert time.monotonic()<deadline,'youtube_slots_not_drained'
         time.sleep(10)
     backup=BASE/('youtube-session-1143-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
@@ -97,7 +109,13 @@ def main():
                 return dict(c.execute('SELECT * FROM drama_youtube_publish WHERE id=?',(TASK,)).fetchone())
     storage=Path(os.environ.get('YOUTUBE_AUTO_STORAGE_ROOT','/mnt/data-disk/youtube-auto-publish'))
     target=TargetStore(DB)
-    engine=ReviewedYouTubePublishEngine(target,YouTubeCredentialRepository(readonly_runner(app),schema=app.DB_NAME),client,
+    class DiagnosticEngine(ReviewedYouTubePublishEngine):
+        def _failure(self,*args,**kwargs):
+            if kwargs.get('internal'):
+                kind,value,tb=sys.exc_info()
+                print(json.dumps({'internal_type':kind.__name__ if kind else '', 'frames':[{'file':Path(x.filename).name,'line':x.lineno,'function':x.name} for x in traceback.extract_tb(tb)]}),flush=True)
+            return super()._failure(*args,**kwargs)
+    engine=DiagnosticEngine(target,YouTubeCredentialRepository(readonly_runner(app),schema=app.DB_NAME),client,
         work_root=backup/'media',approved_cover_root=storage/'assets',
         allowed_source_hosts=tuple(x.strip().lower() for x in os.environ.get('DRAMA_YOUTUBE_SOURCE_HOSTS','').split(',') if x.strip()),media_executor=None)
     deadline=time.monotonic()+1200
