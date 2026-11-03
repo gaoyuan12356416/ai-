@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from features.x_accounts.language import canonical_drama_language
 from features.x_posts import duration_policy
+from features.pipeline_dispatch.backlog_contract import SCHEMA as BACKLOG_SCHEMA, disposition_record
 
 
 UTC = timezone.utc
@@ -546,7 +547,7 @@ def ensure_storage(db_path: Any) -> None:
             conn.executescript(
                 """
                 BEGIN IMMEDIATE;
-
+                """ + BACKLOG_SCHEMA + ";" + """
                 CREATE TABLE IF NOT EXISTS pipeline_canonical_hold (
                     source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL
                 );
@@ -2206,7 +2207,7 @@ class XAutoPostStore:
         lease_expires = (current_dt + timedelta(seconds=seconds)).isoformat(timespec="seconds")
         placeholders = ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES)
         with self._transaction() as conn:
-            row = conn.execute(
+            candidates = conn.execute(
                 """
                 SELECT t.*
                 FROM x_auto_task t
@@ -2225,10 +2226,11 @@ class XAutoPostStore:
                     t.scheduled_at_utc ASC,
                     t.template_id ASC,
                     t.id ASC
-                LIMIT 1
+                LIMIT 1000
                 """ % placeholders,
                 (current, *sorted(ACTIVE_ACCOUNT_TASK_STATUSES)),
-            ).fetchone()
+            ).fetchall()
+            row = next((item for item in candidates if disposition_record(conn, "x:auto:" + str(item["id"]), item) not in {"archive", "blocked"}), None)
             if row is None:
                 return None
             token = secrets.token_urlsafe(32)
@@ -2373,9 +2375,13 @@ class XAutoPostStore:
             for candidate in candidates:
                 if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", ("x:auto:" + str(candidate["id"]),)).fetchone():
                     continue
+                backlog = disposition_record(conn, "x:auto:" + str(candidate["id"]), candidate)
+                if backlog in {"archive", "blocked"}:
+                    continue
                 if (planning_boundary and not candidate["execution_queue_id"]
                     and str(candidate["scheduled_at_utc"]) <= planning_boundary
-                    and str(candidate["created_at"]) <= planning_boundary):
+                    and str(candidate["created_at"]) <= planning_boundary
+                    and backlog != "resume"):
                     continue
                 candidate_id = int(candidate["id"])
                 candidate_status = str(candidate["status"])

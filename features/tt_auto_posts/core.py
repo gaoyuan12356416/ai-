@@ -21,6 +21,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
+from features.pipeline_dispatch.backlog_contract import SCHEMA as BACKLOG_SCHEMA, disposition_record
+
 
 UTC = timezone.utc
 MAX_JSON_BYTES = 256 * 1024
@@ -495,7 +497,7 @@ def ensure_storage(db_path: Any) -> None:
             conn.executescript(
                 """
                 BEGIN IMMEDIATE;
-
+                """ + BACKLOG_SCHEMA + ";" + """
                 CREATE TABLE IF NOT EXISTS pipeline_canonical_hold(source_key TEXT PRIMARY KEY,cutoff TEXT NOT NULL,reason TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS tt_auto_template (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1961,7 +1963,7 @@ class TTAutoPostStore:
         lease_expires = (current_dt + timedelta(seconds=seconds)).isoformat(timespec="seconds")
         placeholders = ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES)
         with self._transaction() as conn:
-            row = conn.execute(
+            candidates = conn.execute(
                 """
                 SELECT t.*
                 FROM tt_auto_task t
@@ -1978,10 +1980,11 @@ class TTAutoPostStore:
                     t.scheduled_at_utc ASC,
                     t.template_id ASC,
                     t.id ASC
-                LIMIT 1
+                LIMIT 1000
                 """ % placeholders,
                 (current, *sorted(ACTIVE_ACCOUNT_TASK_STATUSES)),
-            ).fetchone()
+            ).fetchall()
+            row = next((item for item in candidates if disposition_record(conn, "tt:auto:" + str(item["id"]), item) not in {"archive", "blocked"}), None)
             if row is None:
                 return None
             token = secrets.token_urlsafe(32)
@@ -2073,6 +2076,16 @@ class TTAutoPostStore:
             raise TTAutoPostStoreError("tt_auto_claim_phases_invalid", "readback may only claim reconciliation", 400)
         active_placeholders = ",".join("?" for _ in ACTIVE_ACCOUNT_TASK_STATUSES)
         with self._transaction() as conn:
+            # Only exact committed authorizations can cross the historical
+            # date floor. Freeze the small verified ID set in this transaction;
+            # normal account/phase/unknown guards below still apply.
+            resumed_ids = {
+                int(item["id"]) for item in conn.execute(
+                    "SELECT t.* FROM tt_auto_task t JOIN pipeline_backlog_disposition d ON d.source_key='tt:auto:'||t.id WHERE d.action='resume' AND d.state='committed' AND t.status IN ('pending','selecting','reserved','preparing','retry_wait','ready') ORDER BY t.id LIMIT 500").fetchall()
+                if disposition_record(conn, "tt:auto:" + str(item["id"]), item) == "resume"
+            }
+            resumed_values = tuple(sorted(resumed_ids))
+            resumed_sql = ",".join("?" for _ in resumed_values) or "NULL"
             has_pipeline_claims = legacy_reconcile_only and conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_tt_claim'"
             ).fetchone() is not None
@@ -2104,6 +2117,7 @@ class TTAutoPostStore:
                     )
                 ) AND (
                     scheduled_at_utc>=?
+                    OR id IN (""" + resumed_sql + """)
                     OR status IN ('publishing','reconciling','unknown')
                     OR (status='retry_wait' AND claim_phase='reconcile')
                 )
@@ -2120,11 +2134,13 @@ class TTAutoPostStore:
                     template_id ASC,
                     id ASC
                 """,
-                (prepare_cutoff, *([current] * 9), self.execution_not_before_utc, int(legacy_reconcile_only)),
+                (prepare_cutoff, *([current] * 9), self.execution_not_before_utc, *resumed_values, int(legacy_reconcile_only)),
             )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
                 candidate_id = int(candidate["id"])
+                if disposition_record(conn, "tt:auto:" + str(candidate_id), candidate) in {"archive", "blocked"}:
+                    continue
                 if legacy_reconcile_only:
                     # Check admission atomically with the native lease. This
                     # path can only query an existing legacy platform receipt.
@@ -2185,6 +2201,7 @@ class TTAutoPostStore:
                 # account fences until their existing result is reconciled.
                 others = [other for other in others if (
                     str(other["scheduled_at_utc"]) >= self.execution_not_before_utc
+                    or int(other["id"]) in resumed_ids
                     or other["publish_id"] or other["unknown_outcome"]
                     or other["publish_attempt_count"]
                     or other["status"] in {"publishing", "reconciling", "unknown"}
