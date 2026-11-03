@@ -90,7 +90,9 @@ class Cutover:
             conn.execute("UPDATE pipeline_cutover_plan SET status=?,updated_at=? WHERE id=?", (state, self.store.now(), identity))
         return {"plan_id": identity, "status": state, "paused_count": len(manifest["paused"]) - len(errors), "errors": errors}
 
-    def enable(self, identity, expected_sha):
+    def enable(self, identity, expected_sha, *, preparation_only=False):
+        if not isinstance(preparation_only, bool):
+            raise DispatchError("preparation_only_invalid", status=400)
         saved, manifest = self.load(identity, expected_sha)
         if saved["status"] != "held":
             raise DispatchError("canonical_pauses_incomplete")
@@ -122,5 +124,5 @@ class Cutover:
             active = conn.execute("SELECT COUNT(*) FROM pipeline_job WHERE channel=? AND status='legacy_running'", (manifest["channel"],)).fetchone()[0]
         if active:
             raise DispatchError("legacy_items_still_running")
-        self.store.channel_enabled(manifest["channel"], True)
-        return {"accepted": True, "channel": manifest["channel"], "enabled": True}
+        self.store.channel_enabled(manifest["channel"], True, preparation_only=preparation_only)
+        return {"accepted": True, "channel": manifest["channel"], "enabled": True, "preparation_only": preparation_only}
