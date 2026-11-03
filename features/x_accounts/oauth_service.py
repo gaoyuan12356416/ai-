@@ -397,6 +397,7 @@ def ensure_storage():
                 "disconnected_by_name": "TEXT NOT NULL DEFAULT ''",
                 "publish_approved": "INTEGER NOT NULL DEFAULT 0",
                 "drama_language": "TEXT NOT NULL DEFAULT 'en'",
+                "deleted_at": "TEXT NOT NULL DEFAULT ''",
             }
             existing = {row[1] for row in conn.execute("PRAGMA table_info(x_authorized_account)")}
             for column, definition in account_columns.items():
@@ -999,7 +1000,7 @@ def complete_authorization(code, raw_state):
                 "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
                 "verified", "protected", "subscription_type", "location", "x_created_at", "profile_synced_at",
                 "disconnected_at", "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name",
-                "created_at", "updated_at",
+                "created_at", "updated_at", "deleted_at",
             )
             values = (
                 x_user_id, clean_text(account.get("username", ""), 255), clean_text(account.get("name", ""), 255),
@@ -1011,7 +1012,7 @@ def complete_authorization(code, raw_state):
                 profile["listed_count"], profile["like_count"], profile["media_count"], profile["verified"],
                 profile["protected"], profile["subscription_type"], profile["location"], profile["x_created_at"],
                 profile["profile_synced_at"],
-                "", "", "", "", timestamp, timestamp,
+                "", "", "", "", timestamp, timestamp, "",
             )
             update_columns = (
                 "username", "display_name", "profile_image_url", "token_store_key", "token_type", "scopes_json",
@@ -1020,7 +1021,7 @@ def complete_authorization(code, raw_state):
                 "owner_tenant_key", "owner_user_id", "owner_name", "owner_email",
                 "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
                 "verified", "protected", "subscription_type", "location", "x_created_at", "profile_synced_at", "disconnected_at",
-                "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name", "updated_at",
+                "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name", "updated_at", "deleted_at",
             )
             try:
                 with _DB_LOCK:
@@ -1092,7 +1093,7 @@ def row_to_item(row):
         scopes = parse_scopes(json.loads(item.pop("scopes_json", "[]")))
     except (TypeError, ValueError, json.JSONDecodeError):
         scopes = []
-    stored_status = item.get("status", "active")
+    stored_status = "disabled" if item.get("deleted_at") else item.get("status", "active")
     token = None
     terminal_statuses = EXPLICITLY_DISABLED_STATUSES
     if stored_status not in terminal_statuses:
@@ -1179,10 +1180,10 @@ def list_accounts(actor, scope="mine"):
         conn = db_connect()
         try:
             if scope in {"all", "platform"}:
-                rows = conn.execute("SELECT * FROM x_authorized_account ORDER BY updated_at DESC,id DESC").fetchall()
+                rows = conn.execute("SELECT * FROM x_authorized_account WHERE deleted_at='' ORDER BY updated_at DESC,id DESC").fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM x_authorized_account WHERE owner_tenant_key=? AND owner_user_id=? "
+                    "SELECT * FROM x_authorized_account WHERE deleted_at='' AND owner_tenant_key=? AND owner_user_id=? "
                     "ORDER BY updated_at DESC,id DESC",
                     (actor["tenant_key"], actor["user_id"]),
                 ).fetchall()
@@ -1272,7 +1273,9 @@ def set_account_publish_approval(account_id, approved, actor):
     initial_row = find_scoped_account_row(account_id, actor, _scope)
     x_user_id = str(initial_row["x_user_id"])
     with account_lock("x:" + x_user_id):
-        find_scoped_account_row(account_id, actor, _scope)
+        row = find_scoped_account_row(account_id, actor, _scope)
+        if row["deleted_at"]:
+            raise ServiceError("x_account_not_found", "X账号已从后台移除", 404)
         timestamp = iso_utc()
         with _DB_LOCK:
             conn = db_connect()
@@ -1442,7 +1445,7 @@ def verify_account(
     with account_lock("x:" + x_user_id):
         row = find_scoped_account_row(account_id, actor, scope)
         stored_status = str(row["status"] or "")
-        if stored_status == "disabled":
+        if stored_status == "disabled" or row["deleted_at"]:
             raise ServiceError("x_account_disabled", "X账号已在后台停用；重新授权后才能校验", 409)
         if stored_status == "disconnected":
             raise ServiceError("x_token_missing", "X账号已解除授权，请重新授权", 409)
@@ -5058,6 +5061,77 @@ def cleanup_disconnected_token_artifacts():
             delete_token_artifacts(x_user_id)
 
 
+def delete_account(account_id, actor):
+    """Hide and disable an account while preserving all publishing facts."""
+    actor, _scope = normalize_account_scope(actor, "all")
+    account_id = int(account_id)
+    initial_row = find_scoped_account_row(account_id, actor, "all")
+    x_user_id = str(initial_row["x_user_id"])
+    guard = account_lock("x:" + x_user_id)
+    if not guard.acquire(blocking=False):
+        raise ServiceError("x_account_busy", "该账号正在发布或同步，请完成后再删除", 409)
+    try:
+        with _DB_LOCK:
+            conn = db_connect()
+            try:
+                post_schema = "main"
+                if DB_PATH.resolve() != POST_DB_PATH.resolve():
+                    conn.execute("ATTACH DATABASE ? AS removal_posts", (str(POST_DB_PATH),))
+                    post_schema = "removal_posts"
+                shares = _YOUTUBE_SHARES
+                if shares is not None:
+                    conn.execute("ATTACH DATABASE ? AS removal_shares", (str(shares.db_path),))
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM x_authorized_account WHERE id=?", (account_id,)).fetchone()
+                if not row:
+                    raise ServiceError("x_account_not_found", "X账号记录不存在", 404)
+                if not row["deleted_at"]:
+                    # Node uploads hold short account locks while credentials
+                    # are issued. Their durable queue/log state covers the rest
+                    # of the upload; check it in the disabling transaction.
+                    has_posts = conn.execute(
+                        "SELECT 1 FROM %s.sqlite_master WHERE type='table' AND name='x_post_queue'" % post_schema
+                    ).fetchone()
+                    busy = has_posts and conn.execute(
+                        "SELECT 1 FROM {s}.x_post_queue q LEFT JOIN {s}.x_post_publish_log l ON l.queue_id=q.id "
+                        "WHERE (q.account_id=? OR q.relay_account_id=?) AND "
+                        "(q.status='publishing' OR l.status IN ('media_uploading','post_creating','repost_creating') "
+                        "OR COALESCE(l.unknown_outcome,0)=1) LIMIT 1".format(s=post_schema),
+                        (account_id, account_id),
+                    ).fetchone()
+                    share_busy = shares is not None and conn.execute(
+                        "SELECT 1 FROM removal_shares.youtube_share_item WHERE account_id=? "
+                        "AND status IN ('publishing','unknown_outcome') LIMIT 1", (account_id,),
+                    ).fetchone()
+                    if busy or share_busy:
+                        raise ServiceError("x_account_busy", "该账号有发布中或结果待核对的任务，请处理完成后再删除", 409)
+                    timestamp = iso_utc()
+                    conn.execute(
+                        "UPDATE x_authorized_account SET deleted_at=?,status='disabled',publish_approved=0,"
+                        "disconnected_at=?,disconnected_by_tenant_key=?,disconnected_by_user_id=?,"
+                        "disconnected_by_name=?,updated_at=? WHERE id=?",
+                        (timestamp, timestamp, actor["tenant_key"], actor["user_id"], actor["name"], timestamp, account_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO x_oauth_event(event_type,outcome,x_user_id,actor_user_id,"
+                        "actor_tenant_key,actor_name,error_code,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        ("account_deleted", "completed", x_user_id, actor["user_id"],
+                         actor["tenant_key"], actor["name"], "", timestamp),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        return {"id": account_id, "deleted": True}
+    finally:
+        guard.release()
+
+
+def query_api_credits(actor):
+    normalize_account_scope(actor, "platform" if actor.get("x_platform_access") is True else "all")
+    from features.x_accounts.credits import fetch_current_credits
+    return fetch_current_credits(os.environ.get("X_BILLING_BEARER_TOKEN", ""), OAUTH_APP_NAME)
+
+
 def logout_account(account_id, actor):
     account_id = int(account_id)
     actor = require_actor_subject(actor)
@@ -5927,6 +6001,13 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     list_accounts(payload.get("actor", {}), payload.get("scope", "mine")),
                 )
+                return
+            if parsed.path == "/internal/accounts/credits":
+                self.send_json(200, query_api_credits(payload.get("actor", {})))
+                return
+            match = re.fullmatch(r"/internal/accounts/([0-9]+)/delete", parsed.path)
+            if match:
+                self.send_json(200, delete_account(match.group(1), payload.get("actor", {})))
                 return
             match = re.fullmatch(
                 r"/internal/accounts/([0-9]+)/publish-approval",

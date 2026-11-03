@@ -41294,6 +41294,8 @@ from features.x_accounts.client import (
     query_x_post_runs,
     query_x_post_schedule,
     query_x_accounts as query_x_authorized_accounts,
+    query_x_api_credits,
+    delete_x_account,
     logout_x_account,
     save_x_post_schedule,
     set_x_post_drama_pool_priority,
@@ -41349,6 +41351,7 @@ except ValueError:
     )
 
 X_ACCOUNTS_ERROR_META = {
+    "x_account_busy": (409, "该账号正在发布、同步或有结果待核对的任务，请处理完成后再删除"),
     "x_post_drama_owner_not_configured": (409, "未完结短剧的正常绑定账号必须保留在排期中"),
     "x_post_schedule_slot_in_progress": (409, "当前发布时间点正在冻结或执行，请在90秒窗口结束后再修改配置"),
     "invalid_random_daily_count": (400, "每日随机发布次数无效"),
@@ -94643,6 +94646,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, status, payload, no_store=True)
             return
 
+        if parsed.path == "/api/admin/x-accounts/credits":
+            if not self._require_cookie_module("x_accounts"):
+                return
+            try:
+                json_response(self, 200, query_x_api_credits(x_platform_accounts_actor(self._session() or {})), no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
         if parsed.path == "/api/admin/x-accounts":
             if not self._require_cookie_module("x_accounts"):
                 return
@@ -100735,6 +100748,23 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
+
+        x_account_delete_match = re.fullmatch(r"/api/admin/x-accounts/([0-9]+)", parsed.path)
+        if x_account_delete_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_account_delete_match.group(1)
+            try:
+                result = delete_x_account(account_id, x_accounts_actor(session))
+                append_audit_log(session, "delete_x_account", "x_account", account_id, {"history_preserved": True})
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
             return
 
         x_pool_delete_match = re.fullmatch(
