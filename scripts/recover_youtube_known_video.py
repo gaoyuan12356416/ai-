@@ -7,7 +7,8 @@ BASE=Path('/mnt/data-disk/pipeline-dispatch')
 DB=ROOT/'data/drama_material_jobs.sqlite3'
 def now():return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds').replace('+00:00','Z')
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--task-id',type=int,required=True);p.add_argument('--video-id',required=True);p.add_argument('--apply',action='store_true');args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--task-id',type=int,required=True);p.add_argument('--video-id',required=True);p.add_argument('--apply',action='store_true');p.add_argument('--record-missing',action='store_true');args=p.parse_args()
+    assert not (args.apply and args.record_missing),'choose_recovery_or_readback_annotation'
     task_id=args.task_id;key='youtube:publish:'+str(task_id);worker='operator:existing-video:'+str(task_id)
     pid=subprocess.check_output(['systemctl','show','pipeline-youtube-canonical','-p','MainPID','--value'],text=True).strip()
     os.environ.update({k.decode():v.decode() for k,v in (x.split(b'=',1) for x in Path('/proc/'+pid+'/environ').read_bytes().split(b'\0') if b'=' in x)})
@@ -41,7 +42,17 @@ def main():
     repo=ReadRepository(readonly_runner(app),schema=app.DB_NAME);client=ExistingVideoClient(timeout=30)
     credential=repo.credential(app_id=original['app_id'],channel_local_id=original['channel_local_id'],account_id=original['youtube_account_id'],expected_channel_id=original['channel_id'])
     token=client.refresh_access_token(credential);client.verify_channel_identity(token,original['channel_id'])
-    state=client.read_reviewed_video_state(token,args.video_id,expected_channel_id=original['channel_id'])
+    try:
+        state=client.read_reviewed_video_state(token,args.video_id,expected_channel_id=original['channel_id'])
+    except Exception as exc:
+        if not args.record_missing or getattr(exc,'code','')!='youtube_video_reconcile_unknown':raise
+        with contextlib.closing(store._connect()) as c:
+            c.execute('BEGIN IMMEDIATE');r=dict(c.execute('SELECT * FROM drama_youtube_publish WHERE id=?',(task_id,)).fetchone())
+            assert r==original,'original_row_changed'
+            c.execute('UPDATE drama_youtube_publish SET error_code=?,error_message=?,updated_at_utc=? WHERE id=?',('youtube_video_reconcile_unknown','YouTube 当前未返回原视频，已保留视频 ID 和上传会话，暂停重新上传并等待平台核对。',now(),task_id))
+            c.execute('INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)',(task_id,'operator_owner_readback','still_unknown',json.dumps({'video_id':args.video_id,'previous_error':original['error_code'],'central_job':job[0],'new_uploads':0}),now()));c.commit()
+        print(json.dumps({'task_id':task_id,'video_id':args.video_id,'still_unknown':True,'annotation_saved':True,'new_uploads':0}),flush=True);return
+    assert not args.record_missing,'video_now_visible_use_normal_verified_recovery'
     assert state['state']=='succeeded' and state['visibility'] in ('public','private') and not state['preserved_status'].get('publishAt')
     if state['visibility']=='public':
         assert original['thumbnail_status']=='succeeded' and original['processing_status']=='succeeded' and original['public_status'] in ('running','unknown','succeeded')
