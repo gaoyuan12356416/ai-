@@ -413,7 +413,7 @@ def main():
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
-    store = DispatchStore(config["db_path"])
+    store = DispatchStore(config["db_path"], capability_exclusions=config.get("node_capability_exclusions"))
     from .owners import OwnerResolver
     coordinator = Coordinator(store, build_registry(config), internal_token=os.environ.get("PIPELINE_DISPATCH_INTERNAL_TOKEN", ""), master_key=os.environ.get("PIPELINE_DISPATCH_MASTER_KEY", ""), owner_resolver=OwnerResolver(config.get("paths", {}).get("youtube")))
     server = ThreadingHTTPServer(("127.0.0.1", int(config.get("port", 18846))), handler_type(coordinator))

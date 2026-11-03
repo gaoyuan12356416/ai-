@@ -249,6 +249,24 @@ class YouTubeNativeBridge:
                     allowed.add("youtube_schedule_control")
             if name not in allowed or not re.fullmatch(r"[A-Za-z0-9_-]{8,200}", str(operation.get("operation_id") or "")):
                 raise AdapterError("youtube_operation_invalid")
+            # Credential preparation is not a platform write. Do it before
+            # recording upload/comment intent so a rejected credential cannot
+            # strand a never-started video as an ambiguous upload.
+            credential = self.workflow.channel_directory.repository.credential(app_id=task["app_id"], channel_local_id=task["channel_local_id"], account_id=task["youtube_account_id"], expected_channel_id=task["channel_id"])
+            if (task["workflow"] == "reviewed_thumbnail" and not reviewed_scope_eligible(credential.scopes)) or (task["workflow"] == "legacy" and not credential.capabilities["upload_eligible"]) or (task["comment_text"] and not credential.capabilities["comment_eligible"]):
+                raise AdapterError("youtube_scope_missing")
+            for attempt in range(2):
+                try:
+                    token = self.client.refresh_access_token(credential)
+                    self.client.verify_channel_identity(token, task["channel_id"])
+                    break
+                except Exception as exc:
+                    if attempt or getattr(exc, "code", "") not in {"youtube_token_refresh_unavailable", "youtube_channel_identity_unavailable"}:
+                        raise
+                    time.sleep(1)
+            # Slow credential reads may outlive native ownership. Recheck it
+            # before granting any platform-write intent.
+            task, native = self._owned(job, saved)
             if name == "youtube_begin_resumable":
                 privacy = "public" if task["workflow"] == "legacy" else "private"
                 if details != {"title": task["title"], "description": task["description_rendered"], "size": task["source_size"], "privacy_status": privacy} or not task["source_sha256"]:
@@ -302,11 +320,6 @@ class YouTubeNativeBridge:
                     raise AdapterError("youtube_channel_identity_changed")
             with self.workflow.db(True) as conn:
                 conn.execute("INSERT INTO pipeline_youtube_operation VALUES(?,?,?,?,?,?)", (operation["operation_id"], job["source_key"], job["generation"], name, operation["request_sha256"], now()))
-            credential = self.workflow.channel_directory.repository.credential(app_id=task["app_id"], channel_local_id=task["channel_local_id"], account_id=task["youtube_account_id"], expected_channel_id=task["channel_id"])
-            if (task["workflow"] == "reviewed_thumbnail" and not reviewed_scope_eligible(credential.scopes)) or (task["workflow"] == "legacy" and not credential.capabilities["upload_eligible"]) or (task["comment_text"] and not credential.capabilities["comment_eligible"]):
-                raise AdapterError("youtube_scope_missing")
-            token = self.client.refresh_access_token(credential)
-            self.client.verify_channel_identity(token, task["channel_id"])
             return {"credentials": {"access_token": token}}
 
     def checkpoint(self, job, claim, phase, receipt):

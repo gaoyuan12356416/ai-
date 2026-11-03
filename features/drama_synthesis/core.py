@@ -1369,6 +1369,8 @@ class DramaSynthesisStore:
                         attempts = 0
                     conn.execute("UPDATE drama_youtube_publish SET status=?,video_state=?,video_attempt_count=?,unknown_outcome=0,error_code='',error_message='',updated_at_utc=? WHERE id=?",
                                  (state, state, attempts, utc_now(), int(task_id)))
+                conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)",
+                             (int(task_id), "operator_retry", "requested", "same_task_same_media", utc_now()))
                 conn.commit()
                 return dict(conn.execute("SELECT * FROM drama_youtube_publish WHERE id=?", (int(task_id),)).fetchone())
             except Exception:

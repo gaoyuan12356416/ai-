@@ -133,6 +133,9 @@ def handler_type(bridge, token):
             try:
                 result = bridge.dispatch(action, payload)
             except Exception as exc:
+                # Keep diagnostics useful without logging request/credential
+                # bodies or arbitrary upstream exception messages.
+                print('youtube_canonical_failure action=' + action + ' type=' + type(exc).__name__ + ' code=' + error_code(exc), file=sys.stderr, flush=True)
                 return self.respond(409, {'code': error_code(exc)})
             return self.respond(200, result)
 

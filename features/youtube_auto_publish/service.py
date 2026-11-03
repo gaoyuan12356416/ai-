@@ -258,7 +258,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             elif ls in ('failed','unknown','partial_failed','schedule_missed'):
                 status='comment_failed' if phase=='comment' or ls=='partial_failed' else 'thumbnail_failed' if phase=='thumbnail' else 'publish_failed'
                 error={'code':ledger.get('error_code') or ledger.get('video_error_code') or 'publish_failed','message':ledger.get('error_message') or ledger.get('video_error_message') or ledger.get('comment_error_message') or '发布未完成，请查看阶段状态'}
-            else:status='uploading'
+            else:status='queued' if ls=='queued' else 'uploading'
             value['video_id']=ledger.get('video_id','')
             value['unknown_outcome']=bool(ledger.get('unknown_outcome'))
             value['can_retry']=(ls in ('failed','partial_failed') and not value['unknown_outcome']) or (ls=='unknown' and phase=='public' and bool(ledger.get('video_id')) and ledger.get('comment_status')!='unknown')
@@ -304,7 +304,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                 elif key=='comment' and ledger.get('comment_status')=='published':state='complete';message='首评已发送'
                 elif status=='published':state='complete';message='已完成'
                 elif index<current_index:state='complete';message='已完成'
-                elif index==current_index:state='error' if status.endswith('_failed') or value.get('unknown_outcome') else 'active';message=error.get('message','处理中') if state=='error' else '处理中'
+                elif index==current_index:
+                    state='pending' if status=='queued' else 'error' if status.endswith('_failed') or value.get('unknown_outcome') else 'active'
+                    message='等待调度上传' if status=='queued' else error.get('message','处理中') if state=='error' else '处理中'
             steps.append({'key':key,'label':label,'status':state,'message':message})
         value['steps']=steps
         return value
@@ -374,7 +376,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         selected=[]
         for item in items:
             if search and search not in (item['title']+' '+item['id']+' '+item['material']['name']).casefold():continue
-            if status not in ('all','',item['status']) and not (status=='published' and item['status']=='comment_failed') and not (status=='running' and item['status'] in ('generating','queued_generation','enqueue_pending','uploading','scheduled','schedule_pending')) and not (status=='failed' and (item['status'].endswith('_failed') or item['status']=='schedule_missed')):continue
+            if status not in ('all','',item['status']) and not (status=='published' and item['status']=='comment_failed') and not (status=='running' and item['status'] in ('queued','generating','queued_generation','enqueue_pending','uploading','scheduled','schedule_pending')) and not (status=='failed' and (item['status'].endswith('_failed') or item['status']=='schedule_missed')):continue
             selected.append(item)
         result={'items':selected,'total':len(selected),'counts':counts,'limit':200,'bounded':len(items)==200}
         if compact:
@@ -635,7 +637,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                 with self.db(True) as c:
                     row,current=self._row(c,task_id)
                     if row['lease_token']==token:
-                        current['error']={'code':getattr(exc,'code','generation_failed' if generation else 'enqueue_failed'), 'message':str(exc) if isinstance(exc,WorkflowError) else ('封面生成失败，请重试或手动上传' if generation else '发布准备失败，请检查频道与素材后重试')}
+                        code=getattr(exc,'code','generation_failed' if generation else 'enqueue_failed')
+                        safe_messages={'youtube_previous_outcome_unknown':'同频道同素材的原任务结果待核对，请先处理原任务，避免重复发布', 'youtube_previous_publish_in_progress':'同频道同素材的原任务仍在发布，请查看原任务进度', 'youtube_token_refresh_unavailable':'频道授权刷新暂时不可用，请稍后重试', 'youtube_channel_identity_unavailable':'频道身份核验暂时不可用，请稍后重试'}
+                        current['error']={'code':code, 'message':safe_messages.get(code) or (str(exc) if isinstance(exc,WorkflowError) else ('封面生成失败，请重试或手动上传' if generation else '发布准备失败，请检查频道与素材后重试'))}
                         self._save(c,current,'generation_failed' if generation else 'enqueue_failed')
                         c.execute('UPDATE youtube_auto_preparation SET lease_token=?,lease_until=0 WHERE id=?',('',task_id))
             return {'claimed':True,'task_id':task_id}

@@ -335,6 +335,9 @@ class LedgerAdapter:
                 row["_youtube_publication_handoff"] = bool(child and str(child.get("preparation_id")) == str(row["id"]))
         elif key == ("youtube", "publish"):
             source_key = "youtube:publish:" + str(row["id"])
+            if self._exists(conn, "drama_youtube_publish_event"):
+                retry = conn.execute("SELECT id FROM drama_youtube_publish_event WHERE task_id=? AND phase='operator_retry' AND outcome='requested' ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+                row["_youtube_retry_revision"] = str(retry[0]) if retry else ""
             row["_pipeline_history"] = any(
                 self._exists(conn, table) and conn.execute("SELECT 1 FROM " + table + " WHERE source_key=? LIMIT 1", (source_key,)).fetchone()
                 for table in ("pipeline_youtube_claim", "pipeline_youtube_operation", "pipeline_youtube_checkpoint"))
@@ -471,7 +474,7 @@ class LedgerAdapter:
         if legacy_parent_inflight and not started_at:
             started_at = row.get("legacy_parent_started_at")
         finished_at = row.get("finished_at_utc") or row.get("finished_at") or row.get("completed_at_utc") or row.get("published_at_utc") or row.get("video_published_at_utc") or ((row.get("updated_at_utc") or row.get("updated_at")) if terminal or review_hold else "")
-        source_revision = ""
+        source_revision = str(row.get("_youtube_retry_revision") or "")
         if spec.channel == "youtube" and spec.family == "preparation":
             body = obj(row.get("body"))
             version = row.get("version") or body.get("current_version")
