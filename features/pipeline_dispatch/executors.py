@@ -664,10 +664,11 @@ class NodeExecutors:
                     initialized = response.get("data", {})
                     context.checkpoint("x_media_initialized", {"media_id": initialized.get("id") or initialized.get("media_id"), "operation_id": context.last_operation_id})
                 return response
-        # A 4 MiB segment repeatedly exhausted the 30-second socket write budget
-        # on the production uplink. Small segments bound retransmission cost;
-        # very large media still stays within the existing segment-count limit.
-        chunk_bytes = max(1024 * 1024, (artifact["size"] + MAX_UPLOAD_SEGMENTS - 1) // MAX_UPLOAD_SEGMENTS)
+        # Bound media requests already use a 120-second transport budget. Two
+        # MiB segments halve permit/HTTP overhead versus one MiB while staying
+        # below X's 5 MB guidance and avoiding the old four MiB uplink failures.
+        # Never change segmentation within an initialized upload session.
+        chunk_bytes = max(2 * 1024 * 1024, (artifact["size"] + MAX_UPLOAD_SEGMENTS - 1) // MAX_UPLOAD_SEGMENTS)
         client = self.platform_clients.get("x_publish") or BoundXClient(chunk_bytes=chunk_bytes)
         with tempfile.TemporaryDirectory(dir=self.work_root) as temp:
             media = self._download(artifact, Path(temp) / "media.bin", context, x_network=True)

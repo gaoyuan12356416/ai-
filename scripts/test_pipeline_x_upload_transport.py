@@ -42,8 +42,8 @@ class TransportTests(unittest.TestCase):
     def test_small_segments_and_media_timeout_preserve_single_post(self):
         requests=self.run_upload()
         chunks=[kw for url,kw in requests if url.endswith('/append')]
-        self.assertEqual(len(chunks),3)
-        self.assertTrue(all(len(kw['body']) < 1024*1024+1024 for kw in chunks))
+        self.assertEqual(len(chunks),2)
+        self.assertTrue(all(len(kw['body']) < 2*1024*1024+1024 for kw in chunks))
         self.assertTrue(all(kw['timeout']==120 for url,kw in requests if '/2/media/' in url))
         posts=[kw for url,kw in requests if url.endswith('/2/tweets')]
         self.assertEqual(len(posts),1); self.assertEqual(posts[0]['timeout'],30)
