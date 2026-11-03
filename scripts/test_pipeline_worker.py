@@ -68,13 +68,18 @@ class WorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "outbox.sqlite3"
             client = Client(); client.fail = True
-            outbox = ReceiptOutbox(path)
+            now = [100.0]
+            outbox = ReceiptOutbox(path, clock=lambda: now[0])
             outbox.put("jobs/complete", {"receipt_id": "r1", "result": {"post_id": "123"}})
             self.assertFalse(outbox.flush(client))
+            self.assertFalse(outbox.flush(client, only="r1"))
+            self.assertEqual(len(client.calls), 1)
+            now[0] += 15
             with self.assertRaises(CoordinatorError):
                 outbox.flush(client, only="r1")
             client.fail = False
-            self.assertTrue(ReceiptOutbox(path).flush(client))
+            now[0] += 30
+            self.assertTrue(ReceiptOutbox(path, clock=lambda: now[0]).flush(client))
             before = len(client.calls)
             self.assertTrue(outbox.flush(client))
             self.assertEqual(len(client.calls), before)
@@ -109,10 +114,12 @@ class WorkerTests(unittest.TestCase):
                 return {"status": "published", "post_id": "123"}
         with tempfile.TemporaryDirectory() as temp:
             executor, client = Executor(), Client(); client.fail = True
-            outbox = ReceiptOutbox(Path(temp) / "outbox")
+            now = [100.0]
+            outbox = ReceiptOutbox(Path(temp) / "outbox", clock=lambda: now[0])
             result = execute_claim(JOB, client, outbox, KEY, executor)
             self.assertEqual(result["result"]["post_id"], "123")
             client.fail = False
+            now[0] += 15
             self.assertTrue(outbox.flush(client))
             self.assertEqual(executor.calls, 1)
 
