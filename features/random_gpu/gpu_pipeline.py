@@ -1,4 +1,4 @@
-"""Qualified NVDEC + OpenCL fit/CSC + existing compositor + NVENC RGB input.
+"""Qualified NVDEC + OpenCL fit/CSC + existing compositor + NVENC encoding.
 
 The delivery profile, frozen recipe, source timestamps and audio arguments stay
 with the caller. Unsupported source formats retain the existing hybrid path;
@@ -16,7 +16,7 @@ from fractions import Fraction
 from functools import lru_cache
 
 ENV = 'RANDOM_GPU_PIPELINE_V2'
-IMPLEMENTATION = 'nvdec-opencl-lanczos-nvenc-rgb-v1'
+IMPLEMENTATION = 'nvdec-opencl-lanczos-nvenc-yuv-v1'
 KERNEL = Path(__file__).with_name('gpu_fit.cl')
 
 
@@ -39,6 +39,10 @@ def qualification(info, environ=None):
     if video.get('field_order') not in {None, '', 'unknown', 'progressive'}: return 'interlaced_source'
     if video.get('color_space') not in {None, '', 'unknown', 'bt709', 'bt470bg', 'smpte170m'}: return 'unsupported_color_matrix'
     if video.get('color_transfer') in {'smpte2084', 'arib-std-b67'}: return 'hdr_source'
+    for key in ('color_primaries', 'color_transfer'):
+        if video.get(key) not in {None, '', 'unknown', 'bt709', 'bt470m', 'bt470bg',
+                                  'smpte170m', 'smpte240m', 'film', 'gamma22', 'gamma28'}:
+            return 'unsupported_color_attributes'
     if video.get('chroma_location') not in {None, '', 'unspecified', 'left', 'center', 'topleft'}: return 'unsupported_chroma_location'
     try:
         w, h = int(video['width']), int(video['height'])
@@ -131,6 +135,12 @@ def fuse_command(command, recipe, output, info):
             number += 1
         inputs.append(value)
     program = "program_opencl=inputs=4:size=720x1280:source='%s':kernel=" % _escape(target)
+    # FFmpeg 7.1 NVENC packed-RGB input forces BT.601. Keep the established
+    # final YUV conversion and source color descriptors until an equivalent
+    # GPU output conversion is proven; GPU handles the two source CSC/fits.
+    colors = ':'.join(key + '=' + (video.get(field) or 'unknown') for key, field in
+                     (('colorspace', 'color_space'), ('color_primaries', 'color_primaries'),
+                      ('color_trc', 'color_transfer')))
     graph = [
         '[0:v]hwdownload,format=nv12,format=yuv420p,fps=30:start_time=0,extractplanes=y+u+v[y][u][vplane]',
         '[y]hwupload,split=2[yback][ymain]',
@@ -143,13 +153,11 @@ def fuse_command(command, recipe, output, info):
     graph.extend([
         '[clockback][yback][uback][vback]' + program + 'fit_yuv_cover:shortest=1:eof_action=endall[source]',
         '[clockmain][ymain][umain][vmain]' + program + 'fit_yuv_contain:shortest=1:eof_action=endall[main]',
-        "[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size=720x1280:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1[v]" % _escape(target),
+        "[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size=720x1280:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1,setparams=%s,format=yuv420p[v]" % (_escape(target), colors),
     ])
     tail = list(command[graph_index + 2:])
     if tail[tail.index('-c:v') + 1] not in {'h264_nvenc', 'hevc_nvenc'}:
         raise ValueError('gpu_pipeline_requires_nvenc')
-    tail[tail.index('-pix_fmt') + 1] = 'rgba'
-    tail[-1:-1] = ['-rgb_mode', 'yuv420']
     return [prefix[0], '-filter_complex_threads', '2', '-filter_threads', '2',
             '-init_hw_device', 'opencl=ocl:0.0', '-filter_hw_device', 'ocl',
             *inputs, '-filter_complex', ';'.join(graph), *tail]

@@ -37,8 +37,9 @@ class PipelineTests(unittest.TestCase):
             self.assertIn('h264_cuvid', result)
             self.assertEqual(result[result.index('-af')+1], tail[tail.index('-af')+1])
             self.assertEqual(result[result.index('-t')+1], '20')
-            self.assertEqual(result[result.index('-pix_fmt')+1], 'rgba')
-            self.assertEqual(result[result.index('-rgb_mode')+1], 'yuv420')
+            self.assertEqual(result[result.index('-pix_fmt')+1], 'yuv420p')
+            self.assertNotIn('-rgb_mode', result)
+            self.assertIn('setparams=colorspace=bt709', graph)
             self.assertEqual(result[result.index('-preset')+1], 'p5')
             self.assertTrue(list(Path(tmp).glob('gpu-fit-*.cl')))
 
