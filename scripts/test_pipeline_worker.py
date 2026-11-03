@@ -154,6 +154,38 @@ class WorkerTests(unittest.TestCase):
                         self.fail("must not call external API")
             self.assertNotIn("jobs/begin-operation", [route for route, _ in client.calls])
 
+    def test_transient_heartbeat_timeout_waits_for_authority_without_replaying_write(self):
+        class TransientClient(Client):
+            heartbeats = 0
+            def post(self, route, payload):
+                if route == 'jobs/heartbeat':
+                    self.heartbeats += 1
+                    if self.heartbeats == 1: raise CoordinatorError('coordinator_unavailable', 503)
+                return super().post(route, payload)
+        with tempfile.TemporaryDirectory() as temp:
+            client = TransientClient()
+            with ExecutionContext(JOB, client, ReceiptOutbox(Path(temp)/'outbox'), KEY, heartbeat_seconds=.03) as ctx:
+                limit = time.monotonic()+1
+                while not ctx._heartbeat_uncertain and time.monotonic()<limit: time.sleep(.001)
+                self.assertTrue(ctx._heartbeat_uncertain)
+                with ctx.operation('publish', {'body':'hello'}):
+                    self.assertFalse(ctx._heartbeat_uncertain)
+                    self.assertGreaterEqual(client.heartbeats, 2)
+            self.assertEqual([route for route,_ in client.calls].count('jobs/begin-operation'), 1)
+
+    def test_rejected_lease_never_waits_for_or_authorizes_a_new_write(self):
+        class RejectedClient(Client):
+            def post(self, route, payload):
+                if route=='jobs/heartbeat': raise CoordinatorError('claim_rejected',409)
+                return super().post(route,payload)
+        with tempfile.TemporaryDirectory() as temp:
+            client=RejectedClient()
+            with ExecutionContext(JOB,client,ReceiptOutbox(Path(temp)/'outbox'),KEY,heartbeat_seconds=.01) as ctx:
+                self.assertTrue(ctx.lost.wait(1))
+                with self.assertRaisesRegex(RuntimeError,'claim_rejected'):
+                    with ctx.operation('publish',{}): self.fail('must not write')
+            self.assertNotIn('jobs/begin-operation',[route for route,_ in client.calls])
+
     def test_third_node_config_has_no_server_allowlist(self):
         with tempfile.TemporaryDirectory() as temp:
             config = configuration({"PIPELINE_NODE_ID": "new-worker-3", "PIPELINE_NODE_STATE_ROOT": temp, "PIPELINE_RENDER_BACKEND": "cpu"})

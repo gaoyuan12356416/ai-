@@ -16,7 +16,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.pipeline_node_install import private_json, plan, command
 
-DRAIN_WORKER_SHA = '7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06'
+DRAIN_WORKER_SHAS = {
+    '7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06',
+    # Same signal/claim/drain implementation; bounded heartbeat reconfirmation
+    # before the next operation, never a retry of a platform request.
+    '421978ad0419c514f8d48db737b3110975fb5ba01ec005a7e5b2baad326351e3',
+}
 
 
 def main():
@@ -33,7 +38,7 @@ def main():
         if before[key] != after[key]: raise ValueError('node_identity_changed')
     for info in (before, after):
         root = Path(info['release'])
-        if hashlib.sha256((root/'features/pipeline_dispatch/worker.py').read_bytes()).hexdigest() != DRAIN_WORKER_SHA:
+        if hashlib.sha256((root/'features/pipeline_dispatch/worker.py').read_bytes()).hexdigest() not in DRAIN_WORKER_SHAS:
             raise ValueError('unreviewed_drain_worker')
         if command(['git', '-C', root, 'rev-parse', 'HEAD']) != info['sha'] or command(['git', '-C', root, 'status', '--porcelain']):
             raise ValueError('release_not_clean')

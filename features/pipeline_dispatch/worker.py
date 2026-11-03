@@ -47,6 +47,7 @@ class ExecutionContext:
         self.rate_limit = {}
         self._last_heartbeat = monotonic()
         self._heartbeat_uncertain = False
+        self._heartbeat_error = ""
 
     def __enter__(self):
         self._thread = threading.Thread(target=self._heartbeat, name="pipeline-job-heartbeat", daemon=True)
@@ -65,12 +66,15 @@ class ExecutionContext:
                 metrics[self.phase_name + "_seconds"] = round(metrics.get(self.phase_name + "_seconds", 0) + self.monotonic() - self.phase_started, 3)
                 result = self.client.post("jobs/heartbeat", {**self.identity, "phase": self.phase_name, "metrics": metrics})
                 if result.get("accepted") is False or result.get("ok") is False:
+                    self._heartbeat_error = "heartbeat_rejected"
                     self.lost.set()
                     return
                 self._last_heartbeat = self.monotonic()
                 self._heartbeat_uncertain = False
+                self._heartbeat_error = ""
             except CoordinatorError as exc:
                 self._heartbeat_uncertain = True
+                self._heartbeat_error = exc.code
                 # Transient transport failures do not revoke a 120-second lease.
                 # A rejected identity or an exhausted lease does. No new external
                 # operation starts while authority contact remains uncertain.
@@ -79,8 +83,16 @@ class ExecutionContext:
                     return
 
     def check(self):
+        # A transport timeout does not invalidate an unexpired lease. Pause
+        # before the next external operation while the independent heartbeat
+        # reconfirms authority. Never retry a platform call or clear rejection.
+        deadline = time.monotonic() + min(30, self.heartbeat_seconds * 2)
+        while (self._heartbeat_uncertain and not self.lost.is_set()
+               and self.monotonic() - self._last_heartbeat < 120
+               and time.monotonic() < deadline and not self.finished.is_set()):
+            self.finished.wait(min(.1, self.heartbeat_seconds))
         if self.lost.is_set() or self._heartbeat_uncertain or self.monotonic() - self._last_heartbeat >= 120:
-            raise LeaseLost()
+            raise LeaseLost(self._heartbeat_error or "lease_expired_or_rejected")
 
     def phase(self, name):
         now = self.monotonic()
