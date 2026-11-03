@@ -27,3 +27,21 @@ python3 scripts/recover_x_zero_write_schedules.py apply \
 部署需同时包含 `features/pipeline_dispatch/x_schedule_recovery.py`、现有 `x_manual_recovery.py`、修改后的 `features/x_posts/service.py` 和两个恢复脚本（新脚本复用手动恢复的只读连接/校验工具）。使用实际实时计划；如状态或账号发生变化，重新核对并生成计划，不能手改摘要绕过。
 
 本地测试覆盖：完整冻结身份保留、素材上界不变、其他运行中批次不动、未授权旧任务不被领取、重复 apply、三种共享预检错误、未知/计划写入栅栏拒绝、残留 queue 即使汇总为零也拒绝、账号部分不可用及全不可用、计划/账号漂移、备份期间竞态、身份漂移撤销切换例外。线上执行及最终回执以主部署报告为准。
+
+## 1039 的明确写前拒绝例外
+
+1039 的精确错误 `x_post_pool_fifo_conflict / 素材语言尚未达到冻结批次容量` 来自 `create_schedule_plan` 在 `BEGIN IMMEDIATE` 之前的容量检查，尚未插入队列或创建 Post/短链。2026-11-03 10:44:59 UTC 只读核对确认 queue/log/repost reservation/pool binding 全为 0，原 `plan_attempted_at=finished_at=2026-11-03T10:32:40Z`。SQL trace 回归证明该错误抛出前没有写事务或 INSERT/UPDATE/DELETE，Post 和短链方法均未调用。
+
+因此增加仅此 ID、原日期/时段/配置版本/89 账号数/snapshot=4444、精确错误及原尝试时间匹配的例外。先部署容量 race 修复，再生成独立计划：
+
+```bash
+python3 scripts/recover_x_zero_write_schedules.py plan \
+  --db /var/lib/x-post-automation/accounts.sqlite3 \
+  --run-ids 1039 --dates 2026-11-03 \
+  --known-rejection-commit <已部署并经GitHub留存的完整修复SHA> \
+  --repository <含该SHA的只读Git工作树> \
+  --runner-path /opt/x-post-automation/current/scripts/x_post_schedule_runner.py \
+  --output <新的私有计划路径>
+```
+
+该模式不能与其他 ID 混用。计划及 apply 均比对 Git commit 中的 runner 内容与实际部署文件，包含完整账号范围复核和最多三轮选材修复。apply 沿用前述命令；将原完整行（含 `plan_attempted_at`）和修复版本证据保存在同一审计事务内后，才重置此行的尝试栅栏并重新置为 claimed。所有冻结业务字段和 snapshot 不变。事务中断回滚审计与行更新；同计划重复应用即使任务已继续推进也不会再次重置新尝试。未知、其他错误、其他 ID、已有队列、部署版本漂移均拒绝。

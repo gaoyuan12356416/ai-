@@ -22,6 +22,7 @@ from scripts.x_post_daily_runner import (  # noqa: E402
 )
 from features.x_posts.service import (  # noqa: E402
     XPostError,
+    XPostStore,
     _material_fifo_selection_matches,
 )
 from features.x_posts.drama_selector import DramaPoolRejection  # noqa: E402
@@ -30,6 +31,7 @@ from scripts.x_post_schedule_runner import (  # noqa: E402
     ScheduleConfig,
     ScheduleRunError,
     ScheduleSidecarClient,
+    MaterialScheduleCandidates,
     _drama_candidates,
     _material_candidates,
     _preflight_material_candidates,
@@ -2616,7 +2618,8 @@ class ScheduleRunnerTests(unittest.TestCase):
                     [(item["account_id"], item["error_code"]) for item in batch["skipped_accounts"]],
                     [(11, "x_post_account_needs_review"), (12, "x_post_account_locked")],
                 )
-                self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], [11, 12, 13, 13])
+                expected_verifies = [11, 12, 13, 11, 12, 13] if source_type == "material" else [11, 12, 13, 13]
+                self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], expected_verifies)
                 payload = next(call[2] for call in sidecar.calls if call[0] == "create")
                 self.assertEqual(payload["account_ids"], [13])
                 self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [101])
@@ -2629,7 +2632,7 @@ class ScheduleRunnerTests(unittest.TestCase):
         def verify(account_id):
             account = original_verify(account_id)
             counts[account_id] = counts.get(account_id, 0) + 1
-            if account_id == 12 and counts[account_id] == 2:
+            if account_id == 12 and counts[account_id] >= 2:
                 raise SidecarError("x_post_account_locked", "账号在预检期间被锁定", 409)
             return account
 
@@ -2639,7 +2642,96 @@ class ScheduleRunnerTests(unittest.TestCase):
         payload = next(call[2] for call in sidecar.calls if call[0] == "create")
         self.assertEqual(payload["account_ids"], [11])
         self.assertEqual(result["batches"][0]["skipped_accounts"][0]["account_id"], 12)
-        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], [11, 12, 11, 12, 11])
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], [11, 12, 11, 12, 11, 12])
+
+    def test_recovered_omitted_account_rebuilds_material_capacity_proofs(self):
+        original_identity = due_item(accounts=[11, 12])
+        sidecar = FakeSidecar([dict(original_identity)])
+        original_verify = sidecar.verify_account
+        counts, scanned_scopes = {}, []
+
+        def verify(account_id):
+            account = original_verify(account_id)
+            counts[account_id] = counts.get(account_id, 0) + 1
+            if account_id == 12 and counts[account_id] == 1:
+                raise SidecarError("x_post_account_needs_review", "prior publication in progress", 409)
+            return account
+
+        def loader(config, client, accounts, **kwargs):
+            scanned_scopes.append([account["id"] for account in accounts])
+            values = candidate_loader(config, client, accounts, **kwargs)
+            # Distinct proof sets demonstrate that a stale first-pass skip is
+            # discarded when a previously omitted account becomes healthy.
+            return MaterialScheduleCandidates(values, fifo_capacity_skips=[{
+                "pool_item_id": 800 + len(accounts), "material_id": "proof-%s" % len(accounts),
+                "material_language": "en", "reason": "language_capacity_full"}])
+
+        with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+            result = self.execute(sidecar, material_candidate_loader=loader)
+        self.assertEqual(scanned_scopes, [[11], [11, 12]])
+        creates = [call[2] for call in sidecar.calls if call[0] == "create"]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(creates[0]["account_ids"], [11, 12])
+        self.assertEqual(creates[0]["fifo_capacity_skips"][0]["pool_item_id"], 802)
+        self.assertEqual(sidecar.due[0], original_identity)
+        self.assertEqual(result["batches"][0]["published_count"], 2)
+        self.assertFalse(result["batches"][0].get("skipped_accounts"))
+
+    def test_oscillating_material_scope_stops_before_plan_write(self):
+        sidecar = FakeSidecar([due_item(accounts=[11, 12])])
+        sidecar.heartbeat_schedule_run = mock.Mock(return_value={})
+        original_verify = sidecar.verify_account
+        calls = {}
+
+        def verify(account_id):
+            account = original_verify(account_id)
+            calls[account_id] = calls.get(account_id, 0) + 1
+            if account_id == 12 and calls[account_id] % 2:
+                raise SidecarError("x_post_account_needs_review", "changing account hold", 409)
+            return account
+
+        with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+            result = self.execute(sidecar)
+        self.assertEqual(result["batches"][0]["error_code"], "x_post_schedule_account_state_changed")
+        self.assertEqual(calls[12], 4)
+        self.assertFalse(any(call[0] in {"create", "publish"} for call in sidecar.calls))
+        self.assertFalse(any(call.kwargs.get("plan_attempt") for call in sidecar.heartbeat_schedule_run.call_args_list))
+
+    def test_material_scope_rebuild_preserves_server_snapshot_and_original_run(self):
+        store = XPostStore(Path(self.temporary.name) / "snapshot.sqlite3")
+        store.save_schedule_config("material", {
+            "enabled": True, "timezone": "Asia/Shanghai", "account_ids": [11, 12],
+            "publish_times": ["10:00"], "version": 1,
+        }, actor={"user_id": "test", "name": "Test"}, eligible_account_ids=[11, 12], now=self.now - timedelta(hours=1))
+        identity = store.due_schedule_slots(self.now)["items"][0]
+        def add_material(material_id):
+            return store.add_pool_materials([material_id], actor={"user_id": "test", "name": "Test"},
+                validation_checks=[{"material_id": material_id, "error_code": ""}])["items"][0]
+        first = add_material("201")
+        sidecar = FakeSidecar([identity])
+        original_verify = sidecar.verify_account
+        calls, snapshots = {}, []
+        def verify(account_id):
+            account = original_verify(account_id)
+            calls[account_id] = calls.get(account_id, 0) + 1
+            if account_id == 12 and calls[account_id] == 1:
+                raise SidecarError("x_post_account_needs_review", "previous job running", 409)
+            return account
+        def loader(config, client, accounts, **kwargs):
+            frozen_identity = {key: identity[key] for key in ("source_type", "run_date", "publish_time", "version", "account_ids")}
+            snapshots.append(store.available_pool_items(1000, schedule_identity=frozen_identity))
+            if len(snapshots) == 1:
+                add_material("202")
+            return candidate_loader(config, client, accounts, **kwargs)
+        before = store.query_schedule_plan("material", identity["run_date"], identity["publish_time"])["run"]
+        with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+            self.execute(sidecar, material_candidate_loader=loader)
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[0], snapshots[1])
+        after = store.query_schedule_plan("material", identity["run_date"], identity["publish_time"])["run"]
+        self.assertEqual(after["material_pool_snapshot_max_id"], first["id"])
+        for key in ("account_ids", "run_date", "publish_time", "config_version", "body_template", "plan_attempted_at"):
+            self.assertEqual(after[key], before[key])
 
     def test_all_held_accounts_record_failure_without_sources_or_plan_write(self):
         sidecar = FakeSidecar([due_item()])

@@ -2189,6 +2189,35 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 0,
             )
 
+    def test_language_capacity_rejection_happens_before_write_transaction_or_x(self):
+        self.save_schedule("material", [2, 3], ["09:00"])
+        older, newer = self.add_snapshot_materials(["810", "811"])
+        self.store.due_schedule_slots(datetime(2026, 7, 27, 9, 0, tzinfo=service.BEIJING_TZ))
+        proof = [{"pool_item_id": newer["id"], "material_id": newer["material_id"],
+            "material_language": "en", "reason": "language_capacity_full"}]
+        statements = []
+        real_connect = service._connect
+        def traced(path):
+            conn = real_connect(path)
+            conn.set_trace_callback(statements.append)
+            return conn
+        with mock.patch.object(service, "_connect", side_effect=traced), \
+                mock.patch.object(service, "write_short_redirect") as redirect, \
+                mock.patch.object(service.XApiClient, "create_post") as post:
+            with self.assertRaises(service.XPostError) as rejected:
+                self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2,
+                    [self.material_candidate(older, 2)], fifo_capacity_skips=proof,
+                    material_language_capacities={"en": 2})
+            self.assertEqual(rejected.exception.code, "x_post_pool_fifo_conflict")
+            self.assertEqual(str(rejected.exception), "素材语言尚未达到冻结批次容量")
+            redirect.assert_not_called()
+            post.assert_not_called()
+        self.assertFalse(any(sql.lstrip().upper().startswith(("BEGIN IMMEDIATE", "INSERT", "UPDATE", "DELETE"))
+            for sql in statements))
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            for table in ("x_post_queue", "x_post_publish_log", "x_post_repost_ledger"):
+                self.assertEqual(conn.execute("SELECT count(*) FROM " + table).fetchone()[0], 0)
+
     def test_material_fifo_capacity_proof_accepts_historical_language_skip(self):
         self.save_schedule("material", [2, 3], ["09:00"])
         oldest_en, skipped_ja, newest_ja = self.store.add_pool_materials(

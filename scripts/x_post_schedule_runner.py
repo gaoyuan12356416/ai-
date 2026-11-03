@@ -2327,7 +2327,9 @@ def execute_schedule_tick(
                     sidecar, identity["account_ids"], skip_blocked=True,
                     skipped_accounts=skipped_accounts,
                 )
+                planning_passes = 0
                 while True:
+                    planning_passes += 1
                     source_date = previous_source_date(current)
                     timestamp = max(1, int(current.timestamp()))
                     if identity["source_type"] == "material":
@@ -2376,13 +2378,32 @@ def execute_schedule_tick(
                             "candidate account order does not match frozen schedule",
                             "x_post_schedule_account_mismatch",
                         )
-                    # Material preflight/repair may outlive an access token. Refresh
-                    # the frozen subset immediately before the atomic plan transaction;
-                    # each later publish also verifies its account.
+                    # Material FIFO capacity proofs depend on every currently
+                    # healthy account in the frozen scope, including accounts
+                    # omitted while an earlier publication held them. Recheck
+                    # that entire scope before writing the plan; a recovered
+                    # account can increase capacity just as a new hold reduces it.
+                    current_skips = []
+                    recheck_ids = (identity["account_ids"]
+                        if identity["source_type"] == "material" else candidate_account_ids)
                     rechecked = _verify_accounts(
-                        sidecar, candidate_account_ids, skip_blocked=True,
-                        skipped_accounts=skipped_accounts,
+                        sidecar, recheck_ids, skip_blocked=True,
+                        skipped_accounts=current_skips,
                     )
+                    if identity["source_type"] == "material":
+                        skipped_accounts[:] = current_skips
+                        if [item["id"] for item in rechecked] == [item["id"] for item in accounts]:
+                            break
+                        if planning_passes >= 3:
+                            raise ScheduleRunError(
+                                "账号可用范围在预检期间持续变化，未尝试创建计划",
+                                "x_post_schedule_account_state_changed",
+                            )
+                        # The server-owned material snapshot and original run
+                        # identity remain unchanged; regenerate all FIFO proofs.
+                        accounts = rechecked
+                        continue
+                    skipped_accounts.extend(current_skips)
                     if len(rechecked) == len(candidate_account_ids):
                         break
                     # No queue exists yet. Rebuild FIFO/language proofs instead of

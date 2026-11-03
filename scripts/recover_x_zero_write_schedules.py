@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
+import subprocess
 import sys
 import uuid
 
@@ -19,16 +21,46 @@ INCIDENT_DATES = {"2026-11-02", "2026-11-03"}
 ERRORS = {"x_upstream_error", "x_accounts_unavailable", "x_post_source_query_failed"}
 
 
+def verify_capacity_repair(commit, runner_path, repository):
+    """Tie this incident's exception to the actual deployed GitHub fix bytes."""
+    require(isinstance(commit, str) and re.fullmatch(r"[a-f0-9]{40}", commit), "repair_commit_required")
+    runner = Path(runner_path).absolute()
+    repo = Path(repository).absolute()
+    result = subprocess.run(["git", "-C", str(repo), "show", commit + ":scripts/x_post_schedule_runner.py"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False)
+    require(result.returncode == 0, "repair_commit_unavailable")
+    blob = result.stdout
+    require(all(marker in blob for marker in (
+        b'recheck_ids = (identity["account_ids"]', b'if planning_passes >= 3:', b'accounts = rechecked',
+    )), "repair_commit_missing_capacity_fix")
+    require(runner.is_file() and runner.read_bytes() == blob, "deployed_runner_not_repair_commit")
+    return {"commit": commit, "runner_path": str(runner), "runner_resolved_path": str(runner.resolve()),
+        "repository": str(repo), "runner_sha256": hashlib.sha256(blob).hexdigest()}
+
+
+def known_rejection(run, repair):
+    return bool(repair and run["id"] == 1039 and run["source_type"] == "material" and
+        run["run_date"] == "2026-11-03" and run["publish_time"] == "16:51" and
+        run["slot_key"] == "xpost:schedule:v1:material:2026-11-03:1651" and
+        run["config_version"] == 33 and run["expected_count"] == 89 and
+        run["material_pool_snapshot_max_id"] == 4444 and
+        run["error_code"] == "x_post_pool_fifo_conflict" and
+        run["error_message"] == "素材语言尚未达到冻结批次容量" and
+        run["plan_attempted_at"] == run["finished_at"] == "2026-11-03T10:32:40Z")
+
+
 def existing(c, run_id):
     if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone():
         return None
     return c.execute("SELECT * FROM x_post_schedule_zero_write_resume_audit WHERE run_id=?", (run_id,)).fetchone()
 
 
-def snapshot(c, run_ids, allowed_dates):
+def snapshot(c, run_ids, allowed_dates, repair=None):
     require(run_ids and len(run_ids) == len(set(run_ids)) and
         all(type(i) is int and i > 0 for i in run_ids), "exact_unique_run_ids_required")
     require(allowed_dates and set(allowed_dates) <= INCIDENT_DATES, "outside_incident_dates")
+    if repair:
+        require(run_ids == [1039] and allowed_dates == ["2026-11-03"], "known_rejection_exact_scope_required")
     result = []
     for run_id in run_ids:
         found = rows(c, "SELECT * FROM x_post_schedule_run WHERE id=?", (run_id,))
@@ -36,8 +68,11 @@ def snapshot(c, run_ids, allowed_dates):
         run = found[0]
         require(run["run_date"] in allowed_dates and run["source_type"] in {"material", "drama"},
             "schedule_outside_authorized_scope")
-        require(run["status"] == "failed_preflight" and run["error_code"] in ERRORS and
-            not any(run[k] for k in ("started_at", "plan_attempted_at", "queued_count", "published_count",
+        rejected = known_rejection(run, repair)
+        require(not repair or rejected, "known_rejection_evidence_mismatch")
+        require(run["status"] == "failed_preflight" and (run["error_code"] in ERRORS or rejected) and
+            (not run["plan_attempted_at"] or rejected) and
+            not any(run[k] for k in ("started_at", "queued_count", "published_count",
                 "failed_count", "unknown_count")), "schedule_not_zero_write_preflight_failure")
         require(not c.execute("SELECT 1 FROM x_post_queue WHERE schedule_run_id=?", (run_id,)).fetchone(),
             "schedule_queue_exists")
@@ -56,21 +91,29 @@ def snapshot(c, run_ids, allowed_dates):
             r["publish_approved"] == 1 and not r["deleted_at"]]
         require(eligible, "schedule_all_accounts_unavailable")
         require(existing(c, run_id) is None, "schedule_already_authorized")
-        result.append({"run_id": run_id, "identity_sha256": fingerprint(identity(run)),
+        item = {"run_id": run_id, "identity_sha256": fingerprint(identity(run)),
             "run_sha256": fingerprint(run), "previous_run": run,
             "account_state": safe_accounts, "currently_available_account_ids": eligible,
             "currently_unavailable_account_ids": [i for i in accounts if i not in eligible],
             "queue_count": 0, "log_count": 0,
-            "account_preflight_required": True})
+            "account_preflight_required": True}
+        if rejected:
+            item.update(known_prewrite_rejection=True, repair_evidence=repair,
+                rejection_location="create_schedule_plan.language_capacity_guard_before_begin_immediate")
+        result.append(item)
     return result
 
 
-def plan(path, run_ids, allowed_dates):
+def plan(path, run_ids, allowed_dates, *, known_rejection_commit="", runner_path="", repository=""):
+    repair = (verify_capacity_repair(known_rejection_commit, runner_path, repository)
+        if known_rejection_commit else None)
     with contextlib.closing(connect(path)) as c:
         c.execute("BEGIN")
         result = {"kind": "x_zero_write_schedule_resume", "version": 1,
             "db_path": str(Path(path).resolve()), "run_ids": sorted(run_ids),
-            "allowed_dates": sorted(allowed_dates), "items": snapshot(c, sorted(run_ids), allowed_dates)}
+            "allowed_dates": sorted(allowed_dates), "items": snapshot(c, sorted(run_ids), sorted(allowed_dates), repair)}
+        if repair:
+            result["repair_evidence"] = repair
     result["plan_sha256"] = fingerprint(result)
     return result
 
@@ -81,12 +124,18 @@ def apply(path, saved, expected_sha, backup_dir, actor, reason):
         saved.get("plan_sha256") == expected_sha == fingerprint(unsigned), "plan_hash_mismatch")
     require(saved["db_path"] == str(Path(path).resolve()) and str(actor).strip() and str(reason).strip(),
         "path_actor_or_reason_invalid")
+    repair = saved.get("repair_evidence")
+    def verify_repair():
+        if repair:
+            require(verify_capacity_repair(repair["commit"], repair["runner_path"], repair["repository"]) == repair,
+                "repair_evidence_drift")
     with contextlib.closing(connect(path)) as c:
         receipts = [existing(c, i) for i in saved["run_ids"]]
         if receipts and all(r is not None and r["plan_sha256"] == expected_sha for r in receipts):
             return {"applied": False, "already_applied": True, "plan_sha256": expected_sha,
                 "run_ids": saved["run_ids"], "platform_called": False}
-        require(snapshot(c, saved["run_ids"], saved["allowed_dates"]) == saved["items"], "plan_state_drift")
+        verify_repair()
+        require(snapshot(c, saved["run_ids"], saved["allowed_dates"], repair) == saved["items"], "plan_state_drift")
     directory = Path(backup_dir)
     directory.mkdir(parents=True, exist_ok=True)
     backup = directory / ("schedule-zero-write-" + uuid.uuid4().hex + ".sqlite3")
@@ -103,14 +152,16 @@ def apply(path, saved, expected_sha, backup_dir, actor, reason):
         try:
             c.execute("PRAGMA synchronous=FULL")
             c.execute("BEGIN IMMEDIATE")
-            require(snapshot(c, saved["run_ids"], saved["allowed_dates"]) == saved["items"], "plan_state_drift")
+            verify_repair()
+            require(snapshot(c, saved["run_ids"], saved["allowed_dates"], repair) == saved["items"], "plan_state_drift")
             c.execute(SCHEMA)
             now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             for item in saved["items"]:
                 c.execute("INSERT INTO x_post_schedule_zero_write_resume_audit VALUES(?,?,?,?,?,?,?,?)",
                     (item["run_id"], item["identity_sha256"], expected_sha, str(actor), str(reason), now,
                      digest.hexdigest(), json.dumps(item, ensure_ascii=False, sort_keys=True)))
-                cursor = c.execute("UPDATE x_post_schedule_run SET status='claimed',error_code='',error_message='',"
+                reset_fence = "plan_attempted_at=''," if item.get("known_prewrite_rejection") else ""
+                cursor = c.execute("UPDATE x_post_schedule_run SET " + reset_fence + "status='claimed',error_code='',error_message='',"
                     "finished_at='',updated_at=?,lease_heartbeat_at=? WHERE id=? AND status='failed_preflight'",
                     (now, now, item["run_id"]))
                 require(cursor.rowcount == 1, "schedule_compare_and_swap_failed")
@@ -134,12 +185,16 @@ def main():
     parser.add_argument("--backup-dir")
     parser.add_argument("--actor")
     parser.add_argument("--reason")
+    parser.add_argument("--known-rejection-commit", default="")
+    parser.add_argument("--runner-path", default="")
+    parser.add_argument("--repository", default="")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     with os.fdopen(os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as handle:
         if args.action == "plan":
             require(args.run_ids and args.dates, "exact_scope_required")
-            result = plan(args.db, [int(i) for i in args.run_ids.split(",")], args.dates.split(","))
+            result = plan(args.db, [int(i) for i in args.run_ids.split(",")], args.dates.split(","),
+                known_rejection_commit=args.known_rejection_commit, runner_path=args.runner_path, repository=args.repository)
         else:
             require(all((args.plan, args.plan_sha256, args.backup_dir, args.actor, args.reason)), "apply_arguments_required")
             result = apply(args.db, json.loads(Path(args.plan).read_text(encoding="utf-8")),
