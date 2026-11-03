@@ -39,6 +39,7 @@ def _existing_receipt(executor, task, token):
         uncertain = bool(task.unknown_outcome or task.status == "unknown")
         target, event = ("unknown" if uncertain else "reconciling"), "task_reconcile_pending"
         updates.update(unknown_outcome=uncertain, claim_phase="reconcile",
+                       error_code="", error_message="",
                        next_attempt_at_utc=executor._now() + timedelta(minutes=5))
     saved = executor.store.transition_task(task.id, target, expected_statuses={task.status},
                                          claim_token=token, updates=updates, event_type=event)
