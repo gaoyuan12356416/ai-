@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -47,7 +48,9 @@ def text_sha(value):
 
 
 def parsed(value):
-    result = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    # Graph uses +0000; Python 3.9 fromisoformat requires the colon form.
+    text = re.sub(r'([+-]\d{2})(\d{2})$', r'\1:\2', str(value).replace('Z', '+00:00'))
+    result = datetime.fromisoformat(text)
     require(result.tzinfo is not None, 'timestamp_timezone_missing')
     return result.astimezone(timezone.utc)
 

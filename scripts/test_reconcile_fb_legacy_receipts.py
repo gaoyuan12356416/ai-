@@ -97,6 +97,29 @@ class ConfirmedLegacyReceiptTests(unittest.TestCase):
         result = self.apply(plan, '2')
         self.assertEqual([i['status'] for i in result['items']], ['already_committed'] * 2)
 
+    def test_original_graph_compact_timezone_uses_python39_compatible_parser_input(self):
+        for evidence in (self.pages, self.objects):
+            for item in evidence['items']:
+                rows = item.get('matches') or item['queries'][0]['rows']
+                for row in rows:
+                    row['created_time'] = '2026-11-02T02:34:26+0000'
+                    row['status']['publishing_phase']['publish_time'] = '2026-11-02T02:34:26+0000'
+
+        def python39_fromisoformat(text):
+            # New Python accepts the original Graph format, masking regressions.
+            self.assertNotRegex(text, r'[+-]\d{4}$')
+            return datetime.fromisoformat(text)
+
+        with patch.object(op, 'datetime') as legacy_datetime:
+            legacy_datetime.fromisoformat.side_effect = python39_fromisoformat
+            plan = self.plan()
+            self.assertEqual(op.parsed('2026-11-02T10:34:26+0800'), datetime(2026, 11, 2, 2, 34, 26, tzinfo=timezone.utc))
+            self.assertEqual(op.parsed('2026-11-01T21:34:26-0500'), datetime(2026, 11, 2, 2, 34, 26, tzinfo=timezone.utc))
+        self.assertEqual([i['proof']['published_at'] for i in plan['items']], [self.created] * 2)
+        self.apply(plan)
+        with closing(op.connect(self.path)) as c:
+            self.assertEqual(c.execute('SELECT completed_at_utc FROM fb_auto_task WHERE id=29162').fetchone()[0], self.created)
+
     def test_second_task_drift_rolls_back_both(self):
         plan = self.plan()
         with self.store.connect() as c:
