@@ -39,6 +39,10 @@ class YouTubeNativeBridge:
         self.client = client or ReviewedYouTubeHTTPClient()
         self._source_locks = weakref.WeakValueDictionary()
         self._source_locks_guard = threading.Lock()
+        # Reuse an already verified, short-lived access token only for reads in
+        # this exact claim. Every write still reloads current authorization.
+        self._read_tokens = {}
+        self._read_tokens_lock = threading.Lock()
         with workflow.db(True) as conn:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_youtube_claim(
@@ -252,7 +256,13 @@ class YouTubeNativeBridge:
             # Credential preparation is not a platform write. Do it before
             # recording upload/comment intent so a rejected credential cannot
             # strand a never-started video as an ambiguous upload.
-            for attempt in range(2):
+            cache_key=(job['source_key'],job['generation'],claim_hash(claim),task['channel_id'])
+            with self._read_tokens_lock:
+                cutoff=time.monotonic()
+                self._read_tokens={k:v for k,v in self._read_tokens.items() if v[0]>cutoff}
+                cached=self._read_tokens.get(cache_key) if name=='youtube_video_state' else None
+            token=cached[1] if cached else None
+            for attempt in range(0 if cached else 2):
                 try:
                     credential = self.workflow.channel_directory.repository.credential(app_id=task["app_id"], channel_local_id=task["channel_local_id"], account_id=task["youtube_account_id"], expected_channel_id=task["channel_id"])
                     if (task["workflow"] == "reviewed_thumbnail" and not reviewed_scope_eligible(credential.scopes)) or (task["workflow"] == "legacy" and not credential.capabilities["upload_eligible"]) or (task["comment_text"] and not credential.capabilities["comment_eligible"]):
@@ -268,6 +278,9 @@ class YouTubeNativeBridge:
                     if attempt or (not lookup_unavailable and code not in {"youtube_token_refresh_unavailable", "youtube_channel_identity_unavailable"}):
                         raise
                     time.sleep(1)
+            if not cached:
+                with self._read_tokens_lock:
+                    self._read_tokens[cache_key]=(time.monotonic()+90,token)
             # Slow credential reads may outlive native ownership. Recheck it
             # before granting any platform-write intent.
             task, native = self._owned(job, saved)

@@ -82,6 +82,33 @@ class RecoveryTests(unittest.TestCase):
             c.execute("UPDATE drama_youtube_publish SET status='failed',error_code='pipeline_lease_lost' WHERE id=?",(f.task['id'],))
         self.assertEqual(f.workflow._dto(body,body['creator'],summary=True)['status'],'publish_failed')
 
+    def test_processing_reads_reuse_short_token_but_writes_recheck_authorization(self):
+        f=self.f
+        f.prepare_upload()
+        f.checkpoint('youtube_session',{'session_uri':'https://www.googleapis.com/upload?x=1','size':1024})
+        f.checkpoint('youtube_upload',{'state':'submitted','video_id':'video_123'})
+        f.workflow.channel_directory.repository.credential=Mock(side_effect=WorkflowError('material_query_busy','temporary'))
+        result=f.operation('youtube_video_state',{'video_id':'video_123','channel_id':f.task['channel_id']})
+        self.assertEqual(result['credentials']['access_token'],'short-token')
+        self.assertEqual(f.workflow.channel_directory.repository.credential.call_count,0)
+        with patch('features.pipeline_dispatch.youtube_native.time.sleep'):
+            with self.assertRaisesRegex(AdapterError,'youtube_credential_lookup_unavailable'):
+                f.operation('youtube_thumbnail',{'video_id':'video_123','sha256':f.cover_sha})
+        self.assertEqual(f.workflow.channel_directory.repository.credential.call_count,2)
+        self.assertEqual(f.store.youtube_task(f.task['id'])['thumbnail_status'],'pending')
+
+    def test_expired_read_token_requires_new_authorization(self):
+        f=self.f
+        f.prepare_upload()
+        f.checkpoint('youtube_session',{'session_uri':'https://www.googleapis.com/upload?x=1','size':1024})
+        f.checkpoint('youtube_upload',{'state':'submitted','video_id':'video_123'})
+        f.bridge._read_tokens={key:(0,value[1]) for key,value in f.bridge._read_tokens.items()}
+        f.workflow.channel_directory.repository.credential=Mock(side_effect=WorkflowError('material_query_busy','temporary'))
+        with patch('features.pipeline_dispatch.youtube_native.time.sleep'):
+            with self.assertRaisesRegex(AdapterError,'youtube_credential_lookup_unavailable'):
+                f.operation('youtube_video_state',{'video_id':'video_123','channel_id':f.task['channel_id']})
+        self.assertEqual(f.workflow.channel_directory.repository.credential.call_count,2)
+
     def test_operator_retry_rearms_only_same_unstarted_task_once(self):
         f = self.f
         adapter = LedgerAdapter(LedgerSpec('youtube','publish',str(f.store.db_path),'drama_youtube_publish',module='youtube_auto_publish'),f.bridge)
