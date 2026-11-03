@@ -88,7 +88,14 @@ def _job(row, private=False):
 
 
 class DispatchStore:
-    def __init__(self, path, clock=utcnow):
+    def __init__(self, path, clock=utcnow, *, capability_exclusions=None):
+        exclusions = {} if capability_exclusions is None else capability_exclusions
+        if (not isinstance(exclusions, dict)
+                or any(not isinstance(node, str) or not node or not isinstance(values, list)
+                       or any(not isinstance(value, str) or not value or len(value) > 120 for value in values)
+                       for node, values in exclusions.items())):
+            raise DispatchError("node_capability_policy_invalid", status=400)
+        self.capability_exclusions = {node: set(values) for node, values in exclusions.items()}
         self.path, self.clock = str(path), clock
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
@@ -651,7 +658,8 @@ class DispatchStore:
                     "publish": {"target": 2, "ceiling": 4},
                 }
                 self._save_config(c, config, {}, "node_capacity_initialized")
-            c.execute("INSERT INTO pipeline_node VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET capabilities_json=excluded.capabilities_json,metrics_json=excluded.metrics_json,last_seen_at=excluded.last_seen_at", (node_id, dumps(sorted(set(capabilities))), dumps(metrics or {}), self.now()))
+            admitted = set(capabilities) - self.capability_exclusions.get(node_id, set())
+            c.execute("INSERT INTO pipeline_node VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET capabilities_json=excluded.capabilities_json,metrics_json=excluded.metrics_json,last_seen_at=excluded.last_seen_at", (node_id, dumps(sorted(admitted)), dumps(metrics or {}), self.now()))
             return {"accepted": True, "capacity": self.config(c)["hosts"][node_id], "lease_seconds": LEASE_SECONDS}
 
     def worker_heartbeat(self, node_id, worker_id, stage, pid=None, draining=False, observation=None):
@@ -699,7 +707,9 @@ class DispatchStore:
                 return {"job": None, "idle_reason": "worker_busy"}
             if stage == "publish" and c.execute("SELECT count(*) FROM pipeline_job WHERE stage='publish' AND status IN ('running','legacy_running')").fetchone()[0] >= config["global_publish_limit"]:
                 return {"job": None, "idle_reason": "global_publish_limit"}
-            capabilities = set(json.loads(node["capabilities_json"]))
+            # Apply immediately to cached registrations as well as future node
+            # heartbeats. An unavailable tool must not interrupt other node work.
+            capabilities = set(json.loads(node["capabilities_json"])) - self.capability_exclusions.get(node_id, set())
             rows = c.execute("""SELECT j.* FROM pipeline_job j
               LEFT JOIN pipeline_fairness fc ON fc.scope=? AND fc.item=j.channel
               LEFT JOIN pipeline_fairness fb ON fb.scope=?||j.channel AND fb.item=j.batch_key
@@ -1196,7 +1206,7 @@ class DispatchStore:
                     elif (not last or last <= stamp(self.clock() - dt.timedelta(seconds=300))) and cpu < 70 and available > .25:
                         samples = c.execute("SELECT count(*) FROM pipeline_job WHERE node_id=? AND stage=? AND finished_at>=? AND status IN ('completed','published')", (node["node_id"], stage, stamp(self.clock() - CAPACITY_SAMPLE_WINDOW))).fetchone()[0]
                         candidates = c.execute("SELECT channel,capabilities_json FROM pipeline_job WHERE stage=? AND status IN ('queued','ready') AND hold_reason='' AND scheduled_at<=?", (stage, now)).fetchall()
-                        node_capabilities = set(json.loads(node["capabilities_json"]))
+                        node_capabilities = set(json.loads(node["capabilities_json"])) - self.capability_exclusions.get(node["node_id"], set())
                         waiting = any(item["channel"] in config["enabled_channels"] and set(json.loads(item["capabilities_json"])).issubset(node_capabilities) for item in candidates)
                         gpu_room = stage != "prepare" or not is_gpu or (metrics.get("gpu_percent", 100) < 80 and metrics.get("encoder_percent", 100) < 80 and metrics.get("gpu_memory_available_fraction", 0) > .2)
                         if samples >= 3 and waiting and gpu_room:

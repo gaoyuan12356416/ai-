@@ -1,0 +1,5 @@
+{
+  "node_capability_exclusions": {
+    "hk-gpu": ["prepare:youtube", "youtube_prepare"]
+  }
+}
