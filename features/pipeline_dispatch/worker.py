@@ -17,6 +17,7 @@ import uuid
 from .client import CoordinatorClient, CoordinatorError
 from .credentials import open_credentials
 from .diagnostics import exception_failure_fields
+from .receipt_outbox import ReceiptOutbox
 
 CLAIM_FIELDS = ("job_id", "generation", "claim_token", "node_id", "worker_id")
 
@@ -27,67 +28,6 @@ def canonical(value):
 
 class LeaseLost(RuntimeError):
     code = "pipeline_lease_lost"
-
-
-class ReceiptOutbox:
-    """Fsync before acknowledgements; no credentials are stored here."""
-    def __init__(self, path):
-        self.path = str(path)
-        Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with self.connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("CREATE TABLE IF NOT EXISTS receipt_outbox (id TEXT PRIMARY KEY,route TEXT NOT NULL,payload TEXT NOT NULL,created_at REAL NOT NULL,acked_at REAL)")
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-
-    @contextlib.contextmanager
-    def connect(self):
-        conn = sqlite3.connect(self.path, timeout=10)
-        conn.execute("PRAGMA synchronous=FULL")
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
-
-    def put(self, route, payload, receipt_id=None):
-        identity = receipt_id or str(payload.get("receipt_id") or payload.get("checkpoint_id") or uuid.uuid4().hex)
-        encoded = canonical(payload)
-        with self.connect() as conn:
-            existing = conn.execute("SELECT route,payload FROM receipt_outbox WHERE id=?", (identity,)).fetchone()
-            if existing and existing != (route, encoded):
-                raise ValueError("receipt id reused with changed facts")
-            conn.execute("INSERT OR IGNORE INTO receipt_outbox(id,route,payload,created_at) VALUES(?,?,?,?)", (identity, route, encoded, time.time()))
-        return identity
-
-    def flush(self, client, *, only=None):
-        with self.connect() as conn:
-            rows = conn.execute("SELECT id,route,payload FROM receipt_outbox WHERE acked_at IS NULL" + (" AND id=?" if only else "") + " ORDER BY created_at LIMIT 100", (only,) if only else ()).fetchall()
-        blocked_claims = set()
-        for identity, route, payload in rows:
-            decoded = json.loads(payload)
-            claim_key = (decoded.get("job_id"), decoded.get("generation"))
-            if claim_key in blocked_claims:
-                continue
-            try:
-                result = client.post(route, decoded)
-            except CoordinatorError:
-                if only:
-                    raise
-                blocked_claims.add(claim_key)
-                continue  # Keep durable facts; another channel may still accept its receipt.
-            if result.get("accepted") is False or result.get("ok") is False:
-                if only:
-                    return False
-                blocked_claims.add(claim_key)
-                continue
-            with self.connect() as conn:
-                conn.execute("UPDATE receipt_outbox SET acked_at=? WHERE id=? AND acked_at IS NULL", (time.time(), identity))
-        with self.connect() as conn:
-            remaining = conn.execute("SELECT count(*) FROM receipt_outbox WHERE acked_at IS NULL" + (" AND id=?" if only else ""), (only,) if only else ()).fetchone()[0]
-        return remaining == 0
 
 
 class ExecutionContext:
@@ -105,6 +45,8 @@ class ExecutionContext:
         self._operation_number = 0
         self.last_operation_id = ""
         self.rate_limit = {}
+        self._last_heartbeat = monotonic()
+        self._heartbeat_uncertain = False
 
     def __enter__(self):
         self._thread = threading.Thread(target=self._heartbeat, name="pipeline-job-heartbeat", daemon=True)
@@ -125,14 +67,19 @@ class ExecutionContext:
                 if result.get("accepted") is False or result.get("ok") is False:
                     self.lost.set()
                     return
-            except CoordinatorError:
-                # The current network request/render may finish. No subsequent API
-                # operation can begin without contacting the authority again.
-                self.lost.set()
-                return
+                self._last_heartbeat = self.monotonic()
+                self._heartbeat_uncertain = False
+            except CoordinatorError as exc:
+                self._heartbeat_uncertain = True
+                # Transient transport failures do not revoke a 120-second lease.
+                # A rejected identity or an exhausted lease does. No new external
+                # operation starts while authority contact remains uncertain.
+                if exc.status in (401, 403, 409) or self.monotonic() - self._last_heartbeat >= 120:
+                    self.lost.set()
+                    return
 
     def check(self):
-        if self.lost.is_set():
+        if self.lost.is_set() or self._heartbeat_uncertain or self.monotonic() - self._last_heartbeat >= 120:
             raise LeaseLost()
 
     def phase(self, name):
@@ -144,7 +91,7 @@ class ExecutionContext:
         # Exact upstream receipts must still be recorded after lease loss.
         checkpoint_id = hashlib.sha256(canonical({"job_id": self.identity["job_id"], "generation": self.identity["generation"], "phase": phase, "receipt": receipt}).encode()).hexdigest()
         payload = {**self.identity, "checkpoint_id": checkpoint_id, "phase": phase, "receipt": receipt}
-        self.outbox.put("jobs/checkpoint", payload, checkpoint_id)
+        self.outbox.put("jobs/checkpoint", payload, checkpoint_id, defer_background_seconds=15)
         if not self.outbox.flush(self.client, only=checkpoint_id):
             raise CoordinatorError("checkpoint_not_accepted", 409)
 
@@ -166,6 +113,9 @@ class ExecutionContext:
             if response.get("accepted") is False or not response.get("credential_envelope"):
                 raise CoordinatorError("operation_not_accepted", 409)
             self.write_started = self.write_started or bool(write)
+            # Credential issuance may outlive the lease while the independent
+            # heartbeat is running. A late envelope cannot authorize a new write.
+            self.check()
             with open_credentials(response["credential_envelope"], self.seal_key, binding) as credentials:
                 yield credentials
         except Exception as exc:
@@ -185,6 +135,14 @@ def execute_claim(job, client, outbox, seal_key, executor):
     receipt_id = uuid.uuid4().hex
     with context:
         try:
+            if job.get("reservation_pending"):
+                context.phase("selection")
+                reserved = client.post("jobs/reserve", context.identity)
+                if not reserved.get("job"):
+                    return {**context.identity, "reservation_resolved": True}
+                job = reserved["job"]
+                context.job = job
+                context.check()
             result = executor.execute(job, context)
             if context.rate_limit:
                 result = {**result, **context.rate_limit}
@@ -197,7 +155,7 @@ def execute_claim(job, client, outbox, seal_key, executor):
             context.phase("failed")
             payload = {**context.identity, "receipt_id": receipt_id, "error_code": code, "unknown_outcome": unknown, "metrics": context.metrics, **context.rate_limit, **exception_failure_fields(exc)}
             route = "jobs/fail"
-        outbox.put(route, payload, receipt_id)
+        outbox.put(route, payload, receipt_id, defer_background_seconds=15)
         try:
             outbox.flush(client, only=receipt_id)
         except CoordinatorError:
@@ -227,7 +185,7 @@ def process_worker(config, stage, index):
             if state.get("drain") or state.get("enabled") is False:
                 stopping.wait(5)
                 continue
-            response = client.post("jobs/claim", {**identity, "capabilities": executor.capabilities(stage)})
+            response = client.post("jobs/claim", {**identity, "capabilities": executor.capabilities(stage), "reserve_separately": True})
             job = response.get("job")
             if job:
                 idle_reason = "awaiting_assignment"

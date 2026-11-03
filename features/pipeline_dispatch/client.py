@@ -21,7 +21,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class CoordinatorClient:
     PREFIX = "/internal/pipeline/"
-    ROUTES = frozenset({"nodes/enroll", "nodes/register", "workers/heartbeat", "jobs/claim", "jobs/heartbeat", "jobs/begin-operation", "jobs/checkpoint", "jobs/complete", "jobs/fail", "workers/drain"})
+    ROUTES = frozenset({"nodes/enroll", "nodes/register", "workers/heartbeat", "jobs/claim", "jobs/reserve", "jobs/heartbeat", "jobs/begin-operation", "jobs/checkpoint", "jobs/complete", "jobs/fail", "workers/drain"})
 
     def __init__(self, base_url, token, *, timeout=10, opener=None):
         parsed = urlsplit(str(base_url))
@@ -41,7 +41,7 @@ class CoordinatorClient:
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
         request = urllib.request.Request(self.base_url + self.PREFIX + route, data=body, method="POST", headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json", "Accept": "application/json"})
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
+            with self.opener.open(request, timeout=max(self.timeout, 120) if route in {"jobs/reserve", "jobs/begin-operation", "jobs/checkpoint", "jobs/complete", "jobs/fail"} else self.timeout) as response:
                 raw = response.read(8 * 1024 * 1024 + 1)
                 if len(raw) > 8 * 1024 * 1024:
                     raise CoordinatorError("coordinator_response_too_large", 502)
@@ -58,6 +58,8 @@ class CoordinatorClient:
                     code = candidate
             except (ValueError, AttributeError):
                 pass
+            finally:
+                exc.close()
             raise CoordinatorError(code, exc.code) from None
         except (OSError, ValueError, urllib.error.URLError):
             raise CoordinatorError() from None

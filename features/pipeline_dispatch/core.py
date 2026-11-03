@@ -440,6 +440,14 @@ class DispatchStore:
                 if inherited or (offer.get("legacy_inflight") and in_time and existing["status"] != "backlog_paused"):
                     c.execute("UPDATE pipeline_job SET grandfathered=1 WHERE id=?", (existing["id"],))
                 # Canonical observations cannot reset a claim, failure, hold or write intent.
+                # They may escalate a failed admission to a native unknown outcome.
+                # Preserve the owning ledger's fence even if no permit reached a node.
+                if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"]:
+                    c.execute("UPDATE pipeline_job SET status='unknown',error_code='canonical_unknown_outcome',finished_at='',updated_at=? WHERE id=?", (now, existing["id"]))
+                    for resource in offer.get("resource_keys", []):
+                        c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, existing["id"]))
+                    c.execute("UPDATE pipeline_resource SET quarantined=1 WHERE job_id=?", (existing["id"],))
+                    self.event(c, existing["id"], "canonical_unknown_observed", {"source_status": offer.get("source_status", "")}, now)
                 c.execute("UPDATE pipeline_job SET source_status=? WHERE id=?",
                           (str(offer.get("source_status", "")), existing["id"]))
                 if not existing["owner_tenant_key"] and offer.get("owner_tenant_key") and str(offer.get("owner_user_id", "")) == existing["owner_user_id"]:
@@ -643,6 +651,9 @@ class DispatchStore:
               (stage, stage + ":", stage, now)).fetchall()
             blocked = []
             for row in rows:
+                if c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", ("job:" + str(row["id"]), now)).fetchone():
+                    blocked.append("account_busy")
+                    continue
                 if row["channel"] not in config["enabled_channels"]:
                     blocked.append("channel_disabled")
                     continue
@@ -708,6 +719,20 @@ class DispatchStore:
             if phase:
                 c.execute("UPDATE pipeline_worker SET last_seen_at=?,observation_json=? WHERE node_id=? AND worker_id=?", (self.now(), dumps({"phase": str(phase)[:80]}), row["node_id"], row["worker_id"]))
             return {"accepted": True, "lease_expires_at": expires}
+
+    def defer_blocked(self, claim, reason):
+        """A native pre-claim account conflict waits without freezing a failure."""
+        if reason != "canonical_account_busy":
+            raise DispatchError("defer_reason_invalid")
+        with self.transaction() as c:
+            row = self._validate_claim(c, claim)
+            if row["external_intent"] or c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? LIMIT 1", (row["id"],)).fetchone():
+                raise DispatchError("operation_requires_reconciliation")
+            c.execute("UPDATE pipeline_job SET status='queued',lease_expires_at='',updated_at=?,error_code=? WHERE id=?", (self.now(), reason, row["id"]))
+            c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND generation=?", (row["id"], row["generation"]))
+            c.execute("INSERT INTO pipeline_cooldown VALUES(?,?,?) ON CONFLICT(resource_key) DO UPDATE SET until_at=excluded.until_at,reason=excluded.reason", ("job:" + str(row["id"]), stamp(self.clock() + dt.timedelta(seconds=30)), reason))
+            self.event(c, row["id"], "admission_deferred", {"reason": reason}, self.now())
+            return {"accepted": True, "deferred": True}
 
     def defer_unstarted(self, claim, required_capabilities, reason="capability_unavailable"):
         """Pin an unstarted preparation to its frozen executor capabilities."""

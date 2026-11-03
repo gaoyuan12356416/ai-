@@ -120,6 +120,48 @@ class Coordinator:
                 print("pipeline_collection_failed", flush=True)
             self.stopping.wait(15)
 
+    def reserve_job(self, job):
+        try:
+            if self.recover_prepared(job):
+                return {"job": None, "idle_reason": "canonical_preparation_recovered"}
+            with contextlib.closing(self.store.connect()) as c:
+                node = c.execute("SELECT capabilities_json FROM pipeline_node WHERE node_id=?", (job["node_id"],)).fetchone()
+            capabilities = json.loads(node[0]) if node else []
+            job["executor_backend"] = "gpu" if "backend:gpu" in capabilities else "cpu"
+            job["executor_capabilities"] = capabilities
+            descriptor = self.registry.reserve(job, job)
+            # Freeze the actual descriptor so subsequent operations are
+            # verified against the same body and artifact by native code.
+            with self.store.transaction() as c:
+                self.store._validate_claim(c, job)
+                c.execute("UPDATE pipeline_job SET payload_json=?,artifact_json=? WHERE id=? AND generation=?", (dumps(descriptor), dumps(descriptor.get("artifact", job["artifact"])), job["id"], job["generation"]))
+                if descriptor.get("required_capabilities"):
+                    c.execute("UPDATE pipeline_job SET capabilities_json=? WHERE id=? AND generation=?", (dumps(descriptor["required_capabilities"]), job["id"], job["generation"]))
+            job["payload"] = descriptor
+            job["artifact"] = descriptor.get("artifact", job["artifact"])
+            required = descriptor.get("required_capabilities") or []
+            if not set(required).issubset(capabilities):
+                self.store.defer_unstarted(job, required)
+                return {"job": None, "idle_reason": "capability_unavailable"}
+        except Exception as exc:
+            if getattr(exc, "code", "") in {"claim_expired", "claim_conflict"}:
+                return {"job": None, "idle_reason": "claim_expired_during_reservation"}
+            if getattr(exc, "code", "") == "canonical_account_busy":
+                self.store.defer_blocked(job, "canonical_account_busy")
+                return {"job": None, "idle_reason": "account_busy"}
+            try:
+                if self.recover_prepared(job):
+                    return {"job": None, "idle_reason": "canonical_preparation_recovered"}
+                observed = self.registry.reconcile(job)
+                if observed.get("metadata_only"):
+                    self.store.skip(job, observed.get("canonical_receipt", {}), canonical_verified=True)
+                    return {"job": None, "idle_reason": "canonical_no_candidate"}
+            except Exception:
+                pass
+            self.store.fail(job, getattr(exc, "code", "canonical_reservation_failed"))
+            raise DispatchError(getattr(exc, "code", "canonical_reservation_failed")) from None
+        return {"job": job}
+
     def route(self, path, payload, auth):
         if path.startswith("/internal/pipeline-monitor/"):
             if not auth.get("internal"):
@@ -200,44 +242,16 @@ class Coordinator:
         if action == "jobs/claim":
             response = self.store.claim(node_id, payload.get("worker_id"), payload.get("stage"))
             job = response["job"]
-            if job:
-                try:
-                    if self.recover_prepared(job):
-                        return {"job": None, "idle_reason": "canonical_preparation_recovered"}
-                    with contextlib.closing(self.store.connect()) as c:
-                        node = c.execute("SELECT capabilities_json FROM pipeline_node WHERE node_id=?", (node_id,)).fetchone()
-                    capabilities = json.loads(node[0]) if node else []
-                    job["executor_backend"] = "gpu" if "backend:gpu" in capabilities else "cpu"
-                    job["executor_capabilities"] = capabilities
-                    descriptor = self.registry.reserve(job, job)
-                    # Freeze the actual descriptor so subsequent operations are
-                    # verified against the same body and artifact by native code.
-                    with self.store.transaction() as c:
-                        self.store._validate_claim(c, job)
-                        c.execute("UPDATE pipeline_job SET payload_json=?,artifact_json=? WHERE id=? AND generation=?", (dumps(descriptor), dumps(descriptor.get("artifact", job["artifact"])), job["id"], job["generation"]))
-                        if descriptor.get("required_capabilities"):
-                            c.execute("UPDATE pipeline_job SET capabilities_json=? WHERE id=? AND generation=?", (dumps(descriptor["required_capabilities"]), job["id"], job["generation"]))
-                    job["payload"] = descriptor
-                    job["artifact"] = descriptor.get("artifact", job["artifact"])
-                    required = descriptor.get("required_capabilities") or []
-                    if not set(required).issubset(capabilities):
-                        self.store.defer_unstarted(job, required)
-                        return {"job": None, "idle_reason": "capability_unavailable"}
-                except Exception as exc:
-                    if getattr(exc, "code", "") in {"claim_expired", "claim_conflict"}:
-                        return {"job": None, "idle_reason": "claim_expired_during_reservation"}
-                    try:
-                        if self.recover_prepared(job):
-                            return {"job": None, "idle_reason": "canonical_preparation_recovered"}
-                        observed = self.registry.reconcile(job)
-                        if observed.get("metadata_only"):
-                            self.store.skip(job, observed.get("canonical_receipt", {}), canonical_verified=True)
-                            return {"job": None, "idle_reason": "canonical_no_candidate"}
-                    except Exception:
-                        pass
-                    self.store.fail(job, getattr(exc, "code", "canonical_reservation_failed"))
-                    raise DispatchError(getattr(exc, "code", "canonical_reservation_failed")) from None
-            return response
+            if job and payload.get("reserve_separately") is True:
+                # Hand the identity to the worker before potentially slow native
+                # selection. Its independent heartbeat now protects this lease.
+                return {"job": {**job, "reservation_pending": True}}
+            return self.reserve_job(job) if job else response
+        if action == "jobs/reserve":
+            self.store.heartbeat(payload, "selection")
+            job = self.store.get_job(payload["job_id"])
+            job["claim_token"] = payload["claim_token"]
+            return self.reserve_job(job)
         if action == "jobs/heartbeat":
             return self.store.heartbeat(payload, payload.get("phase"), payload.get("metrics"))
         if action == "jobs/begin-operation":
@@ -335,7 +349,10 @@ def handler_type(coordinator):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The durable callback can be delivered again with its ID.
 
         def do_GET(self):
             self.reply(200, {"ok": True, "service": "pipeline-dispatch"}) if self.path == "/health" else self.reply(404, {"code": "not_found"})
