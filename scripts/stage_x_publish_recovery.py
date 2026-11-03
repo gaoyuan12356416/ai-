@@ -70,7 +70,9 @@ def stage(repo, commit, base, folder):
     verify_source(repo, commit)
     if len(base) != 40 or run(['git', 'rev-parse', base+'^{commit}'], cwd=repo).decode().strip() != base:
         raise ValueError('exact_base_required')
-    folder.mkdir(mode=0o700, parents=True, exist_ok=False)
+    # Service users need traversal into the runtime copy. Individual private
+    # files retain original modes/owners, and the audit manifest is mode 0600.
+    folder.mkdir(mode=0o755, parents=True, exist_ok=False)
     report = {'commit': commit, 'base': base, 'status': 'prepared', 'lanes': {}}
     for lane, names in FILES.items():
         root = Path(ROOTS[lane]); previous = root.resolve()
