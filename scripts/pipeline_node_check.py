@@ -169,6 +169,9 @@ def validate_node(config, *, encode=False, cos_check=False, encode_profiles=None
     _aesgcm(bytes(32))
     executor = NodeExecutors(config)
     processors, profiles, checks = {}, set(), []
+    if config["backend"] == "gpu":
+        from features.random_gpu.asset_cache import validate_configured_cache
+        checks.append({"rgba_asset_cache": validate_configured_cache()})
     for kind in sorted(enabled & set(NodeExecutors.PREPARE)):
         if kind == "youtube_prepare":
             binary = os.environ.get("YOUTUBE_AUTO_CODEX_BIN", "/usr/bin/codex")

@@ -81,7 +81,7 @@ def read_environment(paths):
             if not sep or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
                 raise ValueError("source_environment_syntax")
             # Only renderer/COS settings; never import central account secrets.
-            if key not in {"SSL_CERT_FILE", "SSL_CERT_DIR"} and not key.startswith(("X_POST_", "FB_PAGE_GPU_", "TT_POST_GPU_", "TT_POST_DEFAULT_", "TT_POST_URL_", "RANDOM_OVERLAY_", "COS_", "YOUTUBE_AUTO_CODEX_", "CODEX_HOME")):
+            if key not in {"SSL_CERT_FILE", "SSL_CERT_DIR", "RANDOM_GPU_ASSET_CACHE_ROOT"} and not key.startswith(("X_POST_", "FB_PAGE_GPU_", "TT_POST_GPU_", "TT_POST_DEFAULT_", "TT_POST_URL_", "RANDOM_OVERLAY_", "COS_", "YOUTUBE_AUTO_CODEX_", "CODEX_HOME")):
                 continue
             if any(word in key for word in ("REFRESH_TOKEN", "ACCESS_TOKEN", "CLIENT_SECRET", "COOKIE")):
                 raise ValueError("central_credential_in_node_source")

@@ -21,6 +21,7 @@
     "copy": true
   }],
   "environment": {
+    "RANDOM_GPU_ASSET_CACHE_ROOT": "/data/random-overlay-gpu/asset-cache-v1",
     "PIPELINE_EXECUTORS": "x_preflight,x_random,x_repair,fb_prepare,tt_prepare,youtube_prepare,x_publish,x_share_publish,fb_publish,tt_publish,youtube_publish",
     "PIPELINE_PREPARE_MAX": "2",
     "PIPELINE_PUBLISH_MAX": "4",

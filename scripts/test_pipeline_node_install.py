@@ -8,6 +8,13 @@ from scripts.pipeline_node_install import plan, unit_text, tunnel_text, immutabl
 
 
 class NodeInstallTests(unittest.TestCase):
+    def test_private_renderer_environment_retains_verified_rgba_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'node.env'
+            path.write_text('RANDOM_GPU_ASSET_CACHE_ROOT=/data/cache\nRANDOM_GPU_UNRELATED=ignored\n')
+            with patch.object(Path, 'stat', return_value=SimpleNamespace(st_mode=0o100600)):
+                self.assertEqual(read_environment([path]), {'RANDOM_GPU_ASSET_CACHE_ROOT': '/data/cache'})
+
     def test_default_ca_comes_from_the_new_venv_and_worker_can_read_it(self):
         env = {}
         bundle = '/opt/pipeline-dispatch/venvs/new/lib/python3.10/site-packages/certifi/cacert.pem'

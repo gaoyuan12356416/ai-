@@ -76,3 +76,45 @@ def replace_asset_inputs(prefix, root=None):
     if number not in (5, 6):
         raise ValueError('RGBA cache requires the four-layer random template')
     return result
+
+
+def validate_configured_cache(environ=None):
+    """Offline node admission check, run as the actual service user.
+
+    Validate every selectable layer in every advertised immutable catalog.
+    The unused legacy light layer needs no cache. No rendering, rebuilding,
+    source replacement, COS operation, or platform request is performed.
+    """
+    env = os.environ if environ is None else environ
+    root = env.get(ENV)
+    if not root:
+        return {"enabled": False, "reason": "asset_cache_not_configured"}
+    from features.random_overlay_catalog import configured_asset_catalogs
+    from features.fb_gpu.random_overlay import CATEGORIES, load_asset_set
+    catalogs = {}
+    for root_key, sha_key in (
+        ("X_POST_RANDOM_TEMPLATE_ASSET_ROOT", "X_POST_RANDOM_TEMPLATE_MANIFEST_SHA256"),
+        ("FB_PAGE_GPU_RANDOM_OVERLAY_ROOT", "FB_PAGE_GPU_RANDOM_OVERLAY_MANIFEST_SHA256"),
+        ("TT_POST_GPU_RANDOM_OVERLAY_ROOT", "TT_POST_GPU_RANDOM_OVERLAY_MANIFEST_SHA256"),
+    ):
+        if not env.get(root_key) and not env.get(sha_key):
+            continue
+        approved = configured_asset_catalogs(asset_root=env.get(root_key),
+            manifest_sha256=env.get(sha_key), catalogs_json=env.get("RANDOM_OVERLAY_ASSET_CATALOGS", ""))
+        for sha, directory in approved.items():
+            if sha in catalogs and catalogs[sha] != directory:
+                raise ValueError("asset_cache_catalog_conflict")
+            catalogs[sha] = directory
+    if not catalogs:
+        raise ValueError("asset_cache_catalog_missing")
+    checked = set()
+    for sha, directory in catalogs.items():
+        assets = load_asset_set(directory, sha)
+        for category in CATEGORIES:
+            for asset in assets["categories"][category]:
+                target = cached_path(asset["path"], root)
+                with target.open("rb") as handle:
+                    if not handle.read(1):
+                        raise ValueError("asset_cache_empty")
+                checked.add(str(target))
+    return {"enabled": True, "catalogs_verified": len(catalogs), "assets_verified": len(checked)}
