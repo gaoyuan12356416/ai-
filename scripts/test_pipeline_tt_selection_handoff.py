@@ -243,6 +243,22 @@ class HandoffTests(unittest.TestCase):
             result = probe_node(request)
         self.assertEqual(result['outbox_matching_count'], 1)
         self.assertNotIn('never-return-this', json.dumps(result))
+        with contextlib.closing(sqlite3.connect(root / 'receipts.sqlite3')) as c:
+            c.execute('DELETE FROM receipt_outbox'); c.commit()
+        frozen = self.scope['items'][0]
+        scratch = work / 'jobs'; scratch.mkdir()
+        (scratch / (frozen['gpu_job_id'] + '-other.random')).mkdir()
+        with patch('scripts.inspect_pipeline_tt_handoff_nodes.subprocess.check_output', return_value=state), \
+                patch.object(Path, 'read_text', read):
+            self.assertEqual(probe_node(request)['task_file_matches'], [])
+            (scratch / (frozen['gpu_job_id'] + '.randomsuffix')).mkdir()
+            evidence = probe_node(request)
+        self.assertEqual(evidence['task_file_matches'], [{'job_id': frozen['job_id'], 'kind': 'scratch'}])
+        self.assertEqual(evidence['outbox_matching_count'], 0)
+        plan = self.plan(); evidence['captured_at'] = self.now.isoformat()
+        nodes = self.evidence(plan); nodes['nodes'][0] = evidence
+        with self.assertRaisesRegex(recovery.HandoffRejected, 'node_execution_evidence'):
+            self.apply(plan, nodes)
         env.write_text('PIPELINE_NODE_ID="cpu-main"\n')
         with patch('scripts.inspect_pipeline_tt_handoff_nodes.subprocess.check_output', return_value=state), \
                 patch.object(Path, 'read_text', read), self.assertRaises(KeyError):

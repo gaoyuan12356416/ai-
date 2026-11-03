@@ -57,6 +57,10 @@ def probe_node(request):
                                  ('recipe', base / 'recipes' / (job + '.json')), ('scratch', base / 'jobs' / job)):
                 if target.exists():
                     files.append({'job_id': item['job_id'], 'kind': kind})
+            # TT uses mkdtemp(prefix=job_id + '.'); the literal job directory
+            # alone is not evidence that this frozen render never started.
+            if any(target.is_dir() for target in (base / 'jobs').glob(job + '.*')):
+                files.append({'job_id': item['job_id'], 'kind': 'scratch'})
     return {'node_id': node, 'unit': unit, 'active_state': state.get('ActiveState'), 'main_pid': int(state.get('MainPID', '-1')),
             'captured_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'outbox_matching_count': matches,
             'task_file_matches': files, 'work_root_exists': root.is_dir(), 'outbox_exists': outbox.is_file()}
