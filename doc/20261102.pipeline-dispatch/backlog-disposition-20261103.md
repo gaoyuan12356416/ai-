@@ -167,8 +167,41 @@ Only an idempotent delivery acknowledgement is added; no task, resource fence,
 timestamp or performance sample is rewritten and no platform retry occurs.
 Eight real HTTP/SQLite cases and39 related tests passed. Manual capacity and
 existing adaptive behavior passed48 related tests plus local desktop/mobile
-browser checks. These two follow-up changes still require exact-version
-deployment/readback at this point in the record.
+browser checks. The combined core/capacity/coordinator follow-up passed58 tests.
+
+At12:32:20 Beijing, exact coordinator version
+`d3920082c0e0084f1c40632b0409b6bba6ecfafb` passed76 targeted tests on Linux in
+14.345 seconds and was deployed with a1.482-second guarded HTTP drain/switch.
+Health200, no remaining gate, main API and both node supervisors unchanged.
+Backup: `/mnt/data-disk/pipeline-dispatch/backup-coordinator-20261103T043202Z`.
+
+At12:32:44, two authenticated administrator capacity requests returned200 and
+configuration versions65/66. Only HK GPU modes/targets changed: preparation
+manual2/2, publication manual4/4. CPU remained automatic4/4, all channel/global
+limits, cutovers and enabled-channel flags remained unchanged. Subsequent
+readback after adaptive evaluations retained the exact manual values.
+
+At12:34:36, GPU had two real busy preparation processes and four live idle
+publication processes awaiting ready eligible work; CPU had four actual
+preparations. CPU outbox137/137 acknowledged, zero pending. Old job31715
+retained its original failed status, generation1 and exact03:35:40.680Z
+timestamps, with no operation and exactly one new delivery acknowledgement.
+
+Both main-API static copies and the separate Nginx public copies of monitor
+HTML/JS now match the exact GitHub bytes, with public HTTP200/hash verification.
+No main-API or Nginx restart was needed. Backup:
+`/mnt/data-disk/pipeline-dispatch/backlog-20261103/static-d3920082c0`.
+Refreshing the page displays the manual/automatic label and versioned script.
+
+The12:34 snapshot contains98 failed stages, up from the earlier87: all11 newly
+observed failures are X native account gates (eight require account review,
+three account-not-publishable), with zero publishing attempts/unknown results
+and no execution queue created. These are not new write-lock failures and were
+not retried or bypassed. Their accounts are19/23/46/102(review) and123(unavailable).
+Some restored selections also have no eligible material. All1,456 dispositions
+remain committed, paused backlog remains zero, and normal authorized work
+continues in the existing workers; the backlog is not represented as fully
+published merely because it was released.
 
 Rollback procedure: stop new claims for affected channels, let active work and
 receipt delivery finish, then restore the prior code or native symlink from the
