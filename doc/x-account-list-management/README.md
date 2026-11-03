@@ -30,6 +30,8 @@ The two unallocated-revenue cards are removed from this page only.
 
 - `python -m unittest scripts.test_x_account_list_management.AccountManagementTests scripts.test_x_account_list_management.CreditsTests scripts.test_x_account_list_routes -v`
 - `python scripts/test_x_app_switch.py`
+- `python -m unittest scripts.test_x_account_list_deployment -v` covers the
+  actual main readiness route and apply/rollback with systemd readiness probes.
 - Compile modified Python, check inline JavaScript and `git diff --check`.
 - Browser: nonempty rows, attention filtering, balance refresh, deletion cancel
   and confirmation, updated counts, unavailable balance and nonadmin controls.
@@ -48,6 +50,9 @@ accepted and distributed work to finish, then backs up live SQLite and tokens.
 It switches the sidecar, updates the main API and both static copies, verifies
 health and restores prior X admissions. Other platform channels are untouched.
 If the drain times out, admissions are restored without a code cutover.
+The default drain limit is one hour; use `--drain-timeout-seconds` to set an
+explicit limit. Remove the temporary new-connection fence before systemd
+startup because ExecStartPost probes the same loopback health port.
 
 For code rollback use the same fetched source:
 `python3 scripts/deploy_x_account_list.py --rollback <backup-folder>`.

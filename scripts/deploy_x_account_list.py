@@ -191,8 +191,11 @@ def apply(folder, rollback=False, timeout=900):
             else:copy(SOURCE/item['relative'],path)
         switch(Path(manifest['previous_release'] if rollback else manifest['new_release']));switched=True
         manifest['status']='switched';save(folder,manifest)
-        run('systemctl','start','x-post-automation.service')
+        # ExecStartPost probes the same loopback port. The old process is
+        # stopped and the complete candidate is installed; allow readiness
+        # probes before asking systemd to start it.
         run('iptables','-w','5','-D',*rule);blocked=False
+        run('systemctl','start','x-post-automation.service')
         ready(8810)
         if services['x-auto-post-service.service']=='active':run('systemctl','start','x-auto-post-service.service');ready(18833)
         run('systemctl','restart','drama-material-api.service');ready(8787)
@@ -224,8 +227,10 @@ def apply(folder, rollback=False, timeout=900):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--prepare',action='store_true');p.add_argument('--apply',type=Path);p.add_argument('--rollback',type=Path)
+    p.add_argument('--drain-timeout-seconds', type=int, default=3600)
     a=p.parse_args()
+    if a.drain_timeout_seconds <= 0:p.error('drain timeout must be positive')
     if a.prepare:prepare()
-    elif a.apply:apply(a.apply)
-    elif a.rollback:apply(a.rollback,rollback=True)
+    elif a.apply:apply(a.apply,timeout=a.drain_timeout_seconds)
+    elif a.rollback:apply(a.rollback,rollback=True,timeout=a.drain_timeout_seconds)
     else:p.error('select --prepare, --apply or --rollback')
