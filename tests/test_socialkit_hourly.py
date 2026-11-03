@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from features.socialkit_analytics.hourly import notify, run_hourly, scheduled_range
+from features.socialkit_analytics.hourly import run_hourly, scheduled_range
 from features.socialkit_analytics.refresh import run_refresh
 from features.socialkit_analytics.storage import atomic_json, read_manifest
 from tests.test_socialkit_analytics_data import FakeWriter, dataset
@@ -78,40 +78,22 @@ class RefreshMetadataTests(unittest.TestCase):
 
 
 class CoordinatorTests(unittest.TestCase):
-    def test_alert_uses_exact_published_version_and_failure_does_not_unpublish(self):
+    def test_hourly_refresh_never_sends_group_message(self):
         with tempfile.TemporaryDirectory() as root:
             def refresh(env, target, start, end, **kwargs):
-                manifest = {'version': 'published-version', 'last_full_refresh_beijing_date': kwargs['full_refresh_beijing_date']}
+                manifest = {'version': 'published-version'}
                 atomic_json(Path(target) / 'current.json', manifest)
                 return manifest
-            notification = Mock(side_effect=subprocess.TimeoutExpired('alert', 600))
-            result = run_hourly({}, root, 'alerts', now=moment('2026-11-03T03:00:00Z'),
-                                refresh=refresh, notification=notification)
-            notification.assert_called_once_with({}, root, 'alerts', 'published-version')
+            with patch('features.socialkit_gap_alert.runner.send_card') as sender:
+                result = run_hourly({}, root, now=moment('2026-11-03T03:00:00Z'), refresh=refresh)
+            sender.assert_not_called()
+            self.assertEqual(result['alert_status'], 'scheduled_daily_1130_beijing')
             self.assertEqual(read_manifest(root)['version'], 'published-version')
-            self.assertEqual(result['refresh_status'], 'complete')
-            self.assertEqual(result['alert_status'], 'failed')
-            self.assertEqual(result['alert_error_code'], 'TimeoutExpired')
-            self.assertEqual(json.loads((Path(root) / 'hourly-status.json').read_text())['version'], 'published-version')
 
-    def test_failed_refresh_never_calls_alert(self):
+    def test_failed_refresh_remains_failure(self):
         with tempfile.TemporaryDirectory() as root:
-            notification = Mock()
             with self.assertRaises(RuntimeError):
-                run_hourly({}, root, now=moment('2026-11-03T03:00:00Z'),
-                           refresh=Mock(side_effect=RuntimeError('failed')), notification=notification)
-            notification.assert_not_called()
-
-    def test_notifier_command_is_bounded_version_pinned_and_output_suppressed(self):
-        completed = subprocess.CompletedProcess([], 2, stdout='private payload', stderr='private error')
-        with patch('features.socialkit_analytics.hourly.subprocess.run', return_value=completed) as run:
-            result = notify({'EXAMPLE': 'private'}, 'report-root', 'alert-root', 'the-version')
-        args, kwargs = run.call_args
-        self.assertIn('--send', args[0])
-        self.assertEqual(args[0][-6:], ['--version', 'the-version', '--socialkit-root', 'report-root', '--root', 'alert-root'])
-        self.assertEqual(kwargs['timeout'], 1200)
-        self.assertEqual(result, {'status': 'failed', 'returncode': 2})
-        self.assertNotIn('private', json.dumps(result))
+                run_hourly({}, root, refresh=Mock(side_effect=RuntimeError('failed')))
 
 
 if __name__ == '__main__':

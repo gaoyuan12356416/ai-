@@ -13,13 +13,14 @@ SPEC.loader.exec_module(install)
 
 
 class HourlyDeployTests(unittest.TestCase):
-    def test_only_report_static_and_two_units_are_replaced(self):
+    def test_only_report_static_and_four_units_are_replaced(self):
         writes = install.intended_writes()
-        self.assertEqual(len(writes), 6)
+        self.assertEqual(len(writes), 8)
         self.assertFalse(any(p.name in {'app.py', 'quick-nav.js'} for p in writes))
         self.assertEqual({p.name for p in writes}, {
             'socialkit-analytics.html', 'socialkit-analytics.js',
-            'socialkit-analytics-refresh.service', 'socialkit-analytics-refresh.timer'})
+            'socialkit-analytics-refresh.service', 'socialkit-analytics-refresh.timer',
+            'socialkit-gap-digest.service', 'socialkit-gap-digest.timer'})
 
     def test_changed_live_file_refuses_rollback_before_system_commands(self):
         with tempfile.TemporaryDirectory() as name:

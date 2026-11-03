@@ -1,0 +1,17 @@
+[Unit]
+Description=SocialKit daily revenue gap summary with HTML
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/socialkit-analytics/current
+EnvironmentFile=/etc/socialkit-analytics.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m features.socialkit_gap_alert.digest --send
+TimeoutStartSec=1500
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=full

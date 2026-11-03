@@ -1,5 +1,5 @@
 [Unit]
-Description=SocialKit hourly analytics snapshot and revenue gap alerts
+Description=SocialKit hourly analytics snapshot
 After=network-online.target
 Wants=network-online.target
 

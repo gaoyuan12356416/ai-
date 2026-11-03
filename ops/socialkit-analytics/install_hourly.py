@@ -19,6 +19,8 @@ DATA = Path('/mnt/data-disk/socialkit-analytics')
 CURRENT = Path('/opt/socialkit-analytics/current')
 TIMER = 'socialkit-analytics-refresh.timer'
 SERVICE = 'socialkit-analytics-refresh.service'
+DIGEST_TIMER = 'socialkit-gap-digest.timer'
+DIGEST_SERVICE = 'socialkit-gap-digest.service'
 
 
 def command(*args):
@@ -41,7 +43,7 @@ def intended_writes():
         content = (RELEASE / 'static' / name).read_bytes()
         for target in (Path('/root/drama_material_service/static'), Path('/usr/share/nginx/html')):
             writes[target / name] = content
-    for name in (SERVICE, TIMER):
+    for name in (SERVICE, TIMER, DIGEST_SERVICE, DIGEST_TIMER):
         writes[Path('/etc/systemd/system') / name] = (HERE / name).read_bytes()
     return writes
 
@@ -54,27 +56,35 @@ def verify_release(commit):
         for path in (RELEASE / 'features' / folder).glob('*.py'):
             compile(path.read_bytes(), str(path), 'exec')
     command('node', '--check', str(RELEASE / 'static/socialkit-analytics.js'))
-    command('systemd-analyze', 'verify', str(HERE / SERVICE), str(HERE / TIMER))
+    command('systemd-analyze', 'verify', *(str(HERE / name) for name in (SERVICE, TIMER, DIGEST_SERVICE, DIGEST_TIMER)))
 
 
 @contextlib.contextmanager
 def quiesced():
     import fcntl
     active = unit_value(TIMER, 'ActiveState') == 'active'
+    digest_active = unit_value(DIGEST_TIMER, 'ActiveState') == 'active'
     entered = False
     command('systemctl', 'stop', TIMER)
+    if unit_value(DIGEST_TIMER, 'LoadState') != 'not-found':
+        command('systemctl', 'stop', DIGEST_TIMER)
     try:
         with contextlib.ExitStack() as stack:
-            for path in (Path('/run/lock/socialkit-analytics-refresh.lock'), DATA / 'refresh.lock'):
+            for path in (Path('/run/lock/socialkit-analytics-refresh.lock'), DATA / 'refresh.lock',
+                         Path('/mnt/data-disk/socialkit-gap-alert/run.lock')):
                 handle = stack.enter_context(path.open('a+b'))
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if unit_value(SERVICE, 'ActiveState') not in ('inactive', 'failed'):
                 raise RuntimeError('Refresh still running; retry deployment after completion')
+            if unit_value(DIGEST_SERVICE, 'ActiveState') not in ('inactive', 'failed'):
+                raise RuntimeError('Digest still running; retry after completion')
             entered = True
             yield active
     except BaseException:
         if active and not entered:
             command('systemctl', 'start', TIMER)
+        if digest_active and not entered:
+            command('systemctl', 'start', DIGEST_TIMER)
         raise
 
 
@@ -96,10 +106,13 @@ def install(commit):
         raise RuntimeError('Existing SocialKit release pointer is required')
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     backup = DATA / 'backups' / ('hourly-' + stamp)
+    digest_state = dict(active=unit_value(DIGEST_TIMER, 'ActiveState') == 'active',
+                        enabled=unit_value(DIGEST_TIMER, 'UnitFileState'))
     with quiesced() as was_active:
         backup.mkdir(parents=True, mode=0o700)
         manifest = dict(commit=commit, release=str(RELEASE), old_current=os.readlink(CURRENT),
-                        timer_was_active=was_active, timer_enabled=unit_value(TIMER, 'UnitFileState'), files=[])
+                        timer_was_active=was_active, timer_enabled=unit_value(TIMER, 'UnitFileState'),
+                        digest_timer_state=digest_state, files=[])
         for number, (path, content) in enumerate(writes.items()):
             row = dict(path=str(path), backup=str(number), existed=path.exists(),
                        new_sha256=hashlib.sha256(content).hexdigest())
@@ -140,6 +153,8 @@ def rollback(manifest_path, verify_only=False):
         print(json.dumps(dict(status='rollback_verified', manifest=str(path))))
         return
     with quiesced():
+        if 'digest_timer_state' in manifest:
+            command('systemctl', 'disable', DIGEST_TIMER)
         for item in manifest['files']:
             target = Path(item['path'])
             if item['existed']:
@@ -150,6 +165,10 @@ def rollback(manifest_path, verify_only=False):
         command('systemctl', 'daemon-reload')
     if manifest['timer_was_active']:
         command('systemctl', 'start', TIMER)
+    if manifest.get('digest_timer_state', {}).get('enabled') == 'enabled':
+        command('systemctl', 'enable', DIGEST_TIMER)
+    if manifest.get('digest_timer_state', {}).get('active'):
+        command('systemctl', 'start', DIGEST_TIMER)
     print(json.dumps(dict(status='rolled_back', facts_and_receipts='preserved')))
 
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh SocialKit and compare revenue every hour
+Description=Refresh SocialKit analytics every hour
 
 [Timer]
 OnCalendar=*-*-* *:00:00 Asia/Shanghai
