@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--current', required=True)
     parser.add_argument('--candidate', required=True)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--replace-pending', action='store_true', help='update an existing draining restart target without signaling jobs again')
     args = parser.parse_args()
     old, new = private_json(args.current), private_json(args.candidate)
     before, after = plan(old), plan(new)
@@ -45,8 +46,13 @@ def main():
             raise ValueError('unsafe_unit_drain')
     props = dict(line.split('=',1) for line in command(['systemctl','show',before['unit'],
         '-p','ActiveState','-p','MainPID','-p','KillMode','-p','TimeoutStopUSec']).splitlines())
-    if props['ActiveState'] != 'active' or props['KillMode'] != 'mixed' or props['TimeoutStopUSec'] != 'infinity':
+    draining = props['ActiveState'] == 'deactivating' and args.replace_pending
+    if (props['ActiveState'] != 'active' and not draining) or props['KillMode'] != 'mixed' or props['TimeoutStopUSec'] != 'infinity':
         raise ValueError('runtime_not_ready')
+    if draining:
+        jobs = [row.split() for row in command(['systemctl','list-jobs','--no-legend','--plain']).splitlines()]
+        if not any(len(row) >= 4 and row[1:4] == [before['unit'],'restart','running'] for row in jobs):
+            raise ValueError('no_pending_restart')
     pid = int(props['MainPID']); proc = Path('/proc')/str(pid)
     if before['release']+'/scripts/pipeline_worker.py' not in proc.joinpath('cmdline').read_bytes().decode().split('\0'):
         raise ValueError('runtime_manifest_mismatch')
@@ -69,7 +75,7 @@ def main():
         os.chmod(temporary,0o600); handle.write(json.dumps(new,indent=2)+'\n'); handle.flush(); os.fsync(handle.fileno())
     os.replace(temporary,args.current)
     command(['systemctl','daemon-reload'])
-    command(['systemctl','restart','--no-block',before['unit']])
+    if not draining: command(['systemctl','restart','--no-block',before['unit']])
     report['status'] = 'draining_current_jobs_then_start_verified_release'
     (backup/'audit.json').write_text(json.dumps(report,indent=2))
     print(json.dumps(report))
