@@ -30,8 +30,40 @@
 
 GPU 已于 11:18:51 UTC 自然排空后启动 179596a 新进程 PID267919；11:20 核对 active/running、NRestarts=0、工作心跳新鲜。原有 5 个 render 全部 completed 后才切换。GPU compositor 与 gpu_pipeline 的并行改动哈希保持不变。
 
-CPU 及 X sidecar 第二轮切换仍等待原上传自然结束，不能把已 stage 或 manifest 已更新算作成功部署。最终验收需追加实际 PID、服务哈希、X trigger 恢复与积压进度。
+CPU179 于 11:41:57 UTC、X179 于 11:49:14 UTC 实际上线；CPU 原 8 个发布全部成功后才换代。原 scanner、Auto、coordinator PID 保持，原五个 timer 已于 11:56:17 UTC 恢复。typed read-only preflight 相关 369 个测试通过；绑定前次 episode audit 的专项 13 个通过，均为重叠测试组。
 
 ## 边界与待确认事项
 
-只读查询重试不保证上游永久可用；媒体准备/上传在大量积压下仍需排队。未知发布结果、真实账号语言不一致及未确认解锁的其他账号必须保留阻塞，不能用批量重置消除失败显示。manual1389 受 q5524 unknown 影响，manual1390/1401 受 q5381 unknown 影响，尚未再次恢复。
+只读查询重试不保证上游永久可用；媒体准备/上传在大量积压下仍需排队。未知发布结果、真实账号语言不一致及未确认解锁的其他账号必须保留阻塞，不能用批量重置消除失败显示。manual1389 当前确定是只读 MySQL 连接预检失败、零队列，但其原素材 reservation 已 released，不能直接改状态复用；需按原个人任务正规预留流程处理。manual1390/1401 仍受 q5381 unknown 影响，保持隔离。
+
+## 20:30 北京时间实际恢复范围验收
+
+88 个精确恢复 source（81 native 恢复授权加 7 归因恢复，互不重叠）全部历史代次仅 4 个 createPost 许可、0 个 Repost；每个成功 source 各 1 个 createPost，双 ledger 的 operation_id/generation/operation/request hash 集合一致，4 个成功 Post ID 在全量 native 日志无跨 source 复用。该快照范围中仍有排队任务，不把没有 createPost 的任务宣称为发布成功。唯一经精确对账后解除 unknown 的 5524 尚未再领取；没有未审计 unknown 被恢复。
+
+原生今日成功 89 条，Auto 已成功但显示失败差异为 0。两个用户确认解锁账号后续仍收到 initialize403 临时锁定，已重新留置未开始任务，不盲目重复尝试。
+
+## 后续独立验证
+
+- 9条固定媒体阶段对账、旧5524兼容、Auto只读观察组合172项通过。
+- 锁定错误详情保存专项与native回归25项通过；未知和已成功状态保护不变。
+- 1389零写个人任务原子准入与个人发布回归78项通过；不可恢复旧released预留，重复grant不重新授权后续失败。最终建队必须在Auto选材自然排空并持有原runner锁、确认另一Auto数据库无材料占用的窗口内完成。
+- 两条首次快照缺失精确恢复54项通过。
+- 固定1029/1031单批入口及调度/只读预检回归134项通过。
+- f339实际候选模块导入及native诊断/1389专项20项通过。以上测试组有重叠。
+
+20:57:19北京时间97来源独立验收：全部历史operation双ledger集合一致，4个CreatePost、0个Repost，每source最多1个CreatePost；4个唯一成功Post，未发现重复Post/未经授权代次。互斥状态4成功/2发布中/85未hold排队/5锁定hold/1失败；失败为5280再次initialize403。今日90成功按Auto原计划scheduled_at_utc+8小时、非Auto的run_date归组：11/2为57、11/3为33。native queue.run_date是执行日口径，不可替代Auto原计划日。成功显示差异为0。
+
+5381/5386后续独立历史审查保留边界：虽强支持媒体状态核验阶段中断，但发布child与版本仅有连续supervisor/注册PID/事后idle的间接绑定，且最后central-only GET未进入native许可。不可声称双ledger同集或直接套用APPEND-only恢复；当前运行时也拒绝FINALIZE/GET历史，两条继续隔离。5393/5452同样未恢复。
+
+## 最终运行版本与已执行维护验证
+
+- 195随机视频批次排除图片选择：126项相关测试通过（123+3）；实际候选导入24项通过。最终激活195，f339未激活。
+- q5620严格已知PNG失败结算：30项专项通过，另12项独立验证；生产按原plan完成后重新collect并verify_after验证committed、claim撤销、attempt0/unknown0、17代历史保留。没有平台请求，34个pending包未改。
+- 1031依赖恢复：18项专项通过；等待时0次apply，ready恰好一次，异常/漂移/超时不重试。生产oneshot事件日志确认处于waiting_dependencies，尚未准入。
+- 1034第四次容量拒绝恢复：10项专项、42项联合通过；独立审核实际历史代码和额外异常注入回滚通过。生产原行与三个旧audit精确匹配，写入第四audit后1034claimed、原snapshot4444保留、旧plan_attempt13:05:17保留在audit。
+- 13:42:16 UTC今日101条成功，Auto成功状态差异0；13:43所有原5timer active，X PID3607439/Auto2057294/coordinator1304161正常运行。当前17条X在途证明新领取已恢复。
+- 修正历史摘要中的手动任务队列映射：1388/1399/1400对应5573/5576/5577，均queued、未产生log。附近其他成功队列不属于这三任务，未对其做假成功结算。
+
+这些测试组存在重叠；未发送任何测试Post。剩余4个中央unknown与旧5333均不重发；账号锁定、真实语言不符、材料已被后续任务占用等阻塞保留。
+
+13:49:22 UTC独立最终97范围复核：97/97双operation账本一致，7个CreatePost许可、0个Repost，每source最多1个CreatePost，7个不同成功Post且全量日志无跨source重复ID；90条恢复授权完整，无anomaly。状态7published/3publishing/86queued/1failed，其中queued有5条账号hold，failed是原计划10/30的5280。原计划日11/2范围61条（6成功/2发布中/53排队），11/3范围35条（1成功/1发布中/33排队），不把执行run_date冒充计划日期。今日总101个不同成功Post，原计划11/2为66、11/3为35；Auto成功但failed及待reconcile差异均0。该证明限定已审计范围，不把剩余未知外部结果推断为未发布。
