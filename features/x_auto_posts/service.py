@@ -409,8 +409,21 @@ class XAutoPostService:
         return {"ok": True, "template": item, "item": item}
 
     def _validate_accounts(self, config: Mapping[str, Any]) -> None:
-        for account_id in config.get("account_ids") or []:
-            account = self._account_snapshot(account_id)
+        account_ids = config.get("account_ids") or []
+        if not account_ids:
+            return
+        # account_snapshot reloads the whole projected list. Read it once per
+        # request so a large template does not make N full sidecar requests.
+        accounts_by_id: Dict[str, List[Mapping[str, Any]]] = {}
+        for account in self.account_bridge.accounts():
+            accounts_by_id.setdefault(str(account.get("id") or ""), []).append(account)
+        for account_id in account_ids:
+            matches = accounts_by_id.get(str(account_id), [])
+            if len(matches) != 1:
+                raise AutoPostServiceError(
+                    "x_auto_account_not_found", "X account was not found", 404
+                )
+            account = matches[0]
             if str(account.get("id") or "") != str(account_id) or not bool(
                 account.get("publish_eligible")
             ):

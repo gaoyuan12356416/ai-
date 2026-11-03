@@ -538,19 +538,25 @@
     ui.byId("saveTemplate").disabled = true;
     ui.setText(ui.byId("formStatus"), "正在保存模板…", "");
     ui.byId("formStatus").className = "status-line";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
       const path = templateId ? `${ui.API_BASE}/templates/${templateId}` : `${ui.API_BASE}/templates`;
-      await ui.api(path, { method: "POST", body: JSON.stringify(payload) });
+      await ui.api(path, { method: "POST", body: JSON.stringify(payload), signal: controller.signal });
       state.dirty = false;
       ui.setText(ui.byId("formStatus"), "模板已保存。", "");
       ui.byId("formStatus").className = "status-line success";
       ui.showToast("模板已保存；新模板默认保持关闭。", false);
       location.href = "/x-auto-publish-templates.html";
     } catch (error) {
-      ui.setText(ui.byId("formStatus"), error.message || "模板保存失败。", "");
+      const message = controller.signal.aborted
+        ? "保存请求超时，结果尚未确认。请先到模板列表核对，确认未保存后再重试；当前填写内容已保留。"
+        : (error.message || "模板保存失败。");
+      ui.setText(ui.byId("formStatus"), message, "");
       ui.byId("formStatus").className = "status-line error";
-      ui.showToast(error.message || "模板保存失败", true);
+      ui.showToast(message, true);
     } finally {
+      clearTimeout(timeout);
       state.busy = false;
       ui.byId("saveTemplate").disabled = false;
     }

@@ -9,6 +9,8 @@ const field = id => {
   return fields.get(id);
 };
 const requests = [];
+const timers = new Map();
+let timerId = 0;
 const ui = {
   pageIdFromQuery: () => "9", byId: field, initShell: () => {},
   setText: (node, value) => { node.textContent = value; }, showToast: () => {},
@@ -18,7 +20,9 @@ const ui = {
 };
 const context = {
   window: { XAutoPublish: ui, location: { href: "" } },
-  document: { getElementById: field }, console,
+  document: { getElementById: field }, console, AbortController,
+  setTimeout: (callback, ms) => { assert.equal(ms, 30000); timers.set(++timerId, callback); return timerId; },
+  clearTimeout: id => timers.delete(id),
 };
 context.location = context.window.location;
 let source = fs.readFileSync(path.join(__dirname, "../static/x-auto-publish-template.js"), "utf8");
@@ -52,5 +56,28 @@ for (const value of ["0", "-1", "1.5", "NaN", "59", "9007199254740992"]) {
   assert.equal(saved.material_rule.duration_max_seconds, null);
   assert.equal(saved.expected_version, 6);
   assert.equal(context.window.location.href, "/x-auto-publish-templates.html");
-  console.log("PASS: blank, long, invalid bounds and editor save payload");
+  assert.equal(timers.size, 0);
+  context.location.href = "";
+  editor.state.dirty = true;
+  ui.api = (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  });
+  const pendingSave = editor.saveTemplate({ preventDefault() {} });
+  assert.equal(field("saveTemplate").disabled, true);
+  assert.equal(editor.state.busy, true);
+  timers.values().next().value();
+  await pendingSave;
+  assert.equal(field("saveTemplate").disabled, false);
+  assert.equal(editor.state.busy, false);
+  assert.equal(editor.state.dirty, true);
+  assert.equal(field("templateName").value, "Duration regression");
+  assert.match(field("formStatus").textContent, /结果尚未确认/);
+  assert.equal(context.location.href, "");
+  assert.equal(timers.size, 0);
+  ui.api = async () => { throw new Error("template version changed"); };
+  await editor.saveTemplate({ preventDefault() {} });
+  assert.equal(field("formStatus").textContent, "template version changed");
+  assert.equal(field("saveTemplate").disabled, false);
+  assert.equal(timers.size, 0);
+  console.log("PASS: bounds, successful save, timeout, retained draft and request error");
 })().catch(error => { console.error(error); process.exitCode = 1; });

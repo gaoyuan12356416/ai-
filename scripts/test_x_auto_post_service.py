@@ -39,6 +39,7 @@ class Clock:
 class FakeBridge:
     def __init__(self):
         self.verify_calls = []
+        self.accounts_calls = 0
         self.accounts_by_id = {
             "101": {
                 "id": 101,
@@ -65,6 +66,7 @@ class FakeBridge:
         }
 
     def accounts(self):
+        self.accounts_calls += 1
         return [dict(value) for value in self.accounts_by_id.values()]
 
     def verify_account(self, account_id, **kwargs):
@@ -151,6 +153,41 @@ class XAutoPostServiceTests(unittest.TestCase):
         original = self.store.get_template(created["id"], version=1)
         self.assertEqual(original.config["material_rule"]["duration_max_seconds"], 600)
         self.assertEqual(self.bridge.verify_calls, [])
+
+    def test_large_template_save_reads_one_account_snapshot_per_request(self):
+        service = self.service()
+        sample = self.bridge.accounts_by_id["101"]
+        self.bridge.accounts_by_id = {
+            str(i): {**sample, "id": i, "x_user_id": str(i)}
+            for i in range(1, 87)
+        }
+        payload = valid_payload()
+        payload["account_ids"] = list(self.bridge.accounts_by_id)
+        created = service.create_template(self.actor(payload))["template"]
+        self.assertEqual(self.bridge.accounts_calls, 1)
+        updated = service.update_template(created["id"], self.actor({
+            **payload, "expected_version": 1,
+        }))["template"]
+        self.assertEqual(self.bridge.accounts_calls, 2)
+        self.assertEqual(updated["version"], 2)
+        self.assertEqual(len(updated["config"]["account_ids"]), 86)
+        self.assertEqual(self.bridge.verify_calls, [])
+        self.assertEqual(self.store.list_runs(), [])
+
+    def test_batch_account_validation_keeps_missing_duplicate_and_eligibility_guards(self):
+        service = self.service()
+        sample = dict(self.bridge.accounts_by_id["101"])
+        for accounts, code in [
+            ([], "x_auto_account_not_found"),
+            ([sample, sample], "x_auto_account_not_found"),
+            ([{**sample, "publish_eligible": False}], "x_auto_account_not_publishable"),
+            ([{**sample, "drama_language": "not a language"}], "x_auto_account_language_invalid"),
+        ]:
+            with self.subTest(code=code, count=len(accounts)):
+                self.bridge.accounts = lambda: accounts
+                with self.assertRaises(AutoPostServiceError) as error:
+                    service._validate_accounts({"account_ids": ["101"]})
+                self.assertEqual(error.exception.code, code)
 
     def test_account_list_is_read_only_and_explicit_refresh_uses_all_three_guards(self):
         service = self.service()
