@@ -624,10 +624,10 @@ class AutoPostExecutor:
             queue.get("preview_url") or result.get("preview_url") or ""
         )
         if status == "published":
-            if not post_id:
+            if not post_id or canonical_unknown:
                 raise AutoPostExecutionError(
                     "x_auto_published_identity_missing",
-                    "published X queue is missing its Post ID",
+                    "published X queue lacks a confirmed Post receipt",
                     502,
                 )
             updates: Dict[str, Any] = {
@@ -654,7 +654,12 @@ class AutoPostExecutor:
                 event_type="task_x_published_confirmed",
             )
         run_status = str(run.get("status") or "")
-        if run_status in {"stopped", "needs_review"}:
+        # A distributed upload may return its durable receipt after its parent
+        # was marked needs_review. Keep observing that exact queue; terminal
+        # failed tasks are never polled again. This phase cannot publish again.
+        if run_status in {"stopped", "needs_review"} and not (
+            self.dispatch_enabled and canonical_unknown
+        ):
             retained_unknown = bool(
                 task.unknown_outcome
                 or force_unknown
