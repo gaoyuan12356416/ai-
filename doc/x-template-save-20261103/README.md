@@ -14,6 +14,12 @@ keeps the draft. Its message describes an unconfirmed result and asks the operat
 to check the list before another save. It never retries automatically. A confirmed
 save still returns to the list. The page script cache version is updated.
 
+Live template 4 also contains account 123, currently projected as unavailable.
+Validation now names the blocked account and asks the operator to deselect it or
+restore authorization. The rollout rehearses this rejection, then saves the
+remaining eligible scope only in an isolated database. Production account
+selection is not silently changed.
+
 ## Validation
 
 ```

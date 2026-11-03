@@ -188,6 +188,9 @@ class XAutoPostServiceTests(unittest.TestCase):
                 with self.assertRaises(AutoPostServiceError) as error:
                     service._validate_accounts({"account_ids": ["101"]})
                 self.assertEqual(error.exception.code, code)
+                if code == "x_auto_account_not_publishable":
+                    self.assertIn("ID 101", str(error.exception))
+                    self.assertIn("account101", str(error.exception))
 
     def test_account_list_is_read_only_and_explicit_refresh_uses_all_three_guards(self):
         service = self.service()

@@ -429,7 +429,8 @@ class XAutoPostService:
             ):
                 raise AutoPostServiceError(
                     "x_auto_account_not_publishable",
-                    "selected X account is not currently publishable",
+                    "X 账号 %s（ID %s）当前不可发布，请取消勾选或恢复授权后再保存。"
+                    % (str(account.get("username") or account_id)[:50], account_id),
                     409,
                 )
             self._account_language(account)

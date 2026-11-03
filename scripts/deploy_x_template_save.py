@@ -70,6 +70,8 @@ def rehearse(stage):
     spec.loader.exec_module(module)
     env = process_env()
     template = api('/api/admin/x-auto-publish/templates/4', env)['template']
+    account_items = api('/api/admin/x-auto-publish/accounts', env)['items']
+    eligible = {str(item['id']) for item in account_items if item.get('publish_eligible')}
     class Bridge:
         calls = 0
         def accounts(self):
@@ -80,15 +82,30 @@ def rehearse(stage):
         store = module.XAutoPostStore(Path(scratch) / 'isolated.sqlite3')
         service = module.XAutoPostService(store, bridge, None, None)
         payload = {**template['config'], 'name': template['name'], '_actor': {'user_id': 'save-rehearsal'}}
+        unavailable = [i for i in payload['account_ids'] if str(i) not in eligible]
+        rejection_seconds = None
+        if unavailable:
+            start = time.monotonic()
+            try:
+                service.create_template(payload)
+            except module.AutoPostServiceError as error:
+                assert error.code == 'x_auto_account_not_publishable'
+                assert 'ID ' in str(error)
+            else:
+                raise AssertionError('Unavailable account unexpectedly accepted')
+            rejection_seconds = round(time.monotonic() - start, 3)
+            assert not store.list_templates()
+        calls_before = bridge.calls
+        payload['account_ids'] = [i for i in payload['account_ids'] if str(i) in eligible]
         created = service.create_template(payload)['template']
         start = time.monotonic()
         saved = service.update_template(created['id'], {**payload, 'expected_version': 1})['template']
         seconds = round(time.monotonic() - start, 3)
         assert saved['version'] == 2 and saved['config'] == created['config']
-        assert bridge.calls == 2 and not store.list_runs()
+        assert bridge.calls - calls_before == 2 and not store.list_runs()
     after = api('/api/admin/x-auto-publish/templates/4', env)['template']
     assert after['version'] == template['version'] and after['config'] == template['config']
-    result = {'isolated_save_seconds': seconds, 'selected_accounts': len(saved['config']['account_ids']), 'account_list_calls_per_save': 1, 'live_template_version_unchanged': after['version']}
+    result = {'isolated_save_seconds': seconds, 'eligible_accounts_saved_in_isolation': len(saved['config']['account_ids']), 'live_selected_accounts': len(template['config']['account_ids']), 'unavailable_account_ids': unavailable, 'rejection_seconds': rejection_seconds, 'account_list_calls_per_save': 1, 'live_template_version_unchanged': after['version']}
     print(json.dumps(result), flush=True)
     return result
 
