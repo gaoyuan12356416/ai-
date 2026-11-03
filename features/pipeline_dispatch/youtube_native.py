@@ -10,6 +10,7 @@ import re
 import secrets
 import threading
 import time
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,7 +37,8 @@ class YouTubeNativeBridge:
     def __init__(self, workflow, *, client=None):
         self.workflow, self.store = workflow, workflow.engine_store
         self.client = client or ReviewedYouTubeHTTPClient()
-        self._lock = threading.RLock()
+        self._source_locks = weakref.WeakValueDictionary()
+        self._source_locks_guard = threading.Lock()
         with workflow.db(True) as conn:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_youtube_claim(
@@ -55,6 +57,20 @@ class YouTubeNativeBridge:
         if job.get("channel") != "youtube" or job.get("family") not in {"preparation", "publish"}:
             raise AdapterError("youtube_dispatch_source_invalid")
         return str(job["source_key"]), str(job["stage"]), int(job["generation"])
+
+    def _source_lock(self, job):
+        # Slow reference preparation must not block another source's upload
+        # receipt. Native generations for one source still share one fence;
+        # channel-wide exclusion remains in the coordinator's resource ledger.
+        if job.get("channel") != "youtube" or job.get("family") not in {"preparation", "publish"}:
+            raise AdapterError("youtube_dispatch_source_invalid")
+        source_key = str(job["source_key"])
+        with self._source_locks_guard:
+            lock = self._source_locks.get(source_key)
+            if lock is None:
+                lock = threading.RLock()
+                self._source_locks[source_key] = lock
+            return lock
 
     @staticmethod
     def _continuation_descriptor(task, continuation, control):
@@ -86,7 +102,7 @@ class YouTubeNativeBridge:
 
     def reserve(self, job, claim):
         key = self._key(job)
-        with self._lock:
+        with self._source_lock(job):
             with self.workflow.db() as conn:
                 existing = conn.execute("SELECT 1 FROM pipeline_youtube_claim WHERE source_key=? AND stage=? AND generation=?", key).fetchone()
             if existing:
@@ -124,9 +140,12 @@ class YouTubeNativeBridge:
                             owner = "pipeline:" + secrets.token_hex(16)
                             conn.execute("UPDATE youtube_auto_preparation SET lease_token=?,lease_until=? WHERE id=?", (owner, time.time() + 120, task["id"]))
                             saved["lease_owner"] = owner
-                            # A lost lease cannot authorize another paid model
-                            # call. Only recover a qualified persisted result.
+                            # Old nodes remain recovery-only. New nodes may start
+                            # a never-started invocation only after winning the
+                            # shared immutable generation-intent CAS; an existing
+                            # intent never authorizes another paid model call.
                             descriptor["recovery_only"] = True
+                            descriptor["resume_once"] = True
                             conn.execute("INSERT INTO pipeline_youtube_claim(source_key,stage,generation,claim_hash,task_json,descriptor_json) VALUES(?,?,?,?,?,?)", (*key, claim_hash(claim), encode(saved), encode(descriptor)))
                             return descriptor
                     if row["state"] != "queued_generation" or row["lease_until"] > time.time() or row["lease_token"].startswith("pipeline:"):
@@ -215,7 +234,7 @@ class YouTubeNativeBridge:
             return descriptor
 
     def begin_operation(self, job, claim, operation):
-        with self._lock:
+        with self._source_lock(job):
             _, saved, descriptor = self._stored(job, claim)
             if job["family"] != "publish" or operation.get("account_resource") != descriptor["account_resource"]:
                 raise AdapterError("youtube_operation_resource_invalid")
@@ -291,7 +310,7 @@ class YouTubeNativeBridge:
             return {"credentials": {"access_token": token}}
 
     def checkpoint(self, job, claim, phase, receipt):
-        with self._lock:
+        with self._source_lock(job):
             _, saved, descriptor = self._stored(job, claim)
             digest = hashlib.sha256(encode(receipt).encode()).hexdigest()
             with self.workflow.db() as conn:
@@ -406,7 +425,7 @@ class YouTubeNativeBridge:
             return {"accepted": True}
 
     def complete(self, job, receipt, claim):
-        with self._lock:
+        with self._source_lock(job):
             row, saved, descriptor = self._stored(job, claim)
             if row["receipt_json"]:
                 if obj(row["receipt_json"]) != receipt:
@@ -453,7 +472,7 @@ class YouTubeNativeBridge:
             return self.reconcile(job)
 
     def fail(self, job, claim, receipt):
-        with self._lock:
+        with self._source_lock(job):
             _, saved, _ = self._stored(job, claim)
             if job["family"] == "preparation":
                 with self.workflow.db(True) as conn:
@@ -505,7 +524,7 @@ class YouTubeNativeBridge:
             raise AdapterError("canonical_hold_cutoff_required")
         cutoff = stamp(cutoff)
         held = {"held": True, "accepted": True, "paused": True, "source_key": job["source_key"], "cutoff": cutoff, "canonical_mutations": 0}
-        with self._lock, self.workflow.db(True) as conn:
+        with self._source_lock(job), self.workflow.db(True) as conn:
             existing = conn.execute("SELECT cutoff FROM pipeline_canonical_hold WHERE source_key=?", (job["source_key"],)).fetchone()
             if existing:
                 if existing["cutoff"] != cutoff:

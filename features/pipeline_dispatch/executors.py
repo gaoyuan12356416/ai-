@@ -361,7 +361,7 @@ class NodeExecutors:
         if kind == "youtube_prepare":
             if request.get("action") == "enqueue":
                 return {"status": "ready", "enqueue": True}
-            return self.youtube_prepare(request, context, recovery_only=bool(payload.get("recovery_only")))
+            return self.youtube_prepare(request, context, recovery_only=bool(payload.get("recovery_only")), resume_once=payload.get("resume_once") is True)
         expected_profile = request.get("expected_profile") or request.get("profile")
         processor = self._processor(kind, expected_profile if kind == "tt_prepare" else None)
         if expected_profile and getattr(processor.config, "profile", "") != expected_profile:
@@ -400,7 +400,7 @@ class NodeExecutors:
         finally:
             processor.qualified_artifact = previous
 
-    def youtube_prepare(self, request, context, *, recovery_only=False):
+    def youtube_prepare(self, request, context, *, recovery_only=False, resume_once=False):
         from .youtube_cover import generate_cover, image_bytes
         from features.x_posts.media_repair import WorkerConfig, CosObjectStore
         store = self.factories["artifact_store"]() if "artifact_store" in self.factories else CosObjectStore(replace(WorkerConfig.from_env(), profile="youtube-cover-v1"))
@@ -408,9 +408,12 @@ class NodeExecutors:
         result = journal.recover()
         if result is not None:
             return result
-        if recovery_only:
+        if recovery_only and not resume_once:
             raise ExecutionError("youtube_generation_interrupted")
         context.check()
+        # Resuming an unreceived descriptor reuses the original identity and
+        # still must win the shared CAS. Existing paid/uncertain work is never
+        # restarted, even on a different node or claim generation.
         journal.begin_generation()
         context.check()
         result = generate_cover(request, self.work_root, context, self.factories.get("youtube_prepare"))
