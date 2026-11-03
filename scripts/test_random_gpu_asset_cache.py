@@ -29,7 +29,9 @@ class AssetCacheAdmissionTests(unittest.TestCase):
             ('border', 'opacity_video', 'corners', 'tint')}}
         # Light assets are retained in manifests but are never selected by v3.
         self.assets['categories']['light'] = [{'path': self.root / 'unused.webm'}]
-        self.loader = self.enterContext(patch('features.fb_gpu.random_overlay.load_asset_set', return_value=self.assets))
+        loader = patch('features.fb_gpu.random_overlay.load_asset_set', return_value=self.assets)
+        self.loader = loader.start()
+        self.addCleanup(loader.stop)
 
     def test_complete_cache_checked_without_unused_legacy_layer(self):
         self.assertEqual(validate_configured_cache(self.env),
