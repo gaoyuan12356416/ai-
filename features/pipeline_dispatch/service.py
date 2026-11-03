@@ -311,6 +311,9 @@ class Coordinator:
                 self.store.offer(verified["next_offer"])
             return accept(response)
         if action == "jobs/fail":
+            repeated = self.store.acknowledge_failed_without_intent(payload, delivery_id, payload)
+            if repeated:
+                return repeated
             job = self.store.validate_receipt_claim(payload)
             # Repeat sanitization at the authority boundary. Node-supplied HTTP
             # status is never trusted independently of the normalized message.

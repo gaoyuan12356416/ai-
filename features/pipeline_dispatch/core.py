@@ -944,6 +944,33 @@ class DispatchStore:
             c.execute("INSERT OR IGNORE INTO pipeline_delivery VALUES(?,?,?,?,?,?)", (delivery_id, claim.get("job_id", claim.get("id")), claim["generation"], digest(claim["claim_token"]), digest(dumps(request)), dumps(response)))
         return response
 
+    def acknowledge_failed_without_intent(self, claim, delivery_id, request):
+        """ACK the worker's duplicate of a failed, unwritten reservation only."""
+        if not isinstance(delivery_id, str) or not 1 <= len(delivery_id) <= 256:
+            return None
+        with self.transaction() as c:
+            row = self._validate_claim(c, claim, allow_expired=True)
+            source = json.loads(row["source_meta_json"])
+            if (row["status"] != "failed" or row["external_intent"] or row["canonical_receipt"]
+                    or any(source.get(key) for key in ("source_attempt_count", "reconcile_only", "unknown_outcome", "publish_id", "legacy_inflight"))
+                    or request.get("unknown_outcome", False)
+                    or not row["error_code"] or request.get("error_code") != row["error_code"]
+                    or c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? LIMIT 1", (row["id"],)).fetchone()
+                    or c.execute("SELECT 1 FROM pipeline_checkpoint WHERE job_id=? LIMIT 1", (row["id"],)).fetchone()
+                    or c.execute("SELECT 1 FROM pipeline_receipt WHERE job_id=? LIMIT 1", (row["id"],)).fetchone()
+                    or c.execute("SELECT 1 FROM pipeline_publication WHERE job_id=? LIMIT 1", (row["id"],)).fetchone()):
+                return None
+            identity = (row["id"], row["generation"], digest(claim["claim_token"]), digest(dumps(request)))
+            old = c.execute("SELECT * FROM pipeline_delivery WHERE delivery_id=?", (delivery_id,)).fetchone()
+            if old and tuple(old[k] for k in ("job_id", "generation", "claim_hash", "request_sha256")) != identity:
+                raise DispatchError("delivery_identity_conflict")
+            response = {"accepted": True, "status": "failed", "duplicate": True}
+            # Reservation already failed before a native binding existed. Do
+            # not call native fail again, replace the failure time, add samples,
+            # or change a resource fence; just confirm this exact delivery.
+            c.execute("INSERT OR IGNORE INTO pipeline_delivery VALUES(?,?,?,?,?,?)", (delivery_id, *identity, dumps(response)))
+            return response
+
     def checkpoint(self, claim, checkpoint_id, phase, receipt, canonical_verified=False):
         if not checkpoint_id or not canonical_verified:
             raise DispatchError("canonical_checkpoint_required")
