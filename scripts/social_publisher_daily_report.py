@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send the shared YouTube + X report through the existing 11:00 daily ledger."""
+"""Send the unified social report through the existing 11:00 daily ledger."""
 from __future__ import annotations
 
 import argparse
@@ -12,9 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.post_daily_report.delivery import DefiniteFailure, DeliveryUnknown, send_card
-from features.social_daily_report.collector import BEIJING, DB_PATH, ENV_PATH, X_DB_PATH, collect
+from features.social_daily_report.collector import (
+    BEIJING, DB_PATH, ENV_PATH, X_DB_PATH, FB_DB_PATH, FACEBOOK_ATTRIBUTION_DB_PATH, collect,
+)
 from features.social_daily_report.delivery import SocialDeliveryStore, deliver
-from features.social_daily_report.report import build_cards, payload_size, preview_html
+from features.social_daily_report.report import build_cards, payload_size, preview_html, require_complete
 from scripts.post_daily_report import ensure_storage, atomic_write
 
 CHAT_ID = "oc_7c683c5770aef2e6c84a456e52cad389"
@@ -26,6 +28,8 @@ def main(argv=None):
     parser.add_argument("--state-dir", default="/mnt/data-disk/youtube-publisher-daily-report")
     parser.add_argument("--db", default=DB_PATH)
     parser.add_argument("--x-db", default=X_DB_PATH)
+    parser.add_argument("--fb-db", default=FB_DB_PATH)
+    parser.add_argument("--facebook-attribution-db", default=FACEBOOK_ATTRIBUTION_DB_PATH)
     parser.add_argument("--env-file", default=ENV_PATH)
     parser.add_argument("--publication-timezone", choices=["UTC"], default="UTC")
     parser.add_argument("--feishu-config", default="/root/.codex/plugins/feishu/config.json")
@@ -66,7 +70,22 @@ def main(argv=None):
         if batch:
             report, cards = batch["report"], batch["cards"]
         else:
-            report = collect(day, args.db, args.env_file, args.x_db)
+            report = collect(day, args.db, args.env_file, args.x_db,
+                             args.fb_db, args.facebook_attribution_db)
+            if args.send:
+                try:
+                    require_complete(report)
+                except ValueError as exc:
+                    # Preserve safe source diagnostics before any batch is frozen.
+                    failure = dict(status="collection_failed", date=day, reason=str(exc),
+                                   quality=report["quality"], checked_at=datetime.now(BEIJING).isoformat())
+                    failed = state / "failures" / day
+                    failed.mkdir(parents=True, exist_ok=True)
+                    path = failed / (datetime.now(BEIJING).strftime("%H%M%S-%f") + ".json")
+                    atomic_write(path, json.dumps(failure, ensure_ascii=False, indent=2))
+                    print(json.dumps(dict(status="collection_failed", date=day, reason=str(exc),
+                                          diagnostic_path=str(path)), ensure_ascii=False), flush=True)
+                    raise
             cards = build_cards(report, CHAT_ID)
             if store:
                 store.freeze(day, CHAT_ID, report, cards)
@@ -83,6 +102,7 @@ def main(argv=None):
         ), ensure_ascii=False), flush=True)
         if not args.send:
             return 0
+        require_complete(report)
         receipt = deliver(store, day, CHAT_ID,
                           lambda card, request_uuid: send_card(args.feishu_config, CHAT_ID, card, request_uuid))
         atomic_write(folder / "receipt.json", json.dumps(receipt, ensure_ascii=False, indent=2))

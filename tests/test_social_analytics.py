@@ -43,6 +43,7 @@ def params(**changes):
 
 
 def summarize(catalogs, metrics, actor=SYSTEM, **query):
+    query.setdefault("platform", ["youtube", "x"])
     return report.summarize(catalogs, metrics, actor, params(**query), "snapshot")
 
 
@@ -151,7 +152,7 @@ class AttributionTests(unittest.TestCase):
         manual = catalog(campaign="manual", link_type="manual")
         result = summarize([first, duplicate, manual], [metric(campaign="manual")], platform=["youtube"])
         self.assertEqual(result["totals"]["published_count"], 1)
-        self.assertEqual(result["totals"]["post_count"], 0)
+        self.assertIsNone(result["totals"]["post_count"])
         self.assertEqual(result["totals"]["revenue_cents"], 100)
 
     def test_conflicting_publication_identity_does_not_pick_first(self):
@@ -171,8 +172,8 @@ class AttributionTests(unittest.TestCase):
     def test_parameters_defaults_and_validation(self):
         value = report.parameters({})
         self.assertEqual(value["groups"], ["owner", "platform"])
-        self.assertEqual(value["platforms"], ["youtube", "x"])
-        for query in ({"platform": ["facebook"]}, {"group_by": ["owner,owner"]},
+        self.assertEqual(value["platforms"], ["youtube", "x", "facebook"])
+        for query in ({"platform": ["tiktok"]}, {"group_by": ["owner,owner"]},
                       {"group_by": ["owner,drama,channel,date"]}, {"surprise": ["yes"]}):
             with self.assertRaises(report.ReportError):
                 report.parameters(query)

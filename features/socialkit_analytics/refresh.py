@@ -1,4 +1,4 @@
-"""Daily complete-window refresh; python -m features.socialkit_analytics.refresh."""
+"""Verified explicit-window refresh; scheduled operation lives in hourly.py."""
 import argparse
 import contextlib
 import json
@@ -88,7 +88,7 @@ def day_control(day):
 
 
 def run_refresh(env, root, start, end, *, reader=None, source=None, writer=None,
-                collect=collect_days, verify=verify_warehouse):
+                collect=collect_days, verify=verify_warehouse, full_refresh_beijing_date=None):
     days = days_between(start, end)
     ensure_data_mount(root)
     root = Path(root).resolve()
@@ -118,7 +118,9 @@ def run_refresh(env, root, start, end, *, reader=None, source=None, writer=None,
                     active_writer.write_day(version, day)
                     checked_control = day_control(day)
                     controls.append(checked_control)
-                    date_manifest[day['date']] = dict(version=version, refreshed_at=started, state='complete',
+                    collected_at = utc_now()
+                    date_manifest[day['date']] = dict(version=version, refreshed_at=collected_at,
+                                                     collected_at=collected_at, state='complete',
                                                      effect_rows=len(day['effects']), publication_rows=len(day['publications']),
                                                      source_rows=day['source_rows'], source_updated_at=day['source_updated_at'],
                                                      quality=day['quality'], controls=checked_control)
@@ -144,6 +146,13 @@ def run_refresh(env, root, start, end, *, reader=None, source=None, writer=None,
                                 coverage={kind: {day: 'complete' for day in covered} for kind in ['effects', 'publications']},
                                 quality=quality, source_updated_at=source_updated, source_status='available',
                                 refresh_status='complete', effect_timezone='UTC', publication_timezone='account_local')
+                last_full = (old or {}).get('last_full_refresh_beijing_date')
+                if full_refresh_beijing_date:
+                    # This marker commits with current.json, never with a partial or failed batch.
+                    last_full = max(last_full or '', full_refresh_beijing_date)
+                if last_full:
+                    manifest['last_full_refresh_beijing_date'] = last_full
+                manifest['refresh_cadence'] = 'hourly'
                 builder.finish(manifest)
                 active_writer.finish(version, manifest)
                 publish_snapshot(root, manifest, old)

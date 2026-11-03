@@ -1,28 +1,42 @@
 """Cookie-authenticated API and reusable collector, with independent channel quality."""
 import json
+import logging
+import re
+import hashlib
 import os
 import subprocess
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs
 
 from features.youtube_analytics.titles import enrich
-from .adapters import PLATFORMS, read_catalogs
-from .report import ReportError, csv_export, options, parameters, summarize, validate_metrics
+from .adapters import PLATFORMS, read_catalogs, source_key, source_site
+from .report import (ReportError, csv_export, options, parameters, summarize, validate_metrics,
+                     public_collector_metadata)
 
-_cache = OrderedDict()
+class ReportCache(OrderedDict):
+    def clear(self):
+        # Administrative/test cache clears must also force fresh SQL reads.
+        from .query_cache import clear
+        super().clear()
+        clear()
+
+
+_cache = ReportCache()
 _lock = threading.Lock()
 TTL = 300
 MAX_ROWS = 50000
+logger = logging.getLogger(__name__)
 
 
-def metric_sql(start, end, platform):
+def metric_sql(start, end, platform, site_id=None):
     start, end = date.fromisoformat(start).isoformat(), date.fromisoformat(end).isoformat()
-    if platform not in PLATFORMS:
-        raise ReportError("渠道尚未接入")
+    site = source_site(platform, site_id)
     return """SELECT HEX(JSON_OBJECT('date',CAST(dt AS CHAR),
+      'site_id','%s',
       'campaign_id',MIN(campaign_id),'campaign',MIN(campaign),
       'clicks',SUM(COALESCE(clicks,0)),'views',SUM(COALESCE(views,0)),
       'installs',SUM(COALESCE(installs,0)),'conversions',SUM(COALESCE(recharge,0)),
@@ -31,7 +45,7 @@ def metric_sql(start, end, platform):
       'updated_at',CAST(MAX(updated_at) AS CHAR)))
       FROM kunlunads_dev.ads_facebook_page_insight FORCE INDEX(sd)
       WHERE site_id='%s' AND dt BETWEEN '%s' AND '%s'
-      GROUP BY dt,BINARY campaign_id LIMIT %d""" % (PLATFORMS[platform]["site_id"], start, end, MAX_ROWS + 1)
+      GROUP BY dt,BINARY campaign_id LIMIT %d""" % (site, site, start, end, MAX_ROWS + 1)
 
 
 def query_rows(app, statement, max_rows=1001):
@@ -40,18 +54,34 @@ def query_rows(app, statement, max_rows=1001):
         raise ReportError("报表只读数据源配置异常", 503)
     env = dict(os.environ)
     env.pop("SQL_GATE_BYPASS", None)
+    # The scheduled report opts into a bounded longer query budget; HTTP stays
+    # at eight seconds. Keep the FIFO gate and the overall collection deadline.
+    query_digest = hashlib.sha256(statement.encode()).hexdigest()[:16]
+    statement_ms = min(20000, max(1000, int(app.get("SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS", 8000))))
+    statement_seconds = (statement_ms + 999) // 1000
     env.update(MYSQL_PWD=app["ADMIN_MAPPING_MYSQL_PASSWORD"], SQL_GATE_JOB_NAME="social-analytics",
-               SQL_GATE_WAIT_TIMEOUT_SECONDS="5", SQL_GATE_EXEC_TIMEOUT_SECONDS="12")
-    statement = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=8000; "
+               SQL_GATE_WAIT_TIMEOUT_SECONDS="5", SQL_GATE_EXEC_TIMEOUT_SECONDS=str(statement_seconds + 4))
+    statement = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=%d; " % statement_ms +
                  "START TRANSACTION READ ONLY; SELECT @@read_only; " + statement + "; ROLLBACK;")
+    timeout = min(statement_seconds + 17, app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")) - time.monotonic())
+    if timeout < 1:
+        raise ReportError("日报采集时间预算已用完", 503)
     try:
         result = subprocess.run([
             "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350",
             "-u", str(app["ADMIN_MAPPING_MYSQL_USER"]), "--connect-timeout=3",
             "--default-character-set=utf8mb4", "--skip-reconnect", "-N", "-B", "-r"],
-            input=statement, env=env, text=True, encoding="utf-8", capture_output=True, timeout=25)
+            input=statement, env=env, text=True, encoding="utf-8", capture_output=True, timeout=timeout)
         lines = result.stdout.splitlines()
         if result.returncode or not lines or lines.pop(0) != "1":
+            if "ERROR 3024 (HY000)" in result.stderr:
+                logger.warning("social_effect_query_timeout query=%s mysql_code=3024", query_digest)
+                raise ReportError("效果查询超时（MySQL 3024）；本次不按零统计", 503)
+            mysql_error = re.search(r"ERROR (\d+)", result.stderr)
+            logger.warning("social_effect_query_failed query=%s returncode=%s mysql_code=%s",
+                           query_digest, result.returncode, mysql_error.group(1) if mysql_error else "none")
+            if re.search(r"wait_timeout|queue_full|queue_timeout", result.stderr, re.I):
+                raise ReportError("效果查询排队超时，请稍后重试；本次不按零统计", 503)
             raise ValueError("readonly_query_failed")
         result_rows = [json.loads(bytes.fromhex(line).decode("utf-8")) for line in lines if line.strip()]
         if len(result_rows) > max_rows:
@@ -59,22 +89,53 @@ def query_rows(app, statement, max_rows=1001):
         return result_rows
     except ReportError:
         raise
-    except Exception:
+    except subprocess.TimeoutExpired:
+        logger.warning("social_effect_query_timeout query=%s", query_digest)
+        raise ReportError("效果数据查询超时，请稍后重试；本次不按零统计", 503) from None
+    except Exception as exc:
+        logger.warning("social_effect_query_exception query=%s type=%s", query_digest, type(exc).__name__)
         raise ReportError("效果数据读取失败或繁忙，请稍后重试；本次不按零统计", 503) from None
 
 
-def source(app, start, end, platform):
-    key = (start, end, platform)
+def query_source_rows(app, statement, max_rows):
+    from .query_cache import get_or_load
+    # The SQL includes site/date/exact campaign or source IDs. Reuse only that
+    # same read from the same configured reader; attribution still runs per actor.
+    identity = [str(app.get(key, "")) for key in (
+        "ADMIN_MAPPING_MYSQL_HOST", "ADMIN_MAPPING_MYSQL_PORT", "ADMIN_MAPPING_MYSQL_USER")]
+    key = hashlib.sha256(json.dumps([identity, statement, max_rows]).encode()).hexdigest()
+    deadline = min(app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")), time.monotonic() + 40)
+    return get_or_load(key, lambda: _query_source_uncached(app, statement, max_rows),
+                       deadline=deadline, ttl=TTL)
+
+
+def _query_source_uncached(app, statement, max_rows):
+    # Only the scheduled collector opts into one bounded read-only retry.
+    # Keep the FIFO gate and retry only the failing source, never publication.
+    attempts = min(2, max(1, int(app.get("SOCIAL_ANALYTICS_QUERY_ATTEMPTS", 1))))
+    for attempt in range(attempts):
+        try:
+            return query_rows(app, statement, max_rows)
+        except ReportError as exc:
+            if (exc.status != 503 or attempt + 1 == attempts
+                    or time.monotonic() + 2 >= app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf"))):
+                raise
+            time.sleep(1)
+
+
+def source(app, start, end, platform, site_id=None):
+    site = source_site(platform, site_id)
+    key = (start, end, platform, site)
     with _lock:
         cached = _cache.get(key)
         if cached and time.monotonic() - cached[0] < TTL:
             _cache.move_to_end(key)
             return cached[1], cached[2]
-    result = query_rows(app, metric_sql(start, end, platform), MAX_ROWS)
+    result = query_source_rows(app, metric_sql(start, end, platform, site), MAX_ROWS)
     start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
     days = {(start_day + timedelta(days=i)).isoformat() for i in range((end_day - start_day).days + 1)}
-    validate_metrics(result, platform, days)
-    result = [dict(row, platform=platform) for row in result]
+    validate_metrics(result, platform, days, site_id=site)
+    result = [dict(row, platform=platform, site_id=site) for row in result]
     fetched = datetime.now(timezone.utc).isoformat()
     with _lock:
         _cache[key] = (time.monotonic(), result, fetched)
@@ -84,33 +145,135 @@ def source(app, start, end, platform):
     return result, fetched
 
 
-def build_report(app, actor, query, *, include_titles=False, export=False):
+def scoped_facebook_source(app, start, end, site, catalog=None):
+    """Cache provenance-preserving reads separately from campaign-only reads."""
+    from .backend_scope import eligible, facebook_source
+    allowed = None if catalog is None else sorted({
+        (str(row["key"][0]), row["effect_source"]["adset_id"], row["effect_source"]["ad_id"])
+        for row in catalog if row["platform"] == "facebook" and row["site_id"] == site
+        and row.get("effect_source") and eligible(row, end) and not row.get("excluded")})
+    fingerprint = hashlib.sha256(json.dumps(allowed, separators=(",", ":")).encode()).hexdigest()
+    key = (start, end, "facebook_source_ids_v2", source_site("facebook", site), fingerprint)
+    with _lock:
+        cached = _cache.get(key)
+        if cached and time.monotonic() - cached[0] < TTL:
+            _cache.move_to_end(key)
+            return cached[1], cached[2]
+    result, fetched = facebook_source(app, start, end, site, allowed_sources=allowed)
+    with _lock:
+        _cache[key] = (time.monotonic(), result, fetched)
+        _cache.move_to_end(key)
+        while len(_cache) > 16:
+            _cache.popitem(last=False)
+    return result, fetched
+
+
+def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False,
+                 catalog_snapshot=None):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
     params = parameters(query)
-    catalog, catalog_errors = read_catalogs(app, params["platforms"])
+    # Content provenance is independent of permission scope. HTTP keeps the
+    # authenticated tenant/owner actor; only scheduled collection is global.
+    if catalog_snapshot is not None and actor.get('_system_report') is not True:
+        raise ReportError('冻结归属快照仅供内部采集', 400)
+    catalog, catalog_errors = (catalog_snapshot if catalog_snapshot is not None
+                               else read_catalogs(app, params["platforms"]))
     metrics, errors, fetched = [], {}, []
-    for platform in params["platforms"]:
+    query_coverage, scoped_sources = {}, []
+    web_scoped = ai_backend_only and actor.get("_system_report") is not True
+    if web_scoped:
+        app = dict(app)
+        # Two independent, bounded YouTube windows at a time. All connections
+        # still queue through the existing shared SQL gate.
+        app.setdefault("SOCIAL_ANALYTICS_RANGE_WORKERS", 2)
+        app["SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS"] = max(
+            12000, int(app.get("SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS", 8000)))
+        app["SOCIAL_ANALYTICS_QUERY_DEADLINE"] = min(
+            app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")), time.monotonic() + 40)
+    def read_channel(task):
+        platform, spec = task
+        key = source_key(platform, spec["site_id"])
+        populated = None
         try:
-            channel_rows, channel_fetched = source(app, params["start"], params["end"], platform)
-            metrics.extend(channel_rows)
-            fetched.append(channel_fetched)
+            args = () if len(PLATFORMS[platform]["sources"]) == 1 else (spec["site_id"],)
+            if ai_backend_only and platform == "facebook":
+                candidates = None if actor.get("_system_report") is True else catalog
+                channel_rows, channel_fetched = scoped_facebook_source(
+                    app, params["start"], params["end"], spec["site_id"], candidates)
+            elif web_scoped and platform in {"youtube", "x"}:
+                from .scoped_metrics import campaign_scope, source as scoped_source
+                candidates = campaign_scope(catalog, actor, params, platform, spec["site_id"])
+                channel_rows, channel_fetched, populated = scoped_source(
+                    app, params["start"], params["end"], platform, spec["site_id"], candidates)
+            else:
+                channel_rows, channel_fetched = source(app, params["start"], params["end"], platform, *args)
+            return key, channel_rows, channel_fetched, populated, None
         except ReportError as exc:
-            # A capacity error needs a narrower request, not a partial export.
             if exc.status == 400:
                 raise
-            errors[platform] = str(exc)
+            return key, [], None, None, str(exc)
         except Exception:
-            errors[platform] = "效果数据读取失败或繁忙，待核实；本次不按零统计"
+            return key, [], None, None, "效果数据读取失败或繁忙，待核实；本次不按零统计"
+
+    tasks = [(platform, spec) for platform in params["platforms"] for spec in PLATFORMS[platform]["sources"]]
+    def collect(chunks):
+        for key, rows, timestamp, populated, error in chunks:
+            if error:
+                errors[key] = error
+                continue
+            metrics.extend(rows)
+            fetched.append(timestamp)
+            if populated is not None:
+                query_coverage[key] = populated
+                scoped_sources.append(key)
+    # Independent sources must not consume one another's shared HTTP deadline
+    # serially. At most two channel reads, each with at most two windows, still
+    # pass the shared SQL gate (maximum four concurrent statements/request).
+    if web_scoped and len(tasks) > 1:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="social-channels") as executor:
+            collect(executor.map(read_channel, tasks))
+    else:
+        collect(map(read_channel, tasks))
+    coverage, scope_audit = None, None
+    if ai_backend_only:
+        from .backend_scope import restrict
+        catalog, metrics, coverage, scope_audit = restrict(catalog, metrics, params["end"])
+        for key, days in query_coverage.items():
+            coverage.setdefault(key, set()).update(days)
     report = summarize(catalog, metrics, actor, params,
                        min(fetched) if fetched else datetime.now(timezone.utc).isoformat(),
-                       errors=errors, catalog_errors=catalog_errors)
+                       errors=errors, catalog_errors=catalog_errors,
+                       source_metadata=getattr(catalog_errors, "source_metadata", {}),
+                       metric_coverage=coverage)
+    if scope_audit is not None:
+        report["meta"]["content_scope"] = scope_audit["scope"]
+        report["warnings"][:2] = [
+            "仅统计 AI 后台已确认成功发布的内容及 YouTube 手动短链；包含历史内容在所选 UTC 日期产生的效果。发布量为所选日期确认成功的数量。",
+            "按冻结 campaign ID 归属人员；Facebook 同时核对冻结 Page 和素材 ID，排除其他系统同号来源及未成功发布记录。",
+        ]
+        if actor.get("_system_report") is True:
+            report["scope_audit"] = scope_audit
     if include_titles:
         enrich(report, lambda statement: query_rows(app, statement), export=export)
+    if scoped_sources:
+        report["meta"]["indexed_effect_sources"] = scoped_sources
+        for key in scoped_sources:
+            platform, site = key.split(":", 1)
+            quality = report["quality"]["platforms"][platform]
+            quality["reconciliation"] = "selected_visible_candidates_only"
+            quality["sources"][site]["reconciliation"] = "selected_visible_candidates_only"
     return report
 
 
 def dispatch(handler, parsed, app, *, legacy=False):
-    reply = lambda status, value: app["json_response"](handler, status, value, no_store=True)
+    def reply(status, value):
+        try:
+            return app["json_response"](handler, status, value, no_store=True)
+        except (BrokenPipeError, ConnectionResetError):
+            # Changing filters aborts the old browser request. Do not attempt a
+            # second HTTP response on the closed socket or label it a SQL error.
+            handler.close_connection = True
+            return None
     actor = handler._social_analytics_actor()
     if actor is None:
         return
@@ -128,9 +291,25 @@ def dispatch(handler, parsed, app, *, legacy=False):
                 raise ReportError("筛选选项接口不接受参数")
             catalogs, errors = read_catalogs(app, ["youtube"] if legacy else list(PLATFORMS))
             result = options(catalogs, actor)
-            result["quality"] = {"platforms": {platform: {
-                "state": "unavailable" if platform in errors else "available", "error": errors.get(platform, "")}
-                for platform in (["youtube"] if legacy else PLATFORMS)}}
+            result["quality"] = {"platforms": {}}
+            metadata = getattr(errors, "source_metadata", {})
+            for platform in (["youtube"] if legacy else PLATFORMS):
+                sources = {}
+                for spec in PLATFORMS[platform]["sources"]:
+                    key = source_key(platform, spec["site_id"])
+                    failure = errors.get(key) or errors.get(platform, "")
+                    collector = metadata.get(key, {})
+                    state = "unavailable" if failure else collector.get("state", "available")
+                    if collector.get("freshness") == "stale" and state in {"complete", "available", "ok"}:
+                        state = "partial"
+                    sources[spec["site_id"]] = dict(spec, source_key=key, state=state, error=failure,
+                                                    collector=public_collector_metadata(collector))
+                states = [item["state"] for item in sources.values()]
+                state = ("available" if all(value in {"complete", "available", "ok"} for value in states)
+                         else "unavailable" if all(value == "unavailable" for value in states) else "partial")
+                result["quality"]["platforms"][platform] = dict(
+                    label=PLATFORMS[platform]["label"], state=state, sources=sources,
+                    error="；".join(dict.fromkeys(item["error"] for item in sources.values() if item["error"])))
             if legacy:
                 result["options"]["platform"] = [{"value": "youtube", "label": "YouTube"}]
                 for row in result["options"]["channel"]:
@@ -144,7 +323,7 @@ def dispatch(handler, parsed, app, *, legacy=False):
             query["channel"] = [value if value.startswith("youtube:") else "youtube:" + value
                                 for value in query.get("channel", [])]
         export = parsed.path.endswith("/export.csv")
-        report = build_report(app, actor, query, include_titles=True, export=export)
+        report = build_report(app, actor, query, include_titles=True, export=export, ai_backend_only=True)
         if legacy:
             for row in report["all_rows"]:
                 if "channel" in row:
@@ -167,6 +346,9 @@ def dispatch(handler, parsed, app, *, legacy=False):
             return
         report.pop("all_rows")
         return reply(200, report)
+    except (BrokenPipeError, ConnectionResetError):
+        handler.close_connection = True
+        return None
     except ReportError as exc:
         return reply(exc.status, dict(error="report_unavailable" if exc.status == 503 else "invalid_request",
                                       message=str(exc)))

@@ -3,6 +3,7 @@ import functools
 import json
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -102,6 +103,20 @@ class BrowserTests(unittest.TestCase):
         self.page.set_viewport_size({'width':1440,'height':1000})
         self.page.screenshot(path=str(folder/'socialkit-desktop.png'),full_page=True)
         self.assertEqual(self.errors,[])
+
+    def test_utc_today_shortcut_warning_and_actual_yesterday(self):
+        today = datetime.now(timezone.utc).date()
+        self.assertIn('每小时整点', self.page.locator('#filter-hint').inner_text())
+        self.page.locator('[data-range="today"]').click()
+        self.assertEqual(self.page.locator('#date-start').input_value(), today.isoformat())
+        self.assertEqual(self.page.locator('#date-end').input_value(), today.isoformat())
+        self.page.locator('#apply-filters').click()
+        self.page.wait_for_function("!document.querySelector('#export-report').disabled")
+        self.assertIn('当前 UTC 日期的数据尚未完整', self.page.locator('#quality-message').inner_text())
+        self.page.locator('[data-range="yesterday"]').click()
+        self.assertEqual(self.page.locator('#date-start').input_value(), (today-timedelta(days=1)).isoformat())
+        self.assertEqual(self.page.locator('#date-end').input_value(), (today-timedelta(days=1)).isoformat())
+        self.assertEqual(self.errors, [])
 
 
 if __name__=='__main__':

@@ -18,7 +18,7 @@ python <skill-dir>/scripts/query_report.py --view publications --group-by produc
 
 省略日期时由报表模块选择已发布的最近 14 天。`--format csv` 导出同一查询结果；`--version` 固定已发布版本。CLI 不刷新源库、回填或修改数据库。保存输出时用当前任务的交付目录，不写入技能目录。
 
-先查看返回的版本、日期范围、源更新时间、报表更新时间和未归属量。源查询失败后旧快照仍可用；明确说明数据截至时间，不把旧快照称为刚更新的数据。当前部署按北京时间每天 11:00 重算前 14 个日期，不做日内实时轮询。
+先查看返回的版本、日期范围、源更新时间、报表更新时间和未归属量。源查询失败后旧快照仍可用；明确说明数据截至时间，不把旧快照称为刚更新的数据。2026-11-03 起调度改为每小时整点重算当前 UTC 日期及前两日，每天北京时间 11:00 额外回算前 14 个完整 UTC 日期，错过后补做。当天收入尚未完整，北京时间 08:00 切换 UTC 统计日；每小时刷新不代表上游收入秒级实时。
 
 ## 分析口径
 
@@ -35,5 +35,7 @@ python <skill-dir>/scripts/query_report.py --view publications --group-by produc
 仅在快照缺失、口径核验或用户明确要求源数据时读取 [schema-and-query.md](references/schema-and-query.md)。连接路线使用 `server-43-166-187-96` 技能；保持凭据在 CPU 进程内，禁止查询或复制账号令牌字段。
 
 本技能默认只读。源数据查询不改变任务状态，不修复收入、不启用刷新、不发送通知。若请求变成维护报表或部署，转入对应的后台维护与部署流程，不因调用查询技能而扩大写入范围。
+
+小时刷新后的 Dramawave FB/YouTube/X 收入差异群提醒是独立维护功能，使用 `/mnt/data-disk/socialkit-gap-alert` 发送账本。普通查询不得认领、重试或发送提醒；未知回执先核对，不能直接重发。维护记录见仓库 `doc/20261103.socialkit-hourly-gap-alert`。
 
 实现、验收与回滚记录见 [仓库维护文档](https://github.com/gaoyuan12356416/ai-/tree/codex/socialkit-analytics-20261102/doc/20261102.socialkit-analytics)。2026-11-02 交付功能提交为 `86e0b0dca9d01719121251334ced099797157211`；查询时仍以当前发布版本及其时间戳为准，不把交付快照当作永不变化的数据。

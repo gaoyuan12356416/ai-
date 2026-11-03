@@ -1,5 +1,5 @@
 [Unit]
-Description=SocialKit daily analytics snapshot refresh
+Description=SocialKit hourly analytics snapshot and revenue gap alerts
 After=network-online.target
 Wants=network-online.target
 
@@ -10,8 +10,8 @@ WorkingDirectory=/opt/socialkit-analytics/current
 EnvironmentFile=/etc/socialkit-analytics.env
 Environment=PYTHONUNBUFFERED=1
 Environment=SOCIALKIT_ANALYTICS_ROOT=/mnt/data-disk/socialkit-analytics
-ExecStart=/usr/bin/flock -n /run/lock/socialkit-analytics-refresh.lock /usr/bin/python3 -m features.socialkit_analytics.refresh --root /mnt/data-disk/socialkit-analytics
-TimeoutStartSec=3600
+ExecStart=/usr/bin/flock -n /run/lock/socialkit-analytics-refresh.lock /usr/bin/python3 -m features.socialkit_analytics.hourly --root /mnt/data-disk/socialkit-analytics
+TimeoutStartSec=3500
 Nice=10
 UMask=0027
 NoNewPrivileges=true

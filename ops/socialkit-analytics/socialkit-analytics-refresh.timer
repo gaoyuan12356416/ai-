@@ -1,10 +1,10 @@
 [Unit]
-Description=Refresh SocialKit yesterday and recent 14 days at 11:00 Beijing
+Description=Refresh SocialKit and compare revenue every hour
 
 [Timer]
-OnCalendar=*-*-* 11:00:00 Asia/Shanghai
+OnCalendar=*-*-* *:00:00 Asia/Shanghai
 Persistent=true
-AccuracySec=1min
+AccuracySec=1s
 Unit=socialkit-analytics-refresh.service
 
 [Install]

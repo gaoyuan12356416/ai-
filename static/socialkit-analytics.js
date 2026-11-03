@@ -27,7 +27,7 @@
     $('#ranking-metric').disabled=!usable||state.dirty; $('#page-size').disabled=!usable||state.dirty;
     $('#report-content').setAttribute('aria-busy',String(state.busy));
     $('#report-content').classList.toggle('is-dirty',state.dirty);
-    $('#filter-hint').textContent=state.dirty?'筛选有修改，请应用后查看对应结果。':'每天北京时间 11:00 更新前一天数据；点击读取最新数据查看最新结果。';
+    $('#filter-hint').textContent=state.dirty?'筛选有修改，请应用后查看对应结果。':'每小时整点更新当天及近期数据；收入按 UTC 日统计，北京时间 08:00 切日。';
     document.querySelectorAll('[data-view]').forEach(b=>b.disabled=!state.allowed||state.busy);
   }
   function dirty() { state.dirty=true; state.requestId++; state.controller?.abort(); state.exportController?.abort(); state.busy=false; controls(); }
@@ -82,9 +82,11 @@
     finally{if(id===state.requestId){state.busy=false;controls();}}
   }
   function range(kind) {
-    const fallback=new Date();fallback.setUTCDate(fallback.getUTCDate()-1);
-    const end=new Date((state.options?.range?.end||utc(fallback))+'T00:00:00Z');let start=new Date(end);
-    if(kind!=='yesterday')start.setUTCDate(start.getUTCDate()-Number(kind)+1);
+    const fallback=new Date();
+    let end=new Date((state.options?.range?.end||utc(fallback))+'T00:00:00Z');
+    if(kind==='today'||kind==='yesterday'){end=new Date(utc(fallback)+'T00:00:00Z');if(kind==='yesterday')end.setUTCDate(end.getUTCDate()-1);}
+    const start=new Date(end);
+    if(!['today','yesterday'].includes(kind))start.setUTCDate(start.getUTCDate()-Number(kind)+1);
     $('#date-start').value=utc(start);$('#date-end').value=utc(end);dirty();
   }
   async function latest({initial=false}={}) {
@@ -103,7 +105,7 @@
   function renderTrend(){
     const r=state.report,key=$('#trend-metric').value,points=r.trend,values=points.filter(p=>finite(p[key])).map(p=>Number(p[key]));
     $('#trend-description').textContent=publicationMetrics.includes(key)?'按账号当地排期日期统计':'按 UTC 效果日期统计';
-    $('#trend-caption').textContent=points.some(p=>!finite(p[key]))?'缺失日期留空，不按零处理。':'每天更新完整日期数据，包含历史日期的回补与修正。';
+    $('#trend-caption').textContent=points.some(p=>!finite(p[key]))?'缺失日期留空，不按零处理。':'每小时更新近期数据，每天回算前 14 个完整 UTC 日期；当天数据仍会回传。';
     if(!values.length){$('#trend-chart').innerHTML=empty('所选范围尚无已同步数据');return;}
     const w=780,h=250,left=68,right=20,top=20,bottom=40,minimum=Math.min(0,...values),maximum=Math.max(1,...values),spread=maximum-minimum;
     const x=i=>left+(points.length===1?(w-left-right)/2:i*(w-left-right)/(points.length-1)),y=v=>top+(maximum-v)/spread*(h-top-bottom);
@@ -124,7 +126,7 @@
     const r=state.report,m=r.meta;$('#report-content').classList.remove('hidden');$('#report-content').setAttribute('aria-labelledby','tab-'+state.view);
     $('#report-period').textContent=m.start+' 至 '+m.end+' · '+({overview:'总览',effects:'收入效果',publications:'发布执行'}[state.view]);
     $('#report-updated').textContent='报表更新：'+stamp(m.generated_at)+' · 收入源更新时间：'+stamp(m.source_updated_at);$('#report-version').textContent='快照版本：'+m.version;$('#report-version').className='version-tag';
-    const warnings=[];if(m.stale)warnings.push('最近一次更新未成功，正在显示上一份成功快照。');if(m.partial)warnings.push('所选范围含未同步日期；合计仅包含已同步数据。');
+    const warnings=[];const today=utc(new Date());if(state.view!=='publications'&&m.start<=today&&m.end>=today)warnings.push('当前 UTC 日期的数据尚未完整，收入会随回传更新；北京时间 08:00 切日。');if(m.stale)warnings.push('最近一次更新未成功，正在显示上一份成功快照。');if(m.partial)warnings.push('所选范围含未同步日期；合计仅包含已同步数据。');
     const unmatched=r.totals.unmatched_revenue_cents;if(Number(r.totals.unmatched_rows)||Number(r.totals.unmatched_links)||Number(unmatched))warnings.push('当前筛选有 '+format(r.totals.unmatched_links,'link_count')+' 个未归属短链键（'+format(r.totals.unmatched_rows,'tasks')+' 条明细），点击 '+format(r.totals.unmatched_clicks||0,'clicks')+'、安装 '+format(r.totals.unmatched_installs||0,'installs')+'、收入 '+format(Number(unmatched||0)/100,'revenue')+'；已保留在总盘和未归属分组。');
     if(m.latest_version&&m.latest_version!==m.version)warnings.push('已有更新版本，当前查看的是固定快照；点击“读取最新数据”切换。');
     $('#quality-message').textContent=warnings.join(' ');$('#quality-message').hidden=!warnings.length;
