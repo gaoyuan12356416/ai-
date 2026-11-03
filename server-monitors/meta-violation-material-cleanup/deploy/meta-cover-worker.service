@@ -13,6 +13,9 @@ Environment=PYTHONUNBUFFERED=1
 Environment=SQL_GATE_BYPASS=0
 ExecStart=/usr/bin/env python3 cover.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json work --max-ads 256
 KillSignal=SIGINT
+# Let the coordinator drain read-only mysql children and in-flight receipts.
+# Timeout escalation still kills the whole unit's control group.
+KillMode=mixed
 TimeoutStopSec=180
 Restart=on-failure
 RestartSec=15s

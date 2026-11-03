@@ -24,7 +24,8 @@ _WAITING = {'DISAPPROVED', 'PENDING_REVIEW', 'IN_PROCESS', 'PREAPPROVED'}
 _CLEAR = {'ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'CAMPAIGN_PAUSED',
           'ARCHIVED', 'WITH_ISSUES', 'PENDING_BILLING_INFO'}
 _DEFER_CODES = {'cover_stopped', 'cover_context_expired', 'cancelled_before_request',
-                'cancelled_before_write', 'cover_shared_busy', 'cover_resource_busy'}
+                'cancelled_before_write', 'cover_shared_busy', 'cover_resource_busy',
+                'cover_account_cooldown'}
 
 
 def _error(exc):
@@ -428,6 +429,11 @@ class CoverWorker:
         selected = refreshes = 0
         preparations, batch_sizes, active_accounts = Counter(), Counter(), Counter()
         futures = {}
+        cooldown_accounts = set()
+
+        def account_budget(account):
+            method = getattr(self.governor, 'account_budget', None)
+            return method(account) if method else {'concurrency_limit': 2, 'cooldown_seconds': 0}
 
         def completed(done):
             for future in done:
@@ -475,10 +481,14 @@ class CoverWorker:
                 # one slow account no longer holds the rest of an entire wave.
                 for _ in range(len(prepared)):
                     task, context = prepared.popleft()
-                    if self.clock() - context['_prepared_at'] > self.ttl:
+                    account_state = account_budget(task['account_id'])
+                    if account_state['cooldown_seconds'] > 0:
+                        cooldown_accounts.add(task['account_id'])
+                        tasks.append(task)
+                    elif self.clock() - context['_prepared_at'] > self.ttl:
                         expired(task)
                     elif (selected < max_ads and len(futures) < capacity
-                          and active_accounts[task['account_id']] < per_account):
+                          and active_accounts[task['account_id']] < min(per_account, account_state['concurrency_limit'])):
                         if self.stopped():
                             prepared.appendleft((task, context))
                             break
@@ -498,14 +508,29 @@ class CoverWorker:
                 batch, deferred = [], deque()
                 # Consume the existing buffer before opening another SQL
                 # snapshot. Topping it up after each completion would turn a
-                # large batch into many single-Ad source queries. An unfilled
-                # execution slot may still need a different account prepared.
-                needs_source = not prepared or free_slots > 0
+                # large batch into many single-Ad source queries. Global free
+                # slots are not usable when the remaining accounts are already
+                # at their own limit. Refill early only for an account that can
+                # execute now and has no context already buffered for that slot.
+                needs_source = not prepared
+                if not needs_source and free_slots > 0:
+                    for account in {task['account_id'] for task in tasks}:
+                        state = account_budget(account)
+                        if (state['cooldown_seconds'] <= 0 and not buffered_accounts[account]
+                                and active_accounts[account] < min(per_account, state['concurrency_limit'])):
+                            needs_source = True
+                            break
                 if needs_source and size > 0 and not self.stopped():
                     while tasks and len(batch) < size:
                         task = tasks.popleft()
-                        account_capacity = per_account + max(
-                            0, per_account - active_accounts[task['account_id']])
+                        account_state = account_budget(task['account_id'])
+                        if account_state['cooldown_seconds'] > 0:
+                            cooldown_accounts.add(task['account_id'])
+                            deferred.append(task)
+                            continue
+                        account_limit = min(per_account, account_state['concurrency_limit'])
+                        account_capacity = account_limit + max(
+                            0, account_limit - active_accounts[task['account_id']])
                         if buffered_accounts[task['account_id']] >= account_capacity:
                             deferred.append(task)
                         else:
@@ -550,6 +575,7 @@ class CoverWorker:
                 'source_prepare_batches': sum(batch_sizes.values()),
                 'source_prepare_batch_sizes': dict(batch_sizes),
                 'prepared_context_refreshes': refreshes,
+                'accounts_deferred_for_cooldown': len(cooldown_accounts),
                 'defer_reasons': dict(Counter(item.get('result', {}).get('reason', 'unspecified')
                     for item in outputs if item['status'] == 'pending')),
                 'seconds': round(self.clock() - started, 3),
@@ -843,7 +869,7 @@ class CoverWorker:
             except PayloadError:
                 self._halt('creative_parameters_changed')
                 counts['unresolved_resources'] += 1
-            except GraphError:
+            except (GraphError, RequestNotSent):
                 counts['unresolved_resources'] += 1
         for task in self.store.unknown_tasks(limit=limit):
             if self.stopped():
@@ -866,7 +892,7 @@ class CoverWorker:
                 self.store.finish_task(task['id'], 'succeeded', proof)
                 self.shared.release_cover_resources('cover-task:' + str(task['id']), verified=True)
                 counts['tasks_confirmed'] += 1
-            except (GraphError, PayloadError):
+            except (GraphError, PayloadError, RequestNotSent):
                 counts['unresolved_tasks'] += 1
         for row in self.store.unknown_deletions(limit=limit):
             if self.stopped():
@@ -885,6 +911,6 @@ class CoverWorker:
                     self.shared.finish_cover_delete(owner, account, creative, 'deleted_verified', proof)
                 self.shared.release_cover_resources(owner, verified=True)
                 counts['deletions_confirmed'] += 1
-            except GraphError:
+            except (GraphError, RequestNotSent):
                 counts['unresolved_deletions'] += 1
         return dict(counts)

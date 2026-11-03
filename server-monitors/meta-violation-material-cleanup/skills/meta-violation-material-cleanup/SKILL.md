@@ -42,6 +42,29 @@ Definite failure is not automatically retried. Unknown writes are reconciled rea
 
 ## Concurrency and storage
 
+For account usage collapsing global concurrency or scan SQL disconnects, read
+[account throttling and scan reuse](../../../../doc/20261103.meta-cover-throughput-scan/README.md).
+Cover execution scopes an exact-account BUC header to that account: usage at
+70% lowers its two-slot ceiling to one, below 60% restores it, and 85% retains
+the existing cooldown. App/unknown-scope pressure and explicit rate limits stay
+global; the 32-slot and 24-starts/second ceilings remain. Cooling accounts are
+skipped before SQL preparation. A request encountering account cooldown yields
+the cover task instead of holding the entire cycle: unsent writes defer, sent
+writes retain receipts for GET-only reconciliation without replay. Scan evidence and reverse lookup each reuse a
+bounded read-only snapshot; a transient connection error may restart the entire
+failed scan once in a new batch, never splice partial pages or retry media writes.
+
+For a backlog concentrated in few accounts, consume the existing source buffer
+before SQL top-ups unless a ready account without buffered context can use a
+free execution slot. Global free slots alone do not justify another snapshot
+when account budgets are full. Keep source TTL and per-account limits unchanged.
+
+Worker and temporary acceptance units use KillSignal=SIGINT, KillMode=mixed and
+TimeoutStopSec=180. Signal the coordinator first so it drains mysql subprocesses;
+the default control-group SIGINT can produce mysql exit 130 and a false SQL
+failure pause. The timeout still kills remaining processes as a group. A pause
+may only be archived after its exact cause and current receipts are verified.
+
 Use 32 Ad execution workers. All GET/POST/DELETE in both lanes share one Graph governor: initial/max in-flight 32, per-account 2, total request starts 24/second; respect platform cooldowns and reduce later concurrency. The governor gradually recovers (+2 per 20 seconds with fresh pressure below 60) after throttling. The Ad lane fills free execution slots without waiting for an entire wave. The caller prepares at most 64 contexts per short SQL snapshot, bounded by current free slots plus one execution-capacity buffer; retained prefetched work is at most one capacity after submission. Keep two executing tasks per account, bounded ahead-of-time preparation, and the 30-second freshness check before every write. Freshness starts before SQL preparation, not when SQL returns. Expired unsubmitted contexts are re-read at most once per cycle, then safely deferred; no write is replayed. Use read-only FIFO Gate with SQL_GATE_BYPASS=0 and verified @@read_only=1. Never bypass through direct drivers or mysql.real.
 
 The existing meta-cover-worker.service owns two independent loops in one process: Ad replacement and old-Creative cleanup. Cleanup defaults to four workers (cover_cleanup_workers, range 1..4), consumes its durable queue independently, and never runs at the end of each Ad cycle. Both loops share the same governor and legacy lease, so they do not double request limits or deadlock on two exclusive legacy locks. Skip local cleanup candidates while related replacement tasks remain pending/in-progress/review/unknown, except provably unstarted rows in failed scans; this scheduling filter does not replace complete Meta inventory, object reservations, fresh checks or one-attempt deletion. Existing historical reference waits retain their next-check times.

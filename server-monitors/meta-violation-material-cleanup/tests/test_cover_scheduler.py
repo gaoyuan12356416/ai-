@@ -15,6 +15,19 @@ class SchedulerTests(unittest.TestCase):
     enqueue = fixtures.WorkerTests.enqueue
     worker = fixtures.WorkerTests.worker
 
+    def test_cooling_account_is_skipped_before_sql_and_other_account_progresses(self):
+        ads=[ad('10','20','100'),ad('11','21','200')]
+        self.enqueue(ads)
+        governor=Governor(maximum=32,initial_limit=32,account_scoped_usage=True)
+        governor.account_until['100']=time.monotonic()+180
+        graph=Graph(ads,[creative('20','100'),creative('21','200')])
+        result=self.worker(graph,governor=governor).run_once(max_ads=2,process_deletes=False)
+        self.assertEqual(result['tasks'],{'succeeded':1})
+        self.assertEqual(self.source.calls,[[2]])
+        self.assertEqual(self.store.get_task(1)['status'],'pending')
+        self.assertEqual(result['accounts_deferred_for_cooldown'],1)
+        self.assertFalse(any(call[0]=='get_ad' and call[1]=='10' for call in graph.calls))
+
     def test_free_slot_is_refilled_while_first_ad_is_still_running(self):
         self.config['execution_workers'] = 2
         ads = [ad(str(10+i), str(20+i), str(100+i)) for i in range(4)]
@@ -144,6 +157,42 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(self.store.get_task(1)['status'], 'pending')
         self.assertFalse(self.store.get_task(1)['request_sent'])
         self.assertEqual(graph.calls, [])
+
+    def test_sparse_accounts_drain_buffer_without_single_task_sql_topups(self):
+        # Two account budgets occupy only four of 32 global slots. Staggered
+        # completions must consume the prepared buffer, not trigger one SQL
+        # snapshot for each unused global slot/completed task.
+        self.config['execution_workers'] = 32
+        ads = [ad(str(1000+i), str(2000+i), str(100+i % 2)) for i in range(12)]
+        self.enqueue(ads)
+        first_wave = threading.Barrier(4, timeout=3)
+        replacements = {identifier: threading.Event() for identifier in (5, 6, 7, 8)}
+        next_source_ready = threading.Event()
+        original_prepare = self.source.prepare_candidates
+        def prepare(tasks):
+            if self.source.calls:
+                self.assertEqual(len(tasks), 4, 'account-limited buffer topped up with single-task SQL')
+                result = original_prepare(tasks)
+                next_source_ready.set()
+                return result
+            return original_prepare(tasks)
+        worker = self.worker(Graph(ads, []))
+        def execute(task, context):
+            identifier = task['id']
+            if identifier <= 4:
+                first_wave.wait()
+                predecessor = {3: 5, 2: 7, 4: 6}.get(identifier)
+                if predecessor:
+                    self.assertTrue(replacements[predecessor].wait(3))
+            elif identifier <= 8:
+                replacements[identifier].set()
+                self.assertTrue(next_source_ready.wait(3), 'buffer was not replenished after consumption')
+            return {'task_id': identifier, 'status': 'failed'}
+        with patch.object(self.source, 'prepare_candidates', prepare), \
+             patch.object(worker, '_execute', execute):
+            report = worker.run_once(max_ads=12, process_deletes=False)
+        self.assertEqual([len(part) for part in self.source.calls], [8, 4])
+        self.assertEqual(report['tasks'], {'failed': 12})
 
     def test_refreshed_source_revalidates_credential_before_any_ad_write(self):
         clock = [0.]

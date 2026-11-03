@@ -15,12 +15,13 @@ class RequestNotSent(Exception):
 
 class Governor:
     def __init__(self,maximum=16,per_account=2,rps=24,clock=time.monotonic,
-                 *,initial_limit=None,ramp_up=True):
+                 *,initial_limit=None,ramp_up=True,account_scoped_usage=False):
         if initial_limit is not None and (type(initial_limit) is not int or not 1 <= initial_limit <= maximum):
             raise ValueError('initial_limit_out_of_range')
         if not isinstance(ramp_up,bool):raise ValueError('ramp_up_must_be_boolean')
         self.maximum=maximum;self.limit=min(4,maximum) if initial_limit is None else initial_limit
         self.per_account=per_account;self.rps=rps;self.ramp_up=ramp_up
+        self.account_scoped_usage=account_scoped_usage;self.account_limits={}
         self.clock=clock;self.lock=threading.Lock();self.active=0;self.accounts=Counter()
         self.global_until=0.;self.account_until={};self.next_request=0.;self.last_change=clock()
         self.observed=False;self.usage={};self.metrics=Counter();self.max_seen=0
@@ -42,8 +43,14 @@ class Governor:
             if stop():raise RequestNotSent('cancelled_before_request')
             with self.lock:
                 now=self.clock()
+                # Cover tasks must yield their worker during account cooldown,
+                # including cooldown learned between a write and its readback.
+                # A sleeping final task otherwise blocks the next entire batch.
+                if self.account_scoped_usage and now<self.account_until.get(account,0):
+                    self.metrics['account_cooldown_deferrals']+=1
+                    raise RequestNotSent('cover_account_cooldown')
                 ready=(now>=max(self.global_until,self.account_until.get(account,0),self.next_request)
-                    and self.active<self.limit and self.accounts[account]<self.per_account)
+                    and self.active<self.limit and self.accounts[account]<self.account_limits.get(account,self.per_account))
                 if ready:
                     self.active+=1;self.accounts[account]+=1
                     self.next_request=now+1/self.rps;self.max_seen=max(self.max_seen,self.active)
@@ -58,12 +65,18 @@ class Governor:
 
     def observe(self,response,account):
         headers={str(k).lower():v for k,v in (getattr(response,'headers',{}) or {}).items()}
-        values={};regain=0.
+        values={};regain=0.;scopes={}
         for name in ('x-app-usage','x-ad-account-usage','x-business-use-case-usage'):
             raw=headers.get(name)
             if not isinstance(raw,str) or len(raw)>65536:continue
-            try:nodes=[(json.loads(raw),0)]
+            try:
+                decoded=json.loads(raw);nodes=[(decoded,0)]
             except (ValueError,TypeError):continue
+            # Cover responses identify the exact Ad Account in BUC headers.
+            # An unrecognized/mixed scope remains global, never silently local.
+            scoped=(name=='x-ad-account-usage' or name=='x-business-use-case-usage'
+                    and isinstance(decoded,dict) and set(decoded)=={str(account)})
+            scopes[name]=account if scoped or not self.account_scoped_usage and name!='x-app-usage' else 'global'
             for _ in range(2048):
                 if not nodes:break
                 node,depth=nodes.pop()
@@ -91,13 +104,21 @@ class Governor:
         with self.lock:
             now=self.clock();self.metrics['http_responses']+=1
             for name,value in values.items():
-                scope='global' if name=='x-app-usage' else account
+                scope=scopes[name]
                 self.usage[(name,scope)]=(value,now)
                 self.observed=True
                 metric=name.replace('-','_')+'_max_percent'
                 self.metrics[metric]=max(self.metrics[metric],value)
             recent=[v for v,t in self.usage.values() if now-t<=120]
-            pressure=max(recent,default=0)
+            global_recent=[v for (name,scope),(v,t) in self.usage.items() if scope=='global' and now-t<=120]
+            pressure=max(global_recent if self.account_scoped_usage else recent,default=0)
+            local_values=[v for name,v in values.items() if scopes[name]==account]
+            if self.account_scoped_usage and local_values:
+                local_pressure=max(local_values)
+                if local_pressure>=70:self.account_limits[account]=1
+                elif local_pressure<60:self.account_limits.pop(account,None)
+                if local_pressure>=85:
+                    self.account_until[account]=max(self.account_until.get(account,0),now+max(60,regain))
             if limited or pressure>=70:
                 self.limit=max(1,self.limit//2);self.last_change=now;self.metrics['reductions']+=1
                 # Any explicit rate limit pauses all new requests; the limit
@@ -105,13 +126,18 @@ class Governor:
                 if limited:
                     self.metrics['rate_limit_responses']+=1
                     self.global_until=max(self.global_until,now+max(60,retry,regain))
-                if values.get('x-app-usage',0)>=85:
+                if max((v for name,v in values.items() if scopes[name]=='global'),default=0)>=85:
                     self.global_until=max(self.global_until,now+max(60,regain))
                 if max(values.get('x-ad-account-usage',0),values.get('x-business-use-case-usage',0))>=85:
                     self.account_until[account]=max(self.account_until.get(account,0),now+max(60,regain))
             elif self.ramp_up and self.limit<self.maximum and values and recent and pressure<60 and now-self.last_change>=20:
                 self.limit=min(self.maximum,self.limit+2);self.last_change=now
                 self.metrics['increases']+=1
+
+    def account_budget(self,account):
+        with self.lock:
+            return {'concurrency_limit':self.account_limits.get(account,self.per_account),
+                    'cooldown_seconds':max(0.,self.account_until.get(account,0)-self.clock())}
 
     def snapshot(self):
         with self.lock:
@@ -121,6 +147,9 @@ class Governor:
                 per_account_limit=self.per_account,request_starts_per_second=self.rps,
                 recent_usage_max_percent=max(recent) if recent else None,
                 recent_usage_scopes=len(recent),
+                global_usage_max_percent=max((v for (name,scope),(v,t) in self.usage.items()
+                    if scope=='global' and now-t<=120),default=None),
+                account_throttled_count=len(self.account_limits),
                 account_cooldowns_active=sum(until>now for until in self.account_until.values()),
                 max_in_flight=self.max_seen,active=self.active,
                 global_cooldown_seconds=max(0,round(self.global_until-now,1)))

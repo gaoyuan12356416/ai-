@@ -170,6 +170,46 @@ class ContextBatchTests(unittest.TestCase):
 
 
 class ThrottleTests(unittest.TestCase):
+    def test_cover_account_pressure_does_not_collapse_other_accounts(self):
+        g=Governor(maximum=32,initial_limit=32,account_scoped_usage=True,clock=lambda:0)
+        high=Response({},headers={'x-business-use-case-usage':json.dumps({'100':[{'type':'ads_management','total_time':80}]})})
+        for _ in range(100):
+            g.observe(high,'100')
+            g.observe(Response({},headers={'x-business-use-case-usage':'{"200":[{"total_time":10}]}'}),'200')
+        self.assertEqual(g.limit,32)
+        self.assertEqual(g.account_budget('100')['concurrency_limit'],1)
+        self.assertEqual(g.account_budget('200')['concurrency_limit'],2)
+        self.assertEqual(g.global_until,0)
+        g.observe(Response({},headers={'x-business-use-case-usage':'{"100":[{"total_time":20}]}'}),'100')
+        self.assertEqual(g.account_budget('100')['concurrency_limit'],2)
+
+    def test_cover_account_cooldown_still_honors_platform_minutes(self):
+        g=Governor(maximum=32,initial_limit=32,account_scoped_usage=True,clock=lambda:0)
+        g.observe(Response({},headers={'x-business-use-case-usage':'{"100":[{"total_time":90,"estimated_time_to_regain_access":3}]}'}),'100')
+        self.assertEqual(g.account_budget('100')['cooldown_seconds'],180)
+        self.assertEqual(g.account_budget('200')['cooldown_seconds'],0)
+        self.assertEqual(g.limit,32)
+        with self.assertRaises(RequestNotSent) as raised:
+            with g.slot('100',lambda:False):self.fail('cooling account acquired a slot')
+        self.assertEqual(raised.exception.code,'cover_account_cooldown')
+        self.assertEqual(g.active,0)
+        with g.slot('200',lambda:False):self.assertEqual(g.active,1)
+        self.assertEqual(g.account_budget('100')['cooldown_seconds'],180)
+
+    def test_cover_global_and_unrecognized_scope_still_reduce_and_cool_down(self):
+        for headers in ({'x-app-usage':'{"call_count":90}'},
+                        {'x-business-use-case-usage':'{"other":[{"total_time":90}]}'},
+                        {'x-business-use-case-usage':'{"100":[{"total_time":5}],"200":[{"total_time":90}]}'}):
+            with self.subTest(headers=headers):
+                g=Governor(maximum=32,initial_limit=32,account_scoped_usage=True,clock=lambda:0)
+                g.observe(Response({},headers=headers),'100')
+                self.assertEqual(g.limit,16)
+                self.assertEqual(g.global_until,60)
+        g=Governor(maximum=32,initial_limit=32,account_scoped_usage=True,clock=lambda:0)
+        g.observe(Response({'error':{'code':80004}},400,{'Retry-After':'180'}),'100')
+        self.assertEqual(g.limit,16)
+        self.assertEqual(g.global_until,180)
+
     def test_snapshot_separates_recent_feedback_from_lifetime_peak(self):
         clock=[0.];g=Governor(maximum=32,clock=lambda:clock[0])
         g.observe(Response({},headers={'x-app-usage':'{"call_count":50}'}),'100')

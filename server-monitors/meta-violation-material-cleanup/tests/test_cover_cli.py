@@ -1,11 +1,56 @@
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import cover
 from meta_violation_cleanup.cover_store import CoverStore
 from meta_violation_cleanup.runtime import Runtime
+from meta_violation_cleanup.sql_source import SqlSourceError
+
+
+class ScanRecoveryTests(unittest.TestCase):
+    def test_disconnect_restarts_whole_scan_and_rehomes_only_unsent_partial_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=CoverStore(Path(tmp)/'cover.sqlite3')
+            source=MagicMock()
+            source.last_diagnostic={'id':'diagnostic','code':'sql_stream_incomplete','mysql_errors':[{'errno':2013}]}
+            bids=[]
+            candidate={'account_id':'100','ad_id':'200','old_creative_id':'300','user_id':'1'}
+            def scan(adapter,ledger,bid,*args):
+                bids.append(bid);ledger.begin_batch(bid,{})
+                if len(bids)==2:
+                    self.assertEqual(ledger.ready_tasks(),[])
+                    self.assertEqual(ledger.known_keys(),set())
+                self.assertTrue(ledger.enqueue(bid,candidate))
+                if len(bids)==1:raise SqlSourceError('sql_stream_incomplete')
+                ledger.seal_batch(bid);return {'new_ads':1}
+            with patch.object(cover,'CoverSource',return_value=source), patch.object(cover,'scan',scan), \
+                 patch.object(cover,'notify_completed'),patch.object(cover.time,'sleep'):
+                cover.do_scan({},store,MagicMock(),lambda:False)
+            self.assertEqual(len(set(bids)),2)
+            self.assertEqual(store.get_task(1)['batch_id'],bids[1])
+            self.assertEqual(store.get_task(1)['request_sent'],0)
+            self.assertEqual(len(store.ready_tasks()),1)
+            self.assertEqual(source.close.call_count,2)
+
+    def test_retry_is_bounded_and_does_not_retry_statement_limits_or_data_errors(self):
+        for errno,code,expected in ((2013,'sql_stream_incomplete',2),
+                                    (3024,'sql_stream_incomplete',1),
+                                    (2013,'ad_lineage_incomplete',1)):
+            with self.subTest(errno=errno,code=code),tempfile.TemporaryDirectory() as tmp:
+                store=CoverStore(Path(tmp)/'cover.sqlite3');source=MagicMock()
+                source.last_diagnostic={'id':'diagnostic','code':'sql_stream_incomplete','mysql_errors':[{'errno':errno}]}
+                bids=[]
+                def scan(adapter,ledger,bid,*args):
+                    bids.append(bid);ledger.begin_batch(bid,{})
+                    raise SqlSourceError(code)
+                with patch.object(cover,'CoverSource',return_value=source),patch.object(cover,'scan',scan), \
+                     patch.object(cover,'notify_completed'),patch.object(cover.time,'sleep'):
+                    with self.assertRaises(SqlSourceError):
+                        cover.do_scan({},store,MagicMock(),lambda:False)
+                self.assertEqual(len(bids),expected)
+                self.assertTrue(all(b['status']=='failed' for b in store.get_batches()))
 
 
 class NotificationTests(unittest.TestCase):

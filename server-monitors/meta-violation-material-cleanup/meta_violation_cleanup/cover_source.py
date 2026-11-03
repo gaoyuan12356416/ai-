@@ -67,6 +67,8 @@ class CoverSource(SqlSource):
     def __init__(self, config):
         super().__init__(config)
         self.shared_ledger = Path(config['shared_ledger'])
+        if not self.diagnostic_path and config.get('runtime_dir'):
+            self.diagnostic_path = str(Path(config['runtime_dir']) / 'diagnostics' / 'cover-sql-errors.jsonl')
 
     def confirmed_deleted_ads(self):
         # Positive historical receipts are permanent; do this before expensive
@@ -162,11 +164,12 @@ def scan(source, store, batch_id, audit=None, stop=lambda: False):
     start, end = (cutoff - timedelta(days=3)).isoformat(), cutoff.isoformat()
     meta = {'policy_version': POLICY_VERSION, 'window_start': start, 'window_end': end}
     store.begin_batch(batch_id, meta)
-    scope = product_scope(source.products())
     runner = Runner({}, source, None, None, None, None, stop=stop)
-    violations = source.violations(start, end)
-    rows = [r for r in violations if qualifying_policies(r.get('issues_info'))]
-    lineage, sources = runner.lineage_data(sorted({str(r['ad_id']) for r in rows}), rows, scope)
+    with source.snapshot():
+        scope = product_scope(source.products())
+        violations = source.violations(start, end)
+        rows = [r for r in violations if qualifying_policies(r.get('issues_info'))]
+        lineage, sources = runner.lineage_data(sorted({str(r['ad_id']) for r in rows}), rows, scope)
     evidence = build_evidence(rows, lineage, sources, scope, start, end)
     qualified = {'materials': {mid: dict(e, window_start=start, window_end=end, triggered_at=now())
                                for mid, e in evidence['materials'].items() if e['count'] >= 3}}
@@ -175,7 +178,11 @@ def scan(source, store, batch_id, audit=None, stop=lambda: False):
     triggered = store.triggered_materials()
     new_materials = len(set(triggered) - previous_materials)
     progress = lambda **kw: audit.update(batch_id, **kw) if audit else None
-    found, lookup = material_rows(source, set(triggered), scope, progress, stop)
+    # Reverse lookup is read-only discovery, never write-time authorization.
+    # Reuse one bounded snapshot across all indexed ranges instead of opening
+    # dozens of gated connections. Any incomplete range discards this lookup.
+    with source.snapshot():
+        found, lookup = material_rows(source, set(triggered), scope, progress, stop)
     existing = store.known_keys()
     deleted = source.confirmed_deleted_ads()
     unseen_ids = sorted({str(r['ad_id']) for r in found if
@@ -222,6 +229,7 @@ def scan(source, store, batch_id, audit=None, stop=lambda: False):
                    new_material_product_pairs=new_material_product_pairs,
                    violation_rows=len(violations), policy_rows=len(rows), lookup=lookup,
                    seconds=round(time.monotonic() - began, 3), **meta)
+    summary['source_metrics'] = getattr(source, 'safe_metrics', {})
     store.seal_batch(batch_id, summary)
     if audit:
         audit.artifact(batch_id, 'cover-scan.json', {'summary': summary, 'evidence': evidence})

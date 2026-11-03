@@ -10,7 +10,12 @@ from .sql_source import _inside, _quote, _chunks, _ids, SqlSourceError
 
 # Adjacent, exhaustive string ranges permit InnoDB index-condition pushdown.
 # Include the open-ended first/last ranges, including whitespace and JSON.
-COMPOSITE_BOUNDS=('0','1','2','3','4','5','6','7','8','9','A','G','N','U')
+# The live 1..2 range examines about 45 million index entries even when only
+# hundreds match. Split that dense prefix before querying: LIMIT bounds output,
+# not the work needed to prove that a sparse range is exhausted. Keep adjacent
+# half-open bounds so CSV/whitespace encodings and old Ads remain covered.
+COMPOSITE_BOUNDS=('0','1','11','12','13','14','15','16','17','18','19',
+                  '2','3','4','5','6','7','8','9','A','G','N','U')
 
 def complex_value(column):
     return "(LOCATE(',',{c})>0 OR LEFT(TRIM({c}),1)='[' OR {c} REGEXP '[[:space:]]')".format(c=column)

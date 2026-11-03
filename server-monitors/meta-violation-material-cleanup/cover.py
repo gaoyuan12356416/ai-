@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE.parents[1]))
 
 from run import load_config, validate_paths
 from features.fb_ad_asset_delete.store import Store
-from meta_violation_cleanup.cover_source import CoverSource, scan
+from meta_violation_cleanup.cover_source import CoverSource, SqlSourceError, scan
 from meta_violation_cleanup.cover_store import CoverStore
 from meta_violation_cleanup.cover_graph import CoverGraph
 from meta_violation_cleanup.cover_payload import build_payload, payload_key, PayloadError
@@ -126,20 +126,38 @@ def do_scan(config, store, audit, stop):
     for prior in store.get_batches(1000):
         if prior['status'] == 'scanning':
             store.fail_batch(prior['id'], {'code': 'scanner_interrupted'})
-    bid = batch_id()
-    audit.begin(bid, 'run', {'policy_version': '20261028-cover-v1'})
-    source = CoverSource(config)
-    try:
-        result = scan(source, store, bid, audit, stop)
-        print(json.dumps({'batch_id': bid, 'scan': result}, ensure_ascii=False), flush=True)
-    except Exception as exc:
-        failure = dict(safe_error(exc), code=getattr(exc, 'code', 'scan_failed'))
-        store.fail_batch(bid, failure)
-        audit.update(bid, status='failed', error=failure)
-        raise
-    finally:
-        source.close()
-        notify_completed(store, audit, config)
+    for attempt in range(2):
+        if stop():
+            raise InterruptedError('scan_stopped')
+        bid = batch_id()
+        audit.begin(bid, 'run', {'policy_version': '20261028-cover-v1'})
+        source = CoverSource(config)
+        try:
+            result = scan(source, store, bid, audit, stop)
+            print(json.dumps({'batch_id': bid, 'scan': result}, ensure_ascii=False), flush=True)
+            return
+        except Exception as exc:
+            failure = dict(safe_error(exc), code=getattr(exc, 'code', 'scan_failed'))
+            diagnostic = source.last_diagnostic or {}
+            codes = {item['errno'] for item in diagnostic.get('mysql_errors', [])}
+            if diagnostic:
+                failure.update(sql_diagnostic_id=diagnostic.get('id'), mysql_errors=sorted(codes))
+            store.fail_batch(bid, failure)
+            audit.update(bid, status='failed', error=failure)
+            # Never splice pages across a broken snapshot. A fresh scan batch
+            # can reclaim only proven unsent rows from the failed batch.
+            transient = (isinstance(exc, SqlSourceError) and exc.code in
+                         ('sql_stream_incomplete', 'sql_query_timeout', 'sql_query_failed') and codes and
+                         diagnostic.get('code') == exc.code and
+                         codes <= {1040, 1203, 2002, 2003, 2006, 2013, 2055})
+            if attempt or not transient or stop():
+                raise
+            print(json.dumps({'scan_retry': 'fresh_batch_after_connection_failure',
+                              'failed_batch_id': bid, 'mysql_errors': sorted(codes)}), flush=True)
+        finally:
+            source.close()
+            notify_completed(store, audit, config)
+        time.sleep(2)
 
 
 def preview(config, stop, limit, reuse_dir=None):
@@ -207,7 +225,8 @@ def work(config, store, audit, stop, once, max_ads):
     if type(cleanup_workers) is not int or not 1 <= cleanup_workers <= 4:
         raise ValueError('invalid_cover_cleanup_workers')
     shared = Store(config['shared_ledger'])
-    governor = Governor(maximum=32, per_account=2, rps=24, initial_limit=32, ramp_up=True)
+    governor = Governor(maximum=32, per_account=2, rps=24, initial_limit=32, ramp_up=True,
+                        account_scoped_usage=True)
     recovered = False
 
     def make_worker(lane, stopped):

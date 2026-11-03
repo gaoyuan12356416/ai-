@@ -12,6 +12,7 @@ from features.fb_ad_asset_delete.store import Store
 from meta_violation_cleanup.cover_store import CoverStore
 from meta_violation_cleanup.cover_worker import CoverWorker
 from meta_violation_cleanup.graph import GraphError
+from meta_violation_cleanup.throttle import RequestNotSent
 
 
 def ad(aid='10', cid='20', account='100', status='ACTIVE'):
@@ -145,6 +146,43 @@ class Graph:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_cooldown_before_bind_defers_without_consuming_write_or_recreating(self):
+        self.enqueue([ad()])
+        class CoolingGraph(Graph):
+            cooling=True
+            def bind_creative(self,*args):
+                if self.cooling:
+                    return {'status':'failed','request_sent':False,'code':'cover_account_cooldown'}
+                return super().bind_creative(*args)
+        graph=CoolingGraph([ad()],[creative()]);worker=self.worker(graph)
+        result=worker.run_once(max_ads=1,process_deletes=False)
+        self.assertEqual(result['tasks'],{'pending':1})
+        self.assertFalse(self.store.get_task(1)['request_sent'])
+        self.assertFalse(worker.halted.is_set())
+        graph.cooling=False
+        worker.run_once(max_ads=1,process_deletes=False)
+        self.assertEqual(self.store.get_task(1)['status'],'succeeded')
+        self.assertEqual(sum(c[0]=='create' for c in graph.calls),1)
+        self.assertEqual(sum(c[0]=='bind' for c in graph.calls),1)
+
+    def test_post_bind_cooldown_releases_batch_and_reconciles_without_resend(self):
+        self.enqueue([ad()])
+        class CoolingGraph(Graph):
+            cooling=True
+            def get_cover_ad(self,aid,*args):
+                if self.cooling and aid in self.bound:raise RequestNotSent('cover_account_cooldown')
+                return super().get_cover_ad(aid,*args)
+        graph=CoolingGraph([ad()],[creative()]);worker=self.worker(graph)
+        result=worker.run_once(max_ads=1,process_deletes=False)
+        self.assertEqual(result['tasks'],{'unknown':1})
+        self.assertFalse(result['halted'])
+        self.assertTrue(self.store.get_task(1)['request_sent'])
+        self.assertEqual(worker.reconcile_unknown()['unresolved_tasks'],1)
+        graph.cooling=False
+        self.assertEqual(worker.reconcile_unknown()['tasks_confirmed'],1)
+        self.assertEqual(sum(c[0]=='create' for c in graph.calls),1)
+        self.assertEqual(sum(c[0]=='bind' for c in graph.calls),1)
+
     def test_accepted_bind_stale_readback_is_isolated_and_never_replayed(self):
         original = ad()
         self.enqueue([original])
