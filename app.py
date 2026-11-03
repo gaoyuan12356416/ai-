@@ -94439,6 +94439,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        if parsed.path == "/api/report-auth/yuesiying":
+            from features.private_reports import authorize
+            authorize(self, globals())
+            return
+
         if parsed.path == "/api/report-auth/tt-minis-native-growth":
             self._send_report_auth_status()
             return
