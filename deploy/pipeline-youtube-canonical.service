@@ -1,0 +1,27 @@
+[Unit]
+Description=YouTube canonical RPC bridge for distributed pipeline workers
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+# Use the main API's existing interpreter/configuration and business modules.
+# This private root-owned 0600 file reproduces its required env settings plus
+# PIPELINE_YOUTUBE_CANONICAL_BRIDGE_ENABLED=1 and the existing canonical token.
+WorkingDirectory=/root/drama_material_service
+EnvironmentFile=/etc/pipeline-youtube-canonical.env
+ExecStart=/usr/bin/python3.9 /opt/pipeline-dispatch/current/scripts/pipeline_youtube_canonical.py --runtime-root /root/drama_material_service --dispatch-root /opt/pipeline-dispatch/current --port 18847
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=150
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/root/drama_material_service/data /mnt/data-disk/youtube-auto-publish
+ReadWritePaths=-/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/data
+# No dependency or restart propagation to the main API/screenshot workers.
+
+[Install]
+WantedBy=multi-user.target
