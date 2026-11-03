@@ -141,20 +141,22 @@ def fuse_command(command, recipe, output, info):
     colors = ':'.join(key + '=' + (video.get(field) or 'unknown') for key, field in
                      (('colorspace', 'color_space'), ('color_primaries', 'color_primaries'),
                       ('color_trc', 'color_transfer')))
+    # At the delivery aspect ratio cover and contain are identical, including
+    # rounding, offset and alpha. Share the exact fitted frame instead of
+    # dispatching the same expensive GPU sampling operation twice.
+    shared_fit = video['width'] * 1280 == video['height'] * 720
     graph = [
         '[0:v]hwdownload,format=nv12,format=yuv420p,fps=30:start_time=0,extractplanes=y+u+v[y][u][vplane]',
-        '[y]hwupload,split=2[yback][ymain]',
-        '[u]hwupload,split=2[uback][umain]',
-        '[vplane]hwupload,split=2[vback][vmain]',
     ]
+    for label, back, main in (('y','yback','ymain'),('u','uback','umain'),('vplane','vback','vmain')):
+        graph.append('[%s]hwupload%s' % (label, '[%s]' % back if shared_fit else ',split=2[%s][%s]' % (back, main)))
     for index, label in enumerate(('border', 'opacity', 'corners', 'tint'), start=1):
-        suffix = ',split=3[tint][clockback][clockmain]' if index == 4 else '[%s]' % label
+        suffix = (',split=2[tint][clockback]' if shared_fit else ',split=3[tint][clockback][clockmain]') if index == 4 else '[%s]' % label
         graph.append('[%s:v]fps=30:start_time=0,settb=1/30,format=rgba,hwupload%s' % (index, suffix))
-    graph.extend([
-        '[clockback][yback][uback][vback]' + program + 'fit_yuv_cover:shortest=1:eof_action=endall[source]',
-        '[clockmain][ymain][umain][vmain]' + program + 'fit_yuv_contain:shortest=1:eof_action=endall[main]',
-        "[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size=720x1280:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1,setparams=%s,format=yuv420p[v]" % (_escape(target), colors),
-    ])
+    graph.append('[clockback][yback][uback][vback]' + program + 'fit_yuv_cover:shortest=1:eof_action=endall' + (',split=2[source][main]' if shared_fit else '[source]'))
+    if not shared_fit:
+        graph.append('[clockmain][ymain][umain][vmain]' + program + 'fit_yuv_contain:shortest=1:eof_action=endall[main]')
+    graph.append("[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size=720x1280:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1,setparams=%s,format=yuv420p[v]" % (_escape(target), colors))
     tail = list(command[graph_index + 2:])
     if tail[tail.index('-c:v') + 1] not in {'h264_nvenc', 'hevc_nvenc'}:
         raise ValueError('gpu_pipeline_requires_nvenc')

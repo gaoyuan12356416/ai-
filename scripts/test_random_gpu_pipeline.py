@@ -32,7 +32,8 @@ class PipelineTests(unittest.TestCase):
             result = fuse_command(command+['-filter_complex','old']+tail, RECIPE, output, {'video':VIDEO})
             graph = result[result.index('-filter_complex')+1]
             self.assertIn('fit_yuv_cover', graph)
-            self.assertIn('fit_yuv_contain', graph)
+            self.assertNotIn('fit_yuv_contain', graph)
+            self.assertIn('split=2[source][main]', graph)
             self.assertNotIn('scale=', graph)
             self.assertIn('h264_cuvid', result)
             self.assertEqual(result[result.index('-af')+1], tail[tail.index('-af')+1])
@@ -42,6 +43,9 @@ class PipelineTests(unittest.TestCase):
             self.assertIn('setparams=colorspace=bt709', graph)
             self.assertEqual(result[result.index('-preset')+1], 'p5')
             self.assertTrue(list(Path(tmp).glob('gpu-fit-*.cl')))
+            other = fuse_command(command+['-filter_complex','old']+tail, RECIPE, output,
+                                 {'video':dict(VIDEO,width=1280,height=720)})
+            self.assertIn('fit_yuv_contain', other[other.index('-filter_complex')+1])
 
     def test_color_range_and_chroma_are_explicit(self):
         source=kernel_source(RECIPE, dict(VIDEO, color_range='pc', chroma_location='center'))
