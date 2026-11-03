@@ -89,6 +89,18 @@ class CoverGraph(GraphClient):
         self.http.account = account
         return account
 
+    def _get(self, path, user_id, params):
+        try:
+            return super()._get(path, user_id, params)
+        except InterruptedError as exc:
+            # GraphClient uses InterruptedError for cooperative read stops;
+            # cover workers already defer RequestNotSent before a write and
+            # retain unknown receipts after one. Never turn hourly rotation
+            # into a durable global write pause.
+            if str(exc) != 'stop_requested' or not self.stop():
+                raise
+            raise RequestNotSent('cancelled_before_request') from exc
+
     def _full_record(self, data, identifier, account):
         if not isinstance(data, dict):
             raise GraphError('invalid_object', 'Meta did not return a valid object')
@@ -122,7 +134,12 @@ class CoverGraph(GraphClient):
 
     def _target_ads(self, item, stop=lambda: False):
         self._account(item[1])
-        return super()._target_ads(item, stop)
+        try:
+            return super()._target_ads(item, stop)
+        except InterruptedError as exc:
+            if str(exc) != 'stop_requested' or not (stop() or self.stop()):
+                raise
+            raise RequestNotSent('cancelled_before_request') from exc
 
     def get_reference_ads(self, ad_ids, user_id, account_id):
         account, user = self._account(account_id), _object_id(user_id)

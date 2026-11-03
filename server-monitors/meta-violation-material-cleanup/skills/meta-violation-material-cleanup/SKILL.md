@@ -54,6 +54,14 @@ cover.sqlite3 is separate from /mnt/data-disk/fb-ad-asset-delete/tasks.sqlite3. 
 
 ## Commands and units
 
+For a `worker_or_ledger_error` pause caused by
+`InterruptedError('stop_requested')`, read
+[cooperative interruption recovery](../../../../doc/20261103.meta-cover-interrupt/README.md).
+CoverGraph normalizes only an active cooperative read stop to RequestNotSent:
+unsent tasks defer, sent writes retain unknown outcomes for GET-only
+reconciliation, and cleanup requires a new complete reference check. Never
+clear arbitrary pauses or reset all failed/unknown tasks to recover this case.
+
 From this release's module directory, use cover.py --config <runtime>/config.json with:
 - preview --max-ads 256: isolated preview ledger and read-only Graph.
 - scan: source discovery and durable queue only.
