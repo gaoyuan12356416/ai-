@@ -29,7 +29,7 @@ from meta_violation_cleanup.cover_performance import idle_delay, record_cycle
 from meta_violation_cleanup.cover_pipeline import run_lanes
 from meta_violation_cleanup.notifications import Notifier
 from meta_violation_cleanup.runner import safe_error
-from meta_violation_cleanup.throttle import Governor
+from meta_violation_cleanup.throttle import Governor, RequestNotSent
 
 
 class CoverWritePaused(RuntimeError):
@@ -308,7 +308,7 @@ def work(config, store, audit, stop, once, max_ads):
             continue
         except CoverWritePaused:
             raise
-        except InterruptedError:
+        except (InterruptedError, RequestNotSent):
             if not stop():
                 raise
             break
