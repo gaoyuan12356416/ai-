@@ -110,6 +110,8 @@ def main():
             assert time.monotonic() < deadline, 'coordinator_control_requests_not_drained'
             time.sleep(.5)
         (backup / 'http-drain-proof.json').write_text(json.dumps(evidence, indent=2))
+        assert run(['git', '-C', str(REPO), 'rev-parse', 'HEAD']) == OLD, 'release_changed_during_preflight'
+        assert run(['systemctl', 'show', SERVICE, '-p', 'MainPID', '--value']) == pid, 'coordinator_changed_during_drain'
         run(['systemctl', 'stop', SERVICE], timeout=30)
         assert run(['systemctl', 'show', SERVICE, '-p', 'MainPID', '--value']) == '0'
         run(['git', '-C', str(REPO), 'checkout', '--detach', SHA], timeout=10)
