@@ -24,6 +24,7 @@ FILES = {
         'features/pipeline_dispatch/x_prepost_recovery.py',
         'features/pipeline_dispatch/x_manual_recovery.py',
         'features/pipeline_dispatch/x_schedule_recovery.py',
+        'features/x_video_publish/recovery_1389.py',
     ],
     'coordinator': ['features/pipeline_dispatch/adapters.py',
         'features/pipeline_dispatch/x_prepost_recovery.py'],
