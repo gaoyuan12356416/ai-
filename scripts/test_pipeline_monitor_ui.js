@@ -6,6 +6,7 @@ const ROOT = path.resolve(__dirname, ".."), OUT = process.env.PIPELINE_UI_OUTPUT
 const stamp = new Date().toISOString();
 const base = { generated_at: stamp, collected_at: stamp, stale: false, scope: "all", allowed_channels: ["x", "fb", "tt", "youtube"], warnings: [] };
 const summary = { ...base, totals: { queued: 22, preparing: 3, ready: 7, publishing: 4, prepared: 90, published: 76, failed: 2, unknown: 1, backlog_paused: 611 }, channels: ["x", "fb", "tt", "youtube"].flatMap(channel => ["prepare", "publish"].map(stage => ({ channel, stage, queued: 8, running: 2, ready: 4, completed: 21, failed: 1, unknown: 0, throughput_per_hour: 12, avg_duration_seconds: 321, p95_duration_seconds: null, oldest_wait_seconds: 45 }))), sources: [{ channel: "x", family: "自动模板", state: "healthy", collected_at: stamp }] };
+summary.channels.filter(row => row.stage === "prepare").forEach(row => row.ready = 3);
 summary.efficiency = [
   { channel: "fb", stage: "publish", phase: "platform_submit", samples: 1, p50_seconds: 17, p95_seconds: 17 },
   { channel: "fb", stage: "publish", phase: "platform_upload", samples: 0, applicable: false },
@@ -16,6 +17,14 @@ let capacity = { version: 1, hosts: ["cpu-main", "hk-gpu", "gpu-third"].flatMap(
 let admin = true, authenticated = true, failSummary = false, calls = [], writes = [];
 capacity.hosts.filter(row => row.host_id === "hk-gpu").forEach(row => row.scaling_mode = "manual");
 const workers = () => ({ ...base, capacity, items: ["cpu-main", "hk-gpu", "gpu-third"].map((host_id, i) => ({ host_id, label: ["CPU 服务器", "香港 GPU", "新增 GPU 服务器"][i], last_seen_at: stamp, stale: false, cpu_percent: 35, memory_used_bytes: 8e9, memory_total_bytes: 32e9, gpu_percent: i ? 65 : null, gpu_count: i ? 1 : 0, gpu_memory_used_bytes: i ? 3e9 : null, gpu_memory_total_bytes: i ? 16e9 : null, stages: ["prepare", "publish"].map(stage => ({ stage, max_workers: i === 2 && stage === "prepare" ? 1 : 2, ceiling: 4, alive_workers: i === 2 && stage === "prepare" ? 4 : 2, busy_workers: i === 2 && stage === "prepare" ? 3 : 1, idle_workers: 1, completed_today: 24, throughput_per_hour: 5 })) })), processes: [{ host_id: "gpu-third", worker_id: "prepare-1", stage: "prepare", pid: 12345, status: "busy", current_source_key: "x:auto:fixture-1", channel: "x", phase: "render", elapsed_seconds: 165, last_seen_at: stamp }, { host_id: "cpu-main", worker_id: "publish-1", stage: "publish", pid: 23456, status: "idle", elapsed_seconds: null, last_seen_at: stamp, idle_reason: "账号正在发布，等待下一条可领取任务" }] });
+// Production's existing DTO has no draining count or per-process draining bool.
+const drainingWorkers = () => {
+  const data = workers(), host = data.items[1], stage = host.stages[0];
+  Object.assign(stage, { max_workers: 0, busy_workers: 0, idle_workers: 0, alive_workers: 8 });
+  data.processes = Array.from({ length: 8 }, (_, i) => ({ host_id: host.host_id, worker_id: `draining-${i}`, stage: "prepare", pid: 30000 + i, status: "draining", current_task_id: null, current_source_key: "", last_seen_at: stamp, idle_reason: "account_busy" }));
+  data.processes.push(...Array.from({ length: 100 }, (_, i) => ({ host_id: host.host_id, worker_id: `old-offline-${i}`, stage: "prepare", status: "offline", current_task_id: null, current_source_key: "", last_seen_at: "2026-01-01T00:00:00Z" })));
+  return data;
+};
 const task = { id: 17, source_key: "fixture-task", source_id: "fixture-17", channel: "x", source_family: "自动模板", stage: "publish", status: "unknown", host_id: "gpu-third", worker_id: "publish-1", account_label: "<img src=x onerror=alert(1)>", owner_name: "测试运营", created_at: stamp, started_at: stamp, duration_seconds: null, wait_seconds: 20, detail_url: "javascript:alert(1)" };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://localhost"); calls.push(url.pathname + url.search);
@@ -46,6 +55,9 @@ const server = http.createServer((req, res) => {
     for (const group of ["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]) assert.equal(await page.locator(`[data-quick-nav-group="${group}"]`).count(), 0);
     assert.equal(await page.locator("#pmChannelRows tr").count(), 8);
     assert.match(await page.locator("#pmTotals .pm-stat").first().innerText(), /排队中\s*22/);
+    assert.match(await page.locator('#pmTotals [data-stat-key="ready_prepare"]').innerText(), /待制作\s*12/);
+    assert.match(await page.locator('#pmTotals [data-stat-key="ready_publish"]').innerText(), /待发布\s*16/);
+    assert.equal(await page.locator('#pmTotals [data-stat-key="ready"]').count(), 0);
     assert.equal(await page.locator('#pmStatus option[value="queued"]').innerText(), "排队中");
     assert.match(await page.locator("#pmQueueNote").innerText(), /待选材、未到预约时间及账号等待[\s\S]*不代表当前可领取数/);
     const fbEfficiency = page.locator("#pmEfficiencyRows tr").filter({ hasText: "Facebook · 发布" });
@@ -65,13 +77,43 @@ const server = http.createServer((req, res) => {
     assert.match(await page.locator('[data-worker-host="hk-gpu"] .pm-worker-resources').innerText(), /视频编码器使用率\s*83%/);
     assert.equal(await page.locator('#pmCapacityForms select[name="scaling_mode"]').count(), 0);
     assert.match(await drainStage.innerText(), /当前目标 \/ 上限[\s\S]*1 \/ 4/);
-    assert.match(await drainStage.innerText(), /忙碌 \/ 空闲 \/ 存活[\s\S]*3 \/ 1 \/ 4/);
+    assert.match(await drainStage.innerText(), /忙碌 \/ 空闲 \/ 排空 \/ 存活[\s\S]*3 \/ 1 \/ 0 \/ 4/);
     assert.match(await drainStage.innerText(), /自然排空[\s\S]*当前 3 个任务继续完成/);
     assert.match(await page.locator("#pmTaskRows").innerText(), /<img src=x/);
     assert.equal(await page.locator("#pmTaskRows img").count(), 0);
     assert.equal(await page.locator("#pmTaskRows a").count(), 0);
     await page.screenshot({ path: path.join(OUT, "desktop.png"), fullPage: true });
     await page.locator("#pmWorkers").screenshot({ path: path.join(OUT, "workers.png") });
+    await page.evaluate(snapshot => window.PipelineMonitor.renderWorkers(snapshot), drainingWorkers());
+    const hkPrepare = page.locator('[data-worker-host="hk-gpu"] [data-worker-stage="prepare"]');
+    assert.match(await hkPrepare.innerText(), /忙碌 \/ 空闲 \/ 排空 \/ 存活[\s\S]*0 \/ 0 \/ 8 \/ 8/);
+    assert.match(await hkPrepare.innerText(), /8 个排空进程已停止新领取，无在途任务，等待退出/);
+    assert.equal(await page.locator("#pmProcessRows tr").count(), 8);
+    assert.equal(await page.locator("#pmProcessRows .pm-badge.draining").count(), 8);
+    assert.doesNotMatch(await page.locator("#pmProcessRows").innerText(), /old-offline-|相关账号正在执行/);
+    // A busy worker is counted once even when a newer DTO also marks it draining.
+    const busyDraining = drainingWorkers();
+    Object.assign(busyDraining.items[1].stages[0], { busy_workers: 1, draining_workers: 7, draining_busy_workers: 1 });
+    Object.assign(busyDraining.processes[0], { status: "busy", draining: true, current_task_id: 88, current_source_key: "x:queue:fixture-88", phase: "render" });
+    busyDraining.processes.push({ host_id: "hk-gpu", worker_id: "lost-with-task", stage: "prepare", status: "offline", current_task_id: 99, current_source_key: "x:queue:fixture-99", last_seen_at: "2026-01-01T00:00:00Z" });
+    busyDraining.processes.push({ host_id: "hk-gpu", worker_id: "lost-source-only", stage: "prepare", status: "offline", current_source_key: "x:queue:fixture-100", last_seen_at: "2026-01-01T00:00:00Z" });
+    busyDraining.items[1].stale = true;
+    await page.evaluate(snapshot => window.PipelineMonitor.renderWorkers(snapshot), busyDraining);
+    assert.match(await hkPrepare.innerText(), /1 \/ 0 \/ 7 \/ 8/);
+    assert.match(await hkPrepare.innerText(), /1 个忙碌进程已停止新领取，当前任务完成后退出/);
+    assert.match(await hkPrepare.innerText(), /当前 1 个任务继续完成，目标并发 0/);
+    assert.equal(await page.locator("#pmProcessRows tr").count(), 10);
+    assert.match(await page.locator("#pmProcessRows tr").first().innerText(), /执行中[\s\S]*停止新领取[\s\S]*当前任务完成后退出/);
+    assert.match(await page.locator("#pmProcessRows tr").filter({ hasText: "lost-with-task" }).innerText(), /离线[\s\S]*心跳已过期，任务尚未结束/);
+    assert.match(await page.locator('[data-worker-host="hk-gpu"]').innerText(), /数据延迟[\s\S]*心跳延迟，进程数可能不是当前值/);
+    await page.locator("#pmWorkers").screenshot({ path: path.join(OUT, "draining-workers.png") });
+    // Missing or inconsistent counts stay unknown, never produce a negative or invented zero.
+    for (const invalid of [{ idle_workers: null }, { alive_workers: 0, busy_workers: 1 }, { draining_workers: 99 }]) {
+      const snapshot = drainingWorkers(); Object.assign(snapshot.items[1].stages[0], invalid);
+      await page.evaluate(value => window.PipelineMonitor.renderWorkers(value), snapshot);
+      assert.match(await hkPrepare.innerText(), /忙碌 \/ 空闲 \/ 排空 \/ 存活[\s\S]*\/ — \//);
+    }
+    await page.evaluate(snapshot => window.PipelineMonitor.renderWorkers(snapshot), workers());
     await page.locator("#pmStage").selectOption("publish"); await page.waitForTimeout(100); assert(calls.some(url => url.includes("tasks?") && url.includes("stage=publish")));
     await page.locator('form[data-host="gpu-third"][data-stage="prepare"] button[data-drain]').click();
     await page.waitForFunction(() => document.querySelector("#pmCapacityVersion").textContent.includes("2"));
@@ -99,7 +141,10 @@ const server = http.createServer((req, res) => {
     assert.match(await page.locator("#pmTotals").innerText(), /76/);
     summary.stale = false; summary.warnings = []; summary.sources[0].state = "healthy";
     failSummary = true; await page.locator("#pmRefresh").click(); await page.waitForFunction(() => !document.querySelector("#pmError").hidden); assert.match(await page.locator("#pmTotals").innerText(), /76/);
-    await page.setViewportSize({ width: 390, height: 844 }); await page.waitForTimeout(250); await page.screenshot({ path: path.join(OUT, "mobile.png"), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(snapshot => window.PipelineMonitor.renderWorkers(snapshot), drainingWorkers());
+    await page.waitForTimeout(250); await page.screenshot({ path: path.join(OUT, "mobile.png"), fullPage: true });
+    assert.match(await hkPrepare.innerText(), /0 \/ 0 \/ 8 \/ 8/);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert((await page.locator('#pmSidebar').boundingBox()).x < -200);
     await page.locator("#pmShowNav").click(); await page.waitForFunction(() => document.querySelector("#pmSidebar").getBoundingClientRect().x >= 0);
@@ -122,6 +167,6 @@ const server = http.createServer((req, res) => {
     const html = fs.readFileSync(path.join(ROOT, "static/index.html"), "utf8"), match = html.match(/const homePath =[^]*?\n      }/); assert(match);
     assert(html.includes('/drama-job-runtime.js?v=20260828-async-v1'));
     for (const [pathname, hash, redirect] of [["/", "", true], ["/index.html", "", true], ["/", "#tasks", false], ["/", "#job/123", false], ["/drama-synthesis.html", "", false]]) { let next = ""; vm.runInNewContext(`(function(){${match[0]}})()`, { location: { pathname, hash, search: "?owner=fixture", replace: value => next = value } }); assert.equal(!!next, redirect); if (redirect) assert.equal(next, "/pipeline-monitor.html?owner=fixture"); }
-    console.log("pipeline monitor browser: admin/personal/login gate, 3 nodes, process phases, filters, drain, enrollment cleanup, delayed snapshots, failed-refresh preservation, 15s auto-refresh, escaping, mobile navigation and home deep links passed");
+    console.log("pipeline monitor browser: admin/personal/login gate, 3 nodes, old/new DTO draining counts, busy draining counted once, historical offline filtering with unfinished tasks retained, process phases, filters, drain, enrollment cleanup, delayed snapshots, failed-refresh preservation, 15s auto-refresh, escaping, mobile navigation and home deep links passed");
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; server.close(); });

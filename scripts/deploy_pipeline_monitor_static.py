@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy two exact GitHub monitor assets with a previous-version guard.
+"""Deploy exact GitHub monitor assets with a previous-version guard.
 
 No API/service restart or publication-state mutation. Default is read-only.
 """
@@ -27,7 +27,7 @@ def main():
     for sha in (args.sha, args.expected_sha):
         subprocess.run(['git', '-C', str(repo), 'fetch', 'origin', sha], env=env,
                        check=True, capture_output=True, timeout=120)
-    names = ('pipeline-monitor.js', 'pipeline-monitor.html')
+    names = ('pipeline-monitor.js', 'pipeline-monitor.css', 'pipeline-monitor.html')
     roots = {'main': Path('/root/drama_material_service/static'), 'nginx': Path('/usr/share/nginx/html')}
     def content(sha, name):
         return subprocess.check_output(['git', '-C', str(repo), 'show', sha + ':static/' + name])
@@ -47,7 +47,7 @@ def main():
     report.update(backup=str(backup), files=[])
     for label, root in roots.items():
         (backup / label).mkdir()
-        # JS first; HTML then changes the browser cache key.
+        # Dependencies first; HTML then changes the browser cache keys.
         for name in names:
             target = root / name
             (backup / label / name).write_bytes(target.read_bytes())
