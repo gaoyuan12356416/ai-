@@ -28,6 +28,14 @@ Unsent writes defer; sent writes retain their receipt and become read-only
 reconciliation candidates. Cooldown during reconciliation remains unresolved
 without pausing all workers. No request is sent before the cooldown expires.
 
+When the backlog concentrates in a few accounts, unused global slots do not
+mean those accounts have spare execution capacity. The scheduler consumes its
+existing prepared buffer before refilling it, unless a ready account without a
+buffered context can use a free slot immediately. This prevents single-task SQL
+top-ups while retaining overlap, the per-account limit and the unchanged
+30-second source freshness checks. A deterministic staggered-completion test
+covers two accounts using only four of the 32 global slots.
+
 ## Scan repair
 
 Live diagnostics reproduced MySQL 2013 during session initialization. The old

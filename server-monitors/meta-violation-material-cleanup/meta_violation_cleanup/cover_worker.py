@@ -508,9 +508,18 @@ class CoverWorker:
                 batch, deferred = [], deque()
                 # Consume the existing buffer before opening another SQL
                 # snapshot. Topping it up after each completion would turn a
-                # large batch into many single-Ad source queries. An unfilled
-                # execution slot may still need a different account prepared.
-                needs_source = not prepared or free_slots > 0
+                # large batch into many single-Ad source queries. Global free
+                # slots are not usable when the remaining accounts are already
+                # at their own limit. Refill early only for an account that can
+                # execute now and has no context already buffered for that slot.
+                needs_source = not prepared
+                if not needs_source and free_slots > 0:
+                    for account in {task['account_id'] for task in tasks}:
+                        state = account_budget(account)
+                        if (state['cooldown_seconds'] <= 0 and not buffered_accounts[account]
+                                and active_accounts[account] < min(per_account, state['concurrency_limit'])):
+                            needs_source = True
+                            break
                 if needs_source and size > 0 and not self.stopped():
                     while tasks and len(batch) < size:
                         task = tasks.popleft()

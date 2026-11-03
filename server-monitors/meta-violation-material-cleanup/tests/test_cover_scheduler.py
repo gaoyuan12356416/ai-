@@ -158,6 +158,42 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(self.store.get_task(1)['request_sent'])
         self.assertEqual(graph.calls, [])
 
+    def test_sparse_accounts_drain_buffer_without_single_task_sql_topups(self):
+        # Two account budgets occupy only four of 32 global slots. Staggered
+        # completions must consume the prepared buffer, not trigger one SQL
+        # snapshot for each unused global slot/completed task.
+        self.config['execution_workers'] = 32
+        ads = [ad(str(1000+i), str(2000+i), str(100+i % 2)) for i in range(12)]
+        self.enqueue(ads)
+        first_wave = threading.Barrier(4, timeout=3)
+        replacements = {identifier: threading.Event() for identifier in (5, 6, 7, 8)}
+        next_source_ready = threading.Event()
+        original_prepare = self.source.prepare_candidates
+        def prepare(tasks):
+            if self.source.calls:
+                self.assertEqual(len(tasks), 4, 'account-limited buffer topped up with single-task SQL')
+                result = original_prepare(tasks)
+                next_source_ready.set()
+                return result
+            return original_prepare(tasks)
+        worker = self.worker(Graph(ads, []))
+        def execute(task, context):
+            identifier = task['id']
+            if identifier <= 4:
+                first_wave.wait()
+                predecessor = {3: 5, 2: 7, 4: 6}.get(identifier)
+                if predecessor:
+                    self.assertTrue(replacements[predecessor].wait(3))
+            elif identifier <= 8:
+                replacements[identifier].set()
+                self.assertTrue(next_source_ready.wait(3), 'buffer was not replenished after consumption')
+            return {'task_id': identifier, 'status': 'failed'}
+        with patch.object(self.source, 'prepare_candidates', prepare), \
+             patch.object(worker, '_execute', execute):
+            report = worker.run_once(max_ads=12, process_deletes=False)
+        self.assertEqual([len(part) for part in self.source.calls], [8, 4])
+        self.assertEqual(report['tasks'], {'failed': 12})
+
     def test_refreshed_source_revalidates_credential_before_any_ad_write(self):
         clock = [0.]
         original = ad()
