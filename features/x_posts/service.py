@@ -7921,28 +7921,6 @@ class XPostStore:
             "ORDER BY created_at,id" % placeholders,
             tuple(account_ids),
         ).fetchall()
-        held_route_episode_rows = conn.execute(
-            "SELECT q.drama_pool_item_id,q.account_id,q.episode_number,"
-            "q.drama_replay_generation FROM x_post_queue q "
-            "JOIN x_post_drama_delivery_route route ON route.queue_id=q.id "
-            "WHERE q.source_type='drama' AND q.account_id IN (%s) "
-            "AND %s"
-            % (
-                placeholders,
-                _resumable_drama_duration_route_sql("q", "route"),
-            ),
-            tuple(account_ids),
-        ).fetchall()
-        held_route_episode_bindings = {
-            (
-                int(row["drama_pool_item_id"]),
-                int(row["account_id"]),
-                int(row["episode_number"]),
-                int(row["drama_replay_generation"]),
-            )
-            for row in held_route_episode_rows
-            if row["drama_pool_item_id"] is not None
-        }
         owned_by_account = {}
         occupied_account_ids = set()
         for row in bound_rows:
@@ -7959,17 +7937,13 @@ class XPostStore:
             # as a candidate until an explicit revalidation clears last_error.
             if str(row["last_error_code"] or ""):
                 continue
-            # A duration route that is unresolved or has not made its first X
-            # attempt resumes only through its original run. Keep its account
-            # occupied and never offer that exact episode to a later slot.
-            # Other legacy/resolved queues retain the historical owned-drama
-            # projection until their normal advancement.
-            if (
-                int(row["id"]),
-                owner_id,
-                int(row["next_sub_number"]),
-                int(row["replay_generation"]),
-            ) in held_route_episode_bindings:
+            # Every existing episode queue is a durable reservation, including
+            # cancelled legacy rows without a log. Keep the bound account
+            # occupied; never redraw its drama or advance its episode cursor.
+            episode_key = _drama_episode_key(
+                row["content_id"], row["next_sub_number"], row["replay_generation"])
+            if conn.execute("SELECT 1 FROM x_post_queue WHERE episode_key=? LIMIT 1",
+                    (episode_key,)).fetchone():
                 continue
             if not same_drama_language(
                 row["language"],
@@ -7994,6 +7968,10 @@ class XPostStore:
             "AND free_episode_count>0 "
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id=0 "
+            "AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.episode_key="
+            "x_post_drama_pool.content_id || CASE WHEN x_post_drama_pool.replay_generation>1 "
+            "THEN ':replay' || x_post_drama_pool.replay_generation ELSE '' END || ':' || "
+            "x_post_drama_pool.next_sub_number) "
             "ORDER BY CASE WHEN priority_at<>'' THEN 0 ELSE 1 END,"
             "priority_at DESC,created_at DESC,id DESC LIMIT ?",
             (unassigned_limit,),

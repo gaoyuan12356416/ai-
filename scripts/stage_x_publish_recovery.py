@@ -65,7 +65,7 @@ def tree(path):
     return result
 
 
-def stage(repo, commit, base, folder):
+def stage(repo, commit, base, folder, changed_only=False):
     repo, folder = Path(repo).resolve(), Path(folder)
     verify_source(repo, commit)
     if len(base) != 40 or run(['git', 'rev-parse', base+'^{commit}'], cwd=repo).decode().strip() != base:
@@ -75,6 +75,10 @@ def stage(repo, commit, base, folder):
     folder.mkdir(mode=0o755, parents=True, exist_ok=False)
     report = {'commit': commit, 'base': base, 'status': 'prepared', 'lanes': {}}
     for lane, names in FILES.items():
+        if changed_only:
+            names = [name for name in names if run(['git', 'diff', base, commit, '--', name], cwd=repo)]
+            if not names:
+                continue
         root = Path(ROOTS[lane]); previous = root.resolve()
         candidate = folder / 'candidates' / lane
         before = tree(previous) if lane != 'main' else {
@@ -124,11 +128,12 @@ def stage(repo, commit, base, folder):
     with path.open('x') as f:
         os.chmod(path, 0o600); json.dump(report, f, indent=2); f.flush(); os.fsync(f.fileno())
     return {'status': 'prepared', 'commit': commit, 'manifest': str(path),
-            'changed': {lane: list(files) for lane, files in FILES.items()}}
+            'changed': {lane: list(entry['files']) for lane, entry in report['lanes'].items()}}
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('repo', 'commit', 'base', 'folder'): p.add_argument('--'+name, required=True)
+    p.add_argument('--changed-only', action='store_true', help='patch only changed files in the reviewed lane allowlist')
     a = p.parse_args()
-    print(json.dumps(stage(a.repo, a.commit, a.base, a.folder)))
+    print(json.dumps(stage(a.repo, a.commit, a.base, a.folder, a.changed_only)))

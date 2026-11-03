@@ -17,7 +17,7 @@ class TransportTests(unittest.TestCase):
     def run_upload(self, fail_post=False):
         body = b'x' * (2 * 1024 * 1024 + 5)
         requests = []
-        def download(artifact, path, context):
+        def download(artifact, path, context, **kwargs):
             path.write_bytes(body); return path
         def request(_http, method, url, **kw):
             requests.append((url, kw))
@@ -60,7 +60,7 @@ class TransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             executor=NodeExecutors({'state_root':temp,'backend':'cpu'})
             artifact={'url':'https://media.example/video','sha256':'a'*64,'size':MAX_POST_VIDEO_BYTES}
-            with patch.object(executor,'_download',side_effect=lambda a,p,c:p), patch.object(XApiClient,'upload_media',new=upload), patch.object(XApiClient,'create_post',return_value={'post_id':'123'}):
+            with patch.object(executor,'_download',side_effect=lambda a,p,c,**kw:p), patch.object(XApiClient,'upload_media',new=upload), patch.object(XApiClient,'create_post',return_value={'post_id':'123'}):
                 executor.x_publish({'account_resource':'x:account:1','request':{'body':'frozen'}},artifact,Context())
         self.assertLessEqual((MAX_POST_VIDEO_BYTES+captured[0]-1)//captured[0],MAX_UPLOAD_SEGMENTS)
 

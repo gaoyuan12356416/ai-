@@ -6,6 +6,7 @@ script. Every operation reuses that sidecar's account verification and tokens.
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -14,6 +15,8 @@ import sqlite3
 import threading
 import time
 import weakref
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit, parse_qs
 
 from .adapters import AdapterError, obj
@@ -23,6 +26,48 @@ from features.x_posts.media_limits import video_byte_limit
 from features.x_posts.media_repair import REPAIR_PROFILE
 from features.x_posts.random_template import queue_identity, validate_receipt
 from features.x_posts.random_template_store import PreparationStore, canonical
+
+
+def _resolve_attribution(queue_id, log):
+    """Retry only the read-only resolver, before any link freeze or X intent."""
+    from features.x_posts.attribution import AttributionError, validate_context
+    token = (os.environ.get("X_INTERNAL_TOKEN") or os.environ.get("X_POST_AUTOMATION_INTERNAL_TOKEN") or "").strip()
+    if len(token) < 32:
+        raise AttributionError("x_attribution_internal_auth_missing", 503)
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/internal/x-posts/attribution/resolve",
+        data=json.dumps({"queue_id": queue_id, "log_id": log["id"]}).encode(),
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
+    # Leave room for account verification inside the bridge's 90-second call.
+    deadline = time.monotonic() + 55
+    for attempt in range(3):
+        status = 0
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError()
+            with urllib.request.urlopen(request, timeout=min(20, remaining)) as response:
+                status, raw = response.status, response.read(65537)
+            if status != 200 or len(raw) > 65536:
+                raise AttributionError("x_attribution_response_invalid", 503)
+            context = json.loads(raw)["context"]
+            return validate_context(context, log)
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            retryable = 500 <= status < 600
+            exc.close()
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            retryable = isinstance(reason, (TimeoutError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError, BrokenPipeError))
+        except (ValueError, KeyError, TypeError):
+            raise AttributionError("x_attribution_response_invalid", 503) from None
+        if not retryable or attempt == 2 or time.monotonic() >= deadline:
+            # Never log the response body, request URL, token or exception text.
+            logging.getLogger(__name__).warning(
+                "x_attribution_resolve_failed queue_id=%s log_id=%s http=%s attempts=%s",
+                queue_id, log["id"], status, attempt + 1)
+            raise AttributionError("x_attribution_resolution_unavailable", 503) from None
+        time.sleep(min((0.5, 1.0)[attempt], max(0, deadline - time.monotonic())))
 
 
 class XNativeBridge:
@@ -171,10 +216,10 @@ class XNativeBridge:
         else:
             body = posts.build_post_text(short, queue.get("drama_name"), queue["description"], queue.get("body_template"), copy_contract_version=int(queue.get("copy_contract_version", 1)))
         if os.environ.get("X_POST_ATTRIBUTION_V2_ENABLED", "0") == "1":
-            from features.x_posts.attribution import load_frozen, freeze, resolve_via_loopback, build_url
+            from features.x_posts.attribution import load_frozen, freeze, build_url
             attribution = load_frozen(self.r.POST_DB_PATH, log["id"])
             if attribution is None:
-                attribution = freeze(self.r.POST_DB_PATH, log, resolve_via_loopback(queue["id"], log["id"]))
+                attribution = freeze(self.r.POST_DB_PATH, log, _resolve_attribution(queue["id"], log))
             long_url = build_url(attribution, log)
         else:
             macros = {key: queue[key] for key in ("material_language", "drama_name", "tag", "page_name", "page_id", "material_name", "material_id", "content_id")}

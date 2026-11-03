@@ -2218,6 +2218,83 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             for table in ("x_post_queue", "x_post_publish_log", "x_post_repost_ledger"):
                 self.assertEqual(conn.execute("SELECT count(*) FROM " + table).fetchone()[0], 0)
 
+    def test_episode_occupancy_rejection_rolls_back_before_queue_write_or_x(self):
+        self.save_schedule("drama", [2], ["09:00", "10:00"])
+        pool = self.add_drama("reserved-drama")
+        first = self.store.create_schedule_plan("drama", "2026-07-27", "09:00", 2,
+            [self.drama_candidate(pool, 2, 1)])["queues"][0]
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("UPDATE x_post_queue SET status='cancelled' WHERE id=?", (first["id"],))
+            conn.commit()
+            occupied = dict(conn.execute("SELECT * FROM x_post_drama_pool WHERE id=?", (pool["id"],)).fetchone())
+        occupied["candidate_account_id"] = 2
+        statements = []
+        real_connect = service._connect
+        def traced(path):
+            conn = real_connect(path)
+            conn.set_trace_callback(statements.append)
+            return conn
+        # Reproduce the historical selector leak; retain the actual transaction guard.
+        with mock.patch.object(service, "_connect", side_effect=traced), \
+                mock.patch.object(self.store, "_drama_assignment_candidates", return_value=[occupied]), \
+                mock.patch.object(service, "write_short_redirect") as redirect, \
+                mock.patch.object(service.XApiClient, "create_post") as post:
+            with self.assertRaises(service.XPostError) as rejected:
+                self.store.create_schedule_plan("drama", "2026-07-27", "10:00", 2,
+                    [self.drama_candidate(pool, 2, 1)])
+            self.assertEqual(rejected.exception.code, "x_post_drama_episode_already_used")
+            self.assertEqual(str(rejected.exception), "短剧集数已被其他发布队列占用")
+            redirect.assert_not_called()
+            post.assert_not_called()
+        normalized = [sql.lstrip().upper() for sql in statements]
+        self.assertIn("BEGIN IMMEDIATE", normalized)
+        self.assertIn("ROLLBACK", normalized)
+        self.assertFalse(any(sql.startswith(("INSERT", "UPDATE", "DELETE")) for sql in normalized))
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_queue").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_publish_log").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_schedule_run WHERE publish_time='10:00'").fetchone()[0], 0)
+
+    def test_drama_selection_excludes_every_reserved_episode_without_rebinding_owner(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        bound = self.add_drama("reserved-drama")
+        first = self.store.create_schedule_plan("drama", "2026-07-27", "09:00", 2,
+            [self.drama_candidate(bound, 2, 1)])["queues"][0]
+        fresh = self.add_drama("healthy-drama")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            before = conn.execute("SELECT * FROM x_post_drama_pool WHERE id=?", (bound["id"],)).fetchone()
+        for status in ("queued", "cancelled", "failed", "published"):
+            with self.subTest(status=status):
+                with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+                    conn.execute("UPDATE x_post_queue SET status=? WHERE id=?", (status, first["id"]))
+                    conn.commit()
+                available = self.store.available_drama_pool_items(50, account_ids=[2, 3])
+                self.assertEqual([(r["id"], r["candidate_account_id"]) for r in available], [(fresh["id"], 3)])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT * FROM x_post_drama_pool WHERE id=?", (bound["id"],)).fetchone(), before)
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_queue").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM x_post_publish_log").fetchone()[0], 0)
+        config = self.save_schedule("drama", [2, 3], ["10:00"], version=2)
+        healthy = self.store.create_schedule_plan("drama", "2026-07-27", "10:00", config["version"],
+            [self.drama_candidate(fresh, 3, 1)])
+        self.assertEqual(healthy["account_ids"], [2, 3])
+        self.assertEqual([row["account_id"] for row in healthy["queues"]], [3])
+
+    def test_unassigned_drama_excludes_historical_reserved_episode_key(self):
+        self.save_schedule("drama", [2], ["09:00"])
+        pool = self.add_drama("historic-drama")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            # Historical imported queues can predate durable pool ownership.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
+            payload = {key: value for key, value in self.drama_candidate(pool, 2, 1).items() if key in columns}
+            payload.update(idempotency_key="historical-unbound", status="cancelled",
+                created_at="2026-07-26T00:00:00Z", updated_at="2026-07-26T00:00:00Z")
+            conn.execute("INSERT INTO x_post_queue(" + ",".join(payload) + ") VALUES(" +
+                ",".join("?" for _ in payload) + ")", list(payload.values()))
+            conn.commit()
+        self.assertEqual(self.store.available_drama_pool_items(50, account_ids=[3]), [])
+
     def test_material_fifo_capacity_proof_accepts_historical_language_skip(self):
         self.save_schedule("material", [2, 3], ["09:00"])
         oldest_en, skipped_ja, newest_ja = self.store.add_pool_materials(
