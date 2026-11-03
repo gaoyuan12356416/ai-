@@ -156,6 +156,16 @@ class DeploymentGuards(unittest.TestCase):
         self.assertEqual(self.state, "active"); self.assertFalse(self.gate)
         self.assertEqual(self.timers, self.before)
 
+    def test_expired_failsafe_window_refuses_before_stop(self):
+        def wait(predicate, code, seconds=45):
+            result = self.wait(predicate, code, seconds)
+            if code == "accepted_requests_not_drained": self.gate = False
+            return result
+        with patch.object(deploy, "wait_until", side_effect=wait):
+            with self.assertRaisesRegex(RuntimeError, "gate_window_expired"): deploy.apply("b" * 40, self.old, self.new)
+        self.assertEqual(self.target.read_bytes(), self.old); self.assertEqual(self.timers, self.before)
+        self.assertFalse(any(cmd[-1] == deploy.UNIT for cmd in self.commands))
+
 
 if __name__ == "__main__":
     unittest.main()

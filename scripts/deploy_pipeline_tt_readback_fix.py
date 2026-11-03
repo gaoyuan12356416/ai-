@@ -213,6 +213,7 @@ def apply(commit, old, new):
         report["gate_comment"] = marker; save(audit, report)
         wait_until(lambda: not accepted(), "accepted_requests_not_drained")
         quiescent(); runtime_check(old)
+        need(gate_present(rule), "gate_window_expired")
         need(int(show(UNIT, "MainPID")) == old_pid, "native_pid_changed_before_stop")
         run(["systemctl", "stop", "--no-block", UNIT]); report["status"] = "stop_pending"; save(audit, report)
         wait_until(lambda: show(UNIT, "ActiveState") == "inactive" and show(UNIT, "MainPID") == "0", "graceful_stop_pending")
@@ -220,6 +221,7 @@ def apply(commit, old, new):
         # Catch a central claim that raced the last pre-stop observation. No
         # new native operation can be admitted behind the NEW-only gate.
         quiescent(); need(not accepted(), "accepted_request_after_stop"); runtime_check(old)
+        need(gate_present(rule), "gate_window_expired")
         metadata = target.stat(); temporary = target.with_name(target.name + "." + marker + ".next")
         private_write(temporary, new)
         os.chown(temporary, metadata.st_uid, metadata.st_gid)
