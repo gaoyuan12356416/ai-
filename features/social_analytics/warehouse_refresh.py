@@ -11,6 +11,7 @@ import time
 import hashlib
 import zlib
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 from .adapters import PLATFORMS, read_catalogs, source_key
@@ -55,6 +56,16 @@ class Reader:
             raise RuntimeError('invalid_reader_endpoint')
 
     def query(self, statements, timeout=600):
+        for attempt in range(2):
+            try:
+                return self._query(statements, timeout)
+            except RuntimeError as exc:
+                if attempt or not re.fullmatch(r'source_query_failed_(?:2002|2003|2006|2013)', str(exc)):
+                    raise
+                print(encoded(dict(event='source_connection_retry')), flush=True)
+                time.sleep(2)
+
+    def _query(self, statements, timeout):
         env = dict(os.environ)
         env.pop('SQL_GATE_BYPASS', None)
         env.update(MYSQL_PWD=self.env['ADMIN_MAPPING_MYSQL_PASSWORD'],
@@ -103,6 +114,22 @@ def statements(catalog, platform, site, start, end):
     return [sql, coverage]
 
 
+def query_batches(reader, catalog, platform, site, windows, first):
+    batches = [windows[offset:offset + 7] for offset in range(0, len(windows), 7)]
+    def read_batch(batch):
+        sql = []
+        for begin, stop in batch:
+            queries = statements(catalog, platform, site, begin, stop)
+            sql.extend(queries if stop >= first else queries[1:])
+        return batch, reader.query(sql)
+    workers = 2 if platform == 'facebook' else 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for offset in range(0, len(batches), workers):
+            # Queue only the active pair so a failed batch does not drain the
+            # rest of the history before propagating its error.
+            yield from pool.map(read_batch, batches[offset:offset + workers])
+
+
 def collect(env, reader, start=None, end=None):
     catalog, errors = read_catalogs(env, list(PLATFORMS))
     if errors:
@@ -121,15 +148,9 @@ def collect(env, reader, start=None, end=None):
                             and row['site_id'] == site and row.get('date')]
             first = max(start, min(source_dates, default=start))
             # Coverage includes earlier dates: the source, not publication activity, proves a zero.
-            windows = list(periods(start, end))
+            windows = list(periods(start, end, days=1 if platform == 'facebook' else 4))
             source_rows, populated = [], set()
-            for offset in range(0, len(windows), 7):
-                batch = windows[offset:offset + 7]
-                sql = []
-                for begin, stop in batch:
-                    queries = statements(catalog, platform, site, begin, stop)
-                    sql.extend(queries if stop >= first else queries[1:])
-                rows = reader.query(sql)
+            for batch, rows in query_batches(reader, catalog, platform, site, windows, first):
                 counts, seen = {}, set()
                 for row in rows:
                     kind = row.pop('kind')
