@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 from types import SimpleNamespace
 import json
 import os
@@ -10,6 +11,7 @@ import random
 import re
 import secrets
 import signal
+import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -44,6 +46,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18833
 MAX_BODY_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+RUN_EVENT_LIMIT = 200
+RUN_EVENT_DETAIL_BYTES = 4096
 
 
 class AutoPostServiceError(RuntimeError):
@@ -944,19 +948,54 @@ class XAutoPostService:
             },
         }
 
+    def _run_events(self, run_id: int) -> Tuple[List[Dict[str, Any]], int]:
+        """Read a bounded recent window without loading the full audit trail."""
+        uri = Path(self.store.db_path).resolve().as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            total = conn.execute(
+                "SELECT COUNT(*) FROM x_auto_event WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+            rows = conn.execute(
+                """SELECT id,run_id,task_id,event_type,from_status,to_status,message,created_at,
+                          CASE WHEN length(CAST(details_json AS BLOB))<=?
+                               THEN details_json ELSE '{}' END AS details_json,
+                          length(CAST(details_json AS BLOB))>? AS details_truncated
+                     FROM x_auto_event WHERE run_id=? ORDER BY id DESC LIMIT ?""",
+                (RUN_EVENT_DETAIL_BYTES, RUN_EVENT_DETAIL_BYTES, run_id, RUN_EVENT_LIMIT),
+            ).fetchall()
+        events = []
+        for row in reversed(rows):
+            item = dict(row)
+            details = json.loads(item.pop("details_json"))
+            item["details_truncated"] = bool(item["details_truncated"])
+            item["details"] = (
+                {"summary": "事件明细较长，完整内容保留在审计记录中"}
+                if item["details_truncated"] else _public_selection(details)
+            )
+            if item["message"]:
+                item["message"] = safe_public_message(item["message"])
+            events.append(item)
+        return events, int(total)
+
     def run(self, run_id: Any) -> Dict[str, Any]:
         run = self.store.get_run(run_id)
         template = self.store.get_template(run.template_id, version=run.template_version)
         tasks = self.store.list_tasks(run_id=run.id)
         public_run = self._run_item(run, template=template, tasks=tasks)
         public_tasks = [self._task_item(task) for task in tasks]
+        events, event_total = self._run_events(run.id)
         return {
             "ok": True,
             "run": public_run,
             "item": public_run,
             "tasks": public_tasks,
             "account_tasks": public_tasks,
-            "events": self.store.list_events(run_id=run.id),
+            "events": events,
+            "events_total": event_total,
+            "events_limit": RUN_EVENT_LIMIT,
+            "events_has_more": event_total > len(events),
         }
 
     def execute_next(self, raw: Mapping[str, Any]) -> Dict[str, Any]:

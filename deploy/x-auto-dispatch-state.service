@@ -1,0 +1,36 @@
+[Unit]
+Description=Read-only X Auto dispatch state over a local UNIX socket
+After=local-fs.target
+RequiresMountsFor=/mnt/data-disk/pipeline-dispatch /opt/x-post-automation/current
+
+[Service]
+Type=simple
+User=root
+Group=x-post-daily
+WorkingDirectory=/opt/x-post-automation/current
+RuntimeDirectory=x-auto-dispatch-state
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/python3 /opt/x-post-automation/current/scripts/x_auto_dispatch_state_bridge.py --socket /run/x-auto-dispatch-state/state.sock --group x-post-daily
+Restart=on-failure
+RestartSec=2
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/x-post-automation/current
+ReadWritePaths=/mnt/data-disk/pipeline-dispatch
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

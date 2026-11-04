@@ -342,9 +342,16 @@
     });
   }
 
-  function renderEvents(events) {
+  function renderEvents(events, metadata = {}) {
     const container = ui.byId("runEvents");
     ui.clear(container);
+    const total = Number(metadata.events_total);
+    if (metadata.events_has_more === true && Number.isInteger(total) && total > events.length) {
+      container.appendChild(ui.element("div", {
+        className: "secondary",
+        text: `仅显示最近 ${events.length} 条，共 ${total} 条；完整历史保留在审计记录中。`,
+      }));
+    }
     if (!events.length) {
       container.appendChild(ui.element("div", { className: "secondary", text: "暂无事件。" }));
       return;
@@ -406,7 +413,7 @@
         blacklist_snapshot: run.blacklist_snapshot,
       };
       ui.setText(ui.byId("runSnapshot"), JSON.stringify(publicDetail(snapshot), null, 2), "{}");
-      renderEvents(events);
+      renderEvents(events, payload);
     } catch (error) {
       if (request !== state.detailRequest) return;
       const message = detailErrorMessage(error);

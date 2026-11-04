@@ -39,7 +39,7 @@ const context = {
 };
 let source = fs.readFileSync(path.join(__dirname, "../static/x-auto-publish-runs.js"), "utf8");
 source = source.replace("  void ui.initShell({",
-  "  window.testRuns = { state, renderRuns, renderRunTasks };\n  void ui.initShell({");
+  "  window.testRuns = { state, renderRuns, renderRunTasks, renderEvents };\n  void ui.initShell({");
 vm.runInNewContext(source, context);
 const page = context.window.testRuns;
 const emptyCounts = {
@@ -84,4 +84,13 @@ assert.equal(taskRows[0].children[4].textContent, "等待发布结果");
 assert.equal(taskRows[1].children[4].textContent, "结果待确认");
 assert.equal(taskRows[2].children[4].textContent, "等待重试");
 assert.equal(taskRows[1].children[4].children[0].className, "unknown");
+page.renderEvents([{ event_type: "first" }, { event_type: "latest" }], {
+  events_total: 29513, events_limit: 200, events_has_more: true,
+});
+assert.equal(byId("runEvents").children[0].textContent,
+  "仅显示最近 2 条，共 29513 条；完整历史保留在审计记录中。");
+assert.equal(byId("runEvents").children.length, 3);
+page.renderEvents([{ event_type: "only" }], { events_total: 1, events_has_more: false });
+assert.equal(byId("runEvents").children.length, 1);
+assert.ok(!byId("runEvents").textContent.includes("仅显示"));
 console.log("PASS: run publication counts, exclusive outcomes, unknown and queued-result rendering");

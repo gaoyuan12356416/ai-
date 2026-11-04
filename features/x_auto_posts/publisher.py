@@ -24,6 +24,7 @@ from features.x_posts import duration_policy
 
 from .client import safe_public_message
 from .core import TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
+from .dispatch_reader import read_dispatch_state
 from .operator_retry import execution_key
 from .selector import (
     NoEligibleMaterial,
@@ -331,11 +332,7 @@ class AutoPostExecutor:
         self.max_concurrent_tasks = int(max_concurrent_tasks)
         self.dispatch_enabled = bool(dispatch_enabled)
         self.dispatch_cutoff = dispatch_cutoff
-        self.dispatch_state_reader = dispatch_state_reader or (
-            lambda queue_id: read_dispatch_queue_state(
-                os.environ.get("PIPELINE_DISPATCH_DB_PATH", "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3"), queue_id
-            )
-        )
+        self.dispatch_state_reader = dispatch_state_reader or read_dispatch_state
         self._execute_slots = threading.BoundedSemaphore(self.max_concurrent_tasks)
         if not 120 <= self.lease_seconds <= 10800 or not 1 <= self.max_concurrent_tasks <= 4:
             raise AutoPostExecutionError(
