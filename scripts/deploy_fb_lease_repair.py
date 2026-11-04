@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 
 from scripts.deploy_pipeline_runtime import atomic_copy,preserve_tree_owners,verify_source
 
@@ -71,15 +72,38 @@ def prepare(source,commit,folder,host):
 def idle_nodes(manifest):
     unit=manifest['lanes']['node']['unit']
     assert show(unit,'ActiveState')=='inactive' and show(unit,'MainPID')=='0','node_not_drained'
-    if manifest['host']=='cpu':
-        with sqlite3.connect('file:/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3?mode=ro',uri=True) as c:
-            count=c.execute("SELECT count(*) FROM pipeline_job WHERE status='running'").fetchone()[0]
-            assert not count,'other_node_work_still_active'
+
+def switch_coordinator(item,target):
+    # Only accepted coordinator requests drain. Render/upload workers continue
+    # heartbeats after a short bounded gate; no global queue quiet period.
+    unit=item['unit'];root=Path(item['root']);assert root.is_symlink()
+    marker='fb-lease-coordinator-'+str(os.getpid())
+    rule=['-p','tcp','--dport','18846','-m','conntrack','--ctstate','NEW','-m','comment','--comment',marker,'-j','DROP']
+    run(['systemd-run','--quiet','--unit='+marker,'--on-active=75s','--','/usr/sbin/iptables','-D','INPUT',*rule])
+    gated=False;temporary=root.with_name(root.name+'.fb-lease-next')
+    try:
+        run(['iptables','-I','INPUT','1',*rule]);gated=True
+        pid=show(unit,'MainPID');deadline=time.monotonic()+30
+        while True:
+            sockets=[r for r in run(['ss','-Hntp']).splitlines() if ('pid='+pid+',') in r]
+            listeners=[r for r in run(['ss','-Hlntp']).splitlines() if ('pid='+pid+',') in r]
+            threads=len(list(Path('/proc',pid,'task').iterdir()))
+            if not sockets and sum(int(r.split()[1]) for r in listeners)==0 and threads<=2:break
+            assert time.monotonic()<deadline,'accepted_coordinator_requests_not_drained'
+            time.sleep(.25)
+        assert not temporary.exists() and not temporary.is_symlink()
+        temporary.symlink_to(target);os.replace(temporary,root)
+        run(['systemctl','restart',unit]);assert show(unit,'ActiveState')=='active'
+    finally:
+        if temporary.is_symlink():temporary.unlink()
+        if gated:run(['iptables','-D','INPUT',*rule])
+        run(['systemctl','stop',marker+'.timer'])
+
 
 def apply(folder):
-    manifest=json.loads((folder/'manifest.json').read_text());assert manifest['status']=='prepared'
-    idle_nodes(manifest)
+    manifest=json.loads((folder/'manifest.json').read_text());assert manifest['status'] in ('prepared','partial')
     for name,item in manifest['lanes'].items():
+        if item.get('applied'):continue
         root=Path(item['root']);assert str(root.resolve())==item['previous'],'release_drift'
         assert unit_files(item['unit'])==item['unit_files'],'unit_drift'
         for relative,r in item['files'].items():
@@ -87,11 +111,13 @@ def apply(folder):
             assert sha(Path(item['candidate'])/relative)==r['after'],'candidate_drift'
     # Save before the first switch so rollback is available after an interrupted apply.
     manifest['status']='applying';save(folder/'manifest.json',manifest)
-    if 'coordinator' in manifest['lanes']:
-        item=manifest['lanes']['coordinator'];root=Path(item['root']);assert root.is_symlink()
-        temporary=root.with_name(root.name+'.fb-lease-next');assert not temporary.exists()
-        temporary.symlink_to(item['candidate']);os.replace(temporary,root)
-        run(['systemctl','restart',item['unit']]);assert show(item['unit'],'ActiveState')=='active'
+    if 'coordinator' in manifest['lanes'] and not manifest['lanes']['coordinator'].get('applied'):
+        item=manifest['lanes']['coordinator'];switch_coordinator(item,item['candidate'])
+        item['applied']=True;save(folder/'manifest.json',manifest)
+    if show(manifest['lanes']['node']['unit'],'ActiveState')!='inactive':
+        manifest['status']='partial';save(folder/'manifest.json',manifest)
+        print(json.dumps({'coordinator_applied':manifest['host']=='cpu','node_draining':True}));return
+    idle_nodes(manifest)
     item=manifest['lanes']['node'];override=Path(item['override']);override.parent.mkdir(parents=True,exist_ok=True)
     override.write_text('[Service]\nWorkingDirectory='+item['candidate']+'\nExecStart=\nExecStart='+item['python']+' '+item['candidate']+'/scripts/pipeline_worker.py\n');override.chmod(0o644)
     run(['systemctl','daemon-reload']);run(['systemctl','start',item['unit']]);assert show(item['unit'],'ActiveState')=='active'
@@ -105,8 +131,7 @@ def rollback(folder):
         override.unlink()
     if 'coordinator' in manifest['lanes']:
         item=manifest['lanes']['coordinator'];root=Path(item['root']);assert str(root.resolve())==item['candidate'],'coordinator_changed_since_deploy'
-        temporary=root.with_name(root.name+'.fb-lease-rollback');temporary.symlink_to(item['previous']);os.replace(temporary,root)
-        run(['systemctl','restart',item['unit']])
+        switch_coordinator(item,item['previous'])
     run(['systemctl','daemon-reload']);run(['systemctl','start',node['unit']])
     manifest['status']='rolled_back';save(folder/'manifest.json',manifest)
     print(json.dumps({'rolled_back':True,'host':manifest['host'],'business_ledgers_preserved':True}))
