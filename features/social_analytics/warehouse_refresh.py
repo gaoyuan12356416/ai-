@@ -233,9 +233,11 @@ class Writer:
             if not rows:
                 continue
             sql = 'INSERT INTO ads_ai.' + table + '(' + columns + ') VALUES(' + ','.join(['%s'] * len(rows[0])) + ')'
-            for offset in range(0, len(rows), 250):
+            # PyMySQL additionally splits at its ~1 MiB statement limit.
+            # One bounded transaction per 1,000 rows avoids repeated commit RTTs.
+            for offset in range(0, len(rows), 1000):
                 with self.db.cursor() as cursor:
-                    cursor.executemany(sql, rows[offset:offset + 250])
+                    cursor.executemany(sql, rows[offset:offset + 1000])
                 self.db.commit()
             print(encoded(dict(event='warehouse_written', table=table, rows=len(rows))), flush=True)
 
