@@ -17,6 +17,7 @@ MODULES = ['features/social_analytics/' + name + '.py'
            for name in ('routes', 'report', 'warehouse_reader', 'warehouse_refresh', 'warehouse_schema')]
 ASSETS = ['static/social-analytics.html', 'static/social-analytics.js']
 UNITS = ['social-analytics-warehouse-refresh.service', 'social-analytics-warehouse-refresh.timer']
+DROPIN_TEXT = '[Service]\nEnvironment=SOCIAL_ANALYTICS_WAREHOUSE_ROOT=' + str(ROOT) + '\n'
 
 
 def command(*args):
@@ -58,6 +59,9 @@ def install():
     for name, expected in baseline.items():
         if sha(MAIN / name) != expected:
             raise RuntimeError('live_baseline_changed:' + name)
+    for name in ASSETS:
+        if sha(WEB / Path(name).name) != baseline[name]:
+            raise RuntimeError('public_baseline_changed:' + name)
     manifest = json.loads((ROOT / 'current.json').read_text())
     if set(manifest['tables']) != {'social_analytics_' + suffix for suffix in (
             'youtube_daily', 'x_daily', 'facebook_daily', 'link_catalog', 'publication')}:
@@ -69,7 +73,8 @@ def install():
         saved = backup / str(index)
         if Path(target).exists():
             shutil.copy2(target, saved)
-        files[target] = dict(before=sha(target), backup=str(saved), source=source)
+        after = sha(source) if source else hashlib.sha256(DROPIN_TEXT.encode()).hexdigest()
+        files[target] = dict(before=sha(target), after=after, backup=str(saved), source=source)
     data = dict(commit=commit, source=str(SOURCE), files=files, backup=str(backup), status='prepared')
     (backup / 'deployment.json').write_text(json.dumps(data, indent=2))
     try:
@@ -77,7 +82,7 @@ def install():
             if source:
                 atomic_copy(source, target)
         DROPIN.parent.mkdir(parents=True, exist_ok=True)
-        DROPIN.write_text('[Service]\nEnvironment=SOCIAL_ANALYTICS_WAREHOUSE_ROOT=' + str(ROOT) + '\n')
+        DROPIN.write_text(DROPIN_TEXT)
         command('/usr/bin/python3', '-B', '-c', 'import sys;sys.path.insert(0,' + repr(str(MAIN)) + ');import features.social_analytics.warehouse_reader')
         command('systemctl', 'daemon-reload')
         command('systemctl', 'restart', 'drama-material-api.service')
@@ -96,15 +101,18 @@ def rollback(backup):
     if backup.parent != (ROOT / 'backups').resolve():
         raise RuntimeError('invalid_backup_path')
     data = json.loads((backup / 'deployment.json').read_text())
-    command('systemctl', 'disable', '--now', UNITS[1])
     for target, info in data['files'].items():
         if target not in targets():
             raise RuntimeError('unexpected_rollback_target')
+        if sha(target) not in {info['before'], info['after']}:
+            raise RuntimeError('rollback_target_changed:' + target)
+        if info['before'] is not None and sha(info['backup']) != info['before']:
+            raise RuntimeError('backup_checksum_mismatch')
+    subprocess.run(['systemctl', 'disable', '--now', UNITS[1]], capture_output=True, timeout=30)
+    for target, info in data['files'].items():
         if info['before'] is None:
             Path(target).unlink(missing_ok=True)
         else:
-            if sha(info['backup']) != info['before']:
-                raise RuntimeError('backup_checksum_mismatch')
             atomic_copy(info['backup'], target)
     command('systemctl', 'daemon-reload')
     command('systemctl', 'restart', 'drama-material-api.service')
