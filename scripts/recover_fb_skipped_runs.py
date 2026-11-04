@@ -17,12 +17,14 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from features.fb_auto_posts.core import FBAutoPostStore, utc_now
-from features.fb_auto_posts.languages import candidate_snapshots_for_pages
-from features.fb_auto_posts.repositories import ReadOnlyMySQL, PagePoolRepository, MaterialRepository, MaterialCandidate, CandidateSnapshot
+from features.fb_auto_posts.languages import page_language
+from features.fb_auto_posts.repositories import ReadOnlyMySQL, PagePoolRepository, MaterialRepository, MaterialCandidate, CandidateSnapshot, RepositoryError
 from features.fb_auto_posts.skipped_recovery import recover_skipped
 
 
@@ -45,7 +47,7 @@ def repositories(env, operation):
         conn = pymysql.connect(host=env['FB_AUTO_MYSQL_HOST'], port=63350,
             user=env['FB_AUTO_MYSQL_USER'], password=env['FB_AUTO_MYSQL_PASSWORD'],
             database=env['FB_AUTO_MYSQL_DATABASE'], charset='utf8mb4', autocommit=True,
-            connect_timeout=3, read_timeout=50, write_timeout=5)
+            connect_timeout=8, read_timeout=50, write_timeout=5)
         with conn.cursor() as cur:
             cur.execute('SELECT @@read_only')
             if cur.fetchone()[0] != 1:
@@ -54,7 +56,17 @@ def repositories(env, operation):
             cur.execute('SET SESSION MAX_EXECUTION_TIME=45000')
             cur.execute('SET SESSION TRANSACTION READ ONLY')
         return conn
-    mysql = ReadOnlyMySQL(connect, env['FB_AUTO_MYSQL_DATABASE'], env.get('FB_AUTO_BLACKLIST_MYSQL_DATABASE', 'ads_setting'))
+    class OperatorReads(ReadOnlyMySQL):
+        def select(self, sql, params):
+            # SELECT-only reads may retry once; no publication API is used here.
+            try:
+                return super().select(sql, params)
+            except RepositoryError as exc:
+                if exc.code != 'fb_auto_source_query_failed':
+                    raise
+                time.sleep(1)
+                return super().select(sql, params)
+    mysql = OperatorReads(connect, env['FB_AUTO_MYSQL_DATABASE'], env.get('FB_AUTO_BLACKLIST_MYSQL_DATABASE', 'ads_setting'))
     return (PagePoolRepository(mysql), MaterialRepository(mysql, existing_store(env['FB_AUTO_METRIC_DB_PATH']),
                                                         rng=random.Random(operation)))
 
@@ -63,6 +75,52 @@ def save(path, value):
     path = Path(path)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str) + '\n')
     path.chmod(0o600)
+
+
+def decode_snapshot(raw):
+    candidates = []
+    for item in raw['candidates']:
+        item = dict(item)
+        for key in ('duration_seconds', 'material_spend', 'material_roas', 'drama_spend', 'drama_roas'):
+            if item[key] is not None:
+                item[key] = Decimal(item[key])
+        candidates.append(MaterialCandidate(**item))
+    return CandidateSnapshot(tuple(candidates), tuple(raw['metric_generation_ids']), tuple(raw['metric_dates']))
+
+
+def checkpoint_snapshots(folder, config, pages, materials, operation_id):
+    fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+    snapshots, errors, pending = {}, {}, []
+    for language in sorted({page_language(p.language) for p in pages} - {''}):
+        path = folder / ('candidate-' + language + '.json')
+        cached = json.loads(path.read_text()) if path.exists() else None
+        if (cached and cached['operation_id'] == operation_id and cached['config_sha256'] == fingerprint
+                and 0 <= (utc_now() - datetime.fromisoformat(cached['finished_at_utc'])).total_seconds() <= 900):
+            snapshots[language] = decode_snapshot(cached['snapshot'])
+        else:
+            pending.append(language)
+    def collect(language):
+        print(json.dumps({'phase': 'language_started', 'language': language}), flush=True)
+        return materials.candidate_snapshot({**config, '_candidate_limit': 1000, 'language': language})
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(collect, language): language for language in pending}
+        for future in as_completed(futures):
+            language = futures[future]
+            try:
+                snapshot = future.result()
+                snapshot = CandidateSnapshot(tuple(m for m in snapshot.candidates if page_language(m.language) == language),
+                                             snapshot.metric_generation_ids, snapshot.metric_dates)
+                snapshots[language] = snapshot
+                save(folder / ('candidate-' + language + '.json'), {'operation_id': operation_id,
+                    'config_sha256': fingerprint, 'finished_at_utc': utc_now().isoformat(), 'snapshot': dataclasses.asdict(snapshot)})
+                print(json.dumps({'phase': 'language_finished', 'language': language, 'candidates': len(snapshot.candidates)}), flush=True)
+            except RepositoryError as exc:
+                errors[language] = exc.code
+                print(json.dumps({'phase': 'language_failed', 'language': language, 'error': exc.code}), flush=True)
+    if errors:
+        save(folder / 'catalog-errors.json', errors)
+        raise RuntimeError('incomplete_catalog_recheck_failed_languages_only')
+    return snapshots
 
 
 def main():
@@ -100,20 +158,11 @@ def main():
         assert frozen['config_sha256'] == hashlib.sha256(config_json.encode()).hexdigest()
         age = (utc_now() - datetime.fromisoformat(frozen['finished_at_utc'])).total_seconds()
         assert 0 <= age <= 900, 'candidate_snapshot_expired_rerun_preview'
-        snapshots = {}
-        decimal_fields = ('duration_seconds', 'material_spend', 'material_roas', 'drama_spend', 'drama_roas')
-        for language, raw in frozen['snapshots'].items():
-            candidates = []
-            for item in raw['candidates']:
-                for key in decimal_fields:
-                    if item[key] is not None:
-                        item[key] = Decimal(item[key])
-                candidates.append(MaterialCandidate(**item))
-            snapshots[language] = CandidateSnapshot(tuple(candidates), tuple(raw['metric_generation_ids']), tuple(raw['metric_dates']))
+        snapshots = {language: decode_snapshot(raw) for language, raw in frozen['snapshots'].items()}
     else:
         pages = page_repo.list_pages(config['group_ids'], is_admin=bool(template['scope_is_admin']), owner_user_id=template['owner_user_id'])
         print(json.dumps({'phase': 'current_pages', 'pages': len(pages)}), flush=True)
-        snapshots = candidate_snapshots_for_pages({**config, '_candidate_limit': 1000}, pages, materials)
+        snapshots = checkpoint_snapshots(folder, config, pages, materials, args.operation_id)
         save(cache, {'operation_id': args.operation_id, 'run_ids': args.run_ids,
                      'config_sha256': hashlib.sha256(config_json.encode()).hexdigest(),
                      'finished_at_utc': utc_now().isoformat(),
