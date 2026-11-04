@@ -24,7 +24,7 @@ def main():
     args = parser.parse_args()
     env = environment('/root/drama_material_service/.env')
     env['SOCIAL_ANALYTICS_WAREHOUSE_ROOT'] = args.root
-    cat, _, manifest, _ = warehouse_reader.catalogs(args.root, ['youtube', 'x', 'facebook'])
+    cat, catalog_errors, manifest, _ = warehouse_reader.catalogs(args.root, ['youtube', 'x', 'facebook'])
     actor = dict(tenant_key='149bb4a14b57975f', user_id='acceptance-admin', role='admin')
     if not any(row['tenant'] == actor['tenant_key'] for row in cat):
         raise RuntimeError('expected_tenant_not_found')
@@ -39,7 +39,8 @@ def main():
     outputs['version'] = manifest['version']
     outputs['warehouse_tables'] = manifest['tables']
     if args.compare_live:
-        with patch.object(warehouse_reader, 'configured_root', return_value=None):
+        with patch.object(warehouse_reader, 'configured_root', return_value=None), patch.object(
+                routes, 'read_catalogs', return_value=(cat, catalog_errors)):
             routes._cache.clear()
             begin = time.monotonic()
             old = routes.build_report(env, actor, query, ai_backend_only=True)
@@ -51,7 +52,7 @@ def main():
     exported = list(csv.DictReader(io.StringIO(csv_export(result).decode('utf-8-sig'))))
     assert len(exported) == result['pagination']['total']
     assert sum(int(row['落地页点击']) for row in exported) == result['totals']['clicks']
-    owner = next(row['owner'] for row in cat if row['tenant'] == actor['tenant_key'] and row['owner'])
+    owner = next(row['owner'] for row in result['all_rows'] if row.get('owner') and row.get('revenue_cents', 0))
     own = dict(actor, user_id=owner, role='user')
     filtered = dict(query, owner=[owner])
     admin_owner = warehouse_reader.build_report(env, actor, filtered)
