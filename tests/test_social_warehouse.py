@@ -2,6 +2,7 @@ import copy
 import json
 import tempfile
 import unittest
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -85,6 +86,49 @@ class WarehouseTests(unittest.TestCase):
                 refresh.refresh({}, self.root)
         self.assertEqual((self.root / 'current.json').read_bytes(), before)
         self.assertEqual(json.loads((self.root / 'status.json').read_text())['status'], 'failed')
+
+    def test_lost_commit_ack_retries_same_immutable_batch_without_duplicates(self):
+        class TransientError(Exception):
+            pass
+        records, attempts = {}, []
+        class Connection:
+            def cursor(self):
+                return self
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def executemany(self, sql, rows):
+                self.asserted_sql = sql
+                attempts.append(list(rows))
+                for row in rows:
+                    records.setdefault(row[0], row)
+            def commit(self):
+                if len(attempts) == 1:
+                    raise TransientError(2013, 'lost acknowledgement')
+            def rollback(self):
+                pass
+            def close(self):
+                pass
+        writer = refresh.Writer.__new__(refresh.Writer)
+        writer.db = Connection()
+        writer.connect = lambda: setattr(writer, 'db', Connection())
+        fake = types.SimpleNamespace(err=types.SimpleNamespace(OperationalError=TransientError))
+        with patch.dict('sys.modules', {'pymysql': fake}), patch.object(refresh.time, 'sleep'):
+            writer.write_batch('idempotent insert', [('key', 123)])
+        self.assertEqual(attempts, [[('key', 123)], [('key', 123)]])
+        self.assertEqual(list(records.values()), [('key', 123)])
+
+    def test_batched_titles_keep_ambiguous_names_unresolved(self):
+        fake = types.SimpleNamespace(query=lambda statements: (
+            [{'batch': 0, 'content_id': 'a', 'series_code': 's'}, {'batch': 0, 'content_id': 'b', 'series_code': 't'}]
+            if 'content_id' in statements[0] else
+            [{'batch': 0, 'series_code': 's', 'name': 'One'}, {'batch': 0, 'series_code': 's', 'name': 'Two'},
+             {'batch': 0, 'series_code': 't', 'name': 'Title'}]))
+        result = refresh.collect_titles(fake, ['a', 'b', 'c'])
+        self.assertEqual(result['a']['drama_english_status'], 'ambiguous')
+        self.assertEqual(result['b']['drama_english_name'], 'Title')
+        self.assertEqual(result['c']['drama_english_status'], 'missing')
 
 
 if __name__ == '__main__':

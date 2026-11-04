@@ -172,20 +172,28 @@ def collect_titles(reader, ids):
     """Same exact English-title rules, with two shared read connections."""
     from features.youtube_analytics.titles import literal
     series, names = defaultdict(set), defaultdict(set)
-    sql = ["SELECT DISTINCT HEX(JSON_OBJECT('content_id',content_id,'series_code',series_code)) "
+    sql = ["SELECT DISTINCT HEX(JSON_OBJECT('batch',%d,'content_id',content_id,'series_code',series_code)) " % offset +
            "FROM kunlunads_dev.ads_drama_info WHERE app_id=1479 AND content_id IN (" +
            ','.join(map(literal, ids[offset:offset + 100])) + ') LIMIT 1001'
            for offset in range(0, len(ids), 100)]
+    counts = defaultdict(int)
     for row in reader.query(sql) if sql else []:
+        counts[row['batch']] += 1
+        if counts[row['batch']] > 1000:
+            raise RuntimeError('title_source_limit')
         content, code = str(row['content_id']), str(row.get('series_code') or '').strip()
         if content in ids and code and code != '0':
             series[content].add(code)
     codes = sorted({next(iter(value)) for value in series.values() if len(value) == 1})
-    sql = ["SELECT DISTINCT HEX(JSON_OBJECT('series_code',series_code,'name',TRIM(name))) "
+    sql = ["SELECT DISTINCT HEX(JSON_OBJECT('batch',%d,'series_code',series_code,'name',TRIM(name))) " % offset +
            "FROM kunlunads_dev.ads_drama_info WHERE app_id=1479 AND language='en' AND series_code IN (" +
            ','.join(map(literal, codes[offset:offset + 100])) + ') LIMIT 1001'
            for offset in range(0, len(codes), 100)]
+    counts = defaultdict(int)
     for row in reader.query(sql) if sql else []:
+        counts[row['batch']] += 1
+        if counts[row['batch']] > 1000:
+            raise RuntimeError('title_name_limit')
         code, name = str(row['series_code']), str(row.get('name') or '').strip()
         if code in codes and name:
             names[code].add(name)
