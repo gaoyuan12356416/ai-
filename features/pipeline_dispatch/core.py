@@ -428,9 +428,58 @@ class DispatchStore:
         self.event(c, existing["id"], "youtube_publish_retry_requested", {"source_revision": revision, "previous_generation": existing["generation"]}, self.now())
         return True
 
+    def _refresh_fb_isolation(self, c, row, offer):
+        """Narrow only a fresh canonical FB observation, never a worker guess."""
+        if (row["channel"] != "fb" or row["family"] not in {"auto", "video"}
+                or offer.get("source_key") != row["source_key"]
+                or offer.get("stage") != row["stage"]):
+            return
+        from .fb_isolation import identity_resources
+        resources, page, material = identity_resources(offer.get("fb_page_id"), offer.get("fb_material_id"), row["stage"])
+        if not material or set(resources) != set(offer.get("resource_keys", [])):
+            return  # Unknown legacy material identity keeps the Page fence.
+        old = json.loads(row["resource_keys_json"])
+        c.execute("UPDATE pipeline_job SET resource_keys_json=? WHERE id=?", (dumps(sorted(resources)), row["id"]))
+        native = str(offer.get("source_status") or "")
+        uncertain = native in {"unknown", "submitted", "processing"} or bool(offer.get("unknown_outcome"))
+        resolved = (not uncertain and not offer.get("fb_page_write_active")
+                    and (native in {"failed", "failed_without_retry", "cancelled", "skipped"}
+                         or (native == "published" and bool(offer.get("publish_id")))))
+        if resolved:
+            released = c.execute("DELETE FROM pipeline_resource WHERE job_id=?", (row["id"],)).rowcount
+            released += c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=?", (row["id"],)).rowcount
+            if released:
+                self.event(c, row["id"], "fb_material_isolation_resolved", {"source_status": native}, self.now())
+            return
+        detached = (not offer.get("fb_page_write_active")
+                    and native in {"unknown", "submitted", "processing", "published", "failed", "cancelled", "skipped"})
+        preparation = row["stage"] == "prepare" and not row["external_intent"]
+        held = c.execute("SELECT * FROM pipeline_resource WHERE job_id=?", (row["id"],)).fetchall()
+        legacy = c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?", (row["id"],)).fetchone()
+        if uncertain:
+            c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (material, row["id"]))
+        if held:
+            c.execute("INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)",
+                      (material, row["id"], row["generation"], int(uncertain), int(held[0]["legacy"])))
+        if legacy:
+            c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (material, row["id"]))
+        released = 0
+        if detached or preparation:
+            released += c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND resource_key=?", (row["id"], page)).rowcount
+            released += c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=? AND resource_key=?", (row["id"], page)).rowcount
+        if old != sorted(resources) or released:
+            self.event(c, row["id"], "fb_material_isolation_refreshed",
+                       {"material_resource": material, "page_released": bool(released)}, self.now())
+
     def offer(self, offer):
         now = self.now()
         channel = channel_key(offer["channel"])
+        quarantine_resources = offer.get("resource_keys", [])
+        if channel == "fb" and not offer.get("fb_page_write_active") and offer.get("source_status") in {"unknown", "submitted", "processing"}:
+            from .fb_isolation import identity_resources
+            expected, _, material = identity_resources(offer.get("fb_page_id"), offer.get("fb_material_id"), offer["stage"])
+            if material and set(expected) == set(quarantine_resources):
+                quarantine_resources = [material]
         stage = offer["stage"]
         if stage not in STAGES or not str(offer.get("source_key", "")):
             raise DispatchError("offer_invalid", status=400)
@@ -552,7 +601,7 @@ class DispatchStore:
                                    and json.loads(existing["payload_json"]).get("continuation") == offer["confirmed_youtube_schedule"])
                 if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"] and not parked_schedule:
                     c.execute("UPDATE pipeline_job SET status='unknown',error_code='canonical_unknown_outcome',finished_at='',updated_at=? WHERE id=?", (now, existing["id"]))
-                    for resource in offer.get("resource_keys", []):
+                    for resource in quarantine_resources:
                         c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, existing["id"]))
                     c.execute("UPDATE pipeline_resource SET quarantined=1 WHERE job_id=?", (existing["id"],))
                     self.event(c, existing["id"], "canonical_unknown_observed", {"source_status": offer.get("source_status", "")}, now)
@@ -565,7 +614,7 @@ class DispatchStore:
                 if existing["generation"] == 0 and (existing["status"] != "backlog_paused" or status in ("unknown", "legacy_running")) and status in ("completed", "published", "failed", "unknown", "legacy_running"):
                     c.execute("UPDATE pipeline_job SET status=?,started_at=?,finished_at=?,updated_at=?,canonical_receipt=? WHERE id=?", (status, stamp(offer["started_at"]) if offer.get("started_at") else existing["started_at"], stamp(offer["finished_at"]) if offer.get("finished_at") else existing["finished_at"], now, str(offer.get("canonical_receipt", "")), existing["id"]))
                     if status in ("unknown", "legacy_running"):
-                        for resource in offer.get("resource_keys", []):
+                        for resource in quarantine_resources:
                             c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, existing["id"]))
                     if status in ("completed", "published", "failed"):
                         c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND legacy=1", (existing["id"],))
@@ -573,6 +622,7 @@ class DispatchStore:
                     existing = c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone()
                 self._converge_idle_legacy(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
                 self._release_finished_legacy_resources(c, offer["source_key"])
+                self._refresh_fb_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
                 return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
             cutoff = self.config(c)["cutovers"].get(channel)
             in_time = not cutoff or (offer.get("started_at") and stamp(offer["started_at"]) <= cutoff)
@@ -610,11 +660,12 @@ class DispatchStore:
             cursor = c.execute("INSERT INTO pipeline_job(" + ",".join(keys) + ") VALUES(" + ",".join("?" for _ in keys) + ")", tuple(values[k] for k in keys))
             job_id = cursor.lastrowid
             if status in ("legacy_running", "unknown"):
-                for resource in sorted(set(offer.get("resource_keys", []))):
+                for resource in sorted(set(quarantine_resources)):
                     # Several historical unknowns may share an account. Each
                     # remains a separate fence until every receipt is resolved.
                     c.execute("INSERT INTO pipeline_legacy_resource VALUES(?,?)", (resource, job_id))
             self._release_finished_legacy_resources(c, offer["source_key"])
+            self._refresh_fb_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), offer)
             self.event(c, job_id, "offered", {"status": status}, now)
             return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), True)
 
@@ -812,7 +863,10 @@ class DispatchStore:
                 # of the same identity, otherwise a busy prep pool can keep
                 # reacquiring the account before its completed media is sent.
                 earlier = c.execute("SELECT resource_keys_json FROM pipeline_job WHERE stage='publish' AND status IN ('queued','ready') AND hold_reason='' AND channel=? AND scheduled_at<=? AND (scheduled_at<? OR (scheduled_at=? AND id<?))", (row["channel"], now, row["scheduled_at"], row["scheduled_at"], row["id"])).fetchall()
-                if not independent and any(set(resources).intersection(json.loads(r[0])) for r in earlier):
+                # FB already visits eligible rows in due order and owns a Page
+                # write mutex. A skipped material fence must not turn a queued
+                # duplicate into an indirect FIFO fence for other materials.
+                if row["channel"] != "fb" and not independent and any(set(resources).intersection(json.loads(r[0])) for r in earlier):
                     blocked.append("account_ordering")
                     continue
                 if row["channel"] == "x" and row["family"] == "queue" and stage == "publish" and str(row["source_id"]).isdigit():

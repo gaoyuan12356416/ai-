@@ -52,14 +52,16 @@ def build_manifest(conn, template, pages, materials, input_ids, operation_id,
         raise BatchError("Exact input material IDs are required")
     if len({p.page_id for p in pages}) != len(pages):
         raise BatchError("Ambiguous Page membership")
-    unknown = {r[0] for r in conn.execute("SELECT DISTINCT page_id FROM fb_auto_task WHERE status='unknown' OR unknown_outcome=1")}
+    unknown = set()
     cutoff = (now - timedelta(days=int(config["cooldown_days"]))).isoformat(timespec="seconds")
     reserved = defaultdict(set)
-    for r in conn.execute("SELECT page_id,material_id FROM fb_auto_task WHERE status IN ('planned','preparing','ready','running','submitted','unknown') OR (status IN ('published','failed_without_retry') AND created_at_utc>=?)", (cutoff,)):
+    for r in conn.execute("SELECT page_id,material_id FROM fb_auto_task WHERE status IN ('planned','preparing','ready','running','submitted','unknown') OR unknown_outcome=1 OR (status IN ('published','failed_without_retry') AND created_at_utc>=?)", (cutoff,)):
         reserved[r[0]].add(r[1])
-    from features.fb_video_publish.guards import manual_block, manual_excluded_materials
+    for r in conn.execute("SELECT page_id,material_id FROM fb_auto_publish_ledger WHERE status='unknown' OR unknown_outcome=1"):
+        reserved[r[0]].add(r[1])
+    from features.fb_video_publish.guards import automatic_block, manual_block, manual_excluded_materials
     for page in pages:
-        if manual_block(conn, page.page_id):
+        if automatic_block(conn, page.page_id) or manual_block(conn, page.page_id):
             unknown.add(page.page_id)
         reserved[page.page_id].update(manual_excluded_materials(conn, page.page_id, cutoff))
     by_language = defaultdict(list)

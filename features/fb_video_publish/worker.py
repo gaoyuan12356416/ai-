@@ -229,10 +229,13 @@ class Worker:
                 return result
         return {"ok": True, "status": "no_pending"}
 
-    def reconcile_next(self, worker_id="fb-video-reconcile"):
+    def reconcile_next(self, worker_id="fb-video-reconcile", *, task_id=None, max_credentials=8, graph=None):
+        if type(max_credentials) is not int or not 1 <= max_credentials <= 8:
+            raise ValueError("invalid reconciliation credential limit")
         if not self.live_enabled:
             return {"ok": True, "status": "live_gate_closed"}
-        task = self.store.claim("reconcile", worker_id)
+        task = (self.store.claim("reconcile", worker_id, task_id=task_id) if task_id is not None
+                else self.store.claim("reconcile", worker_id))
         if task is None:
             return {"ok": True, "status": "no_pending"}
         try:
@@ -243,17 +246,21 @@ class Worker:
             return self.store.record_outcome(task, GraphResult("unknown", error_code="reconcile_credentials_unavailable",
                                                                message="暂无可用授权查询平台状态，保留已提交占用"), reconcile=True)
         self.rng.shuffle(credentials)
-        credentials = credentials[:8]
+        truncated = len(credentials) > max_credentials
+        credentials = credentials[:max_credentials]
         for index, credential in enumerate(credentials):
             self.rate_limit()
             if not self.store.claim_is_current(task, status="submitted"):
                 return {"ok": True, "status": "stale_claim"}
             try:
-                result = self.graph.reconcile_video(task["graph_post_id"], credential)
+                result = (graph or self.graph).reconcile_video(task["graph_post_id"], credential)
             except Exception:
                 result = GraphResult("unknown", error_code="reconcile_unavailable", message="平台处理状态暂不可查询")
             final = result.kind != "credential_failure" or index == len(credentials) - 1
-            if result.kind == "credential_failure" and final:
+            if result.kind == "credential_failure" and final and truncated:
+                result = GraphResult("unknown", post_id=task["graph_post_id"], error_code="reconcile_credentials_deferred",
+                                     message="本轮查询授权被拒绝，保留已提交状态等待下一轮核对")
+            elif result.kind == "credential_failure" and final:
                 result = GraphResult("hold", post_id=task["graph_post_id"], error_code="reconcile_all_credentials_rejected",
                                      message="所有授权均被平台拒绝对账，请人工确认")
             elif result.kind == "definite_failure" and result.error_code != "fb_graph_video_processing_failed":

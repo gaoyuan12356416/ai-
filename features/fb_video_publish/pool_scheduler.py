@@ -97,7 +97,7 @@ class PoolScheduler:
         if status >= 500:
             return "skipped", code, False, False
         # Only explicit permanent material/template/confirmation errors consume.
-        permanent = {"material_unavailable", "material_metadata_ambiguous", "language_mismatch",
+        permanent = {"material_unavailable", "material_metadata_ambiguous", "language_mismatch", "fb_video_material_unknown",
                      "repeat_confirmation_required", "pool_repeat_changed", "caption_too_long",
                      "macro_source_missing", "invalid_template", "invalid_macro", "invalid_caption",
                      "template_too_long", "text_too_long", "unknown_macro", "required_text",
@@ -134,9 +134,10 @@ class PoolScheduler:
                 conn.execute("UPDATE fb_video_pool_slot SET status='skipped',reason='queue_changed' WHERE id=?", (slot_id,))
                 conn.commit()
                 return {"status": "skipped"}
-            reason = automatic_block(conn, pool["page_id"]) or manual_block(conn, pool["page_id"])
+            material_id = item["material_id"] if item else ""
+            reason = automatic_block(conn, pool["page_id"], material_id) or manual_block(conn, pool["page_id"], material_id)
             if reason:
-                error = DomainError(reason, "Page存在结果不明的任务，请先核对", 409)
+                error = DomainError(reason, "该Page的此素材已有未结束或结果不明的任务", 409)
             if error is None and not item:
                 conn.execute("UPDATE fb_video_pool_slot SET status='empty',reason='pool_empty' WHERE id=?", (slot_id,))
                 conn.commit()

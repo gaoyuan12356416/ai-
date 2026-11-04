@@ -312,7 +312,8 @@ class LedgerAdapter:
         elif key == ("fb", "video"):
             parent = obj(row.get("snapshot_json")).get("actor", {})
             if self._exists(conn, "fb_video_attempt"):
-                row["publish_attempt_count"] = conn.execute("SELECT COUNT(*) FROM fb_video_attempt WHERE task_id=?", (row["task_id"],)).fetchone()[0]
+                from .fb_isolation import platform_attempt_count
+                row["publish_attempt_count"] = platform_attempt_count(conn, row["task_id"])
         elif key == ("tt", "queue"):
             parent = self._parent(conn, "tt_post_material_pool", "id", row.get("pool_item_id"))
             if row.get("gpu_job_id") and self._exists(conn, "tt_post_material_intake"):
@@ -445,7 +446,8 @@ class LedgerAdapter:
                 if row.get(key):
                     resources.append(f"{spec.channel}:account:{row[key]}")
         elif spec.channel == "fb" and row.get("page_id"):
-            resources.append("fb:page:" + str(row["page_id"]))
+            from .fb_isolation import identity_resources
+            resources, _, _ = identity_resources(row["page_id"], row.get("material_id"), stage)
         elif spec.channel == "youtube":
             body = obj(row.get("body")) if spec.family == "preparation" else {}
             identity = row.get("channel_id") or body.get("channel_id") or obj(body.get("channel")).get("channel_id")
@@ -512,7 +514,13 @@ class LedgerAdapter:
                     eligible_at = created_at
                 if row.get("next_attempt_at_utc"):
                     eligible_at = max(eligible_at, stamp(row["next_attempt_at_utc"]))
-        return {"source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
+        fb_fields = {}
+        if spec.channel == "fb":
+            from .fb_isolation import page_write_active
+            fb_fields = {"fb_page_id": str(row.get("page_id") or ""),
+                         "fb_material_id": str(row.get("material_id") or ""),
+                         "fb_page_write_active": page_write_active(row, spec.family, now)}
+        return {**fb_fields, "source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
                 "backlog_authorization": row.get("_backlog_authorization"),
                 "backlog_ancestor_authorization": row.get("_backlog_ancestor_authorization"),
                 "source_revision": source_revision,

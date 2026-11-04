@@ -183,20 +183,26 @@ class AutoPostExecutor:
             last = result
         return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": last.error_code, "error_message": "同Page的所有可用授权均被Meta明确拒绝", "definite_attempts": definite})
 
-    def reconcile_next(self, worker_id: str, lease_seconds: int = 1200) -> Dict[str, Any]:
+    def reconcile_next(self, worker_id: str, lease_seconds: int = 1200, *, task_id=None, max_credentials=None, graph=None) -> Dict[str, Any]:
+        if max_credentials is not None and (type(max_credentials) is not int or not 1 <= max_credentials <= 8):
+            raise ValueError("invalid reconciliation credential limit")
         if not self.live_enabled:
             return {"ok": True, "status": "live_gate_closed", "claimed": False}
-        task = self.store.claim_submitted(worker_id, lease_seconds)
+        task = (self.store.claim_submitted(worker_id, lease_seconds, task_id=task_id) if task_id is not None
+                else self.store.claim_submitted(worker_id, lease_seconds))
         if task is None:
             return {"ok": True, "status": "no_submitted", "claimed": False}
         credentials = self.pages.eligible_credentials(task["page_id"])
         if not credentials:
             return self.store.reconcile_task(int(task["id"]), "submitted", error_code="fb_page_missing_eligible_token", error_message="暂无授权可查询Meta处理状态")
         self.rng.shuffle(credentials)
+        truncated = max_credentials is not None and len(credentials) > max_credentials
+        if max_credentials is not None:
+            credentials = credentials[:max_credentials]
         rejected = 0
         for credential in credentials:
             self._rate_limit()
-            result = self.graph.reconcile_video(task["graph_post_id"], credential)
+            result = (graph or self.graph).reconcile_video(task["graph_post_id"], credential)
             if result.kind == "success":
                 return self.store.reconcile_task(int(task["id"]), "published")
             if result.kind == "definite_failure" and result.error_code == "fb_graph_video_processing_failed":
@@ -208,6 +214,9 @@ class AutoPostExecutor:
                 return self.store.reconcile_task(int(task["id"]), "unknown", error_code=result.error_code or "fb_graph_reconcile_unavailable", error_message=result.message or "Meta对象无法继续自动对账，请人工确认")
             return self.store.reconcile_task(int(task["id"]), "submitted", error_code=result.error_code or "fb_graph_reconcile_transient", error_message=result.message or "Meta处理状态暂时无法确认")
         if rejected == len(credentials):
+            if truncated:
+                return self.store.reconcile_task(int(task["id"]), "submitted", error_code="fb_graph_reconcile_credentials_deferred",
+                                                 error_message="本轮查询授权被拒绝，等待下一轮尝试其他可用授权")
             return self.store.reconcile_task(
                 int(task["id"]),
                 "unknown",

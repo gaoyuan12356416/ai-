@@ -19,7 +19,7 @@ from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_
 from .languages import candidate_snapshots_for_pages,page_language
 from .repositories import MaterialRepository, PagePoolRepository
 from .validation import config_hash, expected_version, normalize_template_payload
-from features.fb_video_publish.guards import manual_block, manual_excluded_materials, prepare_available
+from features.fb_video_publish.guards import automatic_block, manual_block, manual_excluded_materials, prepare_available, install_backstops
 
 
 UTC = timezone.utc
@@ -176,10 +176,6 @@ class FBAutoPostStore:
         CREATE INDEX IF NOT EXISTS idx_fb_auto_page_material ON fb_auto_task(page_id,material_id,created_at_utc);
         CREATE INDEX IF NOT EXISTS idx_fb_auto_run_created ON fb_auto_run(created_at_utc,id);
         CREATE INDEX IF NOT EXISTS idx_fb_auto_due_claim ON fb_auto_due_slot(status,planned_publish_at_utc,id);
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_fb_auto_active_page ON fb_auto_task(page_id)
-          WHERE status IN ('queued','running','submitted');
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_fb_auto_unresolved_page ON fb_auto_task(page_id)
-          WHERE status IN ('queued','running','submitted','unknown');
         """
         with self.connect() as conn:
             conn.executescript(schema)
@@ -210,14 +206,15 @@ class FBAutoPostStore:
                 "long_url": "TEXT NOT NULL DEFAULT ''",
             })
             self._ensure_columns(conn, "fb_auto_due_slot", {"available_at_utc": "TEXT NOT NULL DEFAULT ''", "trigger_type": "TEXT NOT NULL DEFAULT 'auto'"})
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("DROP INDEX IF EXISTS uq_fb_auto_active_page")
             conn.execute("DROP INDEX IF EXISTS uq_fb_auto_unresolved_page")
             conn.execute("DROP INDEX IF EXISTS uq_fb_auto_active_page_slot")
             conn.execute("DROP INDEX IF EXISTS uq_fb_auto_execution_page")
             conn.execute("CREATE UNIQUE INDEX uq_fb_auto_active_page_slot ON fb_auto_task(page_id,planned_publish_at_utc) WHERE status IN ('planned','preparing','ready','running','submitted')")
-            conn.execute("CREATE UNIQUE INDEX uq_fb_auto_execution_page ON fb_auto_task(page_id) WHERE status IN ('running','submitted','unknown')")
+            conn.execute("CREATE UNIQUE INDEX uq_fb_auto_execution_page ON fb_auto_task(page_id) WHERE status='running'")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_auto_page_content ON fb_auto_task(page_id,content_id,planned_publish_at_utc)")
-            conn.execute("BEGIN IMMEDIATE")
+            install_backstops(conn)
             migration_now = utc_iso(self.now_fn())
             legacy_runs = [int(row[0]) for row in conn.execute("SELECT DISTINCT run_id FROM fb_auto_task WHERE status='ready' AND TRIM(prepared_at_utc)=''")]
             conn.execute(
@@ -410,10 +407,10 @@ class FBAutoPostStore:
             return self._template_dto(self._template_row(conn, template_id, actor))
 
     def _cooldown_material_ids(self, conn: sqlite3.Connection, page_id: str, days: int) -> set[str]:
-        active = ("planned", "preparing", "ready", "running", "submitted", "unknown")
+        active = ("planned", "preparing", "ready", "queued", "running", "submitted", "unknown")
         historical = ("published", "failed_without_retry")
         placeholders = ",".join("?" for _ in active)
-        sql = f"SELECT DISTINCT material_id FROM fb_auto_task WHERE page_id=? AND material_id<>'' AND (status IN ({placeholders})"
+        sql = f"SELECT DISTINCT material_id FROM fb_auto_task WHERE page_id=? AND material_id<>'' AND (status IN ({placeholders}) OR unknown_outcome=1"
         params: List[Any] = [page_id, *active]
         if days > 0:
             history_placeholders = ",".join("?" for _ in historical)
@@ -421,7 +418,10 @@ class FBAutoPostStore:
             params.extend((*historical, utc_iso(self.now_fn() - timedelta(days=days))))
         sql += ")"
         manual_cutoff = utc_iso(self.now_fn() - timedelta(days=days)) if days > 0 else ""
-        return {str(row[0]) for row in conn.execute(sql, params)} | manual_excluded_materials(conn, page_id, manual_cutoff)
+        uncertain_ledger = {str(row[0]) for row in conn.execute(
+            "SELECT material_id FROM fb_auto_publish_ledger WHERE page_id=? AND (status='unknown' OR unknown_outcome=1)", (page_id,))}
+        return ({str(row[0]) for row in conn.execute(sql, params)} | uncertain_ledger
+                | manual_excluded_materials(conn, page_id, manual_cutoff))
 
     @staticmethod
     def _message(config: Mapping[str, Any], material: Any, short_url: str = "") -> str:
@@ -532,6 +532,9 @@ class FBAutoPostStore:
                 or expected_template_version is None
             ):
                 raise StoreError("fb_auto_due_slot_template_changed", "模板已停用或版本已变化，原计划时隙不再执行", 409)
+            # Expired workers must reach a visible terminal/quarantined state
+            # before applying the unchanged per-template backlog capacity gate.
+            self.maintenance_tick()
             config = _loads(template["config_json"], {})
             scope_admin, scope_owner = bool(template["scope_is_admin"]), str(template["owner_user_id"])
             existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (template_id, slot_key)).fetchone()
@@ -701,12 +704,11 @@ class FBAutoPostStore:
                 # BEGIN IMMEDIATE transaction with task insertion. Concurrent
                 # planners therefore serialize, and a later slot sees the
                 # earlier planned/preparing/ready reservation before choosing.
-                unknown = (conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND status='unknown' LIMIT 1", (page.page_id,)).fetchone() is not None
-                           or bool(manual_block(conn, page.page_id)))
                 language=page_language(page.language)
                 task_publish_at = planned_time(config, page.page_id, slot_key, publish_at, manual=trigger_type=="manual")
                 slot_allowed = in_slot(config, page.page_id, slot_key, manual=trigger_type=="manual", times=slot_times)
-                pre_reason = "fb_auto_page_unknown_block" if unknown else ("" if language else "fb_auto_page_language_missing")
+                pre_reason = (automatic_block(conn, page.page_id) or manual_block(conn, page.page_id)
+                              or ("" if language else "fb_auto_page_language_missing"))
                 if not pre_reason and not slot_allowed:
                     pre_reason = "fb_auto_page_frequency_limit"
                 material, selection = None, {}
@@ -906,7 +908,8 @@ class FBAutoPostStore:
             for candidate in due:
                 # Manual reservations live in this same SQLite transaction domain.
                 # Keep existing auto tasks frozen while a manual Page hold exists.
-                if manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True):
+                if (manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True)
+                        or automatic_block(conn, candidate["page_id"], candidate["material_id"], execution=True, exclude_task=candidate["id"])):
                     continue
                 try:
                     policy = task_policy(conn, candidate)
@@ -924,11 +927,11 @@ class FBAutoPostStore:
                         AND (status IN ('planned','preparing','ready','running','submitted','unknown') OR
                         (status IN ('published','failed_without_retry') AND {history_check})) LIMIT 1""",
                         (candidate['page_id'], candidate['material_id'], candidate['id'], utc_iso(now_dt-timedelta(days=cooldown_days)))).fetchone()
-                    unknown = conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND id<>? AND (status='unknown' OR unknown_outcome=1) LIMIT 1",
-                        (candidate['page_id'], candidate['id'])).fetchone()
+                    unknown = conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND material_id=? AND id<>? AND (status='unknown' OR unknown_outcome=1) LIMIT 1",
+                        (candidate['page_id'], candidate['material_id'], candidate['id'])).fetchone()
                     if not unknown and policy.get('material_cooldown_basis') == 'created_at':
-                        unknown = conn.execute("SELECT 1 FROM fb_auto_publish_ledger WHERE page_id=? AND task_id<>? AND (status='unknown' OR unknown_outcome=1) LIMIT 1",
-                            (candidate['page_id'], candidate['id'])).fetchone()
+                        unknown = conn.execute("SELECT 1 FROM fb_auto_publish_ledger WHERE page_id=? AND material_id=? AND task_id<>? AND (status='unknown' OR unknown_outcome=1) LIMIT 1",
+                            (candidate['page_id'], candidate['material_id'], candidate['id'])).fetchone()
                     if conflict or unknown:
                         reason = 'fb_auto_page_unknown_at_publish' if unknown else 'fb_auto_material_cooldown_at_publish'
                         conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason=?,error_code=?,completed_at_utc=? WHERE id=? AND status='ready'", (reason, reason, now, candidate['id']))
@@ -946,10 +949,11 @@ class FBAutoPostStore:
                 if recent:
                     conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_drama_cooldown_at_publish',error_code='fb_auto_drama_cooldown_at_publish',completed_at_utc=? WHERE id=? AND status='ready'", (now,candidate['id']))
                     self._refresh_run(conn, int(candidate['run_id']), now)
-            rows = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND x.prepared_media_url<>x.source_media_url AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status IN ('running','submitted','unknown')) AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now, task_id, task_id)).fetchall()
+            rows = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND x.unknown_outcome=0 AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND x.prepared_media_url<>x.source_media_url AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status='running') AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now, task_id, task_id)).fetchall()
             row = None
             for candidate in rows:
-                if manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True):
+                if (manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True)
+                        or automatic_block(conn, candidate["page_id"], candidate["material_id"], execution=True, exclude_task=candidate["id"])):
                     continue
                 try:
                     policy = task_policy(conn, candidate)
@@ -963,7 +967,7 @@ class FBAutoPostStore:
                 break
             if row is None:
                 conn.commit(); return None
-            updated = conn.execute("UPDATE fb_auto_task SET status='running',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=? AND status='ready' AND TRIM(prepared_at_utc)<>'' AND TRIM(prepared_media_url)<>'' AND media_url=prepared_media_url AND prepared_media_url<>source_media_url AND planned_publish_at_utc<=? AND EXISTS (SELECT 1 FROM fb_auto_template t WHERE t.id=fb_auto_task.template_id AND t.status='enabled' AND t.current_version=fb_auto_task.template_version) AND NOT EXISTS (SELECT 1 FROM fb_auto_task x WHERE x.page_id=fb_auto_task.page_id AND x.id<>fb_auto_task.id AND x.status IN ('running','submitted','unknown'))", (worker_id, lease, now, int(row["id"]), now)).rowcount
+            updated = conn.execute("UPDATE fb_auto_task SET status='running',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=? AND status='ready' AND unknown_outcome=0 AND TRIM(prepared_at_utc)<>'' AND TRIM(prepared_media_url)<>'' AND media_url=prepared_media_url AND prepared_media_url<>source_media_url AND planned_publish_at_utc<=? AND EXISTS (SELECT 1 FROM fb_auto_template t WHERE t.id=fb_auto_task.template_id AND t.status='enabled' AND t.current_version=fb_auto_task.template_version) AND NOT EXISTS (SELECT 1 FROM fb_auto_task x WHERE x.page_id=fb_auto_task.page_id AND x.id<>fb_auto_task.id AND x.status='running')", (worker_id, lease, now, int(row["id"]), now)).rowcount
             if updated != 1:
                 conn.rollback(); return None
             conn.execute("UPDATE fb_auto_run SET status='running' WHERE id=?", (int(row["run_id"]),))
@@ -971,20 +975,44 @@ class FBAutoPostStore:
             claimed = conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (int(row["id"]),)).fetchone()
             return dict(claimed)
 
-    def mark_stale_running_unknown(self) -> int:
+    def maintenance_tick(self) -> Dict[str, int]:
+        """Settle expired native leases without reclaiming or replaying work."""
         now = utc_iso(self.now_fn())
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute("SELECT id,run_id,page_id,material_id FROM fb_auto_task WHERE status='running' AND lease_expires_at_utc<>'' AND lease_expires_at_utc<?", (now,)).fetchall()
+            rows = conn.execute("SELECT * FROM fb_auto_task WHERE status IN ('running','preparing') AND lease_expires_at_utc<>'' AND lease_expires_at_utc<?", (now,)).fetchall()
+            from features.fb_video_publish.guards import has_table
+            has_operations = has_table(conn, "pipeline_fb_operation")
+            failed_preparing, unknown_count = 0, 0
             for row in rows:
+                # Current dispatch renews this native lease immediately before
+                # granting a Graph credential, with a 120-second POST timeout.
+                # BEGIN IMMEDIATE serializes that renewal with this expiry read.
+                evidence = bool(row["graph_post_id"] or row["unknown_outcome"] or conn.execute(
+                    "SELECT 1 FROM fb_auto_publish_attempt WHERE task_id=? LIMIT 1", (row["id"],)).fetchone())
+                if not evidence and has_operations:
+                    evidence = bool(conn.execute("SELECT 1 FROM pipeline_fb_operation WHERE source_key=? AND stage='publish' LIMIT 1",
+                                                 ("fb:auto:" + str(row["id"]),)).fetchone())
+                if row["status"] == "preparing" and not evidence:
+                    conn.execute("""UPDATE fb_auto_task SET status='failed',error_code='fb_auto_prepare_worker_interrupted',
+                        error_message='视频准备执行已超时，未向平台发布',lease_owner='',lease_expires_at_utc='',
+                        next_prepare_at_utc='',completed_at_utc=? WHERE id=?""", (now, row["id"]))
+                    failed_preparing += 1
+                    self._refresh_run(conn, int(row["run_id"]), now)
+                    continue
                 definite_attempts = int(conn.execute(
                     "SELECT COUNT(*) FROM fb_auto_publish_attempt WHERE task_id=? AND result_kind='definite_failure'",
                     (int(row["id"]),),
                 ).fetchone()[0])
                 conn.execute("UPDATE fb_auto_task SET status='unknown',unknown_outcome=1,error_code='fb_auto_worker_interrupted',error_message='发布执行中断，结果待人工确认',completed_at_utc=? WHERE id=?", (now, int(row["id"])))
-                self._upsert_ledger(conn, int(row["id"]), row["page_id"], row["material_id"], "unknown", "", definite_attempts, True, "fb_auto_worker_interrupted", now)
+                self._upsert_ledger(conn, int(row["id"]), row["page_id"], row["material_id"], "unknown", row["graph_post_id"], definite_attempts, True, "fb_auto_worker_interrupted", now)
                 self._refresh_run(conn, int(row["run_id"]), now)
-            conn.commit(); return len(rows)
+                unknown_count += 1
+            conn.commit()
+            return {"failed_preparing": failed_preparing, "unknown_marked": unknown_count}
+
+    def mark_stale_running_unknown(self) -> int:
+        return self.maintenance_tick()["unknown_marked"]
 
     def complete_task(self, task_id: int, outcome: Mapping[str, Any]) -> Dict[str, Any]:
         status = str(outcome.get("status") or "")
@@ -1038,10 +1066,10 @@ class FBAutoPostStore:
         lease = utc_iso(now_dt + timedelta(seconds=lease_seconds))
         with self._lock, self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM fb_auto_task WHERE status='submitted' AND (next_reconcile_at_utc='' OR next_reconcile_at_utc<=?) AND (lease_expires_at_utc='' OR lease_expires_at_utc<?) AND (? IS NULL OR id=?) ORDER BY id LIMIT 1", (now, now, task_id, task_id)).fetchone()
+            row = conn.execute("SELECT * FROM fb_auto_task WHERE (status='submitted' OR (? IS NOT NULL AND status='unknown' AND TRIM(graph_post_id)<>'')) AND (next_reconcile_at_utc='' OR next_reconcile_at_utc<=?) AND (lease_expires_at_utc='' OR lease_expires_at_utc<?) AND (? IS NULL OR id=?) ORDER BY id LIMIT 1", (task_id, now, now, task_id, task_id)).fetchone()
             if row is None:
                 conn.commit(); return None
-            if conn.execute("UPDATE fb_auto_task SET lease_owner=?,lease_expires_at_utc=? WHERE id=? AND status='submitted' AND (next_reconcile_at_utc='' OR next_reconcile_at_utc<=?) AND (lease_expires_at_utc='' OR lease_expires_at_utc<?)", (worker_id, lease, int(row["id"]), now, now)).rowcount != 1:
+            if conn.execute("UPDATE fb_auto_task SET status='submitted',lease_owner=?,lease_expires_at_utc=? WHERE id=? AND status=? AND (next_reconcile_at_utc='' OR next_reconcile_at_utc<=?) AND (lease_expires_at_utc='' OR lease_expires_at_utc<?)", (worker_id, lease, int(row["id"]), row["status"], now, now)).rowcount != 1:
                 conn.rollback(); return None
             conn.commit(); return dict(conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (int(row["id"]),)).fetchone())
 
@@ -1054,8 +1082,8 @@ class FBAutoPostStore:
             row = conn.execute("SELECT * FROM fb_auto_task WHERE id=? AND status='submitted'", (task_id,)).fetchone()
             if row is None: raise StoreError("fb_auto_task_not_submitted", "任务不在待对账状态", 409)
             completed = "" if status == "submitted" else now
-            unknown = status == "unknown"
-            next_reconcile = utc_iso(self.now_fn() + timedelta(minutes=5)) if status == "submitted" else ""
+            unknown = status == "unknown" or (status == "submitted" and bool(row["unknown_outcome"]))
+            next_reconcile = utc_iso(self.now_fn() + timedelta(minutes=5)) if status in {"submitted", "unknown"} and row["graph_post_id"] else ""
             conn.execute("UPDATE fb_auto_task SET status=?,error_code=?,error_message=?,unknown_outcome=?,lease_owner='',lease_expires_at_utc='',next_reconcile_at_utc=?,completed_at_utc=? WHERE id=?", (status, str(error_code)[:96], str(error_message)[:500], int(unknown), next_reconcile, completed, task_id))
             self._upsert_ledger(conn, task_id, row["page_id"], row["material_id"], status, row["graph_post_id"], 0, unknown, str(error_code)[:96], now)
             self._refresh_run(conn, int(row["run_id"]), now); conn.commit()

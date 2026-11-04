@@ -66,20 +66,14 @@ def _gates(runtime):
 
 
 def _skip_reason(conn, store, config, page, material_id, stamp):
-    from features.fb_video_publish.guards import manual_block
-    manual_reason = manual_block(conn, page.page_id, material_id)
-    if manual_reason:
-        return manual_reason
+    from features.fb_video_publish.guards import automatic_block, manual_block
+    material_reason = automatic_block(conn, page.page_id, material_id) or manual_block(conn, page.page_id, material_id)
+    if material_reason:
+        return material_reason
     if daily_limit(config, page.page_id) == 0:
         return "fb_auto_page_frequency_limit"
-    if conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND (status='unknown' OR unknown_outcome=1) LIMIT 1", (page.page_id,)).fetchone():
-        return "fb_auto_page_unknown_block"
-    if conn.execute("SELECT 1 FROM fb_auto_publish_ledger WHERE page_id=? AND (status='unknown' OR unknown_outcome=1) LIMIT 1", (page.page_id,)).fetchone():
-        return "fb_auto_page_unknown_block"
     if page.eligible_token_count <= 0:
         return "fb_page_missing_eligible_token"
-    if conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND material_id=? AND status IN ('planned','preparing','ready','running','submitted','unknown') LIMIT 1", (page.page_id, material_id)).fetchone():
-        return "fb_auto_material_active"
     if material_id in store._cooldown_material_ids(conn, page.page_id, int(config["cooldown_days"])):
         return "fb_auto_material_cooldown"
     if conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND planned_publish_at_utc=? AND status IN ('planned','preparing','ready','running','submitted') LIMIT 1", (page.page_id, stamp)).fetchone():

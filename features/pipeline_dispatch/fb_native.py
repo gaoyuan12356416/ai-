@@ -6,15 +6,18 @@ durable attempt intent; no Graph write or video render happens in this module.
 """
 from __future__ import annotations
 import re
+import logging
 import secrets
 import threading
+import time
 import weakref
+from queue import Queue, Full
 from datetime import timedelta
 from urllib.parse import urlsplit
 
 from .adapters import AdapterError, obj, artifact_from, public_descriptor
 from .native_common import claim_hash, dump, prepare_capabilities
-from features.fb_auto_posts.publisher import GraphResult
+from features.fb_auto_posts.publisher import GraphResult, RequestsGraphTransport
 from features.fb_auto_posts.gpu import PROFILE
 from features.fb_auto_posts.core import utc_iso
 from features.fb_auto_posts.links import validate_short_url, build_short_url, validate_w2a_url
@@ -28,6 +31,13 @@ class FBNativeBridge:
         self.runtime = runtime
         self._source_locks = weakref.WeakValueDictionary()
         self._source_locks_guard = threading.Lock()
+        self._reconcile_queue = Queue(maxsize=32)
+        self._reconcile_pending = set()
+        self._reconcile_guard = threading.Lock()
+        self._reconcile_started = False
+        self._last_reconcile_warning = 0.0
+        self._next_tick = 0.0
+        self._tick_guard = threading.Lock()
         with runtime.store.connect() as conn:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_fb_claim(
@@ -173,6 +183,13 @@ class FBNativeBridge:
             else:
                 task = self.runtime.manual_worker.store.claim("prepare" if stage == "prepare" else "execute", worker_id, task_id=identity)
             if task is None:
+                # A central 120s lease can expire before the native 1200s
+                # write fence. Leave a different, still-pending source queued.
+                table, column = ("fb_auto_task", "id") if family == "auto" else ("fb_video_task", "task_id")
+                with self.runtime.store.connect() as conn:
+                    pending = conn.execute(f"SELECT status FROM {table} WHERE {column}=?", (identity,)).fetchone()
+                if stage == "publish" and pending and pending[0] in {"queued", "ready"}:
+                    raise AdapterError("canonical_account_busy")
                 raise AdapterError("canonical_task_not_claimable")
             try:
                 if frozen_descriptor:
@@ -452,16 +469,77 @@ class FBNativeBridge:
                     self._no_write_failure(job, task, str(receipt.get("error_code") or "node_execution_failed"))
             return {"canonical_no_write": True, **self.reconcile(job)}
 
+    def _queue_reconciliation(self, job):
+        """GET existing IDs without making the shared collector wait for Meta."""
+        worker = self.runtime.executor if job["family"] == "auto" else self.runtime.manual_worker
+        if not callable(getattr(worker, "reconcile_next", None)):
+            return
+        key = str(job["source_key"])
+        with self._reconcile_guard:
+            if key in self._reconcile_pending:
+                return
+            try:
+                self._reconcile_queue.put_nowait((key, job["family"], job["source_id"]))
+            except Full:
+                return  # The next canonical scan will offer this ID again.
+            self._reconcile_pending.add(key)
+            if not self._reconcile_started:
+                self._reconcile_started = True
+                for index in range(2):
+                    threading.Thread(target=self._reconcile_worker,
+                                     name="fb-readback-%s" % index, daemon=True).start()
+
+    def _reconcile_worker(self):
+        while True:
+            key, family, identity = self._reconcile_queue.get()
+            try:
+                worker = self.runtime.executor if family == "auto" else self.runtime.manual_worker
+                # Native task claims/due times deduplicate against existing
+                # timers; native credential selection preserves frozen scope.
+                graph = RequestsGraphTransport(api_version=getattr(getattr(worker, "graph", None), "api_version", "v22.0"),
+                                               timeout_seconds=10)
+                worker.reconcile_next("pipeline-fb-readback", task_id=int(identity) if family == "auto" else identity,
+                                      max_credentials=8, graph=graph)
+            except Exception as exc:
+                # Retain the original publication/claim/attempt evidence. A
+                # transient lookup failure cannot authorize a second POST.
+                with self._reconcile_guard:
+                    warn = time.monotonic() - self._last_reconcile_warning >= 60
+                    if warn:
+                        self._last_reconcile_warning = time.monotonic()
+                if warn:
+                    logging.getLogger(__name__).warning("fb_readback_failed source=%s error_type=%s", key, type(exc).__name__)
+            finally:
+                with self._reconcile_guard:
+                    self._reconcile_pending.discard(key)
+                self._reconcile_queue.task_done()
+
     def reconcile(self, job):
-        # Existing reconcile timers own read-only Graph reconciliation.  Return
-        # only a readback; never issue another POST from a dispatch retry.
+        # Native execution timers may be disabled after dispatch takeover.
+        # Keep their existing local expiry rules alive without any POST/retry.
+        if time.monotonic() >= self._next_tick and self._tick_guard.acquire(blocking=False):
+            try:
+                manual = getattr(self.runtime, "manual_worker", None)
+                if manual is not None:
+                    manual.store.tick()
+                expire = getattr(self.runtime.store, "maintenance_tick", None)
+                if expire is not None:
+                    expire()
+                self._next_tick = time.monotonic() + 15
+            finally:
+                self._tick_guard.release()
         table, key = ("fb_auto_task", "id") if job["family"] == "auto" else ("fb_video_task", "task_id")
+        lease = "lease_expires_at_utc" if job["family"] == "auto" else "execution_until"
         store = self.runtime.store if job["family"] == "auto" else self.runtime.manual_worker.store
         with store.connect() as conn:
-            row = conn.execute(f"SELECT status,graph_post_id,unknown_outcome FROM {table} WHERE {key}=?", (job["source_id"],)).fetchone()
+            row = conn.execute(f"SELECT status,graph_post_id,unknown_outcome,{lease} FROM {table} WHERE {key}=?", (job["source_id"],)).fetchone()
         if row is None:
             raise AdapterError("canonical_task_missing")
-        return dict(row)
+        from .fb_isolation import page_write_active
+        if (row["status"] in {"submitted", "unknown"} and row["graph_post_id"]
+                and not page_write_active(dict(row), job["family"], store.now_fn())):
+            self._queue_reconciliation(job)
+        return {key: row[key] for key in ("status", "graph_post_id", "unknown_outcome")}
 
     def pause(self, job, cutoff):
         from .canonical_holds import pause_row, SCHEMA

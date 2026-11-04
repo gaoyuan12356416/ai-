@@ -220,7 +220,7 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_fb_video_quota ON fb_video_task(planned_bj_date,status);
                 CREATE INDEX IF NOT EXISTS idx_fb_video_batch_owner ON fb_video_batch(tenant_key,owner_user_id,created_at_utc);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_fb_video_execution ON fb_video_task(page_id)
-                  WHERE status IN ('running','submitted','unknown');
+                  WHERE status='running';
             """)
             # Additive migrations leave all prior snapshots and task facts intact.
             for table, column, definition in (
@@ -236,7 +236,14 @@ class Store:
             install_schema(conn)
             from .group_pool import install_schema as install_group_schema
             install_group_schema(conn)
+            # Existing Page-wide indexes must be replaced even on an already
+            # initialized database. Receipts and uncertain outcomes keep their
+            # material fence, while only a live write owns the Page mutex.
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DROP INDEX IF EXISTS uq_fb_video_execution")
+            conn.execute("CREATE UNIQUE INDEX uq_fb_video_execution ON fb_video_task(page_id) WHERE status='running'")
             install_backstops(conn)
+            conn.commit()
 
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=Connection)
@@ -340,7 +347,10 @@ class Store:
                 raise DomainError("language_mismatch", "素材与Page配置剧语言不一致", 409)
             for reason in (automatic_block(conn, pid, mid), manual_block(conn, pid, mid)):
                 if reason:
-                    raise DomainError(reason, "Page有未结束或结果不明的发布，不能提交", 409)
+                    message = ("该Page有无法识别素材的历史未知发布，请先核对" if reason == "fb_video_page_unknown"
+                               else "该Page的此素材有结果不明的发布，请先核对" if reason == "fb_video_material_unknown"
+                               else "该Page的此素材已有未结束的发布任务")
+                    raise DomainError(reason, message, 409)
             configs[pid] = config
             history = published_history(conn, pid, mid)
             if history:
@@ -557,34 +567,28 @@ class Store:
                 row = conn.execute("""SELECT * FROM fb_video_task WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||fb_video_task.task_id) AND status='queued' AND link_state<>'ready'
                     AND link_retry_at<=? AND (link_lease='' OR link_until<=?) AND (? IS NULL OR task_id=?) ORDER BY planned_at_utc,sequence LIMIT 1""", (now, now, task_id, task_id)).fetchone()
             elif kind == "reconcile":
-                row = conn.execute("""SELECT * FROM fb_video_task WHERE status='submitted' AND reconcile_at<=?
-                    AND (execution_lease='' OR execution_until<?) AND (? IS NULL OR task_id=?) ORDER BY reconcile_at,sequence LIMIT 1""", (now, now, task_id, task_id)).fetchone()
+                row = conn.execute("""SELECT * FROM fb_video_task WHERE (status='submitted'
+                    OR (? IS NOT NULL AND status='unknown' AND TRIM(graph_post_id)<>'')) AND reconcile_at<=?
+                    AND (execution_lease='' OR execution_until<?) AND (? IS NULL OR task_id=?) ORDER BY reconcile_at,sequence LIMIT 1""", (task_id, now, now, task_id, task_id)).fetchone()
             elif kind == "execute":
                 rows = conn.execute("""SELECT x.*,b.request_json AS batch_request_json FROM fb_video_task x
                     JOIN fb_video_batch b ON b.batch_id=x.batch_id
-                    WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||x.task_id) AND x.status='queued' AND x.prepare_state='ready'
-                    AND x.link_state='ready' AND x.planned_at_utc<=? AND NOT EXISTS(
-                      SELECT 1 FROM fb_video_task prev WHERE prev.batch_id=x.batch_id AND prev.page_id=x.page_id
-                      AND prev.page_sequence<x.page_sequence AND prev.status NOT IN ('published','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||prev.task_id))
-                    AND NOT EXISTS(SELECT 1 FROM fb_video_task pp WHERE x.source_kind='pool'
-                      AND pp.tenant_key=x.tenant_key AND pp.page_id=x.page_id AND pp.pool_sequence<x.pool_sequence
-                      AND pp.source_kind='pool' AND pp.status NOT IN ('published','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||pp.task_id))
-                    AND NOT EXISTS(SELECT 1 FROM fb_video_task gp WHERE x.source_kind='group_pool'
-                      AND gp.tenant_key=x.tenant_key AND gp.page_id=x.page_id AND gp.source_kind='group_pool'
-                      AND gp.planned_at_utc<x.planned_at_utc AND gp.status NOT IN ('published','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||gp.task_id))
+                    WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||x.task_id) AND x.status='queued' AND x.unknown_outcome=0 AND x.prepare_state='ready'
+                    AND x.link_state='ready' AND x.planned_at_utc<=?
                     AND (? IS NULL OR x.task_id=?) ORDER BY x.planned_at_utc,x.sequence LIMIT 1000""", (now, task_id, task_id)).fetchall()
                 row = None
                 for candidate in rows:
-                    if (automatic_block(conn, candidate["page_id"], execution=True)
-                            or manual_block(conn, candidate["page_id"], execution=True, exclude_task=candidate["task_id"])):
+                    if (automatic_block(conn, candidate["page_id"], candidate["material_id"], execution=True)
+                            or manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True, exclude_task=candidate["task_id"])):
                         continue
                     interval = json.loads(candidate["batch_request_json"]).get("interval_minutes", 0)
                     if interval:
-                        # Published rows are immutable: their final updated_at
-                        # is the time Graph reconciliation confirmed success.
+                        # A ready later row may overtake stalled preparation.
+                        # Keep the configured interval from the latest success
+                        # even when that success has a higher Excel sequence.
                         last_success = conn.execute("""SELECT MAX(updated_at_utc) FROM fb_video_task
-                            WHERE batch_id=? AND page_id=? AND page_sequence<? AND status='published'""",
-                            (candidate["batch_id"], candidate["page_id"], candidate["page_sequence"])).fetchone()[0]
+                            WHERE batch_id=? AND page_id=? AND status='published'""",
+                            (candidate["batch_id"], candidate["page_id"])).fetchone()[0]
                         if last_success and parse_time(last_success) + timedelta(minutes=interval) > self.now_fn():
                             continue
                     row = candidate
@@ -676,6 +680,15 @@ class Store:
             required_status = "submitted" if reconcile else "running"
             row = conn.execute("SELECT * FROM fb_video_task WHERE task_id=? AND status=? AND execution_lease=?",
                                (task["task_id"], required_status, task["claim_token"])).fetchone()
+            if (row is None and not reconcile and final and attempt_id is not None
+                    and outcome.kind == "success" and str(outcome.post_id or "").strip()):
+                # A timed-out writer may return an accepted ID after tick. Only
+                # its original durable attempt/lease can save that receipt; it
+                # never regains permission to issue another platform write.
+                row = conn.execute("""SELECT * FROM fb_video_task WHERE task_id=? AND status='unknown'
+                    AND error_code='worker_interrupted' AND execution_lease=?
+                    AND (graph_post_id='' OR graph_post_id=?)""",
+                    (task["task_id"], task["claim_token"], str(outcome.post_id))).fetchone()
             if row is None:
                 conn.commit()
                 return {"ok": True, "status": "stale_claim"}
@@ -697,9 +710,10 @@ class Store:
                 # Explicit reconciliation hold supplied by worker preserves unknown.
                 if kind == "hold":
                     status = "unknown"
+                unknown = status == "unknown" or (reconcile and status == "submitted" and bool(row["unknown_outcome"]))
                 conn.execute("""UPDATE fb_video_task SET status=?,graph_post_id=?,unknown_outcome=?,error_code=?,error_message=?,
                     execution_lease='',execution_until='',reconcile_at=?,updated_at_utc=? WHERE task_id=?""",
-                    (status, post, int(status == "unknown"), str(outcome.error_code)[:96], str(outcome.message)[:300],
+                    (status, post, int(unknown), str(outcome.error_code)[:96], str(outcome.message)[:300],
                      stamp(self.now_fn() + timedelta(seconds=60)), now, task["task_id"]))
             conn.commit()
             return {"ok": True, "task_id": task["task_id"], "status": status if final else required_status}
@@ -708,8 +722,22 @@ class Store:
         now = stamp(self.now_fn())
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            from .guards import has_table
+            pipeline_intent = (" AND NOT EXISTS(SELECT 1 FROM pipeline_fb_operation o WHERE o.source_key='fb:video:'||fb_video_task.task_id)"
+                               if has_table(conn, "pipeline_fb_operation") else "")
+            # Manual writers persist begin_attempt before issuing Graph. A
+            # claim that expired without any such intent did not publish.
+            # Settle it visibly; a new dispatch generation may explicitly
+            # recover it after checking its own durable operation ledger.
+            failed_before_publish = conn.execute("""UPDATE fb_video_task SET status='failed',unknown_outcome=0,
+                error_code='worker_interrupted_before_publish',error_message='发布前执行中断，未向平台提交',
+                execution_lease='',execution_until='',updated_at_utc=?
+                WHERE status='running' AND unknown_outcome=0 AND execution_until<>'' AND execution_until<? AND graph_post_id=''
+                AND NOT EXISTS(SELECT 1 FROM fb_video_attempt a WHERE a.task_id=fb_video_task.task_id)""" + pipeline_intent,
+                (now, now)).rowcount
             count = conn.execute("""UPDATE fb_video_task SET status='unknown',unknown_outcome=1,
                 error_code='worker_interrupted',error_message='平台请求执行中断，结果待人工核对',updated_at_utc=?
                 WHERE status='running' AND execution_until<>'' AND execution_until<?""", (now, now)).rowcount
             conn.commit()
-            return {"ok": True, "status": "tick_complete", "unknown_marked": count}
+            return {"ok": True, "status": "tick_complete", "unknown_marked": count,
+                    "failed_before_publish": failed_before_publish}

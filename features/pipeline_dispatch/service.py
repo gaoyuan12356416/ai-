@@ -67,6 +67,11 @@ class Coordinator:
     def node_key(self, node_id, version=1):
         return base64.urlsafe_b64encode(hmac.new(self.master_key, (node_id + ":" + str(version)).encode(), hashlib.sha256).digest()).decode()
 
+    def observe_fb(self, job, observed):
+        offer = observed.get("next_offer") or {}
+        if job.get("channel") == "fb" and offer.get("source_key") == job.get("source_key"):
+            self.store.offer(offer)
+
     def authenticate(self, token):
         if secrets.compare_digest(token, self.internal_token):
             return {"internal": True}
@@ -96,6 +101,7 @@ class Coordinator:
         for job in pending:
             try:
                 result = self.registry.reconcile(job)
+                self.observe_fb(job, result)
                 proof = result.get("canonical_receipt", {})
                 if proof.get("publish_id") and (result.get("published") or proof.get("video_published")):
                     self.store.record_publication(job["id"], proof, canonical_verified=True)
@@ -153,6 +159,7 @@ class Coordinator:
                 if self.recover_prepared(job):
                     return {"job": None, "idle_reason": "canonical_preparation_recovered"}
                 observed = self.registry.reconcile(job)
+                self.observe_fb(job, observed)
                 if observed.get("metadata_only"):
                     self.store.skip(job, observed.get("canonical_receipt", {}), canonical_verified=True)
                     return {"job": None, "idle_reason": "canonical_no_candidate"}
@@ -269,6 +276,11 @@ class Coordinator:
                 issued = self.registry.begin_operation(job, payload, payload)
                 if issued.get("credentials_exhausted"):
                     return {"accepted": False, "credentials_exhausted": True}
+                if job["channel"] == "fb":
+                    # Credential lookup may outlive the central lease. An old
+                    # worker must never receive fresh authorization afterward.
+                    with self.store.transaction() as c:
+                        self.store._validate_claim(c, payload)
                 credentials = issued.get("credentials", issued)
                 envelope = seal_credentials(self.node_key(node_id, auth.get("key_version", 1)), credentials, binding, ttl_seconds=120)
             except Exception as exc:
@@ -312,6 +324,8 @@ class Coordinator:
                 # Existing nodes abort on this first 422. Their durable retry
                 # receives the stored ACK and can deliver the following fail.
                 raise DispatchError(code, status=422) from None
+            if job["channel"] == "fb":
+                self.observe_fb(job, self.registry.reconcile(job))
             return accept(self.store.checkpoint(payload, payload.get("checkpoint_id"), payload.get("phase"), payload.get("receipt", {}), canonical_verified=True))
         if action == "jobs/complete":
             job = self.store.validate_receipt_claim(payload)
@@ -319,6 +333,7 @@ class Coordinator:
             self.store.record_execution_metrics(payload, payload.get("metrics", {}))
             self.store.record_cooldown(payload, result)
             verified = self.registry.complete(job, result, payload)
+            self.observe_fb(job, verified)
             proof = verified.get("canonical_receipt", {})
             if verified.get("metadata_only"):
                 return accept(self.store.skip(payload, proof, canonical_verified=True))
@@ -359,6 +374,7 @@ class Coordinator:
             native_fail = getattr(self.registry, "fail", None)
             verified = native_fail(job, safe_payload) if native_fail else {}
             observed = self.registry.reconcile(job)
+            self.observe_fb(job, observed)
             proof = observed.get("canonical_receipt", {})
             if observed.get("metadata_only"):
                 return accept(self.store.skip(payload, proof, canonical_verified=True))

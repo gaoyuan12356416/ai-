@@ -158,7 +158,7 @@ class FBSourceLockTests(unittest.TestCase):
                 second = self.background(lambda: self.bridge.reserve(blocked, self.claim)); threads.append(second[0])
                 third = self.background(lambda: self.bridge.reserve(other, self.claim)); threads.append(third[0])
                 self.assertTrue(second[1].wait(2)); self.assertTrue(third[1].wait(2))
-                self.assertEqual([str(e) for e in second[3]], ['canonical_task_not_claimable'])
+                self.assertEqual([str(e) for e in second[3]], ['canonical_account_busy'])
                 self.assertEqual(third[3], [])
                 self.assertFalse(first[1].is_set())
             finally:
@@ -172,11 +172,11 @@ class FBSourceLockTests(unittest.TestCase):
     def test_cross_family_same_page_fences_remain_authoritative(self):
         manual, automatic = self.video_job(7, '107'), self.auto_job(8, '107')
         self.bridge.reserve(manual, self.claim)
-        with self.assertRaisesRegex(AdapterError, 'canonical_task_not_claimable'):
+        with self.assertRaisesRegex(AdapterError, 'canonical_account_busy'):
             self.bridge.reserve(automatic, self.claim)
         automatic2, manual2 = self.auto_job(9, '109'), self.video_job(10, '109')
         self.bridge.reserve(automatic2, self.claim)
-        with self.assertRaisesRegex(AdapterError, 'canonical_task_not_claimable'):
+        with self.assertRaisesRegex(AdapterError, 'canonical_account_busy'):
             self.bridge.reserve(manual2, self.claim)
         with self.video.connect() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM pipeline_fb_claim').fetchone()[0], 2)

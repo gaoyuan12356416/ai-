@@ -63,11 +63,10 @@ def extend_future_runs(store,run_ids,pages,materials,*,operation_id,expected_sco
             missing=[p for p in page_rows if p.page_id not in existing]
             publish_at=max(run['planned_publish_at_utc'],publish_floor) if publish_floor else run['planned_publish_at_utc']
             for page in missing:
-                from features.fb_video_publish.guards import manual_block
-                if manual_block(conn, page.page_id, execution=True):
-                    raise StoreError('fb_video_page_hold','扩容Page存在手动发布占用或未知结果',409)
-                if conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND status IN ('running','submitted','unknown') LIMIT 1",(page.page_id,)).fetchone():
-                    raise StoreError('fb_auto_page_unknown_block','扩容Page存在未确认发布',409)
+                from features.fb_video_publish.guards import automatic_block, manual_block
+                reason = automatic_block(conn, page.page_id) or manual_block(conn, page.page_id)
+                if reason:
+                    raise StoreError(reason,'扩容Page有无法识别素材的历史未知发布，请先核对',409)
                 if conn.execute('SELECT 1 FROM fb_auto_task WHERE page_id=? AND planned_publish_at_utc=? LIMIT 1',(page.page_id,publish_at)).fetchone():
                     raise StoreError('fb_auto_extension_duplicate_slot','Page已存在该时隙任务',409)
                 language=page_language(page.language)
@@ -76,6 +75,9 @@ def extend_future_runs(store,run_ids,pages,materials,*,operation_id,expected_sco
                     raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化',409)
                 material=materials.choose_from(snapshots[language].candidates,excluded)
                 if material is None:raise StoreError('fb_auto_extension_material_shortage','Page冷却后无可用素材',409)
+                reason = automatic_block(conn, page.page_id, material.material_id) or manual_block(conn, page.page_id, material.material_id)
+                if reason:
+                    raise StoreError(reason,'该Page的此素材已有未结束或结果不明的发布任务',409)
                 conn.execute('INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,?,?)',(rid,page.page_id,page.group_id,json.dumps(list(page.group_ids)),page.owner_user_id,page.timezone,language,page.eligible_token_count,'eligible',''))
                 job='fb-page-'+hashlib.sha256(f"{run['template_id']}:{run['template_version']}:{run['slot_key']}:{page.page_id}".encode()).hexdigest()[:48]
                 cur=conn.execute('INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,material_id,content_id,media_url,message_text,created_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(rid,run['template_id'],run['template_version'],page.page_id,page.group_id,'planned',material.material_id,material.content_id,'',store._message(config,material),now,publish_at,config['video_template'],job,material.media_url))
