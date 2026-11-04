@@ -11,3 +11,17 @@
 回滚（BACKUP 为部署结果中的绝对路径）：
 `/usr/bin/python3.9 BACKUP/deploy.py --rollback BACKUP --apply`
 该命令先校验现有文件与部署 manifest 匹配，采用相同 HTTP 排空流程，只回退本次文件。不能恢复旧数据库或发布事实，不能重置任务。
+
+## 2026-11-04 实际上线记录
+
+代码提交：bc70cd5ab35aa32770eb066527d1d559c7fa85bf，已验证 GitHub push 与服务器精确 fetch。服务器 Git 仓库保持原 HEAD c1e8645d97b227b9b65e0e18de3c4b67c0041f32，没有 checkout 或覆盖其他改动。
+
+上线备份：/mnt/data-disk/pipeline-dispatch/queue-states-20261104T022319Z。
+协调器从 PID 1304161 变为 4075066；HTTP 排空终态连续两次为线程 2、已连接 socket 0、待接受连接 0；保护门总时长 4.148 秒并已移除。/health 200，公开 HTML/JS/CSS 精确匹配 GitHub。
+API 与 CPU 节点主 PID 均未变化，协调器 core.py/service.py 内容不变。容量版本上线前后均为 111，配置指纹一致。没有操作 GPU 服务器、执行器、任务领取记录、发布回执或账号锁。
+
+精确回滚命令（在 CPU 执行）：
+```sh
+/usr/bin/python3.9 /mnt/data-disk/pipeline-dispatch/queue-states-20261104T022319Z/deploy.py --rollback /mnt/data-disk/pipeline-dispatch/queue-states-20261104T022319Z --apply
+```
+详细证据保存在该备份目录 result.json 与 live-summary-verification.json。
