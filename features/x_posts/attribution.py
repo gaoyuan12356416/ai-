@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
 VERSION = "x-attribution-v2"
@@ -173,6 +174,40 @@ class Resolver:
             raise AttributionError("x_attribution_default_owner_unavailable", 503)
         return candidates[0]
 
+    def _audited_retry_task(self, conn, external_key, queue, manual, log):
+        """Accept a retry identity only through its exact operator audit row."""
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_auto_operator_retry'").fetchone():
+            return None
+        audits = conn.execute("SELECT task_id FROM x_auto_operator_retry WHERE external_task_key=?",
+                              (external_key,)).fetchall()
+        if len(audits) != 1:
+            return None
+        row = conn.execute("SELECT * FROM x_auto_task WHERE id=?", (audits[0]["task_id"],)).fetchone()
+        if row is None:
+            return None
+        from features.x_auto_posts.operator_retry import OperatorRetryError, execution_key
+        try:
+            task = dict(row)
+            frozen = SimpleNamespace(**{**task, "account_snapshot": json.loads(task["account_snapshot_json"])})
+            verified_key = execution_key(SimpleNamespace(db_path=self.auto_db), frozen)
+            valid = (
+                verified_key == external_key
+                and task["execution_run_id"] == manual["id"] == queue["manual_run_id"]
+                and task["execution_queue_id"] == queue["id"]
+                and task["template_version"] == manual["template_version"]
+                and str(task["account_id"]) == str(queue["account_id"]) == str(log["account_id"])
+                and str(task["material_id"]) == str(queue["material_id"])
+                and str(task["content_id"]) == str(queue["content_id"])
+                and json.loads(manual["account_ids_json"]) == [int(queue["account_id"])]
+                and json.loads(manual["material_ids_json"]) == [str(queue["material_id"])]
+                and (not task.get("execution_log_id") or task["execution_log_id"] == log["id"])
+            )
+        except (OperatorRetryError, ValueError, TypeError, KeyError, AttributeError):
+            raise AttributionError("x_attribution_template_task_conflict") from None
+        if not valid:
+            raise AttributionError("x_attribution_template_task_conflict")
+        return task
+
     def resolve(self, queue_id, log_id):
         valid_id(queue_id); valid_id(log_id)
         with closing(readonly(self.x_db)) as c:
@@ -195,9 +230,13 @@ class Resolver:
             template_id = int(match.group(1))
             with closing(readonly(self.auto_db)) as c:
                 tpl = c.execute("SELECT * FROM x_auto_template WHERE id=?", (template_id,)).fetchone()
-                task_key = re.fullmatch(r"x-auto-task-([1-9][0-9]*)", m.get("external_task_key", ""))
-                task = c.execute("SELECT template_id,execution_queue_id FROM x_auto_task WHERE id=?",
-                                 (int(task_key.group(1)) if task_key else -1,)).fetchone()
+                external_key = m.get("external_task_key", "")
+                task_key = re.fullmatch(r"x-auto-task-([1-9][0-9]*)", external_key)
+                if task_key:
+                    task = c.execute("SELECT template_id,execution_queue_id FROM x_auto_task WHERE id=?",
+                                     (int(task_key.group(1)),)).fetchone()
+                else:
+                    task = self._audited_retry_task(c, external_key, q, m, l)
                 if not task or task["template_id"] != template_id or task["execution_queue_id"] != int(queue_id):
                     raise AttributionError("x_attribution_template_task_conflict")
                 if tpl:

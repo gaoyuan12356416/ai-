@@ -211,6 +211,33 @@ class LedgerAdapter:
         return {"source_key": source_key, "action": action, "plan_sha256": saved["plan_sha256"],
                 "source_fingerprint": saved["source_fingerprint"], "identity": identity}
 
+    def _x_auto_origin_for_key(self, conn, parent, queue):
+        """Resolve the pre-binding retry window only from its immutable audit."""
+        key = str(parent.get("external_task_key") or "")
+        match = re.fullmatch(r"x-auto-task-([1-9][0-9]*)", key)
+        if match:
+            return conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE id=?", (int(match[1]),)).fetchone()
+        if (parent.get("trigger_source") != "auto_template" or not key
+                or not conn.execute("SELECT 1 FROM pipeline_x_auto.sqlite_master WHERE type='table' AND name='x_auto_operator_retry'").fetchone()):
+            return None
+        receipt = conn.execute("SELECT task_id FROM pipeline_x_auto.x_auto_operator_retry WHERE external_task_key=?", (key,)).fetchone()
+        if receipt is None:
+            return None
+        origin = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE id=?", (receipt["task_id"],)).fetchone()
+        if origin is None:
+            return None
+        from types import SimpleNamespace
+        from features.x_auto_posts.operator_retry import OperatorRetryError, execution_key
+        try:
+            values = dict(origin)
+            task = SimpleNamespace(**values, account_snapshot=json.loads(values["account_snapshot_json"]))
+            valid = (execution_key(SimpleNamespace(db_path=self.cross_paths["x_auto"]), task) == key
+                     and task.execution_run_id == parent.get("id")
+                     and task.execution_queue_id in (None, queue["id"]))
+        except (OperatorRetryError, ValueError, TypeError, KeyError, AttributeError):
+            return None
+        return origin if valid else None
+
     def enrich(self, conn, raw):
         row = dict(raw)
         key = (self.spec.channel, self.spec.family)
@@ -271,8 +298,7 @@ class LedgerAdapter:
                 parent = self._parent(conn, "x_post_schedule_run", "id", row["schedule_run_id"])
                 row["source_family"] = parent.get("source_type", "schedule")
             if self.cross_paths.get("x_auto") and not row.get("ancestor_source_keys"):
-                match = re.fullmatch(r"x-auto-task-([1-9][0-9]*)", str(parent.get("external_task_key") or ""))
-                origin = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE id=?", (int(match[1]),)).fetchone() if match else None
+                origin = self._x_auto_origin_for_key(conn, parent, row)
                 if (origin and parent.get("template_ref") == "x-auto-template-%s" % origin["template_id"]
                         and str(parent.get("template_version")) == str(origin["template_version"])
                         and str(row.get("account_id")) == str(origin["account_id"])
