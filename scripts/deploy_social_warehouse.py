@@ -14,7 +14,7 @@ MAIN = Path('/root/drama_material_service')
 WEB = Path('/usr/share/nginx/html')
 DROPIN = Path('/etc/systemd/system/drama-material-api.service.d/social-analytics-warehouse.conf')
 MODULES = ['features/social_analytics/' + name + '.py'
-           for name in ('routes', 'warehouse_reader', 'warehouse_refresh', 'warehouse_schema')]
+           for name in ('routes', 'report', 'warehouse_reader', 'warehouse_refresh', 'warehouse_schema')]
 ASSETS = ['static/social-analytics.html', 'static/social-analytics.js']
 UNITS = ['social-analytics-warehouse-refresh.service', 'social-analytics-warehouse-refresh.timer']
 

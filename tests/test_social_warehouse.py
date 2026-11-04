@@ -10,11 +10,30 @@ from unittest.mock import patch
 from features.social_analytics import warehouse_reader as reader, warehouse_refresh as refresh
 from features.social_analytics.backend_scope import restrict
 from features.social_analytics.report import summarize, parameters, csv_export
+from features.social_analytics import report
 from features.social_analytics.warehouse_schema import FACT_TABLES, METRICS, CATALOG_TABLE
 from tests.test_social_analytics import catalog, metric, DAY
 
 
 class WarehouseTests(unittest.TestCase):
+    def test_integer_accumulation_matches_legacy_and_rejects_negative_counts(self):
+        for value in (0, 17, 2**60, '17', 17.0, None, False):
+            source = dict.fromkeys(report.FIELDS + report.COUNTS, value)
+            actual, expected = report.empty(), report.empty()
+            report.add(actual, source)
+            report.legacy_add(expected, source)
+            for field in report.COUNTS[1:]:
+                check = dict.fromkeys(report.FIELDS + ('links',), 0)
+                report.legacy_add(check, {'links': value})
+                expected[field] = check['links']
+            self.assertEqual(actual, expected)
+        for field in set(report.FIELDS + report.COUNTS) - {'revenue_cents', 'refund_cents'}:
+            with self.assertRaises(report.ReportError):
+                report.add(report.empty(), {field: -1})
+        actual = report.empty()
+        report.add(actual, {'revenue_cents': -123, 'refund_cents': -5})
+        self.assertEqual(actual['revenue_cents'], -123)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

@@ -154,6 +154,16 @@ def empty():
 
 
 def add(target, source):
+    fields = FIELDS + COUNTS
+    # JSON warehouse facts are already integers. Preserve the legacy numeric
+    # conversion path for strings/floats, including its strict validation.
+    if all(type(source.get(field, 0)) is int for field in fields):
+        for field in fields:
+            value = source.get(field, 0)
+            if value < 0 and field not in ('revenue_cents', 'refund_cents'):
+                raise ReportError('源数据指标异常，暂不能统计', 503)
+            target[field] += value
+        return
     legacy_add(target, source)
     # Use the same strict integer validation for publication counts.
     for key in COUNTS[1:]:
