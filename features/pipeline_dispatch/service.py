@@ -206,6 +206,9 @@ class Coordinator:
             delivered = self.store.delivered(payload, delivery_id, payload)
             if delivered:
                 return delivered
+            rejected = self.store.acknowledge_preparation_rejection(payload, delivery_id, payload, action)
+            if rejected:
+                return rejected
             if action in ("jobs/complete", "jobs/fail"):
                 historical = self.store.historical_receipt_claim(payload)
                 if historical:
@@ -278,7 +281,37 @@ class Coordinator:
             method = getattr(self.registry, "checkpoint", None)
             if method is None:
                 raise DispatchError("canonical_checkpoint_unavailable", status=503)
-            method(job, payload, payload.get("phase"), payload.get("receipt", {}))
+            try:
+                method(job, payload, payload.get("phase"), payload.get("receipt", {}))
+            except Exception as exc:
+                code = getattr(exc, "code", "")
+                if (job["channel"] != "x" or job["family"] != "queue" or job["stage"] != "prepare"
+                        or job.get("external_intent") or payload.get("phase") != "x_preflight"
+                        or code not in {"x_random_requires_video", "x_post_auto_template_duration_exceeded"}):
+                    raise
+                # A native validation error is a business outcome. Commit it in
+                # the existing ledger before releasing any central reservation.
+                self.store.validate_preparation_rejection(payload)
+                before = self.registry.reconcile(job)
+                native = before.get("result") or {}
+                offer = before.get("next_offer") or {}
+                if (native.get("status") not in {"reserved", "failed"}
+                        or native.get("unknown_outcome") or native.get("x_post_id")
+                        or offer.get("source_key") != job["source_key"]
+                        or offer.get("source_attempt_count") != 0 or offer.get("unknown_outcome")
+                        or before.get("published") or before.get("dispatch_completed")):
+                    raise DispatchError("preparation_rejection_unverified") from None
+                failed = {**payload, "error_code": code, "unknown_outcome": False}
+                verified = self.registry.fail(job, failed)
+                observed = self.registry.reconcile(job)
+                proof = observed.get("canonical_receipt", {})
+                if (not verified.get("canonical_no_write") or not observed.get("definitive_failure")
+                        or proof.get("source_key") != job["source_key"] or proof.get("publish_id")):
+                    raise DispatchError("preparation_rejection_unverified") from None
+                self.store.reject_preparation_checkpoint(payload, payload, code, canonical_verified=True)
+                # Existing nodes abort on this first 422. Their durable retry
+                # receives the stored ACK and can deliver the following fail.
+                raise DispatchError(code, status=422) from None
             return accept(self.store.checkpoint(payload, payload.get("checkpoint_id"), payload.get("phase"), payload.get("receipt", {}), canonical_verified=True))
         if action == "jobs/complete":
             job = self.store.validate_receipt_claim(payload)
