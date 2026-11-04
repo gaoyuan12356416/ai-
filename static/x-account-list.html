@@ -148,6 +148,9 @@
               <option value="token_missing">缺少 Token</option>
               <option value="error">异常</option>
             </select>
+            <select id="languageFilter" aria-label="按剧语言筛选">
+              <option value="">全部语言</option>
+            </select>
             <span id="resultCount" class="result-count">共 0 个账号</span>
           </div>
           <div class="table-wrap">
@@ -274,9 +277,11 @@
       function filteredAccounts() {
         const query = el("searchInput").value.trim().toLocaleLowerCase();
         const status = el("statusFilter").value;
+        const language = el("languageFilter").value;
         return state.accounts.filter(item => {
           const itemStatus = String(item.status || "");
           if (status && itemStatus !== status) return false;
+          if (language && canonicalLanguage(item.drama_language) !== language) return false;
           if (!query) return true;
           const ownerName = item.owner_name || item.authorized_by_name || "";
           const ownerEmail = item.owner_email || item.authorized_by_email || "";
@@ -377,6 +382,19 @@
         }).join("");
       }
 
+      function renderLanguageFilter() {
+        const select = el("languageFilter");
+        const selected = select.value;
+        const options = new Map(dramaLanguages.map(([code, label]) => [canonicalLanguage(code), `${label} (${code})`]));
+        for (const value of [selected, ...state.accounts.map(item => canonicalLanguage(item.drama_language))]) {
+          if (value && !options.has(value)) options.set(value, value);
+        }
+        select.innerHTML = '<option value="">全部语言</option>' + Array.from(options, ([code, label]) =>
+          `<option value="${escapeHtml(code)}">${escapeHtml(label)}</option>`
+        ).join("");
+        select.value = selected;
+      }
+
       async function loadData() {
         el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">正在加载…</td></tr>`;
         try {
@@ -388,7 +406,7 @@
           ]);
           state.accounts = Array.isArray(result.items) ? result.items : [];
           state.statsMeta = result.operating_stats_meta || null;
-          renderStats(); renderOperatingSummary(); renderRows();
+          renderStats(); renderOperatingSummary(); renderLanguageFilter(); renderRows();
         } catch (error) {
           el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
@@ -462,6 +480,7 @@
       el("reloadAccounts").addEventListener("click", loadData);
       el("searchInput").addEventListener("input", renderRows);
       el("statusFilter").addEventListener("change", renderRows);
+      el("languageFilter").addEventListener("change", renderRows);
       el("accountRows").addEventListener("click", event => {
         const button = event.target.closest("[data-verify-id]");
         if (button) verifyAccount(button.dataset.verifyId, button);
