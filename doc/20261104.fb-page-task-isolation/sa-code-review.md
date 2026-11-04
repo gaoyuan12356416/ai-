@@ -47,3 +47,7 @@
 专用发布脚本已检查：只覆盖已审 feature 白名单、逐文件核对运行版本、在线备份演练迁移、排空在途请求后切换、9 个常规 timer 原状态恢复，不恢复数据库，不重启历史一次性 timer。部分切换失败保持 FB 暂停并保留新 schema。生产现场的 mount UUID、BASE 文件一致性、drain 证明和健康检查须由实际 prepare/apply 命令确认。
 
 准确产品边界：无写入中断归为明确失败并释放无关素材；不承诺旧失败通用自动重试。已发或结果不明的任务不自动重发。缺失/非法素材身份仍保守隔离所在 Page。15 条跳过 Excel 行不自动补发。
+
+## 部署增量独立评审
+
+最终部署增加显式未来 planner 只读延期分支。独立评审核对 complete_due_slot/defer_due_slot 的原 due id/owner/lease CAS，不改预约，不重建任务，已建 run 仅完成原 due；3 项独立测试通过。已按评审补严 runner 的实际位置参数必须为 plan，以及 client/server 反向 socket 精确端点匹配。不存在媒体/Graph handler 放行；失败仍保持已迁移 schema 和当前业务数据。Linux 3 项及线上验收由主任务完成，结果见 test-report.md。
