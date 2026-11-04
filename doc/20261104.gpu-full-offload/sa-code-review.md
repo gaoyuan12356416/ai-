@@ -61,3 +61,18 @@ MP4 覆盖视频单轨、双轨负 AAC DTS/相同 DTS 稳定交织、ctts v1 负
 用户要求若部署需暂停任务，应先告知并由用户暂停确认。上述测试不包含任务暂停、drain、服务 restart 或 release switch。
 
 HEVC独立评审：PTL位置、96bit总字段、子层profile88bit跳过、Exp-Golomb/conformance window及EPB恢复与单层HEVC结构相符。VPS/SPS层数合并和多层拒绝已覆盖。最新9/9（2.928秒）及H26414/14（6.454秒）通过；重新生成12帧HEVC，CUDA mux前后完整解码SHA相同。与FFmpeg对同raw的hvc1参考相比，23byte配置头、VPS/SPS均逐字节相同；参考PPS多1个尾零，未谎称整个extradata相同。证据`hevc-mux/qa-header-comparison.json`和`qa-hevc-mux/result.json`。当前约束是单层编码器单VPS/SPS/PPS，未泛化任意多层/中途改配置。
+
+## 追加：实际运行漂移的部署阻塞
+
+QA已只读核实生产实际运行`/data/pipeline-dispatch-runtime/fb-lease-f3bd38531f6d/node`，来源是clean Git f3bd38531f6da7e11fbd853444b7d12d95f50ff2的五文件FB租约补丁，非裸179596a。原1,736 tracked files无缺失，仅四既有文件改变加job_lock.py；五文件SHA均与runtime manifest/source相同。具体证据、权限及unit结构见deploy.md。源分支全树与179596a不同，不能全树替换丢失既有X修复。
+
+上线前必须解决：
+
+- 候选保留排他job锁、下载/渲染lease检查、lease异常透传、输出时长和CPU线程约束；与native进程组kill/scratch清理一起回归。不能将旧render_process整文件覆盖本次watchdog。
+- 实际worker SHA为25ccd40ac0b3693a2d8bfad6d8edc7f1980ca968e4bcc16a58fbcac85353273c，仅新增check_render，signal/drain本身未变；仍需审后更新白名单。
+- 现helper的clean-release/argv检查无法接受当前overlay；99-fb-lease-receipt-20261104.conf会覆盖新base unit ExecStart。必须受测地处理exact drop-in及真实runtime身份，不能绕过检查。回滚须恢复此lease overlay。
+- installer.activate只检查is-active返回码，不能排除deactivating/restarting；激活前必须明确inactive/MainPID0、无残留cgroup进程/待执行job，或实现相应校验。
+
+这些是当前部署阻塞，不是GPU组件测试失败。QA未执行任何服务控制或生产文件变更。
+
+后续独立复核：五文件融合保留native进程组/scratch清理、每poll租约检查、下载execution_check、lease异常透传和输出时长校验，worker新增check_render未改变原signal/drain。QA本地复跑专用切换脚本19项、节点lease5项、native控制8项：共30项，29通过、1个Linux进程组专项按平台跳过；根代理另报Linux隔离13项全部通过。新脚本由QA实现、根代理复审；已根据根代理反馈修复“撤99后reload前失败”的cached unit恢复边界并故障注入验证。今天按用户安排仅开发收尾，未做正式环境验收或部署。

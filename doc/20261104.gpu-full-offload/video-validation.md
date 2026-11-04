@@ -69,3 +69,46 @@ T4 不支持的编码格式由实际 `GetDecoderCaps` 事前选择 PyAV CPU 解�
 ## 尚未宣称覆盖的边界
 
 最终精确 SHA 的全链、取消/故障及并发验收由主验收继续。现测试覆盖不代表所有 FFmpeg 可接受媒体的穷举。NVDEC 构造的 maxwidth/maxheight 对普通片保持 4096，初始更大时按初始实际尺寸提高，并限制在实际 device caps 内；已验证 5120 宽，未实测完整 8K 画面。运行中动态尺寸超过这个初始 allowance 仍是未覆盖边界。奇数尺寸 4:2:0 已保留 CPU 仅解码兼容支路，不把当前 SDK surface 描述未合格说成 T4 硬件不支持。GPU 失败不静默重跑旧管线，避免重复长耗时及掩盖错误。
+
+## 精确 SHA 的服务用户验收命令
+
+用户最新要求为今天开发收尾后停止、部署明天再做。因此以下仅保存为明日待根代理串行执行的命令模板，今天不 stage 正式 release/venv、不启动这些 GPU 作业，也不是已经执行的最终 SHA 回执。代码复核时 HEAD 为 `daeda2847c432feda67e09eb90968e8817430c80`；必须换成最终已推送、干净 checkout 且已 stage 的 SHA。使用该 SHA 独立 venv，移除实验 `PYTHONPATH`，不得把 `nvc223-experiment` 覆盖视作干净依赖验收。
+
+实际 unit 的 User/Group 均为 `pipeline-worker`，home 为 `/data/pipeline-dispatch`。E 根目录是 `0700 root`，服务用户不能穿越；源片虽已为 `0600 pipeline-worker`，也不能直接使用 E/real-fixture。在 state 内建立独立服务用户验收目录，把冻结 source.mp4 硬链接进去、复制 recipe.json，保留源文件字节和原 asset_root，不放宽整个实验目录。必须保证真实素材目录、缓存 NUT 和其验证回执可读；已只读核实 asset manifest 与 TT ffmpeg/ffprobe 可由该用户访问。
+
+```sh
+# 每次选用新的验收目录；已有目录先核对回执，不覆盖已有验收结果。
+SHA='<最终40位SHA>'
+RELEASE="/opt/pipeline-dispatch/releases/$SHA"
+PYTHON="/opt/pipeline-dispatch/venvs/$SHA/bin/python"
+ACCEPT="/data/pipeline-dispatch/acceptance/gpu-full-offload-$SHA"
+E=/data/pipeline-dispatch/evaluations/gpu-full-offload-20261104
+install -d -m 0700 -o pipeline-worker -g pipeline-worker "$ACCEPT" "$ACCEPT/fixture"
+ln "$E/real-fixture/source.mp4" "$ACCEPT/fixture/source.mp4"
+install -m 0600 -o pipeline-worker -g pipeline-worker "$E/real-fixture/recipe.json" "$ACCEPT/fixture/recipe.json"
+
+as_worker() {
+  runuser -u pipeline-worker -- env -u PYTHONPATH \
+    RANDOM_GPU_NATIVE=1 RANDOM_GPU_COMPUTE=1 RANDOM_GPU_PYTHON="$PYTHON" \
+    RANDOM_GPU_ASSET_CACHE_ROOT=/data/random-overlay-gpu/asset-cache-v1 \
+    "$PYTHON" "$@"
+}
+as_worker "$RELEASE/scripts/test_native_video.py"
+as_worker "$RELEASE/scripts/verify_native_geometry.py" --package "$RELEASE" --output "$ACCEPT/geometry"
+as_worker "$RELEASE/scripts/verify_native_color_contract.py" --package "$RELEASE" --output "$ACCEPT/h264-colors.json"
+as_worker "$RELEASE/scripts/verify_native_pipeline.py" --fixture "$ACCEPT/fixture" --seconds 6 --output "$ACCEPT/fb.mp4"
+as_worker "$RELEASE/scripts/verify_tt_native_pipeline.py" --fixture "$ACCEPT/fixture" --duration 2 --codec hevc --output "$ACCEPT/tt-hevc"
+```
+
+上述最小集验证：普通原生 H264 + 实际四层缓存、HEVC 正式 context wrapper、SDK/PyAV ABI 与 NVRTC kernel、初始宽 5120 NVDEC、odd CPU 解码上传、H264 实际 RGB→YUV 色值。几何脚本自行生成两张单帧夹具，依赖系统 ffmpeg 的 libx265/libvpx-vp9；颜色脚本只用 GPU 色块。真实 fixture 为固定 source.mp4 与包含 recipe/asset_root/source_sha256 的 recipe.json；TT 脚本明确使用 `/data/pipeline-dispatch/tools/tt/ffmpeg`、`ffprobe`，不调用账号、任务或上传。
+
+整链脚本会记录一些指标但没有全部硬断言，所以不能仅用退出码称验收通过：
+
+- `geometry/geometry.json` 两行 passed=true、frame_count=decoded_frames=1，宽 HEVC backend=nvdec，odd VP9 backend=cpu_decode / reason=sdk_odd_420_surface_unqualified。
+- `h264-colors.json` 五行 passed=true；2.2.3、limited BT.601。
+- `fb.acceptance.json` 的 full_decode_passed=true，video.frame_count=180，H264 / 720×1280 / yuv420p；probe 容器 duration=6，视频首 PTS=0，解码完整。新 `.native.json` 里的 codec/options/配置与平台合同一致。
+- `tt-hevc/result.json` 的 video_timestamps_identical=true、strict_decode_passed=true；candidate 为 HEVC Main / 720×1280 / 60 帧，tv/bt470bg、2 秒，帧 PTS 0 至 59/30；native_report 中视频 output_color_contract=fixed_bt601_limited_30fps_context 且 encoder_options 无 source_av_format_context 指针。音频是否逐字节相同按音频既定验收规则检查；先前同源 context 前后 PCM 相同不等于自动声称与旧 CPU 编码输出相同。
+
+新环境若需要再次独立验证 HEVC 实际颜色（不依赖真实片主观相似性），追加 `as_worker "$RELEASE/scripts/verify_hevc_color_context.py" --pattern bars --output "$ACCEPT/hevc-bars"`，要求 passed=true。必须显式选择 bars；默认 gradient 是早期“像素是否完全一致”的诊断实验，其 pixels_identical=false 正是已确认的 BT.709→BT.601 修正，不能误作正式失败门槛。
+
+可选短补验：`verify_native_sampler_formats.py --package "$RELEASE" --output "$ACCEPT/samplers.json"`（8 个 CUDA 采样已知色值）；`validate_native_video_matrix.py --package "$RELEASE" --output "$ACCEPT/timeline"`（7 个不超过 0.7 秒时间线夹具）。无需重新执行所有 30 秒性能基线才能证明相同代码在新服务用户/依赖下能运行，但最终并发、故障回收和实际 unit 沙箱验证仍由主验收负责。

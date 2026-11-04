@@ -13,7 +13,7 @@ class RenderStalled(subprocess.TimeoutExpired):
 
 
 def run_render(command, *, capture_output=True, text=True, timeout=9000,
-               check=True, stall_seconds=180, poll_seconds=2):
+               check=True, stall_seconds=180, poll_seconds=2, progress_check=None):
     output = Path(command[-1])
     native = 'features.random_gpu.native_pipeline' in command
     progress = Path(str(output)+'.progress') if native else None
@@ -29,10 +29,14 @@ def run_render(command, *, capture_output=True, text=True, timeout=9000,
             scratch = resources.enter_context(tempfile.TemporaryDirectory(prefix='.native-',dir=output.parent))
             command = [*command[:-1], '--work-dir', scratch, command[-1]]
         isolated_group = native and os.name == 'posix'
+        if progress_check:
+            progress_check()
         process = subprocess.Popen(command, stdout=log, stderr=log,
                                    start_new_session=isolated_group)
         try:
             while process.poll() is None:
+                if progress_check:
+                    progress_check()
                 now = time.monotonic()
                 size = output.stat().st_size if output.exists() else 0
                 if size > previous_size:

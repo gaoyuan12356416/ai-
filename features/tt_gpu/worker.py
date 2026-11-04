@@ -2509,7 +2509,7 @@ def build_random_overlay_command(
     )
     if config.compositor_backend == BACKEND:
         from features.random_gpu.native_pipeline import command as native_command, enabled as native_enabled
-        if (config.media_mode == RANDOM_OVERLAY_MEDIA_MODE
+        if (getattr(config, "media_mode", RANDOM_OVERLAY_MEDIA_MODE) == RANDOM_OVERLAY_MEDIA_MODE
                 and config.video_encoder in {"h264_nvenc", "hevc_nvenc"}
                 and native_enabled()):
             return native_command(source_path,output_path,

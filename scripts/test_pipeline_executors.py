@@ -87,8 +87,11 @@ class ExecutorTests(unittest.TestCase):
                     context.phase_name = value
                     observed.append(value)
                 context.phase = phase
-                original = lambda *args, **kwargs: context.phase_name
-                processor = SimpleNamespace(runner=original)
+                lease_check = lambda: None
+                def original(*args, **kwargs):
+                    self.assertIs(kwargs.get('progress_check'), lease_check)
+                    return context.phase_name
+                processor = SimpleNamespace(runner=original, execution_check=lease_check)
                 with executor._measure_processor(processor, context):
                     self.assertEqual(processor.runner(command), expected)
                 self.assertEqual(observed, [expected, 'prepare'])

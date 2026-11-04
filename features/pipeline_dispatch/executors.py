@@ -376,6 +376,23 @@ class NodeExecutors:
         return {"status": "ready", "artifact": artifact, "preparation": result}
 
     def _prepare_processor(self, kind, processor, request, context):
+        # A second process must not unlink the first process's output, even
+        # when an interrupted coordinator has already issued a new generation.
+        if kind == "fb_prepare":
+            from features.fb_gpu.job_lock import exclusive_job
+            check = getattr(context, "check_render", context.check)
+            lock = self.work_root / "fb-job-locks" / (hashlib.sha256(str(request.get("job_id", "")).encode()).hexdigest() + ".lock")
+            with exclusive_job(lock, check):
+                context.check()
+                previous = getattr(processor, "execution_check", None)
+                processor.execution_check = check
+                try:
+                    return self._prepare_processor_locked(kind, processor, request, context)
+                finally:
+                    processor.execution_check = previous
+        return self._prepare_processor_locked(kind, processor, request, context)
+
+    def _prepare_processor_locked(self, kind, processor, request, context):
         store = getattr(processor, "cos", None) or getattr(processor, "object_store", None)
         if store is None and callable(getattr(processor, "_object_store", None)):
             store = processor._object_store()
@@ -447,6 +464,9 @@ class NodeExecutors:
                         "ffmpeg" in Path(str(command[0])).name.lower()
                         or "features.random_gpu.native_pipeline" in command)
                     selected = "render" if is_render else "probe"
+                    check = getattr(processor, "execution_check", None)
+                    if check:
+                        kwargs["progress_check"] = check
                 context.phase(selected)
                 try:
                     return original(*args, **kwargs)

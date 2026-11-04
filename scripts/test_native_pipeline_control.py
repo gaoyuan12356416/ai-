@@ -84,6 +84,25 @@ time.sleep(20)
             digest=file_digest();digest.update(b'abc')
             self.assertEqual(digest.hexdigest(),'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
 
+    def test_lease_loss_cleans_native_scratch_and_preserves_error(self):
+        from features.pipeline_dispatch.worker import LeaseLost
+        code="""import sys,time
+from pathlib import Path
+root=Path(sys.argv[sys.argv.index('--work-dir')+1]);(root/'partial').write_bytes(b'temp')
+Path(str(sys.argv[-1])+'.progress').write_text('working')
+time.sleep(20)
+"""
+        calls=[]
+        def lease_check():
+            calls.append(True)
+            if native_pipeline.progress_path(self.output).exists():
+                raise LeaseLost('native lease lost')
+        with self.assertRaises(LeaseLost):
+            run_render(self.child(code),timeout=5,stall_seconds=3,poll_seconds=.02,
+                       progress_check=lease_check)
+        self.assertGreater(len(calls),1)
+        self.assertEqual(list(self.output.parent.iterdir()),[])
+
     def test_unchecked_failure_retains_bounded_diagnostic_tail(self):
         result=run_render(self.child("import sys;sys.stderr.write('x'*9000+'root-cause');sys.exit(2)"),
                           check=False,timeout=5,poll_seconds=.02)
