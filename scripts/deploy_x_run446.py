@@ -200,17 +200,35 @@ def prepare(root, source, commit, timeout):
 
 def grant_reader_acl(root):
     require(command(["systemctl", "show", SERVICE, "--property=User", "--value"]) == "x-post-daily", "unexpected_auto_service_user")
-    with contextlib.closing(sqlite3.connect(DISPATCH_DB.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-        require(conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete", "dispatch_journal_changed_review_acl_for_wal")
+    sidecars = [Path(str(DISPATCH_DB) + suffix) for suffix in ("-wal", "-shm")]
+    sidecar_backup = root / "dispatch.sidecars.before.json"
+    if not sidecar_backup.exists():
+        before = [{"path": str(path), "acl": command(["getfacl", "-p", path]) if path.exists() else None}
+                  for path in sidecars]
+        write_atomic(sidecar_backup, (json.dumps(before, indent=2) + "\n").encode(), mode=0o600)
     command(["setfacl", "-m", "u:x-post-daily:--x", DISPATCH_DB.parent])
     command(["setfacl", "-m", "u:x-post-daily:r--", DISPATCH_DB])
-    code = ("import sqlite3; c=sqlite3.connect('file:" + str(DISPATCH_DB) + "?mode=ro',uri=True,timeout=5); "
-            "c.execute('PRAGMA query_only=ON'); "
-            "r=c.execute(\"SELECT id,status FROM pipeline_job WHERE source_key='x:queue:5753'\").fetchall(); "
-            "assert r; print('dispatch_read_ok'); c.close()")
-    result = command(["runuser", "-u", "x-post-daily", "--", "python3", "-c", code])
-    require(result == "dispatch_read_ok", "service_user_dispatch_read_failed")
-    write_atomic(root / "dispatch.acl.after", (command(["getfacl", "-p", DISPATCH_DB.parent, DISPATCH_DB]) + "\n").encode(), mode=0o600)
+    # New SQLite WAL/SHM files inherit the reader entry and the DB's effective
+    # 0640 mode. The directory remains traversal-only, never writable by Auto.
+    command(["setfacl", "-m", "d:u:x-post-daily:r--,d:m::r--", DISPATCH_DB.parent])
+    # Pin a root read snapshot during initialization/probe so read-only SQLite
+    # can open existing WAL/SHM without needing directory write permission.
+    with contextlib.closing(sqlite3.connect(DISPATCH_DB.resolve().as_uri() + "?mode=rw", uri=True)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        require(conn.execute("PRAGMA journal_mode").fetchone()[0].lower() in {"delete", "wal"}, "dispatch_journal_mode_unsupported")
+        conn.execute("BEGIN")
+        conn.execute("SELECT id FROM pipeline_job WHERE source_key='x:queue:5753'").fetchall()
+        for path in sidecars:
+            if path.exists():
+                command(["setfacl", "-m", "u:x-post-daily:r--", path])
+        code = ("import sqlite3; c=sqlite3.connect('file:" + str(DISPATCH_DB) + "?mode=ro',uri=True,timeout=5); "
+                "c.execute('PRAGMA query_only=ON'); "
+                "r=c.execute(\"SELECT id,status FROM pipeline_job WHERE source_key='x:queue:5753'\").fetchall(); "
+                "assert r; print('dispatch_read_ok'); c.close()")
+        result = command(["runuser", "-u", "x-post-daily", "--", "python3", "-c", code])
+        require(result == "dispatch_read_ok", "service_user_dispatch_read_failed")
+        current = [DISPATCH_DB.parent, DISPATCH_DB] + [path for path in sidecars if path.exists()]
+        write_atomic(root / "dispatch.acl.after", (command(["getfacl", "-p", *current]) + "\n").encode(), mode=0o600)
 
 
 def link_release(release):
@@ -233,7 +251,7 @@ def health():
 
 
 def switch(root, manifest):
-    require(manifest["phase"] == "prepared", "prepare_phase_required")
+    require(manifest["phase"] in {"prepared", "switching"}, "prepare_phase_required")
     source = Path(manifest["source"])
     verify_source(source, manifest["commit"])
     check_paused(manifest)
@@ -242,7 +260,7 @@ def switch(root, manifest):
         path = CURRENT/name
         require((sha(path) if path.exists() else None) == expected, "old_runtime_file_changed:" + name)
     for item in manifest["files"]:
-        require(sha(item["path"]) == item["sha256"], "target_file_changed:" + item["path"])
+        require(sha(item["path"]) in {item["sha256"], item.get("deployed_sha256", "")}, "target_file_changed:" + item["path"])
     release = Path(manifest["new_release"])
     require({name: sha(release/name) for name in OVERLAYS} == manifest["source_hashes"], "staged_release_hash_changed")
     for item in manifest["files"]:
@@ -299,7 +317,20 @@ def rollback(root, manifest, timeout):
         write_atomic(target, Path(item["backup"]).read_bytes(), mode=item["mode"])
         os.chown(target, item["uid"], item["gid"])
     link_release(Path(manifest["old_release"]))
+    command(["setfacl", "-k", DISPATCH_DB.parent])
     command(["setfacl", "--restore=" + str(root/"dispatch.acl.before")])
+    sidecar_backup = root / "dispatch.sidecars.before.json"
+    if sidecar_backup.exists():
+        for item in json.loads(sidecar_backup.read_text(encoding="utf-8")):
+            path = Path(item["path"])
+            if not path.exists():
+                continue
+            if item["acl"] is None:
+                command(["setfacl", "-x", "u:x-post-daily", path], check=False)
+            else:
+                restore = root / "dispatch.sidecar.restore.acl"
+                write_atomic(restore, (item["acl"] + "\n").encode(), mode=0o600)
+                command(["setfacl", "--restore=" + str(restore)])
     command(["systemctl", "restart", SERVICE])
     health()
     manifest["phase"] = "rolled_back"
