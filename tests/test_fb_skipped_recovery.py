@@ -75,6 +75,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(result['runs'][0]['restored']),0)
         self.assertEqual(result['runs'][0]['retained'][0]['reason'],'existing_execution_evidence')
 
+    def test_one_occupied_slot_does_not_abort_other_recovery(self):
+        with self.store.connect() as c:
+            c.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,material_id,created_at_utc,planned_publish_at_utc) VALUES(999,1,1,'1001','1','planned','299',?,?)",(utc_iso(self.now),utc_iso(self.now)))
+        result=self.recovery(True)
+        self.assertEqual(len(result['runs'][0]['restored']),0)
+        self.assertEqual(result['runs'][0]['retained'][0]['reason'],'fb_auto_page_task_conflict')
+        self.assertEqual(len(result['runs'][1]['restored']),1)
+
     def test_all_time_published_and_unknown_materials_are_excluded(self):
         old=utc_iso(self.now-timedelta(days=30))
         with self.store.connect() as c:

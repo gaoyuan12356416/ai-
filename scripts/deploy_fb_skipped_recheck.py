@@ -141,16 +141,36 @@ def native_active():
         return auto + video
 
 
+def idle_readbacks(pid):
+    """Prove the two idle GET workers by stack identity, never by thread count."""
+    spy = Path('/mnt/data-disk/fb-video-publish/maintenance/inspect-tools/bin/py-spy')
+    if not spy.is_file():
+        return 0
+    threads = json.loads(run([spy, 'dump', '--pid', pid, '--json'], timeout=10))
+    count = 0
+    for thread in threads:
+        frames = thread.get('frames', [])
+        if (thread.get('thread_name') in ('fb-readback-0', 'fb-readback-1') and len(frames) >= 3
+                and frames[0]['name'] == 'wait' and frames[1]['name'] == 'get'
+                and frames[1]['filename'].endswith('/queue.py')
+                and frames[2]['name'] == '_reconcile_worker'
+                and frames[2]['filename'].endswith('/features/pipeline_dispatch/fb_native.py')):
+            count += 1
+    return count
+
+
 def drained(pid):
     sockets = [r for r in run(["ss", "-Hntp"]).splitlines() if ("pid=" + pid + ",") in r]
     listeners = [r for r in run(["ss", "-Hlntp"]).splitlines() if ("pid=" + pid + ",") in r]
     threads = len(list(Path("/proc", pid, "task").iterdir()))
-    return {"threads": threads, "sockets": len(sockets), "accept_queue": sum(int(r.split()[1]) for r in listeners)}
+    return {"threads": threads, "idle_readbacks": idle_readbacks(pid), "sockets": len(sockets),
+            "accept_queue": sum(int(r.split()[1]) for r in listeners)}
 
 
 def future_plan_read(pid):
     """Identify the sole read-only future planner, never a media/Graph handler."""
-    if native_active() or drained(pid)["threads"] > 5:
+    proof = drained(pid)
+    if native_active() or proof["threads"] - proof["idle_readbacks"] > 5:
         return None
     client = show("fb-auto-post-plan.service", "MainPID")
     if client == "0":
@@ -217,9 +237,8 @@ def switch(lane, folder, manifest, audit, *, defer_plan_read=False):
         deadline = time.monotonic() + (300 if lane == "fb" else 30)
         while True:
             proof = drained(pid)
-            # Coordinator has main+collector; FB has main+two idle bounded reconcile workers.
-            # All accepted HTTP/Graph sockets must still drain before a switch.
-            if not proof["sockets"] and not proof["accept_queue"] and proof["threads"] <= (2 if lane == "coordinator" else 3):
+            # Ignore only stack-verified idle GET workers; accepted handlers drain.
+            if not proof["sockets"] and not proof["accept_queue"] and proof["threads"] - proof['idle_readbacks'] <= (2 if lane == "coordinator" else 1):
                 time.sleep(.3)
                 if drained(pid) == proof:
                     break

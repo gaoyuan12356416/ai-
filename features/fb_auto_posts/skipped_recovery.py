@@ -116,6 +116,10 @@ def recover_skipped(store, run_ids, pages, materials, snapshots, *, operation_id
                         reason = automatic_block(conn, page.page_id) or manual_block(conn, page.page_id)
                     material, chosen = None, {}
                     publish_at = max(task["planned_publish_at_utc"], utc_iso(now_dt + timedelta(seconds=run_index)))
+                    if not reason and conn.execute("SELECT 1 FROM fb_auto_task WHERE page_id=? AND planned_publish_at_utc=? "
+                            "AND id<>? AND status IN ('planned','preparing','ready','running','submitted') LIMIT 1",
+                            (task['page_id'], publish_at, task['id'])).fetchone():
+                        reason = 'fb_auto_page_task_conflict'
                     if not reason:
                         snapshot = snapshots.get(page_language(page.language))
                         excluded = store._cooldown_material_ids(conn, page.page_id, int(config["cooldown_days"]))
