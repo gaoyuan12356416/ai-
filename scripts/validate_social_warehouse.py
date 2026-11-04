@@ -15,6 +15,27 @@ from features.social_analytics.report import FIELDS, COUNTS, csv_export
 from features.social_analytics.warehouse_refresh import environment, atomic_json
 
 
+def manual_source_query(env, statement, max_rows=1001):
+    """Manual acceptance uses the reserved read pool; never called by the timer."""
+    import pymysql
+    db = pymysql.connect(host='101.32.56.53', port=63350, user=env['ADMIN_MAPPING_MYSQL_USER'],
+                         password=env['ADMIN_MAPPING_MYSQL_PASSWORD'], charset='utf8mb4',
+                         connect_timeout=3, read_timeout=25, write_timeout=3, autocommit=False)
+    try:
+        with db.cursor() as cursor:
+            cursor.execute('SELECT @@read_only')
+            assert cursor.fetchone()[0] == 1
+            cursor.execute("SET SESSION time_zone='+00:00'")
+            cursor.execute('SET SESSION MAX_EXECUTION_TIME=20000')
+            cursor.execute('START TRANSACTION READ ONLY')
+            cursor.execute(statement)
+            rows = [json.loads(bytes.fromhex(row[0]).decode('utf-8')) for row in cursor.fetchall()]
+            assert len(rows) <= max_rows
+            return rows
+    finally:
+        db.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', default=warehouse_reader.DEFAULT_ROOT)
@@ -40,9 +61,11 @@ def main():
     outputs['warehouse_tables'] = manifest['tables']
     if args.compare_live:
         with patch.object(warehouse_reader, 'configured_root', return_value=None), patch.object(
-                routes, 'read_catalogs', return_value=(cat, catalog_errors)):
+                routes, 'read_catalogs', return_value=(cat, catalog_errors)), patch.object(
+                routes, 'query_rows', side_effect=manual_source_query):
             routes._cache.clear()
             begin = time.monotonic()
+            env['SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS'] = 20000
             old = routes.build_report(env, actor, query, ai_backend_only=True)
             outputs['live_seconds'] = round(time.monotonic() - begin, 4)
         for field in FIELDS + COUNTS:
