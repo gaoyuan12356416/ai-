@@ -88,7 +88,14 @@ def _job(row, private=False):
 
 
 class DispatchStore:
-    def __init__(self, path, clock=utcnow):
+    def __init__(self, path, clock=utcnow, *, capability_exclusions=None):
+        exclusions = {} if capability_exclusions is None else capability_exclusions
+        if (not isinstance(exclusions, dict)
+                or any(not isinstance(node, str) or not node or not isinstance(values, list)
+                       or any(not isinstance(value, str) or not value or len(value) > 120 for value in values)
+                       for node, values in exclusions.items())):
+            raise DispatchError("node_capability_policy_invalid", status=400)
+        self.capability_exclusions = {node: set(values) for node, values in exclusions.items()}
         self.path, self.clock = str(path), clock
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
@@ -383,6 +390,32 @@ class DispatchStore:
         self.event(c, existing["id"], "youtube_revision_requested", {"previous_revision": previous, "source_revision": revision}, self.now())
         return True
 
+    def _rearm_youtube_publish_retry(self, c, existing, offer, meta):
+        revision = str(offer.get("source_revision") or "")
+        previous = str(meta.get("source_revision") or "0")
+        try:
+            proof = json.loads(existing["canonical_receipt"] or "{}")
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(proof, dict) or proof.get("publish_id") or proof.get("unknown_outcome"):
+            return False
+        if not (existing["channel"] == "youtube" and existing["family"] == "publish"
+                and existing["stage"] == "publish" and existing["status"] == "failed"
+                and revision.isdigit() and previous.isdigit() and int(revision) > int(previous)
+                and offer.get("source_status") == "queued" and offer.get("execution_available") is True
+                and existing["hold_reason"] in ("", "adapter_unavailable")
+                and not any(offer.get(k) for k in ("hold_reason", "source_attempt_count", "unknown_outcome", "publish_id", "legacy_inflight", "reconcile_only"))):
+            return False
+        if c.execute("SELECT 1 FROM pipeline_resource WHERE job_id=? UNION ALL SELECT 1 FROM pipeline_legacy_resource WHERE job_id=? LIMIT 1", (existing["id"], existing["id"])).fetchone():
+            return False
+        # Only an explicit native retry of a proven never-uploaded publication.
+        # Keep all prior claims, operations and receipts as historical evidence.
+        meta.update({k: offer[k] for k in ("source_revision", "source_attempt_count", "legacy_inflight", "reconcile_only", "execution_available", "canonical_fingerprint") if k in offer})
+        c.execute("UPDATE pipeline_job SET status='queued',source_status='queued',hold_reason='',external_intent=0,payload_json=?,artifact_json=?,source_meta_json=?,canonical_receipt='',node_id='',worker_id='',claim_hash='',lease_expires_at='',started_at='',finished_at='',error_code='',error_message='',updated_at=? WHERE id=?",
+                  (dumps(offer.get("payload", {})), dumps(offer.get("artifact", {})), dumps(meta), self.now(), existing["id"]))
+        self.event(c, existing["id"], "youtube_publish_retry_requested", {"source_revision": revision, "previous_generation": existing["generation"]}, self.now())
+        return True
+
     def offer(self, offer):
         now = self.now()
         channel = channel_key(offer["channel"])
@@ -434,6 +467,8 @@ class DispatchStore:
                 return None  # Planning a queue is not a completed media render.
             if existing:
                 meta = json.loads(existing["source_meta_json"])
+                if self._rearm_youtube_publish_retry(c, existing, offer, meta):
+                    return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
                 if adopting_schedule and existing["generation"] == 0 and not existing["external_intent"] and existing["status"] in ("unknown", "completed", "queued"):
                     try:
                         proof = json.loads(existing["canonical_receipt"] or "{}")
@@ -499,7 +534,11 @@ class DispatchStore:
                 # Canonical observations cannot reset a claim, failure, hold or write intent.
                 # They may escalate a failed admission to a native unknown outcome.
                 # Preserve the owning ledger's fence even if no permit reached a node.
-                if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"]:
+                parked_schedule = (channel == "youtube" and existing["status"] == "ready"
+                                   and not offer.get("unknown_outcome") and not offer.get("legacy_inflight")
+                                   and bool(offer.get("confirmed_youtube_schedule"))
+                                   and json.loads(existing["payload_json"]).get("continuation") == offer["confirmed_youtube_schedule"])
+                if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"] and not parked_schedule:
                     c.execute("UPDATE pipeline_job SET status='unknown',error_code='canonical_unknown_outcome',finished_at='',updated_at=? WHERE id=?", (now, existing["id"]))
                     for resource in offer.get("resource_keys", []):
                         c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, existing["id"]))
@@ -651,7 +690,8 @@ class DispatchStore:
                     "publish": {"target": 2, "ceiling": 4},
                 }
                 self._save_config(c, config, {}, "node_capacity_initialized")
-            c.execute("INSERT INTO pipeline_node VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET capabilities_json=excluded.capabilities_json,metrics_json=excluded.metrics_json,last_seen_at=excluded.last_seen_at", (node_id, dumps(sorted(set(capabilities))), dumps(metrics or {}), self.now()))
+            admitted = set(capabilities) - self.capability_exclusions.get(node_id, set())
+            c.execute("INSERT INTO pipeline_node VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET capabilities_json=excluded.capabilities_json,metrics_json=excluded.metrics_json,last_seen_at=excluded.last_seen_at", (node_id, dumps(sorted(admitted)), dumps(metrics or {}), self.now()))
             return {"accepted": True, "capacity": self.config(c)["hosts"][node_id], "lease_seconds": LEASE_SECONDS}
 
     def worker_heartbeat(self, node_id, worker_id, stage, pid=None, draining=False, observation=None):
@@ -699,7 +739,9 @@ class DispatchStore:
                 return {"job": None, "idle_reason": "worker_busy"}
             if stage == "publish" and c.execute("SELECT count(*) FROM pipeline_job WHERE stage='publish' AND status IN ('running','legacy_running')").fetchone()[0] >= config["global_publish_limit"]:
                 return {"job": None, "idle_reason": "global_publish_limit"}
-            capabilities = set(json.loads(node["capabilities_json"]))
+            # Apply immediately to cached registrations as well as future node
+            # heartbeats. An unavailable tool must not interrupt other node work.
+            capabilities = set(json.loads(node["capabilities_json"])) - self.capability_exclusions.get(node_id, set())
             rows = c.execute("""SELECT j.* FROM pipeline_job j
               LEFT JOIN pipeline_fairness fc ON fc.scope=? AND fc.item=j.channel
               LEFT JOIN pipeline_fairness fb ON fb.scope=?||j.channel AND fb.item=j.batch_key
@@ -1196,7 +1238,7 @@ class DispatchStore:
                     elif (not last or last <= stamp(self.clock() - dt.timedelta(seconds=300))) and cpu < 70 and available > .25:
                         samples = c.execute("SELECT count(*) FROM pipeline_job WHERE node_id=? AND stage=? AND finished_at>=? AND status IN ('completed','published')", (node["node_id"], stage, stamp(self.clock() - CAPACITY_SAMPLE_WINDOW))).fetchone()[0]
                         candidates = c.execute("SELECT channel,capabilities_json FROM pipeline_job WHERE stage=? AND status IN ('queued','ready') AND hold_reason='' AND scheduled_at<=?", (stage, now)).fetchall()
-                        node_capabilities = set(json.loads(node["capabilities_json"]))
+                        node_capabilities = set(json.loads(node["capabilities_json"])) - self.capability_exclusions.get(node["node_id"], set())
                         waiting = any(item["channel"] in config["enabled_channels"] and set(json.loads(item["capabilities_json"])).issubset(node_capabilities) for item in candidates)
                         gpu_room = stage != "prepare" or not is_gpu or (metrics.get("gpu_percent", 100) < 80 and metrics.get("encoder_percent", 100) < 80 and metrics.get("gpu_memory_available_fraction", 0) > .2)
                         if samples >= 3 and waiting and gpu_room:

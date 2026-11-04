@@ -339,6 +339,9 @@ class LedgerAdapter:
                 row["_youtube_publication_handoff"] = bool(child and str(child.get("preparation_id")) == str(row["id"]))
         elif key == ("youtube", "publish"):
             source_key = "youtube:publish:" + str(row["id"])
+            if self._exists(conn, "drama_youtube_publish_event"):
+                retry = conn.execute("SELECT id FROM drama_youtube_publish_event WHERE task_id=? AND phase='operator_retry' AND outcome='requested' ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+                row["_youtube_retry_revision"] = str(retry[0]) if retry else ""
             row["_pipeline_history"] = any(
                 self._exists(conn, table) and conn.execute("SELECT 1 FROM " + table + " WHERE source_key=? LIMIT 1", (source_key,)).fetchone()
                 for table in ("pipeline_youtube_claim", "pipeline_youtube_operation", "pipeline_youtube_checkpoint"))
@@ -471,13 +474,19 @@ class LedgerAdapter:
             projected_status = "completed"
         if adopt_schedule:
             projected_status = "ready"
+        confirmed_schedule = None
+        if (spec.channel == "youtube" and spec.family == "publish" and state == "scheduled"
+                and row.get("schedule_status") == "armed" and not unknown and not row.get("lease_owner")
+                and publish_id and row.get("publish_at")
+                and stamp(row.get("schedule_confirmed_publish_at") or "") == stamp(row["publish_at"])):
+            confirmed_schedule = {"video_id": publish_id, "scheduled_at": stamp(row["publish_at"])}
         if row.get("canonical_held"):
             projected_status = "backlog_paused"
         started_at = row.get("started_at_utc") or row.get("started_at") or row.get("claimed_at_utc") or row.get("claimed_at") or row.get("selected_at_utc")
         if legacy_parent_inflight and not started_at:
             started_at = row.get("legacy_parent_started_at")
         finished_at = row.get("finished_at_utc") or row.get("finished_at") or row.get("completed_at_utc") or row.get("published_at_utc") or row.get("video_published_at_utc") or ((row.get("updated_at_utc") or row.get("updated_at")) if terminal or review_hold else "")
-        source_revision = ""
+        source_revision = str(row.get("_youtube_retry_revision") or "")
         if spec.channel == "youtube" and spec.family == "preparation":
             body = obj(row.get("body"))
             version = row.get("version") or body.get("current_version")
@@ -507,6 +516,7 @@ class LedgerAdapter:
                 "backlog_authorization": row.get("_backlog_authorization"),
                 "backlog_ancestor_authorization": row.get("_backlog_ancestor_authorization"),
                 "source_revision": source_revision,
+                "confirmed_youtube_schedule": confirmed_schedule,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
                 "stage": stage, "scheduled_at": (stamp(now) if youtube_control_due(row) else adopt_schedule["scheduled_at"]) if adopt_schedule else eligible_at,
