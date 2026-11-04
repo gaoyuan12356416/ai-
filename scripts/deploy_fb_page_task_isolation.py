@@ -142,7 +142,9 @@ def fb_enabled(enabled, preparation_only=False):
 def native_active():
     with contextlib.closing(sqlite3.connect(FB_DB.as_uri() + "?mode=ro", uri=True)) as conn:
         auto = conn.execute("SELECT count(*) FROM fb_auto_task WHERE status IN ('running','preparing')").fetchone()[0]
-        video = conn.execute("SELECT count(*) FROM fb_video_task WHERE status='running' OR prepare_state='preparing' OR link_state='writing'").fetchone()[0]
+        # Cancelled/terminal rows retain historical stage labels. Accepted
+        # handlers are drained separately; labels alone are not active work.
+        video = conn.execute("SELECT count(*) FROM fb_video_task WHERE status='running' OR (status='queued' AND (prepare_state='preparing' OR link_state='writing'))").fetchone()[0]
         return auto + video
 
 
