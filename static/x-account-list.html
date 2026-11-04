@@ -54,6 +54,7 @@
     .publish-toggle input { width:18px; height:18px; margin:0; accent-color:var(--blue); cursor:pointer; }
     .publish-toggle input:disabled { cursor:wait; }
     .auto-publish-col { min-width:120px; white-space:nowrap; }
+    .pool-status-col { min-width:110px; white-space:nowrap; }
     .drama-language-col { min-width:150px; }
     .drama-language-select { min-width:125px; min-height:34px; padding:0 30px 0 10px; border:1px solid var(--line); border-radius:9px; background:#fff; color:var(--ink); }
     .drama-language-select:focus { border-color:#8eacf2; box-shadow:0 0 0 3px rgba(37,99,235,.1); outline:none; }
@@ -160,8 +161,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>运营统计</th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>后台状态</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th>运营统计</th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>后台状态</th><th class="pool-status-col">素材池状态</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -171,13 +172,13 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/x-video-account-settings.js?v=20261027pool-import"></script>
+  <script src="/x-video-account-settings.js?v=20261104pool-status"></script>
   <script src="/vendor/xlsx.full.min.js?v=0.20.3"></script>
   <script src="/x-excel-publish.js?v=20261023shared2"></script>
   <script src="/quick-nav.js?v=20261023xshared2"></script>
   <script>
     (() => {
-      const state = { auth:null, accounts:[], statsMeta:null };
+      const state = { auth:null, accounts:[], statsMeta:null, poolStates:new Map(), loadVersion:0 };
       const dramaLanguages = [
         ["en","English"], ["es","Español"], ["pt-br","Português (Brasil)"],
         ["fr","Français"], ["de","Deutsch"], ["ru","Русский"],
@@ -381,11 +382,75 @@
         }
       }
 
+      function poolStatusHtml(id) {
+        const result = state.poolStates.get(String(id));
+        const pool = result?.pool;
+        if (!pool) return `<span class="status ${result?.error ? "error" : "disabled"}" title="${escapeHtml(result?.error || "正在读取素材池计划状态")}">${result?.error ? "读取失败" : "加载中…"}</span>`;
+        const needsReview = !pool.enabled && pool.pause_reason === "unknown_outcome";
+        const title = `版本 ${pool.version}${pool.pause_reason ? " · " + pool.pause_reason : ""}`;
+        return `<span class="status ${pool.enabled ? "active" : needsReview ? "error" : "expired"}" title="${escapeHtml(title)}">${pool.enabled ? "已启用" : "已暂停"}</span>${needsReview ? '<div class="error-text">结果待核对</div>' : ""}`;
+      }
+
+      function paintPoolStatus(id) {
+        const cell = el("accountRows").querySelector(`[data-pool-status-id="${CSS.escape(String(id))}"]`);
+        if (cell) cell.innerHTML = poolStatusHtml(id);
+      }
+
+      function updatePoolStatus(id, pool, cache = state.poolStates) {
+        if (cache !== state.poolStates) return;
+        const previous = cache.get(String(id))?.pool;
+        if (previous && Number(previous.version) > Number(pool.version)) return;
+        cache.set(String(id), { pool });
+        paintPoolStatus(id);
+      }
+
+      // Load only visible rows, with at most three existing pool reads at once.
+      const poolRequests = [];
+      let activePoolRequests = 0;
+      function drainPoolRequests() {
+        while (activePoolRequests < 3 && poolRequests.length) {
+          const { id, cache } = poolRequests.shift();
+          if (cache !== state.poolStates) continue;
+          activePoolRequests += 1;
+          (async () => {
+            try {
+              const result = await window.XVideoPublish.api(`/accounts/${encodeURIComponent(id)}/pool?state=pending&limit=1`, { signal:AbortSignal.timeout(20000) });
+              if (!result.pool || typeof result.pool.enabled !== "boolean") throw new Error("素材池状态数据不完整");
+              updatePoolStatus(id, result.pool, cache);
+            } catch (error) {
+              if (cache === state.poolStates && !cache.get(id)?.pool) {
+                cache.set(id, { error:`${error.message}；可刷新列表重试` });
+                paintPoolStatus(id);
+              }
+            } finally {
+              activePoolRequests -= 1;
+              drainPoolRequests();
+            }
+          })();
+        }
+      }
+
+      function requestPoolStatus(cell) {
+        const id = cell.dataset.poolStatusId;
+        if (state.poolStates.has(id)) return;
+        state.poolStates.set(id, { loading:true });
+        poolRequests.push({ id, cache:state.poolStates });
+        drainPoolRequests();
+      }
+
+      const poolObserver = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
+        entries.filter(entry => entry.isIntersecting).forEach(entry => {
+          poolObserver.unobserve(entry.target);
+          requestPoolStatus(entry.target);
+        });
+      }, { rootMargin:"200px" }) : null;
+
       function renderRows() {
+        poolObserver?.disconnect();
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="8" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="9" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -414,9 +479,14 @@
             <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? (item.access_token_status === "expired_refreshable" || item.access_token_status === "missing_refreshable" ? "发布池可选；执行时自动续期" : "发布池可选") : (publishApproved ? "授权不可用，发布池不可选" : "发布池不可选")}</div></td>
             <td>${metricsHtml(item)}</td>
             <td><span class="status ${escapeHtml(meta[1])}">${escapeHtml(needsAttention(item) ? attentionReason(item) : meta[0])}</span><div class="subtle">${escapeHtml(item.oauth_app_name || "当前 API")}</div>${item.last_error ? `<div class="error-text">${escapeHtml(item.last_error)}</div>` : ""}</td>
+            <td class="pool-status-col" data-pool-status-id="${escapeHtml(item.id)}" aria-live="polite">${poolStatusHtml(item.id)}</td>
             <td><div class="xp-row-actions">${verifyButton}<button class="button small" data-x-settings="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(publishingReason)}">发布设置</button><button class="button small" data-x-pool="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(publishingReason)}">素材池</button>${state.auth?.user?.role === "admin" ? `<button class="button small danger" type="button" data-delete-id="${escapeHtml(item.id)}">删除</button>` : ""}</div>${publishingReason ? `<div class="xp-row-reason">${escapeHtml(publishingReason)}</div>` : ""}</td>
           </tr>`;
         }).join("");
+        body.querySelectorAll("[data-pool-status-id]").forEach(cell => {
+          if (poolObserver) poolObserver.observe(cell);
+          else requestPoolStatus(cell);
+        });
       }
 
       function renderLanguageFilter() {
@@ -433,8 +503,12 @@
       }
 
       async function loadData() {
+        const loadVersion = ++state.loadVersion;
+        state.poolStates = new Map();
+        poolRequests.length = 0;
+        poolObserver?.disconnect();
         refreshCredits();
-        el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="9" class="empty">正在加载…</td></tr>`;
         try {
           const [result] = await Promise.all([
             api("/api/admin/x-accounts"),
@@ -442,11 +516,13 @@
               ? window.XVideoPublish.refreshAccounts().catch(() => { window.XVideoPublish.accounts=[]; })
               : Promise.resolve(),
           ]);
+          if (loadVersion !== state.loadVersion) return;
           state.accounts = Array.isArray(result.items) ? result.items : [];
           state.statsMeta = result.operating_stats_meta || null;
           renderStats(); renderOperatingSummary(); renderLanguageFilter(); renderRows();
         } catch (error) {
-          el("accountRows").innerHTML = `<tr><td colspan="8" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          if (loadVersion !== state.loadVersion) return;
+          el("accountRows").innerHTML = `<tr><td colspan="9" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         }
@@ -545,7 +621,7 @@
         if (button) verifyAccount(button.dataset.verifyId, button);
         const settings=event.target.closest("[data-x-settings]"),pool=event.target.closest("[data-x-pool]");
         if(settings && !settings.disabled) window.XVideoPublish.openSettings(settings.dataset.xSettings,loadData).catch(error=>toast(error.message));
-        if(pool && !pool.disabled) window.XVideoPublish.openPool(pool.dataset.xPool).catch(error=>toast(error.message));
+        if(pool && !pool.disabled) window.XVideoPublish.openPool(pool.dataset.xPool, value => updatePoolStatus(pool.dataset.xPool, value)).catch(error=>toast(error.message));
       });
       el("accountRows").addEventListener("change", event => {
         const languageSelect = event.target.closest("[data-drama-language-id]");
