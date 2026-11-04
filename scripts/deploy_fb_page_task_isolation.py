@@ -155,7 +155,56 @@ def drained(pid):
     return {"threads": threads, "sockets": len(sockets), "accept_queue": sum(int(r.split()[1]) for r in listeners)}
 
 
-def switch(lane, folder, manifest, audit):
+def future_plan_read(pid):
+    """Identify the sole read-only future planner, never a media/Graph handler."""
+    if native_active() or drained(pid)["threads"] > 5:
+        return None
+    client = show("fb-auto-post-plan.service", "MainPID")
+    if client == "0":
+        return None
+    args = Path("/proc", client, "cmdline").read_bytes().decode().split("\0")
+    runners = [index for index, value in enumerate(args) if value.endswith("fb_auto_post_runner.py")]
+    if len(runners) != 1 or args[runners[0] + 1:runners[0] + 2] != ["plan"]:
+        return None
+    prefix = args[args.index("--worker-id") + 1] if "--worker-id" in args else "fb-auto-post-runner-primary"
+    lines = run(["ss", "-Hntp"]).splitlines()
+    incoming = []
+    for row in lines:
+        if ("pid=" + pid + ",") not in row:
+            continue
+        local, peer = row.split()[3:5]
+        if local == "127.0.0.1:18835":
+            incoming.append(peer)
+        elif peer != "101.32.56.53:63350":
+            return None
+    if len(incoming) != 1 or not any(row.split()[3:5] == [incoming[0], "127.0.0.1:18835"] and ("pid=" + client + ",") in row for row in lines):
+        return None
+    with contextlib.closing(sqlite3.connect(FB_DB.as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM fb_auto_due_slot WHERE status='preparing' AND lease_owner=?", (prefix + "-0",)).fetchall()
+        if len(rows) != 1:
+            return None
+        due = dict(rows[0])
+        if due["run_id"] or dt.datetime.fromisoformat(due["planned_publish_at_utc"]) <= dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1):
+            return None
+        if conn.execute("SELECT 1 FROM fb_auto_run WHERE template_id=? AND slot_key=?", (due["template_id"], due["slot_key"])).fetchone():
+            return None
+    return {"client_pid": client, "due": due}
+
+
+def settle_interrupted_plan(proof):
+    from features.fb_auto_posts.core import FBAutoPostStore
+    store = FBAutoPostStore(FB_DB)
+    due = proof["due"]
+    with store.connect() as conn:
+        existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (due["template_id"], due["slot_key"])).fetchone()
+    expected = {"expected_lease_owner": due["lease_owner"], "expected_lease_expires_at_utc": due["lease_expires_at_utc"]}
+    if existing:
+        return {"completed": store.complete_due_slot(due["id"], run_id=int(existing[0]), **expected)}
+    return {"deferred": store.defer_due_slot(due["id"], "deployment_read_query_interrupted", **expected)}
+
+
+def switch(lane, folder, manifest, audit, *, defer_plan_read=False):
     root, unit, port = LANES[lane]
     item = manifest["lanes"][lane]
     marker = "fb-isolation-" + lane + "-" + str(os.getpid())
@@ -166,6 +215,7 @@ def switch(lane, folder, manifest, audit):
     began = time.monotonic()
     gated = False
     stopped = False
+    plan = None
     temporary = root.with_name(root.name + ".fb-isolation-next")
     try:
         run(["iptables", "-I", "INPUT", "1", *rule])
@@ -178,6 +228,11 @@ def switch(lane, folder, manifest, audit):
             if not proof["sockets"] and not proof["accept_queue"] and proof["threads"] <= (2 if lane == "coordinator" else 1):
                 time.sleep(.3)
                 if drained(pid) == proof:
+                    break
+            if lane == "fb" and defer_plan_read and not proof["accept_queue"]:
+                plan = future_plan_read(pid)
+                if plan is not None:
+                    save(folder / "future-plan-read-proof.json", plan)
                     break
             assert time.monotonic() < deadline, "accepted_requests_not_drained:" + lane
             time.sleep(.5)
@@ -195,6 +250,8 @@ def switch(lane, folder, manifest, audit):
         temporary.replace(root)
         item["applied"] = True
         save(folder / "manifest.json", manifest)
+        if plan is not None:
+            audit["interrupted_future_plan"] = {"due_id": plan["due"]["id"], **settle_interrupted_plan(plan)}
         run(["systemctl", "start", unit], timeout=20)
         assert show(unit) == "active", "service_start_failed:" + lane
         audit[lane] = {"old_pid": pid, "new_pid": show(unit, "MainPID"), "drain": proof,
@@ -221,7 +278,7 @@ def switch(lane, folder, manifest, audit):
             time.sleep(.5)
 
 
-def apply(folder):
+def apply(folder, *, defer_plan_read=False):
     folder = Path(folder).resolve()
     manifest = json.loads((folder / "manifest.json").read_text())
     assert manifest["status"] == "prepared"
@@ -243,7 +300,7 @@ def apply(folder):
             time.sleep(.5)
         backup(FB_DB, folder / "fb-before-apply.sqlite3")
         for lane in ("fb", "coordinator"):
-            switch(lane, folder, manifest, audit)
+            switch(lane, folder, manifest, audit, defer_plan_read=defer_plan_read)
             save(folder / "apply.json", audit)
         completed = True
     finally:
@@ -271,12 +328,13 @@ def main():
     parser.add_argument("--folder", required=True)
     parser.add_argument("--source")
     parser.add_argument("--commit")
+    parser.add_argument("--defer-plan-read", action="store_true", help="Allow only the verified sole future-planning SELECT handler to defer during cutover")
     args = parser.parse_args()
     if args.action == "prepare":
         assert args.source and args.commit
         prepare(args.source, args.commit, args.folder)
     else:
-        apply(args.folder)
+        apply(args.folder, defer_plan_read=args.defer_plan_read)
 
 
 if __name__ == "__main__":
