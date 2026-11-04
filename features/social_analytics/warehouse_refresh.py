@@ -10,6 +10,7 @@ import subprocess
 import time
 import hashlib
 import zlib
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from .adapters import PLATFORMS, read_catalogs, source_key
@@ -157,18 +158,44 @@ def collect(env, reader, start=None, end=None):
             coverage[source_key(platform, site)] = sorted(populated)
             print(encoded(dict(event='source_complete', source=source_key(platform, site),
                                rows=len(facts), included=audit['included_totals'])), flush=True)
-    from features.youtube_analytics.titles import resolve
-    titles = {}
     ids = sorted({row['drama'] for row in restricted if row.get('drama')})
-    for offset in range(0, len(ids), 100):
-        try:
-            titles.update(resolve(ids[offset:offset + 100], lambda statement: reader.query([statement])))
-        except Exception:
-            # Descriptive names cannot invalidate financial facts.
-            titles.update({value: dict(drama_english_name='', drama_english_status='unavailable')
-                           for value in ids[offset:offset + 100]})
+    try:
+        titles = collect_titles(reader, ids)
+    except Exception:
+        titles = {value: dict(drama_english_name='', drama_english_status='unavailable') for value in ids}
+    print(encoded(dict(event='titles_complete', rows=len(titles))), flush=True)
     return dict(catalog=catalog, metrics=accepted, coverage=coverage, titles=titles,
                 start=start, end=end, catalog_errors=dict(errors), source_metadata=errors.source_metadata)
+
+
+def collect_titles(reader, ids):
+    """Same exact English-title rules, with two shared read connections."""
+    from features.youtube_analytics.titles import literal
+    series, names = defaultdict(set), defaultdict(set)
+    sql = ["SELECT DISTINCT HEX(JSON_OBJECT('content_id',content_id,'series_code',series_code)) "
+           "FROM kunlunads_dev.ads_drama_info WHERE app_id=1479 AND content_id IN (" +
+           ','.join(map(literal, ids[offset:offset + 100])) + ') LIMIT 1001'
+           for offset in range(0, len(ids), 100)]
+    for row in reader.query(sql) if sql else []:
+        content, code = str(row['content_id']), str(row.get('series_code') or '').strip()
+        if content in ids and code and code != '0':
+            series[content].add(code)
+    codes = sorted({next(iter(value)) for value in series.values() if len(value) == 1})
+    sql = ["SELECT DISTINCT HEX(JSON_OBJECT('series_code',series_code,'name',TRIM(name))) "
+           "FROM kunlunads_dev.ads_drama_info WHERE app_id=1479 AND language='en' AND series_code IN (" +
+           ','.join(map(literal, codes[offset:offset + 100])) + ') LIMIT 1001'
+           for offset in range(0, len(codes), 100)]
+    for row in reader.query(sql) if sql else []:
+        code, name = str(row['series_code']), str(row.get('name') or '').strip()
+        if code in codes and name:
+            names[code].add(name)
+    result = {}
+    for content in ids:
+        options = series[content]
+        titles = names[next(iter(options))] if len(options) == 1 else set()
+        state = 'matched' if len(titles) == 1 else 'ambiguous' if len(options) > 1 or len(titles) > 1 else 'missing'
+        result[content] = dict(drama_english_name=next(iter(titles)) if state == 'matched' else '', drama_english_status=state)
+    return result
 
 
 def table_rows(data, version):
@@ -190,15 +217,20 @@ def table_rows(data, version):
 
 class Writer:
     def __init__(self, env):
+        self.env = env
+        self.db = None
+        self.connect()
+
+    def connect(self):
         import pymysql
         prefix = 'SOCIAL_ANALYTICS_WAREHOUSE_WRITE_MYSQL_'
         def value(key, default=''):
-            return env.get(prefix + key, env.get('AD_CONTROL_ACTION_LOG_MYSQL_' + key, default))
+            return self.env.get(prefix + key, self.env.get('AD_CONTROL_ACTION_LOG_MYSQL_' + key, default))
         if (value('HOST'), str(value('PORT'))) != ('101.32.56.53', '63353'):
             raise RuntimeError('invalid_writer_endpoint')
         self.db = pymysql.connect(host=value('HOST'), port=63353, user=value('USER'), password=value('PASSWORD'),
                                   database='ads_ai', charset='utf8mb4', connect_timeout=3,
-                                  read_timeout=15, write_timeout=15, autocommit=False)
+                                  read_timeout=30, write_timeout=30, autocommit=False)
         with self.db.cursor() as cursor:
             cursor.execute('SELECT DATABASE(),@@read_only')
             if cursor.fetchone() != ('ads_ai', 0):
@@ -206,8 +238,27 @@ class Writer:
                 raise RuntimeError('writer_identity_invalid')
 
     def close(self):
-        self.db.rollback()
-        self.db.close()
+        if self.db:
+            with contextlib.suppress(Exception):
+                self.db.rollback()
+            with contextlib.suppress(Exception):
+                self.db.close()
+
+    def write_batch(self, sql, rows):
+        import pymysql
+        for attempt in range(3):
+            try:
+                with self.db.cursor() as cursor:
+                    cursor.executemany(sql, rows)
+                self.db.commit()
+                return
+            except pymysql.err.OperationalError as exc:
+                if not exc.args or exc.args[0] not in {2002, 2003, 2006, 2013} or attempt == 2:
+                    raise
+                self.close()
+                print(encoded(dict(event='warehouse_batch_retry', attempt=attempt + 2, mysql_code=exc.args[0])), flush=True)
+                time.sleep((2, 5)[attempt])
+                self.connect()
 
     def install_schema(self):
         # Explicit deployment operation only; hourly runtime never calls this.
@@ -232,13 +283,12 @@ class Writer:
                        'version,row_key,platform,site_id,tenant,owner,dt,payload_json')
             if not rows:
                 continue
-            sql = 'INSERT INTO ads_ai.' + table + '(' + columns + ') VALUES(' + ','.join(['%s'] * len(rows[0])) + ')'
+            sql = ('INSERT INTO ads_ai.' + table + '(' + columns + ') VALUES(' + ','.join(['%s'] * len(rows[0])) +
+                   ') ON DUPLICATE KEY UPDATE row_key=VALUES(row_key)')
             # PyMySQL additionally splits at its ~1 MiB statement limit.
             # One bounded transaction per 1,000 rows avoids repeated commit RTTs.
             for offset in range(0, len(rows), 1000):
-                with self.db.cursor() as cursor:
-                    cursor.executemany(sql, rows[offset:offset + 1000])
-                self.db.commit()
+                self.write_batch(sql, rows[offset:offset + 1000])
             print(encoded(dict(event='warehouse_written', table=table, rows=len(rows))), flush=True)
 
     def finish(self, version, manifest, status='verified'):
