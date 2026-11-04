@@ -406,7 +406,7 @@ class ExecutorTests(unittest.TestCase):
         processor = SimpleNamespace(config=store.config, object_store=store, repair=repair)
         executor = NodeExecutors(self.config, factories={"x_repair": lambda: processor})
         def download(url, path, **kwargs): path.write_bytes(original)
-        def download_repaired(artifact, path, context): path.write_bytes(repaired); return path
+        def download_repaired(artifact, path, context, **kwargs): path.write_bytes(repaired); return path
         raw_probe = {"format": {"duration": "10"}, "streams": [{"codec_type": "video", "width": 1920, "height": 1080}]}
         valid_probe = {"duration": 10, "width": 720, "height": 720, "codec": "h264", "size": len(repaired)}
         request = {"identity_mode": "source_to_fingerprint", "source_url": "https://media.example/original.mp4", "max_duration_seconds": 140, "repair_request": {"job_key": "a" * 64, "material_id": "1", "pool_item_id": "2", "profile": "cpu-profile", "duration_policy": "standard"}}

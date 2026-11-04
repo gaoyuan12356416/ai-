@@ -10,15 +10,19 @@ class RenderStalled(subprocess.TimeoutExpired):
 
 
 def run_render(command, *, capture_output=True, text=True, timeout=9000,
-               check=True, stall_seconds=180, poll_seconds=2):
+               check=True, stall_seconds=180, poll_seconds=2, progress_check=None):
     output = Path(command[-1])
     started = last_progress = time.monotonic()
     previous_size = -1
     # ffmpeg logs can be large; spool to disk instead of filling a pipe.
     with tempfile.TemporaryFile() as log:
+        if progress_check:
+            progress_check()
         process = subprocess.Popen(command, stdout=log, stderr=log)
         try:
             while process.poll() is None:
+                if progress_check:
+                    progress_check()
                 now = time.monotonic()
                 size = output.stat().st_size if output.exists() else 0
                 if size > previous_size:

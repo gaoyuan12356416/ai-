@@ -142,7 +142,12 @@ def software_command(command):
         pos=result.index("-tune")
         if pos+1<len(result) and result[pos+1]=="hq": del result[pos:pos+2]
     if "-preset" in result: result[result.index("-preset")+1]="veryfast"
-    result[1:1]=["-threads","4","-filter_complex_threads","4","-filter_threads","4"]
+    # Six simultaneous production renders were frame-identical with two
+    # filter threads and one decoder thread per immutable template layer.
+    # Bound all layer decoders; a leading -threads only applies to input zero.
+    for index in reversed([i for i,value in enumerate(result) if value=="-i"][1:]):
+        result[index:index]=["-threads","1"]
+    result[1:1]=["-threads","4","-filter_complex_threads","2","-filter_threads","2"]
     # Input -threads does not constrain the output encoder in FFmpeg.
     result[-1:-1]=["-threads","4","-crf","21"]
     return result
@@ -232,6 +237,8 @@ class PrepareProcessor:
             size=0; digest=hashlib.sha256()
             with path.open("xb") as handle:
                 for chunk in response.iter_content(1024*1024):
+                    execution_check=getattr(self,"execution_check",None)
+                    if execution_check: execution_check()
                     size+=len(chunk)
                     if size>self.config.max_source_bytes: raise PrepareWorkerError("fb_gpu_source_too_large","source too large",413)
                     digest.update(chunk); handle.write(chunk)
@@ -313,9 +320,14 @@ class PrepareProcessor:
                             self.runner(build_command(self.config,normalized,output,normalized_info,recipe,paths),capture_output=True,text=True,timeout=self.config.timeout,check=True)
                         finally:
                             normalized.unlink(missing_ok=True)
-                except Exception: raise PrepareWorkerError("fb_gpu_transcode_failed","random-overlay transcode failed",502) from None
+                except Exception as exc:
+                    if getattr(exc, "code", "") == "pipeline_lease_lost":
+                        raise
+                    raise PrepareWorkerError("fb_gpu_transcode_failed","random-overlay transcode failed",502) from None
                 render_seconds=round(time.monotonic()-render_started,3)
                 output_info=_probe(self.config,output); video=output_info["video"]
+                if abs(output_info["duration"]-source_info["duration"])>1.5:
+                    raise PrepareWorkerError("fb_gpu_output_duration_invalid","prepared duration mismatch",502)
                 if video.get("codec_name")!="h264" or str(video.get("profile") or "").lower()!="high" or int(video.get("width") or 0)!=720 or int(video.get("height") or 0)!=1280: raise PrepareWorkerError("fb_gpu_output_contract_invalid","H264 output contract invalid",502)
                 output_sha,size=sha256_file(output)
                 callback=getattr(self,"qualified_artifact",None)

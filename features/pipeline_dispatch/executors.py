@@ -8,9 +8,11 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from contextlib import contextmanager, ExitStack
 import hashlib
+import errno
 import base64
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -374,6 +376,23 @@ class NodeExecutors:
         return {"status": "ready", "artifact": artifact, "preparation": result}
 
     def _prepare_processor(self, kind, processor, request, context):
+        # A second process must not unlink the first process's output, even
+        # when an interrupted coordinator has already issued a new generation.
+        if kind == "fb_prepare":
+            from features.fb_gpu.job_lock import exclusive_job
+            check = getattr(context, "check_render", context.check)
+            lock = self.work_root / "fb-job-locks" / (hashlib.sha256(str(request.get("job_id", "")).encode()).hexdigest() + ".lock")
+            with exclusive_job(lock, check):
+                context.check()
+                previous = getattr(processor, "execution_check", None)
+                processor.execution_check = check
+                try:
+                    return self._prepare_processor_locked(kind, processor, request, context)
+                finally:
+                    processor.execution_check = previous
+        return self._prepare_processor_locked(kind, processor, request, context)
+
+    def _prepare_processor_locked(self, kind, processor, request, context):
         store = getattr(processor, "cos", None) or getattr(processor, "object_store", None)
         if store is None and callable(getattr(processor, "_object_store", None)):
             store = processor._object_store()
@@ -441,6 +460,9 @@ class NodeExecutors:
                 selected = phase
                 if name == "runner":
                     selected = "render" if args and "ffmpeg" in Path(str(args[0][0])).name.lower() else "probe"
+                    check = getattr(processor, "execution_check", None)
+                    if check:
+                        kwargs["progress_check"] = check
                 context.phase(selected)
                 try:
                     return original(*args, **kwargs)
@@ -472,7 +494,6 @@ class NodeExecutors:
     def x_preflight(self, request, context):
         from features.x_posts.media_repair import WorkerConfig, CosObjectStore, REPAIRABLE_TRIGGER_CODES
         from features.x_posts import service as posts
-        from features.drama_synthesis.youtube import YouTubeHTTPClient
         from PIL import Image
         if request.get("prepared_artifact"):
             context.check()
@@ -485,10 +506,12 @@ class NodeExecutors:
         with tempfile.TemporaryDirectory(dir=self.work_root) as temp:
             media = Path(temp) / "source"
             context.phase("download")
-            YouTubeHTTPClient().download(request["source_url"], media, allowed_hosts=hosts, max_bytes=min(int(request.get("max_media_bytes", request.get("max_bytes", 16 * 1024**3))), 16 * 1024**3), heartbeat=context.check)
+            self._x_download_source(request["source_url"], media, context, hosts=hosts,
+                max_bytes=min(int(request.get("max_media_bytes", request.get("max_bytes", 16 * 1024**3))), 16 * 1024**3))
             digest = hashlib.sha256()
             with media.open("rb") as source:
                 for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    context.check()
                     digest.update(chunk)
             context.phase("probe")
             probe = {}
@@ -536,7 +559,7 @@ class NodeExecutors:
                     raise ExecutionError("frozen_renderer_profile_mismatch")
                 repaired = self._prepare_processor("x_repair", processor, repair_request, context)
                 artifact = _artifact(repaired)
-                repaired_path = self._download(artifact, Path(temp) / "repaired.mp4", context)
+                repaired_path = self._download(artifact, Path(temp) / "repaired.mp4", context, x_network=True)
                 probe = validate(repaired_path)
             if repaired is None:
                 config = WorkerConfig.from_env()
@@ -561,29 +584,79 @@ class NodeExecutors:
                 return {"status": "ready", "artifact": _artifact(prepared), "preparation": prepared}
             return {"status": "ready", **checkpoint, "probe": probe}
 
-    def _download(self, artifact, target, context):
+    def _x_download_source(self, url, target, context, *, hosts, max_bytes):
+        """Retry only X's read-only GET, never an upload or Post/Repost call."""
+        import requests
+        from features.drama_synthesis.youtube import YouTubeHTTPClient, YouTubeHTTPError
+        client = YouTubeHTTPClient()
+        client.timeout = (30, 120)  # Separate connection and streamed-read budgets.
+        network_errnos = {errno.ECONNRESET, errno.ECONNABORTED, errno.ECONNREFUSED,
+                          errno.ETIMEDOUT, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EPIPE}
+        for attempt in range(1, 4):
+            context.check()
+            try:
+                # Each GET owns fresh storage. A partial stream can never be
+                # appended to the next attempt or mistaken for the final file.
+                with tempfile.TemporaryDirectory(prefix="x-get-", dir=target.parent) as temp:
+                    downloaded = Path(temp) / "source"
+                    client.download(url, downloaded, allowed_hosts=hosts, max_bytes=max_bytes, heartbeat=context.check)
+                    context.check()
+                    os.replace(downloaded, target)
+                return
+            except YouTubeHTTPError as exc:
+                context.check()  # Lease loss always wins over a network retry.
+                cause = exc.__context__
+                network = isinstance(cause, (requests.ConnectionError, requests.Timeout,
+                    requests.exceptions.ChunkedEncodingError, TimeoutError, ConnectionError))
+                network = network or isinstance(cause, OSError) and cause.errno in network_errnos
+                # The shared downloader marks all OSError retryable, including
+                # disk-full/permission errors. Those must not trigger more GETs.
+                retry = (exc.code == "youtube_source_download_failed" and exc.retryable
+                         and (500 <= exc.status <= 599 or exc.status == 0 and network))
+                status = exc.status if 100 <= exc.status <= 599 else 0
+                kind = type(cause).__name__ if cause is not None else type(exc).__name__
+                kind = kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", kind) else "Error"
+                logging.getLogger(__name__).warning(
+                    "x_media_get_failed attempt=%d retry=%s error_type=%s http_status=%d",
+                    attempt, bool(retry and attempt < 3), kind, status)
+                if not retry or attempt == 3:
+                    raise
+                time.sleep(attempt)
+
+    def _download(self, artifact, target, context, *, x_network=False):
         from features.drama_synthesis.youtube import YouTubeHTTPClient
         artifact = _artifact(artifact)
         hosts = tuple(filter(None, os.environ.get("PIPELINE_MEDIA_ALLOWED_HOSTS", "").split(",")))
         if not hosts:
             raise ExecutionError("node_media_allowlist_missing")
         context.phase("download")
-        YouTubeHTTPClient().download(artifact["url"], target, allowed_hosts=hosts, max_bytes=artifact["size"], heartbeat=context.check)
+        if x_network:
+            self._x_download_source(artifact["url"], target, context, hosts=hosts, max_bytes=artifact["size"])
+        else:
+            YouTubeHTTPClient().download(artifact["url"], target, allowed_hosts=hosts, max_bytes=artifact["size"], heartbeat=context.check)
         digest = hashlib.sha256()
         with target.open("rb") as handle:
             for data in iter(lambda: handle.read(1024 * 1024), b""):
+                if x_network:
+                    context.check()
                 digest.update(data)
         if target.stat().st_size != artifact["size"] or digest.hexdigest() != artifact["sha256"]:
             raise ExecutionError("artifact_fingerprint_changed")
+        if x_network:
+            context.check()
         return target
 
     def x_publish(self, payload, artifact, context):
         from features.x_posts.service import XApiClient
+        from features.x_posts.media_limits import MAX_UPLOAD_SEGMENTS
         artifact = _artifact(artifact)
         request = dict(payload.get("request") or {})
         account = payload.get("source_account_resource") or payload["account_resource"]
         class BoundXClient(XApiClient):
             def _request(self, method, path, access_token, body=None, content_type=None, expected=200, operation="X API", unknown=False):
+                # Media transfer can be slow while the independent lease heartbeat
+                # stays healthy. Keep Post/Repost requests at their original timeout.
+                self.timeout = 120 if path.startswith("/2/media/") else 30
                 fingerprint = {"method": method, "path": path, "body_sha256": hashlib.sha256(body or b"").hexdigest()}
                 stage = "create_post" if path == "/2/tweets" else ("platform_processing" if method == "GET" else "platform_upload") if "/media/" in path else "repost"
                 context.phase(stage)
@@ -611,9 +684,13 @@ class NodeExecutors:
                     initialized = response.get("data", {})
                     context.checkpoint("x_media_initialized", {"media_id": initialized.get("id") or initialized.get("media_id"), "operation_id": context.last_operation_id})
                 return response
-        client = self.platform_clients.get("x_publish") or BoundXClient()
+        # A 4 MiB segment repeatedly exhausted the 30-second socket write budget
+        # on the production uplink. Small segments bound retransmission cost;
+        # very large media still stays within the existing segment-count limit.
+        chunk_bytes = max(1024 * 1024, (artifact["size"] + MAX_UPLOAD_SEGMENTS - 1) // MAX_UPLOAD_SEGMENTS)
+        client = self.platform_clients.get("x_publish") or BoundXClient(chunk_bytes=chunk_bytes)
         with tempfile.TemporaryDirectory(dir=self.work_root) as temp:
-            media = self._download(artifact, Path(temp) / "media.bin", context)
+            media = self._download(artifact, Path(temp) / "media.bin", context, x_network=True)
             uploaded = client.upload_media("broker", media, media_type=artifact["mime"], media_category=request.get("media_category", "tweet_video"))
             context.checkpoint("x_media_uploaded", {"media_id": uploaded["media_id"], "artifact_sha256": artifact["sha256"]})
             created = client.create_post("broker", request["body"], uploaded["media_id"])

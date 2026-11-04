@@ -219,6 +219,11 @@ class Coordinator:
             if action in ("jobs/complete", "jobs/fail"):
                 historical = self.store.historical_receipt_claim(payload)
                 if historical:
+                    if historical["channel"] == "fb" and historical["stage"] == "prepare" and action == "jobs/fail":
+                        # Authenticated obsolete local failures are delivery
+                        # facts, not permission to fail or unlock a successor.
+                        return self.store.save_delivery(payload, delivery_id, payload,
+                            {"accepted": True, "historical": True, "superseded": True})
                     observed = self.registry.reconcile(historical)
                     proof = observed.get("canonical_receipt", {})
                     if historical["stage"] == "prepare":

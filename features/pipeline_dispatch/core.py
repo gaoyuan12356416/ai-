@@ -818,6 +818,12 @@ class DispatchStore:
                 c.execute("UPDATE pipeline_resource SET quarantined=1 WHERE job_id=?", (row["id"],))
             else:
                 c.execute("DELETE FROM pipeline_resource WHERE job_id=?", (row["id"],))
+                if row["channel"] == "fb" and row["stage"] == "prepare":
+                    # Workers stop local rendering at the same lease deadline.
+                    # Allow their bounded poll/kill/reap to finish before another
+                    # host can start the same immutable preparation.
+                    c.execute("INSERT INTO pipeline_cooldown VALUES(?,?,?) ON CONFLICT(resource_key) DO UPDATE SET until_at=excluded.until_at,reason=excluded.reason",
+                              ("job:" + str(row["id"]), stamp(self.clock() + dt.timedelta(seconds=30)), "prepare_lease_cleanup"))
             self.event(c, row["id"], "lease_expired", {"unknown": uncertain}, now)
 
     def expire(self):
