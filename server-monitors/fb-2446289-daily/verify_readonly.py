@@ -27,7 +27,10 @@ def main():
     )
     daily = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(daily)
-    lock = daily.LOCK_PATH.open("w")
+    # The production lock coordinates Meta deletion with a separate cleanup worker.
+    # This verifier isolates its files and rejects every mutation, so only serialize
+    # writes to this verification directory; never stop that worker or alter its lock.
+    lock = (output / "verification.lock").open("a")
     fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     history = daily.SUCCESS_HISTORY_PATH
     original_cache = daily.PAGE_HEALTH_CACHE_PATH

@@ -48,8 +48,10 @@ with a unique directory under `/mnt/data-disk`. It reads the complete 24-hour
 candidate list, takes the first five rows for enrichment, and runs the dry path.
 It explicitly rejects Graph writes/uploads, execution, success-history updates,
 and notifications, and copies the success ledger and Page cache into the verification directory.
-It shares the production nonconcurrent lock and compares production ledger/cache
-hashes. This is a sampled integration check, not a full 24-hour dry run or rerun.
+It locks its own output directory and compares production ledger/cache hashes.
+The production lock coordinates Meta deletions with the separate material cleanup
+worker; read-only verification leaves that lock and worker untouched. This is a
+sampled integration check, not a full 24-hour dry run or rerun.
 
 ```bash
 python3 server-monitors/fb-2446289-daily/verify_readonly.py \
