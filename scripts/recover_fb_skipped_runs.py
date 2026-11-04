@@ -26,6 +26,7 @@ from features.fb_auto_posts.core import FBAutoPostStore, utc_now
 from features.fb_auto_posts.languages import page_language
 from features.fb_auto_posts.repositories import ReadOnlyMySQL, PagePoolRepository, MaterialRepository, MaterialCandidate, CandidateSnapshot, RepositoryError
 from features.fb_auto_posts.skipped_recovery import recover_skipped
+from features.fb_auto_posts.strategy import daily_limit
 
 
 def existing_store(path):
@@ -88,20 +89,21 @@ def decode_snapshot(raw):
     return CandidateSnapshot(tuple(candidates), tuple(raw['metric_generation_ids']), tuple(raw['metric_dates']))
 
 
-def checkpoint_snapshots(folder, config, pages, materials, operation_id):
+def checkpoint_snapshots(folder, config, pages, materials, operation_id, candidate_limit=1000):
     fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
     snapshots, errors, pending = {}, {}, []
     for language in sorted({page_language(p.language) for p in pages} - {''}):
         path = folder / ('candidate-' + language + '.json')
         cached = json.loads(path.read_text()) if path.exists() else None
         if (cached and cached['operation_id'] == operation_id and cached['config_sha256'] == fingerprint
+                and cached.get('candidate_limit',1000) == candidate_limit
                 and 0 <= (utc_now() - datetime.fromisoformat(cached['finished_at_utc'])).total_seconds() <= 900):
             snapshots[language] = decode_snapshot(cached['snapshot'])
         else:
             pending.append(language)
     def collect(language):
         print(json.dumps({'phase': 'language_started', 'language': language}), flush=True)
-        return materials.candidate_snapshot({**config, '_candidate_limit': 1000, 'language': language})
+        return materials.candidate_snapshot({**config, '_candidate_limit': candidate_limit, 'language': language})
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(collect, language): language for language in pending}
         for future in as_completed(futures):
@@ -112,7 +114,8 @@ def checkpoint_snapshots(folder, config, pages, materials, operation_id):
                                              snapshot.metric_generation_ids, snapshot.metric_dates)
                 snapshots[language] = snapshot
                 save(folder / ('candidate-' + language + '.json'), {'operation_id': operation_id,
-                    'config_sha256': fingerprint, 'finished_at_utc': utc_now().isoformat(), 'snapshot': dataclasses.asdict(snapshot)})
+                    'config_sha256': fingerprint, 'candidate_limit': candidate_limit,
+                    'finished_at_utc': utc_now().isoformat(), 'snapshot': dataclasses.asdict(snapshot)})
                 print(json.dumps({'phase': 'language_finished', 'language': language, 'candidates': len(snapshot.candidates)}), flush=True)
             except RepositoryError as exc:
                 errors[language] = exc.code
@@ -129,7 +132,9 @@ def main():
     parser.add_argument('--operation-id', required=True)
     parser.add_argument('--folder', required=True)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--candidate-limit', type=int, default=1000, help='Operator catalog bound; all source rules and final reservations remain unchanged')
     args = parser.parse_args()
+    assert 50 <= args.candidate_limit <= 5000
     folder = Path(args.folder).resolve()
     disk = Path('/mnt/data-disk')
     assert disk.is_mount() and folder.is_relative_to(disk)
@@ -161,8 +166,12 @@ def main():
         snapshots = {language: decode_snapshot(raw) for language, raw in frozen['snapshots'].items()}
     else:
         pages = page_repo.list_pages(config['group_ids'], is_admin=bool(template['scope_is_admin']), owner_user_id=template['owner_user_id'])
-        print(json.dumps({'phase': 'current_pages', 'pages': len(pages)}), flush=True)
-        snapshots = checkpoint_snapshots(folder, config, pages, materials, args.operation_id)
+        with store.connect() as conn:
+            targets = {r[0] for r in conn.execute("SELECT page_id FROM fb_auto_task WHERE status='skipped' "
+                "AND skip_reason='fb_auto_page_unknown_block' AND run_id IN (" + ','.join('?' for _ in args.run_ids) + ')', args.run_ids)}
+        catalog_pages = [p for p in pages if p.page_id in targets and p.eligible_token_count > 0 and daily_limit(config,p.page_id)>0]
+        print(json.dumps({'phase': 'current_pages', 'pages': len(pages), 'catalog_pages': len(catalog_pages)}), flush=True)
+        snapshots = checkpoint_snapshots(folder, config, catalog_pages, materials, args.operation_id, args.candidate_limit)
         save(cache, {'operation_id': args.operation_id, 'run_ids': args.run_ids,
                      'config_sha256': hashlib.sha256(config_json.encode()).hexdigest(),
                      'finished_at_utc': utc_now().isoformat(),

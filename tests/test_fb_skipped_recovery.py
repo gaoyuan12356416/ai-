@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from features.fb_auto_posts.core import ActorScope, FBAutoPostStore, utc_iso
 from features.fb_auto_posts.repositories import PageTarget, MaterialCandidate, CandidateSnapshot
+from features.fb_auto_posts.repositories import RepositoryError
 from features.fb_auto_posts.skipped_recovery import recover_skipped, REASON
 from features.fb_auto_posts.strategy import cooldown_content_ids
 from features.fb_video_publish.core import Store
@@ -131,6 +132,25 @@ class RecoveryTests(unittest.TestCase):
             materials=[r[0] for r in c.execute("SELECT material_id FROM fb_auto_task WHERE run_id IN (?,?) AND status='planned'",ids)]
             self.assertEqual(len(materials),2)
             self.assertEqual(len(set(materials)),2)
+
+    def test_language_checkpoint_reuses_success_after_another_language_fails(self):
+        from scripts.recover_fb_skipped_runs import checkpoint_snapshots
+        pages=[self.pages[0],PageTarget('1',('1',),'1003','owner','Asia/Shanghai','es',1)]
+        calls=[]
+        failing=[True]
+        def snapshot(config):
+            language=config['language'];calls.append(language)
+            if language=='es' and failing[0]:
+                raise RepositoryError('fb_auto_source_query_failed','temporary read failure')
+            return self.snapshots['en'] if language=='en' else CandidateSnapshot((),(),())
+        materials=SimpleNamespace(candidate_snapshot=snapshot)
+        with self.assertRaises(RuntimeError):
+            checkpoint_snapshots(Path(self.temp.name),self.cfg,pages,materials,self.operation)
+        failing[0]=False
+        result=checkpoint_snapshots(Path(self.temp.name),self.cfg,pages,materials,self.operation)
+        self.assertEqual(set(result),{'en','es'})
+        self.assertEqual(calls.count('en'),1)
+        self.assertEqual(calls.count('es'),2)
 
 
 if __name__=='__main__': unittest.main()
