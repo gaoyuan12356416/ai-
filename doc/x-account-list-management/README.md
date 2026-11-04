@@ -26,6 +26,12 @@ supports one-click filtering. Operating statistics are identified as scheduled
 Post/Repost/revenue snapshots, with Beijing update time and yesterday's date.
 The two unallocated-revenue cards are removed from this page only.
 
+The resumed integration on 2026-11-04 preserves the deployed drama-synthesis
+material-source and private-report authorization routes, the account-language
+filter, and the current X publish-recovery composite. Language and status
+filters combine; the attention card resets language/search to show every
+account needing authorization attention.
+
 ## Validation
 
 - `python -m unittest scripts.test_x_account_list_management.AccountManagementTests scripts.test_x_account_list_management.CreditsTests scripts.test_x_account_list_routes -v`

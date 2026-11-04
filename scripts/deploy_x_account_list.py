@@ -25,8 +25,8 @@ CREDITS = 'features/x_accounts/credits.py'
 PAGE = 'static/x-account-list.html'
 BASELINE = {MODULE: 'c10b3898ffa48ce79285b37bfc8493dd214fa58e8c35d13c2be96f6568709056',
             CLIENT: 'd18c29cbabd0f20b3a23726bfc3ecfdb3dadfc84cab6a5a56b87eb3e1fc663b5',
-            'app.py': '7f863ca1094dac54352485484dc40feda280adf579a77dbcfd8bae0d810ec6c7',
-            PAGE: '671eb7d890c784c65deb802e85edd4f649da2db9389207a9ea2dde9bee0737f1'}
+            'app.py': '035cc750efcee2ec79a9547d0f21b157f769d5491362dbc0996f071a30dfcd51',
+            PAGE: '830df81d9b18360a7ea76bfa884dfc677a36d03622c6e8cf55065f7c35f3976a'}
 TRIGGERS = ['x-post-schedule.timer','x-post-schedule-claim.timer','x-post-manual.timer',
             'x-post-manual.path','x-post-daily.timer','x-auto-post-runner.timer',
             'x-auto-post-scheduler.timer','x-auto-post-runner.path','x-auto-post-metric.timer',
