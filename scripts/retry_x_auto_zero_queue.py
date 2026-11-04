@@ -88,13 +88,26 @@ def snapshot(auto, native):
     require(not native.execute("SELECT 1 FROM x_post_repost_ledger WHERE (target_account_id=46 OR relay_account_id=46) "
                                "AND (unknown_outcome=1 OR status IN ('post_creating','repost_creating'))").fetchone(),
             "account_repost_result_not_reconciled")
-    require(not native.execute("SELECT 1 FROM x_post_queue WHERE account_id=46 AND status IN ('queued','publishing')").fetchone(),
-            "account_has_active_queue")
+    busy = []
+    for row in native.execute("SELECT * FROM x_post_queue WHERE account_id=46 AND status IN ('queued','publishing') ORDER BY id"):
+        queued = dict(row)
+        active_log = one(native, "SELECT * FROM x_post_publish_log WHERE queue_id=?", (queued["id"],))
+        require(queued["id"] != task["execution_queue_id"]
+                and active_log["status"] in {"reserved", "media_uploading"}
+                and not any(active_log[k] for k in ("unknown_outcome", "x_post_id", "published_at")),
+                "account_busy_queue_not_safe_to_wait_behind")
+        # Admission only: preserve the active publisher and let the existing
+        # account-resource lock serialize this pending task behind that queue.
+        busy.append({"queue_id": queued["id"], "log_id": active_log["id"],
+                     "queue_status": queued["status"], "log_status": active_log["status"],
+                     "attempt_count": active_log["attempt_count"],
+                     "queue_sha256": fingerprint(queued), "log_sha256": fingerprint(active_log)})
     task_obj = SimpleNamespace(**{**task, "account_snapshot": json.loads(task["account_snapshot_json"])})
     identity = frozen_identity(task_obj)
     return {"identity": identity, "identity_sha256": fingerprint(identity),
             "config_sha256": run["config_sha256"], "task_sha256": fingerprint(task),
-            "prior_run_sha256": fingerprint(prior), "account_sha256": fingerprint(account)}
+            "prior_run_sha256": fingerprint(prior), "account_sha256": fingerprint(account),
+            "existing_busy_queues": busy}
 
 
 def build_plan(auto_db, native_db, task_id):
@@ -164,7 +177,9 @@ def apply_plan(plan, auto_db, native_db, backup_dir, actor, reason):
             auto.execute("UPDATE x_auto_run SET status='running',finished_at_utc='',updated_at=? WHERE id=446", (stamp,))
             details = {"actor": actor.strip(), "reason": reason.strip(), "prior_execution_run_id": 1657,
                        "external_task_key": EXTERNAL_KEY, "plan_sha256": plan["plan_sha256"],
-                       "prior_task_sha256": state["task_sha256"], "new_selection_required": True}
+                       "prior_task_sha256": state["task_sha256"], "new_selection_required": True,
+                       "existing_busy_queues": state["existing_busy_queues"],
+                       "busy_queue_action": "preserved; ordinary account-resource serialization"}
             auto.execute("INSERT INTO x_auto_event(run_id,task_id,event_type,from_status,to_status,message,details_json,created_at) "
                          "VALUES(446,2712,'operator_zero_queue_retry','failed','pending',?,?,?)", (
                              "已核对账号历史阻塞，按原模板重新选材并恢复此任务", json.dumps(details, ensure_ascii=False), stamp))

@@ -60,8 +60,9 @@ class OperatorRetryTests(unittest.TestCase):
                 CREATE TABLE x_authorized_account(id INTEGER PRIMARY KEY,username TEXT,status TEXT,publish_approved INTEGER,
                     drama_language TEXT,deleted_at TEXT);
                 INSERT INTO x_authorized_account VALUES(46,'nedialko123','active',1,'de','');
-                CREATE TABLE x_post_publish_log(id INTEGER PRIMARY KEY,account_id INTEGER,unknown_outcome INTEGER,status TEXT);
-                INSERT INTO x_post_publish_log VALUES(5327,46,0,'failed');
+                CREATE TABLE x_post_publish_log(id INTEGER PRIMARY KEY,account_id INTEGER,unknown_outcome INTEGER,status TEXT,
+                    queue_id INTEGER,attempt_count INTEGER,x_post_id TEXT,published_at TEXT);
+                INSERT INTO x_post_publish_log VALUES(5327,46,0,'failed',5393,1,'','');
                 CREATE TABLE x_post_repost_ledger(target_account_id INTEGER,relay_account_id INTEGER,unknown_outcome INTEGER,status TEXT);
             """)
 
@@ -116,6 +117,30 @@ class OperatorRetryTests(unittest.TestCase):
         self.mutate(self.native, "UPDATE x_post_publish_log SET unknown_outcome=0 WHERE id=5327")
         self.mutate(self.native, "INSERT INTO x_post_queue VALUES(999,1657,46,'failed')")
         with self.assertRaisesRegex(RecoveryRejected, "queue_exists"):
+            self.plan()
+
+    def test_existing_healthy_publisher_is_preserved_while_task_returns_pending(self):
+        self.mutate(self.native, "INSERT INTO x_post_queue VALUES(5362,NULL,46,'publishing')")
+        self.mutate(self.native, "INSERT INTO x_post_publish_log VALUES(5850,46,0,'media_uploading',5362,1,'','')")
+        before_queue = self.read(self.native, "SELECT * FROM x_post_queue")
+        before_log = self.read(self.native, "SELECT * FROM x_post_publish_log")
+        plan = self.plan()
+        busy = plan["state"]["existing_busy_queues"]
+        self.assertEqual([(r["queue_id"], r["log_id"], r["log_status"]) for r in busy],
+                         [(5362, 5850, "media_uploading")])
+        result = self.apply(plan)
+        self.assertEqual(result["publish_requests"], 0)
+        self.assertEqual(self.task_object().status, "pending")
+        self.assertEqual(self.read(self.native, "SELECT * FROM x_post_queue"), before_queue)
+        self.assertEqual(self.read(self.native, "SELECT * FROM x_post_publish_log"), before_log)
+
+    def test_busy_publisher_unknown_or_post_creation_still_rejects_admission(self):
+        self.mutate(self.native, "INSERT INTO x_post_queue VALUES(5362,NULL,46,'publishing')")
+        self.mutate(self.native, "INSERT INTO x_post_publish_log VALUES(5850,46,1,'media_uploading',5362,1,'','')")
+        with self.assertRaisesRegex(RecoveryRejected, "not_reconciled"):
+            self.plan()
+        self.mutate(self.native, "UPDATE x_post_publish_log SET unknown_outcome=0,status='post_creating' WHERE id=5850")
+        with self.assertRaisesRegex(RecoveryRejected, "not_reconciled"):
             self.plan()
 
     def test_scope_reservation_and_live_drift_rejected(self):
