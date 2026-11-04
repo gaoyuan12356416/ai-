@@ -26,3 +26,17 @@
 回滚使用同一脚本反向版本保护：`--sha bc70cd5ab35aa32770eb066527d1d559c7fa85bf --expected-sha TARGET --apply`。仅回退这些静态文件，不回退数据库。若线上文件已被后续任务修改，保护检查应停止，不能覆盖他人改动。
 
 技能上下文无需更新，本次为局部展示修复。
+
+## 实际上线结果
+
+2026-11-04 10:50 北京时间完成。部署代码 `50115ab963fee2aa4393bbaa409943791846fa02`，GitHub push、CPU 精确 fetch、部署前版本保护和公开 HTTPS 三资源逐字节校验全部通过。
+
+备份：`43.166.187.96:/mnt/data-disk/pipeline-dispatch/monitor-static-20261104T025042Z`。部署脚本及完整前后核验在 `deploy.py`、`verification.json`。
+
+API PID 2666330、协调器 PID 4075066、CPU 节点 PID 3679221 前后不变。容量版本 113 及配置 SHA256 前后相同；没有服务重启，没有调度、原生任务或发布状态写入。
+
+精确回滚命令（CPU）：
+
+```sh
+/usr/bin/python3.9 /mnt/data-disk/pipeline-dispatch/monitor-static-20261104T025042Z/deploy.py --sha bc70cd5ab35aa32770eb066527d1d559c7fa85bf --expected-sha 50115ab963fee2aa4393bbaa409943791846fa02 --apply
+```
