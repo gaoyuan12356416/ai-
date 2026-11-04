@@ -1,0 +1,5 @@
+# Channel admission priority
+
+Runtime channel_priority may order youtube, x, fb. Default empty preserves all prior fairness. Listed channels are stably ranked before account/capability/time admission; the within-channel batch/FIFO order remains. Unlisted channels retain the original fair order in the highest band, so this change does not demote TikTok. Busy/quarantined/disabled/future high-priority tasks do not prevent eligible lower-priority claims. No existing lease, operation, account fence or native queue is reset.
+
+Set through the existing versioned capacity endpoint with admin actor: channel_priority=["youtube","x","fb"]. Apply to both preparation and publication. Back up live core and runtime config, verify byte equality to base GitHub source, atomically deploy the fetched core file, restart only the coordinator. Node processes and in-flight platform writes remain running; leases and durable receipts survive. Roll back the exact backed-up core only against its deployed hash and restore channel_priority to its prior value with a fresh expected_version. Never restore old task databases or reset unknown outcomes.

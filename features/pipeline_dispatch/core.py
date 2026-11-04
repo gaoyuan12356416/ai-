@@ -284,6 +284,13 @@ class DispatchStore:
                     # A restored automatic pool starts a new pressure window;
                     # observations from its prior automatic period do not apply.
                     c.execute("DELETE FROM pipeline_capacity_sample WHERE node_id=? AND stage=?", (host, stage))
+            if "channel_priority" in patch:
+                order = patch["channel_priority"]
+                if (not isinstance(order, list) or len(order) > len(CHANNELS)
+                        or any(not isinstance(value, str) or value not in CHANNELS for value in order)
+                        or len(set(order)) != len(order)):
+                    raise DispatchError("channel_priority_invalid", status=400)
+                config["channel_priority"] = list(order)
             if "global_publish_limit" in patch:
                 config["global_publish_limit"] = _positive(patch["global_publish_limit"], True)
             for channel, limit in patch.get("channel_limits", {}).items():
@@ -860,6 +867,13 @@ class DispatchStore:
               WHERE j.stage=? AND j.status IN ('queued','ready') AND j.hold_reason='' AND j.scheduled_at<=?
               ORDER BY COALESCE(fc.last_seq,0),COALESCE(fb.last_seq,0),j.scheduled_at,j.id""",
               (stage, stage + ":", stage, now)).fetchall()
+            # Priority applies only at admission. Existing claims, account locks,
+            # time gates and per-batch fairness remain authoritative. Unlisted
+            # channels keep their fair-order place in the highest band.
+            order = config.get("channel_priority", [])
+            if order:
+                rank = {channel: index for index, channel in enumerate(order)}
+                rows = sorted(rows, key=lambda item: rank.get(item["channel"], 0))
             blocked = []
             for row in rows:
                 if c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", ("job:" + str(row["id"]), now)).fetchone():
