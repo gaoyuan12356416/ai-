@@ -291,6 +291,38 @@ class XAutoPostService:
             item["attention_task_count"] = sum(
                 task.status in {"failed", "canceled", "unknown"} for task in values
             )
+            # Legacy "completed" also includes no-candidate/skipped tasks.  Keep
+            # that field compatible, but expose disjoint publication outcomes
+            # so the UI never presents it as a count of successful Posts.
+            counts = dict.fromkeys((
+                "published", "no_candidate", "skipped", "failed", "canceled",
+                "unknown", "pending", "ready", "retry_wait", "waiting_result",
+                "active",
+            ), 0)
+            for task in values:
+                if task.status == "unknown" or bool(task.unknown_outcome):
+                    category = "unknown"
+                elif task.status == "retry_wait" and task.execution_queue_id:
+                    # Queue-bound waits observe the canonical publisher; they
+                    # are not permission to submit the same Post again.
+                    category = "waiting_result"
+                elif task.status in counts:
+                    category = task.status
+                else:
+                    category = "active"
+                counts[category] += 1
+            item["task_counts"] = counts
+            item["published_task_count"] = counts["published"]
+            item["unfinished_task_count"] = sum(
+                counts[key] for key in (
+                    "unknown", "pending", "ready", "retry_wait",
+                    "waiting_result", "active",
+                )
+            )
+            if (item.get("status") in {"queued", "running"}
+                    and counts["unknown"] > 0
+                    and item["unfinished_task_count"] == counts["unknown"]):
+                item["display_status"] = "needs_review"
         return item
 
     @staticmethod
@@ -409,14 +441,28 @@ class XAutoPostService:
         return {"ok": True, "template": item, "item": item}
 
     def _validate_accounts(self, config: Mapping[str, Any]) -> None:
-        for account_id in config.get("account_ids") or []:
-            account = self._account_snapshot(account_id)
+        account_ids = config.get("account_ids") or []
+        if not account_ids:
+            return
+        # account_snapshot reloads the whole projected list. Read it once per
+        # request so a large template does not make N full sidecar requests.
+        accounts_by_id: Dict[str, List[Mapping[str, Any]]] = {}
+        for account in self.account_bridge.accounts():
+            accounts_by_id.setdefault(str(account.get("id") or ""), []).append(account)
+        for account_id in account_ids:
+            matches = accounts_by_id.get(str(account_id), [])
+            if len(matches) != 1:
+                raise AutoPostServiceError(
+                    "x_auto_account_not_found", "X account was not found", 404
+                )
+            account = matches[0]
             if str(account.get("id") or "") != str(account_id) or not bool(
                 account.get("publish_eligible")
             ):
                 raise AutoPostServiceError(
                     "x_auto_account_not_publishable",
-                    "selected X account is not currently publishable",
+                    "X 账号 %s（ID %s）当前不可发布，请取消勾选或恢复授权后再保存。"
+                    % (str(account.get("username") or account_id)[:50], account_id),
                     409,
                 )
             self._account_language(account)

@@ -358,7 +358,10 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertIn('"attention_task_count"', source)
         self.assertIn("x_auto_run_not_found", source)
         self.assertIn("运行记录不存在或已不可访问。", source)
-        self.assertIn("`${completedTasks} 个完成", source)
+        self.assertIn("已发布 ${publishedTasks", source)
+        self.assertIn("taskSummary(counts)", source)
+        self.assertIn("等待发布结果", source)
+        self.assertIn("item.display_status || item.status", source)
 
     def test_create_editor_sets_create_document_title(self):
         source = SCRIPTS["template"]

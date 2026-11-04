@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +138,43 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertEqual(created["config"]["language_source"], "account")
         self.assertNotIn("language", created["config"])
         self.assertNotIn("access_token", repr(accounts).lower())
+
+    def test_run446_counts_distinguish_actual_posts_from_no_candidate_and_waits(self):
+        run = SimpleNamespace(id=446, as_dict=lambda: {"id": 446, "status": "running"})
+        def task(status, *, unknown=False, queue_id=None):
+            return SimpleNamespace(status=status, unknown_outcome=unknown,
+                                   execution_queue_id=queue_id)
+        tasks = ([task("published") for _ in range(65)]
+                 + [task("no_candidate") for _ in range(10)]
+                 + [task("failed") for _ in range(3)]
+                 + [task("pending") for _ in range(4)]
+                 + [task("retry_wait", queue_id=5819) for _ in range(3)])
+        result = XAutoPostService._run_item(run, tasks=tasks)
+        self.assertEqual(result["task_count"], 85)
+        self.assertEqual(result["completed_task_count"], 75)
+        self.assertEqual(result["published_task_count"], 65)
+        self.assertEqual(result["unfinished_task_count"], 7)
+        self.assertEqual({k: v for k, v in result["task_counts"].items() if v}, {
+            "published": 65, "no_candidate": 10, "failed": 3,
+            "pending": 4, "waiting_result": 3,
+        })
+        self.assertNotIn("display_status", result)
+
+    def test_unknown_is_exclusive_and_only_unknown_remaining_displays_review(self):
+        run = SimpleNamespace(id=446, as_dict=lambda: {"id": 446, "status": "running"})
+        tasks = [SimpleNamespace(status=status, unknown_outcome=unknown,
+                                 execution_queue_id=42) for status, unknown in (
+            ("published", False), ("no_candidate", False), ("failed", False),
+            ("retry_wait", True), ("failed", True), ("unknown", False),
+        )]
+        result = XAutoPostService._run_item(run, tasks=tasks)
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["display_status"], "needs_review")
+        self.assertEqual(result["task_counts"]["unknown"], 3)
+        self.assertEqual(result["task_counts"]["failed"], 1)
+        self.assertEqual(result["task_counts"]["waiting_result"], 0)
+        self.assertEqual(sum(result["task_counts"].values()), 6)
+        self.assertEqual(result["unfinished_task_count"], 3)
 
     def test_save_unbounded_and_long_duration_preserves_template_history(self):
         service = self.service()

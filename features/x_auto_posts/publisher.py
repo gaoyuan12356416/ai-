@@ -8,11 +8,15 @@ publishing remain in the existing X subsystem behind ``XPostAutoBridgeClient``.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import sqlite3
 import threading
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from features.x_accounts.language import same_drama_language
@@ -20,6 +24,7 @@ from features.x_posts import duration_policy
 
 from .client import safe_public_message
 from .core import TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
+from .operator_retry import execution_key
 from .selector import (
     NoEligibleMaterial,
     SelectionRequest,
@@ -232,6 +237,62 @@ def _queue_status(queue: Mapping[str, Any]) -> str:
     return str(queue.get("queue_status") or queue.get("status") or "").strip()
 
 
+def read_dispatch_queue_state(db_path: Any, queue_id: Any) -> Dict[str, Any]:
+    """Read one queue's coordinator state without creating or migrating a DB.
+
+    A failed reservation may precede the native claim and therefore never reach
+    the native queue's failure handler. Only a source with no external operation
+    in any generation is a definitive failure here. Media-only historical
+    attempts and real unknown outcomes still require audited reconciliation.
+    """
+    identity = _positive_int(queue_id, "X queue ID")
+    source_key = "x:queue:" + str(identity)
+    path = Path(str(db_path)).resolve(strict=True)
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=1000")
+        conn.execute("BEGIN")
+        rows = conn.execute(
+            "SELECT id,source_key,stage,status,generation,external_intent,"
+            "error_code,error_message,canonical_receipt,updated_at "
+            "FROM pipeline_job WHERE source_key=? ORDER BY CASE stage WHEN 'publish' THEN 0 ELSE 1 END,id DESC LIMIT 3",
+            (source_key,),
+        ).fetchall()
+        if not rows or len(rows) > 2 or any(row["stage"] not in {"prepare", "publish"} for row in rows):
+            return {}
+        if len({row["stage"] for row in rows}) != len(rows):
+            return {}
+        target = rows[0]
+        ids = [int(row["id"]) for row in rows]
+        slots = ",".join("?" for _ in ids)
+        has_operations = conn.execute(
+            "SELECT 1 FROM pipeline_operation WHERE job_id IN (" + slots + ") LIMIT 1", ids
+        ).fetchone() is not None
+        has_publication = conn.execute(
+            "SELECT 1 FROM pipeline_publication WHERE job_id IN (" + slots + ") LIMIT 1", ids
+        ).fetchone() is not None
+        # Completed preparation receipts are normal. A receipt for the failed
+        # stage can contain success that has not reached the native read model.
+        has_target_receipt = conn.execute(
+            "SELECT 1 FROM pipeline_receipt WHERE job_id=? LIMIT 1", (target["id"],)
+        ).fetchone() is not None
+        has_active_job = any(row["status"] not in {"failed", "completed", "published", "canceled", "cancelled", "skipped"} for row in rows)
+        known_failure = (
+            target["status"] == "failed" and not target["external_intent"]
+            and not target["canonical_receipt"] and not has_operations
+            and not has_publication and not has_target_receipt and not has_active_job
+        )
+        return {
+            "source_key": source_key, "job_id": int(target["id"]),
+            "stage": target["stage"], "generation": int(target["generation"]),
+            "status": target["status"], "error_code": str(target["error_code"] or "")[:96],
+            "error_message": safe_public_message(target["error_message"]) if target["error_message"] else "",
+            "updated_at": str(target["updated_at"]), "known_failure": bool(known_failure),
+            "has_operations": has_operations, "has_publication": has_publication,
+        }
+
+
 class AutoPostExecutor:
     """Execute one task phase at a time with immutable cross-DB identity."""
 
@@ -251,6 +312,7 @@ class AutoPostExecutor:
         max_concurrent_tasks: int = 1,
         dispatch_enabled: bool = False,
         dispatch_cutoff=None,
+        dispatch_state_reader: Optional[Callable[[int], Mapping[str, Any]]] = None,
     ):
         if not callable(candidate_loader) or not callable(media_preflight):
             raise AutoPostExecutionError(
@@ -269,6 +331,11 @@ class AutoPostExecutor:
         self.max_concurrent_tasks = int(max_concurrent_tasks)
         self.dispatch_enabled = bool(dispatch_enabled)
         self.dispatch_cutoff = dispatch_cutoff
+        self.dispatch_state_reader = dispatch_state_reader or (
+            lambda queue_id: read_dispatch_queue_state(
+                os.environ.get("PIPELINE_DISPATCH_DB_PATH", "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3"), queue_id
+            )
+        )
         self._execute_slots = threading.BoundedSemaphore(self.max_concurrent_tasks)
         if not 120 <= self.lease_seconds <= 10800 or not 1 <= self.max_concurrent_tasks <= 4:
             raise AutoPostExecutionError(
@@ -356,14 +423,13 @@ class AutoPostExecutor:
             )
         return account
 
-    @staticmethod
-    def _validate_run_identity(task: TaskRecord, raw: Mapping[str, Any]) -> Dict[str, Any]:
+    def _validate_run_identity(self, task: TaskRecord, raw: Mapping[str, Any]) -> Dict[str, Any]:
         run = dict(raw or {})
         if (
             str(run.get("trigger_source") or "") != "auto_template"
             or run.get("account_ids") != [int(task.account_id)]
             or run.get("material_ids") != [str(task.material_id)]
-            or str(run.get("external_task_key") or "") != f"x-auto-task-{task.id}"
+            or str(run.get("external_task_key") or "") != execution_key(self.store, task)
             or str(run.get("template_ref") or "") != f"x-auto-template-{task.template_id}"
             or int(run.get("template_version") or 0) != task.template_version
         ):
@@ -414,7 +480,7 @@ class AutoPostExecutor:
     def _create_run(self, task: TaskRecord, body_template: str, random_template_enabled: bool = False) -> Dict[str, Any]:
         payload = {
             "duration_policy_version": self.store.get_run(task.run_id).duration_policy_version,
-            "external_task_key": f"x-auto-task-{task.id}",
+            "external_task_key": execution_key(self.store, task),
             "template_ref": f"x-auto-template-{task.template_id}",
             "template_version": task.template_version,
             "account_id": int(task.account_id),
@@ -776,6 +842,32 @@ class AutoPostExecutor:
             # Distributed workers own preparation and publication. Read their
             # canonical receipts without invoking legacy recover/publish paths.
             if _queue_status(queue) in {"queued", "reserved", "preparing", "publishing", "waiting_relay"} and not queue.get("unknown_outcome"):
+                observed: Mapping[str, Any] = {}
+                try:
+                    observed = self.dispatch_state_reader(int(task.execution_queue_id))
+                except (OSError, ValueError, sqlite3.Error):
+                    # Unavailable coordinator evidence must not become a known
+                    # failure or an authorization to retry an external write.
+                    pass
+                if (observed.get("source_key") == "x:queue:" + str(task.execution_queue_id)
+                    and observed.get("known_failure") is True
+                    and not task.unknown_outcome
+                    and _queue_status(queue) in {"queued", "reserved", "preparing"}
+                    and not queue.get("post_id") and not queue.get("attempt_count")):
+                    code = str(observed.get("error_code") or "x_auto_dispatch_failed")[:96]
+                    message = str(observed.get("error_message") or "")
+                    if not message or message == "X automatic publishing request failed":
+                        message = ("账号当前不可发布，请检查授权和允许发布设置"
+                                   if code == "x_account_not_publishable"
+                                   else "发布准备失败，尚未提交帖子（%s）" % code)
+                    return self.store.transition_task(
+                        task.id, "failed", expected_statuses={task.status}, claim_token=claim_token,
+                        updates={"unknown_outcome": False, "claim_phase": "", "claim_worker": "",
+                                 "claim_token": "", "lease_expires_at_utc": "", "next_attempt_at_utc": "",
+                                 "error_code": code, "error_message": safe_public_message(message)},
+                        event_type="task_x_dispatch_failed_without_write",
+                        details={key: observed.get(key) for key in ("source_key", "job_id", "stage", "generation", "updated_at")},
+                    )
                 return self.store.transition_task(
                     task.id, "retry_wait", expected_statuses={task.status}, claim_token=claim_token,
                     updates={"claim_phase": "reconcile", "claim_worker": "", "claim_token": "",
