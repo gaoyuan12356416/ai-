@@ -298,7 +298,9 @@
     $('#report-content').classList.remove('hidden'); scopeLabel(report.meta.scope);
     const platforms = applied.getAll('platform');
     $('#report-period').textContent = (report.meta.start || applied.get('start')) + ' — ' + (report.meta.end || applied.get('end')) + ' · UTC · ' + (platforms.length ? platforms.map(platformLabel).join(' / ') : '全部渠道') + (report.quality.complete === false ? ' · 合计不完整' : '');
-    $('#report-updated').textContent = '源数据更新：' + stamp(report.meta.source_updated_at) + ' · 查询时间：' + stamp(report.meta.fetched_at);
+    $('#report-updated').textContent = report.meta.data_source === 'ads_ai_hourly_warehouse'
+      ? '每小时更新 · 最近同步：' + stamp(report.meta.fetched_at) + (report.meta.snapshot_stale ? ' · 更新延迟，正在显示上次成功数据' : '')
+      : '源数据更新：' + stamp(report.meta.source_updated_at) + ' · 查询时间：' + stamp(report.meta.fetched_at);
     renderQuality(); renderKpis(); renderTrend(); renderConversion(); renderRanking(); renderTable(); updateControls();
   }
   async function exportCsv() {

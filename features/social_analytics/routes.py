@@ -171,6 +171,9 @@ def scoped_facebook_source(app, start, end, site, catalog=None):
 def build_report(app, actor, query, *, include_titles=False, export=False, ai_backend_only=False,
                  catalog_snapshot=None):
     """The sole collector used by API/CSV/daily; app is a settings dictionary."""
+    from .warehouse_reader import configured_root, build_report as warehouse_report
+    if ai_backend_only and actor.get('_system_report') is not True and configured_root(app):
+        return warehouse_report(app, actor, query, include_titles=include_titles, export=export)
     params = parameters(query)
     # Content provenance is independent of permission scope. HTTP keeps the
     # authenticated tenant/owner actor; only scheduled collection is global.
@@ -289,7 +292,9 @@ def dispatch(handler, parsed, app, *, legacy=False):
         if parsed.path.endswith("/options"):
             if query:
                 raise ReportError("筛选选项接口不接受参数")
-            catalogs, errors = read_catalogs(app, ["youtube"] if legacy else list(PLATFORMS))
+            from .warehouse_reader import configured_root, read_catalogs as warehouse_catalogs
+            catalog_reader = warehouse_catalogs if configured_root(app) else read_catalogs
+            catalogs, errors = catalog_reader(app, ["youtube"] if legacy else list(PLATFORMS))
             result = options(catalogs, actor)
             result["quality"] = {"platforms": {}}
             metadata = getattr(errors, "source_metadata", {})

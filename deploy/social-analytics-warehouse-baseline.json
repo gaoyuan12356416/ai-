@@ -1,0 +1,9 @@
+{
+  "features/social_analytics/routes.py": "1916ef849a6c6c00ff91683dd30c2992f6d1c79aee7e5bd6522e8aa759ade488",
+  "features/social_analytics/adapters.py": "b511ee11b12476fbe34912534c90c5f62b3bc07397360e0b9b7a97d4f35d3ac5",
+  "features/social_analytics/report.py": "3a7ca19f3c631f7095bb1eea60d495f833caf0adafb91e8c0a54daa8b552280f",
+  "features/social_analytics/backend_scope.py": "6c882468df19e34c9ccbeead5c61e76a314517cbd33844245dffb923c61c83c8",
+  "features/social_analytics/facebook.py": "1e5757e3b486f397e6b850330e12dbbef692525be630697d49e50f558deb4289",
+  "static/social-analytics.js": "dd406c835add406f81dcc6695b3ebe2e4c2e4e03b23d2f59a317bf48c5f50b59",
+  "static/social-analytics.html": "86f55d20441f38a6690ba586e36514ad890caa7de2f56dfba1fb2a3f158e6d4c"
+}

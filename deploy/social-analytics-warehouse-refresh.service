@@ -1,0 +1,17 @@
+[Unit]
+Description=Hourly social analytics warehouse refresh
+RequiresMountsFor=/mnt/data-disk
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/social-analytics-warehouse/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m features.social_analytics.warehouse_refresh
+TimeoutStartSec=3300
+UMask=0022
+Nice=10
+MemoryMax=2G
+NoNewPrivileges=true
