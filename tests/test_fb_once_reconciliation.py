@@ -60,6 +60,13 @@ class ReconciliationTest(unittest.TestCase):
     def test_ready_without_published_or_incomplete_scan_rejected(self):
         r=copy.deepcopy(self.r);r['direct']['status']['publishing_phase']['publish_status']='unpublished'
         with self.assertRaises(ValueError):op.proof_for(self.state,r,self.m,self.now)
+
+    def test_original_catalog_integer_duration_precision(self):
+        state=copy.deepcopy(self.state);state['task'].update(caption='caption https://s/1',processing_mode='original',prepared_json='{}',snapshot_json=json.dumps({'material':{'duration_seconds':30.0}}))
+        r=copy.deepcopy(self.r);r['family']='video';r['direct']['length']=30.35
+        self.assertEqual(op.proof_for(state,r,self.m,self.now)['video_id'],'999')
+        r['direct']['length']=30.75
+        with self.assertRaisesRegex(ValueError,'duration_mismatch'):op.proof_for(state,r,self.m,self.now)
         r=copy.deepcopy(self.r);r['scan_complete']=False
         with self.assertRaises(ValueError):op.proof_for(self.state,r,self.m,self.now)
 

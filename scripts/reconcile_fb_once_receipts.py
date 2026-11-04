@@ -91,12 +91,17 @@ def proof_for(state, result, manifest, now):
             require(candidate.get('exact_description') is True and candidate.get('exact_frozen_short_url') is True and candidate['description_sha256'] == text_sha(caption), 'description_mismatch')
         require(manifest['description_sha256'] == text_sha(caption) and manifest['short_url_sha256'] == text_sha(t['short_url']), 'frozen_identity_changed')
         duration = t.get('prepared_duration_seconds')
+        tolerance = .1
         if result['family'] == 'video':
             prepared = json.loads(t.get('prepared_json') or '{}')
             duration = prepared.get('duration_seconds') or prepared.get('prepared_duration_seconds') or prepared.get('duration')
             if t.get('processing_mode') == 'original':
                 duration = json.loads(t['snapshot_json']).get('material', {}).get('duration_seconds')
-        require(duration and math.isfinite(float(duration)) and abs(float(row['length'])-float(duration)) <= .1, 'duration_mismatch')
+                # Original-material catalog snapshots can have whole-second
+                # precision; Graph reports fractional playback seconds.
+                if duration and float(duration).is_integer():
+                    tolerance = .5
+        require(duration and math.isfinite(float(duration)) and abs(float(row['length'])-float(duration)) <= tolerance, 'duration_mismatch')
         require(manifest['start']-900 <= created.timestamp() <= manifest['end']+300, 'outside_original_request_time')
     return {'video_id': vid, 'page_id': t['page_id'], 'published_at': published_at.isoformat(timespec='seconds'), 'object': row, 'evidence_sha256': sha(result)}
 
