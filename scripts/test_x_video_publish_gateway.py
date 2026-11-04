@@ -377,9 +377,13 @@ class FakeMySQL:
             "source_tag_name": "fixture", "video_duration": 45, "thumbnail_url": "https://images.example.invalid/1.png"} for i in range(count)]
 
     def source_rows(self, sql, params):
-        if "WHERE s.id IN" in sql:
-            return [dict(r) for r in self.sources if r["material_id"] in params]
         rows = copy.deepcopy(self.sources)
+        if 's.id IN (' in sql:
+            before, after = sql.split('s.id IN (', 1)
+            start = before.count('%s')
+            count = after.split(')', 1)[0].count('%s')
+            material_ids = params[start:start+count]
+            rows = [r for r in rows if r['material_id'] in material_ids]
         if 's.product=%s' in sql:
             product = params[sql.split('s.product=%s')[0].count('%s')]
             rows = [r for r in rows if r['product'] == product]
@@ -426,6 +430,91 @@ class FakeMySQL:
 
 
 class SourceBoundaryTests(unittest.TestCase):
+    def test_multiple_exact_ids_accept_spaces_commas_and_duplicates(self):
+        for query in ['101 102 103', '101,102,103', ' 101, 102\t103\n', ',,101,, 102,103,101,,',
+                      '00101,102 000103,101,000102']:
+            with self.subTest(query=query):
+                mysql = FakeMySQL()
+                mysql.sources[1]['product'] = 'Dramawave'
+                mysql.sources[2]['product'] = 'Other'
+                result = SourceRepository(mysql).listing({'q': query, 'product': 'Dramawave'})
+                self.assertEqual([r['material_id'] for r in result['items']], ['103','102','101'])
+                self.assertEqual(result['next_cursor'], '')
+                self.assertEqual(len(mysql.calls), 1)
+                sql, params = mysql.calls[0]
+                self.assertIn('s.id IN (%s,%s,%s)', sql)
+                self.assertNotIn('s.product=%s', sql)
+                self.assertNotIn('LOCATE', sql)
+                self.assertEqual(params, ['101','102','103'] * 3)
+
+    def test_exact_id_lists_keep_language_filter_and_missing_ids_do_not_scan(self):
+        mysql = FakeMySQL()
+        source = SourceRepository(mysql)
+        result = source.listing({'q': '101,102', 'language': 'ja'})
+        self.assertEqual(result['items'], [])
+        self.assertEqual(len(mysql.calls), 1)
+        self.assertIn('ads_drama_info i FORCE INDEX(ac)', mysql.calls[0][0])
+        self.assertEqual(mysql.calls[0][1], ['101','102','ja','jp'] * 3)
+        mysql.calls.clear()
+        result = source.listing({'q': '999,998'})
+        self.assertEqual(result['items'], [])
+        self.assertEqual(result['next_cursor'], '')
+        self.assertEqual(len(mysql.calls), 1)
+        self.assertNotIn('LOCATE', mysql.calls[0][0])
+
+    def test_exact_id_lists_allow_200_unique_ids_and_long_queries(self):
+        mysql = FakeMySQL(count=200)
+        material_ids = [r['material_id'] for r in mysql.sources]
+        query = ','.join(material_ids + ['101'])
+        self.assertGreater(len(query), 80)
+        result = SourceRepository(mysql).listing({'q': query, 'limit': 50})
+        self.assertEqual([r['material_id'] for r in result['items']], list(reversed(material_ids))[:50])
+        self.assertEqual(len(mysql.calls), 1)
+        self.assertEqual(mysql.calls[0][1], material_ids * 3)
+        mysql.calls.clear()
+        with self.assertRaises(PublishingError) as caught:
+            SourceRepository(mysql).listing({'q': ','.join(material_ids + ['301'])})
+        self.assertEqual(caught.exception.code, 'invalid_material_ids')
+        self.assertEqual(mysql.calls, [])
+        with self.assertRaises(PublishingError) as caught:
+            SourceRepository(mysql).listing({'q': 'title ' * 14})
+        self.assertEqual(caught.exception.code, 'invalid_query')
+
+    def test_exact_id_lists_validate_decimal_strings_without_numeric_precision_loss(self):
+        mysql = FakeMySQL()
+        large_id = '9000000000000000001'
+        mysql.sources[1]['material_id'] = large_id
+        result = SourceRepository(mysql).listing({'q': '101,' + large_id})
+        self.assertEqual([r['material_id'] for r in result['items']], [large_id, '101'])
+        self.assertEqual(mysql.calls[0][1], ['101', large_id] * 3)
+        mysql.calls.clear()
+        long_id = '1234567890123456789012345678901'
+        self.assertEqual(SourceRepository(mysql).listing({'q': long_id})['items'], [])
+        self.assertEqual(mysql.calls[0][1], [long_id] * 3)
+        for query in ['101,0', '101,' + '1' * 32]:
+            with self.subTest(query=query), self.assertRaises(PublishingError) as caught:
+                SourceRepository(mysql).listing({'q': query})
+            self.assertEqual(caught.exception.code, 'invalid_material_ids')
+
+    def test_exact_id_pages_sort_numerically_and_never_omit_or_repeat_rows(self):
+        mysql = FakeMySQL(count=125)
+        for index, row in enumerate(mysql.sources):
+            row['material_id'] = str(index + 1)
+        material_ids = [r['material_id'] for r in mysql.sources]
+        source = SourceRepository(mysql)
+        query = {'q': ' '.join(material_ids), 'limit': 50}
+        found, cursors = [], []
+        for _ in range(4):
+            page = source.listing(query)
+            found.extend(r['material_id'] for r in page['items'])
+            if not page['next_cursor']:
+                break
+            cursors.append(page['next_cursor'])
+            query['cursor'] = page['next_cursor']
+        self.assertEqual(found, list(reversed(material_ids)))
+        self.assertEqual(cursors, ['76', '26'])
+        self.assertEqual(len(mysql.calls), 3)
+
     def test_complete_drama_title_uses_content_index_and_empty_language_does_not_fallback(self):
         mysql = FakeMySQL()
         mysql.exact_titles = [{'content_id': 'fixture-content'}]
@@ -592,7 +681,7 @@ class SourceBoundaryTests(unittest.TestCase):
         source = SourceRepository(mysql)
         source.listing({"q": "9000000000000000001", "limit": "50", "language": "jp"})
         sql, params = mysql.calls[0]
-        self.assertIn("s.id=%s", sql)
+        self.assertIn("s.id IN (%s)", sql)
         self.assertIn("9000000000000000001", params)
         self.assertNotIn("9000000000000000001", sql)
         self.assertIn("ja", params)
@@ -621,6 +710,9 @@ class SourceBoundaryTests(unittest.TestCase):
             self.assertEqual(result['items'][0]['duration_seconds'],1792.934)
             self.assertEqual(result['items'][0]['preview_url'],'https://media.example.invalid/0.mp4')
             self.assertEqual(source.resolve(['101'])['items']['101']['duration_seconds'],1792.934)
+            result = source.listing({'q': '101,102'})
+            self.assertEqual([r['material_id'] for r in result['items']], ['102', '101'])
+            self.assertEqual(result['items'][1]['duration_seconds'], 1792.934)
             self.assertEqual(probe.call_args.args[0], 'https://media.example.invalid/0.mp4')
             self.assertIn('deadline',probe.call_args.kwargs)
             probe.return_value=14401
