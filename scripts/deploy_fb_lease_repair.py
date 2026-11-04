@@ -49,11 +49,12 @@ def prepare(source,commit,folder,host):
                 'unit_files':unit_files(unit),'exec_start':show(unit,'ExecStart'),'files':{}}
         manifest['lanes'][name]=record
         for relative in files:
-            base=('10500ac' if host=='cpu' else NODE_BASE) if relative.endswith('/executors.py') else BASE
+            base=NODE_BASE if relative.endswith('/executors.py') else BASE
             old=subprocess.run(['git','show',base+':'+relative],cwd=source,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             live=root/relative;target=candidate/relative
             assert target.resolve().is_relative_to(candidate.resolve()),'overlay_escape'
-            if old.returncode==0:assert live.read_bytes().replace(b'\r\n',b'\n')==old.stdout,'unreviewed_live_baseline:'+relative
+            if relative.endswith('/executors.py') and host=='cpu':assert sha(live)=='599485473e70ace13d5bbac5ae238a3ae0866988b838782797a621fd0b69bcc0','unreviewed_cpu_executor_baseline'
+            elif old.returncode==0:assert live.read_bytes().replace(b'\r\n',b'\n')==old.stdout,'unreviewed_live_baseline:'+relative
             else:assert not live.exists(),'new_file_collision:'+relative
             before=sha(live) if live.exists() else ''
             if relative.endswith('/executors.py'):
