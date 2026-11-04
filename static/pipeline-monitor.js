@@ -32,6 +32,18 @@
     const labels = { failed: "失败", unknown: "待核对", held: "暂停或限制", blocked_by_unknown: "等待异常账号核对", worker_offline: "执行器失联", repeated_claim: "反复领取未推进", schedule_missing: "预约时间缺失", identity_missing: "账号身份缺失" };
     return Object.entries(row.abnormal_reasons || {}).filter(([, count]) => count > 0).map(([reason, count]) => `<small>${e(labels[reason] || "其他异常")} ${number(count)}</small>`).join("");
   }
+  // Keep headers and cells in the same asset so cached HTML cannot swap
+  // successful completions with unresolved or failed work after an update.
+  const CHANNEL_COLUMNS = [
+    { key: "scheduled", label: "预约中", cell: row => number(row.scheduled) },
+    { key: "waiting", label: "待执行", cell: row => number(row.waiting) },
+    { key: "executing", label: "执行中", cell: row => number(row.executing) },
+    { key: "completed", label: "已完成", cell: row => `<strong>${number(row.completed)}</strong>` },
+    { key: "abnormal", label: "失败", cell: row => `${number(row.abnormal)}${abnormalDetails(row)}` },
+    { key: "throughput_per_hour", label: "吞吐", title: "最近 1 小时成功完成数（条/小时）", cell: row => number(row.throughput_per_hour) },
+    { key: "avg_duration_seconds", label: "平均耗时", cell: row => duration(row.avg_duration_seconds) },
+    { key: "oldest_pending_seconds", label: "最老等待", title: "已到期且待执行任务的最长等待时间", cell: row => `${duration(row.oldest_pending_seconds)}${row.backlog_paused ? `<small>历史暂停 ${number(row.backlog_paused)}</small>` : ""}` },
+  ];
   function renderSummary(data) {
     totals(data);
     $("pmScope").textContent = data.scope === "all" ? "全站任务" : "我的任务";
@@ -47,7 +59,9 @@
     if (data.stale) warnings.unshift("采集数据有延迟，以下保留最近一次可用快照。");
     notice("pmWarnings", [...new Set(warnings)].join("；"));
     $("pmWindowLabel").textContent = data.window?.start && data.window?.end ? `${time(data.window.start)} — ${time(data.window.end)}` : $("pmWindow").selectedOptions[0].textContent;
-    $("pmChannelRows").innerHTML = (data.channels || []).map(row => `<tr><td><span class="pm-channel"><b class="pm-channel-icon">${e({ x: "X", fb: "FB", tt: "TT", youtube: "YT" }[row.channel] || "·")}</b><span><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><small>${e(STAGES[row.stage] || row.stage)}</small></span></span></td><td>${number(row.waiting)}</td><td>${number(row.executing)}</td><td>${number(row.scheduled)}</td><td>${number(row.abnormal)}${abnormalDetails(row)}</td><td><strong>${number(row.completed)}</strong></td><td>${number(row.throughput_per_hour)}</td><td>${duration(row.avg_duration_seconds)} / ${duration(row.p95_duration_seconds)}</td><td>${duration(row.oldest_pending_seconds)}${row.backlog_paused ? `<small>历史暂停 ${number(row.backlog_paused)}</small>` : ""}</td></tr>`).join("") || '<tr><td colspan="9" class="pm-empty">当前范围暂无可见的渠道任务数据</td></tr>';
+    const channelRows = $("pmChannelRows");
+    channelRows.closest("table").querySelector("thead tr").innerHTML = '<th>渠道 / 阶段</th>' + CHANNEL_COLUMNS.map(column => `<th data-column="${column.key}"${column.title ? ` title="${e(column.title)}"` : ""}>${column.label}</th>`).join("");
+    channelRows.innerHTML = (data.channels || []).map(row => `<tr><td><span class="pm-channel"><b class="pm-channel-icon">${e({ x: "X", fb: "FB", tt: "TT", youtube: "YT" }[row.channel] || "·")}</b><span><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><small>${e(STAGES[row.stage] || row.stage)}</small></span></span></td>${CHANNEL_COLUMNS.map(column => `<td data-column="${column.key}">${column.cell(row)}</td>`).join("")}</tr>`).join("") || '<tr><td colspan="9" class="pm-empty">当前范围暂无可见的渠道任务数据</td></tr>';
     $("pmSources").innerHTML = (data.sources || []).map(row => `<div class="pm-source"><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><span>${e(row.family || "")}</span>${badge(row.state)}<span title="采集时间">${e(time(row.collected_at))}</span>${row.error_code ? `<span>${e(row.error_code)}</span>` : ""}</div>`).join("") || '<p class="pm-muted">尚无采集状态，等待采集器上报。</p>';
     $("pmEfficiencyRows").innerHTML = (data.channels || []).map(row => { const phases = (data.efficiency || []).filter(p => p.channel === row.channel && p.stage === row.stage); return `<tr><td>${e(CHANNELS[row.channel])} · ${e(STAGES[row.stage])}</td><td>${row.success_rate == null ? "未记录" : number(row.success_rate * 100) + "%"}</td><td>${number(row.throughput_per_hour)}</td>${["download", "render", "artifact_transfer", "platform_submit", "platform_upload", "platform_processing", "platform_confirmation_wait", "queue"].map(phase => { const timing = phases.find(p => p.phase === phase); return `<td>${timing?.samples ? `${duration(timing.p50_seconds)} / ${duration(timing.p95_seconds)}<small>${number(timing.samples)} 个样本</small>` : timing?.applicable === false ? "不适用" : "未记录"}</td>`; }).join("")}</tr>`; }).join("") || '<tr><td colspan="11" class="pm-empty">暂无已完成的计时样本</td></tr>';
   }

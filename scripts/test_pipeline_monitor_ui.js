@@ -61,7 +61,26 @@ const server = http.createServer((req, res) => {
     assert.match(await page.locator('#pmTotals [data-stat-key="executing"]').innerText(), /执行中\s*16/);
     assert.match(await page.locator('#pmTotals [data-stat-key="abnormal"]').innerText(), /异常\s*24/);
     assert.match(await page.locator('#pmChannelRows tr').first().innerText(), /失败 1[\s\S]*等待异常账号核对 2/);
-    assert.match(await page.locator('#pmChannelRows').locator('..').innerText(), /待执行[\s\S]*执行中[\s\S]*预约中[\s\S]*异常[\s\S]*已完成/);
+    const channelTable = page.locator('#pmChannelRows').locator('..');
+    const expectedHeaders = ['渠道 / 阶段', '预约中', '待执行', '执行中', '已完成', '失败', '吞吐', '平均耗时', '最老等待'];
+    assert.deepEqual(await channelTable.locator('thead th').allTextContents(), expectedHeaders);
+    const firstCells = await page.locator('#pmChannelRows tr').first().locator('td').allTextContents();
+    assert.deepEqual(firstCells.slice(1, 5), ['5', '3', '2', '21']);
+    assert.match(firstCells[5], /^3失败 1等待异常账号核对 2$/);
+    assert.deepEqual(firstCells.slice(6), ['12', '5.3分', '45秒']);
+    // Reproduce the reported FB case: unresolved work never appears as completed.
+    const oldRows = summary.channels;
+    summary.channels = [{ ...oldRows[3], completed: 0, abnormal: 145, abnormal_reasons: { unknown: 141, blocked_by_unknown: 4 } }];
+    // Cached HTML can still have the obsolete order; every render repairs it.
+    await page.locator('#pmChannelRows').locator('..').locator('thead tr').evaluate(el => el.innerHTML = '<th>渠道 / 阶段</th><th>排队中</th><th>执行中</th><th>已就绪</th><th>已完成</th><th>失败 / 待核对</th>');
+    await page.locator('#pmRefresh').click();
+    await page.waitForFunction(() => document.querySelectorAll('#pmChannelRows tr').length === 1);
+    assert.deepEqual(await channelTable.locator('thead th').allTextContents(), expectedHeaders);
+    assert.equal(await page.locator('#pmChannelRows [data-column="completed"]').innerText(), '0');
+    assert.match(await page.locator('#pmChannelRows [data-column="abnormal"]').innerText(), /^145[\s\S]*待核对 141[\s\S]*等待异常账号核对 4$/);
+    summary.channels = oldRows;
+    await page.locator('#pmRefresh').click();
+    await page.waitForFunction(() => document.querySelectorAll('#pmChannelRows tr').length === 8);
     assert.equal(await page.locator('#pmTotals [data-stat-key="ready"]').count(), 0);
     assert.equal(await page.locator('#pmStatus option[value="queued"]').innerText(), "排队中");
     assert.match(await page.locator("#pmQueueNote").innerText(), /待执行：[\s\S]*预约中：未到执行时间[\s\S]*历史暂停单独统计/);
