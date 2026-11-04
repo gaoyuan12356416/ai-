@@ -32,6 +32,15 @@ DEFAULT_CAPACITY = {
 JSON_FIELDS = ("payload", "artifact", "resource_keys", "capabilities")
 
 
+def independent_x_preparation(row):
+    """Only a frozen X queue may render ahead; planners retain account fencing."""
+    meta = json.loads(row["source_meta_json"])
+    return (row["channel"] == "x" and row["family"] == "queue" and row["stage"] == "prepare"
+            and str(row["source_id"]).isdigit() and row["source_key"] == "x:queue:" + str(row["source_id"])
+            and not row["external_intent"]
+            and not any(meta.get(k) for k in ("source_attempt_count", "unknown_outcome", "reconcile_only", "legacy_inflight", "publish_id")))
+
+
 class DispatchError(RuntimeError):
     def __init__(self, code, message=None, status=409):
         self.code, self.status = code, status
@@ -193,6 +202,9 @@ class DispatchStore:
             CREATE TABLE IF NOT EXISTS pipeline_delivery (
               delivery_id TEXT PRIMARY KEY,job_id INTEGER NOT NULL,generation INTEGER NOT NULL,
               claim_hash TEXT NOT NULL,request_sha256 TEXT NOT NULL,response_json TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS pipeline_preparation_rejection (
+              job_id INTEGER PRIMARY KEY,generation INTEGER NOT NULL,phase TEXT NOT NULL,
+              receipt_sha256 TEXT NOT NULL,error_code TEXT NOT NULL,created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS pipeline_publication (
               source_key TEXT PRIMARY KEY,job_id INTEGER NOT NULL,channel TEXT NOT NULL,
               owner_user_id TEXT NOT NULL,owner_tenant_key TEXT NOT NULL,required_module TEXT NOT NULL,
@@ -764,7 +776,29 @@ class DispatchStore:
                 if not resources:
                     blocked.append("account_identity_missing")
                     continue  # All current channel work belongs to an account, Page, or YouTube channel.
-                if any(c.execute("SELECT 1 FROM pipeline_resource WHERE resource_key=? UNION ALL SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? LIMIT 1", (r, r)).fetchone() for r in resources):
+                independent = independent_x_preparation(row)
+                locks = ["prepare:" + r for r in resources] if independent else resources
+                busy = False
+                for resource in resources:
+                    if c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? LIMIT 1", (resource,)).fetchone():
+                        busy = True
+                        break
+                    held = c.execute("SELECT r.quarantined,r.legacy,j.stage,j.status,j.lease_expires_at FROM pipeline_resource r JOIN pipeline_job j ON j.id=r.job_id WHERE r.resource_key=?", (resource,)).fetchone()
+                    if held and not (independent and held["stage"] == "publish" and held["status"] == "running"
+                                     and not held["quarantined"] and not held["legacy"] and held["lease_expires_at"] > now):
+                        busy = True
+                        break
+                    if independent and c.execute("SELECT 1 FROM pipeline_resource WHERE resource_key=?", ("prepare:" + resource,)).fetchone():
+                        busy = True
+                        break
+                    # Unknown preparation fences and legacy planners must also
+                    # see the new lane. A normal publisher checks order below.
+                    if not independent:
+                        prep = c.execute("SELECT quarantined FROM pipeline_resource WHERE resource_key=?", ("prepare:" + resource,)).fetchone()
+                        if prep and (stage != "publish" or prep["quarantined"]):
+                            busy = True
+                            break
+                if busy:
                     blocked.append("account_busy")
                     continue
                 if stage == "publish":
@@ -778,14 +812,21 @@ class DispatchStore:
                 # of the same identity, otherwise a busy prep pool can keep
                 # reacquiring the account before its completed media is sent.
                 earlier = c.execute("SELECT resource_keys_json FROM pipeline_job WHERE stage='publish' AND status IN ('queued','ready') AND hold_reason='' AND channel=? AND scheduled_at<=? AND (scheduled_at<? OR (scheduled_at=? AND id<?))", (row["channel"], now, row["scheduled_at"], row["scheduled_at"], row["id"])).fetchall()
-                if any(set(resources).intersection(json.loads(r[0])) for r in earlier):
+                if not independent and any(set(resources).intersection(json.loads(r[0])) for r in earlier):
                     blocked.append("account_ordering")
                     continue
+                if row["channel"] == "x" and row["family"] == "queue" and stage == "publish" and str(row["source_id"]).isdigit():
+                    # Rendering ahead must never let a later episode publish
+                    # while an older due episode is still being prepared.
+                    preparing = c.execute("SELECT resource_keys_json FROM pipeline_job WHERE channel='x' AND family='queue' AND stage='prepare' AND source_key<>? AND status IN ('queued','ready','running','legacy_running') AND hold_reason='' AND scheduled_at<=? AND (scheduled_at<? OR (scheduled_at=? AND CAST(source_id AS INTEGER)<?))", (row["source_key"], now, row["scheduled_at"], row["scheduled_at"], int(row["source_id"]))).fetchall()
+                    if any(set(resources).intersection(json.loads(r[0])) for r in preparing):
+                        blocked.append("account_ordering")
+                        continue
                 token, generation = secrets.token_urlsafe(32), row["generation"] + 1
                 expires = stamp(self.clock() + dt.timedelta(seconds=LEASE_SECONDS))
                 c.execute("UPDATE pipeline_job SET status='running',node_id=?,worker_id=?,generation=?,claim_hash=?,lease_expires_at=?,started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,updated_at=?,error_code='',error_message='' WHERE id=?", (node_id, worker_id, generation, digest(token), expires, now, now, row["id"]))
                 c.execute("INSERT INTO pipeline_claim_history VALUES(?,?,?,?,?)", (row["id"], generation, node_id, worker_id, digest(token)))
-                for resource in resources:
+                for resource in locks:
                     c.execute("INSERT INTO pipeline_resource VALUES(?,?,?,0,0)", (resource, row["id"], generation))
                 self.event(c, row["id"], "claimed", {"node_id": node_id, "worker_id": worker_id, "generation": generation}, now)
                 seq = c.execute("SELECT max(id) FROM pipeline_event").fetchone()[0]
@@ -978,6 +1019,73 @@ class DispatchStore:
         if tuple(row[k] for k in ("job_id", "generation", "claim_hash", "request_sha256")) != identity:
             raise DispatchError("delivery_identity_conflict")
         return dict(json.loads(row["response_json"]), duplicate=True)
+
+    def validate_preparation_rejection(self, claim):
+        with contextlib.closing(self.connect()) as c:
+            row = self._validate_claim(c, claim, allow_expired=True)
+            if (not independent_x_preparation(row) or row["status"] not in {"running", "queued", "failed"}
+                    or any(c.execute("SELECT 1 FROM " + table + " WHERE job_id=? LIMIT 1", (row["id"],)).fetchone()
+                           for table in ("pipeline_operation", "pipeline_checkpoint", "pipeline_receipt", "pipeline_publication"))):
+                raise DispatchError("preparation_rejection_conflict")
+
+    def reject_preparation_checkpoint(self, claim, request, code, *, canonical_verified=False):
+        """Persist a definitive native rejection, never a successful checkpoint.
+
+        The first HTTP call raises after commit so existing executors stop.
+        Exact outbox redelivery ACKs this disposition, not media acceptance.
+        """
+        if not canonical_verified or code not in {"x_random_requires_video", "x_post_auto_template_duration_exceeded"}:
+            raise DispatchError("preparation_rejection_unverified")
+        with self.transaction() as c:
+            row = self._validate_claim(c, claim, allow_expired=True)
+            if (not independent_x_preparation(row) or request.get("phase") != "x_preflight"
+                    or row["status"] not in {"running", "queued", "failed"}
+                    or any(c.execute("SELECT 1 FROM " + table + " WHERE job_id=? LIMIT 1", (row["id"],)).fetchone()
+                           for table in ("pipeline_operation", "pipeline_checkpoint", "pipeline_receipt", "pipeline_publication"))):
+                raise DispatchError("preparation_rejection_conflict")
+            now = self.now()
+            evidence = (row["id"], row["generation"], "x_preflight", digest(dumps(request.get("receipt", {}))), code, now)
+            previous = c.execute("SELECT * FROM pipeline_preparation_rejection WHERE job_id=?", (row["id"],)).fetchone()
+            if previous and tuple(previous)[:5] != evidence[:5]:
+                raise DispatchError("preparation_rejection_conflict")
+            c.execute("INSERT OR IGNORE INTO pipeline_preparation_rejection VALUES(?,?,?,?,?,?)", evidence)
+            c.execute("UPDATE pipeline_job SET status='failed',error_code=?,error_message=?,finished_at=CASE WHEN finished_at='' THEN ? ELSE finished_at END,updated_at=? WHERE id=?", (code, code, now, now, row["id"]))
+            c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND generation=?", (row["id"], row["generation"]))
+            response = {"accepted": True, "status": "failed", "rejected_checkpoint": True, "error_code": code}
+            c.execute("INSERT INTO pipeline_delivery VALUES(?,?,?,?,?,?)", (request["checkpoint_id"], row["id"], row["generation"], digest(claim["claim_token"]), digest(dumps(request)), dumps(response)))
+            self.event(c, row["id"], "preparation_checkpoint_rejected", {"code": code, "receipt_sha256": evidence[3]}, now)
+            return response
+
+    def acknowledge_preparation_rejection(self, claim, delivery_id, request, action):
+        """Drain only authenticated callbacks for the proven rejected input.
+
+        Older generations may acknowledge delivery but can never change the
+        terminal job, its canonical failure, or a subsequently admitted retry.
+        """
+        if action not in {"jobs/checkpoint", "jobs/fail"} or not delivery_id:
+            return None
+        with self.transaction() as c:
+            job_id = claim.get("job_id", claim.get("id"))
+            rejection = c.execute("SELECT * FROM pipeline_preparation_rejection WHERE job_id=?", (job_id,)).fetchone()
+            if not rejection:
+                return None
+            row = c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone()
+            if (not row or row["status"] != "failed" or row["generation"] != rejection["generation"]
+                    or row["error_code"] != rejection["error_code"] or not independent_x_preparation(row)
+                    or request.get("unknown_outcome")
+                    or any(c.execute("SELECT 1 FROM " + table + " WHERE job_id=? LIMIT 1", (job_id,)).fetchone()
+                           for table in ("pipeline_operation", "pipeline_checkpoint", "pipeline_receipt", "pipeline_publication"))):
+                return None
+            history = c.execute("SELECT * FROM pipeline_claim_history WHERE job_id=? AND generation=?", (job_id, claim.get("generation"))).fetchone()
+            if (not history or history["node_id"] != claim.get("node_id") or history["worker_id"] != claim.get("worker_id")
+                    or not secrets.compare_digest(history["claim_hash"], digest(claim.get("claim_token", "")))):
+                raise DispatchError("claim_conflict")
+            if action == "jobs/checkpoint" and (request.get("phase") != rejection["phase"]
+                    or digest(dumps(request.get("receipt", {}))) != rejection["receipt_sha256"]):
+                return None
+            response = {"accepted": True, "status": "failed", "rejected_checkpoint": True, "error_code": rejection["error_code"]}
+            c.execute("INSERT INTO pipeline_delivery VALUES(?,?,?,?,?,?)", (delivery_id, job_id, claim["generation"], history["claim_hash"], digest(dumps(request)), dumps(response)))
+            return response
 
     def save_delivery(self, claim, delivery_id, request, response):
         if not delivery_id:
