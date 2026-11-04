@@ -127,6 +127,24 @@ class Run446CloseTests(unittest.TestCase):
         with self.assertRaisesRegex(recovery.RecoveryRejected, "post_finalize"):
             self.plan()
 
+    def test_apply_transaction_keeps_auto_sql_writes_forbidden(self):
+        auto_before = Path(self.paths["auto"]).read_bytes()
+        with contextlib.closing(recovery.connect(**self.paths, writable=True)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self.assertEqual(conn.execute("SELECT count(*) FROM auto.x_auto_task").fetchone()[0], 3)
+            for statement in (
+                "UPDATE auto.x_auto_task SET status='pending'",
+                "INSERT INTO auto.x_auto_task(id) VALUES(9999)",
+                "DELETE FROM auto.x_auto_task",
+                "CREATE TABLE auto.unexpected(id INTEGER)",
+                "DROP TABLE auto.x_auto_task",
+            ):
+                with self.subTest(statement=statement):
+                    with self.assertRaisesRegex(sqlite3.DatabaseError, "not authorized"):
+                        conn.execute(statement)
+            conn.rollback()
+        self.assertEqual(Path(self.paths["auto"]).read_bytes(), auto_before)
+
     def test_rejects_pending_or_late_receipt(self):
         self.evidence["nodes"][0]["receipts"][0]["acked_at"] = None
         with self.assertRaisesRegex(recovery.RecoveryRejected, "pending"):

@@ -93,9 +93,15 @@ def connect(native, auto, central, *, writable=False):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("ATTACH DATABASE ? AS dispatch", (Path(central).resolve().as_uri() + "?mode=" + mode,))
-    # The task store is evidence only. Even apply has no ability to alter tasks.
-    conn.execute("ATTACH DATABASE ? AS auto", (Path(auto).resolve().as_uri() + "?mode=ro",))
-    if not writable:
+    # BEGIN IMMEDIATE requests a write lock on every attachment on some SQLite
+    # versions. Attach rw for apply, but keep the evidence-only task store
+    # protected against SQL writes with the connection authorizer.
+    conn.execute("ATTACH DATABASE ? AS auto", (Path(auto).resolve().as_uri() + "?mode=" + mode,))
+    if writable:
+        conn.set_authorizer(lambda action, arg1, arg2, database, source:
+                            sqlite3.SQLITE_DENY if database == "auto" and action != sqlite3.SQLITE_READ
+                            else sqlite3.SQLITE_OK)
+    else:
         conn.execute("PRAGMA query_only=ON")
     return conn
 
