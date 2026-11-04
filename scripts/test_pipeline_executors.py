@@ -74,6 +74,40 @@ class ExecutorTests(unittest.TestCase):
         self.context = Context()
     def tearDown(self): self.temp.cleanup()
 
+    def test_native_render_phase_is_measured_and_restored(self):
+        executor = NodeExecutors(self.config)
+        for command, expected in [
+            (['/gpu/bin/python', '-m', 'features.random_gpu.native_pipeline', '--spec', '{}', '/tmp/out.mp4'], 'render'),
+            (['/usr/bin/ffmpeg', '-i', '/tmp/input', '/tmp/out.mp4'], 'render'),
+            (['/usr/bin/ffprobe', '/tmp/input'], 'probe')]:
+            with self.subTest(command=command[0]):
+                context = SimpleNamespace(phase_name='prepare')
+                observed = []
+                def phase(value):
+                    context.phase_name = value
+                    observed.append(value)
+                context.phase = phase
+                original = lambda *args, **kwargs: context.phase_name
+                processor = SimpleNamespace(runner=original)
+                with executor._measure_processor(processor, context):
+                    self.assertEqual(processor.runner(command), expected)
+                self.assertEqual(observed, [expected, 'prepare'])
+                self.assertIs(processor.runner, original)
+
+    def test_native_render_error_still_restores_phase_and_runner(self):
+        executor = NodeExecutors(self.config)
+        context = SimpleNamespace(phase_name='prepare')
+        context.phase = lambda value: setattr(context, 'phase_name', value)
+        def original(*args, **kwargs):
+            self.assertEqual(context.phase_name, 'render')
+            raise RuntimeError('local_render_failed')
+        processor = SimpleNamespace(runner=original)
+        with self.assertRaisesRegex(RuntimeError, 'local_render_failed'):
+            with executor._measure_processor(processor, context):
+                processor.runner(['python', '-m', 'features.random_gpu.native_pipeline', '/tmp/out.mp4'])
+        self.assertEqual(context.phase_name, 'prepare')
+        self.assertIs(processor.runner, original)
+
     def test_uploaded_qualified_video_survives_hard_crash_and_moves_to_another_node(self):
         for kind in ("fb_prepare", "tt_prepare", "x_random", "x_repair"):
             with self.subTest(kind=kind):

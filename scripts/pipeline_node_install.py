@@ -45,6 +45,10 @@ def plan(spec):
         raise ValueError("identity_or_commit_invalid")
     if spec.get("backend") not in {"cpu", "gpu"}:
         raise ValueError("backend_invalid")
+    if not isinstance(spec.get("gpu_native", False), bool):
+        raise ValueError("gpu_native_must_be_boolean")
+    if spec.get("gpu_native") and spec["backend"] != "gpu":
+        raise ValueError("gpu_native_requires_gpu_node")
     root = absolute(spec.get("install_root", "/opt/pipeline-dispatch"))
     state = absolute(spec["state_root"])
     if root.name != "pipeline-dispatch" or state.name != "pipeline-dispatch" or state == root or not (str(state).startswith("/data/") or str(state).startswith("/mnt/")):
@@ -101,6 +105,65 @@ def configure_tls_ca(environment, venv):
                       "import certifi,os; p=certifi.where(); assert os.path.isfile(p) and os.access(p,os.R_OK); print(p)"])
     absolute(bundle)
     environment["SSL_CERT_FILE"] = bundle
+
+
+def runtime_requirements(spec, release):
+    """Fingerprint the selected runtime and its included base requirements."""
+    release = Path(release)
+    base = release / "deploy/pipeline-node.requirements.txt"
+    data = base.read_bytes()
+    if spec.get("gpu_native"):
+        selected = release / "deploy/pipeline-gpu.requirements.txt"
+        data += b"\0gpu_native\0" + selected.read_bytes()
+    else:
+        selected = base
+    return selected, hashlib.sha256(data).hexdigest()
+
+
+def stage_runtime(spec, info):
+    """A SHA's existing runtime is immutable, including the selected profile."""
+    python = spec.get("python", "/usr/bin/python3.9")
+    absolute(python)
+    venv = Path(info["venv"])
+    requirements, expected = runtime_requirements(spec, info["release"])
+    marker = venv / ".requirements.sha256"
+    if not venv.exists():
+        command([python, "-m", "venv", venv])
+        command([venv / "bin/python", "-m", "pip", "install", "--disable-pip-version-check", "-r", requirements], timeout=1200)
+        immutable(marker, expected.encode())
+    if not marker.is_file():
+        raise ValueError("venv_install_incomplete")
+    if marker.read_text() != expected:
+        raise ValueError("venv_requirements_mismatch")
+
+
+def configure_gpu_runtime(spec, info, environment):
+    if not spec.get("gpu_native"):
+        return
+    interpreter = str(PurePosixPath(info["venv"]) / "bin/python")
+    if environment.get("RANDOM_GPU_PYTHON", interpreter) != interpreter:
+        raise ValueError("gpu_runtime_interpreter_mismatch")
+    environment.setdefault("RANDOM_GPU_NATIVE", "1")
+    environment.setdefault("RANDOM_GPU_COMPUTE", "1")
+    environment["RANDOM_GPU_PYTHON"] = interpreter
+
+
+def gpu_runtime_doctor(spec, info):
+    """Local-only tiny device check as the service user; no claims or uploads."""
+    if not spec.get("gpu_native"):
+        return
+    code = (
+        "import av; from features.random_gpu.gpu_compute import CudaSHA256; "
+        "from features.random_gpu.native_video import codec_runtime; "
+        "from features.random_gpu.gpu_mux import CudaMP4; "
+        "codec_runtime(); "
+        "assert CudaSHA256().update(b'abc').hexdigest() == "
+        "'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'; "
+        "assert CudaMP4().annexb_sample(bytes.fromhex('0000016588')) == bytes.fromhex('000000026588'); "
+        "av.CodecContext.create('aac','w'); print('gpu_runtime_local_doctor_passed')"
+    )
+    command(["runuser", "-u", "pipeline-worker", "--", Path(info["venv"]) / "bin/python", "-c", code],
+            cwd=info["release"], timeout=120)
 
 
 def immutable(path, data, mode=0o600):
@@ -199,16 +262,10 @@ def stage(spec, info):
     if not release.exists(): command(["git", "--git-dir", mirror, "worktree", "add", "--detach", release, info["sha"]])
     if command(["git", "-C", release, "rev-parse", "HEAD"]) != info["sha"] or command(["git", "-C", release, "status", "--porcelain"]):
         raise ValueError("release_changed")
-    python = spec.get("python", "/usr/bin/python3.9")
-    absolute(python)
-    if not venv.exists():
-        command([python, "-m", "venv", venv])
-        requirements = release / "deploy/pipeline-node.requirements.txt"
-        command([venv / "bin/python", "-m", "pip", "install", "--disable-pip-version-check", "-r", requirements], timeout=1200)
-        immutable(venv / ".requirements.sha256", hashlib.sha256(requirements.read_bytes()).hexdigest().encode())
-    if not (venv / ".requirements.sha256").is_file(): raise ValueError("venv_install_incomplete")
+    stage_runtime(spec, info)
     environment = read_environment(spec.get("environment_files", []))
     environment.update({str(k): str(v) for k, v in spec.get("environment", {}).items()})
+    configure_gpu_runtime(spec, info, environment)
     configure_tls_ca(environment, venv)
     catalogs = stage_catalogs(spec, info)
     if catalogs:
@@ -266,20 +323,25 @@ def main():
     parser.add_argument("--manifest", required=True, help="absolute mode0600 JSON; no secret command arguments")
     parser.add_argument("--plan", action="store_true", help="validate/print safe paths without mutation")
     parser.add_argument("--verify", action="store_true", help="run local encode/catalog/COS diagnostics after staging")
+    parser.add_argument("--verify-local", action="store_true", help="run local encode/catalog/runtime diagnostics only; no COS/enrollment/start")
     parser.add_argument("--enroll", action="store_true", help="requires --verify; token from private env/file")
     parser.add_argument("--activate", action="store_true", help="start only this new inactive enrolled node")
     args = parser.parse_args()
     try:
+        if args.verify_local and (args.verify or args.enroll or args.activate):
+            raise ValueError("local_verification_cannot_activate_or_enroll")
         spec = private_json(args.manifest); info = plan(spec)
         if not args.plan:
             stage(spec, info)
             if args.enroll and not args.verify: raise ValueError("enrollment_requires_verification")
-            if args.verify:
+            if args.verify or args.verify_local:
+                gpu_runtime_doctor(spec, info)
                 if args.enroll and spec.get("tunnel"): start_tunnel(info)
-                argv = ["runuser", "-u", "pipeline-worker", "--", info["venv"] + "/bin/python", info["release"] + "/scripts/pipeline_node_check.py", "--env", info["staging"] + "/node.env", "--encode", "--cos-check"]
+                argv = ["runuser", "-u", "pipeline-worker", "--", info["venv"] + "/bin/python", info["release"] + "/scripts/pipeline_node_check.py", "--env", info["staging"] + "/node.env", "--encode"]
+                if args.verify: argv += ["--cos-check"]
                 if args.enroll: argv += ["--enroll", info["state"] + "/credentials.json"]
                 command(argv, timeout=1200)
-                immutable(Path(info["staging"]) / ".verified", info["sha"].encode())
+                immutable(Path(info["staging"]) / (".verified" if args.verify else ".verified-local"), info["sha"].encode())
             if args.activate: activate(spec, info)
         print(json.dumps({"ok": True, "plan_only": args.plan, "activated": bool(args.activate and not args.plan), **info}))
         return 0

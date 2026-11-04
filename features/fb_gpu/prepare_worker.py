@@ -15,6 +15,7 @@ import requests
 from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file, validate_recipe
 from .render_process import RenderStalled, run_render
+from features.random_gpu.gpu_compute import file_digest
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
 CPU_PROFILE="fb-post-random-overlay-libx264-720x1280-v1"
@@ -104,7 +105,7 @@ def _probe(config,path):
     try: duration=float((payload.get("format") or {}).get("duration") or video.get("duration") or 0)
     except Exception: duration=0
     if not math.isfinite(duration) or duration<=0: raise PrepareWorkerError("fb_gpu_probe_failed","media duration invalid",502)
-    return {"duration":duration,"has_audio":audio is not None,"video":video,"audio":audio}
+    return {"duration":duration,"has_audio":audio is not None,"video":video,"audio":audio,"format":payload.get("format") or {}}
 
 def build_command(config,source,output,info,recipe,assets):
     source_overlay=validate_source_overlay(recipe)
@@ -229,7 +230,7 @@ class PrepareProcessor:
         try:
             response=session.get(url,stream=True,timeout=120,allow_redirects=False)
             if response.status_code!=200: raise PrepareWorkerError("fb_gpu_source_download_failed","source download failed",502)
-            size=0; digest=hashlib.sha256()
+            size=0; digest=file_digest()
             with path.open("xb") as handle:
                 for chunk in response.iter_content(1024*1024):
                     size+=len(chunk)
@@ -292,8 +293,16 @@ class PrepareProcessor:
                 try:
                     paths=selected_asset_paths(recipe,assets)
                     try:
-                        self.runner(build_command(self.config,source,output,source_info,recipe,paths),capture_output=True,text=True,timeout=self.config.timeout,check=True)
+                        from features.random_gpu import native_pipeline
+                        native = native_pipeline.enabled() and getattr(self.config,"video_encoder","h264_nvenc")=="h264_nvenc"
+                        render_command = (native_pipeline.command(source,output,source_info,recipe,paths) if native
+                                          else build_command(self.config,source,output,source_info,recipe,paths))
+                        self.runner(render_command,capture_output=True,text=True,timeout=self.config.timeout,check=True)
                     except RenderStalled:
+                        if native:
+                            # A failed native job must never silently change
+                            # source pixels/recipe through the old normalizer.
+                            raise
                         # Some source timestamp/interleaving combinations stall
                         # multi-input framesync. Normalize only after a proven
                         # stall, retaining the frozen source hash and recipe.
@@ -325,7 +334,8 @@ class PrepareProcessor:
                     callback({"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":url,"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":key,"status":"ready","render_seconds":render_seconds},key)
                 stored=self.object_store.upload(output,job,output_sha,size)
                 result={"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":stored["url"],"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":stored["key"],"status":"ready","render_seconds":render_seconds}
-                tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":self.config.compositor_backend,"render_seconds":render_seconds},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
+                renderer="cuda_native_v1" if native else self.config.compositor_backend
+                tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":renderer,"render_seconds":render_seconds},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
             finally: output.unlink(missing_ok=True)
 
 class Server(ThreadingHTTPServer):

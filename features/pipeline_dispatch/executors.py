@@ -308,7 +308,7 @@ class NodeExecutors:
                 return run_render(cpu_thread_command(command) if self.config["backend"] == "cpu" else command, **kwargs)
             processor = PrepareProcessor(WorkerConfig.from_env(), runner=render)
         elif kind == "tt_prepare":
-            from features.tt_gpu.worker import WorkerConfig, TTPostGPUProcessor
+            from features.tt_gpu.worker import WorkerConfig, TTPostGPUProcessor, media_runner
             from .tt_profiles import TTProfileError, select_config
             config = WorkerConfig.from_env()
             try:
@@ -320,7 +320,7 @@ class NodeExecutors:
             if self.config["backend"] == "cpu" and config.video_encoder != "libx264":
                 raise ExecutionError("cpu_profile_requires_libx264")
             def runner(command, **kwargs):
-                return subprocess.run(cpu_thread_command(command) if self.config["backend"] == "cpu" else command, **kwargs)
+                return media_runner(cpu_thread_command(command) if self.config["backend"] == "cpu" else command, **kwargs)
             processor = TTPostGPUProcessor(config, runner=runner)
         else:
             raise ExecutionError("preparation_executor_not_configured")
@@ -442,7 +442,11 @@ class NodeExecutors:
                 previous = getattr(context, "phase_name", "prepare")
                 selected = phase
                 if name == "runner":
-                    selected = "render" if args and "ffmpeg" in Path(str(args[0][0])).name.lower() else "probe"
+                    command = args[0] if args else []
+                    is_render = bool(command) and (
+                        "ffmpeg" in Path(str(command[0])).name.lower()
+                        or "features.random_gpu.native_pipeline" in command)
+                    selected = "render" if is_render else "probe"
                 context.phase(selected)
                 try:
                     return original(*args, **kwargs)
@@ -473,6 +477,7 @@ class NodeExecutors:
 
     def x_preflight(self, request, context):
         from features.x_posts.media_repair import WorkerConfig, CosObjectStore, REPAIRABLE_TRIGGER_CODES
+        from features.random_gpu.gpu_compute import file_digest
         from features.x_posts import service as posts
         from PIL import Image
         if request.get("prepared_artifact"):
@@ -488,7 +493,7 @@ class NodeExecutors:
             context.phase("download")
             self._x_download_source(request["source_url"], media, context, hosts=hosts,
                 max_bytes=min(int(request.get("max_media_bytes", request.get("max_bytes", 16 * 1024**3))), 16 * 1024**3))
-            digest = hashlib.sha256()
+            digest = file_digest()
             with media.open("rb") as source:
                 for chunk in iter(lambda: source.read(1024 * 1024), b""):
                     context.check()

@@ -9,13 +9,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from .gpu_compute import file_digest
 
 ENV = 'RANDOM_GPU_ASSET_CACHE_ROOT'
 VERSION = 'rgba-nut-v1'
 
 
 def sha256_file(path):
-    digest = hashlib.sha256()
+    digest = file_digest()
     with Path(path).open('rb') as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b''):
             digest.update(block)

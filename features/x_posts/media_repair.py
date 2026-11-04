@@ -895,7 +895,8 @@ def build_ffmpeg_command(config, source_path, output_path, source_info):
 
 
 def _file_sha256(path):
-    digest = hashlib.sha256()
+    from features.random_gpu.gpu_compute import file_digest
+    digest = file_digest()
     size = 0
     with Path(path).open("rb") as handle:
         while True:

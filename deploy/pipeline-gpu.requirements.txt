@@ -1,0 +1,9 @@
+# Production native GPU runtime. Experimental torch/torch-aac stay isolated.
+-r pipeline-node.requirements.txt
+cupy-cuda12x==13.6.0
+numpy==2.2.6
+PyNvVideoCodec==2.2.3
+av==16.0.1
+nvidia-cuda-runtime-cu12==12.6.77
+nvidia-cuda-nvrtc-cu12==12.6.85
+fastrlock==0.8.4

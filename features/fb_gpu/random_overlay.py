@@ -9,6 +9,7 @@ import hashlib, json, re, secrets
 from pathlib import Path
 from typing import Any, Mapping
 from features.random_gpu.compositor import validate_source_overlay
+from features.random_gpu.gpu_compute import file_digest
 
 ASSET_CATEGORIES=("border","light","opacity_video","corners","tint")
 CATEGORIES=("border","opacity_video","corners","tint")
@@ -16,7 +17,7 @@ HEX=re.compile(r"[0-9a-f]{64}"); SAFE=re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 class RandomOverlayError(RuntimeError): pass
 
 def sha256_file(path:Path):
-    digest=hashlib.sha256(); size=0
+    digest=file_digest(); size=0
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda:handle.read(1024*1024),b""): size+=len(chunk); digest.update(chunk)
     return digest.hexdigest(),size

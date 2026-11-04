@@ -1453,7 +1453,8 @@ def _job_lock(path, deadline=None):
 
 
 def _file_sha256(path, deadline=None):
-    digest = hashlib.sha256()
+    from features.random_gpu.gpu_compute import file_digest
+    digest = file_digest()
     size = 0
     with Path(path).open("rb") as handle:
         while True:
@@ -1726,7 +1727,8 @@ def download_source(
         config.trusted_source_resolutions,
     )
     destination = Path(destination)
-    digest = hashlib.sha256()
+    from features.random_gpu.gpu_compute import file_digest
+    digest = file_digest()
     size = 0
     try:
         with _open_pinned_https_response(
@@ -1848,6 +1850,25 @@ def _run_command(
     return completed
 
 
+def media_runner(command, **kwargs):
+    """Keep native renders inside the normal runner/metrics boundary.
+
+    Native work needs the progress watchdog, isolated process group and
+    parent-owned scratch cleanup. Probes and existing FFmpeg media modes
+    preserve their subprocess.run behavior.
+    """
+    if "features.random_gpu.native_pipeline" in command:
+        from features.fb_gpu.render_process import run_render
+        options = dict(kwargs)
+        # _run_command's PIPE arguments describe capture, which run_render
+        # implements through a bounded on-disk diagnostic log instead.
+        options.pop("stdout", None)
+        options.pop("stderr", None)
+        options.setdefault("capture_output", True)
+        return run_render(command, **options)
+    return subprocess.run(command, **kwargs)
+
+
 def probe_media(config, path, runner=subprocess.run, deadline=None):
     command = [
         config.ffprobe_bin,
@@ -1944,8 +1965,10 @@ def inspect_input(payload, max_duration):
         "height": height,
         "duration": duration,
         "has_audio": bool(audios),
+        "format": {"start_time": format_payload.get("start_time") or "0",
+                   "duration": format_payload.get("duration") or str(duration)},
         "video": {key: video.get(key) for key in ('width', 'height', 'codec_name', 'pix_fmt',
-                  'r_frame_rate', 'avg_frame_rate', 'start_time', 'sample_aspect_ratio',
+                  'r_frame_rate', 'avg_frame_rate', 'start_time', 'time_base', 'sample_aspect_ratio',
             'color_space', 'color_range', 'color_transfer', 'color_primaries', 'chroma_location', 'field_order')},
     }
 
@@ -2208,6 +2231,24 @@ def _encoder_arguments(config):
     raise AssertionError("unreachable")
 
 
+def native_encoder_options(config):
+    """SDK 2.2.3 mapping of the frozen TT NVENC P6 delivery contract.
+
+    Source + T4 readback establish aq=8 (strength, not a boolean), bf=3
+    (frameIntervalP=4) and P6's useBFramesAsRef=2 (middle). There is no SDK
+    b_ref_mode/profile setter; final SPS/profile validation remains required.
+    """
+    if config.video_encoder not in {"h264_nvenc", "hevc_nvenc"}:
+        raise TTGPUError("invalid_configuration", "native TT rendering requires the frozen NVENC codec", 500)
+    hevc = config.video_encoder == "hevc_nvenc"
+    return dict(codec="hevc" if hevc else "h264", preset="P6", tuning_info="high_quality",
+                rc="vbr", bitrate=900000 if hevc else 1500000,
+                maxbitrate=1350000 if hevc else 2200000,
+                vbvbufsize=1800000 if hevc else 3000000, multipass="fullres",
+                lookahead=32, aq=8, temporalaq=1, bf=3, fps=30, gop=60,
+                idrperiod=60, global_header=1)
+
+
 def build_normalize_command(
     config,
     input_path,
@@ -2467,6 +2508,14 @@ def build_random_overlay_command(
         ]
     )
     if config.compositor_backend == BACKEND:
+        from features.random_gpu.native_pipeline import command as native_command, enabled as native_enabled
+        if (config.media_mode == RANDOM_OVERLAY_MEDIA_MODE
+                and config.video_encoder in {"h264_nvenc", "hevc_nvenc"}
+                and native_enabled()):
+            return native_command(source_path,output_path,
+                dict(input_info,duration=float(output_duration)),recipe,asset_paths,
+                encoder_options=native_encoder_options(config),audio_bitrate=128000,
+                ffmpeg=config.ffmpeg_bin)
         return fuse_command(command, recipe, output_path, input_info)
     return command
 
@@ -3127,7 +3176,8 @@ class LocalMediaStore:
             ) from None
         try:
             if full_hash:
-                digest = hashlib.sha256()
+                from features.random_gpu.gpu_compute import file_digest
+                digest = file_digest()
                 actual_size = 0
                 with os.fdopen(descriptor, "rb", closefd=False) as handle:
                     while True:
@@ -4211,7 +4261,7 @@ class TTPostGPUProcessor:
         monotonic_fn=None,
     ):
         self.config = config
-        self.runner = runner or subprocess.run
+        self.runner = runner or media_runner
         self.downloader = downloader or download_source
         self._object_store_instance = object_store
         self._local_media_store_instance = (

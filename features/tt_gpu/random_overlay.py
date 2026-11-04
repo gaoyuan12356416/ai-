@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 from features.random_gpu.compositor import validate_source_overlay
+from features.random_gpu.gpu_compute import file_digest
 
 
 ASSET_CATEGORIES = ("border", "light", "opacity_video", "corners", "tint")
@@ -23,7 +24,7 @@ class RandomOverlayError(RuntimeError):
 
 
 def sha256_file(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
+    digest = file_digest()
     size = 0
     with Path(path).open("rb") as handle:
         while True:
