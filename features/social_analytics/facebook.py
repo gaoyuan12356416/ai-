@@ -443,9 +443,10 @@ def publications(site, record):
         same(ledger["graph_post_id"], post_id)
         if ledger["status"] != "published" or ledger["unknown_outcome"] != 0:
             raise AttributionError("publication_ledger_mismatch")
-        published_day = day(task["completed_at_utc"])
-        if published_day != day(ledger["updated_at_utc"]):
-            raise AttributionError("publication_time_mismatch")
+        # The ledger is updated when a receipt is reconciled, potentially days
+        # after completion. Its update time is not a publication timestamp.
+        # The matching confirmed task owns the completion date.
+        published_day = day(required(task["completed_at_utc"]))
     else:
         # This schema has no published_at: terminal updated_at is the confirmed
         # reconciliation time; never substitute submission/creation time.
@@ -601,6 +602,14 @@ def _upsert_record(conn, site, record, users, now):
     except (AttributionError, KeyError, TypeError) as exc:
         status = "conflict" if frozen_at else "unresolved"
         error = exc.code if isinstance(exc, AttributionError) else "publication_identity_invalid"
+    if (site == "2049" and previous and previous["status"] == "conflict"
+            and previous["error_code"] == "publication_time_mismatch"
+            and previous["frozen_at"] and previous["publications_json"] == "[]"
+            and previous["observed_hash"] == frozen_hash == evidence_hash and facts):
+        # Repair only the obsolete timestamp comparison, after publications()
+        # revalidates the exact task/Page/material/Post and confirmed states.
+        # Frozen ownership evidence and all other conflict holds stay intact.
+        status, error = "frozen", ""
     if previous and previous["frozen_at"] and previous["publications_json"] != "[]":
         if json.loads(previous["publications_json"]) != facts:
             status, error = "conflict", "confirmed_publication_changed"

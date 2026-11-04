@@ -339,6 +339,88 @@ class FacebookAttributionTests(unittest.TestCase):
         self.assertFalse(old["publications"])
         self.assertEqual(old["owner"], "")
 
+    def test_late_ledger_reconciliation_keeps_task_completion_date(self):
+        self.change("UPDATE fb_auto_publish_ledger SET updated_at_utc=?", (LATER,))
+        self.assertEqual(self.run_collect()["status"], "complete")
+        before = self.saved()
+        self.assertEqual(json.loads(before["publications_json"])[0]["date"], PUBLISHED[:10])
+        self.change("UPDATE fb_auto_publish_ledger SET updated_at_utc='2026-10-22T03:00:00Z'")
+        self.assertEqual(self.run_collect(LATER)["status"], "complete")
+        self.assertEqual(self.saved()["publications_json"], before["publications_json"])
+
+    def mark_old_time_conflict(self):
+        self.change("UPDATE fb_auto_publish_ledger SET updated_at_utc=?", (LATER,))
+        self.run_collect()
+        self.change("UPDATE social_facebook_identity SET status='conflict',"
+                    "error_code='publication_time_mismatch',publications_json='[]' WHERE site_id='2049'",
+                    path=self.ledger)
+        return self.saved()
+
+    def test_obsolete_time_conflict_recovers_without_reassigning_owner(self):
+        before = self.mark_old_time_conflict()
+        self.assertEqual(self.run_collect(LATER)["status"], "complete")
+        after = self.saved()
+        self.assertEqual(after["status"], "frozen")
+        self.assertEqual(json.loads(after["publications_json"])[0]["date"], PUBLISHED[:10])
+        for field in ("identity_json", "evidence_json", "evidence_hash", "frozen_at"):
+            self.assertEqual(after[field], before[field])
+
+    def test_time_conflict_recovery_still_rejects_changed_evidence_or_receipts(self):
+        for statement in (
+            "UPDATE fb_auto_publish_ledger SET graph_post_id='999_777'",
+            "UPDATE fb_auto_publish_ledger SET graph_post_id='999_100',unknown_outcome=1",
+            "UPDATE fb_auto_publish_ledger SET unknown_outcome=0,status='unknown'",
+            "UPDATE fb_auto_publish_ledger SET status='published',page_id='888'",
+            "UPDATE fb_auto_publish_ledger SET page_id='999',material_id='66'",
+            "UPDATE fb_auto_task SET completed_at_utc=''",
+        ):
+            with self.subTest(statement=statement):
+                self.change("UPDATE fb_auto_publish_ledger SET graph_post_id='999_100',"
+                            "unknown_outcome=0,status='published',page_id='999',material_id='55'")
+                self.change("UPDATE fb_auto_task SET completed_at_utc=?", (PUBLISHED,))
+                self.mark_old_time_conflict()
+                self.change(statement)
+                self.run_collect(LATER)
+                self.assertEqual(self.saved()["status"], "conflict")
+
+    def test_time_conflict_does_not_recover_if_frozen_evidence_drifted(self):
+        self.mark_old_time_conflict()
+        self.change("UPDATE fb_auto_template SET created_by='editor'")
+        self.run_collect(LATER)
+        self.assertEqual(self.saved()["status"], "conflict")
+
+    def test_other_conflicts_are_not_cleared_by_valid_late_receipt(self):
+        self.mark_old_time_conflict()
+        self.change("UPDATE social_facebook_identity SET error_code='frozen_evidence_changed' "
+                    "WHERE site_id='2049'", path=self.ledger)
+        self.run_collect(LATER)
+        self.assertEqual(self.saved()["status"], "conflict")
+
+    def test_time_conflict_with_previous_evidence_drift_remains_held(self):
+        self.mark_old_time_conflict()
+        self.change("UPDATE social_facebook_identity SET observed_hash='different' "
+                    "WHERE site_id='2049'", path=self.ledger)
+        self.run_collect(LATER)
+        self.assertEqual(self.saved()["status"], "conflict")
+
+    def test_changed_task_completion_date_preserves_frozen_fact(self):
+        self.run_collect()
+        before = self.saved()
+        self.change("UPDATE fb_auto_task SET completed_at_utc=?", (LATER,))
+        self.run_collect(LATER)
+        after = self.saved()
+        self.assertEqual(after["status"], "conflict")
+        self.assertEqual(after["error_code"], "confirmed_publication_changed")
+        self.assertEqual(after["publications_json"], before["publications_json"])
+
+    def test_missing_completion_time_is_not_replaced_with_today(self):
+        for value in (None, "", "invalid"):
+            with self.subTest(value=value):
+                self.change("UPDATE fb_auto_task SET completed_at_utc=?", (value,))
+                self.run_collect(LATER)
+                self.assertFalse(json.loads(self.saved()["publications_json"]))
+                self.assertNotEqual(self.saved()["status"], "frozen")
+
     def test_pending_task_can_gain_confirmed_fact_without_reassigning_owner(self):
         self.change("UPDATE fb_video_task SET status='queued',graph_post_id=''")
         self.run_collect()
