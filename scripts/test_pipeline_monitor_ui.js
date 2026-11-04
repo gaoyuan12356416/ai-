@@ -6,7 +6,9 @@ const ROOT = path.resolve(__dirname, ".."), OUT = process.env.PIPELINE_UI_OUTPUT
 const stamp = new Date().toISOString();
 const base = { generated_at: stamp, collected_at: stamp, stale: false, scope: "all", allowed_channels: ["x", "fb", "tt", "youtube"], warnings: [] };
 const summary = { ...base, totals: { queued: 22, preparing: 3, ready: 7, publishing: 4, prepared: 90, published: 76, failed: 2, unknown: 1, backlog_paused: 611 }, channels: ["x", "fb", "tt", "youtube"].flatMap(channel => ["prepare", "publish"].map(stage => ({ channel, stage, queued: 8, running: 2, ready: 4, completed: 21, failed: 1, unknown: 0, throughput_per_hour: 12, avg_duration_seconds: 321, p95_duration_seconds: null, oldest_wait_seconds: 45 }))), sources: [{ channel: "x", family: "自动模板", state: "healthy", collected_at: stamp }] };
-summary.channels.filter(row => row.stage === "prepare").forEach(row => row.ready = 3);
+summary.queue_state_version = 1;
+Object.assign(summary.totals, { waiting: 24, executing: 16, scheduled: 40, abnormal: 24 });
+summary.channels.forEach(row => Object.assign(row, { waiting: 3, executing: 2, scheduled: 5, abnormal: 3, abnormal_reasons: { failed: 1, blocked_by_unknown: 2 }, oldest_pending_seconds: 45 }));
 summary.efficiency = [
   { channel: "fb", stage: "publish", phase: "platform_submit", samples: 1, p50_seconds: 17, p95_seconds: 17 },
   { channel: "fb", stage: "publish", phase: "platform_upload", samples: 0, applicable: false },
@@ -54,12 +56,15 @@ const server = http.createServer((req, res) => {
     for (const key of ["pipelineMonitor", "videoEditing", "aiImageDaily", "fbPostMaterialPool", "fbPostAdDelete", "socialkitAnalytics"]) assert.equal(await page.locator(`[data-quick-nav-key="${key}"]`).count(), 1);
     for (const group of ["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]) assert.equal(await page.locator(`[data-quick-nav-group="${group}"]`).count(), 0);
     assert.equal(await page.locator("#pmChannelRows tr").count(), 8);
-    assert.match(await page.locator("#pmTotals .pm-stat").first().innerText(), /排队中\s*22/);
-    assert.match(await page.locator('#pmTotals [data-stat-key="ready_prepare"]').innerText(), /待制作\s*12/);
-    assert.match(await page.locator('#pmTotals [data-stat-key="ready_publish"]').innerText(), /待发布\s*16/);
+    assert.match(await page.locator("#pmTotals .pm-stat").first().innerText(), /待执行\s*24/);
+    assert.match(await page.locator('#pmTotals [data-stat-key="scheduled"]').innerText(), /预约中\s*40/);
+    assert.match(await page.locator('#pmTotals [data-stat-key="executing"]').innerText(), /执行中\s*16/);
+    assert.match(await page.locator('#pmTotals [data-stat-key="abnormal"]').innerText(), /异常\s*24/);
+    assert.match(await page.locator('#pmChannelRows tr').first().innerText(), /失败 1[\s\S]*等待异常账号核对 2/);
+    assert.match(await page.locator('#pmChannelRows').locator('..').innerText(), /待执行[\s\S]*执行中[\s\S]*预约中[\s\S]*异常[\s\S]*已完成/);
     assert.equal(await page.locator('#pmTotals [data-stat-key="ready"]').count(), 0);
     assert.equal(await page.locator('#pmStatus option[value="queued"]').innerText(), "排队中");
-    assert.match(await page.locator("#pmQueueNote").innerText(), /待选材、未到预约时间及账号等待[\s\S]*不代表当前可领取数/);
+    assert.match(await page.locator("#pmQueueNote").innerText(), /待执行：[\s\S]*预约中：未到执行时间[\s\S]*历史暂停单独统计/);
     const fbEfficiency = page.locator("#pmEfficiencyRows tr").filter({ hasText: "Facebook · 发布" });
     assert.match(await fbEfficiency.innerText(), /17秒 \/ 17秒[\s\S]*不适用[\s\S]*未记录[\s\S]*4.2分 \/ 4.2分/);
     assert.match(await page.locator("#pmEfficiencyRows tr").filter({ hasText: "TikTok · 发布" }).innerText(), /1.3分 \/ 1.3分/);
@@ -132,9 +137,17 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => document.querySelector("#pmEnrollmentConfig").textContent.includes("fixture-one-use-token"));
     assert.equal(await page.evaluate(() => Object.values(localStorage).some(v => v.includes("fixture-one-use-token"))), false);
     await page.locator("#pmEnrollClose").click(); assert.equal(await page.locator("#pmEnrollmentConfig").textContent(), "");
+    // Old cached responses must not relabel the old queue total as due work.
+    const savedStateTotals = { ...summary.totals };
+    delete summary.queue_state_version;
+    for (const key of ["waiting", "executing", "scheduled", "abnormal"]) delete summary.totals[key];
+    await page.locator("#pmRefresh").click();
+    await page.waitForFunction(() => document.querySelector('#pmWarnings').textContent.includes('任务分类数据尚未更新'));
+    assert.match(await page.locator('#pmTotals [data-stat-key="waiting"]').innerText(), /待执行\s*—/);
+    summary.queue_state_version = 1; summary.totals = savedStateTotals;
     summary.stale = true; summary.warnings = ["测试来源超过采集时限"];
     summary.sources[0].state = "stale";
-    await page.locator("#pmRefresh").click(); await page.waitForFunction(() => !document.querySelector("#pmWarnings").hidden);
+    await page.locator("#pmRefresh").click(); await page.waitForFunction(() => document.querySelector("#pmWarnings").textContent.includes("测试来源超过采集时限"));
     assert.match(await page.locator("#pmWarnings").innerText(), /采集数据有延迟[\s\S]*测试来源超过采集时限/);
     assert.match(await page.locator("#pmSources").innerText(), /数据延迟/);
     assert.equal(await page.locator("#pmLiveDot").evaluate(el => el.classList.contains("stale")), true);

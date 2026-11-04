@@ -25,14 +25,12 @@
   }
   function filters(tasks) { const values = { window: $("pmWindow").value, channel: $("pmChannel").value }; if (tasks) Object.assign(values, { stage: $("pmStage").value, status: $("pmStatus").value, host_id: $("pmHost").value, cursor, limit: "50" }); return new URLSearchParams(Object.entries(values).filter(([, v]) => v !== "")).toString(); }
   function totals(data) {
-    // totals.ready combines both stages. Use the already scoped channel rows
-    // so a ready preparation is never presented as a ready publication.
-    const readyFor = stage => {
-      const values = (data.channels || []).filter(row => row.stage === stage).map(row => row.ready).filter(value => typeof value === "number" && Number.isFinite(value));
-      return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
-    };
-    const t = { ...(data.totals || {}), ready_prepare: readyFor("prepare"), ready_publish: readyFor("publish") };
-    $("pmTotals").innerHTML = [["queued", "排队中", ""], ["ready_prepare", "待制作", ""], ["preparing", "制作中", ""], ["ready_publish", "待发布", ""], ["publishing", "发布中", ""], ["prepared", "制作完成", ""], ["published", "发布成功", "accent"], ["failed", "失败", ""], ["unknown", "结果待核对", "alert"], ["backlog_paused", "历史积压暂停", "alert"]].map(([key, label, style]) => `<article class="pm-stat ${style}" data-stat-key="${key}"><span class="pm-stat-label">${label}</span><div class="pm-stat-value">${number(t[key])}</div></article>`).join("");
+    const t = data.totals || {};
+    $("pmTotals").innerHTML = [["waiting", "待执行", ""], ["executing", "执行中", ""], ["scheduled", "预约中", ""], ["abnormal", "异常", "alert"], ["prepared", "制作完成", ""], ["published", "发布成功", "accent"], ["backlog_paused", "历史积压暂停", "alert"]].map(([key, label, style]) => `<article class="pm-stat ${style}" data-stat-key="${key}"><span class="pm-stat-label">${label}</span><div class="pm-stat-value">${number(t[key])}</div></article>`).join("");
+  }
+  function abnormalDetails(row) {
+    const labels = { failed: "失败", unknown: "待核对", held: "暂停或限制", blocked_by_unknown: "等待异常账号核对", worker_offline: "执行器失联", repeated_claim: "反复领取未推进", schedule_missing: "预约时间缺失", identity_missing: "账号身份缺失" };
+    return Object.entries(row.abnormal_reasons || {}).filter(([, count]) => count > 0).map(([reason, count]) => `<small>${e(labels[reason] || "其他异常")} ${number(count)}</small>`).join("");
   }
   function renderSummary(data) {
     totals(data);
@@ -45,10 +43,11 @@
     $("pmUpdated").textContent = `更新于 ${time(data.collected_at || data.generated_at)}（北京时间）`;
     $("pmLiveDot").classList.toggle("stale", !!data.stale);
     const warnings = (data.warnings || []).map(v => typeof v === "string" ? v : v.message || v.code || "").filter(Boolean);
+    if (data.queue_state_version !== 1) warnings.unshift("任务分类数据尚未更新，四类计数暂显示为 —。");
     if (data.stale) warnings.unshift("采集数据有延迟，以下保留最近一次可用快照。");
     notice("pmWarnings", [...new Set(warnings)].join("；"));
     $("pmWindowLabel").textContent = data.window?.start && data.window?.end ? `${time(data.window.start)} — ${time(data.window.end)}` : $("pmWindow").selectedOptions[0].textContent;
-    $("pmChannelRows").innerHTML = (data.channels || []).map(row => `<tr><td><span class="pm-channel"><b class="pm-channel-icon">${e({ x: "X", fb: "FB", tt: "TT", youtube: "YT" }[row.channel] || "·")}</b><span><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><small>${e(STAGES[row.stage] || row.stage)}</small></span></span></td><td>${number(row.queued)}</td><td>${number(row.running)}</td><td>${number(row.ready)}</td><td><strong>${number(row.completed)}</strong></td><td>${number(row.failed)} / ${number(row.unknown)}</td><td>${number(row.throughput_per_hour)}</td><td>${duration(row.avg_duration_seconds)} / ${duration(row.p95_duration_seconds)}</td><td>${duration(row.oldest_wait_seconds)}${row.backlog_paused ? `<small>历史暂停 ${number(row.backlog_paused)}</small>` : ""}</td></tr>`).join("") || '<tr><td colspan="9" class="pm-empty">当前范围暂无可见的渠道任务数据</td></tr>';
+    $("pmChannelRows").innerHTML = (data.channels || []).map(row => `<tr><td><span class="pm-channel"><b class="pm-channel-icon">${e({ x: "X", fb: "FB", tt: "TT", youtube: "YT" }[row.channel] || "·")}</b><span><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><small>${e(STAGES[row.stage] || row.stage)}</small></span></span></td><td>${number(row.waiting)}</td><td>${number(row.executing)}</td><td>${number(row.scheduled)}</td><td>${number(row.abnormal)}${abnormalDetails(row)}</td><td><strong>${number(row.completed)}</strong></td><td>${number(row.throughput_per_hour)}</td><td>${duration(row.avg_duration_seconds)} / ${duration(row.p95_duration_seconds)}</td><td>${duration(row.oldest_pending_seconds)}${row.backlog_paused ? `<small>历史暂停 ${number(row.backlog_paused)}</small>` : ""}</td></tr>`).join("") || '<tr><td colspan="9" class="pm-empty">当前范围暂无可见的渠道任务数据</td></tr>';
     $("pmSources").innerHTML = (data.sources || []).map(row => `<div class="pm-source"><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><span>${e(row.family || "")}</span>${badge(row.state)}<span title="采集时间">${e(time(row.collected_at))}</span>${row.error_code ? `<span>${e(row.error_code)}</span>` : ""}</div>`).join("") || '<p class="pm-muted">尚无采集状态，等待采集器上报。</p>';
     $("pmEfficiencyRows").innerHTML = (data.channels || []).map(row => { const phases = (data.efficiency || []).filter(p => p.channel === row.channel && p.stage === row.stage); return `<tr><td>${e(CHANNELS[row.channel])} · ${e(STAGES[row.stage])}</td><td>${row.success_rate == null ? "未记录" : number(row.success_rate * 100) + "%"}</td><td>${number(row.throughput_per_hour)}</td>${["download", "render", "artifact_transfer", "platform_submit", "platform_upload", "platform_processing", "platform_confirmation_wait", "queue"].map(phase => { const timing = phases.find(p => p.phase === phase); return `<td>${timing?.samples ? `${duration(timing.p50_seconds)} / ${duration(timing.p95_seconds)}<small>${number(timing.samples)} 个样本</small>` : timing?.applicable === false ? "不适用" : "未记录"}</td>`; }).join("")}</tr>`; }).join("") || '<tr><td colspan="11" class="pm-empty">暂无已完成的计时样本</td></tr>';
   }

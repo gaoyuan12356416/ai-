@@ -251,7 +251,9 @@ def _summary(conn, scope, args, common, sources, channels, start, end, now):
                 values = sorted(phase_samples.get((channel, stage, phase), []))
                 applicable = not (phase == "platform_upload" and channel in ("fb", "tt") and stage == "publish" and not values)
                 efficiency.append({"channel": channel, "stage": stage, "phase": phase, "applicable": applicable, "samples": len(values), "p50_seconds": values[max(0, math.ceil(len(values) * .5) - 1)] if values else None, "p95_seconds": values[max(0, math.ceil(len(values) * .95) - 1)] if values else None})
-    return dict(common, window={"start": start, "end": end, "timezone": "Asia/Shanghai"},
+    from .queue_states import add_summary
+    add_summary(conn, scope, args, by, totals, common, now)
+    return dict(common, queue_state_version=1, window={"start": start, "end": end, "timezone": "Asia/Shanghai"},
                 totals=totals, channels=list(by.values()), sources=sources, efficiency=efficiency)
 
 
