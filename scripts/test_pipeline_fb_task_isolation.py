@@ -53,6 +53,102 @@ class FBTaskIsolationTests(unittest.TestCase):
         with closing(self.store.connect()) as conn:
             return [tuple(row) for row in conn.execute("SELECT resource_key,job_id FROM " + table + " ORDER BY resource_key,job_id")]
 
+    def auto_skipped_observation(self, identity):
+        job = self.auto_job(identity, str(identity + 1000))
+        adapter = LedgerAdapter(LedgerSpec("fb", "auto", self.auto.path, "fb_auto_task"), driver=object())
+        with self.auto.connect() as conn:
+            conn.execute("UPDATE fb_auto_task SET status='planned',media_url='',prepared_media_url='',prepared_at_utc='' WHERE id=?", (identity,))
+        existing = self.store.offer(adapter.project(adapter.read(str(identity)), now=self.now))
+        with self.auto.connect() as conn:
+            conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_page_unknown_block' WHERE id=?", (identity,))
+        skipped = self.store.offer(adapter.project(adapter.read(str(identity)), now=self.now))
+        self.assertEqual((skipped['id'], skipped['status'], skipped['hold_reason']), (existing['id'], 'completed', 'metadata_only'))
+        return job, adapter, skipped
+
+    def restore_auto_skip(self, adapter, identity, *, marker=True):
+        recovery = dict(operation_id='a' * 32, original_skip_reason='fb_auto_page_unknown_block',
+                        original_planned_publish_at_utc=self.now.isoformat())
+        with self.auto.connect() as conn:
+            conn.execute("UPDATE fb_auto_task SET status='planned',skip_reason='',selection_json=? WHERE id=?",
+                         (json.dumps({'recovery': recovery}) if marker else '{}', identity))
+        return adapter.project(adapter.read(str(identity)), now=self.now)
+
+    def test_explicit_never_executed_auto_skip_rearms_original_preparation_once(self):
+        job, adapter, old = self.auto_skipped_observation(80)
+        offer = self.restore_auto_skip(adapter, 80)
+        self.assertEqual(offer['fb_skipped_recovery'], 'a' * 32)
+        restored = self.store.offer(offer)
+        self.assertEqual((restored['id'], restored['status'], restored['generation']), (old['id'], 'queued', 0))
+        self.assertEqual(restored['hold_reason'], '')
+        self.assertEqual(self.store.offer(offer)['id'], old['id'])
+        with closing(self.store.connect()) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_event WHERE event_type='fb_skipped_recovery_offered' AND job_id=?", (old['id'],)).fetchone()[0], 1)
+        claimed = self.claim_next('prep', 'prepare')
+        self.assertEqual(claimed['source_key'], job['source_key'])
+        self.assertEqual(self.store.offer(offer)['status'], 'running')
+
+    def test_plain_native_status_reset_cannot_rearm_skipped_observation(self):
+        _, adapter, old = self.auto_skipped_observation(81)
+        offer = self.restore_auto_skip(adapter, 81, marker=False)
+        self.assertEqual(offer['fb_skipped_recovery'], '')
+        self.assertEqual(self.store.offer(offer)['status'], 'completed')
+        self.assertIsNone(self.claim_next('prep', 'prepare'))
+
+    def test_recovery_does_not_rearm_terminal_unknown_or_claimed_central_facts(self):
+        changes = ({'status': 'unknown'}, {'status': 'published'}, {'status': 'failed'},
+                   {'generation': 1}, {'external_intent': 1}, {'claim_hash': 'prior'},
+                   {'canonical_receipt': '{}'}, {'hold_reason': 'cutover_overdue'},
+                   {'lease_expires_at': stamp(self.now + timedelta(minutes=1))})
+        for identity, fields in enumerate(changes, 90):
+            with self.subTest(fields=fields):
+                _, adapter, old = self.auto_skipped_observation(identity)
+                with self.store.transaction() as conn:
+                    conn.execute("UPDATE pipeline_job SET " + ','.join(k+'=?' for k in fields) + " WHERE id=?", (*fields.values(), old['id']))
+                result = self.store.offer(self.restore_auto_skip(adapter, identity))
+                self.assertNotEqual(result['status'], 'queued')
+                with closing(self.store.connect()) as conn:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM pipeline_event WHERE event_type='fb_skipped_recovery_offered' AND job_id=?", (old['id'],)).fetchone()[0], 0)
+
+    def test_recovery_preserves_central_operation_and_material_quarantine(self):
+        for identity, table in ((110, 'pipeline_operation'), (111, 'pipeline_legacy_resource')):
+            with self.subTest(table=table):
+                _, adapter, old = self.auto_skipped_observation(identity)
+                with self.store.transaction() as conn:
+                    if table == 'pipeline_operation':
+                        conn.execute("INSERT INTO pipeline_operation VALUES(?,?,0,'node','fb_video_publish',?,'fb:page:100','intent',?,?)",
+                                     ('op-prior', old['id'], 'a'*64, stamp(self.now), stamp(self.now)))
+                    else:
+                        conn.execute("INSERT INTO pipeline_legacy_resource VALUES(?,?)", ('fb:material:100:111', old['id']))
+                result = self.store.offer(self.restore_auto_skip(adapter, identity))
+                self.assertEqual(result['status'], 'completed')
+                with closing(self.store.connect()) as conn:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM " + table + " WHERE job_id=?", (old['id'],)).fetchone()[0], 1)
+
+    def test_native_recovery_proof_excludes_publishing_evidence_and_holds(self):
+        cases = ('ledger', 'operation', 'claim', 'hold', 'attempt_count', 'unknown', 'graph', 'lease', 'started')
+        for identity, case in enumerate(cases, 120):
+            with self.subTest(case=case):
+                _, adapter, _ = self.auto_skipped_observation(identity)
+                self.restore_auto_skip(adapter, identity)
+                key = 'fb:auto:' + str(identity)
+                with self.auto.connect() as conn:
+                    if case == 'ledger':
+                        conn.execute("INSERT INTO fb_auto_publish_ledger VALUES(?, '100', ?, 'submitted', 'post', 1, 0, '', ?, ?)",
+                                     (identity, str(identity), self.now.isoformat(), self.now.isoformat()))
+                    elif case == 'operation':
+                        conn.execute("INSERT INTO pipeline_fb_operation(operation_id,source_key,stage,generation,request_sha256,credential_id,fb_user_id,native_attempt_id,sequence) VALUES(?,?,'publish',1,'hash','cred','user','attempt',1)",
+                                     ('native-op-'+str(identity), key))
+                    elif case == 'claim':
+                        conn.execute("INSERT INTO pipeline_fb_claim(source_key,stage,generation,claim_hash,task_json,descriptor_json) VALUES(?,'prepare',1,'hash','{}','{}')", (key,))
+                    elif case == 'hold':
+                        conn.execute("INSERT INTO pipeline_canonical_hold VALUES(?,?,?)", (key, self.now.isoformat(), 'cutover'))
+                    else:
+                        field, value = {'attempt_count': ('attempt_count', 1), 'unknown': ('unknown_outcome', 1),
+                                        'graph': ('graph_post_id', '1234'), 'lease': ('lease_owner', 'owner'),
+                                        'started': ('started_at_utc', self.now.isoformat())}[case]
+                        conn.execute('UPDATE fb_auto_task SET '+field+'=? WHERE id=?', (value, identity))
+                self.assertEqual(adapter.project(adapter.read(str(identity)), now=self.now)['fb_skipped_recovery'], '')
+
     def test_legacy_page_quarantine_migrates_and_duplicate_cannot_fifo_block_other_material(self):
         old = self.video_job(1)
         self.set_state(old, "unknown", unknown_outcome=1)

@@ -428,6 +428,44 @@ class DispatchStore:
         self.event(c, existing["id"], "youtube_publish_retry_requested", {"source_revision": revision, "previous_generation": existing["generation"]}, self.now())
         return True
 
+    def _rearm_fb_skipped_observation(self, c, existing, offer, meta):
+        """Admit only an explicit native recovery of an unexecuted skipped row."""
+        operation_id = str(offer.get("fb_skipped_recovery") or "")
+        if (len(operation_id) != 32 or any(ch not in "0123456789abcdef" for ch in operation_id)
+                or existing["channel"] != "fb" or existing["family"] != "auto" or existing["stage"] != "prepare"
+                or existing["generation"] != 0 or existing["status"] != "completed"
+                or existing["hold_reason"] != "metadata_only" or existing["source_status"] != "skipped"
+                or any(existing[k] for k in ("external_intent", "claim_hash", "lease_expires_at", "canonical_receipt"))
+                or offer.get("source_status") != "planned" or offer.get("status") != "queued"
+                or offer.get("execution_available") is not True
+                or any(offer.get(k) for k in ("hold_reason", "publish_id", "source_attempt_count", "unknown_outcome",
+                                             "legacy_inflight", "reconcile_only", "metadata_only"))):
+            return False
+        cutoff = self.config(c)["cutovers"].get("fb")
+        if (cutoff and existing["source_created_at"] <= cutoff
+                and stamp(offer.get("cutover_due_at") or offer.get("scheduled_at")) <= cutoff):
+            return False
+        # Any central execution history for either phase keeps the original fact.
+        # Recovery never resets an attempted publish, a receipt, or a quarantine.
+        for table in ("pipeline_claim_history", "pipeline_operation", "pipeline_receipt", "pipeline_checkpoint",
+                      "pipeline_delivery", "pipeline_publication", "pipeline_resource", "pipeline_legacy_resource"):
+            if c.execute("SELECT 1 FROM " + table + " WHERE job_id IN (SELECT id FROM pipeline_job WHERE source_key=?) LIMIT 1",
+                         (existing["source_key"],)).fetchone():
+                return False
+        if c.execute("SELECT 1 FROM pipeline_job WHERE source_key=? AND id<>? AND (generation<>0 OR external_intent<>0 "
+                     "OR claim_hash<>'' OR canonical_receipt<>'' OR status IN ('unknown','published','failed','running','legacy_running')) LIMIT 1",
+                     (existing["source_key"], existing["id"])).fetchone():
+            return False
+        meta.update({k: offer[k] for k in ("canonical_fingerprint", "source_attempt_count", "legacy_inflight",
+                    "reconcile_only", "execution_available", "cutover_due_at") if k in offer})
+        meta["fb_skipped_recovery"] = operation_id
+        c.execute("UPDATE pipeline_job SET status='queued',source_status='planned',hold_reason='',payload_json=?,artifact_json=?,"
+                  "capabilities_json=?,resource_keys_json=?,source_meta_json=?,scheduled_at=?,started_at='',finished_at='',error_code='',error_message='',updated_at=? WHERE id=?",
+                  (dumps(offer.get("payload", {})), dumps(offer.get("artifact", {})), dumps(offer.get("capabilities", [])),
+                   dumps(offer.get("resource_keys", [])), dumps(meta), stamp(offer.get("scheduled_at")), self.now(), existing["id"]))
+        self.event(c, existing["id"], "fb_skipped_recovery_offered", {"operation_id": operation_id}, self.now())
+        return True
+
     def _refresh_fb_isolation(self, c, row, offer):
         """Narrow only a fresh canonical FB observation, never a worker guess."""
         if (row["channel"] != "fb" or row["family"] not in {"auto", "video"}
@@ -528,6 +566,11 @@ class DispatchStore:
                 return None  # Planning a queue is not a completed media render.
             if existing:
                 meta = json.loads(existing["source_meta_json"])
+                if offer.get("fb_skipped_recovery"):
+                    self._rearm_fb_skipped_observation(c, existing, offer, meta)
+                    # A rejected recovery must preserve its earlier receipt and
+                    # fences instead of passing through observation convergence.
+                    return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
                 if self._rearm_youtube_publish_retry(c, existing, offer, meta):
                     return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
                 if adopting_schedule and existing["generation"] == 0 and not existing["external_intent"] and existing["status"] in ("unknown", "completed", "queued"):

@@ -304,6 +304,25 @@ class LedgerAdapter:
                 parent["owner_tenant_key"] = template.get("owner_tenant_key") or template.get("created_by_tenant_key", "")
             if key == ("fb", "auto") and self._exists(conn, "fb_auto_publish_attempt"):
                 row["publish_attempt_count"] = conn.execute("SELECT COUNT(*) FROM fb_auto_publish_attempt WHERE task_id=?", (row["id"],)).fetchone()[0]
+            if key == ("fb", "auto"):
+                recovery = obj(obj(row.get("selection_json")).get("recovery"))
+                source_key = "fb:auto:" + str(row["id"])
+                clean = (row.get("status") == "planned" and not row.get("canonical_held")
+                         and re.fullmatch(r"[a-f0-9]{32}", str(recovery.get("operation_id") or ""))
+                         and recovery.get("original_skip_reason") == "fb_auto_page_unknown_block"
+                         and recovery.get("original_planned_publish_at_utc")
+                         and not any(row.get(k) for k in ("attempt_count", "publish_attempt_count", "graph_post_id",
+                             "unknown_outcome", "lease_owner", "lease_expires_at_utc", "started_at_utc",
+                             "prepared_media_url", "prepared_at_utc", "prepared_sha256")))
+                if clean:
+                    evidence = (("fb_auto_publish_ledger", "task_id", row["id"]),
+                                ("pipeline_fb_claim", "source_key", source_key),
+                                ("pipeline_fb_operation", "source_key", source_key),
+                                ("pipeline_canonical_hold", "source_key", source_key))
+                    if not any(self._exists(conn, table) and conn.execute(
+                            "SELECT 1 FROM " + table + " WHERE " + identity + "=? LIMIT 1", (value,)).fetchone()
+                            for table, identity, value in evidence):
+                        row["_fb_skipped_recovery"] = recovery["operation_id"]
         elif key == ("x", "youtube_share"):
             parent = self._parent(conn, "youtube_share_run", "id", row.get("run_id"))
             row["publish_attempt_count"] = int(bool(row.get("attempted_at")))
@@ -540,6 +559,7 @@ class LedgerAdapter:
                 "legacy_parent_inflight": bool(legacy_parent_inflight),
                 "source_attempt_count": attempts, "unknown_outcome": unknown, "reconcile_only": reconcile_only,
                 "prepost_recovery": recovery,
+                "fb_skipped_recovery": str(row.get("_fb_skipped_recovery") or ""),
                 "status": projected_status,
                 "canonical_fingerprint": fingerprint,
                 "started_at": stamp(started_at) if started_at else "",

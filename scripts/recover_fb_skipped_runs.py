@@ -1,0 +1,148 @@
+"""Operator-only, dry-run-by-default recovery of explicitly selected skipped runs.
+
+Reads production credentials only in memory from the owning service environment.
+Uses the reserved manual read-only SQL pool, not runtime publishing connections.
+"""
+import argparse
+import contextlib
+import dataclasses
+from datetime import datetime, timezone
+from decimal import Decimal
+import hashlib
+import json
+import os
+from pathlib import Path
+import random
+import sqlite3
+import subprocess
+import sys
+import threading
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from features.fb_auto_posts.core import FBAutoPostStore, utc_now
+from features.fb_auto_posts.languages import candidate_snapshots_for_pages
+from features.fb_auto_posts.repositories import ReadOnlyMySQL, PagePoolRepository, MaterialRepository, MaterialCandidate, CandidateSnapshot
+from features.fb_auto_posts.skipped_recovery import recover_skipped
+
+
+def existing_store(path):
+    store = FBAutoPostStore.__new__(FBAutoPostStore)
+    store.path, store.now_fn, store.rng = str(path), utc_now, random.SystemRandom()
+    store._lock, store.max_late_seconds = threading.RLock(), 1800
+    return store
+
+
+def service_env():
+    pid = subprocess.check_output(['systemctl', 'show', 'fb-auto-post-service.service', '-p', 'MainPID', '--value'], text=True).strip()
+    return dict(part.split('=', 1) for part in Path('/proc/' + pid + '/environ').read_text().split('\0') if '=' in part)
+
+
+def repositories(env, operation):
+    import pymysql
+    assert env['FB_AUTO_MYSQL_HOST'] == '101.32.56.53' and env['FB_AUTO_MYSQL_PORT'] == '63350'
+    def connect():
+        conn = pymysql.connect(host=env['FB_AUTO_MYSQL_HOST'], port=63350,
+            user=env['FB_AUTO_MYSQL_USER'], password=env['FB_AUTO_MYSQL_PASSWORD'],
+            database=env['FB_AUTO_MYSQL_DATABASE'], charset='utf8mb4', autocommit=True,
+            connect_timeout=3, read_timeout=50, write_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute('SELECT @@read_only')
+            if cur.fetchone()[0] != 1:
+                conn.close()
+                raise RuntimeError('read_only_endpoint_required')
+            cur.execute('SET SESSION MAX_EXECUTION_TIME=45000')
+            cur.execute('SET SESSION TRANSACTION READ ONLY')
+        return conn
+    mysql = ReadOnlyMySQL(connect, env['FB_AUTO_MYSQL_DATABASE'], env.get('FB_AUTO_BLACKLIST_MYSQL_DATABASE', 'ads_setting'))
+    return (PagePoolRepository(mysql), MaterialRepository(mysql, existing_store(env['FB_AUTO_METRIC_DB_PATH']),
+                                                        rng=random.Random(operation)))
+
+
+def save(path, value):
+    path = Path(path)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str) + '\n')
+    path.chmod(0o600)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--run-ids', type=int, nargs='+', required=True)
+    parser.add_argument('--operation-id', required=True)
+    parser.add_argument('--folder', required=True)
+    parser.add_argument('--apply', action='store_true')
+    args = parser.parse_args()
+    folder = Path(args.folder).resolve()
+    disk = Path('/mnt/data-disk')
+    assert disk.is_mount() and folder.is_relative_to(disk)
+    assert subprocess.check_output(['findmnt', '-n', '-o', 'UUID', str(disk)], text=True).strip() == '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    env = service_env()
+    store = existing_store(env['FB_AUTO_POST_DB_PATH'])
+    if not args.apply:
+        rehearsal = folder / 'preview.sqlite3'
+        with contextlib.closing(sqlite3.connect(Path(store.path).as_uri() + '?mode=ro', uri=True)) as source:
+            with contextlib.closing(sqlite3.connect(rehearsal)) as dest:
+                source.backup(dest)
+        rehearsal.chmod(0o600)
+        store = FBAutoPostStore(rehearsal)
+    with store.connect() as conn:
+        runs = [dict(conn.execute('SELECT * FROM fb_auto_run WHERE id=?', (rid,)).fetchone()) for rid in args.run_ids]
+        assert len({r['config_json'] for r in runs}) == 1
+        template = dict(conn.execute('SELECT * FROM fb_auto_template WHERE id=?', (runs[0]['template_id'],)).fetchone())
+    config_json = runs[0]['config_json']
+    config = json.loads(config_json)
+    page_repo, materials = repositories(env, args.operation_id)
+    cache = folder / 'candidate-snapshot.json'
+    if args.apply:
+        frozen = json.loads(cache.read_text())
+        assert frozen['operation_id'] == args.operation_id and frozen['run_ids'] == args.run_ids
+        assert frozen['config_sha256'] == hashlib.sha256(config_json.encode()).hexdigest()
+        age = (utc_now() - datetime.fromisoformat(frozen['finished_at_utc'])).total_seconds()
+        assert 0 <= age <= 900, 'candidate_snapshot_expired_rerun_preview'
+        snapshots = {}
+        decimal_fields = ('duration_seconds', 'material_spend', 'material_roas', 'drama_spend', 'drama_roas')
+        for language, raw in frozen['snapshots'].items():
+            candidates = []
+            for item in raw['candidates']:
+                for key in decimal_fields:
+                    if item[key] is not None:
+                        item[key] = Decimal(item[key])
+                candidates.append(MaterialCandidate(**item))
+            snapshots[language] = CandidateSnapshot(tuple(candidates), tuple(raw['metric_generation_ids']), tuple(raw['metric_dates']))
+    else:
+        pages = page_repo.list_pages(config['group_ids'], is_admin=bool(template['scope_is_admin']), owner_user_id=template['owner_user_id'])
+        print(json.dumps({'phase': 'current_pages', 'pages': len(pages)}), flush=True)
+        snapshots = candidate_snapshots_for_pages({**config, '_candidate_limit': 1000}, pages, materials)
+        save(cache, {'operation_id': args.operation_id, 'run_ids': args.run_ids,
+                     'config_sha256': hashlib.sha256(config_json.encode()).hexdigest(),
+                     'finished_at_utc': utc_now().isoformat(),
+                     'snapshots': {k: dataclasses.asdict(v) for k, v in snapshots.items()}})
+        print(json.dumps({'phase': 'candidates', 'languages': {k: len(v.candidates) for k,v in snapshots.items()}}), flush=True)
+    # Re-read mutable Page scope/authorization after the potentially slow catalog.
+    pages = page_repo.list_pages(config['group_ids'], is_admin=bool(template['scope_is_admin']), owner_user_id=template['owner_user_id'])
+    if page_repo.legacy_conflicts(config['group_ids']):
+        raise RuntimeError('legacy_queue_conflict')
+    if args.apply:
+        backup = folder / 'before-recovery.sqlite3'
+        if not backup.exists():
+            with contextlib.closing(sqlite3.connect(Path(store.path).as_uri() + '?mode=ro', uri=True)) as source:
+                with contextlib.closing(sqlite3.connect(backup)) as dest:
+                    source.backup(dest)
+                    assert dest.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+            backup.chmod(0o600)
+    report = recover_skipped(store, args.run_ids, pages, materials, snapshots,
+        operation_id=args.operation_id, expected_config=config_json, apply=args.apply)
+    save(folder / ('applied.json' if args.apply else 'preview.json'), report)
+    print(json.dumps({'applied': args.apply, 'operation_id': args.operation_id,
+        'runs': [{'run_id': r['run_id'], 'restored': len(r['restored']), 'retained': len(r['retained']),
+                  'already_restored': len(r['already_restored'])} for r in report['runs']]}), flush=True)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        # Driver errors may contain connection details; expose only safe classes/codes.
+        print(json.dumps({'ok': False, 'error': getattr(exc, 'code', type(exc).__name__)}))
+        sys.exit(1)

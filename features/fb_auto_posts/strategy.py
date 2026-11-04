@@ -75,15 +75,17 @@ def cooldown_content_ids(conn, page_id, publish_at, hours, now):
     lower = (target - timedelta(hours=hours)).isoformat(timespec='seconds')
     upper = (target + timedelta(hours=hours)).isoformat(timespec='seconds')
     # Check both directions: planners may prepare future slots out of order.
-    # Confirmed publication uses completion time; an unresolved outcome holds
-    # the content regardless of its intended time until reconciled.
+    # Confirmed publication uses completion time. Unresolved results retain
+    # their exact-material fence elsewhere; a drama cooldown still expires.
     rows = conn.execute("""
         SELECT DISTINCT content_id FROM fb_auto_task
         WHERE page_id=? AND content_id<>'' AND (
-          status IN ('running','submitted','unknown') OR
+          (status IN ('running','submitted','unknown') AND
+            COALESCE(NULLIF(started_at_utc,''),NULLIF(planned_publish_at_utc,''),created_at_utc)>? AND
+            COALESCE(NULLIF(started_at_utc,''),NULLIF(planned_publish_at_utc,''),created_at_utc)<?) OR
           (status IN ('planned','preparing','ready') AND planned_publish_at_utc>? AND planned_publish_at_utc<?) OR
           (status IN ('published','failed_without_retry') AND
             COALESCE(NULLIF(completed_at_utc,''),created_at_utc)>? AND
             COALESCE(NULLIF(completed_at_utc,''),created_at_utc)<?))
-    """, (str(page_id), lower, upper, lower, upper))
+    """, (str(page_id), lower, upper, lower, upper, lower, upper))
     return {str(row[0]) for row in rows}
