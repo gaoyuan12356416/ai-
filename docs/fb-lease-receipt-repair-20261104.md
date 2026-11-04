@@ -57,21 +57,23 @@ python -m scripts.deploy_fb_lease_repair prepare --source SOURCE --commit SHA --
 # use --host hk on HK
 systemctl stop --no-block pipeline-node-cpu-main.service
 # HK: systemctl stop --no-block pipeline-node-hk-gpu.service
-# Wait for both nodes to finish current work, MainPID=0, no central running jobs.
+# Each node switches after its own in-flight work finishes, MainPID=0.
+# Coordinator drains only accepted HTTP requests under a bounded gate.
 python -m scripts.deploy_fb_lease_repair apply --folder RELEASE
 # Apply CPU first, then HK.
 ```
 
 The helper verifies exact live baselines and unit hashes, preserves unrelated
 runtime overlays and ownership, validates imports as the service user, and saves
-a private manifest. CPU changes coordinator symlink and node override; HK changes
+a private manifest. CPU changes coordinator symlink and node override; apply returns partial while
+that node finishes and can be repeated. HK changes
 only its node override. Original environments remain. Restore original tasks
 using a fresh recovery plan and digest while FB admission is disabled. Verify
 outbox ACKs, restore FB admission, then reconcile native and central publication.
 
 ## Rollback
 
-Disable FB admission, gracefully stop both nodes and wait for completion as
+Disable FB admission, gracefully stop each affected node and wait for its completion as
 above. On CPU, then HK, run:
 
 ```
@@ -82,3 +84,7 @@ This restores the recorded coordinator symlink/removes its own node override,
 then starts original services. Re-enable FB after health checks. The helper
 rejects concurrent release drift. Never restore business DB backups after
 publishing resumes: keep receipts and ledgers to prevent duplicate publication.
+
+CPU already contains the independent 10500ac two-MiB X segment adjustment.
+The deployment overlays only the two FB executor hunks onto each reviewed host
+baseline, retaining CPU 10500ac and HK 179596a behavior respectively.

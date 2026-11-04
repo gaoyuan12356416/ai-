@@ -35,8 +35,8 @@ def unit_files(unit):
 def prepare(source,commit,folder,host):
     commit=verify_source(source,commit)
     mount=Path('/mnt/data-disk' if host=='cpu' else '/data')
-    assert mount.is_mount() and folder.is_relative_to(mount),'data_disk_required'
-    if host=='cpu':assert run(['findmnt','-n','-o','UUID',mount])=='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
+    assert folder.is_relative_to(mount),'runtime_root_required'
+    if host=='cpu':assert mount.is_mount() and run(['findmnt','-n','-o','UUID',mount])=='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
     folder.mkdir(parents=True,exist_ok=False,mode=0o755)
     node='pipeline-node-'+('cpu-main' if host=='cpu' else 'hk-gpu')+'.service'
     lanes={'node':(Path(show(node,'WorkingDirectory')),node,NODE_FILES)}
@@ -49,14 +49,23 @@ def prepare(source,commit,folder,host):
                 'unit_files':unit_files(unit),'exec_start':show(unit,'ExecStart'),'files':{}}
         manifest['lanes'][name]=record
         for relative in files:
-            base=NODE_BASE if relative.endswith('/executors.py') else BASE
+            base=('10500ac' if host=='cpu' else NODE_BASE) if relative.endswith('/executors.py') else BASE
             old=subprocess.run(['git','show',base+':'+relative],cwd=source,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             live=root/relative;target=candidate/relative
             assert target.resolve().is_relative_to(candidate.resolve()),'overlay_escape'
             if old.returncode==0:assert live.read_bytes().replace(b'\r\n',b'\n')==old.stdout,'unreviewed_live_baseline:'+relative
             else:assert not live.exists(),'new_file_collision:'+relative
-            record['files'][relative]={'before':sha(live) if live.exists() else '','after':sha(source/relative)}
-            atomic_copy(source/relative,target);compile(target.read_bytes(),relative,'exec')
+            before=sha(live) if live.exists() else ''
+            if relative.endswith('/executors.py'):
+                # CPU already has the independent 10500ac X segment change;
+                # preserve each host's existing behavior and apply only our
+                # two FB executor hunks from the reviewed node baseline.
+                patch=subprocess.check_output(['git','diff',NODE_BASE,commit,'--',relative],cwd=source)
+                result=subprocess.run(['git','apply','--unsafe-paths','-'],cwd=candidate,input=patch,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                assert result.returncode==0,'fb_executor_overlay_failed'
+            else:atomic_copy(source/relative,target)
+            compile(target.read_bytes(),relative,'exec')
+            record['files'][relative]={'before':before,'after':sha(target)}
         if name=='node':
             python=re.search(r'path=([^ ;]+)',record['exec_start']).group(1)
             record['python']=python
