@@ -41493,7 +41493,7 @@ def x_post_admin_query_params(raw_query, *, runs=False):
             result["unknown_outcome"] = 1 if unknown_outcome in ("1", "true") else 0
         task_source = str((raw.get("task_source") or [""])[0] or "").strip().lower()
         if task_source:
-            if task_source not in {"drama_pool", "material_pool", "auto_publish"}:
+            if task_source not in {"drama_pool", "material_pool", "auto_publish", "manual_publish"}:
                 raise ValueError("invalid task_source")
             result["task_source"] = task_source
     return result
@@ -94690,18 +94690,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/x-posts/logs":
-            if not self._require_cookie_admin():
-                return
-            try:
-                params = x_post_admin_query_params(parsed.query)
-                params.update({"actor": x_accounts_actor(self._session()), "scope": "all"})
-                json_response(self, 200, query_x_post_logs(params), no_store=True)
-            except ValueError as exc:
-                json_response(self, 400, {"error": "invalid_request", "message": str(exc)}, no_store=True)
-            except XAccountsClientError as exc:
-                status, payload = x_accounts_error_payload(exc)
-                json_response(self, status, payload, no_store=True)
-            return
+            from features.x_posts.log_management import dispatch
+            return dispatch(self, parsed, globals())
 
         if parsed.path == "/api/admin/x-posts/runs":
             if not self._require_cookie_admin():
@@ -98047,6 +98037,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             video_editing_handle(self, "POST", sys.modules[__name__])
             return
         parsed = urlparse(self.path)
+        if parsed.path == "/api/admin/x-posts/queue-actions":
+            from features.x_posts.log_management import dispatch
+            return dispatch(self, parsed, globals())
+
         if parsed.path.startswith("/internal/pipeline-dispatch/youtube/"):
             from features.pipeline_dispatch.native_gateway import dispatch_youtube
             return dispatch_youtube(self, parsed.path, globals())
