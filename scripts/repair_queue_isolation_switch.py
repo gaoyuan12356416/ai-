@@ -61,9 +61,9 @@ def proof(d,x,natives):
             result[jid]={'job':j,'queue':q,'log':l,'relay':relay,'operations':ops,'native_operations':native_ops,'checkpoints':cps,'action':'confirm_media_only_failure'}
     return result
 
-def main():
+def main(directory=None):
     apply='--apply' in sys.argv
-    directory=Path('/mnt/data-disk/publish-queue-isolation-20261105/switch-repair')
+    directory=Path(directory or '/mnt/data-disk/publish-queue-isolation-20261105/switch-repair')
     with contextlib.ExitStack() as stack:
         d=stack.enter_context(contextlib.closing(connect(DBS['dispatch'],not apply)))
         x=stack.enter_context(contextlib.closing(connect(DBS['x'],not apply)))
