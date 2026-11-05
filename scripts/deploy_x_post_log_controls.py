@@ -26,6 +26,10 @@ def sha(p):
 def save(p,value):
     p.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n');p.chmod(0o600)
 
+def table_hash(c,table):
+    # sqlite3.Row repr includes memory addresses; hash the actual values.
+    return hashlib.sha256(repr([tuple(r) for r in c.execute('SELECT * FROM '+table+' ORDER BY rowid')]).encode()).hexdigest()
+
 def backup(db,dest):
     with contextlib.closing(sqlite3.connect(db.resolve().as_uri()+'?mode=ro',uri=True)) as source:
         with contextlib.closing(sqlite3.connect(dest)) as target:
@@ -71,7 +75,7 @@ def rehearse(source,directory):
     read=manager.query({'page_size':100})
     report={'query_count':read['pagination']['total'],'manual_count':manager.query({'task_source':'manual_publish'})['pagination']['total'],'reset':[],'stop_resume':[]}
     with contextlib.closing(manager.connect(readonly=True)) as c:
-        immutable={t:hashlib.sha256(repr(c.execute('SELECT * FROM '+t+' ORDER BY rowid').fetchall()).encode()).hexdigest() for t in ['pipeline_x_operation','pipeline_x_checkpoint','dispatch.pipeline_operation','dispatch.pipeline_receipt','dispatch.pipeline_publication']}
+        immutable={t:table_hash(c,t) for t in ['pipeline_x_operation','pipeline_x_checkpoint','dispatch.pipeline_operation','dispatch.pipeline_receipt','dispatch.pipeline_publication']}
         ids=[r[0] for r in c.execute("SELECT id FROM x_post_queue WHERE status IN ('failed','queued','waiting_relay') ORDER BY id DESC LIMIT 500")]
     for qid in ids:
         with contextlib.closing(manager.connect(readonly=True)) as c:
@@ -93,7 +97,7 @@ def rehearse(source,directory):
         assert not projected['reconcile_only'] and not projected['unknown_outcome'],projected['source_key']
         report[bucket].append({'queue_id':qid,'source':s['queue']['source_type'],'manual':bool(s['queue']['manual_run_id']),'stage':projected['stage']})
     with contextlib.closing(manager.connect(readonly=True)) as c:
-        for t,h in immutable.items():assert hashlib.sha256(repr(c.execute('SELECT * FROM '+t+' ORDER BY rowid').fetchall()).encode()).hexdigest()==h,t
+        for t,h in immutable.items():assert table_hash(c,t)==h,t
     assert report['reset'] and report['stop_resume']
     report['receipt_and_operation_history_unchanged']=True
     save(directory/'rehearsal.json',report)
