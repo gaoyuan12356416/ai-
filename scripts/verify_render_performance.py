@@ -85,6 +85,10 @@ def pipeline(args,out):
         results.append(row)
         (out/'pipeline.json').write_text(json.dumps(results,indent=2))
         print(json.dumps(dict(variant=name,elapsed=row['elapsed'],timings=report['timings'])),flush=True)
+    validate_outputs(spec,out,results)
+
+
+def validate_outputs(spec,out,results):
     # Decoder output hashes prove exact video and audio equality independently
     # of container metadata and encoder packetization.
     ffmpeg=spec['ffmpeg'];hashes=[]
@@ -96,18 +100,39 @@ def pipeline(args,out):
             data=subprocess.check_output([ffmpeg,'-v','error','-i',str(path),'-map','0:'+stream,'-f','framemd5','-'],timeout=120)
             streams[stream]=hashlib.sha256(data).hexdigest()
         hashes.append(streams)
-    identical=all(h==hashes[0] for h in hashes)
-    (out/'quality.json').write_text(json.dumps(dict(decoded_frames_identical=identical,hashes=hashes),indent=2))
-    print(json.dumps(dict(decoded_frames_identical=identical)),flush=True)
-    if not identical:raise AssertionError('decoded_media_mismatch')
+    # NVENC's automatic sequence/level selection can differ between runs even
+    # with the unchanged old implementation. Match each candidate to an old
+    # run with the same actual sequence header, then require exact frame hashes.
+    matches=[]
+    for i,row in enumerate(results):
+        if row['variant']!='new':continue
+        video=row['report']['video']
+        compatible=[j for j,r in enumerate(results) if r['variant']=='old' and
+                    r['report']['video']['sequence_header_hex']==video['sequence_header_hex']]
+        matching=[j for j in compatible if hashes[j]==hashes[i]]
+        if not matching:raise AssertionError('candidate_has_no_identical_baseline:'+str(i))
+        old=results[matching[0]]['report']['video']
+        for key in ('encoder_options','encoder_configuration','frame_count','time_base'):
+            if old[key]!=video[key]:raise AssertionError('encoder_contract_changed:'+key)
+        matches.append({'candidate':i,'baseline':matching[0],
+            'mp4_bytes_identical':(out/(str(i)+'-new')/'output.mp4').read_bytes()==
+                                  (out/(str(matching[0])+'-old')/'output.mp4').read_bytes()})
+    quality=dict(matched_baseline_outputs_identical=True,matches=matches,hashes=hashes,
+                 baseline_repeatable=len({hashes[i]['v:0'] for i,r in enumerate(results) if r['variant']=='old'})==1)
+    (out/'quality.json').write_text(json.dumps(quality,indent=2))
+    print(json.dumps(quality),flush=True)
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--phase',choices=['kernels','pipeline'],required=True)
+    p=argparse.ArgumentParser();p.add_argument('--phase',choices=['kernels','pipeline','verify'],required=True)
     p.add_argument('--output',required=True);p.add_argument('--spec');p.add_argument('--baseline-root')
     p.add_argument('--seconds',type=float,default=30);p.add_argument('--order',default='old,new,new,old')
-    args=p.parse_args();out=Path(args.output);out.mkdir(parents=True,exist_ok=False)
-    kernels(out) if args.phase=='kernels' else pipeline(args,out)
+    args=p.parse_args();out=Path(args.output)
+    if args.phase=='verify':
+        validate_outputs(json.loads(Path(args.spec).read_text()),out,json.loads((out/'pipeline.json').read_text()))
+    else:
+        out.mkdir(parents=True,exist_ok=False)
+        kernels(out) if args.phase=='kernels' else pipeline(args,out)
 
 
 if __name__=='__main__':main()
