@@ -94,8 +94,10 @@ def render(spec, output, work_dir=None):
                               spec['info']['duration'], check=check)
         os.replace(scratch/'finished.mp4', output)
         advance('complete')
+        audio.report['mux_backend'] = 'caller_cpu_mux'
         result.update(video={k:v for k,v in record.items() if k!='packets'},
                       audio=audio.report, timings=timings,
+                      render_profile='cpu-mux-cached-lanczos-v1',
                       wall_seconds=time.monotonic()-started)
         # Bounded diagnostic metadata contains neither source URL nor credentials.
         output.with_suffix(output.suffix+'.native.json').write_text(
