@@ -1,10 +1,14 @@
 """Undo only our verified duplicate comment; retain the earlier owner comment."""
-import contextlib,datetime as dt,io,json,os,sqlite3,subprocess,sys
+import argparse,contextlib,datetime as dt,io,json,os,sqlite3,subprocess,sys,time
 from pathlib import Path
 import requests
 ROOT=Path('/root/drama_material_service');BASE=Path('/mnt/data-disk/pipeline-dispatch')
 OURS='Ugz6EWkka4RWMVdPlDx4AaABAg';EARLIER='UgziFIRP12CBbiFzNsF4AaABAg'
 def main():
+    parser=argparse.ArgumentParser();parser.add_argument('--confirm-only');args=parser.parse_args()
+    if args.confirm_only:
+        prior=Path(args.confirm_only).resolve();assert prior.is_relative_to(BASE)
+        intent=json.loads(prior.read_text());assert intent['delete_only']==OURS and intent['retain']==EARLIER
     pid=subprocess.check_output(['systemctl','show','youtube-auto-publish-worker.service','-p','MainPID','--value'],text=True).strip()
     os.environ.update(dict(x.decode().split('=',1) for x in Path('/proc/'+pid+'/environ').read_bytes().split(b'\0') if b'=' in x));sys.path.insert(0,str(ROOT))
     with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
@@ -32,12 +36,19 @@ def main():
         for item in data.get('items',[]):
             top=item['snippet']['topLevelComment'];s=top['snippet']
             if item['snippet'].get('videoId')==task['video_id'] and s.get('authorChannelId',{}).get('value')==task['channel_id'] and s.get('textOriginal','').strip()==task['comment_text'].strip():matches[top['id']]=s['publishedAt']
-        assert matches=={OURS:'2026-11-05T02:31:25Z',EARLIER:'2026-11-05T02:25:09Z'}
-        (folder/'intent.json').write_text(json.dumps({'delete_only':OURS,'retain':EARLIER,'video':task['video_id'],'proof':matches}))
-        r=http.delete('https://www.googleapis.com/youtube/v3/comments',params={'id':OURS},headers=headers,timeout=30,allow_redirects=False)
-        assert r.status_code in (204,404),'comment_delete_requires_readback'
-        r=http.get('https://www.googleapis.com/youtube/v3/comments',params={'part':'snippet','id':OURS+','+EARLIER},headers=headers,timeout=30,allow_redirects=False)
-        assert r.status_code==200 and [x['id'] for x in r.json().get('items',[])]==[EARLIER],'comment_delete_unconfirmed'
+        assert matches.get(EARLIER)=='2026-11-05T02:25:09Z'
+        if not args.confirm_only:
+            assert matches=={OURS:'2026-11-05T02:31:25Z',EARLIER:'2026-11-05T02:25:09Z'}
+            (folder/'intent.json').write_text(json.dumps({'delete_only':OURS,'retain':EARLIER,'video':task['video_id'],'proof':matches}))
+            r=http.delete('https://www.googleapis.com/youtube/v3/comments',params={'id':OURS},headers=headers,timeout=30,allow_redirects=False)
+            (folder/'delete-response.json').write_text(json.dumps({'http_status':r.status_code}))
+            assert r.status_code in (204,404),'comment_delete_requires_readback'
+        # Read propagation can lag the DELETE receipt. Never send a second DELETE.
+        for attempt in range(8):
+            r=http.get('https://www.googleapis.com/youtube/v3/comments',params={'part':'snippet','id':OURS+','+EARLIER,'fields':'items(id,snippet(publishedAt))'},headers={**headers,'Cache-Control':'no-cache'},timeout=30,allow_redirects=False)
+            if r.status_code==200 and [x['id'] for x in r.json().get('items',[])]==[EARLIER]:break
+            time.sleep(2)
+        else:raise RuntimeError('comment_delete_unconfirmed')
     c.execute('BEGIN IMMEDIATE');assert dict(c.execute('SELECT * FROM drama_youtube_publish WHERE id=1155').fetchone())==task
     assert dict(c.execute('SELECT * FROM drama_youtube_sync_outbox WHERE id=?',(out['id'],)).fetchone())==out
     c.execute("UPDATE drama_youtube_publish SET comment_id=?,comment_published_at_utc=?,updated_at_utc=? WHERE id=1155",(EARLIER,matches[EARLIER],utc_now()))
