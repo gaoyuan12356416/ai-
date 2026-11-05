@@ -1,7 +1,9 @@
 """No SSH, systemd or production paths: verify the one-time switch contract."""
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -63,6 +65,26 @@ class IdleTests(unittest.TestCase):
 
 
 class SourceTests(unittest.TestCase):
+    def test_nul_inventory_preserves_unicode_newlines_and_outer_whitespace(self):
+        names = ['\nfirst name.md', 'doc/中文\n说明.md', 'last name\n']
+        output = b'\0'.join(os.fsencode(name) for name in names) + b'\0'
+        result = subprocess.CompletedProcess([], 0, stdout=output, stderr=b'')
+        with patch.object(bridge.subprocess, 'run', return_value=result) as run:
+            self.assertEqual(bridge.tracked_files(Path('source')), names)
+        self.assertEqual(run.call_args.args[0][-2:], ['ls-files', '-z'])
+        self.assertNotIn('text', run.call_args.kwargs)
+
+    def test_real_git_inventory_preserves_chinese_paths_with_default_quoting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); name = '中文说明.md'
+            (root / name).write_bytes(b'fixture')
+            subprocess.run(['git', 'init', '-q', str(root)], check=True, capture_output=True)
+            subprocess.run(['git', '-C', str(root), 'add', '--', name], check=True, capture_output=True)
+            quoted = subprocess.run(['git', '-C', str(root), '-c', 'core.quotePath=true', 'ls-files'],
+                                    check=True, capture_output=True).stdout
+            self.assertTrue(quoted.startswith(b'"'))
+            self.assertEqual(bridge.tracked_files(root), [name])
+
     def test_git_origin_commit_and_cleanliness_are_required(self):
         good = ['a' * 40, '', 'https://github.com/gaoyuan12356416/ai-.git']
         for replies in (['b' * 40], ['a' * 40, ' M changed'],
@@ -92,7 +114,7 @@ class SourceTests(unittest.TestCase):
                             'previous': str(base), 'files': {name: {'after': value} for name, value in files.items()}}}}
             (node.parent / 'manifest.json').write_text(json.dumps(manifest))
             stack.enter_context(patch.object(bridge, 'clean_github'))
-            stack.enter_context(patch.object(bridge, 'command', return_value='old.py\nunchanged.py'))
+            stack.enter_context(patch.object(bridge, 'tracked_files', return_value=['old.py', 'unchanged.py']))
             bridge.verify_overlay_files()
             (node / 'unchanged.py').write_bytes(b'unrecorded hotfix')
             with self.assertRaisesRegex(ValueError, 'unrecorded_runtime_change'): bridge.verify_overlay_files()

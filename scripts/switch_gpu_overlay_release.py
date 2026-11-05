@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 
@@ -123,6 +124,15 @@ def verify_layout(props, *, overlay):
     require(props.get('KillMode') == 'mixed' and props.get('TimeoutStopUSec') == 'infinity', 'unit_drain_contract_changed')
 
 
+def tracked_files(root):
+    # NUL output avoids core.quotePath escaping and preserves embedded newlines.
+    # Do not use command(): its text decoding/strip changes filename bytes.
+    result = subprocess.run(['git', '-C', str(root), 'ls-files', '-z'],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    require(result.returncode == 0, 'git_inventory_failed')
+    return [os.fsdecode(name) for name in result.stdout.split(b'\0') if name]
+
+
 def verify_overlay_files():
     manifest_bytes = regular(RUNTIME / 'manifest.json')
     manifest = json.loads(manifest_bytes)
@@ -141,7 +151,7 @@ def verify_overlay_files():
                 and digest(regular(SOURCE / relative)) == expected, 'overlay_file_changed')
     # The runtime is a copied tree, not itself Git. Check every baseline tracked
     # file too, so a second unrecorded overlay cannot be silently discarded.
-    tracked = command(['git', '-C', BASE, 'ls-files']).splitlines()
+    tracked = tracked_files(BASE)
     require(bool(tracked), 'baseline_inventory_empty')
     for relative in tracked:
         require(not Path(relative).is_absolute() and '..' not in Path(relative).parts, 'tracked_path_invalid')
