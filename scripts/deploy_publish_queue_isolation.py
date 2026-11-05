@@ -161,18 +161,28 @@ def switch(directory,lane,rollback=False):
     assert link.resolve()==old,'later_runtime_switch_preserved:'+lane
     for rel,h in item['files'].items():assert sha(link/rel)==h['after' if rollback else 'before'],'affected_source_drift:'+rel
     units=LANES[lane][1];processes={u:pid(u) for u,_,_ in units}
-    paths=set()
+    paths=set();triggers=set()
     for u,_,_ in units:
         user=run(['systemctl','show',u,'-p','User','--value']) or 'root'
         for rel in item['files']:run(['runuser','-u',user,'--','test','-r',target/rel])
         for dependent in run(['systemctl','show',u,'-p','RequiredBy','--value']).split():
             if dependent.endswith('.path') and run(['systemctl','show',dependent,'-p','ActiveState','--value'])=='active':paths.add(dependent)
+            for trigger in run(['systemctl','show',dependent,'-p','TriggeredBy','--value']).split():
+                if trigger.endswith(('.path','.timer')) and run(['systemctl','show',trigger,'-p','ActiveState','--value'])=='active':triggers.add(trigger)
+    triggers.update(paths)
     item['active_dependent_paths']=sorted(paths);save(path,m)
     marker='queue-isolation-'+lane+'-'+str(int(time.time()))
     rules=[];stopped=[];swapped=False;observations=[];began=time.monotonic()
     drain_seconds=int(os.environ.get('QUEUE_ISOLATION_DRAIN_SECONDS','20'))
     assert 20<=drain_seconds<=300
+    def release_network_gate():
+        while rules:
+            rule,watchdog=rules.pop()
+            run(['iptables','-D','INPUT']+rule)
+            subprocess.run(['systemctl','stop',watchdog+'.timer'],capture_output=True,timeout=10)
     try:
+        # Stop only wakeups, not their already-running execution services.
+        if triggers:run(['systemctl','stop',*sorted(triggers)],timeout=20)
         for u,port,threads in units:
             rule=['-p','tcp','--dport',str(port),'-m','conntrack','--ctstate','NEW','-m','comment','--comment',marker,'-j','DROP']
             watchdog=marker+'-'+str(port)
@@ -185,25 +195,28 @@ def switch(directory,lane,rollback=False):
             if time.monotonic()>deadline:
                 raise RuntimeError('affected_http_handlers_still_active:'+lane)
             time.sleep(.25)
-        for u,_,_ in units:
-            run(['systemctl','stop',u],timeout=20);stopped.append(u)
-            assert pid(u)=='0'
+        stopped=[u for u,_,_ in units]
+        # Avoid Requires= propagation stopping callers with in-flight work.
+        if stopped:run(['systemctl','--job-mode=ignore-dependencies','stop',*stopped],timeout=20)
+        for u in stopped:assert pid(u)=='0'
         assert link.resolve()==old,'concurrent_runtime_switch'
         swap(link,target);swapped=True
+        # Startup readiness probes use these same listeners.
+        release_network_gate()
         for u,port,_ in units:run(['systemctl','start',u],timeout=15)
         for u,_,_ in units:assert run(['systemctl','is-active',u])=='active'
         for dependent in paths:run(['systemctl','start',dependent],timeout=15)
     except BaseException:
         if swapped:
-            for u,_,_ in units:run(['systemctl','stop',u],timeout=20)
+            run(['systemctl','--job-mode=ignore-dependencies','stop',*[u for u,_,_ in units]],timeout=20)
             swap(link,old)
+        release_network_gate()
         for u in stopped:run(['systemctl','start',u],timeout=20)
         for dependent in paths:run(['systemctl','start',dependent],timeout=15)
         raise
     finally:
-        for rule,watchdog in rules:
-            run(['iptables','-D','INPUT']+rule)
-            subprocess.run(['systemctl','stop',watchdog+'.timer'],capture_output=True,timeout=10)
+        release_network_gate()
+        for trigger in triggers:run(['systemctl','start',trigger],timeout=15)
         save(directory/(lane+('-rollback' if rollback else '')+'-drain.json'),
              {'seconds':time.monotonic()-began,'observations':observations,'temporary_rules_removed':marker not in run(['iptables','-S','INPUT'])})
     for _,port,_ in units:health(port)
