@@ -18,6 +18,23 @@ from features.x_auto_posts.core import XPostAutoStore
 TABLE='x_auto_original_selection_recovery_2796'
 SCHEMA='CREATE TABLE IF NOT EXISTS '+TABLE+' (task_id INTEGER PRIMARY KEY,state TEXT NOT NULL,evidence_json TEXT NOT NULL,created_at TEXT NOT NULL)'
 
+def reactivate_reservation(n,now):
+    """Repair the proved zero-write incident inside the caller's write lock.
+
+    The release remains in the immutable recovery evidence. Restore the exact
+    normal transition trigger before commit; other reservations are untouched.
+    """
+    require(n.in_transaction,'transaction_required')
+    prior=n.execute('SELECT state,release_reason,manual_run_id,material_key FROM x_post_manual_material_reservation WHERE id=1854').fetchone()
+    require(tuple(prior or ())==('released','x_post_account_needs_review',1817,'8009155'),'reservation_changed')
+    require(not n.execute("SELECT 1 FROM x_post_queue WHERE manual_run_id=1817 OR material_id='8009155'").fetchone(),'material_queued_elsewhere')
+    require(n.execute('SELECT 1 FROM '+TABLE+" WHERE task_id=2796 AND state='native_armed'").fetchone(),'recovery_evidence_missing')
+    trigger=n.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='trg_x_post_manual_reservation_state_update'").fetchone()
+    require(trigger and 'x_post_manual_material_reservation transition invalid' in trigger[0],'transition_trigger_changed')
+    n.execute('DROP TRIGGER trg_x_post_manual_reservation_state_update')
+    n.execute("UPDATE x_post_manual_material_reservation SET state='active',release_reason='',updated_at=? WHERE id=1854",(now,))
+    n.execute(trigger[0])
+
 def task_proof(a):
     t=dict(a.execute('SELECT * FROM x_auto_task WHERE id=2796').fetchone())
     require(t['status']=='failed' and t['error_code']=='x_post_account_needs_review' and t['execution_run_id']==1817
@@ -60,7 +77,7 @@ def restore(folder):
             require(task_proof(a)==proof['auto'] and native_proof(n)==proof['native'],'state_changed')
             n.execute(SCHEMA)
             n.execute('INSERT INTO '+TABLE+' VALUES(2796,?,?,?)',('native_armed',json.dumps(proof,ensure_ascii=False),now))
-            n.execute("UPDATE x_post_manual_material_reservation SET state='active',release_reason='',updated_at=? WHERE id=1854",(now,))
+            reactivate_reservation(n,now)
             n.execute("UPDATE x_post_manual_run SET status='queued',finished_at='',error_code='',error_message='',updated_at=? WHERE id=1817",(now,))
             n.commit()
             # Only the Auto worker claims auto_template requests. Until this
