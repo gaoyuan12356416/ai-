@@ -521,31 +521,27 @@ class DispatchStore:
                 or row["source_key"] != offer.get("source_key") or row["stage"] != offer.get("stage")):
             return
         from .youtube_isolation import identity_resources
-        resources, channel, media = identity_resources(offer.get("youtube_channel_id"),
-            offer.get("youtube_material_id"), offer.get("youtube_source_url"))
-        if not media or set(resources) != set(offer.get("resource_keys", [])):
-            return
-        # Never mutate the resources of an active generation. In particular,
-        # a native lease released between upload stages is not completion.
-        if row["status"] in {"running", "legacy_running"} or offer.get("youtube_write_active"):
+        resources = identity_resources(row["source_id"])
+        if not resources or resources != offer.get("resource_keys"):
             return
         old = json.loads(row["resource_keys_json"])
-        c.execute("UPDATE pipeline_job SET resource_keys_json=? WHERE id=?", (dumps(resources), row["id"]))
-        uncertain = row["status"] == "unknown" or bool(offer.get("unknown_outcome"))
         held = c.execute("SELECT * FROM pipeline_resource WHERE job_id=?", (row["id"],)).fetchall()
         legacy = c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?", (row["id"],)).fetchone()
-        if uncertain or legacy:
-            for resource in media:
-                c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, row["id"]))
-        if held:
-            for resource in media:
-                c.execute("INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)",
-                          (resource, row["id"], row["generation"], int(uncertain), int(held[0]["legacy"])))
-        released = c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND resource_key=?", (row["id"], channel)).rowcount
-        released += c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=? AND resource_key=?", (row["id"], channel)).rowcount
+        uncertain = row["status"] == "unknown" or bool(offer.get("unknown_outcome"))
+        # Change only the scope of exclusion. Claims, native leases, operation
+        # permits, sessions and receipts remain valid, including active uploads.
+        if held or row["status"] == "running":
+            c.execute("INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)",
+                      (resources[0], row["id"], row["generation"], int(uncertain), int(held[0]["legacy"]) if held else 0))
+        if legacy or uncertain:
+            c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resources[0], row["id"]))
+        released = 0
+        for table in ("pipeline_resource", "pipeline_legacy_resource"):
+            released += c.execute("DELETE FROM " + table + " WHERE job_id=? AND resource_key<>?", (row["id"], resources[0])).rowcount
+        c.execute("UPDATE pipeline_job SET resource_keys_json=? WHERE id=?", (dumps(resources), row["id"]))
         if old != resources or released:
-            self.event(c, row["id"], "youtube_media_isolation_refreshed",
-                       {"media_resources": media, "channel_released": bool(released)}, self.now())
+            self.event(c, row["id"], "youtube_task_isolation_refreshed",
+                       {"task_resource": resources[0], "shared_resources_released": released}, self.now())
 
     def offer(self, offer):
         now = self.now()
@@ -556,11 +552,6 @@ class DispatchStore:
             expected, _, material = identity_resources(offer.get("fb_page_id"), offer.get("fb_material_id"), offer["stage"])
             if material and set(expected) == set(quarantine_resources):
                 quarantine_resources = [material]
-        if channel == "youtube" and offer.get("family") == "publish" and not offer.get("youtube_write_active") and offer.get("status") == "unknown":
-            from .youtube_isolation import identity_resources
-            expected, _, media = identity_resources(offer.get("youtube_channel_id"), offer.get("youtube_material_id"), offer.get("youtube_source_url"))
-            if media and set(expected) == set(quarantine_resources):
-                quarantine_resources = media
         stage = offer["stage"]
         if stage not in STAGES or not str(offer.get("source_key", "")):
             raise DispatchError("offer_invalid", status=400)
@@ -1055,9 +1046,18 @@ class DispatchStore:
             resource = str(operation.get("account_resource", ""))
             if not key or len(key) > 256 or len(fingerprint) != 64 or any(x not in "0123456789abcdef" for x in fingerprint):
                 raise DispatchError("operation_invalid", status=400)
-            if resource not in json.loads(row["resource_keys_json"]):
+            resources = json.loads(row["resource_keys_json"])
+            held_resource = resource
+            if row["channel"] == "youtube" and row["family"] == "publish":
+                from .youtube_isolation import task_resource
+                scoped = task_resource(row["source_id"])
+                # An already running generation retains its original descriptor.
+                # Its exact channel is an identity alias, not a channel-wide lock.
+                if scoped in resources and resource == "youtube:channel:" + row["account_label"]:
+                    held_resource = scoped
+            if held_resource not in resources:
                 raise DispatchError("operation_resource_invalid", status=403)
-            held = c.execute("SELECT * FROM pipeline_resource WHERE resource_key=?", (resource,)).fetchone()
+            held = c.execute("SELECT * FROM pipeline_resource WHERE resource_key=?", (held_resource,)).fetchone()
             if not held or held["job_id"] != row["id"] or held["generation"] != row["generation"]:
                 raise DispatchError("operation_resource_not_held")
             existing = c.execute("SELECT * FROM pipeline_operation WHERE operation_id=?", (key,)).fetchone()

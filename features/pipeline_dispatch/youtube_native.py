@@ -79,7 +79,7 @@ class YouTubeNativeBridge:
 
     @staticmethod
     def _continuation_descriptor(task, continuation, control):
-        descriptor = {"kind": "youtube_publish", "mode": "continuation", "continuation": dict(continuation), "account_resource": "youtube:channel:" + task["channel_id"], "request": {"video_id": task["video_id"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "comment_id": task["comment_id"], "publish_at": task["publish_at"]}}
+        descriptor = {"kind": "youtube_publish", "mode": "continuation", "continuation": dict(continuation), "account_resource": "youtube:task:" + str(task["id"]), "request": {"video_id": task["video_id"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "comment_id": task["comment_id"], "publish_at": task["publish_at"]}}
         if continuation.get("kind") == "comment":
             descriptor["request"].update(comment_only=True, publish_at="")
         if control:
@@ -238,7 +238,7 @@ class YouTubeNativeBridge:
                 if continuation:
                     descriptor = self._continuation_descriptor(task, continuation, control)
                 else:
-                    descriptor = {"kind": "youtube_publish", "mode": "legacy" if task["workflow"] == "legacy" else "reviewed", "account_resource": "youtube:channel:" + task["channel_id"], "request": {"title": task["title"], "description": task["description_rendered"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "publish_at": task["publish_at"]}, "artifact": {"url": task["source_url"], "identity_mode": "source_to_fingerprint", "mime": "video/mp4"}}
+                    descriptor = {"kind": "youtube_publish", "mode": "legacy" if task["workflow"] == "legacy" else "reviewed", "account_resource": "youtube:task:" + str(task["id"]), "request": {"title": task["title"], "description": task["description_rendered"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "publish_at": task["publish_at"]}, "artifact": {"url": task["source_url"], "identity_mode": "source_to_fingerprint", "mime": "video/mp4"}}
                     if task["workflow"] == "reviewed_thumbnail": descriptor["request"]["approved_cover"] = inline_image(content, mime)
             with self.workflow.db(True) as conn:
                 conn.execute("INSERT INTO pipeline_youtube_claim(source_key,stage,generation,claim_hash,task_json,descriptor_json) VALUES(?,?,?,?,?,?)", (*key, claim_hash(claim), encode(saved), encode(descriptor)))

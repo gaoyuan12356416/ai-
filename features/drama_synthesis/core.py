@@ -913,7 +913,7 @@ class DramaSynthesisStore:
                     conn.commit()
                     return dict(existing)
                 if _workflow == REVIEWED_WORKFLOW:
-                    risky = conn.execute("SELECT id,status,video_id,unknown_outcome FROM drama_youtube_publish WHERE workflow=? AND source_material_id=? AND channel_id=? AND (video_id<>'' OR resumable_session_uri<>'' OR status IN ('queued','validating','downloading','uploading','submitted','processing') OR unknown_outcome=1) ORDER BY id DESC LIMIT 1", (_workflow, _reviewed[1], channel_id)).fetchone()
+                    risky = conn.execute("SELECT id,status,video_id,unknown_outcome FROM drama_youtube_publish WHERE workflow=? AND preparation_id=? AND channel_id=? AND (video_id<>'' OR resumable_session_uri<>'' OR status IN ('queued','validating','downloading','uploading','submitted','processing') OR unknown_outcome=1) ORDER BY id DESC LIMIT 1", (_workflow, _reviewed[0], channel_id)).fetchone()
                 else:
                     risky = conn.execute(
                         "SELECT id,status,video_id,unknown_outcome FROM drama_youtube_publish WHERE workflow='legacy' AND job_id=? AND channel_id=? AND (video_state='published' OR status IN ('submitted','processing') OR unknown_outcome=1) ORDER BY id DESC LIMIT 1",

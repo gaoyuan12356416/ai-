@@ -83,10 +83,10 @@ class CoverResourceTests(unittest.TestCase):
         self.assertIsNotNone(self.store.claim('cpu-main', 'prep', 'prepare')['job'])
         self.assertIsNotNone(self.store.claim('hk-gpu', 'prep', 'prepare')['job'])
 
-    def test_publish_projection_keeps_channel_resource_and_missing_identity_stays_blocked(self):
+    def test_publish_projection_uses_task_resource_and_missing_identity_stays_blocked(self):
         adapter = LedgerAdapter(LedgerSpec('youtube', 'publish', 'unused', 'drama_youtube_publish'), driver=object())
         offer = adapter.project({'id': 1, 'status': 'queued', 'channel_id': 'UC-example', 'created_at': stamp(self.now)})
-        self.assertEqual(offer['resource_keys'], ['youtube:channel:UC-example'])
+        self.assertEqual(offer['resource_keys'], ['youtube:task:1'])
         missing = self.adapter.project({'id': 'c' * 32, 'state': 'queued_generation', 'version': 1,
                                         'created_at': stamp(self.now), 'body': '{}'})
         self.assertEqual(missing['resource_keys'], [])

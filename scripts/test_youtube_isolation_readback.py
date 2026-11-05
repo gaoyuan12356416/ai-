@@ -24,49 +24,77 @@ class IsolationTests(unittest.TestCase):
 
     def offer(self, ident, material, *, status='queued', active=False, url=None):
         url = url or 'https://media.example/'+material+'.mp4'
-        resources, _, _ = identity_resources(self.channel, material, url)
+        resources = identity_resources(ident)
         return dict(source_key='youtube:publish:'+str(ident), source_id=str(ident),channel='youtube',family='publish',
             stage='publish',status=status,source_status=status,scheduled_at=stamp(self.now-timedelta(hours=1)),
             source_created_at=stamp(self.now-timedelta(hours=1)), resource_keys=resources,capabilities=['publish:youtube'],
-            payload={},artifact={},execution_available=status=='queued',youtube_channel_id=self.channel,
+            payload={},artifact={},account_label=self.channel,execution_available=status=='queued',youtube_channel_id=self.channel,
             youtube_material_id=material,youtube_source_url=url,youtube_write_active=active,unknown_outcome=status=='unknown')
 
     def claim(self, worker='one'): return self.store.claim('cpu-main',worker,'publish')['job']
 
-    def test_ended_unknown_does_not_block_other_material_or_fifo(self):
-        old=self.offer(1,'a',status='unknown'); legacy=dict(old,resource_keys=['youtube:channel:'+self.channel])
-        saved=self.store.offer(legacy)
-        self.store.offer(self.offer(2,'a')); later=self.store.offer(self.offer(3,'b'))
-        self.assertIsNone(self.claim())
+    def test_unknown_isolated_to_task_allows_same_material_in_order(self):
+        old=self.offer(1,'a',status='unknown')
+        saved=self.store.offer(dict(old,resource_keys=['youtube:channel:'+self.channel]))
+        same=self.store.offer(self.offer(2,'a'));later=self.store.offer(self.offer(3,'b'))
         self.store.offer(old)
-        self.assertEqual(self.claim()['id'],later['id'])
+        self.assertEqual(self.claim()['id'],same['id'])
+        self.assertEqual(self.claim('two')['id'],later['id'])
         with self.store.transaction() as c:
-            self.assertTrue(c.execute('SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?',(saved['id'],)).fetchone())
-            self.assertFalse(c.execute('SELECT 1 FROM pipeline_legacy_resource WHERE job_id=? AND resource_key=?',(saved['id'],'youtube:channel:'+self.channel)).fetchone())
+            fences=c.execute('SELECT resource_key FROM pipeline_legacy_resource WHERE job_id=?',(saved['id'],)).fetchall()
+            self.assertEqual([x[0] for x in fences],['youtube:task:1'])
+        self.assertEqual(self.store.get_job(saved['id'])['status'],'unknown')
 
-    def test_active_claim_and_native_owner_keep_channel_serial(self):
-        first=self.store.offer(self.offer(1,'a')); self.claim()
-        self.store.offer(self.offer(2,'b'))
+    def test_running_legacy_descriptor_survives_task_scope_migration(self):
+        old=self.offer(1,'a');old['resource_keys']=['youtube:channel:'+self.channel]
+        first=self.store.offer(old);claim=self.claim()
         self.store.offer(self.offer(1,'a',status='unknown',active=True))
-        self.assertIsNone(self.claim('two'))
-        # Even after the central lease expires, an uncleared native owner is
-        # not evidence that an external write has stopped.
+        after=self.store.get_job(first['id'])
+        self.assertEqual(after['status'],'running');self.assertEqual(after['generation'],claim['generation'])
+        # Original in-flight credentials still use the channel identity alias.
+        operation=dict(operation_id='old-descriptor-operation',request_sha256='a'*64,
+                       account_resource='youtube:channel:'+self.channel,operation='youtube_upload')
+        self.store.begin_operation(claim,operation)
+        self.store.offer(self.offer(2,'a'))
+        self.assertEqual(self.claim('two')['source_id'],'2')
+        # Same task cannot be claimed a second time or change its operation.
+        self.assertIsNone(self.claim())
+        with self.assertRaises(Exception):self.store.begin_operation(claim,operation)
+        with self.assertRaises(Exception):self.store.begin_operation(claim,dict(operation,operation_id='wrong-channel',account_resource='youtube:channel:other'))
+
+    def test_expired_unknown_does_not_block_same_source_or_lose_own_fence(self):
+        self.store.offer(self.offer(1,'a'));claim=self.claim()
+        self.store.begin_operation(claim,dict(operation_id='upload',request_sha256='a'*64,account_resource='youtube:task:1',operation='youtube_upload'))
         self.now+=timedelta(seconds=121);self.store.expire()
         self.store.register_node('cpu-main',['publish:youtube']);self.store.worker_heartbeat('cpu-main','two','publish')
         self.store.offer(self.offer(1,'a',status='unknown',active=True))
-        self.assertIsNone(self.claim('two'))
-        self.store.offer(self.offer(1,'a',status='unknown'))
-        self.assertEqual(self.claim('two')['source_id'],'2')
-
-    def test_same_source_under_other_material_id_remains_fenced(self):
-        self.store.offer(self.offer(1,'a',status='unknown'))
         self.store.offer(self.offer(2,'alias',url='https://media.example/a.mp4?signature=new'))
-        self.assertIsNone(self.claim())
+        self.assertEqual(self.claim('two')['source_id'],'2')
+        self.assertEqual(self.store.get_job(claim['id'])['status'],'unknown')
 
-    def test_no_media_identity_keeps_old_channel_protection(self):
-        old=self.offer(1,'',status='unknown',url='invalid')
-        self.store.offer(old);self.store.offer(self.offer(2,'b'))
-        self.assertIsNone(self.claim())
+    def test_missing_material_does_not_create_channel_fence(self):
+        self.store.offer(self.offer(1,'',status='unknown',url='invalid'))
+        self.store.offer(self.offer(2,'b'))
+        self.assertEqual(self.claim()['source_id'],'2')
+
+
+class EnqueueScopeTests(unittest.TestCase):
+    def test_same_material_other_preparation_allowed_but_same_task_protected(self):
+        f=fixtures.YouTubeNativeTests();f.setUp()
+        self.addCleanup(f.doCleanups);self.addCleanup(f.tearDown)
+        task=f.task
+        fields=('job_id','content_id','app_id','channel_local_id','channel_id','youtube_account_id','source_kind','source_url','title','description_template','description_rendered','comment_text','operator_user_id','preparation_id','source_material_id','approved_cover_path','approved_cover_sha256')
+        kwargs={k:task[k] for k in fields}
+        kwargs.update(scopes=('https://www.googleapis.com/auth/youtube.force-ssl',),duplicate_confirmed=False)
+        for index,state in enumerate(('unknown','uploading','published')):
+            with f.workflow.db(True) as c:
+                c.execute("UPDATE drama_youtube_publish SET status=?,unknown_outcome=?,video_id=?,resumable_session_uri=? WHERE id=?",(state,int(state=='unknown'),'existing_video' if state=='published' else '','original-session' if state!='published' else '',task['id']))
+            separate=f.store.enqueue_reviewed_youtube(**dict(kwargs,preparation_id='separate-'+str(index),operation_id='separate-op-'+str(index)))
+            self.assertNotEqual(separate['id'],task['id'])
+            with self.assertRaises(Exception):
+                f.store.enqueue_reviewed_youtube(**dict(kwargs,operation_id='replacement-'+str(index)))
+        original=f.store.enqueue_reviewed_youtube(**dict(kwargs,operation_id=task['operation_id']))
+        self.assertEqual(original['id'],task['id'])
 
 
 class ReadbackTests(unittest.TestCase):

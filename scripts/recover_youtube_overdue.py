@@ -75,11 +75,11 @@ def main():
             c.execute('INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)',(a.task_id,'operator_retry','requested',json.dumps({'reason':'overdue_never_uploaded','previous_generation':job['generation']}),now()));c.commit()
         print(json.dumps({'task_id':a.task_id,'ready_immediate':True,'backup':str(folder)}));return
     worker='operator:youtube-session:'+str(a.task_id)+':'+secrets.token_hex(4)
-    central_gen=job['generation']+1;channel='youtube:channel:'+task['channel_id']
+    central_gen=job['generation']+1;channel='youtube:task:'+str(task['id'])
     with contextlib.closing(connect(BASE/'dispatch.sqlite3')) as c:
         c.execute('BEGIN IMMEDIATE');assert dict(c.execute('SELECT * FROM pipeline_job WHERE id=?',(job['id'],)).fetchone())==job
-        assert not c.execute('SELECT 1 FROM pipeline_resource WHERE resource_key=? AND job_id<>?',(channel,job['id'])).fetchone(),'channel_currently_executing'
-        assert not c.execute('SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? AND job_id<>?',(channel,job['id'])).fetchone(),'channel_has_active_legacy_writer'
+        assert not c.execute('SELECT 1 FROM pipeline_resource WHERE resource_key=? AND job_id<>?',(channel,job['id'])).fetchone(),'task_currently_executing'
+        assert not c.execute('SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? AND job_id<>?',(channel,job['id'])).fetchone(),'task_has_active_legacy_writer'
         claim_hash=hashlib.sha256(secrets.token_bytes(32)).hexdigest()
         c.execute("UPDATE pipeline_job SET status='running',generation=?,worker_id=?,claim_hash=?,lease_expires_at=?,started_at=?,updated_at=? WHERE id=?",(central_gen,worker,claim_hash,expiry(),now(),now(),job['id']))
         c.execute('INSERT INTO pipeline_claim_history VALUES(?,?,?,?,?)',(job['id'],central_gen,job['node_id'],worker,claim_hash))

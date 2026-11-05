@@ -475,7 +475,7 @@ class LedgerAdapter:
                     resources.append("youtube:cover:" + source_id)
                 else:
                     from .youtube_isolation import identity_resources
-                    resources, _, _ = identity_resources(identity, row.get("source_material_id"), row.get("source_url"))
+                    resources = identity_resources(source_id)
         payload = {"source_key": source_key, "native_id": source_id, "native_family": spec.family}
         # Rendering specifications are frozen by reserve(), after native checks.
         fingerprint = canonical_fingerprint(row, spec.identity)
@@ -542,12 +542,6 @@ class LedgerAdapter:
             fb_fields = {"fb_page_id": str(row.get("page_id") or ""),
                          "fb_material_id": str(row.get("material_id") or ""),
                          "fb_page_write_active": page_write_active(row, spec.family, now)}
-        if spec.channel == "youtube" and spec.family == "publish":
-            from .youtube_isolation import write_active
-            fb_fields.update(youtube_channel_id=str(row.get("channel_id") or ""),
-                             youtube_material_id=str(row.get("source_material_id") or ""),
-                             youtube_source_url=str(row.get("source_url") or ""),
-                             youtube_write_active=write_active(row))
         return {**fb_fields, "source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
                 "backlog_authorization": row.get("_backlog_authorization"),
                 "backlog_ancestor_authorization": row.get("_backlog_ancestor_authorization"),
