@@ -32,7 +32,7 @@ def live_plan_gaps(paths, channels):
     """Keep expensive multi-ledger scans out of the coordinator HTTP handlers."""
     key=(tuple(sorted((k,str(v)) for k,v in paths.items() if not k.startswith('_'))),tuple(channels))
     with _LIVE_LOCK:
-        entry=_LIVE.setdefault(key, {'loading':False,'updated':0,'result':None})
+        entry=_LIVE.setdefault(key, {'loading':False,'updated':0,'result':None,'error':False})
         if not entry['loading'] and time.monotonic()-entry['updated']>30:
             entry['loading']=True
             def refresh():
@@ -44,9 +44,12 @@ def live_plan_gaps(paths, channels):
                     result=None
                 with _LIVE_LOCK:
                     if result is not None:entry['result']=result
+                    entry['error']=result is None
                     entry['loading']=False;entry['updated']=time.monotonic()
             threading.Thread(target=refresh,name='monitor-plan-read',daemon=True).start()
         result=copy.deepcopy(entry['result'])
+        if result and entry['error']:
+            result['warnings'].append('最新计划扫描失败，暂保留上次成功核对的计划快照；见最近核对时刻')
     return result or {'available':False,'items':[],'warnings':['正在后台只读核对未入队计划；首次完成前数量显示未知，请稍后刷新']}
 
 
