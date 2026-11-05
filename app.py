@@ -14655,7 +14655,9 @@ def decorate_drama_synthesis_job(job):
         elif item.get("status") != "done":
             item["status_label"] = item["remote_progress"]["stage_label"]
         item["active_started_at"] = snapshot.get("first_started_at") or snapshot.get("started_at") or item.get("active_started_at")
-    return item
+    import sys
+    from features.drama_synthesis.material_source import decorate
+    return decorate(item, sys.modules[__name__])
 
 
 def drama_synthesis_error_payload(exc):
@@ -31421,7 +31423,8 @@ def notify_screenshot_ai_source_callback(job, raise_on_error=False):
         except Exception:
             logging.exception("failed to write callback failure audit log")
         if raise_on_error:
-            raise
+            from features.cover_material_source import ScreenshotMaterialIngestionError
+            raise ScreenshotMaterialIngestionError(exc) from exc
         return {"failed": True, "error": str(exc)}
 
 
@@ -38396,6 +38399,10 @@ def screenshot_failed_size_labels(error_text):
 
 
 def humanize_screenshot_failure_reason(job, error_text):
+    from features.cover_material_source import screenshot_ingestion_failure_reason
+    ingestion_reason = screenshot_ingestion_failure_reason(job, error_text)
+    if ingestion_reason:
+        return ingestion_reason
     raw_reason = (
         str(error_text or "").strip()
         or str(job.get("error_message", "") or "").strip()
@@ -38441,15 +38448,20 @@ def humanize_screenshot_failure_reason(job, error_text):
 
 
 def build_screenshot_failure_message(job, error_text):
+    from features.cover_material_source import screenshot_ingestion_failure_reason
+    ingestion_failed = bool(screenshot_ingestion_failure_reason(job, error_text))
+    title = ("封面图片已生成，素材入库失败，已停止本轮重试。" if ingestion_failed
+             else "封面图片生成失败，系统已停止继续重试。")
     reason = humanize_screenshot_failure_reason(job, error_text)
     return (
-        "封面图合成任务失败，系统已停止继续重试。\n"
+        "%s\n"
         "剧名：%s\n"
         "content_id：%s\n"
         "job_id：%s\n"
         "失败原因：%s\n"
         "已生成尺寸：1.91:1=%s，1:1=%s，4:5=%s"
         % (
+            title,
             str(job.get("drama_name", "") or ""),
             str(job.get("content_id", "") or ""),
             str(job.get("job_id", "") or ""),
@@ -41284,6 +41296,8 @@ from features.x_accounts.client import (
     query_x_post_runs,
     query_x_post_schedule,
     query_x_accounts as query_x_authorized_accounts,
+    query_x_api_credits,
+    delete_x_account,
     logout_x_account,
     save_x_post_schedule,
     set_x_post_drama_pool_priority,
@@ -41339,6 +41353,7 @@ except ValueError:
     )
 
 X_ACCOUNTS_ERROR_META = {
+    "x_account_busy": (409, "该账号正在发布、同步或有结果待核对的任务，请处理完成后再删除"),
     "x_post_drama_owner_not_configured": (409, "未完结短剧的正常绑定账号必须保留在排期中"),
     "x_post_schedule_slot_in_progress": (409, "当前发布时间点正在冻结或执行，请在90秒窗口结束后再修改配置"),
     "invalid_random_daily_count": (400, "每日随机发布次数无效"),
@@ -94205,6 +94220,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_GET(self):
+        # SYNTHESIS_MATERIAL_SOURCE_V1
+        if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
+            from features.drama_synthesis.material_source import handle
+            handle(self, "GET", __import__("sys").modules[__name__])
+            return
 
 
 
@@ -94420,6 +94440,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
             return
 
+        if parsed.path == "/api/report-auth/yuesiying":
+            from features.private_reports import authorize
+            authorize(self, globals())
+            return
+
         if parsed.path == "/api/report-auth/tt-minis-native-growth":
             self._send_report_auth_status()
             return
@@ -94628,6 +94653,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             try:
                 session = self._session() or {}
                 json_response(self, 200, query_x_authorized_accounts(x_accounts_actor(session), scope="mine"), no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
+        if parsed.path == "/api/admin/x-accounts/credits":
+            if not self._require_cookie_module("x_accounts"):
+                return
+            try:
+                json_response(self, 200, query_x_api_credits(x_platform_accounts_actor(self._session() or {})), no_store=True)
             except XAccountsClientError as exc:
                 status, payload = x_accounts_error_payload(exc)
                 json_response(self, status, payload, no_store=True)
@@ -98000,6 +98035,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_POST(self):
+        # SYNTHESIS_MATERIAL_SOURCE_V1
+        if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
+            from features.drama_synthesis.material_source import handle
+            handle(self, "POST", __import__("sys").modules[__name__])
+            return
 
         if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
             import sys
@@ -100725,6 +100765,23 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
+
+        x_account_delete_match = re.fullmatch(r"/api/admin/x-accounts/([0-9]+)", parsed.path)
+        if x_account_delete_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_account_delete_match.group(1)
+            try:
+                result = delete_x_account(account_id, x_accounts_actor(session))
+                append_audit_log(session, "delete_x_account", "x_account", account_id, {"history_preserved": True})
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
             return
 
         x_pool_delete_match = re.fullmatch(
