@@ -32,5 +32,9 @@ class SequenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryRejected,'run_has_work'):self.run_tick()
         self.f.update("UPDATE x_post_schedule_run SET queued_count=0,error_code='x_post_schedule_plan_unknown' WHERE id=1054")
         result=self.run_tick();self.assertEqual(result['rearmed_run_id'],1057);self.assertEqual(self.f.row(1054)['error_code'],'x_post_schedule_plan_unknown')
+    def test_successful_partial_plan_does_not_block_unstarted_peer(self):
+        self.f.update("UPDATE x_post_schedule_run SET status='queued',queued_count=1,expected_count=1 WHERE id=1057")
+        before=self.f.row(1057);self.assertEqual(self.run_tick()['rearmed_run_id'],1054)
+        self.assertEqual(self.f.row(1057),before)
 
 if __name__=='__main__':unittest.main()

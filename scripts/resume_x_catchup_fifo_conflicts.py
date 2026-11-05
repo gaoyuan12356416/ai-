@@ -24,6 +24,9 @@ def inspect(c):
     require(len(runs)==3,'incident_runs_missing')
     for r in runs:
         require(r['run_date']=='2026-11-04' and r['source_type']=='material' and r['material_pool_snapshot_max_id']==4444,'incident_scope_changed')
+        # A successfully committed partial plan sets expected_count to its
+        # actual queue count. It is outside recovery and must not block peers.
+        if r['queued_count']:continue
         grant=c.execute('SELECT * FROM x_post_schedule_zero_write_resume_audit WHERE run_id=?',(r['id'],)).fetchone()
         require(grant and grant['identity_sha256']==fingerprint(identity(r)),'original_admission_changed')
     active=[r['id'] for r in runs if r['status']=='claimed' and not r['queued_count']]
