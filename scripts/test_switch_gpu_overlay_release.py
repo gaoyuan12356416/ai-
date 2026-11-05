@@ -64,6 +64,62 @@ class IdleTests(unittest.TestCase):
                 idle.assert_not_called()
 
 
+class StartedTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.now = 0.0
+        self.stack.enter_context(patch.object(bridge.time, 'monotonic', side_effect=lambda: self.now))
+        self.sleep = self.stack.enter_context(patch.object(bridge.time, 'sleep', side_effect=self.advance))
+        self.props = self.stack.enter_context(patch.object(bridge, 'properties', return_value={'ActiveState': 'active', 'MainPID': '42'}))
+        self.stack.enter_context(patch.object(bridge, 'verify_layout'))
+        self.cwd = self.stack.enter_context(patch.object(bridge.os, 'readlink', return_value='/release'))
+        self.good_argv = ('/venv/python\0' + str(Path('/release') / 'scripts/pipeline_worker.py') + '\0').encode()
+        self.argv = self.stack.enter_context(patch.object(Path, 'read_bytes', return_value=self.good_argv))
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def check(self, **kwargs):
+        bridge.assert_started('/release', '/venv/python', overlay=False, **kwargs)
+
+    def test_ready_process_returns_without_delay(self):
+        self.check()
+        self.sleep.assert_not_called()
+        self.assertEqual(self.props.call_count, 1)
+
+    def test_transient_cwd_then_argv_observes_ready_process(self):
+        self.cwd.side_effect = ['/', '/release', '/release']
+        self.argv.side_effect = [b'/systemd-helper\0', b'/systemd-helper\0', self.good_argv]
+        self.check()
+        self.assertEqual(self.props.call_count, 3)
+        self.assertEqual(self.now, .2)
+
+    def test_missing_proc_during_start_can_become_ready(self):
+        self.cwd.side_effect = [FileNotFoundError(), '/release']
+        self.check()
+        self.assertEqual(self.props.call_count, 2)
+
+    def test_persistent_wrong_identity_times_out_without_service_commands(self):
+        self.cwd.return_value = '/wrong'
+        check_timeout = .25
+        with self.assertRaisesRegex(ValueError, 'runtime_cwd_mismatch'):
+            self.check(timeout=check_timeout)
+        self.assertAlmostEqual(self.now, check_timeout)
+        self.assertEqual(self.props.call_count, 4)
+        self.assertTrue(all(0 < call.kwargs['timeout'] <= check_timeout for call in self.props.call_args_list))
+
+    def test_service_exit_during_observation_fails_immediately(self):
+        self.cwd.return_value = '/not-ready'
+        for state in ('inactive', 'failed', 'deactivating'):
+            with self.subTest(state=state):
+                self.props.side_effect = [{'ActiveState': 'active', 'MainPID': '42'},
+                                          {'ActiveState': state, 'MainPID': '0'}]
+                before = self.now
+                with self.assertRaisesRegex(ValueError, 'unit_exited_during_start'):
+                    self.check()
+                self.assertAlmostEqual(self.now - before, .1)
+
+
 class SourceTests(unittest.TestCase):
     def test_nul_inventory_preserves_unicode_newlines_and_outer_whitespace(self):
         names = ['\nfirst name.md', 'doc/中文\n说明.md', 'last name\n']

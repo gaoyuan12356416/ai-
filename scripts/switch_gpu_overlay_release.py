@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.pipeline_node_install import command, plan, private_json, unit_text
@@ -77,13 +78,13 @@ def clean_github(root, sha):
                        'https://github.com/gaoyuan12356416/ai-.git'}, 'github_origin_mismatch')
 
 
-def properties():
+def properties(*, timeout=600):
     keys = ['ActiveState', 'SubState', 'MainPID', 'ControlPID', 'ControlGroup',
             'FragmentPath', 'DropInPaths', 'WorkingDirectory', 'KillMode', 'TimeoutStopUSec']
     argv = ['systemctl', 'show', UNIT]
     for key in keys:
         argv.extend(['-p', key])
-    return dict(row.split('=', 1) for row in command(argv).splitlines() if '=' in row)
+    return dict(row.split('=', 1) for row in command(argv, timeout=timeout).splitlines() if '=' in row)
 
 
 def no_cgroup_processes(group, *, root=Path('/sys/fs/cgroup')):
@@ -237,14 +238,32 @@ def assert_authorized(paused):
     require(os.name == 'posix' and os.geteuid() == 0, 'linux_root_required')
 
 
-def assert_started(directory, python, *, overlay):
-    props = properties()
-    require(props.get('ActiveState') == 'active' and int(props.get('MainPID', '0')) > 0, 'unit_not_active_after_start')
-    verify_layout(props, overlay=overlay)
-    pid = props['MainPID']
-    require(os.readlink('/proc/' + pid + '/cwd') == str(directory), 'runtime_cwd_mismatch')
-    argv = Path('/proc/' + pid + '/cmdline').read_bytes().decode().split('\0')
-    require(argv[:2] == [str(python), str(Path(directory) / 'scripts/pipeline_worker.py')], 'runtime_argv_mismatch')
+def assert_started(directory, python, *, overlay, timeout=10, poll_seconds=.1):
+    # Type=simple can return from start before the child's chdir/exec. Observe
+    # that actual transition; do not delay an already correct running process.
+    deadline = time.monotonic() + timeout
+    expected_argv = [str(python), str(Path(directory) / 'scripts/pipeline_worker.py')]
+    last_error = 'unit_not_active_after_start'
+    while True:
+        try:
+            props = properties(timeout=max(.001, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise ValueError('startup_observation_timeout') from None
+        require(props.get('ActiveState') in ('active', 'activating'), 'unit_exited_during_start')
+        verify_layout(props, overlay=overlay)
+        pid = props.get('MainPID', '0')
+        if props['ActiveState'] == 'active' and int(pid) > 0:
+            try:
+                cwd = os.readlink('/proc/' + pid + '/cwd')
+                argv = Path('/proc/' + pid + '/cmdline').read_bytes().decode().split('\0')
+                if cwd == str(directory) and argv[:2] == expected_argv:
+                    return
+                last_error = 'runtime_cwd_mismatch' if cwd != str(directory) else 'runtime_argv_mismatch'
+            except (FileNotFoundError, ProcessLookupError):
+                last_error = 'runtime_process_not_ready'
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, last_error)
+        time.sleep(min(poll_seconds, remaining))
 
 
 def apply(current, candidate, folder, *, paused=False):
