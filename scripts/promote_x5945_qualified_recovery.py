@@ -98,3 +98,48 @@ def promote(plan,evidence,folder):
                 c.execute("UPDATE pipeline_job SET hold_reason='' WHERE id=? AND status='failed' AND generation=? AND hold_reason=?",(item['job_id'],item['from_generation'],HOLD))
         with audit_path.open('w') as f:json.dump(audit,f,indent=2);f.flush();os.fsync(f.fileno())
     return {k:audit[k] for k in ('queue_id','status','new_sha256','size','platform_called')}
+
+def resume_verified_upload(folder):
+    """Idempotently finish the same staged object without cancelling its uploader.
+
+The first uploader may still await a 1800-second SDK socket timeout. Concurrent
+uploads here contain identical bytes and use the SDK's verified part resume.
+The older process cannot produce a Post or change a different qualification.
+"""
+    folder=Path(folder);audit=json.loads((folder/'5945-qualification-recovery.json').read_text())
+    previous=audit['old_receipt'];new=audit['new_receipt']
+    require(audit['queue_id']==QID and previous['result']['output_sha256']==OLD_SHA and new['result']['output_sha256']==NEW_SHA,'incident_record_changed')
+    native_zero_attempt(QID)
+    pid=subprocess.check_output(['systemctl','show','pipeline-node-cpu-main.service','-p','MainPID','--value'],text=True).strip();proc=Path('/proc')/pid
+    os.environ.update({k.decode():v.decode() for entry in (proc/'environ').read_bytes().split(b'\0') if b'=' in entry for k,v in [entry.split(b'=',1)]})
+    sys.path.insert(0,str((proc/'cwd').resolve()))
+    from features.pipeline_dispatch.executors import NodeExecutors,COSArtifactStore
+    from qcloud_cos import CosConfig,CosS3Client
+    from scripts.recover_x_prepost_failures import writable
+    processor=NodeExecutors({'state_root':os.environ['PIPELINE_NODE_STATE_ROOT'],'backend':'cpu'})._processor('x_random')
+    cfg=processor.config
+    processor.cos.client=CosS3Client(CosConfig(Region=cfg.cos_region,SecretId=cfg.cos_secret_id,SecretKey=cfg.cos_secret_key,Timeout=120,KeepAlive=False))
+    saved=json.loads((processor.root/(previous['result']['job_key']+'.json')).read_text())
+    journal=COSArtifactStore(processor.cos,'x_random',saved['request'],source_key='x:queue:'+str(QID))
+    require(journal.binding==previous['binding'] and journal._read() in (previous,new),'qualification_changed')
+    path=folder/'artifact-cache/5945-render-in-progress.mp4';require(file_identity(path)==(NEW_SHA,new['result']['output_size']),'candidate_bytes_changed')
+    central='/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3'
+    with contextlib.closing(writable(central)) as c:
+        job=c.execute("SELECT id,status,generation,hold_reason FROM pipeline_job WHERE source_key='x:queue:5945' AND stage='prepare'").fetchone()
+        require(job and job['status']=='failed' and job['generation']==2 and job['hold_reason']==HOLD,'incident_hold_changed')
+    processor.cos.upload(new['object_key'],path,NEW_SHA,new['result']['output_size'])
+    if journal._document(audit['archive_key']) is None:
+        try:journal.client.put_object(Bucket=cfg.cos_bucket,Key=audit['archive_key'],Body=journal.encoded(previous),ACL='private',ContentType='application/json',EnableMD5=True,Metadata={'x-cos-forbid-overwrite':'true'})
+        except Exception:pass
+    require(journal._document(audit['archive_key'])==previous,'archive_not_verified')
+    native_zero_attempt(QID)
+    current=journal._read();require(current in (previous,new),'qualification_changed')
+    if current==previous:
+        try:journal.client.put_object(Bucket=cfg.cos_bucket,Key=journal.key,Body=journal.encoded(new),ACL='private',ContentType='application/json',EnableMD5=True)
+        except Exception:pass
+    require(journal._read()==new and journal.recover()==new['result'],'qualification_requires_readback')
+    with contextlib.closing(writable(central)) as c:
+        c.execute("UPDATE pipeline_job SET hold_reason='' WHERE id=? AND status='failed' AND generation=2 AND hold_reason=?",(job['id'],HOLD))
+    result=dict(queue_id=QID,status='restored',new_sha256=NEW_SHA,size=new['result']['output_size'],platform_called=False,original_receipt_archived=True)
+    (folder/'5945-qualification-resumed.json').write_text(json.dumps(result,indent=2))
+    return result
