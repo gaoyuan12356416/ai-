@@ -9,7 +9,7 @@ import hashlib, json, re, secrets
 from pathlib import Path
 from typing import Any, Mapping
 from features.random_gpu.compositor import validate_source_overlay
-from features.random_gpu.gpu_compute import file_digest
+from features.random_gpu.gpu_compute import file_digest, immutable_asset_sha256_file
 
 ASSET_CATEGORIES=("border","light","opacity_video","corners","tint")
 CATEGORIES=("border","opacity_video","corners","tint")
@@ -27,7 +27,7 @@ def load_asset_set(root:Path,expected_manifest_sha256:str):
     if not root.is_absolute() or not HEX.fullmatch(expected) or not root.is_dir() or root.is_symlink(): raise RandomOverlayError("overlay root or manifest invalid")
     manifest_path=root/"manifest.json"
     if not manifest_path.is_file() or manifest_path.is_symlink(): raise RandomOverlayError("overlay manifest missing")
-    actual,size=sha256_file(manifest_path)
+    actual,size=immutable_asset_sha256_file(manifest_path)
     if not secrets.compare_digest(actual,expected) or not 0<size<=2*1024*1024: raise RandomOverlayError("overlay manifest fingerprint invalid")
     try: manifest=json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception: raise RandomOverlayError("overlay manifest unreadable") from None
@@ -45,7 +45,7 @@ def load_asset_set(root:Path,expected_manifest_sha256:str):
             if not SAFE.fullmatch(name) or name in seen or not HEX.fullmatch(sha) or not 0<item_size<=2*1024*1024*1024 or row["media_type"] not in {"image/png","video/webm"}: raise RandomOverlayError("overlay asset contract invalid")
             path=(root/name)
             if not path.is_file() or path.is_symlink(): raise RandomOverlayError("overlay asset missing")
-            resolved=path.resolve(strict=True); resolved.relative_to(resolved_root); got_sha,got_size=sha256_file(resolved)
+            resolved=path.resolve(strict=True); resolved.relative_to(resolved_root); got_sha,got_size=immutable_asset_sha256_file(resolved)
             if got_size!=item_size or not secrets.compare_digest(got_sha,sha): raise RandomOverlayError("overlay asset fingerprint mismatch")
             normalized.append({**row,"path":resolved,"size":item_size,"sha256":sha}); seen.add(name)
         verified[category]=tuple(normalized)

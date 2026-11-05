@@ -6,9 +6,11 @@ An explicitly requested GPU operation never silently returns a CPU result.
 from __future__ import annotations
 
 import ctypes
+from collections import OrderedDict
 from functools import lru_cache
 import os
 from pathlib import Path
+import stat
 import sys
 import threading
 
@@ -187,3 +189,68 @@ def file_digest():
         return CudaSHA256()
     import hashlib
     return hashlib.sha256()
+
+
+_IMMUTABLE_ASSET_DIGESTS = OrderedDict()
+_IMMUTABLE_ASSET_DIGEST_LOCK = threading.RLock()
+_IMMUTABLE_ASSET_DIGEST_LIMIT = 4096
+
+
+def _asset_stat_identity(value):
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns)
+
+
+def immutable_asset_sha256_file(path):
+    """Reuse a verified immutable catalog file within this process only.
+
+    This is intentionally separate from file_digest/sha256_file: downloads,
+    job sources and completed outputs must not use this cache. Callers still
+    validate catalog paths, schema and expected SHA on every load. Only a
+    successful read of an unchanged regular file can populate the cache.
+    """
+    path = Path(path)
+    use_cuda = enabled()
+    backend = "cuda" if use_cuda else "cpu"
+    # Serialize admission of the same file so concurrent catalog consumers
+    # do not duplicate a full digest. No CUDA object is retained in the cache.
+    with _IMMUTABLE_ASSET_DIGEST_LOCK:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("immutable_asset_not_regular")
+        resolved = path.resolve(strict=True)
+        identity = _asset_stat_identity(before)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            opened_identity = _asset_stat_identity(os.fstat(stream.fileno()))
+            # Windows can expose different ctime semantics through path and
+            # descriptor APIs. Compare object/size/mtime across the APIs, then
+            # retain and recheck each API's full identity (including ctime).
+            if opened_identity[:-1] != identity[:-1]:
+                raise ValueError("immutable_asset_changed")
+            key = (os.getpid(), backend, str(resolved), identity, opened_identity)
+            result = _IMMUTABLE_ASSET_DIGESTS.get(key)
+            if result is None:
+                if use_cuda:
+                    digest = CudaSHA256()  # A GPU miss never falls back to CPU.
+                else:
+                    import hashlib
+                    digest = hashlib.sha256()
+                size = 0
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    size += len(block)
+                    digest.update(block)
+                result = (digest.hexdigest(), size)
+            # Recheck both the open object and its name: atomic replacement,
+            # in-place writes, symlink changes and size changes cannot seed or
+            # use a digest under another file identity.
+            if (result[1] != before.st_size
+                    or _asset_stat_identity(os.fstat(stream.fileno())) != opened_identity
+                    or _asset_stat_identity(path.lstat()) != identity
+                    or path.resolve(strict=True) != resolved):
+                raise ValueError("immutable_asset_changed")
+        _IMMUTABLE_ASSET_DIGESTS[key] = result
+        _IMMUTABLE_ASSET_DIGESTS.move_to_end(key)
+        if len(_IMMUTABLE_ASSET_DIGESTS) > _IMMUTABLE_ASSET_DIGEST_LIMIT:
+            _IMMUTABLE_ASSET_DIGESTS.popitem(last=False)
+        return result

@@ -4,34 +4,23 @@ Cache construction is an offline deployment operation. Runtime never decodes
 missing assets or silently falls back after an enabled cache fails validation.
 """
 from __future__ import annotations
-from functools import lru_cache
 import hashlib
 import json
 import os
 from pathlib import Path
-from .gpu_compute import file_digest
+from .gpu_compute import immutable_asset_sha256_file
 
 ENV = 'RANDOM_GPU_ASSET_CACHE_ROOT'
 VERSION = 'rgba-nut-v1'
 
 
 def sha256_file(path):
-    digest = file_digest()
-    with Path(path).open('rb') as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-@lru_cache(maxsize=128)
-def _source_hash(path, size, mtime_ns):
-    return sha256_file(path)
+    return immutable_asset_sha256_file(path)[0]
 
 
 def cached_path(source, root):
     source = Path(source).resolve()
-    stat = source.stat()
-    key = _source_hash(str(source), stat.st_size, stat.st_mtime_ns)
+    key = sha256_file(source)
     root = Path(root).resolve(strict=True)
     receipt = root / (key + '.json')
     record = json.loads(receipt.read_text(encoding='utf-8'))

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 from features.random_gpu.compositor import validate_source_overlay
-from features.random_gpu.gpu_compute import file_digest
+from features.random_gpu.gpu_compute import file_digest, immutable_asset_sha256_file
 
 
 ASSET_CATEGORIES = ("border", "light", "opacity_video", "corners", "tint")
@@ -49,7 +49,7 @@ def load_asset_set(root: Path, expected_manifest_sha256: str) -> Dict[str, Any]:
     if not manifest_path.is_file() or manifest_path.is_symlink():
         raise RandomOverlayError("overlay manifest is missing or unsafe")
     try:
-        manifest_sha, manifest_size = sha256_file(manifest_path)
+        manifest_sha, manifest_size = immutable_asset_sha256_file(manifest_path)
         if not secrets.compare_digest(manifest_sha, expected):
             raise RandomOverlayError("overlay manifest fingerprint mismatch")
         if manifest_size <= 0 or manifest_size > 2 * 1024 * 1024:
@@ -100,7 +100,7 @@ def load_asset_set(root: Path, expected_manifest_sha256: str) -> Dict[str, Any]:
             try:
                 resolved = path.resolve(strict=True)
                 resolved.relative_to(root_resolved)
-                actual_sha, actual_size = sha256_file(resolved)
+                actual_sha, actual_size = immutable_asset_sha256_file(resolved)
             except (OSError, ValueError) as exc:
                 raise RandomOverlayError("overlay asset is unreadable") from exc
             if actual_size != size or not secrets.compare_digest(actual_sha, sha256):
