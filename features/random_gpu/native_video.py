@@ -382,14 +382,14 @@ class NativeRenderer:
 
 
 def encode_video(source, output, info, recipe, assets_at, check, *, duration=None,
-                 encoder_options=None):
+                 encoder_options=None, renderer_class=None):
     """Write Annex B H264/HEVC and an AU sidecar for the independent muxer.
 
     `assets_at(frame_index)` must return four GPU RGBA arrays. Compressed AU
     offsets/sizes refer to output. PTS/DTS/duration use the exact 1/30 timebase.
     No file is promoted or task state mutated by this function.
     """
-    renderer = NativeRenderer(recipe, info['video'])
+    renderer = (renderer_class or NativeRenderer)(recipe, info['video'])
     nvc = renderer.nvc
     options = (dict(codec='h264', profile='high', preset='P5', rc='vbr', cq=21,
                    bitrate=0, fps=FPS, gop=60, idrperiod=60)
@@ -472,6 +472,7 @@ def _encode_frames(encoder, encoder_configuration, renderer, source, output,
     for index, packet in enumerate(packets):
         packet['dts'] = index - delay
     record = {'implementation':IMPLEMENTATION, 'codec_version':NVC_VERSION,
+        'resize_implementation':getattr(renderer, 'resize_implementation', 'cuda_lanczos_direct_v1'),
         'codec':options['codec'],'source_decoder':choice,
         'source_fit':('legacy_swscale_chroma_coordinates' if renderer.legacy_fit
                       else 'qualified_opencl_chroma_coordinates'),

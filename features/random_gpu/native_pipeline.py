@@ -39,7 +39,9 @@ def progress_path(output):
 
 def render(spec, output, work_dir=None):
     from .gpu_audio import prepare_audio_track
-    from .gpu_mux import CudaMP4, native_video_track
+    from .gpu_mux import native_video_track
+    from .cpu_mux import CpuMP4
+    from .native_resize import CachedWeightRenderer
     from .native_video import CachedAssets, encode_video
     output = Path(output)
     progress = progress_path(output)
@@ -76,19 +78,19 @@ def render(spec, output, work_dir=None):
             advance('video')
             record = encode_video(spec['source'], scratch/'video.h264',
                 spec['info'], spec['recipe'], layers, check,
-                encoder_options=spec.get('encoder_options'))
+                encoder_options=spec.get('encoder_options'), renderer_class=CachedWeightRenderer)
         finally:
             layers.close()
         advance('video_packets')
         video = native_video_track(scratch/'video.h264', record,
-                                   scratch/'video.avcc', check=check)
+                                   scratch/'video.avcc', check=check, mux=CpuMP4())
         advance('audio')
         audio = prepare_audio_track(spec['source'], scratch,
             spec['info']['duration'], check=check,
             timeline_origin_seconds=(spec['info'].get('format') or {}).get('start_time', '0'),
             audio_bitrate=spec.get('audio_bitrate',192000),ffmpeg=spec.get('ffmpeg','/usr/bin/ffmpeg'))
         advance('mux')
-        result = CudaMP4().mux([video, audio.track], scratch/'finished.mp4',
+        result = CpuMP4().mux([video, audio.track], scratch/'finished.mp4',
                               spec['info']['duration'], check=check)
         os.replace(scratch/'finished.mp4', output)
         advance('complete')

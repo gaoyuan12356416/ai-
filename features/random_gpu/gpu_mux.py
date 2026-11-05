@@ -59,8 +59,14 @@ class MuxError(ValueError):
 
 
 class CudaMP4:
+    implementation = 'cuda_mp4_tables_interleave_box_serialization_v1'
+    cpu_work = 'codec description/encoded packet input,box structure planning,file IO'
+
     def __init__(self):
         self.cp = cupy_runtime()
+
+    def host(self, value):
+        return value.get()
 
     def raw(self, data):
         import numpy as np
@@ -368,7 +374,7 @@ class CudaMP4:
             whole=end//track.timescale
             remainder=end%track.timescale
             ticks=whole*movie_scale+(remainder*movie_scale+track.timescale-1)//track.timescale
-            track_durations.append(int(ticks.get()))
+            track_durations.append(int(self.host(ticks)))
         movie_duration=max(track_durations)
         if movie_duration>=2**63:raise MuxError("movie_duration_out_of_range")
         common=math.lcm(*(t.timescale for t in tracks))
@@ -380,7 +386,7 @@ class CudaMP4:
         lengths=sizes[order]
         locations=cp.cumsum(lengths,dtype=cp.uint64)-lengths
         original=cp.empty_like(locations);original[order]=locations
-        media_size=int(cp.sum(sizes,dtype=cp.uint64).get())
+        media_size=int(self.host(cp.sum(sizes,dtype=cp.uint64)))
         brands=b"isomiso2mp41" if tracks[0].codec=='hevc' else b"isomiso2avc1mp41"
         ftyp=self.box(b"ftyp",self.raw(b"isom"),self.be([512]),self.raw(brands))
         mdat_header=self.join(self.be([1]),self.raw(b"mdat"),self.be([media_size+16],8))
@@ -412,8 +418,8 @@ class CudaMP4:
         inputs={}
         try:
             with os.fdopen(descriptor,"wb") as handle:
-                for part in (ftyp,moov,mdat_header):handle.write(part.get().tobytes())
-                for index in order.get().tolist():
+                for part in (ftyp,moov,mdat_header):handle.write(self.host(part).tobytes())
+                for index in self.host(order).tolist():
                     if check is not None:check()
                     data=all_samples[index].data
                     if isinstance(data,PacketFile):
@@ -431,15 +437,15 @@ class CudaMP4:
         finally:
             for stream in inputs.values():stream.close()
             temporary.unlink(missing_ok=True)
-        return dict(implementation="cuda_mp4_tables_interleave_box_serialization_v1",
+        return dict(implementation=self.implementation,
                     samples=len(all_samples),tracks=len(tracks),co64=wide,
                     bytes=output.stat().st_size,raw_video_frames_processed=0,
-                    cpu_work="codec description/encoded packet input,box structure planning,file IO")
+                    cpu_work=self.cpu_work)
 
 
-def native_video_track(elementary, record, avcc_spool, *, width=720, height=1280, check=None):
+def native_video_track(elementary, record, avcc_spool, *, width=720, height=1280, check=None, mux=None):
     """Convert NVENC AUs on CUDA, retaining only spool references in memory."""
-    mux=CudaMP4()
+    mux=CudaMP4() if mux is None else mux
     codec=record.get('codec',record.get('encoder_options',{}).get('codec','h264'))
     sequence=bytes.fromhex(record['sequence_header_hex'])
     config=mux.hvcc_config(sequence) if codec=='hevc' else mux.avcc_config(sequence)
