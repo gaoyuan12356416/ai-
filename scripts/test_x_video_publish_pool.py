@@ -177,7 +177,7 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(self.scalar("SELECT status FROM x_post_manual_run"), "queued")
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item WHERE status='pending'"), 1)
 
-    def test_unknown_task_pauses_plan_and_never_requeues_item(self):
+    def test_unknown_task_stays_isolated_and_next_item_runs(self):
         self.settings()
         self.add(["101", "102"])
         self.enable()
@@ -187,14 +187,30 @@ class PoolTests(unittest.TestCase):
         with self.pool.connection() as conn:
             conn.execute("UPDATE x_post_manual_run SET status='needs_review'")
         self.now += timedelta(minutes=1)
-        self.assertEqual(scheduler.tick("offline-worker")["slots_created"], 0)
+        self.assertEqual(scheduler.tick("offline-worker")["slots_created"], 1)
         listing = self.pool.listing(self.actor, "1", {"state": "failed"})
-        self.assertFalse(listing["pool"]["enabled"])
-        self.assertEqual(listing["pool"]["pause_reason"], "unknown_outcome")
+        self.assertTrue(listing["pool"]["enabled"])
+        self.assertEqual(listing["pool"]["pause_reason"], "")
         self.assertEqual(listing["items"][0]["status"], "unknown")
-        with self.assertRaises(XPostError):
-            self.enable()
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_task"), 1)
+        self.enable()
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_task"), 2)
+
+    def test_only_obsolete_automatic_unknown_pause_is_lifted(self):
+        self.settings()
+        for reason,expected in [('unknown_outcome','enabled'),('operator_paused','paused')]:
+            with self.pool.connection() as conn:
+                conn.execute("UPDATE x_video_publish_pool SET status='paused',pause_reason=?",(reason,))
+            PoolService(self.store,self.account_resolver,self.material_resolver,self.identity,now_fn=lambda:self.now,enabled=True)
+            self.assertEqual(self.scalar('SELECT status FROM x_video_publish_pool'),expected)
+
+    def test_unknown_head_only_fails_that_item(self):
+        self.settings();self.add(['101','102']);self.enable();scheduler=self.scheduler()
+        self.now += timedelta(minutes=1,seconds=1)
+        with patch.object(scheduler,'_resolve',side_effect=XPostError('x_post_unknown_outcome','same material unknown',409,True)):
+            self.assertEqual(scheduler.tick('offline-worker')['results'][0]['status'],'failed')
+        self.assertEqual(self.scalar('SELECT status FROM x_video_publish_pool'),'enabled')
+        self.now += timedelta(minutes=1)
+        self.assertEqual(scheduler.tick('offline-worker')['slots_created'],1)
 
     def test_definitive_head_failure_enters_exception_and_next_slot_continues(self):
         self.settings()

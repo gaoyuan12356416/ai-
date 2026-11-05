@@ -1,0 +1,32 @@
+{
+  "fb": {
+    "features/fb_auto_posts/core.py": {
+      "before": "3623e4d247109739e768d2aa985a3428e27bdee70c3cef777d09086fab1939cb",
+      "after": "64594b91f192d472d54f58c92fde69049b1b8352a108c1dcb2587a29542c65bf"
+    },
+    "features/fb_auto_posts/manual_batch.py": {
+      "before": "ba0f945119a40e3cb157e13d0f95346e747c99aa0ffc8d37a5696d9ad4ee074c",
+      "after": "0260506a4902e41a12f84f4b3e1bed8924a7e4d4e9898a33e75a17e9848be8f3"
+    }
+  },
+  "x": {
+    "features/x_video_publish/pool.py": {
+      "before": "2f50e39ce82bb72f74bc603506210039c85c516e5db2b70f5db2fbbec85c9682",
+      "after": "d074ba38d2cf8095dfbbc6a56374a03cabe3f7342511b5d89e28adc681e611fe"
+    },
+    "features/x_video_publish/scheduler.py": {
+      "before": "d51faa6cdad46fb2d00e1a1de7460d7c2dcab8230ab746a795bbd4caad8bf8e3",
+      "after": "8cd03bd6ab23ba09e7d3d90d4e39286748a1f18e04dec23a4ef671a30e9592bf"
+    }
+  },
+  "app": {
+    "features/x_video_publish/pool.py": {
+      "before": "2f50e39ce82bb72f74bc603506210039c85c516e5db2b70f5db2fbbec85c9682",
+      "after": "d074ba38d2cf8095dfbbc6a56374a03cabe3f7342511b5d89e28adc681e611fe"
+    },
+    "features/x_video_publish/scheduler.py": {
+      "before": "d51faa6cdad46fb2d00e1a1de7460d7c2dcab8230ab746a795bbd4caad8bf8e3",
+      "after": "8cd03bd6ab23ba09e7d3d90d4e39286748a1f18e04dec23a4ef671a30e9592bf"
+    }
+  }
+}

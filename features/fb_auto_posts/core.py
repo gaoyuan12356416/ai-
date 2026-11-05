@@ -952,8 +952,6 @@ class FBAutoPostStore:
                     conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_manual_batch_invalid',error_code='fb_manual_batch_invalid',completed_at_utc=? WHERE id=? AND status='ready'", (now, candidate['id']))
                     self._refresh_run(conn, int(candidate['run_id']), now)
                     continue
-                if policy and policy['waiting_for_previous']:
-                    continue
                 row = candidate
                 break
             if row is None:

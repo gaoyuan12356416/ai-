@@ -105,6 +105,9 @@ class PoolService:
         self.enabled = bool(enabled)
         with self.connection() as conn:
             install_schema(conn)
+            # Only the obsolete automatic outcome hold is lifted. Explicit
+            # operator pauses and identity/language restrictions remain intact.
+            conn.execute("UPDATE x_video_publish_pool SET status='enabled',pause_reason='',version=version+1,updated_at_utc=? WHERE status='paused' AND pause_reason IN ('unknown_outcome','x_post_unknown_outcome','pool_unknown_outcome')", (stamp(self.now_fn()),))
 
     @contextmanager
     def connection(self):
@@ -298,8 +301,6 @@ class PoolService:
             if enable:
                 if not json.loads(pool["times_json"]):
                     raise XPostError("pool_times_required", "请先设置每日时间点", status=409)
-                if conn.execute("SELECT 1 FROM x_video_publish_pool_item WHERE tenant_key=? AND user_id=? AND account_id=? AND status='unknown' LIMIT 1", (*subject(actor), aid)).fetchone():
-                    raise XPostError("pool_unknown_outcome", "存在结果待核对的任务，暂不能启用", status=409)
                 if conn.execute("SELECT 1 FROM x_video_publish_pool_item WHERE tenant_key=? AND user_id=? AND account_id=? AND status='pending' AND language<>? LIMIT 1", (*subject(actor), aid, pool["language"])).fetchone():
                     raise XPostError("pool_language_mismatch", "请先移除语言不匹配的待发布素材", status=409)
             self._ensure(conn, actor, aid, account)
@@ -530,6 +531,4 @@ class PoolService:
             conn.execute("BEGIN IMMEDIATE")
             for state, reason, item_id in updates:
                 conn.execute("UPDATE x_video_publish_pool_item SET status=?,reason=?,updated_at_utc=? WHERE id=? AND status IN ('processing','unknown')", (state, reason, stamp(self.now_fn()), item_id))
-            if any(state == "unknown" for state, _, _ in updates):
-                conn.execute("UPDATE x_video_publish_pool SET status='paused',pause_reason='unknown_outcome',version=version+1,updated_at_utc=? WHERE tenant_key=? AND user_id=? AND account_id=? AND (status<>'paused' OR pause_reason<>'unknown_outcome')", (stamp(self.now_fn()), *subject(actor), aid))
             conn.commit()

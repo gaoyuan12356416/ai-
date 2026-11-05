@@ -105,7 +105,7 @@ class PoolScheduler:
     def _failure(error):
         code, status = str(getattr(error, "code", "pool_source_unavailable")), getattr(error, "status", 503)
         if getattr(error, "unknown_outcome", False) or code in {"x_post_unknown_outcome", "pool_unknown_outcome"}:
-            return "blocked", code, True, False
+            return "failed", code, False, True
         if status in {401, 403} or code in {
             "identity_inactive", "identity_permission_denied", "account_not_found", "account_unavailable",
             "account_identity_changed", "account_language_changed", "account_identity_invalid",
