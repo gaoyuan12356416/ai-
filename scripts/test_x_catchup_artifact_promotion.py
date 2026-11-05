@@ -1,6 +1,6 @@
 import copy
 import unittest
-from scripts.promote_x_catchup_artifact import validate_candidate
+from scripts.promote_x_catchup_artifact import validate_candidate,validate_native_input
 
 class CandidateTests(unittest.TestCase):
     def record(self):
@@ -17,5 +17,10 @@ class CandidateTests(unittest.TestCase):
     def test_unreviewed_file_and_out_of_scope_are_rejected(self):
         with self.assertRaisesRegex(RuntimeError,'reviewed_bytes_changed'):validate_candidate(self.record(),5925,'c'*64)
         with self.assertRaisesRegex(RuntimeError,'outside_incident_scope'):validate_candidate(self.record(),6035,'b'*64)
+    def test_existing_preflight_source_is_preserved_but_final_output_is_rejected(self):
+        request={'source_sha256':'source','source_size':10,'source_url':'source-url'}
+        source={'sha256':'source','size':10,'url':'source-url'}
+        validate_native_input(source,request)
+        with self.assertRaisesRegex(RuntimeError,'not_frozen_input'):validate_native_input(dict(source,sha256='output'),request)
 
 if __name__=='__main__':unittest.main()

@@ -36,7 +36,14 @@ def native_uncommitted(qid,request):
         row=n.execute('SELECT status,request_json,result_json FROM x_post_random_template_preparation WHERE queue_id=?',(qid,)).fetchone()
         require(row and row[0]=='frozen' and json.loads(row[1])==request and json.loads(row[2])=={},'completed_native_result_must_not_change')
         require(n.execute('SELECT status FROM x_post_queue WHERE id=?',(qid,)).fetchone()[0]=='failed','queue_not_settled')
-        require(not n.execute('SELECT 1 FROM pipeline_x_artifact WHERE queue_id=?',(qid,)).fetchone(),'native_artifact_committed')
+        row=n.execute('SELECT artifact_json FROM pipeline_x_artifact WHERE queue_id=?',(qid,)).fetchone()
+        if row:validate_native_input(json.loads(row[0]),request)
+
+def validate_native_input(artifact,request):
+    # pipeline_x_artifact records the preflight INPUT. It is intentionally
+    # retained; the final random output lives in result_json checked above.
+    require(artifact.get('sha256')==request['source_sha256'] and artifact.get('size')==request['source_size']
+        and artifact.get('url')==request['source_url'],'native_artifact_is_not_frozen_input')
 
 def promote(plan,evidence,record,reviewed_sha,folder):
     qid=record['queue_id'];old,new=validate_candidate(record,qid,reviewed_sha)
