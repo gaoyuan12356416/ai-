@@ -81,7 +81,7 @@ def published_history(conn, page_id, material_id):
 
 
 def prepare_available(conn, now, family, planned_at):
-    """Shared capacity and earlier-due preference, under BEGIN IMMEDIATE."""
+    """Bound actual active work; another queued task is not a dependency."""
     if not has_table(conn, "fb_video_task"):
         return True
     try:
@@ -96,19 +96,7 @@ def prepare_available(conn, now, family, planned_at):
         auto = conn.execute("SELECT COUNT(*) FROM fb_auto_task WHERE status='preparing' AND lease_expires_at_utc>?", (now,)).fetchone()[0]
     if auto + manual >= limit or (family == "manual" and manual):
         return False
-    if family == "auto":
-        hold_filter = " AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:video:'||fb_video_task.task_id)" if has_table(conn, "pipeline_canonical_hold") else ""
-        other = conn.execute("""SELECT MIN(planned_at_utc) FROM fb_video_task
-            WHERE status='queued' AND processing_mode='random_overlay' AND prepare_state='planned'
-            AND prepare_retry_at<=?""" + hold_filter, (now,)).fetchone()[0]
-    elif has_table(conn, "fb_auto_task"):
-        hold_filter = " AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id)" if has_table(conn, "pipeline_canonical_hold") else ""
-        other = conn.execute("""SELECT MIN(x.planned_publish_at_utc) FROM fb_auto_task x
-            JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND t.current_version=x.template_version
-            WHERE x.status='planned' AND x.next_prepare_at_utc<=?""" + hold_filter, (now,)).fetchone()[0]
-    else:
-        other = None
-    return not other or str(other) >= str(planned_at)
+    return True
 
 
 def install_backstops(conn):

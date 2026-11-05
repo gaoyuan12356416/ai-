@@ -7,7 +7,7 @@ from pathlib import Path
 
 from features.x_posts.service import XPostStore, XPostError
 from features.x_posts.account_blockers import read_account_publish_blockers
-from features.fb_video_publish.guards import automatic_block, install_backstops
+from features.fb_video_publish.guards import automatic_block, install_backstops, prepare_available
 from scripts.test_x_post_priority_manual_store import material_candidate, ACTOR
 
 
@@ -68,6 +68,16 @@ class FBQueueIsolationTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.c.execute("INSERT INTO fb_video_task VALUES('duplicate','123','456','queued',0,'')")
         self.c.execute("INSERT INTO fb_video_task VALUES('new','123','789','queued',0,'')")
+
+
+class FBPreparationOrderingTests(unittest.TestCase):
+    def test_earlier_queued_material_does_not_block_other_family(self):
+        with contextlib.closing(sqlite3.connect(':memory:')) as c:
+            c.executescript('''CREATE TABLE fb_video_task(status,prepare_state,prepare_until,planned_at_utc,processing_mode,prepare_retry_at);
+                INSERT INTO fb_video_task VALUES('queued','planned','','2026-01-01','random_overlay','');''')
+            self.assertTrue(prepare_available(c,'2026-11-05','auto','2026-11-05'))
+            c.execute("UPDATE fb_video_task SET prepare_state='preparing',prepare_until='2027-01-01'")
+            self.assertFalse(prepare_available(c,'2026-11-05','auto','2026-11-05'))
 
 
 if __name__=='__main__':unittest.main()

@@ -127,6 +127,17 @@ def handlers(process):
             sum(('pid='+process+',') in r for r in rows),
             sum(int(r.split()[1]) for r in listeners if ('pid='+process+',') in r)]
 
+def refine_fb(source,commit,directory):
+    source,directory=Path(source).resolve(),Path(directory).resolve()
+    assert run(['git','-C','/mnt/data-disk/pipeline-dispatch/github','rev-parse',commit+'^{commit}'])==commit
+    path=directory/'manifest.json';m=json.loads(path.read_text());item=m['lanes']['fb']
+    assert item['state']=='prepared' and str(Path(LANES['fb'][0]).resolve())==item['before_root']
+    rel='features/fb_video_publish/guards.py';target=Path(item['candidate'])/rel
+    assert sha(target)==item['files'][rel]['after']
+    compile((source/rel).read_bytes(),rel,'exec');copy_file(source/rel,target)
+    item['files'][rel]['after']=sha(target);item['followup_commit']=commit;save(path,m)
+    print(json.dumps({'refined':'fb','commit':commit}),flush=True)
+
 def health(port):
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     until=time.monotonic()+15
@@ -224,8 +235,9 @@ def switch(directory,lane,rollback=False):
     save(path,m);print(json.dumps({'lane':lane,'state':item['state'],'pids':item['active_pids']}),flush=True)
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','activate','rollback']);p.add_argument('args',nargs='+');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','activate','rollback','refine-fb']);p.add_argument('args',nargs='+');a=p.parse_args()
     if a.action=='prepare':prepare(*a.args);return
+    if a.action=='refine-fb':refine_fb(*a.args);return
     directory=Path(a.args[0]).resolve();lanes=a.args[1:] or list(LANES)
     for lane in lanes:switch(directory,lane,a.action=='rollback')
 
