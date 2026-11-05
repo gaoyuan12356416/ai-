@@ -48,6 +48,21 @@ class MonitorReadTests(unittest.TestCase):
                 self.assertIsNone(accounting.effective_state(page, 'x:auto:original', now))
                 self.assertEqual(accounting.effective_state(page, 'x:auto:waiting', now)['code'], 'blocked_by_unknown')
 
+            # Even a confirmed successor must suppress its unfinished ancestor.
+            with store.transaction() as db:
+                db.execute("INSERT INTO pipeline_publication VALUES(?,?,'x','','','','','successor-post',?,'{}')",
+                           ('x:auto:successor', jobs['successor']['id'], then.isoformat()))
+            with closing(store.connect()) as db:
+                db.execute('PRAGMA query_only=ON'); db.execute('BEGIN')
+                full = accounting.load_dispatch({}, now, db)
+                unfinished = accounting.load_dispatch({}, now, db, skip_confirmed=True)
+                self.assertNotIn('x:auto:published', unfinished['jobs'])
+                self.assertNotIn('x:auto:successor', unfinished['jobs'])
+                self.assertIsNone(accounting.effective_state(unfinished, 'x:auto:original', now))
+                with patch.object(plans, 'collect_plan_gaps', return_value={'available': True, 'items': [], 'warnings': []}):
+                    self.assertEqual(accounting.backlog({}, context=full, cutoff=now),
+                                     accounting.backlog({}, context=unfinished, cutoff=now))
+
     def test_execution_event_volume_does_not_multiply_template_history_work(self):
         with closing(sqlite3.connect(':memory:')) as db:
             db.row_factory = sqlite3.Row

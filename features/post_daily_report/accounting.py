@@ -101,7 +101,7 @@ def _native_reasons(paths, result, cutoff):
             result['warnings'].append(name.upper()+' 原始错误码暂不可读，保留调度状态并标注原因未记录')
 
 
-def load_dispatch(paths, cutoff=None, conn=None, *, source_keys=None):
+def load_dispatch(paths, cutoff=None, conn=None, *, source_keys=None, skip_confirmed=False):
     """Load display facts only; never expose payloads, credentials or raw errors."""
     result = {'available': False, 'jobs': {}, 'publications': {}, 'blocked_resources': set(), 'warnings': [], 'aliases': {}}
     if conn is None:
@@ -110,7 +110,7 @@ def load_dispatch(paths, cutoff=None, conn=None, *, source_keys=None):
             return result
         try:
             with read_db(path) as db:
-                return load_dispatch(paths, cutoff, db, source_keys=source_keys)
+                return load_dispatch(paths, cutoff, db, source_keys=source_keys, skip_confirmed=skip_confirmed)
         except (OSError, sqlite3.Error):
             result['warnings'].append('调度状态读取失败，原始任务仍保留；跨日期未完成数量未知')
             return result
@@ -121,14 +121,23 @@ def load_dispatch(paths, cutoff=None, conn=None, *, source_keys=None):
     selected = None if source_keys is None else set(source_keys)
 
     def selected_rows(table, fields):
+        where, values = [], []
+        if table == 'pipeline_job' and skip_confirmed and 'pipeline_publication' in present:
+            # A confirmed publication cannot contribute to unfinished/closed
+            # counts. Let the indexed receipt lookup exclude it before Python
+            # decodes historical task metadata. Match parse_time's UTC cutoff.
+            where.append("NOT EXISTS (SELECT 1 FROM pipeline_publication p WHERE p.source_key=pipeline_job.source_key "
+                         "AND p.publish_id<>'' AND julianday(p.published_at)<julianday(?))")
+            values.append(cutoff.isoformat())
+        query = 'SELECT ' + fields + ' FROM ' + table
         if selected is None:
-            yield from conn.execute('SELECT ' + fields + ' FROM ' + table)
+            yield from conn.execute(query + (' WHERE ' + ' AND '.join(where) if where else ''), values)
         else:
             keys = sorted(selected)
             for offset in range(0, len(keys), 400):
                 chunk = keys[offset:offset + 400]
-                yield from conn.execute('SELECT ' + fields + ' FROM ' + table +
-                                        ' WHERE source_key IN (' + ','.join('?' * len(chunk)) + ')', chunk)
+                clause = where + ['source_key IN (' + ','.join('?' * len(chunk)) + ')']
+                yield from conn.execute(query + ' WHERE ' + ' AND '.join(clause), values + chunk)
 
     fields = 'id,source_key,channel,family,stage,status,source_status,hold_reason,scheduled_at,created_at,updated_at,finished_at,error_code,resource_keys_json,source_meta_json'
     for r in selected_rows('pipeline_job', fields):
@@ -154,7 +163,8 @@ def load_dispatch(paths, cutoff=None, conn=None, *, source_keys=None):
         result['jobs'].setdefault(row['source_key'], []).append(row)
         for ancestor in (object_value(row.get('source_meta_json'), {}) or {}).get('ancestor_source_keys', []):
             result['aliases'][ancestor] = row['source_key']
-    if selected:
+    alias_keys = set(result['jobs']) if skip_confirmed else selected
+    if alias_keys:
         # A successor may lie outside this page. Keep its suppression of the
         # original target without loading every historical task and receipt.
         for row in conn.execute("SELECT source_key,source_meta_json,created_at FROM pipeline_job WHERE source_meta_json LIKE '%\"ancestor_source_keys\"%'"):
@@ -162,7 +172,7 @@ def load_dispatch(paths, cutoff=None, conn=None, *, source_keys=None):
             if created and created >= cutoff:
                 continue
             for ancestor in (object_value(row['source_meta_json'], {}) or {}).get('ancestor_source_keys', []):
-                if ancestor in selected:
+                if ancestor in alias_keys:
                     result['aliases'][ancestor] = row['source_key']
     if 'pipeline_publication' in present:
         for row in selected_rows('pipeline_publication', 'source_key,publish_id,published_at'):

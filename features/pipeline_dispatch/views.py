@@ -418,7 +418,8 @@ def query(store, view, actor, filters):
             paths['dispatch'] = str(store.path)
             try:
                 context = load_dispatch(paths, now, conn,
-                                        source_keys={item['source_key'] for item in result['items']} if view == 'tasks' else None)
+                                        source_keys={item['source_key'] for item in result['items']} if view == 'tasks' else None,
+                                        skip_confirmed=view == 'summary')
                 if view == 'summary':
                     visible = {r[0] for r in conn.execute('SELECT DISTINCT j.source_key FROM pipeline_job j WHERE ' + scope, args)}
                     result['backlog'] = backlog(paths, context=context, cutoff=now, visible_keys=visible,

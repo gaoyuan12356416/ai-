@@ -12,7 +12,7 @@ from deploy_post_monitor_accounting import (
     GIT, COORD, STATIC, atomic_copy, digest, health, run, service_pids, switch_coordinator,
 )
 
-BASE = '82dcc3528df7ad0bbe889660886081650d87ec7e'
+BASE = '89c3a0dd2306dd7be839f607ac43d8f17d5f08ba'
 FILES = ('features/pipeline_dispatch/views.py', 'features/post_daily_report/accounting.py',
          'features/post_daily_report/plans.py')
 ASSETS = ('pipeline-monitor.js', 'pipeline-monitor.html')
