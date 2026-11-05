@@ -27,23 +27,22 @@ const server=http.createServer((req,res)=>{
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
   page.on('pageerror',e=>errors.push(e.message));await page.route('**/*',r=>new URL(r.request().url()).origin===origin?r.continue():r.abort());
-  await page.goto(origin+'/pipeline-monitor.html');await page.waitForFunction(()=>document.querySelector('#pmBacklog').textContent.includes('198'));
-  assert.match(await page.locator('#pmBacklog').innerText(),/历史未完成与计划缺口[\s\S]*已记录未完成任务 191[\s\S]*历史未入队计划 7[\s\S]*合计 198/);
-  assert.match(await page.locator('#pmBacklog').innerText(),/2026\/09\/12.*2026\/09\/14/);
-  assert.match(await page.locator('#pmBacklog').innerText(),/不代表当前可执行队列/);
+  await page.goto(origin+'/pipeline-monitor.html');await page.waitForFunction(()=>document.querySelector('#pmTotals').textContent.includes('160'));
+  assert.equal(await page.locator('#pmBacklog').count(),0);
+  assert.doesNotMatch(await page.locator('#pmContent').innerText(),/历史未完成与计划缺口/);
   assert.doesNotMatch(await page.locator('#pmTaskRows').innerText(),/原任务领取被拒绝/);
   releaseTasks();await page.waitForFunction(()=>document.querySelector('#pmTaskRows').textContent.includes('原任务领取被拒绝'));
   assert.match(await page.locator('#pmTaskRows').innerText(),/受阻[\s\S]*原状态 failed[\s\S]*原任务领取被拒绝/);
   assert.match(await page.locator('#pmChannelRows').innerText(),/领取被拒绝/);
   assert.match(await page.locator('#pmTotals').innerText(),/待执行\s*0/);
-  await page.locator('#pmBacklog summary').click();assert.equal(await page.locator('#pmBacklog script').count(),0);
-  fs.mkdirSync(output,{recursive:true});await page.locator('#pmBacklog').screenshot({path:path.join(output,'backlog.png')});
+  fs.mkdirSync(output,{recursive:true});await page.screenshot({path:path.join(output,'monitor.png'),fullPage:true});
   sample.backlog.unfinished=null;sample.backlog.unqueued=null;sample.backlog.channels[0].unqueued=null;
   sample.backlog.channels[0].unfinished=null;sample.backlog.warnings=['缺少冻结计划证据，不按零统计'];
-  await page.locator('#pmRefresh').click();await page.waitForFunction(()=>document.querySelector('#pmBacklog').textContent.includes('合计 未知'));
-  assert.match(await page.locator('#pmBacklog').innerText(),/已核实 7/);
+  sample.totals.waiting=2;
+  await page.locator('#pmRefresh').click();await page.waitForFunction(()=>document.querySelector('[data-stat-key="waiting"] .pm-stat-value').textContent==='2');
+  assert.equal(await page.locator('#pmBacklog').count(),0);
   await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(output,'mobile.png'),fullPage:true});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);assert.deepEqual(errors,[]);
-  console.log('accounting browser: cross-date backlog, zero waiting, normalized status, unknown totals, escaped plan identities and mobile layout passed');
+  console.log('accounting browser: removed history panel, zero waiting, normalized status, independent summary rendering, refresh and mobile layout passed');
  }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;server.close();});

@@ -16,7 +16,6 @@
     <div id="pmContent" hidden>
       <section class="pm-toolbar" aria-label="监测筛选"><div class="pm-actions"><label>统计范围<select id="pmWindow"><option value="today">今天（北京时间）</option><option value="hour">最近 1 小时</option><option value="day">最近 24 小时</option><option value="week">最近 7 天</option></select></label><label>渠道<select id="pmChannel"><option value="">全部可见渠道</option></select></label><span id="pmScope" class="pm-scope"></span></div><div class="pm-updated"><span id="pmLiveDot" class="pm-live-dot"></span><span id="pmUpdated">等待首个数据快照</span><small>每 15 秒刷新</small></div></section>
       <div id="pmWarnings" class="pm-notice" role="status" hidden></div>
-      <section id="pmBacklog" class="pm-panel" aria-label="跨日期未完成"></section>
       <section id="pmTotals" class="pm-totals" aria-label="任务概况"></section>
       <p id="pmQueueNote" class="pm-muted">待执行：已到期，含正常的账号前序、冷却或并发等待；执行中：已领取且无已识别异常；预约中：未到执行时间；异常：跨日期未解决失败、待核对、明确阻塞或执行异常。待执行不等于全部未完成。历史暂停单独统计。</p>
       <section class="pm-panel"><div class="pm-section-head"><div><h2>渠道处理效率</h2><p class="pm-muted">已完成仅统计所选时间内的真实制作完成或平台确认发布成功；吞吐为最近 1 小时成功完成数（条/小时）。未解决异常列跨日期汇总失败及未解决异常，具体原因单独列明；待核对不代表已确认发布失败。已发视频的后续首评异常仍单独保留。</p></div><span id="pmWindowLabel" class="pm-chip"></span></div><div class="pm-table-scroll"><table class="pm-table"><thead><tr><th>渠道 / 阶段</th><th>预约中</th><th>待执行</th><th>执行中</th><th>已完成</th><th>未解决异常</th><th>吞吐</th><th>平均耗时</th><th>最老等待</th></tr></thead><tbody id="pmChannelRows"><tr><td colspan="9" class="pm-empty">正在读取渠道数据…</td></tr></tbody></table></div></section>
@@ -30,5 +29,5 @@
     </div>
   </main>
 </div>
-<script src="/ui-topbar.js"></script><script src="/quick-nav.js?v=20261102pipeline1"></script><script src="/pipeline-monitor.js?v=20261105fast-history2"></script>
+<script src="/ui-topbar.js"></script><script src="/quick-nav.js?v=20261102pipeline1"></script><script src="/pipeline-monitor.js?v=20261105remove-history1"></script>
 </body></html>
