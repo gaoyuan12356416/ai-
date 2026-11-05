@@ -177,6 +177,18 @@ def make_request(source=b"source-video", **overrides):
 
 
 class MediaRepairTests(unittest.TestCase):
+    def test_cos_network_deadline_is_independent_of_long_render_budget(self):
+        from dataclasses import replace
+        config_factory=mock.Mock(return_value='cos-config')
+        client_factory=mock.Mock(return_value='cos-client')
+        sdk=SimpleNamespace(CosConfig=config_factory,CosS3Client=client_factory)
+        with tempfile.TemporaryDirectory() as root, mock.patch.dict(sys.modules,{'qcloud_cos':sdk}):
+            config=replace(make_config(root),transcode_timeout=7200)
+            store=media_repair.CosObjectStore(config)
+        self.assertEqual(store.client,'cos-client')
+        self.assertLessEqual(config_factory.call_args.kwargs['Timeout'],120)
+        self.assertEqual(config.transcode_timeout,7200)
+
     def test_cpu_conversion_removes_only_nvenc_hq_tune(self):
         from features.fb_gpu.prepare_worker import software_command
         gpu = ['ffmpeg', '-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', 'out.mp4']

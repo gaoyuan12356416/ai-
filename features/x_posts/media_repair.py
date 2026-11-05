@@ -109,6 +109,7 @@ DEFAULT_TRANSCODE_TIMEOUT = 1800
 DEFAULT_PROBE_TIMEOUT = 120
 DEFAULT_DOWNLOAD_TIMEOUT = 120
 DEFAULT_COS_MAX_THREADS = 4
+COS_HTTP_TIMEOUT_SECONDS = 120
 COS_UPLOAD_ATTEMPTS = 3
 COS_UPLOAD_RETRY_DELAYS_SECONDS = (1, 2)
 
@@ -1104,7 +1105,10 @@ class CosObjectStore:
             Region=self.config.cos_region,
             SecretId=self.config.cos_secret_id,
             SecretKey=self.config.cos_secret_key,
-            Timeout=max(60, self.config.transcode_timeout),
+            # An 8 MiB upload part has a network deadline independent of video
+            # rendering. A stalled part must not consume the 30-minute render
+            # budget on every SDK retry and occupy a preparation worker.
+            Timeout=COS_HTTP_TIMEOUT_SECONDS,
             KeepAlive=False,
         )
         return CosS3Client(cos_config)
