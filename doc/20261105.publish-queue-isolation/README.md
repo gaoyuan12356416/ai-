@@ -35,3 +35,5 @@ python3.9 scripts/deploy_publish_queue_isolation.py rollback DEPLOYMENT LANE
 本次切换曾出现候选目录权限、唤醒路径依赖和 FB 常驻回读线程误判问题，已在部署脚本修正。8 条连接失败经精确账本核对和数据库副本演练后处理：6 条未开始外部写入的领取恢复原队列；X 6157/6163 仅进行媒体初始化/分片上传，未进行 FINALIZE、发帖或转推，保留成片和 attempt_count=1，准确记为单条上传失败，不重发。详情及原始证据见服务器 `switch-repair` 目录。
 
 最后补充覆盖两个旧入口：FB 冻结手工批次不再等待前序任务；X 账号素材池未知条目不再暂停整池，既有 `unknown_outcome` 类自动暂停恢复启用，人工暂停不变，原未知条目仍不重试。`deploy_final_queue_entries.py` 为这四个模块建立独立候选、备份与回滚记录；仅重启 FB 服务和 X OAuth/个人素材池服务，X 自动模板进程不受该补充切换影响。
+
+最后入口切换另有 X 6154 的媒体上传连接中断，同样经两侧操作账本确认只进行初始化和分片上传，没有 FINALIZE、发帖或转推。`repair_queue_isolation_switch.py --late-media-only` 在副本演练后，将其记为单条 `upload_interrupted_no_post` 失败，保留成片、操作、代次与 attempt_count=1，不重发。最终切换影响共 6 条未写入任务恢复原队列、3 条媒体上传中断明确失败；原 46 条未知结果不变。
