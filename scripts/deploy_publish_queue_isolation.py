@@ -161,6 +161,13 @@ def switch(directory,lane,rollback=False):
     assert link.resolve()==old,'later_runtime_switch_preserved:'+lane
     for rel,h in item['files'].items():assert sha(link/rel)==h['after' if rollback else 'before'],'affected_source_drift:'+rel
     units=LANES[lane][1];processes={u:pid(u) for u,_,_ in units}
+    paths=set()
+    for u,_,_ in units:
+        user=run(['systemctl','show',u,'-p','User','--value']) or 'root'
+        for rel in item['files']:run(['runuser','-u',user,'--','test','-r',target/rel])
+        for dependent in run(['systemctl','show',u,'-p','RequiredBy','--value']).split():
+            if dependent.endswith('.path') and run(['systemctl','show',dependent,'-p','ActiveState','--value'])=='active':paths.add(dependent)
+    item['active_dependent_paths']=sorted(paths);save(path,m)
     marker='queue-isolation-'+lane+'-'+str(int(time.time()))
     rules=[];stopped=[];swapped=False;observations=[];began=time.monotonic()
     drain_seconds=int(os.environ.get('QUEUE_ISOLATION_DRAIN_SECONDS','20'))
@@ -185,11 +192,13 @@ def switch(directory,lane,rollback=False):
         swap(link,target);swapped=True
         for u,port,_ in units:run(['systemctl','start',u],timeout=15)
         for u,_,_ in units:assert run(['systemctl','is-active',u])=='active'
+        for dependent in paths:run(['systemctl','start',dependent],timeout=15)
     except BaseException:
         if swapped:
             for u,_,_ in units:run(['systemctl','stop',u],timeout=20)
             swap(link,old)
         for u in stopped:run(['systemctl','start',u],timeout=20)
+        for dependent in paths:run(['systemctl','start',dependent],timeout=15)
         raise
     finally:
         for rule,watchdog in rules:
