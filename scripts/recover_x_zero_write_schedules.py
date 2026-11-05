@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan/apply exact 2026-11-02/03 zero-write schedule recovery, without calling X."""
+"""Plan/apply explicitly scoped zero-write schedule recovery, without calling X."""
 import argparse
 import contextlib
 import datetime as dt
@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.pipeline_dispatch.x_schedule_recovery import TABLE, SCHEMA, fingerprint, identity
 from scripts.recover_x_unstarted_manual import RecoveryRejected, connect, require, rows
 
-INCIDENT_DATES = {"2026-11-02", "2026-11-03"}
 ERRORS = {"x_upstream_error", "x_accounts_unavailable", "x_post_source_query_failed"}
 
 
@@ -39,6 +38,12 @@ def verify_capacity_repair(commit, runner_path, repository):
 
 
 def known_rejection(run, repair):
+    if repair and repair.get("kind") == "manual_reservation_fifo":
+        return bool(run["source_type"] == "material" and
+            run["error_code"] == "x_post_pool_fifo_conflict" and
+            run["error_message"] == "素材计划必须使用当前素材池最新的可用记录" and
+            run["material_pool_snapshot_max_id"] is not None and
+            run["plan_attempted_at"] and run["finished_at"] >= run["plan_attempted_at"])
     return bool(repair and run["id"] == 1039 and run["source_type"] == "material" and
         run["run_date"] == "2026-11-03" and run["publish_time"] == "16:51" and
         run["slot_key"] == "xpost:schedule:v1:material:2026-11-03:1651" and
@@ -47,6 +52,25 @@ def known_rejection(run, repair):
         run["error_code"] == "x_post_pool_fifo_conflict" and
         run["error_message"] == "素材语言尚未达到冻结批次容量" and
         run["plan_attempted_at"] == run["finished_at"] == "2026-11-03T10:32:40Z")
+
+
+def verify_reservation_repair(commit, runner_path, repository):
+    result = verify_capacity_repair(commit, runner_path, repository)
+    root = Path(runner_path).absolute().parent.parent
+    files = {}
+    for name in ("features/x_posts/service.py", "features/x_posts/account_blockers.py",
+                 "features/x_accounts/oauth_service.py"):
+        blob = subprocess.run(["git", "-C", str(repository), "show", commit + ":" + name],
+            capture_output=True, timeout=15, check=False)
+        require(blob.returncode == 0 and (root / name).read_bytes() == blob.stdout,
+            "deployed_reservation_repair_changed")
+        files[name] = hashlib.sha256(blob.stdout).hexdigest()
+        if name.endswith("x_posts/service.py"):
+            text = blob.stdout.decode("utf-8")
+            start = text.index("    def create_schedule_plan(")
+            require("AND NOT EXISTS(SELECT 1 FROM x_post_manual_material_reservation r " in text[start:],
+                "reservation_fifo_fix_missing")
+    return dict(result, kind="manual_reservation_fifo", files=files)
 
 
 def existing(c, run_id):
@@ -58,8 +82,9 @@ def existing(c, run_id):
 def snapshot(c, run_ids, allowed_dates, repair=None):
     require(run_ids and len(run_ids) == len(set(run_ids)) and
         all(type(i) is int and i > 0 for i in run_ids), "exact_unique_run_ids_required")
-    require(allowed_dates and set(allowed_dates) <= INCIDENT_DATES, "outside_incident_dates")
-    if repair:
+    require(allowed_dates and len(set(allowed_dates)) <= 2 and
+        all(dt.date.fromisoformat(day).isoformat() == day for day in allowed_dates), "exact_dates_required")
+    if repair and repair.get("kind") != "manual_reservation_fifo":
         require(run_ids == [1039] and allowed_dates == ["2026-11-03"], "known_rejection_exact_scope_required")
     result = []
     for run_id in run_ids:
@@ -99,13 +124,18 @@ def snapshot(c, run_ids, allowed_dates, repair=None):
             "account_preflight_required": True}
         if rejected:
             item.update(known_prewrite_rejection=True, repair_evidence=repair,
-                rejection_location="create_schedule_plan.language_capacity_guard_before_begin_immediate")
+                rejection_location=("create_schedule_plan.fifo_transaction_rolled_back" if
+                    repair.get("kind") == "manual_reservation_fifo" else
+                    "create_schedule_plan.language_capacity_guard_before_begin_immediate"))
         result.append(item)
     return result
 
 
-def plan(path, run_ids, allowed_dates, *, known_rejection_commit="", runner_path="", repository=""):
-    repair = (verify_capacity_repair(known_rejection_commit, runner_path, repository)
+def plan(path, run_ids, allowed_dates, *, known_rejection_commit="", runner_path="", repository="",
+         reservation_fifo_commit=""):
+    require(not (known_rejection_commit and reservation_fifo_commit), "one_repair_kind_required")
+    repair = (verify_reservation_repair(reservation_fifo_commit, runner_path, repository)
+        if reservation_fifo_commit else verify_capacity_repair(known_rejection_commit, runner_path, repository)
         if known_rejection_commit else None)
     with contextlib.closing(connect(path)) as c:
         c.execute("BEGIN")
@@ -127,7 +157,8 @@ def apply(path, saved, expected_sha, backup_dir, actor, reason):
     repair = saved.get("repair_evidence")
     def verify_repair():
         if repair:
-            require(verify_capacity_repair(repair["commit"], repair["runner_path"], repair["repository"]) == repair,
+            verify = verify_reservation_repair if repair.get("kind") == "manual_reservation_fifo" else verify_capacity_repair
+            require(verify(repair["commit"], repair["runner_path"], repair["repository"]) == repair,
                 "repair_evidence_drift")
     with contextlib.closing(connect(path)) as c:
         receipts = [existing(c, i) for i in saved["run_ids"]]
@@ -186,6 +217,7 @@ def main():
     parser.add_argument("--actor")
     parser.add_argument("--reason")
     parser.add_argument("--known-rejection-commit", default="")
+    parser.add_argument("--reservation-fifo-commit", default="")
     parser.add_argument("--runner-path", default="")
     parser.add_argument("--repository", default="")
     parser.add_argument("--output", required=True)
@@ -194,7 +226,8 @@ def main():
         if args.action == "plan":
             require(args.run_ids and args.dates, "exact_scope_required")
             result = plan(args.db, [int(i) for i in args.run_ids.split(",")], args.dates.split(","),
-                known_rejection_commit=args.known_rejection_commit, runner_path=args.runner_path, repository=args.repository)
+                known_rejection_commit=args.known_rejection_commit, runner_path=args.runner_path, repository=args.repository,
+                reservation_fifo_commit=args.reservation_fifo_commit)
         else:
             require(all((args.plan, args.plan_sha256, args.backup_dir, args.actor, args.reason)), "apply_arguments_required")
             result = apply(args.db, json.loads(Path(args.plan).read_text(encoding="utf-8")),

@@ -101,6 +101,35 @@ class RecoveryTests(unittest.TestCase):
             self.create(run_id, "2026-11-03", code)
         self.assertEqual(len(self.saved([1031, 1036])["items"]), 2)
 
+    def test_new_explicit_day_and_known_reservation_fifo_rejection_preserve_history(self):
+        run_id = self.create(1054, "2026-11-04", "x_post_pool_fifo_conflict")
+        self.update("UPDATE x_post_schedule_run SET error_message=?,plan_attempted_at=? WHERE id=?",
+            ("素材计划必须使用当前素材池最新的可用记录", "2026-11-04T00:09:59Z", run_id))
+        previous = self.row(run_id)
+        proof = dict(kind="manual_reservation_fifo", commit="a" * 40,
+            runner_path="/runtime/scripts/x_post_schedule_runner.py", repository="/source", files={})
+        with mock.patch.object(recovery, "verify_reservation_repair", return_value=proof):
+            saved = recovery.plan(self.path, [run_id], ["2026-11-04"], reservation_fifo_commit="a" * 40)
+            result = self.apply(saved)
+            self.assertTrue(result["applied"])
+            self.assertTrue(self.apply(saved)["already_applied"])
+        current = self.row(run_id)
+        self.assertEqual(identity(current), identity(previous))
+        self.assertEqual(current["status"], "claimed")
+        self.assertEqual(current["plan_attempted_at"], "")
+        with contextlib.closing(recovery.connect(self.path)) as c:
+            evidence = json.loads(c.execute("SELECT evidence_json FROM x_post_schedule_zero_write_resume_audit WHERE run_id=?", (run_id,)).fetchone()[0])
+            self.assertEqual(evidence["previous_run"], previous)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 0)
+
+    def test_reservation_fix_does_not_rearm_unknown_transaction_failure(self):
+        run_id = self.create(1054, "2026-11-04", "x_post_pool_fifo_conflict")
+        self.update("UPDATE x_post_schedule_run SET plan_attempted_at=? WHERE id=?",
+            ("2026-11-04T00:09:59Z", run_id))
+        with mock.patch.object(recovery, "verify_reservation_repair", return_value={"kind": "manual_reservation_fifo"}):
+            with self.assertRaisesRegex(recovery.RecoveryRejected, "known_rejection_evidence_mismatch"):
+                recovery.plan(self.path, [run_id], ["2026-11-04"], reservation_fifo_commit="a" * 40)
+
     def test_existing_queue_blocks_recovery_even_when_summary_counters_are_zero(self):
         run_id = self.create()
         payload = base_candidate(2, "example", 501, "content-1")
@@ -128,7 +157,7 @@ class RecoveryTests(unittest.TestCase):
         run_id = self.create()
         with self.assertRaisesRegex(recovery.RecoveryRejected, "exact_unique"):
             self.saved([run_id, run_id])
-        with self.assertRaisesRegex(recovery.RecoveryRejected, "outside_incident"):
+        with self.assertRaisesRegex(recovery.RecoveryRejected, "outside_authorized_scope"):
             recovery.plan(self.path, [run_id], ["2026-11-01"])
         self.update("UPDATE x_post_schedule_run SET error_code='x_publish_unknown' WHERE id=?", (run_id,))
         with self.assertRaisesRegex(recovery.RecoveryRejected, "not_zero_write"):
