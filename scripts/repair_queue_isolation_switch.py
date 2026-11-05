@@ -19,6 +19,7 @@ from scripts.deploy_publish_queue_isolation import backup_db,DBS,save
 UNSTARTED={33554:('fb',29670),33562:('fb',29814),33564:('fb',29813),
            34127:('tt_auto',4698),34136:('tt_auto',4707),34137:('tt_auto',4708)}
 MEDIA_ONLY={34253:6163,34256:6157}
+WINDOW=('2026-11-05T04:11:19','2026-11-05T04:28:12')
 
 def connect(path,readonly=True):
     c=sqlite3.connect('file:'+str(path)+('?mode=ro' if readonly else '?mode=rw'),uri=True,timeout=10)
@@ -29,7 +30,7 @@ def proof(d,x,natives):
     for jid in [*UNSTARTED,*MEDIA_ONLY]:
         j=dict(d.execute('SELECT * FROM pipeline_job WHERE id=?',(jid,)).fetchone())
         assert j['error_code']=='canonical_bridge_unavailable'
-        assert '2026-11-05T04:11:19'<=j['updated_at']<='2026-11-05T04:28:12'
+        assert WINDOW[0]<=j['updated_at']<=WINDOW[1]
         assert not j['canonical_receipt'] and not j['hold_reason']
         assert not d.execute('SELECT 1 FROM pipeline_publication WHERE job_id=?',(jid,)).fetchone()
         if jid in UNSTARTED:
@@ -97,4 +98,9 @@ def main(directory=None):
         after=[dict(r) for r in d.execute('SELECT id,source_key,status,generation,error_code FROM pipeline_job WHERE id IN ('+','.join('?' for _ in checked)+')',list(checked))]
         save(directory/'result.json',after);print(json.dumps(after),flush=True)
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    if '--late-media-only' in sys.argv:
+        UNSTARTED={};MEDIA_ONLY={34285:6154}
+        WINDOW=('2026-11-05T04:44:00','2026-11-05T04:50:10')
+        main('/mnt/data-disk/publish-queue-isolation-20261105/switch-repair-late')
+    else:main()
