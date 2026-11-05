@@ -284,6 +284,13 @@ class DispatchStore:
                     # A restored automatic pool starts a new pressure window;
                     # observations from its prior automatic period do not apply.
                     c.execute("DELETE FROM pipeline_capacity_sample WHERE node_id=? AND stage=?", (host, stage))
+            if "channel_priority" in patch:
+                order = patch["channel_priority"]
+                if (not isinstance(order, list) or len(order) > len(CHANNELS)
+                        or any(not isinstance(value, str) or value not in CHANNELS for value in order)
+                        or len(set(order)) != len(order)):
+                    raise DispatchError("channel_priority_invalid", status=400)
+                config["channel_priority"] = list(order)
             if "global_publish_limit" in patch:
                 config["global_publish_limit"] = _positive(patch["global_publish_limit"], True)
             for channel, limit in patch.get("channel_limits", {}).items():
@@ -509,6 +516,33 @@ class DispatchStore:
             self.event(c, row["id"], "fb_material_isolation_refreshed",
                        {"material_resource": material, "page_released": bool(released)}, self.now())
 
+    def _refresh_youtube_isolation(self, c, row, offer):
+        if (row["channel"] != "youtube" or row["family"] != "publish"
+                or row["source_key"] != offer.get("source_key") or row["stage"] != offer.get("stage")):
+            return
+        from .youtube_isolation import identity_resources
+        resources = identity_resources(row["source_id"])
+        if not resources or resources != offer.get("resource_keys"):
+            return
+        old = json.loads(row["resource_keys_json"])
+        held = c.execute("SELECT * FROM pipeline_resource WHERE job_id=?", (row["id"],)).fetchall()
+        legacy = c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?", (row["id"],)).fetchone()
+        uncertain = row["status"] == "unknown" or bool(offer.get("unknown_outcome"))
+        # Change only the scope of exclusion. Claims, native leases, operation
+        # permits, sessions and receipts remain valid, including active uploads.
+        if held or row["status"] == "running":
+            c.execute("INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)",
+                      (resources[0], row["id"], row["generation"], int(uncertain), int(held[0]["legacy"]) if held else 0))
+        if legacy or uncertain:
+            c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resources[0], row["id"]))
+        released = 0
+        for table in ("pipeline_resource", "pipeline_legacy_resource"):
+            released += c.execute("DELETE FROM " + table + " WHERE job_id=? AND resource_key<>?", (row["id"], resources[0])).rowcount
+        c.execute("UPDATE pipeline_job SET resource_keys_json=? WHERE id=?", (dumps(resources), row["id"]))
+        if old != resources or released:
+            self.event(c, row["id"], "youtube_task_isolation_refreshed",
+                       {"task_resource": resources[0], "shared_resources_released": released}, self.now())
+
     def offer(self, offer):
         now = self.now()
         channel = channel_key(offer["channel"])
@@ -666,6 +700,7 @@ class DispatchStore:
                 self._converge_idle_legacy(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
                 self._release_finished_legacy_resources(c, offer["source_key"])
                 self._refresh_fb_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
+                self._refresh_youtube_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
                 return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
             cutoff = self.config(c)["cutovers"].get(channel)
             in_time = not cutoff or (offer.get("started_at") and stamp(offer["started_at"]) <= cutoff)
@@ -709,6 +744,7 @@ class DispatchStore:
                     c.execute("INSERT INTO pipeline_legacy_resource VALUES(?,?)", (resource, job_id))
             self._release_finished_legacy_resources(c, offer["source_key"])
             self._refresh_fb_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), offer)
+            self._refresh_youtube_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), offer)
             self.event(c, job_id, "offered", {"status": status}, now)
             return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), True)
 
@@ -860,6 +896,13 @@ class DispatchStore:
               WHERE j.stage=? AND j.status IN ('queued','ready') AND j.hold_reason='' AND j.scheduled_at<=?
               ORDER BY COALESCE(fc.last_seq,0),COALESCE(fb.last_seq,0),j.scheduled_at,j.id""",
               (stage, stage + ":", stage, now)).fetchall()
+            # Priority applies only at admission. Existing claims, account locks,
+            # time gates and per-batch fairness remain authoritative. Unlisted
+            # channels keep their fair-order place in the highest band.
+            order = config.get("channel_priority", [])
+            if order:
+                rank = {channel: index for index, channel in enumerate(order)}
+                rows = sorted(rows, key=lambda item: rank.get(item["channel"], 0))
             blocked = []
             for row in rows:
                 if c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", ("job:" + str(row["id"]), now)).fetchone():
@@ -915,7 +958,7 @@ class DispatchStore:
                 # FB already visits eligible rows in due order and owns a Page
                 # write mutex. A skipped material fence must not turn a queued
                 # duplicate into an indirect FIFO fence for other materials.
-                if row["channel"] != "fb" and not independent and any(set(resources).intersection(json.loads(r[0])) for r in earlier):
+                if row["channel"] not in {"fb", "youtube"} and not independent and any(set(resources).intersection(json.loads(r[0])) for r in earlier):
                     blocked.append("account_ordering")
                     continue
                 if row["channel"] == "x" and row["family"] == "queue" and stage == "publish" and str(row["source_id"]).isdigit():
@@ -1003,9 +1046,18 @@ class DispatchStore:
             resource = str(operation.get("account_resource", ""))
             if not key or len(key) > 256 or len(fingerprint) != 64 or any(x not in "0123456789abcdef" for x in fingerprint):
                 raise DispatchError("operation_invalid", status=400)
-            if resource not in json.loads(row["resource_keys_json"]):
+            resources = json.loads(row["resource_keys_json"])
+            held_resource = resource
+            if row["channel"] == "youtube" and row["family"] == "publish":
+                from .youtube_isolation import task_resource
+                scoped = task_resource(row["source_id"])
+                # An already running generation retains its original descriptor.
+                # Its exact channel is an identity alias, not a channel-wide lock.
+                if scoped in resources and resource == "youtube:channel:" + row["account_label"]:
+                    held_resource = scoped
+            if held_resource not in resources:
                 raise DispatchError("operation_resource_invalid", status=403)
-            held = c.execute("SELECT * FROM pipeline_resource WHERE resource_key=?", (resource,)).fetchone()
+            held = c.execute("SELECT * FROM pipeline_resource WHERE resource_key=?", (held_resource,)).fetchone()
             if not held or held["job_id"] != row["id"] or held["generation"] != row["generation"]:
                 raise DispatchError("operation_resource_not_held")
             existing = c.execute("SELECT * FROM pipeline_operation WHERE operation_id=?", (key,)).fetchone()

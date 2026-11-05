@@ -7,6 +7,10 @@ A profile refresh is not evidence that X has unlocked an account.
 import re
 
 
+ACCOUNT_VERIFY_REJECTED = "x_account_verification_rejected"
+ACCOUNT_VERIFY_REJECTED_PREFIX = ACCOUNT_VERIFY_REJECTED + ": "
+
+
 def read_account_publish_blockers(conn, account_ids):
     account_ids = tuple(dict.fromkeys(int(value) for value in account_ids))
     if not account_ids:
@@ -101,15 +105,29 @@ def read_account_publish_blockers(conn, account_ids):
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='x_authorized_account'"
     ).fetchone():
+        account_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_authorized_account)")}
+        error_column = "last_error" if "last_error" in account_columns else "'' AS last_error"
         for row in conn.execute(
-            "SELECT id,status,publish_approved FROM x_authorized_account "
-            "WHERE id IN (%s)" % placeholders, account_ids,
+            "SELECT id,status,publish_approved,%s FROM x_authorized_account "
+            "WHERE id IN (%s)" % (error_column, placeholders), account_ids,
         ).fetchall():
             if row["status"] not in {
                 "revoked", "disabled", "disconnected", "revoke_pending",
                 "error", "token_missing", "scope_missing",
                 "reauth_required",
             } and row["publish_approved"]:
+                # A known verification rejection reduces this account's current
+                # planning capacity without revoking its authorization. The
+                # verify endpoint retries the account and clears last_error on
+                # success; it must not inherit this derived planning hold.
+                message = str(row["last_error"] or "")
+                if message.startswith(ACCOUNT_VERIFY_REJECTED_PREFIX):
+                    account_id = int(row["id"])
+                    blockers.setdefault(account_id, {
+                        "account_id": account_id, "account_username": str(account_id),
+                        "queue_id": 0, "log_id": 0, "schedule_run_id": 0,
+                        "code": ACCOUNT_VERIFY_REJECTED, "message": message,
+                    })
                 continue
             account_id = int(row["id"])
             blockers.setdefault(account_id, {

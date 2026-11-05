@@ -6096,8 +6096,14 @@ class XPostStore:
                 planning_sql = " AND NOT EXISTS (SELECT 1 FROM x_post_queue pq WHERE pq.schedule_run_id=x_post_schedule_run.id) "
                 if planning_boundary:
                     boundary = planning_boundary.isoformat(timespec="seconds").replace("+00:00", "Z")
-                    planning_sql += " AND (created_at>? OR datetime(run_date||'T'||publish_time||':00+08:00')>datetime(?)) "
+                    planning_sql += " AND (created_at>? OR datetime(run_date||'T'||publish_time||':00+08:00')>datetime(?)"
                     planning_values = [boundary, boundary]
+                    from features.pipeline_dispatch.x_schedule_recovery import authorized_run_ids
+                    authorized = authorized_run_ids(conn)
+                    if authorized:
+                        planning_sql += " OR id IN (" + ",".join("?" for _ in authorized) + ")"
+                        planning_values.extend(authorized)
+                    planning_sql += ") "
             scoped_runs_sql = (
                 "SELECT *,CASE WHEN %s THEN 1 ELSE 0 END AS "
                 "unresolved_drama_route,CASE WHEN %s THEN 1 ELSE 0 END AS "
@@ -7915,28 +7921,6 @@ class XPostStore:
             "ORDER BY created_at,id" % placeholders,
             tuple(account_ids),
         ).fetchall()
-        held_route_episode_rows = conn.execute(
-            "SELECT q.drama_pool_item_id,q.account_id,q.episode_number,"
-            "q.drama_replay_generation FROM x_post_queue q "
-            "JOIN x_post_drama_delivery_route route ON route.queue_id=q.id "
-            "WHERE q.source_type='drama' AND q.account_id IN (%s) "
-            "AND %s"
-            % (
-                placeholders,
-                _resumable_drama_duration_route_sql("q", "route"),
-            ),
-            tuple(account_ids),
-        ).fetchall()
-        held_route_episode_bindings = {
-            (
-                int(row["drama_pool_item_id"]),
-                int(row["account_id"]),
-                int(row["episode_number"]),
-                int(row["drama_replay_generation"]),
-            )
-            for row in held_route_episode_rows
-            if row["drama_pool_item_id"] is not None
-        }
         owned_by_account = {}
         occupied_account_ids = set()
         for row in bound_rows:
@@ -7953,17 +7937,13 @@ class XPostStore:
             # as a candidate until an explicit revalidation clears last_error.
             if str(row["last_error_code"] or ""):
                 continue
-            # A duration route that is unresolved or has not made its first X
-            # attempt resumes only through its original run. Keep its account
-            # occupied and never offer that exact episode to a later slot.
-            # Other legacy/resolved queues retain the historical owned-drama
-            # projection until their normal advancement.
-            if (
-                int(row["id"]),
-                owner_id,
-                int(row["next_sub_number"]),
-                int(row["replay_generation"]),
-            ) in held_route_episode_bindings:
+            # Every existing episode queue is a durable reservation, including
+            # cancelled legacy rows without a log. Keep the bound account
+            # occupied; never redraw its drama or advance its episode cursor.
+            episode_key = _drama_episode_key(
+                row["content_id"], row["next_sub_number"], row["replay_generation"])
+            if conn.execute("SELECT 1 FROM x_post_queue WHERE episode_key=? LIMIT 1",
+                    (episode_key,)).fetchone():
                 continue
             if not same_drama_language(
                 row["language"],
@@ -7988,6 +7968,10 @@ class XPostStore:
             "AND free_episode_count>0 "
             "AND next_sub_number<=free_episode_count "
             "AND assigned_account_id=0 "
+            "AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.episode_key="
+            "x_post_drama_pool.content_id || CASE WHEN x_post_drama_pool.replay_generation>1 "
+            "THEN ':replay' || x_post_drama_pool.replay_generation ELSE '' END || ':' || "
+            "x_post_drama_pool.next_sub_number) "
             "ORDER BY CASE WHEN priority_at<>'' THEN 0 ELSE 1 END,"
             "priority_at DESC,created_at DESC,id DESC LIMIT ?",
             (unassigned_limit,),
@@ -9727,6 +9711,7 @@ class XPostStore:
         timestamp = utc_now()
         from features.pipeline_dispatch.x_planning import enabled as dispatch_enabled, cutoff as dispatch_cutoff
         planning_sql, planning_values = "", []
+        boundary = None
         if dispatch_enabled():
             planning_sql = " AND NOT EXISTS (SELECT 1 FROM x_post_queue pq WHERE pq.manual_run_id=x_post_manual_run.id) "
             boundary = dispatch_cutoff()
@@ -9736,6 +9721,19 @@ class XPostStore:
                 planning_values = [boundary, boundary]
         with contextlib.closing(_connect(self.db_path)) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if boundary:
+                from features.pipeline_dispatch.x_manual_recovery import authorized_run_ids
+                authorized = authorized_run_ids(conn)
+                if authorized:
+                    # A scoped audit bypasses only the deployment date cutoff.
+                    # Queue ownership, future scheduling and unknown holds still
+                    # use the same canonical claim conditions below.
+                    planning_sql = planning_sql.replace(
+                        "(created_at>? OR (publish_mode='scheduled' AND scheduled_at>?))",
+                        "(created_at>? OR (publish_mode='scheduled' AND scheduled_at>?) "
+                        "OR id IN (%s))" % ",".join("?" for _ in authorized),
+                    )
+                    planning_values.extend(authorized)
             row = conn.execute(
                 "SELECT * FROM x_post_manual_run "
                 "WHERE trigger_source=? "
@@ -10317,17 +10315,21 @@ class XPostStore:
                 "WHERE manual_run_id=? ORDER BY material_key",
                 (run_id,),
             ).fetchall()
+            recovered_reservation_admission = None
             if reservation_rows and (
                 {str(item["material_key"]) for item in reservation_rows}
                 != set(material_ids)
                 or any(str(item["state"]) != "active" for item in reservation_rows)
             ):
-                conn.rollback()
-                raise XPostError(
-                    "x_post_storage_conflict",
-                    "手动发布素材占用状态与冻结任务不一致",
-                    500,
-                )
+                from features.x_video_publish.recovery_1389 import validate_admission
+                recovered_reservation_admission = validate_admission(conn, run_id, prepared, failures)
+                if recovered_reservation_admission is None:
+                    conn.rollback()
+                    raise XPostError(
+                        "x_post_storage_conflict",
+                        "手动发布素材占用状态与冻结任务不一致",
+                        500,
+                    )
             if str(run["status"]) not in {"queued", "running"}:
                 conn.rollback()
                 raise XPostError(
@@ -10421,6 +10423,9 @@ class XPostStore:
                 if personal is not None:
                     from features.x_video_publish.core import settle_personal_reservations
                     settle_personal_reservations(conn, run_id, timestamp)
+                if recovered_reservation_admission is not None:
+                    from features.x_video_publish.recovery_1389 import consume
+                    consume(conn, recovered_reservation_admission, timestamp)
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
                 raise XPostError(
@@ -13099,6 +13104,8 @@ class XPostStore:
                     "WHERE q.pool_item_id=p.id "
                     "OR q.material_key=p.material_key"
                     ") "
+                    "AND NOT EXISTS(SELECT 1 FROM x_post_manual_material_reservation r "
+                    "WHERE r.material_key=p.material_key AND r.state='active') "
                     "ORDER BY p.created_at DESC,p.id DESC LIMIT 1000"
                     % (
                         _NONBLOCKING_MATERIAL_VALIDATION_SQL,

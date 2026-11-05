@@ -46,6 +46,7 @@ from .code_routes import allocate_code_route, ensure_code_route_storage
 UTC = timezone.utc
 BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 MAX_CAPTION_CHARS = 2200
+MAX_DRAMA_NAME_CHARS = 500
 MAX_EVENT_MESSAGE_CHARS = 500
 MAX_ACCOUNT_SETTINGS_BATCH = 50
 SCHEDULE_MODES = frozenset({"fixed", "random"})
@@ -290,6 +291,22 @@ def _normalize_description(value: Any) -> str:
     text = re.sub(r"\s+", " ", raw).strip()
     if len(text) > 4096 or any(ord(char) < 32 for char in text):
         raise ValueError("description is invalid")
+    return text
+
+
+def _normalize_drama_name(value: Any) -> str:
+    """Normalize the authoritative drama name used by ``{{drama_name}}``."""
+
+    raw = str(value or "")
+    if "\x00" in raw:
+        raise ValueError("drama name contains NUL")
+    text = re.sub(r"\s+", " ", raw).strip()
+    if (
+        not text
+        or len(text) > MAX_DRAMA_NAME_CHARS
+        or any(ord(char) < 32 for char in text)
+    ):
+        raise ValueError("drama name is invalid")
     return text
 
 
@@ -686,6 +703,8 @@ class SnapshotAccountSource:
         normalized = _account_id(account_id)
         try:
             raw = self._account_loader(normalized)
+        except TTPostError:
+            raise
         except Exception:
             raise AccountSourceError(
                 "tt_account_source_unavailable",
@@ -729,13 +748,13 @@ class SnapshotAccountSource:
             except Exception:
                 raise AccountSourceError(
                     "tt_access_token_unavailable",
-                    "TikTok发布凭据暂不可用",
+                    "TikTok账号Token读取失败，请稍后重试",
                     503,
                 ) from None
             if not isinstance(raw, Mapping):
                 raise AccountSourceError(
                     "tt_access_token_missing",
-                    "TikTok发布凭据缺失",
+                    "TikTok账号Token缺失，请重新登录授权后等待每小时账号同步",
                     409,
                 )
             token_account_id = _account_id(raw.get("account_id"))
@@ -754,7 +773,7 @@ class SnapshotAccountSource:
             ):
                 raise AccountSourceError(
                     "tt_access_token_missing",
-                    "TikTok发布凭据缺失",
+                    "TikTok账号Token缺失，请重新登录授权后等待每小时账号同步",
                     409,
                 )
             token = token_value
@@ -846,15 +865,19 @@ def render_caption_template(
     url: Any = None,
     description: Any = None,
     code: Any = None,
+    drama_name: Any = None,
     defer_url: bool = False,
     defer_description: bool = False,
     defer_code: bool = False,
+    defer_drama_name: bool = False,
     max_chars: int = MAX_CAPTION_CHARS,
 ) -> str:
     """Render the user's caption at queue-freeze time.
 
     ``{{contect_id}}`` is supported exactly as supplied by the product owner.
     ``{{content_id}}`` is accepted as a correctly-spelled compatibility alias.
+    ``{{drama_name}}`` is replaced by the authoritative frozen drama name and
+    fails closed when that name is missing.
     ``{url}`` is replaced by the immutable per-queue TT short URL. Material
     intake may explicitly defer that one macro until the queue identity exists.
     ``{desc}`` is the normalized drama description frozen with the material.
@@ -878,7 +901,11 @@ def render_caption_template(
             400,
         )
     unknown = sorted(
-        {name for name in placeholders if name not in {"contect_id", "content_id"}}
+        {
+            name
+            for name in placeholders
+            if name not in {"contect_id", "content_id", "drama_name"}
+        }
     )
     if unknown:
         raise TTPostError(
@@ -913,6 +940,7 @@ def render_caption_template(
     has_url = "url" in single_placeholders
     has_description = "desc" in single_placeholders
     has_code = "code" in single_placeholders
+    has_drama_name = "drama_name" in placeholders
     normalized_url = ""
     if has_url and not defer_url:
         try:
@@ -944,10 +972,37 @@ def render_caption_template(
                 "发布描述模板中的{code}必须绑定有效四位码",
                 400,
             )
+    normalized_drama_name = ""
+    if has_drama_name and not defer_drama_name:
+        try:
+            normalized_drama_name = _normalize_drama_name(drama_name)
+        except ValueError:
+            raise TTPostError(
+                "caption_drama_name_required",
+                "发布描述模板中的{{drama_name}}必须绑定有效剧名",
+                400,
+            ) from None
+
+    def render_double(match: re.Match, *, measuring: bool) -> str:
+        name = match.group(1).strip()
+        if name in {"contect_id", "content_id"}:
+            return normalized_content_id
+        if name == "drama_name":
+            if defer_drama_name:
+                return (
+                    "W" * MAX_DRAMA_NAME_CHARS
+                    if measuring
+                    else match.group(0)
+                )
+            return normalized_drama_name
+        return match.group(0)
+
     rendered_base = _PLACEHOLDER_RE.sub(
-        lambda match: normalized_content_id
-        if match.group(1).strip() in {"contect_id", "content_id"}
-        else match.group(0),
+        lambda match: render_double(match, measuring=False),
+        text,
+    )
+    measured_base = _PLACEHOLDER_RE.sub(
+        lambda match: render_double(match, measuring=True),
         text,
     )
 
@@ -973,7 +1028,7 @@ def render_caption_template(
     ).strip()
     measured = _SINGLE_PLACEHOLDER_RE.sub(
         lambda match: render_single(match, measuring=True),
-        rendered_base,
+        measured_base,
     ).strip()
     try:
         rendered_units = len(measured.encode("utf-16-le")) // 2
@@ -1012,6 +1067,15 @@ def caption_uses_code_macro(template: Any) -> bool:
     return any(
         match.group(1) == "code"
         for match in _SINGLE_PLACEHOLDER_RE.finditer(str(template or ""))
+    )
+
+
+def caption_uses_drama_name_macro(template: Any) -> bool:
+    """Return whether the exact double-brace drama-name macro is present."""
+
+    return any(
+        match.group(1).strip() == "drama_name"
+        for match in _PLACEHOLDER_RE.finditer(str(template or ""))
     )
 
 
@@ -1970,6 +2034,50 @@ def ensure_storage(db_path: Any) -> None:
                             "ALTER TABLE %s ADD COLUMN %s %s"
                             % (table_name, column_name, definition)
                         )
+            # Reporting-only history: capture schedule changes atomically with
+            # their existing writes, including failures before a run is made.
+            # Existing rows are baselined now, never backdated as history.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tt_post_daily_schedule_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tt_post_daily_schedule_audit
+                ON tt_post_daily_schedule_audit(account_id,created_at,id)
+            """)
+            audit_snapshot_sql = """json_object(
+                'account_id',{p}account_id,'enabled',{p}enabled,
+                'version',{p}version,'schedule_mode',{p}schedule_mode,
+                'publish_times_json',{p}publish_times_json,
+                'random_daily_count',{p}random_daily_count,
+                'random_effective_date',{p}random_effective_date,
+                'updated_at',{p}updated_at)
+            """
+            conn.execute("""
+                INSERT INTO tt_post_daily_schedule_audit(
+                    account_id,created_at,snapshot_json)
+                SELECT s.account_id,strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'),%s
+                FROM tt_post_daily_schedule s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tt_post_daily_schedule_audit a
+                    WHERE a.account_id=s.account_id)
+            """ % audit_snapshot_sql.format(p="s."))
+            for audit_operation in ("INSERT", "UPDATE"):
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS tt_post_schedule_audit_%s
+                    AFTER %s ON tt_post_daily_schedule
+                    BEGIN
+                        INSERT INTO tt_post_daily_schedule_audit(
+                            account_id,created_at,snapshot_json)
+                        VALUES(NEW.account_id,
+                            strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'),%s);
+                    END
+                """ % (audit_operation.lower(), audit_operation,
+                       audit_snapshot_sql.format(p="NEW.")))
             pending_language_rows = conn.execute(
                 """
                 SELECT id,material_language
@@ -3058,6 +3166,7 @@ class TTPostStore:
                 url=_MAX_TT_SHORT_URL,
                 description="Drama description",
                 code="AB12",
+                defer_drama_name=True,
             )
 
             normalized_user_consent = (
@@ -3627,6 +3736,11 @@ class TTPostStore:
     ) -> Dict[str, Any]:
         """Create one repeatable test attempt without touching a material pool."""
 
+        normalized_drama_name = _optional_text(
+            drama_name,
+            "短剧名称",
+            500,
+        )
         normalized_material_id = _material_id(material_id)
         normalized_account_id = _account_id(account_id)
         normalized_content_id = str(content_id or "").strip()
@@ -3731,6 +3845,7 @@ class TTPostStore:
             normalized_content_id,
             url=normalized_short_url or None,
             description=normalized_description,
+            drama_name=normalized_drama_name,
         )
         if not secrets.compare_digest(
             normalized_caption.encode("utf-8"),
@@ -5442,6 +5557,11 @@ class TTPostStore:
     ) -> Dict[str, Any]:
         """Persist one validated material before any remote preparation work."""
 
+        normalized_drama_name = _optional_text(
+            drama_name,
+            "短剧名称",
+            500,
+        )
         normalized_material_id = _material_id(material_id)
         normalized_account_id = _account_id(account_id)
         normalized_content_id = str(content_id or "").strip()
@@ -5501,6 +5621,7 @@ class TTPostStore:
             normalized_template,
             normalized_content_id,
             description=normalized_description,
+            drama_name=normalized_drama_name,
             defer_url=True,
             defer_code=True,
         )
@@ -6310,6 +6431,11 @@ class TTPostStore:
         actor_user_id: str = "",
         actor_name: str = "",
     ) -> Dict[str, Any]:
+        normalized_drama_name = _optional_text(
+            drama_name,
+            "短剧名称",
+            500,
+        )
         normalized_material_id = _material_id(material_id)
         normalized_account_id = _account_id(account_id)
         normalized_content_id = str(content_id or "").strip()
@@ -6389,6 +6515,7 @@ class TTPostStore:
             normalized_template,
             normalized_content_id,
             description=normalized_description,
+            drama_name=normalized_drama_name,
             defer_url=True,
             defer_code=True,
         )
@@ -8479,6 +8606,7 @@ class TTPostStore:
                 url=short_url if has_url_macro else None,
                 description=frozen_description,
                 code=code,
+                drama_name=frozen_drama_name,
                 defer_code=defer_code,
             )
             return link_id, short_url, rendered_caption
@@ -8584,6 +8712,7 @@ class TTPostStore:
                         url=existing_short_url,
                         description=frozen_description,
                         code=existing_code,
+                        drama_name=frozen_drama_name,
                     )
                 else:
                     valid_existing_short_url = existing_short_url
@@ -8593,6 +8722,7 @@ class TTPostStore:
                         resolution.content_id,
                         description=frozen_description,
                         code=existing_code,
+                        drama_name=frozen_drama_name,
                     )
                 if (
                     int(existing["pool_item_id"]) == pool_id
