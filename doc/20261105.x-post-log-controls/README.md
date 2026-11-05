@@ -40,3 +40,11 @@ python3.9 scripts/deploy_x_post_log_controls.py rollback BACKUP
 ```sh
 python3.9 /mnt/data-disk/x-post-log-controls-20261105/source-269f7cec/scripts/deploy_x_post_log_controls.py rollback /mnt/data-disk/x-post-log-controls-20261105/deploy-269f7cec
 ```
+
+## HTML 缓存修复
+
+用户报告刷新后仍未看到更新。公网原地址和带参数地址均返回新 HTML（SHA256 `42e6c0936ea32d0a5e0e4c06f1f09b80c7618c09fae333f04d4ed3bdefa7aac1`），但 HTML 没有 Cache-Control；浏览器读取工具未能取得用户实际页面，因此未断言客户端缓存是唯一原因。
+
+`deploy/nginx-x-post-logs.conf` 为该 HTML 增加禁止缓存策略，与既有 X 账号/素材页面一致。独立安装到 `/etc/nginx/default.d/x-post-logs.conf`，先备份旧配置与进程 PID，`nginx -t` 通过后只 reload Nginx。保留共享 OAuth 配置及其他页面策略；不重启 API、调度器或发布服务。回滚脚本恢复该单个配置并重新检查、reload。
+
+验证原地址、新参数地址响应均携带 `no-store`，HTML 内容与已部署新版一致；带参数入口用于首次绕过可能保留的旧 HTML。
