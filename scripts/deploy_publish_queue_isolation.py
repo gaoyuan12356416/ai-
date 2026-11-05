@@ -72,7 +72,9 @@ def prepare(source,commit,directory):
     assert run(['findmnt','-n','-o','UUID','/mnt/data-disk'])=='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
     assert directory.is_relative_to(Path('/mnt/data-disk'))
     assert run(['git','-C','/mnt/data-disk/pipeline-dispatch/github','rev-parse',commit+'^{commit}'])==commit
-    directory.mkdir(parents=True,mode=0o700,exist_ok=False)
+    # Service users must traverse this parent to reach their candidate tree.
+    # Database backups and the manifest are independently private (0600).
+    directory.mkdir(parents=True,mode=0o711,exist_ok=False)
     expected=json.loads((source/'ops/publish-queue-isolation/files.json').read_text())
     manifest={'commit':commit,'source':str(source),'lanes':{},'database_backups':{}}
     for lane,(link,units) in LANES.items():
@@ -151,19 +153,25 @@ def switch(directory,lane,rollback=False):
         item['state']='rolled_back' if rollback else 'installed';save(path,m)
         print(json.dumps({'lane':lane,'state':item['state'],'restart':False}),flush=True);return
     if link.resolve()==target:
-        print(json.dumps({'lane':lane,'state':'already_active'}),flush=True);return
+        for rel,h in item['files'].items():assert sha(link/rel)==h['before' if rollback else 'after']
+        for _,port,_ in LANES[lane][1]:health(port)
+        item['state']='rolled_back' if rollback else 'active'
+        item['active_pids']={u:pid(u) for u,_,_ in LANES[lane][1]};save(path,m)
+        print(json.dumps({'lane':lane,'state':'already_active_verified'}),flush=True);return
     assert link.resolve()==old,'later_runtime_switch_preserved:'+lane
     for rel,h in item['files'].items():assert sha(link/rel)==h['after' if rollback else 'before'],'affected_source_drift:'+rel
     units=LANES[lane][1];processes={u:pid(u) for u,_,_ in units}
     marker='queue-isolation-'+lane+'-'+str(int(time.time()))
     rules=[];stopped=[];swapped=False;observations=[];began=time.monotonic()
+    drain_seconds=int(os.environ.get('QUEUE_ISOLATION_DRAIN_SECONDS','20'))
+    assert 20<=drain_seconds<=300
     try:
         for u,port,threads in units:
             rule=['-p','tcp','--dport',str(port),'-m','conntrack','--ctstate','NEW','-m','comment','--comment',marker,'-j','DROP']
             watchdog=marker+'-'+str(port)
-            run(['systemd-run','--quiet','--unit='+watchdog,'--on-active=65s','--','/usr/sbin/iptables','-D','INPUT']+rule)
+            run(['systemd-run','--quiet','--unit='+watchdog,'--on-active='+str(drain_seconds+45)+'s','--','/usr/sbin/iptables','-D','INPUT']+rule)
             run(['iptables','-I','INPUT','1']+rule);rules.append((rule,watchdog))
-        deadline=time.monotonic()+20
+        deadline=time.monotonic()+drain_seconds
         while True:
             state={u:handlers(processes[u]) for u,_,_ in units};observations.append(state)
             if all(state[u]==[threads,0,0] for u,_,threads in units):break
