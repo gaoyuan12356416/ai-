@@ -5,7 +5,7 @@ import re
 import time
 from collections import defaultdict
 from urllib.parse import urlsplit
-from features.x_accounts.language import canonical_drama_language
+from features.x_accounts.language import canonical_drama_language, same_drama_language
 from features.x_posts.selector import (DramawaveCandidateSelector, PoolCandidateRejection,
                                       previous_source_date, normalize_material_url)
 from features.x_posts.source_duration import probe_source_metadata_duration
@@ -253,7 +253,7 @@ class SourceRepository:
                 clauses.append(f'''(LOCATE(%s,s.name)>0 OR EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
                     WHERE r.content_id=s.data_source_id AND r.app_id=1479 AND LOCATE(%s,r.name)>0))''');params.extend([q,q])
         if language:
-            aliases = [language,'jp'] if language=='ja' else [language]
+            aliases = ['pt', 'pt-br'] if language in {'pt', 'pt-br'} else [language,'jp'] if language=='ja' else [language]
             # Every eligible result also needs a same-language deployment row.
             # Use its small indexed set for the prefilter; full resource identity
             # and language validation still runs below before returning a video.
@@ -273,7 +273,7 @@ class SourceRepository:
         selected = [str(r['material_id']) for r in raw[:limit]]
         resolved = self._resolve_rows(selected,raw[:limit],recover_duration=exact_id,mappings=mappings) if selected else {'items':{},'errors':{}}
         items = [resolved['items'][mid] for mid in selected if mid in resolved['items']
-                 and (not language or resolved['items'][mid]['language'] == language)]
+                 and (not language or same_drama_language(resolved['items'][mid]['language'], language))]
         return {'items':items,'next_cursor':selected[-1] if len(raw)>limit else '',
                 'empty_reason':next(iter(resolved['errors'].values()),{}).get('message','没有符合条件的视频') if not items else ''}
 

@@ -2,7 +2,7 @@
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),{webcrypto}=require('node:crypto');
 const root=path.resolve(__dirname,'..'),staticRoot=path.join(root,'static'),read=name=>fs.readFileSync(path.join(staticRoot,name),'utf8'),clone=value=>JSON.parse(JSON.stringify(value));
 const results=[];const settle=async()=>{for(let i=0;i<40;i++)await Promise.resolve();};
-async function environment({admin=false,accountPage=admin,draft=null}={}){
+async function environment({admin=false,accountPage=admin,draft=null,accountLanguage="en",materialLanguage="en"}={}){
  const nodes=new Map(),storage=new Map(),calls=[],events=new Map();let anonymous=0;const posts=[];
  const attrs=source=>Object.fromEntries([...source.matchAll(/([\w:-]+)(?:="([^"]*)")?/g)].map(m=>[m[1],m[2]??'']));
  function node(tag='div',id=''){
@@ -25,16 +25,16 @@ async function environment({admin=false,accountPage=admin,draft=null}={}){
  }
  const body=node('body','body');body.innerHTML=read(accountPage?'x-account-list.html':'x-video-publish.html');
  const auth={authenticated:true,user:{is_admin:admin,user_id:'owner-1',tenant_key:'tenant-1',permissions:{x_accounts:true}}};
- const accounts=[{account_id:'1',x_user_id:'1900000000000000001',display_name:'Account A',username:'a',language:'en',eligible:true,status:'active',publish_approved:true,caption_template:'default A {name} {url}',config_version:1},{account_id:'2',x_user_id:'1900000000000000002',display_name:'Account B',username:'b',language:'en',eligible:true,status:'active',publish_approved:true,caption_template:'default B {name} {url}',config_version:2}];
+ const accounts=[{account_id:'1',x_user_id:'1900000000000000001',display_name:'Account A',username:'a',language:accountLanguage,eligible:true,status:'active',publish_approved:true,caption_template:'default A {name} {url}',config_version:1},{account_id:'2',x_user_id:'1900000000000000002',display_name:'Account B',username:'b',language:accountLanguage,eligible:true,status:'active',publish_approved:true,caption_template:'default B {name} {url}',config_version:2}];
  if(accountPage)accounts.push({...accounts[0],account_id:'99',x_user_id:'1999999999999999999',display_name:'Other owner',username:'other'});
- const materials=[{material_id:'101',material_name:'Video A',drama_name:'Drama A',language:'en',duration_seconds:20},{material_id:'102',material_name:'Video B',drama_name:'Drama B',language:'en',duration_seconds:25}];
+ const materials=[{material_id:'101',material_name:'Video A',drama_name:'Drama A',language:materialLanguage,duration_seconds:20},{material_id:'102',material_name:'Video B',drama_name:'Drama B',language:materialLanguage,duration_seconds:25}];
  const response=(data,status=200)=>({ok:status<400,status,json:async()=>data,text:async()=>JSON.stringify(data)});let batchCount=0,failSubmit=false;
  const context={console,URL,URLSearchParams,Intl,Date,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,DataView,crypto:webcrypto,structuredClone:clone,Event:class{constructor(type){this.type=type;}},setTimeout:()=>1,clearTimeout:()=>{},sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},location:{search:'',href:'',assign:v=>context.location.href=v},history:{replaceState:()=>{}},document:{body,createElement:tag=>node(tag),getElementById:id=>nodes.get(id)||null,querySelectorAll:()=>[]},addEventListener:(t,fn)=>events.set(t,fn),QuickNav:{render:async()=>{}},UiTopbar:{render:()=>{},handleAuthAction:()=>{}},fetch:async(url,options={})=>{
    calls.push({url,options:clone(options)});const data=options.body?JSON.parse(options.body):null;if(data)posts.push({url,data});
    if(url==='/api/ui/topbar')return response(auth);
    if(url==='/api/admin/x-accounts')return response({items:[{...accounts[0],id:'1',drama_language:'en'},{id:'99',x_user_id:'1999999999999999999',display_name:'Other owner',username:'other',status:'active'}]});
    if(url==='/api/x-video-publish/accounts')return response({items:accounts});
-   if(url==='/api/x-video-publish/languages')return response({items:[{value:'en',label:'English'}]});
+   if(url==='/api/x-video-publish/languages')return response({items:[{value:'en',label:'English'},{value:'pt-br',label:'Português (Brasil)'}]});
    if(url==='/api/x-video-publish/draft')return response({draft});
    if(url.startsWith('/api/x-video-publish/materials?'))return response({items:materials,next_cursor:''});
    if(url==='/api/x-video-publish/preflight')return response({preview_id:'preview-1',expires_at_utc:new Date(Date.now()+300000).toISOString(),items:data.pairs.map(p=>({...p,caption:p.caption_template,planned_at_utc:null,schedule_kind:'immediate'}))});
@@ -48,13 +48,15 @@ async function environment({admin=false,accountPage=admin,draft=null}={}){
  if(accountPage){const inline=[...read('x-account-list.html').matchAll(/<script>([\s\S]*?)<\/script>/g)].pop()[1];vm.runInContext(inline,context);}else vm.runInContext(read('x-video-publish.js'),context);
  await settle();
  const target=(dataset,checked=true)=>({dataset,checked,disabled:false,value:'',closest:()=>null});
- async function choose(){await nodes.get('xpChooseMaterials').click();await settle();for(const m of materials)nodes.get('xpMaterialChoices').onchange({target:target({pick:m.material_id})});nodes.get('xpUseMaterials').click();}
+ async function choose(){await nodes.get('xpChooseMaterials').click();await nodes.get('xpSearchMaterials').click();await settle();for(const m of materials)nodes.get('xpMaterialChoices').onchange({target:target({pick:m.material_id})});nodes.get('xpUseMaterials').click();}
  function candidate(id){nodes.get('xpCandidateAccounts').onchange({target:target({candidate:id})});}
  function pair(m,a,checked=true){nodes.get('xpPairRows').onchange({target:target({pairMaterial:m,pairAccount:a},checked)});}
  return {context,P:context.XVideoPublish,nodes,calls,posts,storage,choose,candidate,pair,materials,accounts,target,get batchCount(){return batchCount;},failSubmit:()=>failSubmit=true};
 }
 async function test(name,fn){try{await fn();results.push({name,pass:true});}catch(error){results.push({name,pass:false,error:error.stack});}}
 (async()=>{
+ await test('pt material pairs and submits with pt-BR account, including draft and filter',async()=>{const x=await environment({accountLanguage:'pt-BR',materialLanguage:'pt'});await x.choose();x.candidate('1');assert.doesNotMatch(x.nodes.get('xpPairRows').innerHTML,/剧语言不匹配/);assert.match(x.nodes.get('xpPairRows').innerHTML,/Português/);x.nodes.get('xpPairLanguage').value='pt-br';x.nodes.get('xpPairLanguage').onchange();assert.match(x.nodes.get('xpPairRows').innerHTML,/Video A/);x.pair('101','1');x.pair('102','1');await x.nodes.get('xpReviewPublish').click();assert.equal(x.posts.find(r=>r.url.endsWith('/preflight')).data.pairs.length,2);await x.nodes.get('xpSaveDraft').click();const draft=x.posts.find(r=>r.url.endsWith('/draft')).data.draft;const restored=await environment({accountLanguage:'pt-br',draft});assert.doesNotMatch(restored.nodes.get('xpPairRows').innerHTML,/剧语言不匹配/);assert.match(restored.nodes.get('xpFooterSummary').innerHTML,/帖子 <strong>2/);});
+ await test('Portuguese aliases do not accept Spanish or pt-PT material',async()=>{for(const materialLanguage of ['es','pt-PT']){const x=await environment({accountLanguage:'pt-br',materialLanguage});await x.choose();x.candidate('1');assert.match(x.nodes.get('xpPairRows').innerHTML,/剧语言不匹配/);}});
  await test('empty selection is blocked before preflight',async()=>{const x=await environment();await x.nodes.get('xpReviewPublish').click();assert.match(x.nodes.get('xpManualError').textContent,/至少选择/);assert.equal(x.posts.length,0);});
  await test('candidate selection never creates pairs and unassigned blocks submission',async()=>{const x=await environment();await x.choose();x.candidate('1');assert.match(x.nodes.get('xpFooterSummary').innerHTML,/帖子 <strong>0/);await x.nodes.get('xpReviewPublish').click();assert.match(x.nodes.get('xpManualError').textContent,/未分配/);});
  await test('A to two accounts plus B to one freezes exactly three independent captions',async()=>{const x=await environment();await x.choose();x.candidate('1');x.candidate('2');x.pair('101','1');x.pair('101','2');x.pair('102','1');x.nodes.get('xpCaption').oninput({target:{value:'Edited first'}});x.nodes.get('xpCaptionPair').onchange({target:{value:'101::2'}});x.nodes.get('xpCaption').oninput({target:{value:'Edited second'}});x.nodes.get('xpCaptionPair').onchange({target:{value:'101::1'}});assert.equal(x.nodes.get('xpCaption').value,'Edited first');await x.nodes.get('xpReviewPublish').click();const req=x.posts.find(x=>x.url.endsWith('/preflight')).data;assert.equal(req.pairs.length,3);assert.deepEqual(req.pairs.map(p=>p.caption_template),['Edited first','Edited second','default A {name} {url}']);assert.equal(new Set(req.pairs.map(p=>p.account_id)).size,2);});

@@ -14,7 +14,7 @@ import re
 import secrets
 import sqlite3
 
-from features.x_accounts.language import canonical_drama_language
+from features.x_accounts.language import canonical_drama_language, same_drama_language
 from features.x_posts.service import XPostError, XPostStore, _connect, utc_now
 from .templates import DEFAULT_COPY, normalize_caption, render_caption
 
@@ -94,7 +94,7 @@ def _account(account, account_id, owner, language=None, *, platform_access=False
         current_language = canonical_drama_language(account.get("drama_language"))
     except ValueError:
         raise XPostError("x_post_account_language_mismatch", "账号剧语言无效", 409) from None
-    if language and current_language != language:
+    if language and not same_drama_language(current_language, language):
         raise XPostError("x_post_account_language_mismatch", "素材与账号剧语言不一致，或账号语言已变更", 409)
     return current_language
 
@@ -424,7 +424,7 @@ class PersonalStore:
                     if not isinstance(material, dict) or str(material.get("material_id", material.get("id", ""))) != material_id:
                         raise XPostError("x_video_material_not_found", "素材不存在或未通过来源校验", 404)
                     material_language = canonical_drama_language(material.get("language", material.get("drama_language")))
-                    if language != material_language:
+                    if not same_drama_language(language, material_language):
                         raise XPostError("x_post_account_language_mismatch", "素材语言与账号剧语言不匹配", 409)
                     schedule = _timing(raw.get("scheduled_at", raw.get("publish_time", "")), current)
                     if source == "manual" and material_id in material_times and material_times[material_id] != schedule:
@@ -504,7 +504,7 @@ class PersonalStore:
                     _account(accounts.get(str(aid), accounts.get(aid)), aid, owner, row["drama_language"], platform_access=actor.get("x_platform_access") is True)
                 if materials is not None:
                     material = materials.get(mid, materials.get(int(mid)))
-                    if not isinstance(material, dict) or canonical_drama_language(material.get("language", material.get("drama_language"))) != row["drama_language"]:
+                    if not isinstance(material, dict) or not same_drama_language(material.get("language", material.get("drama_language")), row["drama_language"]):
                         raise XPostError("x_video_material_changed", "素材数据已变更，请重新核对", 409)
                     rendered = render_caption(row["caption"], material.get("drama_name", material.get("name")), material.get("drama_description", material.get("description", material.get("desc"))), "https://preview.invalid/0.html")
                     if rendered != row["rendered_caption"]:

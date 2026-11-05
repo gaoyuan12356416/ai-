@@ -3,7 +3,9 @@
   const P=window.XVideoPublish,$=P.$,e=P.esc;
   let current="manual",languages=[],dirty=false,selected=new Map(),candidateIds=[],pairs=new Map(),times={},processing="original",active="",operation=P.uid(),recordCursor="",recordNext="",recordStack=[],generation=0;
   const key=(m,a)=>`${m}::${a}`,material=id=>selected.get(String(id)),pairRows=()=>[...selected.keys()].flatMap(mid=>candidateIds.map(aid=>pairs.get(key(mid,aid))).filter(Boolean));
-  const label=code=>languages.find(x=>x.value===code)?.label || code || "未设置";
+  const languageKey=value=>{const code=String(value || "").trim().toLowerCase().replace(/_/g,"-");return ({pt:"pt-br",jp:"ja"})[code] || code;};
+  const sameLanguage=(left,right)=>!!languageKey(left)&&languageKey(left)===languageKey(right);
+  const label=code=>languages.find(x=>sameLanguage(x.value,code))?.label || code || "未设置";
   const options=()=>'<option value="">全部语言</option>'+languages.map(x=>`<option value="${e(x.value)}">${e(x.label)}</option>`).join("");
   const avatar=a=>`<div class="xp-avatar">${P.url(a?.profile_image_url)?`<img src="${e(P.url(a.profile_image_url))}" alt="" loading="lazy" referrerpolicy="no-referrer">`:e((a?.display_name || a?.username || "X").slice(0,1))}</div>`;
   const count=()=>{const rows=pairRows();return {materials:selected.size,accounts:new Set(rows.map(p=>p.account_id)).size,tasks:rows.length,unassigned:[...selected.keys()].filter(mid=>!rows.some(p=>p.material_id===mid)).length};};
@@ -32,7 +34,7 @@
   }
   function renderPairs(){
     const lang=$("xpPairLanguage").value,only=$("xpUnassigned").checked;
-    $("xpPairRows").innerHTML=[...selected.values()].filter(m=>(!lang||m.language===lang)&&(!only||!pairRows().some(p=>p.material_id===m.material_id))).map(m=>`<article class="xp-pair"><h3>${e(m.material_name || m.material_id)} <span class="xp-muted">${e(label(m.language))}</span></h3><div class="xp-pair-grid">${candidateIds.map(id=>{const a=P.account(id),reason=P.reason(a)||(a?.language!==m.language?"剧语言不匹配":"");return `<label class="${reason?"xp-disabled":""}"><input type="checkbox" data-pair-material="${e(m.material_id)}" data-pair-account="${e(id)}" ${pairs.has(key(m.material_id,id))?"checked":""} ${reason?"disabled":""}><span>${e(a?.display_name || a?.username || id)}<small class="xp-muted">${reason?" · "+e(reason):""}</small></span></label>`;}).join("") || '<span class="xp-muted">请先选择本批候选账号</span>'}</div></article>`).join("") || '<div class="xp-empty">没有符合筛选条件的素材</div>';
+    $("xpPairRows").innerHTML=[...selected.values()].filter(m=>(!lang||sameLanguage(m.language,lang))&&(!only||!pairRows().some(p=>p.material_id===m.material_id))).map(m=>`<article class="xp-pair"><h3>${e(m.material_name || m.material_id)} <span class="xp-muted">${e(label(m.language))}</span></h3><div class="xp-pair-grid">${candidateIds.map(id=>{const a=P.account(id),reason=P.reason(a)||(!sameLanguage(a?.language,m.language)?"剧语言不匹配":"");return `<label class="${reason?"xp-disabled":""}"><input type="checkbox" data-pair-material="${e(m.material_id)}" data-pair-account="${e(id)}" ${pairs.has(key(m.material_id,id))?"checked":""} ${reason?"disabled":""}><span>${e(a?.display_name || a?.username || id)}<small class="xp-muted">${reason?" · "+e(reason):""}</small></span></label>`;}).join("") || '<span class="xp-muted">请先选择本批候选账号</span>'}</div></article>`).join("") || '<div class="xp-empty">没有符合筛选条件的素材</div>';
     $("xpSummary").innerHTML=summary();$("xpFooterSummary").innerHTML=summary();
   }
   function previewCaption(){const p=pairs.get(active),m=p&&material(p.material_id),a=p&&P.account(p.account_id);const caption=p?String(p.caption_template || "").replace(/\{(name|desc|url)\}/g,(_,macro)=>({name:m?.drama_name || m?.material_name || "【缺少剧名】",desc:m?.drama_description || "【简介由服务端预检核对】",url:"【提交后生成独立短链】"}[macro])):"建立配对后预览本条 X 帖文";$("xpXPreview").innerHTML=`<header>${avatar(a)}<div><strong>${e(a?.display_name || "X 帖子预览")}</strong><small class="xp-muted"> @${e(a?.username || "account")}</small></div><strong style="margin-left:auto">𝕏</strong></header><p>${e(caption)}</p><div class="xp-x-video">${P.url(m?.thumbnail_url)?`<img src="${e(P.url(m.thumbnail_url))}" alt="视频封面">`:e(m?.material_name || "视频")}</div><p class="xp-muted">文案与账号资格由服务端再次核对；真实短链在发布时生成。</p>`;}
@@ -47,7 +49,7 @@
   }
   function payload(){
     const c=count();if(!c.materials)throw new Error("请至少选择一条视频。");if(c.unassigned)throw new Error(`还有 ${c.unassigned} 条视频未分配账号，请手工勾选目标账号。`);if(!c.tasks || c.tasks>200)throw new Error("每批需有 1–200 条帖子。");const rows=pairRows();
-    for(const p of rows){const a=P.account(p.account_id),m=material(p.material_id),reason=P.reason(a)||(a.language!==m.language?"剧语言不匹配":"")||P.templateError(p.caption_template);if(reason){active=key(p.material_id,p.account_id);renderCaption();throw new Error(`${m.material_name || p.material_id} → ${a?.display_name || p.account_id}：${reason}`);}}
+    for(const p of rows){const a=P.account(p.account_id),m=material(p.material_id),reason=P.reason(a)||(!sameLanguage(a.language,m.language)?"剧语言不匹配":"")||P.templateError(p.caption_template);if(reason){active=key(p.material_id,p.account_id);renderCaption();throw new Error(`${m.material_name || p.material_id} → ${a?.display_name || p.account_id}：${reason}`);}}
     const schedules={};for(const mid of selected.keys()){const local=times[mid] || "",stamp=local?P.parseTime(local):null;if(local&&(!Number.isFinite(stamp)||stamp<=Date.now()))throw new Error(`素材 ${mid} 请选择未来的北京时间，或留空立即发布。`);schedules[mid]=local?new Date(stamp).toISOString():null;}
     return {idempotency_key:operation,source:"manual",material_ids:[...selected.keys()],account_ids:candidateIds,pairs:rows,material_schedules:schedules,processing_mode:processing};
   }
