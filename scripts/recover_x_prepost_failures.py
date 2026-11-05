@@ -53,7 +53,7 @@ def snapshot(c, n, queue_id, stage, days, now):
     require(len(logs) == 1, 'one_native_log_required'); log = logs[0]
     require(log['status'] == 'failed' and not any(log[k] for k in ('unknown_outcome', 'x_post_id', 'x_media_id', 'published_at')),
             'unknown_or_published_native_result')
-    codes = KNOWN_CODES | ({'cos_upload_failed'} if stage == 'prepare' else set())
+    codes = KNOWN_CODES | ({'cos_upload_failed', 'artifact_upload_incomplete'} if stage == 'prepare' else set())
     require(log['error_code'] in codes, 'native_failure_not_recoverable')
     require(log['attempt_count'] == 0 if stage == 'prepare' else log['attempt_count'] >= 0, 'prepare_has_publish_attempt')
     for table, col in [('pipeline_canonical_hold', 'source_key'), ('x_post_repost_ledger', 'queue_id')]:

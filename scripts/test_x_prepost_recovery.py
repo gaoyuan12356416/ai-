@@ -171,6 +171,9 @@ class PrepostRecoveryTests(unittest.TestCase):
     def test_cos_failure_before_x_reuses_same_queue_and_frozen_request(self):
         self._prepare_recovery('cos_upload_failed')
 
+    def test_missing_qualified_artifact_before_x_reuses_original_request(self):
+        self._prepare_recovery('artifact_upload_incomplete')
+
     def _prepare_recovery(self, error_code):
         q = self.queue(identity=3, auto=True, random=True)
         self.store.offer(self.adapter.project(self.adapter.read(q['id'])))
