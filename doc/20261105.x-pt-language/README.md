@@ -32,3 +32,28 @@ Code-only rollback: run `--phase rollback --folder <backup>` then
 abandoned, use `--phase abort --folder <backup>` to restore admissions.
 Rollback never restores databases, tokens or publication facts. Backup folder
 `manifest.json` records exact source commit, paths, hashes and lifecycle state.
+
+## Production receipt (2026-11-05, Beijing)
+
+- Deployed commit: `85b4a083eecbc9eff4f131fc0b5a86dae4fd8102`.
+- Host: `43.166.187.96`; source: `/mnt/data-disk/x-pt-language-20261105/source`.
+- Updated main root `/root/drama_material_service`, active X runtime
+  `/opt/x-post-automation/current`, and public `/usr/share/nginx/html`.
+- Backup: `/mnt/data-disk/x-post-automation/backups/20261105T072232Z-pt-85b4a083`.
+- No running X jobs or active X callers at cutover. Main API, X Sidecar and
+  dependent Auto service healthy; prior trigger and X admission states restored.
+- Exact live Portuguese material query with the `pt-br` filter returned its
+  original `pt` source tag; comparison with the reported account passed.
+- Public HTML/JS hashes match deployed source. Token hashes unchanged.
+- Eleven Python checks also passed on production Linux. No test batch or Post.
+
+Rollback, preserving all current publication data:
+
+```sh
+cd /mnt/data-disk/x-pt-language-20261105/source
+python3 scripts/deploy_x_pt_language.py --phase rollback --folder /mnt/data-disk/x-post-automation/backups/20261105T072232Z-pt-85b4a083
+python3 scripts/deploy_x_pt_language.py --phase switch --folder /mnt/data-disk/x-post-automation/backups/20261105T072232Z-pt-85b4a083
+```
+
+If switch reports `waiting`, let the affected work finish before repeating
+the switch command; do not terminate tasks or clear leases.
