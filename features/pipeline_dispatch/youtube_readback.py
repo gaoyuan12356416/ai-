@@ -1,6 +1,61 @@
 """Owner-authenticated recovery of an existing video, with no platform writes."""
 import json
+import requests
 from features.drama_synthesis.core import utc_now, _video_sync_payload
+
+
+def find_existing_comment(bridge, task):
+    """Recover an owner comment receipt before a delayed first-comment write."""
+    credential = bridge.workflow.channel_directory.repository.credential(
+        app_id=task['app_id'], channel_local_id=task['channel_local_id'],
+        account_id=task['youtube_account_id'], expected_channel_id=task['channel_id'])
+    token = bridge.client.refresh_access_token(credential)
+    bridge.client.verify_channel_identity(token, task['channel_id'])
+    with requests.Session() as http:
+        http.trust_env = False
+        for moderation in ('published', 'heldForReview'):
+            page = ''
+            matches = []
+            for _ in range(10):
+                response = http.get('https://www.googleapis.com/youtube/v3/commentThreads',
+                    params={'part':'snippet','videoId':task['video_id'],'maxResults':100,
+                            'pageToken':page,'textFormat':'plainText','moderationStatus':moderation},
+                    headers={'Authorization':'Bearer '+token},timeout=30,allow_redirects=False)
+                if response.status_code != 200:
+                    raise RuntimeError('youtube_comment_readback_unavailable')
+                payload = response.json()
+                for item in payload.get('items', []):
+                    comment = item.get('snippet', {}).get('topLevelComment', {})
+                    snippet = comment.get('snippet', {})
+                    if (item.get('snippet', {}).get('videoId') == task['video_id']
+                            and snippet.get('authorChannelId', {}).get('value') == task['channel_id']
+                            and snippet.get('textOriginal', '').strip() == task['comment_text'].strip()
+                            and comment.get('id')):
+                        matches.append({'id':comment['id'],'published_at':snippet.get('publishedAt') or utc_now(),'moderation':moderation})
+                page = payload.get('nextPageToken', '')
+                if not page:break
+            if page:raise RuntimeError('youtube_comment_readback_incomplete')
+            if matches:return min(matches,key=lambda x:(x['published_at'],x['id']))
+    return None
+
+
+def reconcile_comment(bridge, task):
+    if not comment_continuation(task):return task
+    receipt = find_existing_comment(bridge, task)
+    if not receipt:return task
+    from features.drama_synthesis.core import _comment_sync_payload
+    with bridge.workflow.db(True) as conn:
+        current = dict(conn.execute('SELECT * FROM drama_youtube_publish WHERE id=?',(task['id'],)).fetchone())
+        if current != task:return current
+        published = receipt['moderation'] == 'published'
+        conn.execute("UPDATE drama_youtube_publish SET comment_id=?,comment_status=?,reviewed_phase=?,unknown_outcome=?,error_code=?,comment_published_at_utc=?,updated_at_utc=? WHERE id=?",
+                     (receipt['id'],'published' if published else 'unknown','complete' if published else 'comment',int(not published),'' if published else 'youtube_existing_comment_held',receipt['published_at'] if published else '',utc_now(),task['id']))
+        if published:
+            payload=json.dumps(_comment_sync_payload(task,receipt['id'],receipt['published_at']),ensure_ascii=False,sort_keys=True)
+            conn.execute("INSERT OR IGNORE INTO drama_youtube_sync_outbox(publish_id,entity_kind,external_id,payload_json,status,created_at_utc,updated_at_utc) VALUES(?,?,?,?,?,?,?)",(task['id'],'comment',receipt['id'],payload,'pending',utc_now(),utc_now()))
+        conn.execute('INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)',
+                     (task['id'],'comment_readback',receipt['moderation'],json.dumps(receipt),utc_now()))
+    return bridge.store.youtube_task(task['id'])
 
 
 def reconcile_video(bridge, task):

@@ -103,10 +103,35 @@ class ReadbackTests(unittest.TestCase):
         self.addCleanup(self.f.doCleanups);self.addCleanup(self.f.tearDown)
         self.proof={'state':'succeeded','visibility':'public','preserved_status':{'privacyStatus':'public'},'published_at':'2026-11-05T00:00:13Z'}
         self.f.bridge.client.read_reviewed_video_state=Mock(return_value=self.proof)
+        lookup=patch('features.pipeline_dispatch.youtube_readback.find_existing_comment',return_value=None)
+        self.comment_lookup=lookup.start();self.addCleanup(lookup.stop)
         with self.f.workflow.db(True) as c:
             c.execute("UPDATE drama_youtube_publish SET status='unknown',video_state='unknown',video_id='video_123',video_attempt_count=1,thumbnail_status='succeeded',processing_status='succeeded',public_status='running',reviewed_phase='public',unknown_outcome=1,error_code='youtube_visibility_unconfirmed',lease_owner='',lease_expires_at_utc='' WHERE id=?",(self.f.task['id'],))
 
     def task(self):return self.f.store.youtube_task(self.f.task['id'])
+
+    def test_existing_comment_is_adopted_without_new_write(self):
+        self.comment_lookup.return_value={'id':'original_comment','published_at':'2026-11-05T00:20:00Z','moderation':'published'}
+        result=self.f.bridge.reconcile(dict(self.f.job,status='unknown'))
+        self.assertEqual(self.task()['comment_id'],'original_comment')
+        self.assertEqual(self.task()['comment_attempt_count'],0)
+        self.assertNotIn('continuation',result)
+        self.assertEqual(self.task()['reviewed_phase'],'complete')
+
+    def test_comment_read_failure_cannot_bypass_lookup_on_next_reconcile(self):
+        self.comment_lookup.side_effect=RuntimeError('youtube_comment_readback_unavailable')
+        for _ in range(2):
+            with self.assertRaises(RuntimeError):self.f.bridge.reconcile(dict(self.f.job,status='unknown'))
+        self.assertEqual(self.comment_lookup.call_count,2)
+        self.assertEqual(self.task()['video_state'],'published')
+        self.assertEqual(self.task()['comment_attempt_count'],0)
+
+    def test_existing_held_comment_stays_local_without_another_post(self):
+        self.comment_lookup.return_value={'id':'held_comment','published_at':'2026-11-05T00:20:00Z','moderation':'heldForReview'}
+        result=self.f.bridge.reconcile(dict(self.f.job,status='unknown'))
+        self.assertEqual(self.task()['comment_status'],'unknown')
+        self.assertEqual(self.task()['video_state'],'published')
+        self.assertNotIn('continuation',result)
 
     def test_public_readback_preserves_video_and_enables_only_unattempted_comment(self):
         f=self.f;result=f.bridge.reconcile(dict(f.job,status='unknown'))

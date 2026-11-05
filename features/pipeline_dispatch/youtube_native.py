@@ -561,6 +561,9 @@ class YouTubeNativeBridge:
                 self._video_readback_after[task["id"]] = time.monotonic() + 60
                 from .youtube_readback import reconcile_video
                 task = reconcile_video(self, task)
+            if job.get("status") in {"unknown", "completed"}:
+                from .youtube_readback import reconcile_comment
+                task = reconcile_comment(self, task)
         result = {key: task.get(key) for key in ("status", "video_id", "comment_id", "unknown_outcome", "schedule_status", "schedule_command_status")}
         from .youtube_readback import comment_continuation
         comment = comment_continuation(task)
