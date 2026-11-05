@@ -166,11 +166,17 @@ class PrepostRecoveryTests(unittest.TestCase):
             recovery.make_plan(self.central, self.runtime.POST_DB_PATH, [self.q['id']], 'publish', ['2020-01-01'], self.now)
 
     def test_zero_attempt_preparation_reuses_frozen_request(self):
+        self._prepare_recovery('media_download_failed')
+
+    def test_cos_failure_before_x_reuses_same_queue_and_frozen_request(self):
+        self._prepare_recovery('cos_upload_failed')
+
+    def _prepare_recovery(self, error_code):
         q = self.queue(identity=3, auto=True, random=True)
         self.store.offer(self.adapter.project(self.adapter.read(q['id'])))
         prep = self.claim('prepare')
         desc = self.bridge.reserve(prep, prep)
-        failure = {'error_code': 'media_download_failed', 'unknown_outcome': False}
+        failure = {'error_code': error_code, 'unknown_outcome': False}
         result = self.bridge.fail(prep, prep, failure)
         self.store.fail(prep, failure['error_code'], canonical_no_write=result['canonical_no_write'])
         key = self.outboxes['cpu-main'].put('jobs/fail', dict(failure, job_id=prep['id'], generation=prep['generation']))

@@ -53,14 +53,15 @@ def snapshot(c, n, queue_id, stage, days, now):
     require(len(logs) == 1, 'one_native_log_required'); log = logs[0]
     require(log['status'] == 'failed' and not any(log[k] for k in ('unknown_outcome', 'x_post_id', 'x_media_id', 'published_at')),
             'unknown_or_published_native_result')
-    require(log['error_code'] in KNOWN_CODES, 'native_failure_not_recoverable')
+    codes = KNOWN_CODES | ({'cos_upload_failed'} if stage == 'prepare' else set())
+    require(log['error_code'] in codes, 'native_failure_not_recoverable')
     require(log['attempt_count'] == 0 if stage == 'prepare' else log['attempt_count'] >= 0, 'prepare_has_publish_attempt')
     for table, col in [('pipeline_canonical_hold', 'source_key'), ('x_post_repost_ledger', 'queue_id')]:
         require(not n.execute('SELECT 1 FROM '+table+' WHERE '+col+'=?', (key if col=='source_key' else queue_id,)).fetchone(), 'native_hold_or_relay')
     jobs = rows(c, 'SELECT * FROM pipeline_job WHERE source_key=? ORDER BY stage', (key,))
     chosen = [j for j in jobs if j['stage'] == stage]
     require(len(chosen) == 1, 'dispatch_job_missing'); job = chosen[0]
-    require(job['status'] == 'failed' and job['generation'] > 0 and job['error_code'] in KNOWN_CODES
+    require(job['status'] == 'failed' and job['generation'] > 0 and job['error_code'] in codes
             and not job['hold_reason'] and not job['canonical_receipt'], 'dispatch_not_known_failure')
     original = date(json.loads(job['source_meta_json']).get('cutover_due_at') or job['scheduled_at'])
     require((original + dt.timedelta(hours=8)).date().isoformat() in days, 'outside_authorized_dates')
