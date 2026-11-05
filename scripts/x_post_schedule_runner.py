@@ -1423,6 +1423,7 @@ def _verify_accounts(sidecar, account_ids, *, skip_blocked=False, skipped_accoun
                 "x_token_revoked", "x_token_missing", "x_token_invalid",
                 "x_identity_mismatch",
                 "x_account_suspended",
+                "x_account_verification_rejected",
             }:
                 raise
             skipped.append({"account_id": int(account_id), "error_code": exc.code, "message": str(exc)})

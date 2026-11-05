@@ -2625,6 +2625,23 @@ class ScheduleRunnerTests(unittest.TestCase):
                 self.assertEqual(payload["account_ids"], [13])
                 self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [101])
 
+    def test_verification_400_skips_only_rejected_account(self):
+        for source_type in ("material", "drama"):
+            with self.subTest(source_type=source_type):
+                sidecar = FakeSidecar([due_item(source_type=source_type, accounts=[11, 12, 13])])
+                original_verify = sidecar.verify_account
+                def verify(account_id):
+                    account = original_verify(account_id)
+                    if account_id == 12:
+                        raise SidecarError("x_account_verification_rejected", "HTTP 400 invalid_request", 409)
+                    return account
+                with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+                    result = self.execute(sidecar)
+                self.assertEqual(result["status"], "published")
+                payload = next(call[2] for call in sidecar.calls if call[0] == "create")
+                self.assertEqual(payload["account_ids"], [11, 13])
+                self.assertEqual(result["batches"][0]["skipped_accounts"][0]["account_id"], 12)
+
     def test_second_verification_new_hold_rebuilds_healthy_candidates(self):
         sidecar = FakeSidecar([due_item()])
         original_verify = sidecar.verify_account

@@ -41,6 +41,7 @@ from features.x_accounts.language import (  # noqa: E402
     same_drama_language,
 )
 from features.x_posts import duration_policy as duration_rules
+from features.x_posts.account_limits import MAX_PUBLISH_ACCOUNTS
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES, video_byte_limit
 from features.x_posts.service import (  # noqa: E402
     DEFAULT_SHORT_BASE_URL,
@@ -73,7 +74,7 @@ REPAIRABLE_MEDIA_CODES = frozenset(
     }
 )
 DEFAULT_REPAIR_PROFILE = "x-h264-nvenc-720-duration-policy-v5"
-MAX_DAILY_ACCOUNTS = 50
+MAX_DAILY_ACCOUNTS = MAX_PUBLISH_ACCOUNTS
 POSITIVE_REPAIR_MATERIAL_ID_RE = re.compile(r"\A[1-9][0-9]{0,30}\Z")
 DRAMA_RESOURCE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 

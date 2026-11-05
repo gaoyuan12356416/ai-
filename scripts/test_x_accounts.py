@@ -119,16 +119,18 @@ class XAccountsTestCase(unittest.TestCase):
         )
         self.assertNotIn("internal_only", result["run"])
 
-    def test_daily_account_scope_accepts_one_and_fifty_but_rejects_invalid_scope(self):
+    def test_daily_account_scope_accepts_current_limit_but_rejects_invalid_scope(self):
         self.assertEqual(service._daily_account_scope((7,)), (7,))
         fifty = tuple(range(1, 51))
         self.assertEqual(service._daily_account_scope(fifty), fifty)
+        maximum = tuple(range(1, service.MAX_DAILY_ACCOUNTS + 1))
+        self.assertEqual(service._daily_account_scope(maximum), maximum)
         for values in (
             (),
             (1, 1),
             (0,),
             (-1,),
-            tuple(range(1, 52)),
+            tuple(range(1, service.MAX_DAILY_ACCOUNTS + 2)),
         ):
             with self.subTest(values=values), self.assertRaises(service.ServiceError):
                 service._daily_account_scope(values)
@@ -1271,6 +1273,47 @@ class XAccountsTestCase(unittest.TestCase):
                 with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
                     conn.execute("DELETE FROM x_authorized_account")
                     conn.commit()
+
+    def test_explicit_invalid_request_is_local_and_successful_verify_clears_capacity_hold(self):
+        from features.x_posts.service import XPostStore
+        store = XPostStore(service.POST_DB_PATH)
+        for index, stage in enumerate(("读取账号身份", "刷新账号授权")):
+            with self.subTest(stage=stage):
+                item = self.complete(x_user_id=str(123456780 + index))
+                if index:
+                    with contextlib.closing(sqlite3.connect(service.DB_PATH)) as conn:
+                        conn.execute("UPDATE x_authorized_account SET access_expires_at='2000-01-01T00:00:00Z' WHERE id=?", (item["id"],))
+                        conn.commit()
+                before_token = service.token_path(item["x_user_id"]).read_bytes()
+                error = urllib.error.HTTPError(service.USERS_ME_URL, 400, "Bad Request", {},
+                    io.BytesIO(b'{"error":"invalid_request","error_description":"access-secret"}'))
+                with mock.patch.object(service._NO_REDIRECT_OPENER, "open", side_effect=error):
+                    with self.assertRaises(service.ServiceError) as rejected:
+                        service.verify_account(item["id"], self.owner, preserve_transient_status=True)
+                self.assertEqual((rejected.exception.code, rejected.exception.status), (service.ACCOUNT_VERIFY_REJECTED, 409))
+                self.assertIn(stage, str(rejected.exception))
+                self.assertNotIn("access-secret", str(rejected.exception))
+                self.assertEqual(service.find_account(item["id"])["status"], "active")
+                self.assertEqual(service.token_path(item["x_user_id"]).read_bytes(), before_token)
+                self.assertEqual(store.schedule_account_blockers([item["id"]])[item["id"]]["code"], service.ACCOUNT_VERIFY_REJECTED)
+                profile = {"data": {"id": item["x_user_id"], "username": "recovered"}}
+                refreshed = {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 7200, "scope": " ".join(service.SCOPES)}
+                # The real schedule endpoint must not turn its temporary
+                # planning exclusion into a permanent verification lock.
+                server = service.ThreadingHTTPServer(("127.0.0.1", 0), service.Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        "http://127.0.0.1:%s/internal/posts/accounts/%s/verify" % (server.server_address[1], item["id"]),
+                        data=json.dumps({"schedule_preflight": True, "preserve_transient_status": True}).encode(),
+                        headers={"Authorization": "Bearer " + service.INTERNAL_TOKEN, "Content-Type": "application/json"})
+                    with mock.patch.object(service, "user_request", return_value=profile), mock.patch.object(service, "token_request", return_value=refreshed):
+                        with urllib.request.urlopen(request) as response:
+                            self.assertEqual(response.status, 200)
+                finally:
+                    server.shutdown(); server.server_close(); thread.join()
+                self.assertEqual(store.schedule_account_blockers([item["id"]]), {})
 
     def test_expired_access_token_refreshes_and_rotates_refresh_token(self):
         item = self.complete()

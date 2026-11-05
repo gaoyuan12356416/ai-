@@ -1645,6 +1645,34 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
             "x_post_pool_fifo_conflict",
         )
 
+    def test_manual_reserved_newest_material_does_not_block_two_healthy_slots(self):
+        self.save_schedule("material", [2], ["09:00", "10:00"])
+        oldest, newer, held = self.add_snapshot_materials(["201", "202", "203"])
+        manual = self.store.create_manual_run(["203"], [4], "held-newest",
+            actor={"user_id": "admin-1", "name": "Admin"})
+        self.assertEqual([r["material_id"] for r in self.store.available_pool_items(10)], ["202", "201"])
+        for time, pool in [("09:00", newer), ("10:00", oldest)]:
+            plan = self.store.create_schedule_plan("material", "2026-07-27", time, 2,
+                [self.material_candidate(pool, 2)])
+            replay = self.store.create_schedule_plan("material", "2026-07-27", time, 2,
+                [self.material_candidate(pool, 2)])
+            self.assertEqual(plan["queues"][0]["id"], replay["queues"][0]["id"])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT state FROM x_post_manual_material_reservation WHERE manual_run_id=?", (manual["id"],)).fetchone()[0], "active")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue WHERE material_key='203'").fetchone()[0], 0)
+
+    def test_schedule_cannot_take_a_manually_reserved_candidate(self):
+        self.save_schedule("material", [2], ["09:00"])
+        held = self.add_snapshot_materials(["201"])[0]
+        self.store.create_manual_run(["201"], [4], "held-target",
+            actor={"user_id": "admin-1", "name": "Admin"})
+        with self.assertRaises(service.XPostError):
+            self.store.create_schedule_plan("material", "2026-07-27", "09:00", 2,
+                [self.material_candidate(held, 2)])
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_queue").fetchone()[0], 0)
+
     def snapshot_identity(self):
         return {
             "source_type": "material", "run_date": "2026-07-27",

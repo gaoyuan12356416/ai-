@@ -13104,6 +13104,8 @@ class XPostStore:
                     "WHERE q.pool_item_id=p.id "
                     "OR q.material_key=p.material_key"
                     ") "
+                    "AND NOT EXISTS(SELECT 1 FROM x_post_manual_material_reservation r "
+                    "WHERE r.material_key=p.material_key AND r.state='active') "
                     "ORDER BY p.created_at DESC,p.id DESC LIMIT 1000"
                     % (
                         _NONBLOCKING_MATERIAL_VALIDATION_SQL,
