@@ -80,9 +80,13 @@ def classify(conn, row, now):
     return "waiting", ""
 
 
-def add_summary(conn, scope, args, by, totals, common, now):
+def add_summary(conn, scope, args, by, totals, common, now, start, end):
+    # Collector updated_at is observation time, not an anomaly occurrence time.
+    # Use the outcome timestamp, then the original task's execution/plan dates.
+    anomaly_time = "COALESCE(NULLIF(j.finished_at,''),NULLIF(j.started_at,''),NULLIF(j.scheduled_at,''),NULLIF(j.source_created_at,''))"
     rows = conn.execute("SELECT j.id,j.channel,j.stage,j.status,j.hold_reason,j.scheduled_at,"
-                        "j.resource_keys_json,j.node_id,j.worker_id,j.generation,j.lease_expires_at "
+                        "j.resource_keys_json,j.node_id,j.worker_id,j.generation,j.lease_expires_at,"
+                        + anomaly_time + " anomaly_at "
                         "FROM pipeline_job j WHERE " + scope +
                         " AND j.status IN ('queued','ready','running','legacy_running') "
                         "AND j.hold_reason<>'metadata_only' LIMIT ?", args + [LIMIT + 1]).fetchall()
@@ -91,26 +95,20 @@ def add_summary(conn, scope, args, by, totals, common, now):
         item.update({k: 0 if known else None for k in KEYS})
         item["abnormal_reasons"] = {}
         item["oldest_pending_seconds"] = None
-        if known:
-            for reason, field in (("failed", "failed"), ("unknown", "unknown")):
-                count = item[field] or 0
-                item["abnormal"] += count
-                if count:
-                    item["abnormal_reasons"][reason] = count
-    # Unresolved failure remains visible after midnight; a later publication or
-    # explicit native closure removes it from backlog without changing the task.
-    failures = conn.execute("SELECT j.channel,j.stage,j.error_code,COUNT(*) n FROM pipeline_job j WHERE " + scope +
-        " AND j.status='failed' AND j.hold_reason<>'metadata_only' AND j.source_status NOT IN ('skipped','cancelled','canceled','abandoned','duplicate','no_candidate')"
-        " AND NOT EXISTS (SELECT 1 FROM pipeline_publication p WHERE p.source_key=j.source_key) GROUP BY j.channel,j.stage,j.error_code", args).fetchall()
-    for item in by.values():
-        if item['abnormal'] is not None:
-            item['abnormal'] -= item['abnormal_reasons'].pop('failed', 0)
+    # Keep receipt/closure semantics, including unresolved post-publication
+    # comments, while scoping both counts and their reason details to the window.
+    outcomes = conn.execute("SELECT j.channel,j.stage,j.status,j.error_code,COUNT(*) n FROM pipeline_job j WHERE " + scope +
+        " AND j.status IN ('failed','unknown') AND j.hold_reason<>'metadata_only'"
+        " AND (j.status='unknown' OR (j.source_status NOT IN ('skipped','cancelled','canceled','abandoned','duplicate','no_candidate')"
+        " AND NOT EXISTS (SELECT 1 FROM pipeline_publication p WHERE p.source_key=j.source_key)))"
+        " AND " + anomaly_time + ">=? AND " + anomaly_time + "<=?"
+        " GROUP BY j.channel,j.stage,j.status,j.error_code", args + [start, end]).fetchall()
     from features.post_daily_report.accounting import reason_label
-    for failure in failures:
-        item = by[(failure['channel'], failure['stage'])]
-        item['abnormal'] = (item['abnormal'] or 0) + failure['n']
-        code = failure['error_code'] or 'failed'
-        item['abnormal_reasons'][code] = item['abnormal_reasons'].get(code, 0) + failure['n']
+    for outcome in outcomes:
+        item = by[(outcome['channel'], outcome['stage'])]
+        item['abnormal'] = (item['abnormal'] or 0) + outcome['n']
+        code = 'unknown' if outcome['status'] == 'unknown' else outcome['error_code'] or 'failed'
+        item['abnormal_reasons'][code] = item['abnormal_reasons'].get(code, 0) + outcome['n']
     if len(rows) > LIMIT:
         for item in by.values():
             item.update({key: None for key in KEYS})
@@ -118,9 +116,14 @@ def add_summary(conn, scope, args, by, totals, common, now):
         totals.update({key: None for key in KEYS})
         common["warnings"].append("任务状态分类超过读取上限，四类计数暂不可用；未以部分数据代替总数")
         return
+    begin, finish = _time(start), _time(end)
     for row in rows:
         item = by[(row["channel"], row["stage"])]
         state, reason = classify(conn, row, now)
+        if state == "abnormal":
+            occurred = _time(row["anomaly_at"])
+            if occurred is None or not begin <= occurred <= finish:
+                continue
         item[state] = (item[state] or 0) + 1
         if reason:
             item["abnormal_reasons"][reason] = item["abnormal_reasons"].get(reason, 0) + 1

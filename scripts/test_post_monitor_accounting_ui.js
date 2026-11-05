@@ -34,6 +34,13 @@ const server=http.createServer((req,res)=>{
   releaseTasks();await page.waitForFunction(()=>document.querySelector('#pmTaskRows').textContent.includes('原任务领取被拒绝'));
   assert.match(await page.locator('#pmTaskRows').innerText(),/受阻[\s\S]*原状态 failed[\s\S]*原任务领取被拒绝/);
   assert.match(await page.locator('#pmChannelRows').innerText(),/领取被拒绝/);
+  assert.equal(await page.locator('th[data-column="abnormal"]').innerText(),'范围内异常');
+  assert.match(await page.locator('#pmQueueNote').innerText(),/所选统计范围内/);
+  sample.channels[0].abnormal=3;sample.channels[0].abnormal_reasons={canonical_task_not_claimable:3};sample.totals.abnormal=3;
+  await page.locator('#pmWindow').selectOption('hour');
+  await page.waitForFunction(()=>document.querySelector('[data-stat-key="abnormal"] .pm-stat-value').textContent==='3');
+  assert.match(await page.locator('#pmChannelRows td[data-column="abnormal"]').innerText(),/^3\s*原任务领取被拒绝 3$/);
+  assert.equal(await page.locator('#pmBacklog').count(),0);
   assert.match(await page.locator('#pmTotals').innerText(),/待执行\s*0/);
   fs.mkdirSync(output,{recursive:true});await page.screenshot({path:path.join(output,'monitor.png'),fullPage:true});
   sample.backlog.unfinished=null;sample.backlog.unqueued=null;sample.backlog.channels[0].unqueued=null;

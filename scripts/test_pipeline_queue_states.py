@@ -57,10 +57,10 @@ class QueueStatesTests(unittest.TestCase):
         result = self.summary()
         self.assertEqual(result['queue_state_version'], 1)
         self.assertEqual({k: result['totals'][k] for k in queue_states.KEYS},
-                         dict(waiting=2, executing=2, scheduled=2, abnormal=4))
+                         dict(waiting=2, executing=2, scheduled=2, abnormal=3))
         row = result['channels'][0]
         self.assertEqual(row['oldest_pending_seconds'], 3600)
-        self.assertEqual(row['abnormal_reasons'], dict(held=1, failed=2, unknown=1))
+        self.assertEqual(row['abnormal_reasons'], dict(held=1, failed=1, unknown=1))
         self.assertEqual(result['totals']['backlog_paused'], 1)
 
     def test_unknown_account_blocker_does_not_leak_other_owner(self):
@@ -76,6 +76,56 @@ class QueueStatesTests(unittest.TestCase):
         self.assertEqual(result['totals']['unknown'], 0)
         self.assertNotIn('secret-bob-key', json.dumps(result))
         self.assertNotIn('shared-account', json.dumps(result))
+
+    def test_all_windows_channels_and_stages_exclude_refreshed_history(self):
+        self.actor.update(is_admin=True, allowed_channels=['x', 'fb', 'tt', 'youtube'])
+        times = [self.now - dt.timedelta(days=2), self.now - dt.timedelta(hours=12),
+                 self.now - dt.timedelta(hours=2), self.now - dt.timedelta(minutes=15)]
+        for channel in self.actor['allowed_channels']:
+            for stage in ('prepare', 'publish'):
+                for index, occurred in enumerate(times):
+                    for status in ('failed', 'unknown', 'queued'):
+                        self.job(f'{channel}-{stage}-{status}-{index}', status,
+                                 channel=channel, stage=stage, scheduled_at=stamp(occurred),
+                                 source_created_at=stamp(occurred), updated_at=stamp(self.now),
+                                 finished_at=stamp(occurred) if status == 'failed' else '',
+                                 hold_reason='adapter_unavailable' if status == 'queued' else '')
+        for window, expected in [('hour', 3), ('today', 6), ('day', 9), ('week', 12)]:
+            result = views.query(self.store, 'summary', self.actor, {'window': window})
+            self.assertEqual(result['totals']['abnormal'], expected * 8)
+            for row in result['channels']:
+                self.assertEqual(row['abnormal'], expected)
+                self.assertEqual(sum(row['abnormal_reasons'].values()), expected)
+        scoped = views.query(self.store, 'summary', self.actor, {'window': 'hour', 'channel': 'fb'})
+        self.assertEqual(scoped['totals']['abnormal'], 6)
+        self.assertEqual({r['channel'] for r in scoped['channels']}, {'fb'})
+
+    def test_beijing_midnight_and_inclusive_window_boundaries(self):
+        start, end = views._window({'window': 'today'}, self.now)
+        midnight = dt.datetime(2026, 11, 3, 16, tzinfo=dt.timezone.utc)
+        self.assertEqual(start, stamp(midnight))
+        for name, occurred in [('before', midnight-dt.timedelta(milliseconds=1)),
+                               ('start', midnight), ('end', self.now),
+                               ('after', self.now+dt.timedelta(milliseconds=1))]:
+            self.job(name, 'failed', finished_at=stamp(occurred))
+        self.assertEqual(self.summary()['totals']['abnormal'], 2)
+
+    def test_original_time_fallback_and_confirmed_or_closed_failures(self):
+        old = stamp(self.now-dt.timedelta(days=2))
+        current = stamp(self.now-dt.timedelta(minutes=10))
+        self.job('recent-result', 'failed', finished_at=current, started_at=old, scheduled_at=old)
+        self.job('recent-start', 'unknown', started_at=current, scheduled_at=old)
+        self.job('original-created', scheduled_at='', source_created_at=current, hold_reason='held')
+        self.job('no-time', scheduled_at='', source_created_at='', hold_reason='held')
+        self.job('closed', 'failed', finished_at=current, source_status='cancelled')
+        failed = self.job('confirmed', 'failed', stage='publish', finished_at=current)
+        unknown = self.job('comment-unknown', 'unknown', stage='publish', started_at=current)
+        for job, key in [(failed, 'confirmed'), (unknown, 'comment-unknown')]:
+            self.store.record_publication(job, {'source_key': key, 'publish_id': 'post-'+key,
+                                               'published_at': current}, canonical_verified=True)
+        result = self.summary()
+        self.assertEqual(result['totals']['abnormal'], 4)
+        self.assertEqual(result['channels'][1]['abnormal_reasons'], {'unknown': 1})
 
     def test_normal_account_lock_is_pending_but_legacy_unknown_is_abnormal(self):
         blocker = self.job('other', 'running', owner_user_id='bob')

@@ -40,7 +40,7 @@
     { key: "waiting", label: "待执行", cell: row => number(row.waiting) },
     { key: "executing", label: "执行中", cell: row => number(row.executing) },
     { key: "completed", label: "已完成", cell: row => `<strong>${number(row.completed)}</strong>` },
-    { key: "abnormal", label: "未解决异常", cell: row => `${number(row.abnormal)}${abnormalDetails(row)}` },
+    { key: "abnormal", label: "范围内异常", title: "仅统计所选时间范围内仍未解决的异常，原因明细采用相同范围", cell: row => `${number(row.abnormal)}${abnormalDetails(row)}` },
     { key: "throughput_per_hour", label: "吞吐", title: "最近 1 小时成功完成数（条/小时）", cell: row => number(row.throughput_per_hour) },
     { key: "avg_duration_seconds", label: "平均耗时", cell: row => duration(row.avg_duration_seconds) },
     { key: "oldest_pending_seconds", label: "最老等待", title: "已到期且待执行任务的最长等待时间", cell: row => `${duration(row.oldest_pending_seconds)}${row.backlog_paused ? `<small>历史暂停 ${number(row.backlog_paused)}</small>` : ""}` },
