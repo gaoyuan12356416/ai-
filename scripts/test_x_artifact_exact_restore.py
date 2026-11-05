@@ -1,7 +1,10 @@
 import copy
+import hashlib
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock
-from scripts.restore_x_random_artifact import exact_callback
+from scripts.restore_x_random_artifact import exact_callback, preserve_qualified
 
 class ExactArtifactTests(unittest.TestCase):
     def test_different_bytes_recipe_or_destination_never_upload(self):
@@ -18,3 +21,14 @@ class ExactArtifactTests(unittest.TestCase):
         journal=Mock();frozen={'result':{'output_sha256':'a'*64},'object_key':'original/a.mp4'}
         exact_callback(journal,frozen)(copy.deepcopy(frozen['result']),frozen['object_key'])
         journal.qualified.assert_called_once_with(frozen['result'],frozen['object_key'])
+
+    def test_only_verified_cache_survives_temporary_output_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            source=Path(root)/'render.mp4';source.write_bytes(b'qualified')
+            target=Path(root)/'cache'/'original.mp4'
+            expected={'output_sha256':hashlib.sha256(b'qualified').hexdigest(),'output_size':9}
+            preserve_qualified(source,target,expected);source.unlink()
+            self.assertEqual(target.read_bytes(),b'qualified')
+            source.write_bytes(b'changed')
+            with self.assertRaisesRegex(RuntimeError,'cached_bytes_differ'):preserve_qualified(source,target,expected)
+            self.assertEqual(target.read_bytes(),b'qualified')
