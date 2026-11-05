@@ -39,6 +39,11 @@ class YouTubeNativeBridge:
         self.client = client or ReviewedYouTubeHTTPClient()
         self._source_locks = weakref.WeakValueDictionary()
         self._source_locks_guard = threading.Lock()
+        # Reuse an already verified, short-lived access token only for reads in
+        # this exact claim. Every write still reloads current authorization.
+        self._read_tokens = {}
+        self._read_tokens_lock = threading.Lock()
+        self._video_readback_after = {}
         with workflow.db(True) as conn:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_youtube_claim(
@@ -75,6 +80,8 @@ class YouTubeNativeBridge:
     @staticmethod
     def _continuation_descriptor(task, continuation, control):
         descriptor = {"kind": "youtube_publish", "mode": "continuation", "continuation": dict(continuation), "account_resource": "youtube:channel:" + task["channel_id"], "request": {"video_id": task["video_id"], "channel_id": task["channel_id"], "comment_text": task["comment_text"], "comment_id": task["comment_id"], "publish_at": task["publish_at"]}}
+        if continuation.get("kind") == "comment":
+            descriptor["request"].update(comment_only=True, publish_at="")
         if control:
             descriptor["request"]["schedule_control"] = {"action": task["schedule_command"], "version": task["schedule_version"], "operation_id": task["schedule_operation_id"], "publish_at": task["publish_at"]}
         return descriptor
@@ -188,6 +195,10 @@ class YouTubeNativeBridge:
                     continuation = obj(job.get("payload")).get("continuation")
                     adopting = False
                     if continuation:
+                        from .youtube_readback import comment_continuation
+                        comment_only = continuation.get("kind") == "comment"
+                        if comment_only and (comment_continuation(task) != continuation or task["pipeline_dispatch_key"] != job["source_key"]):
+                            raise AdapterError("youtube_comment_continuation_not_claimable")
                         control = task["status"] == "schedule_pending" and task["schedule_status"] == "control_pending" and task["schedule_command_status"] == "pending"
                         if obj(job.get("payload")).get("adopt_existing_schedule") is True and not task["pipeline_dispatch_key"]:
                             verified = youtube_existing_schedule(task, allow_control=True)
@@ -195,7 +206,7 @@ class YouTubeNativeBridge:
                             if not verified or history or verified != continuation:
                                 raise AdapterError("youtube_existing_schedule_not_claimable")
                             adopting = True
-                        if (task["workflow"] != "reviewed_thumbnail" or task["unknown_outcome"]
+                        if not comment_only and (task["workflow"] != "reviewed_thumbnail" or task["unknown_outcome"]
                                 or (task["pipeline_dispatch_key"] != job["source_key"] and not adopting)
                                 or continuation.get("video_id") != task["video_id"] or not task["video_id"]
                                 or stamp(continuation.get("scheduled_at")) != stamp(task["schedule_confirmed_publish_at"])
@@ -252,7 +263,13 @@ class YouTubeNativeBridge:
             # Credential preparation is not a platform write. Do it before
             # recording upload/comment intent so a rejected credential cannot
             # strand a never-started video as an ambiguous upload.
-            for attempt in range(2):
+            cache_key=(job['source_key'],job['generation'],claim_hash(claim),task['channel_id'])
+            with self._read_tokens_lock:
+                cutoff=time.monotonic()
+                self._read_tokens={k:v for k,v in self._read_tokens.items() if v[0]>cutoff}
+                cached=self._read_tokens.get(cache_key) if name=='youtube_video_state' else None
+            token=cached[1] if cached else None
+            for attempt in range(0 if cached else 2):
                 try:
                     credential = self.workflow.channel_directory.repository.credential(app_id=task["app_id"], channel_local_id=task["channel_local_id"], account_id=task["youtube_account_id"], expected_channel_id=task["channel_id"])
                     if (task["workflow"] == "reviewed_thumbnail" and not reviewed_scope_eligible(credential.scopes)) or (task["workflow"] == "legacy" and not credential.capabilities["upload_eligible"]) or (task["comment_text"] and not credential.capabilities["comment_eligible"]):
@@ -268,6 +285,9 @@ class YouTubeNativeBridge:
                     if attempt or (not lookup_unavailable and code not in {"youtube_token_refresh_unavailable", "youtube_channel_identity_unavailable"}):
                         raise
                     time.sleep(1)
+            if not cached:
+                with self._read_tokens_lock:
+                    self._read_tokens[cache_key]=(time.monotonic()+90,token)
             # Slow credential reads may outlive native ownership. Recheck it
             # before granting any platform-write intent.
             task, native = self._owned(job, saved)
@@ -387,6 +407,9 @@ class YouTubeNativeBridge:
                     if receipt.get("visibility") not in {"private", "public"} or receipt.get("state") not in {"succeeded", "processing", "failed"}:
                         raise AdapterError("youtube_processing_receipt_invalid")
                     self.store.advance_reviewed_youtube(task["id"], "processing", processing_status="succeeded" if receipt["state"] == "succeeded" else "failed" if receipt["state"] == "failed" else "running", **native)
+                elif phase == "youtube_visibility_observation":
+                    with self.workflow.db(True) as conn:
+                        conn.execute("INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)", (task["id"], "visibility_readback", "unconfirmed", encode({"video_id": task["video_id"], "visibility": str(receipt.get("visibility") or "")[:20], "publish_at": str(receipt.get("publish_at") or "")[:40]}), utc_now()))
                 elif phase == "youtube_visibility":
                     confirmed = receipt.get("confirmed") or {}
                     if receipt.get("publish_at") != task["publish_at"] or confirmed.get("state") != "succeeded":
@@ -412,7 +435,12 @@ class YouTubeNativeBridge:
                     if descriptor.get("mode") != "continuation" or confirmed.get("state") != "succeeded":
                         raise AdapterError("youtube_schedule_unconfirmed")
                     control = descriptor["request"].get("schedule_control")
-                    if confirmed.get("visibility") == "public":
+                    if descriptor["request"].get("comment_only"):
+                        if confirmed.get("visibility") != "public" or task["video_state"] != "published" or task["comment_attempt_count"] or task["comment_id"]:
+                            raise AdapterError("youtube_comment_readback_unconfirmed")
+                        with self.workflow.db(True) as conn:
+                            conn.execute("UPDATE drama_youtube_publish SET comment_status='publishing',reviewed_phase='comment' WHERE id=? AND lease_owner=? AND lease_generation=?", (task["id"], native["worker_id"], native["lease_generation"]))
+                    elif confirmed.get("visibility") == "public":
                         expected_time = task["schedule_confirmed_publish_at"] if control and control["action"] != "immediate" else task["publish_at"] if not control else ""
                         if expected_time and expected_time > utc_now():
                             raise AdapterError("youtube_reviewed_early_public")
@@ -525,8 +553,19 @@ class YouTubeNativeBridge:
                 result["artifact"] = obj(receipt.get("artifact"))
                 result["preparation_completed"] = True
             return result
-        task = self.store.youtube_task(int(job["source_id"]))
+        with self._source_lock(job):
+            task = self.store.youtube_task(int(job["source_id"]))
+            # This path only GETs an existing video. A failed/absent read never
+            # creates a replacement upload or repeats a visibility write.
+            if job.get("status") in {"unknown", "completed"} and not task.get("lease_owner") and time.monotonic() >= self._video_readback_after.get(task["id"], 0):
+                self._video_readback_after[task["id"]] = time.monotonic() + 60
+                from .youtube_readback import reconcile_video
+                task = reconcile_video(self, task)
         result = {key: task.get(key) for key in ("status", "video_id", "comment_id", "unknown_outcome", "schedule_status", "schedule_command_status")}
+        from .youtube_readback import comment_continuation
+        comment = comment_continuation(task)
+        if comment:
+            result.update(dispatch_completed=True, continuation=comment)
         if task["status"] == "scheduled" and task["schedule_status"] == "armed" and task["video_id"] and not task["unknown_outcome"]:
             result.update(dispatch_completed=True, continuation={"video_id": task["video_id"], "scheduled_at": task["schedule_confirmed_publish_at"]})
         if task["status"] == "cancelled" and task["schedule_status"] == "cancelled" and task["schedule_command_status"] == "confirmed" and task["video_id"] and not task["unknown_outcome"]:
