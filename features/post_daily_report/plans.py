@@ -77,19 +77,25 @@ def _days(begin, cutoff, channel, unavailable):
 
 def _auto_slots(db, prefix, channel, runs, versions, cutoff, add, unavailable):
     existing = {(r['template_id'],r['template_version'],r['shanghai_date'],r.get('publish_time')) for r in runs if r.get('trigger_type') != 'manual'}
-    events = read_rows(db,prefix+'_event')
+    # Execution events can vastly outnumber template changes. Read and decode
+    # each relevant change once, rather than replaying every event per template.
+    history_by_template = defaultdict(list)
+    if prefix + '_event' in tables(db):
+        events = db.execute('SELECT event_type,details_json,created_at FROM ' + prefix +
+                            "_event WHERE event_type IN ('template_enabled','template_disabled','template_updated')")
+        for event in events:
+            detail = object_value(event['details_json'], {}) or {}
+            at = parse_time(event['created_at'])
+            if isinstance(detail, dict) and at:
+                history_by_template[str(detail.get('template_id'))].append((at, event['event_type'], detail))
+    for history in history_by_template.values():
+        history.sort(key=lambda x: x[0])
     random_plans={(p['template_id'],p['template_version'],p['shanghai_date']):object_value(p.get('publish_times_json'),[]) for p in read_rows(db,prefix+'_random_plan')}
     frozen={(v['template_id'],v['version']):v for v in read_rows(db,prefix+'_template_version')}
     for template in read_rows(db,prefix+'_template'):
-        history=[]
-        for event in events:
-            detail=object_value(event.get('details_json'), {}) or {}
-            at=parse_time(event.get('created_at'))
-            if str(detail.get('template_id'))==str(template['id']) and at and event.get('event_type') in {'template_enabled','template_disabled','template_updated'}:
-                history.append((at,event['event_type'],detail))
-        history.sort(key=lambda x:x[0])
+        history=history_by_template.get(str(template['id']), [])
         if not history:
-            unavailable(channel,'模板缺少历史启停，未建运行的计划数量未知');continue
+            unavailable(channel,f"模板 {template['id']} 缺少历史启停，未建运行的计划数量未知");continue
         for index,(begin,kind,detail) in enumerate(history):
             if kind!='template_enabled' or begin>=cutoff:continue
             finish=min(history[index+1][0],cutoff) if index+1<len(history) else cutoff

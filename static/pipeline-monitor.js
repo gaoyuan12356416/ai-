@@ -31,9 +31,10 @@
     if ($("pmBacklog")) renderBacklog(data.backlog);
   }
   function renderBacklog(data) {
-    if (!data?.available) { $("pmBacklog").innerHTML = '<p class="pm-muted">跨日期未完成数量未知，正在读取可核对的任务与计划。</p>'; return; }
+    if (!data?.available) { $("pmBacklog").innerHTML = '<p class="pm-muted">历史任务与计划正在核对，当前执行情况见上方监控。</p>'; return; }
     const count = value => value == null ? "未知" : number(value);
-    $("pmBacklog").innerHTML = `<div class="pm-section-head"><div><h2>跨日期未完成 ${count(data.unfinished)}</h2><p class="pm-muted">已有任务 ${count(data.instantiated_unfinished)} ＋ 未入队计划 ${count(data.unqueued)}。覆盖全部历史，不随上方完成统计时段清零；未来预约和已取消计划单列。一个发布目标只计一次，制作与发布阶段不重复累加。计划最近核对 ${e(time(data.plans_as_of))}。</p></div></div>` + (data.channels || []).map(row => `<article class="pm-backlog-channel"><h3>${e(CHANNELS[row.channel] || row.channel)} · 未完成 ${count(row.unfinished)}</h3><p>已有任务 ${count(row.instantiated_unfinished)} · 未入队计划 ${count(row.unqueued)}${row.unqueued == null ? `（已核实 ${number(row.known_unqueued)}）` : ""} · 未来预约 ${number(row.scheduled)} · 已关闭任务 ${number(row.closed)} · 已取消未入队计划 ${number(row.closed_unqueued)}</p><p>${["waiting", "executing", "blocked", "failed", "unknown", "paused"].map(key => `${STATES[key]} ${number(row.states?.[key] || 0)}`).join(" · ")}</p><details><summary>状态原因与未入队计划明细</summary>${(row.reasons || []).concat(row.plan_reasons || []).map(r => `<p>${e(r.reason)}：${number(r.count)}<small>${e(r.code)}</small></p>`).join("")}${(row.plan_sample || []).length ? '<p class="pm-muted">以下展示最多 20 个未入队目标；全部已计入汇总。</p>' + row.plan_sample.map(p => `<p>${e(p.plan_key)} · 账号 ${e(p.account_id || "待确定")} · ${e(time(p.due_at))}</p>`).join("") : ""}</details></article>`).join("") + (data.warnings || []).map(w => `<p class="pm-muted">${e(w)}</p>`).join("");
+    const date = value => value ? new Date(value).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }) : "—";
+    $("pmBacklog").innerHTML = `<div class="pm-section-head"><div><h2>历史未完成与计划缺口（跨日期）</h2><p>已记录未完成任务 ${count(data.instantiated_unfinished)} · 历史未入队计划 ${count(data.unqueued)} · 合计 ${count(data.unfinished)}</p><p class="pm-muted">依据本地任务、发布回执和冻结计划核对，包含历史失败与受阻，不代表当前可执行队列；未逐条向平台重新查询。一个发布目标只计一次，未来预约、取消和策略关闭单列，不随上方统计时段清零。任务核对 ${e(time(data.as_of))}，计划核对 ${e(time(data.plans_as_of))}。</p></div></div>` + (data.channels || []).map(row => `<article class="pm-backlog-channel"><h3>${e(CHANNELS[row.channel] || row.channel)} · 已记录未完成 ${count(row.instantiated_unfinished)}</h3><p>历史未入队计划 ${count(row.unqueued)}${row.unqueued == null ? `（已核实 ${number(row.known_unqueued)}，总量缺少证据）` : ""} · 任务与计划合计 ${count(row.unfinished)} · 未来预约 ${number(row.scheduled)} · 已关闭任务 ${number(row.closed)} · 已取消未入队计划 ${number(row.closed_unqueued)}</p>${row.plans_oldest_at ? `<p class="pm-muted">已核实计划缺口日期：${e(date(row.plans_oldest_at))} — ${e(date(row.plans_latest_at))}</p>` : ""}<p>${["waiting", "executing", "blocked", "failed", "unknown", "paused"].map(key => `${STATES[key]} ${number(row.states?.[key] || 0)}`).join(" · ")}</p><details><summary>状态原因与历史计划明细</summary>${(row.reasons || []).concat(row.plan_reasons || []).map(r => `<p>${e(r.reason)}：${number(r.count)}<small>${e(r.code)}</small></p>`).join("")}${(row.plan_sample || []).length ? '<p class="pm-muted">以下展示最多 20 个历史计划目标；全部已计入计划缺口。</p>' + row.plan_sample.map(p => `<p>${e(p.plan_key)} · 账号 ${e(p.account_id || "待确定")} · ${e(time(p.due_at))}</p>`).join("") : ""}</details></article>`).join("") + (data.warnings || []).map(w => `<p class="pm-muted">${e(w)}</p>`).join("");
   }
   function abnormalDetails(row) {
     const labels = { failed: "失败", unknown: "待核对", held: "暂停或限制", blocked_by_unknown: "等待异常账号核对", worker_offline: "执行器失联", repeated_claim: "反复领取未推进", schedule_missing: "预约时间缺失", identity_missing: "账号身份缺失" };
@@ -123,10 +124,13 @@
     loading = true; $("pmRefresh").disabled = true; const generation = requestGeneration;
     const requests = [["summary", filters(false), renderSummary], ["workers", filters(false), renderWorkers], ["tasks", filters(true), renderTasks]];
     try {
-      const results = await Promise.allSettled(requests.map(([view, query]) => api(`/api/pipeline-monitor/${view}?${query}`)));
+      const results = await Promise.allSettled(requests.map(([view, query, render]) => api(`/api/pipeline-monitor/${view}?${query}`).then(data => {
+        if (generation === requestGeneration) render(data);
+        return data;
+      })));
       if (generation !== requestGeneration) { queuedRefresh = true; return; }
       const errors = [];
-      results.forEach((result, index) => { if (result.status === "fulfilled") requests[index][2](result.value); else errors.push(result.reason?.message || "部分数据读取失败"); });
+      results.forEach(result => { if (result.status === "rejected") errors.push(result.reason?.message || "部分数据读取失败"); });
       notice("pmError", errors.length ? [...new Set(errors)].join("；") : "");
       if (errors.length) $("pmLiveDot").classList.add("stale");
     } finally {

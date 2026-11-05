@@ -101,7 +101,7 @@ def _native_reasons(paths, result, cutoff):
             result['warnings'].append(name.upper()+' 原始错误码暂不可读，保留调度状态并标注原因未记录')
 
 
-def load_dispatch(paths, cutoff=None, conn=None):
+def load_dispatch(paths, cutoff=None, conn=None, *, source_keys=None):
     """Load display facts only; never expose payloads, credentials or raw errors."""
     result = {'available': False, 'jobs': {}, 'publications': {}, 'blocked_resources': set(), 'warnings': [], 'aliases': {}}
     if conn is None:
@@ -110,7 +110,7 @@ def load_dispatch(paths, cutoff=None, conn=None):
             return result
         try:
             with read_db(path) as db:
-                return load_dispatch(paths, cutoff, db)
+                return load_dispatch(paths, cutoff, db, source_keys=source_keys)
         except (OSError, sqlite3.Error):
             result['warnings'].append('调度状态读取失败，原始任务仍保留；跨日期未完成数量未知')
             return result
@@ -118,8 +118,20 @@ def load_dispatch(paths, cutoff=None, conn=None):
     if 'pipeline_job' not in present:
         return result
     cutoff = parse_time(cutoff) or datetime.now(timezone.utc)
+    selected = None if source_keys is None else set(source_keys)
+
+    def selected_rows(table, fields):
+        if selected is None:
+            yield from conn.execute('SELECT ' + fields + ' FROM ' + table)
+        else:
+            keys = sorted(selected)
+            for offset in range(0, len(keys), 400):
+                chunk = keys[offset:offset + 400]
+                yield from conn.execute('SELECT ' + fields + ' FROM ' + table +
+                                        ' WHERE source_key IN (' + ','.join('?' * len(chunk)) + ')', chunk)
+
     fields = 'id,source_key,channel,family,stage,status,source_status,hold_reason,scheduled_at,created_at,updated_at,finished_at,error_code,resource_keys_json,source_meta_json'
-    for r in conn.execute('SELECT ' + fields + ' FROM pipeline_job'):
+    for r in selected_rows('pipeline_job', fields):
         row = dict(r)
         created = parse_time(row['created_at'])
         if created and created >= cutoff:
@@ -142,8 +154,18 @@ def load_dispatch(paths, cutoff=None, conn=None):
         result['jobs'].setdefault(row['source_key'], []).append(row)
         for ancestor in (object_value(row.get('source_meta_json'), {}) or {}).get('ancestor_source_keys', []):
             result['aliases'][ancestor] = row['source_key']
+    if selected:
+        # A successor may lie outside this page. Keep its suppression of the
+        # original target without loading every historical task and receipt.
+        for row in conn.execute("SELECT source_key,source_meta_json,created_at FROM pipeline_job WHERE source_meta_json LIKE '%\"ancestor_source_keys\"%'"):
+            created = parse_time(row['created_at'])
+            if created and created >= cutoff:
+                continue
+            for ancestor in (object_value(row['source_meta_json'], {}) or {}).get('ancestor_source_keys', []):
+                if ancestor in selected:
+                    result['aliases'][ancestor] = row['source_key']
     if 'pipeline_publication' in present:
-        for row in conn.execute('SELECT source_key,publish_id,published_at FROM pipeline_publication'):
+        for row in selected_rows('pipeline_publication', 'source_key,publish_id,published_at'):
             at = parse_time(row['published_at'])
             if row['publish_id'] and at and at < cutoff:
                 result['publications'][row['source_key']] = dict(row)
@@ -261,6 +283,9 @@ def backlog(paths, *, context=None, cutoff=None, visible_keys=None, include_plan
         group['instantiated_unfinished'] = sum(group['states'].values()) - group['scheduled']
         group['unqueued'] = len(missing) if known else None
         group['known_unqueued'] = len(missing)
+        dates = [p['due_at'] for p in missing if p.get('due_at')]
+        group['plans_oldest_at'] = min(dates, default=None)
+        group['plans_latest_at'] = max(dates, default=None)
         group['closed_unqueued'] = len(closed)
         group['unfinished'] = group['instantiated_unfinished'] + len(missing) if known else None
         group['states'] = dict(group['states'])
