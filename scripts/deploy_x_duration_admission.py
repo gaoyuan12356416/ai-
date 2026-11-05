@@ -38,7 +38,12 @@ def prepare():
     before = base.tree(old)
     shutil.copytree(old, release, symlinks=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     for rel in list(FILES) + TESTS:
-        base.copy(base.SOURCE / rel, release / rel)
+        if (release / rel).exists():
+            base.copy(base.SOURCE / rel, release / rel)
+        else:
+            # Some runtime composites omit offline tests entirely.
+            assert rel in TESTS
+            shutil.copy2(base.SOURCE / rel, release / rel)
         if rel.endswith('.py'): compile((release / rel).read_bytes(), rel, 'exec')
     assert base.tree(old) == before
     external = []
