@@ -23,7 +23,9 @@ def collect_report(paths, window):
                       "warnings": ["数据读取失败（%s），本渠道数量未纳入合计。" % type(exc).__name__],
                       "error": type(exc).__name__}
         channels.append(result)
-    pending = backlog(paths, context=paths['_accounting'], cutoff=window.cutoff, channels=('tt', 'fb', 'x'))
+    # Historical report replay must not manufacture an old queue snapshot from
+    # today's mutable projections. Cohort delivery cutoff remains unchanged.
+    pending = backlog(paths, cutoff=datetime.now(timezone.utc), channels=('tt', 'fb', 'x'))
     return {"schema_version": 2, "date": window.date, "backlog": pending,
             "cutoff_utc": window.cutoff.isoformat(),
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -91,7 +93,10 @@ def _backlog_elements(report):
     pending = report.get('backlog')
     if not pending:
         return []
-    elements = [_md('**截至补发截止的跨日期未完成**\n覆盖全部历史计划；未来预约、已取消/策略关闭单列，不计入待处理。与上方统计日计划不可相加。')]
+    from .common import parse_time, BEIJING
+    as_of = parse_time(pending.get('as_of'))
+    label = as_of.astimezone(BEIJING).strftime('%m-%d %H:%M:%S') if as_of else '未知'
+    elements = [_md('**核对时刻的跨日期未完成（北京时间 %s）**\n覆盖全部历史计划；未来预约、已取消/策略关闭单列，不计入待处理。与上方统计日计划不可相加。' % label)]
     if not pending.get('available'):
         return elements + [_md('跨日期未完成：**未知**，调度台账读取不完整。')]
     for row in pending['channels']:

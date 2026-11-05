@@ -66,6 +66,15 @@ class SharedStateTests(unittest.TestCase):
     def test_closed_plan_not_reported_as_unfinished(self):
         self.assertEqual(total([dict(expected=5,published=1,late=1,policy_skipped=2)])['missing'],1)
 
+    def test_archive_and_bridged_ancestor_do_not_inflate_backlog(self):
+        self.add('tt:auto:1','archived',hold_reason='backlog_archived')
+        self.assertEqual(effective_state(self.context,'tt:auto:1',self.now)['state'],'closed')
+        self.add('tt:intake:2','completed',source_status='ready')
+        self.context['aliases']={'tt:intake:2':'tt:queue:3'}
+        self.assertIsNone(effective_state(self.context,'tt:intake:2',self.now))
+        self.add('youtube:creation:4','completed',channel='youtube')
+        self.assertIsNone(effective_state(self.context,'youtube:creation:4',self.now))
+
 
 class ManualVideoTests(unittest.TestCase):
     def setUp(self):

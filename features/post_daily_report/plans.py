@@ -6,6 +6,7 @@ import hashlib
 import random
 import time
 import copy
+import threading
 
 from .common import BEIJING, Window, parse_time, read_db
 from .accounting import object_value, read_rows, tables
@@ -23,6 +24,30 @@ def _accounts(raw):
 
 
 _CACHE = {}
+_LIVE = {}
+_LIVE_LOCK = threading.Lock()
+
+
+def live_plan_gaps(paths, channels):
+    """Keep expensive multi-ledger scans out of the coordinator HTTP handlers."""
+    key=(tuple(sorted((k,str(v)) for k,v in paths.items() if not k.startswith('_'))),tuple(channels))
+    with _LIVE_LOCK:
+        entry=_LIVE.setdefault(key, {'loading':False,'updated':0,'result':None})
+        if not entry['loading'] and time.monotonic()-entry['updated']>30:
+            entry['loading']=True
+            def refresh():
+                at=datetime.now(timezone.utc)
+                try:
+                    result=collect_plan_gaps(paths,at,channels)
+                    result['as_of']=at.isoformat()
+                except Exception:
+                    result=None
+                with _LIVE_LOCK:
+                    if result is not None:entry['result']=result
+                    entry['loading']=False;entry['updated']=time.monotonic()
+            threading.Thread(target=refresh,name='monitor-plan-read',daemon=True).start()
+        result=copy.deepcopy(entry['result'])
+    return result or {'available':False,'items':[],'warnings':['正在后台只读核对未入队计划；首次完成前数量显示未知，请稍后刷新']}
 
 
 def collect_plan_gaps(paths, cutoff, channels=('tt', 'fb', 'x', 'youtube')):

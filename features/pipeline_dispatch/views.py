@@ -421,7 +421,7 @@ def query(store, view, actor, filters):
                 if view == 'summary':
                     visible = {r[0] for r in conn.execute('SELECT DISTINCT j.source_key FROM pipeline_job j WHERE ' + scope, args)}
                     result['backlog'] = backlog(paths, context=context, cutoff=now, visible_keys=visible,
-                                               include_plans=bool(safe_actor.get('is_admin')), channels=channels)
+                                               include_plans=bool(safe_actor.get('is_admin')), channels=channels, async_plans=True)
                 else:
                     for item in result['items']:
                         state = effective_state(context, item['source_key'], now)

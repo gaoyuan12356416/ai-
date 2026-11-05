@@ -47,6 +47,8 @@ REASONS = {
     'plan_not_enqueued': '已到期的冻结计划尚未形成执行任务',
     'plan_cancelled': '未入队计划已明确取消，保留取消记录',
     'source_closed': '原任务已取消或正常策略跳过',
+    'backlog_archived': '历史任务已按保留记录归档，不再计入待处理',
+    'failure_reason_unrecorded': '原任务失败；投影未保留错误码，需查看原记录',
     'execution_pending': '任务待执行',
 }
 BLOCKED_CODES = {'canonical_task_not_claimable', 'canonical_account_busy', 'adapter_unavailable',
@@ -76,9 +78,32 @@ def read_rows(conn, table):
     return [dict(r) for r in conn.execute('SELECT * FROM ' + table)] if table in tables(conn) else []
 
 
+def _native_reasons(paths, result, cutoff):
+    specs = [('fb','fb_auto_task','id','fb:auto:'), ('fb','fb_video_task','task_id','fb:video:'),
+             ('tt_auto','tt_auto_task','id','tt:auto:'), ('tt','tt_post_queue','id','tt:queue:'),
+             ('x_auto','x_auto_task','id','x:auto:'), ('x','x_post_publish_log','queue_id','x:queue:')]
+    for name,table,identity,prefix in specs:
+        if not paths.get(name):continue
+        wanted={key for key,rows in result['jobs'].items() if key.startswith(prefix) and any(r['status']=='failed' and not r['error_code'] for r in rows)}
+        if not wanted:continue
+        try:
+            with read_db(paths[name]) as db:
+                columns={r[1] for r in db.execute('PRAGMA table_info('+table+')')}
+                if not {identity,'error_code'}<=columns:continue
+                updated=next((c for c in ('updated_at_utc','updated_at','created_at_utc','created_at') if c in columns),None)
+                fields=identity+',error_code'+(','+updated if updated else '')
+                for row in db.execute('SELECT '+fields+' FROM '+table+" WHERE error_code<>''"):
+                    key=prefix+str(row[identity]);at=parse_time(row[updated]) if updated else None
+                    if key not in wanted or at and at>=cutoff:continue
+                    for job in result['jobs'][key]:
+                        if job['status']=='failed' and not job['error_code']:job['error_code']=row['error_code']
+        except (OSError,sqlite3.Error):
+            result['warnings'].append(name.upper()+' 原始错误码暂不可读，保留调度状态并标注原因未记录')
+
+
 def load_dispatch(paths, cutoff=None, conn=None):
     """Load display facts only; never expose payloads, credentials or raw errors."""
-    result = {'available': False, 'jobs': {}, 'publications': {}, 'blocked_resources': set(), 'warnings': []}
+    result = {'available': False, 'jobs': {}, 'publications': {}, 'blocked_resources': set(), 'warnings': [], 'aliases': {}}
     if conn is None:
         path = paths.get('dispatch')
         if not path:
@@ -93,7 +118,7 @@ def load_dispatch(paths, cutoff=None, conn=None):
     if 'pipeline_job' not in present:
         return result
     cutoff = parse_time(cutoff) or datetime.now(timezone.utc)
-    fields = 'id,source_key,channel,family,stage,status,source_status,hold_reason,scheduled_at,created_at,updated_at,finished_at,error_code,resource_keys_json'
+    fields = 'id,source_key,channel,family,stage,status,source_status,hold_reason,scheduled_at,created_at,updated_at,finished_at,error_code,resource_keys_json,source_meta_json'
     for r in conn.execute('SELECT ' + fields + ' FROM pipeline_job'):
         row = dict(r)
         created = parse_time(row['created_at'])
@@ -115,6 +140,8 @@ def load_dispatch(paths, cutoff=None, conn=None):
             else:
                 continue
         result['jobs'].setdefault(row['source_key'], []).append(row)
+        for ancestor in (object_value(row.get('source_meta_json'), {}) or {}).get('ancestor_source_keys', []):
+            result['aliases'][ancestor] = row['source_key']
     if 'pipeline_publication' in present:
         for row in conn.execute('SELECT source_key,publish_id,published_at FROM pipeline_publication'):
             at = parse_time(row['published_at'])
@@ -126,27 +153,38 @@ def load_dispatch(paths, cutoff=None, conn=None):
         quarantine = ' OR r.quarantined=1' if table == 'pipeline_resource' else ''
         for r in conn.execute('SELECT r.resource_key FROM ' + table + " r JOIN pipeline_job j ON j.id=r.job_id WHERE j.status='unknown'" + quarantine):
             result['blocked_resources'].add(r[0])
+    _native_reasons(paths, result, cutoff)
     result['available'] = True
     return result
 
 
 def effective_state(context, source_key, now=None):
     now = parse_time(now) or datetime.now(timezone.utc)
+    if source_key in context.get('aliases', {}):
+        return None  # The canonical descendant represents this same target.
     if source_key in context.get('publications', {}):
         return {'state': 'published', 'code': '', 'stage': 'publish'}
-    rows = [r for r in context.get('jobs', {}).get(source_key, []) if r.get('hold_reason') != 'metadata_only']
+    all_rows = context.get('jobs', {}).get(source_key, [])
+    rows = [r for r in all_rows if r.get('hold_reason') != 'metadata_only']
     if not rows:
-        return None
+        rows = [r for r in all_rows if r.get('source_status') in CLOSED_NATIVE]
+        if not rows:
+            return None
     # The publish stage owns delivery after a successful preparation handoff.
     row = max(rows, key=lambda r: (r['stage'] == 'publish', r['id']))
     status, hold, code = row['status'], row.get('hold_reason') or '', row.get('error_code') or ''
+    if row.get('channel') == 'youtube' and row['stage'] == 'prepare' and status == 'completed':
+        return None  # A completed creation job is not a promised publication.
     if status == 'unknown':
         state, code = 'unknown', code or 'unknown_outcome'
+    elif status == 'archived':
+        state, code = 'closed', 'backlog_archived'
     elif row.get('source_status') in CLOSED_NATIVE and status not in {'running', 'legacy_running'}:
         state, code = 'closed', code or 'source_closed'
     elif status == 'backlog_paused':
         state, code = 'paused', hold or 'cutover_overdue'
     elif status == 'failed':
+        code = code or 'failure_reason_unrecorded'
         state = 'blocked' if code in BLOCKED_CODES else 'failed'
     elif status in {'running', 'legacy_running'}:
         state = 'executing'
@@ -185,7 +223,7 @@ def daily_override(context, key, cutoff):
     return bucket, value['code'], value['reason']
 
 
-def backlog(paths, *, context=None, cutoff=None, visible_keys=None, include_plans=True, channels=None):
+def backlog(paths, *, context=None, cutoff=None, visible_keys=None, include_plans=True, channels=None, async_plans=False):
     cutoff = parse_time(cutoff) or datetime.now(timezone.utc)
     context = context if context is not None else load_dispatch(paths, cutoff)
     channels = list(channels or ('tt', 'fb', 'x', 'youtube'))
@@ -194,8 +232,9 @@ def backlog(paths, *, context=None, cutoff=None, visible_keys=None, include_plan
     if not context['available']:
         result.update(unfinished=None, instantiated_unfinished=None, unqueued=None)
         return result
-    from .plans import collect_plan_gaps
-    plans = collect_plan_gaps(paths, cutoff, channels) if include_plans else {'available': False, 'items': [], 'warnings': ['未入队计划缺少可靠的个人归属；仅全站管理员汇总，不按零处理']}
+    from .plans import collect_plan_gaps, live_plan_gaps
+    plans = (live_plan_gaps(paths, channels) if async_plans else collect_plan_gaps(paths, cutoff, channels)) if include_plans else {'available': False, 'items': [], 'warnings': ['未入队计划缺少可靠的个人归属；仅全站管理员汇总，不按零处理']}
+    result['plans_as_of'] = plans.get('as_of', cutoff.isoformat())
     result['warnings'].extend(plans['warnings'])
     grouped = {c: {'channel': c, 'states': Counter(), 'reasons': Counter(), 'sample': [], 'closed': 0} for c in channels}
     for key in context['jobs']:
