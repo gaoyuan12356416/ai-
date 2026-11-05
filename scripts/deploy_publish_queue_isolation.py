@@ -149,6 +149,19 @@ def health(port):
         if time.monotonic()>until:raise RuntimeError('health_failed:'+str(port))
         time.sleep(.25)
 
+def idle_for_switch(lane,units,processes,state):
+    if lane!='fb':return all(state[u]==[threads,0,0] for u,_,threads in units)
+    for u,_,_ in units:
+        if state[u]==[1,0,0]:continue
+        if state[u]!=[3,0,0]:return False
+        # Native FB has two permanent readback workers. Preserve any current
+        # lookup; switch only once both workers are waiting on their queue.
+        spy='/mnt/data-disk/publish-queue-isolation-20261105/diagnostic-tools/bin/py-spy'
+        stacks=run([spy,'dump','--pid',processes[u],'--nonblocking'])
+        workers=[part for part in stacks.split('\nThread ') if '"fb-readback-' in part]
+        if len(workers)!=2 or not all('get (queue.py:' in part for part in workers):return False
+    return True
+
 def switch(directory,lane,rollback=False):
     path=directory/'manifest.json';m=json.loads(path.read_text());item=m['lanes'][lane]
     link=Path(LANES[lane][0]);old=Path(item['candidate'] if rollback else item['before_root'])
@@ -202,7 +215,7 @@ def switch(directory,lane,rollback=False):
         deadline=time.monotonic()+drain_seconds
         while True:
             state={u:handlers(processes[u]) for u,_,_ in units};observations.append(state)
-            if all(state[u]==[threads,0,0] for u,_,threads in units):break
+            if idle_for_switch(lane,units,processes,state):break
             if time.monotonic()>deadline:
                 raise RuntimeError('affected_http_handlers_still_active:'+lane)
             time.sleep(.25)
