@@ -30,3 +30,13 @@ python3.9 scripts/deploy_x_post_log_controls.py rollback BACKUP
 ```
 
 切换只短暂阻止主 API 新 HTTP 连接，排空该服务请求并检查已知后台线程正在等待后重启主 API；入口限制有自动解除计时器。X OAuth/发布服务、调度器、CPU/GPU 执行节点和原定时任务保持运行。Nginx/主 API/X 运行目录的静态来源同步。回滚恢复代码和页面，保留当前数据库、操作审计、暂停、回执、凭据和新发生的业务事实；不会自动恢复已停止的发布队列。
+
+## 2026-11-05 已部署
+
+运行代码提交 `269f7ceccd900a0c16f6a149273a1410d343d4d3`，CPU `43.166.187.96:/root/drama_material_service`。备份和证据：`/mnt/data-disk/x-post-log-controls-20261105/deploy-269f7cec`。副本演练完成 12 条失败重置及 12 条停止/恢复，冻结身份和请求/回执历史摘要不变；另通过离线完整“失败后重置→上传→确认回执→禁止再次重置”链路。
+
+公网 HTML/JS 和九个部署文件校验通过；未登录的日志 GET 和操作 POST 均返回 401；真实只读列表每行包含可操作状态，手动来源筛选正确。主 API PID 由 3311101 切换为 3059839；X 服务 3311120 和调度器 1335330 未变，均 active。生产未创建操作审计表，证明本次部署没有执行线上重置/停止。临时入口规则已移除。
+
+```sh
+python3.9 /mnt/data-disk/x-post-log-controls-20261105/source-269f7cec/scripts/deploy_x_post_log_controls.py rollback /mnt/data-disk/x-post-log-controls-20261105/deploy-269f7cec
+```
