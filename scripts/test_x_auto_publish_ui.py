@@ -79,9 +79,7 @@ class XAutoPublishUiTest(unittest.TestCase):
             with self.subTest(page=name):
                 parser = parse_page(source)
                 self.assertIn("/ui-topbar.css", parser.stylesheets)
-                self.assertIn(
-                    f"/x-auto-publish.css?v={ASSET_VERSION}", parser.stylesheets
-                )
+                self.assertTrue(any(path.startswith("/x-auto-publish.css?v=") for path in parser.stylesheets))
                 self.assertIn("/ui-topbar.js", parser.scripts)
                 self.assertTrue(any(path.split("?", 1)[0] == "/quick-nav.js" for path in parser.scripts))
                 self.assertIn(

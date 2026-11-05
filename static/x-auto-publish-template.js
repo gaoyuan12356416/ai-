@@ -125,7 +125,12 @@
     const list = ui.byId("accountList");
     ui.clear(list);
     const query = ui.byId("accountSearch").value.trim().toLowerCase();
+    const membershipFilter = ui.byId("accountMembershipFilter").value;
     const visible = state.accounts.filter(item => {
+      const subscription = accountSubscription(item);
+      const membership = ["basic", "premium", "premium_plus"].includes(subscription)
+        ? "member" : (subscription === "none" ? "non_member" : "unknown");
+      if (membershipFilter !== "all" && membership !== membershipFilter) return false;
       if (!query) return true;
       return `${accountId(item)} ${accountName(item)} ${accountSubscription(item)} ${accountLanguage(item)} ${item && item.status || ""}`.toLowerCase().includes(query);
     });
@@ -591,6 +596,7 @@
       if (event.key === "Escape") setResourceTypeMenuOpen(false);
     });
     ui.byId("accountSearch").addEventListener("input", renderAccounts);
+    ui.byId("accountMembershipFilter").addEventListener("change", renderAccounts);
     ui.byId("refreshAccountEligibility").addEventListener("click", () => void refreshAccountEligibility());
     ui.byId("accountList").addEventListener("change", event => {
       const checkbox = event.target.closest("input[data-account-id]");
@@ -629,11 +635,13 @@
     });
     ui.byId("scheduleModeFixed").addEventListener("change", renderScheduleMode);
     ui.byId("scheduleModeRandom").addEventListener("change", renderScheduleMode);
-    ui.byId("templateForm").addEventListener("input", () => {
+    ui.byId("templateForm").addEventListener("input", event => {
+      if (event.target.matches("#accountSearch, #accountMembershipFilter")) return;
       state.dirty = true;
       updateSummary();
     });
-    ui.byId("templateForm").addEventListener("change", () => {
+    ui.byId("templateForm").addEventListener("change", event => {
+      if (event.target.matches("#accountSearch, #accountMembershipFilter")) return;
       state.dirty = true;
       updateSummary();
     });
