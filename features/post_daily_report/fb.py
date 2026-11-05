@@ -3,12 +3,18 @@
 Legacy MySQL publishers are deliberately outside this adapter's scope.
 """
 
-from collections import Counter
+from collections import Counter, defaultdict
+import hashlib
+import json
+from pathlib import Path
 
-from .common import in_window, json_value, parse_time, read_db
+from .common import BEIJING, in_window, json_value, parse_time, read_db
+from .accounting import load_dispatch, daily_override, REASONS
 
 
 _REASONS = {
+    "fb_auto_source_url_not_allowed": ("源视频域名未通过制作服务校验，尚未提交 Meta 发布", "核对受信来源域名及下载入口；历史失败不自动重试"),
+    "fb_report_prepare_request_invalid": ("视频制作请求校验失败，旧记录未保留具体参数原因", "核对制作服务原始错误及请求；不能据此认定 Meta 拒绝发布"),
     "fb_page_missing_eligible_token": ("Page 授权不可用", "补充或更新该 Page 的发布授权"),
     "fb_auto_no_eligible_video": ("没有满足筛选和冷却规则的视频", "检查素材储备、筛选条件及冷却周期"),
     "fb_auto_previous_run_backlog": ("上一时隙仍有任务积压", "检查视频制作、上传和发布耗时"),
@@ -36,7 +42,42 @@ _REASONS = {
     "fb_report_confirmation_time_missing": ("缺少发布确认时间", "检查发布账本时间字段"),
     "fb_report_after_cutoff": ("成功确认时间晚于本次统计截止", "在后续日报查看补发结果"),
     "fb_report_missing_tasks": ("计划包含的部分 Page 缺少任务记录", "核查计划和任务生成记录"),
+    "fb_graph_389": ("Meta 无法从 URL 抓取视频", "检查视频地址的外部访问与 Meta 抓取链路；换 Token 不能解决视频抓取问题"),
+    "fb_graph_190": ("Meta 拒绝发布授权", "核查账户确认状态、Page 角色、双重验证及授权有效性"),
+    "fb_graph_200": ("发布权限被 Meta 拒绝", "核查该授权的 Page 发布权限"),
+    "fb_graph_368": ("Meta 拦截了发布操作", "核查平台限制与具体错误；不能仅凭错误码认定 Page 被封"),
+    "fb_graph_network_outcome_unknown": ("Meta 请求连接中断，实际发布结果不明", "先核实平台结果，避免重复发布"),
+    "fb_graph_response_outcome_unknown": ("Meta 响应无法解析，实际发布结果不明", "先核实平台结果，避免重复发布"),
+    "fb_graph_id_missing": ("Meta 响应缺少发布 ID，结果不明", "先核实平台结果，避免重复发布"),
+    "fb_auto_drama_cooldown_at_publish": ("同 Page 同剧触发发布前冷却规则", "按策略正常跳过，不计发布失败"),
+    "fb_auto_material_cooldown_at_publish": ("同 Page 同素材触发发布前冷却规则", "按策略正常跳过，不计发布失败"),
+    "fb_auto_page_frequency_limit": ("按 Page 发布频次策略正常跳过", "自动计划的频次外位置不计应发或失败"),
+    "fb_auto_page_unknown_at_publish": ("Page 在发布前被结果不明任务阻塞", "先核实历史发布结果，避免重复发布"),
+    "fb_report_late_unknown_block": ("视频已制作，但被同 Page 结果不明任务阻塞至超时", "先核实阻塞任务的发布结果，再恢复后续正常计划"),
+    "fb_report_prepare_retries_expired": ("视频制作反复延后重试，超过发布宽限", "保留底层制作错误，定位失败并限制重复重试"),
 }
+
+
+def _verified_preparation_code(task, evidence):
+    """Match immutable evidence; a hostname alone cannot explain old 400s."""
+    item = evidence.get(str(task.get("id")), {})
+    source_sha = hashlib.sha256(str(task.get("source_media_url") or "").encode()).hexdigest()
+    if (item and task.get("run_id") == item.get("run_id")
+            and task.get("gpu_job_id") == item.get("gpu_job_id")
+            and task.get("error_code") == item.get("original_error_code")
+            and source_sha == item.get("source_url_sha256")):
+        return "fb_auto_source_url_not_allowed"
+    return ""
+
+
+def _verified_errors():
+    try:
+        return json.loads(Path(__file__).with_name("verified_preparation_errors.json").read_text(encoding="utf-8"))["tasks"]
+    except (OSError, ValueError, KeyError):
+        return {}
+
+_POLICY_SKIPS = {"fb_auto_page_frequency_limit", "fb_auto_drama_cooldown_at_publish",
+                 "fb_auto_material_cooldown_at_publish"}
 
 
 def _source(trigger):
@@ -46,7 +87,68 @@ def _source(trigger):
 def _new_row(source):
     return {"source": source, "label": "手动触发模板" if source == "manual_template" else "自动模板",
             "form": "Page 视频（随机排重）", "expected": 0, "published": 0, "late": 0,
-            "pending": 0, "unknown": 0, "failed": 0, "reasons": [], "warnings": []}
+            "pending": 0, "unknown": 0, "failed": 0, "blocked": 0,
+            "policy_skipped": 0, "frequency_excluded": 0, "raw_targets": 0,
+            "superseded_slots": 0,
+            "reasons": [], "policy_reasons": [], "warnings": []}
+
+
+def _allowed_pages(run, page_ids, plans):
+    """Reconstruct frozen slot eligibility; never consult current Page settings."""
+    if run.get("trigger_type") == "manual" or "config_json" not in run:
+        return set(page_ids)
+    config = json_value(run.get("config_json"))
+    if not isinstance(config, dict):
+        raise ValueError("missing frozen FB config")
+    if not config.get("page_daily_limits") and "default_daily_count" not in config:
+        return set(page_ids)
+    schedule = config.get("schedule", {})
+    times = schedule.get("times") if schedule.get("mode") == "fixed" else None
+    if schedule.get("mode") == "random":
+        planned = parse_time(run.get("planned_publish_at_utc"))
+        local_date = planned.astimezone(BEIJING).date().isoformat() if planned else None
+        matching = [p for p in plans if p.get("template_id") == run.get("template_id")
+                    and p.get("template_version") == run.get("template_version")
+                    and p.get("local_date") == local_date]
+        if len(matching) == 1:
+            times = json_value(matching[0].get("times_json"))
+    if (not isinstance(times, list) or not times or len(set(times)) != len(times)
+            or str(run.get("slot_key", ""))[-5:] not in times):
+        raise ValueError("unproven frozen FB slots")
+    limits = config.get("page_daily_limits", [])
+    overrides = {}
+    for item in limits:
+        page_id, count = str(item["page_id"]), item["daily_count"]
+        if type(count) is not int or count < 0 or page_id in overrides:
+            raise ValueError("invalid frozen FB frequency")
+        overrides[page_id] = count
+    default = config.get("default_daily_count", len(times))
+    if type(default) is not int or default < 0:
+        raise ValueError("invalid frozen FB default frequency")
+    index = times.index(str(run.get("slot_key", ""))[-5:])
+    allowed = set()
+    for page_id in page_ids:
+        count = min(len(times), overrides.get(str(page_id), default))
+        offset = int(hashlib.sha256(str(page_id).encode()).hexdigest()[:16], 16) % len(times)
+        if count and index in {(int(i * len(times) / count) + offset) % len(times) for i in range(count)}:
+            allowed.add(str(page_id))
+    return allowed
+
+
+def _quota(run, page_ids, plans):
+    try:
+        if _has_frequency(run) and len(set(page_ids)) != int(run.get("total_pages") or 0):
+            raise ValueError("incomplete frozen FB Page scope")
+        return _allowed_pages(run, page_ids, plans)
+    except (ValueError, TypeError, KeyError, ZeroDivisionError):
+        return None
+
+
+def _has_frequency(run):
+    if run.get("trigger_type") == "manual" or "config_json" not in run:
+        return False
+    config = json_value(run.get("config_json"))
+    return not isinstance(config, dict) or bool(config.get("page_daily_limits")) or "default_daily_count" in config
 
 
 def _rows(conn, table):
@@ -61,12 +163,45 @@ def _confirmed(task, ledger):
                 and str(task.get("page_id")) == str(ledger.get("page_id")))
 
 
+def _superseded_at(item, planned, version_times, cutoff):
+    """Prove withdrawal from historical version creation, never current settings."""
+    if item.get("trigger_type", "auto") != "auto" or planned is None:
+        return None
+    key = (item.get("template_id"), item.get("template_version"))
+    created = version_times.get(key)
+    if created is None or type(key[1]) is not int:
+        return None
+    changes = [stamp for (template_id, version), stamp in version_times.items()
+               if template_id == key[0] and type(version) is int and version > key[1]
+               and stamp is not None and created <= stamp < min(planned, cutoff)]
+    return min(changes) if changes else None
+
+
+def _unattempted_run(run, tasks, ledgers, attempted, planned, cutoff):
+    """Do not discard incomplete scope, actual attempts, receipts or ambiguity."""
+    total_pages = int(run.get("total_pages") or 0)
+    if (attempted is None or len(tasks) != total_pages
+            or len({t.get("page_id") for t in tasks}) != total_pages):
+        return False
+    for task in tasks:
+        completed = parse_time(task.get("completed_at_utc"))
+        if (task.get("status") != "skipped" or task.get("graph_post_id")
+                or task.get("unknown_outcome") or task["id"] in ledgers
+                or task["id"] in attempted or completed is None
+                or completed >= min(planned, cutoff)):
+            return False
+    return True
+
+
 def collect(paths, window):
     """Count planned Page posts, requiring task AND ledger success evidence."""
+    context = paths.get('_accounting') or load_dispatch(paths, window.cutoff)
     groups = {key: _new_row(key) for key in ("auto_template", "manual_template")}
     reasons = {key: Counter() for key in groups}
-    warnings, evidence, prior = [], [], 0
+    policy_reasons = {key: Counter() for key in groups}
+    warnings, evidence, excluded_plans, prior = [], [], [], 0
     seen_success = set()
+    verified_errors = _verified_errors()
     with read_db(paths["fb"]) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         required = {"fb_auto_run", "fb_auto_task", "fb_auto_publish_ledger", "fb_auto_due_slot"}
@@ -81,10 +216,33 @@ def collect(paths, window):
                      if "fb_auto_due_target_snapshot" in tables else {})
         schedule_plans = (_rows(conn, "fb_auto_schedule_plan")
                           if "fb_auto_schedule_plan" in tables else [])
+        run_pages = _rows(conn, "fb_auto_run_page") if "fb_auto_run_page" in tables else []
+        version_rows = (_rows(conn, "fb_auto_template_version")
+                        if "fb_auto_template_version" in tables else [])
+        versions = {(v["template_id"], v["version"]): v["config_json"] for v in version_rows}
+        version_times = {(v["template_id"], v["version"]): parse_time(v.get("created_at_utc"))
+                         for v in version_rows}
+        attempted = ({r[0] for r in conn.execute("SELECT DISTINCT task_id FROM fb_auto_publish_attempt")}
+                     if "fb_auto_publish_attempt" in tables else None)
+        fetch_failures = ({r[0] for r in conn.execute(
+            "SELECT DISTINCT task_id FROM fb_auto_publish_attempt WHERE error_code='fb_graph_389'")}
+            if "fb_auto_publish_attempt" in tables else set())
+
+    def exclude(kind, item, planned, changed):
+        groups["auto_template"]["superseded_slots"] += 1
+        excluded_plans.append({"kind": kind, "id": item.get("id"),
+                               "template_id": item.get("template_id"),
+                               "template_version": item.get("template_version"),
+                               "planned_publish_at_utc": planned.isoformat(),
+                               "superseded_at_utc": changed.isoformat()})
+
+    tasks_by_run = defaultdict(list)
+    for task in tasks:
+        tasks_by_run[task.get("run_id")].append(task)
 
     # A frozen random schedule can exist even when the scheduler failed to create
     # its due rows. Preserve that evidence rather than reporting an empty day.
-    observed_slots = {(r.get("template_id"), parse_time(r.get("planned_publish_at_utc")))
+    observed_slots = {(r.get("template_id"), r.get("template_version"), parse_time(r.get("planned_publish_at_utc")))
                       for r in list(runs.values()) + due_slots}
     for plan in schedule_plans:
         if plan.get("local_date") != window.date:
@@ -94,12 +252,23 @@ def collect(paths, window):
             if instant is None:
                 groups["auto_template"]["expected"] = None
                 groups["auto_template"]["warnings"].append("已保存的 FB 随机计划包含无法解析的时刻")
-            elif (plan.get("template_id"), instant) not in observed_slots:
-                groups["auto_template"]["expected"] = None
-                groups["auto_template"]["warnings"].append(
-                    f"模板 {plan['template_id']} 已冻结的 {slot_time} 计划缺少时隙及运行记录，预期条数未知")
+            elif (plan.get("template_id"), plan.get("template_version"), instant) not in observed_slots:
+                changed = _superseded_at(plan, instant, version_times, window.cutoff)
+                if changed is not None:
+                    exclude("schedule", plan, instant, changed)
+                else:
+                    groups["auto_template"]["expected"] = None
+                    groups["auto_template"]["warnings"].append(
+                        f"模板 {plan['template_id']} 已冻结的 {slot_time} 计划缺少时隙及运行记录，预期条数未知")
 
-    cohort_runs = {}
+    page_scope = {}
+    for item in run_pages or tasks:
+        page_scope.setdefault(item.get("run_id"), set()).add(str(item.get("page_id")))
+    unknown_by_page = {}
+    for task in tasks:
+        if task.get("status") == "unknown" or task.get("unknown_outcome"):
+            unknown_by_page.setdefault(str(task.get("page_id")), []).append(task)
+    cohort_runs, quotas, run_expected = {}, {}, {}
     for run_id, run in runs.items():
         planned = parse_time(run.get("planned_publish_at_utc"))
         if planned is None:
@@ -110,10 +279,26 @@ def collect(paths, window):
                 groups[key]["warnings"].append(f"运行 {run_id} 缺少计划时间，昨日归属与预期未确认")
             continue
         if in_window(planned, window.start, window.end):
+            changed = _superseded_at(run, planned, version_times, window.cutoff)
+            if changed is not None and _unattempted_run(
+                    run, tasks_by_run[run_id], ledgers, attempted, planned, window.cutoff):
+                exclude("run", run, planned, changed)
+                continue
             cohort_runs[run_id] = run
             key = _source(run.get("trigger_type"))
-            if groups[key]["expected"] is not None:
-                groups[key]["expected"] += int(run.get("total_pages") or 0)
+            row = groups[key]
+            raw_count = int(run.get("total_pages") or 0)
+            row["raw_targets"] += raw_count
+            quotas[run_id] = _quota(run, page_scope.get(run_id, set()), schedule_plans)
+            count = (len(quotas[run_id]) if _has_frequency(run) else raw_count) if quotas[run_id] is not None else None
+            run_expected[run_id] = count
+            if count is None:
+                row["expected"] = None
+                row["warnings"].append(f"运行 {run_id} 的冻结 Page 频次或时隙证据不完整，实际应发未知")
+            else:
+                row["frequency_excluded"] += raw_count - count
+                if row["expected"] is not None:
+                    row["expected"] += count
             evidence.append(f"fb_auto_run:{run_id}")
 
     run_slots = {(r.get("template_id"), r.get("slot_key")) for r in runs.values()}
@@ -122,19 +307,37 @@ def collect(paths, window):
             continue
         if due.get("run_id") in runs or (due.get("template_id"), due.get("slot_key")) in run_slots:
             continue
+        planned = parse_time(due.get("planned_publish_at_utc"))
+        changed = _superseded_at(due, planned, version_times, window.cutoff)
+        updated = parse_time(due.get("updated_at_utc"))
+        if (changed is not None and due.get("status") == "missed"
+                and due.get("error_code") == "fb_auto_due_slot_template_changed"
+                and updated is not None and changed <= updated < min(planned, window.cutoff)):
+            exclude("due_slot", due, planned, changed)
+            continue
         key = _source(due.get("trigger_type"))
         row = groups[key]
         snapshot = snapshots.get(due["id"])
-        count = int(snapshot["expected_pages"]) if snapshot is not None else None
+        raw_count = int(snapshot["expected_pages"]) if snapshot is not None else 0
+        count = raw_count if snapshot is not None else None
+        row["raw_targets"] += raw_count
+        if snapshot is not None and raw_count and "fb_auto_template_version" in tables:
+            frozen = {**due, "total_pages": raw_count,
+                      "config_json": versions.get((due.get("template_id"), due.get("template_version")))}
+            scope = json_value(snapshot.get("page_ids_json"), [])
+            allowed = _quota(frozen, scope, schedule_plans)
+            count = (len(allowed) if _has_frequency(frozen) else raw_count) if allowed is not None else None
         if count is None:
             row["expected"] = None
             row["warnings"].append(f"时隙 {due['id']} 未生成运行且无 Page 快照，预期条数未知")
         elif row["expected"] is not None:
             row["expected"] += count
+        if count is not None:
+            row["frequency_excluded"] += raw_count - count
         code = str(due.get("error_code") or "fb_report_no_run")
         # Known snapshots count Page posts; missing snapshots report slots separately.
         if count:
-            row["pending" if due.get("status") in {"pending", "preparing"} else "failed"] += count
+            row["pending" if due.get("status") in {"pending", "preparing"} else "blocked"] += count
             reasons[key][code] += count
         else:
             detail = _REASONS.get(code, ("尚未生成发布任务", "核查时隙错误及 Page 池配置"))[0]
@@ -159,10 +362,18 @@ def collect(paths, window):
                 prior += 1
                 seen_success.add(identity)
             continue
-        counts[run["id"]] += 1
         key = _source(run.get("trigger_type"))
         row = groups[key]
         status = str(task.get("status") or "unknown")
+        allowed = quotas[run["id"]]
+        if _has_frequency(run) and allowed is not None and str(task.get("page_id")) not in allowed:
+            # Do not hide a real publication if the frozen plan is inconsistent.
+            if status != "skipped":
+                row["expected"] = None
+                row["warnings"].append(f"运行 {run['id']} 存在频次外执行记录，计划与执行证据冲突")
+            else:
+                continue
+        counts[run["id"]] += 1
         if confirmed and completed is not None and completed < window.cutoff:
             if identity in seen_success:
                 row["unknown"] += 1
@@ -182,17 +393,41 @@ def collect(paths, window):
             row["unknown"] += 1
         else:
             code = str(task.get("skip_reason") or task.get("error_code") or status)
+            override = daily_override(context, 'fb:auto:' + str(task['id']), window.cutoff)
             if task.get("unknown_outcome") or status == "unknown":
                 row["unknown"] += 1
+            elif override and status != 'skipped':
+                bucket, code, _ = override
+                row[bucket] += 1
             elif status in {"planned", "preparing", "ready", "queued", "running", "submitted"}:
                 row["pending"] += 1
+            elif status == "skipped":
+                if code in _POLICY_SKIPS:
+                    row["policy_skipped"] += 1
+                    policy_reasons[key][code] += 1
+                    continue
+                row["blocked"] += 1
+                if code == "fb_auto_task_too_late":
+                    blocked = any(h["id"] != task["id"] and parse_time(h.get("completed_at_utc")) is not None
+                                  and completed is not None and parse_time(h.get("completed_at_utc")) <= completed
+                                  for h in unknown_by_page.get(str(task.get("page_id")), []))
+                    if task.get("prepared_at_utc") and blocked:
+                        code = "fb_report_late_unknown_block"
+                    elif not task.get("prepared_at_utc") and int(task.get("attempt_count") or 0) > 1:
+                        code = "fb_report_prepare_retries_expired"
             else:
                 row["failed"] += 1
+                code = _verified_preparation_code(task, verified_errors) or code
+                if code == "invalid_request" and task.get("error_message") == "GPU视频制作失败" and not task.get("prepared_at_utc"):
+                    code = "fb_report_prepare_request_invalid"
+                if task["id"] in fetch_failures and code in {"fb_graph_389", "fb_graph_190", "fb_graph_10", "fb_graph_102", "fb_graph_200"}:
+                    code = "fb_graph_389"
         reasons[key][code] += 1
 
     for run_id, run in cohort_runs.items():
         key = _source(run.get("trigger_type"))
-        gap = int(run.get("total_pages") or 0) - counts[run_id]
+        expected = run_expected[run_id]
+        gap = (expected - counts[run_id]) if expected is not None else 0
         if gap > 0:
             groups[key]["unknown"] += gap
             reasons[key]["fb_report_missing_tasks"] += gap
@@ -201,10 +436,19 @@ def collect(paths, window):
             groups[key]["warnings"].append(f"运行 {run_id} 的任务数大于 Page 快照数，预期需核实")
     for key, row in groups.items():
         for code, count in reasons[key].most_common():
-            known = _REASONS.get(code)
+            known = _REASONS.get(code) or ((REASONS[code], '核对原任务及调度记录；保留已有回执，不自动重发') if code in REASONS else None)
             reason, suggestion = known or ("发布未完成，具体原因待核实", "检查对应任务的错误记录后处理")
             row["reasons"].append({"code": code, "reason": reason, "count": count,
                                    "suggestion": suggestion, "confidence": "confirmed" if known else "unknown"})
+        for code, count in policy_reasons[key].most_common():
+            reason, suggestion = _REASONS[code]
+            row["policy_reasons"].append({"code": code, "reason": reason, "count": count,
+                                           "suggestion": suggestion, "confidence": "confirmed"})
         row["warnings"] = list(dict.fromkeys(row["warnings"]))
-    return {"channel": "FB", "rows": list(groups.values()), "prior_completed": prior,
-            "warnings": warnings, "evidence": evidence}
+    from .fb_video import collect_video
+    with read_db(paths['fb']) as conn:
+        video_rows, video_prior = collect_video(conn, window, context, seen_success)
+    warnings.extend(context.get('warnings', []))
+    return {"channel": "FB", "accounting": "actual-fb-v2", "accounting_revision": "all-entrypoints-v3",
+            "rows": list(groups.values()) + video_rows, "prior_completed": prior + video_prior,
+            "warnings": warnings, "evidence": evidence, "excluded_plans": excluded_plans}

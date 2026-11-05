@@ -1,6 +1,7 @@
 """Read-only, owner-scoped monitor snapshots over coordinator projections.
 
-No platform API, publishing database, credential, payload or artifact is read.
+No platform API, credential, payload or artifact is exposed. Frozen publishing
+plans are read only for the administrator's unqueued-target summary.
 Snapshots use one SQLite read transaction and a short, scope-keyed bounded cache.
 """
 import base64
@@ -10,6 +11,7 @@ import datetime as dt
 import json
 import math
 import re
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -251,7 +253,9 @@ def _summary(conn, scope, args, common, sources, channels, start, end, now):
                 values = sorted(phase_samples.get((channel, stage, phase), []))
                 applicable = not (phase == "platform_upload" and channel in ("fb", "tt") and stage == "publish" and not values)
                 efficiency.append({"channel": channel, "stage": stage, "phase": phase, "applicable": applicable, "samples": len(values), "p50_seconds": values[max(0, math.ceil(len(values) * .5) - 1)] if values else None, "p95_seconds": values[max(0, math.ceil(len(values) * .95) - 1)] if values else None})
-    return dict(common, window={"start": start, "end": end, "timezone": "Asia/Shanghai"},
+    from .queue_states import add_summary
+    add_summary(conn, scope, args, by, totals, common, now)
+    return dict(common, queue_state_version=1, window={"start": start, "end": end, "timezone": "Asia/Shanghai"},
                 totals=totals, channels=list(by.values()), sources=sources, efficiency=efficiency)
 
 
@@ -268,7 +272,7 @@ def _detail_url(value):
 
 
 def _tasks(conn, scope, args, common, filters, start, end):
-    clause = scope + " AND (j.status IN ('queued','ready','running','legacy_running','unknown','backlog_paused') OR (j.finished_at>=? AND j.finished_at<=?))"
+    clause = scope + " AND (j.status IN ('queued','ready','running','legacy_running','unknown','backlog_paused') OR (j.status='failed' AND j.source_status NOT IN ('skipped','cancelled','canceled','abandoned','duplicate','no_candidate') AND NOT EXISTS (SELECT 1 FROM pipeline_publication p WHERE p.source_key=j.source_key)) OR (j.finished_at>=? AND j.finished_at<=?))"
     values = list(args) + [start, end]
     for key, column in (("stage", "stage"), ("host_id", "node_id")):
         if filters.get(key):
@@ -407,6 +411,29 @@ def query(store, view, actor, filters):
             result = _tasks(conn, scope, args, common, filters, start, end)
         else:
             result = _workers(conn, store, safe_actor, common, now)
+        if view in ('summary', 'tasks'):
+            from features.post_daily_report.accounting import DEFAULT_PATHS, load_dispatch, backlog, effective_state
+            paths = dict(getattr(store, 'accounting_paths', {}) or
+                         (DEFAULT_PATHS if str(store.path) == DEFAULT_PATHS['dispatch'] else {}))
+            paths['dispatch'] = str(store.path)
+            try:
+                context = load_dispatch(paths, now, conn)
+                if view == 'summary':
+                    visible = {r[0] for r in conn.execute('SELECT DISTINCT j.source_key FROM pipeline_job j WHERE ' + scope, args)}
+                    result['backlog'] = backlog(paths, context=context, cutoff=now, visible_keys=visible,
+                                               include_plans=bool(safe_actor.get('is_admin')), channels=channels)
+                else:
+                    for item in result['items']:
+                        state = effective_state(context, item['source_key'], now)
+                        if state:
+                            item['effective_state'] = state['state']
+                            item['effective_reason'] = state.get('reason', '')
+                            item['effective_code'] = state.get('code', '')
+                            item['source_status'] = state.get('source_status', '')
+            except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+                result['warnings'].append('跨日期核对暂不可用（' + type(exc).__name__ + '），数量不按零统计')
+                if view == 'summary':
+                    result['backlog'] = {'available': False, 'unfinished': None, 'unqueued': None, 'channels': []}
     with _LOCK:
         _CACHE[key] = (time.monotonic(), copy.deepcopy(result))
         _CACHE.move_to_end(key)

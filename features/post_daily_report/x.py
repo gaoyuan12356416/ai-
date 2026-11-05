@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from .common import in_window, json_value, parse_time, read_db
+from .accounting import load_dispatch, daily_override, REASONS
 
 
 BJ = timezone(timedelta(hours=8))
@@ -18,7 +20,8 @@ LABELS = {
 ERRORS = {
     "x_post_pool_fifo_conflict": ("素材池最新可用记录与冻结计划冲突", "核查候选快照、素材占用与顺序校验；确认原因后再决定补发"),
     "x_auto_no_eligible_material": ("模板未找到符合条件的可用素材", "检查同语言素材、上线时间、历史占用及模板筛选阈值"),
-    "x_post_schedule_partial_capacity": ("该时点部分配置账号未匹配到可用内容", "补充对应语言的可用素材或短剧，并核查账号与内容绑定"),
+    "x_post_schedule_partial_capacity": ("配置账号未形成发布队列，具体预检限制需核实", "核对当时的账号授权、历史任务占用、语言匹配和内容容量；未入队不代表平台发布失败"),
+    "x_historical_outcome_hold": ("历史发布结果待确认，阻止该账号建立新队列", "先核对已有发布账本，不重新发布历史任务"),
     "x_post_schedule_material_preflight_shortage": ("可通过预检的素材不足", "检查候选素材、下载和媒体校验记录"),
     "x_post_schedule_drama_shortage": ("可用于配置账号的短剧不足", "补充同语言可用短剧并检查未完成短剧绑定"),
     "x_post_premium_relay_unavailable": ("缺少同语言可用 Premium 中继账号", "检查同语言 Premium 账号资格和授权"),
@@ -32,6 +35,7 @@ ERRORS = {
     "unknown_outcome": ("上游发布结果尚未确认", "先只读核对 X 平台与发布台账，避免重复发布"),
     "relay_pending": ("中继原帖已发布，目标账号转发尚未确认", "核对目标 Repost 状态及中继台账"),
     "schedule_not_created": ("计划时点没有对应运行记录", "检查定时器、执行门禁与该时点日志"),
+    "random_plan_not_created": ("随机日计划未生成；应发数量来自已保存的排期配置审计", "检查排期服务与执行门禁；保留原有停用状态，不自动补发"),
     "task_not_created": ("冻结计划中的账号未生成执行任务", "检查任务创建阶段及账号预检日志"),
     "execution_pending": ("任务仍未完成", "检查当前队列、媒体准备与执行服务状态"),
     "publish_failed": ("发布未完成，需核对具体错误", "检查对应批次和发布日志"),
@@ -64,14 +68,15 @@ def _slot(day, time):
 
 def _row(source):
     return {"source": source, "label": LABELS[source], "form": "直接发布／目标转发" if source.endswith("_pool") else "直接发布",
-            "expected": 0, "published": 0, "late": 0, "pending": 0, "unknown": 0, "failed": 0,
-            "reasons": [], "warnings": [], "form_counts": {}}
+            "expected": 0, "published": 0, "late": 0, "pending": 0, "unknown": 0, "failed": 0, "blocked": 0, "policy_skipped": 0,
+            "reasons": [], "warnings": [], "form_counts": {}, "unqueued": 0}
 
 
 def _reason(row, code, count=1, confidence="confirmed"):
     if count <= 0:
         return
     text, suggestion = ERRORS.get(code, ("发布未完成，需核对批次错误记录", "检查对应批次的账号、媒体和平台返回记录"))
+    text = REASONS.get(code, text)
     for item in row["reasons"]:
         if item["code"] == code and item["confidence"] == confidence:
             item["count"] += count
@@ -120,23 +125,41 @@ def _best(outcomes):
     published = [x for x in outcomes if x[0] == "published"]
     if published:
         return min(published, key=lambda x: x[1])
-    for state in ("unknown", "pending", "failed"):
+    for state in ("unknown", "pending", "blocked", "failed", "policy_skipped"):
         for value in outcomes:
             if value[0] == state:
                 return value
     return "pending", None, "直接发布", "execution_pending"
 
 
-def _missing(row, run, count):
+def _missing(row, run, count, account=None, logs_by_id=None):
     if count <= 0:
         return
     code = run.get("error_code") or ""
+    row["unqueued"] += count
+    message = str(run.get("error_message") or "")
+    if run.get('status') in {'cancelled', 'canceled'}:
+        row['policy_skipped'] += count
+        row['unqueued'] -= count
+        _reason(row, 'plan_cancelled', count)
+        return
+    if account is not None and f"账号{account}授权或发布开关不可用" in message:
+        row["blocked"] += count
+        _reason(row, "x_account_not_publishable", count)
+        return
+    if account is not None:
+        for log_id in re.findall(r"日志(\d+)", message):
+            log = (logs_by_id or {}).get(int(log_id), {})
+            if str(log.get("account_id")) == str(account) and log.get("unknown_outcome"):
+                row["blocked"] += count
+                _reason(row, "x_historical_outcome_hold", count)
+                return
     if run.get("status") in {"failed_preflight", "failed", "stopped", "completed_with_errors"}:
-        row["failed"] += count
+        row["blocked"] += count
         _reason(row, code or "publish_failed", count)
     elif run.get("status") == "completed":
-        row["failed"] += count
-        _reason(row, "x_post_schedule_partial_capacity", count)
+        row["blocked"] += count
+        _reason(row, "x_post_schedule_partial_capacity", count, confidence="unknown")
     else:
         row["pending"] += count
         _reason(row, "task_not_created" if run else "schedule_not_created", count)
@@ -162,6 +185,7 @@ def _root_ids(db):
 
 def _pool_plans(db, window, runs, row_by_source):
     plans = {}
+    missing_quotas = {}
     available_sources = set()
     for plan in _rows(db, "x_post_schedule_random_plan", ["source_type", "run_date", "account_ids_json", "publish_times_json"]):
         if plan.get("run_date") != window.date:
@@ -192,6 +216,30 @@ def _pool_plans(db, window, runs, row_by_source):
                 scheduled = _slot(window.date, time)
                 if scheduled and began <= scheduled < until:
                     plans[(source, time)] = _accounts(config.get("account_ids_json"))
+        if audit_covers_day and missing_random:
+            # Random slot timestamps can be absent while the complete-day quota
+            # remains provable. Never use today's mutable config as history.
+            prior = [a for a in ordered if parse_time(a["created_at"]) <= window.start]
+            config = json_value(prior[-1].get("snapshot_json"), {}) if prior else {}
+            effective = config.get("random_effective_date", window.date)
+            accounts = _accounts(config.get("account_ids_json"))
+            count = config.get("random_daily_count")
+            stable = all(
+                parse_time(a["created_at"]) >= window.end
+                or (json_value(a.get("snapshot_json"), {}).get("enabled")
+                    and json_value(a.get("snapshot_json"), {}).get("schedule_mode") == "random"
+                    and json_value(a.get("snapshot_json"), {}).get("random_effective_date", "") > window.date)
+                for a in ordered if parse_time(a["created_at"]) > window.start)
+            observed = [r for r in runs.values() if r.get("run_date") == window.date and r.get("source_type") == source]
+            matches = all(r.get("schedule_mode") == "random" and _accounts(r.get("account_ids_json")) == accounts for r in observed)
+            if (config.get("enabled") and config.get("schedule_mode") == "random"
+                    and isinstance(effective, str) and effective <= window.date
+                    and type(count) is int and 1 <= count <= 24 and accounts
+                    and stable and matches and len(observed) <= count):
+                missing_quotas[source] = (count - len(observed)) * len(accounts)
+                available_sources.add(source)
+                row_by_source[source + "_pool"]["warnings"].append(
+                    "随机时点尚未生成；应发按覆盖整日的配置审计计算（%s 个账号 × %s 批），不推测发布时间。" % (len(accounts), count))
         if audit_covers_day and not missing_random:
             available_sources.add(source)
 
@@ -204,23 +252,32 @@ def _pool_plans(db, window, runs, row_by_source):
             row = row_by_source[source + "_pool"]
             row["expected"] = None
             row["warnings"].append("缺少覆盖昨日的冻结排期或配置审计；仅统计已记录任务，原计划总数待核对")
-    return plans
+    return plans, missing_quotas
 
 
-def _collect_primary(db, window, output, row_by_source):
+def _shared_outcome(outcome, context, source_key, window):
+    if outcome[0] in {'published', 'unknown'}:
+        return outcome
+    override = daily_override(context, source_key, window.cutoff)
+    return (override[0], None, outcome[2], override[1]) if override else outcome
+
+
+def _collect_primary(db, window, output, row_by_source, context=None):
+    context = context or {}
     if not list(db.execute('PRAGMA table_info(x_post_queue)')):
         raise sqlite3.OperationalError("missing X target ledger")
     root = _root_ids(db)
-    all_runs = {r["id"]: r for r in _rows(db, "x_post_schedule_run", ["id", "source_type", "run_date", "publish_time", "account_ids_json", "status", "error_code", "schedule_mode"])}
+    all_runs = {r["id"]: r for r in _rows(db, "x_post_schedule_run", ["id", "source_type", "run_date", "publish_time", "account_ids_json", "status", "error_code", "error_message", "schedule_mode"])}
     runs = {key: r for key, r in all_runs.items() if root(key) == key}
     manuals = {r["id"]: r for r in _rows(db, "x_post_manual_run", ["id", "trigger_source", "run_date", "created_at", "publish_mode", "scheduled_at", "account_ids_json", "expected_count", "status", "error_code"])}
-    logs = {r["queue_id"]: r for r in _rows(db, "x_post_publish_log", ["id", "queue_id", "status", "x_post_id", "published_at", "unknown_outcome", "error_code"])}
+    logs = {r["queue_id"]: r for r in _rows(db, "x_post_publish_log", ["id", "queue_id", "account_id", "status", "x_post_id", "published_at", "unknown_outcome", "error_code"])}
+    logs_by_id = {r["id"]: r for r in logs.values()}
     relays = {r["queue_id"]: r for r in _rows(db, "x_post_repost_ledger", ["queue_id", "status", "source_post_id", "reposted_at", "unknown_outcome", "error_code"])}
     queues = _rows(db, "x_post_queue", ["id", "account_id", "run_date", "source_type", "status", "delivery_mode", "schedule_run_id", "manual_run_id", "run_id", "catchup_run_id"])
     by_schedule, by_manual, by_daily, by_catchup = (defaultdict(list) for _ in range(4))
     queue_outcomes, counted_prior = {}, set()
     for queue in queues:
-        outcome = _delivery(queue, logs.get(queue["id"], {}), relays.get(queue["id"], {}))
+        outcome = _shared_outcome(_delivery(queue, logs.get(queue["id"], {}), relays.get(queue["id"], {})), context, 'x:queue:' + str(queue['id']), window)
         queue_outcomes[queue["id"]] = outcome
         manual = manuals.get(queue.get("manual_run_id"), {})
         plan_date = queue.get("run_date", "")
@@ -244,7 +301,16 @@ def _collect_primary(db, window, output, row_by_source):
             output["prior_completed"] += 1
             counted_prior.add(queue["id"])
 
-    plans = _pool_plans(db, window, runs, row_by_source)
+    plans, missing_quotas = _pool_plans(db, window, runs, row_by_source)
+    cancellations = {(r['run_id'], str(r['account_id'])) for r in _rows(db, 'x_post_unqueued_cancellation')
+                     if parse_time(r.get('created_at')) and parse_time(r['created_at']) < window.cutoff}
+    for source, count in missing_quotas.items():
+        row = row_by_source[source + "_pool"]
+        row["expected"] += count
+        row["pending"] += count
+        row['unqueued'] += count
+        _reason(row, "random_plan_not_created", count)
+        output["evidence"].setdefault("unmaterialized_random_targets", {})[source] = count
     by_slot = {(r["source_type"], r.get("publish_time", "")): r for r in runs.values() if r.get("run_date") == window.date}
     for (source, time), accounts in plans.items():
         row = row_by_source[source + "_pool"]
@@ -258,7 +324,8 @@ def _collect_primary(db, window, output, row_by_source):
             if by_account.get(account):
                 _record(row, _best(by_account[account]), window)
             else:
-                _missing(row, run, 1)
+                missing_run = dict(run, status='cancelled') if (run.get('id'), str(account)) in cancellations else run
+                _missing(row, missing_run, 1, account=account, logs_by_id=logs_by_id)
         extra = set(by_account) - set(accounts)
         if extra:
             row["warnings"].append("存在冻结计划以外的目标账号，请核对补偿批次")
@@ -343,7 +410,8 @@ def _auto_plans(db, window, runs, versions, row):
     return plans
 
 
-def _collect_auto(db, window, output, row, queue_outcomes, counted_prior):
+def _collect_auto(db, window, output, row, queue_outcomes, counted_prior, context=None):
+    context = context or {}
     if not list(db.execute('PRAGMA table_info(x_auto_run)')):
         raise sqlite3.OperationalError("missing X Auto run ledger")
     runs = {r["id"]: r for r in _rows(db, "x_auto_run", ["id", "template_id", "template_version", "trigger_type", "shanghai_date", "publish_time", "status", "error_code"])}
@@ -351,7 +419,7 @@ def _collect_auto(db, window, output, row, queue_outcomes, counted_prior):
     tasks_by_run = defaultdict(list)
     for task in _rows(db, "x_auto_task", ["id", "run_id", "account_id", "status", "execution_queue_id", "publish_id", "published_at_utc", "unknown_outcome", "error_code"]):
         tasks_by_run[task["run_id"]].append(task)
-    def outcome(task):
+    def native_outcome(task):
         queue_id = task.get("execution_queue_id")
         if queue_id in queue_outcomes:
             return queue_outcomes[queue_id]
@@ -359,9 +427,13 @@ def _collect_auto(db, window, output, row, queue_outcomes, counted_prior):
             return "unknown", None, "直接发布", "unknown_outcome"
         if task.get("status") == "published" and task.get("publish_id") and parse_time(task.get("published_at_utc")):
             return "published", parse_time(task["published_at_utc"]), "直接发布", ""
-        if task.get("status") in {"failed", "no_candidate", "cancelled", "skipped"}:
+        if task.get('status') in {'no_candidate', 'cancelled', 'skipped'}:
+            return 'policy_skipped', None, '直接发布', task.get('error_code') or 'source_closed'
+        if task.get("status") == "failed":
             return "failed", None, "直接发布", task.get("error_code") or "publish_failed"
         return "pending", None, "直接发布", "execution_pending"
+    def outcome(task):
+        return _shared_outcome(native_outcome(task), context, 'x:auto:' + str(task['id']), window)
     for run_id, tasks in tasks_by_run.items():
         if runs.get(run_id, {}).get("shanghai_date", "") < window.date:
             for task in tasks:
@@ -387,23 +459,28 @@ def _collect_auto(db, window, output, row, queue_outcomes, counted_prior):
 def collect(paths: dict, window) -> dict:
     """Report plan-cohort final target deliveries and separate prior-plan arrivals."""
     output = {"channel": "X", "rows": [], "prior_completed": 0, "warnings": [], "evidence": {}}
+    context = paths.get('_accounting') or load_dispatch(paths, window.cutoff)
     row_by_source = {source: _row(source) for source in ("material_pool", "drama_pool", "auto_template", "manual_immediate", "manual_scheduled")}
     queue_outcomes, counted_prior = {}, set()
     try:
         with read_db(paths["x"]) as db:
-            queue_outcomes, counted_prior = _collect_primary(db, window, output, row_by_source)
+            queue_outcomes, counted_prior = _collect_primary(db, window, output, row_by_source, context)
     except (OSError, sqlite3.Error, KeyError) as exc:
         output["warnings"].append("X 主发布台账读取失败：" + type(exc).__name__)
         for source in ("material_pool", "drama_pool", "manual_immediate", "manual_scheduled"):
             row_by_source[source]["expected"] = None
+            row_by_source[source]["data_available"] = False
     try:
         with read_db(paths["x_auto"]) as db:
-            _collect_auto(db, window, output, row_by_source["auto_template"], queue_outcomes, counted_prior)
+            _collect_auto(db, window, output, row_by_source["auto_template"], queue_outcomes, counted_prior, context)
     except (OSError, sqlite3.Error, KeyError) as exc:
         row_by_source["auto_template"]["expected"] = None
+        row_by_source["auto_template"]["data_available"] = False
         row_by_source["auto_template"]["warnings"].append("X Auto 台账读取失败：" + type(exc).__name__)
     for row in row_by_source.values():
         row["warnings"] = list(dict.fromkeys(row["warnings"]))
         row["reasons"].sort(key=lambda item: (-item["count"], item["code"]))
     output["rows"] = list(row_by_source.values())
+    from .x_cost import collect_cost
+    output["cost"] = collect_cost(paths, window.start, window.end)
     return output

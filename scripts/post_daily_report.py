@@ -18,6 +18,7 @@ from features.post_daily_report.delivery import DeliveryStore, DefiniteFailure, 
 from features.post_daily_report.report import collect_report, build_card, build_compact_card, preview_html, total
 
 DEFAULT_PATHS = {
+    "dispatch": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
     "tt_auto": "/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3",
     "tt": "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3",
     "fb": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",

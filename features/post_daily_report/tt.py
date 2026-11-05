@@ -9,6 +9,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from .accounting import load_dispatch, daily_override, CLOSED_NATIVE
 
 UTC = timezone.utc
 BEIJING = timezone(timedelta(hours=8))
@@ -73,7 +74,7 @@ def _within(value, start, end):
 
 def _row(source, label, form):
     return {"source": source, "label": label, "form": form, "expected": 0,
-            "published": 0, "late": 0, "pending": 0, "unknown": 0, "failed": 0,
+            "published": 0, "late": 0, "pending": 0, "unknown": 0, "failed": 0, "blocked": 0, "policy_skipped": 0, "unqueued": 0,
             "reasons": [], "warnings": [], "_reasons": Counter()}
 
 
@@ -85,7 +86,13 @@ def _error_reason(row, task, *, confidence="confirmed"):
     code = str(task.get("error_code") or "")
     message = str(task.get("error_message") or "").lower()
     combined = (code + " " + message).lower()
-    if "spam_risk_user_banned_from_posting" in combined:
+    if code in {"source_url_not_allowed", "fb_auto_source_url_not_allowed"}:
+        _reason(row, "source_url_not_allowed", "源视频域名未通过制作服务校验，尚未提交平台发布", "核对受信来源域名及下载入口；历史失败不自动重试", confidence)
+    elif (code in {"tt_publish_outcome_unknown", "tt_auto_reconcile_publish_id_missing"}
+          or task.get("unknown_outcome") or task.get("status") in {"unknown", "reconciling"}):
+        text = "同账号前序发布结果待确认，阻塞后续计划" if confidence == "inferred" else "发布结果待确认，尚不能认定成功或失败"
+        _reason(row, "historical_outcome_hold" if confidence == "inferred" else "outcome_unconfirmed", text, "先核对现有发布结果；不重新初始化历史发布", confidence)
+    elif "spam_risk_user_banned_from_posting" in combined:
         reason = "同账号前序任务遇到发布限制，可能阻塞后续任务" if confidence == "inferred" else "TikTok 明确限制该账号发布"
         _reason(row, "account_posting_banned", reason, "核查账号发布禁令并申诉；评估暂停该账号无效重试", confidence)
     elif any(word in combined for word in ("token", "unauthorized", "credential", "authorization")):
@@ -94,8 +101,10 @@ def _error_reason(row, task, *, confidence="confirmed"):
         _reason(row, "material_unavailable", "未找到符合账号语言或筛选条件的可用素材", "补充对应语言素材，核对素材筛选条件与去重范围", confidence)
     elif any(word in combined for word in ("rate_limit", "too_many", "429")):
         _reason(row, "platform_rate_limit", "平台限流导致发布延后", "检查限流持续时间并调整该账号发布间隔", confidence)
+    elif code == "tt_account_source_unavailable":
+        _reason(row, "account_source_unavailable", "账号状态只读查询暂不可用", "检查账号数据查询服务；保留原发布证据", confidence)
     elif any(word in combined for word in ("gpu", "media", "prepare", "download", "ffmpeg")):
-        _reason(row, "media_preparation", "视频准备、下载或校验未完成", "检查对应制作任务与源视频可用性，修复后由现有流程恢复", confidence)
+        _reason(row, "media_preparation", "视频准备、下载或校验未完成", "检查制作任务及源视频；历史失败不自动重试", confidence)
     elif task.get("status") in {"canceled", "skipped"}:
         _reason(row, "canceled_or_skipped", "计划已取消或跳过", "核对操作记录与当前发布安排", confidence)
     elif task.get("status") == "missed":
@@ -105,11 +114,14 @@ def _error_reason(row, task, *, confidence="confirmed"):
     elif code:
         # Do not copy upstream messages, URLs, or arbitrary codes into the group.
         _reason(row, "publish_error", "发布流程记录了错误，需查看对应任务", "根据任务证据定位失败阶段并处理", confidence)
+    elif task.get("status") == "ready":
+        text = "同账号前序视频已就绪，是否仍阻塞需核实执行策略" if confidence == "inferred" else "视频已制作完成，等待发布执行"
+        _reason(row, "prepared_waiting_publish", text, "检查发布执行通道及历史任务门禁；不自动补发历史计划", confidence)
     else:
         _reason(row, "pending_without_error", "任务尚未完成，未记录明确错误", "检查该账号前序任务、制作进度与调度日志", "unknown")
 
 
-def _account(row, task, published_at, window, blockers=()):
+def _account(row, task, published_at, window, blockers=(), context=None, source_key=''):
     """Count a planned item once; success always requires reconciled platform identity."""
     status = str(task.get("status") or "pending")
     published_at = _time(published_at)
@@ -124,6 +136,13 @@ def _account(row, task, published_at, window, blockers=()):
     if status in {"unknown", "reconciling"} or task.get("unknown_outcome") or status == "published":
         row["unknown"] += 1
         _reason(row, "outcome_unconfirmed", "平台发布结果或成功时间尚无法确认", "先核对平台结果与现有发布账本，避免重复发布", "unknown")
+    elif context and source_key and daily_override(context, source_key, window.cutoff):
+        bucket, code, label = daily_override(context, source_key, window.cutoff)
+        row[bucket] += 1
+        _reason(row, code, label, '核对原任务及调度记录；未知结果先对账，不自动重发')
+    elif status in CLOSED_NATIVE:
+        row['policy_skipped'] += 1
+        _reason(row, 'source_closed', '原任务已取消或正常策略跳过', '保留原计划与关闭记录')
     elif status in TERMINAL:
         row["failed"] += 1
         _error_reason(row, task)
@@ -147,6 +166,7 @@ def _missing(row, count, *, pool_empty=False):
     if count <= 0:
         return
     row["pending"] += count
+    row['unqueued'] += count
     if pool_empty:
         _reason(row, "material_pool_empty_now", "已有排期但未生成发布任务；当前对应素材池为空", "补充账号语言对应的素材；若排期已停用则核对并关闭配置", "inferred", count)
         note = "素材不足依据读取时素材池状态推断；该流程素材为空时不会留下运行记录。"
@@ -188,7 +208,7 @@ def _template_intervals(template, versions, events, window):
     return [], False
 
 
-def _auto(conn, window, output):
+def _auto(conn, window, output, context=None):
     _require(conn, {"tt_auto_template", "tt_auto_template_version", "tt_auto_run", "tt_auto_task", "tt_auto_random_plan", "tt_auto_event"})
     templates = _rows(conn, "tt_auto_template")
     version_rows = _rows(conn, "tt_auto_template_version")
@@ -263,7 +283,7 @@ def _auto(conn, window, output):
             row["warnings"].append("检测到重复账号计划位，按唯一计划位计数。")
             continue
         handled.add(key)
-        _account(row, task, task.get("published_at_utc"), window, blockers)
+        _account(row, task, task.get("published_at_utc"), window, blockers, context, 'tt:auto:' + str(task['id']))
     # A run can exist after preflight but before all per-account tasks were inserted.
     for run in runs:
         row, config = group(run["template_id"], run["template_version"], run.get("trigger_type") == "manual")
@@ -284,11 +304,21 @@ def _auto(conn, window, output):
         groups[source]["expected"] = None
     prior = _rows(conn, "tt_auto_task", " WHERE status='published' AND publish_id<>'' AND julianday(scheduled_at_utc)<julianday(?) AND julianday(published_at_utc)>=julianday(?) AND julianday(published_at_utc)<julianday(?)", (window.start.isoformat(), window.start.isoformat(), window.end.isoformat()))
     output["prior_completed"] += len(prior)
+    event_columns = {r[1] for r in conn.execute("PRAGMA table_info(tt_auto_event)")}
+    if {"task_id", "event_type", "created_at"}.issubset(event_columns):
+        crowded = conn.execute(
+            "SELECT task_id,COUNT(*) FROM tt_auto_event WHERE event_type='task_claimed_reconcile' "
+            "AND julianday(created_at)>=julianday(?) AND julianday(created_at)<julianday(?) "
+            "GROUP BY task_id HAVING COUNT(*)>=1000 ORDER BY COUNT(*) DESC LIMIT 3",
+            (window.start.isoformat(), window.cutoff.isoformat()),
+        ).fetchall()
+        for task_id, count in crowded:
+            output["warnings"].append(f"统计日至补发截止，旧任务 {task_id} 被领取核对 {count} 次，核对频率异常；需检查退避及执行器积压。")
     output["rows"].extend(groups.values())
     output["evidence"].append({"source": "tt_auto", "tables": "tt_auto_template_version,tt_auto_random_plan,tt_auto_run,tt_auto_task,tt_auto_event", "date": window.date, "run_count": len(runs), "task_count": len(tasks)})
 
 
-def _legacy(conn, window, output):
+def _legacy(conn, window, output, context=None):
     _require(conn, {"tt_post_daily_schedule", "tt_post_random_daily_plan", "tt_post_schedule_run", "tt_post_queue", "tt_post_event", "tt_post_direct_test"})
     recurring = _row("manual_material_schedule", "人工素材·每日排期", "素材视频")
     manual = _row("manual_material_once", "人工素材·立即/单次发布", "素材视频")
@@ -334,6 +364,8 @@ def _legacy(conn, window, output):
             periods = [(window.start, window.end, schedule)]
         periods_by_account[account_id] = periods
         for begin, finish, config in periods:
+            if finish <= window.start or begin >= window.end:
+                continue
             if not config.get("enabled"):
                 continue
             if config.get("schedule_mode") == "random":
@@ -383,7 +415,7 @@ def _legacy(conn, window, output):
             handled.add(key)
         else:
             target["expected"] += 1
-        _account(target, task, published_at, window)
+        _account(target, task, published_at, window, context=context, source_key='tt:queue:' + str(task['id']))
     queue_ids = {q["id"] for q in queue}
     for run in runs:
         if run.get("queue_id") in queue_ids:
@@ -419,15 +451,17 @@ def _legacy(conn, window, output):
 def collect(paths: dict, window) -> dict:
     """Report yesterday's plan cohort and confirmed results at a bounded cutoff."""
     output = {"channel": "TT", "rows": [], "prior_completed": 0, "warnings": [], "evidence": []}
+    context = paths.get('_accounting') or load_dispatch(paths, window.cutoff)
     for key, collector, label in (("tt_auto", _auto, "自动模板"), ("tt", _legacy, "人工素材")):
         conn = None
         try:
             conn = _db(paths[key])
-            collector(conn, window, output)
+            collector(conn, window, output, context)
         except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
             output["warnings"].append(f"TT {label} 数据读取不完整（{type(exc).__name__}），不可视为零发布。")
             missing = _row("unavailable:" + key, label + "·数据不可用", "未知")
             missing["expected"] = None
+            missing["data_available"] = False
             output["rows"].append(missing)
         finally:
             if conn is not None:
