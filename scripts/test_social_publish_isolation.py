@@ -16,8 +16,8 @@ class DispatchTests(unittest.TestCase):
                 queue(3, 2, status="published"), queue(4, 3),
                 queue(5, 4, relay_account_id=1)]
         result, _ = dispatch_queues(rows, lambda q: calls.append(q["id"]) or {**q, "status": "published"}, workers=4)
-        self.assertEqual(calls, [4])
-        self.assertEqual([r["status"] for r in result], ["needs_review", "queued", "published", "published", "queued"])
+        self.assertEqual(set(calls), {2, 4, 5})
+        self.assertEqual([r["status"] for r in result], ["needs_review", "published", "published", "published", "published"])
 
     def test_slow_account_does_not_prevent_other_lane_refill(self):
         third_started = threading.Event()
@@ -39,7 +39,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(maximum[0], 2)
         self.assertTrue(all(r["status"] == "published" for r in result))
 
-    def test_unreceipted_exception_holds_account_without_retry_or_batch_abort(self):
+    def test_unreceipted_exception_isolates_one_queue_without_retry_or_batch_abort(self):
         calls = []
         def publish(q):
             calls.append(q["id"])
@@ -47,7 +47,7 @@ class DispatchTests(unittest.TestCase):
                 raise TimeoutError("no receipt")
             return {**q, "status": "published"}
         result, _ = dispatch_queues([queue(1, 1), queue(2, 1), queue(3, 2)], publish, workers=1)
-        self.assertEqual(calls, [1, 3])
+        self.assertEqual(calls, [1, 2, 3])
         self.assertTrue(result[0]["unknown_outcome"])
 
     def test_fb_failed_lane_does_not_abort_healthy_lane_refill(self):

@@ -1,0 +1,11 @@
+--- a/features/post_daily_report/accounting.py
++++ b/features/post_daily_report/accounting.py
+@@ -29,7 +29,7 @@
+     'canonical_account_busy': '等待同账号前序任务或有效占用',
+     'adapter_unavailable': '当前执行适配器不可用',
+     'canonical_link_pending': '短链尚未就绪，发布受阻',
+-    'blocked_by_unknown': '同账号历史发布结果待核对，后续任务受阻',
++    'blocked_by_unknown': '同一素材或任务的发布结果待核对',
+     'unknown_outcome': '发布结果待核对，不能认定成功或失败',
+     'cutover_overdue': '历史任务暂停，保留原任务与回执',
+     'canonical_review_or_enqueue': '等待审核或后续入队',

@@ -1,4 +1,4 @@
-"""Read-only, account-scoped scheduling holds derived from the publish ledger.
+"""Read-only account authorization and explicit platform-lock holds.
 
 These holds never reconcile an unknown write or change account authorization.
 A profile refresh is not evidence that X has unlocked an account.
@@ -59,15 +59,6 @@ def read_account_publish_blockers(conn, account_ids):
 
     for row in rows:
         target_id, relay_id = int(row["account_id"]), int(row["relay_account_id"] or 0)
-        if (
-            row["queue_status"] == "publishing"
-            or row["unknown_outcome"]
-            or row["log_status"] in {"media_uploading", "post_creating", "repost_creating"}
-            or row["relay_unknown"]
-            or row["relay_status"] in {"source_publishing", "reposting", "needs_review"}
-        ):
-            for account_id in {target_id, relay_id} & requested:
-                blockers.setdefault(account_id, item(row, account_id, "x_post_account_needs_review"))
         if row["log_status"] == "published" and row["published_at"]:
             successes[target_id] = max(successes.get(target_id, ""), row["published_at"])
         if relay_id and row["source_post_id"] and row["source_published_at"]:
@@ -88,18 +79,6 @@ def read_account_publish_blockers(conn, account_ids):
     for account_id, (timestamp, blocker) in locks.items():
         if successes.get(account_id, "") <= timestamp:
             blockers.setdefault(account_id, blocker)
-    for row in conn.execute(
-        "SELECT id,assigned_account_id,content_id FROM x_post_drama_pool "
-        "WHERE status='needs_review' AND assigned_account_id IN (%s) "
-        "ORDER BY id" % placeholders, account_ids,
-    ).fetchall():
-        account_id = int(row["assigned_account_id"])
-        blockers.setdefault(account_id, {
-            "account_id": account_id, "account_username": str(account_id),
-            "queue_id": 0, "log_id": 0, "schedule_run_id": 0,
-            "code": "x_post_account_needs_review",
-            "message": "账号%s绑定的短剧%s有待核对发布结果" % (account_id, row["content_id"]),
-        })
     # Use explicit authorization failures, never refreshable Access Token age.
     # Legacy/split post-only databases retain their ledger-only behavior.
     if conn.execute(

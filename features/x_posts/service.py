@@ -5093,10 +5093,7 @@ def _independent_queued_sql(parent, column):
     return (
         "EXISTS(SELECT 1 FROM x_post_queue iq LEFT JOIN x_post_publish_log il ON il.queue_id=iq.id "
         "WHERE iq.%s=%s AND iq.status='queued' AND COALESCE(il.attempt_count,0)=0 "
-        "AND COALESCE(il.unknown_outcome,0)=0 AND COALESCE(il.status,'reserved')='reserved' "
-        "AND NOT EXISTS(SELECT 1 FROM x_post_queue hq LEFT JOIN x_post_publish_log hl ON hl.queue_id=hq.id "
-        "WHERE hq.account_id=iq.account_id AND hq.id<>iq.id AND "
-        "(hq.status='publishing' OR COALESCE(hl.unknown_outcome,0)=1 OR hl.status IN ('post_creating','repost_creating'))))"
+        "AND COALESCE(il.unknown_outcome,0)=0 AND COALESCE(il.status,'reserved')='reserved')"
     ) % (column, parent)
 
 
@@ -8102,21 +8099,7 @@ class XPostStore:
                 % placeholders,
                 tuple(account_ids),
             ).fetchall()
-            unresolved_rows = conn.execute(
-                "SELECT q.account_id,q.relay_account_id "
-                "FROM x_post_queue q JOIN x_post_publish_log l "
-                "ON l.queue_id=q.id WHERE "
-                "(COALESCE(l.unknown_outcome,0)=1 "
-                "OR l.status IN ('post_creating','repost_creating')) "
-                "AND (q.account_id IN (%s) OR q.relay_account_id IN (%s))"
-                % (placeholders, placeholders),
-                tuple(account_ids) + tuple(account_ids),
-            ).fetchall()
             account_blockers = read_account_publish_blockers(conn, account_ids)
-        unresolved = set()
-        for row in unresolved_rows:
-            unresolved.add(int(row["account_id"] or 0))
-            unresolved.add(int(row["relay_account_id"] or 0))
         counts = {
             int(row["relay_account_id"]): int(row["assignment_count"])
             for row in rows
@@ -8124,7 +8107,7 @@ class XPostStore:
         account_ids = [
             account_id
             for account_id in account_ids
-            if account_id not in unresolved and account_id not in account_blockers
+            if account_id not in account_blockers
         ]
         return [
             {
@@ -9742,16 +9725,6 @@ class XPostStore:
                 "AND (status='running' OR publish_mode='immediate' "
                 "OR (publish_mode='scheduled' AND scheduled_at<>'' "
                 "AND scheduled_at<=?)) "
-                "AND NOT EXISTS (SELECT 1 FROM x_video_publish_task self_task "
-                "JOIN x_video_publish_task sibling ON sibling.batch_id=self_task.batch_id "
-                "AND sibling.account_id=self_task.account_id "
-                "JOIN x_post_manual_run sr ON sr.id=sibling.manual_run_id "
-                "LEFT JOIN x_post_queue sq ON sq.manual_run_id=sr.id "
-                "LEFT JOIN x_post_publish_log sl ON sl.queue_id=sq.id "
-                "WHERE self_task.manual_run_id=x_post_manual_run.id "
-                "AND (sr.status IN ('needs_review','stopped') OR sr.unknown_count>0 "
-                "OR COALESCE(sl.unknown_outcome,0)=1 "
-                "OR sl.status IN ('post_creating','repost_creating'))) "
                 + planning_sql +
                 "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
                 "CASE WHEN publish_mode='scheduled' THEN scheduled_at "
@@ -10129,7 +10102,7 @@ class XPostStore:
             from features.x_video_publish.core import personal_task, personal_batch_held
             with contextlib.closing(_connect(self.db_path)) as personal_conn:
                 personal = personal_task(personal_conn, run_id)
-                if personal is None or personal_batch_held(personal_conn, personal["batch_id"], personal["account_id"]):
+                if personal is None or personal_batch_held(personal_conn, personal["batch_id"], personal["account_id"], run_id=run_id):
                     raise XPostError("x_post_unknown_outcome", "个人发布批次不存在或已暂停", 409, True)
         account_ids = list(frozen["account_ids"])
         material_ids = list(frozen["material_ids"])
@@ -10262,7 +10235,7 @@ class XPostStore:
             ).fetchone()
             if personal is not None:
                 from features.x_video_publish.core import personal_batch_held
-                if personal_batch_held(conn, personal["batch_id"], personal["account_id"]):
+                if personal_batch_held(conn, personal["batch_id"], personal["account_id"], run_id=run_id):
                     raise XPostError("x_post_unknown_outcome", "个人发布批次已暂停", 409, True)
             if not run:
                 conn.rollback()
@@ -10364,21 +10337,21 @@ class XPostStore:
                         "selected material is already used by another X queue",
                         409,
                     )
-            selected_accounts = [item["account_id"] for item in prepared]
-            account_placeholders = ",".join("?" for _item in selected_accounts)
+            pair_predicate = " OR ".join("(q.account_id=? AND q.material_key=?)" for _item in prepared) or "0"
+            pair_values = tuple(value for item in prepared for value in (item["account_id"], item["material_key"]))
             if conn.execute(
                 "SELECT 1 FROM x_post_publish_log l "
                 "JOIN x_post_queue q ON q.id=l.queue_id "
-                "WHERE q.account_id IN (%s) "
+                "WHERE (%s) "
                 "AND (COALESCE(l.unknown_outcome,0)=1 "
                 "OR l.status IN ('post_creating','repost_creating')) LIMIT 1"
-                % account_placeholders,
-                tuple(selected_accounts),
+                % pair_predicate,
+                pair_values,
             ).fetchone():
                 conn.rollback()
                 raise XPostError(
                     "x_post_unknown_outcome",
-                    "所选账号存在待核对发布结果，已停止手动发布",
+                    "该账号与素材已有待核对发布结果，禁止重复提交",
                     409,
                     True,
                 )
@@ -15109,14 +15082,14 @@ class XPostStore:
 
     @staticmethod
     def _assert_account_publish_fence(conn, queue):
-        """Fail closed if another edge for this publish scope is unresolved."""
+        """Fence only an unresolved duplicate material/episode delivery."""
         publishing_account_ids = {
             int(queue["account_id"]),
         }
         if int(queue["relay_account_id"] or 0) > 0:
             publishing_account_ids.add(int(queue["relay_account_id"]))
-        # Only identities which can write this delivery are fenced. A held
-        # sibling account in the same batch must not block independent targets.
+        # Independent queues on this account keep moving. The same frozen
+        # material or episode remains protected against an ambiguous duplicate.
         ordered_account_ids = tuple(sorted(publishing_account_ids))
         account_placeholders = ",".join(
             "?" for _item in ordered_account_ids
@@ -15125,7 +15098,8 @@ class XPostStore:
             "SELECT 1 FROM x_post_queue q "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
             "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
-            "WHERE q.id<>? AND (q.account_id IN (%s) "
+            "WHERE q.id<>? AND ((q.material_key<>'' AND q.material_key=?) "
+            "OR (q.episode_key<>'' AND q.episode_key=?)) AND (q.account_id IN (%s) "
             "OR COALESCE(q.relay_account_id,0) IN (%s) "
             "OR COALESCE(r.relay_account_id,0) IN (%s)) "
             "AND (q.status='publishing' "
@@ -15139,12 +15113,12 @@ class XPostStore:
                 account_placeholders,
                 account_placeholders,
             ),
-            (int(queue["id"]),) + ordered_account_ids * 3,
+            (int(queue["id"]), str(queue["material_key"] or ""), str(queue["episode_key"] or "")) + ordered_account_ids * 3,
         ).fetchone()
         if unresolved is not None:
             raise XPostError(
                 "x_post_unknown_outcome",
-                "所选账号存在待核对发布结果，已暂停后续发布",
+                "该素材或剧集已有待核对发布结果，禁止重复发布",
                 409,
                 True,
             )
@@ -16574,7 +16548,7 @@ class XPostStore:
             if (
                 unknown_outcome
                 and code == "x_post_unknown_outcome"
-                and message == "所选账号存在待核对发布结果，已暂停后续发布"
+                and message == "该素材或剧集已有待核对发布结果，禁止重复发布"
                 and row["status"] == "reserved"
                 and int(row["attempt_count"] or 0) == 0
                 and not any(row[key] for key in (

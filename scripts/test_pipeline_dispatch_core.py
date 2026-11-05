@@ -43,85 +43,69 @@ class DispatchCoreTests(unittest.TestCase):
             claims=list(p.map(lambda n: self.store.claim(n,"0","publish")["job"], ["cpu-main","hk-gpu"]))
         self.assertEqual(sum(x is not None for x in claims),1)
 
-    def test_same_account_serial_different_accounts_parallel(self):
+    def test_same_account_queues_publish_independently(self):
         self.offer()
-        self.offer("x:auto:2", resource="x:account:1")
-        self.offer("x:auto:3", resource="x:account:3")
+        self.offer("x:auto:2")
         a=self.claim(); b=self.claim("hk-gpu")
-        self.assertEqual(a["source_key"],"x:auto:1")
-        self.assertEqual(b["source_key"],"x:auto:3")
+        self.assertEqual([a["source_key"],b["source_key"]],["x:auto:1","x:auto:2"])
+        self.intent(a); self.intent_with_id(b, "op-2")
 
-    def test_preparation_blocks_publish_and_other_preparation_across_hosts(self):
-        self.offer("x:auto:prepare", stage="prepare")
-        preparing = self.claim(stage="prepare")
-        self.offer("x:auto:next-prep", stage="prepare")
+    def intent_with_id(self, claim, operation_id):
+        return self.store.begin_operation(claim, {"operation_id":operation_id,"operation":"create_post",
+            "request_sha256":digest(operation_id),"account_resource":"x:account:1"})
+
+    def test_preparation_does_not_block_other_queue_publication(self):
+        self.offer("x:auto:prepare",stage="prepare")
+        preparing=self.claim(stage="prepare")
+        self.offer("x:auto:next-prep",stage="prepare")
         self.offer("x:auto:ready")
-        self.offer("x:auto:other", resource="x:account:other")
-        self.assertIsNone(self.claim("hk-gpu", "prepare", "prepare"))
-        self.assertEqual(self.claim("hk-gpu", "publish")["source_key"], "x:auto:other")
-        self.store.complete(preparing, "prepared-receipt", {"artifact": {
-            "url": "https://media.example/frozen.mp4", "sha256": "a" * 64, "size": 1024}}, canonical_verified=True)
-        self.assertEqual(self.claim("cpu-main", "publish")["source_key"], "x:auto:ready")
+        self.assertEqual(self.claim("hk-gpu","prep","prepare")["source_key"],"x:auto:next-prep")
+        self.assertEqual(self.claim("hk-gpu","pub")["source_key"],"x:auto:ready")
+        self.assertEqual(self.store.get_job(preparing["id"])["status"],"running")
 
-    def test_publication_blocks_same_page_and_channel_preparation(self):
-        for channel, resource in (("fb", "fb:page:1"), ("youtube", "youtube:channel:UC1")):
-            with self.subTest(channel=channel):
-                self.store.channel_enabled(channel, True)
-                self.offer(channel + ":publish:1", channel=channel, resource=resource)
-                claim = self.claim("cpu-main", channel + "-publish")
-                self.offer(channel + ":prepare:2", channel=channel, stage="prepare", resource=resource)
-                self.offer(channel + ":prepare:3", channel=channel, stage="prepare", resource=resource + "-other")
-                other = self.claim("hk-gpu", channel + "-prepare", "prepare")
-                self.assertEqual(other["source_key"], channel + ":prepare:3")
-                self.store.fail(claim, "definite_no_write", canonical_no_write=True)
-                self.store.fail(other, "definite_no_write", canonical_no_write=True)
-
-    def test_shared_relay_resource_serializes_different_primary_accounts(self):
-        self.offer("x:auto:relay-prep", stage="prepare", resource_keys=["x:account:1", "x:account:relay"])
-        self.claim(stage="prepare")
-        self.offer("x:auto:relay-publish", resource_keys=["x:account:2", "x:account:relay"])
+    def test_real_fb_page_write_mutex_still_protects_active_writes(self):
+        resources=["fb:page:1","fb:material:1:11"]
+        self.offer("fb:auto:1",channel="fb",resource_keys=resources)
+        first=self.claim()
+        self.offer("fb:auto:2",channel="fb",resource_keys=["fb:page:1","fb:material:1:22"])
         self.assertIsNone(self.claim("hk-gpu"))
-        self.offer("x:auto:independent", resource="x:account:3")
-        self.assertEqual(self.claim("hk-gpu")["source_key"], "x:auto:independent")
-
-    def test_two_hosts_race_same_account_preparations(self):
-        self.offer("x:auto:1", stage="prepare")
-        self.offer("x:auto:2", stage="prepare")
-        for node in ("cpu-main", "hk-gpu"):
-            self.store.worker_heartbeat(node, "prep", "prepare")
-        with concurrent.futures.ThreadPoolExecutor(2) as pool:
-            claims = list(pool.map(lambda node: self.store.claim(node, "prep", "prepare")["job"], ("cpu-main", "hk-gpu")))
-        self.assertEqual(sum(claim is not None for claim in claims), 1)
-
-    def test_preparation_expiry_releases_old_generation_without_unfencing_new_one(self):
-        self.offer(stage="prepare")
-        old = self.claim(stage="prepare")
-        self.time += dt.timedelta(seconds=121)
-        current = self.claim("hk-gpu", "prep", "prepare")
-        self.assertEqual(current["generation"], 2)
-        self.offer("x:auto:next")
-        self.assertIsNone(self.claim("cpu-main", "pub"))
-        with self.assertRaises(DispatchError):
-            self.store.fail(old, "late_preparation_failure", canonical_no_write=True)
-        self.store.fail(current, "definite_no_write", canonical_no_write=True)
-        self.assertIsNotNone(self.claim("cpu-main", "pub"))
-
-    def test_prepare_yields_to_older_due_publish_but_skips_to_another_account(self):
-        self.offer("x:auto:already-ready")
-        self.offer("x:auto:new-prep", stage="prepare")
-        self.offer("x:auto:other-prep", stage="prepare", resource="x:account:other")
-        self.assertEqual(self.claim(stage="prepare")["source_key"], "x:auto:other-prep")
-        self.assertEqual(self.claim("hk-gpu")["source_key"], "x:auto:already-ready")
-
-    def test_legacy_prepare_fences_both_stages_until_canonical_completion(self):
-        old = self.offer("x:auto:legacy", stage="prepare", legacy_inflight=True)
-        self.offer("x:auto:new-prep", stage="prepare")
-        self.offer("x:auto:new-pub")
-        self.assertIsNone(self.claim(stage="prepare"))
-        self.assertIsNone(self.claim("hk-gpu"))
-        self.offer("x:auto:legacy", stage="publish", status="published", source_status="published", publish_id="confirmed-post")
-        self.assertEqual(self.store.get_job(old["id"])["status"], "completed")
+        self.store.fail(first,"known_failure",canonical_no_write=True)
         self.assertIsNotNone(self.claim("hk-gpu"))
+
+    def test_shared_relay_does_not_make_sibling_queue_dependent(self):
+        self.offer("x:auto:relay-prep",stage="prepare",resource_keys=["x:account:1","x:account:relay"])
+        self.claim(stage="prepare")
+        self.offer("x:auto:relay-publish",resource_keys=["x:account:2","x:account:relay"])
+        self.assertIsNotNone(self.claim("hk-gpu"))
+
+    def test_two_hosts_claim_distinct_same_account_preparations(self):
+        self.offer("x:auto:1",stage="prepare"); self.offer("x:auto:2",stage="prepare")
+        for node in ("cpu-main","hk-gpu"):self.store.worker_heartbeat(node,"prep","prepare")
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            claims=list(pool.map(lambda node:self.store.claim(node,"prep","prepare")["job"],("cpu-main","hk-gpu")))
+        self.assertEqual(len({claim["id"] for claim in claims}),2)
+
+    def test_preparation_expiry_keeps_generation_fence_only_on_original_task(self):
+        self.offer(stage="prepare");old=self.claim(stage="prepare")
+        self.time+=dt.timedelta(seconds=121)
+        current=self.claim("hk-gpu","prep","prepare")
+        self.assertEqual(current["generation"],2)
+        self.offer("x:auto:next")
+        self.assertIsNotNone(self.claim("cpu-main","pub"))
+        with self.assertRaises(DispatchError):self.store.fail(old,"late",canonical_no_write=True)
+        self.assertEqual(self.store.get_job(current["id"])["status"],"running")
+
+    def test_order_does_not_block_preparation_or_publication(self):
+        self.offer("x:auto:already-ready")
+        self.offer("x:auto:new-prep",stage="prepare")
+        self.assertEqual(self.claim(stage="prepare")["source_key"],"x:auto:new-prep")
+        self.assertEqual(self.claim("hk-gpu")["source_key"],"x:auto:already-ready")
+
+    def test_legacy_task_lease_does_not_fence_sibling_queues(self):
+        old=self.offer("x:auto:legacy",stage="prepare",legacy_inflight=True)
+        self.offer("x:auto:new-prep",stage="prepare");self.offer("x:auto:new-pub")
+        self.assertIsNotNone(self.claim(stage="prepare"));self.assertIsNotNone(self.claim("hk-gpu"))
+        self.assertEqual(self.store.get_job(old["id"])["status"],"legacy_running")
 
     def test_missing_prepare_identity_skips_without_failure_and_can_be_enriched(self):
         missing = self.offer("x:auto:missing", stage="prepare", resource_keys=[])
@@ -166,7 +150,7 @@ class DispatchCoreTests(unittest.TestCase):
         with self.assertRaises(DispatchError):
             self.store.complete(old, "late", {"artifact": {"url": "https://media.example/a", "sha256": "a" * 64, "size": 10}}, canonical_verified=True)
         self.offer("x:auto:publish-next")
-        self.assertIsNone(self.claim("cpu-main", "pub"))
+        self.assertIsNotNone(self.claim("cpu-main", "pub"))
 
     def test_explicit_youtube_cover_revision_and_retry_rearm_only_same_preparation(self):
         self.store.channel_enabled("youtube", True)
@@ -207,17 +191,14 @@ class DispatchCoreTests(unittest.TestCase):
         self.assertEqual(self.offer(key, channel="youtube", family="publish", source_revision="2:",
             source_status="queued_generation", execution_available=True)["status"], "completed")
 
-    def test_unknown_expiry_quarantines_account_and_accepts_late_receipt(self):
-        self.offer(); claim=self.claim(); self.intent(claim)
-        self.offer("x:auto:2")
-        self.time+=dt.timedelta(seconds=121)
-        self.store.expire()
+    def test_unknown_task_accepts_late_receipt_while_same_account_progresses(self):
+        self.offer();claim=self.claim();self.intent(claim);self.offer("x:auto:2")
+        self.time+=dt.timedelta(seconds=121);self.store.expire()
         self.assertEqual(self.store.get_job(claim["id"])["status"],"unknown")
-        self.assertIsNone(self.claim("hk-gpu"))
-        result={"publish_id":"123", "canonical_receipt":"123"}
-        self.store.complete(claim,"r1",result,canonical_verified=True)
-        self.assertTrue(self.store.complete(claim,"r1",result,canonical_verified=True)["duplicate"])
-        self.assertIsNotNone(self.claim("hk-gpu"))
+        sibling=self.claim("hk-gpu");self.assertEqual(sibling["source_key"],"x:auto:2")
+        self.store.complete(claim,"r1",{"publish_id":"123","canonical_receipt":"123"},canonical_verified=True)
+        self.assertTrue(self.store.complete(claim,"r1",{"publish_id":"123","canonical_receipt":"123"},canonical_verified=True)["duplicate"])
+        self.assertEqual(self.store.get_job(sibling["id"])["status"],"running")
 
     def test_pre_intent_expiry_can_reclaim_but_stale_worker_cannot_write(self):
         self.offer(); old=self.claim(); self.time+=dt.timedelta(seconds=121)
@@ -228,6 +209,16 @@ class DispatchCoreTests(unittest.TestCase):
     def test_same_operation_never_gets_second_write_permit(self):
         self.offer(); c=self.claim();self.intent(c)
         with self.assertRaises(DispatchError):self.intent(c)
+
+    def test_activation_preserves_inflight_claim_and_accepts_original_operation(self):
+        self.offer(); claim=self.claim()
+        with self.store.transaction() as conn:
+            conn.execute("UPDATE pipeline_resource SET resource_key='x:account:1' WHERE job_id=?",(claim["id"],))
+        before=self.store.get_job(claim["id"])
+        self.store=DispatchStore(self.store.path, clock=lambda:self.time)
+        self.assertEqual(self.store.get_job(claim["id"]),before)
+        self.intent(claim)
+        with self.assertRaises(DispatchError):self.intent(claim)
 
     def test_network_error_cannot_clear_resource_hold(self):
         self.offer();c=self.claim();self.intent(c)

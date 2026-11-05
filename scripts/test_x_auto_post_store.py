@@ -35,7 +35,7 @@ class MutableClock:
 
 
 class AutoPostStoreTests(unittest.TestCase):
-    def test_more_than_500_held_candidates_do_not_hide_available_account(self):
+    def test_unknown_task_does_not_hide_same_account_pending_candidates(self):
         template = self.create_template()
         first = self.create_run(template, "held-first")
         held = self.create_task(first)
@@ -45,7 +45,8 @@ class AutoPostStoreTests(unittest.TestCase):
             self.create_task(self.create_run(template, "held-%s" % index))
         available = self.create_task(self.create_run(template, "available"), "641")
         claim = self.store.claim_next_executable_task(worker_id="isolation-test", lease_seconds=1200)
-        self.assertEqual(claim.task.id, available.id)
+        self.assertEqual(claim.task.id, held.id + 1)
+        self.assertEqual(self.store.get_task(held.id).status, 'unknown')
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -553,7 +554,7 @@ class AutoPostStoreTests(unittest.TestCase):
             "reserved",
         )
 
-    def test_manual_pending_task_wins_and_account_remains_serial(self):
+    def test_manual_priority_keeps_same_account_auto_task_independent(self):
         template = self.create_template()
         auto_task = self.create_task(self.create_run(template, "auto-run", "auto"))
         manual_task = self.create_task(self.create_run(template, "manual-run", "manual"))
@@ -574,7 +575,7 @@ class AutoPostStoreTests(unittest.TestCase):
             worker_id="selector-2",
             lease_seconds=60,
         )
-        self.assertIsNone(blocked)
+        self.assertEqual(blocked.task.id, auto_task.id)
         self.store.release_task_claim(
             manual_task.id,
             claim.reveal_claim_token(),

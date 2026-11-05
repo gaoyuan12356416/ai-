@@ -252,12 +252,12 @@ class FBTaskIsolationTests(unittest.TestCase):
         self.assertEqual(claimed["source_key"], prep["source_key"])
         self.assertEqual(claimed["resource_keys"], ["fb:material:100:12"])
 
-    def test_unidentified_legacy_unknown_keeps_conservative_page_fence(self):
+    def test_unidentified_legacy_unknown_isolates_original_task_only(self):
         old, later = self.video_job(13), self.video_job(14)
         self.set_state(old, "unknown", material_id="invalid", unknown_outcome=1)
         saved = self.offer(old); self.offer(later)
-        self.assertEqual(self.resources("pipeline_legacy_resource"), [("fb:page:100", saved["id"])])
-        self.assertIsNone(self.claim_next())
+        self.assertEqual(self.resources("pipeline_legacy_resource"), [("task:" + saved["source_key"], saved["id"])])
+        self.assertIsNotNone(self.claim_next())
 
     def test_empty_credential_preflight_failure_is_not_platform_attempt(self):
         job = self.video_job(15)

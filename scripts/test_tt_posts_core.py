@@ -2281,18 +2281,17 @@ class RecurringStorageTests(CoreTestCase):
             ),
         )
 
-    def test_double_claim_is_idempotent_and_account_active_run_is_exclusive(self):
+    def test_double_claim_is_idempotent_and_same_account_runs_are_independent(self):
         self.add_recurring("3101")
         self.add_recurring("3102")
         first = self.claim_manual("same")
         replay = self.claim_manual("same")
         self.assertEqual(first["id"], replay["id"])
         self.assertEqual(first["pool_item_id"], replay["pool_item_id"])
-        with self.assertRaises(TTPostError) as busy:
-            self.claim_manual("other", publish_time="10:01")
-        self.assertEqual("tt_post_account_publish_busy", busy.exception.code)
+        other = self.claim_manual("other", publish_time="10:01")
+        self.assertNotEqual(first["id"], other["id"])
         self.assertEqual(
-            1,
+            2,
             self.store.count_recurring_materials(
                 account_id="acct-1",
                 status="reserved",
@@ -2436,7 +2435,7 @@ class RecurringStorageTests(CoreTestCase):
             ],
         )
 
-    def test_unknown_queue_or_run_blocks_all_later_account_claims(self):
+    def test_unknown_queue_and_run_do_not_block_later_account_claims(self):
         self.add_recurring("3201")
         run = self.claim_manual("unknown-queue")
         queue = self.freeze_legacy_queue_for_run(run)
@@ -2464,12 +2463,9 @@ class RecurringStorageTests(CoreTestCase):
         synced = self.store.sync_recurring_from_queue(queue["id"])
         self.assertEqual("unknown", synced["status"])
         self.add_recurring("3202")
-        with self.assertRaises(TTPostError) as queue_busy:
-            self.claim_manual("after-unknown-queue", publish_time="10:01")
-        self.assertEqual(
-            "tt_post_account_publish_busy",
-            queue_busy.exception.code,
-        )
+        other = self.claim_manual("after-unknown-queue", publish_time="10:01")
+        self.assertNotEqual(other["id"], run["id"])
+        self.assertEqual(self.store.get_queue(queue["id"])["status"], "unknown")
 
         self.add_recurring("3301", "acct-2")
         self.add_recurring("3302", "acct-2")
@@ -2487,16 +2483,12 @@ class RecurringStorageTests(CoreTestCase):
             conn.commit()
         finally:
             conn.close()
-        with self.assertRaises(TTPostError) as run_busy:
-            self.claim_manual(
+        other_run = self.claim_manual(
                 "after-unknown-run",
                 "acct-2",
                 publish_time="10:01",
             )
-        self.assertEqual(
-            "tt_post_account_publish_busy",
-            run_busy.exception.code,
-        )
+        self.assertNotEqual(other_run["id"], unknown_run["id"])
 
     def test_release_preflight_returns_material_to_available_fifo(self):
         material = self.add_recurring("4101")

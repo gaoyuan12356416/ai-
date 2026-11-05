@@ -4751,66 +4751,7 @@ class TTPostStore:
                     409,
                 )
             else:
-                direct_account_statuses = sorted(
-                    DIRECT_ACCOUNT_BLOCKING_STATUSES
-                )
-                direct_account_placeholders = ",".join(
-                    "?" for _ in direct_account_statuses
-                )
-                if conn.execute(
-                    """
-                    SELECT 1 FROM tt_post_direct_test
-                    WHERE account_id=? AND id<>? AND status IN (%s)
-                    LIMIT 1
-                    """
-                    % direct_account_placeholders,
-                    (
-                        str(row["account_id"]),
-                        normalized_id,
-                        *direct_account_statuses,
-                    ),
-                ).fetchone():
-                    raise TTPostError(
-                        "tt_post_account_publish_busy",
-                        "This TikTok account has an active or unknown direct test",
-                        409,
-                    )
-                queue_statuses = sorted(ACTIVE_QUEUE_STATUSES)
-                queue_placeholders = ",".join(
-                    "?" for _ in queue_statuses
-                )
-                if conn.execute(
-                    """
-                    SELECT 1 FROM tt_post_queue
-                    WHERE account_id=? AND status IN (%s)
-                      AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_queue.id)
-                    LIMIT 1
-                    """
-                    % queue_placeholders,
-                    (str(row["account_id"]), *queue_statuses),
-                ).fetchone():
-                    raise TTPostError(
-                        "tt_post_account_publish_busy",
-                        "This TikTok account has an active or unknown queue",
-                        409,
-                    )
-                run_statuses = sorted(ACTIVE_SCHEDULE_RUN_STATUSES)
-                run_placeholders = ",".join("?" for _ in run_statuses)
-                if conn.execute(
-                    """
-                    SELECT 1 FROM tt_post_schedule_run
-                    WHERE account_id=? AND status IN (%s)
-                      AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_schedule_run.queue_id)
-                    LIMIT 1
-                    """
-                    % run_placeholders,
-                    (str(row["account_id"]), *run_statuses),
-                ).fetchone():
-                    raise TTPostError(
-                        "tt_post_account_publish_busy",
-                        "This TikTok account has an active or unknown recurring run",
-                        409,
-                    )
+                # This task owns its lease; unrelated account tasks proceed.
                 token = secrets.token_urlsafe(32)
                 updated = conn.execute(
                     """
@@ -7338,65 +7279,7 @@ class TTPostStore:
                         409,
                     )
 
-            direct_account_statuses = sorted(
-                DIRECT_ACCOUNT_BLOCKING_STATUSES
-            )
-            direct_account_placeholders = ",".join(
-                "?" for _ in direct_account_statuses
-            )
-            if conn.execute(
-                """
-                SELECT 1 FROM tt_post_direct_test
-                WHERE account_id=? AND status IN (%s)
-                LIMIT 1
-                """
-                % direct_account_placeholders,
-                (
-                    normalized_account_id,
-                    *direct_account_statuses,
-                ),
-            ).fetchone():
-                raise TTPostError(
-                    "tt_post_account_publish_busy",
-                    "This TikTok account has an active or unknown direct test",
-                    409,
-                )
-
-            placeholders = ",".join("?" for _ in ACTIVE_QUEUE_STATUSES)
-            if conn.execute(
-                """
-                SELECT 1 FROM tt_post_queue
-                WHERE account_id=? AND status IN (%s)
-                LIMIT 1
-                """
-                % placeholders,
-                (normalized_account_id, *sorted(ACTIVE_QUEUE_STATUSES)),
-            ).fetchone():
-                raise TTPostError(
-                    "tt_post_account_publish_busy",
-                    "该TikTok账号已有活跃发布队列",
-                    409,
-                )
-            placeholders = ",".join(
-                "?" for _ in ACTIVE_SCHEDULE_RUN_STATUSES
-            )
-            if conn.execute(
-                """
-                SELECT 1 FROM tt_post_schedule_run
-                WHERE account_id=? AND status IN (%s)
-                LIMIT 1
-                """
-                % placeholders,
-                (
-                    normalized_account_id,
-                    *sorted(ACTIVE_SCHEDULE_RUN_STATUSES),
-                ),
-            ).fetchone():
-                raise TTPostError(
-                    "tt_post_account_publish_busy",
-                    "该TikTok账号已有活跃每日发布运行",
-                    409,
-                )
+            # Run identity and material reservations are independent of other account tasks.
             account_settings = None
             if normalized_trigger == "auto":
                 account_settings = conn.execute(

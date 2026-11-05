@@ -416,7 +416,7 @@ class AutoPostStoreTests(unittest.TestCase):
             "reserved",
         )
 
-    def test_manual_pending_task_wins_and_account_remains_serial(self):
+    def test_manual_priority_does_not_block_same_account_auto_task(self):
         template = self.create_template()
         auto_task = self.create_task(self.create_run(template, "auto-run", "auto"))
         manual_task = self.create_task(self.create_run(template, "manual-run", "manual"))
@@ -437,7 +437,7 @@ class AutoPostStoreTests(unittest.TestCase):
             worker_id="selector-2",
             lease_seconds=60,
         )
-        self.assertIsNone(blocked)
+        self.assertEqual(blocked.task.id, auto_task.id)
         self.store.release_task_claim(
             manual_task.id,
             claim.reveal_claim_token(),

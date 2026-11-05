@@ -1,0 +1,393 @@
+--- a/features/x_auto_posts/core.py
++++ b/features/x_auto_posts/core.py
+@@ -2214,21 +2214,14 @@
+                 WHERE t.status='pending'
+                   AND t.scheduled_at_utc<=?
+                   AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||t.id)
+-                  AND NOT EXISTS (
+-                      SELECT 1 FROM x_auto_task active
+-                      WHERE active.account_id=t.account_id
+-                        AND active.id<>t.id
+-                        AND active.status IN (%s)
+-                        AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||active.id)
+-                  )
+                 ORDER BY
+                     t.trigger_priority ASC,
+                     t.scheduled_at_utc ASC,
+                     t.template_id ASC,
+                     t.id ASC
+                 LIMIT 1000
+-                """ % placeholders,
+-                (current, *sorted(ACTIVE_ACCOUNT_TASK_STATUSES)),
++                """,
++                (current,),
+             ).fetchall()
+             row = next((item for item in candidates if disposition_record(conn, "x:auto:" + str(item["id"]), item) not in {"archive", "blocked"}), None)
+             if row is None:
+@@ -2385,37 +2378,7 @@
+                     continue
+                 candidate_id = int(candidate["id"])
+                 candidate_status = str(candidate["status"])
+-                others = conn.execute(
+-                    """
+-                    SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc
+-                    FROM x_auto_task
+-                    WHERE account_id=? AND id<>? AND status IN (%s)
+-                      AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||x_auto_task.id)
+-                    ORDER BY scheduled_at_utc,id
+-                    """ % active_placeholders,
+-                    (
+-                        str(candidate["account_id"]),
+-                        candidate_id,
+-                        *sorted(ACTIVE_ACCOUNT_TASK_STATUSES),
+-                    ),
+-                ).fetchall()
+-                if candidate_status == "pending" and others:
+-                    continue
+-                if candidate_status in ACTIVE_ACCOUNT_TASK_STATUSES and others:
+-                    if any(
+-                        str(other["claim_token"] or "")
+-                        and str(other["lease_expires_at_utc"] or "") > current
+-                        for other in others
+-                    ):
+-                        continue
+-                    ordering = [
+-                        (str(candidate["scheduled_at_utc"]), candidate_id)
+-                    ] + [
+-                        (str(other["scheduled_at_utc"]), int(other["id"]))
+-                        for other in others
+-                    ]
+-                    if min(ordering) != (str(candidate["scheduled_at_utc"]), candidate_id):
+-                        continue
++                # Each template task owns its lease and receipt independently.
+                 selected = candidate
+                 break
+             if selected is None:
+--- a/features/x_posts/service.py
++++ b/features/x_posts/service.py
+@@ -5093,10 +5093,7 @@
+     return (
+         "EXISTS(SELECT 1 FROM x_post_queue iq LEFT JOIN x_post_publish_log il ON il.queue_id=iq.id "
+         "WHERE iq.%s=%s AND iq.status='queued' AND COALESCE(il.attempt_count,0)=0 "
+-        "AND COALESCE(il.unknown_outcome,0)=0 AND COALESCE(il.status,'reserved')='reserved' "
+-        "AND NOT EXISTS(SELECT 1 FROM x_post_queue hq LEFT JOIN x_post_publish_log hl ON hl.queue_id=hq.id "
+-        "WHERE hq.account_id=iq.account_id AND hq.id<>iq.id AND "
+-        "(hq.status='publishing' OR COALESCE(hl.unknown_outcome,0)=1 OR hl.status IN ('post_creating','repost_creating'))))"
++        "AND COALESCE(il.unknown_outcome,0)=0 AND COALESCE(il.status,'reserved')='reserved')"
+     ) % (column, parent)
+ 
+ 
+@@ -8102,21 +8099,7 @@
+                 % placeholders,
+                 tuple(account_ids),
+             ).fetchall()
+-            unresolved_rows = conn.execute(
+-                "SELECT q.account_id,q.relay_account_id "
+-                "FROM x_post_queue q JOIN x_post_publish_log l "
+-                "ON l.queue_id=q.id WHERE "
+-                "(COALESCE(l.unknown_outcome,0)=1 "
+-                "OR l.status IN ('post_creating','repost_creating')) "
+-                "AND (q.account_id IN (%s) OR q.relay_account_id IN (%s))"
+-                % (placeholders, placeholders),
+-                tuple(account_ids) + tuple(account_ids),
+-            ).fetchall()
+             account_blockers = read_account_publish_blockers(conn, account_ids)
+-        unresolved = set()
+-        for row in unresolved_rows:
+-            unresolved.add(int(row["account_id"] or 0))
+-            unresolved.add(int(row["relay_account_id"] or 0))
+         counts = {
+             int(row["relay_account_id"]): int(row["assignment_count"])
+             for row in rows
+@@ -8124,7 +8107,7 @@
+         account_ids = [
+             account_id
+             for account_id in account_ids
+-            if account_id not in unresolved and account_id not in account_blockers
++            if account_id not in account_blockers
+         ]
+         return [
+             {
+@@ -9742,16 +9725,6 @@
+                 "AND (status='running' OR publish_mode='immediate' "
+                 "OR (publish_mode='scheduled' AND scheduled_at<>'' "
+                 "AND scheduled_at<=?)) "
+-                "AND NOT EXISTS (SELECT 1 FROM x_video_publish_task self_task "
+-                "JOIN x_video_publish_task sibling ON sibling.batch_id=self_task.batch_id "
+-                "AND sibling.account_id=self_task.account_id "
+-                "JOIN x_post_manual_run sr ON sr.id=sibling.manual_run_id "
+-                "LEFT JOIN x_post_queue sq ON sq.manual_run_id=sr.id "
+-                "LEFT JOIN x_post_publish_log sl ON sl.queue_id=sq.id "
+-                "WHERE self_task.manual_run_id=x_post_manual_run.id "
+-                "AND (sr.status IN ('needs_review','stopped') OR sr.unknown_count>0 "
+-                "OR COALESCE(sl.unknown_outcome,0)=1 "
+-                "OR sl.status IN ('post_creating','repost_creating'))) "
+                 + planning_sql +
+                 "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
+                 "CASE WHEN publish_mode='scheduled' THEN scheduled_at "
+@@ -10129,7 +10102,7 @@
+             from features.x_video_publish.core import personal_task, personal_batch_held
+             with contextlib.closing(_connect(self.db_path)) as personal_conn:
+                 personal = personal_task(personal_conn, run_id)
+-                if personal is None or personal_batch_held(personal_conn, personal["batch_id"], personal["account_id"]):
++                if personal is None or personal_batch_held(personal_conn, personal["batch_id"], personal["account_id"], run_id=run_id):
+                     raise XPostError("x_post_unknown_outcome", "个人发布批次不存在或已暂停", 409, True)
+         account_ids = list(frozen["account_ids"])
+         material_ids = list(frozen["material_ids"])
+@@ -10262,7 +10235,7 @@
+             ).fetchone()
+             if personal is not None:
+                 from features.x_video_publish.core import personal_batch_held
+-                if personal_batch_held(conn, personal["batch_id"], personal["account_id"]):
++                if personal_batch_held(conn, personal["batch_id"], personal["account_id"], run_id=run_id):
+                     raise XPostError("x_post_unknown_outcome", "个人发布批次已暂停", 409, True)
+             if not run:
+                 conn.rollback()
+@@ -10364,21 +10337,21 @@
+                         "selected material is already used by another X queue",
+                         409,
+                     )
+-            selected_accounts = [item["account_id"] for item in prepared]
+-            account_placeholders = ",".join("?" for _item in selected_accounts)
++            pair_predicate = " OR ".join("(q.account_id=? AND q.material_key=?)" for _item in prepared) or "0"
++            pair_values = tuple(value for item in prepared for value in (item["account_id"], item["material_key"]))
+             if conn.execute(
+                 "SELECT 1 FROM x_post_publish_log l "
+                 "JOIN x_post_queue q ON q.id=l.queue_id "
+-                "WHERE q.account_id IN (%s) "
++                "WHERE (%s) "
+                 "AND (COALESCE(l.unknown_outcome,0)=1 "
+                 "OR l.status IN ('post_creating','repost_creating')) LIMIT 1"
+-                % account_placeholders,
+-                tuple(selected_accounts),
++                % pair_predicate,
++                pair_values,
+             ).fetchone():
+                 conn.rollback()
+                 raise XPostError(
+                     "x_post_unknown_outcome",
+-                    "所选账号存在待核对发布结果，已停止手动发布",
++                    "该账号与素材已有待核对发布结果，禁止重复提交",
+                     409,
+                     True,
+                 )
+@@ -15109,14 +15082,14 @@
+ 
+     @staticmethod
+     def _assert_account_publish_fence(conn, queue):
+-        """Fail closed if another edge for this publish scope is unresolved."""
++        """Fence only an unresolved duplicate material/episode delivery."""
+         publishing_account_ids = {
+             int(queue["account_id"]),
+         }
+         if int(queue["relay_account_id"] or 0) > 0:
+             publishing_account_ids.add(int(queue["relay_account_id"]))
+-        # Only identities which can write this delivery are fenced. A held
+-        # sibling account in the same batch must not block independent targets.
++        # Independent queues on this account keep moving. The same frozen
++        # material or episode remains protected against an ambiguous duplicate.
+         ordered_account_ids = tuple(sorted(publishing_account_ids))
+         account_placeholders = ",".join(
+             "?" for _item in ordered_account_ids
+@@ -15125,7 +15098,8 @@
+             "SELECT 1 FROM x_post_queue q "
+             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+             "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
+-            "WHERE q.id<>? AND (q.account_id IN (%s) "
++            "WHERE q.id<>? AND ((q.material_key<>'' AND q.material_key=?) "
++            "OR (q.episode_key<>'' AND q.episode_key=?)) AND (q.account_id IN (%s) "
+             "OR COALESCE(q.relay_account_id,0) IN (%s) "
+             "OR COALESCE(r.relay_account_id,0) IN (%s)) "
+             "AND (q.status='publishing' "
+@@ -15139,12 +15113,12 @@
+                 account_placeholders,
+                 account_placeholders,
+             ),
+-            (int(queue["id"]),) + ordered_account_ids * 3,
++            (int(queue["id"]), str(queue["material_key"] or ""), str(queue["episode_key"] or "")) + ordered_account_ids * 3,
+         ).fetchone()
+         if unresolved is not None:
+             raise XPostError(
+                 "x_post_unknown_outcome",
+-                "所选账号存在待核对发布结果，已暂停后续发布",
++                "该素材或剧集已有待核对发布结果，禁止重复发布",
+                 409,
+                 True,
+             )
+@@ -16574,7 +16548,7 @@
+             if (
+                 unknown_outcome
+                 and code == "x_post_unknown_outcome"
+-                and message == "所选账号存在待核对发布结果，已暂停后续发布"
++                and message == "该素材或剧集已有待核对发布结果，禁止重复发布"
+                 and row["status"] == "reserved"
+                 and int(row["attempt_count"] or 0) == 0
+                 and not any(row[key] for key in (
+--- a/features/x_posts/account_blockers.py
++++ b/features/x_posts/account_blockers.py
+@@ -1,4 +1,4 @@
+-"""Read-only, account-scoped scheduling holds derived from the publish ledger.
++"""Read-only account authorization and explicit platform-lock holds.
+ 
+ These holds never reconcile an unknown write or change account authorization.
+ A profile refresh is not evidence that X has unlocked an account.
+@@ -59,15 +59,6 @@
+ 
+     for row in rows:
+         target_id, relay_id = int(row["account_id"]), int(row["relay_account_id"] or 0)
+-        if (
+-            row["queue_status"] == "publishing"
+-            or row["unknown_outcome"]
+-            or row["log_status"] in {"media_uploading", "post_creating", "repost_creating"}
+-            or row["relay_unknown"]
+-            or row["relay_status"] in {"source_publishing", "reposting", "needs_review"}
+-        ):
+-            for account_id in {target_id, relay_id} & requested:
+-                blockers.setdefault(account_id, item(row, account_id, "x_post_account_needs_review"))
+         if row["log_status"] == "published" and row["published_at"]:
+             successes[target_id] = max(successes.get(target_id, ""), row["published_at"])
+         if relay_id and row["source_post_id"] and row["source_published_at"]:
+@@ -88,18 +79,6 @@
+     for account_id, (timestamp, blocker) in locks.items():
+         if successes.get(account_id, "") <= timestamp:
+             blockers.setdefault(account_id, blocker)
+-    for row in conn.execute(
+-        "SELECT id,assigned_account_id,content_id FROM x_post_drama_pool "
+-        "WHERE status='needs_review' AND assigned_account_id IN (%s) "
+-        "ORDER BY id" % placeholders, account_ids,
+-    ).fetchall():
+-        account_id = int(row["assigned_account_id"])
+-        blockers.setdefault(account_id, {
+-            "account_id": account_id, "account_username": str(account_id),
+-            "queue_id": 0, "log_id": 0, "schedule_run_id": 0,
+-            "code": "x_post_account_needs_review",
+-            "message": "账号%s绑定的短剧%s有待核对发布结果" % (account_id, row["content_id"]),
+-        })
+     # Use explicit authorization failures, never refreshable Access Token age.
+     # Legacy/split post-only databases retain their ledger-only behavior.
+     if conn.execute(
+--- a/features/x_video_publish/core.py
++++ b/features/x_video_publish/core.py
+@@ -197,15 +197,15 @@
+     return dict(row) if row else None
+ 
+ 
+-def personal_batch_held(conn, batch_id, account_id=None):
++def personal_batch_held(conn, batch_id, account_id=None, *, run_id):
+     return conn.execute("""SELECT 1 FROM x_video_publish_task t
+       JOIN x_post_manual_run r ON r.id=t.manual_run_id
+       LEFT JOIN x_post_queue q ON q.manual_run_id=r.id
+       LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
+-      WHERE t.batch_id=? AND (? IS NULL OR t.account_id=?)
++      WHERE t.batch_id=? AND (? IS NULL OR t.account_id=?) AND r.id=?
+         AND (r.status IN ('needs_review','stopped') OR r.unknown_count>0
+         OR COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating')) LIMIT 1""",
+-        (int(batch_id), account_id, account_id)).fetchone() is not None
++        (int(batch_id), account_id, account_id, int(run_id))).fetchone() is not None
+ 
+ 
+ @contextlib.contextmanager
+@@ -254,8 +254,8 @@
+         task = _readonly_personal_task(conn, run_id)
+         if task is None:
+             return None
+-        if personal_batch_held(conn, task["batch_id"], task["account_id"]):
+-            raise XPostError("x_post_unknown_outcome", "该账号已暂停，请先核对已有发布结果", 409, True)
++        if personal_batch_held(conn, task["batch_id"], task["account_id"], run_id=run_id):
++            raise XPostError("x_post_unknown_outcome", "此任务已暂停，请先核对其发布结果", 409, True)
+         if account is not None:
+             _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"], platform_access=platform_access)
+         return task
+@@ -369,19 +369,19 @@
+ 
+     @staticmethod
+     def _occupancy(conn, account_id, material_id, allow_success=False, own_batch=None):
+-        # Unknown results fence the account, not just a particular material.
++        # Unknown results fence this account/material pair only.
+         hold = conn.execute("""SELECT 1 FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
+           LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id
+-          WHERE (q.account_id=? OR q.relay_account_id=? OR r.relay_account_id=?)
++          WHERE (q.account_id=? OR q.relay_account_id=? OR r.relay_account_id=?) AND q.material_key=?
+           AND (COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating')
+-          OR COALESCE(r.unknown_outcome,0)=1 OR r.status IN ('source_publishing','reposting','needs_review')) LIMIT 1""", (account_id,) * 3).fetchone()
++          OR COALESCE(r.unknown_outcome,0)=1 OR r.status IN ('source_publishing','reposting','needs_review')) LIMIT 1""", (account_id, account_id, account_id, material_id)).fetchone()
+         if hold:
+-            raise XPostError("x_post_unknown_outcome", "账号存在结果待核对任务，禁止重复提交", 409, True)
++            raise XPostError("x_post_unknown_outcome", "该账号与素材已有结果待核对任务，禁止重复提交", 409, True)
+         personal_hold = conn.execute("""SELECT 1 FROM x_video_publish_task t
+-          JOIN x_post_manual_run r ON r.id=t.manual_run_id WHERE t.account_id=?
+-          AND (r.status='needs_review' OR r.unknown_count>0) LIMIT 1""", (account_id,)).fetchone()
++          JOIN x_post_manual_run r ON r.id=t.manual_run_id WHERE t.account_id=? AND t.material_id=?
++          AND (r.status='needs_review' OR r.unknown_count>0) LIMIT 1""", (account_id, material_id)).fetchone()
+         if personal_hold:
+-            raise XPostError("x_post_unknown_outcome", "账号存在结果待核对任务，禁止重复提交", 409, True)
++            raise XPostError("x_post_unknown_outcome", "该账号与素材已有结果待核对任务，禁止重复提交", 409, True)
+         active = conn.execute("""SELECT 1 FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
+           WHERE q.account_id=? AND q.material_key=? AND (q.status IN ('queued','reserved','publishing')
+           OR l.status IN ('reserved','media_uploading','post_creating','repost_creating')) LIMIT 1""", (account_id, material_id)).fetchone()
+@@ -575,7 +575,7 @@
+         counts = {s: sum(t["status"] == s for t in result["tasks"]) for s in ("waiting", "processing", "success", "failed", "needs_review")}
+         stopped = any(t["run_status"] == "stopped" for t in result["tasks"])
+         result.update(counts=counts, expected_count=len(result["tasks"]), status="needs_review" if counts["needs_review"] else "stopped" if stopped else "running" if counts["processing"] else "queued" if counts["waiting"] else "completed_with_errors" if counts["failed"] else "completed")
+-        result["blocked_reason"] = "结果待核对，已停止后续任务" if counts["needs_review"] else "批次已停止，剩余任务不会自动重试" if stopped else ""
++        result["blocked_reason"] = "部分任务结果待核对，其他任务独立执行" if counts["needs_review"] else "部分任务已停止，其他任务独立执行" if stopped else ""
+         return result
+ 
+     def get_batch(self, actor, batch_id):
+@@ -611,8 +611,8 @@
+             task = personal_task(conn, run_id)
+             if task is None:
+                 return None
+-            if personal_batch_held(conn, task["batch_id"], task["account_id"]):
+-                raise XPostError("x_post_unknown_outcome", "该账号已暂停，请先核对已有发布结果", 409, True)
++            if personal_batch_held(conn, task["batch_id"], task["account_id"], run_id=run_id):
++                raise XPostError("x_post_unknown_outcome", "此任务已暂停，请先核对其发布结果", 409, True)
+             if account is not None:
+                 _account(account, task["account_id"], (task["tenant_key"], task["user_id"]), task["drama_language"], platform_access=platform_access)
+             return task
+--- a/scripts/x_post_dispatch.py
++++ b/scripts/x_post_dispatch.py
+@@ -16,7 +16,6 @@
+     """
+     workers = max(1, min(4, int(workers)))
+     results = {}
+-    held = set()
+     remaining = list(enumerate(queues))
+     pending = {}
+     shared_stop = False
+@@ -38,23 +37,21 @@
+             return entry
+         return None
+ 
+-    # Establish every existing unknown hold before dispatching any sibling.
++    # Keep uncertain rows readback-only without holding their siblings.
+     for index, queue in list(remaining):
+         entry = snapshot(queue)
+         if entry is not None:
+             results[index] = entry
+             remaining.remove((index, queue))
+-            if entry.get("unknown_outcome"):
+-                held.update(account_scope(queue))
+ 
+     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="x-frozen-post") as pool:
+         while remaining or pending:
+             occupied = set().union(*(account_scope(q) for _, q in pending.values())) if pending else set()
+             for index, queue in list(remaining):
+                 scope = account_scope(queue)
+-                if scope & held or shared_stop or time.monotonic() >= deadline:
++                if shared_stop or time.monotonic() >= deadline:
+                     results[index] = {"queue_id": queue["id"], "account_id": queue["account_id"],
+-                                      "status": "queued", "error_code": "x_post_shared_backoff" if shared_stop else "x_post_account_held" if scope & held else "x_post_tick_budget"}
++                                      "status": "queued", "error_code": "x_post_shared_backoff" if shared_stop else "x_post_tick_budget"}
+                     remaining.remove((index, queue))
+                     continue
+                 if len(pending) >= workers or scope & occupied:
+@@ -76,8 +73,6 @@
+                              "status": "needs_review", "unknown_outcome": True,
+                              "error_code": getattr(exc, "code", "x_post_dispatch_outcome_unknown")}
+                 results[index] = entry
+-                if entry.get("unknown_outcome"):
+-                    held.update(account_scope(queue))
+                 if entry.get("shared_stop"):
+                     shared_stop = True
+     return [results[index] for index in sorted(results)], shared_stop

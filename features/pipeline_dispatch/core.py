@@ -32,6 +32,17 @@ DEFAULT_CAPACITY = {
 JSON_FIELDS = ("payload", "artifact", "resource_keys", "capabilities")
 
 
+def isolated_queue_resource(row):
+    """Scope delivery ownership to the immutable task, never its account history."""
+    if row["channel"] in {"x", "tt"}:
+        return "task:" + str(row["source_key"])
+    if row["channel"] == "fb":
+        resources = json.loads(row["resource_keys_json"])
+        if not any(key.startswith("fb:material:") for key in resources):
+            return "task:" + str(row["source_key"])
+    return ""
+
+
 def independent_x_preparation(row):
     """Only a frozen X queue may render ahead; planners retain account fencing."""
     meta = json.loads(row["source_meta_json"])
@@ -108,6 +119,13 @@ class DispatchStore:
         self.path, self.clock = str(path), clock
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
+        # Convert exclusion scope only. Never change a task, generation, lease,
+        # external operation, receipt, or publication while activating this policy.
+        with self.transaction() as conn:
+            rows = conn.execute("SELECT * FROM pipeline_job WHERE id IN ("
+                                "SELECT job_id FROM pipeline_resource UNION SELECT job_id FROM pipeline_legacy_resource)").fetchall()
+            for row in rows:
+                self._refresh_queue_isolation(conn, row)
 
     def now(self):
         return stamp(self.clock())
@@ -508,6 +526,11 @@ class DispatchStore:
                       (material, row["id"], row["generation"], int(uncertain), int(held[0]["legacy"])))
         if legacy:
             c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (material, row["id"]))
+        # A previously unidentified task may acquire its canonical material
+        # identity later. Move that exact task fence to the now-known material.
+        for table in ("pipeline_resource", "pipeline_legacy_resource"):
+            c.execute("DELETE FROM " + table + " WHERE job_id=? AND resource_key=?",
+                      (row["id"], "task:" + row["source_key"]))
         released = 0
         if detached or preparation:
             released += c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND resource_key=?", (row["id"], page)).rowcount
@@ -542,6 +565,25 @@ class DispatchStore:
         if old != resources or released:
             self.event(c, row["id"], "youtube_task_isolation_refreshed",
                        {"task_resource": resources[0], "shared_resources_released": released}, self.now())
+
+    def _refresh_queue_isolation(self, c, row):
+        resource = isolated_queue_resource(row)
+        if not resource:
+            return
+        held = c.execute("SELECT * FROM pipeline_resource WHERE job_id=?", (row["id"],)).fetchall()
+        legacy = c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?", (row["id"],)).fetchone()
+        uncertain = row["status"] == "unknown"
+        if held or row["status"] == "running":
+            c.execute("INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)",
+                      (resource, row["id"], row["generation"], int(uncertain), int(held[0]["legacy"]) if held else 0))
+        if legacy or uncertain:
+            c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, row["id"]))
+        released = 0
+        for table in ("pipeline_resource", "pipeline_legacy_resource"):
+            released += c.execute("DELETE FROM " + table + " WHERE job_id=? AND resource_key<>?", (row["id"], resource)).rowcount
+        if released:
+            self.event(c, row["id"], "queue_isolation_refreshed",
+                       {"task_resource": resource, "shared_resources_released": released}, self.now())
 
     def offer(self, offer):
         now = self.now()
@@ -701,6 +743,7 @@ class DispatchStore:
                 self._release_finished_legacy_resources(c, offer["source_key"])
                 self._refresh_fb_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
                 self._refresh_youtube_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), offer)
+                self._refresh_queue_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone())
                 return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (existing["id"],)).fetchone(), True)
             cutoff = self.config(c)["cutovers"].get(channel)
             in_time = not cutoff or (offer.get("started_at") and stamp(offer["started_at"]) <= cutoff)
@@ -745,6 +788,7 @@ class DispatchStore:
             self._release_finished_legacy_resources(c, offer["source_key"])
             self._refresh_fb_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), offer)
             self._refresh_youtube_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), offer)
+            self._refresh_queue_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone())
             self.event(c, job_id, "offered", {"status": status}, now)
             return _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone(), True)
 
@@ -919,10 +963,11 @@ class DispatchStore:
                 if not resources:
                     blocked.append("account_identity_missing")
                     continue  # All current channel work belongs to an account, Page, or YouTube channel.
-                independent = independent_x_preparation(row)
-                locks = ["prepare:" + r for r in resources] if independent else resources
+                scoped = isolated_queue_resource(row)
+                independent = independent_x_preparation(row) and not scoped
+                locks = [scoped] if scoped else (["prepare:" + r for r in resources] if independent else resources)
                 busy = False
-                for resource in resources:
+                for resource in locks:
                     if c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? LIMIT 1", (resource,)).fetchone():
                         busy = True
                         break
@@ -951,23 +996,7 @@ class DispatchStore:
                     if c.execute("SELECT count(*) FROM pipeline_job WHERE channel=? AND stage='publish' AND status IN ('running','legacy_running')", (row["channel"],)).fetchone()[0] >= config["channel_limits"][row["channel"]]:
                         blocked.append("channel_limit")
                         continue
-                # A new preparation must also yield to an older ready publish
-                # of the same identity, otherwise a busy prep pool can keep
-                # reacquiring the account before its completed media is sent.
-                earlier = c.execute("SELECT resource_keys_json FROM pipeline_job WHERE stage='publish' AND status IN ('queued','ready') AND hold_reason='' AND channel=? AND scheduled_at<=? AND (scheduled_at<? OR (scheduled_at=? AND id<?))", (row["channel"], now, row["scheduled_at"], row["scheduled_at"], row["id"])).fetchall()
-                # FB already visits eligible rows in due order and owns a Page
-                # write mutex. A skipped material fence must not turn a queued
-                # duplicate into an indirect FIFO fence for other materials.
-                if row["channel"] not in {"fb", "youtube"} and not independent and any(set(resources).intersection(json.loads(r[0])) for r in earlier):
-                    blocked.append("account_ordering")
-                    continue
-                if row["channel"] == "x" and row["family"] == "queue" and stage == "publish" and str(row["source_id"]).isdigit():
-                    # Rendering ahead must never let a later episode publish
-                    # while an older due episode is still being prepared.
-                    preparing = c.execute("SELECT resource_keys_json FROM pipeline_job WHERE channel='x' AND family='queue' AND stage='prepare' AND source_key<>? AND status IN ('queued','ready','running','legacy_running') AND hold_reason='' AND scheduled_at<=? AND (scheduled_at<? OR (scheduled_at=? AND CAST(source_id AS INTEGER)<?))", (row["source_key"], now, row["scheduled_at"], row["scheduled_at"], int(row["source_id"]))).fetchall()
-                    if any(set(resources).intersection(json.loads(r[0])) for r in preparing):
-                        blocked.append("account_ordering")
-                        continue
+                # Eligible queues have no dependency on an earlier sibling.
                 token, generation = secrets.token_urlsafe(32), row["generation"] + 1
                 expires = stamp(self.clock() + dt.timedelta(seconds=LEASE_SECONDS))
                 c.execute("UPDATE pipeline_job SET status='running',node_id=?,worker_id=?,generation=?,claim_hash=?,lease_expires_at=?,started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,updated_at=?,error_code='',error_message='' WHERE id=?", (node_id, worker_id, generation, digest(token), expires, now, now, row["id"]))
@@ -1057,6 +1086,10 @@ class DispatchStore:
                     held_resource = scoped
             if held_resource not in resources:
                 raise DispatchError("operation_resource_invalid", status=403)
+            scoped = isolated_queue_resource(row)
+            if scoped:
+                self._refresh_queue_isolation(c, row)
+                held_resource = scoped
             held = c.execute("SELECT * FROM pipeline_resource WHERE resource_key=?", (held_resource,)).fetchone()
             if not held or held["job_id"] != row["id"] or held["generation"] != row["generation"]:
                 raise DispatchError("operation_resource_not_held")

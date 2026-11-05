@@ -246,7 +246,7 @@ class PersonalPublishTests(unittest.TestCase):
                 with self.assertRaises(sqlite3.IntegrityError):
                     conn.execute(sql)
 
-    def test_unknown_holds_siblings_and_other_owner_cannot_bypass(self):
+    def test_unknown_isolates_original_task_and_same_account_sibling_proceeds(self):
         batch = self.commit()
         run = self.freeze(batch["tasks"][0])
         queue_id = run["queues"][0]["id"]
@@ -259,7 +259,10 @@ class PersonalPublishTests(unittest.TestCase):
         with self.assertRaises(XPostError):
             self.store.assert_run_publishable(batch["tasks"][0]["manual_run_id"], self.accounts["1"])
         preview = self.preview([dict(self.rows()[0], material_id="503")])
-        self.assertEqual("x_post_unknown_outcome", preview["rows"][0]["error_code"])
+        self.assertTrue(preview["rows"][0]["valid"])
+        self.store.assert_run_publishable(batch["tasks"][2]["manual_run_id"], self.accounts["1"])
+        self.assertEqual(len(self.freeze(batch["tasks"][2])["queues"]), 1)
+        self.assertTrue(self.legacy.get_log(log["id"])["unknown_outcome"])
 
     def test_explicit_stopped_parent_is_not_presented_as_queued(self):
         batch = self.commit()

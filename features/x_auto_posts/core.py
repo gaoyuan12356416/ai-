@@ -2214,21 +2214,14 @@ class XAutoPostStore:
                 WHERE t.status='pending'
                   AND t.scheduled_at_utc<=?
                   AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||t.id)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM x_auto_task active
-                      WHERE active.account_id=t.account_id
-                        AND active.id<>t.id
-                        AND active.status IN (%s)
-                        AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||active.id)
-                  )
                 ORDER BY
                     t.trigger_priority ASC,
                     t.scheduled_at_utc ASC,
                     t.template_id ASC,
                     t.id ASC
                 LIMIT 1000
-                """ % placeholders,
-                (current, *sorted(ACTIVE_ACCOUNT_TASK_STATUSES)),
+                """,
+                (current,),
             ).fetchall()
             row = next((item for item in candidates if disposition_record(conn, "x:auto:" + str(item["id"]), item) not in {"archive", "blocked"}), None)
             if row is None:
@@ -2385,37 +2378,7 @@ class XAutoPostStore:
                     continue
                 candidate_id = int(candidate["id"])
                 candidate_status = str(candidate["status"])
-                others = conn.execute(
-                    """
-                    SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc
-                    FROM x_auto_task
-                    WHERE account_id=? AND id<>? AND status IN (%s)
-                      AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||x_auto_task.id)
-                    ORDER BY scheduled_at_utc,id
-                    """ % active_placeholders,
-                    (
-                        str(candidate["account_id"]),
-                        candidate_id,
-                        *sorted(ACTIVE_ACCOUNT_TASK_STATUSES),
-                    ),
-                ).fetchall()
-                if candidate_status == "pending" and others:
-                    continue
-                if candidate_status in ACTIVE_ACCOUNT_TASK_STATUSES and others:
-                    if any(
-                        str(other["claim_token"] or "")
-                        and str(other["lease_expires_at_utc"] or "") > current
-                        for other in others
-                    ):
-                        continue
-                    ordering = [
-                        (str(candidate["scheduled_at_utc"]), candidate_id)
-                    ] + [
-                        (str(other["scheduled_at_utc"]), int(other["id"]))
-                        for other in others
-                    ]
-                    if min(ordering) != (str(candidate["scheduled_at_utc"]), candidate_id):
-                        continue
+                # Each template task owns its lease and receipt independently.
                 selected = candidate
                 break
             if selected is None:

@@ -2182,49 +2182,8 @@ class TTAutoPostStore:
                     and candidate_phase not in phase_filter
                 ):
                     continue
-                others = conn.execute(
-                    """
-                    SELECT id,status,scheduled_at_utc,claim_token,lease_expires_at_utc,
-                           publish_id,unknown_outcome,publish_attempt_count,claim_phase
-                    FROM tt_auto_task
-                    WHERE account_id=? AND id<>? AND status IN (%s) AND NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:auto:'||tt_auto_task.id)
-                    ORDER BY scheduled_at_utc,id
-                    """ % active_placeholders,
-                    (
-                        str(candidate["account_id"]),
-                        candidate_id,
-                        *sorted(ACTIVE_ACCOUNT_TASK_STATUSES),
-                    ),
-                ).fetchall()
-                # An unattempted archived task cannot silently resume or occupy
-                # a fresh day's account. Ambiguous writes and live leases remain
-                # account fences until their existing result is reconciled.
-                others = [other for other in others if (
-                    str(other["scheduled_at_utc"]) >= self.execution_not_before_utc
-                    or int(other["id"]) in resumed_ids
-                    or other["publish_id"] or other["unknown_outcome"]
-                    or other["publish_attempt_count"]
-                    or other["status"] in {"publishing", "reconciling", "unknown"}
-                    or other["claim_phase"] == "reconcile"
-                    or (other["claim_token"] and str(other["lease_expires_at_utc"]) > current)
-                )]
-                if candidate_status == "pending" and others:
-                    continue
-                if candidate_status in ACTIVE_ACCOUNT_TASK_STATUSES and others:
-                    if any(
-                        str(other["claim_token"] or "")
-                        and str(other["lease_expires_at_utc"] or "") > current
-                        for other in others
-                    ):
-                        continue
-                    ordering = [
-                        (str(candidate["scheduled_at_utc"]), candidate_id)
-                    ] + [
-                        (str(other["scheduled_at_utc"]), int(other["id"]))
-                        for other in others
-                    ]
-                    if not legacy_reconcile_only and min(ordering) != (str(candidate["scheduled_at_utc"]), candidate_id):
-                        continue
+                # Admission and leases belong to this task. An older task
+                # on the same account has no ordering or failure dependency.
                 selected = candidate
                 break
             if selected is None:

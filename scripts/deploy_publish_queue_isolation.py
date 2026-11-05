@@ -1,0 +1,202 @@
+"""GitHub-source overlays; drain only affected HTTP services, preserve all ledgers.
+
+Usage: prepare SOURCE SHA DIRECTORY; activate DIRECTORY [LANE]; rollback DIRECTORY LANE.
+Never restores a database/token backup. Code rollback keeps current task facts.
+"""
+import argparse
+import contextlib
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+
+LANES={
+    'x':('/opt/x-post-automation/current',[('x-post-automation.service',8810,1),('x-auto-post-service.service',18833,1)]),
+    'tt_auto':('/opt/tt-auto-post/current',[('tt-auto-post-service.service',18831,1)]),
+    'tt':('/opt/tt-post/current',[('tt-post-service.service',18829,1)]),
+    'fb':('/opt/fb-auto-post/current',[('fb-auto-post-service.service',18835,1)]),
+    'coordinator':('/opt/pipeline-dispatch/current',[('pipeline-coordinator.service',18846,2)]),
+    'report':('/opt/post-daily-report/current',[]),
+    'app':('/root/drama_material_service',[]),
+}
+DBS={
+ 'dispatch':'/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3',
+ 'x':'/var/lib/x-post-automation/accounts.sqlite3',
+ 'x_auto':'/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3',
+ 'tt':'/mnt/data-disk/tt-post-publisher/tt-post.sqlite3',
+ 'tt_auto':'/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3',
+ 'fb':'/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3',
+}
+
+def run(args,timeout=60,**kwargs):
+    r=subprocess.run(list(map(str,args)),capture_output=True,text=True,timeout=timeout,**kwargs)
+    if r.returncode:raise RuntimeError('command_failed:'+str(args[0])+':'+str(r.returncode)+':'+r.stderr[-500:])
+    return r.stdout.strip()
+
+def sha(p):return hashlib.sha256(Path(p).read_bytes().replace(b'\r\n',b'\n')).hexdigest()
+def save(path,obj):
+    Path(path).write_text(json.dumps(obj,indent=2)+'\n');Path(path).chmod(0o600)
+def pid(unit):return run(['systemctl','show',unit,'-p','MainPID','--value'])
+def swap(link,target):
+    temporary=link.with_name(link.name+'.queue-isolation-next')
+    if temporary.exists() or temporary.is_symlink():raise RuntimeError('temporary_link_conflict')
+    temporary.symlink_to(target);os.replace(temporary,link)
+
+def copy_file(source,target):
+    old=target.stat() if target.exists() else source.stat()
+    temporary=target.with_name(target.name+'.queue-isolation-next')
+    shutil.copy2(source,temporary);os.chown(temporary,old.st_uid,old.st_gid);os.replace(temporary,target)
+
+def backup_db(source,target):
+    with contextlib.closing(sqlite3.connect('file:'+str(source)+'?mode=ro',uri=True)) as src:
+        with contextlib.closing(sqlite3.connect(str(target))) as dst:
+            src.backup(dst);assert dst.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+    target.chmod(0o600)
+
+def preserve_owners(source,target):
+    for current,dirs,files in os.walk(source,followlinks=False):
+        for item in [Path(current)]+[Path(current)/name for name in dirs+files]:
+            other=target/item.relative_to(source)
+            if other.exists() or other.is_symlink():
+                st=item.lstat();os.chown(other,st.st_uid,st.st_gid,follow_symlinks=False)
+
+def prepare(source,commit,directory):
+    source,directory=Path(source).resolve(),Path(directory).resolve()
+    assert run(['findmnt','-n','-o','UUID','/mnt/data-disk'])=='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
+    assert directory.is_relative_to(Path('/mnt/data-disk'))
+    assert run(['git','-C','/mnt/data-disk/pipeline-dispatch/github','rev-parse',commit+'^{commit}'])==commit
+    directory.mkdir(parents=True,mode=0o700,exist_ok=False)
+    expected=json.loads((source/'ops/publish-queue-isolation/files.json').read_text())
+    manifest={'commit':commit,'source':str(source),'lanes':{},'database_backups':{}}
+    for lane,(link,units) in LANES.items():
+        live=Path(link).resolve();candidate=directory/'candidates'/lane
+        candidate.parent.mkdir(exist_ok=True)
+        if lane=='app':
+            candidate.mkdir()
+            for rel in expected[lane]:
+                (candidate/rel).parent.mkdir(parents=True,exist_ok=True)
+                shutil.copy2(live/rel,candidate/rel)
+        else:
+            shutil.copytree(live,candidate,symlinks=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc','.git'))
+            preserve_owners(live,candidate)
+        item={'before_root':str(live),'candidate':str(candidate),'units':units,'files':expected[lane],
+              'before_pids':{u:pid(u) for u,_,_ in units},'state':'prepared'}
+        manifest['lanes'][lane]=item
+        for rel,hashes in item['files'].items():
+            assert sha(live/rel)==hashes['before'],'affected_source_drift:'+lane+'/'+rel
+            assert (candidate/rel).resolve().is_relative_to(candidate),'overlay_symlink_escape'
+            dst=directory/'before'/lane/rel;dst.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(live/rel,dst)
+        run(['git','apply','--check',source/'ops/publish-queue-isolation'/(lane+'.patch')],cwd=candidate)
+        run(['git','apply',source/'ops/publish-queue-isolation'/(lane+'.patch')],cwd=candidate)
+        for rel,hashes in item['files'].items():
+            assert sha(candidate/rel)==hashes['after'],'candidate_hash_mismatch:'+rel
+            compile((candidate/rel).read_bytes(),rel,'exec')
+            st=(live/rel).stat();os.chown(candidate/rel,st.st_uid,st.st_gid)
+    for name,db in DBS.items():
+        target=directory/(name+'-before.sqlite3');backup_db(Path(db),target)
+        manifest['database_backups'][name]=str(target)
+    save(directory/'manifest.json',manifest)
+    # Rehearse lock-scope conversion on the backup. Prove task/receipt facts stay byte-identical.
+    rehearsal=directory/'dispatch-rehearsal.sqlite3';shutil.copy2(directory/'dispatch-before.sqlite3',rehearsal)
+    code='''import sqlite3,hashlib,json,sys
+from features.pipeline_dispatch.core import DispatchStore
+p=sys.argv[1]
+def facts():
+ c=sqlite3.connect(p)
+ try:return {t:hashlib.sha256(repr(c.execute('SELECT * FROM '+t+' ORDER BY rowid').fetchall()).encode()).hexdigest() for t in ['pipeline_job','pipeline_claim_history','pipeline_operation','pipeline_publication']}
+ finally:c.close()
+before=facts();DispatchStore(p);DispatchStore(p);assert before==facts();print('task_claim_operation_publication_facts_preserved')
+'''
+    proof=run([sys.executable,'-c',code,rehearsal],cwd=directory/'candidates/coordinator')
+    (directory/'rehearsal.log').write_text(proof+'\n')
+    print(json.dumps({'prepared':str(directory),'rehearsal':proof}),flush=True)
+
+def handlers(process):
+    rows=run(['ss','-Hntp']).splitlines()
+    listeners=run(['ss','-Hlntp']).splitlines()
+    return [len(list(Path('/proc',process,'task').iterdir())),
+            sum(('pid='+process+',') in r for r in rows),
+            sum(int(r.split()[1]) for r in listeners if ('pid='+process+',') in r)]
+
+def health(port):
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    until=time.monotonic()+15
+    while True:
+        try:
+            with opener.open('http://127.0.0.1:%s/health'%port,timeout=2) as r:
+                if r.status==200:return
+        except OSError:pass
+        if time.monotonic()>until:raise RuntimeError('health_failed:'+str(port))
+        time.sleep(.25)
+
+def switch(directory,lane,rollback=False):
+    path=directory/'manifest.json';m=json.loads(path.read_text());item=m['lanes'][lane]
+    link=Path(LANES[lane][0]);old=Path(item['candidate'] if rollback else item['before_root'])
+    target=Path(item['before_root'] if rollback else item['candidate'])
+    if lane=='app':
+        # These copies are not the active X writer. Main API proxies to 8810;
+        # updating its source copies requires no main API or worker restart.
+        for rel,h in item['files'].items():
+            destination=link/rel;expected=h['after'] if rollback else h['before']
+            assert sha(destination)==expected,'affected_source_drift:'+rel
+            src=directory/'before'/lane/rel if rollback else target/rel
+            copy_file(src,destination)
+        item['state']='rolled_back' if rollback else 'installed';save(path,m)
+        print(json.dumps({'lane':lane,'state':item['state'],'restart':False}),flush=True);return
+    if link.resolve()==target:
+        print(json.dumps({'lane':lane,'state':'already_active'}),flush=True);return
+    assert link.resolve()==old,'later_runtime_switch_preserved:'+lane
+    for rel,h in item['files'].items():assert sha(link/rel)==h['after' if rollback else 'before'],'affected_source_drift:'+rel
+    units=LANES[lane][1];processes={u:pid(u) for u,_,_ in units}
+    marker='queue-isolation-'+lane+'-'+str(int(time.time()))
+    rules=[];stopped=[];swapped=False;observations=[];began=time.monotonic()
+    try:
+        for u,port,threads in units:
+            rule=['-p','tcp','--dport',str(port),'-m','conntrack','--ctstate','NEW','-m','comment','--comment',marker,'-j','DROP']
+            watchdog=marker+'-'+str(port)
+            run(['systemd-run','--quiet','--unit='+watchdog,'--on-active=65s','--','/usr/sbin/iptables','-D','INPUT']+rule)
+            run(['iptables','-I','INPUT','1']+rule);rules.append((rule,watchdog))
+        deadline=time.monotonic()+20
+        while True:
+            state={u:handlers(processes[u]) for u,_,_ in units};observations.append(state)
+            if all(state[u]==[threads,0,0] for u,_,threads in units):break
+            if time.monotonic()>deadline:
+                raise RuntimeError('affected_http_handlers_still_active:'+lane)
+            time.sleep(.25)
+        for u,_,_ in units:
+            run(['systemctl','stop',u],timeout=20);stopped.append(u)
+            assert pid(u)=='0'
+        assert link.resolve()==old,'concurrent_runtime_switch'
+        swap(link,target);swapped=True
+        for u,port,_ in units:run(['systemctl','start',u],timeout=15)
+        for u,_,_ in units:assert run(['systemctl','is-active',u])=='active'
+    except BaseException:
+        if swapped:
+            for u,_,_ in units:run(['systemctl','stop',u],timeout=20)
+            swap(link,old)
+        for u in stopped:run(['systemctl','start',u],timeout=20)
+        raise
+    finally:
+        for rule,watchdog in rules:
+            run(['iptables','-D','INPUT']+rule)
+            subprocess.run(['systemctl','stop',watchdog+'.timer'],capture_output=True,timeout=10)
+        save(directory/(lane+('-rollback' if rollback else '')+'-drain.json'),
+             {'seconds':time.monotonic()-began,'observations':observations,'temporary_rules_removed':marker not in run(['iptables','-S','INPUT'])})
+    for _,port,_ in units:health(port)
+    item['state']='rolled_back' if rollback else 'active';item['active_pids']={u:pid(u) for u,_,_ in units}
+    save(path,m);print(json.dumps({'lane':lane,'state':item['state'],'pids':item['active_pids']}),flush=True)
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','activate','rollback']);p.add_argument('args',nargs='+');a=p.parse_args()
+    if a.action=='prepare':prepare(*a.args);return
+    directory=Path(a.args[0]).resolve();lanes=a.args[1:] or list(LANES)
+    for lane in lanes:switch(directory,lane,a.action=='rollback')
+
+if __name__=='__main__':main()

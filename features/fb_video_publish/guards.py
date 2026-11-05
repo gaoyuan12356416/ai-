@@ -19,11 +19,7 @@ def _unknown_reason(conn, table, page_id, material_id, *, identity="", exclude_t
     if identity:
         where += " AND " + identity + "<>?"
         args.append(str(exclude_task))
-    # An absent/corrupt historical identity cannot be made into a fictitious
-    # material lock. Keep its conservative Page hold distinct from a known pair.
-    unidentified = "material_id='' OR material_id GLOB '*[^0-9]*' OR substr(material_id,1,1)='0' OR length(material_id)>31"
-    if conn.execute("SELECT 1 FROM " + table + " WHERE " + where + " AND (" + unidentified + ") LIMIT 1", args).fetchone():
-        return "fb_video_page_unknown"
+    # An unidentified old write remains isolated on its original task.
     if material_id and conn.execute("SELECT 1 FROM " + table + " WHERE " + where + " AND material_id=? LIMIT 1", [*args, str(material_id)]).fetchone():
         return "fb_video_material_unknown"
     return ""
@@ -139,7 +135,7 @@ def install_backstops(conn):
             conn.execute(f"""CREATE TRIGGER fb_video_cross_{family}_{suffix}
                 BEFORE {event} ON {table} WHEN NEW.status IN ({statuses}) {receipt_update}
                 AND EXISTS(SELECT 1 FROM {other} o WHERE o.page_id=NEW.page_id AND
-                  (((o.material_id=NEW.material_id OR o.material_id='' OR o.material_id GLOB '*[^0-9]*' OR substr(o.material_id,1,1)='0' OR length(o.material_id)>31) AND (o.status='unknown' OR o.unknown_outcome=1))
+                  (((o.material_id=NEW.material_id) AND (o.status='unknown' OR o.unknown_outcome=1))
                    OR (o.material_id=NEW.material_id AND o.status IN ({other_statuses}))
                    OR (NEW.status='running' AND o.status='running')))
                 BEGIN SELECT RAISE(ABORT,'fb_video_cross_family_hold'); END""")
