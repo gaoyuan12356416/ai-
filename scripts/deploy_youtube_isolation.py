@@ -115,7 +115,9 @@ def main():
     assert run(['git','-C',source,'for-each-ref','--contains',a.commit,'refs/remotes/origin'])
     tag=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     if a.hk_node:
-        node=Path('/data/pipeline-dispatch-runtime/fb-lease-f3bd38531f6d/node');folder=Path('/data/pipeline-dispatch-runtime')/('youtube-fix-'+tag)
+        node=Path(run(['systemctl','show','pipeline-node-hk-gpu.service','-p','WorkingDirectory','--value'])).resolve()
+        assert str(node).startswith(('/data/pipeline-dispatch-runtime/','/opt/pipeline-dispatch/releases/'))
+        folder=Path('/data/pipeline-dispatch-runtime')/('youtube-fix-'+tag)
     else:
         assert run(['findmnt','-no','UUID','/mnt/data-disk'])=='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
         node=NODE;folder=BASE/('youtube-isolation-'+tag)
@@ -125,7 +127,7 @@ def main():
         backup.write_bytes(target.read_bytes());before=sha(target);write(target,data)
         installed.append({'path':str(target),'backup':str(backup),'before':before,'after':sha(target)})
     assert sha(node/ENGINE)==EXPECTED[ENGINE]
-    assert sha(node/EXEC) in {'11b1bd6f4fa4ebdf16dbfdbfbb66ffc90bcc17da16797dd85c8a0f793b75dcad','36ef4b600521ef2f4c19c04100bd40723f1b800c1f2c7901c183bca9bb428f90'}
+    assert sha(node/EXEC) in {'11b1bd6f4fa4ebdf16dbfdbfbb66ffc90bcc17da16797dd85c8a0f793b75dcad','36ef4b600521ef2f4c19c04100bd40723f1b800c1f2c7901c183bca9bb428f90','f5c2ac68be92dbe9eccefa33de9778b4d09ac78cebe6305c9b11dc03971e7cb8'}
     if a.hk_node:
         install(node/EXEC,patched_executor(node/EXEC,source/EXEC));install(node/ENGINE,(source/ENGINE).read_bytes())
         plan={'commit':a.commit,'hk_node':True,'installed':installed,'reload':drain_publish('hk-gpu','pipeline-node-hk-gpu.service',[int(x) for x in a.worker_pids.split(',') if x])}

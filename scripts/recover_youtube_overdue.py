@@ -57,7 +57,11 @@ def main():
         assert probe=={'state':'resume','next_byte':0},'original_session_state_changed'
     else:
         assert task['status'] in {'queued','schedule_missed'} and not task['video_attempt_count'] and not task['resumable_session_uri'] and not task['unknown_outcome']
-        assert job['generation']==0 and not job['external_intent'] and not job['claim_hash']
+        assert not job['external_intent'] and not job['canonical_receipt']
+        assert (job['status']=='queued' and job['generation']==0 and not job['claim_hash']) or (job['status']=='failed' and job['error_code']=='youtube_publish_preflight_pending')
+        with contextlib.closing(connect()) as c:
+            for table in ('pipeline_youtube_claim','pipeline_youtube_operation','pipeline_youtube_checkpoint'):
+                assert not c.execute('SELECT 1 FROM '+table+' WHERE source_key=? LIMIT 1',(key,)).fetchone(),'native_execution_history_exists'
         probe={'state':'never_started'}
     print(json.dumps({'task_id':a.task_id,'probe':probe,'apply':a.apply}),flush=True)
     if not a.apply:return
@@ -67,7 +71,8 @@ def main():
         with contextlib.closing(connect()) as c:
             c.execute('BEGIN IMMEDIATE');assert dict(c.execute('SELECT * FROM drama_youtube_publish WHERE id=?',(a.task_id,)).fetchone())==task
             immediate(c,task)
-            c.execute("UPDATE drama_youtube_publish SET status='queued',video_state='queued',error_code='',error_message='' WHERE id=?",(a.task_id,));c.commit()
+            c.execute("UPDATE drama_youtube_publish SET status='queued',video_state='queued',error_code='',error_message='' WHERE id=?",(a.task_id,))
+            c.execute('INSERT INTO drama_youtube_publish_event(task_id,phase,outcome,safe_detail,created_at_utc) VALUES(?,?,?,?,?)',(a.task_id,'operator_retry','requested',json.dumps({'reason':'overdue_never_uploaded','previous_generation':job['generation']}),now()));c.commit()
         print(json.dumps({'task_id':a.task_id,'ready_immediate':True,'backup':str(folder)}));return
     worker='operator:youtube-session:'+str(a.task_id)+':'+secrets.token_hex(4)
     central_gen=job['generation']+1;channel='youtube:channel:'+task['channel_id']
