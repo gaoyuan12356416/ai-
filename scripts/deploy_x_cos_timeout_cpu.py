@@ -64,4 +64,26 @@ def deploy(repository,folder):
     (folder/'manifest.json').write_text(json.dumps(manifest,indent=2))
     return manifest
 
-if __name__=='__main__':print(json.dumps(deploy(sys.argv[1],sys.argv[2])))
+def rollback(folder):
+    folder=Path(folder);manifest=json.loads((folder/'manifest.json').read_text())
+    pid=int(subprocess.check_output(['systemctl','show','pipeline-node-cpu-main.service','-p','MainPID','--value'],text=True))
+    root=(Path('/proc')/str(pid)/'cwd').resolve();require(str(root)==manifest['runtime'],'runtime_changed')
+    target=root/manifest['file'];old=(folder/'media_repair.py.before').read_bytes()
+    require(digest(old)==manifest['before'] and digest(target.read_bytes())==manifest['after'],'module_changed_do_not_overwrite')
+    worker=(root/'features/pipeline_dispatch/worker.py').read_bytes()
+    require(b'signal.signal(sig, lambda *_: stopping.set())' in worker and b'multiprocessing.get_context("spawn")' in worker,'cooperative_drain_not_verified')
+    temp=target.with_name(target.name+'.x-cos-timeout-rollback');require(not temp.exists(),'rollback_temporary_file_exists')
+    st=target.stat();temp.write_bytes(old);os.chmod(temp,st.st_mode);os.chown(temp,st.st_uid,st.st_gid);os.replace(temp,target)
+    drained=[]
+    with sqlite3.connect('file:/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3?mode=ro',uri=True) as c:
+        candidates=c.execute("SELECT w.pid FROM pipeline_worker w WHERE w.node_id='cpu-main' AND w.stage='prepare' AND w.draining=0 AND NOT EXISTS(SELECT 1 FROM pipeline_job j WHERE j.node_id=w.node_id AND j.worker_id=w.worker_id AND j.status='running' AND j.channel<>'x')").fetchall()
+    for (child,) in candidates:
+        try:
+            stat=(Path('/proc')/str(child)/'stat').read_text().split()
+            if int(stat[3])==pid:os.kill(child,signal.SIGTERM);drained.append(child)
+        except (FileNotFoundError,ProcessLookupError):pass
+    result=dict(status='code_rollback_staged',drained=drained,ledgers_restored=False)
+    (folder/'rollback.json').write_text(json.dumps(result,indent=2));return result
+
+if __name__=='__main__':
+    print(json.dumps(rollback(sys.argv[2]) if sys.argv[1]=='--rollback' else deploy(sys.argv[1],sys.argv[2])))
