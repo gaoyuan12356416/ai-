@@ -60,6 +60,42 @@ class PersonalPublishTests(unittest.TestCase):
         candidate = material_candidate(run, int(task["account_id"]), task["material_id"])
         return self.legacy.create_manual_plan(run["id"], [candidate])
 
+    def test_duration_membership_boundary_and_row_local_feedback(self):
+        rows = [{"account_id": "1", "material_id": "501"}, {"account_id": "2", "material_id": "502"}]
+        self.materials["501"]["duration_seconds"] = 1200
+        self.materials["502"]["duration_seconds"] = 1200.001
+        for membership in ("none", "unknown", "unexpected", None):
+            self.accounts["2"]["subscription_type"] = membership
+            preview = self.preview(rows)
+            self.assertTrue(preview["rows"][0]["valid"])
+            rejected = preview["rows"][1]
+            self.assertFalse(rejected["valid"])
+            self.assertEqual(rejected["error_code"], "x_long_video_requires_premium")
+            self.assertIn("1200.001", rejected["error_message"])
+        for membership in ("basic", "premium", "premium_plus"):
+            self.accounts["2"]["subscription_type"] = membership
+            self.assertEqual(self.preview(rows)["valid_count"], 2)
+        with contextlib.closing(self.store.connect()) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_manual_run").fetchone()[0], 0)
+
+    def test_membership_downgrade_before_submit_creates_no_run(self):
+        self.materials["501"]["duration_seconds"] = 1201
+        self.accounts["1"]["subscription_type"] = "premium"
+        preview = self.preview([{"account_id": "1", "material_id": "501"}])
+        self.accounts["1"]["subscription_type"] = "none"
+        with self.assertRaisesRegex(XPostError, "超过 1200 秒"):
+            self.commit(preview)
+        with contextlib.closing(self.store.connect()) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM x_post_manual_run").fetchone()[0], 0)
+
+    def test_existing_operation_replay_survives_membership_change(self):
+        self.materials["501"]["duration_seconds"] = 1201
+        self.accounts["1"]["subscription_type"] = "basic"
+        preview = self.preview([{"account_id": "1", "material_id": "501"}])
+        batch = self.commit(preview)
+        self.accounts["1"]["subscription_type"] = "none"
+        self.assertEqual(self.commit(preview)["id"], batch["id"])
+
     def test_three_explicit_pairs_create_three_children_two_anchors(self):
         batch = self.commit()
         self.assertEqual(3, len(batch["tasks"]))

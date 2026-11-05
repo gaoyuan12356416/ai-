@@ -5,6 +5,9 @@ account DTOs are resolved by the authenticated Sidecar before entering here.
 """
 from __future__ import annotations
 
+from features.x_posts.duration_policy import standard_limit
+
+
 import contextlib
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -23,6 +26,18 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 PREVIEW_TTL_SECONDS = 600
 MAX_ROWS = 200
 _TERMINAL = {"failed_preflight", "completed", "completed_with_errors", "stopped", "needs_review"}
+
+
+def validate_account_duration(account, material):
+    """Reject known long-video/member mismatches before reserving any task."""
+    # Missing duration remains the source hydration/final media guard's concern.
+    duration = float(material.get("duration_seconds") or 0)
+    if duration > standard_limit() and account.get("subscription_type") not in {
+        "basic", "premium", "premium_plus",
+    }:
+        status = "无会员资格" if account.get("subscription_type") == "none" else "会员资格未知"
+        raise XPostError("x_long_video_requires_premium",
+            "素材时长 %.3f 秒，超过 1200 秒；当前账号%s，请选择有 X Basic、Premium 或 Premium+ 会员资格的账号。" % (duration, status), 409)
 
 
 def actor_subject(actor):
@@ -426,6 +441,7 @@ class PersonalStore:
                     material_language = canonical_drama_language(material.get("language", material.get("drama_language")))
                     if not same_drama_language(language, material_language):
                         raise XPostError("x_post_account_language_mismatch", "素材语言与账号剧语言不匹配", 409)
+                    validate_account_duration(account, material)
                     schedule = _timing(raw.get("scheduled_at", raw.get("publish_time", "")), current)
                     if source == "manual" and material_id in material_times and material_times[material_id] != schedule:
                         raise XPostError("x_video_material_time_mismatch", "同一素材的目标账号必须共用发布时间", 400)
@@ -506,6 +522,7 @@ class PersonalStore:
                     material = materials.get(mid, materials.get(int(mid)))
                     if not isinstance(material, dict) or not same_drama_language(material.get("language", material.get("drama_language")), row["drama_language"]):
                         raise XPostError("x_video_material_changed", "素材数据已变更，请重新核对", 409)
+                    validate_account_duration(accounts.get(str(aid), accounts.get(aid)), material)
                     rendered = render_caption(row["caption"], material.get("drama_name", material.get("name")), material.get("drama_description", material.get("description", material.get("desc"))), "https://preview.invalid/0.html")
                     if rendered != row["rendered_caption"]:
                         raise XPostError("x_video_material_changed", "素材文案数据已变更，请重新核对", 409)

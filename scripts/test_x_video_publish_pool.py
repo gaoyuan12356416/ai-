@@ -77,6 +77,23 @@ class PoolTests(unittest.TestCase):
         with self.pool.connection() as conn:
             return conn.execute(sql, args).fetchone()[0]
 
+    def test_add_material_checks_current_membership_and_keeps_short_rows(self):
+        self.settings()
+        self.materials["101"]["duration_seconds"] = 1201
+        self.materials["102"]["duration_seconds"] = 1200
+        self.account["subscription_type"] = "none"
+        result, proof, body = self.add(["101", "102"])
+        self.assertEqual([i["material_id"] for i in proof["items"]], ["102"])
+        self.assertEqual(proof["skipped"][0]["code"], "x_long_video_requires_premium")
+        self.assertIn("1201", proof["skipped"][0]["message"])
+        self.account["subscription_type"] = "premium"
+        proof = self.pool.preview(self.actor, "1", {"expected_version": self.version(), "material_ids": ["101"]})
+        self.assertEqual(len(proof["items"]), 1)
+        self.account["subscription_type"] = "none"
+        with self.assertRaisesRegex(XPostError, "重新校验"):
+            self.pool.add(self.actor, "1", {"expected_version": self.version(), "preview_id": proof["preview_id"], "idempotency_key": "member-changed-001"})
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM x_video_publish_pool_item WHERE material_id='101'"), 0)
+
     def test_settings_first_save_is_paused_and_version_fenced(self):
         result = self.settings()
         self.assertFalse(result["pool"]["enabled"])

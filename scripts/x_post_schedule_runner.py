@@ -129,7 +129,7 @@ _DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
         "x_post_daily_copy_validation_failed",
     }
 )
-MATERIAL_ASSIGNMENT_VERSION = "material-random-relay-v1"
+MATERIAL_ASSIGNMENT_VERSION = "material-random-premium-direct-v2"
 
 
 class MaterialScheduleCandidates(list):
@@ -1547,7 +1547,6 @@ def _preflight_material_candidates(
         )
         for language, language_accounts in accounts_by_language.items()
     }
-    relay_cache = {}
     work_root = Path(config.work_dir)
     delegated = pipeline_dispatch_enabled()
     if not delegated and (not work_root.exists() or not work_root.is_dir() or work_root.is_symlink()):
@@ -1556,33 +1555,14 @@ def _preflight_material_candidates(
             "x_post_storage_unavailable",
         )
 
-    def relay_for(language, target, material_id):
-        if language not in relay_cache:
-            relay_cache[language] = sidecar.premium_relay_accounts(
-                str(assignment_identity.get("run_date") or ""), language
-            )
-        relay_options = [
-            option
-            for option in relay_cache[language]
-            if int(option["id"]) != int(target["id"])
-            and bool(option.get("long_video_eligible"))
-            and same_drama_language(option.get("drama_language"), language)
-        ]
-        relay_options = stable_shuffler(
-            relay_options,
-            _material_assignment_seed_parts(
-                assignment_identity,
-                accounts,
-                language,
-                "relay:%s:%s" % (int(target["id"]), material_id),
-            ),
+    def premium_target(remaining):
+        for account in remaining:
+            if account.get("long_video_eligible") is True:
+                return account
+        raise CandidatePreflightError(
+            "超过 1200 秒的素材需要同语言会员账号；本批暂无可用会员账号，素材保留待后续排期",
+            "x_long_video_requires_premium",
         )
-        if not relay_options:
-            raise CandidatePreflightError(
-                "no currently eligible same-language public Premium relay account is available",
-                "x_long_video_requires_premium",
-            ) from None
-        return relay_options[0]
 
     with (contextlib.nullcontext(None) if delegated else tempfile.TemporaryDirectory(
         prefix="x-post-schedule-material-", dir=str(work_root)
@@ -1652,11 +1632,11 @@ def _preflight_material_candidates(
                 # already have a candidate in this batch. This is normal batch
                 # capacity, so leave the item clean for a later schedule point.
                 continue
-            target = remaining_targets[0]
+            # Use standard capacity first, retaining Premium capacity for long videos.
+            target = next((a for a in remaining_targets if a.get("long_video_eligible") is not True), remaining_targets[0])
             material_id = str(candidate.get("material_id", "") or "")
             destination = root / ("%s.bin" % material_id)
             rank = len(accepted_by_account) + 1
-            relay = None
             try:
                 duration = float(candidate.get("source_duration") or 0)
                 if candidate.get("media_kind") == "video" and duration <= 0:
@@ -1664,10 +1644,9 @@ def _preflight_material_candidates(
                         "source video duration metadata is missing",
                         code="material_duration_missing",
                     )
+                if duration > duration_policy.standard_limit({"duration_policy_version": getattr(config, "duration_policy_version", 2)}):
+                    target = premium_target(remaining_targets)
                 route_account = target
-                if duration > duration_policy.standard_limit({"duration_policy_version": getattr(config, "duration_policy_version", 2)}) and not target.get("long_video_eligible"):
-                    relay = relay_for(language, target, material_id)
-                    route_account = relay
                 try:
                     item = deferred_candidate(route_account, candidate, rank, timestamp, duration_hint=duration) if delegated else _preflight_candidate(
                         config,
@@ -1690,17 +1669,16 @@ def _preflight_material_candidates(
                     ValueError,
                 ) as direct_error:
                     if not (
-                        relay is None
-                        and str(getattr(direct_error, "code", "") or "")
+                        str(getattr(direct_error, "code", "") or "")
                         == "x_long_video_requires_premium"
                         and not target.get("long_video_eligible")
                     ):
                         raise
-                    relay = relay_for(language, target, material_id)
+                    target = premium_target(remaining_targets)
                     item = _preflight_candidate(
                         config,
                         candidate,
-                        relay,
+                        target,
                         rank,
                         timestamp,
                         destination,
@@ -1717,21 +1695,6 @@ def _preflight_material_candidates(
                         "relay_account_username": "",
                     }
                 )
-                if relay is not None:
-                    item.update(
-                        {
-                            "account_id": int(target["id"]),
-                            "account_username": str(target["username"]),
-                            "page_name": str(
-                                target.get("display_name", "")
-                                or target["username"]
-                            ),
-                            "page_id": str(target["x_user_id"]),
-                            "delivery_mode": "premium_relay_repost",
-                            "relay_account_id": int(relay["id"]),
-                            "relay_account_username": str(relay["username"]),
-                        }
-                    )
             except (
                 XPostError,
                 CandidatePreflightError,

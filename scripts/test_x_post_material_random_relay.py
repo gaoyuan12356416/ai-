@@ -132,7 +132,7 @@ class MaterialAssignmentTests(unittest.TestCase):
         )
         self.assertEqual(injected, [3, 2, 1])
 
-    def test_boundary_140_is_direct_and_140_001_uses_random_relay(self):
+    def test_boundary_1200_is_standard_and_1200_001_selects_premium_target(self):
         target = account(1)
         relays = [
             account(10, premium=True, username="premium10"),
@@ -152,14 +152,14 @@ class MaterialAssignmentTests(unittest.TestCase):
 
         relayed, failures = self.preflight(
             [pool_candidate(2, 1200.001)],
-            [target],
-            relays,
+            [target, *relays],
+            (),
             shuffler=choose_last,
         )
         self.assertFalse(failures)
-        self.assertEqual(relayed[0]["account_id"], 1)
-        self.assertEqual(relayed[0]["delivery_mode"], "premium_relay_repost")
-        self.assertEqual(relayed[0]["relay_account_id"], 11)
+        self.assertEqual(relayed[0]["account_id"], 11)
+        self.assertEqual(relayed[0]["delivery_mode"], "direct")
+        self.assertEqual(relayed[0]["relay_account_id"], 0)
 
     def test_no_relay_skips_long_row_and_publishes_available_short_row(self):
         publisher = mock.Mock()
@@ -193,14 +193,45 @@ class MaterialAssignmentTests(unittest.TestCase):
         ]
         accepted, failures = self.preflight(
             [pool_candidate(1, 1800.0, "en"), pool_candidate(2, 90.0, "ja")],
-            targets,
-            relays,
+            targets + relays,
+            (),
         )
         self.assertFalse(failures)
         by_material = {item["material_id"]: item for item in accepted}
-        self.assertEqual(by_material["1"]["account_id"], 1)
-        self.assertEqual(by_material["1"]["relay_account_id"], 11)
+        self.assertEqual(by_material["1"]["account_id"], 11)
+        self.assertEqual(by_material["1"]["relay_account_id"], 0)
         self.assertEqual(by_material["2"]["account_id"], 2)
+
+
+    def test_short_material_preserves_member_capacity_for_later_long_material(self):
+        accepted, failures = self.preflight(
+            [pool_candidate(1, 60), pool_candidate(2, 1201)],
+            [account(10, premium=True), account(1)],
+            shuffler=lambda values, _: list(values))
+        self.assertFalse(failures)
+        self.assertEqual({i["material_id"]: i["account_id"] for i in accepted}, {"1": 1, "2": 10})
+        self.assertTrue(all(i["delivery_mode"] == "direct" for i in accepted))
+
+    def test_external_or_other_language_member_is_not_selected(self):
+        accepted, failures = self.preflight(
+            [pool_candidate(1, 1201), pool_candidate(2, 60)],
+            [account(1), account(2, "ja", premium=True)],
+            [account(10, premium=True)])
+        self.assertEqual([i["material_id"] for i in accepted], ["2"])
+        self.assertEqual([i["error_code"] for i in failures], ["x_long_video_requires_premium"])
+
+    def test_deferred_long_video_selects_member_without_media_work(self):
+        with mock.patch.object(runner, "pipeline_dispatch_enabled", return_value=True), mock.patch.object(
+            runner, "_preflight_candidate", side_effect=AssertionError("unexpected media work")):
+            accepted, failures = runner._preflight_material_candidates(
+                self.config, FakeRelaySidecar([]), [pool_candidate(1, 1201)],
+                [account(1), account(10, premium=True)], source_date="2026-08-16",
+                timestamp=1, downloader=None, prober=None, repair_client=None,
+                assignment_identity=self.identity)
+        self.assertFalse(failures)
+        self.assertEqual(accepted[0]["account_id"], 10)
+        self.assertEqual(accepted[0]["preflight_duration"], 1201)
+        self.assertEqual(accepted[0]["delivery_mode"], "direct")
 
 
 class MaterialRelayStoreTests(unittest.TestCase):

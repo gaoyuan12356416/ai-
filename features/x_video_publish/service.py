@@ -65,6 +65,7 @@ class PublishingService:
                 'username':account.get('username') or '', 'profile_image_url':safe_url(account.get('profile_image_url')),
                 'language':account.get('drama_language') or '', 'status':account.get('status') or 'unknown',
                 'publish_approved':account.get('publish_approved') is True,'eligible':eligible,
+                'subscription_type':account.get('subscription_type') or 'unknown',
                 'blocked_reason':'' if eligible else '账号授权不可用或未允许发布',
                 'caption_template':config['default_copy'],'config_version':config['version'],
                 'daily_auto_publish_configured':account.get('daily_auto_publish_configured') is True,
