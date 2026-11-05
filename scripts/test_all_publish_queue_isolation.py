@@ -80,4 +80,28 @@ class FBPreparationOrderingTests(unittest.TestCase):
             self.assertFalse(prepare_available(c,'2026-11-05','auto','2026-11-05'))
 
 
+class RollbackScopeTests(unittest.TestCase):
+    def test_lock_projection_preserves_facts_and_refuses_running_claim(self):
+        from scripts.deploy_publish_queue_isolation import rollback_queue_scopes
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'d.db'
+            with contextlib.closing(sqlite3.connect(path)) as c, c:
+                c.executescript('''CREATE TABLE pipeline_job(id,channel,status,generation,resource_keys_json);
+                    CREATE TABLE pipeline_resource(resource_key PRIMARY KEY,job_id,generation,quarantined,legacy);
+                    CREATE TABLE pipeline_legacy_resource(resource_key,job_id,PRIMARY KEY(resource_key,job_id));
+                    INSERT INTO pipeline_job VALUES(1,'x','unknown',2,'["x:account:10"]');
+                    INSERT INTO pipeline_job VALUES(2,'x','unknown',3,'["x:account:10"]');
+                    INSERT INTO pipeline_resource VALUES('task:x:queue:1',1,2,1,0);
+                    INSERT INTO pipeline_resource VALUES('task:x:queue:2',2,3,1,0);''')
+                facts=c.execute('SELECT * FROM pipeline_job').fetchall()
+            rollback_queue_scopes(path)
+            with contextlib.closing(sqlite3.connect(path)) as c, c:
+                self.assertEqual(c.execute('SELECT * FROM pipeline_job').fetchall(),facts)
+                self.assertEqual(c.execute('SELECT COUNT(*) FROM pipeline_legacy_resource').fetchone()[0],2)
+                self.assertEqual(c.execute('SELECT resource_key FROM pipeline_resource').fetchone()[0],'x:account:10')
+                c.execute("UPDATE pipeline_job SET status='running' WHERE id=1")
+            with self.assertRaisesRegex(AssertionError,'rollback_requires_x_tt'):
+                rollback_queue_scopes(path)
+
+
 if __name__=='__main__':unittest.main()

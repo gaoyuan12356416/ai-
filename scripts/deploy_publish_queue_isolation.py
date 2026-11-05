@@ -162,6 +162,20 @@ def idle_for_switch(lane,units,processes,state):
         if len(workers)!=2 or not all('get (queue.py:' in part for part in workers):return False
     return True
 
+def rollback_queue_scopes(database):
+    """Project only lock views for old coordinator code, preserving all facts."""
+    with contextlib.closing(sqlite3.connect(str(database),timeout=10)) as c, c:
+        c.row_factory=sqlite3.Row;c.execute('BEGIN IMMEDIATE')
+        assert not c.execute("SELECT 1 FROM pipeline_job WHERE channel IN ('x','tt') AND status IN ('running','legacy_running') LIMIT 1").fetchone(),'rollback_requires_x_tt_claims_to_finish'
+        rows=c.execute("SELECT * FROM pipeline_job WHERE channel IN ('x','tt') AND id IN (SELECT job_id FROM pipeline_resource UNION SELECT job_id FROM pipeline_legacy_resource)").fetchall()
+        for row in rows:
+            held=c.execute('SELECT * FROM pipeline_resource WHERE job_id=?',(row['id'],)).fetchall()
+            legacy=c.execute('SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?',(row['id'],)).fetchone()
+            for table in ('pipeline_resource','pipeline_legacy_resource'):c.execute('DELETE FROM '+table+' WHERE job_id=?',(row['id'],))
+            for resource in json.loads(row['resource_keys_json']):
+                if held:c.execute('INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)',(resource,row['id'],row['generation'],int(row['status']=='unknown'),held[0]['legacy']))
+                if legacy or row['status']=='unknown':c.execute('INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)',(resource,row['id']))
+
 def switch(directory,lane,rollback=False):
     path=directory/'manifest.json';m=json.loads(path.read_text());item=m['lanes'][lane]
     link=Path(LANES[lane][0]);old=Path(item['candidate'] if rollback else item['before_root'])
@@ -183,6 +197,9 @@ def switch(directory,lane,rollback=False):
         item['active_pids']={u:pid(u) for u,_,_ in LANES[lane][1]};save(path,m)
         print(json.dumps({'lane':lane,'state':'already_active_verified'}),flush=True);return
     assert link.resolve()==old,'later_runtime_switch_preserved:'+lane
+    if rollback and lane=='coordinator':
+        with contextlib.closing(sqlite3.connect('file:'+DBS['dispatch']+'?mode=ro',uri=True)) as c:
+            assert not c.execute("SELECT 1 FROM pipeline_job WHERE channel IN ('x','tt') AND status IN ('running','legacy_running') LIMIT 1").fetchone(),'rollback_requires_x_tt_claims_to_finish'
     for rel,h in item['files'].items():assert sha(link/rel)==h['after' if rollback else 'before'],'affected_source_drift:'+rel
     units=LANES[lane][1];processes={u:pid(u) for u,_,_ in units}
     paths=set();triggers=set()
@@ -224,6 +241,7 @@ def switch(directory,lane,rollback=False):
         if stopped:run(['systemctl','--job-mode=ignore-dependencies','stop',*stopped],timeout=20)
         for u in stopped:assert pid(u)=='0'
         assert link.resolve()==old,'concurrent_runtime_switch'
+        if rollback and lane=='coordinator':rollback_queue_scopes(DBS['dispatch'])
         swap(link,target);swapped=True
         # Startup readiness probes use these same listeners.
         release_network_gate()
