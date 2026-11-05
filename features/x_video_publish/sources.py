@@ -192,7 +192,11 @@ class SourceRepository:
 
     def listing(self, query):
         q = str(query.get('q') or '').strip()
-        if len(q)>80:
+        exact_ids = None
+        if re.fullmatch(r'[0-9,\s]+', q) and re.search(r'[0-9]', q):
+            exact_ids = ids(list(dict.fromkeys(part.lstrip('0') or '0'
+                for part in re.split(r'[,\s]+', q) if part)))
+        if exact_ids is None and len(q)>80:
             raise PublishingError('invalid_query','搜索内容最多 80 字',400)
         product = str(query.get('product') or DEFAULT_PRODUCT).strip()
         if product not in CATALOG_PRODUCTS:
@@ -206,7 +210,7 @@ class SourceRepository:
         except (ValueError,TypeError):
             raise PublishingError('invalid_query','分页或语言筛选无效',400) from None
         clauses, params = ['s.type=2'], []
-        exact_id = re.fullmatch(r'[0-9]+',q) is not None
+        exact_id = exact_ids is not None
         # Browse/name searches stay in one indexed product. Exact IDs retain
         # the existing cross-product manual publishing policy.
         if not exact_id:
@@ -215,7 +219,7 @@ class SourceRepository:
             clauses.append('s.id<%s');params.append(cursor)
         source_from = f'`{self.schema}`.ads_custom_source s'
         if exact_id:
-            clauses.append('s.id=%s');params.append(q)
+            clauses.append(f"s.id IN ({','.join('%s' for _ in exact_ids)})");params.extend(exact_ids)
         elif q:
             # A localized title identifies a series, not only that language's
             # content ID. Expand through the small, indexed drama-info catalog;
@@ -259,6 +263,10 @@ class SourceRepository:
         mappings = None
         if exact_id:
             raw, mappings = self._read_exact_bundle(' AND '.join(clauses), params)
+            # The complete exact bundle is bounded by 200 unique requested IDs.
+            # UNION branch order is unspecified; sort numerically before slicing
+            # so the descending ID cursor cannot omit rows on later pages.
+            raw.sort(key=lambda row: int(row['material_id']), reverse=True)
         else:
             raw = self.mysql.select(f'''SELECT {self._projection()} FROM {source_from}
                 WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
