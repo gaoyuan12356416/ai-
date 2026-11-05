@@ -55,7 +55,13 @@ def exact_restore(processor,request,kind,queue_id,journal):
         require(getattr(exc,'code','')=='artifact_upload_incomplete','unexpected_artifact_state')
     native_zero_attempt(queue_id)
     cache=Path('/mnt/data-disk/x-publish-recovery-20261104-on-20261105/artifact-cache')/(str(queue_id)+'-'+expected['result']['output_sha256']+'.mp4')
-    processor.qualified_artifact=exact_callback(journal,expected)
+    regenerated=[]
+    def qualified(result,key):
+        if result==expected['result'] and key==expected['object_key']:
+            exact_callback(journal,expected)(result,key)
+        else:
+            regenerated.append(dict(binding=journal.binding,object_key=key,result=result,result_sha256=journal.digest(result)))
+    processor.qualified_artifact=qualified
     original=processor.cos.client.upload_file
     def upload(*args,**kwargs):
         try:return original(*args,**kwargs)
@@ -68,6 +74,17 @@ def exact_restore(processor,request,kind,queue_id,journal):
     processor.cos.client.upload_file=upload
     original_upload=processor.cos.upload
     def durable_upload(key,path,sha,size,**kwargs):
+        if regenerated:
+            candidate=regenerated[-1]
+            require(key==candidate['object_key'] and (sha,size)==(candidate['result']['output_sha256'],candidate['result']['output_size']),'upload_identity_changed')
+            candidate_path=cache.parent/(str(queue_id)+'-'+sha+'.mp4')
+            preserve_qualified(path,candidate_path,candidate['result'])
+            record=dict(queue_id=queue_id,old_receipt=expected,candidate_receipt=candidate,local_path=str(candidate_path),platform_called=False)
+            record_path=cache.parent/(str(queue_id)+'-'+sha+'.candidate.json')
+            if record_path.exists():require(json.loads(record_path.read_text())==record,'candidate_record_conflict')
+            else:
+                with record_path.open('x') as stream:json.dump(record,stream,indent=2);stream.flush();os.fsync(stream.fileno())
+            raise RuntimeError('newly_qualified_bytes_preserved_for_review')
         require(key==expected['object_key'] and (sha,size)==(expected['result']['output_sha256'],expected['result']['output_size']),'upload_identity_changed')
         preserve_qualified(path,cache,expected['result'])
         native_zero_attempt(queue_id)
