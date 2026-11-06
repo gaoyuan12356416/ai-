@@ -13,6 +13,12 @@ from scripts.deploy_publish_queue_isolation import (
 FILES = ['features/fb_video_publish/' + name + '.py'
          for name in ('sources', 'pool', 'pool_scheduler', 'worker')]
 BASE = 'b5606afe'
+# Main API proxies publishing and retains older, otherwise unrelated copies.
+# Preserve those differences instead of importing a publishing-runtime upgrade.
+MAIN_BASELINES = {
+    'features/fb_video_publish/pool_scheduler.py': '3bbcdaebf6fdf6fcd740a79185ef66b21c9cd90c19b6a84b84fe9547394bca85',
+    'features/fb_video_publish/worker.py': '1adf248f3d5c7a859ab5cc9bc932c449f615d8caeca964c5f85724a7c217e7dd',
+}
 
 
 def prepare(source, folder):
@@ -36,13 +42,17 @@ def prepare(source, folder):
         manifest['lanes'][lane] = item
         for relative in FILES:
             baseline = subprocess.check_output(['git', 'show', BASE + ':' + relative], cwd=source)
-            assert (live / relative).read_bytes().replace(b'\r\n', b'\n') == baseline, 'source_drift:' + relative
+            matches = (live / relative).read_bytes().replace(b'\r\n', b'\n') == baseline
+            assert matches or (lane == 'app' and sha(live / relative) == MAIN_BASELINES.get(relative)), 'source_drift:' + relative
             backup = folder / 'before' / lane / relative
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(live / relative, backup)
             target = candidate / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            copy_file(source / relative, target)
+            copy_file(live / relative, target)
+            patch = run(['git', 'diff', BASE, commit, '--', relative], cwd=source) + '\n'
+            run(['git', 'apply', '--check', '-'], cwd=candidate, input=patch)
+            run(['git', 'apply', '-'], cwd=candidate, input=patch)
             compile(target.read_bytes(), relative, 'exec')
             item['files'][relative] = {'before': sha(live / relative), 'after': sha(target)}
     save(folder / 'manifest.json', manifest)
