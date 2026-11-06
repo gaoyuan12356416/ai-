@@ -177,6 +177,20 @@ def rollback_queue_scopes(database):
                 if legacy or row['status']=='unknown':c.execute('INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)',(resource,row['id']))
 
 def switch(directory,lane,rollback=False):
+    if lane == 'fb':
+        # The same guard covers forward and rollback failures. Do not replay
+        # historical prepare/publish oneshots or resume previously paused units.
+        if __package__:
+            from .publish_scheduler_health import deployment_guard
+        else:
+            from publish_scheduler_health import deployment_guard
+        audit = directory / ('fb-support-' + str(time.time_ns()))
+        with deployment_guard(['fb'], audit):
+            return _switch(directory, lane, rollback)
+    return _switch(directory, lane, rollback)
+
+
+def _switch(directory,lane,rollback=False):
     path=directory/'manifest.json';m=json.loads(path.read_text());item=m['lanes'][lane]
     link=Path(LANES[lane][0]);old=Path(item['candidate'] if rollback else item['before_root'])
     target=Path(item['before_root'] if rollback else item['candidate'])
@@ -245,7 +259,7 @@ def switch(directory,lane,rollback=False):
         swap(link,target);swapped=True
         # Startup readiness probes use these same listeners.
         release_network_gate()
-        for u,port,_ in units:run(['systemctl','start',u],timeout=15)
+        for u,port,_ in units:run(['systemctl',*(['--job-mode=ignore-dependencies'] if lane=='fb' else []),'start',u],timeout=15)
         for u,_,_ in units:assert run(['systemctl','is-active',u])=='active'
         for dependent in paths:run(['systemctl','start',dependent],timeout=15)
     except BaseException:
@@ -253,7 +267,7 @@ def switch(directory,lane,rollback=False):
             run(['systemctl','--job-mode=ignore-dependencies','stop',*[u for u,_,_ in units]],timeout=20)
             swap(link,old)
         release_network_gate()
-        for u in stopped:run(['systemctl','start',u],timeout=20)
+        for u in stopped:run(['systemctl',*(['--job-mode=ignore-dependencies'] if lane=='fb' else []),'start',u],timeout=20)
         for dependent in paths:run(['systemctl','start',dependent],timeout=15)
         raise
     finally:

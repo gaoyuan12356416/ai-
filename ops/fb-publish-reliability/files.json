@@ -1,0 +1,14 @@
+{
+  "features/pipeline_dispatch/views.py": {
+    "before": "08d174219b4b21e4a24aa21d68520c93a9dacbd71bf77c7bbd5b2bf137ee1723",
+    "after": "3b4bedcc8aa3a0aa55d11052d53a9e05e02f0e08a35daa85d759b01dd5bed67c"
+  },
+  "static/pipeline-monitor.js": {
+    "before": "900c2b79a8575643064e5756efc846761d97cde9d3c78f01f3734fb357df1ebb",
+    "after": "5e61043961ca30a79fbbef3a77dbd4cba6ea06dcd703195ecaefba8ee2ce24e7"
+  },
+  "static/pipeline-monitor.html": {
+    "before": "e62c6f42ce87b0b8f86951a540700aaa4c575936c007c6c3d0352cdba73e9430",
+    "after": "74ad0c37ef189f1013a32db2d8288bdfae2416ad5943bc6c97c94f357506896c"
+  }
+}

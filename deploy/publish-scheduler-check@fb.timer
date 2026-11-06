@@ -1,0 +1,13 @@
+[Unit]
+Description=Observe Facebook support services and short-link progress
+RequiresMountsFor=/mnt/data-disk
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=publish-scheduler-check@fb.service
+
+[Install]
+WantedBy=timers.target

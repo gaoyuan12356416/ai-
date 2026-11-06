@@ -434,6 +434,11 @@ def query(store, view, actor, filters):
                 result['warnings'].append('跨日期核对暂不可用（' + type(exc).__name__ + '），数量不按零统计')
                 if view == 'summary':
                     result['backlog'] = {'available': False, 'unfinished': None, 'unqueued': None, 'channels': []}
+    if view == 'summary':
+        from .support_health import read_snapshot
+        support = read_snapshot(now, safe_actor, channels)
+        if support is not None:
+            result['fb_support'] = support
     with _LOCK:
         _CACHE[key] = (time.monotonic(), copy.deepcopy(result))
         _CACHE.move_to_end(key)

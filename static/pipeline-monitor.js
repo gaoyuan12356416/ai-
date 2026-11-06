@@ -53,6 +53,7 @@
   ];
   function renderSummary(data) {
     totals(data);
+    renderFbSupport(data.fb_support);
     $("pmScope").textContent = data.scope === "all" ? "全站任务" : "我的任务";
     $("pmTaskScope").textContent = data.scope === "all" ? "显示获准渠道的全站任务；保留原账号、素材与发布回执。" : "仅显示当前登录用户在获准渠道内的任务。";
     const allowed = Array.isArray(data.allowed_channels) ? data.allowed_channels : [];
@@ -71,6 +72,18 @@
     channelRows.innerHTML = (data.channels || []).map(row => `<tr><td><span class="pm-channel"><b class="pm-channel-icon">${e({ x: "X", fb: "FB", tt: "TT", youtube: "YT" }[row.channel] || "·")}</b><span><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><small>${e(STAGES[row.stage] || row.stage)}</small></span></span></td>${CHANNEL_COLUMNS.map(column => `<td data-column="${column.key}">${column.cell(row)}</td>`).join("")}</tr>`).join("") || '<tr><td colspan="9" class="pm-empty">当前范围暂无可见的渠道任务数据</td></tr>';
     $("pmSources").innerHTML = (data.sources || []).map(row => `<div class="pm-source"><strong>${e(CHANNELS[row.channel] || row.channel)}</strong><span>${e(row.family || "")}</span>${badge(row.state)}<span title="采集时间">${e(time(row.collected_at))}</span>${row.error_code ? `<span>${e(row.error_code)}</span>` : ""}</div>`).join("") || '<p class="pm-muted">尚无采集状态，等待采集器上报。</p>';
     $("pmEfficiencyRows").innerHTML = (data.channels || []).map(row => { const phases = (data.efficiency || []).filter(p => p.channel === row.channel && p.stage === row.stage); return `<tr><td>${e(CHANNELS[row.channel])} · ${e(STAGES[row.stage])}</td><td>${row.success_rate == null ? "未记录" : number(row.success_rate * 100) + "%"}</td><td>${number(row.throughput_per_hour)}</td>${["download", "render", "artifact_transfer", "platform_submit", "platform_upload", "platform_processing", "platform_confirmation_wait", "queue"].map(phase => { const timing = phases.find(p => p.phase === phase); return `<td>${timing?.samples ? `${duration(timing.p50_seconds)} / ${duration(timing.p95_seconds)}<small>${number(timing.samples)} 个样本</small>` : timing?.applicable === false ? "不适用" : "未记录"}</td>`; }).join("")}</tr>`; }).join("") || '<tr><td colspan="11" class="pm-empty">暂无已完成的计时样本</td></tr>';
+  }
+  function renderFbSupport(data) {
+    const panel = $("pmFbSupport");
+    if (!panel) return;
+    panel.hidden = !data;
+    if (!data) { panel.innerHTML = ""; return; }
+    const progress = data.progress || {};
+    const count = key => progress[key] == null ? "未知" : number(progress[key]);
+    panel.innerHTML = `<div class="pm-section-head"><div><h2>Facebook 发布准备 ${badge(!data.available ? "unavailable" : data.ok ? "healthy" : "blocked")}</h2><p class="pm-muted">全站视频任务 · 每分钟检查 · 最近检查 ${e(time(data.collected_at))}</p></div></div><div class="pm-sources" style="display:grid;gap:8px">`
+      + (data.alerts || []).map(message => `<p class="pm-notice error" role="alert">${e(message)}</p>`).join("")
+      + (data.available ? `<p>${(data.services || []).map(service => `${e(service.name)}：${service.ok ? "正常" : "异常"}`).join(" · ")}</p><p>到期待短链 ${count("due_pending")} · 持续超过 5 分钟 ${count("overdue_pending")} · 最长观察等待 ${duration(progress.oldest_pending_seconds)}</p><p>未来预约 ${count("future_scheduled")} · 平台处理中 ${count("platform_processing")} · 发布执行中 ${count("executing")} · 结果待核对 ${count("outcome_unknown")} · 暂停核对 ${count("held")}</p>` : "")
+      + '<p class="pm-muted">积压提示仅统计已到期、素材就绪且持续等待短链的任务。未来预约、平台处理中和结果待核对分别显示。</p></div>';
   }
   function meter(label, value, text) { const valid = value != null && Number.isFinite(Number(value)); return `<div><div class="pm-resource-head"><span>${e(label)}</span><b>${e(text == null ? (valid ? `${number(value)}%` : "—") : text)}</b></div><div class="pm-meter"><span style="width:${valid ? Math.max(0, Math.min(100, Number(value))) : 0}%"></span></div></div>`; }
   function memory(used, total) { return { percent: used != null && total > 0 ? used / total * 100 : null, text: used != null && total > 0 ? `${(used / 1073741824).toFixed(1)} / ${(total / 1073741824).toFixed(1)} GB` : "—" }; }
@@ -179,6 +192,6 @@
     } catch (error) { $("pmGate").textContent = "监测页面暂不可用，请刷新重试。"; notice("pmError", error.message); }
   }
   // Export pure render helpers for the browser contract tests without credentials.
-  window.PipelineMonitor = { escape: e, number, duration, time, detailUrl, renderSummary, renderWorkers, renderTasks };
+  window.PipelineMonitor = { escape: e, number, duration, time, detailUrl, renderSummary, renderWorkers, renderTasks, renderFbSupport };
   boot();
 })();
