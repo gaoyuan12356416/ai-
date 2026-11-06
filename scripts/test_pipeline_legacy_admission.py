@@ -34,7 +34,9 @@ class LegacyAdmissionTests(unittest.TestCase):
         runtime = SimpleNamespace(internal_token=TOKEN, prepare_next=Mock(return_value={"legacy": True}),
             executor=SimpleNamespace(execute_next=Mock(return_value={"legacy": True}), reconcile_next=Mock(return_value={"readonly": True})),
             manual_worker=SimpleNamespace(dispatch=Mock(return_value={"legacy": True})),
-            plan_next=Mock(return_value={"planned": True}), tick=Mock(return_value={"planned": True}))
+            plan_next=Mock(return_value={"planned": True}), tick=Mock(return_value={"planned": True}),
+            video_pool_scheduler=SimpleNamespace(start=Mock(return_value={"status": "started"}),
+                tick=Mock(return_value={"status": "tick_complete"})))
         request = handler(fb.Handler, path, authorized=authorized)
         request.runtime = runtime
         with patch.dict(os.environ, {"PIPELINE_FB_DISPATCH_ENABLED": "1" if enabled else "0"}):
@@ -66,6 +68,15 @@ class LegacyAdmissionTests(unittest.TestCase):
             request, _ = self.fb_handler("/internal/pipeline-dispatch/fb/reserve")
             bridge.assert_called_once()
             self.assertEqual(request.send_json.call_args.args, (200, {"accepted": True}))
+
+    def test_fb_page_pool_planning_survives_execution_handoff(self):
+        for action, status in (("start", "started"), ("tick", "tick_complete")):
+            with self.subTest(action=action):
+                request, runtime = self.fb_handler("/internal/fb-video-publish/pool-" + action)
+                self.assertEqual(request.send_json.call_args.args, (200, {"status": status}))
+                getattr(runtime.video_pool_scheduler, action).assert_called_once_with("fixture-worker")
+                runtime.manual_worker.dispatch.assert_not_called()
+                runtime.executor.execute_next.assert_not_called()
 
     def test_fb_authenticated_bridge_serializer_only_allows_internal_credentials(self):
         payload = {"credentials": {"access_token": "fixture-private-value"}}
