@@ -28,9 +28,12 @@ def recover(auto_db, native_db, run_id, task_ids, *, operation_id, actor, reason
     require(ids and len(ids) == len(task_ids), "unique explicit task IDs required")
     require(operation_id and actor and reason, "operation, actor and reason required")
     with contextlib.closing(sqlite3.connect(Path(auto_db).resolve().as_uri() +
-            ("?mode=rw" if apply else "?mode=ro"), uri=True, timeout=15)) as c:
+            ("?mode=rw" if apply else "?mode=ro"), uri=True, timeout=15)) as c, \
+            contextlib.closing(sqlite3.connect(Path(native_db).resolve().as_uri() + "?mode=ro",
+                                               uri=True, timeout=15)) as native:
         c.row_factory = sqlite3.Row
-        c.execute("ATTACH DATABASE ? AS native", (Path(native_db).resolve().as_uri() + "?mode=ro",))
+        native.execute("PRAGMA query_only=ON")
+        native.execute("BEGIN")
         c.execute("BEGIN IMMEDIATE" if apply else "BEGIN")
         try:
             old_events = [json.loads(r[0]) for r in c.execute(
@@ -61,7 +64,7 @@ def recover(auto_db, native_db, run_id, task_ids, *, operation_id, actor, reason
                 require(not c.execute("SELECT 1 FROM x_auto_material_ledger WHERE task_id=?", (tid,)).fetchone(),
                         "task has a material reservation")
                 key = "x-auto-task-" + str(tid)
-                require(not c.execute("SELECT 1 FROM native.x_post_manual_run WHERE external_task_key=? OR external_task_key LIKE ?",
+                require(not native.execute("SELECT 1 FROM x_post_manual_run WHERE external_task_key=? OR external_task_key LIKE ?",
                     (key, key + "-%")).fetchone(), "native execution already exists")
                 require(not c.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?",
                     ("x:auto:" + str(tid),)).fetchone(), "task is held")
