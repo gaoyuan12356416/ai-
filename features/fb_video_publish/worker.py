@@ -160,13 +160,13 @@ class Worker:
             elif self.sources is not None:
                 manual = task.get("source_kind") == "manual" and "pool" not in snap
                 self.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
-                # Page pools accept any material product at admission and execution.
-                # Keep their release/language/metadata checks on the strict path.
+                # Page pools do not require a product or a released Dramawave mapping.
+                # Keep source video identity and Page language validation intact.
                 enforce_blacklist = task.get("source_kind") not in {"manual", "pool"}
-                product_policy = {"allow_any_product": True} if task.get("source_kind") == "pool" or "pool" in snap else {}
+                material_policy = {"page_pool": True} if task.get("source_kind") == "pool" or "pool" in snap else {}
                 fresh = self.sources.get_materials([task["material_id"]], need_desc=False,
                                                    enforce_blacklist=enforce_blacklist, manual=manual,
-                                                   **product_policy)[task["material_id"]]
+                                                   **material_policy)[task["material_id"]]
                 if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                     raise DomainError("material_identity_changed", "素材来源身份已变化，未向平台发布", 409)
             media_url = str(prepared.get("media_url") or "")

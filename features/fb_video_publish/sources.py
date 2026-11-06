@@ -179,7 +179,7 @@ class SourceRepository:
                 raise SourceError("page_unavailable", f"Page {pid}：" + page["blocked_reason"], 409)
         return {pid: available[pid] for pid in wanted}
 
-    def _conditions(self, *, enforce_blacklist=True, manual=False, allow_any_product=False):
+    def _conditions(self, *, enforce_blacklist=True, manual=False, page_pool=False):
         schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
         source_language, drama_language = _language_sql("s.language"), _language_sql("d.language")
         sql = f"""
@@ -188,12 +188,13 @@ class SourceRepository:
             AND s.video_duration>0 AND s.video_duration<=3600
         """
         params = ["6"]
-        if not allow_any_product:
+        if not page_pool:
             sql += " AND s.product=%s"
             params.append("Dramawave")
         if not manual:
+            sql += " AND TRIM(COALESCE(s.language,''))<>''"
+        if not (manual or page_pool):
             sql += f"""
-            AND TRIM(COALESCE(s.language,''))<>''
             AND EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
                 WHERE d.content_id=s.data_source_id AND d.app_id=%s AND d.release_status=1
                 AND d.deploy_time>0 AND d.deploy_time<=%s AND {drama_language}={source_language})
@@ -211,9 +212,9 @@ class SourceRepository:
             params.append("1479")
         return sql, params
 
-    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, allow_any_product=False):
+    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False):
         condition, base_params = self._conditions(enforce_blacklist=enforce_blacklist, manual=manual,
-                                                allow_any_product=allow_any_product)
+                                                page_pool=page_pool)
         sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
@@ -249,7 +250,7 @@ class SourceRepository:
             "drama_name": "", "drama_description": "",
         }
 
-    def _enrich(self, materials: list[dict], *, strict: bool, need_desc: bool, manual=False):
+    def _enrich(self, materials: list[dict], *, strict: bool, need_desc: bool, manual=False, page_pool=False):
         if not materials:
             return []
         ids = sorted({item["content_id"] for item in materials})
@@ -257,8 +258,9 @@ class SourceRepository:
         languages = sorted({item["language"] for item in materials})
         language_slots = ",".join("%s" for _ in languages)
         schema = self.mysql.schema
-        released = "" if manual else " AND d.release_status=1 AND d.deploy_time>0 AND d.deploy_time<=%s"
-        release_params = [] if manual else [int(self.now_fn().timestamp())]
+        optional_metadata = manual or page_pool
+        released = "" if optional_metadata else " AND d.release_status=1 AND d.deploy_time>0 AND d.deploy_time<=%s"
+        release_params = [] if optional_metadata else [int(self.now_fn().timestamp())]
         # One bounded query per metadata kind, never one query per Page or material.
         dramas = self.mysql.select(f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(d.content_id AS CHAR) content_id,COALESCE(d.language,'') language,
@@ -274,7 +276,7 @@ class SourceRepository:
              WHERE r.app_id=%s AND r.content_id IN ({placeholders}) AND r.type=2
                AND {_language_sql("r.language")} IN ({language_slots}) LIMIT 1001
         """, ["1479"] + ids + languages)
-        if manual and (len(dramas) > 1000 or len(descriptions) > 1000):
+        if optional_metadata and (len(dramas) > 1000 or len(descriptions) > 1000):
             dramas, descriptions = [], []
         if len(dramas) > 1000 or len(descriptions) > 1000:
             raise SourceError("material_metadata_too_large", "素材剧集关联结果超过安全范围，请缩小选择范围", 503)
@@ -289,7 +291,7 @@ class SourceRepository:
         for item in materials:
             key = (item["content_id"], item["language"])
             named, described = names.get(key, set()), descs.get(key, set())
-            if not manual and (len(named) != 1 or (need_desc and len(described) != 1)):
+            if not optional_metadata and (len(named) != 1 or (need_desc and len(described) != 1)):
                 if strict:
                     raise SourceError("material_metadata_ambiguous", "所选素材缺少唯一的同语言剧名或简介", 409)
                 continue
@@ -413,7 +415,7 @@ class SourceRepository:
         gates = "视频来源" if manual else ("上架、黑名单、视频来源" if enforce_blacklist else "上架、视频来源")
         return f"已找到该素材，但未满足{gates}或同语言剧集信息等发布条件。"
 
-    def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, allow_any_product=False) -> dict[str, dict]:
+    def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, page_pool=False) -> dict[str, dict]:
         wanted = _ids(material_ids, None if manual else MAX_MATERIALS, "素材")
         if any(len(value) > 19 for value in wanted):
             raise SourceError("invalid_request", "素材ID无效")
@@ -421,7 +423,7 @@ class SourceRepository:
         for offset in range(0, len(wanted), 100):
             chunk = wanted[offset:offset + 100]
             rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1,
-                                enforce_blacklist=enforce_blacklist, manual=manual, allow_any_product=allow_any_product)
+                                enforce_blacklist=enforce_blacklist, manual=manual, page_pool=page_pool)
             current = []
             for row in rows:
                 item = self._material(row, manual=manual)
@@ -432,10 +434,10 @@ class SourceRepository:
             if {item["material_id"] for item in current} != set(chunk):
                 gates = "已删除" if manual else ("已删除、未上架、被列入黑名单" if enforce_blacklist else "已删除、未上架")
                 raise SourceError("material_unavailable", f"部分素材{gates}或不符合发布条件，请重新选择", 409)
-            self._enrich(current, strict=True, need_desc=need_desc, manual=manual)
+            self._enrich(current, strict=True, need_desc=need_desc, manual=manual, page_pool=page_pool)
         return {material_id: found[material_id] for material_id in wanted}
 
-    def _unavailable_materials(self, ids, *, enforce_blacklist=True, manual=False, allow_any_product=False):
+    def _unavailable_materials(self, ids, *, enforce_blacklist=True, manual=False, page_pool=False):
         """Explain only requested catalog IDs; never replace a failed source read."""
         if not ids:
             return {}
@@ -478,7 +480,7 @@ class SourceRepository:
                 code, message = "material_not_found", "素材ID不存在"
             elif str(row.get("is_delete")) != "0":
                 code, message = "material_deleted", "素材已删除"
-            elif not allow_any_product and str(row.get("product") or "").casefold() != "dramawave":
+            elif not page_pool and str(row.get("product") or "").casefold() != "dramawave":
                 code, message = "material_product_mismatch", "素材不属于Dramawave"
             elif str(row.get("data_source")) != "6":
                 code, message = "material_source_mismatch", "素材不是当前支持的来源6素材"
@@ -496,12 +498,12 @@ class SourceRepository:
                     code, message = "material_duration_invalid", "素材时长缺失或不在0至3600秒范围内"
                 elif enforce_blacklist and (str(row.get("content_blocked")) == "1" or str(row.get("series_blocked")) == "1"):
                     code, message = "material_blacklisted", "素材关联剧目已被列入Facebook发布黑名单"
-                elif not manual and str(row.get("drama_released")) != "1":
+                elif not (manual or page_pool) and str(row.get("drama_released")) != "1":
                     code, message = "material_not_released", "素材未匹配到已上架的同语言Dramawave剧目"
             result[mid] = {"code": code, "message": message}
         return result
 
-    def resolve_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, allow_any_product=False) -> dict:
+    def resolve_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, page_pool=False) -> dict:
         """Bounded partial resolution for ID admission and Excel previews.
 
         Per-row data errors are returned without weakening the strict legacy
@@ -516,7 +518,7 @@ class SourceRepository:
         for offset in range(0, len(wanted), 100):
             chunk = wanted[offset:offset + 100]
             rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1,
-                                enforce_blacklist=enforce_blacklist, manual=manual, allow_any_product=allow_any_product)
+                                enforce_blacklist=enforce_blacklist, manual=manual, page_pool=page_pool)
             seen, candidates = set(), []
             for row in rows:
                 mid = str(row.get("material_id") or "")
@@ -529,7 +531,7 @@ class SourceRepository:
                     if exc.status >= 500:
                         raise
                     errors[mid] = {"code": exc.code, "message": str(exc)}
-            enriched = self._enrich(candidates, strict=False, need_desc=need_desc, manual=manual)
+            enriched = self._enrich(candidates, strict=False, need_desc=need_desc, manual=manual, page_pool=page_pool)
             found.update((item["material_id"], item) for item in enriched)
             for item in candidates:
                 mid = item["material_id"]
@@ -537,6 +539,6 @@ class SourceRepository:
                     errors[mid] = {"code": "material_metadata_ambiguous", "message": "素材缺少唯一的同语言剧名或简介"}
             errors.update(self._unavailable_materials([mid for mid in chunk if mid not in seen],
                                                      enforce_blacklist=enforce_blacklist, manual=manual,
-                                                     allow_any_product=allow_any_product))
+                                                     page_pool=page_pool))
         return {"items": {mid: found[mid] for mid in wanted if mid in found},
                 "errors": {mid: errors[mid] for mid in wanted if mid in errors}}

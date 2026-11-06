@@ -12,12 +12,12 @@ from scripts.deploy_publish_queue_isolation import (
 
 FILES = ['features/fb_video_publish/' + name + '.py'
          for name in ('sources', 'pool', 'pool_scheduler', 'worker')]
-BASE = 'b5606afe'
+BASE = '9c200de5'
 # Main API proxies publishing and retains older, otherwise unrelated copies.
 # Preserve those differences instead of importing a publishing-runtime upgrade.
 MAIN_BASELINES = {
-    'features/fb_video_publish/pool_scheduler.py': '3bbcdaebf6fdf6fcd740a79185ef66b21c9cd90c19b6a84b84fe9547394bca85',
-    'features/fb_video_publish/worker.py': '1adf248f3d5c7a859ab5cc9bc932c449f615d8caeca964c5f85724a7c217e7dd',
+    'features/fb_video_publish/pool_scheduler.py': '1f810ff42bac371ca3aca188ee4cc847603816474ce9f685c3cb5b72e365ac0d',
+    'features/fb_video_publish/worker.py': '6a34c6fa5c19f4b61a7cbb24b41f21c88116cce2dbfd75b78282c25354b1e54b',
 }
 
 
