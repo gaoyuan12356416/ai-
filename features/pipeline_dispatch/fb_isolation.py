@@ -3,11 +3,16 @@ import re
 from datetime import datetime, timezone
 
 
-def identity_resources(page_id, material_id, stage):
+def identity_resources(page_id, material_id, stage, *, pool_task_id=""):
     page, material = str(page_id or ""), str(material_id or "")
     if not re.fullmatch(r"[1-9][0-9]{0,30}", page):
         return [], "", ""
     page_key = "fb:page:" + page
+    if pool_task_id:
+        if not re.fullmatch(r"[a-f0-9]{32}", str(pool_task_id)):
+            raise ValueError("invalid Page pool task identity")
+        task_key = "fb:material:" + page + ":task:" + str(pool_task_id)
+        return ([page_key, task_key] if stage == "publish" else [task_key]), page_key, task_key
     if not re.fullmatch(r"[1-9][0-9]{0,30}", material):
         # An unidentified legacy write cannot safely be narrowed to one asset.
         return [page_key], page_key, ""

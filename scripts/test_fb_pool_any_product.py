@@ -1,4 +1,4 @@
-"""Page pool product scope without relaxing media or other publisher policies."""
+"""Page pool scope, with strict catalog rules retained for other publishers."""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -22,9 +22,8 @@ class Catalog:
                          drama_released='1' if self.released else '0', content_blocked='0', series_blocked='0')]
         if 'ads_custom_source s' in sql:
             # The real catalog query remains responsible for eligibility filtering.
-            assert 's.type=2' in sql and 's.is_delete=0' in sql
-            assert 's.video_duration<=3600' in sql
-            if ('s.product=%s' in sql and self.product != 'Dramawave') or self.duration == '0':
+            assert 's.type=2' in sql
+            if ('s.product=%s' in sql and self.product != 'Dramawave') or (self.duration == '0' and 's.video_duration' in sql.split('WHERE', 1)[-1]):
                 return []
             if not self.released and 'd.release_status=1' in sql:
                 return []
@@ -53,10 +52,10 @@ class ProductScopeTests(unittest.TestCase):
             fresh = repo.get_materials(['101'], enforce_blacklist=False, page_pool=True)
             self.assertEqual(fresh['101'], result['items']['101'])
 
-    def test_invalid_video_reports_real_reason_in_any_product(self):
+    def test_catalog_duration_no_longer_blocks_page_pool(self):
         result = self.repo(duration='0').resolve_materials(['101'], enforce_blacklist=False, page_pool=True)
-        self.assertEqual(result['items'], {})
-        self.assertEqual(result['errors']['101']['code'], 'material_duration_invalid')
+        self.assertEqual(list(result['items']), ['101'])
+        self.assertEqual(result['errors'], {})
 
     def test_page_pool_allows_unreleased_or_missing_dramawave_mapping(self):
         for metadata in [True, False]:

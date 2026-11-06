@@ -466,7 +466,8 @@ class LedgerAdapter:
                     resources.append(f"{spec.channel}:account:{row[key]}")
         elif spec.channel == "fb" and row.get("page_id"):
             from .fb_isolation import identity_resources
-            resources, _, _ = identity_resources(row["page_id"], row.get("material_id"), stage)
+            resources, _, _ = identity_resources(row["page_id"], row.get("material_id"), stage,
+                pool_task_id=source_id if spec.family == "video" and row.get("source_kind") == "pool" else "")
         elif spec.channel == "youtube":
             body = obj(row.get("body")) if spec.family == "preparation" else {}
             identity = row.get("channel_id") or body.get("channel_id") or obj(body.get("channel")).get("channel_id")
@@ -538,6 +539,7 @@ class LedgerAdapter:
             from .fb_isolation import page_write_active
             fb_fields = {"fb_page_id": str(row.get("page_id") or ""),
                          "fb_material_id": str(row.get("material_id") or ""),
+                         "fb_pool_task_id": source_id if spec.family == "video" and row.get("source_kind") == "pool" else "",
                          "fb_page_write_active": page_write_active(row, spec.family, now)}
         return {**fb_fields, "source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
                 "backlog_authorization": row.get("_backlog_authorization"),

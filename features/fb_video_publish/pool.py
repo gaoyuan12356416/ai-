@@ -31,8 +31,7 @@ def install_schema(conn):
           material_json TEXT NOT NULL,repeat_history_json TEXT NOT NULL,
           added_by TEXT NOT NULL,task_id TEXT NOT NULL DEFAULT '',batch_id TEXT NOT NULL DEFAULT '',
           error_message TEXT NOT NULL DEFAULT '',created_at_utc TEXT NOT NULL,updated_at_utc TEXT NOT NULL);
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_fb_video_pool_pending_material
-          ON fb_video_pool_item(config_instance_id,material_id) WHERE status IN ('pending','processing');
+        DROP INDEX IF EXISTS uq_fb_video_pool_pending_material;
         CREATE INDEX IF NOT EXISTS idx_fb_video_pool_order
           ON fb_video_pool_item(config_instance_id,status,position,id);
         CREATE TABLE IF NOT EXISTS fb_video_pool_slot(
@@ -93,11 +92,11 @@ def sync_items(conn, instance):
           AND t.status IN ('published','failed','cancelled'))""", (instance,))
 
 
-def normalized_ids(values):
-    if not isinstance(values, list) or not 1 <= len(values) <= 200:
+def normalized_ids(values, *, admission=False):
+    if not isinstance(values, list) or not values or (not admission and len(values) > 200):
         raise DomainError("invalid_request", "每次请选择1至200项")
     ids = [id_text(v) for v in values]
-    if len(set(ids)) != len(ids):
+    if not admission and len(set(ids)) != len(ids):
         raise DomainError("invalid_request", "选择项不得重复")
     return ids
 
@@ -280,17 +279,8 @@ class PoolService:
         mid = material["material_id"]
         if material["language"] != config["language"]:
             raise DomainError("language_mismatch", "素材与Page剧语言不一致", 409)
-        row = conn.execute("""SELECT 1 FROM fb_video_pool_item i LEFT JOIN fb_video_task t ON t.task_id=i.task_id
-                WHERE i.config_instance_id=? AND i.material_id=? AND (i.status='pending' OR
-                  (i.status='processing' AND COALESCE(t.status,'') NOT IN ('published','failed','cancelled'))) LIMIT 1""",
-            (config["config_instance_id"], mid)).fetchone()
-        if row:
-            raise DomainError("pool_material_exists", "素材已在待发布或处理中队列", 409)
-        reason = automatic_block(conn, pid, mid) or manual_block(conn, pid, mid)
-        if reason:
-            raise DomainError(reason, "Page或素材存在未结束/结果不明任务", 409)
-        render_preview(config["caption_template"], material)
-        return published_history(conn, pid, mid)
+        render_preview(config["caption_template"], material, manual=True)
+        return []
 
     def _facts(self, conn, actor, pid, payload, materials):
         config, pool = self._locked(conn, actor, pid, payload)
@@ -301,8 +291,8 @@ class PoolService:
 
     def preview(self, actor, pid, payload):
         self._identity(payload, ("material_ids",))
-        payload = {**payload, "material_ids": normalized_ids(payload["material_ids"])}
-        materials = self.sources.get_materials(payload["material_ids"], need_desc=False, enforce_blacklist=False, page_pool=True)
+        payload = {**payload, "material_ids": normalized_ids(payload["material_ids"], admission=True)}
+        materials = self.sources.get_materials(list(dict.fromkeys(payload["material_ids"])), need_desc=False, enforce_blacklist=False, page_pool=True)
         with self.store.connect() as conn:
             conn.execute("BEGIN")
             facts, config, _, histories = self._facts(conn, actor, pid, payload, materials)
@@ -316,8 +306,8 @@ class PoolService:
         """Return an ordered valid subset and a strict admission proof for it."""
         self._identity(payload, ("material_ids",))
         values = payload["material_ids"]
-        if not isinstance(values, list) or not 1 <= len(values) <= 200:
-            raise DomainError("invalid_request", "每次请输入1至200个素材ID")
+        if not isinstance(values, list) or not values:
+            raise DomainError("invalid_request", "请输入素材ID")
         entries, wanted, skipped = [], [], []
         for row_number, value in enumerate(values, 1):
             mid = value.strip() if isinstance(value, str) else str(value)
@@ -332,7 +322,7 @@ class PoolService:
         resolved = self.sources.resolve_materials(wanted, need_desc=False, enforce_blacklist=False, page_pool=True) if wanted else {"items": {}, "errors": {}}
         materials, failures = resolved["items"], resolved["errors"]
         invalid_rows = {item["row_number"] for item in skipped}
-        accepted, histories, items = {}, {}, []
+        accepted, accepted_ids, histories, items = {}, [], {}, []
         with self.store.connect() as conn:
             conn.execute("BEGIN")
             config, pool = self._locked(conn, actor, pid, payload)
@@ -340,9 +330,6 @@ class PoolService:
                 if entry["row_number"] in invalid_rows:
                     continue
                 mid = entry["material_id"]
-                if mid in accepted:
-                    skipped.append({**entry, "code": "duplicate_material_id", "message": "重复素材ID，已保留第一次有效输入"})
-                    continue
                 if mid in failures:
                     skipped.append({**entry, **failures[mid]})
                     continue
@@ -356,14 +343,15 @@ class PoolService:
                     skipped.append({**entry, "code": exc.code, "message": str(exc)})
                     continue
                 accepted[mid], histories[mid] = materials[mid], history
+                accepted_ids.append(mid)
                 items.append({**entry, "material_name": materials[mid]["material_name"],
                               "drama_name": materials[mid]["drama_name"], "language": materials[mid]["language"],
                               "repeat_required": bool(history)})
-            clean = {**{key: payload[key] for key in IDENTITY}, "material_ids": list(accepted)}
+            clean = {**{key: payload[key] for key in IDENTITY}, "material_ids": accepted_ids}
             facts = {"purpose": "pool-admission", "actor": actor, "page_id": pid, "payload": clean,
                      "config": config, "pool": pool, "materials": accepted, "histories": histories}
         skipped.sort(key=lambda item: item["row_number"])
-        return {"ok": True, "material_ids": list(accepted), "items": items, "skipped": skipped,
+        return {"ok": True, "material_ids": accepted_ids, "items": items, "skipped": skipped,
                 "summary": {"total": len(entries), "valid": len(items), "skipped": len(skipped)},
                 "preview_token": self.service._token(facts) if items else "",
                 "repeat_required": any(histories.values())}
@@ -386,7 +374,7 @@ class PoolService:
         if type(payload["allow_repeat"]) is not bool:
             raise DomainError("invalid_request", "重复发布确认无效")
         clean = {key: payload[key] for key in IDENTITY}
-        clean["material_ids"] = normalized_ids(payload["material_ids"])
+        clean["material_ids"] = normalized_ids(payload["material_ids"], admission=True)
         reqhash = digest({"page_id": pid, **clean, "allow_repeat": payload["allow_repeat"]})
         existing = self.existing(actor, pid, payload["operation_id"], reqhash)
         if existing:
@@ -394,7 +382,7 @@ class PoolService:
         if not self.service.pool_enabled:
             raise DomainError("pool_gate_closed", "素材池暂时关闭", 409)
         signed = self.service._verify(payload["preview_token"])
-        materials = self.sources.get_materials(clean["material_ids"], need_desc=False, enforce_blacklist=False, page_pool=True)
+        materials = self.sources.get_materials(list(dict.fromkeys(clean["material_ids"])), need_desc=False, enforce_blacklist=False, page_pool=True)
         with self.store.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute("""SELECT * FROM fb_video_pool_operation
@@ -407,8 +395,6 @@ class PoolService:
             facts, config, _, histories = self._facts(conn, actor, pid, clean, materials)
             if digest(facts) != signed:
                 raise DomainError("preview_changed", "配置、素材或重复历史已改变，请重新预览", 409)
-            if any(histories.values()) and not payload["allow_repeat"]:
-                raise DomainError("repeat_confirmation_required", "请确认已成功素材再次发布", 409)
             self._ensure(conn, config)
             instance = config["config_instance_id"]
             sync_items(conn, instance)

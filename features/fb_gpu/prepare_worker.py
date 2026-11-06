@@ -90,12 +90,13 @@ def cleanup_stale_failed_jobs(config,*,now_fn=time.time,exclude_jobs=()):
     return removed
 
 def validate_request(value,config):
-    if not isinstance(value,Mapping) or set(value)!={"job_id","content_id","source_url","source_trim_tail_seconds","video_template","expected_profile"}: raise PrepareWorkerError("invalid_request","prepare fields invalid")
+    if not isinstance(value,Mapping) or set(value)-{"page_pool"}!={"job_id","content_id","source_url","source_trim_tail_seconds","video_template","expected_profile"} or ("page_pool" in value and value["page_pool"] is not True): raise PrepareWorkerError("invalid_request","prepare fields invalid")
     job=str(value.get("job_id") or ""); content=str(value.get("content_id") or ""); source=str(value.get("source_url") or "")
     parsed=urlsplit(source)
     if not JOB_RE.fullmatch(job) or not 1<=len(content)<=128 or value.get("video_template")!="random_overlay" or value.get("expected_profile")!=getattr(config,"profile",PROFILE) or value.get("source_trim_tail_seconds") not in (0,0.0): raise PrepareWorkerError("invalid_request","prepare identity/profile/trim invalid")
-    if parsed.scheme!="https" or not parsed.hostname or parsed.hostname.lower() not in config.allowed_source_hosts or parsed.username or parsed.password or parsed.fragment: raise PrepareWorkerError("invalid_request","source URL host invalid")
-    return {"job_id":job,"content_id":content,"source_url":source}
+    page_pool = value.get("page_pool") is True
+    if parsed.scheme not in (("http","https") if page_pool else ("https",)) or not parsed.hostname or (not page_pool and parsed.hostname.lower() not in config.allowed_source_hosts) or parsed.username or parsed.password or parsed.fragment: raise PrepareWorkerError("invalid_request","source URL host invalid")
+    return {"job_id":job,"content_id":content,"source_url":source, **({"page_pool":True} if page_pool else {})}
 
 def _probe(config,path):
     try: result=subprocess.run([config.ffprobe,"-v","error","-show_streams","-show_format","-of","json",str(path)],capture_output=True,text=True,timeout=120,check=True); payload=json.loads(result.stdout)

@@ -88,7 +88,8 @@ class FBNativeBridge:
             manual = task.get("source_kind") == "manual" and "pool" not in snap
             worker.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
             fresh = worker.sources.get_materials([task["material_id"]], need_desc=False,
-                    enforce_blacklist=task.get("source_kind") not in {"manual", "pool"}, manual=manual)[task["material_id"]]
+                    enforce_blacklist=task.get("source_kind") not in {"manual", "pool"}, manual=manual,
+                    **({"page_pool": True} if task.get("source_kind") == "pool" or "pool" in snap else {}))[task["material_id"]]
             if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                 raise AdapterError("material_identity_changed")
         media_url = str(prepared.get("media_url") or "")
@@ -205,6 +206,8 @@ class FBNativeBridge:
                     profile = CPU_PROFILE if job.get("executor_backend") == "cpu" else PROFILE
                     descriptor = {"kind": "fb_prepare", "request": {"job_id": task["gpu_job_id"], "content_id": task["content_id"],
                                   "source_url": source, "source_trim_tail_seconds": 0, "video_template": task.get("video_template") or "random_overlay", "expected_profile": profile}}
+                    if family == "video" and task.get("source_kind") == "pool":
+                        descriptor["request"]["page_pool"] = True
                     descriptor["required_capabilities"] = prepare_capabilities("fb", profile, "cpu" if profile == CPU_PROFILE else "gpu", job)
                 else:
                     request = self._auto_preflight(task) if family == "auto" else self._video_preflight(task)

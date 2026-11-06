@@ -335,7 +335,7 @@ class Store:
     def unconfigured(pid):
         return {"page_id": pid, "config_instance_id": "", "version": 0, "language": "", "caption_template": "", "title": ""}
 
-    def check_plan(self, conn, actor, request, resolved, *, manual=False):
+    def check_plan(self, conn, actor, request, resolved, *, manual=False, page_pool=False):
         repeats, configs = {}, {}
         for pair in request["pairs"]:
             pid, mid = pair["page_id"], pair["material_id"]
@@ -345,7 +345,7 @@ class Store:
                 raise DomainError("config_version_conflict", "Page配置已改变，请重新预览", 409)
             if not manual and config["language"] != resolved["materials"][mid]["language"]:
                 raise DomainError("language_mismatch", "素材与Page配置剧语言不一致", 409)
-            for reason in (automatic_block(conn, pid, mid), manual_block(conn, pid, mid)):
+            for reason in (automatic_block(conn, pid, mid, allow_repeat=page_pool), manual_block(conn, pid, mid, allow_repeat=page_pool)):
                 if reason:
                     message = ("该Page有无法识别素材的历史未知发布，请先核对" if reason == "fb_video_page_unknown"
                                else "该Page的此素材有结果不明的发布，请先核对" if reason == "fb_video_material_unknown"
@@ -353,7 +353,7 @@ class Store:
                     raise DomainError(reason, message, 409)
             configs[pid] = config
             history = published_history(conn, pid, mid)
-            if history:
+            if history and not page_pool:
                 repeats[pid + ":" + mid] = history
         return configs, repeats
 
@@ -412,11 +412,11 @@ class Store:
                        "material_name": material["material_name"], "content_id": material["content_id"],
                        "language": material["language"], "drama_name": material["drama_name"],
                        "tag": material.get("material_tag") or "none", "sub_user_id": actor["sub_user_id"], "task_id": tid}
-            if not pool and not group_pool:
+            if not group_pool:
                 context["drama_name"] = str(context["drama_name"] or "none").replace("*", " ")[:512]
             long = build_attribution_url(context, lid, now)
             caption_template, title = manual_text(pair, config) if not pool and not group_pool else (pair["caption_template"], "")
-            caption = render_template(caption_template, material, short, manual=not pool and not group_pool)
+            caption = render_template(caption_template, material, short, manual=not group_pool)
             snapshot = {"page": page, "material": material, "config_instance_id": config["config_instance_id"],
                         "template_version": config["version"], "caption_template": caption_template,
                         "language": config["language"], "actor": actor, "attribution": context,
@@ -578,8 +578,8 @@ class Store:
                     AND (? IS NULL OR x.task_id=?) ORDER BY x.planned_at_utc,x.sequence LIMIT 1000""", (now, task_id, task_id)).fetchall()
                 row = None
                 for candidate in rows:
-                    if (automatic_block(conn, candidate["page_id"], candidate["material_id"], execution=True)
-                            or manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True, exclude_task=candidate["task_id"])):
+                    if (automatic_block(conn, candidate["page_id"], candidate["material_id"], execution=True, allow_repeat=candidate["source_kind"] == "pool")
+                            or manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True, exclude_task=candidate["task_id"], allow_repeat=candidate["source_kind"] == "pool")):
                         continue
                     interval = json.loads(candidate["batch_request_json"]).get("interval_minutes", 0)
                     if interval:

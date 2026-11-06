@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -183,13 +184,12 @@ class SourceRepository:
         schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
         source_language, drama_language = _language_sql("s.language"), _language_sql("d.language")
         sql = f"""
-            s.data_source=%s AND s.type=2 AND s.is_delete=0
+            s.data_source=%s AND s.type=2
             AND TRIM(COALESCE(s.data_source_id,''))<>''
-            AND s.video_duration>0 AND s.video_duration<=3600
         """
         params = ["6"]
         if not page_pool:
-            sql += " AND s.product=%s"
+            sql += " AND s.product=%s AND s.is_delete=0 AND s.video_duration>0 AND s.video_duration<=3600"
             params.append("Dramawave")
         if not manual:
             sql += " AND TRIM(COALESCE(s.language,''))<>''"
@@ -228,17 +228,24 @@ class SourceRepository:
         return self.mysql.select(sql, base_params + list(params) + [limit])
 
     @staticmethod
-    def _material(row, *, manual=False):
+    def _material(row, *, manual=False, page_pool=False):
         material_id = str(row.get("material_id") or "")
         content_id = str(row.get("content_id") or "").strip()
         language = page_language(row.get("language")) or ("und" if manual else "")
         try:
-            duration = Decimal(str(row.get("video_duration") or 0))
-            url = prepare_source_url(row.get("media_url"))
+            try:
+                duration = Decimal(str(row.get("video_duration") or 0))
+            except InvalidOperation:
+                if not page_pool:
+                    raise
+                duration = Decimal(0)
+            if page_pool and (not duration.is_finite() or duration < 0 or not math.isfinite(float(duration))):
+                duration = Decimal(0)
+            url = str(row.get("media_url") or "").strip() if page_pool else prepare_source_url(row.get("media_url"))
             if (not re.fullmatch(r"[1-9][0-9]{0,18}", material_id) or not 0 < len(content_id) <= 256
-                    or not language or not duration.is_finite() or not 0 < duration <= 3600
-                    or not str(row.get("material_name") or "").strip() or len(url) > 4096
-                    or any(ord(char) < 32 for char in url)):
+                    or not language or (not page_pool and (not duration.is_finite() or not 0 < duration <= 3600
+                    or len(url) > 4096 or any(ord(char) < 32 for char in url)))
+                    or not str(row.get("material_name") or "").strip()):
                 raise ValueError("invalid source material")
         except (ValueError, InvalidOperation, RuntimeError):
             raise SourceError("material_unavailable", "素材缺少有效视频、时长、剧集或语言信息", 409) from None
@@ -300,6 +307,20 @@ class SourceRepository:
             item["description_status"] = "matched" if len(described) == 1 else "ambiguous" if described else "missing"
             result.append(item)
         return result
+
+    def _pool_enrich(self, materials, *, page_pool=False, **kwargs):
+        try:
+            return self._enrich(materials, page_pool=page_pool, **kwargs)
+        except TemplateError:
+            if not page_pool:
+                raise
+            # Metadata is optional for explicit Page-pool publications.
+            import logging
+            logging.getLogger(__name__).warning("Page pool metadata unavailable; retaining source materials")
+            for item in materials:
+                item["drama_name"], item["drama_description"] = "", ""
+                item["description_status"] = "unavailable"
+            return materials
 
     def search_materials(self, query: Mapping[str, Any], *, enforce_blacklist=True, manual=False) -> dict:
         if not isinstance(query, Mapping):
@@ -416,7 +437,7 @@ class SourceRepository:
         return f"已找到该素材，但未满足{gates}或同语言剧集信息等发布条件。"
 
     def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, page_pool=False) -> dict[str, dict]:
-        wanted = _ids(material_ids, None if manual else MAX_MATERIALS, "素材")
+        wanted = _ids(material_ids, None if manual or page_pool else MAX_MATERIALS, "素材")
         if any(len(value) > 19 for value in wanted):
             raise SourceError("invalid_request", "素材ID无效")
         found = {}
@@ -426,7 +447,7 @@ class SourceRepository:
                                 enforce_blacklist=enforce_blacklist, manual=manual, page_pool=page_pool)
             current = []
             for row in rows:
-                item = self._material(row, manual=manual)
+                item = self._material(row, manual=manual, page_pool=page_pool)
                 if item["material_id"] not in chunk or item["material_id"] in found:
                     raise SourceError("material_source_ambiguous", "素材来源返回了重复或非请求ID", 503)
                 found[item["material_id"]] = item
@@ -434,7 +455,7 @@ class SourceRepository:
             if {item["material_id"] for item in current} != set(chunk):
                 gates = "已删除" if manual else ("已删除、未上架、被列入黑名单" if enforce_blacklist else "已删除、未上架")
                 raise SourceError("material_unavailable", f"部分素材{gates}或不符合发布条件，请重新选择", 409)
-            self._enrich(current, strict=True, need_desc=need_desc, manual=manual, page_pool=page_pool)
+            self._pool_enrich(current, strict=True, need_desc=need_desc, manual=manual, page_pool=page_pool)
         return {material_id: found[material_id] for material_id in wanted}
 
     def _unavailable_materials(self, ids, *, enforce_blacklist=True, manual=False, page_pool=False):
@@ -478,7 +499,7 @@ class SourceRepository:
             code, message = "material_unavailable", "素材不符合当前发布条件，请刷新后核对"
             if row is None:
                 code, message = "material_not_found", "素材ID不存在"
-            elif str(row.get("is_delete")) != "0":
+            elif not page_pool and str(row.get("is_delete")) != "0":
                 code, message = "material_deleted", "素材已删除"
             elif not page_pool and str(row.get("product") or "").casefold() != "dramawave":
                 code, message = "material_product_mismatch", "素材不属于Dramawave"
@@ -494,7 +515,7 @@ class SourceRepository:
                     duration_ok = duration.is_finite() and 0 < duration <= 3600
                 except (ValueError, InvalidOperation):
                     duration_ok = False
-                if not duration_ok:
+                if not page_pool and not duration_ok:
                     code, message = "material_duration_invalid", "素材时长缺失或不在0至3600秒范围内"
                 elif enforce_blacklist and (str(row.get("content_blocked")) == "1" or str(row.get("series_blocked")) == "1"):
                     code, message = "material_blacklisted", "素材关联剧目已被列入Facebook发布黑名单"
@@ -511,7 +532,7 @@ class SourceRepository:
         """
         if material_ids == []:
             return {"items": {}, "errors": {}}
-        wanted = _ids(material_ids, None if manual else MAX_MATERIALS, "素材")
+        wanted = _ids(material_ids, None if manual or page_pool else MAX_MATERIALS, "素材")
         if any(len(mid) > 19 for mid in wanted):
             raise SourceError("invalid_request", "素材ID无效")
         found, errors = {}, {}
@@ -526,12 +547,12 @@ class SourceRepository:
                     raise SourceError("material_source_ambiguous", "素材来源返回了重复或非请求ID", 503)
                 seen.add(mid)
                 try:
-                    candidates.append(self._material(row, manual=manual))
+                    candidates.append(self._material(row, manual=manual, page_pool=page_pool))
                 except SourceError as exc:
                     if exc.status >= 500:
                         raise
                     errors[mid] = {"code": exc.code, "message": str(exc)}
-            enriched = self._enrich(candidates, strict=False, need_desc=need_desc, manual=manual, page_pool=page_pool)
+            enriched = self._pool_enrich(candidates, strict=False, need_desc=need_desc, manual=manual, page_pool=page_pool)
             found.update((item["material_id"], item) for item in enriched)
             for item in candidates:
                 mid = item["material_id"]

@@ -114,7 +114,8 @@ class Worker:
             try:
                 snap = json.loads(task["snapshot_json"])
                 result = self.gpu.prepare(job_id=task["gpu_job_id"], content_id=task["content_id"],
-                                          source_url=snap["material"]["media_url"], video_template="random_overlay")
+                                          source_url=snap["material"]["media_url"], video_template="random_overlay",
+                                          **({"page_pool": True} if task.get("source_kind") == "pool" else {}))
                 if not isinstance(result.get("random_overlay_recipe"), dict) or not result["random_overlay_recipe"]:
                     raise DomainError("prepared_recipe_missing", "GPU没有返回可冻结的随机加工配方", 409)
                 return self.store.finish_stage(task, "prepare", result)

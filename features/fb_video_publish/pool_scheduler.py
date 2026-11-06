@@ -80,7 +80,7 @@ class PoolScheduler:
         materials = self.sources.get_materials([item["material_id"]], need_desc=False, enforce_blacklist=False, page_pool=True)
         if materials[item["material_id"]]["language"] != candidate["config"]["language"]:
             raise DomainError("language_mismatch", "素材与当前Page剧语言不一致", 409)
-        render_preview(candidate["config"]["caption_template"], materials[item["material_id"]])
+        render_preview(candidate["config"]["caption_template"], materials[item["material_id"]], manual=True)
         return actor, {"pages": pages, "materials": materials}
 
     @staticmethod
@@ -135,7 +135,7 @@ class PoolScheduler:
                 conn.commit()
                 return {"status": "skipped"}
             material_id = item["material_id"] if item else ""
-            reason = automatic_block(conn, pool["page_id"], material_id) or manual_block(conn, pool["page_id"], material_id)
+            reason = automatic_block(conn, pool["page_id"], material_id, allow_repeat=True) or manual_block(conn, pool["page_id"], material_id, allow_repeat=True)
             if reason:
                 error = DomainError(reason, "该Page的此素材已有未结束或结果不明的任务", 409)
             if error is None and not item:
@@ -149,9 +149,6 @@ class PoolScheduler:
                 conn.execute("SAVEPOINT freeze_pool_task")
                 try:
                     mid, pid = item["material_id"], pool["page_id"]
-                    history = published_history(conn, pid, mid)
-                    if history != json.loads(item["repeat_history_json"]):
-                        raise DomainError("pool_repeat_changed", "入池后出现新的成功记录，请重新确认入池", 409)
                     if pool["processing_mode"] == "random_overlay" and not self.service.prepare_enabled:
                         raise DomainError("prepare_gate_closed", "视频加工服务未启用", 409)
                     operation = uuid.uuid5(uuid.NAMESPACE_URL, "fb-pool-slot:" + canonical(candidate["key"])).hex
@@ -159,8 +156,8 @@ class PoolScheduler:
                         "schema_version": 2, "operation_id": operation, "material_ids": [mid], "page_ids": [pid],
                         "processing_mode": pool["processing_mode"], "material_schedules": {mid: None},
                         "pairs": [{"material_id": mid, "page_id": pid, "config_instance_id": config["config_instance_id"],
-                                   "config_version": config["version"], "caption_template": config["caption_template"]}]})
-                    configs, repeats = self.store.check_plan(conn, actor, request, resolved)
+                                   "config_version": config["version"], "caption_template": config["caption_template"]}]}, manual=True)
+                    configs, repeats = self.store.check_plan(conn, actor, request, resolved, page_pool=True)
                     source = {"config_instance_id": config["config_instance_id"], "slot_id": slot_id,
                               "item_id": item["id"], "slot_at_utc": stamp(at)}
                     plans = [(1, request["pairs"][0], 1, at, at.astimezone(BJ).date().isoformat())]

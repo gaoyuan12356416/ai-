@@ -36,11 +36,14 @@ class GPUPrepareClient:
             raise ValueError("invalid FB prepare-only GPU configuration")
         self._token, self.port, self.timeout, self._connection_factory = token, port, int(timeout), connection_factory
 
-    def prepare(self, *, job_id: str, content_id: str, source_url: str, video_template: str) -> Dict[str, Any]:
+    def prepare(self, *, job_id: str, content_id: str, source_url: str, video_template: str, page_pool=False) -> Dict[str, Any]:
         if not re.fullmatch(r"fb-page-[a-f0-9]{48}", job_id) or video_template != "random_overlay":
             raise GPUPrepareError("fb_auto_gpu_request_invalid", "视频制作请求无效", 400)
-        source = _https(source_url)
-        body = json.dumps({"job_id": job_id, "content_id": str(content_id), "source_url": source, "source_trim_tail_seconds": 0, "video_template": video_template, "expected_profile": PROFILE}, sort_keys=True, separators=(",", ":")).encode()
+        source = str(source_url).strip() if page_pool else _https(source_url)
+        request = {"job_id": job_id, "content_id": str(content_id), "source_url": source, "source_trim_tail_seconds": 0, "video_template": video_template, "expected_profile": PROFILE}
+        if page_pool:
+            request["page_pool"] = True
+        body = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
         connection = self._connection_factory("127.0.0.1", self.port, self.timeout) if self._connection_factory else http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
         try:
             connection.request("POST", "/internal/fb-page-media/prepare", body=body, headers={"Authorization": "Bearer " + self._token, "Content-Type": "application/json", "Accept": "application/json", "Connection": "close"})
@@ -70,7 +73,7 @@ class GPUPrepareClient:
         probe = item.get("probe") if isinstance(item.get("probe"), Mapping) else {}
         try: size, duration = int(item.get("output_size") or 0), float(probe.get("duration") or 0)
         except (TypeError, ValueError, OverflowError): size, duration = 0, 0
-        if output == source or not re.fullmatch(r"[a-f0-9]{64}", sha) or size <= 0 or not math.isfinite(duration) or not 0 < duration <= 3600:
+        if output == source or not re.fullmatch(r"[a-f0-9]{64}", sha) or size <= 0 or not math.isfinite(duration) or duration <= 0 or (not page_pool and duration > 3600):
             raise GPUPrepareError("fb_auto_prepared_response_invalid", "GPU成片指纹或媒体元数据无效")
         result = {"media_url": output, "sha256": sha, "size_bytes": size, "duration_seconds": duration, "profile": PROFILE}
         recipe = item.get("random_overlay_recipe")
