@@ -197,6 +197,7 @@ class ApiContractTests(unittest.TestCase):
         old_policies = [
             [self.config["pool_id"], source.accounts],
             ["dramawave-pool-all-pages-v1", "Dramawave", self.config["pool_id"], source.accounts],
+            ["dramawave-pool-all-pages-from-20261101-v1", "Dramawave", self.config["pool_id"], source.accounts],
         ]
         for old_policy in old_policies:
             with self.subTest(old_policy=old_policy):
@@ -204,7 +205,7 @@ class ApiContractTests(unittest.TestCase):
                 old_policy_hash = hashlib.sha256(json.dumps(
                     old_policy, separators=(",", ":"), ensure_ascii=True,
                 ).encode("ascii")).hexdigest()
-                # Reproduce V1.1 page-only or V1.2 unrestricted-date identity.
+                # Reproduce older page-only, unrestricted-date, or product-only identity.
                 with contextlib.closing(sqlite3.connect(
                     str(self.root / "state" / "snapshot.sqlite3")
                 )) as connection, connection:

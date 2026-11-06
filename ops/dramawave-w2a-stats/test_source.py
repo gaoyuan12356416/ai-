@@ -61,7 +61,13 @@ class SqlFixture:
                 ("2026-11-01", "Dramawave", 2335, "101", 7, 1, 1, "0.70", "999.00", "1.20", 0),
                 ("2026-11-01", "Dramawave", 0, "202", 3, 1, 1, "0.30", "999.00", "0.50", 0),
                 ("2026-11-01", "Dramawave", None, "101", 2, 0, 0, "0.20", "999.00", "0.25", 0),
-                ("2026-11-01", "Hotdrama", 2334, "101", 999, 999, 999, 999, 999, 999, 0),
+                ("2026-11-01", "Hotdrama", 2334, "101", 13, 3, 2, "1.30", "999.00", "2.60", 0),
+                ("2026-11-01", "Drama-B", 1234, "101", 50, 5, 4, "4.50", "999.00", "8.00", 0),
+                ("2026-11-01", "Drama-C", 4321, "202", 6, 1, 1, "0.60", "999.00", "1.00", 0),
+                ("2026-11-01", None, 0, "202", 1, 1, 0, "0.10", "999.00", "0.20", 0),
+                ("2026-11-01", "", None, "101", 1, 0, 0, "0.05", "999.00", "0.10", 0),
+                ("2026-11-01", "Drama-B", 1234, "999", 9999, 9999, 9999, "9999.00", "9999.00", "9999.00", 0),
+                ("2026-10-31", "Drama-B", 1234, "202", 9999, 9999, 9999, "9999.00", "9999.00", "9999.00", 0),
                 ("2026-11-01", "Dramawave", 2334, None, 999, 999, 999, 999, 999, 999, 0),
             ],
         )
@@ -96,16 +102,17 @@ class SourceContractTests(unittest.TestCase):
     def test_actual_pool_membership_excludes_deleted_and_other_pools_and_deduplicates(self):
         self.assertEqual(self.source.load_scope(self.config), ("101", "202"))
 
-    def test_real_aggregation_includes_all_pages_and_keeps_product_pool_and_af_revenue0(self):
+    def test_real_aggregation_includes_all_products_pages_but_keeps_pool_date_and_af_revenue0(self):
         accounts = self.source.load_scope(self.config)
         rows = self.source.read_daily(accounts)
         self.assertEqual(rows, [
-            {"day": "2026-11-01", "impression": 42, "click": 7, "install": 5,
-             "revenue": Decimal("4.50"), "cost": Decimal("8.75")},
+            {"day": "2026-11-01", "impression": 113, "click": 17, "install": 12,
+             "revenue": Decimal("11.05"), "cost": Decimal("20.65")},
             {"day": "2026-11-06", "impression": 100, "click": 10, "install": 4,
              "revenue": Decimal("0.05"), "cost": Decimal("20.00")},
         ])
-        # Same-pool 10/31 is excluded; page 2335, 0, NULL and data_source=9 stay eligible.
+        # Products B/C/other/empty/NULL and all pages are eligible; the pool and
+        # 11/1 floor still exclude the unrelated account and older high values.
         self.assertEqual(rows[-1]["impression"], 100)
 
     def test_account_scope_is_byte_exact_despite_case_and_padded_source_collation(self):

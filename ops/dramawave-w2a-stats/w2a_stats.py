@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hourly, account-pool-bound DramaWave statistics snapshot and HTTP API.
+"""Hourly, account-pool-bound statistics snapshot and HTTP API.
 
 The HTTP process never connects to MySQL. Source reads belong to the refresh
 command, and only a complete snapshot of the verified account scope is served.
@@ -22,12 +22,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 
-PRODUCT = "Dramawave"
-# Keep the historical URL stable; its 2334 segment no longer filters data.
+# Historical URL segments do not filter products or pages.
 API_PATH = "/api/v1/dramawave/w2a/2334/daily-stats"
-VERSION = "1.3"
+VERSION = "1.4"
 MIN_DAY = "2026-11-01"
-REPORT_SCOPE = "dramawave-pool-all-pages-from-20261101-v1"
+REPORT_SCOPE = "account-pool-all-products-all-pages-from-20261101-v1"
 DEFAULT_CONFIG = "/etc/dramawave-w2a-stats.json"
 DEFAULT_STATE_DIR = "/mnt/data-disk/dramawave-w2a-stats"
 DAY_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z", re.ASCII)
@@ -210,13 +209,13 @@ def _scope(pool_id, accounts):
             raise ValueError("Invalid member identity")
         members.append(member)
     members = tuple(sorted(set(members)))
-    encoded = json.dumps([REPORT_SCOPE, PRODUCT, pool_id, members],
+    encoded = json.dumps([REPORT_SCOPE, pool_id, members],
                          separators=(",", ":"), ensure_ascii=True).encode("ascii")
     return hashlib.sha256(encoded).hexdigest(), members
 
 
 def _current_snapshot_scope(state, pool_id):
-    """An older page-filtered snapshot is not a complete all-pages report."""
+    """An older product/page-filtered snapshot is not the current pool report."""
     try:
         expected, _ = _scope(pool_id, json.loads(state["members_json"]))
         return state["scope_id"] == expected and state["snapshot_scope"] == expected
@@ -509,7 +508,7 @@ def health(config_path):
 
 def make_handler(config_path):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "W2AStats/1.3"
+        server_version = "W2AStats/1.4"
         sys_version = ""
 
         def _send(self, status, payload):

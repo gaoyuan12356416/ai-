@@ -1,4 +1,4 @@
-"""Read-only source for the DramaWave account-pool export across all pages.
+"""Read-only account-pool export across all products and pages.
 
 Scheduled reads must use the CPU host's shared SQL connection gate. Credentials
 come only from the refresh service environment, never CLI arguments or logs.
@@ -106,8 +106,7 @@ SELECT dt AS day,
        SUM(af_revenue0) AS revenue,
        SUM(spend) AS cost
 FROM kunlunads_dev.ads_custom_source_insight
-WHERE product = 'Dramawave'
-  AND dt >= '2026-11-01'
+WHERE dt >= '2026-11-01'
   AND CAST(ad_account_id AS BINARY) IN (%s)
 GROUP BY dt
 ORDER BY dt
