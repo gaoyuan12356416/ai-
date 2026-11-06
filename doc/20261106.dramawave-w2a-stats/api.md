@@ -1,8 +1,10 @@
-# DramaWave W2A 数据查询接口 V1.1
+# DramaWave 数据查询接口 V1.2
 
 ## 地址与权限
 
 `GET https://ai.yingliangads.com/api/v1/dramawave/w2a/2334/daily-stats`
+
+接口地址保持兼容，其中 `2334` 是历史路径标识，**不再限制任何页面 ID**。
 
 请求头：`Authorization: Bearer <API_TOKEN>`。Token 通过独立凭据文件交付，不写入本公开对接文档。
 
@@ -15,7 +17,7 @@
 
 ## 固定数据范围
 
-数据源为 `kunlunads_dev.ads_custom_source_insight`。固定筛选 `product='Dramawave'`、`w2a_page_id=2334`，并限定 `ad_account_id` 属于账户池 **648（Account for opera）**。五项指标使用同一范围。
+数据源为 `kunlunads_dev.ads_custom_source_insight`。固定筛选 `product='Dramawave'`，并限定 `ad_account_id` 属于账户池 **648（Account for opera）**。五项指标使用同一范围，汇总全部页面，包含页面 ID 为 0 或为空的符合条件记录。
 
 账户池成员取业务账户池 `ads_alternative_account_group` 与 `ads_alternative_accounts`，排除已移出池的成员（`deleted_at` 非零），不按账户当前投放状态另行剔除其历史数据。成员 ID 去重后筛选，不通过重复成员 JOIN 放大指标。
 
@@ -37,7 +39,7 @@
 | `start_date` | 是 | 起始日期，`YYYY-MM-DD` |
 | `end_date` | 是 | 截止日期，`YYYY-MM-DD`，不得早于起始日期 |
 
-包含起止两天，每天最多一行，按日期升序。只接受上述两个参数，禁止重复参数；不能通过参数更换产品、页面或账户池。
+包含起止两天，每天最多一行，按日期升序。只接受上述两个参数，禁止重复参数；不能通过参数更换产品或账户池，也不接受页面筛选参数。
 
 ```bash
 curl --get \

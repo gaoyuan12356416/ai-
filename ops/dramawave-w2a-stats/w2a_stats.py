@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hourly, scope-bound DramaWave W2A 2334 statistics snapshot and HTTP API.
+"""Hourly, account-pool-bound DramaWave statistics snapshot and HTTP API.
 
 The HTTP process never connects to MySQL. Source reads belong to the refresh
 command, and only a complete snapshot of the verified account scope is served.
@@ -23,9 +23,10 @@ from urllib.parse import parse_qsl, urlsplit
 
 
 PRODUCT = "Dramawave"
-PAGE_ID = 2334
+# Keep the historical URL stable; its 2334 segment no longer filters data.
 API_PATH = "/api/v1/dramawave/w2a/2334/daily-stats"
-VERSION = "1.1"
+VERSION = "1.2"
+REPORT_SCOPE = "dramawave-pool-all-pages-v1"
 DEFAULT_CONFIG = "/etc/dramawave-w2a-stats.json"
 DEFAULT_STATE_DIR = "/mnt/data-disk/dramawave-w2a-stats"
 DAY_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z", re.ASCII)
@@ -208,8 +209,18 @@ def _scope(pool_id, accounts):
             raise ValueError("Invalid member identity")
         members.append(member)
     members = tuple(sorted(set(members)))
-    encoded = json.dumps([pool_id, members], separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    encoded = json.dumps([REPORT_SCOPE, PRODUCT, pool_id, members],
+                         separators=(",", ":"), ensure_ascii=True).encode("ascii")
     return hashlib.sha256(encoded).hexdigest(), members
+
+
+def _current_snapshot_scope(state, pool_id):
+    """An older page-filtered snapshot is not a complete all-pages report."""
+    try:
+        expected, _ = _scope(pool_id, json.loads(state["members_json"]))
+        return state["scope_id"] == expected and state["snapshot_scope"] == expected
+    except (TypeError, ValueError, KeyError):
+        return False
 
 
 def _amount(value):
@@ -349,7 +360,7 @@ class Store:
                     return 503, _error("DATA_NOT_READY", "当前账户池尚无成功数据快照")
                 if not state["scope_valid"]:
                     return 503, _error("CONFIG_NOT_READY", "账户池范围暂不可用")
-                if not state["updated_at"] or state["snapshot_scope"] != state["scope_id"]:
+                if not state["updated_at"] or not _current_snapshot_scope(state, pool_id):
                     return 503, _error("DATA_NOT_READY", "当前账户池范围尚无成功数据快照")
                 rows = connection.execute("SELECT * FROM daily WHERE day>=? AND day<=? ORDER BY day",
                                           (start_date, end_date)).fetchall()
@@ -489,7 +500,7 @@ def health(config_path):
         if state:
             result["has_snapshot"] = bool(state["scope_valid"] and state["updated_at"]
                                           and state["pool_id"] == str(config["pool_id"])
-                                          and state["snapshot_scope"] == state["scope_id"])
+                                          and _current_snapshot_scope(state, config["pool_id"]))
     except ConfigError:
         pass
     return result
@@ -497,7 +508,7 @@ def health(config_path):
 
 def make_handler(config_path):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "W2AStats/1.1"
+        server_version = "W2AStats/1.2"
         sys_version = ""
 
         def _send(self, status, payload):

@@ -1,4 +1,4 @@
-"""Read-only source for the fixed DramaWave W2A 2334 export.
+"""Read-only source for the DramaWave account-pool export across all pages.
 
 Scheduled reads must use the CPU host's shared SQL connection gate. Credentials
 come only from the refresh service environment, never CLI arguments or logs.
@@ -30,11 +30,14 @@ class MySQLSource:
         password = os.environ.get("W2A_MYSQL_PASSWORD", "")
         if not user or not password:
             raise SourceError("source credentials are not configured")
+        # All-page history is materially larger than the old single-page query.
+        # Keep membership reads short and bound the single hourly aggregate.
+        query_seconds = 240 if sql.lstrip().startswith("SELECT dt AS day") else 20
         env = os.environ.copy()
         env["MYSQL_PWD"] = password
         env["SQL_GATE_JOB_NAME"] = "dramawave-w2a-stats-2334"
         env["SQL_GATE_WAIT_TIMEOUT_SECONDS"] = "60"
-        env["SQL_GATE_EXEC_TIMEOUT_SECONDS"] = "30"
+        env["SQL_GATE_EXEC_TIMEOUT_SECONDS"] = str(query_seconds + 10)
         env["SQL_GATE_RETRY_DELAYS_SECONDS"] = ""
         env.pop("SQL_GATE_BYPASS", None)
         env.pop("SQL_GATE_TEST_MODE", None)
@@ -45,13 +48,13 @@ class MySQLSource:
             "--connect-timeout=5", "--default-character-set=utf8mb4",
             "--batch", "--raw", "--skip-column-names",
         ]
-        script = ("SET SESSION max_execution_time=20000;\n"
+        script = ("SET SESSION max_execution_time=%d;\n" % (query_seconds * 1000) +
                   "START TRANSACTION READ ONLY;\nSELECT @@read_only;\n"
                   + sql + ";\nCOMMIT;\n")
         try:
             result = subprocess.run(args, input=script, text=True,
                                     encoding="utf-8", capture_output=True,
-                                    env=env, timeout=110, check=False)
+                                    env=env, timeout=query_seconds + 90, check=False)
         except (OSError, subprocess.TimeoutExpired):
             raise SourceError("source query unavailable or timed out") from None
         if result.returncode != 0:
@@ -102,9 +105,8 @@ SELECT dt AS day,
        SUM(installs) AS install,
        SUM(af_revenue0) AS revenue,
        SUM(spend) AS cost
-FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (wcds)
+FROM kunlunads_dev.ads_custom_source_insight
 WHERE product = 'Dramawave'
-  AND w2a_page_id = 2334
   AND CAST(ad_account_id AS BINARY) IN (%s)
 GROUP BY dt
 ORDER BY dt

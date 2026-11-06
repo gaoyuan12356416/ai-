@@ -179,6 +179,11 @@ def rollback(folder):
     elif CURRENT.is_symlink():
         CURRENT.unlink()
     run(['systemctl', 'daemon-reload'])
+    # Old releases may not understand newer report-scope hashes. Rebuild with
+    # the restored reader before reopening HTTP; never serve a newer broader
+    # snapshot under an older page-limited implementation.
+    if manifest['previous_current'] and manifest['units'][UNITS[0]]['active']:
+        run(['systemctl', 'start', UNITS[1]])
     for unit in (UNITS[0], UNITS[2]):
         if manifest['units'][unit]['enabled']:
             run(['systemctl', 'enable', unit])

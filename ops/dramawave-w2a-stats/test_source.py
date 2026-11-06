@@ -57,7 +57,9 @@ class SqlFixture:
                 ("2026-11-01", "Dramawave", 2334, "202", 20, 3, 2, "2.20", "500.00", "4.50", 6),
                 ("2026-11-06", "Dramawave", 2334, "101", 100, 10, 4, "0.05", "900.00", "20.00", 9),
                 ("2026-11-01", "Dramawave", 2334, "999", 999, 999, 999, 999, 999, 999, 0),
-                ("2026-11-01", "Dramawave", 2335, "101", 999, 999, 999, 999, 999, 999, 0),
+                ("2026-11-01", "Dramawave", 2335, "101", 7, 1, 1, "0.70", "999.00", "1.20", 0),
+                ("2026-11-01", "Dramawave", 0, "202", 3, 1, 1, "0.30", "999.00", "0.50", 0),
+                ("2026-11-01", "Dramawave", None, "101", 2, 0, 0, "0.20", "999.00", "0.25", 0),
                 ("2026-11-01", "Hotdrama", 2334, "101", 999, 999, 999, 999, 999, 999, 0),
                 ("2026-11-01", "Dramawave", 2334, None, 999, 999, 999, 999, 999, 999, 0),
             ],
@@ -93,16 +95,16 @@ class SourceContractTests(unittest.TestCase):
     def test_actual_pool_membership_excludes_deleted_and_other_pools_and_deduplicates(self):
         self.assertEqual(self.source.load_scope(self.config), ("101", "202"))
 
-    def test_real_aggregation_uses_af_revenue0_and_all_scope_predicates(self):
+    def test_real_aggregation_includes_all_pages_and_keeps_product_pool_and_af_revenue0(self):
         accounts = self.source.load_scope(self.config)
         rows = self.source.read_daily(accounts)
         self.assertEqual(rows, [
-            {"day": "2026-11-01", "impression": 30, "click": 5, "install": 3,
-             "revenue": Decimal("3.30"), "cost": Decimal("6.80")},
+            {"day": "2026-11-01", "impression": 42, "click": 7, "install": 5,
+             "revenue": Decimal("4.50"), "cost": Decimal("8.75")},
             {"day": "2026-11-06", "impression": 100, "click": 10, "install": 4,
              "revenue": Decimal("0.05"), "cost": Decimal("20.00")},
         ])
-        # The data_source=9 row remains eligible: no undocumented channel gate.
+        # Page 2335, 0 and NULL all contribute; data_source=9 also stays eligible.
         self.assertEqual(rows[-1]["impression"], 100)
 
     def test_account_scope_is_byte_exact_despite_case_and_padded_source_collation(self):
@@ -190,6 +192,31 @@ class SourceContractTests(unittest.TestCase):
             )):
                 with self.assertRaisesRegex(source.SourceError, "read-only"):
                     self.source._query("SELECT 42")
+
+    def test_only_daily_aggregate_gets_longer_bounded_timeout(self):
+        candidate = source.MySQLSource(self.config)
+        membership = SimpleNamespace(returncode=0, stdout="1\n648\t1\t101\n", stderr="")
+        metrics = SimpleNamespace(
+            returncode=0, stdout="1\n2026-11-06\t10\t1\t1\t0.25\t0.50\n", stderr="",
+        )
+        with patch.dict(os.environ, {
+            "W2A_MYSQL_USER": "fixture_user", "W2A_MYSQL_PASSWORD": "fixture-password",
+        }), patch.object(source.subprocess, "run", side_effect=[membership, metrics, membership]) as run:
+            accounts = candidate.load_scope(self.config)
+            self.assertEqual(candidate.read_daily(accounts)[0]["revenue"], Decimal("0.25"))
+            self.assertEqual(candidate.load_scope(self.config), accounts)
+        self.assertEqual(run.call_count, 3)
+        limits = [(20000, 30, 110), (240000, 250, 330), (20000, 30, 110)]
+        for invocation, (statement_ms, gate_seconds, outer_seconds) in zip(run.call_args_list, limits):
+            options = invocation.kwargs
+            self.assertEqual(invocation.args[0][0], "/usr/local/bin/mysql-gated")
+            self.assertTrue(options["input"].startswith(
+                "SET SESSION max_execution_time=%d;\n" % statement_ms,
+            ))
+            self.assertEqual(options["env"]["SQL_GATE_EXEC_TIMEOUT_SECONDS"], str(gate_seconds))
+            self.assertEqual(options["timeout"], outer_seconds)
+            self.assertEqual(options["env"]["SQL_GATE_WAIT_TIMEOUT_SECONDS"], "60")
+            self.assertEqual(options["env"]["SQL_GATE_RETRY_DELAYS_SECONDS"], "")
 
     def test_invalid_source_metrics_raise_instead_of_fabricating_zero(self):
         invalid = [

@@ -1,11 +1,14 @@
 """Contract tests for the isolated W2A daily-stats endpoint."""
 
 import copy
+import contextlib
 import datetime as dt
+import hashlib
 import http.client
 import io
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -188,6 +191,39 @@ class ApiContractTests(unittest.TestCase):
         self.config["pool_id"] = 88
         self.write_config()
         self.assertEqual(self.query()[0], 503)
+
+    def test_old_page_policy_snapshot_is_hidden_until_all_pages_refresh(self):
+        source = FakeSource([row(revenue="5.00", impression=10)])
+        self.refresh(source)
+        old_policy_hash = hashlib.sha256(json.dumps(
+            [self.config["pool_id"], source.accounts],
+            separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii")).hexdigest()
+        # Reproduce the exact V1.1 on-disk scope identity, including a valid
+        # successful snapshot whose figures cover page 2334 only.
+        with contextlib.closing(sqlite3.connect(
+            str(self.root / "state" / "snapshot.sqlite3")
+        )) as connection, connection:
+            connection.execute(
+                "UPDATE state SET scope_id=?, snapshot_scope=?, scope_valid=1 WHERE id=1",
+                (old_policy_hash, old_policy_hash),
+            )
+        status, payload = self.query()
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "DATA_NOT_READY")
+        self.assertFalse(api.health(str(self.config_file))["has_snapshot"])
+        source.data_error = RuntimeError("first all-pages read unavailable")
+        self.assertEqual(self.refresh(source, now=SECOND)["status"], "failed")
+        self.assertEqual(self.query()[0], 503)
+        self.assertFalse(api.health(str(self.config_file))["has_snapshot"])
+        source.data_error = None
+        source.rows = [row(revenue="18.25", impression=42)]
+        self.assertEqual(self.refresh(source, now=SECOND)["status"], "ok")
+        status, payload = self.query()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"][0]["revenue"], Decimal("18.25"))
+        self.assertEqual(payload["data"][0]["impression"], 42)
+        self.assertTrue(api.health(str(self.config_file))["has_snapshot"])
 
     def test_config_changed_during_read_cannot_publish_under_new_pool(self):
         source = FakeSource([row()])
