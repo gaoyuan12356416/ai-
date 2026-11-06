@@ -1,0 +1,9 @@
+{
+  "pool_id": 648,
+  "allowed_ips": ["91.203.98.0/24", "82.145.216.0/24"],
+  "trusted_proxies": ["127.0.0.1/32", "::1/128"],
+  "token_file": "/etc/dramawave-w2a-stats.token",
+  "state_dir": "/mnt/data-disk/dramawave-w2a-stats/state",
+  "bind_host": "127.0.0.1",
+  "port": 8850
+}

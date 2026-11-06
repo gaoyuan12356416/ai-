@@ -1,0 +1,21 @@
+[Unit]
+Description=Refresh DramaWave W2A 2334 account-pool statistics
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/dramawave-w2a-stats/current
+EnvironmentFile=/etc/dramawave-w2a-stats.mysql.env
+ExecStart=/usr/bin/python3 /opt/dramawave-w2a-stats/current/w2a_stats.py refresh --config /etc/dramawave-w2a-stats.json
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/data-disk/dramawave-w2a-stats/state /run/sql-connection-gate /var/lib/sql-connection-gate
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

@@ -1,0 +1,25 @@
+[Unit]
+Description=DramaWave W2A 2334 scoped statistics API
+After=network.target
+RequiresMountsFor=/mnt/data-disk
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/dramawave-w2a-stats/current
+ExecStart=/usr/bin/python3 /opt/dramawave-w2a-stats/current/w2a_stats.py serve --config /etc/dramawave-w2a-stats.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/data-disk/dramawave-w2a-stats/state
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
