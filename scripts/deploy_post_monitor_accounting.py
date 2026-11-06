@@ -54,11 +54,24 @@ def handlers(pid):
     return len(list(Path('/proc/'+pid+'/task').iterdir())),len(sockets),sum(int(r.split()[1]) for r in listeners)
 
 
+def wait_listener(unit=UNIT, port=18846, timeout=12):
+    """Type=simple active does not mean the socket is listening yet."""
+    deadline = time.monotonic() + timeout
+    while True:
+        process = run(['systemctl', 'show', unit, '-p', 'MainPID', '--value'])
+        listeners = run(['ss', '-Hlntp', 'sport = :' + str(port)])
+        if process != '0' and ('pid=' + process + ',') in listeners:
+            return process
+        if time.monotonic() >= deadline:
+            raise RuntimeError('coordinator_listener_not_ready')
+        time.sleep(.05)
+
+
 def switch_coordinator(target,record):
     previous=str(COORD.resolve());pid=run(['systemctl','show',UNIT,'-p','MainPID','--value'])
     marker='post-monitor-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S%f')
     rule=['-p','tcp','--dport','18846','-m','conntrack','--ctstate','NEW','-m','comment','--comment',marker,'-j','DROP']
-    watchdog=marker+'-watchdog';gated=False;stopped=False;changed=False;proof=[];began=time.monotonic()
+    watchdog=marker+'-watchdog';gated=False;stopped=False;changed=False;proof=[];began=time.monotonic();listener_checked=False
     run(['systemd-run','--quiet','--unit='+watchdog,'--on-active=75s','--','/usr/sbin/iptables','-D','INPUT']+rule)
     try:
         run(['iptables','-I','INPUT','1']+rule);gated=True;deadline=time.monotonic()+25
@@ -69,21 +82,24 @@ def switch_coordinator(target,record):
                 if handlers(pid)==state:break
             if time.monotonic()>deadline:raise RuntimeError('control_requests_not_drained')
             time.sleep(.5)
-        run(['systemctl','stop',UNIT],timeout=30);stopped=True
+        run(['systemctl','--job-mode=ignore-dependencies','stop',UNIT],timeout=30);stopped=True
         assert run(['systemctl','show',UNIT,'-p','MainPID','--value'])=='0'
         assert str(COORD.resolve())==previous,'concurrent_runtime_switch'
         swap(COORD,target);changed=True
         run(['systemctl','start',UNIT],timeout=15)
         assert run(['systemctl','is-active',UNIT])=='active'
+        wait_listener();listener_checked=True
     except BaseException:
         if changed:
-            run(['systemctl','stop',UNIT],timeout=30);swap(COORD,previous)
-        if stopped:run(['systemctl','start',UNIT],timeout=15)
+            run(['systemctl','--job-mode=ignore-dependencies','stop',UNIT],timeout=30);swap(COORD,previous)
+        if stopped:
+            run(['systemctl','start',UNIT],timeout=15)
+            wait_listener();listener_checked=True
         raise
     finally:
         if gated:run(['iptables','-D','INPUT']+rule)
         subprocess.run(['systemctl','stop',watchdog+'.timer'],capture_output=True,timeout=10)
-        record.write_text(json.dumps({'http_drain':proof,'gate_seconds':time.monotonic()-began,'rule_removed':marker not in run(['iptables','-S','INPUT'])},indent=2))
+        record.write_text(json.dumps({'http_drain':proof,'gate_seconds':time.monotonic()-began,'listener_checked_before_gate_release':listener_checked,'rule_removed':marker not in run(['iptables','-S','INPUT'])},indent=2))
 
 
 def health():

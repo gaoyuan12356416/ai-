@@ -82,7 +82,7 @@ def rollback(manifest_path):
     m = json.loads(manifest_path.read_text())
     # Check the whole affected set before restoring any part of it.
     assert str(COORD.resolve()) in (m['old_coordinator'], m['new_coordinator']), 'later_coordinator_preserved'
-    assert str(HEALTH.resolve()) in (m['old_health'], m['source']), 'later_health_release_preserved'
+    assert str(HEALTH.resolve()) in (m['old_health'], m['source'], m.get('original_tools_source')), 'later_health_release_preserved'
     for entry in m['static']:
         assert digest(entry['path']) in (entry['old_sha'], entry['new_sha']), 'later_static_change_preserved'
     if TIMER_FILE.exists():
@@ -99,7 +99,7 @@ def rollback(manifest_path):
     for entry in m['static']:
         if digest(entry['path']) == entry['new_sha']:
             copy(folder / entry['backup'], entry['path'])
-    if str(HEALTH.resolve()) == m['source']:
+    if str(HEALTH.resolve()) in (m['source'], m.get('original_tools_source')):
         swap(HEALTH, m['old_health'])
     if m['timer_existed']:
         copy(folder / 'timer-before', TIMER_FILE)
@@ -207,13 +207,40 @@ def install(source, commit):
         raise
 
 
+def upgrade_tools(source, commit, manifest_path):
+    """Install a reviewed deployment-tool fix without another runtime switch."""
+    source, manifest_path = Path(source).resolve(), Path(manifest_path).resolve()
+    m = json.loads(manifest_path.read_text())
+    assert manifest_path.is_relative_to(ROOT) and HEALTH.resolve() == Path(m['source'])
+    assert re.fullmatch('[0-9a-f]{40}', commit)
+    assert run(['git','-C',GIT,'for-each-ref','--contains',commit,'--format=%(refname)','refs/remotes/origin'])
+    run(['git','-C',GIT,'merge-base','--is-ancestor',m['commit'],commit])
+    for relative in SOURCE_FILES + ['scripts/recover_fb_support_switch_upload.py','scripts/test_fb_coordinator_switch.py']:
+        assert (source/relative).read_bytes()==subprocess.check_output(['git','-C',str(GIT),'show',commit+':'+relative])
+    rollback_file=manifest_path.parent/'rollback.sh'
+    shutil.copy2(rollback_file,manifest_path.parent/'rollback-before-tools.sh')
+    shutil.copy2(manifest_path,manifest_path.parent/'manifest-before-tools.json')
+    before=pids()
+    m['original_tools_source']=m['source'];m['source']=str(source);m['tools_commit']=commit
+    rollback_file.write_text("#!/bin/sh\nset -eu\nexec /usr/bin/python3 '"+str(source/'scripts/deploy_fb_publish_reliability.py')+"' --rollback '"+str(manifest_path)+"'\n")
+    rollback_file.chmod(0o700)
+    support.save(manifest_path,m)
+    swap(HEALTH,source)
+    assert before==pids()
+    support.save(manifest_path.parent/'tools-upgrade.json',dict(commit=commit,source=str(source),services_restarted=False,protected_pids_unchanged=True))
+    print(json.dumps({'tools_updated':commit,'services_restarted':False,'rollback_updated':str(rollback_file)}))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source')
     parser.add_argument('--commit')
     parser.add_argument('--rollback')
+    parser.add_argument('--tools-only', help='Existing deployment manifest to update')
     args = parser.parse_args()
     if args.rollback:
         rollback(args.rollback)
+    elif args.tools_only:
+        upgrade_tools(args.source,args.commit,args.tools_only)
     else:
         install(args.source, args.commit)
