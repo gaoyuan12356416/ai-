@@ -179,15 +179,18 @@ class SourceRepository:
                 raise SourceError("page_unavailable", f"Page {pid}：" + page["blocked_reason"], 409)
         return {pid: available[pid] for pid in wanted}
 
-    def _conditions(self, *, enforce_blacklist=True, manual=False):
+    def _conditions(self, *, enforce_blacklist=True, manual=False, allow_any_product=False):
         schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
         source_language, drama_language = _language_sql("s.language"), _language_sql("d.language")
         sql = f"""
-            s.data_source=%s AND s.product=%s AND s.type=2 AND s.is_delete=0
+            s.data_source=%s AND s.type=2 AND s.is_delete=0
             AND TRIM(COALESCE(s.data_source_id,''))<>''
             AND s.video_duration>0 AND s.video_duration<=3600
         """
-        params = ["6", "Dramawave"]
+        params = ["6"]
+        if not allow_any_product:
+            sql += " AND s.product=%s"
+            params.append("Dramawave")
         if not manual:
             sql += f"""
             AND TRIM(COALESCE(s.language,''))<>''
@@ -208,8 +211,9 @@ class SourceRepository:
             params.append("1479")
         return sql, params
 
-    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False):
-        condition, base_params = self._conditions(enforce_blacklist=enforce_blacklist, manual=manual)
+    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, allow_any_product=False):
+        condition, base_params = self._conditions(enforce_blacklist=enforce_blacklist, manual=manual,
+                                                allow_any_product=allow_any_product)
         sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
@@ -409,7 +413,7 @@ class SourceRepository:
         gates = "视频来源" if manual else ("上架、黑名单、视频来源" if enforce_blacklist else "上架、视频来源")
         return f"已找到该素材，但未满足{gates}或同语言剧集信息等发布条件。"
 
-    def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False) -> dict[str, dict]:
+    def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, allow_any_product=False) -> dict[str, dict]:
         wanted = _ids(material_ids, None if manual else MAX_MATERIALS, "素材")
         if any(len(value) > 19 for value in wanted):
             raise SourceError("invalid_request", "素材ID无效")
@@ -417,7 +421,7 @@ class SourceRepository:
         for offset in range(0, len(wanted), 100):
             chunk = wanted[offset:offset + 100]
             rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1,
-                                enforce_blacklist=enforce_blacklist, manual=manual)
+                                enforce_blacklist=enforce_blacklist, manual=manual, allow_any_product=allow_any_product)
             current = []
             for row in rows:
                 item = self._material(row, manual=manual)
@@ -431,7 +435,7 @@ class SourceRepository:
             self._enrich(current, strict=True, need_desc=need_desc, manual=manual)
         return {material_id: found[material_id] for material_id in wanted}
 
-    def _unavailable_materials(self, ids, *, enforce_blacklist=True, manual=False):
+    def _unavailable_materials(self, ids, *, enforce_blacklist=True, manual=False, allow_any_product=False):
         """Explain only requested catalog IDs; never replace a failed source read."""
         if not ids:
             return {}
@@ -474,7 +478,7 @@ class SourceRepository:
                 code, message = "material_not_found", "素材ID不存在"
             elif str(row.get("is_delete")) != "0":
                 code, message = "material_deleted", "素材已删除"
-            elif str(row.get("product") or "").casefold() != "dramawave":
+            elif not allow_any_product and str(row.get("product") or "").casefold() != "dramawave":
                 code, message = "material_product_mismatch", "素材不属于Dramawave"
             elif str(row.get("data_source")) != "6":
                 code, message = "material_source_mismatch", "素材不是当前支持的来源6素材"
@@ -497,7 +501,7 @@ class SourceRepository:
             result[mid] = {"code": code, "message": message}
         return result
 
-    def resolve_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False) -> dict:
+    def resolve_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, allow_any_product=False) -> dict:
         """Bounded partial resolution for ID admission and Excel previews.
 
         Per-row data errors are returned without weakening the strict legacy
@@ -512,7 +516,7 @@ class SourceRepository:
         for offset in range(0, len(wanted), 100):
             chunk = wanted[offset:offset + 100]
             rows = self._select("AND s.id IN (" + ",".join("%s" for _ in chunk) + ")", chunk, len(chunk) + 1,
-                                enforce_blacklist=enforce_blacklist, manual=manual)
+                                enforce_blacklist=enforce_blacklist, manual=manual, allow_any_product=allow_any_product)
             seen, candidates = set(), []
             for row in rows:
                 mid = str(row.get("material_id") or "")
@@ -532,6 +536,7 @@ class SourceRepository:
                 if mid not in found:
                     errors[mid] = {"code": "material_metadata_ambiguous", "message": "素材缺少唯一的同语言剧名或简介"}
             errors.update(self._unavailable_materials([mid for mid in chunk if mid not in seen],
-                                                     enforce_blacklist=enforce_blacklist, manual=manual))
+                                                     enforce_blacklist=enforce_blacklist, manual=manual,
+                                                     allow_any_product=allow_any_product))
         return {"items": {mid: found[mid] for mid in wanted if mid in found},
                 "errors": {mid: errors[mid] for mid in wanted if mid in errors}}
