@@ -62,5 +62,21 @@ class RecoveryProofTests(unittest.TestCase):
         self.c.execute('UPDATE pipeline_worker SET observation_json=?',('{"phase":"upload"}',))
         with self.assertRaises(AssertionError):proof(self.c,self.n,self.o)
 
+    def test_review_parent_only_for_the_exact_single_interrupted_task(self):
+        self.n.execute('ALTER TABLE x_post_queue ADD COLUMN manual_run_id')
+        self.n.execute('UPDATE x_post_queue SET manual_run_id=2228')
+        self.n.execute('CREATE TABLE x_post_manual_run(id,status,unknown_count)')
+        self.n.execute("INSERT INTO x_post_manual_run VALUES(2228,'needs_review',1)")
+        self.assertTrue(proof(self.c,self.n,self.o))
+        self.n.execute('INSERT INTO x_post_queue(id,manual_run_id) VALUES(9999,2228)')
+        with self.assertRaises(AssertionError):proof(self.c,self.n,self.o)
+
+    def test_explicitly_stopped_parent_is_preserved(self):
+        self.n.execute('ALTER TABLE x_post_queue ADD COLUMN manual_run_id')
+        self.n.execute('UPDATE x_post_queue SET manual_run_id=2228')
+        self.n.execute('CREATE TABLE x_post_manual_run(id,status,unknown_count)')
+        self.n.execute("INSERT INTO x_post_manual_run VALUES(2228,'stopped',1)")
+        with self.assertRaises(AssertionError):proof(self.c,self.n,self.o)
+
 
 if __name__=='__main__':unittest.main()

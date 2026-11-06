@@ -75,8 +75,13 @@ def proof(c,n,o):
         assert len(prepared)==1 and json.loads(prepared[0]['artifact_json'])==artifact
     for field,table in [('manual_run_id','x_post_manual_run'),('schedule_run_id','x_post_schedule_run'),('run_id','x_post_daily_run'),('catchup_run_id','x_post_catchup_run')]:
         if q.get(field):
-            parent=n.execute('SELECT status FROM '+table+' WHERE id=?',(q[field],)).fetchone()
-            assert parent and parent[0] not in ('cancelled','canceled','stopped','needs_review')
+            parent=n.execute('SELECT * FROM '+table+' WHERE id=?',(q[field],)).fetchone()
+            assert parent and parent['status'] not in ('cancelled','canceled','stopped')
+            if parent['status']=='needs_review':
+                # This single-task parent was marked for review by this exact
+                # acknowledged failure. Do not lift unrelated parent's holds.
+                assert field=='manual_run_id' and q[field]==2228 and parent['unknown_count']==1
+                assert [r[0] for r in n.execute('SELECT id FROM x_post_queue WHERE manual_run_id=?',(2228,))]==[QUEUE]
     return {'job':j,'queue':q,'log':l,'native_ops':native_ops,'central_ops':central_ops,'acked_receipts':receipts,
             'claim':claim,'artifact':artifact,'prepared':prepared,'random':random}
 
