@@ -29,13 +29,20 @@ class SqlFixture:
 
     def __init__(self):
         self.db = sqlite3.connect(":memory:")
+        # Model the case-insensitive, padded source collation; the production
+        # binary cast must deliberately bypass these text-comparison rules.
+        self.db.create_collation(
+            "SOURCE_CI",
+            lambda left, right: ((left.rstrip().casefold() > right.rstrip().casefold())
+                                 - (left.rstrip().casefold() < right.rstrip().casefold())),
+        )
         self.db.execute("ATTACH DATABASE ':memory:' AS kunlunads_dev")
         self.db.executescript("""
           CREATE TABLE kunlunads_dev.ads_alternative_account_group (id INTEGER PRIMARY KEY);
           CREATE TABLE kunlunads_dev.ads_alternative_accounts
             (id INTEGER PRIMARY KEY, group_id INTEGER, account_id TEXT, deleted_at INTEGER);
           CREATE TABLE kunlunads_dev.ads_custom_source_insight
-            (dt TEXT, product TEXT, w2a_page_id INTEGER, ad_account_id TEXT,
+            (dt TEXT, product TEXT, w2a_page_id INTEGER, ad_account_id TEXT COLLATE SOURCE_CI,
              impressions INTEGER, clicks INTEGER, installs INTEGER,
              af_revenue0 TEXT, revenue TEXT, spend TEXT, data_source INTEGER);
           INSERT INTO kunlunads_dev.ads_alternative_account_group VALUES (648), (649), (650);
@@ -59,26 +66,13 @@ class SqlFixture:
         self.db.create_function("DATE_FORMAT", 2, lambda value, fmt: value)
         self.db.create_aggregate("SUM", 1, ExactSum)
 
-    @staticmethod
-    def text_literal(hex_value):
-        decoded = bytes.fromhex(hex_value).decode("utf-8")
-        return "'" + decoded.replace("'", "''") + "'"
-
     def query(self, sql):
         self.queries.append(sql)
         self.assert_read_only(sql)
         translated = re.sub(r"FORCE\s+INDEX\s*\([^)]*\)", "", sql, flags=re.I)
         translated = re.sub(
-            r"CONVERT\s*\(\s*0x([0-9a-f]+)\s+USING\s+utf8mb4\s*\)",
-            lambda match: self.text_literal(match.group(1)), translated, flags=re.I,
-        )
-        translated = re.sub(
-            r"_utf8mb4\s+0x([0-9a-f]+)",
-            lambda match: self.text_literal(match.group(1)), translated, flags=re.I,
-        )
-        translated = re.sub(
-            r"\b0x([0-9a-f]+)\b",
-            lambda match: self.text_literal(match.group(1)), translated, flags=re.I,
+            r"CAST\s*\(\s*(ad_account_id)\s+AS\s+BINARY\s*\)",
+            r"CAST(\1 AS BLOB)", translated, flags=re.I,
         )
         return [tuple(None if value is None else str(value) for value in row)
                 for row in self.db.execute(translated).fetchall()]
@@ -110,6 +104,24 @@ class SourceContractTests(unittest.TestCase):
         ])
         # The data_source=9 row remains eligible: no undocumented channel gate.
         self.assertEqual(rows[-1]["impression"], 100)
+
+    def test_account_scope_is_byte_exact_despite_case_and_padded_source_collation(self):
+        self.fixture.db.executemany(
+            "INSERT INTO kunlunads_dev.ads_alternative_accounts VALUES (?,650,?,0)",
+            [(6, "123"), (7, "act_AbC")],
+        )
+        self.fixture.db.executemany(
+            "INSERT INTO kunlunads_dev.ads_custom_source_insight VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [("2026-11-06", "Dramawave", 2334, account, count, 1, 1, "1.00", "99.00", "1.00", 0)
+             for account, count in [("123", 1), ("123 ", 100), ("0123", 100),
+                                    ("act_AbC", 2), ("act_abc", 100), ("act_AbC ", 100)]],
+        )
+        scope = self.source.load_scope({"pool_id": 650})
+        self.assertEqual(scope, ("123", "act_AbC"))
+        rows = self.source.read_daily(scope)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["impression"], 3)
+        self.assertEqual(rows[0]["revenue"], Decimal("2.00"))
 
     def test_existing_empty_pool_is_distinct_from_missing_pool(self):
         self.assertEqual(self.source.load_scope({"pool_id": 650}), ())

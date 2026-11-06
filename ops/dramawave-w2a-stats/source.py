@@ -17,7 +17,7 @@ def _account_literal(value):
     if not isinstance(value, str) or not value or value != value.strip():
         raise SourceError("invalid account identity")
     # Account identity remains exact (no act_ removal or numeric coercion).
-    return "CONVERT(0x%s USING utf8mb4)" % value.encode("utf-8").hex()
+    return "X'%s'" % value.encode("utf-8").hex()
 
 
 class MySQLSource:
@@ -105,7 +105,7 @@ SELECT dt AS day,
 FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX (wcds)
 WHERE product = 'Dramawave'
   AND w2a_page_id = 2334
-  AND ad_account_id IN (%s)
+  AND CAST(ad_account_id AS BINARY) IN (%s)
 GROUP BY dt
 ORDER BY dt
 """.strip() % values)
