@@ -17,7 +17,7 @@ from scripts.publish_scheduler_health import deployment_guard
 BASE = 'f44b3b47dda1fff4d2dae2910ad81a6554f74f50'
 VIDEO = ['features/fb_video_publish/'+n+'.py' for n in ('sources','pool','pool_scheduler','worker','core','guards')]
 DISPATCH = ['features/pipeline_dispatch/'+n+'.py' for n in ('adapters','fb_isolation','core')]
-FB = VIDEO + DISPATCH + ['features/fb_auto_posts/gpu.py','features/pipeline_dispatch/fb_native.py']
+FB = VIDEO + ['features/fb_auto_posts/gpu.py','features/pipeline_dispatch/fb_native.py']
 STATIC = ['static/'+n for n in ('fb-pages.html','fb-video-publish.html','fb-video-publish.js')]
 STATIC_BASE = {'static/fb-pages.html': '7ee927121d752f078732dbf3837db6c5e1eaf38c7af895eb647cb30610234014', 'static/fb-video-publish.html': 'e9bda56780b2c948a42ad5d14e93a507d5f122d2ab30e4ea8f51523033ad4393', 'static/fb-video-publish.js': '76da1afb723b95faab04c9a3c25769626ae95122062e8c1a9c2e7c6b3f6cb1e1'}
 

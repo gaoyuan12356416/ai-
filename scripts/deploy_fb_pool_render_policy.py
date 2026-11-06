@@ -34,8 +34,18 @@ def main():
     backup=folder/'before.py';shutil.copy2(runtime/REL,backup)
     target=folder/'candidate'/REL;target.parent.mkdir(parents=True);shutil.copy2(runtime/REL,target)
     patch=run(['git','diff',BASE,commit,'--',REL],cwd=source)+'\n'
-    run(['git','apply','--check','-'],cwd=folder/'candidate',input=patch)
-    run(['git','apply','-'],cwd=folder/'candidate',input=patch)
+    if a.http_port:
+        # The legacy fallback pins PROFILE directly. Preserve that difference
+        # and all its separately maintained render/progress code.
+        baseline=run(['git','show',BASE+':'+REL],cwd=source)
+        def validation(text):return text.split('def validate_request(',1)[1].split('\ndef _probe(',1)[0]
+        old=validation(baseline).replace('getattr(config,"profile",PROFILE)','PROFILE')
+        new=validation((source/REL).read_text()).replace('getattr(config,"profile",PROFILE)','PROFILE')
+        live=target.read_text();assert live.count(old)==1,'fallback_validator_drift'
+        target.write_text(live.replace(old,new))
+    else:
+        run(['git','apply','--check','-'],cwd=folder/'candidate',input=patch)
+        run(['git','apply','-'],cwd=folder/'candidate',input=patch)
     compile(target.read_bytes(),REL,'exec')
     manifest=dict(commit=commit,runtime=str(runtime),unit=a.unit,parent_pid=parent,prepare_workers=children,
                   before=sha(backup),after=sha(target),backup=str(backup))
