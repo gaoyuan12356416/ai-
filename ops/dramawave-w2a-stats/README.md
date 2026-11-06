@@ -4,12 +4,12 @@ Independent loopback HTTP service on port 8850, hourly systemd refresh, and an e
 
 ## Source and persistence
 
-- Fixed source: `kunlunads_dev.ads_custom_source_insight`, product `Dramawave`, all page IDs, `revenue = SUM(af_revenue0)`. V1.2 removes the page predicate and its forced page index; the historical URL remains compatible, including its `2334` segment.
+- Fixed source: `kunlunads_dev.ads_custom_source_insight`, product `Dramawave`, all page IDs from `2026-11-01` inclusive, `revenue = SUM(af_revenue0)`. V1.2 removes the page predicate and its forced page index; V1.3 fixes the minimum date in both source SQL and HTTP snapshot reads. The historical URL remains compatible, including its `2334` segment.
 - Configured pool: `648`, verified in `ads_alternative_account_group`; live memberships are non-deleted `ads_alternative_accounts` records. An existing empty pool is successful empty data; a missing/unreadable pool is unavailable.
 - Source adapter uses `/usr/local/bin/mysql-gated` on CPU, fixed read-only endpoint `101.32.56.53:63350`, explicit `@@read_only` validation, one connection at a time, bounded waits and SELECT execution. Never bypass the shared SQL gate for this automation.
 - The all-page historical aggregate has a 240-second statement budget; membership reads retain 20 seconds. Gate wait is 60 seconds, with one connection and no immediate retries. This replaces the old page-query time budget, which timed out with the now-populated 209-account pool.
 - HTTP never queries MySQL. SQLite scope hash + snapshot transaction protects complete reads and scope changes. State is `/mnt/data-disk/dramawave-w2a-stats/state`; current release is `/opt/dramawave-w2a-stats/current`.
-- V1.2 hashes the report policy as well as pool membership. A V1.1 page-only snapshot is unavailable until the first successful all-pages refresh; no database rows or credentials are reset for this transition.
+- The scope hash includes the report policy as well as pool membership. A snapshot from an older page/date policy is unavailable until the first successful current-policy refresh; no database rows or credentials are reset for this transition. Date requests entirely before 2026-11-01 return successful empty data once a current snapshot exists.
 - `state_dir`, pool ID, token file, CIDRs and trusted proxies are read from `/etc/dramawave-w2a-stats.json` for each request/refresh. Secrets are server-only: `/etc/dramawave-w2a-stats.token` and `/etc/dramawave-w2a-stats.mysql.env`, mode 0600. The dedicated root refresh is required to enter the existing root-owned SQL gate; both services use systemd filesystem hardening.
 
 ## Checks

@@ -1,4 +1,4 @@
-# DramaWave 数据查询接口 V1.2
+# DramaWave 数据查询接口 V1.3
 
 ## 地址与权限
 
@@ -17,7 +17,7 @@
 
 ## 固定数据范围
 
-数据源为 `kunlunads_dev.ads_custom_source_insight`。固定筛选 `product='Dramawave'`，并限定 `ad_account_id` 属于账户池 **648（Account for opera）**。五项指标使用同一范围，汇总全部页面，包含页面 ID 为 0 或为空的符合条件记录。
+数据源为 `kunlunads_dev.ads_custom_source_insight`。固定筛选 `product='Dramawave'`、`dt >= '2026-11-01'`，并限定 `ad_account_id` 属于账户池 **648（Account for opera）**。五项指标使用同一范围，汇总全部页面，包含页面 ID 为 0 或为空的符合条件记录。
 
 账户池成员取业务账户池 `ads_alternative_account_group` 与 `ads_alternative_accounts`，排除已移出池的成员（`deleted_at` 非零），不按账户当前投放状态另行剔除其历史数据。成员 ID 去重后筛选，不通过重复成员 JOIN 放大指标。
 
@@ -40,6 +40,8 @@
 | `end_date` | 是 | 截止日期，`YYYY-MM-DD`，不得早于起始日期 |
 
 包含起止两天，每天最多一行，按日期升序。只接受上述两个参数，禁止重复参数；不能通过参数更换产品或账户池，也不接受页面筛选参数。
+
+**数据起始日为 2026-11-01。** 查询完全早于该日时，成功返回 `data: []`；跨越该日时，只返回 2026-11-01 及之后的数据。该下限同时应用于源表读取与接口输出，调用方不能覆盖。
 
 ```bash
 curl --get \

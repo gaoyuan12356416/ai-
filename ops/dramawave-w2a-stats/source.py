@@ -107,6 +107,7 @@ SELECT dt AS day,
        SUM(spend) AS cost
 FROM kunlunads_dev.ads_custom_source_insight
 WHERE product = 'Dramawave'
+  AND dt >= '2026-11-01'
   AND CAST(ad_account_id AS BINARY) IN (%s)
 GROUP BY dt
 ORDER BY dt

@@ -53,6 +53,7 @@ class SqlFixture:
         self.db.executemany(
             "INSERT INTO kunlunads_dev.ads_custom_source_insight VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [
+                ("2026-10-31", "Dramawave", 2334, "101", 9999, 9999, 9999, "9999.00", "9999.00", "9999.00", 0),
                 ("2026-11-01", "Dramawave", 2334, "101", 10, 2, 1, "1.10", "99.00", "2.30", 0),
                 ("2026-11-01", "Dramawave", 2334, "202", 20, 3, 2, "2.20", "500.00", "4.50", 6),
                 ("2026-11-06", "Dramawave", 2334, "101", 100, 10, 4, "0.05", "900.00", "20.00", 9),
@@ -104,7 +105,7 @@ class SourceContractTests(unittest.TestCase):
             {"day": "2026-11-06", "impression": 100, "click": 10, "install": 4,
              "revenue": Decimal("0.05"), "cost": Decimal("20.00")},
         ])
-        # Page 2335, 0 and NULL all contribute; data_source=9 also stays eligible.
+        # Same-pool 10/31 is excluded; page 2335, 0, NULL and data_source=9 stay eligible.
         self.assertEqual(rows[-1]["impression"], 100)
 
     def test_account_scope_is_byte_exact_despite_case_and_padded_source_collation(self):

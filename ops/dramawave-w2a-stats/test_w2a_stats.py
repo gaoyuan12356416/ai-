@@ -192,38 +192,66 @@ class ApiContractTests(unittest.TestCase):
         self.write_config()
         self.assertEqual(self.query()[0], 503)
 
-    def test_old_page_policy_snapshot_is_hidden_until_all_pages_refresh(self):
+    def test_obsolete_policy_snapshot_is_hidden_until_current_scope_refresh(self):
         source = FakeSource([row(revenue="5.00", impression=10)])
-        self.refresh(source)
-        old_policy_hash = hashlib.sha256(json.dumps(
+        old_policies = [
             [self.config["pool_id"], source.accounts],
-            separators=(",", ":"), ensure_ascii=True,
-        ).encode("ascii")).hexdigest()
-        # Reproduce the exact V1.1 on-disk scope identity, including a valid
-        # successful snapshot whose figures cover page 2334 only.
+            ["dramawave-pool-all-pages-v1", "Dramawave", self.config["pool_id"], source.accounts],
+        ]
+        for old_policy in old_policies:
+            with self.subTest(old_policy=old_policy):
+                self.refresh(source)
+                old_policy_hash = hashlib.sha256(json.dumps(
+                    old_policy, separators=(",", ":"), ensure_ascii=True,
+                ).encode("ascii")).hexdigest()
+                # Reproduce V1.1 page-only or V1.2 unrestricted-date identity.
+                with contextlib.closing(sqlite3.connect(
+                    str(self.root / "state" / "snapshot.sqlite3")
+                )) as connection, connection:
+                    connection.execute(
+                        "UPDATE state SET scope_id=?, snapshot_scope=?, scope_valid=1 WHERE id=1",
+                        (old_policy_hash, old_policy_hash),
+                    )
+                status, payload = self.query()
+                self.assertEqual(status, 503)
+                self.assertEqual(payload["code"], "DATA_NOT_READY")
+                self.assertFalse(api.health(str(self.config_file))["has_snapshot"])
+                source.data_error = RuntimeError("first current-scope read unavailable")
+                self.assertEqual(self.refresh(source, now=SECOND)["status"], "failed")
+                self.assertEqual(self.query()[0], 503)
+                self.assertFalse(api.health(str(self.config_file))["has_snapshot"])
+                source.data_error = None
+                source.rows = [row(revenue="18.25", impression=42)]
+                self.assertEqual(self.refresh(source, now=SECOND)["status"], "ok")
+                status, payload = self.query()
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["data"][0]["revenue"], Decimal("18.25"))
+                self.assertEqual(payload["data"][0]["impression"], 42)
+                self.assertTrue(api.health(str(self.config_file))["has_snapshot"])
+
+    def test_date_floor_filters_snapshot_rows_without_rejecting_early_requests(self):
+        self.refresh(FakeSource([
+            row("2026-10-31", revenue="9999.00"),
+            row("2026-11-01", revenue="1.00"),
+            row("2026-11-02", revenue="2.00"),
+        ]))
+        # Deliberately retain an earlier row in the fixture snapshot to prove
+        # the API read itself enforces the reporting floor independently of SQL.
         with contextlib.closing(sqlite3.connect(
             str(self.root / "state" / "snapshot.sqlite3")
-        )) as connection, connection:
-            connection.execute(
-                "UPDATE state SET scope_id=?, snapshot_scope=?, scope_valid=1 WHERE id=1",
-                (old_policy_hash, old_policy_hash),
-            )
-        status, payload = self.query()
-        self.assertEqual(status, 503)
-        self.assertEqual(payload["code"], "DATA_NOT_READY")
-        self.assertFalse(api.health(str(self.config_file))["has_snapshot"])
-        source.data_error = RuntimeError("first all-pages read unavailable")
-        self.assertEqual(self.refresh(source, now=SECOND)["status"], "failed")
-        self.assertEqual(self.query()[0], 503)
-        self.assertFalse(api.health(str(self.config_file))["has_snapshot"])
-        source.data_error = None
-        source.rows = [row(revenue="18.25", impression=42)]
-        self.assertEqual(self.refresh(source, now=SECOND)["status"], "ok")
-        status, payload = self.query()
+        )) as connection:
+            self.assertIsNotNone(connection.execute(
+                "SELECT day FROM daily WHERE day='2026-10-31'",
+            ).fetchone())
+        status, payload = self.query("start_date=2026-10-01&end_date=2026-10-31")
         self.assertEqual(status, 200)
-        self.assertEqual(payload["data"][0]["revenue"], Decimal("18.25"))
-        self.assertEqual(payload["data"][0]["impression"], 42)
-        self.assertTrue(api.health(str(self.config_file))["has_snapshot"])
+        self.assertEqual(payload["data"], [])
+        status, payload = self.query("start_date=2026-10-01&end_date=2026-11-01")
+        self.assertEqual(status, 200)
+        self.assertEqual([value["day"] for value in payload["data"]], ["2026-11-01"])
+        status, payload = self.query("start_date=2026-11-02&end_date=2026-11-06")
+        self.assertEqual(status, 200)
+        self.assertEqual([value["day"] for value in payload["data"]], ["2026-11-02"])
 
     def test_config_changed_during_read_cannot_publish_under_new_pool(self):
         source = FakeSource([row()])

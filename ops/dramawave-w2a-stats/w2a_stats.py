@@ -25,8 +25,9 @@ from urllib.parse import parse_qsl, urlsplit
 PRODUCT = "Dramawave"
 # Keep the historical URL stable; its 2334 segment no longer filters data.
 API_PATH = "/api/v1/dramawave/w2a/2334/daily-stats"
-VERSION = "1.2"
-REPORT_SCOPE = "dramawave-pool-all-pages-v1"
+VERSION = "1.3"
+MIN_DAY = "2026-11-01"
+REPORT_SCOPE = "dramawave-pool-all-pages-from-20261101-v1"
 DEFAULT_CONFIG = "/etc/dramawave-w2a-stats.json"
 DEFAULT_STATE_DIR = "/mnt/data-disk/dramawave-w2a-stats"
 DAY_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z", re.ASCII)
@@ -363,7 +364,7 @@ class Store:
                 if not state["updated_at"] or not _current_snapshot_scope(state, pool_id):
                     return 503, _error("DATA_NOT_READY", "当前账户池范围尚无成功数据快照")
                 rows = connection.execute("SELECT * FROM daily WHERE day>=? AND day<=? ORDER BY day",
-                                          (start_date, end_date)).fetchall()
+                                          (max(start_date, MIN_DAY), end_date)).fetchall()
                 data = []
                 for row in rows:
                     item = dict(row)
@@ -508,7 +509,7 @@ def health(config_path):
 
 def make_handler(config_path):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "W2AStats/1.2"
+        server_version = "W2AStats/1.3"
         sys_version = ""
 
         def _send(self, status, payload):
