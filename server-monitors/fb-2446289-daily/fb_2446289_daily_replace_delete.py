@@ -3,6 +3,7 @@
 import argparse
 import collections
 import csv
+from datetime import datetime
 import fcntl
 import glob
 import importlib.util
@@ -33,7 +34,9 @@ GRAPH_VERSION = "v22.0"
 DEFAULT_WORKERS = 16
 DEFAULT_GRAPH_TIMEOUT = 25
 MYSQL_RETRY_DELAYS = (1, 3)
-MYSQL_RETRYABLE_CODES = frozenset((1040, 1203, 2002, 2003, 2006, 2013, 2055))
+MYSQL_RETRYABLE_CODES = frozenset((1040, 1203, 2002, 2003, 2006, 2013, 2055, 3024))
+MYSQL_GATE_WAIT_SECONDS = 300
+MYSQL_GATE_CLEANUP_GRACE_SECONDS = 30
 SUCCESS_STATUSES = {
     "deleted",
     "already_deleted",
@@ -127,6 +130,14 @@ def mysql_query(port, sql, timeout=180):
     env["SQL_GATE_BYPASS"] = "0"
     env["SQL_GATE_RETRY_DELAYS_SECONDS"] = ""
     env["SQL_GATE_JOB_NAME"] = "fb2446289-daily"
+    gated = str(port) == str(mod.DEV_PORT)
+    process_timeout = timeout
+    if gated:
+        # Let the gate stop/reap its complete child session before retrying.
+        # Queue waiting must not consume the SELECT execution budget.
+        env["SQL_GATE_WAIT_TIMEOUT_SECONDS"] = str(MYSQL_GATE_WAIT_SECONDS)
+        env["SQL_GATE_EXEC_TIMEOUT_SECONDS"] = str(timeout)
+        process_timeout += MYSQL_GATE_WAIT_SECONDS + MYSQL_GATE_CLEANUP_GRACE_SECONDS
     cmd = [
         "mysql",
         "-h%s" % mod.MYSQL_HOST,
@@ -148,18 +159,20 @@ def mysql_query(port, sql, timeout=180):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True,
-                timeout=timeout,
+                timeout=process_timeout,
                 env=env,
             )
         except subprocess.TimeoutExpired:
             # TimeoutExpired includes the command/SQL; don't leak it through traceback.
-            raise RuntimeError("MySQL SELECT timed out (port=%s, attempt=%s, timeout=%ss); not retried" % (port, attempt, timeout)) from None
+            raise RuntimeError("MySQL client supervision timed out (port=%s, attempt=%s, timeout=%ss); cleanup unconfirmed, not retried" % (port, attempt, process_timeout)) from None
         if not proc.returncode:
             return list(csv.reader(proc.stdout.splitlines(), delimiter="\t"))
         codes, diagnostics = mysql_failure_details(proc.stderr, query)
-        gate_failed = proc.returncode in (75, 124, 125) or bool(re.search(r"\bSQL_GATE_[A-Z_]*(?:FAILED|LOST|TIMEOUT)\b", proc.stderr or ""))
-        retryable = not gate_failed and bool(codes) and set(codes).issubset(MYSQL_RETRYABLE_CODES)
-        code_text = ",".join(str(code) for code in codes) or "unknown"
+        gate_markers = set(re.findall(r"\bSQL_GATE_[A-Z_]*(?:FAILED|LOST|TIMEOUT)\b", proc.stderr or ""))
+        clean_execution_timeout = gated and proc.returncode == 124 and gate_markers == {"SQL_GATE_EXECUTION_TIMEOUT"}
+        gate_failed = (proc.returncode in (75, 124, 125) or bool(gate_markers)) and not clean_execution_timeout
+        retryable = not gate_failed and (clean_execution_timeout or (bool(codes) and set(codes).issubset(MYSQL_RETRYABLE_CODES)))
+        code_text = "execution_timeout" if clean_execution_timeout else (",".join(str(code) for code in codes) or "unknown")
         if retryable and attempt < attempts:
             delay = MYSQL_RETRY_DELAYS[attempt - 1]
             log("MySQL SELECT transient failure port=%s attempt=%s/%s code=%s; retry in %ss" % (port, attempt, attempts, code_text, delay))
@@ -310,8 +323,23 @@ def write_csv(path, rows, fields):
             writer.writerow({key: row.get(key, "") for key in fields})
 
 
-def screen_failed_ads(hours, csv_path, metadata_path):
-    log("screening failed ads for last %s hours" % hours)
+def parse_window_end(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise argparse.ArgumentTypeError("window end must be YYYY-MM-DD HH:MM:SS in server time")
+
+
+def screening_window_sql(hours, window_end=None):
+    if window_end is None:
+        return "created_at >= NOW() - INTERVAL %s HOUR" % int(hours)
+    end = sql_quote(parse_window_end(window_end))
+    return "created_at >= %s - INTERVAL %s HOUR AND created_at < %s" % (end, int(hours), end)
+
+
+def screen_failed_ads(hours, csv_path, metadata_path, window_end=None):
+    window_sql = screening_window_sql(hours, window_end)
+    log("screening failed ads for last %s hours; window_end=%s" % (hours, window_end or "now"))
     fail_sql = """
         SELECT
           CAST(facebook_id AS CHAR) AS ad_id,
@@ -320,7 +348,7 @@ def screen_failed_ads(hours, csv_path, metadata_path):
           MAX(created_at) AS last_failed_at,
           COUNT(*) AS fail_count
         FROM kunlunads_sec.ads_rules_run_logs
-        WHERE created_at >= NOW() - INTERVAL %s HOUR
+        WHERE %s
           AND type = 'ad'
           AND operation = 'delete'
           AND status = 2
@@ -328,7 +356,7 @@ def screen_failed_ads(hours, csv_path, metadata_path):
           AND extension LIKE '%%error_subcode%%2446289%%'
         GROUP BY facebook_id, account_id
         ORDER BY last_failed_at DESC, ad_id
-    """ % int(hours)
+    """ % window_sql
     fail_rows = mysql_query(SEC_PORT, fail_sql, timeout=240)
     target_ad_ids = [row[0] for row in fail_rows if row and row[0]]
     log("screened target rows=%s" % len(target_ad_ids))
@@ -385,14 +413,14 @@ def screen_failed_ads(hours, csv_path, metadata_path):
         success_sql = """
             SELECT account_id, CAST(facebook_id AS CHAR) AS ad_id, MAX(created_at) AS last_success_at, COUNT(*) AS success_count
             FROM kunlunads_sec.ads_rules_run_logs
-            WHERE created_at >= NOW() - INTERVAL %s HOUR
+            WHERE %s
               AND type = 'ad'
               AND operation = 'delete'
               AND status = 0
               AND account_id IN (%s)
             GROUP BY account_id, facebook_id
             ORDER BY last_success_at DESC
-        """ % (int(hours), in_accounts)
+        """ % (window_sql, in_accounts)
         success_rows.extend(mysql_query(SEC_PORT, success_sql, timeout=180))
 
     success_ad_ids = [row[1] for row in success_rows if len(row) >= 2 and row[1] and row[1] not in fail_by_ad]
@@ -504,6 +532,7 @@ def screen_failed_ads(hours, csv_path, metadata_path):
     metadata = {
         "created_at": now_str(),
         "hours": hours,
+        "window_end": window_end,
         "csv_path": str(csv_path),
         "metadata_path": str(metadata_path),
         "target_ad_ids": len(rows),
@@ -1479,6 +1508,7 @@ def run_once(args):
             "时间：%s" % started_at,
             "执行机：%s" % socket.gethostname(),
             "窗口：近 %s 小时" % args.hours,
+            "窗口截止：%s" % (getattr(args, "window_end", None) or "当前时间"),
             "token 用户：803 / 804",
             "workers：%s" % args.workers,
             "dry_run：%s" % args.dry_run,
@@ -1489,6 +1519,7 @@ def run_once(args):
     meta = {
         "started_at": started_at,
         "hours": args.hours,
+        "window_end": getattr(args, "window_end", None),
         "workers": args.workers,
         "graph_timeout_seconds": args.graph_timeout,
         "source_csv": str(source_csv),
@@ -1502,7 +1533,7 @@ def run_once(args):
     }
     write_json(meta_path, meta)
 
-    source_rows, metadata = screen_failed_ads(args.hours, source_csv, source_meta)
+    source_rows, metadata = screen_failed_ads(args.hours, source_csv, source_meta, getattr(args, "window_end", None))
     tokens = mod.load_tokens(["803", "804"])
     success_history = load_success_history()
     page_source_rows = source_rows[: args.limit] if args.limit else source_rows
@@ -1566,6 +1597,7 @@ def run_once(args):
 def main():
     parser = argparse.ArgumentParser(description="Daily repair for FB ad delete failures matching code=100 subcode=2446289.")
     parser.add_argument("--hours", type=int, default=24)
+    parser.add_argument("--window-end", type=parse_window_end, help="Fixed exclusive screening window end in server time; use for missed scheduled runs.")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--graph-timeout", type=int, default=DEFAULT_GRAPH_TIMEOUT)
     parser.add_argument("--dry-run", action="store_true", help="Screen and notify without mutating Meta ads.")

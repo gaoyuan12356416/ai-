@@ -17,7 +17,7 @@ SOURCE = Path(__file__).with_name("fb_2446289_daily_replace_delete.py")
 def load_helpers():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     names = {"mysql_failure_details", "mysql_query", "executor_mysql_query"}
-    constants = {"MYSQL_RETRY_DELAYS", "MYSQL_RETRYABLE_CODES"}
+    constants = {"MYSQL_RETRY_DELAYS", "MYSQL_RETRYABLE_CODES", "MYSQL_GATE_WAIT_SECONDS", "MYSQL_GATE_CLEANUP_GRACE_SECONDS"}
     selected = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:
@@ -71,7 +71,7 @@ class MysqlRetryTests(unittest.TestCase):
         self.assertEqual(self.env["time"].sleep.call_args_list, [mock.call(1), mock.call(3)])
 
     def test_all_transient_codes_retry(self):
-        for code in (1040, 1203, 2002, 2003, 2006, 2013, 2055):
+        for code in (1040, 1203, 2002, 2003, 2006, 2013, 2055, 3024):
             with self.subTest(code=code):
                 self.setUp()
                 self.run.side_effect = [result(1, "", "ERROR %s (HY000): unavailable" % code), result(0, "1\n")]
@@ -99,6 +99,40 @@ class MysqlRetryTests(unittest.TestCase):
         self.assertEqual(self.run.call_count, 1)
         self.env["time"].sleep.assert_not_called()
 
+    def test_clean_gate_execution_timeout_retries_only_current_select(self):
+        self.run.side_effect = [
+            result(124, "partial\tinvalid\n", GATE + "\nSQL_GATE_EXECUTION_TIMEOUT\n"),
+            result(0, "page\t42\n", GATE),
+        ]
+        self.assertEqual(self.query("63350", "SELECT ad_id, page_id FROM pages", timeout=60), [["page", "42"]])
+        self.assertEqual(self.run.call_count, 2)
+        self.assertEqual(self.run.call_args_list[0].args, self.run.call_args_list[1].args)
+        self.env["time"].sleep.assert_called_once_with(1)
+        self.assertIn("code=execution_timeout", self.env["log"].call_args.args[0])
+
+    def test_clean_gate_timeout_exhausts_three_attempts(self):
+        self.run.return_value = result(124, "private-partial", GATE + "\nSQL_GATE_EXECUTION_TIMEOUT\n")
+        with self.assertRaises(RuntimeError) as caught:
+            self.query("63350", "SELECT 1", timeout=60)
+        self.assertIn("attempt=3/3", str(caught.exception))
+        self.assertIn("SQL_GATE_EXECUTION_TIMEOUT", str(caught.exception))
+        self.assertNotIn("private-partial", str(caught.exception))
+        self.assertEqual(self.run.call_count, 3)
+
+    def test_execution_timeout_with_cleanup_failure_is_not_retried(self):
+        self.run.return_value = result(124, "", "SQL_GATE_EXECUTION_TIMEOUT\nSQL_GATE_CHILD_CLEANUP_FAILED\n")
+        with self.assertRaises(RuntimeError):
+            self.query("63350", "SELECT 1")
+        self.assertEqual(self.run.call_count, 1)
+
+    def test_ungated_timeout_does_not_claim_gate_cleanup(self):
+        self.run.return_value = result(124, "", "SQL_GATE_EXECUTION_TIMEOUT\n")
+        with self.assertRaises(RuntimeError):
+            self.query("63348", "SELECT 1", timeout=240)
+        self.assertEqual(self.run.call_count, 1)
+        self.assertEqual(self.run.call_args.kwargs["timeout"], 240)
+        self.assertNotIn("SQL_GATE_EXEC_TIMEOUT_SECONDS", self.run.call_args.kwargs["env"])
+
     def test_gate_safety_failures_override_transient_mysql_code(self):
         for exit_code, marker in ((75, ""), (124, ""), (125, ""), (1, "SQL_GATE_CHILD_CLEANUP_FAILED"), (1, "SQL_GATE_DAEMON_LOST")):
             with self.subTest(exit_code=exit_code, marker=marker):
@@ -123,7 +157,9 @@ class MysqlRetryTests(unittest.TestCase):
         self.assertEqual(kwargs["env"]["SQL_GATE_BYPASS"], "0")
         self.assertEqual(kwargs["env"]["SQL_GATE_RETRY_DELAYS_SECONDS"], "")
         self.assertEqual(kwargs["env"]["SQL_GATE_JOB_NAME"], "fb2446289-daily")
-        self.assertEqual(kwargs["timeout"], 12)
+        self.assertEqual(kwargs["env"]["SQL_GATE_WAIT_TIMEOUT_SECONDS"], "300")
+        self.assertEqual(kwargs["env"]["SQL_GATE_EXEC_TIMEOUT_SECONDS"], "12")
+        self.assertEqual(kwargs["timeout"], 342)
 
     def test_sensitive_stderr_not_exposed(self):
         self.run.return_value = result(1, "private-result", HANDSHAKE + " password=private-password-for-test token=private-token SELECT secret FROM data")
@@ -149,7 +185,7 @@ class MysqlRetryTests(unittest.TestCase):
         self.assertIs(self.env["mod"].mysql_query, self.env["executor_mysql_query"])
         self.assertEqual(self.env["mod"].mysql_query("SELECT user_id, accessToken FROM info", timeout=22), [["803", "private-token"]])
         self.assertEqual(self.run.call_count, 2)
-        self.assertEqual(self.run.call_args.kwargs["timeout"], 22)
+        self.assertEqual(self.run.call_args.kwargs["timeout"], 352)
         self.assertIn("-P63350", self.run.call_args.args[0])
 
 

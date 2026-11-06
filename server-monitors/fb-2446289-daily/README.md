@@ -15,7 +15,7 @@ cause of the transient handshake interruption was not independently established.
 
 Each single SELECT now attempts at most three times, with one- and three-second
 backoffs, for connection errors 1040/1203/2002/2003/2006/2013/2055. Other errors,
-timeouts, and SQL gate lifecycle failures stop immediately. Failed attempts never
+unconfirmed timeouts, and SQL gate lifecycle failures stop immediately. Failed attempts never
 contribute partial rows. The client still uses the global FIFO gate; nested gate
 retries are disabled. Passwords use MYSQL_PWD, and timeout errors omit command/SQL.
 The imported executor uses the same SELECT helper within this daily process.
@@ -27,6 +27,26 @@ unchanged. There is no retry of the complete job or of ad writes.
 The existing SEC log route is 63348. Metadata/token reads remain on the read-only
 63350 endpoint. The SEC log table is not readable by this account on 63350
 (verified ERROR 1142); this patch does not change routes or grants.
+
+## 2026-11-06 timeout recovery
+
+The metadata SELECT budget is now passed to the SQL Gate as its execution timeout.
+The outer supervisor allows 300 seconds for queue admission plus the execution
+budget and 30 seconds for cleanup. An exit 124 with only
+`SQL_GATE_EXECUTION_TIMEOUT` confirms the gate finished its cleanup path; that
+single SELECT can retry within the same three-attempt limit. MySQL 3024 (server
+execution timeout) is also retryable. Completed batches stay in memory and partial
+output from a failed attempt is discarded. Queue timeout, lost gate, failed child
+cleanup, unknown exit 124, or outer supervision timeout still stop without retry.
+No Graph writes or whole jobs are added to this retry mechanism.
+
+For an explicitly authorized missed-run replay, `--window-end '2026-11-06 10:00:03'`
+fixes both failure and replacement-source queries to the preceding `--hours`
+window, with an exclusive upper bound. It uses the existing success ledger and
+normal shared deletion lock. The default cron keeps its existing rolling window.
+If another cleanup worker owns the lock, let it drain using its existing graceful
+signal handler, launch this job, then restore that worker to wait on the shared
+lock. Never remove the lock or reset either worker's receipts.
 
 ## Validation
 
