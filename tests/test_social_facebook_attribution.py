@@ -127,6 +127,45 @@ class FacebookAttributionTests(unittest.TestCase):
         self.assertTrue(all(row["publications"][0]["date"] == "2026-10-19" for row in catalog))
         self.assertTrue(all(value["freshness"] == "fresh" for value in meta.values()))
 
+    def manual_drama_label(self, raw, label):
+        from datetime import datetime
+        saved = copy.deepcopy(self.snapshot)
+        saved["material"]["drama_name"] = raw
+        saved["attribution"]["drama_name"] = label
+        epoch = int(datetime.fromisoformat(CREATED.replace("Z", "+00:00")).timestamp())
+        url = long_url("2310", NEW_ID, c=f"yingliang_post_CLV_VL_facebook_999*{epoch}noneen*{label}*none*1")
+        self.change("UPDATE fb_video_task SET snapshot_json=?,long_url=?", (json.dumps(saved), url))
+        self.change("UPDATE fb_video_link SET long_url=?", (url,))
+
+    def test_manual_display_label_matches_publisher_normalization(self):
+        for raw in ("", None, "A*B", "A" * 600):
+            with self.subTest(raw=raw):
+                label = str(raw or "none").replace("*", " ")[:512]
+                self.manual_drama_label(raw, label)
+                # Read before freezing to exercise the exact identity checker.
+                with fb.readonly(self.source) as conn:
+                    record = fb._read_new(conn)[0]
+                owner = fb.identity_new(record, fb.users_snapshot(self.users))
+                self.assertEqual(owner["owner"], "creator")
+                self.assertEqual(owner["drama"], "dramA")
+
+    def test_arbitrary_manual_label_mismatch_still_rejected(self):
+        self.manual_drama_label("Original title", "Unrelated title")
+        self.run_collect()
+        self.assertEqual(self.saved("2310")["status"], "unresolved")
+
+    def test_missing_manual_label_recovers_without_source_edits(self):
+        self.manual_drama_label("", "none")
+        with patch.object(fb, "identity_new", side_effect=fb.AttributionError("identity_field_invalid")):
+            self.run_collect()
+        before = self.saved("2310")
+        self.assertEqual(before["status"], "unresolved")
+        self.assertEqual(self.run_collect(LATER)["status"], "complete")
+        after = self.saved("2310")
+        self.assertEqual(after["status"], "frozen")
+        self.assertEqual(before["evidence_hash"], after["evidence_hash"])
+        self.assertEqual(before["publications_json"], after["publications_json"])
+
     def add_pool_source(self, kind="group_pool"):
         with database(self.source) as conn:
             conn.execute("ALTER TABLE fb_video_task ADD COLUMN source_kind TEXT DEFAULT 'manual'")

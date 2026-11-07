@@ -400,8 +400,17 @@ def identity_new(record, users):
     same(task["material_id"], context["material_id"], material["material_id"])
     same(task["content_id"], context["content_id"], material["content_id"])
     same(context["page_name"], page["page_name"])
-    for field in ("material_name", "language", "drama_name"):
+    for field in ("material_name", "language"):
         same(context[field], material[field])
+    # Manual publishing freezes the raw material, but normalizes this display
+    # label before building the attribution URL (core._freeze). Empty titles
+    # become "none"; asterisks are escaped and the label is bounded. Identity
+    # fields above and the exact frozen campaign below remain authoritative.
+    raw_drama_name = material.get("drama_name")
+    if context.get("drama_name") != raw_drama_name:
+        same(context["drama_name"], str(raw_drama_name or "none").replace("*", " ")[:512])
+    else:
+        required(context["drama_name"])
     sub_user = same(actor["sub_user_id"], context["sub_user_id"])
     if not re.fullmatch(r"[1-9][0-9]*", sub_user):
         raise AttributionError("publisher_mapping_invalid")
