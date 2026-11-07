@@ -4,6 +4,9 @@ from pathlib import Path
 from datetime import datetime,timezone
 import deploy_x_pool_local_failures as base
 
+# This scheduler became a long-running producer; stop/restart it as well as its timer.
+base.TRIGGERS = list(dict.fromkeys(base.TRIGGERS + ['x-video-pool-scheduler.service']))
+
 FILES=['features/x_posts/service.py','static/x-post-drama-pool.html']
 EXPECTED={'features/x_posts/service.py':'07baee9ea23a9770d238f03bcf8dddc2d60ab537390789185394545806bfba3c',
           'static/x-post-drama-pool.html':'11e3e8be1f4c8a06c4c69d4956b36d2c56226c3bb9ca325e234a9f8bc3084e9f'}
