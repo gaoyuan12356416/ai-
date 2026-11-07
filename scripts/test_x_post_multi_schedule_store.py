@@ -4009,6 +4009,65 @@ class XPostMultiScheduleStoreTests(unittest.TestCase):
                 for table in ("x_post_drama_pool", "x_post_queue", "x_post_publish_log")
             }
 
+    def _save_with_restart(self, accounts=(3, 4), enabled=True):
+        return self.store.save_schedule_config(
+            "drama", {"enabled":enabled,"timezone":"Asia/Shanghai","account_ids":list(accounts),
+                      "publish_times":["10:00"],"version":2,"restart_removed_dramas":True},
+            actor={"user_id":"admin-1","name":"Admin"}, eligible_account_ids=[3,4],
+            now=datetime(2026,7,27,8,0,tzinfo=service.BEIJING_TZ))
+
+    def test_removed_unavailable_owner_restarts_first_episode_preserving_receipts(self):
+        self._unavailable_drama_owner_fixture()
+        before=self._owner_repair_ledger()
+        saved=self._save_with_restart()
+        self.assertEqual(len(saved["restarted_dramas"]),1)
+        after=self._owner_repair_ledger()
+        self.assertEqual(before["x_post_queue"],after["x_post_queue"])
+        self.assertEqual(before["x_post_publish_log"],after["x_post_publish_log"])
+        pool=next(r for r in self.store.query_drama_pool()["items"] if r["content_id"]=="UNAVAILABLE_OWNER")
+        self.assertEqual((pool["replay_generation"],pool["assigned_account_id"],pool["next_sub_number"],pool["published_episode_count"]),(2,0,1,0))
+        candidates=self.store.available_drama_pool_items(account_ids=[3,4])
+        candidate=next(r for r in candidates if r["content_id"]=="UNAVAILABLE_OWNER")
+        self.assertEqual((candidate["candidate_account_id"],candidate["next_sub_number"]),(4,1))
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("select count(*) from x_post_drama_cancel_audit").fetchone()[0],1)
+
+    def test_restart_after_definite_first_episode_failure(self):
+        self.save_schedule("drama",[2,3],["09:00"])
+        pool=self.add_drama(free_episode_count=2)
+        plan=self.store.create_schedule_plan("drama","2026-07-27","09:00",2,[self.drama_candidate(pool,2,1)])
+        log=self.store.reserve_log(plan["queues"][0]["id"])
+        self.store.mark_failed_if_reserved(log["id"],"media_preflight_failed","known failure")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("CREATE TABLE x_authorized_account(id INTEGER PRIMARY KEY,username TEXT,status TEXT,publish_approved INTEGER)")
+            conn.executemany("INSERT INTO x_authorized_account VALUES(?,?,?,?)",[(2,"old","error",0),(3,"new","active",1),(4,"other","active",1)]);conn.commit()
+        before=self._owner_repair_ledger()
+        result=self._save_with_restart()
+        self.assertEqual(len(result["restarted_dramas"]),1)
+        after=self._owner_repair_ledger()
+        self.assertEqual(before["x_post_queue"],after["x_post_queue"])
+        self.assertEqual(before["x_post_publish_log"],after["x_post_publish_log"])
+        candidate=self.store.available_drama_pool_items(account_ids=[3,4])[0]
+        self.assertEqual((candidate["next_sub_number"],candidate["published_episode_count"],candidate["replay_generation"]),(1,0,2))
+        self.assertNotEqual(candidate["candidate_account_id"],2)
+
+    def test_restart_unknown_result_is_atomic_and_keeps_all_history(self):
+        plan=self._unavailable_drama_owner_fixture()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("UPDATE x_post_publish_log SET unknown_outcome=1 WHERE queue_id=?",(plan["queues"][0]["id"],));conn.commit()
+        before=self._owner_repair_ledger()
+        with self.assertRaises(service.XPostError) as caught:self._save_with_restart()
+        self.assertIn(caught.exception.code,("x_post_drama_restart_unsettled","x_post_drama_owner_not_configured"))
+        self.assertEqual(self._owner_repair_ledger(),before)
+        self.assertEqual(self.store.get_schedule_config("drama")["version"],2)
+
+    def test_restart_never_cancels_a_healthy_omitted_owner(self):
+        self._unavailable_drama_owner_fixture()
+        before=self._owner_repair_ledger()
+        with self.assertRaises(service.XPostError) as caught:self._save_with_restart((4,))
+        self.assertEqual(caught.exception.code,"x_post_drama_owner_not_configured")
+        self.assertEqual(self._owner_repair_ledger(),before)
+
     def test_unavailable_owner_can_leave_schedule_without_reassigning_or_replaying(self):
         self._unavailable_drama_owner_fixture()
         before = self._owner_repair_ledger()

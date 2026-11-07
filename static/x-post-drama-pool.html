@@ -532,6 +532,7 @@ Episode {{episode_number}}
           enabled: false,
           timezone: "Asia/Shanghai",
           accountIds: new Set(),
+          savedAccountIds: [],
           publishTimes: [],
           scheduleMode: "fixed",
           randomDailyCount: 1,
@@ -829,6 +830,7 @@ Episode {{episode_number}}
         state.schedule.accountIds = new Set(
           rawAccounts.map(value => String(value || "")).filter(value => /^\d+$/.test(value) && Number(value) > 0)
         );
+        state.schedule.savedAccountIds = Array.from(state.schedule.accountIds);
         state.schedule.publishTimes = Array.from(new Set(
           (Array.isArray(item.publish_times) ? item.publish_times : [])
             .map(value => String(value || "").trim()).filter(validPublishTime)
@@ -940,6 +942,9 @@ Episode {{episode_number}}
           setMessage("scheduleMessage", "已选账号中存在不可发布或已失效账号，请先校验或重新授权；已绑定短剧会保留并暂停续发。", true);
           return;
         }
+        const removedAccountIds = (state.schedule.savedAccountIds || []).filter(id => !state.schedule.accountIds.has(id));
+        const restartRemoved = removedAccountIds.length > 0;
+        if (restartRemoved && !window.confirm("确认移除这些账号？其中不可用账号绑定的未完结短剧将取消旧绑定，保留历史，并重新找同语言账号从第1集发布；正常账号的未完结绑定仍需保留。有执行中或未知结果的旧任务时将阻止重发。")) return;
         state.scheduleBusy = true;
         const button = byId("saveSchedule");
         button.disabled = true;
@@ -957,9 +962,11 @@ Episode {{episode_number}}
               body_template: bodyTemplate,
               random_template_enabled: byId("scheduleRandomTemplate").checked,
               version: state.schedule.version,
+              restart_removed_dramas: restartRemoved,
             }),
           });
           applySchedule(result);
+          await loadDramaPool();
           setMessage("scheduleMessage", scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
           showToast("短剧池自动发布设置已保存。", false);
         } catch (error) {
