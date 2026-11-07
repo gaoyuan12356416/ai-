@@ -12,7 +12,7 @@ EXPECTED={'features/x_posts/service.py':'07baee9ea23a9770d238f03bcf8dddc2d60ab53
           'static/x-post-drama-pool.html':'11e3e8be1f4c8a06c4c69d4956b36d2c56226c3bb9ca325e234a9f8bc3084e9f'}
 
 def apply_patch(target,rel,commit):
-    patch=subprocess.check_output(['git','-C',str(base.SOURCE),'diff',commit+'^',commit,'--',rel])
+    patch=subprocess.check_output(['git','-C',str(base.SOURCE),'diff','7de6e8b',commit,'--',rel])
     assert patch
     subprocess.run(['git','apply','--check','-'],cwd=target,input=patch,check=True,capture_output=True)
     subprocess.run(['git','apply','-'],cwd=target,input=patch,check=True,capture_output=True)
