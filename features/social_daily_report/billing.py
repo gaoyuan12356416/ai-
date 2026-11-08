@@ -202,4 +202,10 @@ def collect_financials(report, app, catalog):
         return apply(report, aggregate(catalog, read_bills(app, report["report_date"]), report["report_date"]))
     except Exception as exc:
         # Driver messages and SQL must not leak into Feishu or failure diagnostics.
-        return unavailable(report, type(exc).__name__)
+        safe_codes = {
+            "billing_purchase_date_missing", "billing_row_limit", "billing_record_invalid",
+            "billing_payer_missing", "billing_reconciliation_failed",
+            "billing_owner_not_in_report_snapshot",
+        }
+        reason = str(exc) if isinstance(exc, ValueError) and str(exc) in safe_codes else type(exc).__name__
+        return unavailable(report, reason)

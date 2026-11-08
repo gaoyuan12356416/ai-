@@ -161,6 +161,21 @@ class DailyBillingTests(unittest.TestCase):
             self.assertNotIn("sensitive-driver-message", card)
             self.assertNotIn("$0.00", card)
 
+    def test_missing_bills_preserves_safe_actionable_reason(self):
+        report = baseline([link()])
+        with patch.object(billing, "read_bills", return_value=[]):
+            billing.collect_financials(report, None, [link()])
+        self.assertEqual(report["quality"]["billing"]["error"], "billing_purchase_date_missing")
+        with self.assertRaises(ValueError):
+            require_complete(report)
+
+    def test_unrecognized_billing_errors_do_not_expose_details(self):
+        report = baseline([link()])
+        with patch.object(billing, "read_bills", side_effect=ValueError("secret connection details")):
+            billing.collect_financials(report, None, [link()])
+        self.assertEqual(report["quality"]["billing"]["error"], "ValueError")
+        self.assertNotIn("secret connection details", json.dumps(report))
+
     def test_collector_uses_one_catalog_snapshot_for_both_sources(self):
         catalog = [link()]
         snapshot = (catalog, CatalogErrors())

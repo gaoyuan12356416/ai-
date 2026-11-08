@@ -21,6 +21,15 @@ if __name__ == "__main__":
     except (DefiniteFailure, DeliveryUnknown) as exc:
         print(json.dumps(dict(status="failed", reason=str(exc))), file=sys.stderr)
         raise SystemExit(2)
+    except ValueError as exc:
+        # No batch is frozen or message submitted when collection is incomplete.
+        # The existing service retries only this explicit temporary-data status.
+        incomplete = str(exc) in {
+            "daily_report_sources_incomplete", "daily_report_metrics_incomplete",
+        }
+        print(json.dumps(dict(status="failed", reason=str(exc) if incomplete else "ValueError",
+                              retryable=incomplete)), file=sys.stderr)
+        raise SystemExit(75 if incomplete else 1)
     except Exception as exc:
         print(json.dumps(dict(status="failed", reason=type(exc).__name__)), file=sys.stderr)
         raise SystemExit(1)
