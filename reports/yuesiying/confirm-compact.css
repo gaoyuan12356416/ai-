@@ -1,0 +1,53 @@
+/* Main report only. Keep all metrics visible; no data or selection changes. */
+#materialConfirmDialog { width:min(1760px,98vw)!important; box-sizing:border-box; }
+#materialConfirmDialog section.confirm-drama-card {
+  grid-template-columns:minmax(130px,13%) minmax(0,1fr)!important;
+  gap:0;
+}
+#materialConfirmDialog section.confirm-drama-card>.confirm-drama-head {
+  padding:10px!important; gap:8px!important;
+}
+#materialConfirmDialog .confirm-drama-head strong { font-size:12px!important; }
+#materialConfirmDialog .confirm-cid { font-size:11px!important; }
+#materialConfirmDialog .confirm-totals { gap:6px!important; grid-template-columns:minmax(0,1fr)!important; }
+#materialConfirmDialog .confirm-totals strong { font-size:14px!important; }
+#materialConfirmDialog .confirm-table-scroll {
+  overflow:visible!important; min-width:0!important; width:100%;
+}
+#materialConfirmDialog .confirm-table-scroll table {
+  min-width:0!important; max-width:100%!important; width:100%!important;
+  table-layout:fixed!important;
+}
+#materialConfirmDialog .confirm-table-scroll col:nth-child(1) { width:3%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(2) { width:29%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(3) { width:10%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(4) { width:8%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(5) { width:6%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(6) { width:10%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(7) { width:8%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(8) { width:9%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(9) { width:8%!important; }
+#materialConfirmDialog .confirm-table-scroll col:nth-child(10) { width:9%!important; }
+#materialConfirmDialog .confirm-table-scroll th,
+#materialConfirmDialog .confirm-table-scroll td {
+  padding:8px 4px!important; font-size:12px!important; line-height:1.45!important;
+  box-sizing:border-box; overflow-wrap:anywhere;
+}
+#materialConfirmDialog .confirm-material-name { font-size:12px!important; line-height:1.45!important; }
+#materialConfirmDialog .confirm-material-id { font-size:10px!important; margin-top:3px!important; }
+#materialConfirmDialog .confirm-track { margin-top:5px!important; height:3px!important; }
+#materialConfirmDialog .confirm-event { padding:3px 5px!important; }
+@media (max-width:1279px) {
+  #materialConfirmDialog section.confirm-drama-card { grid-template-columns:minmax(0,1fr)!important; }
+  #materialConfirmDialog section.confirm-drama-card>.confirm-drama-head {
+    position:static!important; flex-direction:row!important; align-items:center!important;
+    justify-content:space-between!important; border-right:0!important;
+    border-bottom:1px solid #dce5f1!important; border-radius:12px 12px 0 0!important;
+  }
+  #materialConfirmDialog .confirm-totals { display:flex!important; border-top:0!important; padding-top:0!important; }
+}
+@media (max-width:1099px) {
+  #materialConfirmDialog .confirm-table-scroll th,
+  #materialConfirmDialog .confirm-table-scroll td { padding:7px 3px!important; font-size:11px!important; }
+  #materialConfirmDialog .confirm-material-name { font-size:11px!important; }
+}
