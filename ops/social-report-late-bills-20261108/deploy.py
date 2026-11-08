@@ -13,7 +13,7 @@ def main():
  action=argparse.ArgumentParser();action.add_argument('action',choices=['stage','apply','rollback']);act=action.parse_args().action
  os.umask(0o077);manifest=STATE/'deployment.json'
  if act=='stage':
-  assert not manifest.exists()
+  assert not manifest.exists() or json.loads(manifest.read_text()).get('status')=='rolled_back'
   assert run('findmnt','-rn','-o','TARGET','--mountpoint','/mnt/data-disk')=='/mnt/data-disk'
   assert shutil.disk_usage(STATE).free>1024**3
   assert not run('git','-C',str(ROOT),'status','--porcelain')

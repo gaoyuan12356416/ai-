@@ -7,3 +7,5 @@
 验证：`python3 -m unittest discover -s tests -p 'test_social_daily_*.py' -q`。
 推送并 fetch 验证提交后运行本目录 deploy.py stage；候选版本 --preview 检查完整性后 apply。检查 systemctl show 的 Restart、RestartUSec、RestartPreventExitStatus、StartLimitBurst、StartLimitIntervalUSec 与 timer。
 回滚：本目录 deploy.py rollback。仅回滚代码指针和重试 drop-in；不恢复发送账本、不重复发送历史日报。
+
+本机旧版 systemd 不支持 oneshot 的 Restart；drop-in 将报表命令改用 simple 类型，以主进程退出码控制重试，timer 和命令保持不变。
