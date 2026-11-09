@@ -267,6 +267,11 @@ def activate(backup, wait_seconds):
     if source_commit() != info['commit'] or info['status'] != 'staged':
         raise RuntimeError('staged_source_required')
     runtime_files(Path(info['release']))
+    # Required by the existing durable-storage validator. Missing in the initial
+    # empty-lane bootstrap; creating it does not recreate or replay any task.
+    info['media_work_preexisting'] = (lane.ROOT / 'media-work').exists()
+    lane.ensure_media_work()
+    record(backup / 'deployment.json', info)
     with switch_window(backup, wait_seconds):
         if str(lane.CURRENT.resolve()) != info['previous_current']:
             raise RuntimeError('concurrent_release_switch')

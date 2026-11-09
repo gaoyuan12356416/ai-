@@ -197,6 +197,17 @@ def pid_state():
     return cmd('systemctl','show','drama-material-api.service','x-post-automation.service','x-auto-post-service.service','-p','Id,MainPID')
 
 
+def ensure_media_work():
+    """Initialize the independent publisher's required media directory once."""
+    path = ROOT / 'media-work'
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise RuntimeError('tag_media_work_invalid')
+    if not path.exists():
+        path.mkdir(mode=0o700)
+        shutil.chown(path, 'x-post-automation', 'x-post-automation')
+    return path
+
+
 def install():
     if cmd('findmnt','-rn','-o','UUID','--mountpoint','/mnt/data-disk')!='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':raise RuntimeError('data_disk_missing')
     commit=cmd('git','-C',str(SOURCE),'rev-parse','HEAD')
@@ -216,6 +227,7 @@ def install():
     try:
         for name,owner,mode in [('auto','x-post-daily',0o700),('daily-work','x-post-daily',0o700),('posts','x-post-automation',0o700),('s2l','x-post-automation',0o755)]:
             path=ROOT/name;path.mkdir(exist_ok=True);shutil.chown(path,owner,owner);path.chmod(mode)
+        ensure_media_work()
         ROOT.chmod(0o755)
         if not (ROOT/'bin').exists():(ROOT/'bin').symlink_to('/mnt/data-disk/x-post-automation/bin')
         if not ENV.exists():
