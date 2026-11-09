@@ -1,6 +1,7 @@
 """Scoped GitHub release for Excel free episodes; never restore business data."""
 import argparse
 from datetime import datetime, timezone
+import difflib
 import json
 import os
 from pathlib import Path
@@ -81,7 +82,15 @@ def prepare():
     stage = folder / 'main-candidate'
     (stage / 'features/x_posts').mkdir(parents=True)
     shutil.copy2(base.MAIN / 'features/x_posts/service.py', stage / 'features/x_posts/service.py')
-    patch = subprocess.check_output(['git', '-C', str(base.SOURCE), 'diff', BASE_COMMIT, commit, '--', 'features/x_posts/service.py'])
+    rel = 'features/x_posts/service.py'
+    original = subprocess.check_output(['git', '-C', str(base.SOURCE), 'show', BASE_COMMIT + ':' + rel]).decode()
+    updated = (base.SOURCE / rel).read_text()
+    # The existing main API intentionally lacks this X-runner-only call
+    # argument. Omit it from both diff contexts; do not add it to main.
+    runtime_only = '                allow_deferred_media=os.environ.get("PIPELINE_X_DISPATCH_ENABLED") == "1",\n'
+    assert original.count(runtime_only) == updated.count(runtime_only) == 1
+    patch = ''.join(difflib.unified_diff(original.replace(runtime_only, '').splitlines(keepends=True),
+        updated.replace(runtime_only, '').splitlines(keepends=True), fromfile='a/' + rel, tofile='b/' + rel)).encode()
     subprocess.run(['git', 'apply', '--unsafe-paths', '--directory=' + str(stage)],
                    input=patch, cwd=folder, check=True, capture_output=True)
     external = []
