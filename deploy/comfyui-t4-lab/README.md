@@ -16,6 +16,13 @@ when the GPU is idle. Installation and HTTP checks do not enqueue any inference.
 Install only after this deployment directory has been committed and fetched from
 GitHub on the target. Run `bash deploy/comfyui-t4-lab/install.sh` as root.
 
+If the component CDN is very slow, pause only the installation downloader (never
+production workers), fetch this source revision, then run
+`venv/bin/python deployment-source/deploy/comfyui-t4-lab/download_component.py vae`
+and the same command with `text_encoder` from the lab directory. The helper uses
+bounded ranges, keeps reusable chunks, checks the official full SHA256, and only
+then activates the model file. Resume `install.sh` afterwards.
+
 Access from the authorized Windows client:
 
 ```powershell
