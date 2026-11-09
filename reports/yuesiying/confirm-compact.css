@@ -37,6 +37,15 @@
 #materialConfirmDialog .confirm-material-id { font-size:10px!important; margin-top:3px!important; }
 #materialConfirmDialog .confirm-track { margin-top:5px!important; height:3px!important; }
 #materialConfirmDialog .confirm-event { padding:3px 5px!important; }
+/* Stick each material header to the existing vertical viewport, not the page.
+   The next drama's header replaces it when its table enters the viewport. */
+#materialConfirmDialog .confirm-table-scroll thead {
+  position:sticky!important; top:0!important; z-index:4;
+  background:#fafcff; box-shadow:0 1px 0 #dce5f1;
+}
+#materialConfirmDialog .confirm-table-scroll thead th {
+  background:#fafcff;
+}
 @media (max-width:1279px) {
   #materialConfirmDialog section.confirm-drama-card { grid-template-columns:minmax(0,1fr)!important; }
   #materialConfirmDialog section.confirm-drama-card>.confirm-drama-head {
