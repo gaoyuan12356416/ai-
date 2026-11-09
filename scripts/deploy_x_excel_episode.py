@@ -82,7 +82,8 @@ def prepare():
     (stage / 'features/x_posts').mkdir(parents=True)
     shutil.copy2(base.MAIN / 'features/x_posts/service.py', stage / 'features/x_posts/service.py')
     patch = subprocess.check_output(['git', '-C', str(base.SOURCE), 'diff', BASE_COMMIT, commit, '--', 'features/x_posts/service.py'])
-    subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-d', str(stage)], input=patch, check=True, capture_output=True)
+    subprocess.run(['git', 'apply', '--unsafe-paths', '--directory=' + str(stage)],
+                   input=patch, cwd=folder, check=True, capture_output=True)
     external = []
     for rel in FILES:
         if rel.startswith('scripts/'):
