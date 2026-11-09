@@ -94,7 +94,9 @@ def install(source, args):
     subprocess.run(["/usr/bin/python3", "-c", "from features.x_material_alert import AlertStore, build_card, read_journal"],
                    cwd=release, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), check=True)
     config = json.loads(Path(args.config).read_text())
-    config["start_at"] = datetime.now(timezone.utc).isoformat()
+    prior_config = json.loads(config_target.read_text()) if config_target.exists() else {}
+    same_target = all(config.get(k) == prior_config.get(k) for k in ("chat_id", "mention_id"))
+    config["start_at"] = (prior_config.get("start_at") if same_target else None) or datetime.now(timezone.utc).isoformat()
     config["state_dir"] = str(BASE)
     config_target.write_text(json.dumps(config, ensure_ascii=False, indent=2))
     config_target.chmod(0o600)
