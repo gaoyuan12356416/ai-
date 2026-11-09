@@ -260,3 +260,43 @@ cannot start the serving scheduler or target the live cache. It keeps the FIFO
 permit, 15-second statement timeout and atomic complete-result publication.
 Verify the next warm cycle without this flag under the normal 840-second budget
 before activating the release; no production unit/configuration change is needed.
+
+### Production verification (2026-11-09, Beijing time)
+
+- Runtime commit `db25be29966b6efbdae15fbb5994b00b09eed6bb`, fetched from GitHub;
+  only `campaign-copy-performance.service` restarted at 15:34:24. Backup and
+  evidence: `/mnt/data-disk/campaign-copy-performance/recovery-20261109/`, with
+  pre-switch backup `backup/pre-switch-20261109T153422`.
+- The first normal-budget recovery attempt failed after 845.617 seconds and
+  retained its seed. The supervised recovery then succeeded in 664.685 seconds;
+  the second warm run, without the recovery flag, succeeded in 666.011 seconds
+  under the unchanged 840-second SQL budget and 900-second scheduler cadence.
+- The accepted source snapshot is 15:21:29, through November 9: 516,735 Campaigns,
+  6,188 Ad Set/Ad entities, and 1,106,257 daily rows. All November 4–9 dates have
+  Campaign-day rows. Today is a partial-day snapshot, not a finalized daily total.
+- The two history checks retained respectively 942,227 / 942,494 Campaign-day
+  rows and 19,918 / 19,917 Ad Set/Ad-day rows outside each run's refreshed dates.
+  Duplicate keys: zero. Six later source samples matched all 11 metrics/counts:
+  four Meta/TikTok Campaign samples on November 8, one Ad on November 5, and one
+  retained Ad Set sample on September 20. These were separate source snapshots.
+- Campaign detail queries fell from 363 in recovery to 43 in the normal cycle;
+  405,285 unchanged descriptions remain overdue, down from 415,054. Their actual
+  check times remain intact and the Campaign tab labels the delay. Financial
+  rows and exact Ad membership are freshly read for every selected date.
+- 32 tests passed locally and on the server, and JavaScript syntax passed. Public
+  HTML/API returned 200, conditional API HEAD returned 304, cache state was `hit`,
+  and the public ETag matched the accepted candidate. The private cache SHA-256
+  is `c86be62987faba37024b70345efdd7ff8356c199d4e204cd1643c63faa9a1ddb`;
+  public SHA-256 is `1fc8d5c264a585627117daab4ab6970cf80898241e677ee0354dcfd9d3cfcb62`.
+- The real public page rendered without browser console errors. Its Today
+  preset selected November 9 and displayed 12,605 Campaign-day rows, spend
+  52,090.53, and AF D0 revenue 13,961.23, matching the accepted 15:21 snapshot.
+- The first post-deployment scheduled refresh succeeded at 15:47:18 in 738.251
+  seconds, advancing the source snapshot to 15:35:08 with 516,754 Campaigns and
+  1,106,404 daily rows. Public and loopback ETags matched and advanced together;
+  cache state remained `hit`, `last_error` was null, and overdue descriptions
+  decreased again to 395,388. This verifies automatic continuity after activation.
+- Rollback: restore the `current` symlink to release
+  `5ab4071e8c82940b7a1e1b87f01e1022d7fb3d97/ops/campaign-copy-performance`
+  and restart only this report. Retain the latest verified cache. No source
+  database writes, advertising execution changes or publishing-service restarts.
