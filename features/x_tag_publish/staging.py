@@ -31,7 +31,7 @@ def build(source, repo, target, *, verify=True):
     target.mkdir(parents=True)
     for directory in ('features', 'scripts', 'static'):
         shutil.copytree(source / directory, target / directory, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    for module in ('x_tag_publish', 'x_tag_revenue', 'social_analytics'):
+    for module in ('x_tag_publish', 'x_tag_revenue', 'social_analytics', 'youtube_analytics'):
         shutil.copytree(repo / 'features' / module, target / 'features' / module,
                         dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     (target / 'features/__init__.py').touch()

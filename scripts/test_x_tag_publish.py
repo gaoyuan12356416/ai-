@@ -75,6 +75,33 @@ class PolicyTests(unittest.TestCase):
 
 
 class IsolationTests(unittest.TestCase):
+    def test_new_numeric_namespace_survives_attribution_freeze_and_analytics(self):
+        from features.x_posts import attribution
+        from features.social_analytics.adapters import read_x
+        from features.social_analytics.warehouse_refresh import Reader
+        self.assertTrue(callable(Reader))
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path=root/'posts.db';users=root/'users.db'
+            store=post.XPostStore(path);initialize_ids(path)
+            with closing(sqlite3.connect(users)) as db, db:
+                db.execute('CREATE TABLE drama_admin_user(user_id TEXT,tenant_key TEXT,email TEXT,name TEXT)')
+                db.execute("INSERT INTO drama_admin_user VALUES('owner','tenant','test@example.test','Test')")
+            item=store.add_pool_materials(['101'],dict(user_id='owner',name='Test'),
+                validation_checks=[dict(material_id='101',error_code='',error_message='')])['items'][0]
+            queue=store.create_daily_plan('2026-07-23','2026-07-22',[plan_candidate(2,item)],require_pool=True)['queues'][0]
+            log=store.reserve_log(queue['id'])
+            resolver=attribution.Resolver(path,root/'unused-auto.db',users,lambda email:['248'],lambda uid:['test@example.test'])
+            context=resolver.resolve(queue['id'],log['id'])
+            attribution.freeze(path,log,context)
+            self.assertEqual(context['af_c_id'],str(queue['id']))
+            self.assertEqual(context['owner'],'owner')
+            self.assertGreater(int(context['af_c_id']),ID_BASE)
+            url=attribution.build_url(context,log)
+            store.prepare_log(log['id'],url,post._build_short_url('https://gy.g2flow.com/s2l-tag',log['id']),'preview')
+            catalog=read_x(path)
+            self.assertEqual(len(catalog),1)
+            self.assertEqual(catalog[0]['key'][0],str(queue['id']))
+
     def test_bootstrap_copies_only_active_metrics_and_leaves_every_business_store_empty(self):
         from features.x_tag_publish.bootstrap import initialize
         with tempfile.TemporaryDirectory() as tmp:
