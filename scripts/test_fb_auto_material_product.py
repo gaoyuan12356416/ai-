@@ -91,13 +91,13 @@ class ProductTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 normalize_template_payload({**raw, "material_product": value})
 
-    def test_keyset_source_product_and_target_metadata_remain_separate(self):
+    def test_indexed_source_product_and_target_metadata_remain_separate(self):
         mysql, metrics = Source(), Metrics()
         result = MaterialRepository(mysql, metrics).candidate_snapshot(self.config())
         self.assertEqual([m.material_id for m in result.candidates], ["10"])
         source = next(params for sql, params in mysql.calls if "ads_custom_source" in sql)
-        self.assertEqual(source[1], "DramawaveSource")
-        self.assertEqual(source[3], "1479")
+        self.assertEqual(source[2], "DramawaveSource")
+        self.assertEqual(source[4], "1479")
         self.assertEqual(metrics.calls[0]["product"], "Dramawave")
         for sql, params in mysql.calls:
             if "ads_drama_resource" in sql or "JOIN (SELECT d0.content_id" in sql:

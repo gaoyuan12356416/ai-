@@ -68,15 +68,16 @@ class LanguageFallbackTests(unittest.TestCase):
         self.config={**normalize_template_payload(raw),**TARGET,'language':'en'}
         self.repo=MaterialRepository(self.catalog,Metrics(),now_fn=lambda:NOW)
 
-    def test_keyset_empty_null_and_whitespace_use_related_drama_language(self):
+    def test_complete_catalog_empty_null_and_whitespace_use_related_drama_language(self):
         for mid,empty in enumerate(('',None,'  '),10):self.catalog.add(mid,'en-'+str(mid),empty,'en')
         self.catalog.add(20,'pl-drama','','pl')
         result=self.repo.candidate_snapshot(self.config)
         self.assertEqual({m.material_id for m in result.candidates},{'10','11','12'})
         self.assertEqual({m.language for m in result.candidates},{'en'})
         self.assertTrue(all(m.drama_description=='Description' for m in result.candidates))
+        self.assertTrue(all('FORCE INDEX(PRIMARY)' not in sql for sql,_ in self.catalog.calls))
 
-    def test_metric_priority_query_uses_same_fallback(self):
+    def test_indexed_scan_keeps_metric_ranking_and_fallback(self):
         self.catalog.add(10,'en-drama','','en')
         repo=MaterialRepository(self.catalog,Metrics(),now_fn=lambda:NOW,
             candidate_limit=1,metric_prefilter_min_content_ids=1)
@@ -84,6 +85,12 @@ class LanguageFallbackTests(unittest.TestCase):
         source_queries=[sql for sql,_ in self.catalog.calls if 'ads_custom_source' in sql]
         self.assertEqual(len(source_queries),1)
         self.assertIn('idx_source_type_source_id',source_queries[0])
+
+    def test_complete_indexed_scan_keeps_zero_history_dramas_across_batches(self):
+        for mid in (10,20,30):self.catalog.add(mid,'zero-'+str(mid),'','en')
+        repo=MaterialRepository(self.catalog,Metrics(),now_fn=lambda:NOW,metric_prefilter_batch_size=1)
+        self.assertEqual({m.material_id for m in repo.candidate_snapshot(self.config).candidates},{'10','20','30'})
+        self.assertEqual(len([sql for sql,_ in self.catalog.calls if 'ads_custom_source' in sql]),3)
 
     def test_populated_source_language_is_not_overridden(self):
         self.catalog.add(10,'en-drama','pl','en')

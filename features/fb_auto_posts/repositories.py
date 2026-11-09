@@ -657,11 +657,26 @@ class MaterialRepository:
         elif drama_rule["sort_by"] == "roas":
             priority_content_ids = [str(content_id) for content_id, totals in metric_window.by_drama.items() if totals.roas is not None]
         priority_content_ids.sort(key=lambda value: value.encode("utf-8"))
-        if len(priority_content_ids) >= self.metric_prefilter_min_content_ids:
-            for start_at in range(0, len(priority_content_ids), self.metric_prefilter_batch_size):
+        # Empty-language source rows cannot use a selective material-language
+        # predicate. Enumerate the complete eligible drama set first, then use
+        # the source/content index. This includes zero-history dramas and avoids
+        # repeating a full source-table scan for each Page language.
+        complete_content_scan = inherit_language
+        scan_content_ids = priority_content_ids
+        if complete_content_scan:
+            eligible = self.mysql.select(f"""
+                SELECT /*+ MAX_EXECUTION_TIME(45000) */ DISTINCT TRIM(d.content_id) content_id
+                  FROM `{self.mysql.schema}`.ads_drama_info d
+                 WHERE d.app_id=%s AND d.release_status=1
+                   AND d.deploy_time>%s AND d.deploy_time<=%s{type_sql}
+                   AND TRIM(COALESCE(d.content_id,''))<>''
+            """, (app_id, deploy_after, int(self.now_fn().timestamp()), *allowed_types))
+            scan_content_ids = sorted({str(row["content_id"]) for row in eligible}, key=lambda value: value.encode("utf-8"))
+        if complete_content_scan or len(scan_content_ids) >= self.metric_prefilter_min_content_ids:
+            for start_at in range(0, len(scan_content_ids), self.metric_prefilter_batch_size):
                 if self.monotonic_fn() >= deadline:
                     raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)
-                batch = priority_content_ids[start_at:start_at + self.metric_prefilter_batch_size]
+                batch = scan_content_ids[start_at:start_at + self.metric_prefilter_batch_size]
                 ids_sql = ",".join("%s" for _ in batch)
                 priority_sql = f"""
                     SELECT /*+ MAX_EXECUTION_TIME(45000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,s.url media_url,
@@ -686,7 +701,7 @@ class MaterialRepository:
                 end_epoch = int(self.now_fn().timestamp())
                 params: tuple[Any, ...] = (int(config["material_data_source"]), *batch, product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"])
                 add_rows(self.mysql.select(priority_sql, params), expected_content_ids=set(batch))
-            if len(candidates) >= candidate_limit or (per_drama_limit and len({m.content_id for m in candidates}) >= 20):
+            if complete_content_scan or len(candidates) >= candidate_limit or (per_drama_limit and len({m.content_id for m in candidates}) >= 20):
                 return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids), tuple(metric_window.dates))
             candidates.clear()
             seen_material_ids.clear()

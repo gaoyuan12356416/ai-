@@ -46,7 +46,7 @@ def prepare(source, folder):
         result = subprocess.run([sys.executable,str(candidate/relative),'-v'],capture_output=True,text=True,timeout=60)
         (folder/(test+'.log')).write_text(result.stdout+result.stderr)
         assert result.returncode == 0, 'candidate_tests_failed:'+test
-    print(json.dumps(dict(prepared=True,commit=commit,tests='14 passed')))
+    print(json.dumps(dict(prepared=True,commit=commit,tests='15 passed')))
 
 
 def main():
