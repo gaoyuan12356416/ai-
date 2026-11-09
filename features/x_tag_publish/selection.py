@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from features.x_auto_posts.selector import TwoStageSelector
 from features.x_auto_posts.x_sidecar import XPostAutoBridgeClient
-from .policy import Decision, catalog_labels, language
+from .policy import Decision, ranked_dramas, language
 
 
 class AuditStore:
@@ -40,15 +40,9 @@ class ProfileSelector(TwoStageSelector):
                                       os.environ['X_POST_AUTO_INTERNAL_TOKEN'])
         account = bridge.account_snapshot(request.account_id)
         decision = Decision(account, ['auto', request.template_id, request.template_version, request.run_id, request.task_id])
-        fallback = ''
-        try:
-            catalog = catalog_labels(self.source, candidates)
-        except Exception:
-            # Labels are an allocation preference. Preserve otherwise valid source candidates.
-            catalog, fallback = {}, 'candidate_metadata_unavailable'
-        self._profile_context.value = dict(decision=decision, catalog=catalog,
-                                            language=language(request.language), fallback=fallback)
-        return sorted(candidates, key=lambda d: decision.rank(catalog.get((d.content_id, language(d.language)), {})))
+        context = dict(decision=decision, catalog={}, language=language(request.language), fallback='')
+        self._profile_context.value = context
+        return ranked_dramas(self.source, candidates, context)
 
     def _select(self, request, *, reserve):
         try:

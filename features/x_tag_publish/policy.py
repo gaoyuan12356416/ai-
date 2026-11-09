@@ -168,6 +168,37 @@ def catalog_labels(source, dramas):
         return collect_classifications(query, source.schema, ids)
 
 
+def ranked_dramas(source, candidates, context, batch_size=40):
+    """Yield the exact stable hierarchy order without reading unused labels.
+
+    (0, 0, 0) is the best possible rank. Such candidates can be yielded in
+    original order as soon as a batch is classified. Lower ranks wait until
+    every candidate has been considered, so an absent preferred combination
+    never causes premature fallback or skips a better candidate in a later batch.
+    """
+    deferred = []
+    decision = context['decision']
+    def rank(drama):
+        return decision.rank(context['catalog'].get((drama.content_id, language(drama.language)), {}))
+    for start in range(0, len(candidates), batch_size):
+        batch = candidates[start:start + batch_size]
+        try:
+            context['catalog'].update(catalog_labels(source, batch))
+        except Exception:
+            context['fallback'] = 'candidate_metadata_unavailable'
+            # Already yielded candidates failed ordinary material admission.
+            # Resume the old order for every remaining candidate, once only.
+            yield from deferred
+            yield from candidates[start:]
+            return
+        for drama in batch:
+            if rank(drama) == (0, 0, 0):
+                yield drama
+            else:
+                deferred.append(drama)
+    yield from sorted(deferred, key=rank)
+
+
 def initialize_ids(path):
     """Reserve a numeric campaign namespace without sharing counters with legacy."""
     import sqlite3

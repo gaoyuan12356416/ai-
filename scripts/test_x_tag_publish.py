@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch, Mock
 
 sys.path.insert(0, os.environ['X_TAG_TEST_RUNTIME'])
-from features.x_tag_publish.policy import Decision, ID_BASE, initialize_ids, label_index, lane_paths, catalog_labels
+from features.x_tag_publish.policy import Decision, ID_BASE, initialize_ids, label_index, lane_paths, catalog_labels, ranked_dramas
 from features.x_tag_publish.selection import ProfileSelector
 from features.x_tag_publish.pool import install_reservation_policy, material_candidates
 from features.x_tag_publish import gateway
@@ -41,6 +41,49 @@ ACCOUNT = dict(id=101, x_user_id='999', username='channel', drama_language='en',
 
 
 class PolicyTests(unittest.TestCase):
+    def test_lazy_order_equals_full_sort_across_all_hierarchy_and_unknown_ranks(self):
+        decision = Decision(ACCOUNT, 'test', profile([('romance',10000)]))
+        metadata = [classify('Female,Sweet','translated'), classify('Female,Revenge','local'),
+                    classify('Male,Sweet','local'), classify('Female,Sweet','local'), classify([])]
+        candidates = [SimpleNamespace(content_id=str(i), language='en') for i in range(137)]
+        catalog = {(row.content_id,'en'):metadata[int(row.content_id)%len(metadata)] for row in candidates}
+        context = dict(decision=decision,catalog={},fallback='')
+        with patch('features.x_tag_publish.policy.catalog_labels',side_effect=lambda source,batch:{(d.content_id,'en'):catalog[(d.content_id,'en')] for d in batch}) as load:
+            actual=list(ranked_dramas(None,candidates,context,batch_size=7))
+        self.assertEqual(actual,sorted(candidates,key=lambda d:decision.rank(catalog[(d.content_id,'en')])))
+        self.assertEqual(len(context['catalog']),137)
+        self.assertEqual(load.call_count,20)
+
+    def test_success_in_best_branch_does_not_load_unused_catalog(self):
+        candidates=[SimpleNamespace(content_id=str(i),language='en') for i in range(8281)]
+        context=dict(decision=Decision(ACCOUNT,'test',profile([('romance',10000)])),catalog={},fallback='')
+        with patch('features.x_tag_publish.policy.catalog_labels',side_effect=lambda source,batch:{(d.content_id,'en'):classify('Female,Sweet','local') for d in batch}) as load:
+            iterator=ranked_dramas(None,candidates,context)
+            self.assertEqual(next(iterator),candidates[0])
+            iterator.close()
+        self.assertEqual(load.call_count,1)
+        self.assertEqual(len(load.call_args.args[1]),40)
+
+    def test_no_primary_branch_scans_every_candidate_before_ordered_fallback(self):
+        candidates=[SimpleNamespace(content_id=str(i),language='en') for i in range(81)]
+        context=dict(decision=Decision(ACCOUNT,'test',profile([('romance',10000)])),catalog={},fallback='')
+        def load(source,batch):
+            return {(d.content_id,'en'):classify('Female,Revenge','local' if d.content_id=='80' else 'translated') for d in batch}
+        with patch('features.x_tag_publish.policy.catalog_labels',side_effect=load) as query:
+            iterator=ranked_dramas(None,candidates,context)
+            self.assertEqual(next(iterator),candidates[-1])
+            self.assertEqual(query.call_count,3)
+            self.assertEqual(list(iterator),candidates[:-1])
+
+    def test_late_metadata_failure_retains_remaining_old_order_without_duplicates(self):
+        candidates=[SimpleNamespace(content_id=str(i),language='en') for i in range(5)]
+        context=dict(decision=Decision(ACCOUNT,'test',profile([('romance',10000)])),catalog={},fallback='')
+        first={('0','en'):classify('Female,Revenge','local'),('1','en'):classify('Female,Sweet','local')}
+        with patch('features.x_tag_publish.policy.catalog_labels',side_effect=[first,OSError('unavailable')]):
+            actual=list(ranked_dramas(None,candidates,context,batch_size=2))
+        self.assertEqual(actual,[candidates[1],candidates[0],*candidates[2:]])
+        self.assertEqual(context['fallback'],'candidate_metadata_unavailable')
+
     def test_catalog_batches_share_read_only_connection_without_truncation(self):
         cursors = []
         def cursor_factory(connection):
