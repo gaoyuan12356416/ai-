@@ -8,7 +8,9 @@ import subprocess
 from datetime import datetime, timezone
 
 from features.post_daily_report.delivery import DeliveryStore, DeliveryUnknown, DefiniteFailure, send_card
-from features.x_posts.material_shortage import EVENT
+
+# Keep the standalone sender independent of the publisher package initializer.
+EVENT = "x_material_language_shortage_v1"
 
 LANGUAGES = {"en": "英语", "ja": "日语", "ko": "韩语", "es": "西班牙语", "de": "德语",
              "pt-br": "葡萄牙语（巴西）", "pt": "葡萄牙语", "pl": "波兰语", "cs": "捷克语",

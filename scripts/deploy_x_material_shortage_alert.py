@@ -17,8 +17,7 @@ ALERT_CURRENT = Path("/opt/x-material-shortage-alert/current")
 UNITS = ("x-material-shortage-alert.service", "x-material-shortage-alert.timer")
 RUNNER = "scripts/x_post_schedule_runner.py"
 X_FILES = (RUNNER, "features/x_posts/material_shortage.py")
-ALERT_FILES = ("features/__init__.py", "features/x_accounts/__init__.py", "features/x_accounts/language.py",
-               "features/x_posts/__init__.py", "features/x_posts/material_shortage.py",
+ALERT_FILES = ("features/__init__.py",
                "features/post_daily_report/__init__.py", "features/post_daily_report/delivery.py",
                "features/x_material_alert.py", "scripts/x_material_shortage_alert.py")
 
@@ -58,6 +57,9 @@ def install(source, args):
     backup.mkdir(parents=True)
     release = BASE / "releases" / commit
     x_release = previous.parent / (stamp + "-material-alert-" + commit[:8])
+    x_changed = any(not (previous / p).exists() or digest(previous / p) != digest(source / p) for p in X_FILES)
+    if not x_changed:
+        x_release = previous
     config_target = Path("/etc/x-material-shortage-alert.json")
     paths = [config_target] + [Path("/etc/systemd/system") / unit for unit in UNITS]
     manifest = {"commit": commit, "source": str(source), "previous_x": str(previous), "x_release": str(x_release),
@@ -74,11 +76,12 @@ def install(source, args):
     shutil.copy2(previous / RUNNER, backup / "x_post_schedule_runner.py")
     (backup / "manifest.json").write_text(json.dumps(manifest, indent=2))
     # Full copy retains every concurrently deployed component; only X_FILES change.
-    shutil.copytree(previous, x_release, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", ".git"))
-    for relative in X_FILES:
-        target = x_release / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / relative, target)
+    if x_changed:
+        shutil.copytree(previous, x_release, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", ".git"))
+        for relative in X_FILES:
+            target = x_release / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / relative, target)
     release.mkdir(parents=True)
     for relative in ALERT_FILES:
         original = source / relative
@@ -88,6 +91,8 @@ def install(source, args):
             shutil.copy2(original, target)
     for path in [x_release / p for p in X_FILES] + [release / p for p in ALERT_FILES if (release / p).exists()]:
         py_compile.compile(str(path), doraise=True)
+    subprocess.run(["/usr/bin/python3", "-c", "from features.x_material_alert import AlertStore, build_card, read_journal"],
+                   cwd=release, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), check=True)
     config = json.loads(Path(args.config).read_text())
     config["start_at"] = datetime.now(timezone.utc).isoformat()
     config["state_dir"] = str(BASE)
@@ -99,7 +104,8 @@ def install(source, args):
     if X_CURRENT.resolve() != previous or digest(previous / RUNNER) != args.runner_before:
         raise RuntimeError("concurrent_runtime_deployment_detected")
     link(ALERT_CURRENT, release)
-    link(X_CURRENT, x_release)
+    if x_changed:
+        link(X_CURRENT, x_release)
     run("systemctl", "daemon-reload")
     run("systemctl", "enable", "--now", UNITS[1])
     manifest["activated_at"] = datetime.now(timezone.utc).isoformat()
