@@ -24,7 +24,8 @@ def collect_languages(reader, keys):
     found = collections.defaultdict(set)
     for app_id, contents in by_app.items():
         for offset in range(0, len(contents), 500):
-            literals = ["CONVERT(0x%s USING utf8mb4)" % value.encode('utf-8').hex()
+            # Binary literals preserve exact IDs across the source column's collation.
+            literals = ["0x%s" % value.encode('utf-8').hex()
                         for value in contents[offset:offset + 500]]
             sql = ("SELECT HEX(JSON_OBJECT('app_id',app_id,'content_id',MIN(content_id),"
                    "'language',MIN(language))) FROM kunlunads_dev.ads_drama_info FORCE INDEX(ac) "
