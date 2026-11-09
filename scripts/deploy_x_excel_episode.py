@@ -140,9 +140,12 @@ def prepare():
         (manual_env_path, 'X_POST_SOURCE_DURATION_ALLOWED_HOSTS=' + ','.join(manual_hosts) + '\n'),
         (Path('/etc/systemd/system/x-post-manual.service.d/zzzz-x-excel-episode-source.conf'),
          '[Service]\nEnvironmentFile=' + str(manual_env_path) + '\n')]
-    for target, content in config_files:
+    for index, (target, content) in enumerate(config_files):
         assert not target.exists(), 'concurrent configuration: ' + str(target)
-        saved, candidate = folder / ('before-config-' + target.name), folder / ('next-config-' + target.name)
+        # API and manual units use the same drop-in basename in different
+        # directories. Keep their staged files distinct as well.
+        suffix = str(index) + '-' + target.name
+        saved, candidate = folder / ('before-config-' + suffix), folder / ('next-config-' + suffix)
         saved.write_bytes(b''); candidate.write_text(content)
         main_external.append({'path': str(target), 'before': str(saved), 'after': str(candidate),
             'before_sha': base.digest(saved), 'after_sha': base.digest(candidate), 'existed': False})
