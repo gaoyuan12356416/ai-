@@ -2,6 +2,7 @@
 """Allow SQLite WAL reader coordination only for the independent gateway."""
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -43,15 +44,20 @@ def install():
     mount_check()
     commit = source_commit()
     source = SOURCE / 'deploy/x-tag-gateway-sqlite.conf'
+    # readonly() canonicalizes its URI. A writable alias is insufficient when
+    # the data directory lives behind the root-storage relocation symlink.
+    directory = (lane.MAIN / 'data').resolve(strict=True)
+    content = source.read_text().replace('@USERS_DATA_DIR@', str(directory)).encode()
     backup = BACKUPS / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     backup.mkdir(parents=True, mode=0o700)
     info = dict(commit=commit, backup=str(backup), target=str(TARGET), before=lane.sha(TARGET),
-                after=lane.sha(source), legacy_before=lane.pid_state(), status='prepared')
+                after=hashlib.sha256(content).hexdigest(), users_data_directory=str(directory),
+                legacy_before=lane.pid_state(), status='prepared')
     if TARGET.exists():
         lane.atomic(backup / 'before.conf', TARGET.read_bytes())
     record(backup / 'deployment.json', info)
     try:
-        lane.atomic(TARGET, source.read_bytes())
+        lane.atomic(TARGET, content)
         restart()
         info.update(status='active', legacy_after=lane.pid_state())
         info['legacy_pids_unchanged'] = info['legacy_before'] == info['legacy_after']
