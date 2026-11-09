@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from .policy import ROOT, lane_paths, portrait_snapshot, Decision
 from .transport import Error, rpc
+from features.x_tag_revenue.tags import localize_audit
 
 AUTO = '/api/admin/x-tag-auto-publish'
 POST = '/api/admin/x-tag-posts'
@@ -119,11 +120,11 @@ def enrich_logs(result):
             qid = row.get('queue_id')
             audit = db.execute('SELECT selection_json FROM x_tag_queue_selection WHERE queue_id=?', (qid,)).fetchone()
             if audit:
-                row['tag_profile'] = json.loads(audit[0])
+                row['tag_profile'] = localize_audit(json.loads(audit[0]))
             else:
                 task = auto.execute('SELECT selection_json FROM x_auto_task WHERE execution_queue_id=?', (qid,)).fetchone()
                 if task:
-                    row['tag_profile'] = json.loads(task[0]).get('tag_profile')
+                    row['tag_profile'] = localize_audit(json.loads(task[0]).get('tag_profile'))
     return result
 
 

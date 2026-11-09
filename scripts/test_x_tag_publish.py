@@ -17,6 +17,7 @@ from features.x_tag_publish.policy import Decision, ID_BASE, initialize_ids, lab
 from features.x_tag_publish.selection import ProfileSelector
 from features.x_tag_publish.pool import install_reservation_policy, material_candidates
 from features.x_tag_publish import gateway
+from features.x_tag_revenue.tags import VERSION as TAG_MAPPING_VERSION, localize_audit
 from features.x_posts import service as post
 from features.x_auto_posts.core import XAutoPostStore
 from scripts import test_x_auto_post_selector as fixture
@@ -27,13 +28,32 @@ def profile(tags=None, revenue=10000, **meta):
     tags = tags or [('romance', 7000), ('revenge', 3000)]
     return ({'accounts': {'999': dict(status='complete', revenue_cents=revenue,
         tags=[dict(key=k, name=k, revenue_cents=v, share_bp=v) for k, v in tags])}},
-        dict(version='frozen-1', end='2026-11-08', **meta))
+        dict(version='frozen-1', end='2026-11-08', tag_mapping_version=TAG_MAPPING_VERSION, **meta))
 
 
 ACCOUNT = dict(id=101, x_user_id='999', username='channel', drama_language='en', long_video_eligible=False)
 
 
 class PolicyTests(unittest.TestCase):
+    def test_legacy_profile_is_not_reinterpreted_using_aggregated_tag_weights(self):
+        data,meta=profile();meta.pop('tag_mapping_version')
+        self.assertEqual(Decision(ACCOUNT,'task',(data,meta)).reason,'portrait_mapping_outdated')
+
+    def test_frozen_english_audit_only_gets_a_chinese_response_projection(self):
+        audit=dict(policy_version='old-policy',profile_version='old-snapshot',selected_tag='Revenge',
+                   preferred_tag='Counterattack',candidate_labels=['Revenge','復仇'],
+                   weights=[dict(key='Revenge',name='Revenge',revenue_cents=100)])
+        before=json.dumps(audit,sort_keys=True)
+        rendered=localize_audit(audit)
+        self.assertEqual(rendered['selected_tag'],'复仇')
+        self.assertEqual(rendered['preferred_tag'],'逆袭')
+        self.assertEqual(rendered['weights'][0]['key'],'Revenge')
+        self.assertEqual(json.dumps(audit,sort_keys=True),before)
+        from features.x_auto_posts.service import _public_selection
+        public = _public_selection({'reservation': {'tag_profile': audit}})
+        self.assertEqual(public['reservation']['tag_profile']['selected_tag'], '复仇')
+        self.assertEqual(json.dumps(audit,sort_keys=True),before)
+
     def test_weighted_frequency_and_replay(self):
         counts = {'romance': 0, 'revenge': 0}
         for i in range(4000):
@@ -214,7 +234,7 @@ class SelectorTests(unittest.TestCase):
             bridge.return_value.account_snapshot.return_value=ACCOUNT
             result=selector.select_and_reserve(fixture.request())
         self.assertEqual(result.drama.content_id,'C2')
-        self.assertEqual(store.reserve_calls[0]['selection_snapshot']['tag_profile']['selected_tag'],'romance')
+        self.assertEqual(store.reserve_calls[0]['selection_snapshot']['tag_profile']['selected_tag'],'爱情')
         self.assertEqual(result.reservation['tag_profile']['profile_version'],'frozen-1')
 
     def test_reentry_does_not_rerank_or_query_new_profile(self):
@@ -323,7 +343,7 @@ class PoolMatchingTests(unittest.TestCase):
         rows.insert(0,dict(self.candidate(4),source_duration=3000))
         result,_=self.select([ACCOUNT,dict(ACCOUNT,id=102)],rows)
         self.assertEqual([r['material_id'] for r in result],['2','1'])
-        self.assertEqual(result[0]['tag_profile']['selected_tag'],'romance')
+        self.assertEqual(result[0]['tag_profile']['selected_tag'],'爱情')
         self.assertEqual(result[1]['tag_profile']['fallback_reason'],'no_matching_eligible_tag')
 
     def test_failed_candidate_does_not_block_other_account_or_poison_success(self):

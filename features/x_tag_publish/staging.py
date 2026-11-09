@@ -62,6 +62,8 @@ def build(source, repo, target, *, verify=True):
     replace_once(target / 'features/x_posts/selector.py', '"tag": labels[0],',
                  '"tag": labels[0],\n            "drama_labels": list(labels),')
     service = target / 'features/x_auto_posts/service.py'
+    replace_once(service, 'def _public_selection(value: Any) -> Any:\n',
+                 'def _public_selection(value: Any) -> Any:\n    if isinstance(value, Mapping) and "policy_version" in value and "candidate_labels" in value:\n        from features.x_tag_revenue.tags import localize_audit\n        value = localize_audit(dict(value))\n')
     replace_once(service, '    store = XAutoPostStore(db_path)\n',
                  '    store = XAutoPostStore(db_path)\n    from features.x_tag_publish.policy import initialize_ids, lane_paths\n    lane_paths()\n    initialize_ids(db_path)\n')
     with service.open('a', encoding='utf-8') as f:
@@ -79,7 +81,7 @@ def build(source, repo, target, *, verify=True):
                               '按账号剧语言筛选，再按标签收入画像分配剧目；同标签内按模板排序，并筛选素材。')
         if p.suffix == '.html':
             value = value.replace('</head>', '<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>')
-            value = value.replace('<script src="/x-tag-auto-publish-common.js', '<script src="/x-tag-publish-ui.js?v=1"></script>\n  <script src="/x-tag-auto-publish-common.js')
+            value = value.replace('<script src="/x-tag-auto-publish-common.js', '<script src="/x-tag-publish-ui.js?v=2"></script>\n  <script src="/x-tag-auto-publish-common.js')
         (target / 'static' / p.name.replace('x-auto-publish', 'x-tag-auto-publish')).write_text(value, encoding='utf-8')
     p = source / 'static/x-post-material-pool.html'
     value = p.read_text(encoding='utf-8').replace('/api/admin/x-posts/', '/api/admin/x-tag-posts/')
@@ -95,7 +97,7 @@ def build(source, repo, target, *, verify=True):
     value = re.sub(r'<div class="manual-warning">.*?</div>',
         '<div class="manual-warning">手动发布按你明确选择的素材和账号执行，使用本流程独立账本。X 写入后可能部分成功、部分失败，结果未知的任务须先核对原回执；已发布的帖子不会因关闭页面而撤回。视频时长与文件大小按目标账号当前资格和实际媒体校验执行。</div>', value, count=1)
     value = value.replace('</head>', '<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>')
-    value = value.replace('</body>', '<script src="/x-tag-publish-ui.js?v=1"></script></body>')
+    value = value.replace('</body>', '<script src="/x-tag-publish-ui.js?v=2"></script></body>')
     (target / 'static/x-tag-material-pool.html').write_text(value, encoding='utf-8')
     replace_once(target / 'static/x-tag-auto-publish-runs.js', '      row.appendChild(selectionCell);',
                  '      selectionCell.appendChild(ui.element("div", {className:"secondary", text:window.TagPublishUI.explain(selection.tag_profile)}));\n      row.appendChild(selectionCell);')

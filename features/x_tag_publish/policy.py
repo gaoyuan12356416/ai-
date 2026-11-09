@@ -8,8 +8,9 @@ from pathlib import Path
 
 from features.x_tag_revenue.core import label_index, labels, language
 from features.x_tag_revenue.routes import read_snapshot
+from features.x_tag_revenue.tags import VERSION as TAG_MAPPING_VERSION, lookup
 
-VERSION = 'revenue-tag-weighted-v1'
+VERSION = 'revenue-tag-weighted-v2'
 ROOT = '/mnt/data-disk/x-tag-publisher'
 ID_BASE = 9000000000000
 
@@ -55,6 +56,8 @@ class Decision:
             self.reason = 'portrait_incomplete'
         elif not profile or profile.get('status') == 'no_history':
             self.reason = 'no_revenue_history'
+        elif meta.get('tag_mapping_version') != TAG_MAPPING_VERSION:
+            self.reason = 'portrait_mapping_outdated'
         elif profile.get('revenue_cents', 0) <= 0:
             self.reason = 'no_positive_revenue'
         elif any(t.get('share_bp') is None or t.get('revenue_cents', 0) < 0 for t in profile.get('tags', [])):
@@ -63,9 +66,11 @@ class Decision:
             for tag in profile.get('tags', []):
                 key = str(tag.get('key') or '')
                 weight = tag.get('revenue_cents', 0)
-                if key and key != '__unknown__' and weight > 0:
-                    self.weights[key] = int(weight)
-                    self.names[key] = tag.get('name') or key
+                standard = lookup(key)
+                if key and standard['matchable'] and tag.get('matchable', True) and weight > 0:
+                    standard_id = standard['id']
+                    self.weights[standard_id] = self.weights.get(standard_id, 0) + int(weight)
+                    self.names[standard_id] = standard['name_zh']
             if not self.weights:
                 self.reason = 'no_known_revenue_tags'
         seed = canonical([VERSION, identity, self.account_id, self.x_user_id, meta.get('version', '')])
@@ -85,14 +90,16 @@ class Decision:
             reason = 'no_matching_eligible_tag'
         elif not reason and matched != preferred:
             reason = 'preferred_tag_no_eligible_material'
-        return dict(policy_version=VERSION, profile_version=self.meta.get('version', ''),
+        return dict(policy_version=VERSION, tag_mapping_version=TAG_MAPPING_VERSION,
+                    profile_mapping_version=self.meta.get('tag_mapping_version', ''),
+                    profile_version=self.meta.get('version', ''),
                     profile_generated_at=self.meta.get('generated_at', ''),
                     profile_source_end=self.meta.get('end', ''),
                     profile_stale=bool(self.meta.get('stale') or self.meta.get('refresh_failed')),
                     account_id=self.account_id, x_user_id=self.x_user_id,
                     preferred_tag=self.names.get(preferred, preferred),
                     selected_tag=self.names.get(matched, matched), selected_tag_key=matched,
-                    candidate_labels=list(keys.values()), fallback_reason=reason,
+                    candidate_labels=list(keys.values()), candidate_tag_ids=list(keys), fallback_reason=reason,
                     weights=[{'key': k, 'name': self.names[k], 'revenue_cents': v}
                              for k, v in sorted(self.weights.items())])
 

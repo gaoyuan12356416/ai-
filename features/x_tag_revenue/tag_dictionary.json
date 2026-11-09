@@ -1,0 +1,3004 @@
+{
+  "version": "x-drama-tags-20261109-v1",
+  "review": "semantic_review_with_catalog_parallel_evidence_and_explicit_corrections",
+  "tags": [
+    {
+      "id": "1001_nights",
+      "name_zh": "一千零一夜",
+      "aliases": [
+        "1001 Nights",
+        "一千零一夜",
+        "千夜一夜物語"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "action",
+      "name_zh": "动作",
+      "aliases": [
+        "Acción",
+        "Action",
+        "アクション",
+        "动作",
+        "動作"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "adventurous",
+      "name_zh": "冒险",
+      "aliases": [
+        "Adventurous",
+        "Aventuras",
+        "アドベンチャー",
+        "冒险",
+        "冒險"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "affair",
+      "name_zh": "婚外情",
+      "aliases": [
+        "Affair",
+        "Affäre",
+        "Aventura amorosa",
+        "Caso Extraconjugal",
+        "zdrada małżeńska",
+        "不倫",
+        "婚外情",
+        "외도"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "age_gap",
+      "name_zh": "年龄差",
+      "aliases": [
+        "Age Gap",
+        "Diferença de idade",
+        "Różnica wieku",
+        "年齡差",
+        "年齢差",
+        "年龄差",
+        "나이 차"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "agent",
+      "name_zh": "特工",
+      "aliases": [
+        "Agent",
+        "特工",
+        "특수요원"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "alien",
+      "name_zh": "外星人",
+      "aliases": [
+        "Alien",
+        "外星人",
+        "宇宙人"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "alpha",
+      "name_zh": "阿尔法首领",
+      "aliases": [
+        "Alfa",
+        "Alpha",
+        "アルファ",
+        "阿尔法首领"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "alternate_universe",
+      "name_zh": "架空宇宙",
+      "aliases": [
+        "Alternate Universe",
+        "Alternatives Universum",
+        "Universo alternativo",
+        "架空宇宙"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "alternative_history",
+      "name_zh": "架空历史",
+      "aliases": [
+        "Alternative History",
+        "Alternativní historie",
+        "Alternatywna",
+        "架空历史"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "ancient",
+      "name_zh": "古装",
+      "aliases": [
+        "Ancient",
+        "Antiguo",
+        "Antike",
+        "Sejarah Kuno",
+        "Starověk",
+        "古代",
+        "古装",
+        "古裝",
+        "고대"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "angel",
+      "name_zh": "天使",
+      "aliases": [
+        "Angel",
+        "Ángel",
+        "天使",
+        "천사"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "anger",
+      "name_zh": "愤怒",
+      "aliases": [
+        "Anger",
+        "Gniew",
+        "Hněv",
+        "Ira",
+        "Raiva",
+        "Wut",
+        "怒り",
+        "愤怒",
+        "憤怒",
+        "분노"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "angsty",
+      "name_zh": "虐恋",
+      "aliases": [
+        "Amor angustioso",
+        "Amor doloroso",
+        "Angsty",
+        "Bolestná láska",
+        "Cinta Penuh Derita",
+        "Schmerzhafte Liebe",
+        "切ない恋",
+        "虐恋",
+        "虐戀",
+        "애절한 사랑"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "apocalypse",
+      "name_zh": "末日",
+      "aliases": [
+        "Apocalypse",
+        "Apokalypse",
+        "末日",
+        "終末世界"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "artist",
+      "name_zh": "艺术家",
+      "aliases": [
+        "Artist",
+        "Artista",
+        "アーティスト",
+        "艺术家",
+        "아티스트"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "athlete",
+      "name_zh": "运动员",
+      "aliases": [
+        "Athlete",
+        "Atleta",
+        "Sportler",
+        "Sportowiec",
+        "アスリート",
+        "运动员",
+        "運動員",
+        "운동선수"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "baby_on_board",
+      "name_zh": "怀孕带娃",
+      "aliases": [
+        "Baby an Bord",
+        "Baby on Board",
+        "Bebé a Bordo",
+        "Dítě na palubě",
+        "宝宝同行",
+        "怀孕带娃"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "ballroom",
+      "name_zh": "舞会",
+      "aliases": [
+        "Ballroom",
+        "Ballsaal",
+        "Sala balowa",
+        "Salón de baile",
+        "Taneční sál",
+        "宴會廳 / 舞會",
+        "舞会",
+        "舞踏会場",
+        "연회장"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "bdsm",
+      "name_zh": "束缚调教",
+      "aliases": [
+        "BDSM",
+        "BDSM / 特殊性癖",
+        "BDSM要素",
+        "束缚调教",
+        "特殊性癖"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "beastfolk",
+      "name_zh": "兽人",
+      "aliases": [
+        "Beastfolk",
+        "Hombres bestia",
+        "Tiervolk",
+        "兽人",
+        "獣人",
+        "獸人 / 半獸人",
+        "수인"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "beasts",
+      "name_zh": "兽类",
+      "aliases": [
+        "Beasts",
+        "ケモノ",
+        "兽类"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "beautiful_ceo",
+      "name_zh": "美女总裁",
+      "aliases": [
+        "Beautiful CEO",
+        "Piękna prezeska",
+        "Schöne CEO",
+        "美人社長",
+        "美女总裁"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "betrayal",
+      "name_zh": "背叛",
+      "aliases": [
+        "Betrayal",
+        "Pengkhianatan",
+        "Traición",
+        "Traição",
+        "Verrat",
+        "Zdrada",
+        "Zrada",
+        "背叛",
+        "裏切り",
+        "배신"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "billionaire",
+      "name_zh": "亿万富豪",
+      "aliases": [
+        "Billionaire",
+        "Miliarder",
+        "Miliardář",
+        "Milliardär",
+        "Multimillon.",
+        "亿万富豪",
+        "億万長者",
+        "億萬富豪",
+        "재벌"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "bitter_love",
+      "name_zh": "苦恋",
+      "aliases": [
+        "Amor Amargo",
+        "Bitter Love",
+        "Bittere Liebe",
+        "ビターラブ",
+        "苦恋",
+        "苦戀",
+        "쓰라린 사랑"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "bl",
+      "name_zh": "男男恋",
+      "aliases": [
+        "BL",
+        "男男恋",
+        "耽美"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "blended_family",
+      "name_zh": "重组家庭",
+      "aliases": [
+        "Blended Family",
+        "Stieffamilie",
+        "重组家庭"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "blood_awakening",
+      "name_zh": "血脉觉醒",
+      "aliases": [
+        "Blood Awakening",
+        "Despertar de Sangre",
+        "Erwachen der Blutlinie",
+        "Probuzení krve",
+        "Przebudzenie krwi",
+        "血脈の覚醒",
+        "血脉觉醒",
+        "혈통 각성"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "body_swap",
+      "name_zh": "身体互换",
+      "aliases": [
+        "Body Swap",
+        "身体互换"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "bonded_by_fate",
+      "name_zh": "命定羁绊",
+      "aliases": [
+        "Atados al Destino",
+        "Bonded by Fate",
+        "Schicksalsband",
+        "Spojeni osudem",
+        "命定羁绊",
+        "命定羈絆",
+        "運命の絆",
+        "운명의 인연"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "boss_lady",
+      "name_zh": "强势女主",
+      "aliases": [
+        "Boss Lady",
+        "Mächtige Frau",
+        "Szefowa",
+        "Šéfka",
+        "強勢女主角",
+        "强势女主",
+        "강력한 여성 리더"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "business",
+      "name_zh": "商战",
+      "aliases": [
+        "Business",
+        "Wirtschaft",
+        "商战",
+        "商戦",
+        "상전"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "campus",
+      "name_zh": "校园",
+      "aliases": [
+        "Campus",
+        "Kampus",
+        "Szkoła",
+        "キャンパス",
+        "校园",
+        "캠퍼스"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "campus_romance",
+      "name_zh": "校园恋爱",
+      "aliases": [
+        "Amor Escolar",
+        "Campus Romance",
+        "Campus-Romanze",
+        "Láska ve škole",
+        "Romans szkolny",
+        "学園ロマンス",
+        "校园恋爱",
+        "학교 연애"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "celebrity",
+      "name_zh": "明星",
+      "aliases": [
+        "Celebridad",
+        "Celebrity",
+        "セレブ",
+        "明星",
+        "연예인"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "ceo",
+      "name_zh": "总裁",
+      "aliases": [
+        "CEO",
+        "总裁",
+        "總裁",
+        "보스"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "chef",
+      "name_zh": "厨师",
+      "aliases": [
+        "Chef",
+        "厨师"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "child_in_law",
+      "name_zh": "女婿或儿媳",
+      "aliases": [
+        "Child in Law",
+        "Menantu",
+        "女婿或儿媳"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "childhood_crush",
+      "name_zh": "青梅竹马",
+      "aliases": [
+        "Amor de Inf.",
+        "Childhood Crush",
+        "Jugendliebe",
+        "Miłość od dziecka",
+        "幼馴染",
+        "青梅竹馬",
+        "青梅竹马",
+        "소꿉친구"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "comeback",
+      "name_zh": "东山再起",
+      "aliases": [
+        "Comeback",
+        "Powrót",
+        "Regreso",
+        "东山再起",
+        "巻き返す",
+        "컴백"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "confined_survival",
+      "name_zh": "密闭空间求生",
+      "aliases": [
+        "Confined Survival",
+        "Gefangen überleben",
+        "密闭空间求生",
+        "閉鎖空間サバイバル",
+        "밀폐 공간 생존"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "contemporary",
+      "name_zh": "现代",
+      "aliases": [
+        "Contemporary",
+        "Contemporáneo",
+        "Modern",
+        "Moderno",
+        "Současnost",
+        "Współczesność",
+        "Współczesny",
+        "现代",
+        "現代",
+        "현대"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "contract_couple",
+      "name_zh": "契约情侣",
+      "aliases": [
+        "Amor Acordado",
+        "Contract couple",
+        "Pacar Kontrak",
+        "Smluvní milenci",
+        "Vertragspartner",
+        "契約カップル",
+        "契約情侶",
+        "契约情侣",
+        "계약 연인"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "contract_vows",
+      "name_zh": "契约婚姻",
+      "aliases": [
+        "Contract Vows",
+        "Matrim. Conv.",
+        "Umowa",
+        "Vertrag-Ehe",
+        "契約婚姻",
+        "契約結婚",
+        "契约婚姻",
+        "계약 결혼"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "convoluted_plot",
+      "name_zh": "曲折情节",
+      "aliases": [
+        "Alur Berliku",
+        "Convoluted Plot",
+        "曲折情节"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "counterattack",
+      "name_zh": "逆袭",
+      "aliases": [
+        "Contraataque",
+        "Counterattack",
+        "Gegenangriff",
+        "Kontratak",
+        "Protiofenzíva",
+        "Serangan Balik",
+        "Superação",
+        "反撃",
+        "逆袭",
+        "逆襲",
+        "반격"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "crime",
+      "name_zh": "犯罪",
+      "aliases": [
+        "Crime",
+        "Crimen",
+        "Kejahatan",
+        "Krimi",
+        "犯罪",
+        "범죄"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "crime_investigation",
+      "name_zh": "刑侦",
+      "aliases": [
+        "Crime Investigation",
+        "Kriminalermittlung",
+        "刑侦",
+        "犯罪捜査",
+        "범죄 수사"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "crime_lord",
+      "name_zh": "黑道老大",
+      "aliases": [
+        "Bos Kejahatan",
+        "Boss mafii",
+        "Crime Lord",
+        "Jefe Criminal",
+        "Líder da Máfia",
+        "Mafia Boss",
+        "マフィアの頭",
+        "黑道老大",
+        "깡패 두목"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "cultivator",
+      "name_zh": "修仙者",
+      "aliases": [
+        "Cultivator",
+        "修仙者"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "cute_pet",
+      "name_zh": "萌宠",
+      "aliases": [
+        "Cute pet",
+        "かわいいペット",
+        "萌宠"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "dating_show_game",
+      "name_zh": "恋综游戏",
+      "aliases": [
+        "Dating Show Game",
+        "Dating-Spiel",
+        "Seznamovací show",
+        "恋综游戏"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "demi_humans",
+      "name_zh": "亚人",
+      "aliases": [
+        "Demi-Humans",
+        "Halbmenschen",
+        "Półludzie",
+        "Semihumanos",
+        "亚人",
+        "亜人",
+        "亞人",
+        "아인"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "disaster",
+      "name_zh": "灾难",
+      "aliases": [
+        "Disaster",
+        "灾难"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "divorce",
+      "name_zh": "离婚",
+      "aliases": [
+        "Divorce",
+        "离婚",
+        "이혼"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "divorce_aftermath",
+      "name_zh": "离婚后",
+      "aliases": [
+        "Divorce Aftermath",
+        "离婚后",
+        "離婚後"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "dragon",
+      "name_zh": "龙族",
+      "aliases": [
+        "Drache",
+        "Dragon",
+        "Dragón",
+        "Drak",
+        "ドラゴン",
+        "龍",
+        "龙族",
+        "용"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "drama",
+      "name_zh": "剧情",
+      "aliases": [
+        "Drama",
+        "Dramat",
+        "ドラマ",
+        "剧情",
+        "劇情",
+        "드라마"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "drug_lord",
+      "name_zh": "毒枭",
+      "aliases": [
+        "Drug Lord",
+        "毒枭",
+        "麻薬王"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "dungeons_dragons",
+      "name_zh": "龙与地下城",
+      "aliases": [
+        "Dragones y mazmorras",
+        "Dungeons & Dragons",
+        "ダンジョンズ&ドラゴンズ",
+        "龙与地下城",
+        "던전 & 드래곤"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "elf",
+      "name_zh": "精灵",
+      "aliases": [
+        "Elf",
+        "Elfo",
+        "エルフ",
+        "精灵",
+        "精靈",
+        "엘프"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "emotional",
+      "name_zh": "情感浓烈",
+      "aliases": [
+        "Emotional",
+        "Pełne emocji",
+        "情感浓烈"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "empress",
+      "name_zh": "皇后",
+      "aliases": [
+        "Empress",
+        "皇后",
+        "황후"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "entertainment",
+      "name_zh": "娱乐圈",
+      "aliases": [
+        "Entertainment",
+        "Showbiz",
+        "Zábava",
+        "娱乐圈",
+        "芸能界"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "era",
+      "name_zh": "年代",
+      "aliases": [
+        "Epoche",
+        "Epoka",
+        "Era",
+        "Éra",
+        "年代",
+        "연대"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "european_dragons",
+      "name_zh": "西方巨龙",
+      "aliases": [
+        "European Dragons",
+        "西方巨龍",
+        "西方巨龙",
+        "西洋ドラゴン",
+        "서양 드래곤"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "extreme_survival",
+      "name_zh": "极限生存",
+      "aliases": [
+        "Extreme Survival",
+        "极限生存"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "fake_vs_real_heiress",
+      "name_zh": "真假千金",
+      "aliases": [
+        "Fake vs. Real Heiress",
+        "Falsche vs. echte Erbin",
+        "Fałszywa i prawdziwa dziedziczka",
+        "Heredera falsa vs. verdadera",
+        "偽令嬢と本物令嬢",
+        "偽物と本物のお嬢様",
+        "真假千金",
+        "가짜와 진짜 상속녀"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "family",
+      "name_zh": "家庭",
+      "aliases": [
+        "Family",
+        "Keluarga",
+        "家庭"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "family_affection",
+      "name_zh": "亲情",
+      "aliases": [
+        "Amor Familiar",
+        "Familienliebe",
+        "Family Affection",
+        "Więzi rodzinne",
+        "亲情",
+        "家族の絆",
+        "親情",
+        "가족애"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "family_drama",
+      "name_zh": "家庭剧",
+      "aliases": [
+        "Dramat rodzinny",
+        "Familiar",
+        "Familien Serie",
+        "Family Drama",
+        "家庭ドラマ",
+        "家庭剧",
+        "家庭劇",
+        "가정극"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "family_reunion",
+      "name_zh": "亲人团聚",
+      "aliases": [
+        "Family Reunion",
+        "Reencuentro familiar",
+        "亲人团聚",
+        "家族との再会",
+        "가족 상봉"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "fantasy",
+      "name_zh": "奇幻",
+      "aliases": [
+        "Fantasi",
+        "Fantasy",
+        "Fantasía",
+        "Fantazie",
+        "ファンタジー",
+        "奇幻"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "fantasy_world",
+      "name_zh": "奇幻世界",
+      "aliases": [
+        "Dunia Fantasi",
+        "Fantasy Realm",
+        "Fantasy World",
+        "Fantazijní říše",
+        "Kraina fantasy",
+        "Reino Fantasía",
+        "ファンタジー世界",
+        "ファンタジー界",
+        "奇幻世界",
+        "幻想世界",
+        "幻想世界观"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "fated_mates",
+      "name_zh": "命定伴侣",
+      "aliases": [
+        "Fated Mates",
+        "命定伴侣"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "female_growth",
+      "name_zh": "女性成长",
+      "aliases": [
+        "Crec. de Mujer",
+        "Female Growth",
+        "Rozwój kobiet",
+        "Ženský růst",
+        "女性の成長",
+        "女性成長",
+        "女性成长",
+        "여성 성장"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "female_lead",
+      "name_zh": "女主角",
+      "aliases": [
+        "Female Lead",
+        "Protag. Fem.",
+        "女主角",
+        "女性リード"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "female_oriented_reverse_harem",
+      "name_zh": "女性向逆后宫",
+      "aliases": [
+        "Female-Oriented Reverse Harem",
+        "Umgekehrter Frauen-Harem",
+        "女性向け逆ハーレム",
+        "女性向逆后宫",
+        "逆後宮",
+        "여성향 역하렘"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "firefighter",
+      "name_zh": "消防员",
+      "aliases": [
+        "Firefighter",
+        "消防员"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "first_love",
+      "name_zh": "初恋",
+      "aliases": [
+        "First Love",
+        "Pierwsza miłość",
+        "Primer amor",
+        "初恋"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "first_sight_love",
+      "name_zh": "一见钟情",
+      "aliases": [
+        "First-Sight Love",
+        "Flechazo",
+        "Miłość od razu",
+        "一目惚れ",
+        "一見鍾情",
+        "一见钟情",
+        "첫눈에 반함"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "flash_marriage",
+      "name_zh": "闪婚",
+      "aliases": [
+        "Blitzhochzeit",
+        "Flash Marriage",
+        "闪婚",
+        "電撃婚",
+        "초고속 결혼"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "folklore_literature",
+      "name_zh": "民俗文学",
+      "aliases": [
+        "Folklore / Literature",
+        "民俗文学",
+        "民間伝承 / 文学"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "forbidden_love",
+      "name_zh": "禁忌之恋",
+      "aliases": [
+        "Amor prohibido",
+        "Amor Proibido",
+        "Forbidden Love",
+        "Verbotene Liebe",
+        "Zakazana miłość",
+        "Zakázaná láska",
+        "禁忌之恋",
+        "禁忌之戀",
+        "禁断の恋",
+        "금기사랑"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "forced_love",
+      "name_zh": "强制爱",
+      "aliases": [
+        "Amor Forzado",
+        "Amor Forçado",
+        "Forced Love",
+        "Wymuszona miłość",
+        "Zwangsliebe",
+        "強制された愛",
+        "強愛",
+        "强制爱",
+        "강제 사랑"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "forgiveness",
+      "name_zh": "原谅",
+      "aliases": [
+        "Forgiveness",
+        "Pengampunan",
+        "原諒",
+        "原谅",
+        "許し",
+        "용서"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "four_way_love",
+      "name_zh": "四角恋",
+      "aliases": [
+        "Amor a quatro",
+        "Amor cuádruple",
+        "Four-Way Love",
+        "Milostný čtyřúhelník",
+        "Miłosny czworokąt",
+        "Vierfache Liebe",
+        "四角恋",
+        "四角戀",
+        "四角関係",
+        "사각 러브라인"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "future",
+      "name_zh": "未来",
+      "aliases": [
+        "Future",
+        "Zukunft",
+        "未来"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "gay_for_you",
+      "name_zh": "因你心动",
+      "aliases": [
+        "Gay for you",
+        "因你心动"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "general",
+      "name_zh": "将军",
+      "aliases": [
+        "General",
+        "将军",
+        "将軍",
+        "장군"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "genius_babies",
+      "name_zh": "天才萌宝",
+      "aliases": [
+        "Bayi Jenius",
+        "Bebés Genios",
+        "Geniale Babys",
+        "Genius Babies",
+        "Geniální děti",
+        "Małe geniusze",
+        "可愛い子供",
+        "天才萌宝",
+        "萌寶",
+        "천재 아기"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "gl",
+      "name_zh": "女女恋",
+      "aliases": [
+        "GL",
+        "女女恋",
+        "百合"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "golden_boy",
+      "name_zh": "校园男神",
+      "aliases": [
+        "Golden Boy",
+        "学院イケメン",
+        "校园男神",
+        "캠퍼스의 남신"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "goodgirl",
+      "name_zh": "乖乖女",
+      "aliases": [
+        "Braves Mädchen",
+        "Chica buena",
+        "Goodgirl",
+        "乖乖女",
+        "大人しい子",
+        "착한 소녀"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "greek_myth",
+      "name_zh": "希腊神话",
+      "aliases": [
+        "Greek Myth",
+        "ギリシャ神話",
+        "希腊神话"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "grimm_fairy_tales",
+      "name_zh": "格林童话",
+      "aliases": [
+        "Grimm Fairy Tales",
+        "グリム童話",
+        "格林童话"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "group_favorite",
+      "name_zh": "团宠",
+      "aliases": [
+        "Group Favorite",
+        "Grup Favorit",
+        "Gruppenfavorit",
+        "团宠",
+        "愛されキャラ"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "harem",
+      "name_zh": "男性向后宫",
+      "aliases": [
+        "Harem",
+        "Harem dla mężczyzn",
+        "Harém pro muže",
+        "Harén masculino",
+        "Männer-Harem",
+        "後宮",
+        "男性向けハーレム",
+        "男性向后宫",
+        "남성향 하렘"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "hate_to_love",
+      "name_zh": "欢喜冤家",
+      "aliases": [
+        "Del odio al amor",
+        "Hate to Love",
+        "Nenávist k lásce",
+        "Wrogowie miłość",
+        "敵が恋人に変わる",
+        "欢喜冤家",
+        "歡喜冤家",
+        "원수에서 연인까지"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "heartwarming_healing",
+      "name_zh": "温馨治愈",
+      "aliases": [
+        "Hangat & Menyembuhkan",
+        "Heartwarming & Healing",
+        "Herzerwärmend & heilend",
+        "Reconfortante y sanador",
+        "心温まる癒やし",
+        "温馨治愈",
+        "溫馨療癒",
+        "따뜻한 힐링"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "heiress",
+      "name_zh": "女继承人",
+      "aliases": [
+        "Dziedziczka",
+        "Erbin",
+        "Heiress",
+        "Herdeira",
+        "Heredera",
+        "女継承者",
+        "女繼承人",
+        "女继承人",
+        "여자 상속인"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "hero_rescues_beauty",
+      "name_zh": "英雄救美",
+      "aliases": [
+        "Bohater na ratunek",
+        "El héroe rescata a la bella",
+        "Held rettet Schönheit",
+        "Hero Rescues Beauty",
+        "Hero Rescues Veauty",
+        "Hrdina zachraňuje krásku",
+        "ヒロイン救出",
+        "ヒーローが美女を救う",
+        "英雄救美",
+        "영웅의 미녀 구출"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "hidden_identity",
+      "name_zh": "隐藏身份",
+      "aliases": [
+        "Geheime Identität",
+        "Hidden Identity",
+        "Id. Oculta",
+        "Ident. Oculta",
+        "Identitas Rahasia",
+        "Skrytá identita",
+        "Ukryta tożsamość",
+        "Verborgene Identität",
+        "隐藏身份",
+        "隠された正体",
+        "隱藏身份",
+        "隱藏身分",
+        "숨은 정체",
+        "정체성 감춤"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "hidden_roles",
+      "name_zh": "隐藏角色",
+      "aliases": [
+        "Hidden Roles",
+        "隐藏角色",
+        "隠された役割"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "hidden_strength",
+      "name_zh": "隐藏实力",
+      "aliases": [
+        "Força oculta",
+        "Fuerza oculta",
+        "Hidden Strength",
+        "Skrytá síla",
+        "Ukryta siła",
+        "Verborgene Stärke",
+        "実力隠し",
+        "扮豬吃老虎",
+        "隐藏实力",
+        "隠された力",
+        "숨은 실력"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "high_energy",
+      "name_zh": "热血",
+      "aliases": [
+        "De alta energía",
+        "Energiereich",
+        "High-Energy",
+        "Vysoká energie",
+        "Wysoka energia",
+        "热血",
+        "熱血",
+        "고에너지"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "high_fantasy",
+      "name_zh": "史诗奇幻",
+      "aliases": [
+        "Alta fantasía",
+        "Epickie fantasy",
+        "High Fantasy",
+        "Hochfantasy",
+        "Vysoká Fantasy",
+        "ハイファンタジー",
+        "史詩奇幻",
+        "史诗奇幻",
+        "하이 판타지"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "history",
+      "name_zh": "历史",
+      "aliases": [
+        "Geschichte",
+        "Historia",
+        "History",
+        "历史",
+        "歴史",
+        "歷史",
+        "역사극"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "hot_daddy",
+      "name_zh": "性感奶爸",
+      "aliases": [
+        "Ayah Seksi",
+        "Hot Daddy",
+        "ホットダディ",
+        "性感奶爸"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "housewife",
+      "name_zh": "家庭主妇",
+      "aliases": [
+        "Housewife",
+        "家庭主妇",
+        "家庭主婦"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "humiliation",
+      "name_zh": "羞辱打脸",
+      "aliases": [
+        "Demütigung",
+        "Humiliation",
+        "Humillación",
+        "Penghinaan",
+        "Ponížení",
+        "Upokorzenie",
+        "屈辱",
+        "打脸",
+        "打臉",
+        "羞辱打脸"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "identity_reveal",
+      "name_zh": "身份曝光",
+      "aliases": [
+        "Identity Reveal",
+        "Identitätsenthüllung",
+        "Odhalení identity",
+        "Revelación",
+        "Ujawnienie tożsamości",
+        "Ungkap Identitas",
+        "正体発覚",
+        "身份曝光",
+        "身分曝光",
+        "정체 공개"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "identity_twist",
+      "name_zh": "身份误会",
+      "aliases": [
+        "Falsche Identität",
+        "Id. Confusa",
+        "Identitas Salah",
+        "Identity Twist",
+        "Zamiana",
+        "Změna identity",
+        "身份誤會",
+        "身份误会",
+        "身分の誤解",
+        "정체성 오해"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "imperial_prince",
+      "name_zh": "皇子",
+      "aliases": [
+        "Imperial Prince",
+        "皇子",
+        "황자"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "innocent_damsel",
+      "name_zh": "天真少女",
+      "aliases": [
+        "Damisela",
+        "Gadis Polos",
+        "Innocent Damsel",
+        "Naives Mädchen",
+        "Niewinna",
+        "天真少女",
+        "天真爛漫",
+        "천진소녀"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "inspirational",
+      "name_zh": "励志",
+      "aliases": [
+        "Inspiracja",
+        "Inspirador",
+        "Inspirational",
+        "Inspirierend",
+        "励志",
+        "勵志逆襲",
+        "熱血逆襲",
+        "격려"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "kidnap",
+      "name_zh": "绑架",
+      "aliases": [
+        "Entführung",
+        "Kidnap",
+        "Porwanie",
+        "Secuestro",
+        "Únos",
+        "拉致",
+        "綁架",
+        "绑架",
+        "납치"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "kinship_recognition",
+      "name_zh": "认亲",
+      "aliases": [
+        "Kinship Recognition",
+        "Uznanie pokrewieństwa",
+        "認親",
+        "认亲"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "knight",
+      "name_zh": "骑士",
+      "aliases": [
+        "Knight",
+        "Ritter",
+        "Rytíř",
+        "騎士",
+        "骑士",
+        "기사"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "lawyer",
+      "name_zh": "律师",
+      "aliases": [
+        "Lawyer",
+        "弁護士",
+        "律师",
+        "변호사"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "level_up",
+      "name_zh": "升级",
+      "aliases": [
+        "Level up",
+        "Levelaufstieg",
+        "Subida de nivel",
+        "レベルアップ",
+        "升级",
+        "레벨 업"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "live_in_son_in_law",
+      "name_zh": "赘婿",
+      "aliases": [
+        "Live-in Son-in-Law",
+        "入り婿",
+        "赘婿"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "love_after_divorce",
+      "name_zh": "离婚后恋爱",
+      "aliases": [
+        "Love After Divorce",
+        "离婚后恋爱",
+        "離婚後の愛"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "love_after_vows",
+      "name_zh": "先婚后爱",
+      "aliases": [
+        "Amor post-boda",
+        "Liebe nach Ehe",
+        "Love After Vows",
+        "Láska po svatbě",
+        "Miłość po ślubie",
+        "先婚后爱",
+        "先婚後愛",
+        "結婚後の愛",
+        "결혼 후의 사랑"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "love_triangle",
+      "name_zh": "三角恋",
+      "aliases": [
+        "Liebesdreieck",
+        "Love Triangle",
+        "Milostný trojúhelník",
+        "Triángulo Am.",
+        "三角恋",
+        "三角戀",
+        "三角関係",
+        "삼각관계"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "loving_hubby",
+      "name_zh": "护妻狂魔",
+      "aliases": [
+        "Beschützer",
+        "Loving Hubby",
+        "Marido Prot.",
+        "Milující manžel",
+        "Oddany mąż",
+        "Suami Protektif",
+        "护妻狂魔",
+        "護妻狂魔",
+        "過保護旦那",
+        "보호형 남편"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mafia",
+      "name_zh": "黑手党",
+      "aliases": [
+        "Mafia",
+        "Máfia",
+        "マフィア",
+        "黑手党",
+        "黑手黨",
+        "마피아"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mages_medieval",
+      "name_zh": "中世纪魔法师",
+      "aliases": [
+        "Mages — Medieval",
+        "Magos — Medieval",
+        "Penyihir — Medieval",
+        "中世纪魔法师",
+        "魔術師 ― 中世",
+        "마법사 — 중세"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mages_modern",
+      "name_zh": "现代魔法师",
+      "aliases": [
+        "Mages — Modern",
+        "Magier — Moderne",
+        "Magowie — współcześnie",
+        "现代魔法师",
+        "魔術師 ― 現代",
+        "마법사 — 현대"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mages_other",
+      "name_zh": "其他魔法师",
+      "aliases": [
+        "Mages — Other",
+        "Magier — Sonstige",
+        "Magos — Otros",
+        "Magowie — inne",
+        "人類魔法師:其他",
+        "其他魔法师",
+        "魔術師 ― その他",
+        "마법사 — 기타"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "maid",
+      "name_zh": "女佣",
+      "aliases": [
+        "Maid",
+        "女佣",
+        "가정부"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "male_priented_reverse",
+      "name_zh": "男性向反转（待核对）",
+      "aliases": [
+        "Male-Priented Reverse",
+        "男性向反转（待核对）"
+      ],
+      "status": "needs_review"
+    },
+    {
+      "id": "matchmaking",
+      "name_zh": "相亲",
+      "aliases": [
+        "Matchmaking",
+        "お見合い",
+        "相亲"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mecha",
+      "name_zh": "机甲",
+      "aliases": [
+        "Mecha",
+        "机甲"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "medical_drama",
+      "name_zh": "医疗剧",
+      "aliases": [
+        "Drama Médico",
+        "Dramat medyczny",
+        "Medical Drama",
+        "Medizindrama",
+        "メディカルドラマ",
+        "医疗剧",
+        "醫生劇",
+        "의사"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "medical_genius",
+      "name_zh": "医学天才",
+      "aliases": [
+        "Genio médico",
+        "Gênio Médico",
+        "Medical Genius",
+        "Medizingenie",
+        "Medyczny geniusz",
+        "医学の天才",
+        "医学天才",
+        "醫學天才",
+        "의학 천재"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "merfolk",
+      "name_zh": "人鱼",
+      "aliases": [
+        "Merfolk",
+        "人魚",
+        "人魚族",
+        "人鱼",
+        "인어"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "meta_human",
+      "name_zh": "超人类",
+      "aliases": [
+        "Manusia Super",
+        "Meta-human",
+        "Metahumano",
+        "異能者",
+        "超人类",
+        "超能力者",
+        "초능력자"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "misunderstanding",
+      "name_zh": "误会",
+      "aliases": [
+        "Irrtum",
+        "Kesalahpahaman",
+        "Malentendido",
+        "Misunderstanding",
+        "Nedorozumění",
+        "Nieporozumienie",
+        "誤會",
+        "誤解",
+        "误会",
+        "오해"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mother_in_law",
+      "name_zh": "婆婆",
+      "aliases": [
+        "Mother-in-law",
+        "Schwiegermutter",
+        "Suegra",
+        "お義母さん",
+        "婆婆"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mystery",
+      "name_zh": "谜案",
+      "aliases": [
+        "Mystery",
+        "谜案"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "mythological_fiction",
+      "name_zh": "神话幻想",
+      "aliases": [
+        "Mythological Fiction",
+        "神話ファンタジー",
+        "神话幻想"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "nanny",
+      "name_zh": "保姆",
+      "aliases": [
+        "Nanny",
+        "ベビーシッター",
+        "保姆"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "no_romance",
+      "name_zh": "无爱情",
+      "aliases": [
+        "Bez romansu",
+        "Keine Romantik",
+        "No Romance",
+        "Sin romance",
+        "Tanpa Romansa",
+        "恋愛なし",
+        "无感情线",
+        "无爱情",
+        "無愛情",
+        "로맨스 없음"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "nobility",
+      "name_zh": "贵族",
+      "aliases": [
+        "Bangsawan",
+        "Nobility",
+        "Nobleza",
+        "Šlechta",
+        "貴族",
+        "贵族",
+        "귀족"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "nobody",
+      "name_zh": "小人物",
+      "aliases": [
+        "Don Nadie",
+        "Niemand",
+        "Nikdo",
+        "Nobody",
+        "Orang Biasa",
+        "Zwykła osoba",
+        "小人物",
+        "無名の人",
+        "평범한 사람"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "norse_myth",
+      "name_zh": "北欧神话",
+      "aliases": [
+        "Mitología nórdica",
+        "Nordische Mythologie",
+        "Norse Myth",
+        "北欧神話",
+        "北欧神话"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "o_n_s",
+      "name_zh": "一夜情",
+      "aliases": [
+        "Cinta Satu Malam",
+        "De una Noche",
+        "Jedna noc",
+        "Láska na noc",
+        "O.N.S.",
+        "One-Night-Stand",
+        "ワンナイト",
+        "一夜情",
+        "원 나잇"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "office_romance",
+      "name_zh": "办公室恋情",
+      "aliases": [
+        "Büro-Romanze",
+        "Office Romance",
+        "オフィスロマンス",
+        "办公室恋情"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "others",
+      "name_zh": "其他",
+      "aliases": [
+        "Others",
+        "其他"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "overpowered_dominance",
+      "name_zh": "强者碾压",
+      "aliases": [
+        "Bezwzględna dominacja",
+        "Dominasi Mutlak",
+        "Dominação avassaladora",
+        "Dominio aplastante",
+        "Drtivá dominance",
+        "Overpowered Dominance",
+        "Überlegene Dominanz",
+        "圧倒的無双",
+        "强者碾压",
+        "爽(持續碾壓/高手下山)",
+        "압도적 지배"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "parent_with_child",
+      "name_zh": "带娃",
+      "aliases": [
+        "Parent with Child",
+        "子連れ",
+        "带娃"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "pet",
+      "name_zh": "宠物",
+      "aliases": [
+        "Hewan Peliharaan",
+        "Pet",
+        "宠物"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "pirates",
+      "name_zh": "海盗",
+      "aliases": [
+        "Pirates",
+        "海盗"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "playboy",
+      "name_zh": "花花公子",
+      "aliases": [
+        "Playboy",
+        "プレイボーイ",
+        "花花公子",
+        "바람둥이"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "political_intrigue",
+      "name_zh": "权谋",
+      "aliases": [
+        "Intriga política",
+        "Machtspiele",
+        "Political Intrigue",
+        "Politische Intrige",
+        "政争",
+        "权谋",
+        "権謀",
+        "權謀",
+        "정치적 술책",
+        "정치적 음모"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "pregnant_runaway",
+      "name_zh": "带球跑",
+      "aliases": [
+        "Kabur Saat Hamil",
+        "Pregnant Runaway",
+        "带球跑",
+        "帶球跑",
+        "아이갖고 도망가"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "pretend_romance",
+      "name_zh": "假戏真做",
+      "aliases": [
+        "Pretend Romance",
+        "Předstíraný vztah",
+        "Romance fingido",
+        "Romansa Pura-Pura",
+        "Scheinliebe",
+        "假戏真做",
+        "假戲真做",
+        "偽装恋愛",
+        "偽装恋愛から本気へ",
+        "가짜 연애"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "priest",
+      "name_zh": "祭司",
+      "aliases": [
+        "Priest",
+        "祭司",
+        "사제"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "priestess",
+      "name_zh": "女祭司",
+      "aliases": [
+        "Priestess",
+        "女祭司"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "prince",
+      "name_zh": "王子",
+      "aliases": [
+        "Pangeran",
+        "Princ",
+        "Prince",
+        "Prinz",
+        "Príncipe",
+        "王子"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "princess",
+      "name_zh": "公主",
+      "aliases": [
+        "Princesa",
+        "Princess",
+        "Princezna",
+        "Prinzessin",
+        "公主"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "princess_consort",
+      "name_zh": "王妃",
+      "aliases": [
+        "Princess Consort",
+        "王妃",
+        "왕비"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "professor",
+      "name_zh": "教授",
+      "aliases": [
+        "Professor",
+        "教授"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "queen",
+      "name_zh": "女王",
+      "aliases": [
+        "Královna",
+        "Königin",
+        "Queen",
+        "Reina",
+        "女王"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "real_world",
+      "name_zh": "现实世界",
+      "aliases": [
+        "Dunia Nyata",
+        "Mundo real",
+        "Real-World",
+        "Realität",
+        "Skutečný svět",
+        "Świat rzeczywisty",
+        "寫實 / 現代",
+        "现实世界",
+        "現実世界",
+        "현실"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "rebirth",
+      "name_zh": "重生",
+      "aliases": [
+        "Rebirth",
+        "Renacimiento",
+        "Wiedergeburt",
+        "Znovuzrození",
+        "重生"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "reconciliation",
+      "name_zh": "破镜重圆",
+      "aliases": [
+        "Reconciliation",
+        "破鏡重圓",
+        "破镜重圆"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "redemption",
+      "name_zh": "救赎",
+      "aliases": [
+        "Erlösung",
+        "Redemption",
+        "Redención",
+        "救済",
+        "救贖",
+        "救赎",
+        "구원"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "regret",
+      "name_zh": "后悔",
+      "aliases": [
+        "Arrepentimiento",
+        "Regret",
+        "Reue",
+        "Żal",
+        "后悔",
+        "後悔",
+        "후회"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "reincarnation",
+      "name_zh": "转世",
+      "aliases": [
+        "Reincarnation",
+        "转世",
+        "환생"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "reject",
+      "name_zh": "拒绝",
+      "aliases": [
+        "Ablehnung",
+        "Rechazo",
+        "Reject",
+        "拒绝"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "reject_marriage",
+      "name_zh": "拒婚",
+      "aliases": [
+        "Reject Marriage",
+        "拒婚",
+        "結婚を拒む"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "resurrection",
+      "name_zh": "复活",
+      "aliases": [
+        "Resurrection",
+        "复活",
+        "生き返る"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "reunion",
+      "name_zh": "重逢",
+      "aliases": [
+        "Opětovné shledání",
+        "Ponowne spotkanie",
+        "Reuni",
+        "Reunion",
+        "Reunión",
+        "Wiedersehen",
+        "Wiedervereinigung",
+        "Znovusetkání",
+        "再会",
+        "重逢",
+        "재결합"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "revenge",
+      "name_zh": "复仇",
+      "aliases": [
+        "Pomsta",
+        "Rache",
+        "Revenge",
+        "Venganza",
+        "Zemsta",
+        "复仇",
+        "復仇",
+        "復讐",
+        "복수"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "rom_com",
+      "name_zh": "爱情喜剧",
+      "aliases": [
+        "Comedia Rom.",
+        "Rom-Com",
+        "ラブコメ",
+        "爱情喜剧",
+        "로맨틱 코미디"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "romance",
+      "name_zh": "爱情",
+      "aliases": [
+        "Romance",
+        "Romans",
+        "Romansa",
+        "Romantik",
+        "Romantika",
+        "ロマンス",
+        "恋爱",
+        "愛情",
+        "爱情",
+        "로맨스"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "royal_family",
+      "name_zh": "王室",
+      "aliases": [
+        "Königsfamilie",
+        "Royal Family",
+        "王室"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "runaway_bride_groom",
+      "name_zh": "逃婚",
+      "aliases": [
+        "Runaway Bride/Groom",
+        "逃げる花嫁/花婿",
+        "逃婚"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "rural",
+      "name_zh": "乡村",
+      "aliases": [
+        "Rural",
+        "乡村",
+        "田舎"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "saintess",
+      "name_zh": "圣女",
+      "aliases": [
+        "Saintess",
+        "圣女",
+        "聖女"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "satisfying_revenge",
+      "name_zh": "痛快复仇",
+      "aliases": [
+        "Satisfying Revenge",
+        "痛快复仇",
+        "통쾌한 복수"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "satisfying_reversal",
+      "name_zh": "爽快逆转",
+      "aliases": [
+        "Satisfying Reversal",
+        "爽快逆转",
+        "痛快逆転"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "sci_fi",
+      "name_zh": "科幻",
+      "aliases": [
+        "Sci-Fi",
+        "SF",
+        "科幻"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "second_chance",
+      "name_zh": "第二次机会",
+      "aliases": [
+        "Second Chance",
+        "Seg. Oportu.",
+        "Zweite Chance",
+        "セカンドチャンス",
+        "第二次机会",
+        "두 번째 기회"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "secret_child",
+      "name_zh": "秘密宝宝",
+      "aliases": [
+        "Secret Child",
+        "Tajne dziecko",
+        "秘密宝宝"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "secret_love",
+      "name_zh": "暗恋",
+      "aliases": [
+        "Amor secreto",
+        "Geheime Liebe",
+        "Secret Love",
+        "暗恋",
+        "暗戀",
+        "片思い",
+        "짝사랑"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "secretary",
+      "name_zh": "秘书",
+      "aliases": [
+        "Secretary",
+        "秘书",
+        "秘書"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "shapeshift_dragon",
+      "name_zh": "变身龙族",
+      "aliases": [
+        "Dragón metamorfo",
+        "Drak měnící podobu",
+        "Shapeshift Dragon",
+        "Smok zmiennokształtny",
+        "Wandlerdrache",
+        "变身龙族",
+        "変身竜",
+        "變身龍族",
+        "변신 드래곤"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "single_dad",
+      "name_zh": "单亲爸爸",
+      "aliases": [
+        "Single Dad",
+        "シングルパパ",
+        "单亲爸爸",
+        "單親爸爸",
+        "싱글 아빠"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "single_mom",
+      "name_zh": "单亲妈妈",
+      "aliases": [
+        "Ibu Tunggal",
+        "Mamá Soltera",
+        "Single Mom",
+        "Svobodná matka",
+        "シングルママ",
+        "单亲妈妈",
+        "單親媽媽",
+        "싱글 엄마"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "son_in_law",
+      "name_zh": "女婿",
+      "aliases": [
+        "Son-in-Law",
+        "Zięć",
+        "女婿",
+        "娘婿",
+        "사위"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "sports_competition",
+      "name_zh": "体育竞技",
+      "aliases": [
+        "Deporte",
+        "Rywalizacja sportowa",
+        "Sports Competition",
+        "Sportwettkampf",
+        "スポーツ競技",
+        "体育竞技",
+        "스포츠 경쟁"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "spy",
+      "name_zh": "间谍",
+      "aliases": [
+        "Spy",
+        "スパイ",
+        "间谍"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "step_siblings",
+      "name_zh": "继兄弟姐妹",
+      "aliases": [
+        "Hermanastros",
+        "Step Siblings",
+        "继兄弟姐妹",
+        "義兄弟姉妹",
+        "의붓형제"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "strong_woman",
+      "name_zh": "女强人",
+      "aliases": [
+        "Mulher Forte",
+        "Silna kobieta",
+        "Starke Frau",
+        "Strong Woman",
+        "Wanita Tangguh",
+        "女强人"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "student",
+      "name_zh": "学生",
+      "aliases": [
+        "Estudiante",
+        "Student",
+        "学生",
+        "學生",
+        "학생"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "substitute_bride",
+      "name_zh": "替嫁新娘",
+      "aliases": [
+        "Novia por sustitución",
+        "Substitute Bride",
+        "替嫁新娘",
+        "身代わり花嫁"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "sudden_wealth",
+      "name_zh": "一夜暴富",
+      "aliases": [
+        "Sudden Wealth",
+        "一夜暴富",
+        "成り上がり",
+        "뜻밖의 부자 됨"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "super_warrior",
+      "name_zh": "超级战士",
+      "aliases": [
+        "Super bojovník",
+        "Super Warrior",
+        "Superkrieger",
+        "Superwojownik",
+        "スーパーウォリア",
+        "超級戰士",
+        "超级战士",
+        "슈퍼 파이터"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "superhero",
+      "name_zh": "超级英雄",
+      "aliases": [
+        "Superheld",
+        "Superhero",
+        "Súper Héroe",
+        "超级英雄"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "supernatural",
+      "name_zh": "超自然",
+      "aliases": [
+        "Nadprzyrodzone",
+        "Nadpřirozeno",
+        "Sobrenatural",
+        "Supernatural",
+        "Übernatürlich",
+        "超自然",
+        "초자연"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "superpower",
+      "name_zh": "超能力",
+      "aliases": [
+        "Kekuatan Super",
+        "Moce specjalne",
+        "Superkraft",
+        "Superpoder",
+        "Superpoderes",
+        "Superpower",
+        "超能力",
+        "초능력"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "survival",
+      "name_zh": "生存",
+      "aliases": [
+        "Survival",
+        "Überleben",
+        "サバイバル",
+        "生存"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "survival_game",
+      "name_zh": "生存游戏",
+      "aliases": [
+        "Survival Game",
+        "Überlebensspiel",
+        "サバイバルゲーム",
+        "生存游戏",
+        "서바이벌 게임"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "sweet",
+      "name_zh": "甜宠",
+      "aliases": [
+        "Dulce y romántico",
+        "Manis dan Romantis",
+        "Romance doce",
+        "Sladká romance",
+        "Sweet",
+        "Süß und romantisch",
+        "Słodki romans",
+        "甘々ロマンス",
+        "甜宠",
+        "甜宠浪漫",
+        "甜寵浪漫",
+        "달달한 로맨스"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "sweet_love",
+      "name_zh": "甜蜜爱情",
+      "aliases": [
+        "Sweet Love",
+        "Słodka miłość",
+        "スイートラブ",
+        "甜蜜爱情",
+        "달콤한 사랑"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "system",
+      "name_zh": "系统",
+      "aliases": [
+        "System",
+        "システム系",
+        "系統",
+        "系统",
+        "시스템"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "teacher",
+      "name_zh": "老师",
+      "aliases": [
+        "Lehrer",
+        "Profesor",
+        "Teacher",
+        "先生",
+        "老师",
+        "老師"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "teenager",
+      "name_zh": "青少年",
+      "aliases": [
+        "Teenager",
+        "青少年",
+        "청소년"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "the_substitute",
+      "name_zh": "替身",
+      "aliases": [
+        "El Sustituto",
+        "Stellvertreter",
+        "The Substitute",
+        "代役",
+        "替身",
+        "대역"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "thrill_calls",
+      "name_zh": "惊险来电",
+      "aliases": [
+        "Thrill Calls",
+        "スリルコール",
+        "惊险来电",
+        "스릴 콜"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "thrilling_suspenseful",
+      "name_zh": "惊险悬疑",
+      "aliases": [
+        "Emocionante / Suspense",
+        "Emocionante y tenso",
+        "Napínavé a vzrušující",
+        "Spannend & aufregend",
+        "Thrilling & Suspenseful",
+        "Trzymające w napięciu",
+        "スリル & サスペンス",
+        "惊险悬疑",
+        "緊張/刺激",
+        "긴장감 & 스릴"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "time_travel",
+      "name_zh": "穿越",
+      "aliases": [
+        "Cestování časem",
+        "Podróż w czasie",
+        "Time Travel",
+        "Viaje Temporal",
+        "Zeitreise",
+        "タイムトラベル",
+        "時空旅行",
+        "穿越",
+        "시간 여행"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "tough_girl",
+      "name_zh": "独立女性",
+      "aliases": [
+        "Mujer Libre",
+        "Mulher Indep.",
+        "Tough Girl",
+        "独立女性",
+        "獨立女性",
+        "인디펜던트 우먼"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "twins",
+      "name_zh": "双胞胎",
+      "aliases": [
+        "Bliźnięta",
+        "Gemelos",
+        "Gêmeos",
+        "Twins",
+        "双子",
+        "双胞胎",
+        "雙胞胎",
+        "쌍둥이"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "twist",
+      "name_zh": "反转",
+      "aliases": [
+        "Giro inesperado",
+        "Reviravolta",
+        "Twist",
+        "Wendung",
+        "Zvrat",
+        "Zwrot akcji",
+        "反転",
+        "反轉",
+        "反转",
+        "반전"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "twisted",
+      "name_zh": "扭曲关系",
+      "aliases": [
+        "Retorcido",
+        "Toksyczna relacja",
+        "Torcido",
+        "Twisted",
+        "扭曲关系",
+        "扭曲關係",
+        "歪んだ関係",
+        "왜곡된 관계"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "ugly_duckling_to_swan",
+      "name_zh": "丑小鸭蜕变",
+      "aliases": [
+        "El patito feo se convierte en cisne",
+        "Ugly Ducking Transforns into Swan",
+        "Ugly Duckling to Swan",
+        "丑小鸭蜕变",
+        "華麗なる変身"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "uncle",
+      "name_zh": "大叔",
+      "aliases": [
+        "Starszy mężczyzna",
+        "Uncle",
+        "おじさん",
+        "大叔"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "underdog_rise",
+      "name_zh": "弱者崛起",
+      "aliases": [
+        "Ascenso del desvalido",
+        "Aufstieg des Außenseiters",
+        "Od zera na szczyt",
+        "Underdog Rise",
+        "Vzestup outsidera",
+        "弱者の逆転",
+        "弱者崛起",
+        "爽(從弱變強/逆襲)",
+        "약자의 역습"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "urban",
+      "name_zh": "都市",
+      "aliases": [
+        "Urban",
+        "都市",
+        "都會",
+        "도시"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "vampire",
+      "name_zh": "吸血鬼",
+      "aliases": [
+        "Vampire",
+        "吸血鬼"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "war_god",
+      "name_zh": "战神",
+      "aliases": [
+        "Bóg wojny",
+        "Dios de la guerra",
+        "Kriegsgott",
+        "War God",
+        "战神",
+        "戦神",
+        "전쟁의 신"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "werewolf",
+      "name_zh": "狼人",
+      "aliases": [
+        "Hombre Lobo",
+        "Vlkodlak",
+        "Werewolf",
+        "Werwolf",
+        "Wilkołak",
+        "人狼",
+        "狼人",
+        "늑대 인간"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "western_fantasy",
+      "name_zh": "西方奇幻",
+      "aliases": [
+        "Fantasía occidental",
+        "Western Fantasy",
+        "Westliche Fantasy",
+        "西方奇幻",
+        "西洋ファンタジー"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "winning_back_wife",
+      "name_zh": "追妻",
+      "aliases": [
+        "Frau zurückgewinnen",
+        "Reconquistar a esposa",
+        "Recuperar a la esposa",
+        "Winning Back Wife",
+        "Získání manželky zpět",
+        "妻を取り戻す",
+        "追妻",
+        "아내 되찾기"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "witch",
+      "name_zh": "女巫",
+      "aliases": [
+        "Witch",
+        "女巫",
+        "魔女"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "witch_wizard",
+      "name_zh": "巫师",
+      "aliases": [
+        "Hexe/Zauberer",
+        "Penyihir",
+        "Witch/Wizard",
+        "巫女或巫师",
+        "巫师"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "workplace",
+      "name_zh": "职场",
+      "aliases": [
+        "Büro",
+        "Lugar de Trabajo",
+        "Workplace",
+        "职场",
+        "職場",
+        "직장"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "id": "xxl_wife",
+      "name_zh": "丰满娇妻",
+      "aliases": [
+        "Esposa XXL",
+        "XXL Wife",
+        "ぽっちゃり妻",
+        "丰满娇妻"
+      ],
+      "status": "reviewed"
+    }
+  ],
+  "ambiguous_aliases": {
+    "판타지": {
+      "id": "ambiguous_fantasy_ko",
+      "name_zh": "奇幻（韩语歧义待核对）",
+      "candidates": [
+        "fantasy_world",
+        "fantasy"
+      ],
+      "reason": "source_alias_has_multiple_meanings"
+    },
+    "fantasie": {
+      "id": "ambiguous_fantasy_de",
+      "name_zh": "奇幻（德语歧义待核对）",
+      "candidates": [
+        "fantasy_world",
+        "fantasy"
+      ],
+      "reason": "source_alias_has_multiple_meanings"
+    }
+  }
+}

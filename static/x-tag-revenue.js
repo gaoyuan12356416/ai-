@@ -38,7 +38,7 @@
       note = document.createElement("div"); note.id = "xtrSummary"; note.className = "xtr-summary";
       table.before(note);
     }
-    note.innerHTML = meta ? `<span>标签收入：${esc(meta.start)} 至 ${esc(meta.end)}（UTC 完整日），USD；多标签平均分摊。</span>
+    note.innerHTML = meta ? `<span>标签收入：${esc(meta.start)} 至 ${esc(meta.end)}（UTC 完整日），USD；同义标签合并后平均分摊。</span>
       <span class="xtr-note">收入快照 ${esc(clock(meta.source_generated_at))}（北京时间）；每小时更新。历史范围以已收录数据为准。</span>${warning(meta)}` : esc(error || "正在读取历史标签收入…");
   }
   async function refresh() {
@@ -58,7 +58,7 @@
     dialog.addEventListener("close", () => { sequence++; });
   }
   function intro(data) {
-    return `<p class="xtr-note">${esc(data.meta.start)} 至 ${esc(data.meta.end)} · UTC · USD · 收入快照 ${esc(clock(data.meta.source_generated_at))}（北京时间）</p>${warning(data.meta)}`;
+    return `<p class="xtr-note">${esc(data.meta.start)} 至 ${esc(data.meta.end)} · UTC · USD · 收入快照 ${esc(clock(data.meta.source_generated_at))}（北京时间）<br>多语言同义标签使用统一中文名称；同剧先合并同义标签，再平均分摊。待映射和歧义标签单独展示，不参与发布偏好匹配。</p>${warning(data.meta)}`;
   }
   async function open(id, tag) {
     ensureDialog(); currentId = id;

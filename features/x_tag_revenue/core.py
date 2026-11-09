@@ -2,7 +2,7 @@
 from collections import defaultdict
 from fractions import Fraction
 import json
-import unicodedata
+from .tags import lookup, VERSION as TAG_MAPPING_VERSION
 
 UNKNOWN = '__unknown__'
 
@@ -23,9 +23,9 @@ def labels(value):
     for item in value or []:
         if not isinstance(item, str):
             continue
-        name = unicodedata.normalize('NFKC', item).strip()
-        if name:
-            result.setdefault(name.casefold(), name)
+        if item.strip():
+            tag = lookup(item)
+            result.setdefault(tag['id'], tag['name_zh'])
     return result
 
 
@@ -140,6 +140,7 @@ def build(catalog, metrics, resources, end):
                     'labels': list(metadata['tags'].values()),
                 }
         cents_by_tag = rounded_parts(amounts, channel_total)
+        unknown = sum(value for key, value in cents_by_tag.items() if not lookup(key)['matchable'])
         meaningful_share = channel_total > 0 and all(value >= 0 for value in amounts.values())
         shares = rounded_parts({key: value * 10000 / channel_total for key, value in amounts.items()}, 10000) if meaningful_share else {}
         tag_rows = []
@@ -150,7 +151,8 @@ def build(catalog, metrics, resources, end):
                 dramas.append({k: v for k, v in row.items() if k != 'fraction'} | {'allocated_cents': parts[key]})
             dramas.sort(key=lambda r: (-r['allocated_cents'], r['content_id'], r['language']))
             post_ids = set().union(*(channel['dramas'][key]['posts'] for key in detail[tag]))
-            tag_rows.append(dict(key=tag, name=names[tag], revenue_cents=cents_by_tag[tag],
+            tag_rows.append(dict(key=tag, name=names[tag], mapping_status=lookup(tag)['status'],
+                                 matchable=lookup(tag)['matchable'], revenue_cents=cents_by_tag[tag],
                                  share_bp=shares.get(tag), drama_count=len(dramas),
                                  published_count=len(post_ids), dramas=dramas))
         tag_rows.sort(key=lambda r: (-r['revenue_cents'], r['key']))
@@ -162,5 +164,5 @@ def build(catalog, metrics, resources, end):
     included = sum(row['revenue_cents'] for row in output.values())
     if included + unresolved != total:
         raise ValueError('channel_revenue_not_conserved')
-    return dict(accounts=output, audit=dict(source_revenue_cents=total, included_revenue_cents=included,
+    return dict(accounts=output, mapping_version=TAG_MAPPING_VERSION, audit=dict(source_revenue_cents=total, included_revenue_cents=included,
                                           unassigned_revenue_cents=unresolved, unassigned_rows=unresolved_rows))

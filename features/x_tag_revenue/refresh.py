@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .core import build
+from .tags import VERSION as TAG_MAPPING_VERSION
 from features.social_analytics.warehouse_reader import current, connect, DEFAULT_ROOT as WAREHOUSE_ROOT
 from features.social_analytics.warehouse_refresh import Reader, environment, atomic_json
 
@@ -57,7 +58,7 @@ def refresh(root, warehouse_root, env_path):
             result['meta'] = dict(version=version, generated_at=now.isoformat(),
                                   source_version=manifest['version'], source_generated_at=manifest['generated_at'],
                                   start=manifest['start'], end=end, timezone='UTC', currency='USD',
-                                  app_id='1479', allocation='equal_distinct_labels',
+                                  app_id='1479', allocation='equal_distinct_semantic_tags', tag_mapping_version=TAG_MAPPING_VERSION,
                                   label_basis='current_catalog', label_updated_at=now.isoformat(),
                                   missing_dates=missing, source='ai_backend_confirmed_x_publications')
             directory = root / 'snapshots'

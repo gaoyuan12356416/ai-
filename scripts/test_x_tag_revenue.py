@@ -11,6 +11,7 @@ from features.x_tag_revenue.core import build, label_index, rounded_parts
 from features.x_tag_revenue.routes import response, dispatch, read_snapshot
 from features.x_tag_revenue.integration import patch_html, unpatch_html, CHANGES
 from features.x_tag_revenue.http_server import authorize
+from features.x_tag_revenue.tags import lookup, VERSION as TAG_MAPPING_VERSION
 
 
 def publication(campaign='1', channel='123', content='drama', **extra):
@@ -29,6 +30,28 @@ def resource(names='Romance,CEO', content='drama', lang='en', series='s'):
 
 
 class PortraitTests(unittest.TestCase):
+    def test_multilingual_synonyms_merge_before_equal_allocation(self):
+        out=build([publication()],[metric(120)],[resource('Revenge,復仇,复仇,복수,Rache,Romance,爱情')],'2026-01-31')
+        tags=out['accounts']['123']['tags']
+        self.assertEqual({t['key']:t['revenue_cents'] for t in tags},{'revenge':60,'romance':60})
+        self.assertEqual({t['name'] for t in tags},{'复仇','爱情'})
+        self.assertTrue(all(t['dramas'][0]['label_count']==2 for t in tags))
+        self.assertEqual(out['mapping_version'],TAG_MAPPING_VERSION)
+
+    def test_related_meanings_and_ambiguous_translations_do_not_collapse(self):
+        tags=label_index([resource('Revenge,Counterattack,Princess,王妃,Fantasy,Fantasy World,판타지,Fantasie')])[('drama','en')]['tags']
+        self.assertEqual(len(tags),8)
+        self.assertFalse(lookup('판타지')['matchable'])
+        self.assertFalse(lookup('Fantasie')['matchable'])
+        self.assertNotEqual(lookup('판타지')['id'],lookup('Fantasy')['id'])
+
+    def test_unmapped_revenue_preserves_totals_and_uses_chinese_status(self):
+        p=build([publication()],[metric(100)],[resource('Revenge,not-yet-reviewed-777')],'2026-01-31')['accounts']['123']
+        self.assertEqual(p['unknown_revenue_cents'],50)
+        self.assertEqual(sum(t['revenue_cents'] for t in p['tags']),100)
+        pending=next(t for t in p['tags'] if not t['matchable'])
+        self.assertTrue(pending['name'].startswith('待映射标签'))
+
     def test_equal_allocation_and_duplicate_labels(self):
         out = build([publication()], [metric(101)], [resource('Romance,CEO,romance,CEO')], '2026-01-31')
         p = out['accounts']['123']
@@ -73,10 +96,10 @@ class PortraitTests(unittest.TestCase):
         self.assertEqual(14,out['audit']['source_revenue_cents'])
 
     def test_mapping_merges_labels_but_keeps_language_product_identity(self):
-        rows=[resource('A',lang='jp'),resource('B',lang='ja'),resource('C',lang='en'),resource('D',lang='pt')]
+        rows=[resource('Romance',lang='jp'),resource('CEO',lang='ja'),resource('Revenge',lang='en'),resource('Sweet',lang='pt')]
         rows.append(dict(resource('WRONG',lang='ja'),app_id=999))
         idx=label_index(rows)
-        self.assertEqual({'a','b'},set(idx[('drama','ja')]['tags']))
+        self.assertEqual({'romance','ceo'},set(idx[('drama','ja')]['tags']))
         self.assertIn(('drama','pt-br'),idx)
         idx=label_index([resource('A',series='one'),resource('B',series='two')])
         self.assertEqual('ambiguous_drama',idx[('drama','en')]['status'])
