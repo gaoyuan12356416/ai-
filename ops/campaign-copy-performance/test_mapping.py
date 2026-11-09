@@ -128,6 +128,48 @@ class MappingTest(unittest.TestCase):
         prior["c"][0][prior["cf"].index("platform")] = 0
         self.assertEqual(self.query({FB: [source_row()]}, [{"platform": 0, "new_id": "100"}], prior)[3]["detail_queries"], 1)
 
+    def test_outage_bounds_expired_labels_without_reusing_stale_membership(self):
+        tables = {TT: [source_row(cid=str(i), ad=str(1000+i)) for i in range(200)]}
+        logs = [{"platform": 3, "new_id": str(i)} for i in range(200)]
+        with mock.patch.object(mapping, "metadata_bucket", return_value=95):
+            prior = self.prior(tables, logs)
+            original = copy.deepcopy(prior)
+            tables[TT][0]["ad_id"] = "replacement"
+            tables[TT].append(source_row(cid="new", ad="new-ad"))
+            logs.append({"platform": 3, "new_id": "new"})
+            now = NOW + dt.timedelta(days=6)
+            rows, metadata, _, stats, _ = self.query(tables, logs, prior, now)
+        self.assertEqual(stats["detail_campaigns"], 5)  # 2 required + ceil(201/96).
+        self.assertEqual(stats["metadata_stale_campaigns"], 196)
+        self.assertEqual(stats["metadata_oldest_checked_at"], str(NOW))
+        self.assertIn("replacement", [r["ad_id"] for r in rows])
+        self.assertNotIn("1000", [r["ad_id"] for r in rows])
+        self.assertEqual(metadata[(3, "0")]["metadata_checked_at"], str(now))
+        self.assertEqual(sum(m["metadata_checked_at"] == str(NOW) for m in metadata.values()), 196)
+        self.assertEqual(prior, original)
+
+    def test_expired_labels_catch_up_oldest_first_across_successes(self):
+        tables = {TT: [source_row(cid=str(i), ad=str(1000+i)) for i in range(100)]}
+        logs = [{"platform": 3, "new_id": str(i)} for i in range(100)]
+        with mock.patch.object(mapping, "metadata_bucket", return_value=95):
+            prior = self.prior(tables, logs)
+            checked_index = prior["cf"].index("metadata_checked_at")
+            id_index = prior["cf"].index("campaign_id")
+            for row in prior["c"]:
+                row[checked_index] = str(NOW-dt.timedelta(hours=int(row[id_index])))
+            now = NOW + dt.timedelta(days=6)
+            _, metadata, bucket, stats, _ = self.query(tables, logs, prior, now)
+            refreshed = {cid for (_, cid), m in metadata.items() if m["metadata_checked_at"] == str(now)}
+            self.assertEqual(refreshed, {"98", "99"})
+            self.assertEqual(stats["metadata_stale_campaigns"], 98)
+            for row in prior["c"]:
+                row[checked_index] = metadata[(3, row[id_index])]["metadata_checked_at"]
+            prior["m"]["mapping_metadata_next_bucket"] = bucket
+            _, metadata, _, stats, _ = self.query(tables, logs, prior, now+dt.timedelta(minutes=15))
+            refreshed = {cid for (_, cid), m in metadata.items() if m["metadata_checked_at"] == str(now+dt.timedelta(minutes=15))}
+            self.assertEqual(refreshed, {"96", "97"})
+            self.assertEqual(stats["metadata_stale_campaigns"], 96)
+
     def test_meta_migration_only_fetches_raw_product_when_log_app_name_is_missing(self):
         logs = [{"platform": 0, "new_id": "100", "app_name": "App label"}]
         tables = {FB: [source_row()]}

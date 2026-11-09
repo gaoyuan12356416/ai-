@@ -59,7 +59,9 @@ def query_campaign_mapping(cur, logs, previous, now):
     """Keep current membership/fallback semantics without a million table lookups.
 
     New Campaigns and changed membership get fresh descriptions immediately.
-    Unchanged descriptions are read in 96 rotating buckets, at most 24h old.
+    Unchanged descriptions rotate over 96 successful cycles. After an outage,
+    overdue descriptions catch up oldest-first in bounded batches; they must
+    not force a full descriptive rebuild that prevents financial refreshes.
     The published report is the only seed, so a failed refresh cannot advance it.
     """
     started = time.monotonic()
@@ -101,7 +103,8 @@ def query_campaign_mapping(cur, logs, previous, now):
     sources = {}
     metadata = {}
     stats = {"membership_queries": 0, "detail_queries": 0, "detail_campaigns": 0,
-             "membership_rows": 0, "detail_rows": 0, "reused_campaigns": 0}
+             "membership_rows": 0, "detail_rows": 0, "reused_campaigns": 0,
+             "metadata_stale_campaigns": 0, "metadata_oldest_checked_at": ""}
     for platform, table, index, product_sql in SOURCE_SPECS:
         # Meta's second table is a fallback per Campaign, not a union.
         remaining = sorted(cid for cid in ids_by_platform[platform] if (platform, cid) not in sources)
@@ -120,6 +123,7 @@ def query_campaign_mapping(cur, logs, previous, now):
                 sources[(platform, cid)] = table
 
         refresh_ids = []
+        overdue = []
         for cid in remaining:
             key = (platform, cid)
             if sources.get(key) != table:
@@ -136,7 +140,7 @@ def query_campaign_mapping(cur, logs, previous, now):
                     {str(r["ad_id"]) for r in rows if r.get("ad_id")}
                 )
             )
-            due = (not same or checked is None or checked > now or now - checked >= METADATA_MAX_AGE
+            due = (not same or checked is None or checked > now
                    or metadata_bucket(platform, cid) == bucket
                    or (key in needs_product and (old or {}).get("product") is None)
                    or any(field not in (old or {}) for field in METADATA_FIELDS))
@@ -147,10 +151,29 @@ def query_campaign_mapping(cur, logs, previous, now):
             else:
                 metadata[key].update({field: old[field] for field in METADATA_FIELDS})
                 stats["reused_campaigns"] += 1
+                if now - checked >= METADATA_MAX_AGE:
+                    overdue.append((checked, cid))
+
+        # Keep the normal bucket rotation and immediately refresh new/changed
+        # membership. Expiry alone gets one additional bucket-sized batch.
+        # Unselected labels retain their real check time, never a fabricated age.
+        overdue.sort()
+        catchup_limit = max(1, (len(remaining) + METADATA_BUCKETS - 1) // METADATA_BUCKETS)
+        for _, cid in overdue[:catchup_limit]:
+            refresh_ids.append(cid)
+            metadata[(platform, cid)]["metadata_checked_at"] = str(now)
+            stats["reused_campaigns"] -= 1
+        deferred = overdue[catchup_limit:]
+        stats["metadata_stale_campaigns"] += len(deferred)
+        if deferred:
+            oldest = str(deferred[0][0])
+            stats["metadata_oldest_checked_at"] = min(
+                stats["metadata_oldest_checked_at"] or oldest, oldest)
 
         print(json.dumps({"event": "campaign_copy_report_mapping_plan", "platform": platform,
                           "source": table, "membership_campaigns": len(remaining),
-                          "detail_campaigns": len(refresh_ids)}), flush=True)
+                          "detail_campaigns": len(refresh_ids),
+                          "deferred_descriptions": len(deferred)}), flush=True)
         for part in chunks(refresh_ids, DETAIL_BATCH):
             placeholders = ",".join(["%s"] * len(part))
             # status, budget and ad_account_id were fetched but never consumed.

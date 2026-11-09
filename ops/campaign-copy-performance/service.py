@@ -883,6 +883,8 @@ def build_payload(raw: dict) -> dict:
             "source": "ads_business.ads_campaign_rule_logs + kunlunads_dev.admin_user_group + kunlunads_dev.ads_custom_source_insight",
             "platform_scope": "0=Meta, 3=TikTok",
             "mapping_metadata_next_bucket": raw.get("mapping_metadata_next_bucket", 0),
+            "metadata_stale_campaigns": raw.get("mapping_stats", {}).get("metadata_stale_campaigns", 0),
+            "metadata_oldest_checked_at": raw.get("mapping_stats", {}).get("metadata_oldest_checked_at", ""),
             "read_only_verified": True,
             "copy_start": min(copy_times, default=""),
             "copy_end": max(copy_times, default=""),

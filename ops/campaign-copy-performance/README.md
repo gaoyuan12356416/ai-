@@ -146,8 +146,8 @@ has no rows. No database DDL or source writes are required.
 
 Only new Campaigns, changed membership, and a rotating 1/96 of existing Campaigns
 fetch descriptions, with at most 250 IDs per detailed query. Campaign names,
-countries, languages, and the source product fallback have a maximum successful
-refresh age of 24 hours. Copy-log App names and financial metrics still refresh
+countries, languages, and the source product fallback normally rotate within
+96 successful cycles (24 hours at the configured cadence). Copy-log App names and financial metrics still refresh
 every cycle. `status`, `budget`, and `ad_account_id` were not used by this report
 and are no longer fetched for Campaign mappings. Ad Set/Ad queries are unchanged.
 
@@ -225,3 +225,29 @@ systemctl restart campaign-copy-performance.service
   `a5137810e469aa0c69519143b33a796964f8d20f436ab07d9dbd67b7dccfa0ea`.
 - Evidence remains under the optimization directory. Rollback uses the commands
   above to restore code `4727724`, preserving the latest v2 cache.
+
+## Stale-cache recovery (2026-11-09)
+
+The last verified snapshot was November 3 at 21:15 Beijing time. Source insight
+dates and copy logs continued through November 9, but the refresh repeatedly
+exhausted its 840-second database budget in Campaign mapping. Expiry of every
+cached description expanded the next attempt to more than 450,000 detailed
+Campaign lookups, so retrying the unchanged seed could not recover.
+
+New Campaigns, changed exact Ad membership, missing required fields, and the
+normal rotating bucket still refresh descriptions immediately. Expiry alone
+now adds at most `ceil(source_campaigns / 96)` oldest descriptions per source
+per successful cycle. Unselected descriptions retain their actual check time;
+the page reports how many names/countries/languages remain overdue. This is
+recovery of descriptive fields, not permission to reuse old Ad membership or
+publish partial financial results. The read-only endpoint, FIFO gate, query
+budgets, complete selected-date replacement and historical retention remain.
+Normal rotations and oldest-first catch-up continue until the overdue count
+reaches zero; failures do not move either progress marker.
+
+Before activating this fix, seed an isolated warm cache from the verified live
+cache, validate preserved history, inspect fresh dates and source samples, and
+verify a second cycle. Only restart `campaign-copy-performance.service` after
+the candidate passes. Roll back the code to `5ab4071e8c82940b7a1e1b87f01e1022d7fb3d97`
+by restoring the previous `current` symlink and restarting this service. Keep
+the newest verified cache during rollback.
