@@ -114,6 +114,26 @@ def prepare():
             external.append({'path': str(target), 'before': str(saved), 'after': str(candidate),
                 'before_sha': base.digest(saved), 'after_sha': base.digest(candidate), 'existed': exists})
     main_external = [item for item in external if item['path'].startswith(str(base.MAIN) + '/features/')]
+    # The free-episode CDN is already trusted by the active X publisher. Add
+    # that same host to the separate interactive metadata reader, preserving
+    # all current entries and keeping credentials out of release artifacts.
+    def process_env(unit):
+        pid = base.run('systemctl', 'show', unit, '-p', 'MainPID', '--value')
+        return dict(part.decode().split('=', 1) for part in Path('/proc/' + pid + '/environ').read_bytes().split(b'\0') if b'=' in part)
+    api_env, x_env = process_env('drama-material-api.service'), process_env('x-post-automation.service')
+    assert 'img.tianmai.cn' in x_env.get('X_POST_MEDIA_ALLOWED_HOSTS', '').split(',')
+    hosts = list(dict.fromkeys(filter(None, api_env.get('X_POST_SOURCE_DURATION_ALLOWED_HOSTS', '').split(',') + ['img.tianmai.cn'])))
+    assert all(host and all(char.isalnum() or char in '.-*' for char in host) for host in hosts)
+    env_path = Path('/etc/x-excel-episode-source.env')
+    config_files = [(env_path, 'X_POST_SOURCE_DURATION_ALLOWED_HOSTS=' + ','.join(hosts) + '\n'),
+        (Path('/etc/systemd/system/drama-material-api.service.d/zzzz-x-excel-episode-source.conf'),
+         '[Service]\nEnvironmentFile=' + str(env_path) + '\n')]
+    for target, content in config_files:
+        assert not target.exists(), 'concurrent configuration: ' + str(target)
+        saved, candidate = folder / ('before-config-' + target.name), folder / ('next-config-' + target.name)
+        saved.write_bytes(b''); candidate.write_text(content)
+        main_external.append({'path': str(target), 'before': str(saved), 'after': str(candidate),
+            'before_sha': base.digest(saved), 'after_sha': base.digest(candidate), 'existed': False})
     manifest = {'phase': 'prepared', 'commit': commit, 'source': str(base.SOURCE),
         'old_release': str(old), 'new_release': str(release), 'old_tree': before,
         'new_tree': base.tree(release), 'external': [item for item in external if item not in main_external],
@@ -182,6 +202,7 @@ def install_main(folder, manifest, *, restore=False):
         for item in manifest['main_external']:
             if target_before and not item['existed']: Path(item['path']).unlink(missing_ok=True)
             else: atomic_copy(Path(item[next_key]), Path(item['path']))
+        base.run('systemctl', 'daemon-reload')
         base.run('systemctl', 'restart', 'drama-material-api.service')
         base.run('iptables', '-w', '5', '-D', *rule); gated = False
         api_ready()
@@ -194,6 +215,7 @@ def install_main(folder, manifest, *, restore=False):
             for item in manifest['main_external']:
                 if current_key == 'before' and not item['existed']: Path(item['path']).unlink(missing_ok=True)
                 else: atomic_copy(Path(item[current_key]), Path(item['path']))
+            base.run('systemctl', 'daemon-reload')
             base.run('systemctl', 'restart', 'drama-material-api.service')
         raise
     finally:
