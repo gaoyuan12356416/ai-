@@ -95,9 +95,10 @@
     $('app-scope').append(node('p', p.name + '（' + p.id + '）：' + (apps.join('；') || '见本次产品范围清单')));
   }
   const historical = /\/daily\/\d{4}-\d{2}-\d{2}\//.test(location.pathname || '');
-  if (historical || R.snapshot_kind === 'initial') {
+  if (historical || R.snapshot_kind === 'initial' || R.snapshot_kind === 'revision') {
     $('snapshot-notice').hidden = false;
-    $('snapshot-notice').textContent = historical ?
+    $('snapshot-notice').textContent = R.snapshot_kind === 'revision' ?
+      '当前为补充人工图片对比的修订版，原始每日快照仍保留，可从历史日报选择。' : historical ?
       '正在查看历史快照：' + R.report_date + '。本页保留当次生成结果；查看最新数据请使用上方固定入口。' :
       '首次三产品快照。近 7 天投放按本次读取结果汇总，历史页保留当次生成的数据。';
   }
@@ -142,6 +143,11 @@
       const url = safeUrl(item.url); if (!url) continue;
       const opt = node('option', item.date + (item.date === R.report_date ? ' · 当前数据日' : ''));
       opt.value = url; select.append(opt);
+      for (const revision of arr(item.revisions).slice().reverse()) {
+        const revisionUrl = safeUrl(revision.url); if (!revisionUrl) continue;
+        const revised = node('option', item.date + ' · 修订版 ' + timeText(revision.generated_at));
+        revised.value = revisionUrl; select.append(revised);
+      }
     }
   }
   async function fetchJson(url, mutable = false) {
@@ -182,6 +188,39 @@
       $('product-comparison-body').append(tr);
     }
   }
+  function renderHumanComparison() {
+    const data = R.human_comparison;
+    $('human-comparison').hidden = !data || !['all', '1479'].includes(selected);
+    if (!data) return;
+    const mode = $('human-comparison-scope').value || 'all', comparison = data.modes[mode];
+    const summary = comparison[period];
+    $('human-comparison-period').textContent = periodText();
+    $('human-comparison-body').replaceChildren();
+    for (const [key, title] of [['human', '人工图片（非 AI 来源）'], ['ai', 'AI 图片（已验证）']]) {
+      const row = summary[key], tr = node('tr', null, key === 'human' ? 'focus-row' : '');
+      tr.append(td(title), ...[fmt(row.spending_materials), money(row.spend), money(row.af_revenue_d0), pct(row.roas),
+        fmt(row.impressions), fmt(row.clicks), fmt(row.installs), pct(row.ctr), money(row.cpi)].map(value => td(value, 'num')));
+      $('human-comparison-body').append(tr);
+    }
+    const unknown = data.unknown[period], human = summary.human, ai = summary.ai;
+    const delta = number(human.roas) !== null && number(ai.roas) !== null ?
+      '人工 ROAS 较 AI ' + (human.roas >= ai.roas ? '高 ' : '低 ') + fmt(Math.abs(human.roas - ai.roas), 2) + ' 个百分点。' :
+      '至少一类没有消耗，暂无可比较的 ROAS。';
+    $('human-comparison-summary').textContent = delta +
+      '人工图片累计入库 ' + fmt(data.inventory.total) + ' 张，所选区间新增 ' + fmt(data.inventory[period === 'week' ? 'new_week' : 'new_day']) + ' 张。' +
+      '全部 DramaWave 范围内，来源待核对 / 未验证 AI 导入：本期有消耗 ' + fmt(unknown.spending_materials) + ' 张、消耗 $' + money(unknown.spend) + '，未计入人工图片。' +
+      (mode === 'matched' ? '当前仅比较两类在同日共同投放的应用与渠道。' : '当前显示两类在 DramaWave 的全部投放。');
+    $('human-trend-body').replaceChildren();
+    for (const row of arr(comparison.trend)) {
+      const tr = node('tr');
+      tr.append(td(row.dt), ...[money(row.human.spend), money(row.human.af_revenue_d0), pct(row.human.roas),
+        money(row.ai.spend), money(row.ai.af_revenue_d0), pct(row.ai.roas)].map(value => td(value, 'num')));
+      $('human-trend-body').append(tr);
+    }
+    $('human-comparison-rule').textContent = data.note;
+    $('human-comparison-method').textContent = data.scope_note;
+  }
+  $('human-comparison-scope').addEventListener('change', renderHumanComparison);
   function renderSummary() {
     const s = selectedSummary(view()), prod = s.production || {}, metric = s.performance || {};
     const comparisons = selectedComparisons(), previous = comparisons.previous || {};
@@ -220,7 +259,7 @@
     const insights = arr(period === 'week' ? view().week?.insights : view().insights);
     for (const text of insights) $('insights').append(node('div', text, 'insight'));
     if (!insights.length) $('insights').append(node('div', '以上为当前数据范围的实际表现；投放与产出按各自归属统计。', 'insight'));
-    renderProductTable(); renderTop(); renderChart();
+    renderHumanComparison(); renderProductTable(); renderTop(); renderChart();
     document.documentElement.dataset.summaryReady = 'true';
   }
   function renderTop() {

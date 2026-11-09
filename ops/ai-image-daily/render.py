@@ -14,6 +14,12 @@ DEFAULT_HOME_URL = (
 )
 
 
+def snapshot_path(date, version, revision=False):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", version):
+        raise ValueError("invalid_snapshot_identity")
+    return "daily/" + date + ("/revisions/" + version if revision else "") + "/index.html"
+
+
 def _safe_url(value: Any) -> str:
     """Only public HTTP(S) URL shapes may reach links or image attributes."""
     if not isinstance(value, str) or any(ord(char) < 32 for char in value):
@@ -120,7 +126,7 @@ def build_bundle(report: Dict[str, Any], history: List[Dict[str, Any]],
     _json(source)
     shell = {key: source[key] for key in (
         "schema_version", "report_date", "generated_at", "timezone", "currency",
-        "period", "snapshot_kind", "validation", "notes", "products", "freshness",
+        "period", "snapshot_kind", "validation", "notes", "products", "freshness", "human_comparison",
     ) if key in source}
     shell.update(home_url=base_url + "/index.html", history_url=base_url + "/history.json",
                  status_url=base_url + "/status.json", bundle_version=version,
@@ -148,7 +154,7 @@ def build_bundle(report: Dict[str, Any], history: List[Dict[str, Any]],
     rendered = _render(shell).encode("utf-8")
     bundle["index.html"] = dict(data=rendered, content_type="text/html; charset=utf-8",
                                 immutable=False, compress=True)
-    bundle["daily/" + date + "/index.html"] = dict(bundle["index.html"], immutable=True)
+    bundle[snapshot_path(date, version, report.get("snapshot_kind") == "revision")] = dict(bundle["index.html"], immutable=True)
     bundle["assets/" + version + "/report.js"] = dict(
         data=Path(__file__).with_name("report.js").read_bytes(),
         content_type="application/javascript; charset=utf-8", immutable=True, compress=True)

@@ -74,6 +74,38 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(item['metadata']['CacheControl'], report.IMMUTABLE_CACHE if item['immutable'] else report.NO_CACHE)
         self.assertFalse(self.pub.puts)
 
+    def test_same_day_revision_preserves_original_and_resumes_frozen_bytes(self):
+        self.publish()
+        original_key = report.PREFIX + '/daily/' + self.date + '/index.html'
+        original = copy.deepcopy(self.pub.objects[original_key])
+        revision_run = self.state / 'runs' / 'revision'
+        revision_run.mkdir()
+        archive = report.snapshot_path(self.date, 'v2', True)
+        entry = dict(self.entry, url='https://example.test/' + archive, snapshot_kind='revision')
+        history = report.revised_history([self.entry], entry, True)
+        bundle = copy.deepcopy(self.bundle)
+        bundle[archive] = bundle.pop('daily/' + self.date + '/index.html')
+        bundle[archive]['data'] = b'<html>revision</html>'
+        bundle['index.html']['data'] = b'<html>revision</html>'
+        bundle['history.json']['data'] = report.json_bytes(history)
+        report.freeze_bundle(self.state, revision_run, dict(self.data, snapshot_kind='revision'),
+                             entry, history, bundle, 'v2')
+        self.pub.fail_key = report.PREFIX + '/index.html'
+        with self.assertRaises(RuntimeError):
+            self.publish()
+        self.pub.fail_key = None
+        self.publish()
+        self.assertEqual(self.pub.objects[original_key], original)
+        self.assertEqual(report.load_json(self.state / 'history.json')[0]['url'], self.entry['url'])
+        self.assertEqual(report.load_json(self.state / 'history.json')[0]['revisions'], [entry])
+        self.assertIn(report.PREFIX + '/' + archive, self.pub.objects)
+
+    def test_revision_requires_latest_existing_date(self):
+        with self.assertRaisesRegex(ValueError, 'latest_published_date'):
+            report.revised_history([], self.entry, True)
+        with self.assertRaisesRegex(ValueError, 'latest_published_date'):
+            report.revised_history([dict(self.entry, date='2026-10-22')], self.entry, True)
+
     def test_order_all_resources_verified_before_latest_and_redirect_last(self):
         status = self.publish()
         ranks = [report.phase(key) for key in self.pub.puts if not key.endswith('/status.json')]

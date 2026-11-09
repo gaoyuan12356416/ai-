@@ -417,9 +417,10 @@ def fact_projection():
     return ','.join("'%s',COALESCE(SUM(%s),0)" % (k, v) for k,v in METRIC_SQL.items())
 
 
-def collect_days(catalog, ids, apps, dates):
+def collect_days(catalog, ids, apps, dates, human_comparison=False):
     """Three daily views share one MVCC snapshot, avoiding live-update drift."""
     multi = isinstance(apps, dict)
+    human_apps = [name for name, root in apps['app_to_product'].items() if str(root) == '1479'] if multi else []
     if multi:
         apps = apps['app_names']
     app_filter = ','.join(literal(x) for x in apps)
@@ -439,6 +440,19 @@ def collect_days(catalog, ids, apps, dates):
                         ','.join(literal(x) for x in part) + ')' + (' GROUP BY app_id,platform' if multi else ''))
         sqls.append("SELECT JSON_OBJECT('kind','market','dt',dt,'platform',platform,'app_id',app_id,'resource_type',resource_type,'latest_updated',MAX(updated_at)," + fact_projection() + ') FROM ads_custom_source_insight FORCE INDEX(`as`) WHERE ' + common + ' GROUP BY dt,platform,app_id,resource_type')
         sqls.append("SELECT JSON_OBJECT('kind','pool','dt',dt,'id',resource_id," + ("'app_id',app_id,'platform',platform," if multi else '') + "'latest_updated',MAX(updated_at)," + fact_projection() + ') FROM ads_custom_source_insight FORCE INDEX(pss) WHERE ' + common + ' AND product=' + literal('Drama-AI素材') + ' AND source_type=3 AND resource_type=1 GROUP BY dt,resource_id' + (',app_id,platform' if multi else ''))
+        if human_comparison:
+            if not human_apps:
+                raise ValueError('human_comparison_scope_required')
+            projection = ','.join("'%s',COALESCE(SUM(i.%s),0)" % (key, field) for key, field in METRIC_SQL.items())
+            sqls.append("SELECT JSON_OBJECT('kind','dramawave_image','dt',i.dt,'id',i.resource_id,"
+                        "'app_id',i.app_id,'platform',i.platform,'optimizer',i.optimizer," + projection +
+                        ') FROM ads_custom_source_insight i FORCE INDEX(`as`) '
+                        'STRAIGHT_JOIN ads_custom_source s ON s.id=i.resource_id AND BINARY i.resource_id=CAST(s.id AS CHAR) '
+                        'WHERE i.dt=' + literal(day) + ' AND i.app_id IN (' + ','.join(literal(x) for x in human_apps) + ')'
+                        ' AND i.source_type=3 AND i.resource_type=1 AND s.type=1 AND s.data_source IN (0,6)'
+                        ' AND s.product=' + literal('Dramawave') +
+                        ' GROUP BY i.dt,i.resource_id,i.app_id,i.platform,i.optimizer')
+            sqls.append("SELECT JSON_OBJECT('kind','human_coverage','dt'," + literal(day) + ",'ok',1)")
         if multi:
             # This row proves the query executed successfully even if all product
             # totals are genuinely empty. Missing this sentinel is not zero spend.

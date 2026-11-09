@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 from collector import Catalog, TZ, collect_days, collect_lineage
 from analysis import build_report
-from render import build_bundle
+from render import build_bundle, snapshot_path
 
 PREFIX = 'codex-artifacts/html/ai-image-daily'
 LEGACY_INDEX = 'codex-artifacts/html/dramawave-ai-image-daily/index.html'
@@ -174,7 +174,8 @@ def freeze_bundle(state, run, report, history_entry, history, bundle, version):
     dt.date.fromisoformat(date)
     if report.get('schema_version') != 3 or not re.fullmatch(r'[A-Za-z0-9_-]+', version):
         raise ValueError('invalid_bundle_version')
-    required = {'index.html', 'daily/' + date + '/index.html', 'history.json'}
+    archive = snapshot_path(date, version, report.get('snapshot_kind') == 'revision')
+    required = {'index.html', archive, 'history.json'}
     if not required.issubset(bundle):
         raise ValueError('incomplete_static_bundle')
     objects = {PREFIX + '/' + key: value for key, value in bundle.items()}
@@ -190,7 +191,7 @@ def freeze_bundle(state, run, report, history_entry, history, bundle, version):
         immutable = rank in (0, 1)
         if bool(artifact['immutable']) != immutable:
             raise ValueError('incorrect_bundle_immutability')
-        if rank == 1 and key != PREFIX + '/daily/' + date + '/index.html':
+        if rank == 1 and key != PREFIX + '/' + archive:
             raise ValueError('unexpected_daily_snapshot')
         raw = artifact['data']
         if not isinstance(raw, bytes):
@@ -210,7 +211,7 @@ def freeze_bundle(state, run, report, history_entry, history, bundle, version):
             stored_file=stored_file, sha256=sha(raw), stored_sha256=sha(encoded), bytes=len(raw),
             stored_bytes=len(encoded), metadata=meta))
     write_json(run / 'report.json', report)
-    manifest = dict(schema_version=3, report_date=date, version=version, history_entry=history_entry,
+    manifest = dict(schema_version=3, report_date=date, version=version, snapshot_path=archive, history_entry=history_entry,
         history=history, report_sha256=sha((run / 'report.json').read_bytes()), objects=artifacts)
     write_json(run / 'manifest.json', manifest)
     write_json(state / 'pending.json', dict(schema_version=3, run=str(run), report_date=date,
@@ -248,7 +249,12 @@ def read_frozen(state):
         decoded = gzip.decompress(encoded) if item['metadata'].get('ContentEncoding') == 'gzip' else encoded
         if decoded != raw or len(raw) != item['bytes'] or len(encoded) != item['stored_bytes']:
             raise ValueError('pending_encoding_mismatch')
-    if not {PREFIX + '/index.html', PREFIX + '/daily/' + manifest['report_date'] + '/index.html',
+    frozen_report = load_json(run / 'report.json')
+    archive = snapshot_path(manifest['report_date'], manifest['version'], frozen_report.get('snapshot_kind') == 'revision')
+    if manifest.get('snapshot_path', archive) != archive or any(
+            item['phase'] == 1 and item['key'] != PREFIX + '/' + archive for item in manifest['objects']):
+        raise ValueError('unexpected_daily_snapshot')
+    if not {PREFIX + '/index.html', PREFIX + '/' + archive,
             PREFIX + '/history.json', LEGACY_INDEX}.issubset(seen):
         raise ValueError('incomplete_frozen_manifest')
     return run, manifest
@@ -433,6 +439,16 @@ def restore_public(state, publisher, backup):
     return result
 
 
+def revised_history(history, entry, revision=False):
+    """Keep every original daily URL; a revision gets its own immutable URL."""
+    if not revision:
+        return sorted(history + [entry], key=lambda row: row['date'], reverse=True)
+    if not history or entry['date'] != max(row['date'] for row in history):
+        raise ValueError('revision_requires_latest_published_date')
+    return [dict(row, revisions=list(row.get('revisions', [])) + [entry])
+            if row['date'] == entry['date'] else dict(row) for row in history]
+
+
 def run(args):
     import fcntl
     from thumbnails import prepare_thumbnails
@@ -467,7 +483,10 @@ def run(args):
         history = load_json(state / 'history.json', [])
         if history and date < max(entry['date'] for entry in history):
             raise ValueError('report_date_older_than_latest')
-        if any(entry['date'] == date for entry in history):
+        revision = bool(getattr(args, 'revision', False))
+        if revision and (not history or date != max(entry['date'] for entry in history)):
+            raise ValueError('revision_requires_latest_published_date')
+        if not revision and any(entry['date'] == date for entry in history):
             print(json.dumps(dict(state='skipped', reason='date_already_published', report_date=date)))
             return
         generated = dt.datetime.now(TZ)
@@ -481,7 +500,11 @@ def run(args):
         print(json.dumps(dict(phase='lineage_complete', counts=counts, unresolved=len(unresolved))), flush=True)
         end = dt.date.fromisoformat(date)
         dates = [(end - dt.timedelta(days=n)).isoformat() for n in range(6, -1, -1)]
-        facts = collect_days(catalog, mapped, scope, dates)
+        from human_comparison import collect_inventory, attach_comparison
+        inventory = collect_inventory(catalog, mapped, unresolved, date)
+        write_json(run_dir / 'human-inventory.json', inventory)
+        print(json.dumps(dict(phase='human_inventory', human_count=len(inventory['members']), excluded=inventory['excluded_counts'])), flush=True)
+        facts = collect_days(catalog, mapped, scope, dates, human_comparison=True)
         write_json(run_dir / 'facts.json', facts)
         optimizers = sorted({str(row['optimizer']) for row in facts if row['kind'] == 'ai'})
         names = {}
@@ -490,15 +513,16 @@ def run(args):
                                  ','.join(str(int(i)) for i in optimizers) + ')')
             names = {str(row['id']): row['name'] for row in rows}
         report = build_report(mapped, unresolved, facts, date, generated.isoformat(timespec='seconds'),
-                              names, 'scheduled' if history else 'initial', scope=scope)
+                              names, 'revision' if revision else ('scheduled' if history else 'initial'), scope=scope)
+        attach_comparison(report, inventory, mapped, facts)
         report['query_count'] = catalog.queries
         report['home_url'] = DOMAIN + '/' + PREFIX + '/index.html'
         thumbs, thumb_status = prepare_thumbnails(report, state / 'thumbs', DOMAIN + '/' + PREFIX)
         report['thumbnails'] = thumb_status
         version = date.replace('-', '') + '-' + sha(json_bytes(report))[:16]
-        entry = dict(date=date, url=DOMAIN + '/' + PREFIX + '/daily/' + date + '/index.html',
+        entry = dict(date=date, url=DOMAIN + '/' + PREFIX + '/' + snapshot_path(date, version, revision),
                      generated_at=report['generated_at'], snapshot_kind=report['snapshot_kind'])
-        new_history = sorted(history + [entry], key=lambda row: row['date'], reverse=True)
+        new_history = revised_history(history, entry, revision)
         bundle = build_bundle(report, new_history, DOMAIN + '/' + PREFIX, version)
         if set(bundle).intersection(thumbs):
             raise ValueError('thumbnail_bundle_key_collision')
@@ -520,6 +544,7 @@ def main():
     parser.add_argument('--source-db', default='/root/drama_material_service/data/drama_material_jobs.sqlite3')
     parser.add_argument('--sync-db', default='/mnt/data-disk/youtube-cover-material-sync/sync.sqlite3')
     parser.add_argument('--date')
+    parser.add_argument('--revision', action='store_true', help='Refresh the latest published date into a separate immutable revision; preserve the original daily snapshot')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--prepare-only', action='store_true')
     mode.add_argument('--publish-prepared', action='store_true')

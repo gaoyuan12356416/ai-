@@ -2,6 +2,18 @@
 
 独立只读日报，覆盖 DramaWave（1479）、MoboShort（2373）、MoboReels（3360）及各自 W2A。业务日使用后台日表 `dt`，币种美元，不重算广告账号当地自然日。产出按来源产品、效果按实际投放应用归属；近七天重新读取归因，已发布历史快照不覆盖。
 
+## DramaWave 人工与 AI 图片对比
+
+首页及 DramaWave 视图新增独立对比，支持昨日、近七天累计及逐日数据，展示有消耗素材数、消耗、AF D0 收入、ROAS、曝光、点击、安装、CTR、CPI。原三产品 AI 统计保持原口径。
+
+- 人工候选来自 `ads_custom_source.product='Dramawave'`、`type=1`、正式来源 `data_source IN (0,6)`；按正式 ID 去重，保留已删除图片历史。人工来源为素材任务 `task_id>0`、手动上传 `0`、Excel 导入 `-1`。
+- 优先排除已验证 AI ID、相同 AI 图片签名、未解决来源 ID、`remark.origin=ai-cover`、`remark='ai drama'`、AI 接口导入 `task_id=-2` 和其他未知来源。相同签名但正式 ID 尚未验证的图片仍为待核对，不冒充已验证 AI。其他未知、AI 导入且来源未验证的实际消耗单列展示。
+- 这是系统来源分类，不能证明人工设计人员未使用外部 AI 工具；不以“大盘图片减 AI”的余数充当人工。库存按日报日截断，原始分类集合冻结到 `human-inventory.json`。
+- 两类效果均限定实际投放到 DramaWave 主 App/W2A。AI 沿用已验证正式 ID；人工以日表 `resource_id` 关联正式图片。查询与既有 AI、大盘数据同一每日只读事务，继续使用 SQL Gate；每个日期有独立覆盖标记，查询失败不能变成零。
+- 默认比较全部投放，也可切换到两类同日均有消耗的共同应用/渠道。七日素材数对正式 ID 去重；ROAS/CTR/CPI 按总额重算。新增人工库存不合并进原 AI 产出或跨产品合计。
+
+已发布当日需补充新口径时，使用 `--revision --date YYYY-MM-DD --prepare-only`，检查后仍以 `--publish-prepared` 发布冻结批次。只允许修订最新已发布日期，生成 `daily/YYYY-MM-DD/revisions/<version>/index.html`；保留原 `daily/YYYY-MM-DD/index.html` 和历史主条目，将修订链接追加到该日期 `revisions`。最新入口更新，历史选择同时提供原版与修订版。普通每日执行不传 `--revision`，已成功日期仍直接跳过。
+
 ## 运行与准备
 
 ```bash
