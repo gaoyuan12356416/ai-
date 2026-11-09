@@ -35,7 +35,7 @@ class FakeStore:
             "queues": [],
         }
 
-    def create_manual_plan(self, run_id, candidates, trigger_source="manual"):
+    def create_manual_plan(self, run_id, candidates, trigger_source="manual", preflight_failures=None):
         self.candidates = list(candidates)
         return {"id": int(run_id), "queues": []}
 

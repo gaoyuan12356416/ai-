@@ -44,7 +44,7 @@ class XAutoPostRunnerTests(unittest.TestCase):
             execute_timeout=10200,
             publish_timeout=9000,
             lease_seconds=10800,
-            lock_path="/run/x-post-daily/runner.lock",
+            lock_path="/run/x-auto-post/runner.lock",
             scheduler_lock_path="/run/x-auto-post/scheduler.lock",
             worker_count=2,
             max_tasks_per_worker=1,
@@ -65,12 +65,12 @@ class XAutoPostRunnerTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual([len(items) for items in result["execute"]], [1, 1])
 
-    def test_defaults_use_new_sidecar_and_existing_x_publish_lock(self):
+    def test_defaults_use_lane_sidecar_and_independent_runner_locks(self):
         config = RunnerConfig.from_env(
             {"X_AUTO_POST_INTERNAL_TOKEN": "a" * 48}
         )
         self.assertEqual(config.internal_url, "http://127.0.0.1:18833")
-        self.assertEqual(config.lock_path, "/run/x-post-daily/runner.lock")
+        self.assertEqual(config.lock_path, "/run/x-auto-post/runner.lock")
         self.assertEqual(config.scheduler_lock_path, "/run/x-auto-post/scheduler.lock")
         self.assertEqual(config.worker_count, 1)
         config.validate()
@@ -83,7 +83,8 @@ class XAutoPostRunnerTests(unittest.TestCase):
                     "replace-with-unique-random-token-at-least-32-characters"
                 )
             },
-            {"max_tasks_per_worker": 2},
+            {"max_tasks_per_worker": 0},
+            {"max_tasks_per_worker": 21},
             {"execute_timeout": 9200},
             {"lease_seconds": 10400},
         ):
@@ -91,6 +92,10 @@ class XAutoPostRunnerTests(unittest.TestCase):
                 invalid = RunnerConfig(**{**self.config.__dict__, **changes})
                 with self.assertRaises(RunnerError):
                     invalid.validate()
+
+    def test_configured_worker_budget_accepts_current_bounds(self):
+        for count in (1, 2, 20):
+            RunnerConfig(**{**self.config.__dict__, "max_tasks_per_worker": count}).validate()
 
 
 if __name__ == "__main__":

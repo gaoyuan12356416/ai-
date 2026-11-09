@@ -7,6 +7,10 @@ import json
 from pathlib import Path
 import shutil
 
+REGRESSION_FILES = ('test_x_auto_post_runner.py', 'test_x_auto_post_store.py',
+                    'test_x_auto_post_metrics.py', 'test_x_post_manual_runner.py',
+                    'test_x_post_manual_sidecar.py', 'test_x_post_schedule_runner.py')
+
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -31,6 +35,12 @@ def build(source, repo, target, *, verify=True):
     target.mkdir(parents=True)
     for directory in ('features', 'scripts', 'static'):
         shutil.copytree(source / directory, target / directory, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    # Maintain regression contracts in Git, not in the immutable production
+    # snapshot. Apply the same lane namespace substitutions to these fixtures.
+    for name in REGRESSION_FILES:
+        shutil.copy2(repo / 'scripts' / name, target / 'scripts' / name)
+    (target / 'deploy').mkdir()
+    shutil.copy2(repo / 'deploy/x-post-schedule.env.example', target / 'deploy/x-post-schedule.env.example')
     for module in ('x_tag_publish', 'x_tag_revenue', 'social_analytics', 'youtube_analytics'):
         shutil.copytree(repo / 'features' / module, target / 'features' / module,
                         dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
@@ -38,14 +48,15 @@ def build(source, repo, target, *, verify=True):
     # Fixed loopback address validation stays strict, with a new fixed address.
     for name in ('features/x_auto_posts/x_sidecar.py', 'features/x_auto_posts/service.py',
                  'scripts/x_auto_post_runner.py', 'scripts/x_post_daily_runner.py',
-                 'scripts/x_post_schedule_runner.py', 'features/x_auto_posts/client.py'):
+                 'scripts/x_post_schedule_runner.py', 'features/x_auto_posts/client.py',
+                 'scripts/test_x_auto_post_runner.py'):
         p = target / name
         value = p.read_text(encoding='utf-8').replace('8810', '8821').replace('18833', '18843')
         p.write_text(value, encoding='utf-8')
     # Every runtime lock, working directory and default publishing ledger is separate.
     for directory in ('features/x_posts', 'features/x_auto_posts', 'scripts'):
         for p in (target / directory).glob('*.py'):
-            if directory == 'scripts' and not p.name.startswith(('x_post_', 'x_auto_post_')):
+            if directory == 'scripts' and not p.name.startswith(('x_post_', 'x_auto_post_')) and p.name not in REGRESSION_FILES:
                 continue
             value = p.read_text(encoding='utf-8')
             for old, new in (('/run/x-post-daily', '/run/x-tag-post'),

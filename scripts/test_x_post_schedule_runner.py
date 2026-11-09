@@ -222,7 +222,7 @@ class FakeSidecar:
             {"found": False, "run": None, "queues": []},
         )
 
-    def preflight_storage(self, path):
+    def preflight_storage(self, path, required_media_count=None):
         self.calls.append(("storage", path))
         return {"ready": True, "mounted": True, "atomic_write": True}
 
@@ -681,7 +681,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 )
                 return []
 
-        def hydrate(_connection, items, _source_date, *, limit, schema):
+        def hydrate(_connection, items, _source_date, *, limit, schema, allow_images=True):
             del schema
             selector_batches.append(
                 [str(item["material_id"]) for item in items]
@@ -2616,7 +2616,9 @@ class ScheduleRunnerTests(unittest.TestCase):
                     [(item["account_id"], item["error_code"]) for item in batch["skipped_accounts"]],
                     [(11, "x_post_account_needs_review"), (12, "x_post_account_locked")],
                 )
-                self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], [11, 12, 13, 13])
+                verified = [call[1] for call in sidecar.calls if call[0] == "verify"]
+                self.assertEqual(verified[:3], [11, 12, 13])
+                self.assertGreaterEqual(verified.count(13), 2)
                 payload = next(call[2] for call in sidecar.calls if call[0] == "create")
                 self.assertEqual(payload["account_ids"], [13])
                 self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [101])
@@ -2629,7 +2631,7 @@ class ScheduleRunnerTests(unittest.TestCase):
         def verify(account_id):
             account = original_verify(account_id)
             counts[account_id] = counts.get(account_id, 0) + 1
-            if account_id == 12 and counts[account_id] == 2:
+            if account_id == 12 and counts[account_id] >= 2:
                 raise SidecarError("x_post_account_locked", "账号在预检期间被锁定", 409)
             return account
 
@@ -2639,7 +2641,28 @@ class ScheduleRunnerTests(unittest.TestCase):
         payload = next(call[2] for call in sidecar.calls if call[0] == "create")
         self.assertEqual(payload["account_ids"], [11])
         self.assertEqual(result["batches"][0]["skipped_accounts"][0]["account_id"], 12)
-        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "verify"], [11, 12, 11, 12, 11])
+        self.assertGreaterEqual(counts[12], 2)
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [101])
+
+    def test_recovered_account_rejoins_only_after_current_preflight(self):
+        sidecar = FakeSidecar([due_item()])
+        original_verify = sidecar.verify_account
+        counts = {}
+
+        def verify(account_id):
+            account = original_verify(account_id)
+            counts[account_id] = counts.get(account_id, 0) + 1
+            if account_id == 12 and counts[account_id] == 2:
+                raise SidecarError("x_post_account_locked", "temporary hold", 409)
+            return account
+
+        with mock.patch.object(sidecar, "verify_account", side_effect=verify):
+            result = self.execute(sidecar)
+        payload = next(call[2] for call in sidecar.calls if call[0] == "create")
+        self.assertEqual(payload["account_ids"], [11, 12])
+        self.assertGreaterEqual(counts[12], 3)
+        self.assertEqual(result["status"], "published")
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [101, 102])
 
     def test_all_held_accounts_record_failure_without_sources_or_plan_write(self):
         sidecar = FakeSidecar([due_item()])
@@ -3258,7 +3281,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             [101],
         )
 
-    def test_unknown_frozen_queue_stops_without_another_publish_call(self):
+    def test_unknown_frozen_queue_holds_only_its_account(self):
         identity = due_item(source_type="drama", accounts=[11, 12])
         sidecar = FakeSidecar([identity])
         sidecar.existing[
@@ -3272,8 +3295,8 @@ class ScheduleRunnerTests(unittest.TestCase):
             ],
         }
         result = self.execute(sidecar)
-        self.assertEqual(result["status"], "stopped")
-        self.assertFalse(any(call[0] == "publish" for call in sidecar.calls))
+        self.assertEqual(result["status"], "completed_with_errors")
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [202])
         self.assertTrue(
             result["batches"][0]["results"][0]["unknown_outcome"]
         )
@@ -3298,7 +3321,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             [202],
         )
 
-    def test_frozen_rate_limited_queue_still_stops_later_queue(self):
+    def test_historical_rate_failure_does_not_stop_later_account(self):
         identity = due_item(source_type="drama", accounts=[11, 12])
         sidecar = FakeSidecar([identity])
         sidecar.existing[("drama", "2026-07-27", "10:00", 3)] = {
@@ -3318,8 +3341,8 @@ class ScheduleRunnerTests(unittest.TestCase):
 
         result = self.execute(sidecar)
 
-        self.assertEqual(result["status"], "stopped")
-        self.assertFalse(any(call[0] == "publish" for call in sidecar.calls))
+        self.assertEqual(result["status"], "completed_with_errors")
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [202])
 
     def test_before_start_date_is_a_noop(self):
         config = make_config(self.temporary.name)

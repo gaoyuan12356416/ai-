@@ -541,7 +541,7 @@ class AutoPostStoreTests(unittest.TestCase):
             "reserved",
         )
 
-    def test_manual_pending_task_wins_and_account_remains_serial(self):
+    def test_manual_priority_preserves_independent_task_leases(self):
         template = self.create_template()
         auto_task = self.create_task(self.create_run(template, "auto-run", "auto"))
         manual_task = self.create_task(self.create_run(template, "manual-run", "manual"))
@@ -558,11 +558,15 @@ class AutoPostStoreTests(unittest.TestCase):
             content_id="manual-drama",
             claim_token=claim.reveal_claim_token(),
         )
-        blocked = self.store.claim_next_executable_task(
+        independent = self.store.claim_next_executable_task(
             worker_id="selector-2",
             lease_seconds=60,
         )
-        self.assertIsNone(blocked)
+        self.assertIsNotNone(independent)
+        self.assertEqual(independent.task.id, auto_task.id)
+        self.assertEqual(independent.claim_phase, "selection")
+        self.assertNotEqual(independent.reveal_claim_token(), claim.reveal_claim_token())
+        self.assertIsNone(self.store.claim_next_executable_task(worker_id="selector-3", lease_seconds=60))
         self.store.release_task_claim(
             manual_task.id,
             claim.reveal_claim_token(),

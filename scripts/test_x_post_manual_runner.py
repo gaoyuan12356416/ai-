@@ -64,7 +64,7 @@ class FakeManualSidecar:
         self.calls.append(("claim",))
         return self.run
 
-    def preflight_storage(self, path):
+    def preflight_storage(self, path, required_media_count=None):
         self.calls.append(("storage", path))
         return {"ready": True}
 
@@ -250,7 +250,7 @@ class XPostManualRunnerTests(unittest.TestCase):
             ["claim", "publish", "publish"],
         )
 
-    def test_resumed_inflight_queue_stops_without_retrying_x_write(self):
+    def test_resumed_unknown_queue_is_not_resent_and_healthy_queue_continues(self):
         sidecar = FakeManualSidecar(
             manual_run(
                 [
@@ -260,9 +260,10 @@ class XPostManualRunnerTests(unittest.TestCase):
             )
         )
         result = self.execute(sidecar)
-        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["status"], "needs_review")
         self.assertTrue(result["results"][0]["unknown_outcome"])
-        self.assertEqual(sidecar.calls, [("claim",)])
+        self.assertEqual([call[1] for call in sidecar.calls if call[0] == "publish"], [802])
+        self.assertEqual(result["results"][1]["status"], "published")
 
     def test_known_failure_continues_but_rate_limit_stops_remaining_accounts(self):
         queues = [queue(801, 71, 11, 1), queue(802, 71, 12, 2)]

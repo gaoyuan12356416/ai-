@@ -39,8 +39,11 @@ def material_candidates(config, sidecar, accounts, *, source_date, connection_fa
     snapshot = portrait_snapshot()
     assigned, used, failures = {}, set(), []
     repair_state = {'attempted': 0}
-    # Rotate contention deterministically between channels. Never redraw a frozen queue.
+    # Keep scarce short-video capacity for ordinary accounts. Stable sorting
+    # preserves deterministic rotation within each capability group. This runs
+    # only before reservation; frozen queues never enter candidate selection.
     ordered_accounts = runner._stable_shuffled(accounts, [canonical(identity), 'tag-profile-accounts'])
+    ordered_accounts.sort(key=lambda account: bool(account.get('long_video_eligible')))
     for account in ordered_accounts:
         decision = Decision(account, ['pool', identity], snapshot)
         eligible = [item for item in candidates if str(item['material_id']) not in used

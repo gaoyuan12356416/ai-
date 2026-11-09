@@ -1,6 +1,6 @@
 """Offline behavior tests against the exact independently staged X runtime."""
 import hashlib
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timezone
 import json
 import os
@@ -311,7 +311,7 @@ class PoolMatchingTests(unittest.TestCase):
                       material_candidates)
         self.assertIs(auto.TwoStageSelector, ProfileSelector)
 
-    def select(self, accounts, candidates, *, fail=None, snapshot=None):
+    def select(self, accounts, candidates, *, fail=None, snapshot=None, identity=None):
         from scripts import x_post_schedule_runner as runner
         with tempfile.TemporaryDirectory() as tmp:
             config=SimpleNamespace(material_pool_path='/pool',scan_limit=1000,candidate_pool_limit=50,
@@ -323,19 +323,59 @@ class PoolMatchingTests(unittest.TestCase):
                 return dict(candidate,account_id=account['id'])
             with patch.object(runner,'_open_source_connection',return_value=Mock()), \
                  patch.object(runner,'select_pool_candidates',return_value=(candidates,[])), \
-                 patch.object(runner,'_stable_shuffled',side_effect=lambda rows,_:list(rows)), \
+                 (nullcontext() if identity else patch.object(runner,'_stable_shuffled',side_effect=lambda rows,_:list(rows))), \
                  patch.object(runner,'_preflight_candidate',side_effect=preflight), \
                  patch.object(runner,'_record_pool_checks_best_effort') as checks, \
                  patch('features.x_tag_publish.pool.portrait_snapshot',return_value=snapshot or profile([('romance',10000)])), \
                  patch.dict(os.environ,PIPELINE_X_DISPATCH_ENABLED='0'):
                 result=material_candidates(config,sidecar,accounts,source_date='2026-11-08',
-                    connection_factory=None,downloader=None,prober=None,repair_client=None,timestamp=1)
+                    connection_factory=None,downloader=None,prober=None,repair_client=None,timestamp=1,
+                    assignment_identity=identity)
                 recorded=[row for call in checks.call_args_list for row in call.args[2]]
             return result,recorded
 
     def candidate(self,mid,tag='romance',**extra):
         return dict(material_id=str(mid),pool_item_id=mid,material_language='en',source_duration=30,
                     drama_labels=[tag],media_kind='video',**extra)
+
+    def test_premium_first_draw_preserves_short_video_for_ordinary_account(self):
+        from features.x_tag_publish.policy import canonical
+        from scripts import x_post_schedule_runner as runner
+        accounts = [dict(ACCOUNT, long_video_eligible=True), dict(ACCOUNT, id=102)]
+        identity = dict(source_type='material', run_date='2026-11-09', publish_time='03:00',
+                        version=1, account_ids=[101, 102])
+        self.assertEqual(runner._stable_shuffled(accounts, [canonical(identity), 'tag-profile-accounts'])[0]['id'], 101)
+        short, long = self.candidate(1), dict(self.candidate(2), source_duration=2000)
+        for snapshot in (profile([('romance', 10000)]), ({'accounts': {}}, {})):
+            for rows in ([short, long], [long, short]):
+                with self.subTest(snapshot=snapshot, order=[r['material_id'] for r in rows]):
+                    result, _ = self.select(accounts, rows, snapshot=snapshot, identity=identity)
+                    self.assertEqual([(r['account_id'], r['material_id']) for r in result], [(101, '2'), (102, '1')])
+                    self.assertEqual(result.shortage_snapshot['languages'], [])
+                    replay, _ = self.select(accounts, rows, snapshot=snapshot, identity=identity)
+                    self.assertEqual(result, replay)
+
+    def test_same_capability_contention_keeps_stable_rotation_and_input_order(self):
+        from features.x_tag_publish.policy import canonical
+        from scripts import x_post_schedule_runner as runner
+        winners = set()
+        for premium in (False, True):
+            accounts = [dict(ACCOUNT, id=i, long_video_eligible=premium) for i in (101, 102)]
+            for hour in range(12):
+                identity = dict(source_type='material', run_date='2026-11-09', publish_time=f'{hour:02}:00',
+                                version=1, account_ids=[101, 102])
+                expected = runner._stable_shuffled(accounts, [canonical(identity), 'tag-profile-accounts'])[0]['id']
+                result, _ = self.select(accounts, [self.candidate(1), self.candidate(2)], identity=identity)
+                self.assertEqual([r['account_id'] for r in result], [101, 102])
+                self.assertEqual(next(r['account_id'] for r in result if r['material_id'] == '1'), expected)
+                winners.add(expected)
+        self.assertEqual(winners, {101, 102})
+
+    def test_only_long_stock_skips_ordinary_without_blocking_premium(self):
+        accounts = [ACCOUNT, dict(ACCOUNT, id=102, long_video_eligible=True)]
+        result, _ = self.select(accounts, [dict(self.candidate(1), source_duration=2000)])
+        self.assertEqual([(r['account_id'], r['material_id']) for r in result], [(102, '1')])
+        self.assertEqual(result.shortage_snapshot['languages'][0]['missing'], 1)
 
     def test_profile_rank_language_duration_and_lane_dedupe(self):
         rows=[self.candidate(1,'revenge'),self.candidate(2)]
