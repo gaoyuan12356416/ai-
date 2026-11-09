@@ -6,6 +6,7 @@ import re
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 from features.x_accounts.language import canonical_drama_language, same_drama_language
 from features.x_posts.drama_selector import (
@@ -13,8 +14,8 @@ from features.x_posts.drama_selector import (
     _text, build_name_tag,
 )
 from features.x_posts.selector import DramawaveCandidateSelector, PoolCandidateRejection, previous_source_date
-from features.x_posts.service import XPostError
-from features.x_posts.source_duration import probe_source_metadata_duration
+from features.x_posts.service import XPostError, _allowed_host
+from features.x_posts.source_duration import probe_source_metadata_duration, _allowed_hosts
 
 from .errors import PublishingError
 from .material_identity import normalize_material_id
@@ -41,8 +42,9 @@ class _DeploymentSelector(DramawaveCandidateSelector):
 
 
 class EpisodeRepository:
-    def __init__(self, mysql, schema):
+    def __init__(self, mysql, schema, *, allow_pending_duration=False):
         self.mysql, self.schema = mysql, schema
+        self.allow_pending_duration = allow_pending_duration is True
 
     def _read(self, episode_ids):
         marks = ','.join('%s' for _ in episode_ids)
@@ -81,7 +83,7 @@ class EpisodeRepository:
         return buckets['episode'], buckets['deploy']
 
     @staticmethod
-    def _candidate(mid, row, selector, deadline):
+    def _candidate(mid, row, selector, deadline, *, allow_pending_duration=False):
         try:
             if normalize_material_id(row.get('resource_id')) != mid:
                 raise ValueError()
@@ -104,6 +106,14 @@ class EpisodeRepository:
         except (DramaSelectionError, ValueError, TypeError):
             raise PoolCandidateRejection('free_episode_metadata_invalid', '免费集的剧目、语言或视频地址不完整，请核对源库信息') from None
         deployed_at = selector._validate_drama_deploy_time(content_id, language, canonical_language=True)
+        # Preserve the existing probe's host boundary even when an interactive
+        # preview may defer its duration read. A pending read is not permission
+        # to accept a new host or a missing source-media configuration.
+        allowed = _allowed_hosts()
+        if not allowed:
+            raise PoolCandidateRejection('media_allowlist_not_configured', '免费集视频域名允许列表未配置')
+        if not _allowed_host(urlsplit(url).hostname, allowed):
+            raise PoolCandidateRejection('media_host_not_allowed', '免费集视频域名不在允许列表内')
         # The current resource catalog has no video-duration column. The shared
         # probe reads bounded MP4 metadata and caches verified URL measurements;
         # it never downloads the full video or writes a guessed duration to SQL.
@@ -113,14 +123,19 @@ class EpisodeRepository:
             raise PoolCandidateRejection('material_duration_invalid', '免费集视频时长数据无效') from None
         if not math.isfinite(duration):
             raise PoolCandidateRejection('material_duration_invalid', '免费集视频时长数据无效')
+        duration_status = 'verified'
         if duration <= 0:
             try:
                 duration = float(probe_source_metadata_duration(url, deadline=min(deadline, time.monotonic() + 8)))
             except (XPostError, ValueError, TypeError, OSError):
-                raise PoolCandidateRejection('material_duration_missing', '免费集已找到，但暂未读到视频时长，请稍后重试') from None
-        if not math.isfinite(duration) or duration <= 0:
-            raise PoolCandidateRejection('material_duration_missing', '免费集已找到，但暂未读到视频时长，请稍后重试')
-        if duration > 14400:
+                if not allow_pending_duration:
+                    raise PoolCandidateRejection('material_duration_missing', '免费集已找到，但暂未读到视频时长，请稍后重试') from None
+                duration, duration_status = None, 'pending'
+        if duration is not None and (not math.isfinite(duration) or duration <= 0):
+            if not allow_pending_duration:
+                raise PoolCandidateRejection('material_duration_missing', '免费集已找到，但暂未读到视频时长，请稍后重试')
+            duration, duration_status = None, 'pending'
+        if duration is not None and duration > 14400:
             raise PoolCandidateRejection('material_duration_exceeds_limit', '免费集视频时长超过 4 小时上限')
         tag = next((value.strip() for value in labels.split(',') if value.strip()), name)
         return {
@@ -133,7 +148,7 @@ class EpisodeRepository:
             'drama_name': name, 'description': description, 'drama_description': description,
             'material_language': language, 'language': language, 'drama_language': language,
             'material_url': url, 'preview_url': url, 'thumbnail_url': '',
-            'source_duration': duration, 'duration_seconds': duration,
+            'source_duration': duration, 'duration_seconds': duration, 'duration_status': duration_status,
             'drama_deploy_time': deployed_at, 'tag': tag, 'name_tag': build_name_tag(name, labels),
             'spend': 0.0, 'facebook_violation_count': 0, 'tiktok_violation_count': 0,
             'twitter_violation_count': 0, 'resource_audit_count': 0, 'dangerous_tag_count': 0,
@@ -160,7 +175,8 @@ class EpisodeRepository:
                     raise PoolCandidateRejection('free_episode_not_found', '未找到该免费集 ID')
                 if len(found) != 1:
                     raise PoolCandidateRejection('free_episode_ambiguous', '该免费集 ID 存在重复源数据，请核对源库信息')
-                return mid, self._candidate(mid, found[0], selector, deadline), None
+                return mid, self._candidate(mid, found[0], selector, deadline,
+                    allow_pending_duration=self.allow_pending_duration), None
             except PoolCandidateRejection as exc:
                 return mid, None, {'code': exc.error_code, 'message': exc.error_message}
             except DramaSelectionError:

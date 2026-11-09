@@ -468,7 +468,8 @@ class SourceBoundaryTests(unittest.TestCase):
             "drama_description": "Fixture description", "drama_labels": "Romance", "language": "en",
             "sub_number": 6, "unlocked_episodes_count": 10, "sub_name": "Episode 6",
             "sub_url": "https://media.example.invalid/free-6.mp4"}]
-        with patch("features.x_video_publish.episode_sources.probe_source_metadata_duration", return_value=80):
+        with patch("features.x_video_publish.episode_sources.probe_source_metadata_duration", return_value=80), \
+                patch("features.x_video_publish.episode_sources._allowed_hosts", return_value=("media.example.invalid",)):
             result = SourceRepository(mysql).resolve(["101", episode_id.upper()])
         self.assertEqual(set(result["items"]), {"101", episode_id})
         self.assertEqual(result["errors"], {})

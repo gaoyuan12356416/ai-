@@ -155,6 +155,8 @@ class PublishingService:
             material=row['source_snapshot'];account=row['account_snapshot']
             items.append({'row_number':row['row_number'],'material_id':row['material_id'],
                 'material_name':material.get('material_name') or material.get('drama_name') or row['material_id'],
+                **({'duration_status':material.get('duration_status'),
+                    'duration_seconds':material.get('duration_seconds')} if is_episode_id(row['material_id']) else {}),
                 'account_id':row['account_id'],'x_user_id':account.get('x_user_id',''),
                 'account_name':account.get('display_name') or account.get('username') or row['account_id'],
                 'caption':row['rendered_caption'],'caption_template':row['caption'],

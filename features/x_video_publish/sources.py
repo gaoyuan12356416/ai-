@@ -80,11 +80,14 @@ class CachedSelector(DramawaveCandidateSelector):
         return [r for r in self.deploy.get(str(content_id), []) if match(r)]
 
 class SourceRepository:
-    def __init__(self, mysql):
+    def __init__(self, mysql, *, allow_pending_episode_duration=False):
         self.mysql = mysql
         if not re.fullmatch(r'[A-Za-z0-9_]+', mysql.schema):
             raise PublishingError('source_not_configured','素材库配置无效',503)
         self.schema = mysql.schema
+        # Owned by the server adapter, never accepted from browser payloads.
+        # Execution readers keep the strict default before creating a queue.
+        self.allow_pending_episode_duration = allow_pending_episode_duration is True
 
     @staticmethod
     def _projection():
@@ -93,7 +96,7 @@ class SourceRepository:
             TRIM(s.data_source_id) content_id,s.tag_name source_tag_name,s.video_duration,s.cover thumbnail_url'''
 
     def resolve(self, material_ids):
-        deadline = time.monotonic() + 65
+        deadline = time.monotonic() + (8 if self.allow_pending_episode_duration else 65)
         material_ids = ids(material_ids)
         originals = [mid for mid in material_ids if not is_episode_id(mid)]
         episodes = [mid for mid in material_ids if is_episode_id(mid)]
@@ -104,7 +107,8 @@ class SourceRepository:
             result = self._resolve_rows(originals, rows, recover_duration=True, mappings=mappings)
         if episodes:
             from .episode_sources import EpisodeRepository
-            resolved = EpisodeRepository(self.mysql, self.schema).resolve(episodes, deadline=deadline)
+            resolved = EpisodeRepository(self.mysql, self.schema,
+                allow_pending_duration=self.allow_pending_episode_duration).resolve(episodes, deadline=deadline)
             for key in result:
                 result[key].update(resolved[key])
         return result
@@ -306,4 +310,4 @@ def for_main(app):
     env = {'X_VIDEO_PUBLISH_MYSQL_USER':app.get('ADMIN_MAPPING_MYSQL_USER',''),
            'X_VIDEO_PUBLISH_MYSQL_PASSWORD':app.get('ADMIN_MAPPING_MYSQL_PASSWORD',''),
            'X_VIDEO_PUBLISH_MYSQL_DATABASE':'kunlunads_dev'}
-    return SourceRepository(GatedReadOnlyMySQL(env))
+    return SourceRepository(GatedReadOnlyMySQL(env), allow_pending_episode_duration=True)

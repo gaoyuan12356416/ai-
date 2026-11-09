@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import math
 import os
 import re
 import sys
@@ -471,6 +472,17 @@ def _manual_candidates(
                          "copy_contract_version": int(run.get("copy_contract_version", 1)),
                          "source_type": "material", "source_date": run["source_date"]}
             if is_episode_id(material_id):
+                # Excel admission can defer a slow metadata probe, but a real
+                # task must resolve duration and recheck the chosen account
+                # before either the deferred pipeline or direct preflight.
+                try:
+                    duration = float(candidate.get("duration_seconds"))
+                except (TypeError, ValueError, OverflowError):
+                    duration = 0
+                if candidate.get("duration_status") == "pending" or not math.isfinite(duration) or duration <= 0:
+                    raise ManualRunError("免费集视频时长仍待核验，未进入发布队列", "material_duration_missing")
+                from features.x_video_publish.core import validate_account_duration
+                validate_account_duration(account_by_id[account_id], candidate)
                 # Media repair needs a stable positive item identity just as
                 # ordinary manual selection does; it is not a source fact.
                 candidate["manual_item_id"] = run["material_ids"].index(material_id) + 1

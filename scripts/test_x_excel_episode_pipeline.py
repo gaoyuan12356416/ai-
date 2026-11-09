@@ -35,7 +35,7 @@ def episode(mid=EPISODE):
         "drama_description": "A complete story description.", "language": "en",
         "material_language": "en", "material_name": "Episode 2",
         "material_url": "https://media.example.test/" + mid + ".mp4",
-        "source_duration": 50, "duration_seconds": 50, "media_kind": "video",
+        "source_duration": 50, "duration_seconds": 50, "duration_status": "verified", "media_kind": "video",
         "source_type": "material", "pool_item_id": None, "pool_created_at": "",
         "tag": "Drama", "name_tag": "#Episode_story", "spend": 0,
         "facebook_violation_count": 0, "tiktok_violation_count": 0,
@@ -239,6 +239,59 @@ class ExcelEpisodePipelineTests(unittest.TestCase):
         self.assertTrue(self.preview()["rows"][0]["valid"])
         self.accounts["1"]["drama_language"] = "de"
         self.assertEqual(self.preview()["rows"][0]["error_code"], "x_post_account_language_mismatch")
+
+    def test_pending_preview_retains_unknown_and_strict_runner_rejects_long_nonmember(self):
+        pending = self.materials[EPISODE]
+        pending.update(duration_status="pending", duration_seconds=None, source_duration=None)
+        preview = self.preview()
+        self.assertTrue(preview["rows"][0]["valid"])
+        snapshot = preview["rows"][0]["source_snapshot"]
+        self.assertEqual(snapshot["duration_status"], "pending")
+        self.assertIsNone(snapshot["duration_seconds"])
+        dto = PublishingService.preview_dto(preview)
+        self.assertEqual(dto["items"][0]["duration_status"], "pending")
+        self.assertIsNone(dto["items"][0]["duration_seconds"])
+        batch = self.commit(preview)
+        run = runner._manual_identity(self.legacy.get_manual_run(batch["tasks"][0]["manual_run_id"]))
+        actual = episode()
+        actual.update(duration_seconds=1501, source_duration=1501)
+        with mock.patch.object(runner, "deferred_candidate") as dispatch:
+            planned = self.candidates(run, actual)
+        dispatch.assert_not_called()
+        self.assertEqual(len(planned), 0)
+        self.assertEqual(planned.preflight_failures[0]["error_code"], "x_long_video_requires_premium")
+        self.accounts["1"]["subscription_type"] = "premium"
+        allowed = self.candidates(run, actual)
+        self.assertEqual(len(allowed), 1)
+        self.assertFalse(allowed.preflight_failures)
+
+    def test_unresolved_duration_never_advances_to_media_or_pipeline(self):
+        task = self.commit()["tasks"][0]
+        run = runner._manual_identity(self.legacy.get_manual_run(task["manual_run_id"]))
+        for duration, status in ((None, "pending"), (0, "verified"), (float("nan"), "verified")):
+            with self.subTest(duration=duration, status=status):
+                unresolved = episode()
+                unresolved.update(duration_seconds=duration, source_duration=duration, duration_status=status)
+                with mock.patch.object(runner, "deferred_candidate") as dispatch:
+                    planned = self.candidates(run, unresolved)
+                dispatch.assert_not_called()
+                self.assertFalse(planned)
+                self.assertEqual(planned.preflight_failures[0]["error_code"], "material_duration_missing")
+
+    def test_strict_source_duration_error_stays_on_original_task(self):
+        task = self.commit()["tasks"][0]
+        run = runner._manual_identity(self.legacy.get_manual_run(task["manual_run_id"]))
+        resolved = {"items": {}, "errors": {EPISODE: {
+            "code": "material_duration_missing", "message": "视频时长暂不可用"}}}
+        with mock.patch.object(runner, "_open_source_connection", return_value=mock.Mock()), \
+                mock.patch("features.x_video_publish.sources.SourceRepository.resolve", return_value=resolved), \
+                mock.patch.object(runner, "deferred_candidate") as dispatch:
+            planned = runner._manual_candidates(make_config(self.tmp.name), run, [self.accounts["1"]], now=NOW)
+        dispatch.assert_not_called()
+        self.assertFalse(planned)
+        self.assertEqual(planned.preflight_failures[0]["material_id"], EPISODE)
+        self.assertEqual(planned.preflight_failures[0]["account_id"], 1)
+        self.assertEqual(planned.preflight_failures[0]["error_code"], "material_duration_missing")
 
 
 if __name__ == "__main__":

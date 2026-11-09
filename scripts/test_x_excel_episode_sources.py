@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from features.x_video_publish.episode_sources import EpisodeRepository
 from features.x_video_publish.material_identity import is_episode_id, normalize_material_id
-from features.x_video_publish.sources import SourceClient, SourceRepository, ids
+from features.x_video_publish.sources import SourceClient, SourceRepository, for_main, ids
 from features.x_video_publish.errors import PublishingError
 
 
@@ -55,6 +55,9 @@ class EpisodeSourcesTest(unittest.TestCase):
         self.probe = patch('features.x_video_publish.episode_sources.probe_source_metadata_duration', return_value=120.5)
         self.probe_mock = self.probe.start()
         self.addCleanup(self.probe.stop)
+        self.allowlist = patch('features.x_video_publish.episode_sources._allowed_hosts', return_value=('media.example.test',))
+        self.allowlist_mock = self.allowlist.start()
+        self.addCleanup(self.allowlist.stop)
 
     def resolve(self, rows, requested=None, deployments=None):
         sql = FakeSQL(rows, deployments)
@@ -80,6 +83,7 @@ class EpisodeSourcesTest(unittest.TestCase):
         self.assertEqual(item['material_key'], EPISODE)
         self.assertEqual(item['source_type'], 'material')
         self.assertEqual(item['duration_seconds'], 120.5)
+        self.assertEqual(item['duration_status'], 'verified')
         self.assertEqual(item['language'], 'en')
         self.assertEqual(item['content_id'], 'series-en')
         self.assertEqual(item['series_code'], '22835')
@@ -215,6 +219,61 @@ class EpisodeSourcesTest(unittest.TestCase):
         self.assertEqual(set(result['items']), {OTHER})
         self.assertEqual(result['errors'][EPISODE]['code'], 'material_duration_missing')
         self.assertIn('稍后重试', result['errors'][EPISODE]['message'])
+
+    def test_only_main_adapter_defers_failed_duration_read(self):
+        self.probe_mock.side_effect = ValueError('metadata deadline exceeded')
+        mysql = FakeSQL([resource()])
+        app = {'ADMIN_MAPPING_MYSQL_HOST': '101.32.56.53', 'ADMIN_MAPPING_MYSQL_PORT': 63350,
+               'ADMIN_MAPPING_MYSQL_USER': 'fixture', 'ADMIN_MAPPING_MYSQL_PASSWORD': 'fixture'}
+        with patch('features.x_video_publish.runtime_source.GatedReadOnlyMySQL', return_value=mysql):
+            main = for_main(app)
+        pending = main.resolve([EPISODE])
+        item = pending['items'][EPISODE]
+        self.assertEqual(item['duration_status'], 'pending')
+        self.assertIsNone(item['duration_seconds'])
+        self.assertIsNone(item['source_duration'])
+        self.assertEqual(pending['errors'], {})
+        self.assertLessEqual(self.probe_mock.call_args.kwargs['deadline'], time.monotonic() + 8)
+        # The execution runner constructs this repository with its strict default.
+        strict = SourceRepository(mysql).resolve([EPISODE])
+        self.assertEqual(strict['items'], {})
+        self.assertEqual(strict['errors'][EPISODE]['code'], 'material_duration_missing')
+
+    def test_pending_is_not_an_allowlist_or_identity_bypass(self):
+        self.probe_mock.side_effect = ValueError('metadata unavailable')
+        for hosts, code in [((), 'media_allowlist_not_configured'),
+                            (('other.example.test',), 'media_host_not_allowed')]:
+            self.allowlist_mock.return_value = hosts
+            with self.subTest(hosts=hosts):
+                result = SourceRepository(FakeSQL([resource()]), allow_pending_episode_duration=True).resolve([EPISODE])
+                self.assertEqual(result['items'], {})
+                self.assertEqual(result['errors'][EPISODE]['code'], code)
+        self.probe_mock.assert_not_called()
+        self.allowlist_mock.return_value = ('media.example.test',)
+        paid = resource()
+        paid['sub_number'] = 11
+        result = SourceRepository(FakeSQL([paid]), allow_pending_episode_duration=True).resolve([EPISODE])
+        self.assertEqual(result['errors'][EPISODE]['code'], 'episode_not_free')
+        self.probe_mock.assert_not_called()
+
+    def test_pending_budget_keeps_all_exact_valid_rows_without_faking_zero_duration(self):
+        requested = [f'{number:032x}' for number in range(1, 101)]
+        self.probe_mock.side_effect = ValueError('metadata deadline exceeded')
+        mysql = FakeSQL([resource(mid) for mid in requested])
+        result = EpisodeRepository(mysql, mysql.schema, allow_pending_duration=True).resolve(requested, deadline=time.monotonic() - 1)
+        self.assertEqual(set(result['items']), set(requested))
+        self.assertEqual(result['errors'], {})
+        self.assertTrue(all(item['duration_status'] == 'pending' and item['duration_seconds'] is None
+                            for item in result['items'].values()))
+
+    def test_main_pending_policy_does_not_change_numeric_material_failures(self):
+        repository = SourceRepository(FakeSQL([]), allow_pending_episode_duration=True)
+        numeric_error = {'items': {}, 'errors': {'5595933': {'code': 'material_duration_missing'}}}
+        with patch.object(repository, '_read_exact_bundle', return_value=([], ([], []))), \
+                patch.object(repository, '_resolve_rows', return_value=numeric_error):
+            result = repository.resolve(['5595933'])
+        self.assertEqual(result, numeric_error)
+        self.probe_mock.assert_not_called()
 
     def test_mixed_resolver_preserves_numeric_path(self):
         sql = FakeSQL([resource()])
