@@ -4,6 +4,7 @@
   const API = '/api/socialkit-analytics';
   const labels = {date:'日期',team_id:'团队',product:'产品',platform:'平台',account:'账号',drama:'剧目',country:'收入国家',device_os:'设备系统',material_type:'素材类型',creation_source:'短链来源',language:'账号语言',account_country:'账号国家',reason:'发布方式',task_status:'任务状态'};
   const moneyKeys = new Set(['revenue','refunds','net_revenue','dnu_revenue']);
+  labels.drama_language = '剧语言';
   const percentKeys = new Set(['success_rate','install_rate','pay_rate']);
   const publicationMetrics = ['tasks','planned','success','failed','unfulfilled','success_rate'];
   const effectMetrics = ['revenue','net_revenue','dnu_revenue','refunds','clicks','views','installs','conversions','dnu_conversions','link_count','install_rate','pay_rate'];
@@ -61,7 +62,7 @@
     dimensions.filter(k=>k!=='date').forEach(k=>renderFilterList(k));
     $('#group-choices').innerHTML=dimensions.map(key=>`<label class="group-choice"><input type="checkbox" value="${key}" ${state.groups.includes(key)?'checked':''}><span>${esc(labels[key])}</span></label>`).join('');
     updateGroupLimit();
-    $('#view-hint').textContent={overview:'共同维度并列查看收入与发布；两者日期口径不同',effects:'收入国家、设备、素材与短链来源支持组合筛选',publications:'按账号语言、国家、发布方式与任务状态查看执行'}[state.view];
+    $('#view-hint').textContent={overview:'共同维度并列查看收入与发布；两者日期口径不同',effects:'剧语言、收入国家、设备、素材与短链来源支持组合筛选',publications:'按剧语言、账号语言、国家、发布方式与任务状态查看执行'}[state.view];
   }
   function updateGroupLimit(){document.querySelectorAll('#group-choices input').forEach(node=>node.disabled=!node.checked&&state.groups.length>=3);}
   function collect() {
@@ -129,6 +130,11 @@
     const warnings=[];const today=utc(new Date());if(state.view!=='publications'&&m.start<=today&&m.end>=today)warnings.push('当前 UTC 日期的数据尚未完整，收入会随回传更新；北京时间 08:00 切日。');if(m.stale)warnings.push('最近一次更新未成功，正在显示上一份成功快照。');if(m.partial)warnings.push('所选范围含未同步日期；合计仅包含已同步数据。');
     const unmatched=r.totals.unmatched_revenue_cents;if(Number(r.totals.unmatched_rows)||Number(r.totals.unmatched_links)||Number(unmatched))warnings.push('当前筛选有 '+format(r.totals.unmatched_links,'link_count')+' 个未归属短链键（'+format(r.totals.unmatched_rows,'tasks')+' 条明细），点击 '+format(r.totals.unmatched_clicks||0,'clicks')+'、安装 '+format(r.totals.unmatched_installs||0,'installs')+'、收入 '+format(Number(unmatched||0)/100,'revenue')+'；已保留在总盘和未归属分组。');
     if(m.latest_version&&m.latest_version!==m.version)warnings.push('已有更新版本，当前查看的是固定快照；点击“读取最新数据”切换。');
+    if(state.groups.includes('drama_language')||(state.filters.drama_language||[]).length){
+      const languageStatus=m.drama_languages?.status;
+      if(languageStatus==='failed')warnings.push('剧语言更新未成功，保留上次语言资料；新剧缺失项显示为“未提供”。');
+      if(!languageStatus||languageStatus==='missing')warnings.push('该快照未采集剧语言，相关分组显示为“未提供”。');
+    }
     $('#quality-message').textContent=warnings.join(' ');$('#quality-message').hidden=!warnings.length;
     const kpis=state.view==='publications'?['success','planned','tasks','unfulfilled','failed','success_rate']:state.view==='effects'?['revenue','net_revenue','dnu_revenue','refunds','clicks','views','installs','conversions']:['revenue','net_revenue','success','installs','conversions','dnu_revenue','refunds','clicks'];
     $('#kpi-grid').innerHTML=kpis.map(key=>`<article class="kpi-card"><span class="kpi-label">${esc(metricLabels[key])}</span><strong class="kpi-value">${format(r.totals[key],key)}</strong><span class="kpi-hint">${publicationMetrics.includes(key)?'按账号当地排期日期':key==='conversions'?'每日人数累加 · 跨日不去重':'按 UTC 效果日期'}</span></article>`).join('');

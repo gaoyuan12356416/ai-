@@ -131,6 +131,9 @@ def run_refresh(env, root, start, end, *, reader=None, source=None, writer=None,
                 if status['completed_dates'] != days:
                     raise CollectionError('refresh did not complete every requested date')
                 verify(active_reader, version, controls)
+                from .drama_language import update_languages
+                language_reader = reader or GatedReader(env, timeout=60)
+                language_state = update_languages(builder.connection, language_reader, (old or {}).get('drama_languages'))
                 completed = utc_now()
                 covered = sorted(date_manifest)
                 quality = dict(effect_rows=sum(v['effect_rows'] for v in date_manifest.values()),
@@ -153,6 +156,7 @@ def run_refresh(env, root, start, end, *, reader=None, source=None, writer=None,
                 if last_full:
                     manifest['last_full_refresh_beijing_date'] = last_full
                 manifest['refresh_cadence'] = 'hourly'
+                manifest['drama_languages'] = language_state
                 builder.finish(manifest)
                 active_writer.finish(version, manifest)
                 publish_snapshot(root, manifest, old)

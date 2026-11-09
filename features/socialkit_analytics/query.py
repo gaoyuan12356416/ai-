@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 DEFAULT_ROOT = "/mnt/data-disk/socialkit-analytics"
-COMMON = ("date", "team_id", "product", "platform", "account", "drama")
+COMMON = ("date", "team_id", "product", "platform", "account", "drama", "drama_language")
 EFFECT_DIMS = ("country", "device_os", "material_type", "creation_source")
 PUBLICATION_DIMS = ("language", "account_country", "reason", "task_status")
 DIMENSIONS = {"date": "日期", "team_id": "团队", "product": "产品", "platform": "平台", "account": "账号", "drama": "剧目", "country": "收入国家", "device_os": "设备系统", "material_type": "素材类型", "creation_source": "短链来源", "language": "账号语言", "account_country": "账号国家", "reason": "发布方式", "task_status": "任务状态"}
@@ -28,6 +28,14 @@ METRICS = {"revenue": "收入 (USD)", "refunds": "退款 (USD)", "net_revenue": 
 _CACHE = collections.OrderedDict()
 _OPTIONS_CACHE = collections.OrderedDict()
 _LOCK = threading.Lock()
+DIMENSIONS['drama_language'] = '剧语言'
+LABELS['drama_language'] = {
+    '': '未提供', '__conflict__': '语言冲突', 'en': '英语', 'es': '西班牙语',
+    'pt': '葡萄牙语', 'pt-br': '葡萄牙语（巴西）', 'fr': '法语', 'de': '德语',
+    'it': '意大利语', 'ja': '日语', 'ko': '韩语', 'id': '印尼语', 'th': '泰语',
+    'vi': '越南语', 'ru': '俄语', 'ar': '阿拉伯语', 'tr': '土耳其语',
+    'zh': '中文', 'zh-cn': '简体中文', 'zh-tw': '繁体中文', 'ms': '马来语',
+}
 
 
 class QueryError(Exception):
@@ -87,6 +95,13 @@ def snapshot(root=DEFAULT_ROOT, version=None):
         elif chosen != latest:
             raise QueryError("该报表版本已不可用，请刷新读取最新数据。", 409, "snapshot_changed")
         manifest = dict(manifest, version=chosen, latest_version=latest)
+        # Connection-local views preserve immutable facts and avoid warehouse DDL.
+        has_languages = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='drama_languages'").fetchone()
+        for table in ('effects', 'publications'):
+            language = "COALESCE(l.drama_language,'')" if has_languages else "''"
+            join = " LEFT JOIN main.drama_languages l ON l.drama=f.drama" if has_languages else ""
+            conn.execute("CREATE TEMP VIEW " + table + " AS SELECT f.*," + language +
+                         " AS drama_language FROM main." + table + " f" + join)
         status = _json_file(root / "status.json", optional=True)
         return conn, manifest, status
     except Exception:
@@ -294,6 +309,7 @@ def _refresh_report_state(response, manifest, status):
     response["meta"]["refresh_status"] = status
     response["meta"]["stale"] = _stale_status(status)
     response["meta"]["latest_version"] = manifest["latest_version"]
+    response["meta"]["drama_languages"] = manifest.get('drama_languages', {'status': 'missing'})
     return response
 
 
@@ -349,6 +365,7 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
         pages = max(1, math.ceil(len(all_rows) / parsed["page_size"]))
         page = min(parsed["page"], pages)
         response = dict(meta=dict(version=manifest["version"], latest_version=manifest["latest_version"], generated_at=manifest.get("generated_at") or manifest.get("refreshed_at"), source_updated_at=manifest.get("source_updated_at"), view=parsed["view"], start=parsed["start"], end=parsed["end"], effect_timezone="UTC", publication_timezone="account_local", currency="USD", refresh_status=status, stale=_stale_status(status), missing_days=missing, partial=any(missing.values()), range=manifest.get("range"), quality=manifest.get("quality", {})), group_by=parsed["groups"], totals=totals, trend=trend, ranking=ranking, breakdowns={dim: sorted(aggregate([dim]), key=lambda r:r.get("success" if parsed["view"] == "publications" else "revenue") or 0, reverse=True) for dim in ("platform", "product")}, rows=all_rows[(page-1)*parsed["page_size"]:page*parsed["page_size"]], all_rows=all_rows, pagination=dict(page=page, page_size=parsed["page_size"], pages=pages, total=len(all_rows)), parameters=parsed, metric_labels=METRICS, dimension_labels=DIMENSIONS)
+        _refresh_report_state(response, manifest, status)
         serialized = json.dumps(response, ensure_ascii=False)
         if len(serialized) <= 2_000_000:
             with _LOCK:
@@ -366,7 +383,8 @@ def options(root=DEFAULT_ROOT, version=None, _allow_precomputed=True):
     try:
         if _allow_precomputed:
             warmed = _precomputed(root, manifest["version"], "options")
-            if warmed and warmed.get("version") == manifest["version"] and isinstance(warmed.get("options"), dict):
+            if (warmed and warmed.get("version") == manifest["version"] and isinstance(warmed.get("options"), dict)
+                    and warmed.get('allowed_dimensions', {}).get('overview') == list(COMMON)):
                 warmed["refresh_status"] = status
                 return warmed
         cachekey = (str(Path(root).resolve()), manifest["version"])

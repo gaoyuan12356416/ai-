@@ -57,3 +57,5 @@ def create_snapshot_schema(conn):
             conn.execute('CREATE INDEX IF NOT EXISTS idx_%s_%s ON %s(%s)' % (kind, suffix, kind, columns))
     conn.execute('CREATE INDEX IF NOT EXISTS idx_effect_country ON effects(date,country,device_os)')
     conn.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS drama_languages '
+                 '(drama TEXT PRIMARY KEY,drama_language TEXT NOT NULL)')

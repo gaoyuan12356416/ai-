@@ -93,6 +93,7 @@ class BrowserTests(unittest.TestCase):
     def test_failure_banner_and_mobile_layout(self):
         (self.fixture.root/'status.json').write_text(json.dumps({'status':'failed','error':'timeout'}))
         self.page.locator('#refreshPage').click()
+        self.page.wait_for_function("!document.querySelector('#export-report').disabled")
         self.page.locator('#quality-message:not([hidden])').wait_for()
         self.assertIn('上一份成功快照',self.page.locator('#quality-message').inner_text())
         self.page.set_viewport_size({'width':390,'height':844})
@@ -103,6 +104,33 @@ class BrowserTests(unittest.TestCase):
         self.page.set_viewport_size({'width':1440,'height':1000})
         self.page.screenshot(path=str(folder/'socialkit-desktop.png'),full_page=True)
         self.assertEqual(self.errors,[])
+
+    def test_drama_language_group_filter_and_export(self):
+        from features.socialkit_analytics.drama_language import enrich_snapshot
+        from tests.test_socialkit_drama_language import Reader
+        enrich_snapshot(self.fixture.root, Reader([dict(app_id=1479, content_id='abc', language='ja')]))
+        self.page.locator('#refreshPage').click()
+        self.page.wait_for_function("document.querySelector('#report-version').textContent.includes('-lang-')")
+        self.page.locator('#tab-effects').click()
+        self.page.wait_for_function("document.querySelector('#report-period').textContent.includes('收入效果') && !document.querySelector('#export-report').disabled")
+        self.page.locator('#group-choices input[value="platform"]').uncheck()
+        self.page.locator('#group-choices input[value="drama_language"]').check()
+        self.page.locator('#apply-filters').click()
+        self.page.wait_for_function("!document.querySelector('#export-report').disabled")
+        self.assertIn('剧语言', self.page.locator('#report-head').inner_text())
+        self.assertIn('日语', self.page.locator('#report-body').inner_text())
+        self.assertIn('未提供', self.page.locator('#report-body').inner_text())
+        self.page.locator('details').filter(has=self.page.locator('[data-summary="drama_language"]')).locator('summary').click()
+        self.page.locator('input[data-filter="drama_language"][value="ja"]').check()
+        self.page.locator('#apply-filters').click()
+        self.page.wait_for_function("!document.querySelector('#export-report').disabled")
+        self.assertIn('$18.99', self.page.locator('#kpi-grid').inner_text())
+        self.assertNotIn('未提供', self.page.locator('#report-body').inner_text())
+        with self.page.expect_download() as downloaded:
+            self.page.locator('#export-report').click()
+        csv = Path(downloaded.value.path()).read_text(encoding='utf-8-sig')
+        self.assertIn('剧语言', csv); self.assertIn('日语', csv)
+        self.assertEqual(self.errors, [])
 
     def test_utc_today_shortcut_warning_and_actual_yesterday(self):
         today = datetime.now(timezone.utc).date()
