@@ -66,8 +66,10 @@ def build(source, repo, target, *, verify=True):
                  '    store = XAutoPostStore(db_path)\n    from features.x_tag_publish.policy import initialize_ids, lane_paths\n    lane_paths()\n    initialize_ids(db_path)\n')
     with service.open('a', encoding='utf-8') as f:
         f.write('\n# This import is installed only in the independent tag runtime.\nfrom features.x_tag_publish.selection import ProfileSelector as TwoStageSelector\n')
-    replace_once(target / 'scripts/x_post_schedule_runner.py', 'if __name__ == "__main__":',
-                 'from features.x_tag_publish.pool import material_candidates as _material_candidates\n\nif __name__ == "__main__":')
+    # Bind before the function definition: its default loader is evaluated then,
+    # so replacing only the module global below the definition would retain FIFO.
+    replace_once(target / 'scripts/x_post_schedule_runner.py', 'def execute_schedule_tick(',
+                 'from features.x_tag_publish.pool import material_candidates as _material_candidates\n\ndef execute_schedule_tick(')
     # The new source starts empty; it never receives the old account list or schedule.
     for p in (source / 'static').glob('x-auto-publish*'):
         value = p.read_text(encoding='utf-8').replace('x-auto-publish', 'x-tag-auto-publish')

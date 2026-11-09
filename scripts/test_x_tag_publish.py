@@ -256,6 +256,14 @@ class GatewayTests(unittest.TestCase):
 
 
 class PoolMatchingTests(unittest.TestCase):
+    def test_live_scheduler_and_template_service_bind_profile_selectors(self):
+        import inspect
+        from scripts import x_post_schedule_runner as runner
+        from features.x_auto_posts import service as auto
+        self.assertIs(inspect.signature(runner.execute_schedule_tick).parameters['material_candidate_loader'].default,
+                      material_candidates)
+        self.assertIs(auto.TwoStageSelector, ProfileSelector)
+
     def select(self, accounts, candidates, *, fail=None, snapshot=None):
         from scripts import x_post_schedule_runner as runner
         with tempfile.TemporaryDirectory() as tmp:
