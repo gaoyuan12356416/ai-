@@ -134,7 +134,10 @@ def units():
     result={
       'x-tag-post.service':unit('publisher','x-post-automation','-m features.x_tag_publish.runtime',writes=str(ROOT/'posts')+' '+str(ROOT/'s2l')+' '+str(ROOT)),
       'x-tag-auto.service':unit('automatic templates','x-post-daily',str(CURRENT/'scripts/x_auto_post_service.py'),after='x-tag-post.service',writes=str(ROOT/'auto')+' '+str(ROOT/'daily-work')+' /run/x-tag-auto'),
-      'x-tag-gateway.service':unit('browser gateway','root','-m features.x_tag_publish.gateway',after='x-tag-post.service x-tag-auto.service',writes=str(ROOT)),
+      # SQLite read-only WAL readers may need to create/update the shared-memory
+      # sidecar beside the trusted users DB. Resolver still uses mode=ro and
+      # PRAGMA query_only=ON; no SQL writes to that DB are permitted.
+      'x-tag-gateway.service':unit('browser gateway','root','-m features.x_tag_publish.gateway',after='x-tag-post.service x-tag-auto.service',writes=str(ROOT)+' '+str((MAIN/'data').resolve())),
     }
     scripts={'x-tag-auto-scheduler':('x_auto_post_runner.py --mode tick','/run/x-tag-auto'),
              'x-tag-auto-runner':('x_auto_post_runner.py --mode execute','/run/x-tag-auto'),
