@@ -31,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.x_posts import material_shortage
 from features.x_posts.read_failures import read_failure
 from features.pipeline_dispatch.x_planning import enabled as pipeline_dispatch_enabled, deferred_candidate, queue_handoff
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
@@ -135,9 +136,10 @@ MATERIAL_ASSIGNMENT_VERSION = "material-random-premium-direct-v2"
 class MaterialScheduleCandidates(list):
     """List-compatible plan carrying clean, run-scoped FIFO skip proof."""
 
-    def __init__(self, values=(), *, fifo_capacity_skips=None):
+    def __init__(self, values=(), *, fifo_capacity_skips=None, shortage_snapshot=None):
         super().__init__(values)
         self.fifo_capacity_skips = list(fifo_capacity_skips or [])
+        self.shortage_snapshot = shortage_snapshot
 
 
 def _is_ordered_account_subset(values, configured):
@@ -1784,10 +1786,12 @@ def _material_candidates(
         config.material_pool_path, config.scan_limit, **pool_options
     )
     if not pool_items:
-        raise ScheduleRunError(
+        exc = ScheduleRunError(
             "manual material pool has no available item",
             "x_post_schedule_material_shortage",
         )
+        exc.shortage_snapshot = material_shortage.snapshot(accounts, [], scan_limit=config.scan_limit)
+        raise exc
     identity = dict(assignment_identity or {})
     identity.setdefault("source_type", "material")
     identity.setdefault("run_date", source_date)
@@ -1797,6 +1801,8 @@ def _material_candidates(
     repair_state = {"attempted": 0}
     capacity_skips = []
     planned = []
+    scanned = 0
+    shortage_rejections = {}
     connection = _open_source_connection(config, connection_factory)
     try:
         # candidate_pool_limit bounds one metadata-hydration page. The
@@ -1857,6 +1863,8 @@ def _material_candidates(
                 capacity_skips=capacity_skips,
                 heartbeat=heartbeat,
             )
+            scanned += len(pool_batch)
+            material_shortage.observe_rejections(shortage_rejections, candidates, planning_rejections)
             _record_capacity_skip_proofs(
                 sidecar,
                 config,
@@ -1870,13 +1878,18 @@ def _material_candidates(
     finally:
         _close_source_connection(connection)
     if not planned:
-        raise ScheduleRunError(
+        exc = ScheduleRunError(
             "no FIFO material candidate passed media preflight",
             "x_post_schedule_material_preflight_shortage",
         )
+        exc.shortage_snapshot = material_shortage.snapshot(
+            accounts, [], scanned=scanned, scan_limit=config.scan_limit, rejections=shortage_rejections)
+        raise exc
     return MaterialScheduleCandidates(
         planned,
         fifo_capacity_skips=capacity_skips,
+        shortage_snapshot=material_shortage.snapshot(
+            accounts, planned, scanned=scanned, scan_limit=config.scan_limit, rejections=shortage_rejections),
     )
 
 
@@ -2528,6 +2541,7 @@ def execute_schedule_tick(
                     identity,
                     exc,
                 )
+                material_shortage.emit(identity, getattr(exc, "shortage_snapshot", None))
                 local_results.append(
                     _preflight_failure_result(identity, exc, audit)
                 )
@@ -2562,6 +2576,8 @@ def execute_schedule_tick(
                         )
                         return
                     if reconciled["found"] and reconciled["queues"]:
+                        if [q["account_id"] for q in reconciled["queues"]] == candidate_account_ids:
+                            material_shortage.emit(identity, getattr(candidates, "shortage_snapshot", None))
                         result = _publish_frozen_queues(
                             batch_config,
                             sidecar,
@@ -2588,6 +2604,7 @@ def execute_schedule_tick(
                     "created queue order does not match frozen schedule",
                     "x_post_schedule_plan_mismatch",
                 )
+            material_shortage.emit(identity, getattr(candidates, "shortage_snapshot", None))
             result = _publish_frozen_queues(
                 batch_config, sidecar, identity, queues, resumed=False
             )

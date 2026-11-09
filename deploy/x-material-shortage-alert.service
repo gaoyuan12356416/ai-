@@ -1,0 +1,14 @@
+[Unit]
+Description=X material pool language shortage Feishu alerts
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /opt/x-material-shortage-alert/current/scripts/x_material_shortage_alert.py --config /etc/x-material-shortage-alert.json --send
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/data-disk/x-material-shortage-alert
+PrivateTmp=true
