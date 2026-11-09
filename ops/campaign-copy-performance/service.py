@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import collections
 import datetime as dt
 import gzip
@@ -1401,10 +1402,29 @@ def self_test() -> int:
     return 0
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Campaign copy performance report")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--warm-cache", action="store_true")
+    parser.add_argument("--recover-stale-cache", action="store_true",
+                        help="Allow 30 minutes for one isolated warm recovery; the serving scheduler stays at 14 minutes")
+    args = parser.parse_args(argv)
+    if args.recover_stale_cache and not args.warm_cache:
+        parser.error("--recover-stale-cache requires --warm-cache")
+    if args.recover_stale_cache and (CACHE_PATH is None or CACHE_PATH.resolve() == Path(
+            "/mnt/data-disk/campaign-copy-performance/cache/report.json").resolve()):
+        parser.error("recovery requires an isolated CAMPAIGN_COPY_REPORT_CACHE_PATH")
+    return args
+
+
 def main() -> int:
-    if "--self-test" in sys.argv:
+    global REFRESH_BUDGET_SECONDS
+    args = parse_args()
+    if args.self_test:
         return self_test()
-    if "--warm-cache" in sys.argv:
+    if args.warm_cache:
+        if args.recover_stale_cache:
+            REFRESH_BUDGET_SECONDS = 1800
         CACHE.load_disk()
         return 0 if CACHE.refresh() else 1
     if not INDEX_PATH.is_file():

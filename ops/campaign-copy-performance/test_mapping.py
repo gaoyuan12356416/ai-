@@ -2,6 +2,7 @@ import copy
 import datetime as dt
 import unittest
 import json
+from pathlib import Path
 from unittest import mock
 
 import campaign_mapping as mapping
@@ -216,6 +217,16 @@ class MappingTest(unittest.TestCase):
 
 
 class RefreshSchedulingTest(unittest.TestCase):
+    def test_extended_recovery_cannot_be_used_by_the_serving_scheduler_or_live_cache(self):
+        with self.assertRaises(SystemExit):
+            service.parse_args(["--recover-stale-cache"])
+        with mock.patch.object(service, "CACHE_PATH", Path("/mnt/data-disk/campaign-copy-performance/cache/report.json")):
+            with self.assertRaises(SystemExit):
+                service.parse_args(["--warm-cache", "--recover-stale-cache"])
+        with mock.patch.object(service, "CACHE_PATH", Path("candidate.json")):
+            self.assertTrue(service.parse_args(["--warm-cache", "--recover-stale-cache"]).recover_stale_cache)
+        self.assertEqual(service.REFRESH_BUDGET_SECONDS, 840)
+
     def test_private_metadata_is_retained_for_refresh_but_never_sent_to_browser(self):
         seed = {"v": 2, "m": {"read_only_verified": True, "mapping_metadata_next_bucket": 5},
                 "cf": ["campaign_id", "metadata_signature", "metadata_checked_at", "metadata_product"],

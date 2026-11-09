@@ -251,3 +251,12 @@ verify a second cycle. Only restart `campaign-copy-performance.service` after
 the candidate passes. Roll back the code to `5ab4071e8c82940b7a1e1b87f01e1022d7fb3d97`
 by restoring the previous `current` symlink and restarting this service. Keep
 the newest verified cache during rollback.
+
+For the first recovery only, `service.py --warm-cache --recover-stale-cache`
+allows a 1,800-second overall SQL budget on a separate cache path. The November
+outage accumulated about 90,000 new/changed descriptions; mapping alone took
+492 seconds before the eight financial dates were read. This temporary option
+cannot start the serving scheduler or target the live cache. It keeps the FIFO
+permit, 15-second statement timeout and atomic complete-result publication.
+Verify the next warm cycle without this flag under the normal 840-second budget
+before activating the release; no production unit/configuration change is needed.
