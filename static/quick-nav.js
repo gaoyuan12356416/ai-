@@ -1,5 +1,33 @@
 (function () {
+  const TAG_PUBLISH_ITEMS = [
+    { key: "xTagAutoPublishTemplates", label: "标签画像自动发布",
+      description: "按频道标签收入画像选择剧目和素材", kind: "page",
+      href: "/x-tag-auto-publish-templates.html", module: "x_accounts",
+      adminOnly: false, enabled: true, order: 25 },
+    { key: "xTagMaterialPool", label: "标签画像素材池",
+      description: "维护按频道标签画像分配的独立素材池", kind: "page",
+      href: "/x-tag-material-pool.html", module: "x_accounts",
+      adminOnly: false, enabled: true, order: 26 },
+  ];
+  const TAG_PAGE_ACTIVE_KEYS = {
+    "/x-tag-auto-publish-templates.html": "xTagAutoPublishTemplates",
+    "/x-tag-auto-publish-template.html": "xTagAutoPublishTemplates",
+    "/x-tag-auto-publish-runs.html": "xTagAutoPublishTemplates",
+    "/x-tag-material-pool.html": "xTagMaterialPool",
+  };
   const DEFAULT_NAV = [
+    {
+      key: "pipeline_overview", label: "运行监测", order: 1,
+      items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,
+        description: "任务进度、服务器容量与制作发布效率", kind: "page",
+        href: "/pipeline-monitor.html", enabled: true }],
+    },
+    {
+      key: "video_editing", label: "视频剪辑", order: 15, module: "video_editing",
+      items: [{ key: "videoEditing", label: "视频剪辑工作台", order: 10,
+        description: "共享视频素材、逐剧剪辑与制作任务", kind: "page",
+        href: "/video-editing.html", module: "video_editing", enabled: true }],
+    },
     {
       key: "ad_control",
       label: "AI自动规则调控",
@@ -257,6 +285,7 @@
       order: 40,
       module: "x_accounts",
       items: [
+        ...TAG_PUBLISH_ITEMS,
         {
           key: "xAccounts",
           label: "X账号授权",
@@ -365,19 +394,25 @@
     },
     {
       key: "social_reports",
-      label: "社媒数据报表",
+      label: "数据报表",
       order: 50,
       module: "social_analytics",
       items: [
         {
           key: "socialAnalytics",
-          label: "发布效果分析",
+          label: "社媒效果分析",
           description: "按人员、渠道和剧目分析发布、点击、安装及付费转化",
           kind: "page",
           href: "/social-analytics.html",
           module: "social_analytics",
           enabled: true,
           order: 10,
+        },
+        {
+          key: "aiImageDaily", label: "AI 图片素材日报",
+          description: "查看三产品 AI 图片产出、投放效果及历史日报",
+          kind: "page", href: "/ai-image-daily.html",
+          module: "social_analytics", enabled: true, order: 20,
         },
       ],
     },
@@ -553,6 +588,8 @@
   }
 
   const INTERNAL_VIEW_HREFS = {
+    pipelineMonitor: "/pipeline-monitor.html",
+    videoEditing: "/video-editing.html",
     tasks: "/drama-synthesis.html",
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
@@ -565,12 +602,17 @@
     fbAutoPublishRuns: "/fb-auto-publish-runs.html",
     xAccounts: "/x-accounts.html",
     xAccountList: "/x-account-list.html",
+    xVideoPublish: "/x-video-publish.html",
+    xVideoPublishRecords: "/x-video-publish.html?view=records",
     xAutoPublishTemplates: "/x-auto-publish-templates.html",
+    xTagAutoPublishTemplates: "/x-tag-auto-publish-templates.html",
+    xTagMaterialPool: "/x-tag-material-pool.html",
     xAutoPublishRuns: "/x-auto-publish-runs.html",
     xPostMaterialPool: "/x-post-material-pool.html",
     xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
     socialAnalytics: "/social-analytics.html",
+    socialkitAnalytics: "/socialkit-analytics.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",
@@ -597,6 +639,68 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    if (!normalized.some(group => (group.items || []).some(item => item.key === "pipelineMonitor"))) {
+      normalized.unshift({ key: "pipeline_overview", label: "运行监测", order: 1,
+        items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,
+          description: "任务进度、服务器容量与制作发布效率", kind: "page",
+          href: "/pipeline-monitor.html", enabled: true }] });
+    }
+    // SocialKit has its own module; retain inherited permissions on old items.
+    let socialkitReports = normalized.find(group => group && group.key === "social_reports");
+    if (!socialkitReports) {
+      socialkitReports = cloneNav([DEFAULT_NAV.find(group => group.key === "social_reports")])[0];
+      normalized.push(socialkitReports);
+    }
+    if (!Array.isArray(socialkitReports.items)) socialkitReports.items = [];
+    const socialkitExists = normalized.some(group => Array.isArray(group.items) &&
+      group.items.some(item => item && item.key === "socialkitAnalytics"));
+    const customReportAcl = socialkitReports.module && (socialkitReports.module !== "social_analytics" ||
+      socialkitReports.items.some(item => item && item.module && item.module !== "social_analytics"));
+    if (!socialkitExists && customReportAcl) {
+      let separate = normalized.find(group => group && group.key === "socialkit_reports");
+      if (!separate) {
+        separate = {key: "socialkit_reports", label: "数据报表 · SocialKit", order: 51, items: []};
+        normalized.push(separate);
+      }
+      socialkitReports = separate;
+    }
+    if (!socialkitExists && socialkitReports.module === "social_analytics") {
+      socialkitReports.items.forEach(item => { if (!item.module) item.module = "social_analytics"; });
+      delete socialkitReports.module;
+    }
+    if (!socialkitExists) {
+      socialkitReports.items.push({key: "socialkitAnalytics", label: "SocialKit 效果报表",
+        description: "按平台、产品、账号和剧目查看每日发布与收入",
+        kind: "page", href: "/socialkit-analytics.html", module: "socialkit_analytics",
+        enabled: true, order: 30});
+    }
+
+
+    // Upgrade saved and cached navigation without replacing other groups or ACLs.
+    const reportDefault = DEFAULT_NAV.find(group => group.key === "social_reports");
+    let reports = normalized.find(group => group && group.key === "social_reports");
+    if (!reports) {
+      reports = cloneNav([reportDefault])[0];
+      normalized.push(reports);
+    } else {
+      reports.label = "数据报表";
+      if (!Array.isArray(reports.items)) reports.items = [];
+      const analytics = reports.items.find(item => item && item.key === "socialAnalytics");
+      if (analytics) analytics.label = "社媒效果分析";
+      if (!reports.items.some(item => item && item.key === "aiImageDaily")) {
+        reports.items.push(cloneNav(reportDefault.items.filter(item => item.key === "aiImageDaily"))[0]);
+      }
+    }
+
+    if (!normalized.some(group => group && Array.isArray(group.items) &&
+        group.items.some(item => item && item.key === "videoEditing"))) {
+      const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
+      const editorGroup = normalized.find(group => group && group.key === "video_editing");
+      if (editorGroup) {
+        if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
+        editorGroup.items.push(JSON.parse(JSON.stringify(editorDefault.items[0])));
+      } else normalized.push(JSON.parse(JSON.stringify(editorDefault)));
+    }
     // Migrate both saved server navigation and cached legacy navigation.
     let assetItem;
     normalized.forEach(group => {
@@ -713,6 +817,7 @@
     // FB_VIDEO_PUBLISH_NAVIGATION_V1
     delete facebookPlatform.module;
     const fbVideoItems = [{"key": "fbPageManagement", "label": "Page 管理", "description": "设置 Page 剧语言和发布文案", "kind": "page", "href": "/fb-pages.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 30}, {"key": "fbVideoPublish", "label": "视频批量发布", "description": "按剧语言匹配素材与 Page", "kind": "page", "href": "/fb-video-publish.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 40}, {"key": "fbVideoPublishRecords", "label": "批量发布记录", "description": "查看批次、冻结文案和发布结果", "kind": "page", "href": "/fb-video-publish-records.html", "module": "fb_video_publish", "adminOnly": false, "enabled": true, "order": 50}];
+    fbVideoItems.push({key: "fbPostMaterialPool", label: "FB Post 素材池", description: "按语言分配素材到 Page 组定时发布", kind: "page", href: "/fb-post-material-pool.html", module: "fb_video_publish", adminOnly: false, enabled: true, order: 45});
     fbVideoItems.forEach(item => {
       if (!facebookPlatform.items.some(existing => existing && existing.key === item.key)) facebookPlatform.items.push(item);
     });
@@ -744,6 +849,24 @@
     }
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      TAG_PUBLISH_ITEMS.forEach(item => {
+        if (!xPlatform.items.some(existing => existing && existing.key === item.key)) {
+          xPlatform.items.push({ ...item });
+        }
+      });
+      [
+        { key: "xVideoPublish", label: "手动发布", description: "全部账号选材、配对与定时发布", href: "/x-video-publish.html", order: 23 },
+        { key: "xVideoPublishRecords", label: "手动发布记录", description: "查看手动、素材池和 Excel 发布批次", href: "/x-video-publish.html?view=records", order: 24 },
+      ].forEach(item => {
+        if (!xPlatform.items.some(existing => existing && existing.key === item.key)) {
+          xPlatform.items.push({ ...item, kind: "page", module: "x_accounts", adminOnly: false, enabled: true });
+        }
+      });
+      xPlatform.items.forEach(item => {
+        if (["xAccountList", "xVideoPublish", "xVideoPublishRecords"].includes(item?.key)) {
+          item.module = "x_accounts"; item.adminOnly = false;
+        }
+      });
       const xAutoPublishTemplatesExists = xPlatform.items.some(
         item => item && item.key === "xAutoPublishTemplates"
       );
@@ -921,6 +1044,7 @@
   }
 
   function setActive(container, activeKey) {
+    activeKey = TAG_PAGE_ACTIVE_KEYS[window.location.pathname] || activeKey;
     const root = typeof container === "string" ? document.querySelector(container) : container;
     if (!root) return;
     root.querySelectorAll(".nav-item").forEach(item => {

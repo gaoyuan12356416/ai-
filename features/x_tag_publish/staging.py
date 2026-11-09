@@ -5,6 +5,7 @@ No transformation in this module writes to the existing runtime or business DB.
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 
 REGRESSION_FILES = ('test_x_auto_post_runner.py', 'test_x_auto_post_store.py',
@@ -102,7 +103,6 @@ def build(source, repo, target, *, verify=True):
     value = value.replace('定时任务按加入时间从新到旧选择未发布且未占用的素材，并按语言匹配账号。',
                           '定时任务按频道的标签收入画像选择素材，语言需匹配；同标签内按加入时间从新到旧选择。本页的素材占用和发布量独立计算。')
     value = value.replace('重复或已被历史队列占用的素材不会再次加入。', '本流程内重复或已被本流程历史队列占用的素材不会再次加入。')
-    import re
     value = re.sub(r'只有这里选中的账号才会从素材池取素材发布；.*?每个账号会在每个发布时间点各发布一篇。',
         '为所选频道按标签收入比例分配素材，同标签内最新入池优先。语言、时长和文件大小按目标账号资格校验。每个账号在每个发布时间点各发布一篇，只计入本画像流程的发布量。', value, count=1)
     value = re.sub(r'<div class="manual-warning">.*?</div>',
@@ -123,6 +123,13 @@ def build(source, repo, target, *, verify=True):
         shutil.copy2(p, target / 'static' / p.name)
     for p in (repo / 'static').glob('x-tag-post-logs.*'):
         shutil.copy2(p, target / 'static' / p.name)
+    # Shared navigation is maintained separately from the legacy runtime snapshot.
+    shutil.copy2(repo / 'static/quick-nav.js', target / 'static/quick-nav.js')
+    nav_version = digest(repo / 'static/quick-nav.js')[:12]
+    for p in (target / 'static').glob('x-tag-*.html'):
+        value = p.read_text(encoding='utf-8')
+        value = re.sub(r'(/quick-nav\.js)(?:\?[^"\']*)?', r'\1?v=' + nav_version, value)
+        p.write_text(value, encoding='utf-8')
     (target / 'tag-runtime-manifest.json').write_text(json.dumps(dict(baseline=manifest,
         files={str(p.relative_to(target)).replace('\\', '/'): digest(p) for p in target.rglob('*') if p.is_file()}),
         indent=2), encoding='utf-8')
