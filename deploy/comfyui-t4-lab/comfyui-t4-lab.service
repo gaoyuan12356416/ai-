@@ -1,0 +1,26 @@
+[Unit]
+Description=Isolated ComfyUI Wan2.2 T4 test environment
+After=network.target
+
+[Service]
+Type=simple
+User=comfyui-lab
+Group=comfyui-lab
+WorkingDirectory=/data/comfyui-t4-lab/ComfyUI
+Environment=HOME=/data/comfyui-t4-lab
+Environment=OMP_NUM_THREADS=2
+Environment=MKL_NUM_THREADS=2
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+Environment=HF_HOME=/data/comfyui-t4-lab/user/huggingface
+Environment=XDG_CACHE_HOME=/data/comfyui-t4-lab/user/.cache
+ExecStart=/data/comfyui-t4-lab/venv/bin/python main.py --listen 127.0.0.1 --port 8188 --lowvram --reserve-vram 6 --force-fp16 --fp32-vae --use-pytorch-cross-attention --disable-smart-memory --disable-api-nodes --extra-model-paths-config /data/comfyui-t4-lab/extra_model_paths.yaml --input-directory /data/comfyui-t4-lab/input --output-directory /data/comfyui-t4-lab/output --user-directory /data/comfyui-t4-lab/user --temp-directory /data/comfyui-t4-lab/temp
+Nice=10
+CPUQuota=200%
+MemoryMax=24G
+NoNewPrivileges=yes
+PrivateTmp=yes
+Restart=no
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

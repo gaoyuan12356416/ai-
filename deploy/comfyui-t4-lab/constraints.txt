@@ -1,0 +1,6 @@
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+transformers==4.57.1
+tokenizers==0.22.1
+numpy==2.2.6
