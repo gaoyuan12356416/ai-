@@ -1,5 +1,6 @@
 """Profile-aware pool matching while retaining existing media admission/reservation."""
 from .policy import Decision, portrait_snapshot, canonical, language
+from features.x_tag_revenue.taxonomy import collect_classifications
 
 
 def material_candidates(config, sidecar, accounts, *, source_date, connection_factory,
@@ -19,6 +20,7 @@ def material_candidates(config, sidecar, accounts, *, source_date, connection_fa
         raise error
     connection = runner._open_source_connection(config, connection_factory)
     candidates, shortage_rejections = [], {}
+    catalog, metadata_error = {}, ''
     try:
         for start in range(0, len(pool), config.candidate_pool_limit):
             if callable(heartbeat):
@@ -34,6 +36,12 @@ def material_candidates(config, sidecar, accounts, *, source_date, connection_fa
                     limit=config.candidate_pool_limit, schema=config.mysql_database, allow_images=allow_images)
             candidates.extend(selected)
             runner._record_pool_checks_best_effort(sidecar, config, rejected)
+        try:
+            from features.x_posts.selector import _cursor_rows
+            catalog = collect_classifications(lambda sql, params: _cursor_rows(connection, sql, params, query_stage='drama'),
+                                               config.mysql_database, [item['content_id'] for item in candidates])
+        except Exception:
+            metadata_error = 'candidate_metadata_unavailable'
     finally:
         runner._close_source_connection(connection)
     snapshot = portrait_snapshot()
@@ -49,7 +57,8 @@ def material_candidates(config, sidecar, accounts, *, source_date, connection_fa
         eligible = [item for item in candidates if str(item['material_id']) not in used
                     and language(item.get('material_language')) == language(account.get('drama_language'))
                     and (account.get('long_video_eligible') or float(item.get('source_duration') or 0) <= 1200)]
-        ranked = sorted(eligible, key=lambda item: decision.rank(item.get('drama_labels', [])))
+        metadata = lambda item: catalog.get((str(item['content_id']), language(item.get('material_language'))), {})
+        ranked = sorted(eligible, key=lambda item: decision.rank(metadata(item)))
         for candidate in ranked:
             planned, rejected = runner._preflight_material_candidates(config, sidecar, [candidate], [account],
                 source_date=source_date, timestamp=timestamp, downloader=downloader, prober=prober,
@@ -59,7 +68,7 @@ def material_candidates(config, sidecar, accounts, *, source_date, connection_fa
             runner.material_shortage.observe_rejections(shortage_rejections, [candidate], rejected)
             if planned:
                 item = planned[0]
-                item['tag_profile'] = decision.audit(candidate.get('drama_labels', []))
+                item['tag_profile'] = decision.audit(metadata(candidate), fallback=metadata_error)
                 assigned[int(account['id'])] = item
                 used.add(str(candidate['material_id']))
                 break

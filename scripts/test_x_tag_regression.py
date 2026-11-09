@@ -19,7 +19,8 @@ MODULES = ('x_auto_post_validation', 'x_auto_post_store', 'x_auto_post_selector'
 def run(runtime, output):
     runtime, output = Path(runtime).resolve(), Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    commands = [('tag_revenue', [sys.executable, '-B', str(ROOT / 'scripts/test_x_tag_revenue.py')]),
+    commands = [('hierarchy', [sys.executable, '-B', str(ROOT / 'scripts/test_x_hierarchy.py')]),
+                ('tag_revenue', [sys.executable, '-B', str(ROOT / 'scripts/test_x_tag_revenue.py')]),
                 ('tag_publish', [sys.executable, '-B', str(ROOT / 'scripts/test_x_tag_publish.py')])]
     commands += [(name, [sys.executable, '-B', '-m', 'unittest', 'scripts.test_' + name]) for name in MODULES]
     results = []

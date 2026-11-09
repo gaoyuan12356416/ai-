@@ -18,6 +18,7 @@ from features.x_tag_publish.selection import ProfileSelector
 from features.x_tag_publish.pool import install_reservation_policy, material_candidates
 from features.x_tag_publish import gateway
 from features.x_tag_revenue.tags import VERSION as TAG_MAPPING_VERSION, localize_audit
+from features.x_tag_revenue.taxonomy import VERSION as HIERARCHY_VERSION, classify
 from features.x_posts import service as post
 from features.x_auto_posts.core import XAutoPostStore
 from scripts import test_x_auto_post_selector as fixture
@@ -26,9 +27,14 @@ from scripts.test_x_post_material_pool import plan_candidate
 
 def profile(tags=None, revenue=10000, **meta):
     tags = tags or [('romance', 7000), ('revenge', 3000)]
+    mapped = [('sweet_romance' if k == 'romance' else k, v) for k,v in tags]
+    themes=[dict(key=k,name=k,revenue_cents=v,share_bp=v,matchable=k!='__unknown__') for k,v in mapped]
+    audience=dict(key='female',name='女性',revenue_cents=revenue,share_bp=10000,matchable=True,children=themes)
+    dtype=dict(key='local',name='本土剧',revenue_cents=revenue,share_bp=10000,matchable=True,children=[audience])
     return ({'accounts': {'999': dict(status='complete', revenue_cents=revenue,
-        tags=[dict(key=k, name=k, revenue_cents=v, share_bp=v) for k, v in tags])}},
-        dict(version='frozen-1', end='2026-11-08', tag_mapping_version=TAG_MAPPING_VERSION, **meta))
+        hierarchy_version=HIERARCHY_VERSION,types=[dtype])}},
+        dict(version='frozen-1', end='2026-11-08', tag_mapping_version=TAG_MAPPING_VERSION,
+             hierarchy_version=HIERARCHY_VERSION, **meta))
 
 
 ACCOUNT = dict(id=101, x_user_id='999', username='channel', drama_language='en', long_video_eligible=False)
@@ -55,17 +61,17 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(json.dumps(audit,sort_keys=True),before)
 
     def test_weighted_frequency_and_replay(self):
-        counts = {'romance': 0, 'revenge': 0}
+        counts = {'sweet_romance': 0, 'revenge': 0}
         for i in range(4000):
             a = Decision(ACCOUNT, ['task', i], profile())
             b = Decision(ACCOUNT, ['task', i], profile())
-            self.assertEqual(a.tag_order, b.tag_order)
-            counts[a.tag_order[0]] += 1
-        self.assertTrue(0.67 < counts['romance'] / 4000 < 0.73, counts)
+            self.assertEqual(a.preferred(), b.preferred())
+            counts[a.preferred()[2]] += 1
+        self.assertTrue(0.67 < counts['sweet_romance'] / 4000 < 0.73, counts)
 
     def test_unknown_and_negative_not_preferences(self):
         decision = Decision(ACCOUNT, 'a', profile([('__unknown__', 10000)]))
-        self.assertEqual(decision.reason, 'no_known_revenue_tags')
+        self.assertEqual(decision.audit(classify('Female,Sweet','local'))['fallback_reason'], 'no_valid_theme_profile')
         self.assertEqual(Decision(ACCOUNT, 'a', profile([('romance', -100)], -100)).reason, 'no_positive_revenue')
 
     def test_no_history_missing_source_and_incomplete_are_distinct(self):
@@ -83,8 +89,8 @@ class PolicyTests(unittest.TestCase):
 
     def test_fallback_and_stale_are_visible(self):
         d = Decision(ACCOUNT, 1, profile(stale=True))
-        result = d.audit(['unrelated'])
-        self.assertEqual(result['fallback_reason'], 'no_matching_eligible_tag')
+        result = d.audit(classify('Female,unrelated','local'))
+        self.assertEqual(result['fallback_reason'], 'no_matching_eligible_theme')
         self.assertTrue(result['profile_stale'])
         self.assertEqual(result['profile_version'], 'frozen-1')
 
@@ -219,7 +225,7 @@ class SelectorTests(unittest.TestCase):
         source = fixture.FakeSource([fixture.drama('C1'), fixture.drama('C2')],
             {'C1':[fixture.material('101','C1')], 'C2':[fixture.material('201','C2')]})
         source.schema='test'
-        source._stream_select=lambda *_: [dict(content_id=c,app_id=1479,language='en',series_code='s'+c,labels=t)
+        source._stream_select=lambda *_: [dict(content_id=c,app_id=1479,language='en',series_code='s'+c,labels='Female,'+t,resource_type=1)
                                          for c,t in [('C1','revenge'),('C2','romance')]]
         store=fixture.FakeStore()
         selector=ProfileSelector(source,fixture.MetricWindowRepository(fixture.FakeMetricStore()),
@@ -234,7 +240,7 @@ class SelectorTests(unittest.TestCase):
             bridge.return_value.account_snapshot.return_value=ACCOUNT
             result=selector.select_and_reserve(fixture.request())
         self.assertEqual(result.drama.content_id,'C2')
-        self.assertEqual(store.reserve_calls[0]['selection_snapshot']['tag_profile']['selected_tag'],'爱情')
+        self.assertEqual(store.reserve_calls[0]['selection_snapshot']['tag_profile']['selected_tag'],'甜宠恋爱')
         self.assertEqual(result.reservation['tag_profile']['profile_version'],'frozen-1')
 
     def test_reentry_does_not_rerank_or_query_new_profile(self):
@@ -251,7 +257,7 @@ class SelectorTests(unittest.TestCase):
              patch('features.x_tag_publish.policy.portrait_snapshot', return_value=profile()):
             bridge.return_value.account_snapshot.return_value=ACCOUNT
             result=selector.select_and_reserve(fixture.request())
-        self.assertEqual(result.reservation['tag_profile']['fallback_reason'],'candidate_labels_unavailable')
+        self.assertEqual(result.reservation['tag_profile']['fallback_reason'],'candidate_metadata_unavailable')
 
 
 class GatewayTests(unittest.TestCase):
@@ -327,6 +333,7 @@ class PoolMatchingTests(unittest.TestCase):
                  patch.object(runner,'_preflight_candidate',side_effect=preflight), \
                  patch.object(runner,'_record_pool_checks_best_effort') as checks, \
                  patch('features.x_tag_publish.pool.portrait_snapshot',return_value=snapshot or profile([('romance',10000)])), \
+                 patch('features.x_tag_publish.pool.collect_classifications',return_value={(r['content_id'],r['material_language']):classify(['Female']+r['drama_labels'],'local') for r in candidates}), \
                  patch.dict(os.environ,PIPELINE_X_DISPATCH_ENABLED='0'):
                 result=material_candidates(config,sidecar,accounts,source_date='2026-11-08',
                     connection_factory=None,downloader=None,prober=None,repair_client=None,timestamp=1,
@@ -335,7 +342,7 @@ class PoolMatchingTests(unittest.TestCase):
             return result,recorded
 
     def candidate(self,mid,tag='romance',**extra):
-        return dict(material_id=str(mid),pool_item_id=mid,material_language='en',source_duration=30,
+        return dict(material_id=str(mid),content_id='C'+str(mid),pool_item_id=mid,material_language='en',source_duration=30,
                     drama_labels=[tag],media_kind='video',**extra)
 
     def test_premium_first_draw_preserves_short_video_for_ordinary_account(self):
@@ -383,8 +390,8 @@ class PoolMatchingTests(unittest.TestCase):
         rows.insert(0,dict(self.candidate(4),source_duration=3000))
         result,_=self.select([ACCOUNT,dict(ACCOUNT,id=102)],rows)
         self.assertEqual([r['material_id'] for r in result],['2','1'])
-        self.assertEqual(result[0]['tag_profile']['selected_tag'],'爱情')
-        self.assertEqual(result[1]['tag_profile']['fallback_reason'],'no_matching_eligible_tag')
+        self.assertEqual(result[0]['tag_profile']['selected_tag'],'甜宠恋爱')
+        self.assertEqual(result[1]['tag_profile']['fallback_reason'],'no_matching_eligible_theme')
 
     def test_failed_candidate_does_not_block_other_account_or_poison_success(self):
         rows=[self.candidate(1),self.candidate(2,'revenge')]

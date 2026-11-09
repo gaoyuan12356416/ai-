@@ -19,8 +19,8 @@ class AuditStore:
         context = getattr(self.context, 'value', None)
         if context:
             key = (str(kwargs['content_id']), context['language'])
-            tags = context['catalog'].get(key, {}).get('tags', {})
-            audit = context['decision'].audit(list(tags.values()), fallback=context.get('fallback', ''))
+            metadata = context['catalog'].get(key, {})
+            audit = context['decision'].audit(metadata, fallback=context.get('fallback', ''))
             snapshot = dict(kwargs.get('selection_snapshot') or {})
             snapshot['tag_profile'] = audit
             kwargs['selection_snapshot'] = snapshot
@@ -42,14 +42,13 @@ class ProfileSelector(TwoStageSelector):
         decision = Decision(account, ['auto', request.template_id, request.template_version, request.run_id, request.task_id])
         fallback = ''
         try:
-            catalog = catalog_labels(self.source, candidates) if decision.weights else {}
+            catalog = catalog_labels(self.source, candidates)
         except Exception:
             # Labels are an allocation preference. Preserve otherwise valid source candidates.
-            catalog, fallback = {}, 'candidate_labels_unavailable'
+            catalog, fallback = {}, 'candidate_metadata_unavailable'
         self._profile_context.value = dict(decision=decision, catalog=catalog,
                                             language=language(request.language), fallback=fallback)
-        return sorted(candidates, key=lambda d: decision.rank(list(catalog.get(
-            (d.content_id, language(d.language)), {}).get('tags', {}).values())))
+        return sorted(candidates, key=lambda d: decision.rank(catalog.get((d.content_id, language(d.language)), {})))
 
     def _select(self, request, *, reserve):
         try:

@@ -56,6 +56,10 @@ def localize_audit(value):
     """Only a response projection. Never mutate a frozen selection or its IDs."""
     if not isinstance(value, dict):
         return value
+    if value.get('hierarchy_version'):
+        # These names are frozen from the hierarchy's own controlled taxonomy.
+        # Reinterpreting them through the old flat-label dictionary corrupts them.
+        return dict(value)
     result = dict(value)
     for field in ('preferred_tag', 'selected_tag'):
         result[field] = display(value.get(field, ''))

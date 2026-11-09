@@ -217,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
                         "SELECT account_id,COUNT(*) FROM x_post_queue WHERE status='published' GROUP BY account_id")}
                 return 200, dict(meta=snapshot[1], items=[dict(account_id=a['id'], username=a.get('username'),
                     published_count=counts.get(str(a['id']), 0),
-                    profile=Decision(a, ['preview'], snapshot).audit([])) for a in accounts])
+                    profile=Decision(a, ['preview'], snapshot).audit(None)) for a in accounts])
             routes = {'logs': 'logs/query', 'runs': 'runs/query', 'material-pool': 'material-pool/query',
                       'material-pool/account-options': 'material-pool/account-options',
                       'material-pool/schedule': 'material-pool/schedule/query'}

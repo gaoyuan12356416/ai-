@@ -61,12 +61,15 @@ def rounded_parts(values, total=None):
     return floors
 
 
-def build(catalog, metrics, resources, end):
+def build(catalog, metrics, resources, end, drama_info=None):
     # Retain the existing global campaign identity and publication boundary.
     from features.social_analytics.report import campaign_index, resolve
     from features.social_analytics.backend_scope import eligible
     index = campaign_index([r for r in catalog if r['platform'] == 'x'])
     tags = label_index(resources)
+    from .taxonomy import classification_index
+    from .hierarchy import build_tree
+    classifications = classification_index(resources, drama_info or [])
     channels = {}
     unresolved = 0
     unresolved_rows = 0
@@ -161,6 +164,7 @@ def build(catalog, metrics, resources, end):
             known_share_bp=round(Fraction(channel_total - unknown, channel_total) * 10000) if meaningful_share else None,
             published_count=len(channel['posts']), drama_count=len(channel['dramas']),
             status='partial' if channel['incomplete'] else 'complete', tags=tag_rows)
+        output[channel_id.removeprefix('x:')].update(build_tree(channel['dramas'], classifications))
     included = sum(row['revenue_cents'] for row in output.values())
     if included + unresolved != total:
         raise ValueError('channel_revenue_not_conserved')

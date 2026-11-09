@@ -90,25 +90,25 @@ def build(source, repo, target, *, verify=True):
         value = value.replace('X Post 自动发布', 'X 标签画像自动发布').replace('X 自动发布', 'X 标签画像自动发布')
         value = value.replace('以及旧发布池或新系统已经出现的素材', '以及本画像流程已保留或发布过的素材（防重独立于原流程）')
         value = value.replace('按每个 X 账户设置的剧语言筛选和排序，再在入选剧中按素材规则选择。',
-                              '按账号剧语言筛选，再按标签收入画像分配剧目；同标签内按模板排序，并筛选素材。')
+                              '按账号剧语言和模板条件筛选，再按剧类型、受众、题材三级收入画像选剧；同组合内按模板排序选择素材。')
         if p.suffix == '.html':
             value = value.replace('</head>', '<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>')
-            value = value.replace('<script src="/x-tag-auto-publish-common.js', '<script src="/x-tag-publish-ui.js?v=2"></script>\n  <script src="/x-tag-auto-publish-common.js')
+            value = value.replace('<script src="/x-tag-auto-publish-common.js', '<script src="/x-tag-publish-ui.js?v=20261109hierarchy1"></script>\n  <script src="/x-tag-auto-publish-common.js')
         (target / 'static' / p.name.replace('x-auto-publish', 'x-tag-auto-publish')).write_text(value, encoding='utf-8')
     p = source / 'static/x-post-material-pool.html'
     value = p.read_text(encoding='utf-8').replace('/api/admin/x-posts/', '/api/admin/x-tag-posts/')
     value = value.replace('x-post-material-pool', 'x-tag-material-pool').replace('/x-post-logs', '/x-tag-post-logs')
     value = value.replace('X Post 素材池', 'X 标签画像素材池').replace('X素材池', 'X标签画像素材池')
-    value = value.replace('随机分配', '按频道标签画像分配').replace('最新素材优先', '标签匹配优先，同标签内最新素材优先')
+    value = value.replace('随机分配', '按频道标签画像分配').replace('最新素材优先', '类型 → 受众 → 题材优先，同组合内最新素材优先')
     value = value.replace('定时任务按加入时间从新到旧选择未发布且未占用的素材，并按语言匹配账号。',
                           '定时任务按频道的标签收入画像选择素材，语言需匹配；同标签内按加入时间从新到旧选择。本页的素材占用和发布量独立计算。')
     value = value.replace('重复或已被历史队列占用的素材不会再次加入。', '本流程内重复或已被本流程历史队列占用的素材不会再次加入。')
     value = re.sub(r'只有这里选中的账号才会从素材池取素材发布；.*?每个账号会在每个发布时间点各发布一篇。',
-        '为所选频道按标签收入比例分配素材，同标签内最新入池优先。语言、时长和文件大小按目标账号资格校验。每个账号在每个发布时间点各发布一篇，只计入本画像流程的发布量。', value, count=1)
+        '为所选频道按剧类型、受众、题材逐层分配素材，同组合内最新入池优先。语言、时长和文件大小按目标账号资格校验。每个账号在每个发布时间点各发布一篇，只计入本画像流程的发布量。', value, count=1)
     value = re.sub(r'<div class="manual-warning">.*?</div>',
         '<div class="manual-warning">手动发布按你明确选择的素材和账号执行，使用本流程独立账本。X 写入后可能部分成功、部分失败，结果未知的任务须先核对原回执；已发布的帖子不会因关闭页面而撤回。视频时长与文件大小按目标账号当前资格和实际媒体校验执行。</div>', value, count=1)
     value = value.replace('</head>', '<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>')
-    value = value.replace('</body>', '<script src="/x-tag-publish-ui.js?v=2"></script></body>')
+    value = value.replace('</body>', '<script src="/x-tag-publish-ui.js?v=20261109hierarchy1"></script></body>')
     (target / 'static/x-tag-material-pool.html').write_text(value, encoding='utf-8')
     replace_once(target / 'static/x-tag-auto-publish-runs.js', '      row.appendChild(selectionCell);',
                  '      selectionCell.appendChild(ui.element("div", {className:"secondary", text:window.TagPublishUI.explain(selection.tag_profile)}));\n      row.appendChild(selectionCell);')
@@ -123,12 +123,17 @@ def build(source, repo, target, *, verify=True):
         shutil.copy2(p, target / 'static' / p.name)
     for p in (repo / 'static').glob('x-tag-post-logs.*'):
         shutil.copy2(p, target / 'static' / p.name)
+    for p in (repo / 'static').glob('x-tag-revenue.*'):
+        shutil.copy2(p, target / 'static' / p.name)
     # Shared navigation is maintained separately from the legacy runtime snapshot.
     shutil.copy2(repo / 'static/quick-nav.js', target / 'static/quick-nav.js')
     nav_version = digest(repo / 'static/quick-nav.js')[:12]
     for p in (target / 'static').glob('x-tag-*.html'):
         value = p.read_text(encoding='utf-8')
         value = re.sub(r'(/quick-nav\.js)(?:\?[^"\']*)?', r'\1?v=' + nav_version, value)
+        for asset in ('x-tag-publish-ui.js', 'x-tag-post-logs.js', 'x-tag-revenue.js', 'x-tag-revenue.css'):
+            version=digest(repo / 'static' / asset)[:12]
+            value=re.sub(r'(/'+re.escape(asset)+r')(?:\?[^"\']*)?',r'\1?v='+version,value)
         p.write_text(value, encoding='utf-8')
     (target / 'tag-runtime-manifest.json').write_text(json.dumps(dict(baseline=manifest,
         files={str(p.relative_to(target)).replace('\\', '/'): digest(p) for p in target.rglob('*') if p.is_file()}),

@@ -21,3 +21,4 @@
 .xtr-table td:first-child{overflow-wrap:anywhere}.xtr-table tfoot{font-weight:600;background:#f7f9fc}
 .xtr-tag-link{padding:0;background:none;border:0;color:#2457b8;font:inherit;text-align:left;cursor:pointer}
 @media(max-width:600px){.xtr-dialog{padding:16px;width:calc(100vw - 20px);max-height:92vh}.xtr-head{top:-16px}.xtr-stats{gap:8px 16px}}
+.xtr-breadcrumb{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0}.xtr-table details{max-width:450px;white-space:normal;line-height:1.6}.xtr-table details summary{cursor:pointer;margin:8px 0}.xtr-open .xtr-tag span{white-space:normal;text-align:left}.xtr-open{min-width:240px}
