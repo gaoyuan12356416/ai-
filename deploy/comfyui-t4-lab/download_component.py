@@ -7,8 +7,11 @@ import concurrent.futures
 import hashlib
 import os
 from pathlib import Path
+import ssl
 import time
 import urllib.request
+
+import certifi
 
 
 REVISION = "ee6f4a40737a995bf5818954cfce6d59443b0f04"
@@ -50,6 +53,9 @@ def main():
     url = f"https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/{REVISION}/split_files/{relative}"
     chunk_size = 32 * 1024 * 1024
     count = (size + chunk_size - 1) // chunk_size
+    # The copied standalone Python's compiled-in CA path belongs to its build host.
+    # Use the installed, maintained CA bundle; keep certificate verification on.
+    tls = ssl.create_default_context(cafile=certifi.where())
 
     def fetch(index):
         start = index * chunk_size
@@ -65,7 +71,7 @@ def main():
                     url,
                     headers={"Range": f"bytes={start}-{end}", "Accept-Encoding": "identity"},
                 )
-                with urllib.request.urlopen(request, timeout=90) as response:
+                with urllib.request.urlopen(request, timeout=90, context=tls) as response:
                     wanted_range = f"bytes {start}-{end}/{size}"
                     if response.status != 206 or response.headers.get("Content-Range") != wanted_range:
                         raise RuntimeError("Server did not honor requested byte range")
