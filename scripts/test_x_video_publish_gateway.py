@@ -367,6 +367,7 @@ class FakeMySQL:
     schema = "fixture_schema"
     def __init__(self, count=3):
         self.calls, self.resource_count, self.deploy_count = [], 1, 1
+        self.episodes = []
         self.sources = [{"material_id": str(101 + i), "product": "Fixture", "material_type": 2,
             "material_is_deleted": 0, "material_url": "https://media.example.invalid/" + str(i) + ".mp4",
             "material_name": "Fixture video", "material_language": "en", "content_id": "fixture-content",
@@ -374,25 +375,36 @@ class FakeMySQL:
 
     def select(self, sql, params):
         self.calls.append((sql, list(params)))
+        resources = [{"content_id": "fixture-content", "series_code": "fixture-series", "language": "en",
+            "drama_name": "Fixture drama", "drama_labels": "Romance", "drama_description": "Fixture description"}
+            for _ in range(self.resource_count)]
+        deployments = [{"content_id": "fixture-content", "app_id": 1479, "app": "fixture-app", "language": "en", "deploy_time": 0}
+            for _ in range(self.deploy_count)]
+        if "SELECT bundle.row_kind,bundle.row_json" in sql:
+            if "'episode' row_kind" in sql:
+                selected = [row for row in self.episodes if row["resource_id"] in params]
+                buckets = [("episode", selected), ("deploy", deployments if selected else [])]
+            else:
+                selected = [row for row in self.sources if row["material_id"] in params]
+                buckets = [("material", selected), ("drama", resources if selected else []),
+                           ("deploy", deployments if selected else [])]
+            return [{"row_kind": kind, "row_json": json.dumps(row)} for kind, rows in buckets for row in rows]
         if "FROM `fixture_schema`.ads_custom_source" in sql:
-            if "WHERE s.id IN" in sql:
-                return [dict(r) for r in self.sources if r["material_id"] in params]
-            return copy.deepcopy(self.sources)
+            return copy.deepcopy(sorted(self.sources, key=lambda row: int(row["material_id"]), reverse=True))
         if "FROM `fixture_schema`.ads_drama_resource" in sql:
-            return [{"content_id": "fixture-content", "series_code": "fixture-series", "language": "en",
-                     "drama_name": "Fixture drama", "drama_labels": "Romance", "drama_description": "Fixture description"} for _ in range(self.resource_count)]
+            return resources
         if "FROM `fixture_schema`.ads_drama_info" in sql:
-            return [{"content_id": "fixture-content", "app_id": 1479, "app": "fixture-app", "language": "en", "deploy_time": 0} for _ in range(self.deploy_count)]
+            return deployments
         raise AssertionError("Unexpected source query")
 
 
 class SourceBoundaryTests(unittest.TestCase):
-    def test_resolve_and_listing_each_use_at_most_three_bounded_queries(self):
+    def test_exact_resolve_uses_one_snapshot_and_browse_three_bounded_queries(self):
         mysql = FakeMySQL()
         source = SourceRepository(mysql)
         result = source.resolve(["101", "102", "103"])
         self.assertEqual(len(result["items"]), 3)
-        self.assertEqual(len(mysql.calls), 3)
+        self.assertEqual(len(mysql.calls), 1)
         self.assertTrue(all("LIMIT" in sql for sql, _ in mysql.calls))
         mysql.calls.clear()
         listing = source.listing({"limit": "2"})
@@ -407,7 +419,7 @@ class SourceBoundaryTests(unittest.TestCase):
             with self.assertRaises(PublishingError) as caught:
                 SourceRepository(mysql).resolve(["101"])
             self.assertEqual(caught.exception.code, "source_mapping_too_large")
-            self.assertLessEqual(len(mysql.calls), 3)
+            self.assertEqual(len(mysql.calls), 1)
 
     def test_exact_limit_is_complete_and_still_validated(self):
         mysql = FakeMySQL()
@@ -421,7 +433,7 @@ class SourceBoundaryTests(unittest.TestCase):
         source = SourceRepository(mysql)
         source.listing({"q": "9000000000000000001", "limit": "50", "language": "jp"})
         sql, params = mysql.calls[0]
-        self.assertIn("s.id=%s", sql)
+        self.assertIn("s.id IN (%s)", sql)
         self.assertIn("9000000000000000001", params)
         self.assertNotIn("9000000000000000001", sql)
         self.assertIn("ja", params)
@@ -432,13 +444,39 @@ class SourceBoundaryTests(unittest.TestCase):
         with self.assertRaises(PublishingError):
             source.resolve(["1e3"])
 
-    def test_missing_duration_never_probes_or_downloads_media(self):
-        mysql = FakeMySQL()
+    def test_missing_duration_exact_read_probes_metadata_without_full_download(self):
+        mysql = FakeMySQL(1)
         mysql.sources[0]["video_duration"] = 0
         with patch("features.x_posts.selector.probe_source_duration", side_effect=AssertionError("No media download allowed")):
-            result = SourceRepository(mysql).resolve(["101"])
+            with patch("features.x_video_publish.sources.probe_source_metadata_duration", return_value=120) as metadata:
+                result = SourceRepository(mysql).resolve(["101"])
+                self.assertEqual(result["items"]["101"]["duration_seconds"], 120)
+                metadata.assert_called_once()
+                self.assertIn("deadline", metadata.call_args.kwargs)
+            with patch("features.x_video_publish.sources.probe_source_metadata_duration", side_effect=ValueError("No metadata")):
+                result = SourceRepository(mysql).resolve(["101"])
         self.assertEqual(result["items"], {})
         self.assertEqual(result["errors"]["101"]["code"], "material_duration_missing")
+        with patch("features.x_video_publish.sources.probe_source_metadata_duration", side_effect=AssertionError("Browsing must not probe")):
+            self.assertEqual(SourceRepository(mysql).listing({})["items"], [])
+
+    def test_mixed_numeric_and_episode_ids_keep_distinct_exact_sources(self):
+        mysql = FakeMySQL(1)
+        episode_id = "abcdef0123456789abcdef0123456789"
+        mysql.episodes = [{"resource_id": episode_id, "app_id": 1479, "resource_type": 2,
+            "content_id": "fixture-content", "drama_name": "Fixture drama", "series_code": "fixture-series",
+            "drama_description": "Fixture description", "drama_labels": "Romance", "language": "en",
+            "sub_number": 6, "unlocked_episodes_count": 10, "sub_name": "Episode 6",
+            "sub_url": "https://media.example.invalid/free-6.mp4"}]
+        with patch("features.x_video_publish.episode_sources.probe_source_metadata_duration", return_value=80):
+            result = SourceRepository(mysql).resolve(["101", episode_id.upper()])
+        self.assertEqual(set(result["items"]), {"101", episode_id})
+        self.assertEqual(result["errors"], {})
+        self.assertEqual(result["items"]["101"]["duration_seconds"], 45)
+        self.assertEqual(result["items"][episode_id]["episode_number"], 6)
+        self.assertEqual(len(mysql.calls), 2)
+        self.assertEqual(mysql.calls[0][1], ["101", "101", "101"])
+        self.assertEqual(mysql.calls[1][1], [episode_id, episode_id])
 
     def test_safe_url_and_sql_binding_reject_unsafe_values(self):
         for url in ("javascript:alert(1)", "http://example.invalid/x", "https://user:pass@example.invalid/x", "https://example.invalid:444/x"):

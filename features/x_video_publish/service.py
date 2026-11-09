@@ -6,6 +6,7 @@ from .core import PersonalStore
 from .errors import PublishingError
 from .sources import LANGUAGES, SourceClient, safe_url
 from .transport import broker
+from .material_identity import is_episode_id, normalize_material_id
 
 def processing(value):
     if value in (None,'','original'):
@@ -110,8 +111,11 @@ class PublishingService:
                     # Preserve a row-local invalid mode for core validation;
                     # one bad Excel row must not discard other valid rows.
                     mode='invalid'
+                material_id=row.get('material_id')
+                if is_episode_id(material_id):
+                    material_id=normalize_material_id(material_id)
                 rows.append({'row_number':row.get('row_number'),'account_id':str(account['id']) if account else '',
-                    'material_id':row.get('material_id'),'caption':row.get('caption_template') or '',
+                    'material_id':material_id,'caption':row.get('caption_template') or '',
                     'scheduled_at':row.get('scheduled_at_utc') or '',
                     'processing':mode})
         else:
@@ -132,7 +136,8 @@ class PublishingService:
                     'processing':processing(payload.get('processing_mode'))})
             if set(mids)!=assigned:
                 raise PublishingError('unassigned_material','存在未分配目标账号的素材',400)
-        mids=list(dict.fromkeys(r['material_id'] for r in rows if isinstance(r['material_id'],str) and re.fullmatch(r'[1-9][0-9]{0,30}',r['material_id'])))
+        mids=list(dict.fromkeys(r['material_id'] for r in rows if isinstance(r['material_id'],str)
+            and (re.fullmatch(r'[1-9][0-9]{0,30}',r['material_id']) or (excel and is_episode_id(r['material_id'])))))
         resolved=self.source.resolve(mids) if mids else {'items':{},'errors':{}}
         result=self.store.preview(actor,{'source':'excel' if excel else 'manual','rows':rows},accounts,resolved['items'])
         return self.preview_dto(result,resolved.get('errors',{}))

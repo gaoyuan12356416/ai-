@@ -12,6 +12,7 @@ from features.x_posts.source_duration import probe_source_metadata_duration
 from features.x_posts.service import XPostError
 from .errors import PublishingError
 from .transport import broker
+from .material_identity import is_episode_id, normalize_material_id
 
 LANGUAGES = [('en','English'),('es','Español'),('pt-br','Português (Brasil)'),('fr','Français'),
              ('de','Deutsch'),('ru','Русский'),('ja','日本語'),('ko','한국어'),('ar','العربية'),
@@ -21,10 +22,12 @@ DEFAULT_PRODUCT = 'Drama-社媒专用素材'
 CATALOG_PRODUCTS = (DEFAULT_PRODUCT, 'Dramawave')
 
 def ids(values):
-    if (not isinstance(values, list) or not 1 <= len(values) <= 200
-            or any(not isinstance(x, str) or not re.fullmatch(r'[1-9][0-9]{0,30}', x) for x in values)):
-        raise PublishingError('invalid_material_ids', '素材 ID 必须为 1 至 200 个十进制字符串', 400)
-    return list(dict.fromkeys(values))
+    try:
+        if not isinstance(values, list) or not 1 <= len(values) <= 200:
+            raise ValueError()
+        return list(dict.fromkeys(normalize_material_id(value) for value in values))
+    except ValueError:
+        raise PublishingError('invalid_material_ids', '素材 ID 必须为 1 至 200 个数字素材 ID 或 32 位免费集 ID 文本', 400) from None
 
 def safe_url(value):
     try:
@@ -90,10 +93,21 @@ class SourceRepository:
             TRIM(s.data_source_id) content_id,s.tag_name source_tag_name,s.video_duration,s.cover thumbnail_url'''
 
     def resolve(self, material_ids):
+        deadline = time.monotonic() + 65
         material_ids = ids(material_ids)
-        marks = ','.join('%s' for _ in material_ids)
-        rows, mappings = self._read_exact_bundle(f's.id IN ({marks})', material_ids)
-        return self._resolve_rows(material_ids, rows, recover_duration=True, mappings=mappings)
+        originals = [mid for mid in material_ids if not is_episode_id(mid)]
+        episodes = [mid for mid in material_ids if is_episode_id(mid)]
+        result = {'items': {}, 'errors': {}}
+        if originals:
+            marks = ','.join('%s' for _ in originals)
+            rows, mappings = self._read_exact_bundle(f's.id IN ({marks})', originals)
+            result = self._resolve_rows(originals, rows, recover_duration=True, mappings=mappings)
+        if episodes:
+            from .episode_sources import EpisodeRepository
+            resolved = EpisodeRepository(self.mysql, self.schema).resolve(episodes, deadline=deadline)
+            for key in result:
+                result[key].update(resolved[key])
+        return result
 
     def _read_exact_bundle(self, where, params):
         """Fetch source + both mapping sets in one gated connection/statement.

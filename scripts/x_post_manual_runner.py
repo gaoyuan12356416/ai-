@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.x_video_publish.material_identity import is_episode_id, normalize_material_id
 from features.pipeline_dispatch.x_planning import enabled as pipeline_dispatch_enabled, deferred_candidate
 from features.x_posts.manual_preflight import PreparedManual
 from features.x_posts.selector import (  # noqa: E402
@@ -130,7 +131,9 @@ def _manual_identity(raw):
         )
         or any(
             not isinstance(value, str)
-            or not re.fullmatch(r"[1-9][0-9]*", value)
+            or not (re.fullmatch(r"[1-9][0-9]*", value)
+                    or (raw.get("copy_contract_version", 1) == 2
+                        and is_episode_id(value) and normalize_material_id(value) == value))
             for value in material_ids
         )
         or len(set(material_ids)) != len(material_ids)
@@ -419,14 +422,30 @@ def _manual_candidates(
 ):
     connection = _open_source_connection(config, connection_factory)
     try:
-        candidates, selector_rejections = select_manual_candidates(
-            connection,
-            run["material_ids"],
-            run["source_date"],
-            limit=len(run["material_ids"]),
-            schema=config.mysql_database,
-            now=now,
-        )
+        episode_ids = [mid for mid in run["material_ids"] if is_episode_id(mid)]
+        material_ids = [mid for mid in run["material_ids"] if not is_episode_id(mid)]
+        candidates, selector_rejections = [], []
+        if material_ids:
+            candidates, selector_rejections = select_manual_candidates(
+                connection, material_ids, run["source_date"], limit=len(material_ids),
+                schema=config.mysql_database, now=now,
+            )
+        if episode_ids:
+            if int(run.get("copy_contract_version", 1)) != 2:
+                raise ManualRunError("Free episode IDs require the personal Excel publishing contract", "invalid_material_id")
+            from features.x_posts.selector import _cursor_rows
+            from features.x_video_publish.sources import SourceRepository
+
+            class ExactSourceReader:
+                schema = config.mysql_database
+
+                def select(self, sql, params):
+                    return _cursor_rows(connection, sql, params)
+
+            resolved = SourceRepository(ExactSourceReader()).resolve(episode_ids)
+            candidates.extend(resolved["items"].values())
+            selector_rejections.extend({"material_id": mid, "error_code": error["code"],
+                "error_message": error["message"]} for mid, error in resolved.get("errors", {}).items())
     finally:
         close = getattr(connection, "close", None)
         if callable(close):
@@ -451,6 +470,10 @@ def _manual_candidates(
             candidate = {**candidate, "body_template": run["body_template"],
                          "copy_contract_version": int(run.get("copy_contract_version", 1)),
                          "source_type": "material", "source_date": run["source_date"]}
+            if is_episode_id(material_id):
+                # Media repair needs a stable positive item identity just as
+                # ordinary manual selection does; it is not a source fact.
+                candidate["manual_item_id"] = run["material_ids"].index(material_id) + 1
             if pipeline_dispatch_enabled():
                 prepared, rejected = [deferred_candidate(account_by_id[account_id], candidate, len(planned) + 1, timestamp)], []
             else:

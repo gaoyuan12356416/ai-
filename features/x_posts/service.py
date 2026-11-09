@@ -1178,8 +1178,12 @@ def _legacy_run_date(created_at):
         ) from None
 
 
-def normalize_material_key(value, error_code="invalid_request"):
+def normalize_material_key(value, error_code="invalid_request", *, allow_episode=False):
     raw = str(value or "").strip()
+    if allow_episode:
+        from features.x_video_publish.material_identity import is_episode_id, normalize_material_id
+        if is_episode_id(raw):
+            return normalize_material_id(raw)
     if not re.fullmatch(r"[0-9]+", raw):
         raise XPostError(error_code, "素材ID必须为正十进制整数", 500 if error_code != "invalid_request" else 400)
     parsed = int(raw)
@@ -2778,8 +2782,9 @@ def ensure_storage(db_path):
             legacy_rows = conn.execute(
                 "SELECT id,source_type,material_id,material_key,episode_key,"
                 "content_id,episode_number,drama_replay_generation,"
-                "run_date,created_at "
-                "FROM x_post_queue ORDER BY id"
+                "run_date,created_at,manual_run_id," +
+                ("copy_contract_version" if "copy_contract_version" in queue_columns else "1 AS copy_contract_version") +
+                " FROM x_post_queue ORDER BY id"
             ).fetchall()
             for row in legacy_rows:
                 source_type = str(row["source_type"] or "material").strip()
@@ -2807,14 +2812,17 @@ def ensure_storage(db_path):
                         )
                     material_key = ""
                 elif source_type == "material":
+                    allow_episode = int(row["copy_contract_version"] or 1) == 2 and bool(row["manual_run_id"])
                     material_key = normalize_material_key(
                         row["material_id"],
                         error_code="x_post_storage_conflict",
+                        allow_episode=allow_episode,
                     )
                     existing_material_key = str(row["material_key"] or "").strip()
                     if existing_material_key and normalize_material_key(
                         existing_material_key,
                         error_code="x_post_storage_conflict",
+                        allow_episode=allow_episode,
                     ) != material_key:
                         raise XPostError(
                             "x_post_storage_conflict",
@@ -4488,7 +4496,8 @@ def ensure_storage(db_path):
                 BEFORE INSERT ON x_post_queue
                 WHEN EXISTS(
                     SELECT 1 FROM x_post_manual_material_reservation r
-                     WHERE r.material_key=NEW.material_key
+                     WHERE (r.material_key=NEW.material_key OR (NEW.source_type='drama'
+                         AND length(NEW.material_id)=32 AND r.material_key=lower(NEW.material_id)))
                        AND r.state='active'
                        AND (
                            NEW.manual_run_id IS NULL
@@ -4510,10 +4519,11 @@ def ensure_storage(db_path):
             conn.execute(
                 """
                 CREATE TRIGGER trg_x_post_queue_manual_reservation_update
-                BEFORE UPDATE OF material_key,manual_run_id ON x_post_queue
+                BEFORE UPDATE OF material_key,material_id,source_type,manual_run_id ON x_post_queue
                 WHEN EXISTS(
                     SELECT 1 FROM x_post_manual_material_reservation r
-                     WHERE r.material_key=NEW.material_key
+                     WHERE (r.material_key=NEW.material_key OR (NEW.source_type='drama'
+                         AND length(NEW.material_id)=32 AND r.material_key=lower(NEW.material_id)))
                        AND r.state='active'
                        AND (
                            NEW.manual_run_id IS NULL
@@ -4818,7 +4828,7 @@ def _is_ordered_account_subset(values, configured):
     return ranks == sorted(ranks)
 
 
-def _manual_material_ids(values):
+def _manual_material_ids(values, *, allow_episode=False):
     if (
         not isinstance(values, list)
         or not values
@@ -4832,7 +4842,7 @@ def _manual_material_ids(values):
     normalized = []
     seen = set()
     for raw in values:
-        material_id = normalize_material_key(raw)
+        material_id = normalize_material_key(raw, allow_episode=allow_episode)
         if material_id in seen:
             raise XPostError(
                 "invalid_request",
@@ -6412,6 +6422,7 @@ class XPostStore:
         allow_duration_pending=False,
         duration_policy_version=2,
         copy_contract_version=1,
+        allow_free_episode=False,
     ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
@@ -6604,10 +6615,10 @@ class XPostStore:
             )
         result["relay_account_username"] = relay_username
         if source_type == "material":
-            material_key = normalize_material_key(result["material_id"])
+            material_key = normalize_material_key(result["material_id"], allow_episode=allow_free_episode)
             supplied_material_key = payload.get("material_key")
             if supplied_material_key not in (None, ""):
-                supplied_material_key = normalize_material_key(supplied_material_key)
+                supplied_material_key = normalize_material_key(supplied_material_key, allow_episode=allow_free_episode)
                 if supplied_material_key != material_key:
                     raise XPostError(
                         "invalid_request",
@@ -6615,6 +6626,7 @@ class XPostStore:
                         400,
                     )
             result["material_key"] = material_key
+            result["material_id"] = material_key
             result["episode_key"] = ""
             result["episode_number"] = 0
             result["drama_replay_generation"] = 0
@@ -9361,6 +9373,7 @@ class XPostStore:
         )
         item["material_ids"] = _manual_material_ids(
             _json_array(item.pop("material_ids_json"), "material_ids"),
+            allow_episode=int(item.get("copy_contract_version", 1)) == 2 and item["trigger_source"] == MANUAL_TRIGGER_SOURCE,
         )
         if int(item.get("copy_contract_version", 1)) == 2:
             from features.x_video_publish.templates import normalize_caption
@@ -10260,6 +10273,8 @@ class XPostStore:
                 payload["account_drama_language"] = personal["drama_language"]
                 from features.x_video_publish.templates import render_caption
                 snapshot = json.loads(personal["source_snapshot_json"])
+                from features.x_video_publish.core import validate_episode_snapshot
+                validate_episode_snapshot(personal["material_id"], payload, snapshot)
                 frozen_copy = render_caption(
                     personal["caption"], snapshot.get("drama_name"),
                     snapshot.get("drama_description", snapshot.get("description")),
@@ -10281,6 +10296,7 @@ class XPostStore:
                 require_compliance=True,
                 duration_policy_version=duration_policy.version(frozen),
                 copy_contract_version=int(frozen.get("copy_contract_version", 1)),
+                allow_free_episode=personal is not None,
                 allow_deferred_media=os.environ.get("PIPELINE_X_DISPATCH_ENABLED") == "1",
             )
             if (
@@ -10363,7 +10379,8 @@ class XPostStore:
                 _json_array(run["account_ids_json"], "account_ids")
             )
             stored_materials = _manual_material_ids(
-                _json_array(run["material_ids_json"], "material_ids")
+                _json_array(run["material_ids_json"], "material_ids"),
+                allow_episode=personal is not None,
             )
             if stored_accounts != account_ids or stored_materials != material_ids:
                 conn.rollback()
@@ -15209,12 +15226,16 @@ class XPostStore:
         account_placeholders = ",".join(
             "?" for _item in ordered_account_ids
         )
+        from features.x_video_publish.material_identity import is_episode_id
+        resource_id = str(queue["material_id"] or "")
+        resource_id = resource_id.lower() if is_episode_id(resource_id) else ""
         unresolved = conn.execute(
             "SELECT 1 FROM x_post_queue q "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
             "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
             "WHERE q.id<>? AND ((q.material_key<>'' AND q.material_key=?) "
-            "OR (q.episode_key<>'' AND q.episode_key=?)) AND (q.account_id IN (%s) "
+            "OR (q.episode_key<>'' AND q.episode_key=?) "
+            "OR (?<>'' AND q.material_id=? COLLATE NOCASE)) AND (q.account_id IN (%s) "
             "OR COALESCE(q.relay_account_id,0) IN (%s) "
             "OR COALESCE(r.relay_account_id,0) IN (%s)) "
             "AND (q.status='publishing' "
@@ -15228,7 +15249,7 @@ class XPostStore:
                 account_placeholders,
                 account_placeholders,
             ),
-            (int(queue["id"]), str(queue["material_key"] or ""), str(queue["episode_key"] or "")) + ordered_account_ids * 3,
+            (int(queue["id"]), str(queue["material_key"] or ""), str(queue["episode_key"] or ""), resource_id, resource_id) + ordered_account_ids * 3,
         ).fetchone()
         if unresolved is not None:
             raise XPostError(
