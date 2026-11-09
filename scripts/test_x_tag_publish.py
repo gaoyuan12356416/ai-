@@ -243,6 +243,28 @@ class SelectorTests(unittest.TestCase):
         self.assertEqual(store.reserve_calls[0]['selection_snapshot']['tag_profile']['selected_tag'],'甜宠恋爱')
         self.assertEqual(result.reservation['tag_profile']['profile_version'],'frozen-1')
 
+    def test_executor_claim_phase_preserves_profile_and_freezes_audit(self):
+        from features.x_auto_posts.publisher import AutoPostExecutor
+        selector,store=self.make()
+        executor=object.__new__(AutoPostExecutor)
+        executor.selector,executor.store=selector,store
+        phase=executor._phase_selector('existing-task-lease')
+        with patch.dict(os.environ, X_POST_AUTOMATION_INTERNAL_URL='http://127.0.0.1:8821',X_POST_AUTO_INTERNAL_TOKEN='a'*48), \
+             patch('features.x_tag_publish.selection.XPostAutoBridgeClient') as bridge, \
+             patch('features.x_tag_publish.policy.portrait_snapshot', return_value=profile([('romance',10000)])):
+            bridge.return_value.account_snapshot.return_value=ACCOUNT
+            result=phase.select_and_reserve(fixture.request())
+        self.assertEqual(result.drama.content_id,'C2')
+        saved=store.reserve_calls[0]
+        self.assertEqual(saved['claim_token'],'existing-task-lease')
+        self.assertEqual(saved['selection_snapshot']['tag_profile']['hierarchy_version'],HIERARCHY_VERSION)
+        self.assertEqual(saved['selection_snapshot']['tag_profile']['selected_path_names'],['本土剧','女性','甜宠恋爱'])
+        store.existing=result.reservation
+        with patch('features.x_tag_publish.selection.XPostAutoBridgeClient',side_effect=AssertionError('must keep frozen reservation')):
+            again=executor._phase_selector('next-lease').select_and_reserve(fixture.request())
+        self.assertTrue(again.idempotent)
+        self.assertEqual(len(store.reserve_calls),1)
+
     def test_reentry_does_not_rerank_or_query_new_profile(self):
         selector,store=self.make();store.existing={'material_id':'101','task_id':11,'tag_profile':{'profile_version':'old'}}
         with patch('features.x_tag_publish.selection.XPostAutoBridgeClient',side_effect=AssertionError('must not rerank')):
