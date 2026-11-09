@@ -272,10 +272,20 @@ def read_x(path):
 
 def read_catalogs(app, platforms):
     catalog, errors = [], CatalogErrors()
+    def x_catalog():
+        result = read_x(app.get("SOCIAL_ANALYTICS_X_DB_PATH", "/var/lib/x-post-automation/accounts.sqlite3"))
+        default_tag = "/mnt/data-disk/x-tag-publisher/posts.sqlite3"
+        tag_path = app.get("SOCIAL_ANALYTICS_X_TAG_DB_PATH", default_tag if Path(default_tag).is_file() else "")
+        if tag_path:
+            extra = read_x(tag_path)
+            for item in extra:
+                item["publishing_workflow"] = "tag_profile"
+                item["link_type_label"] = "画像发布"
+            result.extend(extra)
+        return result
     readers = {
         "youtube": lambda: read_youtube(app["JOB_DB_PATH"]),
-        "x": lambda: read_x(app.get("SOCIAL_ANALYTICS_X_DB_PATH",
-                                   "/var/lib/x-post-automation/accounts.sqlite3")),
+        "x": x_catalog,
     }
     for platform in platforms:
         try:

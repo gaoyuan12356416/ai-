@@ -1,0 +1,310 @@
+"""Offline behavior tests against the exact independently staged X runtime."""
+import hashlib
+from contextlib import closing
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch, Mock
+
+sys.path.insert(0, os.environ['X_TAG_TEST_RUNTIME'])
+from features.x_tag_publish.policy import Decision, ID_BASE, initialize_ids, label_index, lane_paths
+from features.x_tag_publish.selection import ProfileSelector
+from features.x_tag_publish.pool import install_reservation_policy, material_candidates
+from features.x_tag_publish import gateway
+from features.x_posts import service as post
+from features.x_auto_posts.core import XAutoPostStore
+from scripts import test_x_auto_post_selector as fixture
+from scripts.test_x_post_material_pool import plan_candidate
+
+
+def profile(tags=None, revenue=10000, **meta):
+    tags = tags or [('romance', 7000), ('revenge', 3000)]
+    return ({'accounts': {'999': dict(status='complete', revenue_cents=revenue,
+        tags=[dict(key=k, name=k, revenue_cents=v, share_bp=v) for k, v in tags])}},
+        dict(version='frozen-1', end='2026-11-08', **meta))
+
+
+ACCOUNT = dict(id=101, x_user_id='999', username='channel', drama_language='en', long_video_eligible=False)
+
+
+class PolicyTests(unittest.TestCase):
+    def test_weighted_frequency_and_replay(self):
+        counts = {'romance': 0, 'revenge': 0}
+        for i in range(4000):
+            a = Decision(ACCOUNT, ['task', i], profile())
+            b = Decision(ACCOUNT, ['task', i], profile())
+            self.assertEqual(a.tag_order, b.tag_order)
+            counts[a.tag_order[0]] += 1
+        self.assertTrue(0.67 < counts['romance'] / 4000 < 0.73, counts)
+
+    def test_unknown_and_negative_not_preferences(self):
+        decision = Decision(ACCOUNT, 'a', profile([('__unknown__', 10000)]))
+        self.assertEqual(decision.reason, 'no_known_revenue_tags')
+        self.assertEqual(Decision(ACCOUNT, 'a', profile([('romance', -100)], -100)).reason, 'no_positive_revenue')
+
+    def test_no_history_missing_source_and_incomplete_are_distinct(self):
+        for snapshot, reason in [(({'accounts': {}}, {}), 'no_revenue_history'),
+                                 (({'accounts': {}}, {'unavailable': True}), 'portrait_unavailable'),
+                                 (profile(missing_dates=['2026-11-01']), 'portrait_incomplete')]:
+            self.assertEqual(Decision(ACCOUNT, 1, snapshot).reason, reason)
+
+    def test_multilabel_normalization_and_mapping_conflict(self):
+        rows = [dict(content_id='d', app_id=1479, language='jp', series_code='s', labels=' Romance ,romance,REVENGE')]
+        value = label_index(rows)[('d', 'ja')]
+        self.assertEqual(set(value['tags']), {'romance', 'revenge'})
+        rows.append(dict(rows[0], series_code='other'))
+        self.assertEqual(label_index(rows)[('d', 'ja')]['tags'], {})
+
+    def test_fallback_and_stale_are_visible(self):
+        d = Decision(ACCOUNT, 1, profile(stale=True))
+        result = d.audit(['unrelated'])
+        self.assertEqual(result['fallback_reason'], 'no_matching_eligible_tag')
+        self.assertTrue(result['profile_stale'])
+        self.assertEqual(result['profile_version'], 'frozen-1')
+
+    def test_paths_cannot_point_to_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                lane_paths(dict(X_TAG_STATE_ROOT=tmp, X_POST_DB_PATH=str(Path(tmp).parent/'old.db'), X_AUTO_POST_DB_PATH=tmp+'/auto.db'))
+
+
+class IsolationTests(unittest.TestCase):
+    def test_bootstrap_copies_only_active_metrics_and_leaves_every_business_store_empty(self):
+        from features.x_tag_publish.bootstrap import initialize
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path=Path(tmp)/'old.db';old=XAutoPostStore(old_path)
+            day=datetime.now(timezone.utc).date().isoformat()
+            generation=old.record_metric_generation(platform=1,metric_date=day,product='dramawave',
+                rows=[dict(content_id='C1',material_id='101',spend='12',af_revenue0='15')],
+                refreshed_at_utc=day+'T00:00:00Z')
+            old.activate_metric_generation(generation.id)
+            before=old_path.read_bytes()
+            new=Path(tmp)/'new'
+            with patch.dict(os.environ,X_TAG_STATE_ROOT=str(new),X_POST_DB_PATH=str(new/'post.db'),
+                            X_AUTO_POST_DB_PATH=str(new/'auto.db')):
+                result=initialize(old_path)
+                self.assertEqual(result['metric_days'],1)
+            self.assertEqual(old_path.read_bytes(),before)
+            with closing(sqlite3.connect(new/'auto.db')) as db:
+                for name in ('x_auto_template','x_auto_run','x_auto_task','x_auto_material_ledger'):
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM '+name).fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT generation_id,spend,af_revenue0 FROM x_auto_metric_daily').fetchone(),
+                                 (ID_BASE+generation.id,'12','15'))
+            with closing(sqlite3.connect(new/'post.db')) as db:
+                for name in ('x_post_queue','x_post_publish_log','x_post_material_pool','x_tag_queue_selection'):
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM '+name).fetchone()[0],0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM x_post_schedule_config WHERE enabled<>0 OR account_ids_json<>'[]' OR publish_times_json<>'[]'").fetchone()[0],0)
+
+    def test_account_storage_is_read_only_and_refresh_delegates_to_existing_owner(self):
+        from features.x_tag_publish.runtime import install
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);account=root/'accounts.db'
+            with closing(sqlite3.connect(account)) as db, db:db.execute('CREATE TABLE secret(value TEXT)')
+            runtime=SimpleNamespace(POST_DB_PATH=root/'posts.db',DB_PATH=account,INTERNAL_TOKEN='new-token',
+                create_post_schedule_plan_request=lambda p:{'queues':[]},ServiceError=gateway.Error)
+            with patch.dict(os.environ,X_TAG_STATE_ROOT=tmp,X_POST_DB_PATH=str(root/'posts.db'),
+                            X_AUTO_POST_DB_PATH=str(root/'auto.db'),X_TAG_ACCOUNT_BROKER_TOKEN='old-broker'), \
+                 patch.object(post,'_material_fifo_selection_matches',post._material_fifo_selection_matches), \
+                 patch('features.x_posts.attribution.resolve_via_loopback'), \
+                 patch('features.x_tag_publish.transport.rpc',return_value={'item':dict(ACCOUNT,publish_approved=True)}) as rpc:
+                install(runtime)
+                with closing(runtime.db_connect()) as db:
+                    with self.assertRaises(sqlite3.OperationalError):db.execute("INSERT INTO secret VALUES('changed')")
+                self.assertEqual(runtime.verify_account(101,{'user_id':'u'},require_publish_approved=True)['id'],101)
+                self.assertEqual(rpc.call_args.args[:3],('http://127.0.0.1:8810','/internal/accounts/101/verify','old-broker'))
+
+    def test_same_material_account_and_day_can_be_reserved_in_each_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path, new_path = Path(tmp)/'old.db', Path(tmp)/'new.db'
+            old, new = post.XPostStore(old_path), post.XPostStore(new_path)
+            initialize_ids(new_path)
+            actor = dict(user_id='test', name='Test')
+            plans = []
+            for store in (old, new):
+                items = store.add_pool_materials(['101'], actor,
+                    validation_checks=[dict(material_id='101', error_code='', error_message='')])['items']
+                plan = store.create_daily_plan('2026-07-23', '2026-07-22', [plan_candidate(2, items[0])], require_pool=True)
+                plans.append(plan)
+                self.assertEqual(store.available_pool_items(), [])
+                self.assertEqual(store.query_material_keys(['101']), ['101'])
+            self.assertNotEqual(plans[0]['queues'][0]['id'], plans[1]['queues'][0]['id'])
+            self.assertGreater(plans[1]['queues'][0]['id'], ID_BASE)
+            before = old_path.read_bytes()
+            new.add_pool_materials(['102'], actor, validation_checks=[dict(material_id='102', error_code='', error_message='')])
+            self.assertEqual(old_path.read_bytes(), before)
+
+    def test_initial_business_state_empty_and_ids_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'auto.db'
+            XAutoPostStore(path)
+            initialize_ids(path)
+            initialize_ids(path)
+            with closing(sqlite3.connect(path)) as db:
+                for table in ('x_auto_template','x_auto_run','x_auto_task'):
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],0)
+                self.assertGreaterEqual(db.execute("SELECT seq FROM sqlite_sequence WHERE name='x_auto_task'").fetchone()[0],ID_BASE)
+
+    def test_new_short_link_namespace_and_legacy_rejection(self):
+        self.assertIn('/s2l-tag/', post._build_short_url('https://gy.g2flow.com/s2l-tag', ID_BASE+1))
+        with self.assertRaises(post.XPostError):
+            post._build_short_url('https://gy.g2flow.com/s2l', 1)
+
+    def test_profile_order_relaxes_only_fifo_not_membership_or_available_set(self):
+        original = post._material_fifo_selection_matches
+        with patch.object(post, '_material_fifo_selection_matches', original):
+            install_reservation_policy(post)
+            pools = [dict(id=1,last_error_code='',last_checked_at=''),dict(id=2,last_error_code='',last_checked_at='')]
+            candidate = dict(pool_item_id=2, account_id=101, material_language='en', preflight_duration=30)
+            self.assertFalse(original(pools,[candidate],[101],[]))
+            self.assertTrue(post._material_fifo_selection_matches(pools,[candidate],[101],[]))
+            self.assertFalse(post._material_fifo_selection_matches(pools,[dict(candidate,preflight_duration=2000)],[101],[]))
+            self.assertFalse(post._material_fifo_selection_matches(pools,[dict(candidate,pool_item_id=3)],[101],[]))
+
+
+class SelectorTests(unittest.TestCase):
+    def make(self):
+        source = fixture.FakeSource([fixture.drama('C1'), fixture.drama('C2')],
+            {'C1':[fixture.material('101','C1')], 'C2':[fixture.material('201','C2')]})
+        source.schema='test'
+        source._stream_select=lambda *_: [dict(content_id=c,app_id=1479,language='en',series_code='s'+c,labels=t)
+                                         for c,t in [('C1','revenge'),('C2','romance')]]
+        store=fixture.FakeStore()
+        selector=ProfileSelector(source,fixture.MetricWindowRepository(fixture.FakeMetricStore()),
+            fixture.FakePublishedHistory(),store,material_validator=fixture.FakeValidator())
+        return selector,store
+
+    def test_selected_profile_is_saved_with_reservation(self):
+        selector,store=self.make()
+        with patch.dict(os.environ, X_POST_AUTOMATION_INTERNAL_URL='http://127.0.0.1:8821',X_POST_AUTO_INTERNAL_TOKEN='a'*48), \
+             patch('features.x_tag_publish.selection.XPostAutoBridgeClient') as bridge, \
+             patch('features.x_tag_publish.policy.portrait_snapshot', return_value=profile([('romance',10000)])):
+            bridge.return_value.account_snapshot.return_value=ACCOUNT
+            result=selector.select_and_reserve(fixture.request())
+        self.assertEqual(result.drama.content_id,'C2')
+        self.assertEqual(store.reserve_calls[0]['selection_snapshot']['tag_profile']['selected_tag'],'romance')
+        self.assertEqual(result.reservation['tag_profile']['profile_version'],'frozen-1')
+
+    def test_reentry_does_not_rerank_or_query_new_profile(self):
+        selector,store=self.make();store.existing={'material_id':'101','task_id':11,'tag_profile':{'profile_version':'old'}}
+        with patch('features.x_tag_publish.selection.XPostAutoBridgeClient',side_effect=AssertionError('must not rerank')):
+            result=selector.select_and_reserve(fixture.request())
+        self.assertTrue(result.idempotent)
+        self.assertEqual(result.reservation['tag_profile']['profile_version'],'old')
+
+    def test_label_outage_degrades_without_aborting_valid_material(self):
+        selector,store=self.make();selector.source._stream_select=Mock(side_effect=OSError())
+        with patch.dict(os.environ, X_POST_AUTOMATION_INTERNAL_URL='http://127.0.0.1:8821',X_POST_AUTO_INTERNAL_TOKEN='a'*48), \
+             patch('features.x_tag_publish.selection.XPostAutoBridgeClient') as bridge, \
+             patch('features.x_tag_publish.policy.portrait_snapshot', return_value=profile()):
+            bridge.return_value.account_snapshot.return_value=ACCOUNT
+            result=selector.select_and_reserve(fixture.request())
+        self.assertEqual(result.reservation['tag_profile']['fallback_reason'],'candidate_labels_unavailable')
+
+
+class GatewayTests(unittest.TestCase):
+    def test_account_refresh_preserves_empty_internal_body_contract(self):
+        h=object.__new__(gateway.Handler);h.path=gateway.AUTO+'/accounts/101/verify';h.command='POST'
+        h.headers={'Cookie':'valid','Origin':'https://ai.yingliangads.com'};h.body=lambda:{}
+        with patch.object(gateway,'authorize',return_value=dict(user_id='owner',tenant_key='t',name='Owner')), \
+             patch.object(gateway,'rpc',return_value={'item':ACCOUNT}) as rpc, \
+             patch.dict(os.environ,X_AUTO_POST_INTERNAL_TOKEN='a'*48):h.dispatch()
+        self.assertEqual(rpc.call_args.kwargs['payload'],{})
+
+    def test_schedule_put_uses_new_service_and_trusted_actor(self):
+        h=object.__new__(gateway.Handler);h.path=gateway.POST+'/material-pool/schedule';h.command='PUT'
+        h.headers={'Cookie':'valid','Origin':'https://ai.yingliangads.com'}
+        h.body=lambda:dict(enabled=False,account_ids=[],publish_times=[])
+        with patch.object(gateway,'authorize',return_value=dict(user_id='owner',tenant_key='t',name='Owner')), \
+             patch.object(gateway,'post_rpc',return_value={'item':{}}) as rpc:
+            h.dispatch()
+        self.assertEqual(rpc.call_args.args[0],'material-pool/schedule/save')
+        self.assertEqual(rpc.call_args.args[1]['actor']['user_id'],'owner')
+        self.assertFalse(rpc.call_args.args[1]['settings']['enabled'])
+
+    def test_cookie_required_and_acl_checked_every_time(self):
+        with self.assertRaises(gateway.Error):gateway.authorize('', '/probe')
+        user=dict(user_id='u',tenant_key='t',name='User',role='user')
+        with patch.object(gateway,'rpc',side_effect=[dict(authenticated=True,user=user),{},dict(authenticated=True,user=user),gateway.Error('denied','',403)]) as call:
+            self.assertEqual(gateway.authorize('cookie','/probe')['user_id'],'u')
+            with self.assertRaises(gateway.Error):gateway.authorize('cookie','/probe')
+            self.assertEqual(call.call_count,4)
+            self.assertEqual(call.call_args.kwargs['cookie'],'cookie')
+
+    def test_gateway_overwrites_untrusted_actor(self):
+        h=object.__new__(gateway.Handler);h.path=gateway.AUTO+'/templates';h.command='POST'
+        h.headers={'Cookie':'valid','Origin':'https://ai.yingliangads.com'}
+        h.body=lambda:dict(name='x',_actor=dict(user_id='attacker'))
+        with patch.object(gateway,'authorize',return_value=dict(user_id='owner',tenant_key='tenant',name='Owner')), \
+             patch.object(gateway,'rpc',return_value={'ok':True}) as call, \
+             patch.dict(os.environ,X_AUTO_POST_INTERNAL_TOKEN='a'*48):
+            h.dispatch()
+        self.assertEqual(call.call_args.kwargs['payload']['_actor']['user_id'],'owner')
+        self.assertEqual(call.call_args.args[0],'http://127.0.0.1:18843')
+
+    def test_cross_origin_write_rejected(self):
+        h=object.__new__(gateway.Handler);h.path=gateway.AUTO+'/templates';h.command='POST'
+        h.headers={'Cookie':'valid','Origin':'https://example.test'}
+        with patch.object(gateway,'authorize',return_value=dict(user_id='owner',tenant_key='tenant',name='Owner')):
+            with self.assertRaises(gateway.Error) as exc:h.dispatch()
+        self.assertEqual(exc.exception.status,403)
+
+
+class PoolMatchingTests(unittest.TestCase):
+    def select(self, accounts, candidates, *, fail=None, snapshot=None):
+        from scripts import x_post_schedule_runner as runner
+        with tempfile.TemporaryDirectory() as tmp:
+            config=SimpleNamespace(material_pool_path='/pool',scan_limit=1000,candidate_pool_limit=50,
+                                   mysql_database='test',work_dir=tmp,duration_policy_version=2)
+            sidecar=Mock();sidecar.available_pool_items.return_value=candidates
+            def preflight(cfg,candidate,account,*args,**kwargs):
+                if fail and fail(candidate,account):
+                    raise runner.CandidatePreflightError('media rejected','media_invalid')
+                return dict(candidate,account_id=account['id'])
+            with patch.object(runner,'_open_source_connection',return_value=Mock()), \
+                 patch.object(runner,'select_pool_candidates',return_value=(candidates,[])), \
+                 patch.object(runner,'_stable_shuffled',side_effect=lambda rows,_:list(rows)), \
+                 patch.object(runner,'_preflight_candidate',side_effect=preflight), \
+                 patch.object(runner,'_record_pool_checks_best_effort') as checks, \
+                 patch('features.x_tag_publish.pool.portrait_snapshot',return_value=snapshot or profile([('romance',10000)])), \
+                 patch.dict(os.environ,PIPELINE_X_DISPATCH_ENABLED='0'):
+                result=material_candidates(config,sidecar,accounts,source_date='2026-11-08',
+                    connection_factory=None,downloader=None,prober=None,repair_client=None,timestamp=1)
+                recorded=[row for call in checks.call_args_list for row in call.args[2]]
+            return result,recorded
+
+    def candidate(self,mid,tag='romance',**extra):
+        return dict(material_id=str(mid),pool_item_id=mid,material_language='en',source_duration=30,
+                    drama_labels=[tag],media_kind='video',**extra)
+
+    def test_profile_rank_language_duration_and_lane_dedupe(self):
+        rows=[self.candidate(1,'revenge'),self.candidate(2)]
+        rows.insert(0,dict(self.candidate(3),material_language='ja'))
+        rows.insert(0,dict(self.candidate(4),source_duration=3000))
+        result,_=self.select([ACCOUNT,dict(ACCOUNT,id=102)],rows)
+        self.assertEqual([r['material_id'] for r in result],['2','1'])
+        self.assertEqual(result[0]['tag_profile']['selected_tag'],'romance')
+        self.assertEqual(result[1]['tag_profile']['fallback_reason'],'no_matching_eligible_tag')
+
+    def test_failed_candidate_does_not_block_other_account_or_poison_success(self):
+        rows=[self.candidate(1),self.candidate(2,'revenge')]
+        result,checks=self.select([ACCOUNT,dict(ACCOUNT,id=102)],rows,
+            fail=lambda c,a:c['material_id']=='1' and a['id']==101)
+        self.assertEqual([r['material_id'] for r in result],['2','1'])
+        self.assertFalse(any(r['material_id']=='1' for r in checks))
+
+    def test_no_history_falls_back_and_missing_material_is_not_success(self):
+        result,_=self.select([ACCOUNT],[self.candidate(1)],snapshot=({'accounts':{}},{}))
+        self.assertEqual(result[0]['tag_profile']['fallback_reason'],'no_revenue_history')
+        from scripts.x_post_schedule_runner import ScheduleRunError
+        with self.assertRaises(ScheduleRunError) as exc:self.select([ACCOUNT],[])
+        self.assertTrue(hasattr(exc.exception,'shortage_snapshot'))
+
+
+if __name__=='__main__':
+    unittest.main()
