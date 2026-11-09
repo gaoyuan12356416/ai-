@@ -28,6 +28,7 @@ DAEMON = 'x-video-pool-scheduler.service'
 
 def atomic_copy(source, target):
     target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
     old = target.stat() if target.exists() else target.parent.stat()
     temp = target.with_name(target.name + '.excel-next')
     shutil.copyfile(source, temp)
@@ -125,9 +126,20 @@ def prepare():
     hosts = list(dict.fromkeys(filter(None, api_env.get('X_POST_SOURCE_DURATION_ALLOWED_HOSTS', '').split(',') + ['img.tianmai.cn'])))
     assert all(host and all(char.isalnum() or char in '.-*' for char in host) for host in hosts)
     env_path = Path('/etc/x-excel-episode-source.env')
+    schedule_lines = [line.split('=', 1)[1].strip().strip('"').strip("'")
+        for line in Path('/etc/x-post-schedule.env').read_text().splitlines()
+        if line.startswith('X_POST_SCHEDULE_MEDIA_ALLOWED_HOSTS=')]
+    assert len(schedule_lines) == 1
+    manual_hosts = list(dict.fromkeys(host.strip() for host in schedule_lines[0].split(',') if host.strip()))
+    assert 'img.tianmai.cn' in manual_hosts
+    assert all(all(char.isalnum() or char in '.-*' for char in host) for host in manual_hosts)
+    manual_env_path = Path('/etc/x-excel-episode-manual-source.env')
     config_files = [(env_path, 'X_POST_SOURCE_DURATION_ALLOWED_HOSTS=' + ','.join(hosts) + '\n'),
         (Path('/etc/systemd/system/drama-material-api.service.d/zzzz-x-excel-episode-source.conf'),
-         '[Service]\nEnvironmentFile=' + str(env_path) + '\n')]
+         '[Service]\nEnvironmentFile=' + str(env_path) + '\n'),
+        (manual_env_path, 'X_POST_SOURCE_DURATION_ALLOWED_HOSTS=' + ','.join(manual_hosts) + '\n'),
+        (Path('/etc/systemd/system/x-post-manual.service.d/zzzz-x-excel-episode-source.conf'),
+         '[Service]\nEnvironmentFile=' + str(manual_env_path) + '\n')]
     for target, content in config_files:
         assert not target.exists(), 'concurrent configuration: ' + str(target)
         saved, candidate = folder / ('before-config-' + target.name), folder / ('next-config-' + target.name)
