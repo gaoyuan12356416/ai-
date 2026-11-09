@@ -31,7 +31,10 @@ def initialize(source_metrics_path='/mnt/data-disk/x-auto-post-publisher/x-auto-
     first = (datetime.now(timezone.utc).date() - timedelta(days=31)).isoformat()
     with closing(sqlite3.connect(str(paths['X_AUTO_POST_DB_PATH']), uri=True, timeout=60)) as db, db:
         db.execute('ATTACH DATABASE ? AS metrics_source', (old,))
-        db.execute('BEGIN IMMEDIATE')
+        # Older server SQLite tries to acquire a write lock on every attached
+        # database for IMMEDIATE. A deferred transaction keeps the source truly
+        # read-only and holds one source snapshot across all three copy queries.
+        db.execute('BEGIN')
         columns = [r[1] for r in db.execute('PRAGMA table_info(x_auto_metric_generation)')]
         selected = ','.join('g.id+%d' % ID_BASE if col == 'id' else 'g.' + col for col in columns)
         db.execute('INSERT INTO x_auto_metric_generation SELECT ' + selected +
