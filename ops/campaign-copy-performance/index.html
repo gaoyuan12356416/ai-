@@ -326,7 +326,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     get('metaLine').textContent=currentLevel().name+'｜复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+'｜更新 '+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
     get('scopeHint').textContent=(staleReport?'数据尚未更新，当前展示上次成功快照；缺少日期不代表零消耗｜':'每15分钟后台自动刷新｜')+(meta.platform_scope||'0=Meta, 3=TikTok')+' · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
     get('scopeHint').style.color=staleReport?'#b45309':'';
-    if(num(meta.metadata_stale_campaigns)>0){get('scopeHint').textContent+='｜部分广告名称、国家和语言待更新（'+integer(meta.metadata_stale_campaigns)+' 个）；消耗和收入按本次快照统计';get('scopeHint').style.color='#b45309';}
+    if(state.level==='0'&&num(meta.metadata_stale_campaigns)>0){get('scopeHint').textContent+='｜部分广告名称、国家、语言等信息待更新（'+integer(meta.metadata_stale_campaigns)+' 个）；消耗和收入按本次快照统计';get('scopeHint').style.color='#b45309';}
     get('keyword').placeholder='搜索统计日期、规则、'+currentLevel().name+'、账户、短剧、产品、操作人...';render();
   }
 
