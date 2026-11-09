@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly X channel tag revenue portrait refresh
+
+[Timer]
+OnCalendar=*-*-* *:20:00
+Persistent=true
+Unit=x-channel-tag-revenue-refresh.service
+
+[Install]
+WantedBy=timers.target

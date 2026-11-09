@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh read-only X channel tag revenue portraits
+RequiresMountsFor=/mnt/data-disk
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/drama_material_service
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m features.x_tag_revenue.refresh
+TimeoutStartSec=900
+MemoryMax=512M
+Nice=10
+UMask=0022
+NoNewPrivileges=true

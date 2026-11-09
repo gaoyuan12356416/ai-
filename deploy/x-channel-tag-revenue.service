@@ -1,0 +1,20 @@
+[Unit]
+Description=Read-only X channel tag revenue API
+RequiresMountsFor=/mnt/data-disk
+After=network.target drama-material-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/drama_material_service
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m features.x_tag_revenue.http_server
+Restart=on-failure
+RestartSec=3
+MemoryMax=256M
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

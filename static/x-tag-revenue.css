@@ -1,0 +1,23 @@
+.xtr-col{min-width:235px;max-width:310px}
+.xtr-open{display:grid;gap:7px;width:100%;padding:0;border:0;background:transparent;text-align:left;color:var(--ink,#13233a);font:inherit;cursor:pointer}
+.xtr-open:hover .xtr-note,.xtr-tag-link:hover{color:var(--blue,#2563eb);text-decoration:underline}
+.xtr-open:focus-visible,.xtr-tag-link:focus-visible{outline:2px solid #2563eb;outline-offset:4px}
+.xtr-tag{display:flex;justify-content:space-between;gap:14px;line-height:1.5}
+.xtr-tag span{overflow-wrap:anywhere}.xtr-tag b{font-weight:500;white-space:nowrap}
+.xtr-note{display:block;color:var(--muted,#687894);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.xtr-summary{display:grid;gap:4px;margin:0 0 14px;font-size:13px;line-height:1.6}
+.xtr-warning{padding:8px 12px;background:#fff5dd;color:#855100;line-height:1.6;font-size:13px;border-radius:8px}
+.xtr-dialog{width:min(1050px,calc(100vw - 32px));max-height:88vh;padding:24px;border:1px solid #dce5f1;border-radius:18px;color:#13233a;background:#fff;box-shadow:0 24px 80px #10213d44;overflow:auto}
+.xtr-dialog::backdrop{background:#0a162980}
+.xtr-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;position:sticky;top:-24px;background:#fff;padding:12px 0;z-index:3}
+.xtr-head h2{font-size:19px;line-height:1.5;margin:0;overflow-wrap:anywhere}
+.xtr-head .button{flex-shrink:0;white-space:nowrap}
+#xtrBody{display:grid;gap:14px}#xtrBody p{margin:0;line-height:1.6}
+.xtr-stats{display:flex;flex-wrap:wrap;gap:14px 24px;font-size:14px}
+.xtr-table-scroll{max-height:54vh;overflow:auto}
+.xtr-dialog .xtr-table{width:100%;min-width:670px;border-collapse:collapse;table-layout:auto}
+.xtr-dialog .xtr-table th,.xtr-dialog .xtr-table td{padding:11px 12px;border-bottom:1px solid #e8eef6;vertical-align:top;font-size:13px;min-width:0;max-width:480px}
+.xtr-table th{background:#f7f9fc}.xtr-table td:not(:first-child),.xtr-table th:not(:first-child){text-align:right;white-space:nowrap}
+.xtr-table td:first-child{overflow-wrap:anywhere}.xtr-table tfoot{font-weight:600;background:#f7f9fc}
+.xtr-tag-link{padding:0;background:none;border:0;color:#2457b8;font:inherit;text-align:left;cursor:pointer}
+@media(max-width:600px){.xtr-dialog{padding:16px;width:calc(100vw - 20px);max-height:92vh}.xtr-head{top:-16px}.xtr-stats{gap:8px 16px}}
