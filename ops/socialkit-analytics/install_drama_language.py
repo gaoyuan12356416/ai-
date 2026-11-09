@@ -10,8 +10,9 @@ import subprocess
 from install import DATA, RUNTIME, WEB, RELEASE, atomic_write, check_mount
 
 BASE = 'c409299d7177e67597f7384a0579bb2ee5f90370'
-FILES = ['features/socialkit_analytics/' + name + '.py' for name in
-         ('query', 'refresh', 'schema', 'drama_language')]
+# The main API only serves queries. Collection runs from CURRENT, and its older
+# unused main-runtime copy must not be overwritten by this report change.
+FILES = ['features/socialkit_analytics/query.py']
 FILES += ['static/socialkit-analytics.js', 'static/socialkit-analytics.html']
 CURRENT = Path('/opt/socialkit-analytics/current')
 
@@ -29,7 +30,7 @@ def switch_release(target):
 def install():
     check_mount()
     commit = subprocess.check_output(['git', '-C', str(RELEASE), 'rev-parse', 'HEAD'], text=True).strip()
-    changed = subprocess.check_output(['git', '-C', str(RELEASE), 'status', '--porcelain', '--'] + FILES, text=True)
+    changed = subprocess.check_output(['git', '-C', str(RELEASE), 'status', '--porcelain', '--untracked-files=no'], text=True)
     if changed:
         raise RuntimeError('Release code has local changes')
     old_release = str(CURRENT.resolve())
