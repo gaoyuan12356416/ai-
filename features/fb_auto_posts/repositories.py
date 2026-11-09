@@ -413,8 +413,8 @@ class MaterialRepository:
         row = rows[0]
         if (str(row.get("type")) != "2" or str(row.get("data_source")) != str(config["material_data_source"])
                 or str(row.get("is_delete")) != "0"
-                or str(row.get("product") or "").casefold() != str(config["product"]).casefold()):
-            raise RepositoryError("fb_auto_material_invalid", "指定素材须为当前产品下未删除的视频素材", 409)
+                or str(row.get("product") or "").casefold() != str(config.get("material_product") or config["product"]).casefold()):
+            raise RepositoryError("fb_auto_material_invalid", "指定素材须为所选素材产品下未删除的视频素材", 409)
         content_id = str(row.get("content_id") or "").strip()
         language = page_language(row.get("language"))
         try:
@@ -519,7 +519,9 @@ class MaterialRepository:
                AND s.id>%s
              ORDER BY s.id LIMIT %s
         """
-        product, app_id = str(config["product"]), str(config["app_id"])
+        # The source catalog product is independent of the Page's target app,
+        # drama metadata, metrics and attribution. Legacy configs keep their scope.
+        product, app_id = str(config.get("material_product") or config["product"]), str(config["app_id"])
         allowed_type_set = set(allowed_types)
         uses_description = "{{desc}}" in str(config.get("message_template") or "")
         from .strategy import diverse_candidates

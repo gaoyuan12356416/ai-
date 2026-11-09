@@ -129,7 +129,7 @@ def _schedule(raw: Any) -> Dict[str, Any]:
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
     required = {"name", "group_ids", "message_template", "drama_rule", "material_rule", "schedule", "video_template"}
-    optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "app_id", "product", "metric_product", "metric_platform", "drama_cooldown_hours", "page_daily_limits", "default_daily_count", "stagger_minutes", "feedback_selection"}
+    optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "material_product", "app_id", "product", "metric_product", "metric_platform", "drama_cooldown_hours", "page_daily_limits", "default_daily_count", "stagger_minutes", "feedback_selection"}
     if "video_template" not in value or value.get("video_template") != "random_overlay":
         raise ValidationError(
             "fb_auto_video_template_required",
@@ -176,6 +176,11 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "schedule": _schedule(value.get("schedule")),
         "material_type": "video",
     }
+    if "material_product" in value:
+        product = value["material_product"]
+        if not isinstance(product, str) or not 1 <= len(product.strip()) <= 128 or any(ord(c) < 32 for c in product):
+            raise ValidationError("invalid_request", "素材产品名称无效")
+        result["material_product"] = product.strip()
     if "drama_cooldown_hours" in value:
         result["drama_cooldown_hours"] = _strict_int(value["drama_cooldown_hours"], "同剧冷却小时", 0, 168)
     if "stagger_minutes" in value:
