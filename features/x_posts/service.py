@@ -2487,6 +2487,38 @@ def ensure_storage(db_path):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_drama_cancel_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_item_id INTEGER NOT NULL,
+                    content_id TEXT NOT NULL,
+                    from_generation INTEGER NOT NULL
+                        CHECK(from_generation>0),
+                    to_generation INTEGER NOT NULL
+                        CHECK(to_generation=from_generation+1),
+                    from_status TEXT NOT NULL,
+                    from_free_episode_count INTEGER NOT NULL
+                        CHECK(from_free_episode_count>0),
+                    from_next_sub_number INTEGER NOT NULL
+                        CHECK(from_next_sub_number>0),
+                    from_published_episode_count INTEGER NOT NULL
+                        CHECK(from_published_episode_count>=0),
+                    from_assigned_account_id INTEGER NOT NULL
+                        CHECK(from_assigned_account_id>0),
+                    from_assigned_at TEXT NOT NULL DEFAULT '',
+                    from_assigned_source_queue_id INTEGER,
+                    actor_user_id TEXT NOT NULL,
+                    actor_name TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                        CHECK(reason='operator_full_replay_v1'),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(pool_item_id,to_generation),
+                    FOREIGN KEY(pool_item_id)
+                        REFERENCES x_post_drama_pool(id)
+                )
+                """
+            )
             queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
             additive_columns = {
                 "account_username": "TEXT NOT NULL DEFAULT ''",
@@ -4130,7 +4162,8 @@ def ensure_storage(db_path):
                       AND NEW.assigned_at=''
                       AND NEW.assigned_source_queue_id IS NULL
                       AND EXISTS(
-                          SELECT 1 FROM x_post_drama_replay_audit a
+                          SELECT 1 FROM (SELECT * FROM x_post_drama_replay_audit
+                                UNION ALL SELECT * FROM x_post_drama_cancel_audit) a
                            WHERE a.pool_item_id=OLD.id
                              AND a.content_id=OLD.content_id
                              AND a.from_generation=
@@ -4182,7 +4215,8 @@ def ensure_storage(db_path):
                       AND NEW.last_error_code=''
                       AND NEW.last_error_message=''
                       AND EXISTS(
-                          SELECT 1 FROM x_post_drama_replay_audit a
+                          SELECT 1 FROM (SELECT * FROM x_post_drama_replay_audit
+                                UNION ALL SELECT * FROM x_post_drama_cancel_audit) a
                            WHERE a.pool_item_id=OLD.id
                              AND a.content_id=OLD.content_id
                              AND a.from_generation=
@@ -5093,10 +5127,7 @@ def _independent_queued_sql(parent, column):
     return (
         "EXISTS(SELECT 1 FROM x_post_queue iq LEFT JOIN x_post_publish_log il ON il.queue_id=iq.id "
         "WHERE iq.%s=%s AND iq.status='queued' AND COALESCE(il.attempt_count,0)=0 "
-        "AND COALESCE(il.unknown_outcome,0)=0 AND COALESCE(il.status,'reserved')='reserved' "
-        "AND NOT EXISTS(SELECT 1 FROM x_post_queue hq LEFT JOIN x_post_publish_log hl ON hl.queue_id=hq.id "
-        "WHERE hq.account_id=iq.account_id AND hq.id<>iq.id AND "
-        "(hq.status='publishing' OR COALESCE(hl.unknown_outcome,0)=1 OR hl.status IN ('post_creating','repost_creating'))))"
+        "AND COALESCE(il.unknown_outcome,0)=0 AND COALESCE(il.status,'reserved')='reserved')"
     ) % (column, parent)
 
 
@@ -5491,6 +5522,78 @@ class XPostStore:
             None,
         )
 
+    @staticmethod
+    def _restart_removed_drama_owners(conn, removed_ids, actor, timestamp):
+        """Operator-confirmed restart; keep every old queue and receipt immutable."""
+        if not removed_ids:
+            return []
+        placeholders = ",".join("?" for _ in removed_ids)
+        rows = conn.execute(
+            "SELECT * FROM x_post_drama_pool WHERE assigned_account_id IN (%s) "
+            "AND status IN ('pending','active','needs_review') "
+            "AND next_sub_number<=free_episode_count ORDER BY id" % placeholders,
+            tuple(removed_ids),
+        ).fetchall()
+        blockers = read_account_publish_blockers(conn, removed_ids)
+        restarted = []
+        for row in rows:
+            owner = int(row["assigned_account_id"])
+            if blockers.get(owner, {}).get("code") not in {
+                "x_account_not_publishable", "x_post_account_locked",
+                "x_account_verification_rejected",
+            }:
+                continue  # Healthy owners still require their existing binding.
+            # Unknown writes and work in progress cannot be cancelled as failures.
+            unsettled = conn.execute(
+                "SELECT q.id FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.drama_pool_item_id=? AND (q.status IN "
+                "('queued','reserved','publishing','waiting_relay') OR COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status IN ('post_creating','repost_creating') "
+                "OR EXISTS(SELECT 1 FROM x_post_repost_ledger r WHERE r.queue_id=q.id AND r.unknown_outcome=1)) LIMIT 1", (row["id"],),
+            ).fetchone()
+            if unsettled:
+                raise XPostError("x_post_drama_restart_unsettled",
+                    "短剧%s仍有执行中或结果待核实的旧任务%s，请先核实后再取消绑定" %
+                    (row["content_id"], unsettled["id"]), 409)
+            published = int(row["published_episode_count"])
+            queues = conn.execute(
+                "SELECT q.*,l.status log_status,l.unknown_outcome,l.x_post_id,l.x_post_url "
+                "FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.drama_pool_item_id=? AND q.drama_replay_generation=? ORDER BY q.episode_number,q.id",
+                (row["id"], row["replay_generation"]),
+            ).fetchall()
+            confirmed = [q for q in queues if q["status"] == "published"]
+            if (published < 0 or int(row["next_sub_number"]) != published + 1
+                    or [q["episode_number"] for q in confirmed] != list(range(1, published + 1))
+                    or any(q["log_status"] != "published" or q["unknown_outcome"]
+                           or not q["x_post_id"] or not q["x_post_url"] for q in confirmed)
+                    or any(q["status"] not in ('published','failed') or q["log_status"] not in ('published','failed')
+                           for q in queues)):
+                raise XPostError("x_post_drama_restart_history_conflict",
+                    "短剧%s的旧发布记录尚不满足安全重发条件，请先核实首集及历史回执" % row["content_id"], 409)
+            if not actor.get("user_id") or not (actor.get("name") or actor.get("email")):
+                raise XPostError("invalid_request", "取消绑定需要完整操作人信息", 400)
+            conn.execute(
+                "INSERT INTO x_post_drama_cancel_audit("
+                "pool_item_id,content_id,from_generation,to_generation,from_status,from_free_episode_count,"
+                "from_next_sub_number,from_published_episode_count,from_assigned_account_id,from_assigned_at,"
+                "from_assigned_source_queue_id,actor_user_id,actor_name,reason,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row["id"],row["content_id"],row["replay_generation"],int(row["replay_generation"])+1,
+                 row["status"],row["free_episode_count"],row["next_sub_number"],published,owner,row["assigned_at"],
+                 row["assigned_source_queue_id"],str(actor["user_id"]),str(actor.get("name") or actor["email"]),
+                 DRAMA_REPLAY_REASON,timestamp),
+            )
+            conn.execute(
+                "UPDATE x_post_drama_pool SET replay_generation=replay_generation+1,status='pending',"
+                "next_sub_number=1,published_episode_count=0,assigned_account_id=0,assigned_at='',"
+                "assigned_source_queue_id=NULL,completed_at='',last_error_code='',last_error_message='',"
+                "priority_at=?,updated_at=? WHERE id=?", (timestamp,timestamp,row["id"]),
+            )
+            restarted.append({"pool_item_id":int(row["id"]),"content_id":row["content_id"],
+                              "previous_account_id":owner,"replay_generation":int(row["replay_generation"])+1})
+        return restarted
+
     def save_schedule_config(
         self,
         source_type,
@@ -5689,6 +5792,13 @@ class XPostStore:
                     "当前发布时间点正在冻结或执行，请在90秒窗口结束后再修改配置",
                     409,
                 )
+            restarted_dramas = []
+            restart_removed = payload.get("restart_removed_dramas", False)
+            if not isinstance(restart_removed, bool):
+                raise XPostError("invalid_request", "restart_removed_dramas必须是布尔值", 400)
+            if source_type == "drama" and restart_removed:
+                removed_ids = [value for value in current_item["account_ids"] if value not in account_ids]
+                restarted_dramas = self._restart_removed_drama_owners(conn, removed_ids, actor, timestamp)
             if enabled:
                 if source_type == "drama":
                     placeholders = ",".join(
@@ -5832,6 +5942,8 @@ class XPostStore:
                 )
             conn.commit()
         item = self.get_schedule_config(source_type, now=current_time)
+        if restarted_dramas:
+            item["restarted_dramas"] = restarted_dramas
         if skipped_account_ids:
             item["skipped_account_ids"] = skipped_account_ids
         return item
@@ -8102,21 +8214,7 @@ class XPostStore:
                 % placeholders,
                 tuple(account_ids),
             ).fetchall()
-            unresolved_rows = conn.execute(
-                "SELECT q.account_id,q.relay_account_id "
-                "FROM x_post_queue q JOIN x_post_publish_log l "
-                "ON l.queue_id=q.id WHERE "
-                "(COALESCE(l.unknown_outcome,0)=1 "
-                "OR l.status IN ('post_creating','repost_creating')) "
-                "AND (q.account_id IN (%s) OR q.relay_account_id IN (%s))"
-                % (placeholders, placeholders),
-                tuple(account_ids) + tuple(account_ids),
-            ).fetchall()
             account_blockers = read_account_publish_blockers(conn, account_ids)
-        unresolved = set()
-        for row in unresolved_rows:
-            unresolved.add(int(row["account_id"] or 0))
-            unresolved.add(int(row["relay_account_id"] or 0))
         counts = {
             int(row["relay_account_id"]): int(row["assignment_count"])
             for row in rows
@@ -8124,7 +8222,7 @@ class XPostStore:
         account_ids = [
             account_id
             for account_id in account_ids
-            if account_id not in unresolved and account_id not in account_blockers
+            if account_id not in account_blockers
         ]
         return [
             {
@@ -9742,16 +9840,6 @@ class XPostStore:
                 "AND (status='running' OR publish_mode='immediate' "
                 "OR (publish_mode='scheduled' AND scheduled_at<>'' "
                 "AND scheduled_at<=?)) "
-                "AND NOT EXISTS (SELECT 1 FROM x_video_publish_task self_task "
-                "JOIN x_video_publish_task sibling ON sibling.batch_id=self_task.batch_id "
-                "AND sibling.account_id=self_task.account_id "
-                "JOIN x_post_manual_run sr ON sr.id=sibling.manual_run_id "
-                "LEFT JOIN x_post_queue sq ON sq.manual_run_id=sr.id "
-                "LEFT JOIN x_post_publish_log sl ON sl.queue_id=sq.id "
-                "WHERE self_task.manual_run_id=x_post_manual_run.id "
-                "AND (sr.status IN ('needs_review','stopped') OR sr.unknown_count>0 "
-                "OR COALESCE(sl.unknown_outcome,0)=1 "
-                "OR sl.status IN ('post_creating','repost_creating'))) "
                 + planning_sql +
                 "ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,"
                 "CASE WHEN publish_mode='scheduled' THEN scheduled_at "
@@ -10129,7 +10217,7 @@ class XPostStore:
             from features.x_video_publish.core import personal_task, personal_batch_held
             with contextlib.closing(_connect(self.db_path)) as personal_conn:
                 personal = personal_task(personal_conn, run_id)
-                if personal is None or personal_batch_held(personal_conn, personal["batch_id"], personal["account_id"]):
+                if personal is None or personal_batch_held(personal_conn, personal["batch_id"], personal["account_id"], run_id=run_id):
                     raise XPostError("x_post_unknown_outcome", "个人发布批次不存在或已暂停", 409, True)
         account_ids = list(frozen["account_ids"])
         material_ids = list(frozen["material_ids"])
@@ -10262,7 +10350,7 @@ class XPostStore:
             ).fetchone()
             if personal is not None:
                 from features.x_video_publish.core import personal_batch_held
-                if personal_batch_held(conn, personal["batch_id"], personal["account_id"]):
+                if personal_batch_held(conn, personal["batch_id"], personal["account_id"], run_id=run_id):
                     raise XPostError("x_post_unknown_outcome", "个人发布批次已暂停", 409, True)
             if not run:
                 conn.rollback()
@@ -10364,21 +10452,21 @@ class XPostStore:
                         "selected material is already used by another X queue",
                         409,
                     )
-            selected_accounts = [item["account_id"] for item in prepared]
-            account_placeholders = ",".join("?" for _item in selected_accounts)
+            pair_predicate = " OR ".join("(q.account_id=? AND q.material_key=?)" for _item in prepared) or "0"
+            pair_values = tuple(value for item in prepared for value in (item["account_id"], item["material_key"]))
             if conn.execute(
                 "SELECT 1 FROM x_post_publish_log l "
                 "JOIN x_post_queue q ON q.id=l.queue_id "
-                "WHERE q.account_id IN (%s) "
+                "WHERE (%s) "
                 "AND (COALESCE(l.unknown_outcome,0)=1 "
                 "OR l.status IN ('post_creating','repost_creating')) LIMIT 1"
-                % account_placeholders,
-                tuple(selected_accounts),
+                % pair_predicate,
+                pair_values,
             ).fetchone():
                 conn.rollback()
                 raise XPostError(
                     "x_post_unknown_outcome",
-                    "所选账号存在待核对发布结果，已停止手动发布",
+                    "该账号与素材已有待核对发布结果，禁止重复提交",
                     409,
                     True,
                 )
@@ -15109,14 +15197,14 @@ class XPostStore:
 
     @staticmethod
     def _assert_account_publish_fence(conn, queue):
-        """Fail closed if another edge for this publish scope is unresolved."""
+        """Fence only an unresolved duplicate material/episode delivery."""
         publishing_account_ids = {
             int(queue["account_id"]),
         }
         if int(queue["relay_account_id"] or 0) > 0:
             publishing_account_ids.add(int(queue["relay_account_id"]))
-        # Only identities which can write this delivery are fenced. A held
-        # sibling account in the same batch must not block independent targets.
+        # Independent queues on this account keep moving. The same frozen
+        # material or episode remains protected against an ambiguous duplicate.
         ordered_account_ids = tuple(sorted(publishing_account_ids))
         account_placeholders = ",".join(
             "?" for _item in ordered_account_ids
@@ -15125,7 +15213,8 @@ class XPostStore:
             "SELECT 1 FROM x_post_queue q "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
             "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
-            "WHERE q.id<>? AND (q.account_id IN (%s) "
+            "WHERE q.id<>? AND ((q.material_key<>'' AND q.material_key=?) "
+            "OR (q.episode_key<>'' AND q.episode_key=?)) AND (q.account_id IN (%s) "
             "OR COALESCE(q.relay_account_id,0) IN (%s) "
             "OR COALESCE(r.relay_account_id,0) IN (%s)) "
             "AND (q.status='publishing' "
@@ -15139,12 +15228,12 @@ class XPostStore:
                 account_placeholders,
                 account_placeholders,
             ),
-            (int(queue["id"]),) + ordered_account_ids * 3,
+            (int(queue["id"]), str(queue["material_key"] or ""), str(queue["episode_key"] or "")) + ordered_account_ids * 3,
         ).fetchone()
         if unresolved is not None:
             raise XPostError(
                 "x_post_unknown_outcome",
-                "所选账号存在待核对发布结果，已暂停后续发布",
+                "该素材或剧集已有待核对发布结果，禁止重复发布",
                 409,
                 True,
             )
@@ -16574,7 +16663,7 @@ class XPostStore:
             if (
                 unknown_outcome
                 and code == "x_post_unknown_outcome"
-                and message == "所选账号存在待核对发布结果，已暂停后续发布"
+                and message == "该素材或剧集已有待核对发布结果，禁止重复发布"
                 and row["status"] == "reserved"
                 and int(row["attempt_count"] or 0) == 0
                 and not any(row[key] for key in (
