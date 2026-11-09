@@ -557,44 +557,12 @@ class FBAutoPostStore:
             error = StoreError("fb_auto_legacy_queue_conflict", "所选Page池仍被旧版自动发布队列占用", 409)
             error.conflicts = legacy
             raise error
-        exclusive = self.enabled_group_conflicts(template_id, config["group_ids"])
-        if exclusive:
-            error = StoreError("fb_auto_group_template_conflict", "所选Page池已被其他新版启用模板独占", 409)
-            error.conflicts = exclusive
-            raise error
-        page_ids = {page.page_id for page in page_rows}
-        drift_conflicts: List[Dict[str, Any]] = []
+        # Templates may share a group or individual Pages. Each template's slot
+        # has its own capacity; actual Page writes retain the execution mutex.
         enabled_others = self.enabled_template_sources(template_id)
-        global_slot_jobs = sum(page.eligible_token_count > 0 for page in page_rows)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
         for other in enabled_others:
             enabled_fingerprint.add((int(other["template_id"]), int(other["template_version"])))
-            other_pages = pages.list_pages(
-                other["config"]["group_ids"],
-                is_admin=other["scope_is_admin"],
-                owner_user_id=other["owner_user_id"],
-            )
-            global_slot_jobs += sum(page.eligible_token_count > 0 for page in other_pages)
-            overlap = sorted(
-                page_ids.intersection(page.page_id for page in other_pages)
-            )
-            if overlap:
-                drift_conflicts.append(
-                    {
-                        "template_id": other["template_id"],
-                        "template_name": other["template_name"],
-                        "overlap_count": len(overlap),
-                        "page_ids": overlap[:20],
-                    }
-                )
-        if drift_conflicts:
-            error = StoreError(
-                "fb_auto_page_template_conflict",
-                "当前Page组成员与其他启用模板发生重叠，本时隙未创建",
-                409,
-            )
-            error.conflicts = drift_conflicts[:20]
-            raise error
         total, publishable = len(page_rows), sum(1 for page in page_rows if page.eligible_token_count > 0)
         schedule = config["schedule"]
         daily_count = len(schedule["times"]) if schedule["mode"] == "fixed" else int(schedule["daily_count"])
@@ -604,9 +572,9 @@ class FBAutoPostStore:
             if publishable == 0:
                 raise StoreError("fb_auto_page_pool_unpublishable", "所选Page池当前没有可发布Page，未创建运行", 409)
             if ((max_publishable_pages is not None and publishable > int(max_publishable_pages))
-                    or (max_jobs_per_slot is not None and global_slot_jobs > int(max_jobs_per_slot))
+                    or (max_jobs_per_slot is not None and publishable > int(max_jobs_per_slot))
                     or (max_daily_jobs is not None and daily_capacity(config, page_rows) > int(max_daily_jobs))):
-                raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，全局最坏同槽GPU任务 {global_slot_jobs}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
+                raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
         with self.connect() as conn:
             max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in page_rows),default=0)
         candidate_limit=min(5000,max(1000 if config.get("drama_cooldown_hours") else 500,max_reserved+100))
@@ -615,34 +583,18 @@ class FBAutoPostStore:
         # Catalog/metric freezing can be the longest read in planning.  Re-read
         # every mutable Page-side input afterwards so a pool disable, membership
         # growth, token loss, legacy enable, or sibling-template enable cannot
-        # create an empty/over-capacity/conflicting run from a stale snapshot.
+        # create an empty or over-capacity run from a stale snapshot.
         legacy = pages.legacy_conflicts(config["group_ids"])
         if legacy:
             error = StoreError("fb_auto_legacy_queue_conflict", "所选Page池仍被旧版自动发布队列占用", 409)
             error.conflicts = legacy
             raise error
-        exclusive = self.enabled_group_conflicts(template_id, config["group_ids"])
-        if exclusive:
-            error = StoreError("fb_auto_group_template_conflict", "所选Page池已被其他新版启用模板独占", 409)
-            error.conflicts = exclusive
-            raise error
         page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
         if any(page_language(page.language) and page_language(page.language) not in candidate_snapshots for page in page_rows):
             raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
-        page_ids, global_slot_jobs = {page.page_id for page in page_rows}, sum(page.eligible_token_count > 0 for page in page_rows)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
-        drift_conflicts = []
         for other in self.enabled_template_sources(template_id):
             enabled_fingerprint.add((int(other["template_id"]), int(other["template_version"])))
-            other_pages = pages.list_pages(other["config"]["group_ids"], is_admin=other["scope_is_admin"], owner_user_id=other["owner_user_id"])
-            global_slot_jobs += sum(page.eligible_token_count > 0 for page in other_pages)
-            overlap = sorted(page_ids.intersection(page.page_id for page in other_pages))
-            if overlap:
-                drift_conflicts.append({"template_id": other["template_id"], "template_name": other["template_name"], "overlap_count": len(overlap), "page_ids": overlap[:20]})
-        if drift_conflicts:
-            error = StoreError("fb_auto_page_template_conflict", "当前Page组成员与其他启用模板发生重叠，本时隙未创建", 409)
-            error.conflicts = drift_conflicts[:20]
-            raise error
         total, publishable = len(page_rows), sum(page.eligible_token_count > 0 for page in page_rows)
         if trigger_type == "auto" or any(value is not None for value in (max_publishable_pages,max_jobs_per_slot,max_daily_jobs)):
             if total == 0:
@@ -650,9 +602,9 @@ class FBAutoPostStore:
             if publishable == 0:
                 raise StoreError("fb_auto_page_pool_unpublishable", "所选Page池当前没有可发布Page，未创建运行", 409)
             if ((max_publishable_pages is not None and publishable > int(max_publishable_pages))
-                    or (max_jobs_per_slot is not None and global_slot_jobs > int(max_jobs_per_slot))
+                    or (max_jobs_per_slot is not None and publishable > int(max_jobs_per_slot))
                     or (max_daily_jobs is not None and daily_capacity(config, page_rows) > int(max_daily_jobs))):
-                raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，全局最坏同槽GPU任务 {global_slot_jobs}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
+                raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
         slot_times = None
         if config.get('page_daily_limits') or 'default_daily_count' in config:
             slot_date = datetime.fromisoformat(planned_publish_at_utc or utc_iso(self.now_fn())).astimezone(BEIJING).date().isoformat()

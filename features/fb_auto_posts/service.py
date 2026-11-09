@@ -79,21 +79,14 @@ class Runtime:
         config = template["config"]
         legacy = self.pages.legacy_conflicts(config["group_ids"])
         if legacy: raise ServiceError("fb_auto_legacy_queue_conflict", "所选Page池仍被旧版自动发布队列占用", 409, legacy)
-        exclusive = self.store.enabled_group_conflicts(int(template["id"]), config["group_ids"])
-        if exclusive: raise ServiceError("fb_auto_group_template_conflict", "所选Page池已被其他新版启用模板独占", 409, exclusive)
         pages = self.pages.list_pages(config["group_ids"], is_admin=bool(template["scope_is_admin"]), owner_user_id=str(template["owner_user_id"]))
         page_ids = {page.page_id for page in pages}
-        page_conflicts, other_slot_jobs = [], 0
+        other_slot_jobs = 0
         enabled_sources = self.store.enabled_template_sources(int(template["id"]))
         enabled_fingerprint = [(int(item["template_id"]),int(item["template_version"])) for item in enabled_sources]
         for other in enabled_sources:
             other_pages = self.pages.list_pages(other["config"]["group_ids"], is_admin=other["scope_is_admin"], owner_user_id=other["owner_user_id"])
             other_slot_jobs += sum(page.eligible_token_count > 0 for page in other_pages)
-            overlap = sorted(page_ids.intersection(page.page_id for page in other_pages))
-            if overlap:
-                page_conflicts.append({"template_id": other["template_id"], "template_name": other["template_name"], "overlap_count": len(overlap), "page_ids": overlap[:20]})
-        if page_conflicts:
-            raise ServiceError("fb_auto_page_template_conflict", "所选Page与其他启用模板存在重叠", 409, page_conflicts[:20])
         publishable = sum(page.eligible_token_count > 0 for page in pages)
         schedule = config["schedule"]
         daily_count = len(schedule["times"]) if schedule["mode"] == "fixed" else int(schedule["daily_count"])
@@ -108,8 +101,9 @@ class Runtime:
         summary["_enabled_fingerprint"] = enabled_fingerprint
         if not pages: raise ServiceError("fb_auto_page_pool_empty", "所选Page池没有有效Page", 409)
         if not publishable: raise ServiceError("fb_auto_page_pool_unpublishable", "所选Page池没有任何可发布Page", 409)
-        if publishable > self.max_publishable_pages or global_slot_jobs > self.max_jobs_per_slot or daily_jobs > self.max_daily_jobs or enabled_count + 1 > self.max_enabled_templates:
-            raise ServiceError("fb_auto_capacity_exceeded", f"容量门禁拒绝启用：可发布Page {publishable}/{self.max_publishable_pages}，全局最坏同槽GPU任务 {global_slot_jobs}/{self.max_jobs_per_slot}，每日GPU任务和Graph发布 {daily_jobs}/{self.max_daily_jobs}，启用模板 {enabled_count + 1}/{self.max_enabled_templates}", 409)
+        summary["capacity_scope"] = "template_slot"
+        if publishable > self.max_publishable_pages or publishable > self.max_jobs_per_slot or daily_jobs > self.max_daily_jobs or enabled_count + 1 > self.max_enabled_templates:
+            raise ServiceError("fb_auto_capacity_exceeded", f"容量门禁拒绝启用：可发布Page {publishable}/{self.max_publishable_pages}，本模板单批任务 {publishable}/{self.max_jobs_per_slot}，每日GPU任务和Graph发布 {daily_jobs}/{self.max_daily_jobs}，启用模板 {enabled_count + 1}/{self.max_enabled_templates}", 409)
         if config.get("video_template") != "random_overlay":
             raise ServiceError("fb_auto_video_template_required", "视频制作模板必填，当前仅支持随机排重模板", 409)
         today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).date()
