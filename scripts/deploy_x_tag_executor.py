@@ -61,7 +61,8 @@ def install(wait_seconds):
         lane.build(lane.LEGACY_SOURCE, SOURCE, release)
     after = runtime_files(release)
     changed = sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
-    allowed = {'features/x_auto_posts/publisher.py', 'features/x_tag_publish/staging.py'}
+    allowed = {'features/x_auto_posts/publisher.py', 'features/x_tag_publish/staging.py',
+               'features/x_tag_publish/policy.py', 'features/x_tag_revenue/taxonomy.py'}
     if not set(changed) <= allowed or 'features/x_auto_posts/publisher.py' not in changed:
         raise RuntimeError('unexpected_executor_runtime_scope:' + json.dumps(changed))
     backup = BACKUPS / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')

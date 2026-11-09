@@ -1,5 +1,6 @@
 """Stable weighted tag choice; no publishing quotas or dedupe state are shared."""
 import hashlib
+from collections.abc import Mapping
 from contextlib import closing
 import json
 import math
@@ -142,7 +143,29 @@ class Decision:
 
 def catalog_labels(source, dramas):
     """Exact-version classifications shared with income portraits."""
-    return collect_classifications(source._stream_select, source.schema, [d.content_id for d in dramas])
+    ids = [d.content_id for d in dramas]
+    if not ids:
+        return {}
+    factory = getattr(source, 'connection_factory', None)
+    cursor_factory = getattr(source, '_streaming_cursor', None)
+    if not callable(factory) or not callable(cursor_factory):
+        return collect_classifications(source._stream_select, source.schema, ids)
+    # Keep the existing read-only connection factory and its access checks, but
+    # reuse one connection across the complete catalog instead of reconnecting
+    # for each batch. Never truncate candidates: that would bias the hierarchy.
+    with closing(factory()) as connection:
+        def query(sql, params):
+            with closing(cursor_factory(connection)) as cursor:
+                cursor.execute(sql, tuple(params))
+                while True:
+                    rows = cursor.fetchmany(500)
+                    if not rows:
+                        break
+                    for row in rows:
+                        if not isinstance(row, Mapping):
+                            raise ValueError('candidate_metadata_row_invalid')
+                        yield dict(row)
+        return collect_classifications(query, source.schema, ids)
 
 
 def initialize_ids(path):

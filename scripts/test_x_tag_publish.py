@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch, Mock
 
 sys.path.insert(0, os.environ['X_TAG_TEST_RUNTIME'])
-from features.x_tag_publish.policy import Decision, ID_BASE, initialize_ids, label_index, lane_paths
+from features.x_tag_publish.policy import Decision, ID_BASE, initialize_ids, label_index, lane_paths, catalog_labels
 from features.x_tag_publish.selection import ProfileSelector
 from features.x_tag_publish.pool import install_reservation_policy, material_candidates
 from features.x_tag_publish import gateway
@@ -41,6 +41,44 @@ ACCOUNT = dict(id=101, x_user_id='999', username='channel', drama_language='en',
 
 
 class PolicyTests(unittest.TestCase):
+    def test_catalog_batches_share_read_only_connection_without_truncation(self):
+        cursors = []
+        def cursor_factory(connection):
+            cursor = Mock()
+            def execute(sql, params):
+                self.assertTrue(sql.startswith('SELECT DISTINCT '))
+                self.assertEqual(params[0], 1479)
+                self.assertLessEqual(len(params), 501)
+                resource = 'ads_drama_resource' in sql
+                self.assertIn('FORCE INDEX(content_id)' if resource else 'FORCE INDEX(ac)', sql)
+                rows = [dict(content_id=key, app_id=1479, language='en', series_code='s'+key,
+                             **({'labels':'Sweet'} if resource else {'resource_type':2})) for key in params[1:]]
+                cursor.fetchmany.side_effect = [rows, []]
+            cursor.execute.side_effect = execute
+            cursors.append(cursor)
+            return cursor
+        source = SimpleNamespace(schema='kunlunads_dev', connection_factory=Mock(return_value=Mock()),
+                                 _streaming_cursor=cursor_factory)
+        dramas = [SimpleNamespace(content_id=str(i)) for i in range(501)]
+        result = catalog_labels(source, dramas + dramas[:1])
+        self.assertEqual(len(result), 501)
+        self.assertTrue(all(row['drama_type']=='translated' and row['audience']=='female' for row in result.values()))
+        source.connection_factory.assert_called_once_with()
+        source.connection_factory.return_value.close.assert_called_once_with()
+        self.assertEqual(len(cursors), 4)
+        for cursor in cursors:
+            cursor.close.assert_called_once_with()
+
+    def test_catalog_query_failure_releases_cursor_and_connection(self):
+        connection, cursor = Mock(), Mock()
+        cursor.execute.side_effect = RuntimeError('source temporarily unavailable')
+        source = SimpleNamespace(schema='kunlunads_dev', connection_factory=Mock(return_value=connection),
+                                 _streaming_cursor=Mock(return_value=cursor))
+        with self.assertRaisesRegex(RuntimeError, 'temporarily unavailable'):
+            catalog_labels(source, [SimpleNamespace(content_id='1')])
+        cursor.close.assert_called_once_with()
+        connection.close.assert_called_once_with()
+
     def test_legacy_profile_is_not_reinterpreted_using_aggregated_tag_weights(self):
         data,meta=profile();meta.pop('tag_mapping_version')
         self.assertEqual(Decision(ACCOUNT,'task',(data,meta)).reason,'portrait_mapping_outdated')

@@ -138,10 +138,12 @@ def collect_classifications(query, schema, ids):
     """Use the caller's existing read-only connection; exact product/version keys."""
     resources,infos=[],[]
     ids=sorted(set(str(value) for value in ids))
-    for start in range(0,len(ids),100):
-        batch=ids[start:start+100];placeholders=','.join('%s' for _ in batch)
-        for table,columns,target in [('ads_drama_resource','content_id,app_id,language,series_code,labels',resources),
-                                     ('ads_drama_info','content_id,app_id,language,series_code,resource_type',infos)]:
-            sql='SELECT DISTINCT '+columns+' FROM `'+schema+'`.'+table+' WHERE app_id=%s AND content_id IN ('+placeholders+')'
+    for start in range(0,len(ids),500):
+        batch=ids[start:start+500];placeholders=','.join('%s' for _ in batch)
+        # These are the same product/content indexes used by portrait refresh.
+        # Without the hint MySQL can scan the entire product for every batch.
+        for table,index,columns,target in [('ads_drama_resource','content_id','content_id,app_id,language,series_code,labels',resources),
+                                           ('ads_drama_info','ac','content_id,app_id,language,series_code,resource_type',infos)]:
+            sql='SELECT DISTINCT '+columns+' FROM `'+schema+'`.'+table+' FORCE INDEX('+index+') WHERE app_id=%s AND content_id IN ('+placeholders+')'
             target.extend(query(sql,[1479]+batch))
     return classification_index(resources,infos)
