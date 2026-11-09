@@ -113,6 +113,7 @@ def prepare():
 
 
 def drain(folder, manifest, rollback=False):
+    assert manifest['phase'] == ('complete' if rollback else 'prepared')
     if api_work():
         return {'phase': 'waiting_api_work', 'api_screenshot_tasks': api_work()}
     if rollback:
@@ -123,6 +124,7 @@ def drain(folder, manifest, rollback=False):
     health('snapshot', folder, 'youtube')
     manifest['personal_scheduler_was_active'] = base.state(DAEMON) == 'active'
     manifest['main_pid_before'] = base.run('systemctl', 'show', 'drama-material-api.service', '-p', 'MainPID', '--value')
+    manifest['main_preactivated'] = False
     result = base.drain(folder, manifest, rollback)
     if manifest['personal_scheduler_was_active']:
         # Handler sets stop and finishes its current bounded HTTP call. Exit 0
@@ -197,10 +199,12 @@ def activate(folder, manifest):
         return {'phase': 'waiting_api_work', 'api_screenshot_tasks': api_work()}
     original_resume = base.resume
     base.resume = lambda *_: None
+    owners_ready = False
     try:
         result = base.activate(folder, manifest)
         if result['phase'] not in {'complete', 'rolled_back'}: return result
         api_ready()
+        owners_ready = True
         original_resume(folder, manifest)
         for lane in ('x', 'youtube'): health('restore', folder, lane)
         manifest['schedulers_verified'] = True
@@ -211,13 +215,20 @@ def activate(folder, manifest):
             if not install_main(folder, manifest, restore=True):
                 manifest['phase'] = 'restore_pending_api_work'
                 base.save(folder, manifest)
+            else:
+                api_ready()
+                base.ready(8810)
+                owners_ready = True
         raise
     finally:
         base.resume = original_resume
-        if manifest['phase'] in {'complete', 'rolled_back', 'failed_restored'}:
+        if owners_ready:
             original_resume(folder, manifest)
             if manifest.get('personal_scheduler_was_active'):
                 base.run('systemctl', 'start', DAEMON)
+        elif manifest['phase'] in {'complete', 'rolled_back', 'failed_restored'}:
+            manifest['phase'] = 'activation_needs_attention'
+            base.save(folder, manifest)
 
 
 if __name__ == '__main__':
