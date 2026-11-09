@@ -8,7 +8,41 @@
     }
     return [a.selected_tag ? `匹配标签：${a.selected_tag}` : '', reasons[a.fallback_reason] || '', a.profile_stale ? '使用上次成功画像' : '', a.profile_version ? `画像 ${a.profile_version}` : ''].filter(Boolean).join(' · ');
   }
-  window.TagPublishUI = {explain};
+  async function previewTemplate(item, ui) {
+    if (document.getElementById('tagPreviewDialog')) return;
+    const ids=[...new Set((item.config?.account_ids || item.account_ids || []).map(String))];
+    if(!ids.length){ui.showToast('模板尚未配置频道',true);return;}
+    const dialog=node('dialog');dialog.id='tagPreviewDialog';dialog.setAttribute('aria-labelledby','tagPreviewTitle');
+    const head=node('div','','dialog-head'),title=node('h2','按频道预览');title.id='tagPreviewTitle';head.append(title);
+    const body=node('div','','dialog-body'),label=node('label','选择频道');label.htmlFor='tagPreviewAccount';
+    const select=node('select');select.id='tagPreviewAccount';select.style.width='100%';
+    for(const id of ids){const option=node('option',`频道 ${id}`);option.value=id;select.append(option);}
+    const result=node('p','预览仅检查本频道的选材结果，不保留素材或创建发布任务。');result.setAttribute('role','status');result.style.whiteSpace='pre-wrap';
+    body.append(label,select,result);
+    const foot=node('div','','dialog-foot'),close=node('button','关闭','button'),run=node('button','预览选中频道','button primary');close.type=run.type='button';foot.append(close,run);
+    dialog.append(head,body,foot);document.body.append(dialog);
+    const finished=new Promise(resolve=>dialog.addEventListener('close',()=>{dialog.remove();resolve();},{once:true}));
+    close.addEventListener('click',()=>dialog.close());
+    run.addEventListener('click',async()=>{
+      run.disabled=select.disabled=true;result.textContent='正在按该频道的三级画像检查合格剧目和素材…';
+      try{
+        const payload=await ui.api(`${ui.API_BASE}/templates/${item.id || item.template_id}/preview`,{method:'POST',body:JSON.stringify({expected_version:Number(item.version || item.current_version),account_id:select.value})});
+        const row=ui.readItems(payload,['preview','items'])[0];
+        if(!row || !ui.boolValue(row.ok))throw Error(row?.error_message || row?.error_code || '暂无合格素材');
+        const selection=ui.objectValue(row.selection),drama=ui.objectValue(selection.drama),material=ui.objectValue(selection.material);
+        if(dialog.open)result.textContent=`${select.selectedOptions[0].textContent}\n${drama.name || drama.drama_name || '已选剧'} / 素材 ${material.material_id || material.id || '已选'}\n${explain(ui.objectValue(selection.reservation).tag_profile)}`;
+      }catch(error){if(dialog.open)result.textContent=error.message || '频道预览失败，请稍后重试';}
+      finally{run.disabled=select.disabled=false;}
+    });
+    dialog.showModal();
+    // Names improve the picker, but a failed auxiliary lookup must not block it.
+    ui.api(`${ui.API_BASE}/accounts`).then(payload=>{
+      const accounts=new Map(ui.readItems(payload,['accounts','items']).map(a=>[String(a.id || a.account_id),a]));
+      for(const option of select.options){const a=accounts.get(option.value);if(a)option.textContent=a.username?`@${a.username}`:a.display_name || `频道 ${option.value}`;}
+    }).catch(()=>{});
+    await finished;
+  }
+  window.TagPublishUI = {explain,previewTemplate};
   function node(tag, text, cls) { const n=document.createElement(tag);if(text)n.textContent=text;if(cls)n.className=cls;return n; }
   function start() {
     if (document.querySelector('.tag-lane-banner')) return;

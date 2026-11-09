@@ -120,10 +120,12 @@ def build(source, repo, target, *, verify=True):
                  '      selectionCell.appendChild(ui.element("div", {className:"secondary", text:window.TagPublishUI.explain(selection.tag_profile)}));\n      row.appendChild(selectionCell);')
     p = target / 'static/x-tag-auto-publish-templates.js'
     value = p.read_text(encoding='utf-8')
-    anchor = 'return `${account}：${drama.name || drama.drama_name || "已选剧"} / 素材 ${material.material_id || material.id || "已选"}`;'
-    if value.count(anchor) != 1:
-        raise RuntimeError('preview_ui_anchor_changed')
-    value = value.replace(anchor, anchor.replace('}`;', '} · ${window.TagPublishUI.explain(ui.objectValue(selection.reservation).tag_profile)}`;'))
+    value, preview_count = re.subn(
+        r'  async function previewTemplate\(item\) \{.*?\n  \}\n\n(?=  async function mutateTemplate)',
+        '  async function previewTemplate(item) {\n    await window.TagPublishUI.previewTemplate(item, ui);\n  }\n\n',
+        value, flags=re.S)
+    if preview_count != 1:
+        raise RuntimeError('preview_picker_anchor_changed')
     p.write_text(value, encoding='utf-8')
     for p in (repo / 'static').glob('x-tag-publish-*'):
         shutil.copy2(p, target / 'static' / p.name)
@@ -137,8 +139,8 @@ def build(source, repo, target, *, verify=True):
     for p in (target / 'static').glob('x-tag-*.html'):
         value = p.read_text(encoding='utf-8')
         value = re.sub(r'(/quick-nav\.js)(?:\?[^"\']*)?', r'\1?v=' + nav_version, value)
-        for asset in ('x-tag-publish-ui.js', 'x-tag-post-logs.js', 'x-tag-revenue.js', 'x-tag-revenue.css'):
-            version=digest(repo / 'static' / asset)[:12]
+        for asset in ('x-tag-publish-ui.js', 'x-tag-post-logs.js', 'x-tag-revenue.js', 'x-tag-revenue.css', 'x-tag-auto-publish-templates.js'):
+            version=digest(target / 'static' / asset)[:12]
             value=re.sub(r'(/'+re.escape(asset)+r')(?:\?[^"\']*)?',r'\1?v='+version,value)
         p.write_text(value, encoding='utf-8')
     (target / 'tag-runtime-manifest.json').write_text(json.dumps(dict(baseline=manifest,
