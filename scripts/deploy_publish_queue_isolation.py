@@ -176,7 +176,7 @@ def rollback_queue_scopes(database):
                 if held:c.execute('INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)',(resource,row['id'],row['generation'],int(row['status']=='unknown'),held[0]['legacy']))
                 if legacy or row['status']=='unknown':c.execute('INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)',(resource,row['id']))
 
-def switch(directory,lane,rollback=False):
+def switch(directory,lane,rollback=False,*,preserve_queue_scopes=False):
     path=directory/'manifest.json';m=json.loads(path.read_text());item=m['lanes'][lane]
     link=Path(LANES[lane][0]);old=Path(item['candidate'] if rollback else item['before_root'])
     target=Path(item['before_root'] if rollback else item['candidate'])
@@ -197,7 +197,7 @@ def switch(directory,lane,rollback=False):
         item['active_pids']={u:pid(u) for u,_,_ in LANES[lane][1]};save(path,m)
         print(json.dumps({'lane':lane,'state':'already_active_verified'}),flush=True);return
     assert link.resolve()==old,'later_runtime_switch_preserved:'+lane
-    if rollback and lane=='coordinator':
+    if rollback and lane=='coordinator' and not preserve_queue_scopes:
         with contextlib.closing(sqlite3.connect('file:'+DBS['dispatch']+'?mode=ro',uri=True)) as c:
             assert not c.execute("SELECT 1 FROM pipeline_job WHERE channel IN ('x','tt') AND status IN ('running','legacy_running') LIMIT 1").fetchone(),'rollback_requires_x_tt_claims_to_finish'
     for rel,h in item['files'].items():assert sha(link/rel)==h['after' if rollback else 'before'],'affected_source_drift:'+rel
@@ -241,13 +241,14 @@ def switch(directory,lane,rollback=False):
         if stopped:run(['systemctl','--job-mode=ignore-dependencies','stop',*stopped],timeout=20)
         for u in stopped:assert pid(u)=='0'
         assert link.resolve()==old,'concurrent_runtime_switch'
-        if rollback and lane=='coordinator':rollback_queue_scopes(DBS['dispatch'])
+        if rollback and lane=='coordinator' and not preserve_queue_scopes:rollback_queue_scopes(DBS['dispatch'])
         swap(link,target);swapped=True
         # Startup readiness probes use these same listeners.
         release_network_gate()
         for u,port,_ in units:run(['systemctl','start',u],timeout=15)
         for u,_,_ in units:assert run(['systemctl','is-active',u])=='active'
         for dependent in paths:run(['systemctl','start',dependent],timeout=15)
+        for _,port,_ in units:health(port)
     except BaseException:
         if swapped:
             run(['systemctl','--job-mode=ignore-dependencies','stop',*[u for u,_,_ in units]],timeout=20)
@@ -261,7 +262,6 @@ def switch(directory,lane,rollback=False):
         for trigger in triggers:run(['systemctl','start',trigger],timeout=15)
         save(directory/(lane+('-rollback' if rollback else '')+'-drain.json'),
              {'seconds':time.monotonic()-began,'observations':observations,'temporary_rules_removed':marker not in run(['iptables','-S','INPUT'])})
-    for _,port,_ in units:health(port)
     item['state']='rolled_back' if rollback else 'active';item['active_pids']={u:pid(u) for u,_,_ in units}
     save(path,m);print(json.dumps({'lane':lane,'state':item['state'],'pids':item['active_pids']}),flush=True)
 

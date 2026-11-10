@@ -197,14 +197,15 @@ def switch(directory,lane):
 
 def rollback_before_effective(directory):
     from features import social_random_schedule as daily
-    from scripts.migrate_social_random_schedule import reverse_before_effective
     directory=Path(directory).resolve();path=directory/'manifest.json';manifest=json.loads(path.read_text())
     if daily.local_day()>=manifest['effective_date']:raise RuntimeError('after_activation_keep_compatible_consumers_and_forward_fix')
+    for key in INITIALIZERS:
+        with contextlib.closing(sqlite3.connect('file:'+switcher.DBS[key]+'?mode=ro',uri=True)) as c:
+            if c.execute("SELECT 1 FROM sqlite_master WHERE name='social_random_day'").fetchone() and c.execute('SELECT 1 FROM social_random_day LIMIT 1').fetchone():
+                raise RuntimeError('frozen_days_require_compatible_consumers_and_forward_fix:'+key)
     for key,table in [('x','x_post_schedule_run'),('x','x_post_manual_run'),('x_auto','x_auto_task'),('tt','tt_post_queue'),('tt_auto','tt_auto_task')]:
         with contextlib.closing(sqlite3.connect('file:'+switcher.DBS[key]+'?mode=ro',uri=True)) as c:
             if c.execute('SELECT 1 FROM '+table+' WHERE schedule_policy=? LIMIT 1',(daily.POLICY,)).fetchone():raise RuntimeError('target_tasks_already_exist:'+key)
-    retime=directory/'retime-live.json'
-    if retime.exists():print(json.dumps(reverse_before_effective(switcher.DBS['fb'],switcher.DBS['dispatch'],json.loads(retime.read_text()))),flush=True)
     original=json.loads(json.dumps(manifest))
     for item in manifest['lanes'].values():item['files']={rel:h for rel,h in item['files'].items() if h['before'] is not None}
     save(path,manifest)
@@ -212,11 +213,19 @@ def rollback_before_effective(directory):
     switcher.rollback_queue_scopes=lambda _:None  # This release does not revert queue isolation.
     try:
         for lane in ['fb','tt','tt_auto','x','coordinator','app']:
-            if original['lanes'][lane]['state'] not in {'active','installed'}:continue
+            if lane=='app':
+                # A copy can fail halfway before state becomes installed.
+                for rel,h in original['lanes'][lane]['files'].items():
+                    target=Path(LANES[lane][0])/rel
+                    if sha(target)==h['before']:continue
+                    if sha(target)!=h['after']:raise RuntimeError('rollback_static_drift:'+rel)
+                    if h['before'] is not None:atomic_copy(directory/'before'/lane/rel,target)
+                continue
+            if Path(LANES[lane][0]).resolve()!=Path(original['lanes'][lane]['candidate']):continue
             health_lane={'tt_auto':'tt','tt':'tt'}.get(lane,lane)
             before=directory/('rollback-schedulers-before-'+lane+'.json')
             if lane!='app':run([sys.executable,HEALTH,'snapshot','--lane',health_lane,'--output',before])
-            switcher.switch(directory,lane,True)
+            switcher.switch(directory,lane,True,preserve_queue_scopes=True)
             if lane!='app':run([sys.executable,HEALTH,'restore','--baseline',before,'--wait-seconds','25','--output',directory/('rollback-schedulers-after-'+lane+'.json')],timeout=45)
         for rel,hashes in original['static'].items():
             if hashes['before'] is not None:atomic_copy(directory/'before/nginx'/Path(rel).name,Path('/usr/share/nginx/html')/Path(rel).name)

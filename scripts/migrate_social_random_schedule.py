@@ -238,6 +238,8 @@ def reverse_before_effective(fb,dispatch,plan,*,now=None):
     c=connect(fb,dispatch,readonly=False)
     try:
         c.execute('BEGIN IMMEDIATE')
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='social_random_day'").fetchone() and c.execute('SELECT 1 FROM social_random_day LIMIT 1').fetchone():
+            raise ValueError('compatibility_rollback_required_for_frozen_days')
         ids={e['task_id'] for g in plan['groups'] for e in g['entries'] if e['change_policy']}
         if any(r[0] not in ids for r in c.execute('SELECT id FROM fb_auto_task WHERE schedule_policy=?',(daily.POLICY,))):raise ValueError('new_target_tasks_require_compatibility_rollback')
         entries=[e for g in plan['groups'] for e in g['entries'] if e['change_policy']]

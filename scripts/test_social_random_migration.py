@@ -103,12 +103,13 @@ class MigrationTests(unittest.TestCase):
         with connect(self.fb) as c:
             self.assertEqual(c.execute("SELECT native_id FROM social_random_slot WHERE target_id='1' AND ordinal=1").fetchone()[0],'1')
 
-    def test_pre_activation_rollback_keeps_material_and_ledger(self):
+    def test_pre_activation_rollback_preserves_frozen_plan_and_material(self):
         plan=self.plan();apply_plan(self.fb,self.dispatch,plan,now=self.now)
-        result=reverse_before_effective(self.fb,self.dispatch,plan,now=self.now)
-        self.assertEqual(result['restored_future_intents'],2)
+        with self.assertRaisesRegex(ValueError,'compatibility_rollback'):
+            reverse_before_effective(self.fb,self.dispatch,plan,now=self.now)
+        planned=next(e['after'] for g in plan['groups'] for e in g['entries'] if e['task_id']==1)
         with connect(self.fb) as c:
-            self.assertEqual(c.execute('SELECT planned_publish_at_utc,prepared_sha256,attempt_count FROM fb_auto_task WHERE id=1').fetchone(),('2026-11-11T12:00:00+00:00','original',2))
+            self.assertEqual(c.execute('SELECT planned_publish_at_utc,prepared_sha256,attempt_count FROM fb_auto_task WHERE id=1').fetchone(),(planned,'original',2))
         with self.assertRaisesRegex(ValueError,'compatibility_rollback'):
             reverse_before_effective(self.fb,self.dispatch,plan,now=self.now+dt.timedelta(days=1))
 
