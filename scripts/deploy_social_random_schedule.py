@@ -225,10 +225,14 @@ def rollback_before_effective(directory):
             health_lane={'tt_auto':'tt','tt':'tt'}.get(lane,lane)
             before=directory/('rollback-schedulers-before-'+lane+'.json')
             if lane!='app':run([sys.executable,HEALTH,'snapshot','--lane',health_lane,'--output',before])
-            switcher.switch(directory,lane,True,preserve_queue_scopes=True)
-            if lane!='app':run([sys.executable,HEALTH,'restore','--baseline',before,'--wait-seconds','25','--output',directory/('rollback-schedulers-after-'+lane+'.json')],timeout=45)
+            try:switcher.switch(directory,lane,True,preserve_queue_scopes=True)
+            finally:
+                run([sys.executable,HEALTH,'restore','--baseline',before,'--wait-seconds','25','--output',directory/('rollback-schedulers-after-'+lane+'.json')],timeout=45)
         for rel,hashes in original['static'].items():
-            if hashes['before'] is not None:atomic_copy(directory/'before/nginx'/Path(rel).name,Path('/usr/share/nginx/html')/Path(rel).name)
+            target=Path('/usr/share/nginx/html')/Path(rel).name
+            if sha(target)==hashes['before']:continue
+            if sha(target)!=hashes['after']:raise RuntimeError('rollback_nginx_drift:'+rel)
+            if hashes['before'] is not None:atomic_copy(directory/'before/nginx'/Path(rel).name,target)
     finally:switcher.rollback_queue_scopes=original_rollback
 
 
