@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from scripts import deploy_publish_queue_isolation as switcher
 
@@ -50,8 +51,9 @@ class SwitchRecoveryTests(unittest.TestCase):
                     state["running"] = True
                 return ""
 
-            def fail_candidate_health(requested_port):
+            def fail_candidate_health(requested_port, maintenance_triggers=()):
                 self.assertEqual(requested_port, port)
+                self.assertEqual(set(maintenance_triggers), {timer})
                 self.assertEqual(state["root"], candidate)
                 self.assertTrue(state["running"])
                 raise RuntimeError("candidate_health_failed")
@@ -78,6 +80,43 @@ class SwitchRecoveryTests(unittest.TestCase):
             self.assertEqual(sum(command[:3] == ["iptables", "-D", "INPUT"] for command in commands), 1)
             self.assertNotEqual(json.loads((directory / "manifest.json").read_text())["lanes"]["x"]["state"], "active")
             self.assertTrue(json.loads((directory / "x-drain.json").read_text())["temporary_rules_removed"])
+
+
+class MaintenanceHealthTests(unittest.TestCase):
+    def unavailable(self, problems):
+        body = json.dumps({"automation": {"problems": problems}}).encode()
+        error = HTTPError("http://127.0.0.1:18899/health", 503, "unavailable", {}, io.BytesIO(body))
+        self.addCleanup(error.close)
+        return error
+
+    def test_only_expected_paused_trigger_failures_pass_maintenance_probe(self):
+        triggers = ("test-planner.timer", "test-publish.path")
+        with patch.object(switcher.urllib.request, "build_opener") as build, \
+                patch.object(switcher.time, "monotonic", return_value=0), \
+                patch.object(switcher.time, "sleep") as sleep:
+            build.return_value.open.side_effect = self.unavailable([name + ":inactive" for name in triggers])
+            self.assertIsNone(switcher.health(18899, maintenance_triggers=triggers))
+            build.return_value.open.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_other_503_failures_and_normal_probe_never_pass(self):
+        expected = "test-planner.timer:inactive"
+        cases = [
+            ([expected, "database_unavailable"], ("test-planner.timer",)),
+            (["other-planner.timer:inactive"], ("test-planner.timer",)),
+            (["test-planner.timer:failed"], ("test-planner.timer",)),
+            ([], ("test-planner.timer",)),
+            ([expected], ()),
+        ]
+        for problems, triggers in cases:
+            with self.subTest(problems=problems, maintenance_triggers=triggers), \
+                    patch.object(switcher.urllib.request, "build_opener") as build, \
+                    patch.object(switcher.time, "monotonic", side_effect=[0, 16]), \
+                    patch.object(switcher.time, "sleep") as sleep:
+                build.return_value.open.side_effect = self.unavailable(problems)
+                with self.assertRaisesRegex(RuntimeError, "health_failed:18899"):
+                    switcher.health(18899, maintenance_triggers=triggers)
+                sleep.assert_not_called()
 
 
 if __name__ == "__main__":

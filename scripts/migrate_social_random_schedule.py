@@ -28,31 +28,82 @@ def _rows(c, table, where, args):
     return [dict(r) for r in c.execute(f'SELECT * FROM {table} WHERE {where}', args)] if _exists(c,table) else []
 
 
-def native_reason(c, task):
+NATIVE_EVIDENCE = (
+    ('fb_auto_publish_attempt', 'task_id', ''),
+    ('fb_auto_publish_ledger', 'task_id', ''),
+    ('pipeline_fb_claim', 'source_key', " AND stage='publish'"),
+    ('pipeline_fb_operation', 'source_key', " AND stage='publish'"),
+    ('pipeline_canonical_hold', 'source_key', ''),
+)
+DISPATCH_EVIDENCE = (
+    'pipeline_claim_history', 'pipeline_operation', 'pipeline_receipt',
+    'pipeline_publication', 'pipeline_resource', 'pipeline_legacy_resource',
+)
+
+
+def _matching_values(c, table, result_column, lookup_column, values, suffix=''):
+    values = sorted(set(values))
+    result = set()
+    if values and _exists(c, table):
+        # Older deployed SQLite builds allow only 999 bound variables. One
+        # batch covers this migration; larger manifests remain bounded too.
+        for offset in range(0, len(values), 900):
+            batch = values[offset:offset + 900]
+            placeholders = ','.join('?' for _ in batch)
+            result.update(row[0] for row in c.execute(
+                f'SELECT DISTINCT {result_column} FROM {table} '
+                f'WHERE {lookup_column} IN ({placeholders}){suffix}', batch))
+    return result
+
+
+def execution_evidence(c, task_ids):
+    """Read evidence once while apply holds both databases' write transaction.
+
+    Evidence cannot change concurrently under BEGIN IMMEDIATE, and migration
+    writes only schedule fields. Native task and dispatch job state are still
+    checked on each pass; only immutable execution evidence is cached here.
+    """
+    task_ids = {int(value) for value in task_ids}
+    source_keys = {'fb:auto:' + str(value) for value in task_ids}
+    native = {
+        table: _matching_values(c, table, column, column,
+                                task_ids if column == 'task_id' else source_keys, suffix)
+        for table, column, suffix in NATIVE_EVIDENCE
+    }
+    job_ids = _matching_values(c, 'dispatch.pipeline_job', 'id', 'source_key',
+                               source_keys, " AND stage='publish'")
+    dispatch = {
+        table: _matching_values(c, 'dispatch.' + table, 'job_id', 'job_id', job_ids)
+        for table in DISPATCH_EVIDENCE
+    }
+    return {'native': native, 'dispatch': dispatch}
+
+
+def native_reason(c, task, evidence=None):
     key='fb:auto:'+str(task['id'])
     if task['status'] not in {'planned','ready'}:
         return 'preserved_'+task['status']
     # started_at/attempt_count also describe media preparation, not publication.
     if any(task.get(k) for k in ('graph_post_id','unknown_outcome','lease_owner','lease_expires_at_utc')):
         return 'native_execution_or_receipt'
-    for table,condition,args in (
-        ('fb_auto_publish_attempt','task_id=?',(task['id'],)),
-        ('fb_auto_publish_ledger','task_id=?',(task['id'],)),
-        ('pipeline_fb_claim',"source_key=? AND stage='publish'",(key,)),
-        ('pipeline_fb_operation',"source_key=? AND stage='publish'",(key,)),
-        ('pipeline_canonical_hold','source_key=?',(key,))):
-        if _rows(c,table,condition,args): return table
+    for table,column,suffix in NATIVE_EVIDENCE:
+        identity = task['id'] if column == 'task_id' else key
+        found = (identity in evidence['native'][table] if evidence is not None
+                 else bool(_rows(c,table,column+'=?'+suffix,(identity,))))
+        if found: return table
     return ''
 
 
-def dispatch_reason(c, task_id):
+def dispatch_reason(c, task_id, evidence=None):
     key='fb:auto:'+str(task_id)
     jobs=_rows(c,'dispatch.pipeline_job',"source_key=? AND stage='publish'",(key,))
     for job in jobs:
         if job['status'] not in {'queued','ready'} or any(job.get(k) for k in ('generation','claim_hash','external_intent','canonical_receipt','lease_expires_at','hold_reason')):
             return 'dispatch_execution_or_hold'
-        for table in ('pipeline_claim_history','pipeline_operation','pipeline_receipt','pipeline_publication','pipeline_resource','pipeline_legacy_resource'):
-            if _rows(c,'dispatch.'+table,'job_id=?',(job['id'],)): return table
+        for table in DISPATCH_EVIDENCE:
+            found = (job['id'] in evidence['dispatch'][table] if evidence is not None
+                     else bool(_rows(c,'dispatch.'+table,'job_id=?',(job['id'],))))
+            if found: return table
     return ''
 
 
@@ -163,6 +214,8 @@ def apply_plan(fb,dispatch,plan,*,now=None):
     try:
         c.execute('BEGIN IMMEDIATE')
         daily.ensure_schema(c,now=now,effective_date=plan['effective_date'])
+        evidence=execution_evidence(c,(entry['task_id'] for group in plan['groups']
+                                       for entry in group['entries'] if entry['change_policy']))
         for group in plan['groups']:
             # Revalidate under the write transaction. A concurrently changed
             # task only preserves its Page's day (spacing is Page-local).
@@ -172,7 +225,7 @@ def apply_plan(fb,dispatch,plan,*,now=None):
                 row=c.execute('SELECT * FROM fb_auto_task WHERE id=?',(entry['task_id'],)).fetchone()
                 if row is None:raise ValueError('task_identity_removed')
                 task=dict(row)
-                reason=native_reason(c,task) or dispatch_reason(c,task['id']) if entry['change_policy'] else ''
+                reason=native_reason(c,task,evidence) or dispatch_reason(c,task['id'],evidence) if entry['change_policy'] else ''
                 if digest(stable_facts(task))!=entry['facts_sha256'] or task['planned_publish_at_utc'] not in {entry['before'],entry['after']}:
                     reason=reason or 'task_changed_since_preview'
                 if reason:
@@ -202,7 +255,7 @@ def apply_plan(fb,dispatch,plan,*,now=None):
                 if digest(stable_facts(task))!=entry['facts_sha256']:raise ValueError('task_facts_changed:'+str(entry['task_id']))
                 if task['planned_publish_at_utc'] not in {entry['before'],entry['after']}:raise ValueError('task_time_changed')
                 if entry['change_policy']:
-                    reason=native_reason(c,task) or dispatch_reason(c,task['id'])
+                    reason=native_reason(c,task,evidence) or dispatch_reason(c,task['id'],evidence)
                     if reason:raise ValueError('task_execution_changed:'+str(task['id'])+':'+reason)
                     c.execute('UPDATE fb_auto_task SET planned_publish_at_utc=?,schedule_policy=? WHERE id=?',(entry['after'],daily.POLICY,task['id']))
                     for job in _rows(c,'dispatch.pipeline_job',"source_key=? AND stage='publish'",('fb:auto:'+str(task['id']),)):

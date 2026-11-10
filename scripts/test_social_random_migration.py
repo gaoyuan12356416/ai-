@@ -4,9 +4,11 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from features import social_random_schedule as daily
 from scripts.migrate_social_random_schedule import build_plan,apply_plan,reverse_before_effective
+from scripts import migrate_social_random_schedule as migration
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -48,6 +50,64 @@ class MigrationTests(unittest.TestCase):
                 c.execute("INSERT INTO pipeline_job(id,source_key,stage,status,scheduled_at,source_meta_json,payload_json) VALUES(?,?,'publish','ready','2026-11-11T12:00:00Z','{}',?)",(identity,'fb:auto:'+str(identity),json.dumps({'planned_publish_at_utc':'2026-11-11T12:00:00+00:00','artifact':'keep'})))
 
     def plan(self):return build_plan(self.fb,self.dispatch,'2026-11-11',now=self.now)
+
+    def evidence_tables(self):
+        with connect(self.fb) as c:
+            c.executescript("""
+                CREATE TABLE fb_auto_publish_ledger(task_id INTEGER);
+                CREATE TABLE pipeline_fb_claim(source_key TEXT,stage TEXT);
+                CREATE TABLE pipeline_fb_operation(source_key TEXT,stage TEXT);
+                CREATE TABLE pipeline_canonical_hold(source_key TEXT);
+            """)
+        with connect(self.dispatch) as c:
+            for table in migration.DISPATCH_EVIDENCE:
+                c.execute('CREATE TABLE '+table+'(job_id INTEGER)')
+
+    def test_apply_reads_each_evidence_table_once_under_write_transaction(self):
+        self.evidence_tables()
+        plan=self.plan()
+        statements=[]
+        original_connect=migration.connect
+        def traced_connect(*args,**kwargs):
+            c=original_connect(*args,**kwargs)
+            c.set_trace_callback(statements.append)
+            return c
+        with mock.patch.object(migration,'connect',side_effect=traced_connect):
+            self.assertEqual(apply_plan(self.fb,self.dispatch,plan,now=self.now)['retimed'],2)
+        begin=statements.index('BEGIN IMMEDIATE');commit=statements.index('COMMIT')
+        tables=[t for t,_,_ in migration.NATIVE_EVIDENCE]+['dispatch.'+t for t in migration.DISPATCH_EVIDENCE]
+        for table in tables:
+            reads=[i for i,sql in enumerate(statements) if ' FROM '+table+' WHERE ' in sql]
+            self.assertEqual(len(reads),1,table)
+            self.assertLess(begin,reads[0]);self.assertLess(reads[0],commit)
+
+    def test_every_cached_evidence_type_preserves_only_affected_page(self):
+        self.evidence_tables()
+        with connect(self.fb) as c:
+            for identity in range(3,13):
+                c.execute("INSERT INTO fb_auto_task(id,run_id,template_id,template_version,page_id,status,skip_reason,planned_publish_at_utc) VALUES(?,1,3,2,?,'ready','','2026-11-11T12:00:00+00:00')",(identity,str(identity)))
+        with connect(self.dispatch) as c:
+            for identity in range(3,13):
+                c.execute("INSERT INTO pipeline_job(id,source_key,stage,status,scheduled_at,source_meta_json,payload_json) VALUES(?,?,'publish','ready','2026-11-11T12:00:00Z','{}','{}')",(identity,'fb:auto:'+str(identity)))
+        plan=self.plan()
+        expected={}
+        with connect(self.fb) as c:
+            for identity,(table,column,suffix) in enumerate(migration.NATIVE_EVIDENCE,1):
+                value=identity if column=='task_id' else 'fb:auto:'+str(identity)
+                if suffix:c.execute('INSERT INTO '+table+' VALUES(?,\'publish\')',(value,))
+                else:c.execute('INSERT INTO '+table+' VALUES(?)',(value,))
+                expected[identity]=table
+            c.execute("INSERT INTO pipeline_fb_operation VALUES('fb:auto:12','prepare')")
+        with connect(self.dispatch) as c:
+            for identity,table in enumerate(migration.DISPATCH_EVIDENCE,6):
+                c.execute('INSERT INTO '+table+' VALUES(?)',(identity,))
+                expected[identity]=table
+            c.execute('INSERT INTO pipeline_operation VALUES(9999)')
+        result=apply_plan(self.fb,self.dispatch,plan,now=self.now)
+        self.assertEqual(result['retimed'],1)
+        self.assertEqual({r['task_id']:r['reason'] for r in result['skipped']},expected)
+        with connect(self.fb) as c:
+            self.assertEqual(c.execute('SELECT id FROM fb_auto_task WHERE schedule_policy=?',(daily.POLICY,)).fetchall(),[(12,)])
 
     def test_retime_preserves_artifact_and_preparation_attempts(self):
         plan=self.plan();self.assertEqual(len(plan['groups'][0]['entries']),2)

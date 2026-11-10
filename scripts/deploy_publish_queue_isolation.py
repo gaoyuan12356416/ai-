@@ -138,13 +138,24 @@ def refine_fb(source,commit,directory):
     item['files'][rel]['after']=sha(target);item['followup_commit']=commit;save(path,m)
     print(json.dumps({'refined':'fb','commit':commit}),flush=True)
 
-def health(port):
+def health(port,maintenance_triggers=()):
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     until=time.monotonic()+15
     while True:
         try:
             with opener.open('http://127.0.0.1:%s/health'%port,timeout=2) as r:
                 if r.status==200:return
+        except urllib.error.HTTPError as exc:
+            # TT reports 503 while its scheduler wakeups are deliberately
+            # stopped for this switch. Only those exact expected failures may
+            # pass the process probe; full readiness is checked after restore.
+            if exc.code==503 and maintenance_triggers:
+                try:
+                    body=json.loads(exc.read())
+                    problems=body.get('automation',{}).get('problems',[])
+                    expected={name+':inactive' for name in maintenance_triggers}
+                    if problems and set(problems)<=expected:return
+                except (ValueError,AttributeError,TypeError):pass
         except OSError:pass
         if time.monotonic()>until:raise RuntimeError('health_failed:'+str(port))
         time.sleep(.25)
@@ -248,7 +259,7 @@ def switch(directory,lane,rollback=False,*,preserve_queue_scopes=False):
         for u,port,_ in units:run(['systemctl','start',u],timeout=15)
         for u,_,_ in units:assert run(['systemctl','is-active',u])=='active'
         for dependent in paths:run(['systemctl','start',dependent],timeout=15)
-        for _,port,_ in units:health(port)
+        for _,port,_ in units:health(port,maintenance_triggers=triggers)
     except BaseException:
         if swapped:
             run(['systemctl','--job-mode=ignore-dependencies','stop',*[u for u,_,_ in units]],timeout=20)
