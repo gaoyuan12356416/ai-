@@ -174,11 +174,16 @@ class ProfileWriter(Writer):
         self.write_batch(sql, [('@current', '', encoded({'version': version, 'previous': previous}), '{}', '{}', 0)])
         # Retain the active generation and its predecessor for open dialogs and
         # rollback. This table is derived data, never a publication ledger.
-        with self.db.cursor() as cursor:
-            cursor.execute(f"SELECT profile_version FROM {TABLE} WHERE x_user_id='' AND profile_version<>'@current' ORDER BY profile_version DESC")
-            obsolete = [r[0] for r in cursor.fetchall() if r[0] not in (version, previous)]
-        for old in obsolete:
+        try:
             with self.db.cursor() as cursor:
-                cursor.execute(f'DELETE FROM {TABLE} WHERE profile_version=%s', (old,))
-            self.db.commit()
+                cursor.execute(f"SELECT profile_version FROM {TABLE} WHERE x_user_id='' AND profile_version<>'@current' ORDER BY profile_version DESC")
+                obsolete = [r[0] for r in cursor.fetchall() if r[0] not in (version, previous)]
+            for old in obsolete:
+                with self.db.cursor() as cursor:
+                    cursor.execute(f'DELETE FROM {TABLE} WHERE profile_version=%s', (old,))
+                self.db.commit()
+        except Exception:
+            # A retention failure must not misreport a verified publication as
+            # failed. The next hourly refresh retries cleanup of old versions.
+            print(encoded(dict(event='portrait_retention_delayed', version=version)), flush=True)
         return dict(version=version, **expected)

@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import io
 from pathlib import Path
 import sys
 import unittest
@@ -14,11 +15,44 @@ from features.x_tag_revenue.storage import Store, ProfileWriter, projections, en
 from features.x_tag_revenue.routes import dispatch
 from features.x_tag_revenue.integration import patch_columns
 from features.x_tag_publish.policy import Decision
+from features.x_tag_revenue.http_server import internal_profiles
 
 VERSION = '20261110T020000000000Z'
 
 
 class StorageTests(unittest.TestCase):
+    def test_internal_auth_precedes_database_query(self):
+        handler = Mock(); handler.headers = {}
+        with patch('features.x_tag_revenue.http_server.internal_token', return_value='fixture'), patch('features.x_tag_revenue.http_server.read_snapshot') as read:
+            internal_profiles(handler)
+            read.assert_not_called()
+        self.assertEqual(handler.send_json.call_args.args[0], 401)
+
+    def test_internal_reader_bounds_ids_and_returns_only_tree(self):
+        handler = Mock()
+        payload = json.dumps({'x_user_ids': ['123']}).encode()
+        handler.headers = {'Authorization': 'Bearer fixture', 'Content-Length': str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        with patch('features.x_tag_revenue.http_server.internal_token', return_value='fixture'), patch('features.x_tag_revenue.http_server.read_snapshot', return_value=({'accounts': {}}, {'version': VERSION})) as read:
+            internal_profiles(handler)
+            self.assertEqual(read.call_args.args[1], ['123'])
+        self.assertEqual(handler.send_json.call_args.args[0], 200)
+        payload = json.dumps({'x_user_ids': ['123'] * 201}).encode()
+        handler.headers['Content-Length'] = str(len(payload)); handler.rfile = io.BytesIO(payload)
+        with patch('features.x_tag_revenue.http_server.internal_token', return_value='fixture'), patch('features.x_tag_revenue.http_server.read_snapshot') as read:
+            internal_profiles(handler); read.assert_not_called()
+        self.assertEqual(handler.send_json.call_args.args[0], 400)
+
+    def test_publisher_uses_authenticated_loopback_and_reports_failure(self):
+        from features.x_tag_publish.policy import portrait_snapshot
+        from features.x_tag_publish.transport import Error
+        with patch.dict('os.environ', {'X_AUTO_POST_INTERNAL_TOKEN': 'fixture'}), patch('features.x_tag_publish.policy.rpc', return_value={'data': {'accounts': {}}, 'meta': {'version': VERSION}}) as rpc:
+            self.assertEqual(portrait_snapshot([123])[1]['version'], VERSION)
+            self.assertEqual(rpc.call_args.kwargs['payload'], {'x_user_ids': ['123']})
+            self.assertEqual(rpc.call_args.args[0], 'http://127.0.0.1:8896')
+            rpc.side_effect = Error('service_unavailable')
+            self.assertTrue(portrait_snapshot(['123'])[1]['unavailable'])
+
     def test_small_projections_preserve_hierarchy_and_decision(self):
         data, meta = snapshot()
         full = data['accounts']['channel']

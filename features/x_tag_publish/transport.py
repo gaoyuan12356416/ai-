@@ -17,7 +17,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 def rpc(base, path, token='', *, payload=None, method=None, cookie='', timeout=30):
     if base not in {'http://127.0.0.1:8810', 'http://127.0.0.1:8787', 'http://127.0.0.1:8821',
-                    'http://127.0.0.1:18843', 'http://127.0.0.1:8898'} or not path.startswith('/') or path.startswith('//'):
+                    'http://127.0.0.1:18843', 'http://127.0.0.1:8898', 'http://127.0.0.1:8896'} or not path.startswith('/') or path.startswith('//'):
         raise ValueError('invalid_loopback_route')
     headers = {'Accept': 'application/json'}
     if token:

@@ -24,7 +24,7 @@ from features.x_tag_revenue.integration import patch_columns
 ROOT = Path('/mnt/data-disk/x-channel-tag-revenue')
 BACKUPS = ROOT / 'database-backups'
 BASE = '0b8f2efb969585a17518894d9d4ebd5df5d46eda'
-CODE = ('storage.py', 'routes.py', 'refresh.py', 'integration.py')
+CODE = ('storage.py', 'routes.py', 'refresh.py', 'integration.py', 'http_server.py')
 UNCHANGED = ('drama-material-api.service', 'x-post-automation.service', 'x-auto-post-service.service', 'x-tag-post.service')
 
 
@@ -52,7 +52,7 @@ def prepare():
     changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
     # The active daemon predates the already deployed bd788728 preview UI;
     # staging also carries those reviewed static-only transformations forward.
-    allowed = {'features/x_tag_publish/' + n for n in ('policy.py', 'pool.py', 'gateway.py', 'staging.py')}
+    allowed = {'features/x_tag_publish/' + n for n in ('policy.py', 'pool.py', 'gateway.py', 'staging.py', 'transport.py')}
     allowed |= {'features/x_tag_revenue/' + n for n in CODE}
     allowed |= {'static/' + n for n in ('x-tag-revenue.js', 'x-tag-revenue.css', 'x-tag-publish-ui.js', 'x-tag-auto-publish-templates.js')}
     allowed |= {'static/' + n for n in ('x-tag-auto-publish-templates.html', 'x-tag-auto-publish-template.html', 'x-tag-auto-publish-runs.html', 'x-tag-material-pool.html', 'x-tag-post-logs.html')}
@@ -200,7 +200,10 @@ def rollback(backup, wait_seconds):
 
 
 def probe():
-    data, meta = Store().load(view='summary')
+    from features.x_tag_publish.policy import portrait_snapshot
+    data, meta = portrait_snapshot(['63027281'])
+    if meta.get('unavailable'):
+        raise RuntimeError('profile_internal_read_unavailable')
     print(json.dumps(dict(status='ok', version=meta['version'], accounts=len(data['accounts']),
                          summary_bytes=len(json.dumps(data).encode()), no_full_snapshot_cache=True)))
 

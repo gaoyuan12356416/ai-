@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from features.x_tag_revenue.core import label_index, labels, language
-from features.x_tag_revenue.routes import read_snapshot
+from .transport import rpc, Error as TransportError
 from features.x_tag_revenue.tags import VERSION as TAG_MAPPING_VERSION, lookup
 from features.x_tag_revenue.taxonomy import VERSION as HIERARCHY_VERSION, UNKNOWN, TYPES, AUDIENCES, THEMES, classify, collect_classifications
 
@@ -24,9 +24,13 @@ def canonical(value):
 
 def portrait_snapshot(x_user_ids=None):
     try:
-        data, meta = read_snapshot(os.environ.get('X_TAG_PORTRAIT_ROOT', '/mnt/data-disk/x-channel-tag-revenue'), x_user_ids)
-        return data, meta
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError):
+        # Low-privilege publishing users do not have SQL Gate access. The
+        # existing root read service owns that connection; this call grants
+        # neither database credentials nor broader OS permissions.
+        result = rpc('http://127.0.0.1:8896', '/internal/x-channel-tag-revenue',
+                     os.environ['X_AUTO_POST_INTERNAL_TOKEN'], payload={'x_user_ids': [str(uid) for uid in x_user_ids or [] if uid]}, timeout=25)
+        return result['data'], result['meta']
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, TransportError, subprocess.SubprocessError):
         return {'accounts': {}}, {'version': '', 'unavailable': True}
 
 

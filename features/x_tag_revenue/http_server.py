@@ -1,12 +1,44 @@
 """Independent local read-only API; existing main API remains the auth authority."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hmac
 import json
 import os
+from pathlib import Path
+import re
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from .routes import dispatch, DEFAULT_ROOT
+from .routes import dispatch, read_snapshot, DEFAULT_ROOT
+
+
+def internal_token():
+    for line in Path('/etc/x-tag-publisher.env').read_text().splitlines():
+        if line.startswith('X_AUTO_POST_INTERNAL_TOKEN='):
+            return line.split('=', 1)[1].strip().strip('"').strip("'")
+    return ''
+
+
+def internal_profiles(handler):
+    try:
+        token = internal_token()
+        if not token or not hmac.compare_digest(handler.headers.get('Authorization', '').encode(), ('Bearer ' + token).encode()):
+            return handler.send_json(401, {'message': '内部凭证无效'})
+        size = int(handler.headers.get('Content-Length', '0'))
+        if not 0 < size <= 16384:
+            return handler.send_json(400, {'message': '查询参数无效'})
+        try:
+            payload = json.loads(handler.rfile.read(size))
+        except ValueError:
+            return handler.send_json(400, {'message': '查询参数无效'})
+        ids = payload.get('x_user_ids') if isinstance(payload, dict) else None
+        if not isinstance(ids, list) or len(ids) > 200 or any(not isinstance(v, str) or not re.fullmatch(r'[0-9]{1,32}', v) for v in ids):
+            return handler.send_json(400, {'message': '频道参数无效'})
+        data, meta = read_snapshot(os.environ.get('X_TAG_REVENUE_ROOT', DEFAULT_ROOT), ids)
+        return handler.send_json(200, dict(data=data, meta=meta))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+        return handler.send_json(503, {'message': '画像数据库暂不可用'})
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -53,6 +85,12 @@ class Handler(BaseHTTPRequestHandler):
         if not parsed.path.startswith('/api/x-channel-tag-revenue'):
             return self.send_json(404, {'message': '未找到接口'})
         dispatch(self, parsed, authorize, os.environ.get('X_TAG_REVENUE_ROOT', DEFAULT_ROOT))
+
+    def do_POST(self):
+        if self.path != '/internal/x-channel-tag-revenue':
+            return self.send_json(404, {'message': '未找到接口'})
+        self.connection.settimeout(30)
+        internal_profiles(self)
 
 
 if __name__ == '__main__':
