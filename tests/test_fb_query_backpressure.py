@@ -113,6 +113,16 @@ class BackpressureTests(FBSourceLockTests):
             self.assertEqual(after['status'], 'queued')
             self.assertEqual(c.execute('SELECT COUNT(*) FROM native.fb_video_attempt').fetchone()[0], 1)
             self.assertTrue(plan(c, [claim['id']])['items'][0]['already_recovered'])
+            c.execute("UPDATE native.fb_video_task SET status='failed',error_code='source_busy'")
+            c.execute("UPDATE pipeline_job SET status='failed',error_code='source_busy',generation=2 WHERE id=?", (claim['id'],))
+            self.assertEqual(plan(c, [claim['id']], True)['excluded'][0]['reason'], 'no_unissued_query_permit')
+            c.execute("INSERT INTO pipeline_operation VALUES('unissued',?,2,'cpu-main','fb_video_publish',?,'fb:page:100','intent',?,?)",
+                      (claim['id'], 'a'*64, stamp(self.now), stamp(self.now)))
+            continued = plan(c, [claim['id']], True)
+            self.assertEqual(continued['excluded'], [])
+            apply(c, continued);c.commit()
+            self.assertEqual(c.execute("SELECT status FROM pipeline_operation WHERE operation_id='unissued'").fetchone()[0], 'confirmed_unissued')
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM pipeline_event WHERE event_type='authorized_fb_unpublished_query_retry'").fetchone()[0], 1)
             # A distinct unknown task is excluded even if its label says busy.
             c.execute("UPDATE pipeline_job SET source_key='fb:video:other',source_id='other',status='unknown' WHERE id=?", (claim['id'],))
             c.execute("DELETE FROM pipeline_event WHERE event_type='authorized_fb_unpublished_recovery'")

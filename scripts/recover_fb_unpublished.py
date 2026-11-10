@@ -19,6 +19,7 @@ from features.pipeline_dispatch.core import dumps
 PREWRITE = {'identity_unavailable', 'group_pool_source_unavailable', 'source_busy'}
 REJECTED = {'fb_graph_190', 'fb_graph_368'}
 EVENT = 'authorized_fb_unpublished_recovery'
+QUERY_RETRY_EVENT = 'authorized_fb_unpublished_query_retry'
 
 def sha(value):
     return hashlib.sha256(dumps(value).encode()).hexdigest()
@@ -30,13 +31,16 @@ def require(condition, reason):
 def rows(c, sql, args=()):
     return [dict(r) for r in c.execute(sql, args)]
 
-def proof(c, job_id):
+def proof(c, job_id, retry_query=False):
     j = rows(c, 'SELECT * FROM pipeline_job WHERE id=?', (job_id,))
     require(len(j) == 1, 'job_missing')
     j = j[0]
     require(j['channel'] == 'fb' and j['stage'] == 'publish' and j['family'] in {'video', 'auto'}, 'scope_invalid')
     require(j['source_key'] == 'fb:%s:%s' % (j['family'], j['source_id']), 'source_identity_changed')
     prior = rows(c, 'SELECT details_json FROM pipeline_event WHERE job_id=? AND event_type=?', (job_id, EVENT))
+    if retry_query:
+        require(len(prior) == 1 and j['error_code'] == 'source_busy', 'not_recovered_query_failure')
+        prior = rows(c, 'SELECT details_json FROM pipeline_event WHERE job_id=? AND event_type=?', (job_id, QUERY_RETRY_EVENT))
     if prior:
         return {'job_id': job_id, 'source_key': j['source_key'], 'already_recovered': True}
     now = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -78,6 +82,8 @@ def proof(c, job_id):
     # The empty native operation plus only completed rejection/preflight rows
     # excludes a partial begin_attempt and every accepted/unknown response.
     missing = [o['operation_id'] for o in central_ops if o['operation_id'] not in issued]
+    if retry_query:
+        require(any(o['operation_id'] in missing and o['generation'] == j['generation'] for o in central_ops), 'no_unissued_query_permit')
     for table2, key2 in [('fb_video_task', 'task_id'), ('fb_auto_task', 'id')]:
         created = 'created_at_utc'
         competing = rows(c, 'SELECT '+key2+' FROM native.'+table2+" WHERE page_id=? AND material_id=? AND "+created+">=? AND (status IN ('published','submitted','unknown','running') OR graph_post_id<>'' OR unknown_outcome=1)" + (' AND '+key2+'<>?' if table2 == table else ''),
@@ -89,12 +95,15 @@ def proof(c, job_id):
             'attempts': len(attempts), 'explicit_rejections': len(operations), 'unissued_permits': missing,
             'state_sha256': sha(state)}
 
-def plan(c, ids):
+def plan(c, ids, retry_query=False):
     require(ids and len(ids) == len(set(ids)) and all(type(x) is int and x > 0 for x in ids), 'exact_ids_required')
     items, excluded = [], []
     for job_id in sorted(ids):
         try:
-            items.append(proof(c, job_id))
+            item = proof(c, job_id, retry_query)
+            if retry_query:
+                item['query_retry'] = True
+            items.append(item)
         except ValueError as exc:
             excluded.append({'job_id': job_id, 'reason': str(exc)})
     return {'items': items, 'excluded': excluded, 'plan_sha256': sha({'items': items, 'excluded': excluded})}
@@ -116,7 +125,7 @@ def apply(c, prepared):
         c.execute("UPDATE pipeline_job SET status='queued',source_status=?,external_intent=0,node_id='',worker_id='',claim_hash='',lease_expires_at='',error_code='',error_message='',finished_at='',started_at='',updated_at=? WHERE id=? AND status='failed'",
                   ('ready' if row['family'] == 'auto' else 'queued', now, row['job_id']))
         c.execute('INSERT INTO pipeline_event(job_id,event_type,details_json,created_at) VALUES(?,?,?,?)',
-                  (row['job_id'], EVENT, dumps({**row, 'plan_sha256': prepared['plan_sha256'], 'actor': 'operator_authorized', 'recovered_at': now}), now))
+                  (row['job_id'], QUERY_RETRY_EVENT if row.get('query_retry') else EVENT, dumps({**row, 'plan_sha256': prepared['plan_sha256'], 'actor': 'operator_authorized', 'recovered_at': now}), now))
 
 def backup(source, target):
     require(not target.exists(), 'backup_exists')
@@ -131,6 +140,7 @@ def main():
     for name in ('central', 'native', 'job-ids', 'output'):
         p.add_argument('--'+name, required=True)
     p.add_argument('--apply', action='store_true'); p.add_argument('--plan-sha256'); p.add_argument('--backup-dir')
+    p.add_argument('--retry-query-failure', action='store_true', help='One bounded continuation of an already recovered task stopped by an unissued busy credential lookup')
     a = p.parse_args(); ids = json.loads(Path(a.job_ids).read_text())
     if a.apply:
         require(a.plan_sha256 and a.backup_dir, 'apply_requires_plan_and_backup')
@@ -141,7 +151,7 @@ def main():
         c.row_factory = sqlite3.Row
         c.execute('ATTACH DATABASE ? AS native', (Path(a.native).resolve().as_uri()+'?mode='+mode,))
         c.execute('BEGIN IMMEDIATE' if a.apply else 'BEGIN')
-        result = plan(c, ids)
+        result = plan(c, ids, a.retry_query_failure)
         if a.apply:
             require(result['plan_sha256'] == a.plan_sha256, 'plan_changed')
             apply(c, result); c.commit()

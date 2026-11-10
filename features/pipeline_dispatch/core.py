@@ -499,7 +499,7 @@ class DispatchStore:
                 or any(offer.get(k) for k in ("unknown_outcome", "publish_id", "legacy_inflight", "fb_page_write_active", "hold_reason"))
                 or row["external_intent"]):
             return False
-        event = c.execute("SELECT details_json FROM pipeline_event WHERE job_id=? AND event_type='authorized_fb_unpublished_recovery' ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+        event = c.execute("SELECT details_json FROM pipeline_event WHERE job_id=? AND event_type IN ('authorized_fb_unpublished_recovery','authorized_fb_unpublished_query_retry') ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
         if not event:
             return False
         proof = json.loads(event[0])
