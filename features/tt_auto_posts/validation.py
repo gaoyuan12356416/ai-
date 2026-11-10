@@ -8,7 +8,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, Mapping, Optional
 
-from features.tt_posts.core import TTPostError, caption_uses_code_macro, render_caption_template
+from features.tt_posts.core import TTPostError, render_caption_template
 
 
 RESOURCE_TYPE_V2_LABELS = {
@@ -37,6 +37,13 @@ RESOURCE_TYPE_V2_LABELS = {
     "22": "AI翻译解说剧首发",
     "100": "小说",
 }
+
+VIDEO_TEMPLATE_RANDOM_OVERLAY = "random_overlay"
+VIDEO_TEMPLATE_DIRECT_OUTRO = "direct_outro"
+DEFAULT_VIDEO_TEMPLATE = VIDEO_TEMPLATE_RANDOM_OVERLAY
+VIDEO_TEMPLATE_VALUES = frozenset(
+    {VIDEO_TEMPLATE_RANDOM_OVERLAY, VIDEO_TEMPLATE_DIRECT_OUTRO}
+)
 
 
 class ValidationError(ValueError):
@@ -262,17 +269,14 @@ def _schedule(raw: Any) -> Dict[str, Any]:
 
 def _caption_template(value: Any) -> str:
     template = _text(value, "发布文案", minimum=1, maximum=20000)
-    if caption_uses_code_macro(template):
-        raise ValidationError(
-            "tt_auto_caption_code_unsupported",
-            "自动发布模板暂不支持{code}变量",
-        )
     try:
         render_caption_template(
             template,
             "123456",
             description="Drama description",
             defer_url=True,
+            defer_code=True,
+            defer_drama_name=True,
         )
     except TTPostError as exc:
         raise ValidationError(
@@ -283,12 +287,30 @@ def _caption_template(value: Any) -> str:
     return template
 
 
+def normalize_video_template(value: Any = None, *, missing: bool = False) -> str:
+    if missing:
+        return DEFAULT_VIDEO_TEMPLATE
+    if not isinstance(value, str):
+        raise ValidationError("invalid_request", "视频制作模板无效")
+    normalized = value.strip()
+    if normalized not in VIDEO_TEMPLATE_VALUES:
+        raise ValidationError("invalid_request", "视频制作模板无效")
+    return normalized
+
+
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
+    if "video_template" not in value:
+        raise ValidationError(
+            "tt_auto_video_template_required",
+            "视频制作模板字段缺失，请强制刷新页面后重新保存",
+            409,
+        )
     required = {
         "name",
         "account_ids",
         "caption_template",
+        "video_template",
         "drama_rule",
         "material_rule",
         "schedule",
@@ -320,6 +342,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "name": _text(value.get("name"), "模板名称", minimum=1, maximum=120),
         "account_ids": account_ids,
         "caption_template": _caption_template(value.get("caption_template")),
+        "video_template": normalize_video_template(value.get("video_template")),
         "metric_window_days": _integer(
             value.get("metric_window_days", 7), "指标统计窗口", 1, 30
         ),
@@ -350,11 +373,16 @@ def config_hash(value: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "DEFAULT_VIDEO_TEMPLATE",
+    "VIDEO_TEMPLATE_DIRECT_OUTRO",
+    "VIDEO_TEMPLATE_RANDOM_OVERLAY",
+    "VIDEO_TEMPLATE_VALUES",
     "ValidationError",
     "canonical_json",
     "config_hash",
     "expected_version",
     "is_placeholder_secret",
     "normalize_template_payload",
+    "normalize_video_template",
     "valid_internal_bearer",
 ]

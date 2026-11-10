@@ -114,7 +114,8 @@ class Worker:
             try:
                 snap = json.loads(task["snapshot_json"])
                 result = self.gpu.prepare(job_id=task["gpu_job_id"], content_id=task["content_id"],
-                                          source_url=snap["material"]["media_url"], video_template="random_overlay")
+                                          source_url=snap["material"]["media_url"], video_template="random_overlay",
+                                          **({"page_pool": True} if task.get("source_kind") == "pool" else {}))
                 if not isinstance(result.get("random_overlay_recipe"), dict) or not result["random_overlay_recipe"]:
                     raise DomainError("prepared_recipe_missing", "GPU没有返回可冻结的随机加工配方", 409)
                 return self.store.finish_stage(task, "prepare", result)
@@ -160,11 +161,13 @@ class Worker:
             elif self.sources is not None:
                 manual = task.get("source_kind") == "manual" and "pool" not in snap
                 self.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
-                # Manual and Page-pool tasks both waive the blacklist. Keep
-                # pool release/language/metadata checks on the strict path.
+                # Page pools do not require a product or a released Dramawave mapping.
+                # Keep source video identity and Page language validation intact.
                 enforce_blacklist = task.get("source_kind") not in {"manual", "pool"}
+                material_policy = {"page_pool": True} if task.get("source_kind") == "pool" or "pool" in snap else {}
                 fresh = self.sources.get_materials([task["material_id"]], need_desc=False,
-                                                   enforce_blacklist=enforce_blacklist, manual=manual)[task["material_id"]]
+                                                   enforce_blacklist=enforce_blacklist, manual=manual,
+                                                   **material_policy)[task["material_id"]]
                 if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                     raise DomainError("material_identity_changed", "素材来源身份已变化，未向平台发布", 409)
             media_url = str(prepared.get("media_url") or "")

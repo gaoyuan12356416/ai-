@@ -1178,8 +1178,12 @@ def _legacy_run_date(created_at):
         ) from None
 
 
-def normalize_material_key(value, error_code="invalid_request"):
+def normalize_material_key(value, error_code="invalid_request", *, allow_episode=False):
     raw = str(value or "").strip()
+    if allow_episode:
+        from features.x_video_publish.material_identity import is_episode_id, normalize_material_id
+        if is_episode_id(raw):
+            return normalize_material_id(raw)
     if not re.fullmatch(r"[0-9]+", raw):
         raise XPostError(error_code, "素材ID必须为正十进制整数", 500 if error_code != "invalid_request" else 400)
     parsed = int(raw)
@@ -2487,6 +2491,38 @@ def ensure_storage(db_path):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_post_drama_cancel_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_item_id INTEGER NOT NULL,
+                    content_id TEXT NOT NULL,
+                    from_generation INTEGER NOT NULL
+                        CHECK(from_generation>0),
+                    to_generation INTEGER NOT NULL
+                        CHECK(to_generation=from_generation+1),
+                    from_status TEXT NOT NULL,
+                    from_free_episode_count INTEGER NOT NULL
+                        CHECK(from_free_episode_count>0),
+                    from_next_sub_number INTEGER NOT NULL
+                        CHECK(from_next_sub_number>0),
+                    from_published_episode_count INTEGER NOT NULL
+                        CHECK(from_published_episode_count>=0),
+                    from_assigned_account_id INTEGER NOT NULL
+                        CHECK(from_assigned_account_id>0),
+                    from_assigned_at TEXT NOT NULL DEFAULT '',
+                    from_assigned_source_queue_id INTEGER,
+                    actor_user_id TEXT NOT NULL,
+                    actor_name TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                        CHECK(reason='operator_full_replay_v1'),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(pool_item_id,to_generation),
+                    FOREIGN KEY(pool_item_id)
+                        REFERENCES x_post_drama_pool(id)
+                )
+                """
+            )
             queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(x_post_queue)")}
             additive_columns = {
                 "account_username": "TEXT NOT NULL DEFAULT ''",
@@ -2746,8 +2782,9 @@ def ensure_storage(db_path):
             legacy_rows = conn.execute(
                 "SELECT id,source_type,material_id,material_key,episode_key,"
                 "content_id,episode_number,drama_replay_generation,"
-                "run_date,created_at "
-                "FROM x_post_queue ORDER BY id"
+                "run_date,created_at,manual_run_id," +
+                ("copy_contract_version" if "copy_contract_version" in queue_columns else "1 AS copy_contract_version") +
+                " FROM x_post_queue ORDER BY id"
             ).fetchall()
             for row in legacy_rows:
                 source_type = str(row["source_type"] or "material").strip()
@@ -2775,14 +2812,17 @@ def ensure_storage(db_path):
                         )
                     material_key = ""
                 elif source_type == "material":
+                    allow_episode = int(row["copy_contract_version"] or 1) == 2 and bool(row["manual_run_id"])
                     material_key = normalize_material_key(
                         row["material_id"],
                         error_code="x_post_storage_conflict",
+                        allow_episode=allow_episode,
                     )
                     existing_material_key = str(row["material_key"] or "").strip()
                     if existing_material_key and normalize_material_key(
                         existing_material_key,
                         error_code="x_post_storage_conflict",
+                        allow_episode=allow_episode,
                     ) != material_key:
                         raise XPostError(
                             "x_post_storage_conflict",
@@ -4130,7 +4170,8 @@ def ensure_storage(db_path):
                       AND NEW.assigned_at=''
                       AND NEW.assigned_source_queue_id IS NULL
                       AND EXISTS(
-                          SELECT 1 FROM x_post_drama_replay_audit a
+                          SELECT 1 FROM (SELECT * FROM x_post_drama_replay_audit
+                                UNION ALL SELECT * FROM x_post_drama_cancel_audit) a
                            WHERE a.pool_item_id=OLD.id
                              AND a.content_id=OLD.content_id
                              AND a.from_generation=
@@ -4182,7 +4223,8 @@ def ensure_storage(db_path):
                       AND NEW.last_error_code=''
                       AND NEW.last_error_message=''
                       AND EXISTS(
-                          SELECT 1 FROM x_post_drama_replay_audit a
+                          SELECT 1 FROM (SELECT * FROM x_post_drama_replay_audit
+                                UNION ALL SELECT * FROM x_post_drama_cancel_audit) a
                            WHERE a.pool_item_id=OLD.id
                              AND a.content_id=OLD.content_id
                              AND a.from_generation=
@@ -4454,7 +4496,8 @@ def ensure_storage(db_path):
                 BEFORE INSERT ON x_post_queue
                 WHEN EXISTS(
                     SELECT 1 FROM x_post_manual_material_reservation r
-                     WHERE r.material_key=NEW.material_key
+                     WHERE (r.material_key=NEW.material_key OR (NEW.source_type='drama'
+                         AND length(NEW.material_id)=32 AND r.material_key=lower(NEW.material_id)))
                        AND r.state='active'
                        AND (
                            NEW.manual_run_id IS NULL
@@ -4476,10 +4519,11 @@ def ensure_storage(db_path):
             conn.execute(
                 """
                 CREATE TRIGGER trg_x_post_queue_manual_reservation_update
-                BEFORE UPDATE OF material_key,manual_run_id ON x_post_queue
+                BEFORE UPDATE OF material_key,material_id,source_type,manual_run_id ON x_post_queue
                 WHEN EXISTS(
                     SELECT 1 FROM x_post_manual_material_reservation r
-                     WHERE r.material_key=NEW.material_key
+                     WHERE (r.material_key=NEW.material_key OR (NEW.source_type='drama'
+                         AND length(NEW.material_id)=32 AND r.material_key=lower(NEW.material_id)))
                        AND r.state='active'
                        AND (
                            NEW.manual_run_id IS NULL
@@ -4784,7 +4828,7 @@ def _is_ordered_account_subset(values, configured):
     return ranks == sorted(ranks)
 
 
-def _manual_material_ids(values):
+def _manual_material_ids(values, *, allow_episode=False):
     if (
         not isinstance(values, list)
         or not values
@@ -4798,7 +4842,7 @@ def _manual_material_ids(values):
     normalized = []
     seen = set()
     for raw in values:
-        material_id = normalize_material_key(raw)
+        material_id = normalize_material_key(raw, allow_episode=allow_episode)
         if material_id in seen:
             raise XPostError(
                 "invalid_request",
@@ -5488,6 +5532,78 @@ class XPostStore:
             None,
         )
 
+    @staticmethod
+    def _restart_removed_drama_owners(conn, removed_ids, actor, timestamp):
+        """Operator-confirmed restart; keep every old queue and receipt immutable."""
+        if not removed_ids:
+            return []
+        placeholders = ",".join("?" for _ in removed_ids)
+        rows = conn.execute(
+            "SELECT * FROM x_post_drama_pool WHERE assigned_account_id IN (%s) "
+            "AND status IN ('pending','active','needs_review') "
+            "AND next_sub_number<=free_episode_count ORDER BY id" % placeholders,
+            tuple(removed_ids),
+        ).fetchall()
+        blockers = read_account_publish_blockers(conn, removed_ids)
+        restarted = []
+        for row in rows:
+            owner = int(row["assigned_account_id"])
+            if blockers.get(owner, {}).get("code") not in {
+                "x_account_not_publishable", "x_post_account_locked",
+                "x_account_verification_rejected",
+            }:
+                continue  # Healthy owners still require their existing binding.
+            # Unknown writes and work in progress cannot be cancelled as failures.
+            unsettled = conn.execute(
+                "SELECT q.id FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.drama_pool_item_id=? AND (q.status IN "
+                "('queued','reserved','publishing','waiting_relay') OR COALESCE(l.unknown_outcome,0)=1 "
+                "OR l.status IN ('post_creating','repost_creating') "
+                "OR EXISTS(SELECT 1 FROM x_post_repost_ledger r WHERE r.queue_id=q.id AND r.unknown_outcome=1)) LIMIT 1", (row["id"],),
+            ).fetchone()
+            if unsettled:
+                raise XPostError("x_post_drama_restart_unsettled",
+                    "短剧%s仍有执行中或结果待核实的旧任务%s，请先核实后再取消绑定" %
+                    (row["content_id"], unsettled["id"]), 409)
+            published = int(row["published_episode_count"])
+            queues = conn.execute(
+                "SELECT q.*,l.status log_status,l.unknown_outcome,l.x_post_id,l.x_post_url "
+                "FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
+                "WHERE q.drama_pool_item_id=? AND q.drama_replay_generation=? ORDER BY q.episode_number,q.id",
+                (row["id"], row["replay_generation"]),
+            ).fetchall()
+            confirmed = [q for q in queues if q["status"] == "published"]
+            if (published < 0 or int(row["next_sub_number"]) != published + 1
+                    or [q["episode_number"] for q in confirmed] != list(range(1, published + 1))
+                    or any(q["log_status"] != "published" or q["unknown_outcome"]
+                           or not q["x_post_id"] or not q["x_post_url"] for q in confirmed)
+                    or any(q["status"] not in ('published','failed') or q["log_status"] not in ('published','failed')
+                           for q in queues)):
+                raise XPostError("x_post_drama_restart_history_conflict",
+                    "短剧%s的旧发布记录尚不满足安全重发条件，请先核实首集及历史回执" % row["content_id"], 409)
+            if not actor.get("user_id") or not (actor.get("name") or actor.get("email")):
+                raise XPostError("invalid_request", "取消绑定需要完整操作人信息", 400)
+            conn.execute(
+                "INSERT INTO x_post_drama_cancel_audit("
+                "pool_item_id,content_id,from_generation,to_generation,from_status,from_free_episode_count,"
+                "from_next_sub_number,from_published_episode_count,from_assigned_account_id,from_assigned_at,"
+                "from_assigned_source_queue_id,actor_user_id,actor_name,reason,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row["id"],row["content_id"],row["replay_generation"],int(row["replay_generation"])+1,
+                 row["status"],row["free_episode_count"],row["next_sub_number"],published,owner,row["assigned_at"],
+                 row["assigned_source_queue_id"],str(actor["user_id"]),str(actor.get("name") or actor["email"]),
+                 DRAMA_REPLAY_REASON,timestamp),
+            )
+            conn.execute(
+                "UPDATE x_post_drama_pool SET replay_generation=replay_generation+1,status='pending',"
+                "next_sub_number=1,published_episode_count=0,assigned_account_id=0,assigned_at='',"
+                "assigned_source_queue_id=NULL,completed_at='',last_error_code='',last_error_message='',"
+                "priority_at=?,updated_at=? WHERE id=?", (timestamp,timestamp,row["id"]),
+            )
+            restarted.append({"pool_item_id":int(row["id"]),"content_id":row["content_id"],
+                              "previous_account_id":owner,"replay_generation":int(row["replay_generation"])+1})
+        return restarted
+
     def save_schedule_config(
         self,
         source_type,
@@ -5686,6 +5802,13 @@ class XPostStore:
                     "当前发布时间点正在冻结或执行，请在90秒窗口结束后再修改配置",
                     409,
                 )
+            restarted_dramas = []
+            restart_removed = payload.get("restart_removed_dramas", False)
+            if not isinstance(restart_removed, bool):
+                raise XPostError("invalid_request", "restart_removed_dramas必须是布尔值", 400)
+            if source_type == "drama" and restart_removed:
+                removed_ids = [value for value in current_item["account_ids"] if value not in account_ids]
+                restarted_dramas = self._restart_removed_drama_owners(conn, removed_ids, actor, timestamp)
             if enabled:
                 if source_type == "drama":
                     placeholders = ",".join(
@@ -5829,6 +5952,8 @@ class XPostStore:
                 )
             conn.commit()
         item = self.get_schedule_config(source_type, now=current_time)
+        if restarted_dramas:
+            item["restarted_dramas"] = restarted_dramas
         if skipped_account_ids:
             item["skipped_account_ids"] = skipped_account_ids
         return item
@@ -6297,6 +6422,7 @@ class XPostStore:
         allow_duration_pending=False,
         duration_policy_version=2,
         copy_contract_version=1,
+        allow_free_episode=False,
     ):
         if not isinstance(payload, dict):
             raise XPostError("invalid_request", "发布候选必须是对象", 400)
@@ -6489,10 +6615,10 @@ class XPostStore:
             )
         result["relay_account_username"] = relay_username
         if source_type == "material":
-            material_key = normalize_material_key(result["material_id"])
+            material_key = normalize_material_key(result["material_id"], allow_episode=allow_free_episode)
             supplied_material_key = payload.get("material_key")
             if supplied_material_key not in (None, ""):
-                supplied_material_key = normalize_material_key(supplied_material_key)
+                supplied_material_key = normalize_material_key(supplied_material_key, allow_episode=allow_free_episode)
                 if supplied_material_key != material_key:
                     raise XPostError(
                         "invalid_request",
@@ -6500,6 +6626,7 @@ class XPostStore:
                         400,
                     )
             result["material_key"] = material_key
+            result["material_id"] = material_key
             result["episode_key"] = ""
             result["episode_number"] = 0
             result["drama_replay_generation"] = 0
@@ -9246,6 +9373,7 @@ class XPostStore:
         )
         item["material_ids"] = _manual_material_ids(
             _json_array(item.pop("material_ids_json"), "material_ids"),
+            allow_episode=int(item.get("copy_contract_version", 1)) == 2 and item["trigger_source"] == MANUAL_TRIGGER_SOURCE,
         )
         if int(item.get("copy_contract_version", 1)) == 2:
             from features.x_video_publish.templates import normalize_caption
@@ -10145,6 +10273,8 @@ class XPostStore:
                 payload["account_drama_language"] = personal["drama_language"]
                 from features.x_video_publish.templates import render_caption
                 snapshot = json.loads(personal["source_snapshot_json"])
+                from features.x_video_publish.core import validate_episode_snapshot
+                validate_episode_snapshot(personal["material_id"], payload, snapshot)
                 frozen_copy = render_caption(
                     personal["caption"], snapshot.get("drama_name"),
                     snapshot.get("drama_description", snapshot.get("description")),
@@ -10166,6 +10296,7 @@ class XPostStore:
                 require_compliance=True,
                 duration_policy_version=duration_policy.version(frozen),
                 copy_contract_version=int(frozen.get("copy_contract_version", 1)),
+                allow_free_episode=personal is not None,
                 allow_deferred_media=os.environ.get("PIPELINE_X_DISPATCH_ENABLED") == "1",
             )
             if (
@@ -10248,7 +10379,8 @@ class XPostStore:
                 _json_array(run["account_ids_json"], "account_ids")
             )
             stored_materials = _manual_material_ids(
-                _json_array(run["material_ids_json"], "material_ids")
+                _json_array(run["material_ids_json"], "material_ids"),
+                allow_episode=personal is not None,
             )
             if stored_accounts != account_ids or stored_materials != material_ids:
                 conn.rollback()
@@ -15094,12 +15226,16 @@ class XPostStore:
         account_placeholders = ",".join(
             "?" for _item in ordered_account_ids
         )
+        from features.x_video_publish.material_identity import is_episode_id
+        resource_id = str(queue["material_id"] or "")
+        resource_id = resource_id.lower() if is_episode_id(resource_id) else ""
         unresolved = conn.execute(
             "SELECT 1 FROM x_post_queue q "
             "LEFT JOIN x_post_publish_log l ON l.queue_id=q.id "
             "LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id "
             "WHERE q.id<>? AND ((q.material_key<>'' AND q.material_key=?) "
-            "OR (q.episode_key<>'' AND q.episode_key=?)) AND (q.account_id IN (%s) "
+            "OR (q.episode_key<>'' AND q.episode_key=?) "
+            "OR (?<>'' AND q.material_id=? COLLATE NOCASE)) AND (q.account_id IN (%s) "
             "OR COALESCE(q.relay_account_id,0) IN (%s) "
             "OR COALESCE(r.relay_account_id,0) IN (%s)) "
             "AND (q.status='publishing' "
@@ -15113,7 +15249,7 @@ class XPostStore:
                 account_placeholders,
                 account_placeholders,
             ),
-            (int(queue["id"]), str(queue["material_key"] or ""), str(queue["episode_key"] or "")) + ordered_account_ids * 3,
+            (int(queue["id"]), str(queue["material_key"] or ""), str(queue["episode_key"] or ""), resource_id, resource_id) + ordered_account_ids * 3,
         ).fetchone()
         if unresolved is not None:
             raise XPostError(

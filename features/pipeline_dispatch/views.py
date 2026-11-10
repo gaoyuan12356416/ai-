@@ -254,7 +254,7 @@ def _summary(conn, scope, args, common, sources, channels, start, end, now):
                 applicable = not (phase == "platform_upload" and channel in ("fb", "tt") and stage == "publish" and not values)
                 efficiency.append({"channel": channel, "stage": stage, "phase": phase, "applicable": applicable, "samples": len(values), "p50_seconds": values[max(0, math.ceil(len(values) * .5) - 1)] if values else None, "p95_seconds": values[max(0, math.ceil(len(values) * .95) - 1)] if values else None})
     from .queue_states import add_summary
-    add_summary(conn, scope, args, by, totals, common, now)
+    add_summary(conn, scope, args, by, totals, common, now, start, end)
     return dict(common, queue_state_version=1, window={"start": start, "end": end, "timezone": "Asia/Shanghai"},
                 totals=totals, channels=list(by.values()), sources=sources, efficiency=efficiency)
 
@@ -417,7 +417,9 @@ def query(store, view, actor, filters):
                          (DEFAULT_PATHS if str(store.path) == DEFAULT_PATHS['dispatch'] else {}))
             paths['dispatch'] = str(store.path)
             try:
-                context = load_dispatch(paths, now, conn)
+                context = load_dispatch(paths, now, conn,
+                                        source_keys={item['source_key'] for item in result['items']} if view == 'tasks' else None,
+                                        skip_confirmed=view == 'summary')
                 if view == 'summary':
                     visible = {r[0] for r in conn.execute('SELECT DISTINCT j.source_key FROM pipeline_job j WHERE ' + scope, args)}
                     result['backlog'] = backlog(paths, context=context, cutoff=now, visible_keys=visible,
@@ -434,6 +436,11 @@ def query(store, view, actor, filters):
                 result['warnings'].append('跨日期核对暂不可用（' + type(exc).__name__ + '），数量不按零统计')
                 if view == 'summary':
                     result['backlog'] = {'available': False, 'unfinished': None, 'unqueued': None, 'channels': []}
+    if view == 'summary':
+        from .support_health import read_snapshot
+        support = read_snapshot(now, safe_actor, channels)
+        if support is not None:
+            result['fb_support'] = support
     with _LOCK:
         _CACHE[key] = (time.monotonic(), copy.deepcopy(result))
         _CACHE.move_to_end(key)

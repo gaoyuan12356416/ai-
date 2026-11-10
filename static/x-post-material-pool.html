@@ -644,7 +644,7 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=20260915retired"></script>
+  <script src="/quick-nav.js?v=d64e9c9ccd31"></script>
   <script data-version="20261012-drama-language">
     (() => {
       const state = {
@@ -1511,7 +1511,7 @@
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? "可发布" : (selected ? "不可发布，请移除" : "不可发布"));
+          setText(status, eligible ? "可发布" : (selected ? "异常，保存时自动跳过" : "不可发布"));
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });
@@ -1696,10 +1696,10 @@
         }
         const invalidSelected = selectedIds.filter(id => {
           const item = state.accountOptions.find(account => accountId(account) === id);
-          return !item || !accountEligible(item);
+          return !item;
         });
         if (invalidSelected.length) {
-          setScheduleMessage("已选账号中存在不可发布或已失效账号，请移除后再保存。", true);
+          setScheduleMessage("已选账号中存在未找到的账号，请刷新账号列表后再保存。", true);
           return;
         }
         state.scheduleBusy = true;
@@ -1723,7 +1723,11 @@
             }),
           });
           applySchedule(result);
-          setScheduleMessage(scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
+          const skipped = scheduleItem(result).skipped_account_ids || [];
+          const skippedMessage = skipped.length
+            ? `已跳过 ${skipped.length} 个异常账号，不参与发布；恢复后可重新勾选。${state.schedule.accountIds.size ? "" : "当前无可发布账号，已保存并关闭自动发布。"}`
+            : "";
+          setScheduleMessage((scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。") + skippedMessage, false);
           showToast("素材池自动发布设置已保存。", false);
         } catch (error) {
           setScheduleMessage(`保存失败：${error.message}`, true);
@@ -2249,5 +2253,7 @@
       init();
     })();
   </script>
+<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" />
+<script src="/x-tag-publish-entry.js?v=1"></script>
 </body>
 </html>

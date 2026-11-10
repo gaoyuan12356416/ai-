@@ -24,14 +24,24 @@ from features.tt_posts.service import (
 )
 from features.x_posts.selector import connect_read_only
 
+from .automation_health import probe_automation
 from .client import (
     TT_AUTO_ADMIN_PREFIX,
     contains_sensitive_key,
     safe_public_message,
 )
+from .code_broker import synthetic_queue_id
+from .code_broker_client import AutoCodeBrokerClient, DEFAULT_BROKER_URL
 from .core import AuditActor, PUBLISH_LOG_STATUS_GROUPS, TTPostAutoStore
-from .legacy_reader import LegacyTTPostReader
-from .publisher import AutoLiveGates, AutoPostExecutor, selector_rules
+from .legacy_reader import LegacyTTPostReader, LegacyTTPostReaderError
+from .publisher import (
+    DIRECT_OUTRO_MEDIA_PROFILE,
+    RANDOM_OVERLAY_MEDIA_PROFILE,
+    AutoLiveGates,
+    AutoPostExecutor,
+    VideoTemplateRoute,
+    selector_rules,
+)
 from .repositories import (
     BEIJING_TZ,
     MetricWindowRepository,
@@ -43,6 +53,8 @@ from .selector import (
     TwoStageSelector,
 )
 from .validation import (
+    VIDEO_TEMPLATE_DIRECT_OUTRO,
+    VIDEO_TEMPLATE_RANDOM_OVERLAY,
     ValidationError,
     expected_version,
     normalize_template_payload,
@@ -203,8 +215,11 @@ class TTAutoPostService:
         *,
         now_fn=lambda: datetime.now(UTC),
         runner_kick_path: Any = "/run/tt-auto-post/manual-kick",
+        automation_probe=None,
         schedule_grace_seconds: int = 600,
+        prepare_ahead_seconds: int = 0,
     ):
+        self.automation_probe = automation_probe
         self.store = store
         self.legacy_reader = legacy_reader
         self.account_repository = account_repository
@@ -214,12 +229,47 @@ class TTAutoPostService:
         self.now_fn = now_fn
         self.runner_kick_path = str(runner_kick_path or "").strip()
         self.schedule_grace_seconds = int(schedule_grace_seconds)
+        self.prepare_ahead_seconds = int(prepare_ahead_seconds)
         self._schedule_lock = threading.Lock()
         self._run_create_lock = threading.Lock()
         if not 60 <= self.schedule_grace_seconds <= 3600:
             raise AutoPostServiceError(
                 "tt_auto_schedule_config_invalid", "调度宽限时间无效", 500
             )
+        if not 0 <= self.prepare_ahead_seconds <= 43200:
+            raise AutoPostServiceError(
+                "tt_auto_schedule_config_invalid",
+                "prepare ahead window is invalid",
+                500,
+            )
+
+    def health(self) -> Dict[str, Any]:
+        automation = (self.automation_probe() if self.automation_probe else
+                      {"ready": True, "problems": [], "units": {}, "mode": "in_process"})
+        summaries = getattr(self.executor, "video_template_summaries", None)
+        video_templates = (
+            summaries()
+            if callable(summaries)
+            else [
+                {
+                    "key": VIDEO_TEMPLATE_RANDOM_OVERLAY,
+                    "profile": self.executor.media_profile_version,
+                    "source_trim_tail_seconds": (
+                        self.executor.source_trim_tail_seconds
+                    ),
+                }
+            ]
+        )
+        return {
+            "ok": automation["ready"],
+            "automation": automation,
+            "service": "tt-auto-post",
+            "gates": self.executor.gates.as_dict(),
+            "profile": self.executor.media_profile_version,
+            "source_trim_tail_seconds": self.executor.source_trim_tail_seconds,
+            "prepare_ahead_seconds": self.prepare_ahead_seconds,
+            "video_templates": video_templates,
+        }
 
     def _now(self) -> datetime:
         value = self.now_fn()
@@ -750,17 +800,23 @@ class TTAutoPostService:
         try:
             now = self._now()
             shanghai = now.astimezone(BEIJING_TZ)
-            day = shanghai.date().isoformat()
+            cutoff_shanghai = (
+                now + timedelta(seconds=self.prepare_ahead_seconds)
+            ).astimezone(BEIJING_TZ)
+            days = [shanghai.date().isoformat()]
+            if cutoff_shanghai.date() != shanghai.date():
+                days.append(cutoff_shanghai.date().isoformat())
             created = []
             for template in self.store.list_templates(enabled=True):
-                for publish_time in self._schedule_times(template, day):
+                for day, publish_time in (
+                    (day, publish_time)
+                    for day in days
+                    for publish_time in self._schedule_times(template, day)
+                ):
                     hour, minute = (int(value) for value in publish_time.split(":"))
-                    slot = shanghai.replace(
-                        hour=hour,
-                        minute=minute,
-                        second=0,
-                        microsecond=0,
-                    ).astimezone(UTC)
+                    slot = datetime.fromisoformat(
+                        day + "T%02d:%02d:00" % (hour, minute)
+                    ).replace(tzinfo=BEIJING_TZ).astimezone(UTC)
                     try:
                         enabled_at = datetime.fromisoformat(
                             str(template.enabled_at_utc).replace("Z", "+00:00")
@@ -774,7 +830,10 @@ class TTAutoPostService:
                     if slot < enabled_at:
                         continue
                     age = (now - slot).total_seconds()
-                    if age < 0 or age > self.schedule_grace_seconds:
+                    if (
+                        age < -self.prepare_ahead_seconds
+                        or age > self.schedule_grace_seconds
+                    ):
                         continue
                     try:
                         run, was_created = self._create_run(
@@ -801,6 +860,7 @@ class TTAutoPostService:
                 "created_runs": sorted(set(created)),
                 "current_shanghai_minute": shanghai.strftime("%Y-%m-%d %H:%M"),
                 "grace_seconds": self.schedule_grace_seconds,
+                "prepare_ahead_seconds": self.prepare_ahead_seconds,
                 "gates": self.executor.gates.as_dict(),
             }
         finally:
@@ -945,6 +1005,23 @@ class TTAutoPostService:
             else dict(empty)
         )
 
+        automatic_items = automatic.get("items", [])
+        if automatic_items:
+            route_to_task = {
+                synthetic_queue_id(item.get("task_id")): item
+                for item in automatic_items
+            }
+            try:
+                automatic_codes = self.legacy_reader.code_routes_for_queue_ids(
+                    route_to_task
+                )
+            except LegacyTTPostReaderError as exc:
+                if int(exc.status) < 500:
+                    raise AutoPostServiceError(exc.code, str(exc), exc.status) from None
+                automatic_codes = {}
+            for route_id, code in automatic_codes.items():
+                route_to_task[route_id]["code"] = code
+
         values = [
             dict(item)
             for result in (legacy, automatic)
@@ -1016,11 +1093,44 @@ class TTAutoPostService:
             "events": self.store.list_events(run_id=run.id),
         }
 
+    def force_close_task(
+        self, task_id: Any, raw: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        payload = dict(raw)
+        actor = _actor(payload)
+        if set(payload) != {"reason"}:
+            raise AutoPostServiceError("invalid_request", "强制关闭参数无效", 400)
+        reason = str(payload.get("reason") or "").strip()
+        if not reason or len(reason) > 200:
+            raise AutoPostServiceError("invalid_request", "强制关闭原因无效", 400)
+        audit_reason = "%s（操作人：%s / %s）" % (
+            reason,
+            actor.name or "未知",
+            actor.user_id or "未知",
+        )
+        task = self.executor.force_close_task(task_id, reason=audit_reason)
+        return {"ok": True, "task": self._task_item(task)}
+
     def execute_next(self, raw: Mapping[str, Any]) -> Dict[str, Any]:
         payload = dict(raw)
-        if set(payload) != {"worker_id"}:
+        if (
+            set(payload).difference({"worker_id", "phases"})
+            or "worker_id" not in payload
+        ):
             raise AutoPostServiceError("invalid_request", "执行器参数无效", 400)
-        return self.executor.execute_next(payload.get("worker_id"))
+        phases = payload.get("phases")
+        if phases is not None and (
+            isinstance(phases, (str, bytes))
+            or not isinstance(phases, list)
+            or not phases
+            or any(not isinstance(value, str) for value in phases)
+        ):
+            raise AutoPostServiceError(
+                "invalid_request", "executor phases are invalid", 400
+            )
+        return self.executor.execute_next(
+            payload.get("worker_id"), allowed_phases=phases
+        )
 
 
 def _required_env(source: Mapping[str, str], name: str) -> str:
@@ -1138,7 +1248,10 @@ def build_service_from_env(
         source_connection,
         schema=material_schema,
     )
-    store = TTPostAutoStore(db_path)
+    store = TTPostAutoStore(
+        db_path,
+        execution_not_before_utc=source.get("TT_AUTO_POST_EXECUTION_NOT_BEFORE_UTC", ""),
+    )
     legacy = LegacyTTPostReader(legacy_path)
     legacy.validate_schema()
     resolver = DramawaveMaterialResolver(
@@ -1171,18 +1284,69 @@ def build_service_from_env(
             "自动发布内部凭据必须与旧 TT 服务及 GPU 凭据独立",
             500,
         )
+    gpu_seal_key = _required_env(
+        source, "TT_POST_GPU_CREDENTIAL_SEAL_KEY_B64"
+    )
+    gpu_timeout = int(source.get("TT_POST_GPU_TIMEOUT", "900"))
+    gpu_prepare_timeout = int(
+        source.get("TT_POST_GPU_PREPARE_TIMEOUT", "9000")
+    )
     gpu = GPUClient(
         str(source.get("TT_POST_GPU_URL", "http://127.0.0.1:18830")),
         gpu_token,
-        _required_env(source, "TT_POST_GPU_CREDENTIAL_SEAL_KEY_B64"),
-        timeout=int(source.get("TT_POST_GPU_TIMEOUT", "900")),
-        prepare_timeout=int(source.get("TT_POST_GPU_PREPARE_TIMEOUT", "9000")),
+        gpu_seal_key,
+        timeout=gpu_timeout,
+        prepare_timeout=gpu_prepare_timeout,
+    )
+    direct_outro_gpu = GPUClient(
+        str(
+            source.get(
+                "TT_AUTO_POST_DIRECT_OUTRO_GPU_URL",
+                "http://127.0.0.1:18834",
+            )
+        ),
+        gpu_token,
+        gpu_seal_key,
+        timeout=gpu_timeout,
+        prepare_timeout=gpu_prepare_timeout,
+        allowed_loopback_ports=(18834,),
+    )
+    primary_trim = float(
+        source.get("TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS", "0")
+    )
+    primary_profile = str(
+        source.get(
+            "TT_POST_MEDIA_PROFILE_VERSION",
+            RANDOM_OVERLAY_MEDIA_PROFILE,
+        )
+        or ""
+    ).strip()
+    if primary_profile != RANDOM_OVERLAY_MEDIA_PROFILE or primary_trim != 0:
+        raise AutoPostServiceError(
+            "tt_auto_random_overlay_route_invalid",
+            "随机排重GPU路由的profile或trim配置不一致",
+            500,
+        )
+    prepare_ahead_seconds = int(
+        source.get("TT_AUTO_POST_PREPARE_AHEAD_SECONDS", "0")
     )
     executor = AutoPostExecutor(
         store,
         selector,
         account_repository.as_account_source(),
         gpu,
+        code_route_broker=AutoCodeBrokerClient(
+            str(
+                source.get(
+                    "TT_AUTO_CODE_ROUTE_SERVICE_URL",
+                    DEFAULT_BROKER_URL,
+                )
+            ),
+            internal_token,
+            timeout_seconds=float(
+                source.get("TT_AUTO_CODE_ROUTE_TIMEOUT_SECONDS", "5")
+            ),
+        ),
         gates=AutoLiveGates.from_env(source),
         short_link_root=str(
             source.get(
@@ -1190,13 +1354,22 @@ def build_service_from_env(
                 "/mnt/data-disk/tt-auto-post-public/s2l",
             )
         ),
-        source_trim_tail_seconds=float(
-            source.get("TT_POST_DEFAULT_SOURCE_TRIM_TAIL_SECONDS", "4.333333")
-        ),
-        media_profile_version=str(
-            source.get("TT_POST_MEDIA_PROFILE_VERSION", "tt-post-hevc-720x1280-v2")
-        ),
+        source_trim_tail_seconds=primary_trim,
+        media_profile_version=primary_profile,
+        video_template_routes={
+            VIDEO_TEMPLATE_RANDOM_OVERLAY: VideoTemplateRoute(
+                gpu,
+                RANDOM_OVERLAY_MEDIA_PROFILE,
+                0.0,
+            ),
+            VIDEO_TEMPLATE_DIRECT_OUTRO: VideoTemplateRoute(
+                direct_outro_gpu,
+                DIRECT_OUTRO_MEDIA_PROFILE,
+                4.333333,
+            ),
+        },
         max_concurrent_tasks=int(source.get("TT_AUTO_POST_WORKER_COUNT", "4")),
+        prepare_ahead_seconds=prepare_ahead_seconds,
     )
     return TTAutoPostService(
         store,
@@ -1204,6 +1377,7 @@ def build_service_from_env(
         account_repository,
         selector,
         executor,
+        automation_probe=probe_automation,
         runner_kick_path=str(
             source.get(
                 "TT_AUTO_POST_RUNNER_KICK_PATH",
@@ -1213,6 +1387,7 @@ def build_service_from_env(
         schedule_grace_seconds=int(
             source.get("TT_AUTO_POST_SCHEDULE_GRACE_SECONDS", "600")
         ),
+        prepare_ahead_seconds=prepare_ahead_seconds,
     )
 
 
@@ -1308,11 +1483,8 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         service = self.server.tt_auto_service
         if self.command == "GET" and path == "/health":
-            return 200, {
-                "ok": True,
-                "service": "tt-auto-post",
-                "gates": service.executor.gates.as_dict(),
-            }
+            health = service.health()
+            return (200 if health["ok"] else 503), health
         if not self._authorized():
             return 403, {
                 "ok": False,
@@ -1381,6 +1553,13 @@ class TTAutoPostRequestHandler(BaseHTTPRequestHandler):
             return 200, service.tick()
         if self.command == "POST" and path == "/internal/tt-auto-post/execute-next":
             return 200, service.execute_next(self._body())
+        match = re.fullmatch(
+            re.escape(TT_AUTO_ADMIN_PREFIX)
+            + r"/tasks/([1-9][0-9]*)/force-close",
+            path,
+        )
+        if self.command == "POST" and match:
+            return 200, service.force_close_task(match.group(1), self._body())
         raise AutoPostServiceError("not_found", "路由不存在", 404)
 
     def _handle(self) -> None:

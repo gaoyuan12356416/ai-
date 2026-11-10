@@ -498,7 +498,10 @@ class DispatchStore:
                 or offer.get("stage") != row["stage"]):
             return
         from .fb_isolation import identity_resources
-        resources, page, material = identity_resources(offer.get("fb_page_id"), offer.get("fb_material_id"), row["stage"])
+        pool_task_id = offer.get("fb_pool_task_id", "")
+        if pool_task_id and (row["family"] != "video" or pool_task_id != row["source_id"]):
+            return
+        resources, page, material = identity_resources(offer.get("fb_page_id"), offer.get("fb_material_id"), row["stage"], pool_task_id=pool_task_id)
         if not material or set(resources) != set(offer.get("resource_keys", [])):
             return  # Unknown legacy material identity keeps the Page fence.
         old = json.loads(row["resource_keys_json"])
@@ -591,7 +594,8 @@ class DispatchStore:
         quarantine_resources = offer.get("resource_keys", [])
         if channel == "fb" and not offer.get("fb_page_write_active") and offer.get("source_status") in {"unknown", "submitted", "processing"}:
             from .fb_isolation import identity_resources
-            expected, _, material = identity_resources(offer.get("fb_page_id"), offer.get("fb_material_id"), offer["stage"])
+            expected, _, material = identity_resources(offer.get("fb_page_id"), offer.get("fb_material_id"), offer["stage"],
+                pool_task_id=offer.get("fb_pool_task_id", "") if offer.get("family") == "video" and offer.get("fb_pool_task_id") == offer.get("source_id") else "")
             if material and set(expected) == set(quarantine_resources):
                 quarantine_resources = [material]
         stage = offer["stage"]

@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <title>编辑 X Post 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/x-auto-publish.css?v=20260814language1" />
+  <link rel="stylesheet" href="/x-auto-publish.css?v=20261105membership1" />
 </head>
 <body>
   <div class="app">
@@ -99,6 +99,12 @@
                   <span id="selectedAccountCount" class="badge">已选 0 个</span>
                 </div>
                 <div class="account-toolbar">
+                  <select id="accountMembershipFilter" aria-label="会员状态筛选">
+                    <option value="all">全部会员状态</option>
+                    <option value="member">会员</option>
+                    <option value="non_member">非会员</option>
+                    <option value="unknown">会员状态未知</option>
+                  </select>
                   <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称、账号 ID 或订阅类型" />
                   <button id="refreshAccountEligibility" class="button small" type="button" disabled>刷新可选账号资格</button>
                   <button id="selectVisibleAccounts" class="button small" type="button">选择当前结果</button>
@@ -280,8 +286,8 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=20260915retired"></script>
+  <script src="/quick-nav.js?v=d64e9c9ccd31"></script>
   <script src="/x-auto-publish-common.js?v=20260814language1"></script>
-  <script src="/x-auto-publish-template.js?v=20261020duration20m1"></script>
+  <script src="/x-auto-publish-template.js?v=20261105membership1"></script>
 </body>
 </html>

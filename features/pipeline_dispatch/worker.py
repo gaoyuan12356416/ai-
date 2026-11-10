@@ -82,15 +82,6 @@ class ExecutionContext:
                     self.lost.set()
                     return
 
-    def check_render(self):
-        """Cancel local computation promptly, independently of a blocked RPC.
-
-        Unlike operation admission this must never wait another 30 seconds
-        after the lease deadline. run_render kills and reaps its child.
-        """
-        if self.lost.is_set() or self.monotonic() - self._last_heartbeat >= 120:
-            raise LeaseLost(self._heartbeat_error or "lease_expired_or_rejected")
-
     def check(self):
         # A transport timeout does not invalidate an unexpired lease. Pause
         # before the next external operation while the independent heartbeat

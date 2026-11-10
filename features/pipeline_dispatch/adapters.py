@@ -466,16 +466,17 @@ class LedgerAdapter:
                     resources.append(f"{spec.channel}:account:{row[key]}")
         elif spec.channel == "fb" and row.get("page_id"):
             from .fb_isolation import identity_resources
-            resources, _, _ = identity_resources(row["page_id"], row.get("material_id"), stage)
+            resources, _, _ = identity_resources(row["page_id"], row.get("material_id"), stage,
+                pool_task_id=source_id if spec.family == "video" and row.get("source_kind") == "pool" else "")
         elif spec.channel == "youtube":
             body = obj(row.get("body")) if spec.family == "preparation" else {}
             identity = row.get("channel_id") or body.get("channel_id") or obj(body.get("channel")).get("channel_id")
             if identity:
-                # Cover generation only writes this preparation's private asset.
-                # Historical uncertain uploads must fence new platform writes,
-                # without preventing the owner from generating/reviewing covers.
-                resources.append("youtube:cover:" + source_id if spec.family == "preparation"
-                                 else "youtube:channel:" + str(identity))
+                if spec.family == "preparation":
+                    resources.append("youtube:cover:" + source_id)
+                else:
+                    from .youtube_isolation import identity_resources
+                    resources = identity_resources(source_id)
         payload = {"source_key": source_key, "native_id": source_id, "native_family": spec.family}
         # Rendering specifications are frozen by reserve(), after native checks.
         fingerprint = canonical_fingerprint(row, spec.identity)
@@ -496,6 +497,9 @@ class LedgerAdapter:
         if adopt_schedule:
             projected_status = "ready"
         confirmed_schedule = None
+        if spec.channel == "youtube" and spec.family == "publish":
+            from .youtube_readback import comment_continuation
+            confirmed_schedule = comment_continuation(row)
         if (spec.channel == "youtube" and spec.family == "publish" and state == "scheduled"
                 and row.get("schedule_status") == "armed" and not unknown and not row.get("lease_owner")
                 and publish_id and row.get("publish_at")
@@ -538,6 +542,7 @@ class LedgerAdapter:
             from .fb_isolation import page_write_active
             fb_fields = {"fb_page_id": str(row.get("page_id") or ""),
                          "fb_material_id": str(row.get("material_id") or ""),
+                         "fb_pool_task_id": source_id if spec.family == "video" and row.get("source_kind") == "pool" else "",
                          "fb_page_write_active": page_write_active(row, spec.family, now)}
         return {**fb_fields, "source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
                 "backlog_authorization": row.get("_backlog_authorization"),
@@ -701,7 +706,8 @@ class AdapterRegistry:
             raise AdapterError("canonical_execution_not_connected")
         row = adapter.read(job["source_id"])
         current = adapter.project(row) if row else None
-        if current is None or current.get("observation_only"):
+        continuation = self._verified_continuation(adapter, row, obj(job.get("payload")).get("continuation"), allow_control=True) if row else None
+        if current is None or (current.get("observation_only") and not (continuation and continuation.get("kind") == "comment")):
             raise AdapterError("canonical_task_terminal_or_missing")
         expected_fingerprint = job.get("canonical_fingerprint", obj(job.get("payload")).get("canonical_fingerprint", current["canonical_fingerprint"]))
         if (current["canonical_fingerprint"] != expected_fingerprint
@@ -764,12 +770,20 @@ class AdapterRegistry:
         continuation = self._verified_continuation(adapter, row, obj(result).get("continuation"))
         if continuation:
             verified["continuation"] = continuation
+            if continuation.get("kind") == "comment":
+                verified["dispatch_completed"] = True
         return verified
 
     @staticmethod
     def _verified_continuation(adapter, row, requested, *, allow_control=False):
         if not requested:
             return None
+        if obj(requested).get("kind") == "comment":
+            from .youtube_readback import comment_continuation
+            expected = comment_continuation(row)
+            if adapter.spec.channel != "youtube" or adapter.spec.family != "publish" or not expected or expected != requested:
+                raise AdapterError("canonical_comment_continuation_unconfirmed")
+            return expected
         control = allow_control and youtube_control_due(row)
         expected_time = row.get("schedule_confirmed_publish_at") if control else row.get("publish_at")
         if (adapter.spec.channel != "youtube" or adapter.spec.family != "publish"

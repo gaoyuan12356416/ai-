@@ -15,7 +15,7 @@
   const STATUS_LABELS = {
     queued: "等待执行",
     scheduled: "等待执行",
-    running: "执行中",
+    running: "未结束",
     pending: "等待执行",
     selecting: "筛选中",
     filtering: "筛选中",
@@ -54,10 +54,32 @@
 
   function countValue(item, names, fallback) {
     for (const name of names) {
+      if (!item || item[name] == null || item[name] === "") continue;
       const value = Number(item && item[name]);
       if (Number.isFinite(value)) return value;
     }
     return fallback;
+  }
+
+  const TASK_COUNT_LABELS = {
+    published: "已发布", no_candidate: "无符合条件素材", skipped: "已跳过",
+    failed: "失败", canceled: "已取消", unknown: "结果待确认",
+    pending: "待处理", ready: "等待发布", retry_wait: "等待重试",
+    waiting_result: "等待发布结果", active: "执行中",
+  };
+
+  function taskCounts(item, total) {
+    const counts = ui.objectValue(item.task_counts);
+    const values = Object.keys(TASK_COUNT_LABELS).map(key => counts[key]);
+    if (!values.every(value => Number.isInteger(value) && value >= 0)) return null;
+    return values.reduce((sum, value) => sum + value, 0) === total ? counts : null;
+  }
+
+  function taskSummary(counts) {
+    return Object.entries(TASK_COUNT_LABELS)
+      .filter(([key]) => counts[key] > 0)
+      .map(([key, label]) => `${label} ${counts[key]}`)
+      .join("；");
   }
 
   function setEmpty(message) {
@@ -102,7 +124,7 @@
     }
     state.runs.forEach(item => {
       const id = runId(item);
-      const status = String(item.status || "").toLowerCase();
+      const status = String(item.display_status || item.status || "").toLowerCase();
       const row = ui.element("tr");
       ui.appendTextCell(row, ui.formatTime(item.triggered_at || item.created_at || item.scheduled_at || item.scheduled_at_utc));
 
@@ -118,18 +140,27 @@
       const totalTasks = countValue(item, ["task_count", "account_count", "total_tasks"], 0);
       const completedTasks = countValue(item, ["completed_task_count", "completed_accounts", "completed_tasks"], 0);
       const failedTasks = countValue(item, ["attention_task_count", "failed_task_count", "failed_accounts", "failed_tasks"], 0);
+      const counts = taskCounts(item, totalTasks);
+      const publishedTasks = counts ? counts.published : countValue(item, ["published_task_count"], null);
       const tasksCell = ui.element("td");
-      tasksCell.appendChild(ui.element("strong", { text: `${completedTasks} / ${totalTasks || "—"} 完成` }));
-      if (failedTasks) tasksCell.appendChild(ui.element("div", { className: "secondary", text: `${failedTasks} 个失败或待确认` }));
+      tasksCell.appendChild(ui.element("strong", { text: `已发布 ${publishedTasks == null ? "—" : publishedTasks} / ${totalTasks || "—"}` }));
+      if (counts) {
+        const unfinished = counts.unknown + counts.pending + counts.ready + counts.retry_wait + counts.waiting_result + counts.active;
+        if (unfinished) tasksCell.appendChild(ui.element("div", { className: "secondary", text: `${unfinished} 个未结束` }));
+      } else {
+        tasksCell.appendChild(ui.element("div", { className: "secondary", text: `已处理 ${completedTasks}（含无素材或跳过）` }));
+      }
       row.appendChild(tasksCell);
 
       const statusCell = ui.element("td");
       statusCell.appendChild(ui.statusBadge(statusLabel(status), ui.statusKind(status)));
       row.appendChild(statusCell);
 
-      const summary = item.result_summary || item.summary || item.message || item.error_message
-        || (totalTasks
-          ? `${completedTasks} 个完成${failedTasks ? `，${failedTasks} 个失败或待确认` : ""}`
+      const reason = item.result_summary || item.summary || item.message || item.error_message;
+      const summary = counts
+        ? [taskSummary(counts), reason].filter(Boolean).join("；") || "—"
+        : reason || (totalTasks
+          ? `发布明细待同步${failedTasks ? `；${failedTasks} 个失败或待确认` : ""}`
           : "—");
       ui.appendTextCell(row, summary);
       ui.appendTextCell(row, ui.formatTime(item.completed_at || item.finished_at || item.finished_at_utc));
@@ -289,7 +320,10 @@
 
       const taskStatus = String(item.status || "").toLowerCase();
       const taskStatusCell = ui.element("td");
-      taskStatusCell.appendChild(ui.statusBadge(statusLabel(taskStatus), ui.statusKind(taskStatus)));
+      const effectiveStatus = item.unknown_outcome ? "unknown" : taskStatus;
+      const taskLabel = effectiveStatus === "retry_wait" && queueId
+        ? "等待发布结果" : statusLabel(effectiveStatus);
+      taskStatusCell.appendChild(ui.statusBadge(taskLabel, ui.statusKind(effectiveStatus)));
       row.appendChild(taskStatusCell);
 
       const resultCell = ui.element("td");
@@ -308,9 +342,16 @@
     });
   }
 
-  function renderEvents(events) {
+  function renderEvents(events, metadata = {}) {
     const container = ui.byId("runEvents");
     ui.clear(container);
+    const total = Number(metadata.events_total);
+    if (metadata.events_has_more === true && Number.isInteger(total) && total > events.length) {
+      container.appendChild(ui.element("div", {
+        className: "secondary",
+        text: `仅显示最近 ${events.length} 条，共 ${total} 条；完整历史保留在审计记录中。`,
+      }));
+    }
     if (!events.length) {
       container.appendChild(ui.element("div", { className: "secondary", text: "暂无事件。" }));
       return;
@@ -359,7 +400,7 @@
       const facts = ui.byId("runDetailFacts");
       facts.append(
         detailFact("触发方式", triggerLabel(run.trigger_type)),
-        detailFact("运行状态", statusLabel(run.status)),
+        detailFact("运行状态", statusLabel(run.display_status || run.status)),
         detailFact("计划 / 触发时间", ui.formatTime(run.scheduled_at || run.scheduled_at_utc || run.triggered_at || run.created_at)),
         detailFact("账号任务", `${tasks.length} 个`),
         detailFact("完成时间", ui.formatTime(run.completed_at || run.finished_at || run.finished_at_utc)),
@@ -372,7 +413,7 @@
         blacklist_snapshot: run.blacklist_snapshot,
       };
       ui.setText(ui.byId("runSnapshot"), JSON.stringify(publicDetail(snapshot), null, 2), "{}");
-      renderEvents(events);
+      renderEvents(events, payload);
     } catch (error) {
       if (request !== state.detailRequest) return;
       const message = detailErrorMessage(error);

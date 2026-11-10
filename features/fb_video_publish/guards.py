@@ -25,10 +25,12 @@ def _unknown_reason(conn, table, page_id, material_id, *, identity="", exclude_t
     return ""
 
 
-def manual_block(conn, page_id, material_id="", *, execution=False, exclude_task=""):
+def manual_block(conn, page_id, material_id="", *, execution=False, exclude_task="", allow_repeat=False):
     if not has_table(conn, "fb_video_task"):
         return ""
     args = [str(page_id), str(exclude_task)]
+    if allow_repeat:
+        material_id = ""
     unknown = _unknown_reason(conn, "fb_video_task", page_id, material_id, identity="task_id", exclude_task=exclude_task)
     if unknown:
         return unknown
@@ -39,10 +41,12 @@ def manual_block(conn, page_id, material_id="", *, execution=False, exclude_task
     return ""
 
 
-def automatic_block(conn, page_id, material_id="", *, execution=False, exclude_task=""):
+def automatic_block(conn, page_id, material_id="", *, execution=False, exclude_task="", allow_repeat=False):
     if not has_table(conn, "fb_auto_task"):
         return ""
     args = [str(page_id), str(exclude_task)]
+    if allow_repeat:
+        material_id = ""
     unknown = _unknown_reason(conn, "fb_auto_task", page_id, material_id, identity="id", exclude_task=exclude_task)
     if not unknown and has_table(conn, "fb_auto_publish_ledger"):
         # Even a candidate's own unresolved ledger must prevent another write.
@@ -111,6 +115,7 @@ def install_backstops(conn):
         statuses = ",".join("'" + v + "'" for v in active)
         other_statuses = ",".join("'" + v + "'" for v in other_active)
         for event in ("INSERT", "UPDATE OF status,page_id,material_id"):
+            material_guard = "NEW.source_kind<>'pool' AND " if family == "manual" else ""
             suffix = "insert" if event == "INSERT" else "update"
             receipt_update = (" AND NOT (NEW.page_id=OLD.page_id AND NEW.material_id=OLD.material_id"
                               " AND OLD.status IN ('running','submitted','unknown')"
@@ -123,7 +128,7 @@ def install_backstops(conn):
             conn.execute(f"""CREATE TRIGGER fb_video_cross_{family}_{suffix}
                 BEFORE {event} ON {table} WHEN NEW.status IN ({statuses}) {receipt_update}
                 AND EXISTS(SELECT 1 FROM {other} o WHERE o.page_id=NEW.page_id AND
-                  (((o.material_id=NEW.material_id) AND (o.status='unknown' OR o.unknown_outcome=1))
-                   OR (o.material_id=NEW.material_id AND o.status IN ({other_statuses}))
+                  (({material_guard}(o.material_id=NEW.material_id) AND (o.status='unknown' OR o.unknown_outcome=1))
+                   OR ({material_guard}o.material_id=NEW.material_id AND o.status IN ({other_statuses}))
                    OR (NEW.status='running' AND o.status='running')))
                 BEGIN SELECT RAISE(ABORT,'fb_video_cross_family_hold'); END""")

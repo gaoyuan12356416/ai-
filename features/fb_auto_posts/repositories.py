@@ -392,6 +392,16 @@ class MaterialRepository:
             return low is None and high is None
         return (low is None or value >= Decimal(str(low))) and (high is None or value <= Decimal(str(high)))
 
+    @staticmethod
+    def _material_language(product: str, material_language: Any, drama_language: Any = "") -> str:
+        from .languages import page_language
+        # A populated source language remains authoritative, including an
+        # invalid value. Only this source product can inherit a missing value.
+        value = material_language
+        if not str(value or "").strip() and product.casefold() == "dramawavesource":
+            value = drama_language
+        return page_language(value)
+
     def exact_material(self, config: Mapping[str, Any], material_id: str) -> MaterialCandidate:
         """Resolve one trusted source ID without automatic ranking or Page language filters."""
         from .languages import page_language
@@ -413,17 +423,19 @@ class MaterialRepository:
         row = rows[0]
         if (str(row.get("type")) != "2" or str(row.get("data_source")) != str(config["material_data_source"])
                 or str(row.get("is_delete")) != "0"
-                or str(row.get("product") or "").casefold() != str(config["product"]).casefold()):
-            raise RepositoryError("fb_auto_material_invalid", "指定素材须为当前产品下未删除的视频素材", 409)
+                or str(row.get("product") or "").casefold() != str(config.get("material_product") or config["product"]).casefold()):
+            raise RepositoryError("fb_auto_material_invalid", "指定素材须为所选素材产品下未删除的视频素材", 409)
         content_id = str(row.get("content_id") or "").strip()
         language = page_language(row.get("language"))
+        inherit_language = (str(row.get("product") or "").casefold() == "dramawavesource"
+                            and not str(row.get("language") or "").strip())
         try:
             duration = Decimal(str(row.get("video_duration") or 0))
         except (InvalidOperation, TypeError, ValueError):
             duration = Decimal(0)
         if not duration.is_finite():
             duration = Decimal(0)
-        if not content_id or not language:
+        if not content_id or (not language and not inherit_language):
             raise RepositoryError("fb_auto_material_invalid", "指定素材缺少短剧或语言信息", 409)
         if duration > 3600:
             raise RepositoryError("fb_auto_material_duration_invalid", "指定视频时长超过当前1小时制作上限", 409)
@@ -439,9 +451,13 @@ class MaterialRepository:
              WHERE d.app_id=%s AND d.content_id=%s AND d.release_status=1
                AND d.deploy_time>0 AND d.deploy_time<=%s ORDER BY d.id DESC
         """, (str(config["app_id"]), content_id, int(self.now_fn().timestamp())))
-        detail = next((item for item in dramas if page_language(item.get("language")) == language), None)
+        detail = (dramas[0] if dramas else None) if inherit_language else next(
+            (item for item in dramas if page_language(item.get("language")) == language), None)
         if detail is None:
             raise RepositoryError("fb_auto_material_drama_unavailable", "指定素材未匹配到已上架且已到投放时间的短剧", 409)
+        language = self._material_language(str(row.get("product") or ""), row.get("language"), detail.get("language"))
+        if not language:
+            raise RepositoryError("fb_auto_material_invalid", "指定素材及关联短剧缺少有效语言信息", 409)
         blocked = self.mysql.select(f"""
             SELECT b.id FROM `{self.mysql.blacklist_schema}`.ads_facebook_post_blacklist b
              WHERE b.is_delete=0 AND ((b.type=1 AND b.content_id=%s) OR
@@ -469,7 +485,7 @@ class MaterialRepository:
                   FROM `{self.mysql.schema}`.ads_drama_resource r
                  WHERE r.app_id=%s AND r.content_id=%s AND r.type=2
                    AND LOWER(TRIM(r.language))=%s AND TRIM(COALESCE(r.`desc`,''))<>''
-            """, (str(config["app_id"]), content_id, str(row["language"])))
+            """, (str(config["app_id"]), content_id, language))
             if len(descriptions) == 1 and int(descriptions[0].get("description_count") or 0) == 1:
                 description = _description(descriptions[0].get("drama_description"))
             if not description:
@@ -499,13 +515,21 @@ class MaterialRepository:
         drama_rule, material_rule = config["drama_rule"], config["material_rule"]
         allowed_types = [str(item) for item in drama_rule.get("resource_type_v2") or []]
         type_sql = "" if not allowed_types else " AND CAST(d.resource_type_v2 AS CHAR) IN (" + ",".join("%s" for _ in allowed_types) + ")"
+        # The target app still owns drama metadata and attribution. For source
+        # videos with no language, admit the row for the existing metadata read
+        # below, then match the resolved language before retaining a candidate.
+        product, app_id = str(config.get("material_product") or config["product"]), str(config["app_id"])
+        inherit_language = product.casefold() == "dramawavesource"
+        source_language_sql = "LOWER(TRIM(s.language))=%s"
+        if inherit_language:
+            source_language_sql = "(" + source_language_sql + " OR TRIM(COALESCE(s.language,''))='')"
         keyset_sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(45000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,s.url media_url,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
                    LOWER(TRIM(s.language)) language,s.video_duration
               FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
              WHERE s.data_source=%s AND s.product=%s AND s.type=2 AND s.is_delete=0
-               AND LOWER(TRIM(s.language))=%s AND s.video_duration>0
+               AND {source_language_sql} AND s.video_duration>0
                AND EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info d FORCE INDEX(ac)
                             WHERE d.content_id=s.data_source_id AND d.app_id=%s
                               AND d.release_status=1 AND d.deploy_time>%s AND d.deploy_time<=%s{type_sql})
@@ -519,7 +543,8 @@ class MaterialRepository:
                AND s.id>%s
              ORDER BY s.id LIMIT %s
         """
-        product, app_id = str(config["product"]), str(config["app_id"])
+        # The source catalog product is independent of the Page's target app,
+        # drama metadata, metrics and attribution. Legacy configs keep their scope.
         allowed_type_set = set(allowed_types)
         uses_description = "{{desc}}" in str(config.get("message_template") or "")
         from .strategy import diverse_candidates
@@ -553,6 +578,7 @@ class MaterialRepository:
                 metadata_type_sql = "" if not allowed_types else " AND CAST(d0.resource_type_v2 AS CHAR) IN (" + ",".join("%s" for _ in allowed_types) + ")"
                 metadata_sql = f"""
                     SELECT TRIM(d.content_id) content_id,COALESCE(d.name,'') drama_name,
+                           LOWER(TRIM(d.language)) language,
                            CAST(d.resource_type_v2 AS CHAR) resource_type_v2,COALESCE(d.series_code,'') series_code
                       FROM `{self.mysql.schema}`.ads_drama_info d
                       JOIN (SELECT d0.content_id,MAX(d0.id) id
@@ -598,6 +624,9 @@ class MaterialRepository:
                 d_spend = drama_totals.spend if drama_totals else Decimal("0")
                 d_roas = drama_totals.roas if drama_totals else None
                 detail = metadata.get(content_id, row)
+                if inherit_language and self._material_language(product, row.get("language"),
+                        metadata.get(content_id, {}).get("language")) != language:
+                    continue
                 resource_type = str(detail.get("resource_type_v2") or "")
                 if not url or (allowed_type_set and resource_type not in allowed_type_set):
                     continue
@@ -628,11 +657,26 @@ class MaterialRepository:
         elif drama_rule["sort_by"] == "roas":
             priority_content_ids = [str(content_id) for content_id, totals in metric_window.by_drama.items() if totals.roas is not None]
         priority_content_ids.sort(key=lambda value: value.encode("utf-8"))
-        if len(priority_content_ids) >= self.metric_prefilter_min_content_ids:
-            for start_at in range(0, len(priority_content_ids), self.metric_prefilter_batch_size):
+        # Empty-language source rows cannot use a selective material-language
+        # predicate. Enumerate the complete eligible drama set first, then use
+        # the source/content index. This includes zero-history dramas and avoids
+        # repeating a full source-table scan for each Page language.
+        complete_content_scan = inherit_language
+        scan_content_ids = priority_content_ids
+        if complete_content_scan:
+            eligible = self.mysql.select(f"""
+                SELECT /*+ MAX_EXECUTION_TIME(45000) */ DISTINCT TRIM(d.content_id) content_id
+                  FROM `{self.mysql.schema}`.ads_drama_info d
+                 WHERE d.app_id=%s AND d.release_status=1
+                   AND d.deploy_time>%s AND d.deploy_time<=%s{type_sql}
+                   AND TRIM(COALESCE(d.content_id,''))<>''
+            """, (app_id, deploy_after, int(self.now_fn().timestamp()), *allowed_types))
+            scan_content_ids = sorted({str(row["content_id"]) for row in eligible}, key=lambda value: value.encode("utf-8"))
+        if complete_content_scan or len(scan_content_ids) >= self.metric_prefilter_min_content_ids:
+            for start_at in range(0, len(scan_content_ids), self.metric_prefilter_batch_size):
                 if self.monotonic_fn() >= deadline:
                     raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)
-                batch = priority_content_ids[start_at:start_at + self.metric_prefilter_batch_size]
+                batch = scan_content_ids[start_at:start_at + self.metric_prefilter_batch_size]
                 ids_sql = ",".join("%s" for _ in batch)
                 priority_sql = f"""
                     SELECT /*+ MAX_EXECUTION_TIME(45000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,s.url media_url,
@@ -641,7 +685,7 @@ class MaterialRepository:
                       FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(idx_source_type_source_id)
                      WHERE s.data_source=%s AND s.data_source_id IN ({ids_sql})
                        AND s.product=%s AND s.type=2 AND s.is_delete=0
-                       AND LOWER(TRIM(s.language))=%s AND s.video_duration>0
+                       AND {source_language_sql} AND s.video_duration>0
                        AND EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info d FORCE INDEX(ac)
                                     WHERE d.content_id=s.data_source_id AND d.app_id=%s
                                       AND d.release_status=1 AND d.deploy_time>%s AND d.deploy_time<=%s{type_sql})
@@ -657,7 +701,7 @@ class MaterialRepository:
                 end_epoch = int(self.now_fn().timestamp())
                 params: tuple[Any, ...] = (int(config["material_data_source"]), *batch, product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"])
                 add_rows(self.mysql.select(priority_sql, params), expected_content_ids=set(batch))
-            if len(candidates) >= candidate_limit or (per_drama_limit and len({m.content_id for m in candidates}) >= 20):
+            if complete_content_scan or len(candidates) >= candidate_limit or (per_drama_limit and len({m.content_id for m in candidates}) >= 20):
                 return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids), tuple(metric_window.dates))
             candidates.clear()
             seen_material_ids.clear()

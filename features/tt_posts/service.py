@@ -63,6 +63,7 @@ from .core import (
     beijing_to_utc,
     caption_uses_desc_macro,
     caption_uses_code_macro,
+    caption_uses_drama_name_macro,
     caption_uses_url_macro,
     normalize_drama_language,
     redact_text,
@@ -108,7 +109,6 @@ DEFAULT_PREPARATION_MAX_ATTEMPTS = 5
 MAX_ACCOUNT_ROWS = 1000
 MAX_HTTP_BODY_BYTES = 256 * 1024
 MAX_HTTP_RESPONSE_BYTES = 1024 * 1024
-TOKEN_MIN_VALIDITY_SECONDS = 300
 CAPTION_DRAMA_LINE_RE = re.compile(r"(?m)^[ \t]*Drama ID:[ \t]*(\S+)[ \t]*$")
 SAFE_INTERNAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 ACCOUNT_SETTINGS_VALUE_FIELDS = frozenset(
@@ -181,7 +181,6 @@ WHERE is_active = 1
   AND account_status = 2
   AND token_status = 2
   AND disable_publish = 0
-  AND token_expires_time > %s
 ORDER BY source_account_id
 LIMIT 1001
 """
@@ -211,7 +210,25 @@ WHERE source_account_id = %s
   AND account_status = 2
   AND token_status = 2
   AND disable_publish = 0
-  AND token_expires_time > %s
+LIMIT 2
+"""
+
+
+# Exact metadata-only diagnostic used only when the normal eligibility query
+# returns no row.  It distinguishes an explicit token-status failure from real
+# account disablement without ever selecting the credential.
+ACCOUNT_STATUS_SQL = """
+SELECT
+  source_account_id,
+  token_status,
+  account_status,
+  token_expires_time,
+  disable_publish,
+  is_active,
+  last_seen_at,
+  updated_at
+FROM `ads_ai`.`tiktok_personal_account_snapshot`
+WHERE source_account_id = %s
 LIMIT 2
 """
 
@@ -226,7 +243,6 @@ WHERE source_account_id = %s
   AND account_status = 2
   AND token_status = 2
   AND disable_publish = 0
-  AND token_expires_time > %s
   AND access_token IS NOT NULL
   AND OCTET_LENGTH(access_token) > 0
 LIMIT 2
@@ -280,6 +296,69 @@ class GPUClientError(TTPostServiceError):
             "GPUClientError(code=%r, status=%r, unknown_outcome=%r)"
             % (self.code, self.status, self.unknown_outcome)
         )
+
+
+def _classify_gpu_token_failure(
+    code: str,
+    details: Mapping[str, Any],
+) -> Optional[Tuple[str, str, int]]:
+    """Map unambiguous TikTok rejection details for the new CPU consumer."""
+    if str(code or "") != "tt_upstream_rejected":
+        return None
+    upstream_code = str(details.get("upstream_code") or "").strip().lower()
+    try:
+        http_status = int(details.get("upstream_http_status") or 0)
+    except (TypeError, ValueError, OverflowError):
+        http_status = 0
+    scope_error = upstream_code in {
+        "scope_not_authorized",
+        "insufficient_scope",
+        "scope_permission_missing",
+    } or (
+        "scope" in upstream_code
+        and any(
+            marker in upstream_code
+            for marker in ("denied", "missing", "unauthorized")
+        )
+    )
+    token_error = http_status == 401 or upstream_code in {
+        "access_token_expired",
+        "access_token_invalid",
+        "invalid_access_token",
+        "oauth_token_invalid",
+        "token_expired",
+        "token_invalid",
+        "token_revoked",
+    } or (
+        "token" in upstream_code
+        and any(
+            marker in upstream_code
+            for marker in ("expired", "invalid", "revoked", "unauthorized")
+        )
+    )
+    log_id = str(details.get("log_id") or "")
+    reference = ", ".join(
+        value
+        for value in (
+            "code=%s" % upstream_code if upstream_code else "",
+            "log_id=%s" % log_id if log_id else "",
+        )
+        if value
+    )
+    suffix = "（TikTok %s）" % reference if reference else ""
+    if scope_error:
+        return (
+            "tt_access_token_scope_missing",
+            "TikTok账号Token权限不足，请重新登录授权并确认Content Posting权限" + suffix,
+            403,
+        )
+    if token_error:
+        return (
+            "tt_access_token_invalid",
+            "TikTok账号Token已失效，请重新登录授权" + suffix,
+            401,
+        )
+    return None
 
 
 def _exact_bool(value: Any, label: str) -> bool:
@@ -500,15 +579,6 @@ def _now_utc(now_fn: Callable[[], datetime]) -> datetime:
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     return current.astimezone(UTC)
-
-
-def _minimum_token_expiry_ns(
-    now_fn: Callable[[], datetime],
-    *,
-    minimum_seconds: int = TOKEN_MIN_VALIDITY_SECONDS,
-) -> int:
-    current = _now_utc(now_fn)
-    return int((current + timedelta(seconds=int(minimum_seconds))).timestamp() * 1_000_000_000)
 
 
 @dataclass(frozen=True)
@@ -754,8 +824,7 @@ class MySQLSnapshotAccountRepository:
         }
 
     def list_public_accounts(self) -> List[Dict[str, Any]]:
-        minimum = _minimum_token_expiry_ns(self._now_fn)
-        rows = self._rows(ACCOUNT_LIST_SQL, (minimum,))
+        rows = self._rows(ACCOUNT_LIST_SQL, ())
         if len(rows) > MAX_ACCOUNT_ROWS:
             raise AccountSourceError(
                 "tt_account_source_too_large",
@@ -774,9 +843,61 @@ class MySQLSnapshotAccountRepository:
 
     def get_public_account(self, source_account_id: Any) -> Dict[str, Any]:
         normalized = _positive_decimal(source_account_id, "TikTok账号ID")
-        minimum = _minimum_token_expiry_ns(self._now_fn)
-        rows = self._rows(ACCOUNT_METADATA_SQL, (normalized, minimum))
-        if len(rows) != 1:
+        rows = self._rows(ACCOUNT_METADATA_SQL, (normalized,))
+        if len(rows) > 1:
+            raise AccountSourceError(
+                "tt_account_metadata_ambiguous",
+                "TikTok账号候选存在重复身份",
+                503,
+            )
+        if not rows:
+            status_rows = self._rows(ACCOUNT_STATUS_SQL, (normalized,))
+            if len(status_rows) > 1:
+                raise AccountSourceError(
+                    "tt_account_metadata_ambiguous",
+                    "TikTok账号候选存在重复身份",
+                    503,
+                )
+            if status_rows:
+                status_row = status_rows[0]
+                diagnostic_id = _positive_decimal(
+                    status_row.get("source_account_id"),
+                    "TikTok账号ID",
+                )
+                if not secrets.compare_digest(diagnostic_id, normalized):
+                    raise AccountSourceError(
+                        "tt_account_metadata_mismatch",
+                        "TikTok账号资料与请求账号不一致",
+                        409,
+                    )
+                try:
+                    is_active = int(status_row.get("is_active") or 0)
+                    account_status = int(status_row.get("account_status") or 0)
+                    token_status = int(status_row.get("token_status") or 0)
+                    disable_publish = int(status_row.get("disable_publish") or 0)
+                except (TypeError, ValueError, OverflowError):
+                    raise AccountSourceError(
+                        "tt_account_metadata_invalid",
+                        "TikTok账号候选数据无效",
+                        503,
+                    ) from None
+                if (
+                    is_active == 1
+                    and account_status == 2
+                    and disable_publish == 0
+                    and token_status != 2
+                ):
+                    if token_status == 3:
+                        raise AccountSourceError(
+                            "tt_access_token_expired",
+                            "TikTok账号Token状态为已过期，请重新登录授权后等待每小时账号同步",
+                            409,
+                        )
+                    raise AccountSourceError(
+                        "tt_access_token_status_invalid",
+                        "TikTok账号Token状态异常，请重新登录授权后等待每小时账号同步",
+                        409,
+                    )
             raise AccountSourceError(
                 "tt_account_not_found",
                 "TikTok账号不存在或不满足候选条件",
@@ -793,8 +914,7 @@ class MySQLSnapshotAccountRepository:
 
     def _load_token(self, source_account_id: str) -> Optional[Mapping[str, Any]]:
         normalized = _positive_decimal(source_account_id, "TikTok账号ID")
-        minimum = _minimum_token_expiry_ns(self._now_fn)
-        rows = self._rows(ACCOUNT_TOKEN_SQL, (normalized, minimum))
+        rows = self._rows(ACCOUNT_TOKEN_SQL, (normalized,))
         if len(rows) != 1:
             return None
         row = rows[0]
@@ -1305,6 +1425,14 @@ class GPUClient:
                     if isinstance(decoded.get("details"), Mapping)
                     else {}
                 )
+                message = str(
+                    decoded.get("message")
+                    or decoded.get("error_message")
+                    or "TT GPU请求失败"
+                )[:500]
+                token_failure = _classify_gpu_token_failure(code, details)
+                if token_failure is not None:
+                    code, message, status = token_failure
                 known_not_created_codes = {
                     "invalid_request",
                     "prepared_artifact_not_found",
@@ -1316,6 +1444,8 @@ class GPUClient:
                     "tt_manual_canary_target_mismatch",
                     "tt_manual_canary_artifact_mismatch",
                     "tt_upstream_rejected",
+                    "tt_access_token_invalid",
+                    "tt_access_token_scope_missing",
                     "credential_envelope_invalid",
                     "credential_envelope_expired",
                     "credential_binding_mismatch",
@@ -1338,11 +1468,7 @@ class GPUClient:
                     unknown = False
                 raise GPUClientError(
                     code,
-                    str(
-                        decoded.get("message")
-                        or decoded.get("error_message")
-                        or "TT GPU请求失败"
-                    )[:500],
+                    message,
                     status,
                     unknown_outcome=unknown,
                     publish_was_not_created=not_created,
@@ -1824,7 +1950,9 @@ def _caption_from_submission(
     content_id: Any,
     *,
     description: Any = None,
+    drama_name: Any = None,
     defer_description: bool = False,
+    defer_drama_name: bool = False,
 ) -> Tuple[str, str]:
     """Normalize editable templates while preserving legacy callers."""
 
@@ -1840,14 +1968,20 @@ def _caption_from_submission(
             template,
             content_id,
             description=description,
+            drama_name=drama_name,
             defer_url=True,
             defer_description=defer_description,
             defer_code=True,
+            defer_drama_name=defer_drama_name,
         )
         if raw_caption not in (None, ""):
             submitted = _bounded_text(raw_caption, "发布描述", 2200)
             if not (
-                defer_description and caption_uses_desc_macro(template)
+                (defer_description and caption_uses_desc_macro(template))
+                or (
+                    defer_drama_name
+                    and caption_uses_drama_name_macro(template)
+                )
             ):
                 if not secrets.compare_digest(
                     submitted.encode("utf-8"),
@@ -1869,9 +2003,11 @@ def _caption_from_submission(
         template,
         content_id,
         description=description,
+        drama_name=drama_name,
         defer_url=True,
         defer_description=defer_description,
         defer_code=True,
+        defer_drama_name=defer_drama_name,
     )
     if not secrets.compare_digest(
         rendered.encode("utf-8"),
@@ -2034,6 +2170,21 @@ class TTPostService:
             "TT媒体制作版本",
             128,
         )
+        if (
+            self.media_profile_version
+            in {
+                "tt-post-source-direct-v1",
+                "tt-post-random-overlay-hevc-720x1280-v3",
+                "tt-post-random-overlay-h264-720x1280-v3",
+            }
+            and self.source_trim_tail_seconds != 0
+        ):
+            raise TTPostServiceError(
+                "tt_media_profile_trim_forbidden",
+                "%s requires zero source trim"
+                % self.media_profile_version,
+                500,
+            )
         self.short_link_root = str(short_link_root or "").strip()
         self.code_resolver = code_resolver or TTCodeRouteResolver(
             self.store.db_path,
@@ -2445,16 +2596,17 @@ class TTPostService:
             defer_url=True,
             defer_description=True,
             defer_code=True,
+            defer_drama_name=True,
         )
         # A pure stop must not require the operator to create a new consent
         # record. The UI still submits an explicit accepted=false placeholder
         # when disabling; ignore it and let the core preserve prior consent.
         consent = self._consent_from_payload(payload) if enabled else None
 
-        # Configuration membership is metadata-only. TikTok Creator Info is a
-        # volatile publish-time capability and must not block saving a draft
-        # or enabling a configuration. New/active members still have to exist
-        # in the trusted snapshot and have local publication settings.
+        # Configuration membership is metadata-only. Volatile account state
+        # and TikTok Creator Info are publish-time capabilities and must not
+        # block saving edited configuration. Persisted local settings remain
+        # the trust record for newly added account IDs.
         current_config = self.store.get_auto_publish_config()
         if expected_version != int(current_config.get("version") or 0):
             raise TTPostServiceError(
@@ -2466,30 +2618,13 @@ class TTPostService:
             str(value)
             for value in current_config.get("account_ids") or []
         }
-        ids_to_validate = account_ids if enabled else [
+        ids_to_validate = [
             account_id
             for account_id in account_ids
             if account_id not in existing_ids
         ]
-        if ids_to_validate:
-            trusted_ids = {
-                str(item.get("source_account_id") or "")
-                for item in self.account_repository.list_public_accounts()
-                if isinstance(item, Mapping)
-            }
-            missing_ids = [
-                account_id
-                for account_id in ids_to_validate
-                if account_id not in trusted_ids
-            ]
-            if missing_ids:
-                raise TTPostServiceError(
-                    "tt_post_auto_account_not_found",
-                    "Automatic publish account is not in the trusted account snapshot",
-                    409,
-                )
-            for account_id in ids_to_validate:
-                self.store.get_account_settings(account_id, required=True)
+        for account_id in ids_to_validate:
+            self.store.get_account_settings(account_id, required=True)
 
         if enabled:
             for account_id in account_ids:
@@ -3008,6 +3143,7 @@ class TTPostService:
             resolved["content_id"],
             url=short_url or None,
             description=resolved.get("description"),
+            drama_name=resolved.get("drama_name"),
         )
         synced_at = _now_utc(self._now_fn).replace(
             microsecond=0
@@ -3792,6 +3928,7 @@ class TTPostService:
                 payload,
                 resolved["content_id"],
                 description=resolved.get("description"),
+                drama_name=resolved.get("drama_name"),
             )
         else:
             caption_template = str(auto_config.get("caption_template") or "")
@@ -3799,6 +3936,7 @@ class TTPostService:
                 caption_template,
                 resolved["content_id"],
                 description=resolved.get("description"),
+                drama_name=resolved.get("drama_name"),
                 defer_url=True,
                 defer_code=True,
             )
@@ -5371,6 +5509,7 @@ class TTPostService:
                 url=existing.get("short_url"),
                 description=existing.get("description"),
                 code=existing.get("code"),
+                drama_name=existing.get("drama_name"),
             )
         if not secrets.compare_digest(
             str(existing.get("caption") or "").encode("utf-8"),
@@ -5414,6 +5553,7 @@ class TTPostService:
                 payload,
                 requested_content_id,
                 defer_description=True,
+                defer_drama_name=True,
             )
         elif submitted_caption not in (None, ""):
             candidate_template = None
@@ -5512,6 +5652,7 @@ class TTPostService:
             payload,
             requested_content_id,
             description=prepared.get("description"),
+            drama_name=prepared.get("drama_name"),
         )
         maximum_duration = int(
             creator.get("max_video_post_duration_sec") or 0

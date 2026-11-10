@@ -30,6 +30,11 @@
     { value: "100", label: "小说" },
   ]);
   const RESOURCE_TYPE_V2_VALUES = new Set(RESOURCE_TYPE_V2_OPTIONS.map(item => item.value));
+  const DEFAULT_VIDEO_TEMPLATE = "random_overlay";
+  const VIDEO_TEMPLATE_LABELS = Object.freeze({
+    random_overlay: "随机排重",
+    direct_outro: "拼接结尾",
+  });
   const state = {
     accounts: [],
     selectedAccountIds: new Set(),
@@ -199,6 +204,11 @@
     setValue("captionTemplate", configValue("caption_template", ""));
     setValue("dramaLaunchWindowDays", configValue("drama_launch_window_days", 0), "0");
     setValue("cooldownDays", configValue("cooldown_days", 0), "0");
+    const videoTemplate = String(configValue("video_template", DEFAULT_VIDEO_TEMPLATE) || "").trim();
+    if (!Object.prototype.hasOwnProperty.call(VIDEO_TEMPLATE_LABELS, videoTemplate)) {
+      throw new Error("模板的视频制作模板配置无效，请联系管理员。");
+    }
+    setValue("videoTemplate", videoTemplate, DEFAULT_VIDEO_TEMPLATE);
 
     const drama = ui.objectValue(configValue("drama_rule", {}));
     const material = ui.objectValue(configValue("material_rule", {}));
@@ -260,6 +270,8 @@
     ui.setText(ui.byId("summaryMetric"), `platform=${ui.byId("platform").value || "0"} / ${ui.byId("metricWindowDays").value || "7"} 天`, "");
     ui.setText(ui.byId("summaryDramaSort"), sortSummary("drama"), "");
     ui.setText(ui.byId("summaryMaterialSort"), sortSummary("material"), "");
+    const videoTemplate = ui.byId("videoTemplate").value;
+    ui.setText(ui.byId("summaryVideoTemplate"), VIDEO_TEMPLATE_LABELS[videoTemplate], "未选择");
     if (selectedScheduleMode() === "random") {
       ui.setText(ui.byId("summarySchedule"), `每天随机 ${ui.byId("randomDailyCount").value || "1"} 次`, "");
     } else {
@@ -318,6 +330,10 @@
     if (!Number.isInteger(durationMin) || durationMin < 0 || durationMin > 3600) throw new Error("素材最小时长必须为 0–3600 秒的整数。");
     if (!Number.isInteger(durationMax) || durationMax < 1 || durationMax > 3600) throw new Error("素材最长时长必须为 1–3600 秒的整数。");
     if (durationMin > durationMax) throw new Error("素材时长最小值不能大于最大值。");
+    const videoTemplate = ui.byId("videoTemplate").value;
+    if (!Object.prototype.hasOwnProperty.call(VIDEO_TEMPLATE_LABELS, videoTemplate)) {
+      throw new Error("请选择有效的视频制作模板。");
+    }
 
     const mode = selectedScheduleMode();
     let schedule;
@@ -336,6 +352,7 @@
       name,
       account_ids: Array.from(state.selectedAccountIds),
       caption_template: caption,
+      video_template: videoTemplate,
       metric_window_days: metricWindowDays,
       drama_launch_window_days: launchWindow,
       cooldown_days: cooldown,

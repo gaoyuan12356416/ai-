@@ -105,11 +105,8 @@ def publish_material(runtime, template_id, actor, payload):
     enabled = store.enabled_template_sources(template_id)
     fingerprint = {(int(template_id), request["expected_version"])}
     automatic_daily_jobs = daily_capacity(config, pages)
-    target_ids = {p.page_id for p in pages}
     for other in enabled:
         other_pages = runtime.pages.list_pages(other["config"]["group_ids"], is_admin=other["scope_is_admin"], owner_user_id=other["owner_user_id"])
-        if target_ids.intersection(p.page_id for p in other_pages):
-            raise StoreError("fb_auto_page_template_conflict", "模板Page与其他启用模板重叠，未创建运行", 409)
         automatic_daily_jobs += daily_capacity(other["config"], other_pages)
         fingerprint.add((int(other["template_id"]), int(other["template_version"])))
     material = runtime.materials.exact_material(config, request["material_id"])

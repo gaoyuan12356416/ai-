@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 
 from features.tt_posts.core import (
     TTPostError,
-    caption_uses_code_macro,
     render_caption_template,
 )
 from features.tt_posts.links import build_w2a_url, validate_w2a_url
@@ -187,9 +186,26 @@ def build_auto_w2a_url(
     content_id: Any,
 ) -> str:
     normalized_id = _positive_id(link_id)
+    # The read-only TikTok account snapshot exposes an external account
+    # identity rather than a guaranteed public handle.  Keep the automatic
+    # flow aligned with the legacy TT pool by normalizing that identity into
+    # the conservative character set accepted by the W2A campaign contract.
+    # Page ID remains the stable fallback and is also carried separately as
+    # af_adset_id, so attribution does not depend on a guessed public handle.
+    tracking_username = re.sub(
+        r"[^A-Za-z0-9._]",
+        "_",
+        str(username or "").lstrip("@"),
+    ).strip("_")
+    if not tracking_username or len(tracking_username) > 50:
+        tracking_username = re.sub(
+            r"[^A-Za-z0-9._]",
+            "_",
+            str(page_id or ""),
+        ).strip("_")
     return build_w2a_url(
         {
-            "username": username,
+            "username": tracking_username,
             "timestamp": timestamp,
             "material_language": language,
             "drama_name": drama_name,
@@ -213,19 +229,17 @@ def render_auto_caption(
     *,
     short_url: Any,
     description: Any,
+    code: Any = None,
+    drama_name: Any = None,
 ) -> str:
-    if caption_uses_code_macro(template):
-        raise AutoPostLinkError(
-            "tt_auto_caption_code_unsupported",
-            "自动发布模板暂不支持{code}变量",
-            400,
-        )
     normalized_url = validate_auto_short_url(short_url)
     try:
         rendered = render_caption_template(
             template,
             content_id,
             description=description,
+            code=code,
+            drama_name=drama_name,
             defer_url=True,
         )
     except TTPostError as exc:
