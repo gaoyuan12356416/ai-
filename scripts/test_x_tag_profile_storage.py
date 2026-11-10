@@ -153,7 +153,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(result['revenue'], 10000)
         self.assertEqual(writer.write_batch.call_args.args[1][0][0], '@current')
         retry, data = self.writer()
-        retry.db.cursor.return_value.__enter__.return_value.fetchone.return_value = json.dumps({'version': VERSION})
+        retry.db.cursor.return_value.__enter__.return_value.fetchone.return_value = (json.dumps({'version': VERSION}),)
         reader.query.side_effect = None
         reader.query.return_value = [{k: result[k] for k in ('rows', 'revenue', 'checksum')}]
         self.assertEqual(retry.publish(data, reader), result)
