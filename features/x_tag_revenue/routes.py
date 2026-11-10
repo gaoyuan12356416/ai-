@@ -20,11 +20,13 @@ def read_snapshot(root):
         raise ValueError('invalid_snapshot')
     with _lock:
         data = _cache.get(str(path))
-    if data is None:
-        data = json.loads(path.read_text(encoding='utf-8'))
-        if data['meta']['version'] != pointer['version']:
-            raise ValueError('snapshot_version_mismatch')
-        with _lock:
+        if data is None:
+            # The hierarchy contains full drill-down details. Concurrent cold
+            # reads must share one decode, including at the hourly rollover;
+            # otherwise each request creates another large Python object tree.
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if data['meta']['version'] != pointer['version']:
+                raise ValueError('snapshot_version_mismatch')
             _cache.clear()
             _cache[str(path)] = data
     meta = dict(data['meta'])

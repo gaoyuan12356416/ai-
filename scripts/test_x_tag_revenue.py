@@ -2,9 +2,13 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from urllib.parse import urlsplit
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.x_tag_revenue.core import build, label_index, rounded_parts
@@ -12,6 +16,7 @@ from features.x_tag_revenue.routes import response, dispatch, read_snapshot
 from features.x_tag_revenue.integration import patch_html, unpatch_html, CHANGES
 from features.x_tag_revenue.http_server import authorize
 from features.x_tag_revenue.tags import lookup, VERSION as TAG_MAPPING_VERSION
+from features.x_tag_revenue import routes
 
 
 def publication(campaign='1', channel='123', content='drama', **extra):
@@ -30,6 +35,41 @@ def resource(names='Romance,CEO', content='drama', lang='en', series='s'):
 
 
 class PortraitTests(unittest.TestCase):
+    def test_concurrent_cold_reads_decode_each_snapshot_once_and_share_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'snapshots').mkdir()
+            original=Path.read_text;reads=[];counter_lock=threading.Lock()
+            def read(path,*args,**kwargs):
+                if path.parent==root/'snapshots':
+                    with counter_lock:reads.append(path.name)
+                    time.sleep(.05)
+                return original(path,*args,**kwargs)
+            with routes._lock:routes._cache.clear()
+            with patch.object(Path,'read_text',read):
+                for version in ('first','second'):
+                    (root/'snapshots'/f'{version}.json').write_text(json.dumps(dict(accounts={},meta=dict(version=version,source_generated_at='2026-11-09T00:00:00+00:00'))))
+                    (root/'current.json').write_text(json.dumps(dict(file=f'snapshots/{version}.json',version=version)))
+                    barrier=threading.Barrier(8)
+                    def fetch(_):
+                        barrier.wait(timeout=3)
+                        return read_snapshot(root)
+                    with ThreadPoolExecutor(max_workers=8) as pool:results=list(pool.map(fetch,range(8)))
+                    self.assertTrue(all(value[0] is results[0][0] for value in results))
+                    self.assertTrue(all(value[1]['version']==version for value in results))
+            self.assertEqual(reads,['first.json','second.json'])
+
+    def test_failed_new_snapshot_does_not_replace_successful_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'snapshots').mkdir()
+            good=dict(file='snapshots/good.json',version='good')
+            (root/'snapshots/good.json').write_text(json.dumps(dict(accounts={},meta=dict(version='good',source_generated_at='2026-11-09T00:00:00+00:00'))))
+            (root/'current.json').write_text(json.dumps(good));cached=read_snapshot(root)[0]
+            (root/'snapshots/bad.json').write_text('{invalid')
+            (root/'current.json').write_text(json.dumps(dict(file='snapshots/bad.json',version='bad')))
+            with self.assertRaises(ValueError):read_snapshot(root)
+            (root/'current.json').write_text(json.dumps(good))
+            self.assertIs(read_snapshot(root)[0],cached)
+
     def test_multilingual_synonyms_merge_before_equal_allocation(self):
         out=build([publication()],[metric(120)],[resource('Revenge,復仇,复仇,복수,Rache,Romance,爱情')],'2026-01-31')
         tags=out['accounts']['123']['tags']

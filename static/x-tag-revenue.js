@@ -7,7 +7,16 @@
   const basis={explicit:'明确标签',inferred:'规则推导',conflict:'标注冲突',unlabeled:'证据不足'};
   const rules={explicit_audience_label:'明确受众标签',conflicting_explicit_audiences:'明确受众标签冲突',conflicting_audience_signals:'男女向信号同时出现',relationship_and_female_story:'恋爱关系／女性成长信号',male_power_and_son_in_law_story:'战神／赘婿／强者信号',general_subject_without_directional_signal:'通用题材且无明确方向信号',insufficient_audience_evidence:'缺少足够受众信号'};
   let items={},meta=null,error='',loading=false,sequence=0,currentId='',currentPath=[],dialog;
-  async function api(path){const r=await fetch(path,{credentials:'same-origin',cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.message||'画像暂不可用');return d;}
+  async function api(path){
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),25000);
+    try{
+      const r=await fetch(path,{credentials:'same-origin',cache:'no-store',signal:controller.signal});
+      let d;try{d=await r.json();}catch(e){if(e.name==='AbortError')throw e;throw Error(r.status===504?'画像读取超时，请稍后重试':'画像服务响应异常，请稍后重试');}
+      if(!r.ok)throw Error(d.message||(r.status===504?'画像读取超时，请稍后重试':'画像暂不可用'));
+      return d;
+    }catch(e){if(e.name==='AbortError')throw Error('画像读取超时，请稍后重试');throw e;}
+    finally{clearTimeout(timer);}
+  }
   function cell(id){
     const item=items[String(id)];
     if(!item)return error?`<span class="xtr-note">${esc(error)}</span><button type="button" class="button small" data-xtr-retry>重试</button>`:'<span class="xtr-note">正在读取画像…</span>';
