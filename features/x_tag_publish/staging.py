@@ -101,6 +101,14 @@ def build(source, repo, target, *, verify=True):
             value = value.replace('</head>', '<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>')
             value = value.replace('<script src="/x-tag-auto-publish-common.js', '<script src="/x-tag-publish-ui.js?v=20261109hierarchy1"></script>\n  <script src="/x-tag-auto-publish-common.js')
         (target / 'static' / p.name.replace('x-auto-publish', 'x-tag-auto-publish')).write_text(value, encoding='utf-8')
+    # Account DTOs expose both the local record ID and the string X user ID.
+    # Keep usernames searchable even when a display name is present.
+    replace_once(target / 'static/x-tag-auto-publish-template.js',
+                 '${accountId(item)} ${accountName(item)} ${accountSubscription(item)}',
+                 '${accountId(item)} ${item && item.x_user_id || ""} ${item && item.username ? "@" + item.username : ""} ${accountName(item)} ${accountSubscription(item)}')
+    replace_once(target / 'static/x-tag-auto-publish-template.html',
+                 '搜索账号名称、账号 ID 或订阅类型',
+                 '搜索名称、@用户名、后台账号 ID、X 用户 ID 或订阅类型')
     p = source / 'static/x-post-material-pool.html'
     value = p.read_text(encoding='utf-8').replace('/api/admin/x-posts/', '/api/admin/x-tag-posts/')
     value = value.replace('x-post-material-pool', 'x-tag-material-pool').replace('/x-post-logs', '/x-tag-post-logs')
@@ -139,7 +147,7 @@ def build(source, repo, target, *, verify=True):
     for p in (target / 'static').glob('x-tag-*.html'):
         value = p.read_text(encoding='utf-8')
         value = re.sub(r'(/quick-nav\.js)(?:\?[^"\']*)?', r'\1?v=' + nav_version, value)
-        for asset in ('x-tag-publish-ui.js', 'x-tag-post-logs.js', 'x-tag-revenue.js', 'x-tag-revenue.css', 'x-tag-auto-publish-templates.js'):
+        for asset in ('x-tag-publish-ui.js', 'x-tag-post-logs.js', 'x-tag-revenue.js', 'x-tag-revenue.css', 'x-tag-auto-publish-templates.js', 'x-tag-auto-publish-template.js'):
             version=digest(target / 'static' / asset)[:12]
             value=re.sub(r'(/'+re.escape(asset)+r')(?:\?[^"\']*)?',r'\1?v='+version,value)
         p.write_text(value, encoding='utf-8')
