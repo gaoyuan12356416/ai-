@@ -45,6 +45,9 @@ class SqlFixture:
             (dt TEXT, product TEXT, w2a_page_id INTEGER, ad_account_id TEXT COLLATE SOURCE_CI,
              impressions INTEGER, clicks INTEGER, installs INTEGER,
              af_revenue0 TEXT, revenue TEXT, spend TEXT, data_source INTEGER);
+          CREATE TABLE kunlunads_dev.ads_tiktok_insights
+            (start_date TEXT, product TEXT, advertiser_id TEXT COLLATE SOURCE_CI,
+             category INTEGER, show_cnt TEXT, click_cnt TEXT, stat_cost TEXT);
           INSERT INTO kunlunads_dev.ads_alternative_account_group VALUES (648), (649), (650);
           INSERT INTO kunlunads_dev.ads_alternative_accounts VALUES
             (1,648,'101',0), (2,648,'202',0), (3,648,'202',0),
@@ -57,6 +60,7 @@ class SqlFixture:
                 ("2026-11-01", "Dramawave", 2334, "101", 10, 2, 1, "1.10", "99.00", "2.30", 0),
                 ("2026-11-01", "Dramawave", 2334, "202", 20, 3, 2, "2.20", "500.00", "4.50", 6),
                 ("2026-11-06", "Dramawave", 2334, "101", 100, 10, 4, "0.05", "900.00", "20.00", 9),
+                ("2026-11-05", "Drama-B", 0, "101", 9999, 9999, 3, "9.05", "999.00", "9999.00", 6),
                 ("2026-11-01", "Dramawave", 2334, "999", 999, 999, 999, 999, 999, 999, 0),
                 ("2026-11-01", "Dramawave", 2335, "101", 7, 1, 1, "0.70", "999.00", "1.20", 0),
                 ("2026-11-01", "Dramawave", 0, "202", 3, 1, 1, "0.30", "999.00", "0.50", 0),
@@ -71,6 +75,21 @@ class SqlFixture:
                 ("2026-11-01", "Dramawave", 2334, None, 999, 999, 999, 999, 999, 999, 0),
             ],
         )
+        self.db.executemany(
+            "INSERT INTO kunlunads_dev.ads_tiktok_insights VALUES (?,?,?,?,?,?,?)",
+            [
+                ("2026-11-01", "Drama-B", "101", 0, "100.00", "10.00", "20.00"),
+                ("2026-11-01", "Other", "101", 0, "50.00", "5.00", "7.50"),
+                ("2026-11-01", "", "202", 0, "200.00", "20.00", "50.00"),
+                ("2026-11-03", "Drama-C", "202", 0, "4.00", "1.00", "0.25"),
+                ("2026-11-06", None, "101", 0, "1000.00", "100.00", "200.00"),
+                ("2026-10-31", "Drama-B", "101", 0, "9999.00", "9999.00", "9999.00"),
+                ("2026-11-01", "Drama-B", "999", 0, "9999.00", "9999.00", "9999.00"),
+                ("2026-11-01", "Drama-B", "777", 0, "9999.00", "9999.00", "9999.00"),
+                ("2026-11-01", "Drama-B", "101", 1, "9999.00", "9999.00", "9999.00"),
+                ("2026-11-01", "Drama-B", "101", 2, "9999.00", "9999.00", "9999.00"),
+            ],
+        )
         self.queries = []
         self.db.create_function("DATE_FORMAT", 2, lambda value, fmt: value)
         self.db.create_aggregate("SUM", 1, ExactSum)
@@ -80,9 +99,11 @@ class SqlFixture:
         self.assert_read_only(sql)
         translated = re.sub(r"FORCE\s+INDEX\s*\([^)]*\)", "", sql, flags=re.I)
         translated = re.sub(
-            r"CAST\s*\(\s*(ad_account_id)\s+AS\s+BINARY\s*\)",
+            r"CAST\s*\(\s*(ad_account_id|advertiser_id)\s+AS\s+BINARY\s*\)",
             r"CAST(\1 AS BLOB)", translated, flags=re.I,
         )
+        translated = re.sub(r"CONVERT\((X'[0-9a-f]+') USING utf8mb4\)",
+                            r"CAST(\1 AS TEXT)", translated, flags=re.I)
         return [tuple(None if value is None else str(value) for value in row)
                 for row in self.db.execute(translated).fetchall()]
 
@@ -102,18 +123,23 @@ class SourceContractTests(unittest.TestCase):
     def test_actual_pool_membership_excludes_deleted_and_other_pools_and_deduplicates(self):
         self.assertEqual(self.source.load_scope(self.config), ("101", "202"))
 
-    def test_real_aggregation_includes_all_products_pages_but_keeps_pool_date_and_af_revenue0(self):
+    def test_independent_metric_sources_preserve_scope_without_raw_join_or_level_duplication(self):
         accounts = self.source.load_scope(self.config)
         rows = self.source.read_daily(accounts)
         self.assertEqual(rows, [
-            {"day": "2026-11-01", "impression": 113, "click": 17, "install": 12,
-             "revenue": Decimal("11.05"), "cost": Decimal("20.65")},
-            {"day": "2026-11-06", "impression": 100, "click": 10, "install": 4,
-             "revenue": Decimal("0.05"), "cost": Decimal("20.00")},
+            {"day": "2026-11-01", "impression": 350, "click": 35, "install": 12,
+             "revenue": Decimal("11.05"), "cost": Decimal("77.50")},
+            {"day": "2026-11-03", "impression": 4, "click": 1, "install": 0,
+             "revenue": Decimal("0"), "cost": Decimal("0.25")},
+            {"day": "2026-11-05", "impression": 0, "click": 0, "install": 3,
+             "revenue": Decimal("9.05"), "cost": Decimal("0")},
+            {"day": "2026-11-06", "impression": 1000, "click": 100, "install": 4,
+             "revenue": Decimal("0.05"), "cost": Decimal("200.00")},
         ])
         # Products B/C/other/empty/NULL and all pages are eligible; the pool and
         # 11/1 floor still exclude the unrelated account and older high values.
-        self.assertEqual(rows[-1]["impression"], 100)
+        self.assertEqual(rows[-1]["impression"], 1000)
+        self.assertEqual(len(self.fixture.queries), 2)  # scope + one metric SELECT
 
     def test_account_scope_is_byte_exact_despite_case_and_padded_source_collation(self):
         self.fixture.db.executemany(
@@ -126,12 +152,28 @@ class SourceContractTests(unittest.TestCase):
              for account, count in [("123", 1), ("123 ", 100), ("0123", 100),
                                     ("act_AbC", 2), ("act_abc", 100), ("act_AbC ", 100)]],
         )
+        self.fixture.db.executemany(
+            "INSERT INTO kunlunads_dev.ads_tiktok_insights VALUES (?,?,?,?,?,?,?)",
+            [("2026-11-06", "Drama-B", account, 0, str(count)+".00", "1.00", "2.00")
+             for account, count in [("123", 1), ("123 ", 100), ("0123", 100),
+                                    ("act_AbC", 2), ("act_abc", 100), ("act_AbC ", 100)]],
+        )
         scope = self.source.load_scope({"pool_id": 650})
         self.assertEqual(scope, ("123", "act_AbC"))
         rows = self.source.read_daily(scope)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["impression"], 3)
         self.assertEqual(rows[0]["revenue"], Decimal("2.00"))
+        self.assertEqual(rows[0]["cost"], Decimal("4.00"))
+
+    def test_integral_decimal_counts_are_preserved(self):
+        candidate = source.MySQLSource(self.config, query=lambda sql: [
+            ("2026-11-09", "89737706.00", "1606468.00", "29773", "80065.35", "203976.90"),
+        ])
+        result = candidate.read_daily(("101",))[0]
+        self.assertEqual(result["impression"], 89737706)
+        self.assertEqual(result["click"], 1606468)
+        self.assertEqual(result["cost"], Decimal("203976.90"))
 
     def test_existing_empty_pool_is_distinct_from_missing_pool(self):
         self.assertEqual(self.source.load_scope({"pool_id": 650}), ())

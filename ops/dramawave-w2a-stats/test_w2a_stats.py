@@ -198,6 +198,7 @@ class ApiContractTests(unittest.TestCase):
             [self.config["pool_id"], source.accounts],
             ["dramawave-pool-all-pages-v1", "Dramawave", self.config["pool_id"], source.accounts],
             ["dramawave-pool-all-pages-from-20261101-v1", "Dramawave", self.config["pool_id"], source.accounts],
+            ["account-pool-all-products-all-pages-from-20261101-v1", self.config["pool_id"], source.accounts],
         ]
         for old_policy in old_policies:
             with self.subTest(old_policy=old_policy):

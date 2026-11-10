@@ -20,6 +20,15 @@ def _account_literal(value):
     return "X'%s'" % value.encode("utf-8").hex()
 
 
+def _count(value):
+    # TikTok count columns are DECIMAL(10,2). Accept integral decimals without
+    # truncating a fractional count or converting through binary floating point.
+    number = Decimal(str(value))
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValueError("invalid source count")
+    return int(number)
+
+
 class MySQLSource:
     def __init__(self, config, query=None):
         self.config = config
@@ -30,7 +39,7 @@ class MySQLSource:
         password = os.environ.get("W2A_MYSQL_PASSWORD", "")
         if not user or not password:
             raise SourceError("source credentials are not configured")
-        # All-page history is materially larger than the old single-page query.
+        # Both metric sources are aggregated in one consistent SELECT snapshot.
         # Keep membership reads short and bound the single hourly aggregate.
         query_seconds = 240 if sql.lstrip().startswith("SELECT dt AS day") else 20
         env = os.environ.copy()
@@ -98,19 +107,45 @@ ORDER BY a.account_id, a.id
         if not accounts:
             return []
         values = ", ".join(_account_literal(value) for value in accounts)
+        # A text comparison enables the advertiser/date index. The additional
+        # binary predicate preserves byte-exact membership despite its collation.
+        text_values = ", ".join("CONVERT(%s USING utf8mb4)" % _account_literal(value)
+                                for value in accounts)
         rows = self.query("""
 SELECT dt AS day,
-       SUM(impressions) AS impression,
-       SUM(clicks) AS click,
-       SUM(installs) AS install,
-       SUM(af_revenue0) AS revenue,
-       SUM(spend) AS cost
-FROM kunlunads_dev.ads_custom_source_insight
-WHERE dt >= '2026-11-01'
-  AND CAST(ad_account_id AS BINARY) IN (%s)
+       SUM(impression) AS impression,
+       SUM(click) AS click,
+       SUM(install) AS install,
+       SUM(revenue) AS revenue,
+       SUM(cost) AS cost
+FROM (
+    SELECT start_date AS dt,
+           SUM(show_cnt) AS impression,
+           SUM(click_cnt) AS click,
+           0 AS install,
+           0 AS revenue,
+           SUM(stat_cost) AS cost
+    FROM kunlunads_dev.ads_tiktok_insights FORCE INDEX(ads)
+    WHERE start_date >= '2026-11-01'
+      AND category = 0
+      AND advertiser_id IN (%s)
+      AND CAST(advertiser_id AS BINARY) IN (%s)
+    GROUP BY start_date
+    UNION ALL
+    SELECT dt,
+           0 AS impression,
+           0 AS click,
+           SUM(installs) AS install,
+           SUM(af_revenue0) AS revenue,
+           0 AS cost
+    FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX(stats_date)
+    WHERE dt >= '2026-11-01'
+      AND CAST(ad_account_id AS BINARY) IN (%s)
+    GROUP BY dt
+) AS facts
 GROUP BY dt
 ORDER BY dt
-""".strip() % values)
+""".strip() % (text_values, values, values))
         result = []
         try:
             for row in rows:
@@ -123,8 +158,8 @@ ORDER BY dt
                 if any(not value.is_finite() for value in amount):
                     raise ValueError("non-finite source amount")
                 result.append({
-                    "day": day, "impression": int(row[1]), "click": int(row[2]),
-                    "install": int(row[3]), "revenue": amount[0], "cost": amount[1],
+                    "day": day, "impression": _count(row[1]), "click": _count(row[2]),
+                    "install": _count(row[3]), "revenue": amount[0], "cost": amount[1],
                 })
         except (TypeError, ValueError, InvalidOperation):
             raise SourceError("invalid source metric result") from None

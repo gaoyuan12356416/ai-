@@ -1,4 +1,4 @@
-# 账户池数据查询接口 V1.4
+# 账户池数据查询接口 V1.5
 
 ## 地址与权限
 
@@ -18,20 +18,26 @@
 
 ## 固定数据范围
 
-数据源为 `kunlunads_dev.ads_custom_source_insight`。仅限定 `ad_account_id` 属于账户池 **648（Account for opera）**，并保留 `dt >= '2026-11-01'` 日期下限。**不按产品或页面筛选**，五项指标按日汇总池内账户的全部产品、全部页面数据，产品或页面字段为空也不因此排除。
+固定账户池为 **648（Account for opera）**，日期下限为 **2026-11-01**。**不按产品或页面筛选**，包含池内账户的全部产品、全部页面数据。
+
+- 展示、点击、花费来自 `kunlunads_dev.ads_tiktok_insights`，按 `advertiser_id` 匹配账户池，日期取 `start_date`，使用 Campaign 层 `category=0`。不叠加广告组、广告层，避免重复计数。
+- 安装、收入继续来自 `kunlunads_dev.ads_custom_source_insight`，按 `ad_account_id` 匹配同一账户池，日期取 `dt`，收入仍为 `af_revenue0`。
+- 两张表分别按日汇总后合并对应指标，不关联原始明细放大数据。不因某账户仅在其中一张表有数据或花费为零而排除其指标。
 
 账户池成员取业务账户池 `ads_alternative_account_group` 与 `ads_alternative_accounts`，排除已移出池的成员（`deleted_at` 非零），不按账户当前投放状态另行剔除其历史数据。成员 ID 去重后筛选，不通过重复成员 JOIN 放大指标。
 
 | 返回字段 | JSON 类型 | 口径 |
 |---|---|---|
-| `day` | string | 源表 `dt`，`YYYY-MM-DD` |
-| `impression` | integer | `SUM(impressions)` |
-| `click` | integer | `SUM(clicks)` |
-| `install` | integer | `SUM(installs)` |
-| `revenue` | number | **`SUM(af_revenue0)`**，两位小数 |
-| `cost` | number | `SUM(spend)`，两位小数 |
+| `day` | string | TikTok 表 `start_date` / 原表 `dt`，`YYYY-MM-DD` |
+| `impression` | integer | TikTok 表 `SUM(show_cnt)` |
+| `click` | integer | TikTok 表 `SUM(click_cnt)` |
+| `install` | integer | 原表 `SUM(installs)` |
+| `revenue` | number | 原表 **`SUM(af_revenue0)`**，两位小数 |
+| `cost` | number | TikTok 表 `SUM(stat_cost)`，两位小数 |
 
 日期和金额沿用源表口径，不重新切日或换算汇率。`revenue` 不代表按收入事件日另行重算的实际收款。
+
+ROAS 可由调用方按 `revenue / cost × 100%` 计算；花费为零时 ROAS 不适用。接口字段保持不变，不新增 ROAS 字段。
 
 ## 查询参数与示例
 
@@ -77,7 +83,7 @@ curl --get \
 
 ## 更新规则
 
-- 后台每小时整点读取一次，重新汇总该范围内全部已有日期，完成后整体替换快照。HTTP 请求只读取已生成快照。
+- 后台每小时整点读取一次，在同一只读查询快照中汇总两张表的全部已有日期，完成后整体替换快照。HTTP 请求只读取已生成快照。V1.5 首次成功刷新会按新数据源回溯 11 月 1 日以来的数据；当天数值为截至刷新时的未完结数据。
 - 每行是该日期的最新汇总值。对接方应按 `day` 覆盖更新，不能累加不同小时的返回值。源表历史修订会反映到后续快照。
 - 每次刷新读取当前账户池成员；成员变化会重新计算历史数据。刷新过程中再次核对成员，成员范围变化时旧范围快照不继续开放。
 - 源指标查询失败时，保留同范围上一份完整快照和原 `updated_at`，并返回 `stale: true`。没有成功快照时返回 503。

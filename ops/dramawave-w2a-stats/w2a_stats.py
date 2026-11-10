@@ -24,9 +24,9 @@ from urllib.parse import parse_qsl, urlsplit
 
 # Historical URL segments do not filter products or pages.
 API_PATH = "/api/v1/dramawave/w2a/2334/daily-stats"
-VERSION = "1.4"
+VERSION = "1.5"
 MIN_DAY = "2026-11-01"
-REPORT_SCOPE = "account-pool-all-products-all-pages-from-20261101-v1"
+REPORT_SCOPE = "account-pool-tiktok-campaign-delivery-custom-af0-from-20261101-v2"
 DEFAULT_CONFIG = "/etc/dramawave-w2a-stats.json"
 DEFAULT_STATE_DIR = "/mnt/data-disk/dramawave-w2a-stats"
 DAY_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z", re.ASCII)
