@@ -29,6 +29,9 @@ _INITIALIZE_LOCK = threading.Lock()
 class FBNativeBridge:
     def __init__(self, runtime):
         self.runtime = runtime
+        # Match the two local SQL/mapping slots. Backpressure happens before
+        # a native claim; receipts and platform uploads never take this gate.
+        self._preflight_slots = threading.BoundedSemaphore(2)
         self._source_locks = weakref.WeakValueDictionary()
         self._source_locks_guard = threading.Lock()
         self._reconcile_queue = Queue(maxsize=32)
@@ -88,7 +91,8 @@ class FBNativeBridge:
             manual = task.get("source_kind") == "manual" and "pool" not in snap
             worker.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
             fresh = worker.sources.get_materials([task["material_id"]], need_desc=False,
-                    enforce_blacklist=task.get("source_kind") not in {"manual", "pool"}, manual=manual)[task["material_id"]]
+                    enforce_blacklist=task.get("source_kind") not in {"manual", "pool"}, manual=manual,
+                    **({"page_pool": True} if task.get("source_kind") == "pool" or "pool" in snap else {}))[task["material_id"]]
             if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                 raise AdapterError("material_identity_changed")
         media_url = str(prepared.get("media_url") or "")
@@ -162,6 +166,38 @@ class FBNativeBridge:
         return descriptor
 
     def reserve(self, job, claim):
+        with self._source_lock(job):
+            if job["stage"] != "publish":
+                return self._reserve(job, claim)
+            if not self._preflight_slots.acquire(blocking=False):
+                raise AdapterError("canonical_source_busy")
+            try:
+                return self._reserve(job, claim)
+            finally:
+                self._preflight_slots.release()
+
+    def _defer_preflight(self, job, task, code):
+        """Release only this unstarted video claim; retain every old receipt."""
+        if job["family"] != "video" or job["stage"] != "publish":
+            raise AdapterError("canonical_preflight_defer_invalid")
+        store = self.runtime.manual_worker.store
+        with store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM fb_video_task WHERE task_id=?", (task["task_id"],)).fetchone()
+            if (row is None or row["status"] != "running" or row["execution_lease"] != task["claim_token"]
+                    or row["graph_post_id"] or row["unknown_outcome"]
+                    or conn.execute("SELECT 1 FROM fb_video_attempt WHERE task_id=? AND lease_token=? LIMIT 1",
+                                    (task["task_id"], task["claim_token"])).fetchone()
+                    or conn.execute("SELECT 1 FROM pipeline_fb_operation WHERE source_key=? AND stage=? AND generation=? LIMIT 1",
+                                    self._key(job)).fetchone()):
+                raise AdapterError("canonical_preflight_requires_reconciliation")
+            conn.execute("UPDATE fb_video_task SET status='queued',execution_lease='',execution_until='',error_code=?,"
+                         "error_message=?,updated_at_utc=? WHERE task_id=?",
+                         (code, "发布前只读核验暂不可用，等待重试，尚未调用平台", utc_iso(store.now_fn()), task["task_id"]))
+            conn.commit()
+        logging.getLogger(__name__).warning("fb_preflight_deferred source=%s code=%s", job["source_key"], code)
+
+    def _reserve(self, job, claim):
         key = self._key(job)
         with self._source_lock(job):
             with self.runtime.store.connect() as conn:
@@ -205,6 +241,8 @@ class FBNativeBridge:
                     profile = CPU_PROFILE if job.get("executor_backend") == "cpu" else PROFILE
                     descriptor = {"kind": "fb_prepare", "request": {"job_id": task["gpu_job_id"], "content_id": task["content_id"],
                                   "source_url": source, "source_trim_tail_seconds": 0, "video_template": task.get("video_template") or "random_overlay", "expected_profile": profile}}
+                    if family == "video" and task.get("source_kind") == "pool":
+                        descriptor["request"]["page_pool"] = True
                     descriptor["required_capabilities"] = prepare_capabilities("fb", profile, "cpu" if profile == CPU_PROFILE else "gpu", job)
                 else:
                     request = self._auto_preflight(task) if family == "auto" else self._video_preflight(task)
@@ -215,7 +253,14 @@ class FBNativeBridge:
                         descriptor["processing_mode"] = "original"
                         descriptor["artifact"]["identity_mode"] = "remote_url"
             except Exception as exc:
-                self._no_write_failure(job, task, getattr(exc, "code", "canonical_preflight_failed"))
+                code = getattr(exc, "code", "canonical_preflight_failed")
+                transient = code in {"source_busy", "source_query_failed", "source_query_timeout",
+                    "source_connection_failed", "identity_unavailable", "mapping_busy", "mapping_unavailable"}
+                transient = transient or (code == "group_pool_source_unavailable" and getattr(exc, "retryable", False))
+                if transient and family == "video" and stage == "publish":
+                    self._defer_preflight(job, task, code)
+                    raise AdapterError("canonical_source_unavailable") from None
+                self._no_write_failure(job, task, code)
                 raise
             descriptor.update({"source_key": job["source_key"], "account_resource": "fb:page:" + str(task["page_id"]),
                                "credential_ref": job["source_key"]})
@@ -236,8 +281,23 @@ class FBNativeBridge:
         return self.runtime.manual_worker.store.record_outcome(task, GraphResult("definite_failure", "", code, code, ""), final=True)
 
     def _credentials(self, family, task):
-        credentials = (self.runtime.pages.eligible_credentials(task["page_id"]) if family == "auto"
-                       else self.runtime.manual_worker._task_credentials(task))
+        # Prioritize already-reserved publications over new preflights. This
+        # bounded wait plus one busy-only SELECT retry fits the 90s native RPC.
+        # The native attempt is created only after credentials are available.
+        if not self._preflight_slots.acquire(timeout=30):
+            raise AdapterError("source_busy")
+        try:
+            for attempt in range(2):
+                try:
+                    credentials = (self.runtime.pages.eligible_credentials(task["page_id"]) if family == "auto"
+                                   else self.runtime.manual_worker._task_credentials(task))
+                    break
+                except Exception as exc:
+                    if attempt or getattr(exc, "code", "") != "source_busy":
+                        raise
+                    time.sleep(.5)
+        finally:
+            self._preflight_slots.release()
         # Stable order across restarts; never substitute another Page or owner.
         return sorted(credentials, key=lambda c: (c.credential_id, c.fb_user_id))
 
@@ -369,7 +429,12 @@ class FBNativeBridge:
                     if current is None or current["status"] != "running" or current["lease_owner"] != task["lease_owner"] or current["lease_expires_at_utc"] <= utc_iso(self.runtime.store.now_fn()):
                         raise AdapterError("canonical_claim_stale")
                     conn.execute("UPDATE fb_auto_task SET lease_expires_at_utc=? WHERE id=?", (utc_iso(self.runtime.store.now_fn() + timedelta(seconds=1200)), task["id"]))
-            sequence = int(previous["sequence"] + 1) if previous else 1
+            # Explicit recovery creates a new fenced generation, but attempt
+            # numbers remain unique across the original task's full history.
+            with self.runtime.store.connect() as conn:
+                prior_sequence = conn.execute("SELECT COALESCE(MAX(sequence),0) FROM pipeline_fb_operation WHERE source_key=? AND stage=?",
+                                              (job["source_key"], job["stage"])).fetchone()[0]
+            sequence = int(prior_sequence) + 1
             with self.runtime.store.connect() as conn:
                 conn.execute("INSERT INTO pipeline_fb_operation(operation_id,source_key,stage,generation,request_sha256,credential_id,fb_user_id,native_attempt_id,sequence) VALUES(?,?,?,?,?,?,?,?,?)",
                              (operation_id, *self._key(job), str(operation.get("request_sha256") or ""), credential.credential_id, credential.fb_user_id, attempt_id, sequence))

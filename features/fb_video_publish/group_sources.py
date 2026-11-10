@@ -82,8 +82,10 @@ class GroupPoolSource:
                 LOG.warning("group_pool_source_failure stage=%s code=%s attempt=%s", stage, safe_code, attempt + 1)
                 if attempt == 0 and code in TRANSIENT_SOURCE_CODES:
                     continue
-                raise SourceError("group_pool_source_unavailable",
-                    "素材池只读数据源查询失败（" + stage + "/" + safe_code + "）", 503) from None
+                failure = SourceError("group_pool_source_unavailable",
+                    "素材池只读数据源查询失败（" + stage + "/" + safe_code + "）", 503)
+                failure.retryable = code in TRANSIENT_SOURCE_CODES
+                raise failure from None
         if not isinstance(rows, list) or len(rows) > maximum or any(not isinstance(row, Mapping) for row in rows):
             raise SourceError("group_pool_source_too_large", "素材池来源结果超过安全范围或格式无效", 503)
         return rows

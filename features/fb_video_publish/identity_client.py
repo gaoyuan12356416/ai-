@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 
@@ -45,6 +46,12 @@ class IdentityClient:
                             "identity_inactive", "identity_permission_denied", "identity_attribution_invalid",
                         }:
                             raise GatewayError(code, "原发布人身份已失效，请重新启用计划", 403)
+                        # Preserve safe upstream 503 classifications. Never log the
+                        # actor, response body, Authorization header or raw exception.
+                        safe_code = code if code in {"mapping_busy", "mapping_unavailable", "identity_unavailable"} else "identity_unavailable"
+                        logging.getLogger(__name__).warning("fb_identity_unavailable status=%s code=%s", response.status_code, safe_code)
+                        if response.status_code == 503:
+                            raise GatewayError(safe_code, "发布人身份只读核验暂不可用，请稍后重试", 503)
                         raise ValueError()
                     actor = data.get("actor") if isinstance(data, dict) and data.get("ok") is True else None
                     if (not isinstance(actor, dict) or set(actor) != ACTOR_KEYS

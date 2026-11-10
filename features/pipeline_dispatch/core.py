@@ -1042,11 +1042,21 @@ class DispatchStore:
 
     def defer_blocked(self, claim, reason):
         """A native pre-claim account conflict waits without freezing a failure."""
-        if reason not in {"canonical_account_busy", "x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
+        if reason not in {"canonical_account_busy", "canonical_source_busy", "canonical_source_unavailable", "x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
             raise DispatchError("defer_reason_invalid")
         with self.transaction() as c:
             row = self._validate_claim(c, claim)
-            if row["external_intent"] or c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? LIMIT 1", (row["id"],)).fetchone():
+            if reason in {"canonical_source_busy", "canonical_source_unavailable"} and (row["channel"], row["stage"]) != ("fb", "publish"):
+                raise DispatchError("defer_reason_invalid")
+            operation_sql = "SELECT 1 FROM pipeline_operation WHERE job_id=?"
+            operation_args = [row["id"]]
+            # FB recovery preserves old operations. A new claim may wait after
+            # its original unknown/rejected history was explicitly reconciled;
+            # external_intent and this generation's permit still fence writes.
+            if (row["channel"], row["stage"]) == ("fb", "publish"):
+                operation_sql += " AND generation=?"
+                operation_args.append(row["generation"])
+            if row["external_intent"] or c.execute(operation_sql + " LIMIT 1", operation_args).fetchone():
                 raise DispatchError("operation_requires_reconciliation")
             c.execute("UPDATE pipeline_job SET status='queued',lease_expires_at='',updated_at=?,error_code=? WHERE id=?", (self.now(), reason, row["id"]))
             c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND generation=?", (row["id"], row["generation"]))
