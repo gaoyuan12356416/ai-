@@ -32,6 +32,8 @@ class FBNativeBridge:
         # Match the two local SQL/mapping slots. Backpressure happens before
         # a native claim; receipts and platform uploads never take this gate.
         self._preflight_slots = threading.BoundedSemaphore(2)
+        self._credential_waiters = 0
+        self._credential_guard = threading.Lock()
         self._source_locks = weakref.WeakValueDictionary()
         self._source_locks_guard = threading.Lock()
         self._reconcile_queue = Queue(maxsize=32)
@@ -169,6 +171,9 @@ class FBNativeBridge:
         with self._source_lock(job):
             if job["stage"] != "publish":
                 return self._reserve(job, claim)
+            with self._credential_guard:
+                if self._credential_waiters:
+                    raise AdapterError("canonical_source_busy")
             if not self._preflight_slots.acquire(blocking=False):
                 raise AdapterError("canonical_source_busy")
             try:
@@ -282,20 +287,27 @@ class FBNativeBridge:
 
     def _credentials(self, family, task):
         # Prioritize already-reserved publications over new preflights. This
-        # bounded wait plus one busy-only SELECT retry fits the 90s native RPC.
+        # bounded wait plus busy-only SELECT retries fits the 90s native RPC.
         # The native attempt is created only after credentials are available.
-        if not self._preflight_slots.acquire(timeout=30):
+        with self._credential_guard:
+            self._credential_waiters += 1
+        try:
+            acquired = self._preflight_slots.acquire(timeout=30)
+        finally:
+            with self._credential_guard:
+                self._credential_waiters -= 1
+        if not acquired:
             raise AdapterError("source_busy")
         try:
-            for attempt in range(2):
+            for attempt in range(6):
                 try:
                     credentials = (self.runtime.pages.eligible_credentials(task["page_id"]) if family == "auto"
                                    else self.runtime.manual_worker._task_credentials(task))
                     break
                 except Exception as exc:
-                    if attempt or getattr(exc, "code", "") != "source_busy":
+                    if attempt == 5 or getattr(exc, "code", "") != "source_busy":
                         raise
-                    time.sleep(.5)
+                    time.sleep(1)
         finally:
             self._preflight_slots.release()
         # Stable order across restarts; never substitute another Page or owner.

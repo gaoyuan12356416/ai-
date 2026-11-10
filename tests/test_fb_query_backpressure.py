@@ -55,6 +55,14 @@ class BackpressureTests(FBSourceLockTests):
             self.bridge._preflight_slots.release()
         self.bridge.reserve(job, self.claim)
 
+    def test_waiting_credentials_take_priority_over_new_reservations(self):
+        job = self.video_job(49)
+        self.bridge._credential_waiters = 1
+        with self.assertRaisesRegex(AdapterError, '^canonical_source_busy$'):
+            self.bridge.reserve(job, self.claim)
+        self.bridge._credential_waiters = 0
+        self.bridge.reserve(job, self.claim)
+
     def test_started_attempt_cannot_be_returned_to_queue(self):
         job = self.video_job(42)
         self.bridge.reserve(job, self.claim)
@@ -138,6 +146,23 @@ class BackpressureTests(FBSourceLockTests):
             c.execute('UPDATE pipeline_job SET external_intent=1 WHERE id=?', (job['id'],))
         with self.assertRaisesRegex(DispatchError, 'requires_reconciliation'):
             store.defer_blocked(job, 'canonical_source_busy')
+
+    def test_authorized_rejected_history_does_not_become_a_new_unknown(self):
+        store = DispatchStore(self.temp.name + '/observation.sqlite', clock=lambda: self.now)
+        offer = dict(source_key='fb:auto:50', source_id='50', channel='fb', family='auto', stage='publish',
+                     source_status='ready', source_attempt_count=1, status='unknown', resource_keys=['fb:page:100'],
+                     unknown_outcome=False, publish_id='', legacy_inflight=False)
+        job = store.offer(dict(offer, status='queued'))
+        with store.transaction() as c:
+            c.execute('UPDATE pipeline_job SET generation=2 WHERE id=?', (job['id'],))
+            store.event(c, job['id'], 'authorized_fb_unpublished_recovery', dict(source_key=job['source_key'],
+                        actor='operator_authorized', generation=1, attempts=1), store.now())
+        self.assertEqual(store.offer(offer)['status'], 'queued')
+        # Neither a fresh unknown nor any new write can inherit old permission.
+        self.assertEqual(store.offer(dict(offer, unknown_outcome=True))['status'], 'unknown')
+        with store.transaction() as c:
+            c.execute("UPDATE pipeline_job SET status='queued',external_intent=1 WHERE id=?", (job['id'],))
+        self.assertEqual(store.offer(offer)['status'], 'unknown')
 
 
 class SourceErrorsTests(unittest.TestCase):

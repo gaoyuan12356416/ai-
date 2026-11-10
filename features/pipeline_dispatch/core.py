@@ -491,6 +491,25 @@ class DispatchStore:
         self.event(c, existing["id"], "fb_skipped_recovery_offered", {"operation_id": operation_id}, self.now())
         return True
 
+    def _fb_recovered_history_only(self, c, row, offer):
+        """Old explicit rejections are not a new unknown after operator recovery."""
+        if (row["channel"] != "fb" or row["stage"] != "publish"
+                or offer.get("source_key") != row["source_key"]
+                or offer.get("source_status") not in {"queued", "ready"}
+                or any(offer.get(k) for k in ("unknown_outcome", "publish_id", "legacy_inflight", "fb_page_write_active", "hold_reason"))
+                or row["external_intent"]):
+            return False
+        event = c.execute("SELECT details_json FROM pipeline_event WHERE job_id=? AND event_type='authorized_fb_unpublished_recovery' ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+        if not event:
+            return False
+        proof = json.loads(event[0])
+        return (proof.get("source_key") == row["source_key"]
+                and proof.get("actor") == "operator_authorized"
+                and int(offer.get("source_attempt_count") or 0) <= int(proof.get("attempts", -1))
+                and not c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? AND generation>? LIMIT 1",
+                                  (row["id"], int(proof.get("generation", -1)))).fetchone()
+                and not c.execute("SELECT 1 FROM pipeline_publication WHERE source_key=? LIMIT 1", (row["source_key"],)).fetchone())
+
     def _refresh_fb_isolation(self, c, row, offer):
         """Narrow only a fresh canonical FB observation, never a worker guess."""
         if (row["channel"] != "fb" or row["family"] not in {"auto", "video"}
@@ -722,7 +741,9 @@ class DispatchStore:
                                    and not offer.get("unknown_outcome") and not offer.get("legacy_inflight")
                                    and bool(offer.get("confirmed_youtube_schedule"))
                                    and json.loads(existing["payload_json"]).get("continuation") == offer["confirmed_youtube_schedule"])
-                if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"] and not parked_schedule:
+                recovered_history = (existing["status"] in ("queued", "ready")
+                                     and self._fb_recovered_history_only(c, existing, offer))
+                if status == "unknown" and existing["status"] in ("queued", "ready", "failed") and existing["generation"] and not parked_schedule and not recovered_history:
                     c.execute("UPDATE pipeline_job SET status='unknown',error_code='canonical_unknown_outcome',finished_at='',updated_at=? WHERE id=?", (now, existing["id"]))
                     for resource in quarantine_resources:
                         c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, existing["id"]))

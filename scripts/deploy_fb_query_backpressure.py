@@ -25,15 +25,22 @@ def scheduler(action, folder, suffix):
         args += ['--output', str(folder/(lane+'-schedulers-'+suffix+'.json'))]
         ops.run(args, timeout=55)
 
-def prepare(source, commit, folder):
+def verify_service_access(manifest):
+    for lane, item in manifest['lanes'].items():
+        user = ops.show(ops.LANES[lane][1], 'User') or 'root'
+        probe = 'import pathlib,sys; root=pathlib.Path(sys.argv[1]); [(root/p).read_bytes() for p in sys.argv[2:]]'
+        ops.run(['runuser', '-u', user, '--', sys.executable, '-c', probe,
+                 item['candidate'], *item['files']])
+
+def prepare(source, commit, folder, baseline=BASE):
     commit = verify_source(source, commit)
     assert ops.DATA.is_mount() and folder.is_relative_to(ops.DATA)
     assert ops.run(['findmnt', '-n', '-o', 'UUID', str(ops.DATA)]) == '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
     assert shutil.disk_usage(ops.DATA).free > 3 * 1024**3, 'insufficient_data_disk_space'
-    changed = set(ops.run(['git', 'diff', '--name-only', BASE, commit, '--', 'features'], cwd=source).splitlines())
-    assert changed == NATIVE | CENTRAL, 'unexpected_overlay_scope'
+    changed = set(ops.run(['git', 'diff', '--name-only', baseline, commit, '--', 'features'], cwd=source).splitlines())
+    assert changed and changed <= NATIVE | CENTRAL, 'unexpected_overlay_scope'
     folder.mkdir(mode=0o755, parents=True, exist_ok=False)
-    manifest = {'commit':commit, 'source':str(source), 'baseline':BASE, 'status':'preparing', 'lanes':{}}
+    manifest = {'commit':commit, 'source':str(source), 'baseline':baseline, 'status':'preparing', 'lanes':{}}
     for lane, (root, unit, port) in ops.LANES.items():
         assert root.is_symlink()
         target = folder/'candidates'/lane
@@ -42,16 +49,17 @@ def prepare(source, commit, folder):
         preserve_tree_owners(root.resolve(), target)
         item = {'previous_root':str(root.resolve()), 'candidate':str(target), 'files':{}}
         manifest['lanes'][lane] = item
-        for relative in sorted(NATIVE | CENTRAL if lane == 'coordinator' else NATIVE):
+        for relative in sorted(changed & (NATIVE | CENTRAL if lane == 'coordinator' else NATIVE)):
             live = root/relative
-            original = subprocess.check_output(['git','show',BASE+':'+relative], cwd=source)
-            assert live.read_bytes().replace(b'\r\n', b'\n') == original or (relative.endswith('/fb_native.py') and ops.digest(live) == POOL_OVERLAY), 'unreviewed_live_baseline:'+lane+'/'+relative
+            original = subprocess.check_output(['git','show',baseline+':'+relative], cwd=source)
+            assert live.read_bytes().replace(b'\r\n', b'\n') == original or (baseline == BASE and relative.endswith('/fb_native.py') and ops.digest(live) == POOL_OVERLAY), 'unreviewed_live_baseline:'+lane+'/'+relative
             assert (target/relative).resolve().is_relative_to(target.resolve())
             before = ops.digest(live)
             atomic_copy(source/relative, target/relative)
             compile((target/relative).read_bytes(), relative, 'exec')
             item['files'][relative] = {'before':before, 'after':ops.digest(target/relative)}
     ops.verify_live(manifest)
+    verify_service_access(manifest)
     ops.backup(ops.FB_DB, folder/'fb-before.sqlite3')
     ops.backup(ops.DISPATCH_DB, folder/'dispatch-before.sqlite3')
     manifest['status'] = 'prepared'
@@ -59,6 +67,7 @@ def prepare(source, commit, folder):
     print(json.dumps({'prepared':True, 'commit':commit, 'files':{k:len(v['files']) for k,v in manifest['lanes'].items()}}))
 
 def activate(folder):
+    verify_service_access(json.loads((folder/'manifest.json').read_text()))
     scheduler('snapshot', folder, 'before')
     ops.apply(folder)
     scheduler('restore', folder, 'after')
@@ -78,9 +87,9 @@ def rollback(folder):
 if __name__ == '__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('action', choices=['prepare','apply','rollback']);p.add_argument('--folder',type=Path,required=True)
-    p.add_argument('--source',type=Path);p.add_argument('--commit');a=p.parse_args()
+    p.add_argument('--source',type=Path);p.add_argument('--commit');p.add_argument('--baseline', default=BASE);a=p.parse_args()
     if a.action == 'prepare':
-        prepare(a.source.resolve(),a.commit,a.folder.resolve())
+        prepare(a.source.resolve(),a.commit,a.folder.resolve(),a.baseline)
     elif a.action == 'apply':
         activate(a.folder.resolve())
     else:
