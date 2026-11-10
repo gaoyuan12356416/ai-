@@ -90,6 +90,8 @@ class StorageTests(unittest.TestCase):
         self.assertIn('.dramas[99]', sql)
         self.assertNotIn('.dramas[0]', sql)
         self.assertIn('profile_version=0x', sql)
+        reader.query.return_value = [{'total': 51, 'items': None}]
+        self.assertEqual(Store(reader=reader).dramas('123', VERSION, '$.types[0].children[1].children[2].dramas', 3)['items'], [])
 
     def test_expired_version_is_explicit(self):
         reader = Mock(); reader.query.return_value = []

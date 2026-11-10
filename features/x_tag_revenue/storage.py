@@ -106,14 +106,16 @@ class Store:
         if not re.fullmatch(VERSION_RE, version) or not re.fullmatch(r'\$\.(?:types|tags)\[\d+\](?:\.children\[\d+\]){0,2}\.dramas', json_path):
             raise ValueError('invalid_detail_path')
         offset = (page - 1) * PAGE_SIZE
-        expressions = ','.join(f"JSON_EXTRACT(detail_json,'{json_path}[{i}]')" for i in range(offset, offset + PAGE_SIZE))
+        # Multiple paths in ONE extraction parse the channel JSON once. Calling
+        # JSON_EXTRACT 50 times made a real detail page take about 14 seconds.
+        paths = ','.join(f"'{json_path}[{i}]'" for i in range(offset, offset + PAGE_SIZE))
         rows = self.reader.query([f"SELECT HEX(JSON_OBJECT('total',JSON_LENGTH(JSON_EXTRACT(detail_json,'{json_path}')),"
-                  f"'items',JSON_ARRAY({expressions}))) FROM {TABLE} WHERE profile_version={literal(version)} "
+                  f"'items',JSON_EXTRACT(detail_json,{paths}))) FROM {TABLE} WHERE profile_version={literal(version)} "
                   f"AND x_user_id={literal(x_user_id)}"], timeout=20)
         if not rows:
             raise SnapshotExpired('portrait_version_expired')
         return dict(page=page, page_size=PAGE_SIZE, total=rows[0]['total'] or 0,
-                    items=[r for r in rows[0]['items'] if r is not None])
+                    items=[r for r in rows[0]['items'] or [] if r is not None])
 
 
 class ProfileWriter(Writer):
