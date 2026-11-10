@@ -118,7 +118,7 @@ def prepare():
             raise RuntimeError('tree_projection_mismatch')
         info['version'] = meta['version']
     record(backup / 'deployment.json', info)
-    print(json.dumps(dict(status='prepared', backup=str(backup), database=info['database'], tests=tests['count'] + 9)), flush=True)
+    print(json.dumps(dict(status='prepared', backup=str(backup), database=info['database'], tests=tests['count'] + 12)), flush=True)
 
 
 def install_ui(backup):

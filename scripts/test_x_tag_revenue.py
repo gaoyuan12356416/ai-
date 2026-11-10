@@ -166,14 +166,13 @@ class PortraitTests(unittest.TestCase):
         dispatch(Handler(),urlsplit('/api/x-channel-tag-revenue/1'),lambda cookie:(403,[]),'/does-not-exist')
         self.assertEqual([403],sent)
 
-    def test_corrupt_snapshot_is_unavailable_not_zero(self):
+    def test_database_error_is_unavailable_not_zero(self):
         sent=[]
         class Handler:
             headers={'Cookie':'fixture'}
             def send_json(self,status,payload): sent.append((status,payload))
-        with tempfile.TemporaryDirectory() as root:
-            Path(root,'current.json').write_text('{}')
-            dispatch(Handler(),urlsplit('/api/x-channel-tag-revenue'),lambda cookie:(200,[]),root)
+        with patch('features.x_tag_revenue.routes.Store', side_effect=RuntimeError('database unavailable')):
+            dispatch(Handler(),urlsplit('/api/x-channel-tag-revenue'),lambda cookie:(200,[]),'/unused')
         self.assertEqual(503,sent[0][0])
         self.assertNotIn('items',sent[0][1])
 
