@@ -52,16 +52,24 @@ def tree_summary(nodes):
 
 
 def projections(portrait):
-    tree = {k: v for k, v in portrait.items() if k not in ('types', 'tags')}
-    tree['types'] = tree_summary(portrait.get('types', []))
+    root = 'audiences' if 'audiences' in portrait else 'types'
+    tree = {k: v for k, v in portrait.items() if k not in ('types', 'audiences', 'tags')}
+    tree[root] = tree_summary(portrait.get(root, []))
     tree['tags'] = [{k: v for k, v in t.items() if k != 'dramas'} for t in portrait.get('tags', [])]
-    summary = {k: v for k, v in tree.items() if k not in ('types', 'tags', 'combinations')}
-    summary['types'] = [{k: v for k, v in t.items() if k != 'children'} for t in tree['types']]
+    summary = {k: v for k, v in tree.items() if k not in ('types', 'audiences', 'tags', 'combinations')}
+    summary[root] = [{k: v for k, v in t.items() if k != 'children'} for t in tree[root]]
     summary['combinations'] = tree.get('combinations', [])[:3]
     summary['tag_count'] = len(tree['tags'])
     summary['tags'] = tree['tags'][:3]
     # Each displayed layer has an explicit parent. Never pool audience/theme
     # shares across types, and never choose a different type via a top leaf.
+    if root == 'audiences':
+        audiences = tree[root]
+        audience = max(audiences, key=lambda t: t['revenue_cents']) if audiences else {}
+        simple = lambda n: {k: v for k, v in n.items() if k != 'children'}
+        summary['focus'] = dict(audience=simple(audience),
+                                themes=[simple(n) for n in audience.get('children', [])[:3]])
+        return summary, tree
     types = tree['types']
     primary = max(types, key=lambda t: t['revenue_cents']) if types else {}
     audiences = primary.get('children', [])
@@ -103,7 +111,7 @@ class Store:
         return {'accounts': {r['x_user_id']: r['profile'] for r in rows if 'x_user_id' in r}}, metadata
 
     def dramas(self, x_user_id, version, json_path, page=1):
-        if not re.fullmatch(VERSION_RE, version) or not re.fullmatch(r'\$\.(?:types|tags)\[\d+\](?:\.children\[\d+\]){0,2}\.dramas', json_path):
+        if not re.fullmatch(VERSION_RE, version) or not re.fullmatch(r'\$\.(?:audiences|types|tags)\[\d+\](?:\.children\[\d+\]){0,2}\.dramas', json_path):
             raise ValueError('invalid_detail_path')
         offset = (page - 1) * PAGE_SIZE
         # Multiple paths in ONE extraction parse the channel JSON once. Calling

@@ -34,11 +34,11 @@ class ServingTests(unittest.TestCase):
             self.assertEqual(meta['read_model'], 'verified_disk')
             self.assertEqual(store.load(['999'])[0]['accounts'], {})
             self.assertEqual(store.load([])[0]['accounts'], {})
-            path = '$.types[0].children[0].children[0].dramas'
+            path = '$.audiences[0].children[0].dramas'
             pages = [store.dramas('123', proof['version'], path, n) for n in (1, 2, 3)]
             self.assertEqual([len(p['items']) for p in pages], [50, 25, 0])
             rows = pages[0]['items'] + pages[1]['items']
-            expected = data['accounts']['123']['types'][0]['children'][0]['children'][0]['dramas']
+            expected = data['accounts']['123']['audiences'][0]['children'][0]['dramas']
             self.assertEqual(rows, expected)
             self.assertEqual(sum(r['allocated_cents'] for r in rows), proof['revenue'])
             self.assertEqual(pages[0]['total'], 75)
@@ -83,8 +83,8 @@ class ServingTests(unittest.TestCase):
     def test_minor_audiences_remain_visible_in_summary(self):
         data = portrait([(1, 'Female,Sweet', 80), (1, 'Male,Action', 15), (1, 'BL', 5)])
         summary, _ = projections(data['accounts']['channel'])
-        self.assertEqual([a['key'] for a in summary['focus']['audiences']], ['female', 'male', 'lgbtq'])
-        self.assertEqual(summary['focus']['audiences'][-1]['share_bp'], 500)
+        self.assertEqual([a['key'] for a in summary['audiences']], ['female', 'male', 'lgbtq'])
+        self.assertEqual(summary['audiences'][-1]['share_bp'], 500)
 
     def test_parallel_frontend_load_is_idempotent(self):
         text = '        const loadVersion = ++state.loadVersion;\n' + '          window.XTagRevenue?.refresh();'

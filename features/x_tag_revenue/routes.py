@@ -30,7 +30,7 @@ def read_snapshot(root, x_user_ids=None, *, view='tree', version=None, store=Non
 
 def empty_account():
     return dict(status='no_history', revenue_cents=0, unknown_revenue_cents=0, known_share_bp=None,
-                published_count=0, drama_count=0, tags=[], types=[], combinations=[], audience_basis_counts={})
+                published_count=0, drama_count=0, tags=[], audiences=[], combinations=[], audience_basis_counts={})
 
 
 def response(data, meta, accounts, account_id=None, tag=None, path=None):
@@ -42,14 +42,14 @@ def response(data, meta, accounts, account_id=None, tag=None, path=None):
         portrait = data['accounts'].get(str(account.get('x_user_id')), empty_account())
         result = dict(portrait)
         if path is not None:
-            nodes=portrait.get('types',[])
+            nodes=portrait.get('audiences',portrait.get('types',[]))
             found=None
             for key in path:
                 found=next((r for r in nodes if r['key']==key),None)
                 if found is None:return 404, {'message':'画像层级不存在'}
                 nodes=found.get('children',[])
             result=dict(found)
-            if len(path)<3:result['children']=tree_summary(nodes)
+            if 'children' in found:result['children']=tree_summary(nodes)
         elif tag is not None:
             found = next((row for row in portrait['tags'] if row['key'] == tag), None)
             if found is None:
@@ -57,15 +57,17 @@ def response(data, meta, accounts, account_id=None, tag=None, path=None):
             result = dict(found)
         else:
             result['tags'] = [{k: v for k, v in row.items() if k != 'dramas'} for row in portrait['tags']]
-            result['types'] = tree_summary(portrait.get('types',[]))
+            root = 'audiences' if 'audiences' in portrait else 'types'
+            result[root] = tree_summary(portrait.get(root,[]))
         return 200, dict(meta=meta, account_id=account_id,
                          account_name=account.get('display_name') or account.get('username') or account_id,
                          username=account.get('username') or '', portrait=result)
     items = {}
     for key, account in allowed.items():
         portrait = data['accounts'].get(str(account.get('x_user_id')), empty_account())
-        items[key] = {k: v for k, v in portrait.items() if k not in ('tags','types','combinations')}
-        items[key]['types'] = [{k:v for k,v in row.items() if k!='children'} for row in portrait.get('types',[])]
+        items[key] = {k: v for k, v in portrait.items() if k not in ('tags','types','audiences','combinations')}
+        root = 'audiences' if 'audiences' in portrait else 'types'
+        items[key][root] = [{k:v for k,v in row.items() if k!='children'} for row in portrait.get(root,[])]
         items[key]['combinations'] = portrait.get('combinations',[])[:3]
         items[key]['tag_count'] = portrait.get('tag_count', len(portrait['tags']))
         items[key]['tags'] = [{k: v for k, v in row.items() if k != 'dramas'} for row in portrait['tags'][:3]]
@@ -105,10 +107,11 @@ def dispatch(handler, parsed, authorize, root=DEFAULT_ROOT):
         data, meta = read_snapshot(root, [a.get('x_user_id') for a in selected],
                                    view='tree' if account_id else 'summary', version=version, store=store)
         tag = query.get('tag', [None])[0]
-        if account_id and (tag is not None or (path and len(path) == 3)):
+        if account_id and (tag is not None or path):
             uid = str(allowed[account_id].get('x_user_id'))
             profile = data['accounts'].get(uid, empty_account())
-            nodes, json_path, found = profile.get('types', []), '$', None
+            root = 'audiences' if 'audiences' in profile else 'types'
+            nodes, json_path, found = profile.get(root, []), '$', None
             if tag is not None:
                 path, nodes = [tag], profile.get('tags', [])
             for depth, key in enumerate(path):
@@ -116,11 +119,12 @@ def dispatch(handler, parsed, authorize, root=DEFAULT_ROOT):
                 if index is None:
                     return send(404, {'message': '画像层级不存在'})
                 found = nodes[index]
-                json_path += ('.tags' if tag is not None else '.types' if depth == 0 else '.children') + f'[{index}]'
+                json_path += ('.tags' if tag is not None else '.'+root if depth == 0 else '.children') + f'[{index}]'
                 nodes = found.get('children', [])
-            details = store.dramas(uid, meta['version'], json_path + '.dramas', page)
-            found['dramas'] = details.pop('items')
-            found['pagination'] = details
+            if 'children' not in found:
+                details = store.dramas(uid, meta['version'], json_path + '.dramas', page)
+                found['dramas'] = details.pop('items')
+                found['pagination'] = details
             if tag is not None:
                 path = None
         status, payload = response(data, meta, accounts, account_id, tag, path)

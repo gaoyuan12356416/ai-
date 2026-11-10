@@ -11,9 +11,10 @@ from pathlib import Path
 from features.x_tag_revenue.core import label_index, labels, language
 from .transport import rpc, Error as TransportError
 from features.x_tag_revenue.tags import VERSION as TAG_MAPPING_VERSION, lookup
-from features.x_tag_revenue.taxonomy import VERSION as HIERARCHY_VERSION, UNKNOWN, TYPES, AUDIENCES, THEMES, classify, collect_classifications
+from features.x_tag_revenue.taxonomy import UNKNOWN, AUDIENCES, THEMES, classify, collect_classifications
+from features.x_tag_revenue.hierarchy import VERSION as HIERARCHY_VERSION
 
-VERSION = 'revenue-hierarchy-weighted-v3'
+VERSION = 'revenue-audience-theme-weighted-v4'
 ROOT = '/mnt/data-disk/x-tag-publisher'
 ID_BASE = 9000000000000
 
@@ -80,31 +81,28 @@ class Decision:
                 if n.get('children'):
                     visit(n['children'], path+(n['key'],))
         if not self.reason:
-            visit(profile.get('types', []), ())
-            if not self.orders.get(()):self.reason = 'no_valid_type_profile'
+            visit(profile.get('audiences', []), ())
+            if not self.orders.get(()):self.reason = 'no_valid_audience_profile'
         self.weights = self.node_weights.get((), {})
-        self.type_order = self.orders.get((), [])
+        self.audience_order = self.orders.get((), [])
 
     def rank(self, metadata):
-        if self.reason:return (0, 0, 0)
+        if self.reason:return (0, 0)
         data = metadata if isinstance(metadata, dict) else classify(metadata)
-        dtype, audience = data.get('drama_type', UNKNOWN), data.get('audience', UNKNOWN)
+        audience = data.get('audience', UNKNOWN)
         def position(path, key):
             order = self.orders.get(path, [])
             return order.index(key) if key in order else len(order)
-        rank = (position((), dtype),)
+        rank = (position((), audience),)
         # Missing income at one layer retains its ancestors and the old order
         # inside that branch. Lower layers never override a missing parent.
-        if dtype not in self.type_order or not self.orders.get((dtype,)):
-            return rank+(0, 0)
-        rank += (position((dtype,), audience),)
-        if audience not in self.orders[(dtype,)] or not self.orders.get((dtype, audience)):
+        if audience not in self.audience_order or not self.orders.get((audience,)):
             return rank+(0,)
-        return rank+(min((position((dtype, audience), k) for k in data.get('themes', [UNKNOWN])), default=len(self.orders[(dtype, audience)])),)
+        return rank+(min((position((audience,), k) for k in data.get('themes', [UNKNOWN])), default=len(self.orders[(audience,)])),)
 
     def preferred(self):
         path=[]
-        for _ in range(3):
+        for _ in range(2):
             order=self.orders.get(tuple(path),[])
             if not order:break
             path.append(order[0])
@@ -112,22 +110,20 @@ class Decision:
 
     def audit(self, metadata, *, fallback=''):
         data = metadata if isinstance(metadata, dict) and metadata else classify(metadata or [], status='candidate_metadata_missing' if not metadata else 'matched')
-        dtype, audience = data.get('drama_type', UNKNOWN), data.get('audience', UNKNOWN)
-        order = self.orders.get((dtype, audience), []) if audience in self.orders.get((dtype,), []) else []
+        audience = data.get('audience', UNKNOWN)
+        order = self.orders.get((audience,), []) if audience in self.audience_order else []
         matched = next((key for key in order if key in data.get('themes', [])), '')
         preferred = self.preferred()
-        selected = [dtype, audience, matched or (data.get('themes') or [UNKNOWN])[0]]
+        selected = [audience, matched or (data.get('themes') or [UNKNOWN])[0]]
         reason, level = self.reason or fallback, 'all' if self.reason or fallback else ''
         if metadata is not None and not reason:
-            if dtype != preferred[0]:reason,level='preferred_type_no_eligible_material','type'
-            elif not self.orders.get((dtype,)):reason,level='no_valid_audience_profile','audience'
-            elif audience != self.orders[(dtype,)][0]:reason,level='preferred_audience_no_eligible_material','audience'
+            if audience != preferred[0]:reason,level='preferred_audience_no_eligible_material','audience'
             elif not order:reason,level='no_valid_theme_profile','theme'
             elif not matched:reason,level='no_matching_eligible_theme','theme'
             elif matched != order[0]:reason,level='preferred_theme_no_eligible_material','theme'
-        names = (TYPES, AUDIENCES, THEMES)
+        names = (AUDIENCES, THEMES)
         return dict(policy_version=VERSION, tag_mapping_version=TAG_MAPPING_VERSION,
-                    hierarchy_version=HIERARCHY_VERSION, classification=data,
+                    hierarchy_version=HIERARCHY_VERSION, profile_levels=['audience', 'theme'], classification=data,
                     preferred_path=preferred, preferred_path_names=[names[i][key] for i,key in enumerate(preferred)],
                     selected_path=selected if metadata is not None else [],
                     selected_path_names=[names[i][key] for i,key in enumerate(selected)] if metadata is not None else [],
@@ -138,12 +134,12 @@ class Decision:
                     profile_source_end=self.meta.get('end', ''),
                     profile_stale=bool(self.meta.get('stale') or self.meta.get('refresh_failed')),
                     account_id=self.account_id, x_user_id=self.x_user_id,
-                    preferred_tag=THEMES[preferred[2]] if len(preferred)>2 else '',
+                    preferred_tag=THEMES[preferred[1]] if len(preferred)>1 else '',
                     selected_tag=THEMES[matched] if matched else '', selected_tag_key=matched,
                     candidate_labels=data.get('raw_labels', []), candidate_tag_ids=data.get('themes', []), fallback_reason=reason,
-                    weights=[{'key': k, 'name': TYPES[k], 'revenue_cents': v} for k,v in sorted(self.weights.items())],
+                    weights=[{'key': k, 'name': AUDIENCES[k], 'revenue_cents': v} for k,v in sorted(self.weights.items())],
                     conditional_weights=[dict(path=list(path), weights=values) for path,values in self.node_weights.items()
-                                         if path in ((), (dtype,), (dtype,audience))])
+                                         if path in ((), (audience,))])
 
 
 def catalog_labels(source, dramas):
@@ -176,7 +172,7 @@ def catalog_labels(source, dramas):
 def ranked_dramas(source, candidates, context, batch_size=40):
     """Yield the exact stable hierarchy order without reading unused labels.
 
-    (0, 0, 0) is the best possible rank. Such candidates can be yielded in
+    (0, 0) is the best possible rank. Such candidates can be yielded in
     original order as soon as a batch is classified. Lower ranks wait until
     every candidate has been considered, so an absent preferred combination
     never causes premature fallback or skips a better candidate in a later batch.
@@ -197,7 +193,7 @@ def ranked_dramas(source, candidates, context, batch_size=40):
             yield from candidates[start:]
             return
         for drama in batch:
-            if rank(drama) == (0, 0, 0):
+            if rank(drama) == (0, 0):
                 yield drama
             else:
                 deferred.append(drama)

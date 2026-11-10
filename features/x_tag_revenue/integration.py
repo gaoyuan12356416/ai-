@@ -56,3 +56,16 @@ def patch_fast_load(text):
     if text.count(anchor) != 1 or text.count(old) != 1:
         raise ValueError('profile_parallel_load_anchor_changed')
     return text.replace(old, '          window.XTagRevenue?.paint();').replace(anchor, anchor + '\n' + marker)
+
+
+def patch_two_levels(text):
+    """Drop only the existing type column and adjust its two remaining labels."""
+    if '受众方向<small>占频道收入</small>' in text and 'data-x-tag-level="type"' not in text:
+        return text
+    text, headers = re.subn(r'<th class="xtr-col">剧类型<small>占频道收入</small></th>', '', text)
+    text, cells = re.subn(r'\s*<td class="xtr-col" data-x-tag-id="\$\{escapeHtml\(item.id\)\}" data-x-tag-level="type">.*?</td>', '', text)
+    if headers != 1 or cells != 1:
+        raise ValueError('two_level_column_anchor_changed')
+    return (text.replace('受众方向<small>主要类型内</small>', '受众方向<small>占频道收入</small>')
+            .replace('题材<small>主要类型与受众内</small>', '题材<small>主要受众内</small>')
+            .replace('colspan="12"', 'colspan="11"'))

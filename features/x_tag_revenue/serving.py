@@ -53,6 +53,9 @@ def publish(root, data, proof):
                     for j, audience in enumerate(dtype.get('children', [])):
                         for k, theme in enumerate(audience.get('children', [])):
                             insert_details(str(uid), f'$.types[{i}].children[{j}].children[{k}].dramas', theme.get('dramas', []))
+                for i, audience in enumerate(profile.get('audiences', [])):
+                    for j, theme in enumerate(audience.get('children', [])):
+                        insert_details(str(uid), f'$.audiences[{i}].children[{j}].dramas', theme.get('dramas', []))
                 for i, tag in enumerate(profile.get('tags', [])):
                     insert_details(str(uid), f'$.tags[{i}].dramas', tag.get('dramas', []))
             db.commit()

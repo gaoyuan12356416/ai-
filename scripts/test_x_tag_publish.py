@@ -18,7 +18,8 @@ from features.x_tag_publish.selection import ProfileSelector
 from features.x_tag_publish.pool import install_reservation_policy, material_candidates
 from features.x_tag_publish import gateway
 from features.x_tag_revenue.tags import VERSION as TAG_MAPPING_VERSION, localize_audit
-from features.x_tag_revenue.taxonomy import VERSION as HIERARCHY_VERSION, classify
+from features.x_tag_revenue.taxonomy import classify
+from features.x_tag_revenue.hierarchy import VERSION as HIERARCHY_VERSION
 from features.x_posts import service as post
 from features.x_auto_posts.core import XAutoPostStore
 from scripts import test_x_auto_post_selector as fixture
@@ -30,9 +31,8 @@ def profile(tags=None, revenue=10000, **meta):
     mapped = [('sweet_romance' if k == 'romance' else k, v) for k,v in tags]
     themes=[dict(key=k,name=k,revenue_cents=v,share_bp=v,matchable=k!='__unknown__') for k,v in mapped]
     audience=dict(key='female',name='女性',revenue_cents=revenue,share_bp=10000,matchable=True,children=themes)
-    dtype=dict(key='local',name='本土剧',revenue_cents=revenue,share_bp=10000,matchable=True,children=[audience])
     return ({'accounts': {'999': dict(status='complete', revenue_cents=revenue,
-        hierarchy_version=HIERARCHY_VERSION,types=[dtype])}},
+        hierarchy_version=HIERARCHY_VERSION,audiences=[audience])}},
         dict(version='frozen-1', end='2026-11-08', tag_mapping_version=TAG_MAPPING_VERSION,
              hierarchy_version=HIERARCHY_VERSION, **meta))
 
@@ -68,7 +68,7 @@ class PolicyTests(unittest.TestCase):
         candidates=[SimpleNamespace(content_id=str(i),language='en') for i in range(81)]
         context=dict(decision=Decision(ACCOUNT,'test',profile([('romance',10000)])),catalog={},fallback='')
         def load(source,batch):
-            return {(d.content_id,'en'):classify('Female,Revenge','local' if d.content_id=='80' else 'translated') for d in batch}
+            return {(d.content_id,'en'):classify('Female,Revenge' if d.content_id=='80' else 'Male,Revenge','translated') for d in batch}
         with patch('features.x_tag_publish.policy.catalog_labels',side_effect=load) as query:
             iterator=ranked_dramas(None,candidates,context)
             self.assertEqual(next(iterator),candidates[-1])
@@ -147,7 +147,7 @@ class PolicyTests(unittest.TestCase):
             a = Decision(ACCOUNT, ['task', i], profile())
             b = Decision(ACCOUNT, ['task', i], profile())
             self.assertEqual(a.preferred(), b.preferred())
-            counts[a.preferred()[2]] += 1
+            counts[a.preferred()[1]] += 1
         self.assertTrue(0.67 < counts['sweet_romance'] / 4000 < 0.73, counts)
 
     def test_unknown_and_negative_not_preferences(self):
@@ -339,7 +339,7 @@ class SelectorTests(unittest.TestCase):
         saved=store.reserve_calls[0]
         self.assertEqual(saved['claim_token'],'existing-task-lease')
         self.assertEqual(saved['selection_snapshot']['tag_profile']['hierarchy_version'],HIERARCHY_VERSION)
-        self.assertEqual(saved['selection_snapshot']['tag_profile']['selected_path_names'],['本土剧','女性','甜宠恋爱'])
+        self.assertEqual(saved['selection_snapshot']['tag_profile']['selected_path_names'],['女性','甜宠恋爱'])
         store.existing=result.reservation
         with patch('features.x_tag_publish.selection.XPostAutoBridgeClient',side_effect=AssertionError('must keep frozen reservation')):
             again=executor._phase_selector('next-lease').select_and_reserve(fixture.request())

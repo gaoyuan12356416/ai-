@@ -59,9 +59,9 @@ class StorageTests(unittest.TestCase):
         summary, tree = projections(full)
         self.assertNotIn('dramas', encoded(tree))
         self.assertNotIn('children', encoded(summary))
-        self.assertEqual(summary['focus']['type']['key'], 'local')
+        self.assertNotIn('types', summary)
         self.assertEqual(summary['focus']['audience']['key'], 'female')
-        self.assertEqual(summary['focus']['audiences'][0]['share_bp'], 8000)
+        self.assertEqual(summary['audiences'][0]['share_bp'], 5600)
         self.assertEqual(summary['focus']['themes'][0]['share_bp'], 5000)
         reduced = {'accounts': {'channel': tree}}
         for seed in range(100):
@@ -115,7 +115,7 @@ class StorageTests(unittest.TestCase):
         store.dramas.return_value = dict(items=[{'name': 'page two'}], total=75, page=2, page_size=50)
         handler = Mock(); handler.headers = {}
         with patch('features.x_tag_revenue.routes.Store', return_value=store):
-            dispatch(handler, urlsplit('/api/x-channel-tag-revenue/8?path=local/female/sweet_romance&page=2&version='+VERSION),
+            dispatch(handler, urlsplit('/api/x-channel-tag-revenue/8?path=female/sweet_romance&page=2&version='+VERSION),
                      lambda _: (200, [dict(id=8, x_user_id='123')]))
         status, body = handler.send_json.call_args.args
         self.assertEqual(status, 200)
