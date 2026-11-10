@@ -53,9 +53,16 @@ def overlay(source,commit,candidate,live,rel,directory,lane):
     new.parent.mkdir(parents=True,exist_ok=True)
     if base and old.exists():
         patch=subprocess.run(['git','-C',str(source),'diff','--binary',BASE,commit,'--',rel],capture_output=True,check=True).stdout
+        context=[]
         proc=subprocess.run(['git','apply','--check','-'],input=patch,cwd=candidate,capture_output=True)
+        if proc.returncode:
+            # Sidecars retain platform-local adjacent lines. Require matching
+            # hunk content and at least one context line instead of replacing
+            # their whole module with the coordinator's different baseline.
+            context=['-C1']
+            proc=subprocess.run(['git','apply',*context,'--check','-'],input=patch,cwd=candidate,capture_output=True)
         if proc.returncode:raise RuntimeError('patch_context_drift:'+lane+'/'+rel)
-        subprocess.run(['git','apply','-'],input=patch,cwd=candidate,capture_output=True,check=True)
+        subprocess.run(['git','apply',*context,'-'],input=patch,cwd=candidate,capture_output=True,check=True)
     else:
         if old.exists() and rel not in EXTRA_BASELINE:raise RuntimeError('unexpected_existing_new_file:'+lane+'/'+rel)
         if old.exists() and before!=EXTRA_BASELINE[rel]:raise RuntimeError('extra_static_drift:'+rel)
