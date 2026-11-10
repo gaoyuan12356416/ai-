@@ -508,7 +508,7 @@ def health(config_path):
 
 def make_handler(config_path):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "W2AStats/1.4"
+        server_version = "W2AStats/" + VERSION
         sys_version = ""
 
         def _send(self, status, payload):
