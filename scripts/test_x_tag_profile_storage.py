@@ -152,6 +152,12 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(result['rows'], 2)
         self.assertEqual(result['revenue'], 10000)
         self.assertEqual(writer.write_batch.call_args.args[1][0][0], '@current')
+        retry, data = self.writer()
+        retry.db.cursor.return_value.__enter__.return_value.fetchone.return_value = json.dumps({'version': VERSION})
+        reader.query.side_effect = None
+        reader.query.return_value = [{k: result[k] for k in ('rows', 'revenue', 'checksum')}]
+        self.assertEqual(retry.publish(data, reader), result)
+        retry.write_batch.assert_not_called()
 
     def test_three_columns_preserve_surrounding_shared_page(self):
         text = '<th class="xtr-col">历史三级画像</th>outside<td class="xtr-col" data-x-tag-id="${escapeHtml(item.id)}">old</td>colspan="10"'

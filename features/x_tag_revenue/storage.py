@@ -150,9 +150,12 @@ class ProfileWriter(Writer):
             checksum ^= zlib.crc32((row[1] + ':' + hashlib.sha256(payload.encode('utf-8')).hexdigest()).encode('ascii'))
             count += 1
             revenue += row[5]
-            batch.append(row)
+            # Active versions are immutable, including deployment retries.
+            # Re-verify them without rewriting tens of MB of identical rows.
+            if head.get('version') != version:
+                batch.append(row)
             size += len(payload.encode('utf-8'))
-            if size >= 1024 * 1024 or len(batch) >= 50:
+            if batch and (size >= 1024 * 1024 or len(batch) >= 50):
                 self.write_batch(sql, batch)
                 batch, size = [], 0
         if batch:
@@ -171,6 +174,8 @@ class ProfileWriter(Writer):
             if time.monotonic() >= deadline:
                 raise RuntimeError('profile_replica_verification_failed')
             time.sleep(3)
+        if head.get('version') == version:
+            return dict(version=version, **expected)
         self.write_batch(sql, [('@current', '', encoded({'version': version, 'previous': previous}), '{}', '{}', 0)])
         # Retain the active generation and its predecessor for open dialogs and
         # rollback. This table is derived data, never a publication ledger.
