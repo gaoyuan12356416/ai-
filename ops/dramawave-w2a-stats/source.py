@@ -109,7 +109,7 @@ ORDER BY a.account_id, a.id
         values = ", ".join(_account_literal(value) for value in accounts)
         # A text comparison enables the advertiser/date index. The additional
         # binary predicate preserves byte-exact membership despite its collation.
-        text_values = ", ".join("CONVERT(%s USING utf8mb4)" % _account_literal(value)
+        text_values = ", ".join("CONVERT(%s USING utf8mb4) COLLATE utf8mb4_unicode_ci" % _account_literal(value)
                                 for value in accounts)
         rows = self.query("""
 SELECT dt AS day,

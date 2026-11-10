@@ -104,6 +104,7 @@ class SqlFixture:
         )
         translated = re.sub(r"CONVERT\((X'[0-9a-f]+') USING utf8mb4\)",
                             r"CAST(\1 AS TEXT)", translated, flags=re.I)
+        translated = translated.replace("COLLATE utf8mb4_unicode_ci", "COLLATE SOURCE_CI")
         return [tuple(None if value is None else str(value) for value in row)
                 for row in self.db.execute(translated).fetchall()]
 
