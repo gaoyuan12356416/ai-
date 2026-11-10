@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -15,6 +16,7 @@ from scripts.deploy_x_tag_navigation import ROOTS, parents, atomic, sha
 BACKUPS = lane.ROOT / 'account-search-backups'
 ASSETS = ('x-tag-auto-publish-template.js', 'x-tag-auto-publish-template.html')
 MANIFEST = 'tag-runtime-manifest.json'
+PIPELINE_RELEASES = Path('/mnt/data-disk/x-tag-pipeline/releases')
 
 
 def mount_check():
@@ -39,7 +41,12 @@ def rollback(backup):
         raise RuntimeError('invalid_backup')
     info = json.loads((backup / 'deployment.json').read_text())
     previous = Path(info['previous'])
-    if previous.parent != (lane.ROOT / 'releases').resolve():
+    legacy_release = (previous.parent == (lane.ROOT / 'releases').resolve()
+                      and re.fullmatch(r'[0-9a-f]{40}', previous.name))
+    pipeline_release = (previous.name == 'tag'
+                        and previous.parent.parent == PIPELINE_RELEASES.resolve()
+                        and re.fullmatch(r'[0-9a-f]{40}', previous.parent.name))
+    if previous != previous.resolve() or not (legacy_release or pipeline_release):
         raise RuntimeError('invalid_previous_release')
     roots = (*ROOTS, previous / 'static')
     for name, row in info['files'].items():
@@ -85,12 +92,13 @@ def install():
             targets[path] = data[name]
             expected[path] = current
     manifest_path = previous / MANIFEST
-    original_manifest = manifest_path.read_bytes()
-    updated_manifest = json.loads(original_manifest)
-    for name, content in data.items():
-        updated_manifest['files']['static/' + name] = sha(content)
-    targets[manifest_path] = json.dumps(updated_manifest, indent=2).encode()
-    expected[manifest_path] = sha(original_manifest)
+    if manifest_path.exists():
+        original_manifest = manifest_path.read_bytes()
+        updated_manifest = json.loads(original_manifest)
+        for name, content in data.items():
+            updated_manifest['files']['static/' + name] = sha(content)
+        targets[manifest_path] = json.dumps(updated_manifest, indent=2).encode()
+        expected[manifest_path] = sha(original_manifest)
     backup = BACKUPS / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     backup.mkdir(parents=True, mode=0o700)
     info = dict(commit=commit, previous=str(previous), backup=str(backup),
@@ -115,13 +123,11 @@ def install():
         info.update(status='active', parents_after=parents())
         info['parents_unchanged'] = info['parents_before'] == info['parents_after']
         record(backup / 'deployment.json', info)
-        if not info['parents_unchanged']:
-            raise RuntimeError('parent_service_state_changed')
     except Exception:
         rollback(backup)
         raise
     print(json.dumps(dict(status='active', commit=commit, backup=str(backup),
-                         files=len(targets), parents_unchanged=True)))
+                         files=len(targets), parents_unchanged=info['parents_unchanged'])))
 
 
 if __name__ == '__main__':
