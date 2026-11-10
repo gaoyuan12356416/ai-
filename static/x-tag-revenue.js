@@ -7,6 +7,9 @@
   const basis={explicit:'明确标签',inferred:'规则推导',conflict:'标注冲突',unlabeled:'证据不足'};
   const rules={explicit_audience_label:'明确受众标签',conflicting_explicit_audiences:'明确受众标签冲突',conflicting_audience_signals:'男女向信号同时出现',relationship_and_female_story:'恋爱关系／女性成长信号',male_power_and_son_in_law_story:'战神／赘婿／强者信号',general_subject_without_directional_signal:'通用题材且无明确方向信号',insufficient_audience_evidence:'缺少足够受众信号'};
   let items={},meta=null,error='',loading=false,sequence=0,currentId='',currentPath=[],currentVersion='',dialog;
+  // Only the currently open channel, for this dialog session. The server keeps
+  // its durable portraits on disk; navigating a loaded tree needs no request.
+  let detailRoot=null;const detailPages=new Map();
   async function api(path){
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),25000);
     try{
@@ -38,11 +41,21 @@
   function ensureDialog(){if(dialog)return;dialog=document.createElement('dialog');dialog.className='xtr-dialog';dialog.setAttribute('aria-labelledby','xtrTitle');dialog.innerHTML='<div class="xtr-head"><h2 id="xtrTitle">三级收入画像</h2><button type="button" class="button small" data-xtr-close aria-label="关闭画像详情">关闭</button></div><div id="xtrBody" aria-live="polite"></div>';document.body.append(dialog);dialog.addEventListener('click',e=>{if(e.target===dialog||e.target.closest('[data-xtr-close]'))dialog.close();});dialog.addEventListener('close',()=>sequence++);}
   function intro(d){return `<p class="xtr-note">${esc(d.meta.start)} 至 ${esc(d.meta.end)} · UTC · USD · 收入快照 ${esc(clock(d.meta.source_generated_at))}（北京时间）<br>类型取实际剧目版本的 drama_info.resource_type；受众优先明确标签，再按现有标签规则推导。缺失或冲突列为“未标注”，不默认本土或通用。</p>${warning(d.meta)}`;}
   async function open(id,path=[],page=1,reset=false){
-    if(reset||String(id)!==String(currentId))currentVersion='';
+    if(reset||String(id)!==String(currentId)){currentVersion='';detailRoot=null;detailPages.clear();}
     ensureDialog();currentId=id;currentPath=path;if(!dialog.open)dialog.showModal();const request=++sequence,body=document.getElementById('xtrBody');body.innerHTML='<p>正在读取详情…</p>';
     try{
-      const query=new URLSearchParams();if(path.length)query.set('path',path.join('/'));if(currentVersion)query.set('version',currentVersion);if(page>1)query.set('page',String(page));
-      const d=await api(`/api/x-channel-tag-revenue/${encodeURIComponent(id)}${query.size?'?'+query.toString():''}`);if(request!==sequence)return;currentVersion=d.meta.version;
+      if(!detailRoot){const loaded=await api(`/api/x-channel-tag-revenue/${encodeURIComponent(id)}`);if(request!==sequence)return;detailRoot=loaded;currentVersion=loaded.meta.version;}
+      let d=detailRoot;
+      if(path.length<3){
+        let portrait=d.portrait;
+        for(let index=0;index<path.length;index++){portrait=(index?portrait.children:portrait.types)?.find(n=>n.key===path[index]);if(!portrait)throw Error('该分类已更新，请重新打开详情');}
+        d={...d,portrait};
+      }else{
+        const key=`${path.join('/')}?page=${page}`;
+        if(detailPages.has(key))d=detailPages.get(key);
+        else{const query=new URLSearchParams({path:path.join('/'),version:currentVersion,page:String(page)});d=await api(`/api/x-channel-tag-revenue/${encodeURIComponent(id)}?${query}`);if(request!==sequence)return;if(detailPages.size>=20)detailPages.clear();detailPages.set(key,d);}
+      }
+      if(request!==sequence)return;
       document.getElementById('xtrTitle').textContent=`${d.account_name}${d.username?' (@'+d.username+')':''} · 三级收入画像`;
       const p=d.portrait,parent=['频道','剧类型','类型＋受众'][path.length]||'类型＋受众',level=['剧类型','受众方向','题材'][path.length];
       let html=intro(d)+`<div class="xtr-breadcrumb"><button type="button" class="button small" data-xtr-path="">全部类型</button>${path.length?'<button type="button" class="button small" data-xtr-back>← 返回上一级</button>':''}<span>${['类型','受众','题材'].slice(0,path.length).join(' → ')}</span></div>`;
@@ -60,5 +73,5 @@
     }catch(e){if(request===sequence)body.innerHTML=`<p>${esc(e.message)}</p><button type="button" class="button small" data-xtr-open="${esc(id)}">重新读取频道详情</button>`;}
   }
   document.addEventListener('click',e=>{const t=e.target.closest('[data-xtr-open],[data-xtr-retry],[data-xtr-path],[data-xtr-back],[data-xtr-page]');if(!t)return;if(t.hasAttribute('data-xtr-open'))open(t.dataset.xtrOpen,(t.dataset.xtrStart||'').split('/').filter(Boolean),1,true);else if(t.hasAttribute('data-xtr-retry'))refresh();else if(t.hasAttribute('data-xtr-page'))open(currentId,currentPath,Number(t.dataset.xtrPage));else if(t.hasAttribute('data-xtr-back'))open(currentId,currentPath.slice(0,-1));else open(currentId,(t.dataset.xtrPath||'').split('/').filter(Boolean));});
-  window.XTagRevenue={cell,refresh};if(document.querySelector('[data-x-tag-id]'))refresh();
+  window.XTagRevenue={cell,refresh,paint};if(document.querySelector('[data-x-tag-id]'))refresh();
 })();

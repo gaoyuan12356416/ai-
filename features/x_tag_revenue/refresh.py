@@ -10,6 +10,7 @@ from .core import build
 from .tags import VERSION as TAG_MAPPING_VERSION
 from .taxonomy import VERSION as HIERARCHY_VERSION
 from .storage import ProfileWriter
+from .serving import publish as publish_serving
 from features.social_analytics.warehouse_reader import current, connect, DEFAULT_ROOT as WAREHOUSE_ROOT
 from features.social_analytics.warehouse_refresh import Reader, environment, atomic_json
 
@@ -91,6 +92,7 @@ def refresh(root, warehouse_root, env_path):
             # use the verified database generation and never decode this file.
             with closing(ProfileWriter(env)) as writer:
                 stored = writer.publish(result, reader)
+            publish_serving(root, result, stored)
             old = json.loads((root / 'current.json').read_text()) if (root / 'current.json').exists() else {}
             atomic_json(root / 'current.json', dict(file=filename, version=version, previous=old.get('file')))
             atomic_json(root / 'status.json', dict(status='ok', attempted_at=now.isoformat()))

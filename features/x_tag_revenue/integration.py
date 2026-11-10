@@ -45,3 +45,14 @@ def patch_columns(text):
     if count != 1:
         raise ValueError('portrait_cell_anchor_changed')
     return text.replace('colspan="10"', 'colspan="12"')
+
+
+def patch_fast_load(text):
+    marker = '        window.XTagRevenue?.refresh(); // Load alongside account requests.'
+    if marker in text:
+        return text
+    anchor = '        const loadVersion = ++state.loadVersion;'
+    old = '          window.XTagRevenue?.refresh();'
+    if text.count(anchor) != 1 or text.count(old) != 1:
+        raise ValueError('profile_parallel_load_anchor_changed')
+    return text.replace(old, '          window.XTagRevenue?.paint();').replace(anchor, anchor + '\n' + marker)

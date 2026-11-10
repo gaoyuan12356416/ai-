@@ -68,7 +68,7 @@ def projections(portrait):
     audience = max(audiences, key=lambda t: t['revenue_cents']) if audiences else {}
     simple = lambda n: {k: v for k, v in n.items() if k != 'children'}
     summary['focus'] = dict(type=simple(primary), audience=simple(audience),
-                            audiences=[simple(n) for n in audiences[:2]],
+                            audiences=[simple(n) for n in audiences],
                             themes=[simple(n) for n in audience.get('children', [])[:2]])
     return summary, tree
 

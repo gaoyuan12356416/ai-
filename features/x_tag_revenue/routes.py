@@ -7,13 +7,14 @@ import re
 import subprocess
 from urllib.parse import parse_qs
 
-from .storage import Store, SnapshotExpired, VERSION_RE, tree_summary
+from .storage import SnapshotExpired, VERSION_RE, tree_summary
+from .serving import Store
 
 DEFAULT_ROOT = '/mnt/data-disk/x-channel-tag-revenue'
 
 
 def read_snapshot(root, x_user_ids=None, *, view='tree', version=None, store=None):
-    data, meta = (store or Store()).load(x_user_ids, view=view, version=version)
+    data, meta = (store or Store(root=root)).load(x_user_ids, view=view, version=version)
     meta = dict(meta)
     # The collector's global reconciliation totals are not channel-scoped.
     # Keep them in the database; browser and publisher responses omit them.
@@ -100,7 +101,7 @@ def dispatch(handler, parsed, authorize, root=DEFAULT_ROOT):
         if account_id is not None and account_id not in allowed:
             return send(404, {'message': '频道不存在或无权查看'})
         selected = [allowed[account_id]] if account_id else accounts
-        store = Store()
+        store = Store(root=root)
         data, meta = read_snapshot(root, [a.get('x_user_id') for a in selected],
                                    view='tree' if account_id else 'summary', version=version, store=store)
         tag = query.get('tag', [None])[0]
