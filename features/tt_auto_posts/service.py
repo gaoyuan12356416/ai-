@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from features import social_random_schedule as target_random
+
 import hashlib
 import json
 import os
@@ -284,7 +286,7 @@ class TTAutoPostService:
         if schedule.get("mode") == "fixed":
             schedule_summary = "、".join(schedule.get("times") or [])
         else:
-            schedule_summary = "随机 %s 次/天" % schedule.get("daily_count", 0)
+            schedule_summary = "每账号随机 %s 次/天 · 00:00 备料" % schedule.get("daily_count", 0)
         return {
             "id": snapshot.id,
             "template_id": snapshot.id,
@@ -420,9 +422,14 @@ class TTAutoPostService:
         }
 
     def template(self, template_id: Any) -> Dict[str, Any]:
+        snapshot = self.store.get_template(template_id)
+        item = self._template_item(snapshot)
+        day = self._now().astimezone(BEIJING_TZ).date().isoformat()
+        item["random_day_plan"] = self.store.target_day_plan(snapshot, day)
+        item["preparation_time"] = "00:00"
         return {
             "ok": True,
-            "template": self._template_item(self.store.get_template(template_id)),
+            "template": item,
         }
 
     def _validate_accounts(self, config: Mapping[str, Any]) -> None:
@@ -460,6 +467,8 @@ class TTAutoPostService:
         normalized = normalize_template_payload(payload)
         name = normalized.pop("name")
         self._validate_accounts(normalized)
+        previous = self.store.get_template(template_id)
+        self._target_plan(previous, self._now().astimezone(BEIJING_TZ).date().isoformat())
         item = self.store.update_template(
             template_id,
             expected_version=version,
@@ -588,7 +597,8 @@ class TTAutoPostService:
             task.account_id: task for task in self.store.list_tasks(run_id=run.id)
         }
         tasks = []
-        for account_id in config.get("account_ids") or []:
+        target_ids = [run.target_account_id] if run.target_account_id else config.get("account_ids") or []
+        for account_id in target_ids:
             if account_id in existing:
                 tasks.append(existing[account_id])
                 continue
@@ -600,7 +610,7 @@ class TTAutoPostService:
                     run_id=run.id,
                     account_id=account_id,
                     drama_language="und",
-                    account_settings={"configured": False},
+                    account_settings={"configured": False, "schedule_policy": run.schedule_policy},
                     account_setting_version=0,
                 )
                 task = self.store.transition_task(
@@ -621,6 +631,8 @@ class TTAutoPostService:
                 settings.pop("updated_at", None)
                 settings.pop("version", None)
                 settings.pop("drama_language", None)
+                if run.schedule_policy:
+                    settings.update(schedule_policy=run.schedule_policy, prepare_at_utc=target_random.utc_at(run.shanghai_date))
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,
@@ -650,6 +662,9 @@ class TTAutoPostService:
         publish_time: str,
         run_key: str,
         actor: AuditActor = AuditActor(),
+        target_account_id: str = "",
+        schedule_policy: str = "",
+        slot_ordinal: int = 0,
     ) -> Tuple[Any, bool]:
         # Serialize manual and scheduled creation so the first caller freezes
         # the blacklist/account facts.  Replays return before any external
@@ -695,6 +710,9 @@ class TTAutoPostService:
                 publish_time=publish_time,
                 blacklist_snapshot=_blacklist_dict(blacklist),
                 actor=actor,
+                target_account_id=target_account_id,
+                schedule_policy=schedule_policy,
+                slot_ordinal=slot_ordinal,
             )
             self._run_tasks(run, template.config)
             return self.store.get_run(run.id), True
@@ -751,7 +769,7 @@ class TTAutoPostService:
         }
 
     @staticmethod
-    def _random_times(template: Any, shanghai_date: str, count: int) -> List[str]:
+    def _random_times(template: Any, shanghai_date: str, count: int, account_id: str = "") -> List[str]:
         digest = hashlib.sha256(
             (
                 str(template.id)
@@ -761,6 +779,7 @@ class TTAutoPostService:
                 + template.config_sha256
                 + "|"
                 + shanghai_date
+                + ("|" + str(account_id) if account_id else "")
             ).encode("utf-8")
         ).digest()
         generator = random.Random(int.from_bytes(digest[:16], "big"))
@@ -787,6 +806,24 @@ class TTAutoPostService:
             template.id, template.version, shanghai_date, times
         )
 
+    def _target_plan(self, template: Any, day: str):
+        saved = self.store.target_day_plan(template, day)
+        if saved is not None:
+            return saved
+        if not self.store.target_random_active(day) or template.config.get("schedule", {}).get("mode") != "random":
+            return None
+        if not template.enabled or not template.enabled_at_utc:
+            return None
+        midnight = datetime.fromisoformat(target_random.utc_at(day).replace("Z", "+00:00"))
+        # Enabling a new template during a day begins with tomorrow's plan.
+        if datetime.fromisoformat(template.enabled_at_utc.replace("Z", "+00:00")) > midnight:
+            return None
+        if day != self._now().astimezone(BEIJING_TZ).date().isoformat():
+            return None
+        return self.store.target_day_plan(template, day, lambda target: self._random_times(
+            template, day, int(template.config["schedule"].get("daily_count") or 0), target,
+        ))
+
     def tick(self) -> Dict[str, Any]:
         if not self.executor.gates.is_open:
             return {
@@ -808,9 +845,30 @@ class TTAutoPostService:
                 days.append(cutoff_shanghai.date().isoformat())
             created = []
             for template in self.store.list_templates(enabled=True):
+                day = shanghai.date().isoformat()
+                plan = self._target_plan(template, day)
+                if plan is not None:
+                    frozen = self.store.get_template(template.id, version=int(plan["config_version"]))
+                    for target in plan["targets"]:
+                        for slot in target["slots"]:
+                            run, was_created = self._create_run(
+                                frozen, trigger_type="auto",
+                                scheduled_at=datetime.fromisoformat(slot["scheduled_at"].replace("Z", "+00:00")),
+                                publish_time=slot["publish_time"],
+                                run_key="tt-auto:auto:v2:" + str(template.id) + ":" + target_random.slot_key(day, target["target_id"], slot["ordinal"]),
+                                target_account_id=target["target_id"], schedule_policy=target_random.POLICY,
+                                slot_ordinal=slot["ordinal"],
+                            )
+                            if was_created:
+                                created.append(run.id)
+                    continue
+                if (self.store.target_random_active(day)
+                        and template.config.get("schedule", {}).get("mode") == "random"):
+                    continue
                 for day, publish_time in (
                     (day, publish_time)
                     for day in days
+                    if not (self.store.target_random_active(day) and template.config.get("schedule", {}).get("mode") == "random")
                     for publish_time in self._schedule_times(template, day)
                 ):
                     hour, minute = (int(value) for value in publish_time.split(":"))

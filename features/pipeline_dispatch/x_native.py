@@ -202,6 +202,10 @@ class XNativeBridge:
             if previous:
                 return self.stored(job, claim)[1]
             queue = self.store.get_queue(int(job["source_id"]))
+            if job["stage"] == "publish":
+                # Check before a native claim or any media-upload intent. A
+                # later episode waits locally for the confirmed episode cursor.
+                self.store.assert_scheduled_publishable(queue["id"])
             # Deferred/routed inputs are admitted only once the existing route
             # planner has frozen the original media and account identity.
             pending_route = queue.get("delivery_mode") == "duration_pending"

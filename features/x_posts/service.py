@@ -37,6 +37,7 @@ from features.x_accounts.language import (
 from features.x_posts.account_blockers import read_account_publish_blockers
 from features.x_posts.account_limits import MAX_PUBLISH_ACCOUNTS
 from features.x_posts import duration_policy
+from features import social_random_schedule as target_random
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES, MAX_UPLOAD_SEGMENTS, video_byte_limit
 
 
@@ -4577,6 +4578,12 @@ def ensure_storage(db_path):
             # media recheck may release an unbound candidate.
             from features.x_video_publish.core import ensure_core_schema
             ensure_core_schema(conn)
+            target_random.ensure_schema(conn)
+            for table in ("x_post_schedule_run", "x_post_manual_run"):
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(" + table + ")")}
+                for name in ("schedule_policy", "planned_publish_at_utc"):
+                    if name not in columns:
+                        conn.execute("ALTER TABLE " + table + " ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''")
             conn.commit()
         except Exception:
             conn.rollback()
@@ -5284,6 +5291,9 @@ class XPostStore:
     ):
         config = self._schedule_config_item(config_row)
         normalized_date = _date_value(run_date, "run_date")
+        if target_random.is_active(conn, normalized_date):
+            plan = self._target_random_pool_plan(conn, config_row, normalized_date, timestamp)
+            return self._target_random_pool_item(plan) if plan else None
         if (
             not config["enabled"]
             or config["schedule_mode"] != "random"
@@ -5388,6 +5398,43 @@ class XPostStore:
         ).fetchone()
         return self._random_schedule_plan_item(row)
 
+    @staticmethod
+    def _target_random_pool_item(plan):
+        config = plan["config"]
+        return {**config, "run_date": plan["local_date"], "config_version": int(plan["config_version"]),
+                "schedule_policy": target_random.POLICY, "prepare_at": plan["prepare_at"],
+                "publish_times": sorted({time for target in plan["targets"] for time in target["times"]}),
+                "target_plans": [{"account_id": int(target["target_id"]), "publish_times": target["times"]} for target in plan["targets"]]}
+
+    def _target_random_pool_plan(self, conn, config_row, day, timestamp):
+        source = "x:pool:" + str(config_row["source_type"])
+        saved = target_random.get_day_plan(conn, source, day)
+        if saved:
+            return saved
+        current = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(BEIJING_TZ)
+        config = self._schedule_config_item(config_row, now=current)
+        if (day != current.date().isoformat() or not config["enabled"] or config["schedule_mode"] != "random"
+            or not config["random_effective_date"] or day < config["random_effective_date"]):
+            return None
+        previous_date = (current.date() - timedelta(days=1)).isoformat()
+        previous = target_random.get_day_plan(conn, source, previous_date)
+        others = conn.execute("SELECT * FROM x_post_schedule_config WHERE source_type<>? AND enabled=1", (config["source_type"],)).fetchall()
+        def times_for(account):
+            prior = next((target["times"] for target in (previous or {}).get("targets", []) if target["target_id"] == account), [])
+            forbidden = set()
+            for raw in others:
+                other = self._schedule_config_item(raw, now=current)
+                if int(account) not in other["account_ids"]:
+                    continue
+                if other["schedule_mode"] == "fixed":
+                    forbidden.update(other["publish_times"])
+                else:
+                    other_plan = target_random.get_day_plan(conn, "x:pool:" + other["source_type"], day)
+                    if other_plan:
+                        forbidden.update(time for target in other_plan["targets"] if target["target_id"] == account for time in target["times"])
+            return _generate_random_publish_times(config["random_daily_count"], previous_times=prior, forbidden_times=forbidden)
+        return target_random.ensure_day_plan(conn, source, day, config["version"], config, config["account_ids"], times_for, now=current)
+
     def ensure_random_schedule_plans(self, run_dates):
         if not isinstance(run_dates, list):
             raise XPostError(
@@ -5457,6 +5504,14 @@ class XPostStore:
                 item["random_daily_plans"] = [
                     self._random_schedule_plan_item(plan) for plan in plans
                 ]
+                for day in dates:
+                    if target_random.is_active(conn, day):
+                        item["random_daily_plans"] = [plan for plan in item["random_daily_plans"] if plan["run_date"] != day]
+                        target_plan = target_random.get_day_plan(conn, "x:pool:" + source_type, day)
+                        if target_plan:
+                            item["random_daily_plans"].append(self._target_random_pool_item(target_plan))
+                item["random_daily_plans"].sort(key=lambda plan: plan["run_date"])
+                item["preparation_schedule"] = "每天北京时间 00:00 开始备料"
         if item["schedule_mode"] == "random" and item["enabled"]:
             for plan in item["random_daily_plans"]:
                 for publish_time in plan["publish_times"]:
@@ -5876,6 +5931,11 @@ class XPostStore:
                                     )
                                 )
                             )
+                        for day in (current_time.date().isoformat(), tomorrow):
+                            frozen_targets = target_random.get_day_plan(conn, "x:pool:" + other_item["source_type"], day)
+                            for target in (frozen_targets or {}).get("targets", []):
+                                if int(target["target_id"]) in account_ids and set(target["times"]).intersection(publish_times):
+                                    raise XPostError("x_post_schedule_collision", "同一X账号不能与另一素材池已冻结的随机时间冲突", 409)
                     if (
                         schedule_mode == "fixed"
                         and other_accounts.intersection(account_ids)
@@ -6051,17 +6111,47 @@ class XPostStore:
                     self._random_schedule_plan_item(row)
                 for row in random_plan_rows
             }
+            today = current.date().isoformat()
+            if target_random.is_active(conn, today):
+                for raw in configs:
+                    if raw["schedule_mode"] != "random" and not target_random.get_day_plan(conn, "x:pool:" + raw["source_type"], today):
+                        continue
+                    plan = self._target_random_pool_plan(conn, raw, today, timestamp)
+                    if not plan:
+                        continue
+                    config = plan["config"]
+                    grouped = {}
+                    for target in plan["targets"]:
+                        for slot in target["slots"]:
+                            grouped.setdefault(slot["publish_time"], []).append((target["target_id"], slot["ordinal"]))
+                    for publish_time, identities in sorted(grouped.items()):
+                        account_ids = [int(identity[0]) for identity in identities]
+                        key = "xpost:schedule:target_midnight_v1:%s:%s:%s" % (config["source_type"], today, publish_time.replace(":", ""))
+                        conn.execute(
+                            "INSERT OR IGNORE INTO x_post_schedule_run(slot_key,source_type,run_date,publish_time,timezone,config_version,account_ids_json,schedule_mode,body_template,random_template_enabled,status,expected_count,queued_count,created_at,updated_at,lease_heartbeat_at,duration_policy_version,schedule_policy,planned_publish_at_utc) "
+                            "VALUES(?,?,?,?,?,?,?,'random',?,?,'claimed',?,0,?,?,?,2,?,?)",
+                            (key, config["source_type"], today, publish_time, SCHEDULE_TIMEZONE, int(plan["config_version"]), json.dumps(account_ids, separators=(",", ":")),
+                             config["body_template"], int(config["random_template_enabled"]), len(account_ids), timestamp, timestamp, timestamp,
+                             target_random.POLICY, target_random.utc_at(today, publish_time)))
+                        native = conn.execute("SELECT id,schedule_policy FROM x_post_schedule_run WHERE source_type=? AND run_date=? AND publish_time=?", (config["source_type"], today, publish_time)).fetchone()
+                        if native and native["schedule_policy"] == target_random.POLICY:
+                            for account_id, ordinal in identities:
+                                target_random.bind_slot(conn, "x:pool:" + config["source_type"], today, account_id, ordinal, "x_post_schedule_run", native["id"])
             for run_date, publish_time in slots:
                 if planning_boundary and datetime.fromisoformat(run_date + "T" + publish_time + ":00").replace(tzinfo=BEIJING_TZ) <= planning_boundary:
                     continue
                 for row in configs:
                     config = self._schedule_config_item(row, now=current)
+                    if target_random.is_active(conn, run_date) and target_random.get_day_plan(conn, "x:pool:" + config["source_type"], run_date):
+                        continue
                     schedule_mode = config["schedule_mode"]
                     slot_config = config
                     if schedule_mode == "fixed":
                         if publish_time not in config["publish_times"]:
                             continue
                     else:
+                        if target_random.is_active(conn, run_date):
+                            continue
                         slot_config = random_plans.get(
                             (config["source_type"], run_date)
                         )
@@ -6132,6 +6222,7 @@ class XPostStore:
             stale_rows = [] if delegated else conn.execute(
                 "SELECT id,run_date,publish_time FROM x_post_schedule_run "
                 "WHERE run_date<? AND status NOT IN (?,?,?,?,?) "
+                "AND schedule_policy<>'target_midnight_v1' "
                 "AND NOT (status='claimed' AND queued_count=0) "
                 "AND COALESCE(NULLIF(lease_heartbeat_at,''),updated_at)<=? "
                 "AND NOT " + resumable_drama_route_sql + " "
@@ -6201,7 +6292,7 @@ class XPostStore:
                         *stale_run_ids,
                     ),
                 )
-            scope_clauses = ["run_date=?"]
+            scope_clauses = ["run_date=?", "schedule_policy='target_midnight_v1'"]
             scope_values = [current_run_date]
             for run_date, publish_time in slots:
                 if run_date == current_run_date:
@@ -6313,6 +6404,8 @@ class XPostStore:
             items.append(
                 {
                     "source_type": str(row["source_type"]),
+                    "schedule_policy": str(row["schedule_policy"]),
+                    "planned_publish_at_utc": str(row["planned_publish_at_utc"]),
                     "run_date": str(row["run_date"]),
                     "publish_time": str(row["publish_time"]),
                     "timezone": str(row["timezone"]),
@@ -7986,6 +8079,7 @@ class XPostStore:
         account_languages=None,
         premium_account_ids=None,
         configured_account_ids=None,
+        allow_reserved_successors=False,
     ):
         account_ids = _schedule_account_ids(account_ids)
         configured_account_ids = _schedule_account_ids(
@@ -8064,11 +8158,25 @@ class XPostStore:
             # Every existing episode queue is a durable reservation, including
             # cancelled legacy rows without a log. Keep the bound account
             # occupied; never redraw its drama or advance its episode cursor.
-            episode_key = _drama_episode_key(
-                row["content_id"], row["next_sub_number"], row["replay_generation"])
-            if conn.execute("SELECT 1 FROM x_post_queue WHERE episode_key=? LIMIT 1",
-                    (episode_key,)).fetchone():
+            row = _row_dict(row)
+            next_number = int(row["next_sub_number"])
+            blocked = False
+            while next_number <= int(row["free_episode_count"]):
+                episode_key = _drama_episode_key(row["content_id"], next_number, row["replay_generation"])
+                reserved = conn.execute(
+                    "SELECT q.account_id,q.status,r.schedule_policy,COALESCE(l.unknown_outcome,0) AS unknown_outcome,COALESCE(l.status,'') AS log_status "
+                    "FROM x_post_queue q LEFT JOIN x_post_schedule_run r ON r.id=q.schedule_run_id LEFT JOIN x_post_publish_log l ON l.queue_id=q.id WHERE q.episode_key=? LIMIT 1", (episode_key,)).fetchone()
+                if not reserved:
+                    break
+                if (not allow_reserved_successors or reserved["schedule_policy"] != target_random.POLICY or int(reserved["account_id"]) != owner_id
+                    or reserved["status"] in {"failed", "canceled", "skipped"} or reserved["unknown_outcome"] or reserved["log_status"] in {"post_creating", "repost_creating", "failed"}):
+                    blocked = True
+                    break
+                next_number += 1
+            if blocked or next_number > int(row["free_episode_count"]):
                 continue
+            # Reservation cursor only: confirmed publication progress is untouched.
+            row["next_sub_number"] = next_number
             if not same_drama_language(
                 row["language"],
                 normalized_account_languages[owner_id],
@@ -8142,6 +8250,7 @@ class XPostStore:
         account_languages=None,
         premium_account_ids=None,
         configured_account_ids=None,
+        schedule_identity=None,
     ):
         try:
             limit = int(limit)
@@ -8154,6 +8263,15 @@ class XPostStore:
                 400,
             )
         with contextlib.closing(_connect(self.db_path)) as conn:
+            allow_ahead = False
+            if schedule_identity is not None:
+                identity = schedule_identity if isinstance(schedule_identity, dict) else {}
+                frozen = conn.execute("SELECT * FROM x_post_schedule_run WHERE source_type='drama' AND run_date=? AND publish_time=?", (str(identity.get("run_date") or ""), str(identity.get("publish_time") or ""))).fetchone()
+                if (not frozen or int(frozen["config_version"]) != int(identity.get("version") or 0)
+                    or frozen["schedule_policy"] != target_random.POLICY or frozen["status"] != "claimed"
+                    or not set(account_ids or []).issubset(set(json.loads(frozen["account_ids_json"])))):
+                    raise XPostError("x_post_schedule_config_changed", "短剧提前准备计划与冻结任务不一致", 409)
+                allow_ahead = True
             if account_ids is not None:
                 return self._drama_assignment_candidates(
                     conn,
@@ -8162,6 +8280,7 @@ class XPostStore:
                     account_languages=account_languages,
                     premium_account_ids=premium_account_ids,
                     configured_account_ids=configured_account_ids,
+                    allow_reserved_successors=allow_ahead,
                 )
             rows = conn.execute(
                 "SELECT id,content_id,next_sub_number,created_at,"
@@ -9632,6 +9751,8 @@ class XPostStore:
         actor=None,
         random_template_enabled=False,
         duration_policy_version=2,
+        schedule_policy="",
+        planned_publish_at_utc="",
     ):
         duration_policy_version = duration_policy.version({"duration_policy_version": duration_policy_version})
         random_template_enabled = _random_template_enabled(random_template_enabled)
@@ -9677,6 +9798,16 @@ class XPostStore:
             - timedelta(days=1)
         ).isoformat()
         timestamp = utc_now()
+        if schedule_policy:
+            if schedule_policy != target_random.POLICY:
+                raise XPostError("invalid_request", "unknown schedule policy", 400)
+            try:
+                planned = datetime.fromisoformat(str(planned_publish_at_utc).replace("Z", "+00:00"))
+                if planned.tzinfo is None:
+                    raise ValueError("timezone required")
+                planned_publish_at_utc = planned.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except (TypeError, ValueError):
+                raise XPostError("invalid_request", "planned publication time is invalid", 400) from None
         accounts_json = json.dumps(account_ids, separators=(",", ":"))
         materials_json = json.dumps(material_ids, separators=(",", ":"))
         idempotency_key = "xpost:auto-template:v1:%s" % hashlib.sha256(
@@ -9705,6 +9836,8 @@ class XPostStore:
                     == body_template_sha256
                     and bool(existing["random_template_enabled"]) == random_template_enabled
                     and str(existing["actor_user_id"]) == actor_user_id
+                    and str(existing["schedule_policy"]) == schedule_policy
+                    and str(existing["planned_publish_at_utc"]) == planned_publish_at_utc
                 )
                 if not same:
                     conn.rollback()
@@ -9764,8 +9897,8 @@ class XPostStore:
                     "template_ref,template_version,body_template_sha256,"
                     "run_date,source_date,account_ids_json,material_ids_json,"
                     "body_template,random_template_enabled,actor_user_id,actor_name,status,"
-                    "expected_count,created_at,updated_at,duration_policy_version"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,?)",
+                    "expected_count,created_at,updated_at,duration_policy_version,schedule_policy,planned_publish_at_utc"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,?,?,?)",
                     (
                         idempotency_key,
                         AUTO_TEMPLATE_TRIGGER_SOURCE,
@@ -9784,6 +9917,8 @@ class XPostStore:
                         timestamp,
                         timestamp,
                         duration_policy_version,
+                        schedule_policy,
+                        planned_publish_at_utc,
                     ),
                 )
                 run_id = int(cursor.lastrowid)
@@ -10572,6 +10707,8 @@ class XPostStore:
         run_date = _date_value(run_date, "run_date")
         publish_time = _schedule_publish_time(publish_time)
         run_fields = (
+            "schedule_policy",
+            "planned_publish_at_utc",
             "duration_policy_version",
             "id",
             "slot_key",
@@ -13301,6 +13438,7 @@ class XPostStore:
                     },
                     premium_account_ids=premium_account_ids,
                     configured_account_ids=account_ids,
+                    allow_reserved_successors=bool(existing and existing["schedule_policy"] == target_random.POLICY),
                 )
                 expected_by_pool = {
                     int(item["id"]): item for item in assignments
@@ -16449,6 +16587,32 @@ class XPostStore:
             conn.commit()
         return self.get_log(log_id)
 
+    @staticmethod
+    def _assert_scheduled_publishable(conn, queue, now=None):
+        if not queue:
+            raise XPostError("x_post_queue_not_found", "发布队列不存在", 404)
+        parent = None
+        for key, table in (("schedule_run_id", "x_post_schedule_run"), ("manual_run_id", "x_post_manual_run")):
+            if queue[key]:
+                parent = conn.execute("SELECT schedule_policy,planned_publish_at_utc FROM " + table + " WHERE id=?", (queue[key],)).fetchone()
+                break
+        if not parent or parent["schedule_policy"] != target_random.POLICY:
+            return
+        planned = datetime.fromisoformat(parent["planned_publish_at_utc"].replace("Z", "+00:00"))
+        current = now or datetime.now(timezone.utc)
+        if current < planned:
+            raise XPostError("x_post_schedule_not_due", "素材已备好，等待计划发布时间", 409)
+        if queue["source_type"] == "drama":
+            pool = conn.execute("SELECT next_sub_number FROM x_post_drama_pool WHERE id=? AND replay_generation=?", (queue["drama_pool_item_id"], queue["drama_replay_generation"])).fetchone()
+            if pool and int(queue["episode_number"]) > int(pool["next_sub_number"]):
+                raise XPostError("x_post_drama_previous_episode_pending", "前一集尚未确认发布，当前集等待后继续", 409)
+
+    def assert_scheduled_publishable(self, queue_id, now=None):
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            queue = conn.execute("SELECT * FROM x_post_queue WHERE id=?", (_positive_int(queue_id, "queue_id"),)).fetchone()
+            self._assert_scheduled_publishable(conn, queue, now=now)
+        return True
+
     def mark_publishing(self, log_id):
         log_id = _positive_int(log_id, "log_id")
         timestamp = utc_now()
@@ -16465,6 +16629,7 @@ class XPostStore:
                 "SELECT * FROM x_post_queue WHERE id=?",
                 (row["queue_id"],),
             ).fetchone()
+            self._assert_scheduled_publishable(conn, queue)
             self._assert_drama_queue_assignment(conn, queue)
             relay_ledger = None
             if (
@@ -19352,6 +19517,7 @@ def publish_canary(
         raise XPostError("x_token_invalid", "Token失效，请重新登陆", 409)
     store = XPostStore(db_path)
     queue = store.get_queue(queue_id)
+    store.assert_scheduled_publishable(queue_id)
     relay_delivery = bool(
         queue.get("delivery_mode") == PREMIUM_RELAY_REPOST_MODE
     )

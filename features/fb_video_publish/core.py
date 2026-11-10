@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .guards import automatic_block, manual_block, published_history, prepare_available, install_backstops
+from features import social_random_schedule as target_daily
 
 UTC = timezone.utc
 BJ = timezone(timedelta(hours=8))
@@ -236,6 +237,7 @@ class Store:
             install_schema(conn)
             from .group_pool import install_schema as install_group_schema
             install_group_schema(conn)
+            target_daily.ensure_schema(conn, now=self.now_fn())
             # Existing Page-wide indexes must be replaced even on an already
             # initialized database. Receipts and uncertain outcomes keep their
             # material fence, while only a live write owns the Page mutex.
@@ -466,6 +468,8 @@ class Store:
                    "link_state", "graph_post_id", "unknown_outcome", "error_code", "error_message", "created_at_utc", "updated_at_utc",
                    "source_kind", "pool_instance_id", "pool_sequence")
         return {**{k: row[k] for k in allowed}, "page": snap["page"], "material": snap["material"],
+                "schedule_policy": snap.get("group_pool", {}).get("schedule_policy", ""),
+                "prepare_at_utc": snap.get("group_pool", {}).get("prepare_at", ""),
                 "page_name": snap["page"]["page_name"], "material_name": snap["material"]["material_name"],
                 "caption_template": snap["caption_template"], "template_version": snap["template_version"],
                 "row_number": snap.get("row_number"), "title": snap.get("title", ""),

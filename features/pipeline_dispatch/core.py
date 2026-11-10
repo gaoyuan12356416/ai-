@@ -1042,7 +1042,7 @@ class DispatchStore:
 
     def defer_blocked(self, claim, reason):
         """A native pre-claim account conflict waits without freezing a failure."""
-        if reason != "canonical_account_busy":
+        if reason not in {"canonical_account_busy", "x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
             raise DispatchError("defer_reason_invalid")
         with self.transaction() as c:
             row = self._validate_claim(c, claim)

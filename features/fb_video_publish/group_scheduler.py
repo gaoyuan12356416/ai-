@@ -9,6 +9,11 @@ from datetime import timedelta
 
 from .core import BJ, DomainError, actor_checked, canonical, parse_time, stamp
 from .group_pool import exclusion, pool_row, random_times, routing
+from features import social_random_schedule as target_daily
+
+
+def target_source(tenant):
+    return "fb:group_pool:" + str(tenant)
 
 
 class GroupScheduler:
@@ -38,8 +43,26 @@ class GroupScheduler:
             conn.execute("BEGIN IMMEDIATE")
             pools = [dict(r) for r in conn.execute("SELECT * FROM fb_group_pool WHERE status='enabled' ORDER BY tenant_key")]
             for pool in pools:
+                day = local.date().isoformat()
+                saved = target_daily.get_day_plan(conn, target_source(pool["tenant_key"]), day)
+                frozen_pool = saved["config"] if saved else pool
+                if frozen_pool["schedule_mode"] == "random" and target_daily.is_active(conn, day):
+                    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if not saved and midnight < parse_time(pool["effective_at_utc"]):
+                        continue
+                    for ordinal in range(int(frozen_pool["daily_batches"])):
+                        # This is a stable preparation-run identity, not a publication time.
+                        at = midnight + timedelta(seconds=ordinal)
+                        if conn.execute("SELECT 1 FROM fb_group_pool_run WHERE tenant_key=? AND slot_at_utc=?", (pool["tenant_key"], stamp(at))).fetchone():
+                            continue
+                        boundary = conn.execute("SELECT COALESCE(MAX(id),0) FROM fb_group_pool_item WHERE tenant_key=?", (pool["tenant_key"],)).fetchone()[0]
+                        result.append({"pool": frozen_pool, "at": at, "max_item_id": boundary,
+                                       "schedule_policy": target_daily.POLICY, "ordinal": ordinal})
+                    continue
                 for offset in (0, 1):
                     day = (local + timedelta(days=offset)).date().isoformat()
+                    if pool["schedule_mode"] == "random" and target_daily.is_active(conn, day):
+                        continue
                     existing = conn.execute("SELECT times_json FROM fb_group_pool_day WHERE tenant_key=? AND bj_date=? AND schedule_revision=?",
                                             (pool["tenant_key"], day, pool["schedule_revision"])).fetchone()
                     if existing:
@@ -74,6 +97,7 @@ class GroupScheduler:
 
     def _finish(self, candidate, actor, facts, error):
         pool, at = candidate["pool"], candidate["at"]
+        target_mode = candidate.get("schedule_policy") == target_daily.POLICY
         policy_version, selection = routing(pool)
         now = stamp(self.now_fn())
         with self.store.connect() as conn:
@@ -81,14 +105,29 @@ class GroupScheduler:
             if conn.execute("SELECT 1 FROM fb_group_pool_run WHERE tenant_key=? AND slot_at_utc=?", (pool["tenant_key"], stamp(at))).fetchone():
                 return {"status": "already_recorded"}
             current = pool_row(conn, pool["tenant_key"])
-            stale = (current["status"] != "enabled" or current["schedule_revision"] != pool["schedule_revision"]
+            stale = (current["status"] != "enabled" or (not target_mode and (current["schedule_revision"] != pool["schedule_revision"]
                      or current["publisher_user_id"] != pool["publisher_user_id"]
-                     or current["effective_at_utc"] != pool["effective_at_utc"])
-            late = not 0 <= (self.now_fn() - at).total_seconds() < 60
+                     or current["effective_at_utc"] != pool["effective_at_utc"])))
+            late = not target_mode and not 0 <= (self.now_fn() - at).total_seconds() < 60
             if stale or late:
                 error = DomainError("configuration_changed" if stale else "slot_expired", "配置已变化或已错过时点，不补发", 409)
             selected = {"pairs": [], "excluded": []}
+            target_times = {}
             if error is None:
+                if target_mode:
+                    day, ordinal = at.astimezone(BJ).date().isoformat(), candidate["ordinal"]
+                    source = target_source(pool["tenant_key"])
+                    plan = target_daily.ensure_day_plan(conn, source, day, pool["schedule_revision"], pool,
+                        list(facts["scope"]["pages"]),
+                        lambda pid: random_times(pool["tenant_key"] + ":" + pid, day, pool["schedule_revision"], pool["daily_batches"]),
+                        now=self.now_fn())
+                    for target in plan["targets"]:
+                        if ordinal < len(target["slots"]):
+                            slot = target["slots"][ordinal]
+                            binding = target_daily.slot_binding(conn, source, day, target["target_id"], ordinal)
+                            if not binding["native_id"]:
+                                target_times[target["target_id"]] = parse_time(slot["scheduled_at"])
+                    facts = {**facts, "page_order": [pid for pid in facts["page_order"] if pid in target_times]}
                 selected = self.pool.match(conn, actor, pool, facts, day=at.astimezone(BJ).date().isoformat())
             else:
                 selected["excluded"] = [exclusion(str(getattr(error, "code", "group_source_unavailable")),
@@ -116,13 +155,18 @@ class GroupScheduler:
                             "materials": {p["material_id"]: facts["materials"][p["material_id"]] for p in pairs}}
                 configs = {pid: {"config_instance_id": "", "version": pool["schedule_revision"], "language": page["language"]}
                            for pid, page in resolved["pages"].items()}
-                plans = [(n, p, 1, at, at.astimezone(BJ).date().isoformat()) for n, p in enumerate(pairs, 1)]
+                plans = [(n, p, 1, target_times[p["page_id"]] if target_mode else at, at.astimezone(BJ).date().isoformat()) for n, p in enumerate(pairs, 1)]
                 snapshot = {"policy_version": policy_version, "run_id": run_id, "group_ids": json.loads(pool["group_ids_json"]),
                             "page_language_selection": selection,
                             "schedule_revision": pool["schedule_revision"], "slot_at_utc": stamp(at), "max_item_id": candidate["max_item_id"]}
+                if target_mode:
+                    snapshot.update(schedule_policy=target_daily.POLICY, local_date=day, ordinal=ordinal,
+                                    prepare_at=target_daily.utc_at(day))
                 result = self.store.freeze(conn, actor, request, resolved, configs, {}, plans, group_pool=snapshot)
                 item_ids = {p["material_id"]: int(p["item_id"]) for p in selected["pairs"]}
                 for task in result["batch"]["items"]:
+                    if target_mode:
+                        target_daily.bind_slot(conn, source, day, task["page_id"], ordinal, "fb_video_task", task["task_id"])
                     item_id = item_ids[task["material_id"]]
                     conn.execute("INSERT INTO fb_group_pool_reservation VALUES(?,?,?,?,?,?)",
                         (pool["tenant_key"], task["material_id"], item_id, run_id, task["task_id"], now))

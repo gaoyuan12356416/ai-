@@ -152,9 +152,10 @@ class Coordinator:
         except Exception as exc:
             if getattr(exc, "code", "") in {"claim_expired", "claim_conflict"}:
                 return {"job": None, "idle_reason": "claim_expired_during_reservation"}
-            if getattr(exc, "code", "") == "canonical_account_busy":
-                self.store.defer_blocked(job, "canonical_account_busy")
-                return {"job": None, "idle_reason": "account_busy"}
+            if getattr(exc, "code", "") in {"canonical_account_busy", "x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
+                reason = exc.code
+                self.store.defer_blocked(job, reason)
+                return {"job": None, "idle_reason": "account_busy" if reason == "canonical_account_busy" else reason}
             try:
                 if self.recover_prepared(job):
                     return {"job": None, "idle_reason": "canonical_preparation_recovered"}

@@ -242,7 +242,8 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                 <div id="randomScheduleFields" class="field hidden" style="margin-top: 15px; max-width: 320px;">
                   <label for="randomDailyCount">每天随机发布次数</label>
                   <input id="randomDailyCount" type="number" min="1" max="24" step="1" value="1" />
-                  <span class="helper">模板每天生成一组稳定的随机时刻；每个时刻为所选账号分别创建任务，同账号保持串行。</span>
+                  <span class="helper">每个账号每天独立随机；每天北京时间 00:00 开始备料，制作完成后等待各自发布时间。迟到则制作完成后发布；排期修改次日生效。</span>
+                  <div id="targetRandomDayPlan" class="helper" aria-live="polite"></div>
                 </div>
               </section>
             </div>
@@ -286,6 +287,6 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=d64e9c9ccd31"></script>
   <script src="/tt-auto-publish-common.js"></script>
-  <script src="/tt-auto-publish-template.js?v=20260812-outro-required-v1"></script>
+  <script src="/tt-auto-publish-template.js?v=20261110-target-random-v1"></script>
 </body>
 </html>

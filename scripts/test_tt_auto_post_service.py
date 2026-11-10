@@ -145,6 +145,7 @@ def template_payload(*, name="Template A", mode="fixed", account_ids=None):
     )
     return {
         "name": name,
+        "video_template": "random_overlay",
         "account_ids": list(account_ids or ["640", "641"]),
         "caption_template": "Drama {{content_id}}\n{desc}\n{url}",
         "metric_window_days": 7,
@@ -241,9 +242,7 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
             normalize_template_payload(invalid)
         invalid = template_payload()
         invalid["caption_template"] = "{code}"
-        with self.assertRaises(ValidationError) as caught:
-            normalize_template_payload(invalid)
-        self.assertEqual(caught.exception.code, "tt_auto_caption_code_unsupported")
+        self.assertEqual("{code}", normalize_template_payload(invalid)["caption_template"])
         invalid = template_payload()
         invalid["unexpected"] = True
         with self.assertRaises(ValidationError):
@@ -452,6 +451,7 @@ class TTAutoPostServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(executor.execute_calls, [])
 
     def test_random_schedule_is_stable_and_does_not_execute(self):
+        self.clock.value = datetime(2026, 8, 4, 16, 0, tzinfo=UTC)
         gates = AutoLiveGates(True, True, True)
         service, executor = self.service(gates=gates)
         template = self.create(

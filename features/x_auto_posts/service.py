@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 from features.x_posts.selector import connect_read_only
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import canonical_drama_language
+from features import social_random_schedule as target_random
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
 from .core import AuditActor, XAutoPostStore
@@ -221,6 +222,10 @@ class XAutoPostService:
 
     def _template_item(self, snapshot: Any) -> Dict[str, Any]:
         item = self._template_snapshot_item(snapshot)
+        with self.store._transaction() as conn:
+            plans = [target_random.get_day_plan(conn, "x:auto:" + str(snapshot.id), (self._now().astimezone(BEIJING_TZ).date() + timedelta(days=i)).isoformat()) for i in range(2)]
+        item["target_daily_plans"] = [plan for plan in plans if plan]
+        item["preparation_schedule"] = "每天北京时间 00:00 开始备料"
         last_run = self.store.get_latest_run_for_template(snapshot.id)
         next_run_at = ""
         if snapshot.enabled:
@@ -240,9 +245,8 @@ class XAutoPostService:
                 if schedule.get("mode") == "fixed":
                     publish_times = list(schedule.get("times") or [])
                 else:
-                    publish_times = self.store.get_random_plan(
-                        snapshot.id, snapshot.version, day
-                    ) or []
+                    target_plan = next((p for p in item["target_daily_plans"] if p["local_date"] == day), None)
+                    publish_times = sorted({time for target in target_plan["targets"] for time in target["times"]}) if target_plan else self.store.get_random_plan(snapshot.id, snapshot.version, day) or []
                 for publish_time in publish_times:
                     hour, minute = (int(value) for value in publish_time.split(":"))
                     slot = datetime(
@@ -720,6 +724,8 @@ class XAutoPostService:
         publish_time: str,
         run_key: str,
         actor: AuditActor = AuditActor(),
+        account_ids: Optional[Sequence[str]] = None,
+        schedule_policy: str = "",
     ) -> Tuple[Any, bool]:
         with self._run_create_lock:
             existing = self.store.get_run_by_key(run_key)
@@ -738,7 +744,7 @@ class XAutoPostService:
                         "run idempotency key belongs to different frozen facts",
                         409,
                     )
-                self._run_tasks(existing, frozen.config)
+                self._run_tasks(existing, dict(frozen.config, account_ids=list(account_ids)) if account_ids is not None else frozen.config)
                 return self.store.get_run(existing.id), False
             blacklist = self.selector.source.blacklist_snapshot()
             shanghai_date = scheduled_at.astimezone(BEIJING_TZ).date().isoformat()
@@ -752,8 +758,9 @@ class XAutoPostService:
                 publish_time=publish_time,
                 blacklist_snapshot=_blacklist_dict(blacklist),
                 actor=actor,
+                schedule_policy=schedule_policy,
             )
-            self._run_tasks(run, template.config)
+            self._run_tasks(run, dict(template.config, account_ids=list(account_ids)) if account_ids is not None else template.config)
             return self.store.get_run(run.id), True
 
     def _kick(self) -> bool:
@@ -813,7 +820,7 @@ class XAutoPostService:
         }
 
     @staticmethod
-    def _random_times(template: Any, shanghai_date: str, count: int) -> List[str]:
+    def _random_times(template: Any, shanghai_date: str, count: int, account_id: str = "") -> List[str]:
         digest = hashlib.sha256(
             (
                 str(template.id)
@@ -823,6 +830,7 @@ class XAutoPostService:
                 + template.config_sha256
                 + "|"
                 + shanghai_date
+                + ("|" + str(account_id) if account_id else "")
             ).encode("utf-8")
         ).digest()
         generator = random.Random(int.from_bytes(digest[:16], "big"))
@@ -840,6 +848,21 @@ class XAutoPostService:
         times = self._random_times(template, shanghai_date, int(schedule.get("daily_count") or 0))
         return self.store.put_random_plan(template.id, template.version, shanghai_date, times)
 
+    def _target_random_plan(self, template: Any, day: str):
+        source = "x:auto:" + str(template.id)
+        with self.store._transaction() as conn:
+            if not target_random.is_active(conn, day):
+                return None
+            saved = target_random.get_day_plan(conn, source, day)
+            if saved:
+                return saved
+            enabled_day = datetime.fromisoformat(template.enabled_at_utc.replace("Z", "+00:00")).astimezone(BEIJING_TZ).date().isoformat()
+            if enabled_day >= day:
+                return {"targets": [], "config_version": template.version}
+            return target_random.ensure_day_plan(
+                conn, source, day, template.version, dict(template.config), template.config.get("account_ids") or [],
+                lambda account: self._random_times(template, day, int(template.config["schedule"]["daily_count"]), account), now=self._now())
+
     def tick(self) -> Dict[str, Any]:
         if not self.executor.gates.is_open:
             return {
@@ -856,6 +879,32 @@ class XAutoPostService:
             day = shanghai.date().isoformat()
             created = []
             for template in self.store.list_templates(enabled=True):
+                with self.store._transaction() as conn:
+                    frozen_today = target_random.get_day_plan(conn, "x:auto:" + str(template.id), day)
+                if frozen_today or template.config.get("schedule", {}).get("mode") == "random":
+                    target_plan = self._target_random_plan(template, day)
+                    if target_plan is not None:
+                        frozen = self.store.get_template(template.id, version=int(target_plan["config_version"]))
+                        for target in target_plan["targets"]:
+                            for target_slot in target["slots"]:
+                                try:
+                                    run, was_created = self._create_run(
+                                        frozen, trigger_type="auto", scheduled_at=datetime.fromisoformat(target_slot["scheduled_at"].replace("Z", "+00:00")),
+                                        publish_time=target_slot["publish_time"],
+                                        run_key=f"x-auto:auto:{target_random.POLICY}:{template.id}:{day}:{target['target_id']}:{target_slot['ordinal']}",
+                                        account_ids=[target["target_id"]], schedule_policy=target_random.POLICY)
+                                except Exception as exc:
+                                    if str(getattr(exc, "code", "")) in {
+                                        "x_auto_template_not_enabled_for_slot",
+                                        "x_auto_template_version_conflict",
+                                    }:
+                                        continue
+                                    raise
+                                with self.store._transaction() as conn:
+                                    target_random.bind_slot(conn, "x:auto:" + str(template.id), day, target["target_id"], target_slot["ordinal"], "x_auto_run", run.id)
+                                if was_created:
+                                    created.append(run.id)
+                        continue
                 for publish_time in self._schedule_times(template, day):
                     hour, minute = (int(value) for value in publish_time.split(":"))
                     slot = shanghai.replace(

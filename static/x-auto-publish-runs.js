@@ -312,6 +312,8 @@
       const preparedDuration = item.selected_duration_sec == null ? item.prepared_duration_sec : item.selected_duration_sec;
       const prepareFact = item.prepare_status || item.preparation_status || (item.prepared ? `已准备 ${ui.formatNumber(preparedDuration)} 秒` : item.gpu_job_id ? `GPU ${item.gpu_job_id}` : "—");
       stageCell.appendChild(ui.element("div", { text: prepareFact }));
+      stageCell.appendChild(ui.element("div", { className: "secondary", text: `计划发布：${ui.formatTime(item.scheduled_at_utc)}` }));
+      if (item.published_at_utc) stageCell.appendChild(ui.element("div", { className: "secondary", text: `实际发布：${ui.formatTime(item.published_at_utc)}` }));
       const queueId = item.execution_queue_id || item.x_queue_id;
       const logId = item.execution_log_id || item.x_log_id;
       const ledgerFacts = [queueId ? `queue ${queueId}` : "", logId ? `log ${logId}` : ""].filter(Boolean).join(" / ");
@@ -321,8 +323,11 @@
       const taskStatus = String(item.status || "").toLowerCase();
       const taskStatusCell = ui.element("td");
       const effectiveStatus = item.unknown_outcome ? "unknown" : taskStatus;
-      const taskLabel = effectiveStatus === "retry_wait" && queueId
-        ? "等待发布结果" : statusLabel(effectiveStatus);
+      const future = Date.parse(item.scheduled_at_utc || "") > Date.now();
+      const targetRandom = item.schedule_policy === "target_midnight_v1";
+      const taskLabel = targetRandom && effectiveStatus === "ready" ? (future ? "已备好，等待发布" : "已备好，准备发布")
+        : targetRandom && ["pending", "selecting", "reserved", "preparing"].includes(effectiveStatus) ? (future ? "制作中" : "制作迟到，完成后发布")
+        : effectiveStatus === "retry_wait" && queueId ? "等待发布结果" : statusLabel(effectiveStatus);
       taskStatusCell.appendChild(ui.statusBadge(taskLabel, ui.statusKind(effectiveStatus)));
       row.appendChild(taskStatusCell);
 

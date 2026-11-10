@@ -13,6 +13,7 @@ from .core import BJ, DomainError, actor_checked, canonical, digest, id_text, pa
 from .guards import automatic_block, has_table, manual_block
 from .group_language import LEGACY_POLICY, POLICY_VERSION, default_selection, normalize_selection
 from .templates import render_preview, validate_template
+from features import social_random_schedule as target_daily
 
 SCAN_LIMIT = 5000
 DEFAULT_CAPTION = "{name}\n{desc}\n{url}"
@@ -572,6 +573,8 @@ class GroupPoolService:
             for row in rows[:limit]:
                 visible = actor["is_admin"] or actor["user_id"] == row["publisher_user_id"]
                 counts = {r[0]: r[1] for r in conn.execute("SELECT status,COUNT(*) FROM fb_video_task WHERE batch_id=? GROUP BY status", (row["batch_id"],))}
+                task_rows = conn.execute("SELECT page_id,planned_at_utc,status,prepare_state,snapshot_json FROM fb_video_task WHERE batch_id=? ORDER BY planned_at_utc,page_id", (row["batch_id"],)).fetchall()
+                schedule_policy = json.loads(task_rows[0]["snapshot_json"]).get("group_pool", {}).get("schedule_policy", "") if task_rows else ""
                 status = row["status"]
                 if counts:
                     status = "unknown" if "unknown" in counts else "completed" if set(counts) <= {"published", "failed", "cancelled"} else "processing"
@@ -579,6 +582,8 @@ class GroupPoolService:
                 items.append({"id": str(row["id"]), "slot_at_utc": row["slot_at_utc"], "status": status,
                     "reason": row["reason"], "max_item_id": row["max_item_id"], "task_counts": counts,
                     "pairs": json.loads(row["pairs_json"]) if visible else [], "excluded": json.loads(row["excluded_json"]) if visible else [],
+                    "schedule_policy": schedule_policy,
+                    "scheduled_targets": [{k: task[k] for k in ("page_id", "planned_at_utc", "status", "prepare_state")} for task in task_rows] if visible else [],
                     "batch_id": row["batch_id"] if visible else "", "can_view_tasks": bool(visible)})
         return {"ok": True, "items": items, "has_more": len(rows) > limit,
                 "next_cursor": str(rows[limit - 1]["id"]) if len(rows) > limit else None}
@@ -595,8 +600,14 @@ class GroupPoolService:
                     first_day = max(first_day, parse_time(pool["effective_at_utc"]).astimezone(BJ).date().isoformat())
                 rows = conn.execute("SELECT * FROM fb_group_pool_day WHERE tenant_key=? AND schedule_revision=? AND bj_date>=? ORDER BY bj_date LIMIT 2",
                                     (actor["tenant_key"], pool["schedule_revision"], first_day)).fetchall()
+                rows = [r for r in rows if r["mode"] != "random" or not target_daily.is_active(conn, r["bj_date"])]
+                today = self.store.now_fn().astimezone(BJ).date().isoformat()
+                source = "fb:group_pool:" + actor["tenant_key"]
+                target_dates = conn.execute("SELECT local_date FROM social_random_day WHERE source_key=? AND local_date>=? ORDER BY local_date LIMIT 2", (source, today)).fetchall()
+                target_plans = [target_daily.get_day_plan(conn, source, r[0]) for r in target_dates]
             return {"ok": True, "pool": pool_dto(pool), "enabled": self.enabled, "feature_enabled": self.enabled,
-                    "day_plan": [{"bj_date": r["bj_date"], "times": json.loads(r["times_json"]), "mode": r["mode"]} for r in rows]}
+                    "day_plan": [{"bj_date": r["bj_date"], "times": json.loads(r["times_json"]), "mode": r["mode"]} for r in rows],
+                    "target_daily_plans": target_plans, "prepare_time": "00:00", "timezone": "Asia/Shanghai"}
         if method == "GET" and suffix == "/runs":
             return self.runs(actor, query)
         if method == "GET" and suffix.startswith("/operations/"):

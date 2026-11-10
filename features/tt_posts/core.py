@@ -17,6 +17,8 @@ TikTok API client so it can be tested without network or production data.
 
 from __future__ import annotations
 
+from features import social_random_schedule as target_random
+
 import contextlib
 import hashlib
 import json
@@ -1985,6 +1987,7 @@ def ensure_storage(db_path: Any) -> None:
                     """
                 )
             additive_columns = {
+                "tt_post_schedule_run": {"schedule_policy": "TEXT NOT NULL DEFAULT ''"},
                 "tt_post_account_setting": {
                     "drama_language": "TEXT NOT NULL DEFAULT 'en'",
                 },
@@ -2010,6 +2013,7 @@ def ensure_storage(db_path: Any) -> None:
                     "description": "TEXT NOT NULL DEFAULT ''",
                 },
                 "tt_post_queue": {
+                    "schedule_policy": "TEXT NOT NULL DEFAULT ''",
                     "material_name": "TEXT NOT NULL DEFAULT ''",
                     "drama_name": "TEXT NOT NULL DEFAULT ''",
                     "material_language": "TEXT NOT NULL DEFAULT ''",
@@ -2399,6 +2403,12 @@ class TTPostStore:
         self.code_route_lock = code_route_lock or threading.RLock()
         self.code_route_invalidator: Optional[Callable[[str], None]] = None
         ensure_storage(self.db_path)
+        with self._transaction() as conn:
+            target_random.ensure_schema(conn, now=self._now_fn())
+
+    def target_random_active(self, shanghai_date: str) -> bool:
+        with contextlib.closing(_connect(self.db_path)) as conn:
+            return target_random.is_active(conn, shanghai_date)
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -2851,6 +2861,27 @@ class TTPostStore:
             (account_id, normalized_date),
         ).fetchone()
         return _public_random_daily_plan(row)
+
+    @staticmethod
+    def _discard_future_random_previews(
+        conn: sqlite3.Connection, account_id: str, today: str,
+    ) -> None:
+        # Future random previews are not frozen daily work. Switching to fixed
+        # times must take effect tomorrow without disturbing today's plan or
+        # any date whose material has already been reserved by an auto run.
+        conn.execute(
+            """
+            DELETE FROM tt_post_random_daily_plan
+            WHERE account_id=? AND shanghai_date>?
+                AND NOT EXISTS (
+                    SELECT 1 FROM tt_post_schedule_run r
+                    WHERE r.trigger_type='auto'
+                        AND r.account_id=tt_post_random_daily_plan.account_id
+                        AND r.shanghai_date=tt_post_random_daily_plan.shanghai_date
+                )
+            """,
+            (account_id, today),
+        )
 
     def ensure_random_daily_plans(
         self,
@@ -3402,6 +3433,11 @@ class TTPostStore:
                         ),
                     )
 
+            if normalized_mode == "fixed":
+                today = self._now_fn().astimezone(BEIJING_TZ).date().isoformat()
+                for normalized_account_id in normalized_account_ids:
+                    self._discard_future_random_previews(conn, normalized_account_id, today)
+
             if normalized_enabled and normalized_mode == "random":
                 for normalized_account_id in normalized_account_ids:
                     schedule = conn.execute(
@@ -3695,6 +3731,10 @@ class TTPostStore:
                         normalized_account_id,
                     ),
                 )
+            self._discard_future_random_previews(
+                conn, normalized_account_id,
+                self._now_fn().astimezone(BEIJING_TZ).date().isoformat(),
+            )
             row = conn.execute(
                 "SELECT * FROM tt_post_daily_schedule WHERE account_id=?",
                 (normalized_account_id,),
@@ -7223,6 +7263,7 @@ class TTPostStore:
                 )
                 return self._recurring_run_result(conn, existing)
 
+            schedule_policy = ""
             if normalized_trigger == "auto":
                 schedule = conn.execute(
                     """
@@ -7234,7 +7275,9 @@ class TTPostStore:
                 valid_slot = False
                 if schedule is not None and bool(schedule["enabled"]):
                     mode = _schedule_mode(schedule["schedule_mode"])
-                    if mode == "fixed":
+                    frozen_plan = conn.execute("SELECT * FROM tt_post_random_daily_plan WHERE account_id=? AND shanghai_date=?", (normalized_account_id, normalized_date)).fetchone()
+                    frozen_random = bool(frozen_plan is not None and target_random.is_active(conn, normalized_date))
+                    if mode == "fixed" and not frozen_random:
                         try:
                             configured_times = _publish_times(
                                 json.loads(
@@ -7257,13 +7300,7 @@ class TTPostStore:
                             and normalized_time in configured_times
                         )
                     else:
-                        plan = conn.execute(
-                            """
-                            SELECT * FROM tt_post_random_daily_plan
-                            WHERE account_id=? AND shanghai_date=?
-                            """,
-                            (normalized_account_id, normalized_date),
-                        ).fetchone()
+                        plan = frozen_plan
                         if plan is not None:
                             public_plan = _public_random_daily_plan(plan)
                             valid_slot = bool(
@@ -7272,6 +7309,8 @@ class TTPostStore:
                                 and normalized_time
                                 in public_plan["publish_times"]
                             )
+                            if valid_slot and target_random.is_active(conn, normalized_date):
+                                schedule_policy = target_random.POLICY
                 if not valid_slot:
                     raise TTPostError(
                         "tt_post_schedule_not_current",
@@ -7403,6 +7442,8 @@ class TTPostStore:
                     409,
                 ) from None
             run_id = int(cursor.lastrowid)
+            if schedule_policy:
+                conn.execute("UPDATE tt_post_schedule_run SET schedule_policy=? WHERE id=?", (schedule_policy, run_id))
             if normalized_trigger == "auto" and account_settings is not None:
                 updated = conn.execute(
                     """
@@ -8518,6 +8559,7 @@ class TTPostStore:
         )
 
         with self._transaction() as conn:
+            schedule_policy = ""
             if normalized_recurring_run_id is not None:
                 recurring_run = conn.execute(
                     "SELECT * FROM tt_post_schedule_run WHERE id=?",
@@ -8529,6 +8571,7 @@ class TTPostStore:
                         "每日发布运行不存在",
                         404,
                     )
+                schedule_policy = str(recurring_run["schedule_policy"] or "")
                 self._assert_recurring_execution(
                     recurring_run,
                     normalized_execution_token,
@@ -8864,6 +8907,8 @@ class TTPostStore:
                     409,
                 ) from None
             queue_id = int(cursor.lastrowid)
+            if schedule_policy:
+                conn.execute("UPDATE tt_post_queue SET schedule_policy=? WHERE id=?", (schedule_policy, queue_id))
             if queue_id != predicted_queue_id:
                 raise TTPostError(
                     "tt_short_link_identity_mismatch",
@@ -9329,6 +9374,7 @@ class TTPostStore:
                 """
                 SELECT * FROM tt_post_queue
                 WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_queue.id) AND scheduled_at_utc<?
+                  AND schedule_policy<>'target_midnight_v1'
                   AND (
                     status='scheduled'
                     OR (
@@ -9378,7 +9424,7 @@ class TTPostStore:
             candidates = conn.execute(
                 """
                 SELECT * FROM tt_post_queue
-                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_queue.id) AND scheduled_at_utc>=?
+                WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:queue:'||tt_post_queue.id) AND (scheduled_at_utc>=? OR schedule_policy='target_midnight_v1')
                   AND scheduled_at_utc<=?
                   AND (
                     status='scheduled'

@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 from features.x_accounts.language import canonical_drama_language
 from features.x_posts import duration_policy
 from features.pipeline_dispatch.backlog_contract import SCHEMA as BACKLOG_SCHEMA, disposition_record
+from features import social_random_schedule as target_random
 
 
 UTC = timezone.utc
@@ -205,11 +206,13 @@ class RunRecord:
     finished_at_utc: str
 
     duration_policy_version: int = 2
+    schedule_policy: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "duration_policy_version": self.duration_policy_version,
+            "schedule_policy": self.schedule_policy,
             "run_key": self.run_key,
             "template_id": self.template_id,
             "template_version": self.template_version,
@@ -264,11 +267,13 @@ class TaskRecord:
     updated_at: str
     reserved_at_utc: str
     published_at_utc: str
+    schedule_policy: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "run_id": self.run_id,
+            "schedule_policy": self.schedule_policy,
             "template_id": self.template_id,
             "template_version": self.template_version,
             "account_id": self.account_id,
@@ -927,6 +932,10 @@ def ensure_storage(db_path: Any) -> None:
                 """
             )
             duration_policy.migrate(conn, ("x_auto_run",))
+            target_random.ensure_schema(conn)
+            for table in ("x_auto_run", "x_auto_task"):
+                if "schedule_policy" not in {r[1] for r in conn.execute("PRAGMA table_info(" + table + ")")}:
+                    conn.execute("ALTER TABLE " + table + " ADD COLUMN schedule_policy TEXT NOT NULL DEFAULT ''")
             conn.commit()
         except Exception:
             if conn.in_transaction:
@@ -954,6 +963,7 @@ def _template_from_row(row: sqlite3.Row) -> TemplateSnapshot:
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
     raw_generation = row["metric_generation_id"]
     return RunRecord(
+        schedule_policy=str(row["schedule_policy"] or ""),
         duration_policy_version=int(row["duration_policy_version"]),
         id=int(row["id"]),
         run_key=str(row["run_key"]),
@@ -977,6 +987,7 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
 
 def _task_from_row(row: sqlite3.Row) -> TaskRecord:
     return TaskRecord(
+        schedule_policy=str(row["schedule_policy"] or ""),
         id=int(row["id"]),
         run_id=int(row["run_id"]),
         template_id=int(row["template_id"]),
@@ -1533,6 +1544,7 @@ class XAutoPostStore:
         metric_generation_id: Optional[Any] = None,
         blacklist_snapshot: Optional[Mapping[str, Any]] = None,
         actor: AuditActor = AuditActor(),
+        schedule_policy: str = "",
     ) -> RunRecord:
         clean_key = _bounded_text(run_key, "run key", 255)
         normalized_template_id = _positive_int(template_id, "template id")
@@ -1561,6 +1573,8 @@ class XAutoPostStore:
             if not bool(version_row["confirmed"]):
                 raise XAutoPostStoreError("x_auto_template_version_unconfirmed", "template version must be confirmed before execution", 409)
             if clean_trigger == "auto":
+                frozen_day = target_random.get_day_plan(conn, "x:auto:" + str(normalized_template_id), normalized_date) if schedule_policy == target_random.POLICY else None
+                frozen_target_day = bool(frozen_day and int(frozen_day["config_version"]) == normalized_version)
                 current_template = conn.execute(
                     """
                     SELECT enabled,current_version,enabled_at_utc
@@ -1577,11 +1591,10 @@ class XAutoPostStore:
                 if (
                     current_template is None
                     or not bool(current_template["enabled"])
-                    or int(current_template["current_version"])
-                    != normalized_version
+                    or (int(current_template["current_version"]) != normalized_version and not frozen_target_day)
                     or not enabled_at
-                    or _utc_datetime(scheduled)
-                    < _utc_datetime(enabled_at, "template enabled time")
+                    or (not frozen_target_day and _utc_datetime(scheduled)
+                    < _utc_datetime(enabled_at, "template enabled time"))
                 ):
                     raise XAutoPostStoreError(
                         "x_auto_template_not_enabled_for_slot",
@@ -1629,9 +1642,9 @@ class XAutoPostStore:
                     trigger_type,scheduled_at_utc,shanghai_date,publish_time,
                     metric_generation_id,blacklist_snapshot_json,status,
                     created_by_user_id,created_by_name,created_at,updated_at,
-                    duration_policy_version
+                    duration_policy_version,schedule_policy
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,2)
+                VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,2,?)
                 """,
                 (
                     clean_key,
@@ -1648,6 +1661,7 @@ class XAutoPostStore:
                     actor.name,
                     now,
                     now,
+                    schedule_policy,
                 ),
             )
             run_id = int(cursor.lastrowid)
@@ -1916,8 +1930,8 @@ class XAutoPostStore:
                     trigger_priority,scheduled_at_utc,status,language,
                     account_snapshot_version,account_snapshot_json,
                     body_template,body_sha256,body_utf16_units,
-                    created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?,?)
+                    created_at,updated_at,schedule_policy
+                ) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     normalized_run_id,
@@ -1936,6 +1950,7 @@ class XAutoPostStore:
                     body_units,
                     now,
                     now,
+                    str(run["schedule_policy"] or ""),
                 ),
             )
             task_id = int(cursor.lastrowid)
@@ -2212,7 +2227,7 @@ class XAutoPostStore:
                 SELECT t.*
                 FROM x_auto_task t
                 WHERE t.status='pending'
-                  AND t.scheduled_at_utc<=?
+                  AND (t.scheduled_at_utc<=? OR t.schedule_policy='target_midnight_v1')
                   AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||t.id)
                 ORDER BY
                     t.trigger_priority ASC,
@@ -2333,7 +2348,7 @@ class XAutoPostStore:
                     """
                 SELECT * FROM x_auto_task
                 WHERE
-                    (status='pending' AND scheduled_at_utc<=?)
+                    (status='pending' AND (scheduled_at_utc<=? OR schedule_policy='target_midnight_v1'))
                     OR (status='selecting' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
                         status='reserved'
@@ -2378,6 +2393,10 @@ class XAutoPostStore:
                     continue
                 candidate_id = int(candidate["id"])
                 candidate_status = str(candidate["status"])
+                if (str(candidate["schedule_policy"]) == target_random.POLICY
+                    and str(candidate["scheduled_at_utc"]) > current
+                    and (candidate_status == "ready" or (candidate_status == "retry_wait" and candidate["claim_phase"] == "publish"))):
+                    continue
                 # Each template task owns its lease and receipt independently.
                 selected = candidate
                 break

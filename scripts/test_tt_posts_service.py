@@ -2573,6 +2573,10 @@ class ServiceLifecycleTests(unittest.TestCase):
         first = service.schedules_due({})["items"]
         second = service.schedules_due({})["items"]
 
+        # All of today's random slots are now prepared together. A missing
+        # second material is reported locally without duplicating the first.
+        first = [item for item in first if item.get("queue_id")]
+        second = [item for item in second if item.get("queue_id")]
         self.assertEqual(1, len(first))
         self.assertEqual(publish_time, first[0]["publish_time"])
         self.assertEqual("101", first[0]["source_account_id"])

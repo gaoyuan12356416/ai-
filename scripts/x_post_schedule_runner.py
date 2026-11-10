@@ -19,6 +19,7 @@ import random
 import re
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, replace
@@ -679,6 +680,7 @@ def _schedule_identity(raw):
         "version": version,
         "account_ids": list(account_ids),
         "frozen": frozen,
+        **({"schedule_policy": str(raw["schedule_policy"]), "planned_publish_at_utc": str(raw.get("planned_publish_at_utc") or "")} if raw.get("schedule_policy") else {}),
     }
 
 
@@ -1132,11 +1134,13 @@ class ScheduleSidecarClient(SidecarClient):
             )
         return dict(item)
 
-    def available_drama_pool(self, path, limit, account_ids, *, configured_account_ids=None):
+    def available_drama_pool(self, path, limit, account_ids, *, configured_account_ids=None, schedule_identity=None):
         normalized_accounts = [int(value) for value in account_ids]
         payload = {"limit": int(limit), "account_ids": normalized_accounts}
         if configured_account_ids is not None:
             payload["configured_account_ids"] = list(configured_account_ids)
+        if schedule_identity is not None:
+            payload["schedule_identity"] = dict(schedule_identity)
         result = self.post(
             path,
             payload,
@@ -1905,6 +1909,7 @@ def _drama_candidates(
     repair_client,
     timestamp,
     configured_account_ids=None,
+    schedule_identity=None,
 ):
     del downloader, prober, repair_client
     account_ids = [int(account["id"]) for account in accounts]
@@ -1947,6 +1952,8 @@ def _drama_candidates(
                 accounts = _verify_accounts(sidecar, account_ids)
                 refresh_accounts = False
             scope_options = {}
+            if schedule_identity is not None:
+                scope_options["schedule_identity"] = schedule_identity
             if configured_account_ids is not None and list(configured_account_ids) != account_ids:
                 scope_options["configured_account_ids"] = list(configured_account_ids)
             pool_items = sidecar.available_drama_pool(
@@ -2236,6 +2243,8 @@ def _heartbeat_best_effort(sidecar, identity, *, plan_attempt=False):
 def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
     if pipeline_dispatch_enabled():
         return queue_handoff(identity, queues, resumed=resumed)
+    if identity.get("schedule_policy") == "target_midnight_v1" and datetime.now(BEIJING_TZ) < _scheduled_at(identity):
+        return {"status": "ready", "planned_count": len(queues), "attempted_count": 0, "published_count": 0, "resumed_existing_plan": bool(resumed), **identity}
     from scripts.x_post_dispatch import dispatch_queues
 
     def publish(queue):
@@ -2247,6 +2256,9 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
                 if key in published:
                     entry[key] = published[key]
         except SidecarError as exc:
+            if exc.code in {"x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
+                entry.update(status="queued", error_code=exc.code, unknown_outcome=False)
+                return entry
             entry.update(status="needs_review" if exc.unknown_outcome else "failed",
                          error_code=exc.code, unknown_outcome=exc.unknown_outcome)
             # X's generic rate response can describe a shared App limit. Stop
@@ -2287,6 +2299,39 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
         ),
         "results": results,
     }
+
+
+def _execute_ordered_batches(identities, process, *, workers):
+    """Freeze new random pool slots in time order; release before publishing.
+
+    FIFO material choice is shared across accounts in one pool, while drama
+    episode choice also depends on prior reservations. Only their selection and
+    freeze are ordered. Other pools and legacy batches remain independent.
+    """
+    targets = iter(sorted((item for item in identities if item.get("schedule_policy") == "target_midnight_v1"), key=_scheduled_at))
+    ordered = [next(targets) if item.get("schedule_policy") == "target_midnight_v1" else item for item in identities]
+    previous = {}
+    entries = []
+    for identity in ordered:
+        ready = threading.Event()
+        dependency = None
+        if identity.get("schedule_policy") == "target_midnight_v1":
+            dependency = previous.get(identity["source_type"])
+            previous[identity["source_type"]] = ready
+        entries.append((identity, dependency, ready))
+
+    def execute(entry):
+        identity, dependency, ready = entry
+        if dependency is not None:
+            dependency.wait()
+        try:
+            return process(identity, ready.set)
+        finally:
+            # An account or material failure must not hold later slots.
+            ready.set()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(execute, entries))
 
 
 def execute_schedule_tick(
@@ -2352,7 +2397,7 @@ def execute_schedule_tick(
 
     batches = []
     retrying_downloader = _retrying_media_downloader(downloader)
-    def process_identity(identity):
+    def process_identity(identity, planning_finished):
         local_results = []
         def process():
             # Frozen state always wins. This query precedes token verification,
@@ -2362,6 +2407,7 @@ def execute_schedule_tick(
             )
             batch_config = replace(config, duration_policy_version=duration_policy.version(existing["run"]) if existing["found"] else 2)
             if existing["found"] and existing["queues"]:
+                planning_finished()
                 result = _publish_frozen_queues(
                     batch_config,
                     sidecar,
@@ -2446,6 +2492,8 @@ def execute_schedule_tick(
                         drama_scope_options = {}
                         if drama_candidate_loader is _drama_candidates:
                             drama_scope_options["configured_account_ids"] = identity["account_ids"]
+                            if identity.get("schedule_policy") == "target_midnight_v1":
+                                drama_scope_options["schedule_identity"] = identity
                         candidates = drama_candidate_loader(
                             batch_config,
                             sidecar,
@@ -2576,6 +2624,7 @@ def execute_schedule_tick(
                         )
                         return
                     if reconciled["found"] and reconciled["queues"]:
+                        planning_finished()
                         if [q["account_id"] for q in reconciled["queues"]] == candidate_account_ids:
                             material_shortage.emit(identity, getattr(candidates, "shortage_snapshot", None))
                         result = _publish_frozen_queues(
@@ -2604,6 +2653,7 @@ def execute_schedule_tick(
                     "created queue order does not match frozen schedule",
                     "x_post_schedule_plan_mismatch",
                 )
+            planning_finished()
             material_shortage.emit(identity, getattr(candidates, "shortage_snapshot", None))
             result = _publish_frozen_queues(
                 batch_config, sidecar, identity, queues, resumed=False
@@ -2627,9 +2677,8 @@ def execute_schedule_tick(
                                   "error_code": getattr(exc, "code", "x_post_batch_unavailable")})
         return local_results
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.batch_workers) as pool:
-        for result in pool.map(process_identity, accepted_due):
-            batches.extend(result)
+    for result in _execute_ordered_batches(accepted_due, process_identity, workers=config.batch_workers):
+        batches.extend(result)
 
     return {
         "status": "dispatch_queued" if batches and all(item["status"] == "dispatch_queued" for item in batches) else (

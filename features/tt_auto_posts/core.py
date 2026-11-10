@@ -8,6 +8,8 @@ facts.  The legacy TT Post database is read through ``legacy_reader.py`` only.
 
 from __future__ import annotations
 
+from features import social_random_schedule as target_random
+
 import contextlib
 import hashlib
 import json
@@ -196,6 +198,8 @@ class RunRecord:
     updated_at: str
     started_at_utc: str
     finished_at_utc: str
+    target_account_id: str = ""
+    schedule_policy: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -216,6 +220,8 @@ class RunRecord:
             "updated_at": self.updated_at,
             "started_at_utc": self.started_at_utc,
             "finished_at_utc": self.finished_at_utc,
+            "target_account_id": self.target_account_id,
+            "schedule_policy": self.schedule_policy,
         }
 
 
@@ -254,6 +260,7 @@ class TaskRecord:
     updated_at: str
     reserved_at_utc: str
     published_at_utc: str
+    schedule_policy: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -266,6 +273,7 @@ class TaskRecord:
             "account_display_name": self.account_display_name,
             "trigger_priority": self.trigger_priority,
             "scheduled_at_utc": self.scheduled_at_utc,
+            "schedule_policy": self.schedule_policy,
             "status": self.status,
             "drama_language": self.drama_language,
             "account_setting_version": self.account_setting_version,
@@ -810,6 +818,17 @@ def ensure_storage(db_path: Any) -> None:
                 conn.rollback()
             raise
 
+        conn.execute("BEGIN IMMEDIATE")
+        for table, columns in {
+            "tt_auto_run": ("target_account_id", "schedule_policy"),
+            "tt_auto_task": ("schedule_policy",),
+        }.items():
+            present = {str(row["name"]) for row in conn.execute("PRAGMA table_info(" + table + ")")}
+            for column in columns:
+                if column not in present:
+                    conn.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
 
 def _template_from_row(row: sqlite3.Row) -> TemplateSnapshot:
     return TemplateSnapshot(
@@ -848,6 +867,8 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
         updated_at=str(row["updated_at"]),
         started_at_utc=str(row["started_at_utc"] or ""),
         finished_at_utc=str(row["finished_at_utc"] or ""),
+        target_account_id=str(row["target_account_id"] or ""),
+        schedule_policy=str(row["schedule_policy"] or ""),
     )
 
 
@@ -886,6 +907,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
         updated_at=str(row["updated_at"]),
         reserved_at_utc=str(row["reserved_at_utc"] or ""),
         published_at_utc=str(row["published_at_utc"] or ""),
+        schedule_policy=str(row["schedule_policy"] or ""),
     )
 
 
@@ -928,6 +950,8 @@ class TTAutoPostStore:
             if execution_not_before_utc else ""
         )
         ensure_storage(path)
+        with self._transaction() as conn:
+            target_random.ensure_schema(conn, now=self._now())
 
     def _now(self) -> datetime:
         value = self._now_fn()
@@ -1357,6 +1381,21 @@ class TTAutoPostStore:
             )
         return normalized_times
 
+    def target_random_active(self, shanghai_date: str) -> bool:
+        with self._reader() as conn:
+            return target_random.is_active(conn, shanghai_date)
+
+    def target_day_plan(self, template: TemplateSnapshot, shanghai_date: str, time_factory=None):
+        source = "tt_auto:" + str(template.id)
+        with self._transaction() as conn:
+            existing = target_random.get_day_plan(conn, source, shanghai_date)
+            if existing is not None or time_factory is None:
+                return existing
+            return target_random.ensure_day_plan(
+                conn, source, shanghai_date, template.version, template.config,
+                template.config.get("account_ids") or [], time_factory, now=self._now(),
+            )
+
     def get_random_plan(self, template_id: Any, template_version: Any, shanghai_date: Any) -> Optional[List[str]]:
         normalized_id = _positive_int(template_id, "template id")
         normalized_version = _positive_int(template_version, "template version")
@@ -1384,6 +1423,9 @@ class TTAutoPostStore:
         metric_generation_id: Optional[Any] = None,
         blacklist_snapshot: Optional[Mapping[str, Any]] = None,
         actor: AuditActor = AuditActor(),
+        target_account_id: str = "",
+        schedule_policy: str = "",
+        slot_ordinal: int = 0,
     ) -> RunRecord:
         clean_key = _bounded_text(run_key, "run key", 255)
         normalized_template_id = _positive_int(template_id, "template id")
@@ -1399,6 +1441,15 @@ class TTAutoPostStore:
         actor = AuditActor.from_values(actor.user_id, actor.name)
         now = self._now_iso()
         with self._transaction() as conn:
+            target_plan = None
+            if schedule_policy:
+                if schedule_policy != target_random.POLICY or clean_trigger != "auto" or not target_account_id:
+                    raise TTAutoPostStoreError("tt_auto_schedule_invalid", "invalid target schedule policy", 400)
+                target_plan = target_random.get_day_plan(conn, "tt_auto:" + str(normalized_template_id), normalized_date)
+                binding = target_random.slot_binding(conn, "tt_auto:" + str(normalized_template_id), normalized_date, target_account_id, slot_ordinal)
+                if (not target_plan or int(target_plan["config_version"]) != normalized_version
+                        or not binding or _utc_iso(binding["planned_at"], "planned time") != scheduled):
+                    raise TTAutoPostStoreError("tt_auto_schedule_invalid", "target slot does not match frozen plan", 409)
             version_row = conn.execute(
                 """
                 SELECT config_sha256,confirmed
@@ -1428,11 +1479,11 @@ class TTAutoPostStore:
                 if (
                     current_template is None
                     or not bool(current_template["enabled"])
-                    or int(current_template["current_version"])
-                    != normalized_version
+                    or (target_plan is None and int(current_template["current_version"])
+                    != normalized_version)
                     or not enabled_at
-                    or _utc_datetime(scheduled)
-                    < _utc_datetime(enabled_at, "template enabled time")
+                    or (target_plan is None and _utc_datetime(scheduled)
+                    < _utc_datetime(enabled_at, "template enabled time"))
                 ):
                     raise TTAutoPostStoreError(
                         "tt_auto_template_not_enabled_for_slot",
@@ -1470,7 +1521,9 @@ class TTAutoPostStore:
                     int(existing["metric_generation_id"]) if existing["metric_generation_id"] is not None else None,
                     str(existing["blacklist_snapshot_json"]),
                 )
-                if existing_facts != immutable:
+                if (existing_facts != immutable
+                        or str(existing["target_account_id"] or "") != str(target_account_id)
+                        or str(existing["schedule_policy"] or "") != str(schedule_policy)):
                     raise TTAutoPostStoreError("tt_auto_run_idempotency_conflict", "run key belongs to different facts", 409)
                 return _run_from_row(existing)
             cursor = conn.execute(
@@ -1500,6 +1553,9 @@ class TTAutoPostStore:
                 ),
             )
             run_id = int(cursor.lastrowid)
+            if target_plan is not None:
+                conn.execute("UPDATE tt_auto_run SET target_account_id=?,schedule_policy=? WHERE id=?", (str(target_account_id), schedule_policy, run_id))
+                target_random.bind_slot(conn, "tt_auto:" + str(normalized_template_id), normalized_date, target_account_id, slot_ordinal, "tt_auto_run", run_id)
             self._event(
                 conn,
                 run_id=run_id,
@@ -1691,6 +1747,8 @@ class TTAutoPostStore:
                 ),
             )
             task_id = int(cursor.lastrowid)
+            if str(run["schedule_policy"] or ""):
+                conn.execute("UPDATE tt_auto_task SET schedule_policy=? WHERE id=?", (str(run["schedule_policy"]), task_id))
             self._event(
                 conn,
                 run_id=normalized_run_id,
@@ -2056,6 +2114,8 @@ class TTAutoPostStore:
         prepare_cutoff = (
             current_dt + timedelta(seconds=ahead_seconds)
         ).isoformat(timespec="seconds")
+        local_midnight = current_dt.astimezone(target_random.SHANGHAI).replace(hour=0, minute=0, second=0, microsecond=0)
+        target_prepare_end = (local_midnight + timedelta(days=1)).astimezone(UTC).isoformat(timespec="seconds")
         phase_filter = None
         if allowed_phases is not None:
             if isinstance(allowed_phases, (str, bytes)):
@@ -2093,7 +2153,8 @@ class TTAutoPostStore:
                 """
                 SELECT * FROM tt_auto_task
                 WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='tt:auto:'||tt_auto_task.id) AND (
-                    (status='pending' AND scheduled_at_utc<=?)
+                    (status='pending' AND ((schedule_policy<>'target_midnight_v1' AND scheduled_at_utc<=?)
+                        OR (schedule_policy='target_midnight_v1' AND scheduled_at_utc<?)))
                     OR (status='selecting' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
                         status='reserved'
@@ -2134,7 +2195,7 @@ class TTAutoPostStore:
                     template_id ASC,
                     id ASC
                 """,
-                (prepare_cutoff, *([current] * 9), self.execution_not_before_utc, *resumed_values, int(legacy_reconcile_only)),
+                (prepare_cutoff, target_prepare_end, *([current] * 9), self.execution_not_before_utc, *resumed_values, int(legacy_reconcile_only)),
             )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
@@ -2181,6 +2242,8 @@ class TTAutoPostStore:
                     phase_filter is not None
                     and candidate_phase not in phase_filter
                 ):
+                    continue
+                if candidate_phase == "publish" and str(candidate["scheduled_at_utc"]) > current:
                     continue
                 # Admission and leases belong to this task. An older task
                 # on the same account has no ordering or failure dependency.

@@ -3682,6 +3682,8 @@ def _auto_template_run(item):
     """Return the frozen execution identity required by the auto runner."""
     source = item if isinstance(item, dict) else {}
     allowed_run = (
+        "schedule_policy",
+        "planned_publish_at_utc",
         "id",
         "trigger_source",
         "external_task_key",
@@ -3768,6 +3770,7 @@ def create_post_auto_template_run_request(payload):
             AUTO_TEMPLATE_ACTOR,
             duration_policy_version=payload.get("duration_policy_version", 2),
             random_template_enabled=payload.get("random_template_enabled", False),
+            **({"schedule_policy": payload["schedule_policy"], "planned_publish_at_utc": payload.get("planned_publish_at_utc", "")} if payload.get("schedule_policy") else {}),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -4273,6 +4276,7 @@ def available_post_drama_pool_request(payload):
                     if account.get("long_video_eligible")
                 ],
                 configured_account_ids=payload.get("configured_account_ids"),
+                schedule_identity=payload.get("schedule_identity"),
             )
         }
     except XPostError as exc:
@@ -4468,6 +4472,8 @@ def _safe_schedule_plan_query_result(result):
             503,
         )
     allowed_run = (
+        "schedule_policy",
+        "planned_publish_at_utc",
         "id",
         "slot_key",
         "source_type",

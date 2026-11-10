@@ -159,13 +159,14 @@
               <input id="fixedTimes" value="10:30" />
             </div>
             <div class="field hidden" id="randomField">
-              <label>每日随机候选次数 / 窗口（北京时间）</label>
+              <label>每 Page 独立随机次数 / 窗口（北京时间）</label>
               <div class="random-grid">
                 <input id="randomCount" type="number" value="1" min="1" max="24" aria-label="每日随机次数" />
                 <input id="randomStart" type="time" value="08:00" aria-label="随机开始时间" />
                 <input id="randomEnd" type="time" value="23:00" aria-label="随机结束时间" />
               </div>
             </div>
+            <div class="field wide"><p class="helper">随机模式每天北京时间 00:00 开始备料，各 Page 独立随机；提前完成等待到点，迟到完成后立即发布。排期修改次日生效。</p><div id="targetDayPlan" class="helper" style="white-space:pre-wrap"></div></div>
             <div class="field" id="staggerField">
               <label for="staggerMinutes">固定时段内 Page 错峰（分钟）</label>
               <input id="staggerMinutes" type="number" min="0" max="59" value="0" />
@@ -217,6 +218,6 @@
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=d64e9c9ccd31"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-template.js?v=material-product-20261109-v1"></script>
+  <script src="/fb-auto-publish-template.js?v=target-midnight-20261110-material-product-20261109-v1"></script>
 </body>
 </html>

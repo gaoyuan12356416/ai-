@@ -14,6 +14,8 @@ AI backend.  It never writes to the source MySQL databases.
 
 from __future__ import annotations
 
+from features import social_random_schedule as target_random
+
 import contextlib
 import hashlib
 import http.client
@@ -4919,8 +4921,9 @@ class TTPostService:
                     now_shanghai + timedelta(days=day_offset)
                 ).date()
                 shanghai_date = local_day.isoformat()
-                if str(schedule.get("schedule_mode") or "fixed") == "random":
-                    plan = random_plans.get((account_id, shanghai_date))
+                plan = random_plans.get((account_id, shanghai_date))
+                frozen_random = bool(plan and self.store.target_random_active(shanghai_date))
+                if frozen_random or str(schedule.get("schedule_mode") or "fixed") == "random":
                     publish_times = (
                         list(plan.get("publish_times") or [])
                         if isinstance(plan, Mapping)
@@ -4959,7 +4962,12 @@ class TTPostService:
                         continue
                     slot_utc = local_slot.astimezone(UTC)
                     age_seconds = (now_utc - slot_utc).total_seconds()
-                    if 0 <= age_seconds <= DEFAULT_GRACE_SECONDS:
+                    midnight_preparation = (
+                        day_offset == 0
+                        and (frozen_random or str(schedule.get("schedule_mode") or "fixed") == "random")
+                        and self.store.target_random_active(shanghai_date)
+                    )
+                    if midnight_preparation or 0 <= age_seconds <= DEFAULT_GRACE_SECONDS:
                         due_slots.append(
                             (
                                 slot_utc,
@@ -5040,6 +5048,7 @@ class TTPostService:
                 if (
                     (now_utc - scheduled).total_seconds()
                     > DEFAULT_GRACE_SECONDS
+                    and pending.get("schedule_policy") != target_random.POLICY
                 ):
                     execution = self.store.acquire_recurring_execution(
                         pending["id"],

@@ -246,7 +246,14 @@
 
       const taskStatus = String(item.status || "").toLowerCase();
       const taskStatusCell = ui.element("td");
-      taskStatusCell.appendChild(ui.statusBadge(statusLabel(taskStatus), ui.statusKind(taskStatus)));
+      const targetRandom = item.schedule_policy === "target_midnight_v1";
+      const plannedMs = Date.parse(item.scheduled_at_utc || "");
+      let taskLabel = statusLabel(taskStatus);
+      if (targetRandom && taskStatus === "ready") taskLabel = plannedMs > Date.now() ? "已备好，等待发布" : "已备好，等待执行发布";
+      else if (targetRandom && ["pending", "selecting", "reserved", "preparing"].includes(taskStatus)) taskLabel = plannedMs <= Date.now() ? "制作迟到，完成后发布" : "制作中";
+      taskStatusCell.appendChild(ui.statusBadge(taskLabel, ui.statusKind(taskStatus)));
+      taskStatusCell.appendChild(ui.element("div", { className: "secondary", text: `计划：${ui.formatTime(item.scheduled_at_utc)}` }));
+      if (item.published_at_utc) taskStatusCell.appendChild(ui.element("div", { className: "secondary", text: `实际：${ui.formatTime(item.published_at_utc)}` }));
       row.appendChild(taskStatusCell);
 
       const resultCell = ui.element("td");

@@ -486,6 +486,9 @@ class AutoPostExecutor:
             "random_template_enabled": random_template_enabled,
             "actor": "x_auto_post_service",
         }
+        if task.schedule_policy:
+            payload["schedule_policy"] = task.schedule_policy
+            payload["planned_publish_at_utc"] = task.scheduled_at_utc
         try:
             raw = self.bridge.create_run(payload)
         except XPostBridgeError as exc:

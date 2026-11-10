@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Mapping
+from features.social_random_schedule import POLICY as TARGET_RANDOM_POLICY, local_day, utc_at
 
 
 class AdapterError(RuntimeError):
@@ -228,6 +229,7 @@ class LedgerAdapter:
                     row["ancestor_source_keys"] = ["x:auto:" + str(origin[0]["id"])]
                     row["origin_created_at"] = origin[0]["created_at"]
                     row["scheduled_at"] = origin[0]["scheduled_at_utc"]
+                    row["schedule_policy"] = dict(origin[0]).get("schedule_policy", "")
                     template = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_template WHERE id=?", (origin[0]["template_id"],)).fetchone()
                     auto_owner = dict(template) if template else {}
                     native_parent = dict(origin[0])
@@ -270,6 +272,13 @@ class LedgerAdapter:
             elif row.get("schedule_run_id"):
                 parent = self._parent(conn, "x_post_schedule_run", "id", row["schedule_run_id"])
                 row["source_family"] = parent.get("source_type", "schedule")
+            if parent.get("schedule_policy") == TARGET_RANDOM_POLICY:
+                # Preserve the scheduling parent before attribution substitutes
+                # the pool creator below. Creation at midnight is not publish time.
+                row["schedule_policy"] = TARGET_RANDOM_POLICY
+                row["scheduled_at"] = parent.get("planned_publish_at_utc") or parent.get("scheduled_at")
+                if not row["scheduled_at"]:
+                    raise AdapterError("random_publish_time_missing")
             if self.cross_paths.get("x_auto") and not row.get("ancestor_source_keys"):
                 match = re.fullmatch(r"x-auto-task-([1-9][0-9]*)", str(parent.get("external_task_key") or ""))
                 origin = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE id=?", (int(match[1]),)).fetchone() if match else None
@@ -280,6 +289,7 @@ class LedgerAdapter:
                     self._x_origin_execution(row, origin)
                     row["ancestor_source_keys"] = ["x:auto:" + str(origin["id"])]
                     row["origin_created_at"], row["scheduled_at"] = origin["created_at"], origin["scheduled_at_utc"]
+                    row["schedule_policy"] = dict(origin).get("schedule_policy", "")
                     template = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_template WHERE id=?", (origin["template_id"],)).fetchone()
                     auto_owner = dict(template) if template else {}
             row["batch_key"] = "x:" + str(row.get("manual_run_id") or row.get("schedule_run_id") or row.get("run_id") or row["id"])
@@ -299,6 +309,7 @@ class LedgerAdapter:
             parent = self._parent(conn, prefix + "_run", "id", row.get("run_id"))
             template = self._parent(conn, prefix + "_template", "id", row.get("template_id"))
             parent = {**template, **parent}
+            row["schedule_policy"] = row.get("schedule_policy") or parent.get("schedule_policy") or obj(row.get("account_settings_json")).get("schedule_policy", "")
             if template.get("owner_user_id") or template.get("created_by_user_id"):
                 parent["owner_user_id"] = template.get("owner_user_id") or template["created_by_user_id"]
                 parent["owner_tenant_key"] = template.get("owner_tenant_key") or template.get("created_by_tenant_key", "")
@@ -330,6 +341,7 @@ class LedgerAdapter:
             row["origin_created_at"] = parent.get("created_at")
         elif key == ("fb", "video"):
             parent = obj(row.get("snapshot_json")).get("actor", {})
+            row["schedule_policy"] = row.get("schedule_policy") or obj(obj(row.get("snapshot_json")).get("group_pool")).get("schedule_policy", "")
             if self._exists(conn, "fb_video_attempt"):
                 from .fb_isolation import platform_attempt_count
                 row["publish_attempt_count"] = platform_attempt_count(conn, row["task_id"])
@@ -522,7 +534,13 @@ class LedgerAdapter:
         if stage == "prepare" and not terminal and not review_hold:
             created_at = row.get("origin_created_at") or row.get("created_at_utc") or row.get("created_at")
             created_at = stamp(created_at) if created_at else publish_at
-            if spec.channel == "fb" and spec.family in {"auto", "video"}:
+            if row.get("schedule_policy") == TARGET_RANDOM_POLICY and publish_at:
+                day = local_day(datetime.fromisoformat(publish_at.replace("Z", "+00:00")))
+                eligible_at = max(created_at, utc_at(day))
+                for field in ("next_prepare_at_utc", "prepare_retry_at", "next_attempt_at_utc"):
+                    if row.get(field):
+                        eligible_at = max(eligible_at, stamp(row[field]))
+            elif spec.channel == "fb" and spec.family in {"auto", "video"}:
                 # Canonical planning already bounded eligible material selection.
                 # Both FB preparers may render a frozen future publication now.
                 retry_at = row.get("next_prepare_at_utc") if spec.family == "auto" else row.get("prepare_retry_at")
@@ -551,6 +569,7 @@ class LedgerAdapter:
                 "confirmed_youtube_schedule": confirmed_schedule,
                 "ancestor_source_keys": list(row.get("ancestor_source_keys") or []),
                 "batch_key": str(row.get("batch_key") or f"{spec.channel}:{spec.family}:{row.get('run_id') or row.get('batch_id') or source_id}"),
+                "schedule_policy": row.get("schedule_policy", ""),
                 "stage": stage, "scheduled_at": (stamp(now) if youtube_control_due(row) else adopt_schedule["scheduled_at"]) if adopt_schedule else eligible_at,
                 "cutover_due_at": stamp(row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) if (row.get("cutover_due_at") or row.get("publish_at") or row.get("scheduled_at") or row.get("created_at_utc") or row.get("created_at")) else "",
                 "owner_user_id": row.get("owner_user_id", ""), "owner_tenant_key": row.get("owner_tenant_key", ""),

@@ -240,6 +240,20 @@
     setValue("randomDailyCount", schedule.daily_count || schedule.random_daily_count, "1");
     renderScheduleMode();
 
+    const planContainer = ui.byId("targetRandomDayPlan");
+    ui.clear(planContainer);
+    const dayPlan = state.template.random_day_plan;
+    if (dayPlan && Array.isArray(dayPlan.targets)) {
+      planContainer.appendChild(ui.element("div", { text: `${dayPlan.local_date} 已冻结的账号计划` }));
+      dayPlan.targets.forEach(target => {
+        const account = state.accounts.find(item => String(item.source_account_id || item.account_id) === String(target.target_id));
+        const label = account ? (account.display_name || account.username || target.target_id) : target.target_id;
+        planContainer.appendChild(ui.element("div", { text: `${label}：${(target.times || []).join("、")}` }));
+      });
+    } else if (randomMode) {
+      planContainer.textContent = "次日零点生成各账号当天计划。";
+    }
+
     ui.setText(ui.byId("pageTitle"), `编辑 TT 自动发布模板 · ${state.template.name || templateId}`, "");
     const badge = ui.byId("templateStatusBadge");
     ui.setText(badge, statusText(state.template), "");
@@ -273,7 +287,7 @@
     const videoTemplate = ui.byId("videoTemplate").value;
     ui.setText(ui.byId("summaryVideoTemplate"), VIDEO_TEMPLATE_LABELS[videoTemplate], "未选择");
     if (selectedScheduleMode() === "random") {
-      ui.setText(ui.byId("summarySchedule"), `每天随机 ${ui.byId("randomDailyCount").value || "1"} 次`, "");
+      ui.setText(ui.byId("summarySchedule"), `每账号每天随机 ${ui.byId("randomDailyCount").value || "1"} 次 · 零点备料`, "");
     } else {
       const times = timeValues();
       ui.setText(ui.byId("summarySchedule"), times.length ? `每天 ${times.join("、")}` : "未设置", "");

@@ -762,7 +762,7 @@ Episode {{episode_number}}
         const total = accountCount * timeCount;
         const node = byId("scheduleSummary");
         node.replaceChildren();
-        node.appendChild(document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "随机批次" : "时间点"} = 每日最多 `));
+        node.appendChild(document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "独立随机时次" : "时间点"} = 每日最多 `));
         const strong = document.createElement("strong");
         setText(strong, `${total} 篇 Post`);
         node.appendChild(strong);
@@ -774,14 +774,18 @@ Episode {{episode_number}}
           ? state.schedule.randomDailyPlans
           : [];
         if (!plans.length) {
-          setText(container, "随机计划尚未生成；首次启用或修改后从次日生效。");
+          setText(container, "随机计划尚未生成；次日北京时间 00:00 按账号独立排期并开始备料。");
           return;
         }
+        container.appendChild(document.createTextNode("每天北京时间 00:00 开始备料；完成后等待各账号计划时间，迟到则完成后发布。"));
         plans.forEach(plan => {
-          const line = document.createElement("span");
-          const times = Array.isArray(plan.publish_times) ? plan.publish_times.join("、") : "";
-          setText(line, `${String(plan.run_date || "")}：${times || "尚无时间"}`);
-          container.appendChild(line);
+          const targets = Array.isArray(plan.target_plans) ? plan.target_plans : [plan];
+          targets.forEach(target => {
+            const line = document.createElement("span");
+            const times = Array.isArray(target.publish_times) ? target.publish_times.join("、") : "";
+            setText(line, `${String(plan.run_date || "")} ${target.account_id ? "账号 " + target.account_id : "原计划"}：${times || "尚无时间"}`);
+            container.appendChild(line);
+          });
         });
       }
       function renderScheduleMode() {

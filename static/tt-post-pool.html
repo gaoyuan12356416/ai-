@@ -804,7 +804,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
                       <div id="randomScheduleFields" class="random-schedule-fields hidden">
                         <label for="randomDailyCount">每天随机发布次数</label>
                         <input id="randomDailyCount" type="number" min="1" max="24" step="1" value="1" />
-                        <span class="helper">北京时间 00:00–23:59 内按分钟随机；不使用整点，同账号相邻时间至少间隔 1 小时。首次启用或修改次数后从次日生效。</span>
+                        <span class="helper">每账号独立随机，避开整点且相邻至少间隔 1 小时。每天北京时间 00:00 提前选材并复用已制作成片，等待各自发布时间；首次启用或修改次数后从次日生效。</span>
                       </div>
                     </div>
                     <label class="schedule-toggle">
@@ -3226,6 +3226,10 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
         const status = String(item.status || item.queue_status || "unknown").toLowerCase();
         if (Number(item.unknown_outcome || 0) === 1 || status === "needs_review") {
           return { status: "needs_review", label: "结果待确认", kind: "warning" };
+        }
+        if (item.schedule_policy === "target_midnight_v1" && ["scheduled", "ready"].includes(status)) {
+          const due = Date.parse(item.scheduled_at_utc || item.scheduled_at || "") <= Date.now();
+          return { status, label: due ? "已备好，等待执行发布" : "已备好，等待发布时间", kind: "progress" };
         }
         const map = {
           draft: ["草稿", "neutral"],

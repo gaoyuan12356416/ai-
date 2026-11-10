@@ -264,6 +264,7 @@
           const item = await loadTemplate();
           if (!ui.positiveId(item && (item.id || item.template_id))) throw new Error("模板不存在或不可访问。");
           hydrateTemplate(item);
+          ui.byId("targetDayPlan").textContent = (item.target_daily_plans || []).map(day => day.local_date + "（北京）\n" + (day.targets || []).map(target => "Page " + target.target_id + "：" + (target.times || []).join("、")).join("\n")).join("\n\n");
         } else {
           toggleSchedule();
         }
