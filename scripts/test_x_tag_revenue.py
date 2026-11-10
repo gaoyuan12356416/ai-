@@ -38,12 +38,13 @@ class PortraitTests(unittest.TestCase):
     def test_database_projection_has_no_resident_catalog_cache(self):
         class Database:
             def load(self, ids, **kwargs):
-                return {'accounts': {}}, {'version': '20261110T020000000000Z', 'source_generated_at': '2026-11-10T02:00:00+00:00'}
+                return {'accounts': {}}, {'version': '20261110T020000000000Z', 'source_generated_at': '2026-11-10T02:00:00+00:00', 'audit': {'global_revenue': 100}}
         with tempfile.TemporaryDirectory() as root:
             Path(root, 'current.json').write_text('invalid legacy file')
             first = read_snapshot(root, ['123'], store=Database())
             second = read_snapshot(root, ['123'], store=Database())
         self.assertIsNot(first[0], second[0])
+        self.assertNotIn('audit', first[1])
         self.assertFalse(hasattr(routes, '_cache'))
 
     def test_database_failure_is_not_hidden_by_old_file(self):

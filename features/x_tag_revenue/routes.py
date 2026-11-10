@@ -15,6 +15,9 @@ DEFAULT_ROOT = '/mnt/data-disk/x-channel-tag-revenue'
 def read_snapshot(root, x_user_ids=None, *, view='tree', version=None, store=None):
     data, meta = (store or Store()).load(x_user_ids, view=view, version=version)
     meta = dict(meta)
+    # The collector's global reconciliation totals are not channel-scoped.
+    # Keep them in the database; browser and publisher responses omit them.
+    meta.pop('audit', None)
     age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(meta['source_generated_at'])).total_seconds())
     meta.update(stale=age > 7200, age_seconds=round(age))
     try:
