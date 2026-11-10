@@ -174,6 +174,33 @@ class BackpressureTests(FBSourceLockTests):
             c.execute("UPDATE pipeline_job SET status='queued',external_intent=1 WHERE id=?", (job['id'],))
         self.assertEqual(store.offer(offer)['status'], 'unknown')
 
+    def test_recovered_graph_rejection_passes_actual_registry_and_native_claim(self):
+        from features.pipeline_dispatch.adapters import AdapterRegistry, LedgerAdapter, LedgerSpec
+        from scripts.recover_fb_unpublished import plan, apply
+        job = self.video_job(55)
+        descriptor = self.bridge.reserve(job, self.claim)
+        op = self.operation(descriptor)
+        self.bridge.begin_operation(job, self.claim, op)
+        receipt = dict(operation_id=op['operation_id'],kind='definite_failure',error_code='fb_graph_190')
+        self.bridge.checkpoint(job,self.claim,'fb_publish_attempt',receipt)
+        self.bridge.complete(job,receipt,self.claim)
+        store = DispatchStore(self.temp.name+'/registry.sqlite',clock=lambda:self.now)
+        store.channel_enabled('fb',True);store.register_node('cpu-main',['publish:fb']);store.worker_heartbeat('cpu-main','w','publish')
+        adapter=LedgerAdapter(LedgerSpec('fb','video',self.video.path,'fb_video_task',identity='task_id'),
+            driver=SimpleNamespace(reserve=lambda row,j,cl:self.bridge.reserve(j,cl)))
+        offered=adapter.project(adapter.read(job['source_id']),now=self.now)
+        created=store.offer(dict(offered,status='queued',execution_available=True))
+        claim=store.claim('cpu-main','w','publish')['job'];store.fail(claim,'canonical_execution_failed');store.channel_enabled('fb',False)
+        with contextlib.closing(store.connect()) as c:
+            c.execute('ATTACH DATABASE ? AS native',(self.video.path,))
+            prepared=plan(c,[created['id']]);self.assertEqual(prepared['excluded'],[])
+            c.execute('BEGIN IMMEDIATE');apply(c,prepared);c.commit()
+        store.channel_enabled('fb',True)
+        registry=AdapterRegistry([adapter]);coordinator=Coordinator(store,registry,internal_token='i'*32,master_key='m'*32)
+        fresh=store.claim('cpu-main','w','publish')['job']
+        self.assertEqual(coordinator.reserve_job(fresh)['job']['generation'],2)
+        self.assertEqual(self.bridge.reconcile(fresh)['status'],'running')
+
 
 class SourceErrorsTests(unittest.TestCase):
     def test_group_wrapper_retries_only_transient_select(self):

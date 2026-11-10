@@ -13,7 +13,7 @@ from scripts.deploy_pipeline_runtime import preserve_tree_owners, atomic_copy, v
 BASE = '23f615debb88a0c14a93aa84d6a11e2b91f75c71'
 NATIVE = {'features/pipeline_dispatch/fb_native.py', 'features/fb_video_publish/group_sources.py',
           'features/fb_video_publish/identity_client.py'}
-CENTRAL = {'features/pipeline_dispatch/core.py', 'features/pipeline_dispatch/service.py'}
+CENTRAL = {'features/pipeline_dispatch/core.py', 'features/pipeline_dispatch/service.py', 'features/pipeline_dispatch/adapters.py'}
 POOL_OVERLAY = '42c3ef04b76cfbc3ef97504b474fda51d7412be08227cb90f62425d2f329d846'
 HEALTH = '/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
 

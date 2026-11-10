@@ -696,6 +696,7 @@ class AdapterRegistry:
     def __init__(self, adapters=()):
         self.adapters = {(a.spec.channel, a.spec.family): a for a in adapters}
         self.errors = {}
+        self.fb_recovery_guard = None
 
     @classmethod
     def from_paths(cls, paths, drivers=None, *, preparation_policy=None):
@@ -733,7 +734,9 @@ class AdapterRegistry:
                 and not adapter.owns_frozen_tt_selection(row, job, claim, expected_fingerprint)):
             raise AdapterError("canonical_identity_changed")
         continuation = self._verified_continuation(adapter, row, obj(job.get("payload")).get("continuation"), allow_control=True)
-        if current["reconcile_only"] and not continuation:
+        recovered = (job.get('channel') == 'fb' and callable(self.fb_recovery_guard)
+                     and self.fb_recovery_guard(job, claim, current))
+        if current["reconcile_only"] and not continuation and not recovered:
             raise AdapterError("canonical_reconciliation_required")
         if current.get('prepost_recovery') and job.get('generation') != current['prepost_recovery']['to_generation']:
             raise AdapterError('x_recovery_generation_changed')

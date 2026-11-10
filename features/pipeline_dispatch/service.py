@@ -23,6 +23,7 @@ class Coordinator:
         if len(internal_token) < 32 or len(master_key) < 32:
             raise ValueError("pipeline authority credentials missing")
         self.store, self.registry = store, registry
+        self.registry.fb_recovery_guard = self.fb_recovery_guard
         self.owner_resolver = owner_resolver
         self.internal_token, self.master_key = internal_token, master_key.encode()
         self.stopping = threading.Event()
@@ -33,6 +34,11 @@ class Coordinator:
             state = c.execute("SELECT value_json FROM pipeline_collector_state WHERE id=1").fetchone()
         if state and hasattr(registry, "restore_cursors"):
             registry.restore_cursors(json.loads(state[0]))
+
+    def fb_recovery_guard(self, job, claim, current):
+        with contextlib.closing(self.store.connect()) as c:
+            row = self.store._validate_claim(c, claim)
+            return self.store._fb_recovered_history_only(c, row, current)
 
     def recover_prepared(self, job):
         """A native committed artifact survives loss of the coordinator ACK."""
