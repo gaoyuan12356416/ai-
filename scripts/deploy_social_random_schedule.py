@@ -34,8 +34,10 @@ def save(path,obj):switcher.save(path,obj)
 
 
 def applies(lane,rel):
+    # Main API routes these X operations to 8810. Its older unused store copy
+    # has a different baseline; update the owning writer and static pages only.
+    if lane=='app':return rel.startswith('static/')
     if rel=='features/social_random_schedule.py':return True
-    if lane=='app':return rel=='features/x_posts/service.py' or rel.startswith('static/')
     if rel.startswith('features/pipeline_dispatch/'):
         return lane=='coordinator' or rel.endswith(('adapters.py','x_native.py')) and lane=='x'
     if lane=='coordinator':return False
