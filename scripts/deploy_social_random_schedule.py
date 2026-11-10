@@ -188,7 +188,9 @@ def switch(directory,lane):
         switcher.sha=old_sha;switcher.copy_file=old_copy
         if lane!='app':run([sys.executable,HEALTH,'restore','--baseline',baseline,'--wait-seconds','25','--output',directory/('schedulers-after-'+lane+'.json')],timeout=45)
     if lane!='app':
-        for _,port,_ in LANES[lane][1]:switcher.health(port)
+        # Restarted calendar timers have no LastTrigger until the next minute.
+        # Observe their natural firing; do not manually launch publishing jobs.
+        for _,port,_ in LANES[lane][1]:switcher.health(port,wait_seconds=75)
     if lane=='app':
         for rel,hashes in manifest['static'].items():
             target=Path('/usr/share/nginx/html')/Path(rel).name

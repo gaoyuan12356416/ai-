@@ -138,9 +138,9 @@ def refine_fb(source,commit,directory):
     item['files'][rel]['after']=sha(target);item['followup_commit']=commit;save(path,m)
     print(json.dumps({'refined':'fb','commit':commit}),flush=True)
 
-def health(port,maintenance_triggers=()):
+def health(port,maintenance_triggers=(),wait_seconds=15):
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    until=time.monotonic()+15
+    until=time.monotonic()+wait_seconds
     while True:
         try:
             with opener.open('http://127.0.0.1:%s/health'%port,timeout=2) as r:
