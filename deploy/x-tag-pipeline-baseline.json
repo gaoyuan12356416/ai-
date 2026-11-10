@@ -1,0 +1,17 @@
+{
+  "roots": {
+    "tag": "/mnt/data-disk/x-tag-publisher/releases/79b2b601349bdc2045ab5a1ca3611ec996808dd0",
+    "coordinator": "/mnt/data-disk/fb-pool-open-20261106/deployment-v2/candidates/coordinator"
+  },
+  "files": {
+    "tag/features/pipeline_dispatch/x_native.py": "9804b666b7d108406050df045e1dafd943454f14171a4f0100f88011a9899d51",
+    "tag/features/x_auto_posts/service.py": "0e4d427e12bd6e609beb01c5e3dadf2c8b58601c305a2c42411aa599a506a647",
+    "tag/features/x_auto_posts/core.py": "6294affe4288510816ddc2cd1c80b52a777f5dc44ff68fb230157dbd9abdc2c6",
+    "tag/features/x_auto_posts/publisher.py": "2582bb9b9ea50a1868f8101d9a1dba7023575e59545629edfa15a75b3540250a",
+    "tag/features/x_tag_publish/runtime.py": "1ea2e7db441f9661cbcdf1ce1944d39c313a6e011bc1aec87d5ba07b9e69e0e6",
+    "coordinator/features/pipeline_dispatch/service.py": "9fd9cff8198a2947b8dc9a62b53f3ba5b11ea43443a46eb65774cb4d649ee255",
+    "coordinator/features/pipeline_dispatch/core.py": "485a5fe6844b6eb18583acf6c92957a0208b6c12a9cb9d283a58adf656c1e96b",
+    "coordinator/features/pipeline_dispatch/adapters.py": "3e6aeb9ddfc628daed00250150880ce641f9bf5b0c5469519cfc8f506a50bdc4",
+    "coordinator/features/pipeline_dispatch/views.py": "3b4bedcc8aa3a0aa55d11052d53a9e05e02f0e08a35daa85d759b01dd5bed67c"
+  }
+}
