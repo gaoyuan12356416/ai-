@@ -1,39 +1,24 @@
-"""Channel-list ACL, local snapshot reads and bounded detail responses."""
+"""Channel-list ACL and bounded database projections."""
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
-import threading
+import subprocess
 from urllib.parse import parse_qs
 
+from .storage import Store, SnapshotExpired, VERSION_RE, tree_summary
+
 DEFAULT_ROOT = '/mnt/data-disk/x-channel-tag-revenue'
-_lock = threading.Lock()
-_cache = {}
 
 
-def read_snapshot(root):
-    root = Path(root)
-    pointer = json.loads((root / 'current.json').read_text(encoding='utf-8'))
-    path = (root / pointer['file']).resolve()
-    if path.parent != (root / 'snapshots').resolve() or path.suffix != '.json':
-        raise ValueError('invalid_snapshot')
-    with _lock:
-        data = _cache.get(str(path))
-        if data is None:
-            # The hierarchy contains full drill-down details. Concurrent cold
-            # reads must share one decode, including at the hourly rollover;
-            # otherwise each request creates another large Python object tree.
-            data = json.loads(path.read_text(encoding='utf-8'))
-            if data['meta']['version'] != pointer['version']:
-                raise ValueError('snapshot_version_mismatch')
-            _cache.clear()
-            _cache[str(path)] = data
-    meta = dict(data['meta'])
+def read_snapshot(root, x_user_ids=None, *, view='tree', version=None, store=None):
+    data, meta = (store or Store()).load(x_user_ids, view=view, version=version)
+    meta = dict(meta)
     age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(meta['source_generated_at'])).total_seconds())
     meta.update(stale=age > 7200, age_seconds=round(age))
     try:
-        meta['refresh_failed'] = json.loads((root / 'status.json').read_text()).get('status') == 'error'
+        meta['refresh_failed'] = json.loads((Path(root) / 'status.json').read_text()).get('status') == 'error'
     except (OSError, ValueError):
         meta['refresh_failed'] = False
     return data, meta
@@ -42,10 +27,6 @@ def read_snapshot(root):
 def empty_account():
     return dict(status='no_history', revenue_cents=0, unknown_revenue_cents=0, known_share_bp=None,
                 published_count=0, drama_count=0, tags=[], types=[], combinations=[], audience_basis_counts={})
-
-
-def tree_summary(nodes):
-    return [{k: (tree_summary(v) if k=='children' else v) for k,v in row.items() if k!='dramas'} for row in nodes]
 
 
 def response(data, meta, accounts, account_id=None, tag=None, path=None):
@@ -82,7 +63,7 @@ def response(data, meta, accounts, account_id=None, tag=None, path=None):
         items[key] = {k: v for k, v in portrait.items() if k not in ('tags','types','combinations')}
         items[key]['types'] = [{k:v for k,v in row.items() if k!='children'} for row in portrait.get('types',[])]
         items[key]['combinations'] = portrait.get('combinations',[])[:3]
-        items[key]['tag_count'] = len(portrait['tags'])
+        items[key]['tag_count'] = portrait.get('tag_count', len(portrait['tags']))
         items[key]['tags'] = [{k: v for k, v in row.items() if k != 'dramas'} for row in portrait['tags'][:3]]
     return 200, dict(meta=meta, items=items)
 
@@ -91,8 +72,13 @@ def dispatch(handler, parsed, authorize, root=DEFAULT_ROOT):
     send = handler.send_json
     match = re.fullmatch(r'/api/x-channel-tag-revenue(?:/([0-9]+))?', parsed.path)
     query = parse_qs(parsed.query, keep_blank_values=True)
-    if not match or set(query) - {'tag','path'} or any(len(v) != 1 for v in query.values()) or (query and not match.group(1)) or ('tag' in query and 'path' in query):
+    if not match or set(query) - {'tag','path','page','version'} or any(len(v) != 1 for v in query.values()) or (query and not match.group(1)) or ('tag' in query and 'path' in query):
         return send(400, {'message': '查询参数无效'})
+    version = query.get('version', [None])[0]
+    page = query.get('page', ['1'])[0]
+    if (version is not None and not re.fullmatch(VERSION_RE, version)) or not re.fullmatch(r'[1-9][0-9]{0,5}', page):
+        return send(400, {'message': '查询参数无效'})
+    page = int(page)
     path=query.get('path',[None])[0]
     if path is not None:
         path=path.split('/')
@@ -106,8 +92,36 @@ def dispatch(handler, parsed, authorize, root=DEFAULT_ROOT):
     except (OSError, ValueError, KeyError, TypeError):
         return send(503, {'message': '频道权限暂时无法核验，请稍后重试'})
     try:
-        data, meta = read_snapshot(root)
-        status, payload = response(data, meta, accounts, match.group(1), query.get('tag', [None])[0], path)
+        account_id = match.group(1)
+        allowed = {str(a['id']): a for a in accounts}
+        if account_id is not None and account_id not in allowed:
+            return send(404, {'message': '频道不存在或无权查看'})
+        selected = [allowed[account_id]] if account_id else accounts
+        store = Store()
+        data, meta = read_snapshot(root, [a.get('x_user_id') for a in selected],
+                                   view='tree' if account_id else 'summary', version=version, store=store)
+        tag = query.get('tag', [None])[0]
+        if account_id and (tag is not None or (path and len(path) == 3)):
+            uid = str(allowed[account_id].get('x_user_id'))
+            profile = data['accounts'].get(uid, empty_account())
+            nodes, json_path, found = profile.get('types', []), '$', None
+            if tag is not None:
+                path, nodes = [tag], profile.get('tags', [])
+            for depth, key in enumerate(path):
+                index = next((i for i, node in enumerate(nodes) if node['key'] == key), None)
+                if index is None:
+                    return send(404, {'message': '画像层级不存在'})
+                found = nodes[index]
+                json_path += ('.tags' if tag is not None else '.types' if depth == 0 else '.children') + f'[{index}]'
+                nodes = found.get('children', [])
+            details = store.dramas(uid, meta['version'], json_path + '.dramas', page)
+            found['dramas'] = details.pop('items')
+            found['pagination'] = details
+            if tag is not None:
+                path = None
+        status, payload = response(data, meta, accounts, account_id, tag, path)
         return send(status, payload)
-    except (OSError, ValueError, KeyError, TypeError):
+    except SnapshotExpired:
+        return send(409, {'message': '该画像版本已更新，请重新打开详情'})
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
         return send(503, {'message': '标签收入画像暂不可用，请稍后重试；频道其他功能可正常使用'})

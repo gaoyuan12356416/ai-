@@ -9,6 +9,7 @@ from pathlib import Path
 from .core import build
 from .tags import VERSION as TAG_MAPPING_VERSION
 from .taxonomy import VERSION as HIERARCHY_VERSION
+from .storage import ProfileWriter
 from features.social_analytics.warehouse_reader import current, connect, DEFAULT_ROOT as WAREHOUSE_ROOT
 from features.social_analytics.warehouse_refresh import Reader, environment, atomic_json
 
@@ -62,7 +63,8 @@ def refresh(root, warehouse_root, env_path):
                 catalog = [json.loads(r[0]) for r in db.execute("SELECT payload FROM catalog WHERE json_extract(payload,'$.platform')='x'")]
                 metrics = [json.loads(r[0]) for r in db.execute("SELECT payload FROM effects WHERE platform='x' AND dt<=?", (end,))]
             ids = sorted({r['drama'] for r in catalog if r.get('drama')})
-            reader = Reader(environment(env_path))
+            env = environment(env_path)
+            reader = Reader(env)
             resources = collect_labels(reader, ids)
             drama_info = collect_drama_info(reader, ids)
             result = build(catalog, metrics, resources, end, drama_info)
@@ -85,6 +87,10 @@ def refresh(root, warehouse_root, env_path):
             directory.mkdir(exist_ok=True)
             filename = 'snapshots/' + version + '.json'
             atomic_json(root / filename, result)
+            # The full file is a rollback/export artifact only. Serving readers
+            # use the verified database generation and never decode this file.
+            with closing(ProfileWriter(env)) as writer:
+                stored = writer.publish(result, reader)
             old = json.loads((root / 'current.json').read_text()) if (root / 'current.json').exists() else {}
             atomic_json(root / 'current.json', dict(file=filename, version=version, previous=old.get('file')))
             atomic_json(root / 'status.json', dict(status='ok', attempted_at=now.isoformat()))
@@ -92,7 +98,7 @@ def refresh(root, warehouse_root, env_path):
             for snapshot in directory.glob('*.json'):
                 if str(snapshot.relative_to(root)) not in keep:
                     snapshot.unlink()
-            return dict(status='ok', version=version, accounts=len(result['accounts']), audit=result['audit'],
+            return dict(status='ok', version=version, storage=stored, accounts=len(result['accounts']), audit=result['audit'],
                         missing_days=len(missing), start=manifest['start'], end=end)
         except Exception as exc:
             atomic_json(root / 'status.json', dict(status='error', attempted_at=datetime.now(timezone.utc).isoformat(),

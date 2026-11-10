@@ -211,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == 'GET':
             if suffix == 'profiles':
                 accounts = post_rpc('material-pool/account-options', payload)['items']
-                snapshot = portrait_snapshot()
+                snapshot = portrait_snapshot([a.get('x_user_id') for a in accounts])
                 with closing(readonly(lane_paths()['X_POST_DB_PATH'])) as db:
                     counts = {str(r[0]): r[1] for r in db.execute(
                         "SELECT account_id,COUNT(*) FROM x_post_queue WHERE status='published' GROUP BY account_id")}

@@ -5,6 +5,7 @@ from contextlib import closing
 import json
 import math
 import os
+import subprocess
 from pathlib import Path
 
 from features.x_tag_revenue.core import label_index, labels, language
@@ -21,11 +22,11 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
-def portrait_snapshot():
+def portrait_snapshot(x_user_ids=None):
     try:
-        data, meta = read_snapshot(os.environ.get('X_TAG_PORTRAIT_ROOT', '/mnt/data-disk/x-channel-tag-revenue'))
+        data, meta = read_snapshot(os.environ.get('X_TAG_PORTRAIT_ROOT', '/mnt/data-disk/x-channel-tag-revenue'), x_user_ids)
         return data, meta
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError):
         return {'accounts': {}}, {'version': '', 'unavailable': True}
 
 
@@ -43,7 +44,7 @@ def weighted_order(weights, seed):
 
 class Decision:
     def __init__(self, account, identity, snapshot=None):
-        data, meta = snapshot if snapshot is not None else portrait_snapshot()
+        data, meta = snapshot if snapshot is not None else portrait_snapshot([account.get('x_user_id')])
         self.meta = meta
         self.account_id = str(account.get('id') or '')
         self.x_user_id = str(account.get('x_user_id') or '')

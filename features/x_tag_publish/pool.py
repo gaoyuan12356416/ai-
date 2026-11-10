@@ -44,7 +44,7 @@ def material_candidates(config, sidecar, accounts, *, source_date, connection_fa
             metadata_error = 'candidate_metadata_unavailable'
     finally:
         runner._close_source_connection(connection)
-    snapshot = portrait_snapshot()
+    snapshot = portrait_snapshot([a.get('x_user_id') for a in accounts])
     assigned, used, failures = {}, set(), []
     repair_state = {'attempted': 0}
     # Keep scarce short-video capacity for ordinary accounts. Stable sorting
