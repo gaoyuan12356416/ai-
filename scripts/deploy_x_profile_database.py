@@ -50,9 +50,11 @@ def prepare():
         lane.build(lane.LEGACY_SOURCE, SOURCE, release)
     before, after = runtime_files(previous), runtime_files(release)
     changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
-    allowed = {'features/x_tag_publish/' + n for n in ('policy.py', 'pool.py', 'gateway.py')}
+    # The active daemon predates the already deployed bd788728 preview UI;
+    # staging also carries those reviewed static-only transformations forward.
+    allowed = {'features/x_tag_publish/' + n for n in ('policy.py', 'pool.py', 'gateway.py', 'staging.py')}
     allowed |= {'features/x_tag_revenue/' + n for n in CODE}
-    allowed |= {'static/' + n for n in ('x-tag-revenue.js', 'x-tag-revenue.css', 'x-tag-publish-ui.js')}
+    allowed |= {'static/' + n for n in ('x-tag-revenue.js', 'x-tag-revenue.css', 'x-tag-publish-ui.js', 'x-tag-auto-publish-templates.js')}
     allowed |= {'static/' + n for n in ('x-tag-auto-publish-templates.html', 'x-tag-auto-publish-template.html', 'x-tag-auto-publish-runs.html', 'x-tag-material-pool.html', 'x-tag-post-logs.html')}
     if not set(changed) <= allowed:
         raise RuntimeError('unexpected_runtime_scope:' + json.dumps(changed))
