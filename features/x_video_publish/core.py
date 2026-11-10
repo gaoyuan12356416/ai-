@@ -18,7 +18,7 @@ import secrets
 import sqlite3
 
 from features.x_accounts.language import canonical_drama_language, same_drama_language
-from features.x_posts.service import XPostError, XPostStore, _connect, utc_now
+from features.x_posts.service import XPostError, XPostStore, _connect, redact_text, utc_now
 from .templates import DEFAULT_COPY, normalize_caption, render_caption
 from .material_identity import is_episode_id, normalize_material_id
 
@@ -608,13 +608,22 @@ class PersonalStore:
         result = {k: row[k] for k in ("id", "source", "created_at", "idempotency_key")}
         tasks = conn.execute("""SELECT t.*,r.status AS run_status,r.error_code,r.error_message,
           q.id AS queue_id,q.status AS queue_status,l.id AS log_id,l.status AS log_status,
-          l.unknown_outcome,l.x_post_id,l.x_post_url,l.post_text
+          l.unknown_outcome,l.x_post_id,l.x_post_url,l.post_text,
+          l.error_code AS log_error_code,l.error_message AS log_error_message
           FROM x_video_publish_task t JOIN x_post_manual_run r ON r.id=t.manual_run_id
           LEFT JOIN x_post_queue q ON q.manual_run_id=r.id
           LEFT JOIN x_post_publish_log l ON l.queue_id=q.id WHERE t.batch_id=? ORDER BY t.id""", (int(batch_id),)).fetchall()
         result["tasks"] = []
         for task in tasks:
             item = dict(task)
+            log_code = item.pop("log_error_code")
+            log_message = item.pop("log_error_message")
+            if log_code or log_message:
+                # The publisher records queue-specific failures on the log;
+                # the parent run may only carry its aggregate terminal status.
+                item["error_code"] = log_code or ""
+                item["error_message"] = log_message or ""
+            item["error_message"] = redact_text(item["error_message"], 500)
             item["source_snapshot"] = json.loads(item.pop("source_snapshot_json"))
             item["account_snapshot"] = json.loads(item.pop("account_snapshot_json"))
             if item["unknown_outcome"] or item["run_status"] == "needs_review" or item["log_status"] in {"post_creating", "repost_creating"}:

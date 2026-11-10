@@ -18,6 +18,13 @@ def processing(value):
 def client_processing(value):
     return 'random_overlay' if value=='random' else 'original'
 
+def task_error_message(task):
+    message = task.get('error_message') or ''
+    if (task.get('status') == 'failed' and task.get('error_code') == 'x_upstream_error'
+            and 'your account is temporarily locked.' in message.lower()):
+        return 'X 账号暂时锁定，请登录该账号按提示解锁后再恢复发布。原始错误：' + message
+    return message
+
 def batch_dto(batch, *, include_items=True):
     status_map={'waiting':'queued','processing':'processing','success':'published','needs_review':'unknown',
                 'completed_with_errors':'partial','running':'processing','stopped':'stopped'}
@@ -36,7 +43,7 @@ def batch_dto(batch, *, include_items=True):
             'caption':t.get('post_text') or t.get('caption') or '',
             'planned_at_utc':t.get('scheduled_at') or None,'processing_mode':client_processing(t.get('processing')),
             'schedule_kind':'scheduled' if t.get('scheduled_at') else 'immediate',
-            'status':status_map.get(t['status'],t['status']),'error_message':t.get('error_message') or '',
+            'status':status_map.get(t['status'],t['status']),'error_message':task_error_message(t),
             'post_url':safe_url(t.get('x_post_url')),'row_number':t.get('row_number'),
             'queue_id':str(t.get('queue_id') or ''),'manual_run_id':str(t.get('manual_run_id') or '')})
     result['items'] = items

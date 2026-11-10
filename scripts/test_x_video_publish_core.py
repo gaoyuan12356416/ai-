@@ -27,6 +27,7 @@ from scripts.test_x_posts import ScriptedHttpClient, response, valid_probe_paylo
 from scripts.x_post_manual_runner import _manual_identity
 from features.x_accounts import oauth_service
 from features.x_video_publish.errors import PublishingError
+from features.x_video_publish.service import batch_dto
 
 ACTOR = {"tenant_key": "tenant-a", "user_id": "operator-a", "name": "Operator"}
 OTHER = {"tenant_key": "tenant-b", "user_id": "operator-a", "name": "Other"}
@@ -288,7 +289,11 @@ class PersonalPublishTests(unittest.TestCase):
         queue_id = run["queues"][0]["id"]
         log = self.legacy.reserve_log(queue_id)
         self.legacy.mark_failed(log["id"], "x_post_unknown_outcome", "ambiguous", unknown_outcome=True)
-        self.assertEqual("needs_review", self.store.get_batch(ACTOR, batch["id"])["status"])
+        result = self.store.get_batch(ACTOR, batch["id"])
+        self.assertEqual("needs_review", result["status"])
+        self.assertEqual("x_post_unknown_outcome", result["tasks"][0]["error_code"])
+        self.assertEqual("ambiguous", result["tasks"][0]["error_message"])
+        self.assertEqual("unknown", batch_dto(result)["items"][0]["status"])
         self.store.assert_run_publishable(batch["tasks"][1]["manual_run_id"], self.accounts["2"])
         claim = self.legacy.claim_manual_run()
         self.assertEqual(claim["run"]["id"], batch["tasks"][1]["manual_run_id"])
@@ -300,6 +305,48 @@ class PersonalPublishTests(unittest.TestCase):
         self.assertEqual("x_post_unknown_outcome", repeated["rows"][0]["error_code"])
         with self.assertRaises(XPostError):
             self.store.get_batch(OTHER, batch["id"])
+
+    def test_batch_exposes_publish_log_failure_when_run_has_no_error(self):
+        batch = self.commit(self.preview(self.rows()[:1]))
+        run = self.freeze(batch["tasks"][0])
+        log = self.legacy.reserve_log(run["queues"][0]["id"])
+        message = ("X媒体初始化失败(HTTP 403): Your account is temporarily locked. "
+                   "Please log in to [redacted-url] to unlock your account. Bearer fixture-secret")
+        self.legacy.mark_failed(log["id"], "x_upstream_error", message)
+        result = self.store.get_batch(ACTOR, batch["id"])
+        task = result["tasks"][0]
+        self.assertEqual("failed", task["status"])
+        self.assertEqual("x_upstream_error", task["error_code"])
+        self.assertIn("Your account is temporarily locked.", task["error_message"])
+        self.assertNotIn("fixture-secret", task["error_message"])
+        item = batch_dto(result)["items"][0]
+        self.assertEqual("failed", item["status"])
+        self.assertIn("请登录该账号按提示解锁", item["error_message"])
+        self.assertIn(task["error_message"], item["error_message"])
+
+    def test_publish_log_error_pair_takes_precedence_over_run_error(self):
+        batch = self.commit(self.preview(self.rows()[:1]))
+        run = self.freeze(batch["tasks"][0])
+        log = self.legacy.reserve_log(run["queues"][0]["id"])
+        self.legacy.mark_failed(log["id"], "x_upstream_error", "Exact queue failure")
+        with contextlib.closing(self.store.connect()) as conn:
+            conn.execute("UPDATE x_post_manual_run SET error_code=?,error_message=? WHERE id=?",
+                         ("batch_error", "Aggregate run failure", run["id"]))
+            conn.commit()
+        task = self.store.get_batch(ACTOR, batch["id"])["tasks"][0]
+        self.assertEqual(("x_upstream_error", "Exact queue failure"),
+                         (task["error_code"], task["error_message"]))
+
+    def test_preflight_failure_keeps_run_error_without_publish_log(self):
+        batch = self.commit(self.preview(self.rows()[:1]))
+        self.legacy.record_manual_failure(batch["tasks"][0]["manual_run_id"],
+                                          "failed_media", "Source media unavailable")
+        result = self.store.get_batch(ACTOR, batch["id"])
+        task = result["tasks"][0]
+        self.assertIsNone(task["log_id"])
+        self.assertEqual(("failed_media", "Source media unavailable"),
+                         (task["error_code"], task["error_message"]))
+        self.assertEqual("Source media unavailable", batch_dto(result)["items"][0]["error_message"])
 
     def test_explicit_stopped_parent_is_not_presented_as_queued(self):
         batch = self.commit()
