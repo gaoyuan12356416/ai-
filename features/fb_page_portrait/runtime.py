@@ -6,8 +6,10 @@ from pathlib import Path
 def shared():
     import features
     path = str(Path(os.environ.get('FB_PORTRAIT_SHARED_ROOT', '/root/drama_material_service')) / 'features')
-    if path not in features.__path__:
-        features.__path__.append(path)
+    # Composite production modules can be newer than the checkout's partial
+    # packages. Resolve shared dependencies from their actual deployed owner.
+    if path in features.__path__:features.__path__.remove(path)
+    features.__path__.insert(0,path)
 
 
 def encoded(value):
