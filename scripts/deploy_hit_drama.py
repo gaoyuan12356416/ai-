@@ -47,7 +47,8 @@ def settings(platform):
 
 def prepare(platform,folder):
     assert run('findmnt','-rn','-o','UUID','--mountpoint','/mnt/data-disk')=='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
-    commit=run('git','-C',SOURCE,'rev-parse','HEAD');base=run('git','-C',SOURCE,'rev-parse','HEAD^')
+    commit=run('git','-C',SOURCE,'rev-parse','HEAD')
+    base={'x':'6ba8280a7d6884d2dcc9f2546caf71b8a96dc99c','fb':'e34277d1ccbc3f7f611d40d786ba01ebaf82d796'}[platform]
     assert not run('git','-C',SOURCE,'status','--porcelain') and run('git','-C',SOURCE,'branch','-r','--contains',commit),'pushed_clean_source_required'
     current,files,db=settings(platform);previous=current.resolve();candidate=folder/'candidate'
     folder.mkdir(parents=True,exist_ok=False);folder.chmod(0o755)
@@ -94,7 +95,9 @@ def publish_static(info,rollback=False):
     for name,row in info['static'].items():
         assert sha(name)==row['after' if rollback else 'before'],'static_changed:'+name
     for name,row in info['static'].items():
-        if rollback and not row['before']:Path(name).unlink(missing_ok=True)
+        if rollback and not row['before']:
+            # The other platform may now use this additive shared asset.
+            if Path(name).name!='hit-drama-publish.js':Path(name).unlink(missing_ok=True)
         else:atomic(name,Path(row['backup' if rollback else 'next']).read_bytes())
 
 def verify_current(info,rollback):
