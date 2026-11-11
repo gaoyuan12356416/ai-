@@ -11,6 +11,9 @@ Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+# mode=ro SQLite still needs to create WAL shared-memory bookkeeping when the
+# last writer has checkpointed and removed the side files. SQL remains read-only.
+ReadWritePaths=/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/data /mnt/data-disk/fb-auto-post-publisher
 PrivateTmp=true
 MemoryMax=256M
 CPUQuota=100%

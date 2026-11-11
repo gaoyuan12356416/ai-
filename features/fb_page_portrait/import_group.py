@@ -29,7 +29,7 @@ def main():
     req=urllib.request.Request('http://127.0.0.1:8787/internal/fb-video-publish/identity',
           data=encoded(dict(tenant_key=m['tenant_key'],user_id=m['user_id'])).encode(),
           headers={'Content-Type':'application/json','Authorization':'Bearer '+env['FB_AUTO_POST_INTERNAL_TOKEN']},method='POST')
-    with urllib.request.urlopen(req,timeout=30) as response:identity=json.load(response)
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=30) as response:identity=json.load(response)
     actor=identity['actor']
     assert actor['user_name']=='郜远' and actor['is_admin']
     current=Reader(env).query(["SELECT HEX(JSON_OBJECT('page_id',page_id,'language',language)) FROM kunlunads_dev.ads_facebook_page_group_ins WHERE group_id=62 AND deleted_at=0"],timeout=30)

@@ -23,7 +23,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def authenticated_get(path,cookie):
     request=urllib.request.Request('http://127.0.0.1:8787'+path,headers={'Cookie':cookie,'Accept':'application/json'})
-    with urllib.request.build_opener(NoRedirect).open(request,timeout=20) as response:
+    with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect).open(request,timeout=20) as response:
         raw=response.read(4*1024*1024+1)
         if len(raw)>4*1024*1024:raise ValueError('authorization_response_oversized')
         return json.loads(raw)
