@@ -688,6 +688,10 @@ def _build_short_url(short_base_url, log_id):
     ):
         raise XPostError("invalid_short_base_url", "短链基础地址无效", 500)
     base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+    from features.x_posts.shared_short_links import allocate
+    allocated = allocate(base, log_id)
+    if allocated is not None:
+        return allocated
     return "%s/%s.html" % (base, log_id)
 
 
@@ -980,6 +984,15 @@ def _sync_existing_short_redirect(path):
 
 
 def write_short_redirect(public_root, log_id, long_url, *, durable_storage=None):
+    from features.x_posts.shared_short_links import write_allocated
+    target = _validate_w2a_url(long_url)
+    allocated = write_allocated(DEFAULT_SHORT_BASE_URL, log_id, target, _write_short_redirect_file)
+    if allocated is not None:
+        return allocated
+    return _write_short_redirect_file(public_root, log_id, target, durable_storage=durable_storage)
+
+
+def _write_short_redirect_file(public_root, log_id, long_url, *, durable_storage=None):
     """Atomically create an immutable ``<log_id>.html`` redirect page."""
     target = _validate_w2a_url(long_url)
     log_id = _positive_int(log_id, "日志ID")

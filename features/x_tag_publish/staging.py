@@ -58,6 +58,8 @@ def build(source, repo, target, *, verify=True):
     # Every runtime lock, working directory and default publishing ledger is separate.
     for directory in ('features/x_posts', 'features/x_auto_posts', 'scripts'):
         for p in (target / directory).glob('*.py'):
+            if p.name == 'shared_short_links.py':
+                continue  # Both publishing lanes must use the exact same allocator.
             if directory == 'scripts' and not p.name.startswith(('x_post_', 'x_auto_post_')) and p.name not in REGRESSION_FILES:
                 continue
             value = p.read_text(encoding='utf-8')
