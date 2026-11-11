@@ -1,0 +1,26 @@
+[Unit]
+Description=DramaWave batch Facebook Page assignment API
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk/fb-page-assignment
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/fb-page-assignment/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=FB_PAGE_ASSIGNMENT_SHARED_ROOT=/root/drama_material_service
+ExecStart=/usr/bin/python3 -m features.fb_page_assignment.server --env /etc/fb-page-assignment.env --port 8943 --data-root /mnt/data-disk/fb-page-assignment
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
