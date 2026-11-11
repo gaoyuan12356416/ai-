@@ -661,10 +661,11 @@ class MaterialRepository:
         # predicate. Enumerate the complete eligible drama set first, then use
         # the source/content index. This includes zero-history dramas and avoids
         # repeating a full source-table scan for each Page language.
-        target_content_id = (config.get('hit_drama_publish') or {}).get('content_id')
-        complete_content_scan = inherit_language or bool(target_content_id)
-        scan_content_ids = [str(target_content_id)] if target_content_id else priority_content_ids
-        if complete_content_scan and not target_content_id:
+        from features.hit_drama_target import content_ids as target_content_ids
+        target = config.get('hit_drama_publish')
+        complete_content_scan = inherit_language or bool(target)
+        scan_content_ids = target_content_ids(target, language) if target else priority_content_ids
+        if complete_content_scan and not target:
             eligible = self.mysql.select(f"""
                 SELECT /*+ MAX_EXECUTION_TIME(45000) */ DISTINCT TRIM(d.content_id) content_id
                   FROM `{self.mysql.schema}`.ads_drama_info d

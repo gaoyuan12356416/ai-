@@ -19,6 +19,7 @@ from features import social_random_schedule as target_daily
 from . import target_schedule
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
 from .languages import candidate_snapshots_for_pages,page_language
+from features.hit_drama_target import content_ids as target_content_ids
 from .repositories import MaterialRepository, PagePoolRepository
 from .validation import config_hash, expected_version, normalize_template_payload
 from features.fb_video_publish.guards import automatic_block, manual_block, manual_excluded_materials, prepare_available, install_backstops
@@ -707,7 +708,8 @@ class FBAutoPostStore:
                     if candidate_limit<5000 and len(excluded)>candidate_limit-50:
                         raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化，请重试',409)
                     blocked_content = cooldown_content_ids(conn, page.page_id, task_publish_at, int(config.get("drama_cooldown_hours", 0)), now)
-                    candidates = [item for item in candidate_snapshots[language].candidates if item.content_id not in blocked_content and (not hit_drama or item.content_id == hit_drama['content_id'])]
+                    allowed = set(target_content_ids(hit_drama, language)) if hit_drama else None
+                    candidates = [item for item in candidate_snapshots[language].candidates if item.content_id not in blocked_content and (allowed is None or item.content_id in allowed)]
                     material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
                     if material is None and blocked_content:
                         pre_reason = "fb_auto_no_video_after_drama_cooldown"

@@ -20,7 +20,7 @@ class HitDramaTests(unittest.TestCase):
         self.template=self.store.create_template(payload(),self.actor,dict(app_id='1479',product='Dramawave',metric_product='Dramawave',metric_platform=0))
         with self.store.connect() as conn:conn.execute("UPDATE fb_auto_template SET status='enabled'")
         self.pages=SimpleNamespace(list_pages=lambda *a,**k:[PageTarget('6',('6',),'11','1','UTC','en',1),PageTarget('6',('6',),'12','1','UTC','id',1)],legacy_conflicts=lambda *_:[])
-        self.mysql=SimpleNamespace(schema='ads',select=lambda sql,args:[dict(content_id='123')])
+        self.mysql=SimpleNamespace(schema='ads',select=lambda sql,args:[dict(content_id='123',language='en')])
         def material(mid,cid,lang):return MaterialCandidate(mid,cid,'https://media.test/'+mid+'.mp4','m','drama',lang,Decimal(60),Decimal(0),None,Decimal(0),None,'1')
         self.configs=[]
         def candidates(config):
@@ -65,6 +65,28 @@ class HitDramaTests(unittest.TestCase):
         self.assertEqual(repo.candidate_snapshot(config).candidates,())
         self.assertEqual(len(queries),1)
         self.assertIn('s.data_source_id IN (%s)',queries[0][0]);self.assertIn('123',queries[0][1])
+
+    def test_business_resource_selects_its_language_version_per_page(self):
+        self.mysql.select=lambda *_:[dict(content_id='enAbc',language='en'),dict(content_id='idXyz',language='id')]
+        def candidates(config):
+            cid={'en':'enAbc','id':'idXyz'}[config['language']]
+            m=MaterialCandidate('2' if cid=='enAbc' else '3',cid,'https://media.test/a.mp4','m','drama',config['language'],Decimal(60),Decimal(0),None,Decimal(0),None,'1')
+            other=MaterialCandidate('4','otherDrama','https://media.test/other.mp4','m','other',config['language'],Decimal(60),Decimal(0),None,Decimal(0),None,'1')
+            return CandidateSnapshot((other,m),(),())
+        self.materials.candidate_snapshot=candidates
+        result=publish_drama(self.runtime,self.template['id'],self.actor,dict(self.request,id_type='resource_id',drama_id='30911'))
+        self.assertEqual(result['queued'],2);self.assertEqual(result['languages'],['en','id'])
+        with self.store.connect() as conn:
+            self.assertEqual([tuple(r) for r in conn.execute("SELECT page_id,content_id FROM fb_auto_task WHERE status='planned' ORDER BY page_id")],[('11','enAbc'),('12','idXyz')])
+
+    def test_missing_target_language_never_scans_unrelated_catalog(self):
+        queries=[]
+        mysql=SimpleNamespace(schema='ads',blacklist_schema='ads',select=lambda *a:queries.append(a) or [])
+        metrics=SimpleNamespace(load_metric_window=lambda **_:SimpleNamespace(by_drama={},by_material={},generation_ids=(),dates=()))
+        repo=MaterialRepository(mysql,metrics)
+        with self.store.connect() as conn:config=json.loads(self.store._template_row(conn,self.template['id'],self.actor)['config_json'])
+        config.update(language='id',hit_drama_publish=dict(version=2,by_language={'en':['enAbc']},content_ids=['enAbc']))
+        self.assertEqual(repo.candidate_snapshot(config).candidates,());self.assertEqual(queries,[])
 
 
 if __name__=='__main__':unittest.main()
