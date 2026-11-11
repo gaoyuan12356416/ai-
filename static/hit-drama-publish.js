@@ -11,16 +11,17 @@
   async function open(platform, templateId) {
     if(document.getElementById('hitDramaDialog'))return;
     const isX=platform==='x', base=isX?'/api/admin/x-tag-auto-publish':'/api/admin/fb-auto-publish';
-    const dialog=el('dialog'); dialog.id='hitDramaDialog'; dialog.setAttribute('aria-labelledby','hitDramaTitle');
+    const dialog=el('dialog'); dialog.id='hitDramaDialog'; dialog.setAttribute('aria-labelledby','hitDramaTitle');dialog.style.width='min(650px, calc(100vw - 32px))';dialog.style.maxWidth='650px';
     const title=el('h2','爆款剧发布'); title.id='hitDramaTitle'; const head=el('div','','dialog-head');head.append(title);
-    const body=el('div','','dialog-body');
+    const body=el('div','','dialog-body');body.style.display='grid';body.style.gap='12px';
     const scope=el('p',isX?'仅向模板中语言、受众方向和题材画像均匹配的频道各发布一次；无有效画像或不匹配的频道会跳过。':'在本模板 Page 范围内按语言筛选该剧素材，各发布一次。');
     const tip=el('p','沿用模板的素材、上线时间、指标和冷却条件。本次操作不修改模板或日常排期。');
     const label=el('label','ID 类型');label.htmlFor='hitDramaType';const type=el('select');type.id='hitDramaType';
     for(const [value,text] of [['content_id','剧 ID（content_id）'],['resource_id','资源 ID（剧集资源记录 ID）']]){const option=el('option',text);option.value=value;type.append(option);}
     const idLabel=el('label','剧 ID 或资源 ID');idLabel.htmlFor='hitDramaInput';const input=el('input');input.id='hitDramaInput';input.type='text';input.inputMode='numeric';input.maxLength=31;input.autocomplete='off';input.placeholder='输入一个 ID';
     const status=el('p','正在读取模板…');status.setAttribute('role','status');status.style.whiteSpace='pre-wrap';const resultBox=el('div');
-    body.append(scope,tip,label,type,idLabel,input,status,resultBox);
+    const typeField=el('div','','field'),idField=el('div','','field');typeField.append(label,type);idField.append(idLabel,input);
+    body.append(scope,tip,typeField,idField,status,resultBox);
     const foot=el('div','','dialog-foot'),close=el('button','关闭','button'),submit=el('button','确认发布','button primary');close.type=submit.type='button';submit.disabled=true;foot.append(close,submit);
     dialog.append(head,body,foot);document.body.append(dialog);dialog.showModal();
     let busy=false,draft=null,key='',version=0,done=false;
