@@ -32,6 +32,14 @@ def replace(text,old,new):
     if text.count(old)!=1:raise RuntimeError('anchor_changed:'+old[:90])
     return text.replace(old,new,1)
 
+def health(port):
+    deadline=time.monotonic()+20
+    while True:
+        result=subprocess.run(['curl','-fsS',f'http://127.0.0.1:{port}/health'],capture_output=True,timeout=3)
+        if result.returncode==0:return
+        assert time.monotonic()<deadline,'service_health_not_ready'
+        time.sleep(.5)
+
 def static_js(text,platform):
     if platform=='x':
         text=replace(text,'      actions.appendChild(actionButton("手动执行", "run", id, "primary"));','      actions.appendChild(actionButton("手动执行", "run", id, "primary"));\n      actions.appendChild(actionButton("爆款剧发布", "drama", id, "primary"));')
@@ -93,7 +101,7 @@ def prepare(platform,folder):
 
 def publish_static(info,rollback=False):
     for name,row in info['static'].items():
-        assert sha(name)==row['after' if rollback else 'before'],'static_changed:'+name
+        assert sha(name) in ([row['after']] if rollback else [row['before'],row['after']]),'static_changed:'+name
     for name,row in info['static'].items():
         if rollback and not row['before']:
             # The other platform may now use this additive shared asset.
@@ -108,6 +116,14 @@ def verify_current(info,rollback):
 
 def activate(platform,folder,rollback=False):
     info=json.loads((folder/'manifest.json').read_text());assert info['platform']==platform
+    if not rollback and info['status']=='prepared' and str(settings(platform)[0].resolve())==info['candidate']:
+        for name,row in info['files'].items():assert sha(Path(info['candidate'])/name)==row['after'],'candidate_changed'
+        health(18843 if platform=='x' else 18835)
+        publish_static(info)
+        run(sys.executable,HEALTH,'snapshot','--lane',platform,'--output',folder/'schedulers-after.json')
+        info['status']='active';info['controller_commit']=run('git','-C',SOURCE,'rev-parse','HEAD');save(folder/'manifest.json',info)
+        print(json.dumps(dict(status='active',platform=platform,completed_existing_switch=True,commit=info['commit'])),flush=True)
+        return
     current=verify_current(info,rollback);destination=info['previous'] if rollback else info['candidate']
     if rollback and platform=='x':
         _,_,db=settings(platform)
@@ -152,7 +168,7 @@ def activate(platform,folder,rollback=False):
                 verify_current(info,rollback)
                 temp=current.with_name('current.hit-next');temp.symlink_to(destination);temp.replace(current)
                 run('systemctl','restart','x-tag-auto.service',timeout=60)
-                run('curl','-fsS','http://127.0.0.1:18843/health')
+                health(18843)
                 publish_static(info,rollback)
         finally:
             for unit,enabled in states.items():
