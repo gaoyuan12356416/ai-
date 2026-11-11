@@ -1,11 +1,13 @@
 import copy
 import hashlib
 import tempfile
+import sqlite3
+from pathlib import Path
 import unittest
 from features.fb_page_portrait.build import build
 from features.fb_page_portrait.runtime import encoded
 from features.fb_page_portrait.storage import publish,Store,projections
-from features.fb_page_portrait.server import select,PREFIX
+from features.fb_page_portrait.server import select,PREFIX,admin_scope
 
 
 def fixture():
@@ -18,6 +20,18 @@ def fixture():
 
 
 class PortraitTests(unittest.TestCase):
+    def test_fast_admin_scope_is_current_and_tenant_bound(self):
+        with tempfile.TemporaryDirectory() as root:
+            users=Path(root)/'users.db';configs=Path(root)/'pages.db'
+            db=sqlite3.connect(users);db.execute('CREATE TABLE drama_admin_user(tenant_key,user_id,role,status)')
+            db.execute('INSERT INTO drama_admin_user VALUES(?,?,?,?)',('t1','u1','admin','active'));db.commit();db.close()
+            db=sqlite3.connect(configs);db.execute('CREATE TABLE fb_video_page(tenant_key,page_id,deleted)')
+            db.executemany('INSERT INTO fb_video_page VALUES(?,?,?)',[('t1','11',0),('t2','22',0),('t1','33',1)]);db.commit();db.close()
+            user=dict(tenant_key='t1',user_id='u1')
+            self.assertEqual(admin_scope(user,['11','22','33'],config_db=configs,user_db=users),{'11'})
+            db=sqlite3.connect(users);db.execute("UPDATE drama_admin_user SET role='user'");db.commit();db.close()
+            self.assertIsNone(admin_scope(user,['11'],config_db=configs,user_db=users))
+
     def test_income_conservation_and_distinct_theme_allocation(self):
         data=build(fixture());p=data['pages']['11']
         self.assertEqual((p['paid_cents'],p['social_cents'],p['revenue_cents']),(5,6,11))

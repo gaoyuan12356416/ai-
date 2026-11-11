@@ -1,9 +1,11 @@
 """Cookie Page-list authorization on every request; no SQL in HTTP handlers."""
 import argparse
+from contextlib import closing
 from datetime import datetime,timezone
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
 import re
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
@@ -19,15 +21,44 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):return None
 
 
-def authorize(cookie):
+def authenticated_get(path,cookie):
+    request=urllib.request.Request('http://127.0.0.1:8787'+path,headers={'Cookie':cookie,'Accept':'application/json'})
+    with urllib.request.build_opener(NoRedirect).open(request,timeout=20) as response:
+        raw=response.read(4*1024*1024+1)
+        if len(raw)>4*1024*1024:raise ValueError('authorization_response_oversized')
+        return json.loads(raw)
+
+
+def admin_scope(user,ids,*,config_db='/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3',
+                user_db='/root/drama_material_service/data/drama_material_jobs.sqlite3'):
+    """Admins have no source-owner predicate. Never trust creator as an ACL.
+
+    The current active admin and current tenant configuration are re-read for
+    every request. Normal users retain the existing source-owner Page gate.
+    """
+    if not user.get('tenant_key') or not user.get('user_id'):return None
+    with closing(sqlite3.connect('file:'+str(user_db)+'?mode=ro',uri=True,timeout=3)) as db:
+        rows=db.execute('SELECT role,status FROM drama_admin_user WHERE tenant_key=? AND user_id=? LIMIT 2',
+                        (user['tenant_key'],user['user_id'])).fetchall()
+    if rows!=[('admin','active')]:return None
+    with closing(sqlite3.connect('file:'+str(config_db)+'?mode=ro',uri=True,timeout=3)) as db:
+        return {r[0] for r in db.execute('SELECT page_id FROM fb_video_page WHERE tenant_key=? AND deleted=0 AND page_id IN ('+','.join('?' for _ in ids)+')',[user['tenant_key'],*ids])}
+
+
+def authorize(cookie,ids):
     if not cookie:return 401,set()
-    request=urllib.request.Request('http://127.0.0.1:8787/api/fb-video-publish/pages',headers={'Cookie':cookie,'Accept':'application/json'})
     try:
-        with urllib.request.build_opener(NoRedirect).open(request,timeout=20) as response:
-            raw=response.read(4*1024*1024+1)
-            if len(raw)>4*1024*1024:raise ValueError('authorization_response_oversized')
-            data=json.loads(raw)
-            return response.status,{str(r['page_id']) for r in data['items']}
+        auth=authenticated_get('/api/ui/topbar',cookie)
+        user=auth.get('user') or {}
+        if auth.get('authenticated') and user.get('is_admin') is True:
+            # This cheap existing endpoint enforces the identical Cookie,
+            # module and navigation gates as the Page list, without source SQL.
+            gate=authenticated_get('/api/fb-video-publish/languages',cookie)
+            if gate.get('ok') is False or not isinstance(gate.get('items'),list):raise ValueError('invalid_navigation_gate')
+            allowed=admin_scope(user,ids)
+            if allowed is not None:return 200,allowed
+        data=authenticated_get('/api/fb-video-publish/pages',cookie)
+        return 200,{str(r['page_id']) for r in data['items']}
     except urllib.error.HTTPError as exc:return exc.code,set()
 
 
@@ -71,9 +102,14 @@ class Handler(BaseHTTPRequestHandler):
         if not LIMIT.acquire(blocking=False):return self.send(503,{'message':'画像请求较多，请稍后重试'})
         try:
             parsed=urlsplit(self.path)
-            status,allowed=authorize(self.headers.get('Cookie',''))
+            query=parse_qs(parsed.query,keep_blank_values=True,max_num_fields=5)
+            match=re.fullmatch(re.escape(PREFIX)+r'(?:/([1-9][0-9]{0,30})(?:/dramas)?)?',parsed.path)
+            if not match:return self.send(404,{'message':'接口不存在'})
+            ids=[match[1]] if match[1] else query.get('ids',[''])[0].split(',')
+            if not 1<=len(ids)<=20 or any(not re.fullmatch(r'[1-9][0-9]{0,30}',i) for i in ids):raise ValueError('invalid_page_ids')
+            status,allowed=authorize(self.headers.get('Cookie',''),ids)
             if status!=200:return self.send(status if status in (401,403) else 503,{'message':'请登录并使用已获授权的 Page 管理'})
-            status,result=select(parsed.path,parse_qs(parsed.query,keep_blank_values=True),allowed,self.store)
+            status,result=select(parsed.path,query,allowed,self.store)
             self.send(status,result)
         except FileNotFoundError:self.send(409,{'message':'画像正在刷新，请稍后重新打开'})
         except ValueError:self.send(400,{'message':'画像请求参数无效'})
