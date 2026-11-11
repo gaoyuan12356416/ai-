@@ -13,12 +13,26 @@ from unittest import mock
 from features.x_posts import service as posts, duration_policy
 from features.x_posts import shared_short_links as links
 from scripts.deploy_x_shared_short_links import patch_native, patch_service
+from scripts import deploy_x_shared_short_links as deployment
 from scripts.test_x_posts import candidate
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_start_readiness_runs_after_temporary_gate_is_removed(self):
+        commands = []
+        def run(*args, **kwargs):
+            commands.append(args)
+            return '123' if args[:2] == ('systemctl', 'show') else ''
+        with mock.patch.object(deployment, 'run', side_effect=run), mock.patch.object(deployment, 'health'):
+            deployment.switch_unit('test.service', 8810, lambda: None)
+        stopped = commands.index(('systemctl', 'stop', 'test.service'))
+        ungated = next(i for i,c in enumerate(commands) if c[:3] == ('iptables','-D','INPUT'))
+        started = commands.index(('systemctl', 'start', 'test.service'))
+        self.assertLess(stopped, ungated)
+        self.assertLess(ungated, started)
+
     def native_source(self):
         path = ROOT / 'features/pipeline_dispatch/x_native.py'
         if path.exists():
