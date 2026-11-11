@@ -58,7 +58,7 @@ def paid(reader, scope, start, end):
     for i in range(7):
         day = (date.fromisoformat(start)+timedelta(days=i)).isoformat()
         sql = """SELECT HEX(JSON_OBJECT('page_id',page_id,'date',CAST(dt AS CHAR),
-           'content_id',MIN(data_source_id),'language',MIN(COALESCE(NULLIF(drama_language,''),NULLIF(language,''),'unknown')),
+           'content_id',MIN(data_source_id),'language',MIN(COALESCE(NULLIF(drama_language,''),NULLIF(language,''),'unknown') COLLATE utf8mb4_bin),
            'spend',SUM(spend),'revenue',SUM(af_revenue0)))
            FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX(pss)
            WHERE product='Dramawave' AND platform=0 AND dt='%s' AND page_id IN (%s)
