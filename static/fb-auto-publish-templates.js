@@ -91,6 +91,7 @@
         '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",
         '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
         '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', runDisabled, runTitle, ">爆款素材发布</button>",
+        '<button class="button small primary" type="button" data-action="drama" data-template-id="', id, '"', runDisabled, runTitle, ">爆款剧发布</button>",
         "</div></td>",
         "</tr>",
       ].join("");
@@ -270,10 +271,11 @@
     if (!item || state.busyIds.has(id)) return;
     const action = button.dataset.action;
     const enabled = isEnabled(item);
-    if (["run", "material"].includes(action) && !enabled) {
+    if (["run", "material", "drama"].includes(action) && !enabled) {
       ui.showToast("模板已停用，请先启用后再手动执行。", true);
       return;
     }
+    if (action === "drama") { await window.HitDramaPublish.open("fb", id); return; }
     if (action === "material") {
       openMaterialDialog(item);
       return;

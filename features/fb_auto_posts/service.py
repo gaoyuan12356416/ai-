@@ -307,6 +307,9 @@ class Handler(BaseHTTPRequestHandler):
                 summary = self.runtime.validate_activation(template) if action == "enable" else {}
                 fingerprint = summary.pop("_enabled_fingerprint", None)
                 result = {"ok": True, "template": self.runtime.store.set_template_status(template_id, action == "enable", actor, payload["expected_version"], expected_enabled_fingerprint=fingerprint, preserve_unsubmitted_before_utc=payload.get("preserve_unsubmitted_before_utc")), "page_summary": summary}
+            elif action == "run-now" and "drama_id" in payload:
+                from .hit_drama import publish_drama
+                result = publish_drama(self.runtime, template_id, actor, payload)
             elif action == "run-now" and "material_id" in payload:
                 from .hit_material import publish_material
                 result = publish_material(self.runtime, template_id, actor, payload)

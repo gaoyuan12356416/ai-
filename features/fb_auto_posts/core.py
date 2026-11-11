@@ -520,9 +520,16 @@ class FBAutoPostStore:
                  planned_publish_at_utc, len(targets), json.dumps(targets), utc_iso(self.now_fn())),
             )
 
-    def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None) -> Dict[str, Any]:
+    def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None, hit_drama: Mapping[str, Any] | None = None) -> Dict[str, Any]:
         if trigger_type not in {"auto", "manual"} or not slot_key or len(slot_key) > 120:
             raise StoreError("invalid_request", "运行触发参数无效", 400)
+        if hit_drama:
+            from .hit_drama import receipt
+            with self.connect() as conn:
+                self._template_row(conn, template_id, actor)
+                existing_hit = receipt(conn, template_id, slot_key, hit_drama['request'])
+                if existing_hit:
+                    return existing_hit
         with self.connect() as conn:
             template = dict(self._template_row(conn, template_id, actor))
             target_slot = target_schedule.parse_slot(slot_key) if trigger_type == "auto" else None
@@ -536,7 +543,7 @@ class FBAutoPostStore:
             if expected_template_version is not None and template["status"] != "enabled":
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
-            if expected_template_version is not None:
+            if expected_template_version is not None and not hit_drama:
                 self._validate_due_claim(
                     conn, template_id=template_id, slot_key=slot_key, trigger_type=trigger_type,
                     expected_template_version=int(expected_template_version), expected_due_id=expected_due_id,
@@ -552,6 +559,9 @@ class FBAutoPostStore:
             # before applying the unchanged per-template backlog capacity gate.
             self.maintenance_tick()
             config = _loads(template["config_json"], {})
+            if hit_drama:
+                config['hit_drama_publish'] = dict(hit_drama)
+                template['config_json'] = json.dumps(config, ensure_ascii=False)
             scope_admin, scope_owner = bool(template["scope_is_admin"]), str(template["owner_user_id"])
             existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (template_id, slot_key)).fetchone()
             if existing and expected_template_version is None:
@@ -639,7 +649,7 @@ class FBAutoPostStore:
             if current["status"] != "enabled" and (expected_template_version is not None or trigger_type == "auto"):
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
-            if expected_template_version is not None:
+            if expected_template_version is not None and not hit_drama:
                 self._validate_due_claim(
                     conn, template_id=template_id, slot_key=slot_key, trigger_type=trigger_type,
                     expected_template_version=int(expected_template_version), expected_due_id=expected_due_id,
@@ -653,6 +663,10 @@ class FBAutoPostStore:
                     enabled_fingerprint.add((template_id, int(current["current_version"])))
                 if current_enabled != enabled_fingerprint:
                     raise StoreError("fb_auto_capacity_snapshot_changed", "启用模板集合在计划期间变化，请重试容量复核", 409)
+            if existing and hit_drama:
+                result = receipt(conn, template_id, slot_key, hit_drama['request'])
+                conn.commit()
+                return result
             if existing:
                 conn.commit()
                 return {"ok": True, "run_id": int(existing[0]), "idempotent": True}
@@ -693,7 +707,7 @@ class FBAutoPostStore:
                     if candidate_limit<5000 and len(excluded)>candidate_limit-50:
                         raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化，请重试',409)
                     blocked_content = cooldown_content_ids(conn, page.page_id, task_publish_at, int(config.get("drama_cooldown_hours", 0)), now)
-                    candidates = [item for item in candidate_snapshots[language].candidates if item.content_id not in blocked_content]
+                    candidates = [item for item in candidate_snapshots[language].candidates if item.content_id not in blocked_content and (not hit_drama or item.content_id == hit_drama['content_id'])]
                     material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
                     if material is None and blocked_content:
                         pre_reason = "fb_auto_no_video_after_drama_cooldown"
@@ -721,6 +735,8 @@ class FBAutoPostStore:
                 if target_slot:
                     conn.execute("UPDATE fb_auto_task SET schedule_policy=? WHERE id=?", (target_daily.POLICY, int(task_cursor.lastrowid)))
                     target_daily.bind_slot(conn, target_schedule.source_key(template_id), day, page.page_id, ordinal, "fb_auto_task", int(task_cursor.lastrowid))
+                if hit_drama:
+                    selection['hit_drama_publish'] = dict(hit_drama)
                 conn.execute("UPDATE fb_auto_task SET selection_json=? WHERE id=?", (json.dumps(selection, sort_keys=True), int(task_cursor.lastrowid)))
                 if status == "planned": queued += 1
                 else: skipped += 1
