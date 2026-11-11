@@ -115,7 +115,7 @@ class InventoryTests(unittest.TestCase):
     def test_source_failure_not_a_zero_inventory_report(self):
         env = {"X_POST_DAILY_MYSQL_HOST": "101.32.56.53", "X_POST_DAILY_MYSQL_PORT": "63350",
                "X_POST_DAILY_MYSQL_USER": "test", "X_POST_DAILY_MYSQL_PASSWORD": "not-real"}
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1)):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1, stderr="ERROR 2013 lost connection")):
             with self.assertRaisesRegex(RuntimeError, "source_query_failed"):
                 mysql_rows(env, "SELECT 1")
 
