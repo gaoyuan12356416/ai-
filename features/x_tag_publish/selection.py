@@ -31,10 +31,19 @@ class AuditStore:
 class ProfileSelector(TwoStageSelector):
     def __init__(self, source, metrics, history, store, **kwargs):
         self._profile_context = threading.local()
+        # Claimed selectors wrap the ledger; previews must remain unbound.
+        self._run_store = store.store if hasattr(store, 'claim_token') else store
         # A preview must delegate to the preview store, never the live reservation store.
         super().__init__(source, metrics, history, AuditStore(store, self._profile_context), **kwargs)
 
     def _eligible_dramas(self, request, rows, metrics, rejection_counts):
+        from .hit_drama import MARKER, match_reason
+        get_run = getattr(self._run_store, 'get_run', None)
+        target = get_run(request.run_id).blacklist_snapshot.get(MARKER) if callable(get_run) else None
+        if target:
+            if str(request.account_id) not in target['account_ids']:
+                return []
+            rows = [row for row in rows if row.content_id == target['target']['content_id']]
         candidates = super()._eligible_dramas(request, rows, metrics, rejection_counts)
         bridge = XPostAutoBridgeClient(os.environ['X_POST_AUTOMATION_INTERNAL_URL'],
                                       os.environ['X_POST_AUTO_INTERNAL_TOKEN'])
@@ -42,6 +51,12 @@ class ProfileSelector(TwoStageSelector):
         decision = Decision(account, ['auto', request.template_id, request.template_version, request.run_id, request.task_id])
         context = dict(decision=decision, catalog={}, language=language(request.language), fallback='')
         self._profile_context.value = context
+        if target:
+            from .policy import catalog_labels
+            context['catalog'] = catalog_labels(self.source, candidates)
+            # Exact-drama requests never use ordinary no-profile/rank fallback.
+            return [drama for drama in candidates if not match_reason(decision,
+                context['catalog'].get((drama.content_id, language(drama.language))))]
         return ranked_dramas(self.source, candidates, context)
 
     def _select(self, request, *, reserve):

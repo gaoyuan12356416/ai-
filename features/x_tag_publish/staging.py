@@ -80,6 +80,8 @@ def build(source, repo, target, *, verify=True):
                  '    store = XAutoPostStore(db_path)\n    from features.x_tag_publish.policy import initialize_ids, lane_paths\n    lane_paths()\n    initialize_ids(db_path)\n')
     with service.open('a', encoding='utf-8') as f:
         f.write('\n# This import is installed only in the independent tag runtime.\nfrom features.x_tag_publish.selection import ProfileSelector as TwoStageSelector\n')
+    replace_once(service, '    return XAutoPostService(\n',
+                 '    from features.x_tag_publish.hit_drama import TagAutoPostService\n    return TagAutoPostService(\n')
     # The executor rebuilds a selector around its claim-token store for each
     # task phase. Preserve the configured profile subclass at that boundary;
     # using the base class would silently bypass preferences and audit freezing.
@@ -129,6 +131,8 @@ def build(source, repo, target, *, verify=True):
     p.write_text(value, encoding='utf-8')
     for p in (repo / 'static').glob('x-tag-publish-*'):
         shutil.copy2(p, target / 'static' / p.name)
+    for name in ('hit-drama-publish.js', 'x-tag-auto-publish-templates.js', 'x-tag-auto-publish-templates.html'):
+        shutil.copy2(repo / 'static' / name, target / 'static' / name)
     for p in (repo / 'static').glob('x-tag-post-logs.*'):
         shutil.copy2(p, target / 'static' / p.name)
     for p in (repo / 'static').glob('x-tag-revenue.*'):
