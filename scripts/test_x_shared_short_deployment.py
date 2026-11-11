@@ -20,6 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_health_waits_for_simple_service_to_bind(self):
+        ready = mock.MagicMock()
+        ready.__enter__.return_value.status = 200
+        with mock.patch.object(deployment.urllib.request, 'urlopen', side_effect=[OSError('not bound yet'), ready]) as request, \
+                mock.patch.object(deployment.time, 'sleep'):
+            deployment.health(8821)
+        self.assertEqual(request.call_count, 2)
+
     def test_start_readiness_runs_after_temporary_gate_is_removed(self):
         commands = []
         def run(*args, **kwargs):

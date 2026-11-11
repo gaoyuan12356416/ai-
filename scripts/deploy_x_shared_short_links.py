@@ -168,8 +168,16 @@ def unit_state(unit):
 
 
 def health(port):
-    with urllib.request.urlopen('http://127.0.0.1:%d/health' % port, timeout=5) as r:
-        assert r.status == 200
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:%d/health' % port, timeout=2) as r:
+                assert r.status == 200
+                return
+        except (OSError, AssertionError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.25)
 
 
 def switch_unit(unit, port, callback):
