@@ -2630,16 +2630,18 @@ class XAutoPostStore:
                 cooldown_start = _utc_iso(cooldown_since_utc, "cooldown start")
                 cooldown_hit = conn.execute(
                     """
-                    SELECT 1 FROM x_auto_material_ledger
-                    WHERE template_id=? AND content_id=? AND reserved_at_utc>=?
+                    SELECT 1 FROM x_auto_material_ledger AS ledger
+                    JOIN x_auto_task AS prior_task ON prior_task.id=ledger.task_id
+                    WHERE ledger.template_id=? AND prior_task.account_id=?
+                      AND ledger.content_id=? AND ledger.reserved_at_utc>=?
                     LIMIT 1
                     """,
-                    (int(task["template_id"]), clean_content_id, cooldown_start),
+                    (int(task["template_id"]), str(task["account_id"]), clean_content_id, cooldown_start),
                 ).fetchone()
                 if cooldown_hit is not None:
                     raise XAutoPostStoreError(
                         "x_auto_drama_in_cooldown",
-                        "drama is still in this template's cooldown window",
+                        "drama is still in this template's cooldown window for the target account",
                         409,
                     )
             existing_ledger = conn.execute(
@@ -2986,19 +2988,23 @@ class XAutoPostStore:
             return None
         return _reservation_from_row(row)
 
-    def last_template_drama_reserved_at(self, template_id: Any, content_id: Any) -> Optional[str]:
+    def last_template_drama_reserved_at(
+        self, template_id: Any, content_id: Any, *, account_id: Any
+    ) -> Optional[str]:
         normalized_template_id = _positive_int(template_id, "template id")
         clean_content_id = _bounded_text(content_id, "content id", MAX_IDENTITY_CHARS)
+        clean_account_id = _bounded_text(account_id, "account id", MAX_ACCOUNT_ID_CHARS)
         with self._reader() as conn:
             row = conn.execute(
                 """
-                SELECT reserved_at_utc
-                FROM x_auto_material_ledger
-                WHERE template_id=? AND content_id=?
-                ORDER BY reserved_at_utc DESC
+                SELECT ledger.reserved_at_utc
+                FROM x_auto_material_ledger AS ledger
+                JOIN x_auto_task AS task ON task.id=ledger.task_id
+                WHERE ledger.template_id=? AND task.account_id=? AND ledger.content_id=?
+                ORDER BY ledger.reserved_at_utc DESC
                 LIMIT 1
                 """,
-                (normalized_template_id, clean_content_id),
+                (normalized_template_id, clean_account_id, clean_content_id),
             ).fetchone()
         return None if row is None else str(row["reserved_at_utc"])
 
@@ -3008,12 +3014,13 @@ class XAutoPostStore:
         content_id: Any,
         cooldown_days: Any,
         *,
+        account_id: Any,
         now: Optional[Any] = None,
     ) -> bool:
         days = _nonnegative_int(cooldown_days, "cooldown days")
         if days == 0:
             return False
-        last = self.last_template_drama_reserved_at(template_id, content_id)
+        last = self.last_template_drama_reserved_at(template_id, content_id, account_id=account_id)
         if not last:
             return False
         current = self._now() if now is None else _utc_datetime(now)
@@ -3024,10 +3031,13 @@ class XAutoPostStore:
         template_id: Any,
         content_ids: Sequence[Any],
         since_utc: Any,
+        *,
+        account_id: Any,
     ) -> Set[str]:
-        """Return dramas reserved by this template at or after ``since_utc``."""
+        """Return this template/account's dramas reserved at or after ``since_utc``."""
 
         normalized_template_id = _positive_int(template_id, "template id")
+        clean_account_id = _bounded_text(account_id, "account id", MAX_ACCOUNT_ID_CHARS)
         since = _utc_iso(since_utc, "cooldown start")
         if isinstance(content_ids, (str, bytes)) or not isinstance(content_ids, Sequence):
             raise XAutoPostStoreError("x_auto_content_ids_invalid", "content ids must be a list", 400)
@@ -3046,12 +3056,13 @@ class XAutoPostStore:
                 placeholders = ",".join("?" for _ in batch)
                 rows = conn.execute(
                     """
-                    SELECT DISTINCT content_id
-                    FROM x_auto_material_ledger
-                    WHERE template_id=? AND reserved_at_utc>=?
-                      AND content_id IN (%s)
+                    SELECT DISTINCT ledger.content_id
+                    FROM x_auto_material_ledger AS ledger
+                    JOIN x_auto_task AS task ON task.id=ledger.task_id
+                    WHERE ledger.template_id=? AND task.account_id=? AND ledger.reserved_at_utc>=?
+                      AND ledger.content_id IN (%s)
                     """ % placeholders,
-                    (normalized_template_id, since, *batch),
+                    (normalized_template_id, clean_account_id, since, *batch),
                 ).fetchall()
                 result.update(str(row["content_id"]) for row in rows)
         return result

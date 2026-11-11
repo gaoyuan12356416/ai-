@@ -208,8 +208,8 @@ class FakeStore:
     def reserved_material_ids(self, material_ids):
         return set(material_ids).intersection(self.reserved)
 
-    def cooldown_content_ids(self, *, template_id, content_ids, since_utc):
-        return set(content_ids).intersection(self.cooldown)
+    def cooldown_content_ids(self, *, template_id, account_id, content_ids, since_utc):
+        return {value for value in content_ids if (account_id, value) in self.cooldown}
 
     def reserve_material(self, **kwargs):
         self.reserve_calls.append(dict(kwargs))
@@ -531,7 +531,7 @@ class TwoStageSelectionTests(unittest.TestCase):
         with self.assertRaises(NoEligibleMaterial):
             selector(blocked_material, FakeMetricStore([])).select_and_reserve(request())
 
-    def test_cooldown_is_template_scoped_and_zero_disables_it(self):
+    def test_cooldown_is_target_account_scoped_and_zero_disables_it(self):
         source = FakeSource(
             [drama("C1"), drama("C2")],
             {
@@ -540,14 +540,19 @@ class TwoStageSelectionTests(unittest.TestCase):
             },
         )
         store = FakeStore()
-        store.cooldown.add("C1")
+        store.cooldown.add(("101", "C1"))
         selected = selector(source, FakeMetricStore([]), store=store).select_and_reserve(
             request(rules(drama={"cooldown_days": 7}))
         )
         self.assertEqual(selected.drama.content_id, "C2")
 
+        other_account = selector(source, FakeMetricStore([]), store=store).select_and_reserve(
+            request(rules(drama={"cooldown_days": 7}), account_id="102")
+        )
+        self.assertEqual(other_account.drama.content_id, "C1")
+
         fresh_store = FakeStore()
-        fresh_store.cooldown.add("C1")
+        fresh_store.cooldown.add(("101", "C1"))
         selected = selector(
             source,
             FakeMetricStore([]),

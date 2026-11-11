@@ -7,6 +7,7 @@ import contextlib
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -416,7 +417,7 @@ class AutoPostStoreTests(unittest.TestCase):
             "x_auto_material_reservation_permanent",
         )
 
-    def test_drama_cooldown_is_template_scoped_and_binary_exact(self):
+    def test_drama_cooldown_is_template_account_scoped_and_binary_exact(self):
         first_template = self.create_template("First")
         second_template = self.create_template("Second")
         task = self.create_task(self.create_run(first_template, "cooldown:first"))
@@ -431,6 +432,7 @@ class AutoPostStoreTests(unittest.TestCase):
                 first_template.id,
                 ["CaseSensitive", "casesensitive", "Other"],
                 "2026-08-04T00:00:00+00:00",
+                account_id="640",
             ),
             {"CaseSensitive"},
         )
@@ -439,6 +441,7 @@ class AutoPostStoreTests(unittest.TestCase):
                 second_template.id,
                 ["CaseSensitive"],
                 "2026-08-04T00:00:00+00:00",
+                account_id="640",
             ),
             set(),
         )
@@ -447,6 +450,7 @@ class AutoPostStoreTests(unittest.TestCase):
                 first_template.id,
                 "CaseSensitive",
                 1,
+                account_id="640",
                 now="2026-08-05T12:00:00+00:00",
             )
         )
@@ -455,8 +459,65 @@ class AutoPostStoreTests(unittest.TestCase):
                 first_template.id,
                 "CaseSensitive",
                 0,
+                account_id="640",
             )
         )
+        self.assertEqual(
+            self.store.cooldown_content_ids(
+                first_template.id, ["CaseSensitive"], "2026-08-04T00:00:00+00:00",
+                account_id="641",
+            ),
+            set(),
+        )
+        self.assertFalse(self.store.template_drama_in_cooldown(
+            first_template.id, "CaseSensitive", 1, account_id="641",
+            now="2026-08-05T12:00:00+00:00",
+        ))
+        self.assertEqual(self.store.cooldown_content_ids(
+            first_template.id, ["CaseSensitive"], "2026-08-05T00:00:01+00:00",
+            account_id="640",
+        ), set())
+
+    def test_other_account_can_reserve_same_drama_but_not_same_material(self):
+        template = self.create_template()
+        run = self.create_run(template, "account-cooldown")
+        first = self.create_task(run, "640")
+        second = self.create_task(run, "641")
+        third = self.create_task(run, "642")
+        since = "2026-08-04T00:00:00+00:00"
+        self.store.reserve_material(first.id, material_id="m-a", content_id="drama-a", cooldown_since_utc=since)
+        reservation = self.store.reserve_material(
+            second.id, material_id="m-b", content_id="drama-a", cooldown_since_utc=since,
+        )
+        self.assertEqual(self.store.get_task(reservation.task_id).account_id, "641")
+        with self.assertRaises(XAutoPostStoreError) as reused:
+            self.store.reserve_material(third.id, material_id="m-a", content_id="drama-a", cooldown_since_utc=since)
+        self.assertEqual(reused.exception.code, "x_auto_material_already_reserved")
+
+    def test_concurrent_same_account_reservations_allow_only_one_drama(self):
+        template = self.create_template()
+        tasks = [self.create_task(self.create_run(template, "race:" + str(i)), "640") for i in range(2)]
+        barrier = threading.Barrier(2)
+        results = []
+
+        def reserve(task):
+            barrier.wait(timeout=5)
+            try:
+                self.store.reserve_material(
+                    task.id, material_id="m-" + str(task.id), content_id="same-drama",
+                    cooldown_since_utc="2026-08-04T00:00:00+00:00",
+                )
+                results.append("reserved")
+            except XAutoPostStoreError as error:
+                results.append(error.code)
+
+        threads = [threading.Thread(target=reserve, args=(task,)) for task in tasks]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+        self.assertCountEqual(results, ["reserved", "x_auto_drama_in_cooldown"])
 
     def test_reservation_queries_claim_fence_and_transactional_cooldown(self):
         template = self.create_template()
@@ -473,7 +534,7 @@ class AutoPostStoreTests(unittest.TestCase):
             expected_statuses={"reserved"},
         )
 
-        second_task = self.create_task(self.create_run(template, "reserve-contract:second"), "641")
+        second_task = self.create_task(self.create_run(template, "reserve-contract:second"), "640")
         claim = self.store.claim_next_executable_task(
             worker_id="selector-contract",
             lease_seconds=60,
