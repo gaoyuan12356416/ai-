@@ -46,6 +46,7 @@ def build(source, repo, target, *, verify=True):
         shutil.copytree(repo / 'features' / module, target / 'features' / module,
                         dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     (target / 'features/__init__.py').touch()
+    shutil.copy2(repo / 'features/hit_drama_target.py', target / 'features/hit_drama_target.py')
     # Fixed loopback address validation stays strict, with a new fixed address.
     for name in ('features/x_auto_posts/x_sidecar.py', 'features/x_auto_posts/service.py',
                  'scripts/x_auto_post_runner.py', 'scripts/x_post_daily_runner.py',

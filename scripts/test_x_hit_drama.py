@@ -67,14 +67,33 @@ class HitDramaTests(unittest.TestCase):
         self.assertTrue(match_reason(decision,dict(audience='female',themes=['revenge'])))
         self.assertTrue(match_reason(decision,dict(audience='male',themes=['sweet_romance'])))
 
-    def test_resource_mapping_is_product_scoped_and_ambiguous_rejected(self):
+    def test_resource_mapping_is_product_scoped_and_multilingual(self):
         source=SimpleNamespace(schema='ads',app_id=1479)
         calls=[]
-        source._stream_select=lambda sql,args:(calls.append((sql,args)) or ([{'content_id':'123'}] if 'resource' in sql else [{'content_id':'123','language':'en'}]))
-        self.assertEqual(resolve(source,dict(id_type='resource_id',drama_id='456'))['content_id'],'123')
-        self.assertIn('app_id=%s',calls[0][0]);self.assertEqual(calls[0][1],('456',1479))
-        source._stream_select=lambda *_:[{'content_id':'123'},{'content_id':'124'}]
-        with self.assertRaises(Exception):resolve(source,dict(id_type='resource_id',drama_id='456'))
+        source._stream_select=lambda sql,args:(calls.append((sql,args)) or [{'content_id':'enAbc','language':'en'},{'content_id':'idXyz','language':'id'}])
+        target=resolve(source,dict(id_type='resource_id',drama_id='456'))
+        self.assertEqual(target['content_ids'],['enAbc','idXyz'])
+        self.assertIn('app_id=%s',calls[0][0]);self.assertEqual(calls[0][1],(1479,'456','456'))
+
+    def test_resource_freezes_matching_content_scope_for_each_channel(self):
+        self.service.account_bridge.accounts_by_id['102']['drama_language']='id'
+        target=dict(version=2,content_id='',content_ids=['enA','idB','idBad'],languages=['en','id'],by_language={'en':['enA'],'id':['idB','idBad']})
+        catalog={('enA','en'):dict(audience='female',themes=['sweet_romance']),('idB','id'):dict(audience='male',themes=['revenge']),('idBad','id'):dict(audience='female',themes=['sweet_romance'])}
+        with patch('features.x_tag_publish.hit_drama.resolve',return_value=target),patch('features.x_tag_publish.hit_drama.catalog_labels',return_value=catalog),patch('features.x_tag_publish.hit_drama.portrait_snapshot',return_value=snapshot()):
+            result=self.service.run_now(self.template['id'],dict(self.payload,id_type='resource_id',drama_id='30911'))
+        frozen=self.store.get_run(result['run_id']).blacklist_snapshot[MARKER]
+        self.assertEqual(frozen['account_content_ids'],{'101':['enA'],'102':['idB']})
+        self.assertEqual(result['matched_channels'],2)
+
+    def test_claimed_multilingual_target_excludes_other_language_versions(self):
+        source=fixture.FakeSource([fixture.drama('C1'),fixture.drama('C2')],{'C1':[fixture.material('101','C1')],'C2':[fixture.material('201','C2')]})
+        store=fixture.FakeStore();store.get_run=lambda _:SimpleNamespace(blacklist_snapshot={MARKER:dict(account_ids=['101'],account_content_ids={'101':['C1']},target=dict(version=2,by_language={'en':['C1'],'id':['C2']},content_ids=['C1','C2']))})
+        selector=ProfileSelector(source,fixture.MetricWindowRepository(fixture.FakeMetricStore()),fixture.FakePublishedHistory(),store,material_validator=fixture.FakeValidator())
+        executor=object.__new__(AutoPostExecutor);executor.store=store;executor.selector=selector
+        with patch.dict(os.environ,X_POST_AUTOMATION_INTERNAL_URL='http://127.0.0.1:8821',X_POST_AUTO_INTERNAL_TOKEN='a'*48),patch('features.x_tag_publish.selection.XPostAutoBridgeClient') as bridge,patch('features.x_tag_publish.policy.portrait_snapshot',return_value=snapshot()),patch('features.x_tag_publish.policy.catalog_labels',return_value={('C1','en'):dict(audience='female',themes=['sweet_romance'])}):
+            bridge.return_value.account_snapshot.return_value=dict(id=101,x_user_id='x-101',drama_language='en')
+            selected=executor._phase_selector('claim').select_and_reserve(fixture.request())
+        self.assertEqual(selected.drama.content_id,'C1');self.assertEqual(source.material_calls,[('C1','en')])
 
 
 if __name__=='__main__':unittest.main()

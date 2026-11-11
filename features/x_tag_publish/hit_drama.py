@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from features.x_auto_posts.service import XAutoPostService, AutoPostServiceError, _actor, _blacklist_dict
 from features.x_auto_posts.repositories import BEIJING_TZ
 from .policy import Decision, catalog_labels, language, portrait_snapshot
+from features.hit_drama_target import identifier, resolve_target, content_ids
 
 MARKER = 'hit_drama_publish'
 
@@ -13,28 +14,22 @@ MARKER = 'hit_drama_publish'
 def normalize(payload):
     if set(payload) != {'expected_version', 'drama_id', 'id_type', 'idempotency_key', 'confirmed'} or payload.get('confirmed') is not True:
         raise AutoPostServiceError('invalid_request', '爆款剧发布请求无效', 400)
-    if payload['id_type'] not in ('content_id', 'resource_id') or not re.fullmatch(r'[1-9][0-9]{0,30}', str(payload['drama_id'])):
-        raise AutoPostServiceError('invalid_request', '请输入一个有效的剧 ID 或资源 ID', 400)
+    try:
+        value = identifier(payload['id_type'], payload['drama_id'])
+    except ValueError as exc:
+        raise AutoPostServiceError('invalid_request', str(exc), 400) from None
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,70}', str(payload['idempotency_key'])):
         raise AutoPostServiceError('invalid_request', '操作标识无效', 400)
     if isinstance(payload['expected_version'], bool) or not re.fullmatch(r'[1-9][0-9]{0,8}', str(payload['expected_version'])):
         raise AutoPostServiceError('invalid_request', '模板版本无效', 400)
-    return dict(payload, drama_id=str(payload['drama_id']), expected_version=int(payload['expected_version']))
+    return dict(payload, drama_id=value, expected_version=int(payload['expected_version']))
 
 
 def resolve(source, request):
-    if request['id_type'] == 'resource_id':
-        rows = list(source._stream_select(f'SELECT DISTINCT content_id FROM `{source.schema}`.ads_drama_resource WHERE id=%s AND app_id=%s LIMIT 2', (request['drama_id'], source.app_id)))
-        ids = {str(r['content_id']).strip() for r in rows if r.get('content_id')}
-        if len(ids) != 1:
-            raise AutoPostServiceError('hit_drama_not_found', '资源 ID 未关联到目标产品下的唯一剧目', 409)
-        content_id = ids.pop()
-    else:
-        content_id = request['drama_id']
-    rows = list(source._stream_select(f'SELECT DISTINCT content_id,language FROM `{source.schema}`.ads_drama_info WHERE app_id=%s AND content_id=%s LIMIT 100', (source.app_id, content_id)))
-    if not rows or len(rows) == 100:
-        raise AutoPostServiceError('hit_drama_not_found', '未找到目标产品下的唯一剧目资料', 409)
-    return {'content_id': content_id, 'languages': sorted({language(r['language']) for r in rows if r.get('language')})}
+    try:
+        return resolve_target(source._stream_select, source.schema, source.app_id, request)
+    except ValueError as exc:
+        raise AutoPostServiceError('hit_drama_not_found', str(exc), 409) from None
 
 
 def match_reason(decision, metadata):
@@ -75,7 +70,7 @@ class TagAutoPostService(XAutoPostService):
                 if template.version != request['expected_version']:
                     raise AutoPostServiceError('x_auto_template_version_conflict', '模板版本已变化，请刷新后重试', 409)
                 target = resolve(self.selector.source, request)
-                catalog = catalog_labels(self.selector.source, [SimpleNamespace(content_id=target['content_id'])])
+                catalog = catalog_labels(self.selector.source, [SimpleNamespace(content_id=cid) for cid in content_ids(target)])
                 accounts, skipped = [], []
                 for account_id in template.config.get('account_ids', []):
                     try:
@@ -86,21 +81,23 @@ class TagAutoPostService(XAutoPostService):
                     except Exception:
                         skipped.append(dict(account_id=account_id, reason='account_not_publishable'))
                 snapshot = portrait_snapshot([a.get('x_user_id') for a in accounts])
-                matched, audits = [], {}
+                matched, audits, account_targets = [], {}, {}
                 for account in accounts:
                     account_id = str(account['id'])
                     lang = self._account_language(account)
                     decision = Decision(account, ['hit-drama', key], snapshot)
-                    metadata = catalog.get((target['content_id'], language(lang)))
-                    reason = 'language_not_matched' if lang not in target['languages'] else match_reason(decision, metadata)
+                    ids = content_ids(target, lang)
+                    eligible = [cid for cid in ids if not match_reason(decision, catalog.get((cid, language(lang))))]
+                    reason = '' if eligible else ('language_not_matched' if not ids else match_reason(decision, catalog.get((ids[0], language(lang)))))
                     if reason:
                         skipped.append(dict(account_id=account_id, reason=reason))
                     else:
                         matched.append(account_id)
-                        audits[account_id] = decision.audit(metadata)
+                        account_targets[account_id] = eligible
+                        audits[account_id] = decision.audit(catalog[(eligible[0], language(lang))])
                 if not matched:
                     raise AutoPostServiceError('hit_drama_no_matching_channel', '没有语言、受众和题材画像均匹配的可发布频道，未创建任务', 409)
-                frozen = dict(request=request, target=target, account_ids=matched, skipped=skipped, profiles=audits)
+                frozen = dict(request=request, target=target, account_ids=matched, account_content_ids=account_targets, skipped=skipped, profiles=audits)
                 now = self._now()
                 run = self.store.create_run(run_key=key, template_id=template.id, template_version=template.version,
                     trigger_type='manual', scheduled_at_utc=now, shanghai_date=now.astimezone(BEIJING_TZ).date().isoformat(),
@@ -110,4 +107,5 @@ class TagAutoPostService(XAutoPostService):
                 created = True
         self._kick()
         return dict(ok=True, run_id=run.id, created=created, idempotent=not created,
-                    matched_channels=len(frozen['account_ids']), skipped_channels=frozen['skipped'], content_id=frozen['target']['content_id'])
+                    matched_channels=len(frozen['account_ids']), skipped_channels=frozen['skipped'], content_id=frozen['target'].get('content_id',''),
+                    content_ids=content_ids(frozen['target']), languages=frozen['target'].get('languages',[]))

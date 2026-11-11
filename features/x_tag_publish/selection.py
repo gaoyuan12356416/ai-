@@ -43,7 +43,11 @@ class ProfileSelector(TwoStageSelector):
         if target:
             if str(request.account_id) not in target['account_ids']:
                 return []
-            rows = [row for row in rows if row.content_id == target['target']['content_id']]
+            from features.hit_drama_target import content_ids
+            allowed = set(content_ids(target['target'], request.language))
+            if 'account_content_ids' in target:
+                allowed.intersection_update(target['account_content_ids'].get(str(request.account_id), []))
+            rows = [row for row in rows if row.content_id in allowed]
         candidates = super()._eligible_dramas(request, rows, metrics, rejection_counts)
         bridge = XPostAutoBridgeClient(os.environ['X_POST_AUTOMATION_INTERNAL_URL'],
                                       os.environ['X_POST_AUTO_INTERNAL_TOKEN'])
