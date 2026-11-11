@@ -3,6 +3,12 @@ import re
 from features.x_accounts.language import canonical_drama_language
 
 
+def target_language(value):
+    """Match the catalog's pt and account/portrait pt-br without rewriting either."""
+    value = canonical_drama_language(value, default='')
+    return 'pt-br' if value == 'pt' else value
+
+
 def identifier(id_type, value):
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise ValueError('请输入一个有效的剧 ID 或资源 ID')
@@ -34,7 +40,7 @@ def resolve_target(query, schema, app_id, request):
         if not resource and content_id != value:
             continue
         try:
-            lang = canonical_drama_language(row.get('language'), default='')
+            lang = target_language(row.get('language'))
         except ValueError:
             continue
         by_language.setdefault(lang, set()).add(content_id)
@@ -50,7 +56,11 @@ def resolve_target(query, schema, app_id, request):
 def content_ids(target, language=None):
     """Read both new multilingual targets and already-frozen version-one runs."""
     if 'by_language' in target and language is not None:
-        return list(target['by_language'].get(canonical_drama_language(language, default=''), []))
-    if language is not None and target.get('languages') and language not in target['languages']:
+        # Older frozen runs can still have pt keys. Canonicalize at lookup too,
+        # and never infer equivalence with pt-pt or other regional variants.
+        wanted = target_language(language)
+        return sorted({cid for key, ids in target['by_language'].items()
+                       if target_language(key) == wanted for cid in ids})
+    if language is not None and target.get('languages') and target_language(language) not in {target_language(v) for v in target['languages']}:
         return []
     return list(target.get('content_ids') or ([target['content_id']] if target.get('content_id') else []))

@@ -69,6 +69,23 @@ class TaxonomyTests(unittest.TestCase):
         result=classify('Revenge,复仇,Counterattack,逆袭,Sweet,Romance')
         self.assertEqual(set(result['themes']),{'revenge','sweet_romance'})
 
+    def test_dominance_is_a_theme_not_a_gender_signal(self):
+        for raw in ('Female Growth,Boss Lady,Overpowered Dominance,Humiliation',
+                    '女性成長,強勢女主角,爽(持續碾壓/高手下山)',
+                    'Strong Woman,Overpowered Dominance'):
+            actual=classify(raw)
+            self.assertEqual((actual['audience'],actual['audience_basis']),('female','inferred'))
+            self.assertIn('revenge',actual['themes'])
+        self.assertEqual(classify('Overpowered Dominance')['audience'],UNKNOWN)
+        self.assertEqual(classify('War God,Overpowered Dominance')['audience'],'male')
+        self.assertEqual(classify('Male,Female,Overpowered Dominance')['audience_basis'],'conflict')
+
+    def test_fixed_classification_rebuilds_profile_without_changing_income(self):
+        result=portrait([(1,'Female Growth,Overpowered Dominance',101)])['accounts']['channel']
+        self.assertEqual(result['audiences'][0]['key'],'female')
+        self.assertEqual(result['revenue_cents'],101)
+        self.assertEqual(sum(n['revenue_cents'] for n in result['audiences'][0]['children']),101)
+
 
 class IncomeTests(unittest.TestCase):
     def test_migration_merges_type_branches_from_unique_drama_facts(self):

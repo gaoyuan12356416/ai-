@@ -31,5 +31,17 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(content_ids({'content_id':'old'}),['old'])
         self.assertEqual(content_ids({'content_id':'old','languages':['en']},'id'),[])
 
+    def test_portuguese_aliases_share_scope_without_other_regions(self):
+        target=resolve_target(lambda *a:[{'content_id':'a','language':'pt'},
+            {'content_id':'a','language':'pt-BR'},{'content_id':'b','language':'pt-PT'}],
+            'ads',1479,dict(id_type='resource_id',drama_id='123'))
+        self.assertEqual(target['by_language'],{'pt-br':['a'],'pt-pt':['b']})
+        for language in ('pt','pt-BR','pt_br'):
+            self.assertEqual(content_ids(target,language),['a'])
+            self.assertEqual(content_ids({'by_language':{'pt':['a']}},language),['a'])
+            self.assertEqual(content_ids({'content_id':'a','languages':['pt']},language),['a'])
+        self.assertEqual(content_ids(target,'es'),[])
+        self.assertEqual(content_ids(target,'pt-PT'),['b'])
+
 
 if __name__=='__main__':unittest.main()

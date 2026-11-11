@@ -11,6 +11,7 @@ from features.x_tag_publish.hit_drama import TagAutoPostService, match_reason, n
 from features.x_tag_publish.policy import Decision
 from features.x_tag_revenue.tags import VERSION as TAG_VERSION
 from features.x_tag_revenue.hierarchy import VERSION as HIERARCHY_VERSION
+from features.x_tag_revenue.taxonomy import classify
 from scripts.test_x_auto_post_service import FakeBridge, FakeSelector, FakeExecutor, Clock
 from scripts.test_x_auto_post_validation import valid_payload
 from scripts import test_x_auto_post_selector as fixture
@@ -94,6 +95,26 @@ class HitDramaTests(unittest.TestCase):
             bridge.return_value.account_snapshot.return_value=dict(id=101,x_user_id='x-101',drama_language='en')
             selected=executor._phase_selector('claim').select_and_reserve(fixture.request())
         self.assertEqual(selected.drama.content_id,'C1');self.assertEqual(source.material_calls,[('C1','en')])
+
+    def test_female_dominance_resource_admits_only_matching_portuguese_channel(self):
+        for account in self.service.account_bridge.accounts_by_id.values():account['drama_language']='pt-br'
+        source=SimpleNamespace(schema='ads',app_id=1479,_stream_select=lambda *a:[dict(content_id='C1',language='pt')])
+        target=resolve(source,dict(id_type='resource_id',drama_id='123'))
+        catalog={('C1','pt-br'):classify('Female Growth,Overpowered Dominance,Sweet')}
+        with patch('features.x_tag_publish.hit_drama.resolve',return_value=target),patch('features.x_tag_publish.hit_drama.catalog_labels',return_value=catalog),patch('features.x_tag_publish.hit_drama.portrait_snapshot',return_value=snapshot()):
+            result=self.service.run_now(self.template['id'],dict(self.payload,id_type='resource_id'))
+        self.assertEqual(result['matched_channels'],1)
+        frozen=self.store.get_run(result['run_id']).blacklist_snapshot[MARKER]
+        self.assertEqual(frozen['account_content_ids'],{'101':['C1']})
+        source=fixture.FakeSource([fixture.drama('C1',language='pt')],{'C1':[fixture.material('101','C1',language='pt')]})
+        store=fixture.FakeStore();store.get_run=lambda _:SimpleNamespace(blacklist_snapshot={MARKER:frozen})
+        selector=ProfileSelector(source,fixture.MetricWindowRepository(fixture.FakeMetricStore()),fixture.FakePublishedHistory(),store,material_validator=fixture.FakeValidator(overrides={'material_language':'pt'}))
+        executor=object.__new__(AutoPostExecutor);executor.store=store;executor.selector=selector
+        with patch.dict(os.environ,X_POST_AUTOMATION_INTERNAL_URL='http://127.0.0.1:8821',X_POST_AUTO_INTERNAL_TOKEN='a'*48),patch('features.x_tag_publish.selection.XPostAutoBridgeClient') as bridge,patch('features.x_tag_publish.policy.portrait_snapshot',return_value=snapshot()),patch('features.x_tag_publish.policy.catalog_labels',return_value=catalog):
+            bridge.return_value.account_snapshot.return_value=dict(id=101,x_user_id='x-101',drama_language='pt-br')
+            selected=executor._phase_selector('claim').select_and_reserve(fixture.request(language='pt'))
+        self.assertEqual(selected.drama.content_id,'C1')
+        self.assertEqual(source.material_calls,[('C1','pt')])
 
 
 if __name__=='__main__':unittest.main()

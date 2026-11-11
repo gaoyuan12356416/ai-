@@ -16,13 +16,13 @@ sys.path.insert(0, str(SOURCE))
 from scripts import deploy_hit_drama as release
 
 
-def prepare(platform, folder):
+def prepare(platform, folder, *, base=None, files=None, static=True, tests=None):
     assert release.run('findmnt', '-rn', '-o', 'UUID', '--mountpoint', '/mnt/data-disk') == '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
     commit = release.run('git', '-C', SOURCE, 'rev-parse', 'HEAD')
     assert not release.run('git', '-C', SOURCE, 'status', '--porcelain')
     assert release.run('git', '-C', SOURCE, 'branch', '-r', '--contains', commit), 'pushed_source_required'
-    base = {'x': '277c76b4', 'fb': 'b51461ec'}[platform]
-    files = ['features/hit_drama_target.py'] + (
+    base = base or {'x': '277c76b4', 'fb': 'b51461ec'}[platform]
+    files = files or ['features/hit_drama_target.py'] + (
         ['features/x_tag_publish/hit_drama.py', 'features/x_tag_publish/selection.py'] if platform == 'x' else
         ['features/fb_auto_posts/' + name + '.py' for name in ('hit_drama', 'core', 'repositories')])
     current, _, db = release.settings(platform)
@@ -50,7 +50,7 @@ def prepare(platform, folder):
     prefix = 'x-tag' if platform == 'x' else 'fb'
     asset = (SOURCE / 'static/hit-drama-publish.js').read_bytes()
     version = hashlib.sha256(asset).hexdigest()[:12]
-    for root in (candidate / 'static', release.MAIN, release.WEB):
+    for root in ((candidate / 'static', release.MAIN, release.WEB) if static else ()):
         html = root / (prefix + '-auto-publish-templates.html')
         page, count = re.subn(r'(/hit-drama-publish\.js)(?:\?[^"\']*)?', r'\1?v=' + version, html.read_text())
         assert count == 1, 'shared_asset_reference_changed:' + str(html)
@@ -63,7 +63,7 @@ def prepare(platform, folder):
             shutil.copy2(path, old)
             new.write_bytes(content)
             info['static'][str(path)] = dict(before=release.sha(path), after=hashlib.sha256(content).hexdigest(), backup=str(old), next=str(new))
-    tests = ['test_hit_drama_target', 'test_x_hit_drama' if platform == 'x' else 'test_fb_hit_drama']
+    tests = tests or ['test_hit_drama_target', 'test_x_hit_drama' if platform == 'x' else 'test_fb_hit_drama']
     for name in tests:
         shutil.copy2(SOURCE / 'scripts' / (name + '.py'), candidate / 'scripts' / (name + '.py'))
     proof = subprocess.run([sys.executable, '-B', '-m', 'unittest', *['scripts.' + name for name in tests], '-q'], cwd=candidate, capture_output=True, text=True, timeout=120)

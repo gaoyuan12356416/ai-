@@ -9,6 +9,7 @@ from pathlib import Path
 from .core import build
 from .tags import VERSION as TAG_MAPPING_VERSION
 from .hierarchy import VERSION as HIERARCHY_VERSION
+from .taxonomy import VERSION as TAXONOMY_VERSION
 from .storage import ProfileWriter
 from .serving import publish as publish_serving
 from features.social_analytics.warehouse_reader import current, connect, DEFAULT_ROOT as WAREHOUSE_ROOT
@@ -82,6 +83,7 @@ def refresh(root, warehouse_root, env_path):
                                   label_basis='current_catalog', label_updated_at=now.isoformat(),
                                   missing_dates=missing, source='ai_backend_confirmed_x_publications')
             result['meta'].update(hierarchy_version=HIERARCHY_VERSION,
+                                  audience_taxonomy_version=TAXONOMY_VERSION,
                                   allocation='audience_distinct_broad_themes',
                                   type_source='ads_drama_info.resource_type',audience_source='versioned_label_rules')
             directory = root / 'snapshots'

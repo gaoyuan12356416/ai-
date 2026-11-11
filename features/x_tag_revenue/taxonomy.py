@@ -5,7 +5,7 @@ import json
 from .core import labels, label_index, language
 from .tags import normalized
 
-VERSION = 'x-hierarchy-20261109-v1'
+VERSION = 'x-hierarchy-20261111-v2'
 UNKNOWN = '__unknown__'
 TYPES = {'local': '本土剧', 'translated': '翻译剧', UNKNOWN: '未标注'}
 AUDIENCES = {'female': '女性', 'male': '男性', 'lgbtq': 'LGBTQ+', 'general': '通用', UNKNOWN: '未标注'}
@@ -65,7 +65,9 @@ EXPLICIT_IDS = {'bl': 'lgbtq', 'gl': 'lgbtq', 'gay_for_you': 'lgbtq',
 FEMALE_SIGNALS = set('''sweet sweet_love loving_hubby winning_back_wife love_after_vows
     substitute_bride contract_vows flash_marriage female_growth female_lead strong_woman
     pregnant_runaway hot_daddy xxl_wife'''.split())
-MALE_SIGNALS = set('''war_god super_warrior live_in_son_in_law overpowered_dominance cultivator harem'''.split())
+# Dominance describes a plot, not the audience's gender. It still contributes
+# to the revenge theme, including female-led stories.
+MALE_SIGNALS = set('''war_god super_warrior live_in_son_in_law cultivator harem'''.split())
 GENERAL_SIGNALS = set('''crime crime_investigation mystery thrilling_suspenseful adventurous survival
     extreme_survival confined_survival survival_game disaster apocalypse action medical_drama lawyer
     firefighter workplace inspirational sports_competition heartwarming_healing family_affection'''.split())
