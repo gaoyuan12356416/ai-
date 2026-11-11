@@ -382,7 +382,7 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         "prebuild_days_ahead": int(env.get("FB_AUTO_PREBUILD_DAYS_AHEAD", "1")),
         "max_late_seconds": int(env.get("FB_AUTO_MAX_LATE_SECONDS", "600")),
     }
-    if not 1 <= limits["max_daily_jobs"] <= 100000 or not 1 <= limits["max_publishable_pages"] <= 10000 or not 1 <= limits["max_jobs_per_slot"] <= 1000 or not 1 <= limits["max_enabled_templates"] <= 1000 or not 3600 <= limits["prepare_ahead_seconds"] <= 86400 or not 0 <= limits["prebuild_days_ahead"] <= 7 or not 0 <= limits["max_late_seconds"] <= 86400:
+    if not 1 <= limits["max_daily_jobs"] <= 100000 or not 1 <= limits["max_publishable_pages"] <= 10000 or not 1 <= limits["max_jobs_per_slot"] <= 5000 or not 1 <= limits["max_enabled_templates"] <= 1000 or not 3600 <= limits["prepare_ahead_seconds"] <= 86400 or not 0 <= limits["prebuild_days_ahead"] <= 7 or not 0 <= limits["max_late_seconds"] <= 86400:
         raise ValueError("FB auto capacity configuration invalid")
     runtime = Runtime(store, pages, materials, executor, preparer, token, metric_store=metric_store, prebuild_enabled=prebuild_enabled, **limits)
     from features.fb_video_publish.core import Store as ManualStore
