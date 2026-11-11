@@ -49,6 +49,8 @@ def valid_event(event):
 def build_card(event, mention_id):
     if not re.fullmatch(r"ou_[A-Za-z0-9]+", mention_id):
         raise ValueError("invalid_mention_id")
+    if event.get("event") == "x_material_inventory_daily_v2":
+        return build_daily_card(event, mention_id)
     activation = event.get("event") == "x_material_alert_enabled_v1"
     title = "X 素材池缺素材提醒已启用" if activation else "X 素材池缺素材提醒"
     if activation:
@@ -72,6 +74,31 @@ def build_card(event, mention_id):
     return {"config": {"wide_screen_mode": True},
             "header": {"template": "blue" if activation else "orange", "title": {"tag": "plain_text", "content": title}},
             "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": body}}]}
+
+
+def build_daily_card(event, mention_id):
+    lines = ["**%s · 每日 10:30（北京时间）**" % event["report_date"],
+             "预警阈值：各语言当前每日排期用量 × %d 天；余量 ≤ 阈值时提醒。" % event["threshold_days"], ""]
+    for row in event["languages"]:
+        if not row["alert"]:
+            continue
+        language = row["language"]
+        lines.append("**%s（%s）**：可用余量 **%d 条**，阈值 **%d 条**（每天 %d 条）。" % (
+            LANGUAGES.get(language, language), language, row["remaining"], row["threshold"], row["daily_demand"]))
+        if row["long_remaining"] and not row["premium_daily_demand"]:
+            lines.append("另有 %d 条超过20分钟视频，当前无同语言会员排期承接，未计入可用余量；请优先补充20分钟内视频。" % row["long_remaining"])
+        elif row["short_low"]:
+            lines.append("普通账号可用的20分钟内视频/图片仅 %d 条，低于或等于其两天用量 %d 条，请优先补充。" % (
+                row["short_remaining"], row["standard_threshold"]))
+    lines += ["", "按当前选材范围、来源信息和账号能力快照估算，已排队或被预占的素材不计入。实际发布仍执行原有校验。"]
+    if event.get("pool_total", 0) > event.get("scanned", 0):
+        lines.append("当前选材扫描最新 %d 条；更早素材未计入本次可用余量。" % event["scanned"])
+    if event.get("metadata_rejections"):
+        lines.append("来源信息缺失或校验未通过的 %d 条素材未计入可用余量。" % sum(event["metadata_rejections"].values()))
+    lines += ["提醒独立运行，不暂停或改变现有发布。", '\n<at id="%s"></at> 请及时关注并补充素材。' % mention_id]
+    return {"config": {"wide_screen_mode": True},
+            "header": {"template": "orange", "title": {"tag": "plain_text", "content": "X 素材池每日余量提醒"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}]}
 
 
 class AlertStore(DeliveryStore):
@@ -117,12 +144,20 @@ class AlertStore(DeliveryStore):
         with self.db:
             return self._enqueue("x-material-alert-enabled-v1", {"event": "x_material_alert_enabled_v1"}, config)
 
-    def deliver(self, config, sender=send_card):
+    def enqueue_daily(self, event, config):
+        key = "x-material-inventory-v2/" + event["report_date"]
+        with self.db:
+            if any(row["alert"] for row in event["languages"]):
+                self._enqueue(key, event, config)
+        return key
+
+    def deliver(self, config, sender=send_card, *, only_key=None):
         results = []
+        key_filter = " AND e.event_key=?" if only_key is not None else ""
         rows = self.db.execute("""SELECT e.* FROM alert_event e LEFT JOIN delivery d
             ON d.report_date=e.event_key AND d.chat_id=?
-            WHERE d.status IS NULL OR (d.status='failed' AND d.attempts<3)
-            ORDER BY e.created_at LIMIT 100""", (config["chat_id"],)).fetchall()
+            WHERE (d.status IS NULL OR (d.status='failed' AND d.attempts<3))""" + key_filter +
+            " ORDER BY e.created_at LIMIT 100", (config["chat_id"],) + ((only_key,) if only_key is not None else ())).fetchall()
         for row in rows:
             key = row["event_key"]
             prior = self.get(key, config["chat_id"])

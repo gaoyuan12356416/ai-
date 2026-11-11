@@ -1,10 +1,11 @@
 [Unit]
-Description=Check completed X material selection for language shortages
+Description=Daily X material inventory reminder at 10:30 Beijing
 
 [Timer]
-OnBootSec=30s
-OnUnitInactiveSec=60s
-AccuracySec=5s
+OnCalendar=*-*-* 10:30:00 Asia/Shanghai
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
 Unit=x-material-shortage-alert.service
 
 [Install]

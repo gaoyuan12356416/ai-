@@ -1,5 +1,5 @@
 [Unit]
-Description=X material pool language shortage Feishu alerts
+Description=Daily X material inventory Feishu reminder
 After=network-online.target
 
 [Service]
@@ -7,8 +7,9 @@ Type=oneshot
 User=root
 ExecStart=/usr/bin/python3 /opt/x-material-shortage-alert/current/scripts/x_material_shortage_alert.py --config /etc/x-material-shortage-alert.json --send
 TimeoutStartSec=180
+Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/mnt/data-disk/x-material-shortage-alert
+ReadWritePaths=/mnt/data-disk/x-material-shortage-alert /run/sql-connection-gate /var/lib/sql-connection-gate/session-locks
 PrivateTmp=true
