@@ -266,8 +266,12 @@
   }
 
   async function pageManagement() {
-    let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false;
-    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><select id="pageCreator" aria-label="按创建人筛选" disabled><option value="">全部创建人</option></select><button id="reloadPages" class="button">刷新列表</button></div><p id="pagePortraitNotice" class="helper">画像按近 7 个完整报告日统计，列表就绪后加载当前页摘要。</p><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>近 7 天收入（USD）</th><th>收入画像 / 比例</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
+    let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false,listGeneration=0,sourceController=null;
+    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><select id="pageCreator" aria-label="按创建人筛选" disabled><option value="">全部创建人</option></select><button id="reloadPages" class="button">刷新列表</button></div><p id="pageAuthorizationNotice" class="helper" role="status" hidden></p><p id="pagePortraitNotice" class="helper">画像按近 7 个完整报告日统计，列表就绪后加载当前页摘要。</p><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>近 7 天收入（USD）</th><th>收入画像 / 比例</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
+    function authorizationBadge(p) {
+      if(p.authorization_pending||p.authorization_unknown)return `<span class="badge">${p.authorization_pending?"正在核验":"暂未核验"}</span>`;
+      return `<span class="badge ${p.blocked_reason || !p.eligible_token_count?"bad":"good"}">${p.blocked_reason || !p.eligible_token_count?"不可发布":"授权可用"}</span>${p.blocked_reason?`<p class="helper">${esc(p.blocked_reason)}</p>`:""}`;
+    }
     function render() {
       $("createPage").disabled=!languageReady||!loaded;$("excelPublishButton").disabled=!loaded;
       $("pageSearch").disabled=!loaded;$("pageCreator").disabled=!loaded;$("reloadPages").disabled=loading;
@@ -278,17 +282,42 @@
       }
       const rows=configs.filter(p=>(!creator||p.created_by===creator)&&`${p.page_name} ${p.page_id}`.toLowerCase().includes(query.toLowerCase()));
       page=Math.min(page,Math.max(0,Math.ceil(rows.length/20)-1));
-      $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td>${window.FbPagePortraits?.cells(p.page_id)||'<td>画像组件加载中</td><td>请刷新页面</td>'}<td><span class="badge ${p.blocked_reason || !p.eligible_token_count?"bad":"good"}">${p.blocked_reason || !p.eligible_token_count?"不可发布":"授权可用"}</span>${p.blocked_reason?`<p class="helper">${esc(p.blocked_reason)}</p>`:""}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
+      $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td>${window.FbPagePortraits?.cells(p.page_id)||'<td>画像组件加载中</td><td>请刷新页面</td>'}<td>${authorizationBadge(p)}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
       $("pageTotal").textContent=`共 ${rows.length} 个 Page · 第 ${page+1} 页`;$("pagePrev").disabled=page===0;$("pageNext").disabled=(page+1)*20>=rows.length;
       window.FbPagePortraits?.load(rows.slice(page*20,(page+1)*20).map(p=>p.page_id));
     }
+    function setConfigs(items) {
+      configs=items||[];loaded=true;
+      const creators=[...new Map(configs.map(p=>[p.created_by,p.created_by_name||p.created_by||"未记录"])).entries()].sort((a,b)=>a[1].localeCompare(b[1],"zh-CN"));
+      if(creator&&!creators.some(([id])=>id===creator))creator="";
+      $("pageCreator").innerHTML='<option value="">全部创建人</option>'+creators.map(([id,name])=>`<option value="${esc(id)}">${esc(name)}</option>`).join("");$("pageCreator").value=creator;
+    }
+    async function verifySource(generation) {
+      const controller=new AbortController();sourceController=controller;
+      $("pageAuthorizationNotice").hidden=false;$("pageAuthorizationNotice").textContent="Page 已载入，正在后台核验授权状态…";
+      try {
+        const data=await api("/pages",{signal:controller.signal});
+        if(generation!==listGeneration)return;
+        setConfigs(data.items);$("pageAuthorizationNotice").hidden=true;render();
+      } catch(err) {
+        if(generation!==listGeneration||err.name==="AbortError")return;
+        configs=configs.map(p=>({...p,authorization_pending:false,authorization_unknown:true}));
+        $("pageAuthorizationNotice").textContent="Page 列表已载入，授权状态暂未核验。可刷新重试；发布时会重新核验。";render();
+      } finally { if(sourceController===controller)sourceController=null; }
+    }
     async function load() {
-      if(loading)return;loading=true;render();errorAt("pageError","");
-      try{const data=await api("/pages");configs=data.items || [];loaded=true;
-        const creators=[...new Map(configs.map(p=>[p.created_by,p.created_by_name||p.created_by||"未记录"])).entries()].sort((a,b)=>a[1].localeCompare(b[1],"zh-CN"));
-        if(creator&&!creators.some(([id])=>id===creator))creator="";
-        $("pageCreator").innerHTML='<option value="">全部创建人</option>'+creators.map(([id,name])=>`<option value="${esc(id)}">${esc(name)}</option>`).join("");$("pageCreator").value=creator;}
-      finally{loading=false;render();}
+      if(loading)return;const generation=++listGeneration;sourceController?.abort();sourceController=null;
+      loading=true;render();errorAt("pageError","");$("pageAuthorizationNotice").hidden=true;
+      try {
+        let data;
+        if(auth.user?.is_admin){
+          try{data=await api("/api/fb-page-portraits/pages");}
+          catch(err){if(![403,404,503].includes(err.status))throw err;data=await api("/pages");}
+        }else data=await api("/pages");
+        if(generation!==listGeneration)return;
+        setConfigs(data.items);
+        if(data.authorization_pending)void verifySource(generation);
+      } finally {loading=false;render();}
     }
     async function loadLanguageOptions() {
       $("pageLanguageNotice").hidden=false;$("pageLanguageNotice").textContent="正在加载剧语言选项…";

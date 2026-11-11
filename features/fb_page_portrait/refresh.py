@@ -8,6 +8,7 @@ from .build import build
 from .collect import collect
 from .runtime import atomic_json,encoded
 from .storage import ROOT,write,publish
+from .page_list import refresh_names
 
 
 def main():
@@ -18,6 +19,12 @@ def main():
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         try:
             raw,env,reader=collect(args.env)
+            try:
+                count=refresh_names(reader,raw['page_ids'],root)
+                print(encoded(dict(event='page_names_refreshed',rows=count)),flush=True)
+            except Exception as exc:
+                # A display name refresh must not invalidate financial data.
+                print(encoded(dict(event='page_names_preserved',error=type(exc).__name__)),flush=True)
             data=build(raw)
             atomic_json(root/(data['meta']['version']+'.input.json'),raw)
             proof=write(data,env,reader,create_table=args.create_table)

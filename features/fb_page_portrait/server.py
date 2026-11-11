@@ -12,6 +12,7 @@ import urllib.request
 from urllib.parse import urlsplit,parse_qs
 from .storage import Store,ROOT,VERSION_RE
 from .runtime import encoded
+from .page_list import current_admin,configured_list
 
 PREFIX='/api/fb-page-portraits'
 LIMIT=threading.BoundedSemaphore(8)
@@ -36,11 +37,7 @@ def admin_scope(user,ids,*,config_db='/mnt/data-disk/fb-auto-post-publisher/fb-a
     The current active admin and current tenant configuration are re-read for
     every request. Normal users retain the existing source-owner Page gate.
     """
-    if not user.get('tenant_key') or not user.get('user_id'):return None
-    with closing(sqlite3.connect('file:'+str(user_db)+'?mode=ro',uri=True,timeout=3)) as db:
-        rows=db.execute('SELECT role,status FROM drama_admin_user WHERE tenant_key=? AND user_id=? LIMIT 2',
-                        (user['tenant_key'],user['user_id'])).fetchall()
-    if rows!=[('admin','active')]:return None
+    if not current_admin(user,user_db):return None
     with closing(sqlite3.connect('file:'+str(config_db)+'?mode=ro',uri=True,timeout=3)) as db:
         return {r[0] for r in db.execute('SELECT page_id FROM fb_video_page WHERE tenant_key=? AND deleted=0 AND page_id IN ('+','.join('?' for _ in ids)+')',[user['tenant_key'],*ids])}
 
@@ -60,6 +57,20 @@ def authorize(cookie,ids):
         data=authenticated_get('/api/fb-video-publish/pages',cookie)
         return 200,{str(r['page_id']) for r in data['items']}
     except urllib.error.HTTPError as exc:return exc.code,set()
+
+
+def fast_pages(cookie,root):
+    if not cookie:return 401,{'message':'请先登录'}
+    try:
+        auth=authenticated_get('/api/ui/topbar',cookie)
+        user=auth.get('user') or {}
+        if not auth.get('authenticated'):return 401,{'message':'请先登录'}
+        if user.get('is_admin') is not True:return 403,{'message':'请使用原 Page 列表权限入口'}
+        gate=authenticated_get('/api/fb-video-publish/languages',cookie)
+        if gate.get('ok') is False or not isinstance(gate.get('items'),list):raise ValueError('invalid_navigation_gate')
+        return 200,configured_list(user,root)
+    except PermissionError:return 403,{'message':'当前账号权限已变化，请刷新'}
+    except urllib.error.HTTPError as exc:return exc.code,{'message':'请登录并使用已获授权的 Page 管理'}
 
 
 def select(path,query,allowed,store):
@@ -103,6 +114,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed=urlsplit(self.path)
             query=parse_qs(parsed.query,keep_blank_values=True,max_num_fields=5)
+            if parsed.path==PREFIX+'/pages':
+                if query:raise ValueError('unexpected_page_list_parameter')
+                status,result=fast_pages(self.headers.get('Cookie',''),self.store.root)
+                return self.send(status,result)
             match=re.fullmatch(re.escape(PREFIX)+r'(?:/([1-9][0-9]{0,30})(?:/dramas)?)?',parsed.path)
             if not match:return self.send(404,{'message':'接口不存在'})
             ids=[match[1]] if match[1] else query.get('ids',[''])[0].split(',')
