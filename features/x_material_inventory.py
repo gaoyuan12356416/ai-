@@ -56,19 +56,18 @@ def prefetch(env, pool):
         raise ValueError("invalid_source_schema")
     materials, dramas, deploy = {}, defaultdict(list), defaultdict(list)
     ids = list(dict.fromkeys(str(int(p["material_id"])) for p in pool))
-    for start in range(0, len(ids), 200):
+    for start in range(0, len(ids), 500):
         rows = mysql_rows(env, """SELECT JSON_OBJECT(
           'material_id',CAST(id AS CHAR),'product',product,'material_type',type,
           'material_is_deleted',is_delete,'material_url',url,'material_name',name,
           'material_language',language,'content_id',data_source_id,
           'source_tag_name',tag_name,'video_duration',video_duration)
-          FROM `%s`.ads_custom_source WHERE id IN (%s);""" % (schema, ",".join(ids[start:start + 200])))
+          FROM `%s`.ads_custom_source WHERE id IN (%s);""" % (schema, ",".join(ids[start:start + 500])))
         materials.update((str(r["material_id"]), r) for r in rows)
     content_ids = sorted({str(r["content_id"]) for r in materials.values() if r.get("content_id")})
-    for start in range(0, len(content_ids), 200):
+    for start in range(0, len(content_ids), 500):
         # Hex literals keep opaque content IDs out of SQL syntax.
-        keys = ",".join("CONVERT(0x%s USING utf8mb4)" % value.encode().hex()
-                        for value in content_ids[start:start + 200])
+        keys = ",".join("0x" + value.encode().hex() for value in content_ids[start:start + 500])
         rows = mysql_rows(env, """SELECT JSON_OBJECT(
           'content_id',content_id,'series_code',series_code,'language',language,
           'drama_name',name,'drama_labels',labels,'drama_description',`desc`)
