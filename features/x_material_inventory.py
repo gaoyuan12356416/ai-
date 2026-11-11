@@ -43,7 +43,8 @@ def mysql_rows(env, sql):
     ], input="SET SESSION TRANSACTION READ ONLY; SET SESSION MAX_EXECUTION_TIME=15000;\n"
              "SELECT @@read_only;\n" + sql, text=True, capture_output=True, env=child_env, timeout=45)
     if result.returncode:
-        raise RuntimeError("inventory_source_query_failed")
+        error = re.search(r"ERROR (\d+)", result.stderr or "")
+        raise RuntimeError("inventory_source_query_failed_" + (error.group(1) if error else "transport"))
     lines = result.stdout.splitlines()
     if not lines or lines.pop(0).strip() != "1":
         raise RuntimeError("inventory_source_not_read_only")

@@ -73,9 +73,9 @@ def main():
                     print(json.dumps({"status": "already_handled", "delivery_status": prior["status"]}))
                     return
                 report = daily_report(config)
-                # A slow source read must not send a late or previous-day report.
+                # The timer starts at 10:30; bounded source reads can finish later.
                 completed = datetime.now(timezone(timedelta(hours=8)))
-                if completed.date() != now.date() or (completed.hour, completed.minute) != (10, 30):
+                if completed.date() != now.date():
                     print(json.dumps({"status": "daily_window_elapsed"}))
                     return
                 key = store.enqueue_daily(report, config)
@@ -98,5 +98,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(json.dumps({"status": "failed", "error": type(exc).__name__}), file=sys.stderr)
+        detail = str(exc) if str(exc).startswith("inventory_") else type(exc).__name__
+        print(json.dumps({"status": "failed", "error": detail}), file=sys.stderr)
         sys.exit(1)

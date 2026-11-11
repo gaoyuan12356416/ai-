@@ -68,11 +68,15 @@ def install(source):
     backup.mkdir(parents=True)
     backup.chmod(0o700)
     release = BASE / "releases" / (commit + "-daily")
-    release.mkdir()
+    release.mkdir(exist_ok=True)
     for name in FILES:
         target = release / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / name, target)
+        if target.exists():
+            if target.read_bytes() != (source / name).read_bytes():
+                raise RuntimeError("staged_release_content_changed")
+        else:
+            shutil.copy2(source / name, target)
     manifest = {"commit": commit, "backup": str(backup), "release": str(release),
                 "previous_alert": str(CURRENT.resolve()), "publisher_before": publishers(),
                 "publisher_runtime": str(Path("/opt/x-post-automation/current").resolve()),
