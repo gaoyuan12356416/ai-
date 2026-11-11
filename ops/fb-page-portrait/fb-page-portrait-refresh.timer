@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly managed Page income refresh
+
+[Timer]
+OnCalendar=*-*-* *:25:00
+RandomizedDelaySec=120
+Persistent=false
+Unit=fb-page-portrait-refresh.service
+
+[Install]
+WantedBy=timers.target

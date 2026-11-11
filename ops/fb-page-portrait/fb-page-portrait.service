@@ -1,0 +1,19 @@
+[Unit]
+Description=Facebook Page income portrait read service
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/fb-page-portraits/current
+ExecStart=/usr/bin/python3 -m features.fb_page_portrait.server
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+MemoryMax=256M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

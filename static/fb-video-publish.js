@@ -67,6 +67,7 @@
   async function loadLanguages() {
     const result=await api("/languages");
     for(const item of result.items || []) languages.set(String(item.value),item.label);
+    for(const [value,label] of [["ro","罗马尼亚语"],["el","希腊语"],["cs","捷克语"],["sv","瑞典语"]]) if(!languages.has(value))languages.set(value,label);
   }
 
   async function materialPickerDialog(initial, apply, options={}) {
@@ -265,24 +266,28 @@
   }
 
   async function pageManagement() {
-    let configs=[],page=0,query="",loading=false,loaded=false,languageReady=false;
-    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><button id="reloadPages" class="button">刷新列表</button></div><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
+    let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false;
+    $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><select id="pageCreator" aria-label="按创建人筛选" disabled><option value="">全部创建人</option></select><button id="reloadPages" class="button">刷新列表</button></div><p id="pagePortraitNotice" class="helper">画像按近 7 个完整报告日统计，列表就绪后加载当前页摘要。</p><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>近 7 天收入（USD）</th><th>收入画像 / 比例</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
     function render() {
       $("createPage").disabled=!languageReady||!loaded;$("excelPublishButton").disabled=!loaded;
-      $("pageSearch").disabled=!loaded;$("reloadPages").disabled=loading;
+      $("pageSearch").disabled=!loaded;$("pageCreator").disabled=!loaded;$("reloadPages").disabled=loading;
       $("pageRows").setAttribute("aria-busy",String(loading));
       if(!loaded){
-        $("pageRows").innerHTML=`<tr><td colspan="7" class="empty">${loading?"正在加载 Page 列表…":"Page 列表加载失败，请点击“刷新列表”重试。"}</td></tr>`;
+        $("pageRows").innerHTML=`<tr><td colspan="9" class="empty">${loading?"正在加载 Page 列表…":"Page 列表加载失败，请点击“刷新列表”重试。"}</td></tr>`;
         $("pageTotal").textContent="";$("pagePrev").disabled=true;$("pageNext").disabled=true;return;
       }
-      const rows=configs.filter(p=>`${p.page_name} ${p.page_id}`.toLowerCase().includes(query.toLowerCase()));
+      const rows=configs.filter(p=>(!creator||p.created_by===creator)&&`${p.page_name} ${p.page_id}`.toLowerCase().includes(query.toLowerCase()));
       page=Math.min(page,Math.max(0,Math.ceil(rows.length/20)-1));
-      $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td><td><span class="badge ${p.blocked_reason || !p.eligible_token_count?"bad":"good"}">${p.blocked_reason || !p.eligible_token_count?"不可发布":"授权可用"}</span>${p.blocked_reason?`<p class="helper">${esc(p.blocked_reason)}</p>`:""}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="7" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
+      $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td>${window.FbPagePortraits?.cells(p.page_id)||'<td>画像组件加载中</td><td>请刷新页面</td>'}<td><span class="badge ${p.blocked_reason || !p.eligible_token_count?"bad":"good"}">${p.blocked_reason || !p.eligible_token_count?"不可发布":"授权可用"}</span>${p.blocked_reason?`<p class="helper">${esc(p.blocked_reason)}</p>`:""}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
       $("pageTotal").textContent=`共 ${rows.length} 个 Page · 第 ${page+1} 页`;$("pagePrev").disabled=page===0;$("pageNext").disabled=(page+1)*20>=rows.length;
+      window.FbPagePortraits?.load(rows.slice(page*20,(page+1)*20).map(p=>p.page_id));
     }
     async function load() {
       if(loading)return;loading=true;render();errorAt("pageError","");
-      try{const data=await api("/pages");configs=data.items || [];loaded=true;}
+      try{const data=await api("/pages");configs=data.items || [];loaded=true;
+        const creators=[...new Map(configs.map(p=>[p.created_by,p.created_by_name||p.created_by||"未记录"])).entries()].sort((a,b)=>a[1].localeCompare(b[1],"zh-CN"));
+        if(creator&&!creators.some(([id])=>id===creator))creator="";
+        $("pageCreator").innerHTML='<option value="">全部创建人</option>'+creators.map(([id,name])=>`<option value="${esc(id)}">${esc(name)}</option>`).join("");$("pageCreator").value=creator;}
       finally{loading=false;render();}
     }
     async function loadLanguageOptions() {
@@ -294,8 +299,9 @@
       }
       render();
     }
+    $("pageCreator").onchange=e=>{creator=e.target.value;page=0;render();};
     $("pageSearch").oninput=e=>{query=e.target.value;page=0;render();};$("pagePrev").onclick=()=>{page--;render();};$("pageNext").onclick=()=>{page++;render();};
-    $("reloadPages").onclick=e=>busy(e.target,()=>load().catch(err=>errorAt("pageError",err)));
+    $("reloadPages").onclick=e=>busy(e.target,()=>{window.FbPagePortraits?.clear();return load().catch(err=>errorAt("pageError",err));});
     async function editor(existing) {
       let chosen=new Set(),available=[],generation=0,searchTimer;
       const modal=dialog("pageEditor",existing?"编辑 Page":"创建 Page 配置",`<div class="notice">配置在同租户内共用。其他有权访问此 Page 的用户也会使用保存的语言和文案；已提交的任务保持冻结内容。</div><div id="editorError" class="error" role="alert" hidden></div><div class="form-grid"><label class="field"><span>剧语言</span><select id="editLanguage">${langOptions("请选择剧语言",existing?.language)}</select>${existing?'<span class="helper">更改剧语言会暂停素材池；请处理语言不匹配的待发布项后再启用。</span>':""}</label><div class="field"><span>落地页</span><div class="notice mono">${LANDING}</div></div><label class="field"><span>默认标题（选填）</span><input id="editTitle" value="${esc(existing?.title || "")}" placeholder="本次发布未填标题时使用"></label><div class="field"><label for="editCaption">默认发布文案（选填）</label><textarea id="editCaption" rows="8">${esc(existing?.caption_template || "")}</textarea>${macroButtons("editCaption")}<p class="helper">支持 {name}、{desc}、{url} 替换；其他文本原样保留。缺少剧名或简介时对应宏为空。</p></div><div class="field"><span>示例文案预览</span><div id="editPreview" class="copy-preview"></div><span class="helper">使用示例剧目演示宏替换，不绑定发布素材、不生成真实链接。</span></div>${existing?`<div class="full notice"><strong>${esc(existing.page_name)}</strong> · ${esc(existing.page_id)} · 当前版本 v${existing.version}</div>`:`<div class="full"><div class="filters"><input id="availableSearch" placeholder="搜索可访问的 Page 名称或 ID" aria-label="搜索可访问的 Page"><button class="button" id="searchAvailable">搜索</button></div><div class="helper" id="availableCount"></div><div class="pick-list" id="availablePages"></div></div>`}</div>`,`<button class="button" data-close>取消</button><button class="button primary" id="savePage">${existing?"保存修改":"创建所选 Page"}</button>`);
@@ -319,6 +325,8 @@
       window.FbExcelPublish.open({auth,api,post,dialog,esc,atBJ,errorAt,toast,statuses}).catch(err=>errorAt("pageError",err));
     };
     $("pageRows").onclick=e=>{
+      const profile=e.target.closest("[data-fpp-open]");
+      if(profile){const row=configs.find(p=>p.page_id===profile.dataset.fppOpen);window.FbPagePortraits?.open(row.page_id,row.page_name,dialog);return;}
       const edit=e.target.closest("[data-edit-page]"),del=e.target.closest("[data-delete-page]"),pool=e.target.closest("[data-pool-page]");
       if(pool)openPool({...configs.find(p=>p.page_id===pool.dataset.poolPage)},render);
       if(edit)editor({...configs.find(p=>p.page_id===edit.dataset.editPage)});

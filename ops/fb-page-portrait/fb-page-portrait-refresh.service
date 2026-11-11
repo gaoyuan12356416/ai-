@@ -1,0 +1,16 @@
+[Unit]
+Description=Refresh managed Page 7-day income portraits
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/fb-page-portraits/current
+ExecStart=/usr/bin/python3 -m features.fb_page_portrait.refresh
+Environment=PYTHONUNBUFFERED=1
+Environment=SQL_GATE_JOB_NAME=fb-page-portrait
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryMax=1G
+CPUQuota=100%
