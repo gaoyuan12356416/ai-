@@ -101,8 +101,10 @@ def prepare(platform,folder):
 
 def publish_static(info,rollback=False):
     for name,row in info['static'].items():
+        if rollback and Path(name).name=='hit-drama-publish.js':continue
         assert sha(name) in ([row['after']] if rollback else [row['before'],row['after']]),'static_changed:'+name
     for name,row in info['static'].items():
+        if rollback and Path(name).name=='hit-drama-publish.js':continue
         if rollback and not row['before']:
             # The other platform may now use this additive shared asset.
             if Path(name).name!='hit-drama-publish.js':Path(name).unlink(missing_ok=True)
