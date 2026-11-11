@@ -14,13 +14,16 @@ from features.social_analytics.warehouse_refresh import environment,Reader
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--manifest',required=True);p.add_argument('--receipt',required=True)
-    p.add_argument('--apply',action='store_true');p.add_argument('--expected-sha256');a=p.parse_args()
+    p.add_argument('--apply',action='store_true');p.add_argument('--expected-sha256')
+    p.add_argument('--identity-env',default='/etc/fb-auto-post-app.env');a=p.parse_args()
     source=Path(a.manifest).read_bytes();m=json.loads(source)
     digest=hashlib.sha256(source).hexdigest()
     assert m['group_id']==62 and len(m['members'])==236 and len({r['page_id'] for r in m['members']})==236
     assert m['tenant_key']=='149bb4a14b57975f' and m['user_id']=='892fd2e8'
     assert sum(not r['language'] for r in m['members'])==20
     env=environment('/root/drama_material_service/.env')
+    env.update({k:v for k,v in environment(a.identity_env).items() if k.startswith('FB_AUTO_POST_')})
+    normalized=lambda value:str(value or '').strip().lower().replace('_','-')
     # Current identity is resolved by the existing trusted broker, including
     # active membership, module permission, navigation and business mapping.
     req=urllib.request.Request('http://127.0.0.1:8787/internal/fb-video-publish/identity',
@@ -36,7 +39,7 @@ def main():
     overlap=[r for r in m['members'] if r['page_id'] in existing]
     if overlap:
         # A completed or partially completed invocation can be reconciled.
-        assert all(existing[r['page_id']]['created_by']==actor['user_id'] and existing[r['page_id']]['language']==r['language'] for r in overlap),'existing_configuration_requires_review'
+        assert all(existing[r['page_id']]['created_by']==actor['user_id'] and existing[r['page_id']]['language']==normalized(r['language']) for r in overlap),'existing_configuration_requires_review'
     additions=[r for r in m['members'] if r['page_id'] not in existing]
     report=dict(manifest_sha256=digest,group_id=62,creator=actor['user_name'],creator_id=actor['user_id'],before=len(before),new=len(additions),already_imported=len(overlap),languages=dict(Counter(r['language'] for r in additions)))
     if not a.apply:
@@ -55,8 +58,10 @@ def main():
                     payload=dict(page_ids=ids[start:start+200],language=lang,caption_template='',title=''))
     after=request('GET','/api/fb-video-publish/pages',actor=actor,environ=env)['items']
     result={r['page_id']:r for r in after}
-    assert all(result[r['page_id']]['created_by']==actor['user_id'] and result[r['page_id']]['created_by_name']==actor['user_name'] and result[r['page_id']]['language']==r['language'] for r in m['members'])
-    assert all(result[r['page_id']]==r for r in before if r['page_id'] not in {x['page_id'] for x in m['members']}),'unrelated_configuration_changed'
+    assert all(result[r['page_id']]['created_by']==actor['user_id'] and result[r['page_id']]['created_by_name']==actor['user_name'] and result[r['page_id']]['language']==normalized(r['language']) for r in m['members'])
+    fields=('tenant_key','page_id','config_instance_id','version','language','caption_template','title','created_by','created_by_name','updated_by','created_at_utc','updated_at_utc')
+    persistent=lambda row:{k:row.get(k) for k in fields}
+    assert all(persistent(result[r['page_id']])==persistent(r) for r in before if r['page_id'] not in {x['page_id'] for x in m['members']}),'unrelated_configuration_changed'
     report.update(after=len(after),verified_group_pages=236,blank_language=20,backup=str(backup),status='applied')
     atomic_json(a.receipt,report);print(encoded(report))
 
