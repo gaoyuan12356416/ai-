@@ -195,7 +195,12 @@ def switch_unit(unit, port, callback):
             time.sleep(.25)
         callback()
         run('systemctl', 'daemon-reload')
-        run('systemctl', 'restart', unit, timeout=45)
+        run('systemctl', 'stop', unit, timeout=45)
+        # ExecStartPost uses the same HTTP port for its readiness probe. Release
+        # the gate after the drained old listener exits, before starting it.
+        run('iptables', '-D', 'INPUT', *rule)
+        gated = False
+        run('systemctl', 'start', unit, timeout=45)
     finally:
         if gated:
             run('iptables', '-D', 'INPUT', *rule, check=False)
@@ -235,6 +240,20 @@ def activate(folder, rollback=False):
             row = info['lanes'][lane]
             current = Path(link)
             assert str(current.resolve()) in (row['previous'], row['candidate']), 'concurrent_release:' + lane
+            # A controller may exit after a successful switch. Reconcile the
+            # running process before considering another restart.
+            pid = run('systemctl', 'show', unit, '-p', 'MainPID', '--value')
+            expected_flag = '0' if rollback else '1'
+            if pid != '0' and str(current.resolve()) == row['candidate']:
+                env = dict(v.split('=', 1) for v in Path('/proc/' + pid + '/environ').read_text().split('\0') if '=' in v)
+                if (os.readlink('/proc/' + pid + '/cwd') == row['candidate']
+                        and env.get('X_POST_SHARED_SHORT_ROOT') == str(ROOT)
+                        and env.get('X_POST_SHARED_SHORT_ALLOCATE') == expected_flag):
+                    health(port)
+                    row['activated'] = True
+                    save(folder, info)
+                    print(json.dumps(dict(lane=lane, status='already_healthy', rollback=rollback)), flush=True)
+                    continue
             if rollback:
                 assert str(current.resolve()) == row['candidate'], 'rollback_release_changed'
             else:
@@ -262,6 +281,7 @@ def activate(folder, rollback=False):
         run(sys.executable, HEALTH, 'restore', '--baseline', folder / 'schedulers-before.json',
             '--wait-seconds', '25', '--output', folder / 'schedulers-after.json', timeout=45)
     info['status'] = 'allocation_disabled' if rollback else 'active'
+    info['controller_commit'] = run('git', '-C', SOURCE, 'rev-parse', 'HEAD')
     save(folder, info)
     print(json.dumps(dict(status=info['status'], commit=info['commit'])), flush=True)
 
