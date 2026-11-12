@@ -1,9 +1,13 @@
 """Fixed-table MySQL access: FIFO-gated replica reads and scoped writes."""
 import datetime
+import errno
 import json
+import logging
 import os
+import re
 import subprocess
 import threading
+import time
 
 
 CATALOG_TABLE = "ads_ai.cdreader_koc_drama"
@@ -25,6 +29,17 @@ PROMOTION_COLUMNS = (
 
 class DatabaseError(RuntimeError):
     pass
+
+
+_TRANSIENT_MYSQL_ERRORS = {1040, 1203, 2002, 2003, 2006, 2013, 2055, 3024}
+_TRANSIENT_OS_ERRORS = {errno.EAGAIN, errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNREFUSED,
+                        errno.EHOSTUNREACH, errno.ENETUNREACH}
+
+
+def _read_failure(attempt, kind, mysql_errno=None, returncode=None, os_errno=None):
+    # Never include stderr, SQL, subprocess arguments, response rows or exception text.
+    logging.warning("Moboreels read failed: attempt=%d kind=%s mysql_errno=%s wrapper_rc=%s os_errno=%s",
+                    attempt, kind, mysql_errno, returncode, os_errno)
 
 
 def _literal(value):
@@ -79,21 +94,39 @@ class Database:
                    "--database=ads_ai", "--default-character-set=utf8mb4", "--batch", "--raw",
                    "--skip-column-names", "--connect-timeout=5"]
         sql = "SELECT @@read_only; SET SESSION MAX_EXECUTION_TIME=15000;\n" + statements
-        try:
-            result = subprocess.run(command, input=sql, encoding="utf-8", errors="strict",
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    env=env, timeout=100, check=False)
-        except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
-            raise DatabaseError("数据库读取暂不可用，请稍后重试") from exc
-        if result.returncode:
-            raise DatabaseError("数据库读取失败，请稍后重试")
-        lines = result.stdout.splitlines()
-        if not lines or lines[0].strip() != "1":
-            raise DatabaseError("数据库只读端验证失败")
-        try:
-            return [json.loads(line) for line in lines[1:] if line.strip()]
-        except (ValueError, TypeError) as exc:
-            raise DatabaseError("数据库读取结果格式异常") from exc
+        for attempt in range(1, 4):
+            try:
+                result = subprocess.run(command, input=sql, encoding="utf-8", errors="strict",
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        env=env, timeout=100, check=False)
+            except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+                os_errno = exc.errno if isinstance(exc, OSError) else None
+                transient = isinstance(exc, subprocess.TimeoutExpired) or os_errno in _TRANSIENT_OS_ERRORS
+                _read_failure(attempt, type(exc).__name__, os_errno=os_errno)
+                if transient and attempt < 3:
+                    time.sleep(attempt)
+                    continue
+                raise DatabaseError("数据库读取暂不可用，请稍后重试") from exc
+            if result.returncode:
+                match = re.search(r"\bERROR\s+(\d{4,5})\b", result.stderr or "")
+                mysql_errno = int(match.group(1)) if match else None
+                _read_failure(attempt, "command", mysql_errno, result.returncode)
+                # Each retry re-enters the same FIFO wrapper. No driver or endpoint fallback.
+                transient = mysql_errno in _TRANSIENT_MYSQL_ERRORS or result.returncode in (75, 124)
+                if transient and attempt < 3:
+                    time.sleep(attempt)
+                    continue
+                raise DatabaseError("数据库读取失败，请稍后重试")
+            # JSON strings may contain literal NEL/LS/PS characters. Only LF separates CLI rows.
+            lines = result.stdout.split("\n")
+            if not lines or lines[0].strip() != "1":
+                _read_failure(attempt, "readonly_validation")
+                raise DatabaseError("数据库只读端验证失败")
+            try:
+                return [json.loads(line) for line in lines[1:] if line.strip()]
+            except (ValueError, TypeError) as exc:
+                _read_failure(attempt, "json_format")
+                raise DatabaseError("数据库读取结果格式异常") from exc
 
     def _scope(self):
         return "institution_user_id=%s AND project_type=2" % _literal(self.settings.institution_user_id)
