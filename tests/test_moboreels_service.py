@@ -8,7 +8,6 @@ import sys
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,8 +17,11 @@ if str(ROOT) not in sys.path:
 try:
     import fcntl  # noqa: F401
 except ImportError:
-    with mock.patch.dict(sys.modules, {"fcntl": SimpleNamespace()}):
+    sys.modules["fcntl"] = SimpleNamespace()
+    try:
         from features.moboreels_library.service import Application, Handler, public_run
+    finally:
+        del sys.modules["fcntl"]
 else:
     from features.moboreels_library.service import Application, Handler, public_run
 
