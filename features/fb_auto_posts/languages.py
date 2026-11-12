@@ -1,5 +1,6 @@
 """Page-owned language routing, independent of legacy template language."""
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from .validation import LANGUAGE_ALIASES,LANGUAGE_RE
 from .repositories import CandidateSnapshot
 
@@ -21,5 +22,5 @@ def candidate_snapshots_for_pages(config,pages,materials):
     for language,snapshot in zip(languages,snapshots):
         # Defend against a stale or incorrectly scoped adapter response too.
         candidates=tuple(item for item in snapshot.candidates if page_language(item.language)==language)
-        result[language]=CandidateSnapshot(candidates,snapshot.metric_generation_ids,snapshot.metric_dates)
+        result[language]=replace(snapshot, candidates=candidates)
     return result

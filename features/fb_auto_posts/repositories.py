@@ -79,6 +79,8 @@ class CandidateSnapshot:
     candidates: tuple[MaterialCandidate, ...]
     metric_generation_ids: tuple[int, ...]
     metric_dates: tuple[str, ...]
+    profile_classifications: Mapping = field(default_factory=dict)
+    profile_error: str = ""
 
 
 def _decimal(value: Any) -> Decimal:
@@ -500,6 +502,9 @@ class MaterialRepository:
         # Trusted planner-only bound: retain enough ranked rows for every known
         # Page cooldown plus the unchanged random choice among its first 50.
         candidate_limit=max(1,min(int(config.get("_candidate_limit",self.candidate_limit)),self.candidate_limit))
+        profile_mode = bool(config.get('_profile_selection'))
+        classifications, classified_ids = {}, set()
+        profile_error = ''
         if self.metric_store is None:
             raise RepositoryError("fb_auto_metric_cache_not_configured", "FB指标缓存尚未配置", 503)
         days = int(config["metric_window_days"])
@@ -568,6 +573,7 @@ class MaterialRepository:
         deadline = self.monotonic_fn() + self.catalog_deadline_seconds
 
         def add_rows(rows: Sequence[Mapping[str, Any]], *, expected_content_ids: set[str] | None = None) -> None:
+            nonlocal profile_error
             if expected_content_ids is not None:
                 rows = [row for row in rows if str(row.get("content_id") or "").strip() in expected_content_ids]
             content_ids = tuple(dict.fromkeys(str(row.get("content_id") or "").strip() for row in rows if str(row.get("content_id") or "").strip()))
@@ -642,7 +648,27 @@ class MaterialRepository:
                 seen_material_ids.add(raw_id)
                 candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255]))
             candidates.sort(key=cmp_to_key(compare))
-            candidates[:] = diverse_candidates(candidates, candidate_limit, per_drama_limit)
+            if profile_mode and not profile_error:
+                # Rank-equivalent buckets retain the same bounded old-metric
+                # top-N. A later audience/theme must not disappear behind an
+                # earlier, unrelated paid-metric top-N before Page selection.
+                missing = {item.content_id for item in candidates} - classified_ids
+                if missing:
+                    try:
+                        from .profile_selection import load_classifications
+                        classifications.update(load_classifications(self.mysql, sorted(missing)))
+                        classified_ids.update(missing)
+                    except Exception:
+                        profile_error = 'candidate_metadata_unavailable'
+                if not profile_error:
+                    from .profile_material import retain_profile_candidates
+                    candidates[:] = retain_profile_candidates(candidates, classifications, candidate_limit, per_drama_limit)
+            if not profile_mode or profile_error:
+                candidates[:] = diverse_candidates(candidates, candidate_limit, per_drama_limit)
+
+        def snapshot():
+            return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids),
+                                     tuple(metric_window.dates), classifications, profile_error)
 
         # The primary ordering is always drama-level.  For descending spend,
         # every positive-spend drama sorts before every zero-history drama; for
@@ -663,7 +689,7 @@ class MaterialRepository:
         # repeating a full source-table scan for each Page language.
         from features.hit_drama_target import content_ids as target_content_ids
         target = config.get('hit_drama_publish')
-        complete_content_scan = inherit_language or bool(target)
+        complete_content_scan = inherit_language or bool(target) or profile_mode
         scan_content_ids = target_content_ids(target, language) if target else priority_content_ids
         if complete_content_scan and not target:
             eligible = self.mysql.select(f"""
@@ -704,7 +730,7 @@ class MaterialRepository:
                 params: tuple[Any, ...] = (int(config["material_data_source"]), *batch, product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"])
                 add_rows(self.mysql.select(priority_sql, params), expected_content_ids=set(batch))
             if complete_content_scan or len(candidates) >= candidate_limit or (per_drama_limit and len({m.content_id for m in candidates}) >= 20):
-                return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids), tuple(metric_window.dates))
+                return snapshot()
             candidates.clear()
             seen_material_ids.clear()
 
@@ -729,7 +755,7 @@ class MaterialRepository:
             if self.monotonic_fn() >= deadline:
                 raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)
         candidates.sort(key=cmp_to_key(compare))
-        return CandidateSnapshot(tuple(candidates), tuple(metric_window.generation_ids), tuple(metric_window.dates))
+        return snapshot()
 
     def candidates(self, config: Mapping[str, Any]) -> List[MaterialCandidate]:
         return list(self.candidate_snapshot(config).candidates)

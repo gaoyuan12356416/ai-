@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .links import FBPostLinkError, build_short_url, build_w2a_url
-from .strategy import daily_capacity, in_slot, planned_time, cooldown_content_ids
+from .strategy import daily_capacity, in_slot, planned_time, cooldown_content_ids, diverse_candidates
 from features import social_random_schedule as target_daily
 from . import target_schedule
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
 from .languages import candidate_snapshots_for_pages,page_language
+from .profile_selection import Decision, load_profiles
+from .profile_material import choose_profile_material
 from features.hit_drama_target import content_ids as target_content_ids
 from .repositories import MaterialRepository, PagePoolRepository
 from .validation import config_hash, expected_version, normalize_template_payload
@@ -604,7 +606,12 @@ class FBAutoPostStore:
         with self.connect() as conn:
             max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in page_rows),default=0)
         candidate_limit=min(5000,max(1000 if config.get("drama_cooldown_hours") else 500,max_reserved+100))
-        candidate_snapshots = candidate_snapshots_for_pages({**config,'_candidate_limit':candidate_limit},page_rows,materials)
+        profile_supported = not hit_drama and str(config.get('app_id')) == '1479'
+        profile_snapshot = load_profiles([p.page_id for p in page_rows]) if profile_supported else ({'pages': {}}, {})
+        profile_identity = [template_id, int(template['current_version']), slot_key]
+        profile_enabled = profile_supported and any(not Decision(p.page_id, profile_identity, profile_snapshot).reason for p in page_rows)
+        candidate_snapshots = candidate_snapshots_for_pages({**config,'_candidate_limit':candidate_limit,
+            '_profile_selection':profile_enabled},page_rows,materials)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
         # Catalog/metric freezing can be the longest read in planning.  Re-read
         # every mutable Page-side input afterwards so a pool disable, membership
@@ -709,8 +716,19 @@ class FBAutoPostStore:
                         raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化，请重试',409)
                     blocked_content = cooldown_content_ids(conn, page.page_id, task_publish_at, int(config.get("drama_cooldown_hours", 0)), now)
                     allowed = set(target_content_ids(hit_drama, language)) if hit_drama else None
-                    candidates = [item for item in candidate_snapshots[language].candidates if item.content_id not in blocked_content and (allowed is None or item.content_id in allowed)]
-                    material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
+                    page_snapshot = candidate_snapshots[language]
+                    decision = Decision(page.page_id, profile_identity, profile_snapshot)
+                    candidate_pool = page_snapshot.candidates
+                    if not hit_drama and (decision.reason or page_snapshot.profile_error or not profile_supported):
+                        candidate_pool = diverse_candidates(candidate_pool, candidate_limit,
+                            20 if int(config.get('drama_cooldown_hours', 0)) else 0)
+                    candidates = [item for item in candidate_pool if item.content_id not in blocked_content and (allowed is None or item.content_id in allowed)]
+                    if hit_drama:
+                        material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
+                    else:
+                        material, selection = choose_profile_material(candidates, excluded,
+                            decision=decision, snapshot=page_snapshot, candidate_limit=candidate_limit,
+                            materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
                     if material is None and blocked_content:
                         pre_reason = "fb_auto_no_video_after_drama_cooldown"
                 reason = pre_reason or ("" if page.eligible_token_count > 0 else "fb_page_missing_eligible_token")
