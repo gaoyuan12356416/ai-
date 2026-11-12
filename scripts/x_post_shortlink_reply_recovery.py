@@ -226,9 +226,9 @@ def run(args):
     grouped = collections.defaultdict(list)
     for row in rows:
         grouped[row['account_id']].append(row)
-    sent = 0
+    sent, attempted = 0, 0
     for aid, candidates in grouped.items():
-        if args.limit and sent >= args.limit:
+        if args.limit and attempted >= args.limit:
             break
         try:
             client.verify_x_account(aid, actor, 'all', only_refresh_required=True, preserve_transient_status=True)
@@ -258,7 +258,7 @@ def run(args):
             continue
         originals = {str(p['id']):p for p in timeline}
         for row in candidates:
-            if args.limit and sent >= args.limit:
+            if args.limit and attempted >= args.limit:
                 break
             existing = [p for p in timeline if is_reply(p, row['post_id'], user_id, row['text'])]
             if existing:
@@ -302,6 +302,7 @@ def run(args):
                         if n != 1:
                             raise ValueError('already_attempted')
                         event(c, row['post_id'], 'request_reserved', text=row['text'])
+                    attempted += 1
                     result = api(token, 'POST', '/2/tweets', {'text':row['text'], 'reply':{'in_reply_to_tweet_id':row['post_id']}})
                     reply_id = str(result.get('data', {}).get('id', ''))
                     if not re.fullmatch('[0-9]+', reply_id):
