@@ -310,7 +310,16 @@ class SyncManager:
 
     def _plan(self, run_id, source):
         # Build every target row before issuing any writes, so schema errors cannot partially import.
-        existing = {str(row["story_id"]): row for row in self.db.iter_catalog_rows()}
+        existing = {}
+        compared_rows = 0
+        self._update(run_id, compared_rows=0)
+        for row in self.db.iter_catalog_rows():
+            existing[str(row["story_id"])] = row
+            compared_rows += 1
+            if compared_rows % 500 == 0:
+                self._update(run_id, compared_rows=compared_rows)
+        if compared_rows % 500:
+            self._update(run_id, compared_rows=compared_rows)
         records = []
         counts = dict(new_count=0, updated_count=0, listed_count=0, delisted_count=0)
         for raw in source:

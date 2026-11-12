@@ -39,7 +39,7 @@ def private_run():
         "id": RUN_ID, "run_id": RUN_ID, "status": "running", "stage": "writing",
         "created_at": "2026-11-12T09:00:00.000Z", "started_at": "2026-11-12T09:00:00.001Z",
         "updated_at": "2026-11-12T09:01:00.000Z", "finished_at": None, "error": None,
-        "total": 100, "processed": 70, "total_pages": 1, "fetched_pages": 1, "verified": 0,
+        "total": 100, "processed": 70, "total_pages": 1, "fetched_pages": 1, "compared_rows": 100, "verified": 0,
         "new_count": 10, "updated_count": 20, "listed_count": 5, "delisted_count": 3,
         "actor": ACTOR, "resume_actor": {"tenant_key": "private-tenant", "user_id": "private-user", "name": "Private Name"},
         "resume_count": 2, "resume_trigger": "manual", "resumable": True, "source_complete": True,
@@ -123,10 +123,11 @@ class ServiceRouteTest(unittest.TestCase):
         source = private_run()
         rendered = public_run(source)
         expected = {"id", "run_id", "status", "stage", "created_at", "started_at", "finished_at", "updated_at",
-                    "total_pages", "fetched_pages", "verified", "error", "total_rows", "processed_rows",
+                    "total_pages", "fetched_pages", "compared_rows", "verified", "error", "total_rows", "processed_rows",
                     "inserted", "updated", "listed", "delisted", "unchanged"}
         self.assertEqual(set(rendered), expected)
         self.assertEqual(rendered["processed_rows"], 70)
+        self.assertEqual(rendered["compared_rows"], 100)
         self.assertEqual(rendered["unchanged"], 40)
         self.assertNotIn("private-user", json.dumps(rendered))
         self.assertNotIn("/private/", json.dumps(rendered))

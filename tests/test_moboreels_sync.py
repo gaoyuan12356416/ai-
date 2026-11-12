@@ -1,6 +1,7 @@
 """Behavioral sync tests using only temporary files and in-memory adapters."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import copy
 import json
 from pathlib import Path
@@ -199,6 +200,32 @@ class SyncBehaviorTest(unittest.TestCase):
         failed = self.complete(manager)
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(manager.last_success_at(), succeeded["finished_at"])
+
+    def test_existing_catalog_read_progress_is_persisted_before_writes(self):
+        db = FakeDatabase([source_row(str(index)) for index in range(1001)])
+        manager = SyncManager(self.settings, db, FakeProvider([source_row("0")]))
+        original_iterator = db.iter_catalog_rows
+        checkpoints = []
+
+        def observed_rows(batch_size=500):
+            for index, row in enumerate(original_iterator(batch_size), 1):
+                yield row
+                if index in (500, 1000):
+                    # Generator resumes after _plan has persisted this completed page.
+                    with closing(sqlite3.connect(manager.db_path)) as connection:
+                        saved = json.loads(connection.execute("SELECT payload FROM sync_run").fetchone()[0])
+                    checkpoints.append(saved)
+                    self.assertEqual(db.apply_calls + db.touch_calls, 0)
+
+        db.iter_catalog_rows = observed_rows
+        result = self.complete(manager)
+        self.assertEqual(result["status"], "succeeded", result)
+        self.assertEqual([row["compared_rows"] for row in checkpoints], [500, 1000])
+        for row in checkpoints:
+            self.assertEqual(row["stage"], "writing")
+            self.assertEqual(row["processed"], 0)
+            self.assertTrue(row["updated_at"].endswith("Z"))
+        self.assertEqual(result["compared_rows"], 1001)
 
     def test_full_sync_changes_status_preserves_hidden_info_and_does_not_delete_missing(self):
         initial = [source_row("1"), source_row("2"), source_row("3"),

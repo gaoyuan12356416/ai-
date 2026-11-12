@@ -35,6 +35,10 @@ async function main() {
   assert.ok(Number.isFinite(ui.runModel({status:"running",stage:"fetching",total_pages:0}).progress));
   assert.equal(ui.runModel({status:"failed",stage:"writing",total_rows:10,processed_rows:5}).active,false);
   assert.equal(ui.runModel({status:"succeeded",total_rows:100}).progress,100);
+  assert.equal(ui.runModel({status:"running",stage:"verifying",total_rows:1200,verified:500}).detail,"已核对 500 / 1,200 条剧目");
+  assert.equal(ui.runModel({status:"running",stage:"writing",total_rows:1200,processed_rows:0,compared_rows:1000}).detail,"已读取 1,000 条已有剧目，正在比对资料");
+  assert.equal(ui.runModel({status:"running",stage:"writing",total_rows:1200,processed_rows:500,compared_rows:1000}).detail,"已处理 500 / 1,200 条剧目");
+  assert.equal(ui.runModel({status:"running",stage:"writing",total_rows:1200,processed_rows:0}).detail,"已处理 0 / 1,200 条剧目");
 
   let calls = [], resolveCreate;
   const loader = ui.createPromotionLoader(async (url,options) => {

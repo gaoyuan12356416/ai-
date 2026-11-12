@@ -24,7 +24,7 @@ def public_run(run):
     # This shared progress response must never expand with the private run ledger.
     # In particular resume_actor carries the same user identifiers as actor.
     fields = ("id", "run_id", "status", "stage", "created_at", "started_at",
-              "finished_at", "updated_at", "total_pages", "fetched_pages", "verified", "error")
+              "finished_at", "updated_at", "total_pages", "fetched_pages", "compared_rows", "verified", "error")
     row = {key: run[key] for key in fields if key in run}
     aliases = {"total_rows": "total", "processed_rows": "processed", "inserted": "new_count",
                "updated": "updated_count", "listed": "listed_count", "delisted": "delisted_count"}

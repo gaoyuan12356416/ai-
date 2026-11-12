@@ -36,11 +36,11 @@
     const active = ACTIVE_RUN.has(run.status);
     const stage = {fetching:"正在获取剧目",writing:"正在更新剧库",verifying:"正在核对数据"}[run.stage] || "正在准备同步";
     const pages = number(run.total_pages), fetched = number(run.fetched_pages);
-    const rows = number(run.total_rows), processed = number(run.processed_rows);
+    const rows = number(run.total_rows), processed = number(run.processed_rows), compared = number(run.compared_rows);
     let progress = 0, detail = "";
     if (run.stage === "fetching") { progress = pages ? Math.min(50, fetched / pages * 50) : 0; detail = `已读取 ${count(fetched)}${pages ? ` / ${count(pages)}` : ""} 页`; }
-    else if (run.stage === "writing") { progress = 50 + (rows ? Math.min(45, processed / rows * 45) : 0); detail = `已处理 ${count(processed)} / ${count(rows)} 条剧目`; }
-    else if (run.stage === "verifying") { progress = 95; detail = `正在核对 ${count(rows)} 条剧目`; }
+    else if (run.stage === "writing") { progress = 50 + (rows ? Math.min(45, processed / rows * 45) : 0); detail = processed === 0 && compared > 0 ? `已读取 ${count(compared)} 条已有剧目，正在比对资料` : `已处理 ${count(processed)} / ${count(rows)} 条剧目`; }
+    else if (run.stage === "verifying") { const verified = number(run.verified); progress = 95 + (rows ? Math.min(4, verified / rows * 4) : 0); detail = `已核对 ${count(verified)} / ${count(rows)} 条剧目`; }
     if (run.status === "succeeded") return {label:"同步完成",kind:"success",active:false,progress:100,detail:`本次核对 ${count(rows)} 条剧目`};
     if (run.status === "failed") return {label:"同步未完成",kind:"error",active:false,progress,detail};
     return {label:run.status === "queued" ? "等待开始" : stage,kind:"running",active,progress,detail};
