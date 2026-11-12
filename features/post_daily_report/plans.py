@@ -10,6 +10,7 @@ import threading
 
 from .common import BEIJING, Window, parse_time, read_db
 from .accounting import object_value, read_rows, tables
+from .target_plans import load_target_plans, POLICY
 
 
 def _slot(day, value):
@@ -77,19 +78,47 @@ def _days(begin, cutoff, channel, unavailable):
 
 def _auto_slots(db, prefix, channel, runs, versions, cutoff, add, unavailable):
     existing = {(r['template_id'],r['template_version'],r['shanghai_date'],r.get('publish_time')) for r in runs if r.get('trigger_type') != 'manual'}
-    events = read_rows(db,prefix+'_event')
+    activation, target_plans = load_target_plans(db, prefix) if channel == 'tt' else ('9999-12-31', {})
+    target_runs = set()
+    target_days = set()
+    if channel == 'tt':
+        for run in runs:
+            if run.get('trigger_type') == 'manual':
+                continue
+            account = str(run.get('target_account_id') or '')
+            if account or run.get('schedule_policy') == POLICY:
+                target_days.add((run['template_id'], run['shanghai_date']))
+            if account:
+                due = parse_time(run.get('scheduled_at_utc')) or _slot(run.get('shanghai_date'), run.get('publish_time'))
+                target_runs.add((run['template_id'], run['shanghai_date'], account, due))
+        for (template_id, day), plan in target_plans.items():
+            midnight = _slot(day, '00:00')
+            if midnight is None:
+                unavailable(channel, '账号随机日计划日期无效'); continue
+            if midnight >= cutoff:
+                continue
+            if plan['error']:
+                unavailable(channel, plan['error'])
+            for slot in plan['slots']:
+                identity = (template_id, day, slot['account_id'], slot['due'])
+                if identity not in target_runs:
+                    add(channel, f'target-slot:{template_id}:{day}:{slot["ordinal"]}', slot['account_id'], slot['due'])
+    history_by_template = defaultdict(list)
+    if prefix + '_event' in tables(db):
+        events = db.execute('SELECT event_type,details_json,created_at FROM ' + prefix + "_event WHERE event_type IN ('template_enabled','template_disabled','template_updated')")
+        for event in events:
+            detail = object_value(event['details_json'], {}) or {}
+            at = parse_time(event['created_at'])
+            if isinstance(detail, dict) and at:
+                history_by_template[str(detail.get('template_id'))].append((at, event['event_type'], detail))
+        for history in history_by_template.values():
+            history.sort(key=lambda x: x[0])
     random_plans={(p['template_id'],p['template_version'],p['shanghai_date']):object_value(p.get('publish_times_json'),[]) for p in read_rows(db,prefix+'_random_plan')}
     frozen={(v['template_id'],v['version']):v for v in read_rows(db,prefix+'_template_version')}
     for template in read_rows(db,prefix+'_template'):
-        history=[]
-        for event in events:
-            detail=object_value(event.get('details_json'), {}) or {}
-            at=parse_time(event.get('created_at'))
-            if str(detail.get('template_id'))==str(template['id']) and at and event.get('event_type') in {'template_enabled','template_disabled','template_updated'}:
-                history.append((at,event['event_type'],detail))
-        history.sort(key=lambda x:x[0])
+        history = history_by_template.get(str(template['id']), [])
         if not history:
-            unavailable(channel,'模板缺少历史启停，未建运行的计划数量未知');continue
+            unavailable(channel, f"模板 {template['id']} 缺少历史启停，未建运行的计划数量未知");continue
         for index,(begin,kind,detail) in enumerate(history):
             if kind!='template_enabled' or begin>=cutoff:continue
             finish=min(history[index+1][0],cutoff) if index+1<len(history) else cutoff
@@ -99,6 +128,18 @@ def _auto_slots(db, prefix, channel, runs, versions, cutoff, add, unavailable):
             schedule=config.get('schedule',{})
             for day in _days(begin,finish,channel,unavailable):
                 if _slot(day,'00:00')>=finish:break
+                if channel == 'tt':
+                    # A saved day survives later template edits and owns its
+                    # target times; the old whole-template draw is not additive.
+                    if (template['id'], day) in target_plans:
+                        continue
+                    if ((day >= activation and schedule.get('mode') == 'random')
+                            or (template['id'], day) in target_days):
+                        # A random template enabled after midnight starts on the
+                        # next day. Missing evidence at midnight stays unknown.
+                        if begin <= _slot(day, '00:00'):
+                            unavailable(channel, '按账号随机日计划缺失，未使用旧随机算法推算')
+                        continue
                 times=schedule.get('times',[]) if schedule.get('mode')=='fixed' else random_plans.get((template['id'],version,day))
                 if times is None and channel=='tt':
                     digest=frozen.get((template['id'],version),{}).get('config_sha256')
@@ -240,11 +281,19 @@ def _collect_plan_gaps(paths, cutoff, channels):
                 tasks = read_rows(db,prefix+'_task')
                 actual = {(r['run_id'],str(r['account_id'])) for r in tasks}
                 for run in runs:
-                    config = versions.get((run['template_id'],run['template_version']))
-                    if config is None:
-                        unavailable(channel,'模板冻结版本缺失'); continue
                     due = parse_time(run.get('scheduled_at_utc')) or _slot(run.get('shanghai_date'), run.get('publish_time'))
-                    for account in _accounts(config.get('account_ids')):
+                    is_target_run = channel == 'tt' and run.get('trigger_type') != 'manual'
+                    target = str(run.get('target_account_id') or '') if is_target_run else ''
+                    if target:
+                        accounts = [target]
+                    elif is_target_run and run.get('schedule_policy') == POLICY:
+                        unavailable(channel, '按账号随机运行缺少目标账号'); continue
+                    else:
+                        config = versions.get((run['template_id'],run['template_version']))
+                        if config is None:
+                            unavailable(channel,'模板冻结版本缺失'); continue
+                        accounts = _accounts(config.get('account_ids'))
+                    for account in accounts:
                         if (run['id'],account) not in actual:
                             add(channel,f'auto:{run["id"]}',account,due,run.get('error_code'),run.get('status') in {'cancelled','canceled'})
                 _auto_slots(db, prefix, channel, runs, versions, cutoff, add, unavailable)

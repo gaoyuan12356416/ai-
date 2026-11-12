@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from .accounting import load_dispatch, daily_override, CLOSED_NATIVE
+from .target_plans import load_target_plans, POLICY
 
 UTC = timezone.utc
 BEIJING = timezone(timedelta(hours=8))
@@ -219,11 +220,15 @@ def _auto(conn, window, output, context=None):
     runs = _rows(conn, "tt_auto_run", " WHERE shanghai_date=?", (window.date,))
     tasks = _rows(conn, "tt_auto_task", " WHERE julianday(scheduled_at_utc)>=julianday(?) AND julianday(scheduled_at_utc)<julianday(?)", (window.start.isoformat(), window.end.isoformat()))
     blockers = _rows(conn, "tt_auto_task", " WHERE status IN ('selecting','reserved','preparing','retry_wait','ready','publishing','reconciling','unknown') AND julianday(scheduled_at_utc)<julianday(?)", (window.end.isoformat(),))
+    target_effective, target_plans = load_target_plans(conn, day=window.date)
+    target_run_templates = {r['template_id'] for r in runs
+                            if r.get('trigger_type') != 'manual' and
+                            (r.get('schedule_policy') == POLICY or r.get('target_account_id'))}
     groups = {}
 
-    def group(template_id, version, manual=False):
+    def group(template_id, version, manual=False, frozen_config=None):
         value = versions.get((template_id, version), {})
-        config = _json(value.get("config_json"), {})
+        config = frozen_config if frozen_config is not None else _json(value.get("config_json"), {})
         form = FORMS.get(config.get("video_template"), "其他模板视频")
         source = ("auto_template_manual:" if manual else "auto_template:") + str(config.get("video_template") or "unspecified")
         if source not in groups:
@@ -233,7 +238,18 @@ def _auto(conn, window, output, context=None):
     # A source/version change at the same slot must not manufacture a second post.
     expected = {}
     uncertain = set()
+    # The publisher retains the midnight snapshot even after same-day edits.
+    # Its target slots replace both the old shared times and old seed fallback.
+    for (template_id, _), plan in target_plans.items():
+        row, _ = group(template_id, plan['version'], frozen_config=plan['config'])
+        if plan['error']:
+            uncertain.add(row['source'])
+            row['warnings'].append(plan['error'])
+        for slot in plan['slots']:
+            expected[(template_id, slot['due'], slot['account_id'])] = row
     for template in templates:
+        if (template['id'], window.date) in target_plans:
+            continue
         intervals, reliable = _template_intervals(template, versions, events, window)
         if not reliable:
             row, _ = group(template["id"], template["current_version"])
@@ -247,6 +263,13 @@ def _auto(conn, window, output, context=None):
             if schedule.get("mode") == "fixed":
                 times = schedule.get("times") or []
             else:
+                if window.date >= target_effective or template['id'] in target_run_templates:
+                    # Enabling a target-random template after midnight starts
+                    # tomorrow. Otherwise a missing frozen plan is unknown.
+                    if begin <= window.start:
+                        uncertain.add(row['source'])
+                        row['warnings'].append('账号随机日计划缺失，无法完整确认应发数量。')
+                    continue
                 times = plans.get((template["id"], version))
                 if times is None:
                     frozen = versions.get((template["id"], version), {})
@@ -287,7 +310,15 @@ def _auto(conn, window, output, context=None):
     # A run can exist after preflight but before all per-account tasks were inserted.
     for run in runs:
         row, config = group(run["template_id"], run["template_version"], run.get("trigger_type") == "manual")
-        for account_id in config.get("account_ids") or []:
+        account_ids = config.get("account_ids") or []
+        if run.get('trigger_type') != 'manual':
+            if run.get('target_account_id'):
+                account_ids = [str(run['target_account_id'])]
+            elif run.get('schedule_policy') == POLICY:
+                uncertain.add(row['source'])
+                row['warnings'].append('账号随机运行缺少目标账号，已存在任务仍逐条核对。')
+                account_ids = []
+        for account_id in account_ids:
             if run.get("trigger_type") == "manual":
                 if not any(t["run_id"] == run["id"] and str(t["account_id"]) == str(account_id) for t in tasks):
                     manual_count[row["source"]] += 1
