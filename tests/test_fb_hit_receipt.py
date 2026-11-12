@@ -106,7 +106,19 @@ async function open(platform,responses){
   document.getElementById('hitDramaInput').value='29899';
   document.getElementById('hitDramaType').value='resource_id';
   const submit=all(body).find(n=>n.tagName==='button'&&n.textContent==='确认发布');
-  return {body,saved,posts,submit,document};
+  const close=all(body).find(n=>n.tagName==='button'&&n.textContent==='关闭');
+  return {body,saved,posts,submit,close,document};
+}
+async function assertCompleted(ui){
+  // CSS can override the HTML hidden attribute. A completed receipt must
+  // remove the action from the dialog, rather than leave an inert button.
+  assert(!all(ui.body).includes(ui.submit),'completed submit remains in the dialog DOM');
+  assert(!all(ui.body).some(n=>n.tagName==='button'&&['确认发布','重试确认'].includes(n.textContent)));
+  assert.equal(ui.submit.disabled,true,'detached submit must stay disabled after finally');
+  assert.equal(ui.close.disabled,false,'close must be restored after receipt');
+  const before=ui.posts.length,oldHandler=ui.submit.onclick;
+  await oldHandler();assert.equal(ui.posts.length,before,'old completed handler sent another POST');
+  ui.close.onclick();assert(!ui.document.getElementById('hitDramaDialog'),'completed dialog cannot close');
 }
 (async()=>{
   let ui=await open('fb',[{ok:true,body:{ok:true,run_id:324,queued:0,skipped:236,matched_pages:12,
@@ -119,15 +131,19 @@ async function open(platform,responses){
   assert(ui.body.textContent.includes('Page 11：题材画像不匹配'));
   assert(ui.body.textContent.includes('没有合格素材：236 个 Page'));
   assert.equal(ui.saved.size,0);
+  await assertCompleted(ui);
 
   ui=await open('fb',[{ok:false,body:{code:'fb_auto_result_pending',message:'等待回执超时'}},
                      {ok:true,body:{ok:true,run_id:325,queued:1,skipped:0,matched_pages:1,idempotent:true}}]);
   await ui.submit.onclick();
   assert.equal(ui.saved.size,1);assert.equal(ui.submit.textContent,'重试确认');
   assert.equal(ui.document.getElementById('hitDramaInput').readOnly,true);
+  assert(all(ui.body).includes(ui.submit),'unknown receipt lost its retry action');
+  assert.equal(ui.submit.disabled,false);assert.equal(ui.close.disabled,false);
   await ui.submit.onclick();assert.deepEqual(ui.posts[0],ui.posts[1]);assert.equal(ui.saved.size,0);
   assert(ui.body.textContent.includes('已排队 1 个 Page'));
   assert(!ui.body.textContent.includes('本轮未发布'));
+  await assertCompleted(ui);
 
   ui=await open('fb',[{ok:false,body:{code:'hit_drama_no_matching_page',message:'没有匹配的 Page',
     conflicts:[{page_id:'11',language:'en',reason:'candidate_metadata_unavailable'},
@@ -143,6 +159,7 @@ async function open(platform,responses){
   assert(ui.body.textContent.includes('Page 14：画像数据异常'));
   await ui.submit.onclick();assert(!ui.body.textContent.includes('Page 11：剧目分类暂不可用'));
   assert(ui.body.textContent.includes('已排队 1 个 Page'));
+  await assertCompleted(ui);
 
   ui=await open('x',[{ok:true,body:{ok:true,run_id:71,matched_channels:1,
       skipped_channels:[{account_id:'12',reason:'theme_not_matched'}]}}]);
@@ -150,6 +167,7 @@ async function open(platform,responses){
   assert(ui.body.textContent.includes('频道 12：题材画像不匹配'));
   assert(!ui.body.textContent.includes('画像匹配 1 个 Page'));
   assert.equal(ui.posts[0].confirmed,true);assert(ui.posts[0].idempotency_key);assert(!ui.posts[0].operation_id);
+  await assertCompleted(ui);
   console.log('FB receipt UI cases passed');
 })().catch(error=>{console.error(error);process.exit(1);});
 '''

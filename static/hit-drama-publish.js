@@ -46,7 +46,7 @@
       }
     }
     function showResult(result){
-      done=true;submit.hidden=true;status.textContent=isX?`已创建运行 ${result.run_id}：匹配 ${result.matched_channels} 个频道，跳过 ${(result.skipped_channels||[]).length} 个频道。实际选材和发布进度请查看记录。`:`已创建运行 ${result.run_id}：已排队 ${result.queued} 个 Page，跳过 ${result.skipped} 个 Page。`;
+      done=true;submit.disabled=true;submit.remove();status.textContent=isX?`已创建运行 ${result.run_id}：匹配 ${result.matched_channels} 个频道，跳过 ${(result.skipped_channels||[]).length} 个频道。实际选材和发布进度请查看记录。`:`已创建运行 ${result.run_id}：已排队 ${result.queued} 个 Page，跳过 ${result.skipped} 个 Page。`;
       if(!isX){
         const matched=Number.isInteger(result.matched_pages)?`画像匹配 ${result.matched_pages} 个 Page。`:'';
         const skipped=Number(result.skipped||0)+(Array.isArray(result.skipped_pages)?result.skipped_pages.length:0);
@@ -86,7 +86,7 @@
         if(!isX)rejected.add('hit_drama_no_matching_page');
         if(rejected.has(error.code)){status.textContent=error.message;draft=null;sessionStorage.removeItem(key);frozen(false);submit.textContent='确认发布';if(!isX&&error.code==='hit_drama_no_matching_page')showFbSkipDetails({skipped_pages:error.conflicts});}
         else{status.textContent=`${error.message}。提交结果尚未确认，请点“重试确认”核对同一轮任务。`;submit.textContent='重试确认';}
-      }finally{busy=false;submit.disabled=close.disabled=false;}
+      }finally{busy=false;submit.disabled=done;close.disabled=false;}
     };
   }
   window.HitDramaPublish={open};
