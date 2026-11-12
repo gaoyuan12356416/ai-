@@ -90,6 +90,30 @@ class BrowserTests(unittest.TestCase):
         self.assertNotIn('$',self.page.locator('#kpi-grid').inner_text())
         self.assertEqual(self.errors,[])
 
+    def test_published_account_kpi_sort_trend_and_csv(self):
+        card=self.page.locator('.kpi-card').filter(has_text='发布账号数')
+        self.assertEqual(card.locator('.kpi-value').inner_text(),'1')
+        self.assertIn('查询日期内',card.inner_text())
+        self.assertIn('发布账号数',self.page.locator('#report-head').inner_text())
+        self.page.locator('#report-head [data-sort="published_accounts"]').click()
+        self.page.wait_for_function("!document.querySelector('#export-report').disabled")
+        self.page.locator('#trend-metric').select_option('published_accounts')
+        self.assertIn('每日成功发布账号去重',self.page.locator('#trend-description').inner_text())
+        with self.page.expect_download() as downloaded:
+            self.page.locator('#export-report').click()
+        self.assertIn('发布账号数',Path(downloaded.value.path()).read_text(encoding='utf-8-sig'))
+        self.page.locator('#tab-publications').click()
+        self.page.wait_for_function("document.querySelector('#report-period').textContent.includes('发布执行') && !document.querySelector('#export-report').disabled")
+        self.assertEqual(card.locator('.kpi-value').inner_text(),'1')
+        self.page.locator('#ranking-metric').select_option('published_accounts')
+        self.page.wait_for_function("!document.querySelector('#export-report').disabled")
+        self.assertIn('发布账号数',self.page.locator('#ranking-caption').inner_text())
+        self.page.locator('#tab-effects').click()
+        self.page.wait_for_function("document.querySelector('#report-period').textContent.includes('收入效果') && !document.querySelector('#export-report').disabled")
+        self.assertEqual(card.count(),0)
+        self.assertNotIn('发布账号数',self.page.locator('#report-head').inner_text())
+        self.assertEqual(self.errors,[])
+
     def test_failure_banner_and_mobile_layout(self):
         (self.fixture.root/'status.json').write_text(json.dumps({'status':'failed','error':'timeout'}))
         self.page.locator('#refreshPage').click()

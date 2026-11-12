@@ -24,7 +24,9 @@ PLATFORMS = {"facebook": "Facebook", "youtube": "YouTube", "tiktok": "TikTok", "
 LABELS = {"material_type": {"ordinary": "普通／无素材", "new": "新剧", "hit": "爆款", "historical_hit": "历史爆款", "old": "老剧", "none": "无素材", "unknown": "未知"}, "creation_source": {"automatic_material": "自动发布素材维度", "ranking_drama": "排行榜剧维度", "browser_api": "社媒浏览器外部 API", "unknown": "历史／未知"}, "task_status": {"1": "已排期", "2": "处理中", "3": "已完成", "4": "已取消", "5": "无内容", "6": "状态 6（待确认）", "7": "状态 7（待确认）"}, "reason": {"ADS_MATERIAL": "广告素材", "DRAMA_CONTINUE": "剧集续发", "PRE_PUBLISH_ADS_MATERIAL": "预发广告素材", "X_SHORT_LINK_EPISODE": "X 短链剧集", "MANUAL": "手动", "X_SHORT_LINK_AD": "X 短链广告", "PRE_PUBLISH": "预发"}}
 EFFECT_FIELDS = ("clicks", "views", "installs", "conversions", "revenue_cents", "refund_cents", "dnu_revenue_cents", "dnu_conversions")
 PUBLICATION_FIELDS = ("tasks", "planned", "success", "failed")
-METRICS = {"revenue": "收入 (USD)", "refunds": "退款 (USD)", "net_revenue": "收入减退款 (USD)", "dnu_revenue": "新用户收入 (USD)", "clicks": "落地页点击", "views": "落地页访问", "installs": "安装", "conversions": "充值人数汇总", "dnu_conversions": "新用户充值人数汇总", "tasks": "任务数", "planned": "计划内容", "success": "成功发布", "failed": "失败字段合计", "unfulfilled": "未计入成功", "success_rate": "计划完成率 (%)", "install_rate": "安装／点击 (%)", "pay_rate": "充值／安装 (%)", "link_count": "有指标短链数"}
+PUBLICATION_METRICS = PUBLICATION_FIELDS + ("published_accounts", "unfulfilled", "success_rate")
+METRICS = {"revenue": "收入 (USD)", "refunds": "退款 (USD)", "net_revenue": "收入减退款 (USD)", "dnu_revenue": "新用户收入 (USD)", "clicks": "落地页点击", "views": "落地页访问", "installs": "安装", "conversions": "充值人数汇总", "dnu_conversions": "新用户充值人数汇总", "tasks": "任务数", "planned": "计划内容", "success": "成功发布", "published_accounts": "发布账号数", "failed": "失败字段合计", "unfulfilled": "未计入成功", "success_rate": "计划完成率 (%)", "install_rate": "安装／点击 (%)", "pay_rate": "充值／安装 (%)", "link_count": "有指标短链数"}
+PRECOMPUTED_FORMAT_VERSION = 2
 _CACHE = collections.OrderedDict()
 _OPTIONS_CACHE = collections.OrderedDict()
 _LOCK = threading.Lock()
@@ -169,7 +171,8 @@ def parameters(params, manifest):
     default_metric = "success" if view == "publications" else "revenue"
     sort = _one(params, "sort", default_metric)
     ranking = _one(params, "ranking_metric", default_metric)
-    valid_metrics = set(METRICS) - ({"tasks", "planned", "success", "failed", "unfulfilled", "success_rate"} if view == "effects" else set(METRICS) - {"tasks", "planned", "success", "failed", "unfulfilled", "success_rate"} if view == "publications" else set())
+    valid_metrics = (set(METRICS) - set(PUBLICATION_METRICS) if view == "effects"
+                     else set(PUBLICATION_METRICS) if view == "publications" else set(METRICS))
     if sort not in valid_metrics | set(groups) or ranking not in valid_metrics:
         raise QueryError("排序或图表指标不适用于当前视图。")
     direction = _one(params, "direction", "desc")
@@ -208,6 +211,9 @@ def _query(conn, table, params, groups, context=None):
         where.append("(instr(lower(drama_name),lower(?))>0 OR instr(lower(drama_content_id),lower(?))>0 OR instr(lower(account_name),lower(?))>0)")
         args.extend([params["search"]] * 3)
     selections = list(groups) + ["COALESCE(SUM(%s),0) AS %s" % (f, f) if f in columns else "0 AS " + f for f in fields]
+    if table == "publications":
+        # Count within each requested scope; daily/product counts are not additive.
+        selections.append("COUNT(DISTINCT CASE WHEN success>0 AND account<>'' THEN account END) AS published_accounts")
     label_fields = (("account_name", "external_account_id") if "account" in groups else ()) + (("drama_name", "drama_content_id") if "drama" in groups else ())
     for name in label_fields:
         selections.append("MIN(%s) AS %s" % (name, name))
@@ -244,7 +250,7 @@ def _query(conn, table, params, groups, context=None):
 
 def _finish(row, view):
     row = dict(row)
-    for f in EFFECT_FIELDS + PUBLICATION_FIELDS + ("link_count", "unmatched_rows", "unmatched_links"):
+    for f in EFFECT_FIELDS + PUBLICATION_FIELDS + ("published_accounts", "link_count", "unmatched_rows", "unmatched_links"):
         row.setdefault(f, 0)
     for target, source in (("revenue", "revenue_cents"), ("refunds", "refund_cents"), ("dnu_revenue", "dnu_revenue_cents")):
         row[target] = round(row[source] / 100, 2)
@@ -253,7 +259,7 @@ def _finish(row, view):
     for target, numerator, denominator in (("install_rate", "installs", "clicks"), ("pay_rate", "conversions", "installs"), ("success_rate", "success", "planned")):
         row[target] = round(row[numerator] / row[denominator] * 100, 2) if row[denominator] else None
     if view == "effects":
-        for f in PUBLICATION_FIELDS + ("unfulfilled", "success_rate"):
+        for f in PUBLICATION_METRICS:
             row[f] = None
     if view == "publications":
         for f in EFFECT_FIELDS + ("revenue", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count", "unmatched_rows", "unmatched_links"):
@@ -300,7 +306,9 @@ def _stale_status(status):
 
 def _precomputed(root, version, kind):
     value = _json_file(Path(root) / "precomputed" / (version + "-" + kind + ".json"), optional=True)
-    if value.get("version") != version or not isinstance(value.get("payload"), dict):
+    if (value.get("version") != version
+            or value.get("format_version") != PRECOMPUTED_FORMAT_VERSION
+            or not isinstance(value.get("payload"), dict)):
         return None
     return value["payload"]
 
@@ -353,14 +361,14 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
                 for f in EFFECT_FIELDS + ("revenue", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count"):
                     row[f] = None
             if row["source_status"]["publications"] == "missing":
-                for f in PUBLICATION_FIELDS + ("unfulfilled", "success_rate"):
+                for f in PUBLICATION_METRICS:
                     row[f] = None
             trend.append(row)
         tables = ("effects", "publications") if parsed["view"] == "overview" else (parsed["view"],)
         missing = {t: [d for d in parsed["dates"] if _day_status(manifest, t, d) == "missing"] for t in tables}
         for t in tables:
             if len(missing[t]) == len(parsed["dates"]):
-                for f in (EFFECT_FIELDS + ("revenue", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count") if t == "effects" else PUBLICATION_FIELDS + ("unfulfilled", "success_rate")):
+                for f in (EFFECT_FIELDS + ("revenue", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count") if t == "effects" else PUBLICATION_METRICS):
                     totals[f] = None
         pages = max(1, math.ceil(len(all_rows) / parsed["page_size"]))
         page = min(parsed["page"], pages)
@@ -434,7 +442,7 @@ def warm_snapshot(root=DEFAULT_ROOT, version=None):
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=str(folder), prefix=chosen+"-", suffix=".tmp", delete=False) as handle:
                 temporary = Path(handle.name)
-                json.dump({"version": chosen, "payload": payload}, handle, ensure_ascii=False, separators=(",", ":"))
+                json.dump({"version": chosen, "format_version": PRECOMPUTED_FORMAT_VERSION, "payload": payload}, handle, ensure_ascii=False, separators=(",", ":"))
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(str(temporary), str(path))
@@ -452,7 +460,7 @@ def warm_snapshot(root=DEFAULT_ROOT, version=None):
 def export_csv(result):
     groups = result["group_by"]
     view = result["meta"]["view"]
-    metric_fields = [k for k in METRICS if not (view == "effects" and k in ("tasks", "planned", "success", "failed", "unfulfilled", "success_rate")) and not (view == "publications" and k not in ("tasks", "planned", "success", "failed", "unfulfilled", "success_rate"))]
+    metric_fields = [k for k in METRICS if not (view == "effects" and k in PUBLICATION_METRICS) and not (view == "publications" and k not in PUBLICATION_METRICS)]
     buf = io.StringIO(newline="")
     writer = csv.writer(buf)
     writer.writerow([DIMENSIONS[k] for k in groups] + [METRICS[k] for k in metric_fields] + ["快照版本", "收入日期口径", "发布日期口径"])

@@ -51,10 +51,20 @@ class QueryTests(unittest.TestCase):
     def params(self,**extra):
         return dict(start='2026-11-01',end='2026-11-01',**extra)
 
+    def add_publications(self, *variants):
+        conn = sqlite3.connect(str(self.root / 'snapshots/v1.sqlite3'))
+        conn.row_factory = sqlite3.Row
+        original = dict(conn.execute('SELECT * FROM publications LIMIT 1').fetchone())
+        for index, changes in enumerate(variants):
+            row = dict(original, task_id=100+index, **changes)
+            self.insert(conn, 'publications', 'extra'+str(index), PUBLICATION_FIELDS, row)
+        conn.commit(); conn.close()
+
     def test_separate_facts_do_not_multiply_revenue(self):
         r=query.report(self.root,self.params())
         self.assertEqual(r['totals']['revenue'],18.99)
         self.assertEqual(r['totals']['success'],3)
+        self.assertEqual(r['totals']['published_accounts'],1)
         self.assertEqual(r['totals']['installs'],2)
         self.assertEqual(len(r['rows']),2)
         self.assertEqual(sum(x['revenue'] for x in r['rows']),18.99)
@@ -62,6 +72,77 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(r['totals']['unmatched_links'],1)
         self.assertEqual(r['totals']['unmatched_installs'],1)
         self.assertEqual(r['totals']['unmatched_revenue_cents'],0)
+
+    def test_published_accounts_deduplicate_across_dates_products_dramas_and_names(self):
+        self.add_publications(
+            dict(date='2026-10-31', account_name='old name'),
+            dict(product='HotDrama', drama_app_id=3302, drama='[3302,"other"]',
+                 drama_content_id='other', drama_name='剧 B', account_name='new name'),
+        )
+        for view in ('overview', 'publications'):
+            with self.subTest(view=view):
+                result = query.report(self.root, dict(start='2026-10-31', end='2026-11-01',
+                                      view=view, group_by=['product', 'drama']))
+                self.assertEqual(result['totals']['published_accounts'], 1)
+                self.assertEqual([r['published_accounts'] for r in result['trend']], [1, 1])
+                rows = [r for r in result['rows'] if r['published_accounts']]
+                self.assertEqual([r['published_accounts'] for r in rows], [1, 1])
+                self.assertEqual(sum(r['published_accounts'] for r in result['breakdowns']['product']), 2)
+        grouped = query.report(self.root, dict(start='2026-10-31', end='2026-11-01',
+                               view='publications', group_by='account'))
+        self.assertEqual(len(grouped['rows']), 1)
+        self.assertEqual(grouped['rows'][0]['published_accounts'], 1)
+
+    def test_published_accounts_use_identity_and_require_success_and_nonempty_account(self):
+        self.add_publications(
+            dict(account='[2,"tiktok","b"]', external_account_id='b'),
+            dict(team_id=3, account='[3,"tiktok","a"]'),
+            dict(platform='x', account='[2,"x","a"]', task_status=2),
+            dict(account='[2,"tiktok","failed"]', external_account_id='failed', success=0, failed=1),
+            dict(account='[2,"tiktok","planned"]', external_account_id='planned', success=0, task_status=1),
+            dict(account='', external_account_id=''),
+        )
+        result = query.report(self.root, self.params(view='publications', group_by='platform'))
+        self.assertEqual(result['totals']['published_accounts'], 4)
+        self.assertEqual({r['platform']: r['published_accounts'] for r in result['rows']},
+                         {'tiktok': 3, 'x': 1})
+        empty = query.report(self.root, self.params(view='publications', account=''))
+        self.assertEqual(empty['totals']['success'], 1)
+        self.assertEqual(empty['totals']['published_accounts'], 0)
+
+    def test_published_accounts_filters_sort_ranking_and_csv(self):
+        self.add_publications(
+            dict(platform='x', account='[2,"x","a"]', account_name='published X A', language='PT'),
+            dict(platform='x', account='[2,"x","b"]', external_account_id='b',
+                 account_name='published X B', language='PT'),
+            dict(platform='x', account='[2,"x","c"]', external_account_id='c',
+                 account_name='published X C', language='PT', success=0),
+        )
+        for view in ('overview', 'publications'):
+            with self.subTest(view=view):
+                result = query.report(self.root, self.params(view=view, group_by='platform',
+                                      sort='published_accounts', ranking_metric='published_accounts'))
+                self.assertEqual([(r['platform'], r['published_accounts']) for r in result['rows'][:2]],
+                                 [('x', 2), ('tiktok', 1)])
+                self.assertEqual(result['ranking'][0]['platform'], 'x')
+                exported = list(csv.DictReader(io.StringIO(query.export_csv(result).decode('utf-8-sig'))))
+                self.assertEqual([(r['平台'], r['发布账号数']) for r in exported[:2]], [('X', '2'), ('TikTok', '1')])
+        filtered = query.report(self.root, self.params(view='publications', platform='x',
+                                language='PT', search='published X B', group_by='account'))
+        self.assertEqual(filtered['totals']['published_accounts'], 1)
+        self.assertEqual(filtered['rows'][0]['external_account_id'], 'b')
+        empty = query.report(self.root, self.params(view='publications', platform='absent'))
+        self.assertEqual(empty['totals']['published_accounts'], 0)
+
+    def test_published_accounts_are_not_an_effect_metric(self):
+        result = query.report(self.root, self.params(view='effects'))
+        self.assertIsNone(result['totals']['published_accounts'])
+        self.assertTrue(all(r['published_accounts'] is None for r in result['rows'] + result['trend']))
+        header = next(csv.reader(io.StringIO(query.export_csv(result).decode('utf-8-sig'))))
+        self.assertNotIn('发布账号数', header)
+        for param in ('sort', 'ranking_metric'):
+            with self.subTest(param=param), self.assertRaises(query.QueryError):
+                query.report(self.root, self.params(view='effects', **{param: 'published_accounts'}))
 
     def test_only_grouped_account_and_drama_labels_are_aggregated(self):
         conn, manifest, _ = query.snapshot(self.root)
@@ -168,8 +249,35 @@ class QueryTests(unittest.TestCase):
             response=query.report(self.root,{})
             selectors=query.options(self.root)
         self.assertEqual(response['totals']['revenue'],18.99)
+        self.assertEqual(response['totals']['published_accounts'],1)
+        self.assertEqual(selectors['metrics']['published_accounts'],'发布账号数')
         self.assertTrue(response['meta']['stale'])
         self.assertEqual(selectors['refresh_status']['error'],'new_failure')
+
+    def test_legacy_precomputed_without_published_accounts_falls_back_for_both_kinds(self):
+        warmed = query.warm_snapshot(self.root, 'v1')
+        def strip_metric(value):
+            if isinstance(value, dict):
+                value.pop('published_accounts', None)
+                for nested in value.values():
+                    strip_metric(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    strip_metric(nested)
+        for filename in warmed['files']:
+            path = Path(filename)
+            value = json.loads(path.read_text(encoding='utf-8'))
+            value.pop('format_version')
+            strip_metric(value['payload'])
+            path.write_text(json.dumps(value), encoding='utf-8')
+        query._CACHE.clear()
+        query._OPTIONS_CACHE.clear()
+        with patch.object(query, '_combined', wraps=query._combined) as combined:
+            result = query.report(self.root, {})
+        self.assertTrue(combined.called)
+        self.assertEqual(result['totals']['published_accounts'], 1)
+        self.assertTrue(all('published_accounts' in row for row in result['rows'] + result['trend']))
+        self.assertEqual(query.options(self.root)['metrics']['published_accounts'], '发布账号数')
 
     def test_nondefault_parameters_do_not_use_precomputed_homepage(self):
         query.warm_snapshot(self.root,'v1')
@@ -200,6 +308,10 @@ class QueryTests(unittest.TestCase):
         r=query.report(self.root,dict(start='2026-10-30',end='2026-11-01'))
         self.assertIsNone(r['trend'][0]['revenue'])
         self.assertEqual(r['trend'][1]['revenue'],0)
+        self.assertIsNone(r['trend'][0]['published_accounts'])
+        self.assertEqual(r['trend'][1]['published_accounts'],0)
+        self.assertEqual(r['trend'][2]['published_accounts'],1)
+        self.assertEqual(r['totals']['published_accounts'],1)
         self.assertTrue(r['meta']['partial'])
         self.assertEqual(r['totals']['revenue'],18.99)
 
@@ -207,6 +319,7 @@ class QueryTests(unittest.TestCase):
         r=query.report(self.root,dict(start='2026-10-29',end='2026-10-30'))
         self.assertIsNone(r['totals']['revenue'])
         self.assertIsNone(r['totals']['success'])
+        self.assertIsNone(r['totals']['published_accounts'])
 
     def test_reject_cross_fact_dimension_in_overview(self):
         with self.assertRaises(query.QueryError):
