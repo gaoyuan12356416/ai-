@@ -3652,6 +3652,7 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "moboreels_library": "Moboreels 短剧库",
     "video_editing": "视频剪辑",
     "x_video_publish": "X 个人视频发布",
     "fb_video_publish": "Facebook 视频批量发布", # FB_VIDEO_PUBLISH_INTEGRATION_V1
@@ -3735,6 +3736,7 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "moboreels_library": False,
     "video_editing": False,
     "x_video_publish": False,
     "fb_video_publish": False,
@@ -55962,12 +55964,13 @@ def delete_session(session_token):
 
 
 def load_navigation_config():
+    from features.moboreels_library.navigation import ensure_navigation as ensure_moboreels_navigation
     from features.socialkit_analytics.navigation import ensure_navigation as ensure_socialkit_navigation
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
         from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
         from features.pipeline_dispatch.monitor import ensure_navigation as ensure_pipeline_navigation
-        return ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))))
+        return ensure_moboreels_navigation(ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle)))))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94220,6 +94223,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_GET(self):
+        if urlparse(self.path).path == "/api/moboreels" or urlparse(self.path).path.startswith("/api/moboreels/"):
+            from features.moboreels_library.bridge import dispatch
+            return dispatch(self, urlparse(self.path), globals())
         # SYNTHESIS_MATERIAL_SOURCE_V1
         if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
             from features.drama_synthesis.material_source import handle
@@ -94276,6 +94282,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in {
+            "/moboreels-library.html",
+            "/moboreels-library.js",
+            "/moboreels-library.css",
             "/pipeline-monitor.html",
             "/pipeline-monitor.css",
             "/pipeline-monitor.js",
@@ -98025,6 +98034,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_POST(self):
+        if urlparse(self.path).path == "/api/moboreels" or urlparse(self.path).path.startswith("/api/moboreels/"):
+            from features.moboreels_library.bridge import dispatch
+            return dispatch(self, urlparse(self.path), globals())
         # SYNTHESIS_MATERIAL_SOURCE_V1
         if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
             from features.drama_synthesis.material_source import handle

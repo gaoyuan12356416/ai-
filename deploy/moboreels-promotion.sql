@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS ads_ai.cdreader_koc_promotion (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  institution_user_id CHAR(32) NOT NULL COMMENT '畅读KOC机构用户ID',
+  star_user_id CHAR(32) NOT NULL COMMENT '稳定达人ID，由机构、登录租户和用户身份确定性生成',
+  project_type TINYINT UNSIGNED NOT NULL COMMENT '业务类型，本模块固定为2短剧',
+  story_id VARCHAR(64) NOT NULL COMMENT '来源短剧ID，按字符串保存',
+  tenant_key VARCHAR(128) NOT NULL COMMENT '生成者的飞书租户标识',
+  user_id VARCHAR(128) NOT NULL COMMENT '生成者的后台稳定用户ID',
+  star_name VARCHAR(255) NOT NULL COMMENT '请求时的达人显示名称',
+  status VARCHAR(24) NOT NULL COMMENT '请求状态：creating处理中，unknown待核对，succeeded成功，rejected明确失败',
+  request_id CHAR(32) NOT NULL COMMENT '最近一次供应方请求的唯一ID',
+  koc_code VARCHAR(64) DEFAULT NULL COMMENT '推广口令',
+  deep_link TEXT COMMENT '直达短剧的推广深度链接',
+  home_link TEXT COMMENT '推广主页链接',
+  request_json JSON NOT NULL COMMENT '推广请求业务参数，不包含认证请求头或凭据',
+  response_json JSON DEFAULT NULL COMMENT '供应方响应及已核对结果，不包含凭据',
+  created_at DATETIME(3) NOT NULL COMMENT '首次建立推广记录的时间（UTC）',
+  updated_at DATETIME(3) NOT NULL COMMENT '最近更新推广记录的时间（UTC）',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_institution_star_story (institution_user_id,star_user_id,project_type,story_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Moboreels按用户和短剧隔离的推广链接及请求结果';

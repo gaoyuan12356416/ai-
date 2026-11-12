@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moboreels 短剧库 - AI自动后台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/ui-topbar.css?v=20261112mobo1">
+  <link rel="stylesheet" href="/moboreels-library.css?v=20261112mobo1">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="brand-mark">AI</span><span><strong>AI 自动后台</strong><small>创作与运营工作台</small></span></a>
+      <nav id="quickNav" class="nav" aria-label="功能导航"></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><h1>Moboreels 短剧库</h1><p class="muted">发现短剧，获取属于你的推广口令和链接。</p></div>
+        <div class="top-actions"><div id="userCard" class="user-card">正在确认登录状态…</div><button id="loginBtn" class="btn" type="button">登录</button></div>
+      </header>
+      <div id="accessNotice" class="notice hidden" role="alert"></div>
+      <section class="panel sync-panel" aria-labelledby="syncHeading">
+        <div class="sync-heading"><div><h2 id="syncHeading">目录更新</h2><p class="muted">每天北京时间 09:00 自动同步，也可随时手动更新。</p></div><button id="syncBtn" class="btn btn-primary" type="button" disabled>立即更新</button></div>
+        <div class="sync-line"><span id="syncStatus" class="badge">正在读取状态</span><span id="lastSuccess" class="muted">最近成功：—</span><span id="syncUpdated" class="muted"></span></div>
+        <div id="syncProgressWrap" class="hidden"><progress id="syncProgress" max="100" value="0" aria-label="目录同步进度"></progress><p id="syncProgressText" class="muted" aria-live="polite"></p></div>
+        <div id="syncCounts" class="sync-counts"></div>
+        <p id="syncError" class="error-text hidden" role="alert"></p>
+      </section>
+      <section class="panel library-panel" aria-labelledby="libraryHeading">
+        <div class="panel-head"><div><h2 id="libraryHeading">短剧目录</h2><span id="resultCount" class="muted">正在加载…</span></div><button id="refreshBtn" class="btn" type="button" disabled>刷新列表</button></div>
+        <form id="filterForm" class="filters">
+          <fieldset id="filterFields" disabled>
+            <label class="search-field">名称 / 剧目 ID<input id="searchInput" name="search" type="search" maxlength="200" placeholder="搜索剧名或输入剧目 ID"></label>
+            <label>语言<select id="languageFilter" name="lang_id"><option value="">全部语言</option></select></label>
+            <label>上下架状态<select id="statusFilter" name="is_show"><option value="1">上架</option><option value="0">下架 / 隐藏</option><option value="">全部状态</option></select></label>
+            <label>剧目类型<select id="typeFilter" name="local_type"><option value="">全部类型</option><option value="1">本土剧</option><option value="2">译制剧</option><option value="4">动态漫</option></select></label>
+            <label>音轨类型<select id="audioFilter" name="audio_type"><option value="">全部音轨</option><option value="1">原声剧</option><option value="2">配音剧</option></select></label>
+            <button class="btn btn-primary" type="submit">查询</button><button id="resetFiltersBtn" class="btn" type="button">重置</button>
+          </fieldset>
+        </form>
+        <div id="listError" class="notice error hidden" role="alert"></div>
+        <div class="table-wrap">
+          <table><thead><tr><th scope="col">短剧</th><th scope="col">语言</th><th scope="col">类型 / 音轨</th><th scope="col">收费起始集</th><th scope="col">状态</th><th scope="col">来源上架时间</th><th scope="col">操作</th></tr></thead><tbody id="dramaRows"><tr><td colspan="7" class="empty">正在加载短剧…</td></tr></tbody></table>
+        </div>
+        <footer class="pagination"><div><label class="page-size-label">每页 <select id="pageSize" aria-label="每页条数"><option value="50">50 条</option><option value="100">100 条</option></select></label><span id="pageSummary" class="muted"></span></div><div class="pagination-buttons"><button id="prevPage" class="btn" type="button" disabled>上一页</button><span id="pageNumber">1 / 1</span><button id="nextPage" class="btn" type="button" disabled>下一页</button></div></footer>
+      </section>
+    </main>
+  </div>
+  <dialog id="detailDialog" class="dialog" aria-labelledby="detailTitle"><div class="dialog-head"><div><span class="eyebrow">短剧详情</span><h2 id="detailTitle">正在加载…</h2></div><button class="icon-btn" data-close="detailDialog" type="button" aria-label="关闭详情">×</button></div><div id="detailBody" class="dialog-body"></div></dialog>
+  <dialog id="promotionDialog" class="dialog promotion-dialog" aria-labelledby="promotionTitle"><div class="dialog-head"><div><span class="eyebrow">我的推广链接</span><h2 id="promotionTitle">正在加载…</h2></div><button class="icon-btn" data-close="promotionDialog" type="button" aria-label="关闭推广链接">×</button></div><div id="promotionBody" class="dialog-body" aria-live="polite"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/quick-nav.js?v=20261112mobo1"></script>
+  <script src="/ui-topbar.js?v=20261112mobo1"></script>
+  <script src="/moboreels-library.js?v=20261112mobo1"></script>
+</body>
+</html>

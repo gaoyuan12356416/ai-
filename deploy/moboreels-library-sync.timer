@@ -1,0 +1,11 @@
+[Unit]
+Description=Synchronize Moboreels catalog daily at 09:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1s
+Unit=moboreels-library-sync.service
+
+[Install]
+WantedBy=timers.target

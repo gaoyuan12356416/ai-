@@ -26,6 +26,9 @@
     return RETIRED_X_KEYS.has(item.key) || RETIRED_X_KEYS.has(item.view) || RETIRED_X_PAGES.has(path);
   }
   const DEFAULT_NAV = [
+    {key:"partner_libraries", label:"合作方剧库", order:16, enabled:true,
+     items:[{key:"moboreelsLibrary", label:"Moboreels 短剧库", order:10,
+       href:"/moboreels-library.html", module:"moboreels_library", enabled:true}]},
     {
       key: "pipeline_overview", label: "运行监测", order: 1,
       items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,
