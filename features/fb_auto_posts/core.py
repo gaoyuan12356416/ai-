@@ -573,6 +573,9 @@ class FBAutoPostStore:
             # capacity and material preflight can prevent a run from being created.
             # Reuse the same Page read below; audit data never drives publication.
             page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
+            if hit_drama and hit_drama.get('match_policy'):
+                from .hit_profile import filter_pages
+                page_rows = filter_pages(page_rows, hit_drama)
             if expected_due_id is not None:
                 self.snapshot_due_targets(
                     due_slot_id=expected_due_id, template_id=template_id,
@@ -623,6 +626,9 @@ class FBAutoPostStore:
             error.conflicts = legacy
             raise error
         page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
+        if hit_drama and hit_drama.get('match_policy'):
+            from .hit_profile import filter_pages
+            page_rows = filter_pages(page_rows, hit_drama)
         if any(page_language(page.language) and page_language(page.language) not in candidate_snapshots for page in page_rows):
             raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
@@ -715,22 +721,26 @@ class FBAutoPostStore:
                     if candidate_limit<5000 and len(excluded)>candidate_limit-50:
                         raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化，请重试',409)
                     blocked_content = cooldown_content_ids(conn, page.page_id, task_publish_at, int(config.get("drama_cooldown_hours", 0)), now)
-                    allowed = set(target_content_ids(hit_drama, language)) if hit_drama else None
+                    allowed = set(hit_drama['page_content_ids'].get(page.page_id, [])) if hit_drama and hit_drama.get('match_policy') else (set(target_content_ids(hit_drama, language)) if hit_drama else None)
                     page_snapshot = candidate_snapshots[language]
                     decision = Decision(page.page_id, profile_identity, profile_snapshot)
                     candidate_pool = page_snapshot.candidates
                     if not hit_drama and (decision.reason or page_snapshot.profile_error or not profile_supported):
                         candidate_pool = diverse_candidates(candidate_pool, candidate_limit,
                             20 if int(config.get('drama_cooldown_hours', 0)) else 0)
-                    candidates = [item for item in candidate_pool if item.content_id not in blocked_content and (allowed is None or item.content_id in allowed)]
+                    scoped_candidates = [item for item in candidate_pool if allowed is None or item.content_id in allowed]
+                    candidates = [item for item in scoped_candidates if item.content_id not in blocked_content]
                     if hit_drama:
                         material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
                     else:
                         material, selection = choose_profile_material(candidates, excluded,
                             decision=decision, snapshot=page_snapshot, candidate_limit=candidate_limit,
                             materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
-                    if material is None and blocked_content:
-                        pre_reason = "fb_auto_no_video_after_drama_cooldown"
+                    if material is None and scoped_candidates:
+                        if not candidates:
+                            pre_reason = "fb_auto_no_video_after_drama_cooldown"
+                        elif all(item.material_id in excluded for item in candidates):
+                            pre_reason = "fb_auto_no_video_after_material_cooldown"
                 reason = pre_reason or ("" if page.eligible_token_count > 0 else "fb_page_missing_eligible_token")
                 snapshot_status = "eligible" if not reason else "skipped"
                 conn.execute("INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, page.page_id, page.group_id, json.dumps(list(page.group_ids)), page.owner_user_id, page.timezone, language, page.eligible_token_count, snapshot_status, reason))
@@ -756,7 +766,20 @@ class FBAutoPostStore:
                     conn.execute("UPDATE fb_auto_task SET schedule_policy=? WHERE id=?", (target_daily.POLICY, int(task_cursor.lastrowid)))
                     target_daily.bind_slot(conn, target_schedule.source_key(template_id), day, page.page_id, ordinal, "fb_auto_task", int(task_cursor.lastrowid))
                 if hit_drama:
-                    selection['hit_drama_publish'] = dict(hit_drama)
+                    if hit_drama.get('match_policy'):
+                        from .hit_profile import profileaudit
+                        selection['tag_profile'] = profileaudit(page.page_id, material.content_id, hit_drama) if material else {
+                            'page_id': page.page_id, 'match_policy': hit_drama['match_policy'],
+                            'selection_mode': 'strict_profile_match', 'selected_content_id': '',
+                            'fallback': True, 'fallback_reason': reason or 'no_eligible_material'}
+                        selection['tag_profile'].update(selected_content_id=material.content_id if material else '',
+                                                        selected_material_id=material.material_id if material else '')
+                        selection['hit_drama_publish'] = {key: value for key, value in hit_drama.items()
+                            if key not in ('profiles', 'page_ids', 'page_languages', 'page_content_ids', 'skipped_pages')}
+                        selection['hit_drama_publish']['matched_page_id'] = page.page_id
+                        selection['hit_drama_publish']['allowed_content_ids'] = hit_drama['page_content_ids'].get(page.page_id, [])
+                    else:
+                        selection['hit_drama_publish'] = dict(hit_drama)
                 conn.execute("UPDATE fb_auto_task SET selection_json=? WHERE id=?", (json.dumps(selection, sort_keys=True), int(task_cursor.lastrowid)))
                 if status == "planned": queued += 1
                 else: skipped += 1

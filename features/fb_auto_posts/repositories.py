@@ -503,6 +503,7 @@ class MaterialRepository:
         # Page cooldown plus the unchanged random choice among its first 50.
         candidate_limit=max(1,min(int(config.get("_candidate_limit",self.candidate_limit)),self.candidate_limit))
         profile_mode = bool(config.get('_profile_selection'))
+        strict_hit = bool(config.get('hit_drama_publish', {}).get('match_policy'))
         classifications, classified_ids = {}, set()
         profile_error = ''
         if self.metric_store is None:
@@ -663,7 +664,17 @@ class MaterialRepository:
                 if not profile_error:
                     from .profile_material import retain_profile_candidates
                     candidates[:] = retain_profile_candidates(candidates, classifications, candidate_limit, per_drama_limit)
-            if not profile_mode or profile_error:
+            if strict_hit:
+                # Different Pages can match different same-language versions
+                # of one resource. Retain each version before the final Page
+                # restriction, rather than letting one version consume top-N.
+                groups = {}
+                for item in candidates:
+                    groups.setdefault(item.content_id, []).append(item)
+                kept = {item.material_id for group in groups.values()
+                        for item in diverse_candidates(group, candidate_limit, per_drama_limit)}
+                candidates[:] = [item for item in candidates if item.material_id in kept]
+            elif not profile_mode or profile_error:
                 candidates[:] = diverse_candidates(candidates, candidate_limit, per_drama_limit)
 
         def snapshot():

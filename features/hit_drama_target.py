@@ -49,8 +49,13 @@ def resolve_target(query, schema, app_id, request):
 
 def content_ids(target, language=None):
     """Read both new multilingual targets and already-frozen version-one runs."""
+    def matching_language(value):
+        normalized = canonical_drama_language(value, default='')
+        return 'pt-br' if normalized == 'pt' else normalized
     if 'by_language' in target and language is not None:
-        return list(target['by_language'].get(canonical_drama_language(language, default=''), []))
-    if language is not None and target.get('languages') and language not in target['languages']:
+        normalized = matching_language(language)
+        return list(dict.fromkeys(cid for key, ids in target['by_language'].items()
+                                  if matching_language(key) == normalized for cid in ids))
+    if language is not None and target.get('languages') and matching_language(language) not in {matching_language(value) for value in target['languages']}:
         return []
     return list(target.get('content_ids') or ([target['content_id']] if target.get('content_id') else []))

@@ -31,5 +31,10 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(content_ids({'content_id':'old'}),['old'])
         self.assertEqual(content_ids({'content_id':'old','languages':['en']},'id'),[])
 
+    def test_portuguese_profile_alias_keeps_portugal_distinct(self):
+        target={'by_language':{'pt':['br'],'pt-pt':['pt']},'content_ids':['br','pt']}
+        self.assertEqual(content_ids(target,'pt-br'),['br'])
+        self.assertEqual(content_ids(target,'pt-pt'),['pt'])
+
 
 if __name__=='__main__':unittest.main()

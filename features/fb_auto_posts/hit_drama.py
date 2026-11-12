@@ -4,8 +4,15 @@ import re
 from .core import StoreError
 from .hit_material import _gates
 from features.hit_drama_target import identifier, resolve_target, content_ids
+from .hit_profile import freeze_match
 
 MARKER = 'hit_drama_publish'
+
+
+def run_summary(conn, run_id):
+    return [dict(reason=row[0], count=row[1]) for row in conn.execute(
+        "SELECT COALESCE(NULLIF(skip_reason,''),NULLIF(error_code,''),'unknown') reason,COUNT(*) n "
+        "FROM fb_auto_task WHERE run_id=? AND status IN ('skipped','failed') GROUP BY reason ORDER BY n DESC,reason", (run_id,))]
 
 
 def normalize(payload):
@@ -30,7 +37,10 @@ def receipt(conn, template_id, slot, request):
     if marker.get('request') != request:
         raise StoreError('hit_drama_operation_conflict', '同一操作标识已用于不同剧目或模板版本', 409)
     return dict(ok=True, run_id=row['id'], idempotent=True, queued=row['queued_tasks'], skipped=row['skipped_tasks'], total_pages=row['total_pages'],
-                content_id=marker.get('content_id',''), content_ids=content_ids(marker), languages=marker.get('languages',[]))
+                content_id=marker.get('content_id',''), content_ids=content_ids(marker), languages=marker.get('languages',[]),
+                matched_pages=len(marker.get('page_ids', [])) if 'page_ids' in marker else None,
+                match_policy=marker.get('match_policy', 'legacy_language_only'),
+                skipped_pages=marker.get('skipped_pages', []), skip_summary=run_summary(conn, row['id']))
 
 
 def publish_drama(runtime, template_id, actor, payload):
@@ -50,9 +60,17 @@ def publish_drama(runtime, template_id, actor, payload):
         target = resolve_target(mysql.select, mysql.schema, config['app_id'], request)
     except ValueError as exc:
         raise StoreError('hit_drama_not_found', str(exc), 409) from None
+    page_rows = runtime.pages.list_pages(config['group_ids'], is_admin=bool(template['scope_is_admin']),
+                                        owner_user_id=str(template['owner_user_id']))
+    target = freeze_match(page_rows, target, mysql, [template_id, request['expected_version'], slot],
+                          app_id=config['app_id'])
+    if not target['page_ids']:
+        error = StoreError('hit_drama_no_matching_page', '没有语言、受众和题材收入画像同时匹配的可发布Page，未创建发布任务', 409)
+        error.conflicts = target['skipped_pages']
+        raise error
     result = runtime.store.create_run(template_id, slot, 'manual', actor, runtime.pages, runtime.materials,
         expected_template_version=request['expected_version'], hit_drama=dict(target, request=request),
         max_publishable_pages=runtime.max_publishable_pages, max_jobs_per_slot=runtime.max_jobs_per_slot, max_daily_jobs=runtime.max_daily_jobs)
-    summary = result.get('summary', {})
-    return dict(result, queued=summary.get('queued_tasks', result.get('queued', 0)), skipped=summary.get('skipped_tasks', result.get('skipped', 0)),
-                content_id=target['content_id'], content_ids=target['content_ids'], languages=target['languages'])
+    with runtime.store.connect() as conn:
+        saved = receipt(conn, template_id, slot, request)
+    return dict(saved, idempotent=bool(result.get('idempotent')))

@@ -93,9 +93,17 @@ def request_admin(method: Any, path: Any, *, payload: Optional[Mapping[str, Any]
     if actor is not None:
         headers["X-FB-Auto-Actor"] = json.dumps(dict(actor), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     session = requests.Session(); session.trust_env = False
-    timeout = 30 if path.endswith("/run-now") else (900 if path.endswith("/enable") else 120)
+    # Ordinary run-now only enqueues a due slot. A named drama synchronously
+    # resolves its language versions and screens Page/material eligibility.
+    # Stay below the existing 300-second public proxy timeout.
+    drama_run = method == "POST" and path.endswith("/run-now") and payload is not None and "drama_id" in payload
+    timeout = 240 if drama_run else (30 if path.endswith("/run-now") else (900 if path.endswith("/enable") else 120))
     try:
         response = session.request(method, base + path, params=dict(query or {}) or None, json=dict(payload) if payload is not None else None, headers=headers, timeout=timeout, allow_redirects=False)
+    except requests.ReadTimeout:
+        if drama_run:
+            raise FBAutoPostAdminClientError("fb_auto_result_pending", "等待剧目筛选回执超时，请使用“重试确认”核对同一轮任务", 503) from None
+        raise FBAutoPostAdminClientError("fb_auto_post_service_unavailable", "FB Page自动发布服务暂不可用", 503) from None
     except requests.RequestException:
         raise FBAutoPostAdminClientError("fb_auto_post_service_unavailable", "FB Page自动发布服务暂不可用", 503) from None
     finally:
