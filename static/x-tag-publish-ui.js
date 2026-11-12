@@ -52,7 +52,7 @@
     banner.append(node('strong','X 标签画像发布'));
     banner.append(node('p','模板、素材池、排期、防重和频道发布量独立计算。按受众方向 → 题材逐层按收入比例选择，受众优先。先在同受众内放宽题材，再尝试其他受众；无有效受众画像时沿用原排序，题材画像缺失时保留受众偏好。'));
     const nav=node('nav');
-    for(const [href,label] of [['/x-tag-auto-publish-templates.html','自动发布模板'],['/x-tag-material-pool.html','画像素材池'],['/x-tag-auto-publish-runs.html','模板运行记录'],['/x-tag-post-logs.html','画像发布日志'],['/x-account-list.html','频道收入画像'],['/x-auto-publish-templates.html','原自动发布']]){const a=node('a',label);a.href=href;nav.append(a);}
+    for(const [href,label] of [['/x-tag-auto-publish-templates.html','自动发布模板'],['/x-tag-material-pool.html','画像素材池'],['/x-tag-auto-publish-runs.html','模板运行记录'],['/x-tag-post-logs.html','画像发布日志'],['/x-account-list.html','频道收入画像']]){const a=node('a',label);a.href=href;nav.append(a);}
     banner.append(nav);
     const details=node('details');details.append(node('summary','查看频道画像和本流程发布量'));
     const list=node('div','','tag-profile-list');details.append(list);banner.append(details);host.prepend(banner);

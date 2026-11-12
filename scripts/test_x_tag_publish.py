@@ -384,12 +384,14 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(rpc.call_args.args[1]['settings']['enabled'])
 
     def test_cookie_required_and_acl_checked_every_time(self):
-        with self.assertRaises(gateway.Error):gateway.authorize('', '/probe')
+        with self.assertRaises(gateway.Error):gateway.authorize('', gateway.PROFILE_POOL_NAV)
         user=dict(user_id='u',tenant_key='t',name='User',role='user')
-        with patch.object(gateway,'rpc',side_effect=[dict(authenticated=True,user=user),{},dict(authenticated=True,user=user),gateway.Error('denied','',403)]) as call:
-            self.assertEqual(gateway.authorize('cookie','/probe')['user_id'],'u')
-            with self.assertRaises(gateway.Error):gateway.authorize('cookie','/probe')
-            self.assertEqual(call.call_count,4)
+        with patch.object(gateway,'rpc',return_value=dict(authenticated=True,user=user)) as call, \
+             patch.object(gateway,'require_navigation',side_effect=[None,gateway.Error('denied','',403)]) as access:
+            self.assertEqual(gateway.authorize('cookie',gateway.PROFILE_POOL_NAV)['user_id'],'u')
+            with self.assertRaises(gateway.Error):gateway.authorize('cookie',gateway.PROFILE_POOL_NAV)
+            self.assertEqual(call.call_count,2)
+            self.assertEqual(access.call_count,2)
             self.assertEqual(call.call_args.kwargs['cookie'],'cookie')
 
     def test_gateway_overwrites_untrusted_actor(self):

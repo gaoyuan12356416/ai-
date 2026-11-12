@@ -18,6 +18,8 @@ AUTO = '/api/admin/x-tag-auto-publish'
 POST = '/api/admin/x-tag-posts'
 OLD_AUTO = '/api/admin/x-auto-publish'
 NAV_POOL = 'xPostMaterialPool'
+PROFILE_TEMPLATE_NAV = 'xTagAutoPublishTemplates'
+PROFILE_POOL_NAV = 'xTagMaterialPool'
 
 
 def read_env(path):
@@ -30,15 +32,60 @@ def read_env(path):
     return result
 
 
-def authorize(cookie, probe):
+def require_navigation(user, item_keys):
+    """Use current profile-page ACLs without probing retired publishing APIs.
+
+    auth/status supplies the main API's normalized permissions. The navigation
+    file is the same operator-managed source used by the main API and browser;
+    read it for every request so disabling a page takes effect immediately.
+    """
+    admin = user.get('role') == 'admin'
+    permissions = user.get('permissions') or {}
+    if not isinstance(permissions, dict):
+        permissions = {}
+    if not admin and not permissions.get('x_accounts'):
+        raise Error('permission_denied', '无 X 发布权限', 403)
+    try:
+        path = os.environ.get('DRAMA_NAVIGATION_CONFIG_PATH', '/usr/share/nginx/html/navigation.json')
+        config = json.loads(Path(path).read_text(encoding='utf-8-sig'))
+        if not isinstance(config, list):
+            raise ValueError()
+    except (OSError, UnicodeError, ValueError):
+        raise Error('navigation_config_unavailable', '导航配置暂不可用', 503) from None
+    keys = {item_keys} if isinstance(item_keys, str) else set(item_keys)
+    denied = 'navigation_item_unavailable'
+    for group in config:
+        if not isinstance(group, dict) or not isinstance(group.get('items', []), list):
+            continue
+        for item in group.get('items', []):
+            if not isinstance(item, dict) or str(item.get('key', '')).strip() not in keys:
+                continue
+            if group.get('enabled') is False or item.get('enabled') is False:
+                continue
+            if (group.get('adminOnly') or item.get('adminOnly')) and not admin:
+                if denied != 'permission_denied':
+                    denied = 'admin_required'
+                continue
+            modules = (str(node.get('module', '') or '').strip() for node in (group, item))
+            if not admin and any(module and not permissions.get(module) for module in modules):
+                denied = 'permission_denied'
+                continue
+            return
+    raise Error(denied, '暂无此页面访问权限', 403)
+
+
+def authorize(cookie, navigation_keys=None):
     if not cookie or len(cookie) > 16384:
         raise Error('cookie_auth_required', '请先登录', 401)
     auth = rpc('http://127.0.0.1:8787', '/api/auth/status', cookie=cookie)
     user = auth.get('user') or {}
     if not auth.get('authenticated') or not user.get('user_id') or not user.get('tenant_key'):
         raise Error('cookie_auth_required', '请先登录', 401)
-    # The original route evaluates the current navigation and module ACL.
-    rpc('http://127.0.0.1:8787', probe, cookie=cookie)
+    if navigation_keys is None:
+        # The supported history route retains its existing access policy.
+        rpc('http://127.0.0.1:8787', '/api/admin/x-posts/logs?page_size=1', cookie=cookie)
+    else:
+        require_navigation(user, navigation_keys)
     return {k: user.get(k, '') for k in ('user_id', 'tenant_key', 'name', 'email', 'role')}
 
 
@@ -174,15 +221,12 @@ class Handler(BaseHTTPRequestHandler):
         post_match = re.fullmatch(re.escape(POST) + r'/(?:logs|runs|profiles|material-pool(?:/(?:account-options|schedule|manual-publish|manual-runs/[1-9][0-9]*|[1-9][0-9]*))?)', path)
         if not auto_match and not post_match:
             raise Error('not_found', '', 404)
-        probe = (OLD_AUTO + ('/runs?limit=1' if '/runs' in path else '/templates?limit=1')) if auto_match else \
-                ('/api/admin/x-posts/logs?page_size=1' if path.endswith(('/logs', '/runs')) else '/api/admin/x-posts/material-pool?page_size=1')
-        try:
-            actor = authorize(self.headers.get('Cookie', ''), probe)
-        except Error as exc:
-            if path == POST + '/profiles' and exc.status == 403:
-                actor = authorize(self.headers.get('Cookie', ''), OLD_AUTO + '/templates?limit=1')
-            else:
-                raise
+        navigation_keys = PROFILE_TEMPLATE_NAV if auto_match else PROFILE_POOL_NAV
+        if path == POST + '/profiles':
+            navigation_keys = (PROFILE_POOL_NAV, PROFILE_TEMPLATE_NAV)
+        elif path in (POST + '/logs', POST + '/runs'):
+            navigation_keys = None
+        actor = authorize(self.headers.get('Cookie', ''), navigation_keys)
         body = {}
         if self.command in ('POST', 'PUT', 'DELETE'):
             source = self.headers.get('Origin') or self.headers.get('Referer') or ''
