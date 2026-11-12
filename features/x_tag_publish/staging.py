@@ -107,6 +107,8 @@ def build(source, repo, target, *, verify=True):
     p = source / 'static/x-post-material-pool.html'
     value = p.read_text(encoding='utf-8').replace('/api/admin/x-posts/', '/api/admin/x-tag-posts/')
     value = value.replace('x-post-material-pool', 'x-tag-material-pool').replace('/x-post-logs', '/x-tag-post-logs')
+    value = value.replace('xPostMaterialPool', 'xTagMaterialPool')
+    value = value.replace('当前账号没有 Post 素材池权限', '当前账号没有标签画像素材池权限')
     value = value.replace('X Post 素材池', 'X 标签画像素材池').replace('X素材池', 'X标签画像素材池')
     value = value.replace('随机分配', '按频道标签画像分配').replace('最新素材优先', '受众 → 题材优先，同组合内最新素材优先')
     value = value.replace('定时任务按加入时间从新到旧选择未发布且未占用的素材，并按语言匹配账号。',
