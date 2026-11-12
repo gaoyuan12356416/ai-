@@ -46,8 +46,8 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
 
     def test_pool_pages_describe_newest_upload_first(self):
         self.assertIn("可用素材按上传时间倒序、最新上传优先", MATERIAL)
-        self.assertIn("按上传时间倒序领取尚未发布过的新剧", DRAMA)
-        self.assertIn("领取最新上传的未绑定短剧", DRAMA)
+        self.assertIn("新短剧按标签画像匹配所选频道", DRAMA)
+        self.assertIn("无有效画像时按原顺序分配", DRAMA)
         self.assertIn("人工素材池按最新上传优先选材", LOGS)
         self.assertNotIn("人工素材池 FIFO", LOGS)
 
@@ -57,11 +57,10 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertEqual(drama["label"], "Post短剧池")
         self.assertEqual(drama["href"], "/x-post-drama-pool.html")
         self.assertEqual(drama["module"], "x_accounts")
-        self.assertFalse(items["xPostMaterialPool"]["adminOnly"])
+        self.assertNotIn("xPostMaterialPool", items)
         self.assertFalse(drama["adminOnly"])
         self.assertTrue(drama["enabled"])
         self.assertEqual(drama["order"], 40)
-        self.assertEqual(items["xPostMaterialPool"]["order"], 30)
         self.assertEqual(items["xPostLogs"]["order"], 50)
 
         self.assertIn('xPostDramaPool: "/x-post-drama-pool.html"', QUICK_NAV)
@@ -141,7 +140,7 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertIn("assigned_account_id", DRAMA)
         self.assertIn("assigned_account_username", DRAMA)
         self.assertIn("绑定账号 / 下次发布时间", DRAMA)
-        self.assertIn("调整账号顺序不会改变已有绑定", DRAMA)
+        self.assertIn("调整频道顺序不会改变已有绑定", DRAMA)
         self.assertIn('"待分配"', DRAMA)
         self.assertIn('"不可分配"', DRAMA)
         self.assertIn("历史发布账号 · 免费剧集已完成", DRAMA)

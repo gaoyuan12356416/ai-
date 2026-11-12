@@ -49,23 +49,15 @@ class XAutoPublishAppContractTests(unittest.TestCase):
             "X_AUTO_POST_ADMIN_TIMEOUT": "30",
         }
 
-    def test_app_parses_and_navigation_reuses_x_accounts_permission(self):
+    def test_app_parses_and_profile_navigation_reuses_x_accounts_permission(self):
         ast.parse(APP_SOURCE)
         platform = next(item for item in NAVIGATION if item["key"] == "x_platform")
         entries = {item["key"]: item for item in platform["items"]}
-        self.assertEqual(entries["xAutoPublishTemplates"]["module"], "x_accounts")
-        self.assertEqual(entries["xAutoPublishRuns"]["module"], "x_accounts")
-        self.assertEqual(
-            entries["xAutoPublishTemplates"]["href"],
-            "/x-auto-publish-templates.html",
-        )
-        self.assertEqual(
-            entries["xAutoPublishRuns"]["href"],
-            "/x-auto-publish-runs.html",
-        )
-        ordered = [item["key"] for item in sorted(platform["items"], key=lambda item: item["order"])]
-        self.assertLess(ordered.index("xAccountList"), ordered.index("xAutoPublishTemplates"))
-        self.assertLess(ordered.index("xAutoPublishRuns"), ordered.index("xPostMaterialPool"))
+        for key in ("xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"):
+            self.assertNotIn(key, entries)
+        self.assertEqual(entries["xTagAutoPublishTemplates"]["module"], "x_accounts")
+        self.assertEqual(entries["xTagMaterialPool"]["module"], "x_accounts")
+        self.assertIn("retired_path(parsed.path)", APP_SOURCE)
 
     def test_get_proxy_routes_are_allowlisted_navigation_gated_and_no_store(self):
         start = APP_SOURCE.index(

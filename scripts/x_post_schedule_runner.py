@@ -9,6 +9,7 @@ the X sidecar, and publishes only queue identities returned by that plan.
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
 import hashlib
 import http.client
 import json
@@ -18,6 +19,8 @@ import random
 import re
 import sys
 import tempfile
+import threading
+import time
 import urllib.parse
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -29,6 +32,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from features.x_posts import duration_policy
+from features.x_posts import material_shortage
+from features.x_posts.read_failures import read_failure
+from features.pipeline_dispatch.x_planning import enabled as pipeline_dispatch_enabled, deferred_candidate, queue_handoff
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_posts.drama_selector import (  # noqa: E402
     DRAMAWAVE_APP_ID,
     DramaPoolRejection,
@@ -96,7 +103,7 @@ DEFAULT_MATERIAL_CHECK_PATH = "/internal/posts/material-pool/check"
 DEFAULT_STORAGE_PREFLIGHT_PATH = "/internal/posts/storage/preflight"
 DEFAULT_PUBLISH_PATH = "/internal/posts/queue/{queue_id}/publish"
 DEFAULT_WORK_DIR = "/mnt/data-disk/x-post-automation/daily-work"
-DEFAULT_LOCK_PATH = "/run/x-post-daily/runner.lock"
+DEFAULT_LOCK_PATH = "/run/x-post-daily/schedule.lock"
 MAX_DUE_BATCHES = 10
 MAX_POOL_SCAN = 1000
 SCHEDULE_MEDIA_DOWNLOAD_ATTEMPTS = 3
@@ -124,15 +131,16 @@ _DRAMA_DETERMINISTIC_REJECTION_CODES = frozenset(
         "x_post_daily_copy_validation_failed",
     }
 )
-MATERIAL_ASSIGNMENT_VERSION = "material-random-relay-v1"
+MATERIAL_ASSIGNMENT_VERSION = "material-random-premium-direct-v2"
 
 
 class MaterialScheduleCandidates(list):
     """List-compatible plan carrying clean, run-scoped FIFO skip proof."""
 
-    def __init__(self, values=(), *, fifo_capacity_skips=None):
+    def __init__(self, values=(), *, fifo_capacity_skips=None, shortage_snapshot=None):
         super().__init__(values)
         self.fifo_capacity_skips = list(fifo_capacity_skips or [])
+        self.shortage_snapshot = shortage_snapshot
 
 
 def _is_ordered_account_subset(values, configured):
@@ -164,6 +172,92 @@ class ScheduleRunError(RuntimeError):
         self.drama_pool_item_id = drama_pool_item_id
         self.content_id = str(content_id or "")
         super().__init__(redact_text(message, 240))
+
+
+class ScheduleAccountScopeChanged(ScheduleRunError):
+    """Only the bounded, pre-write material account-scope loop may defer."""
+
+
+class ScheduleReadPreflightTransient(ScheduleRunError):
+    def __init__(self,details):
+        self.read_failure=details
+        super().__init__("只读预检瞬时故障，未尝试创建计划", "x_post_read_preflight_transient")
+
+
+def _targeted_schedule_lock(config, identity):
+    """Shared with one incident operator; every future normal tick honors it."""
+    targets = {
+        ('drama', '2026-11-02', '16:28', 27): 1029,
+        ('drama', '2026-11-03', '08:44', 27): 1031,
+    }
+    rid = targets.get(tuple(identity.get(k) for k in ('source_type', 'run_date', 'publish_time', 'version')))
+    if rid is None:
+        return contextlib.nullcontext(True)
+    return process_lock(str(Path(config.lock_path).parent / ('schedule-targeted-%s.lock' % rid)))
+
+
+def _transient_read_details(exc):
+    if isinstance(exc, (CandidateSelectionError, DramaQueryError, ScheduleReadPreflightTransient)):
+        return getattr(exc,"read_failure",None)
+    if isinstance(exc,SidecarError) and not exc.unknown_outcome:
+        if exc.code=="x_sidecar_unreachable" and exc.status==503:
+            return {"kind":"sidecar_read_network"}
+        if exc.code=="x_sidecar_http_error" and 500<=exc.status<=599:
+            return {"kind":"sidecar_read_http","http_status":exc.status}
+        # The old generic network message also represents malformed JSON, so it
+        # is deliberately excluded. This exact format carries real upstream HTTP.
+        match=re.fullmatch(r"X API请求失败（HTTP (5[0-9]{2})，[^\r\n]*）",str(exc))
+        if exc.code=="x_upstream_error" and exc.status==502 and match:
+            return {"kind":"x_account_read_http","http_status":int(match.group(1))}
+    return None
+
+
+def _readonly_preflight_call(call,*,reconnect=None):
+    """At most two calls, only around verified read-only preflight boundaries."""
+    for attempt in range(2):
+        try:return call()
+        except Exception as exc:
+            details=_transient_read_details(exc)
+            if not details:raise
+            if attempt:raise ScheduleReadPreflightTransient(details) from None
+            time.sleep(.25)
+            if reconnect is not None:reconnect()
+
+
+_SCOPE_WAIT_IDENTITY = (
+    "id", "slot_key", "source_type", "run_date", "publish_time", "timezone",
+    "config_version", "account_ids", "expected_count", "body_template",
+    "schedule_mode", "created_at", "random_template_enabled", "duration_policy_version",
+)
+
+
+def _same_scope_wait_identity(before, after, *, snapshot=True, allow_drama=False):
+    fields = _SCOPE_WAIT_IDENTITY + (("material_pool_snapshot_max_id",) if snapshot else ())
+    return (isinstance(before, dict) and isinstance(after, dict)
+            and all(k in before and k in after and before[k] == after[k] for k in fields)
+            and before["source_type"] in (("material","drama") if allow_drama else ("material",))
+            and type(before["id"]) is int and before["id"] > 0)
+
+
+def _zero_write_claim(run):
+    return (isinstance(run, dict) and run.get("status") == "claimed"
+            and all(k in run and not run[k] for k in ("plan_attempted_at", "started_at", "finished_at", "error_code"))
+            and all(type(run.get(k)) is int and run[k] == 0
+                    for k in ("queued_count", "published_count", "failed_count", "unknown_count")))
+
+
+def _wait_for_account_scope(sidecar, config, identity, baseline, *, read_preflight=False):
+    """No plan retry or failure write; prove the original empty run still exists."""
+    latest = sidecar.query_schedule_plan(config.plan_query_path, identity)
+    run = latest.get("run")
+    if (latest.get("found") is not True or latest.get("queues") != []
+            or not _same_scope_wait_identity(baseline, run,allow_drama=read_preflight) or not _zero_write_claim(run)
+            or not (type(run.get("material_pool_snapshot_max_id")) is int
+                    or (read_preflight and run.get("material_pool_snapshot_max_id") is None))):
+        return False
+    renewed = sidecar.heartbeat_schedule_run(DEFAULT_HEARTBEAT_PATH, identity, plan_attempt=False)
+    return (renewed.get("heartbeat_recorded") is True and renewed.get("plan_attempt_recorded") is False
+            and _same_scope_wait_identity(baseline, renewed,allow_drama=read_preflight) and _zero_write_claim(renewed))
 
 
 def _env_value(name, fallback_name="", default=""):
@@ -256,6 +350,8 @@ class ScheduleConfig:
     previous_day_deployed_commit: str = ""
     drama_duration_routing_enabled: bool = False
     duration_policy_version: int = 2
+    publish_workers: int = 1
+    batch_workers: int = 1
 
     @property
     def pool_check_path(self):
@@ -269,6 +365,8 @@ class ScheduleConfig:
             "X_POST_DAILY_MEDIA_ALLOWED_HOSTS",
         )
         return cls(
+            publish_workers=_env_int("X_POST_PUBLISH_WORKERS", "", 2, 1, 4),
+            batch_workers=_env_int("X_POST_SCHEDULE_BATCH_WORKERS", "", 2, 1, 2),
             internal_url=_env_value(
                 "X_POST_SCHEDULE_INTERNAL_URL",
                 "X_POST_DAILY_INTERNAL_URL",
@@ -335,9 +433,9 @@ class ScheduleConfig:
             max_media_bytes=_env_int(
                 "X_POST_SCHEDULE_MAX_MEDIA_BYTES",
                 "X_POST_DAILY_MAX_MEDIA_BYTES",
-                512 * 1024 * 1024,
+                MAX_POST_VIDEO_BYTES,
                 1024,
-                512 * 1024 * 1024,
+                MAX_POST_VIDEO_BYTES,
             ),
             media_timeout=_env_int(
                 "X_POST_SCHEDULE_MEDIA_TIMEOUT",
@@ -582,6 +680,7 @@ def _schedule_identity(raw):
         "version": version,
         "account_ids": list(account_ids),
         "frozen": frozen,
+        **({"schedule_policy": str(raw["schedule_policy"]), "planned_publish_at_utc": str(raw.get("planned_publish_at_utc") or "")} if raw.get("schedule_policy") else {}),
     }
 
 
@@ -1035,11 +1134,13 @@ class ScheduleSidecarClient(SidecarClient):
             )
         return dict(item)
 
-    def available_drama_pool(self, path, limit, account_ids, *, configured_account_ids=None):
+    def available_drama_pool(self, path, limit, account_ids, *, configured_account_ids=None, schedule_identity=None):
         normalized_accounts = [int(value) for value in account_ids]
         payload = {"limit": int(limit), "account_ids": normalized_accounts}
         if configured_account_ids is not None:
             payload["configured_account_ids"] = list(configured_account_ids)
+        if schedule_identity is not None:
+            payload["schedule_identity"] = dict(schedule_identity)
         result = self.post(
             path,
             payload,
@@ -1281,13 +1382,15 @@ def _preflight_failure_result(identity, exc, audit):
 def _open_source_connection(config, connection_factory):
     factory = connection_factory or _connect_from_config
     try:
-        return factory(config)
+        return _readonly_preflight_call(lambda:factory(config))
     except CandidateSelectionError:
         raise
-    except Exception:
+    except ScheduleReadPreflightTransient:
+        raise
+    except Exception as exc:
         # Driver connection errors can contain hosts, usernames or DSNs.
         # Keep the same safe operator contract as cursor query failures.
-        raise CandidateQueryError("source") from None
+        raise CandidateQueryError("source",read_failure=read_failure(exc)) from None
 
 
 def _close_source_connection(connection):
@@ -1317,7 +1420,7 @@ def _verify_accounts(sidecar, account_ids, *, skip_blocked=False, skipped_accoun
     skipped = []
     for account_id in account_ids:
         try:
-            verified.append(_safe_account(sidecar.verify_account(account_id)))
+            verified.append(_safe_account(_readonly_preflight_call(lambda:sidecar.verify_account(account_id))))
         except SidecarError as exc:
             if not skip_blocked or exc.unknown_outcome or exc.status != 409 or exc.code not in {
                 "x_post_account_needs_review", "x_post_account_locked",
@@ -1326,6 +1429,7 @@ def _verify_accounts(sidecar, account_ids, *, skip_blocked=False, skipped_accoun
                 "x_token_revoked", "x_token_missing", "x_token_invalid",
                 "x_identity_mismatch",
                 "x_account_suspended",
+                "x_account_verification_rejected",
             }:
                 raise
             skipped.append({"account_id": int(account_id), "error_code": exc.code, "message": str(exc)})
@@ -1449,46 +1553,27 @@ def _preflight_material_candidates(
         )
         for language, language_accounts in accounts_by_language.items()
     }
-    relay_cache = {}
     work_root = Path(config.work_dir)
-    if not work_root.exists() or not work_root.is_dir() or work_root.is_symlink():
+    delegated = pipeline_dispatch_enabled()
+    if not delegated and (not work_root.exists() or not work_root.is_dir() or work_root.is_symlink()):
         raise ScheduleRunError(
             "schedule media work directory is unavailable",
             "x_post_storage_unavailable",
         )
 
-    def relay_for(language, target, material_id):
-        if language not in relay_cache:
-            relay_cache[language] = sidecar.premium_relay_accounts(
-                str(assignment_identity.get("run_date") or ""), language
-            )
-        relay_options = [
-            option
-            for option in relay_cache[language]
-            if int(option["id"]) != int(target["id"])
-            and bool(option.get("long_video_eligible"))
-            and same_drama_language(option.get("drama_language"), language)
-        ]
-        relay_options = stable_shuffler(
-            relay_options,
-            _material_assignment_seed_parts(
-                assignment_identity,
-                accounts,
-                language,
-                "relay:%s:%s" % (int(target["id"]), material_id),
-            ),
+    def premium_target(remaining):
+        for account in remaining:
+            if account.get("long_video_eligible") is True:
+                return account
+        raise CandidatePreflightError(
+            "超过 1200 秒的素材需要同语言会员账号；本批暂无可用会员账号，素材保留待后续排期",
+            "x_long_video_requires_premium",
         )
-        if not relay_options:
-            raise CandidatePreflightError(
-                "no currently eligible same-language public Premium relay account is available",
-                "x_long_video_requires_premium",
-            ) from None
-        return relay_options[0]
 
-    with tempfile.TemporaryDirectory(
+    with (contextlib.nullcontext(None) if delegated else tempfile.TemporaryDirectory(
         prefix="x-post-schedule-material-", dir=str(work_root)
-    ) as temporary:
-        root = Path(temporary)
+    )) as temporary:
+        root = Path(temporary) if temporary else work_root
         for candidate in candidates:
             if callable(heartbeat):
                 heartbeat()
@@ -1553,11 +1638,11 @@ def _preflight_material_candidates(
                 # already have a candidate in this batch. This is normal batch
                 # capacity, so leave the item clean for a later schedule point.
                 continue
-            target = remaining_targets[0]
+            # Use standard capacity first, retaining Premium capacity for long videos.
+            target = next((a for a in remaining_targets if a.get("long_video_eligible") is not True), remaining_targets[0])
             material_id = str(candidate.get("material_id", "") or "")
             destination = root / ("%s.bin" % material_id)
             rank = len(accepted_by_account) + 1
-            relay = None
             try:
                 duration = float(candidate.get("source_duration") or 0)
                 if candidate.get("media_kind") == "video" and duration <= 0:
@@ -1565,12 +1650,11 @@ def _preflight_material_candidates(
                         "source video duration metadata is missing",
                         code="material_duration_missing",
                     )
+                if duration > duration_policy.standard_limit({"duration_policy_version": getattr(config, "duration_policy_version", 2)}):
+                    target = premium_target(remaining_targets)
                 route_account = target
-                if duration > duration_policy.standard_limit({"duration_policy_version": getattr(config, "duration_policy_version", 2)}) and not target.get("long_video_eligible"):
-                    relay = relay_for(language, target, material_id)
-                    route_account = relay
                 try:
-                    item = _preflight_candidate(
+                    item = deferred_candidate(route_account, candidate, rank, timestamp, duration_hint=duration) if delegated else _preflight_candidate(
                         config,
                         candidate,
                         route_account,
@@ -1591,17 +1675,16 @@ def _preflight_material_candidates(
                     ValueError,
                 ) as direct_error:
                     if not (
-                        relay is None
-                        and str(getattr(direct_error, "code", "") or "")
+                        str(getattr(direct_error, "code", "") or "")
                         == "x_long_video_requires_premium"
                         and not target.get("long_video_eligible")
                     ):
                         raise
-                    relay = relay_for(language, target, material_id)
+                    target = premium_target(remaining_targets)
                     item = _preflight_candidate(
                         config,
                         candidate,
-                        relay,
+                        target,
                         rank,
                         timestamp,
                         destination,
@@ -1612,27 +1695,12 @@ def _preflight_material_candidates(
                     )
                 item.update(
                     {
-                        "media_validation_mode": "preflight",
+                        "media_validation_mode": "deferred" if delegated else "preflight",
                         "delivery_mode": "direct",
                         "relay_account_id": 0,
                         "relay_account_username": "",
                     }
                 )
-                if relay is not None:
-                    item.update(
-                        {
-                            "account_id": int(target["id"]),
-                            "account_username": str(target["username"]),
-                            "page_name": str(
-                                target.get("display_name", "")
-                                or target["username"]
-                            ),
-                            "page_id": str(target["x_user_id"]),
-                            "delivery_mode": "premium_relay_repost",
-                            "relay_account_id": int(relay["id"]),
-                            "relay_account_username": str(relay["username"]),
-                        }
-                    )
             except (
                 XPostError,
                 CandidatePreflightError,
@@ -1710,6 +1778,7 @@ def _material_candidates(
     assignment_identity=None,
     stable_shuffler=_stable_shuffled,
     heartbeat=None,
+    allow_images=True,
 ):
     pool_options = {}
     if assignment_identity is not None:
@@ -1721,10 +1790,12 @@ def _material_candidates(
         config.material_pool_path, config.scan_limit, **pool_options
     )
     if not pool_items:
-        raise ScheduleRunError(
+        exc = ScheduleRunError(
             "manual material pool has no available item",
             "x_post_schedule_material_shortage",
         )
+        exc.shortage_snapshot = material_shortage.snapshot(accounts, [], scan_limit=config.scan_limit)
+        raise exc
     identity = dict(assignment_identity or {})
     identity.setdefault("source_type", "material")
     identity.setdefault("run_date", source_date)
@@ -1734,6 +1805,8 @@ def _material_candidates(
     repair_state = {"attempted": 0}
     capacity_skips = []
     planned = []
+    scanned = 0
+    shortage_rejections = {}
     connection = _open_source_connection(config, connection_factory)
     try:
         # candidate_pool_limit bounds one metadata-hydration page. The
@@ -1754,6 +1827,7 @@ def _material_candidates(
                     source_date,
                     limit=config.candidate_pool_limit,
                     schema=config.mysql_database,
+                    allow_images=allow_images,
                 )
             except CandidateQueryError:
                 # Preserve the frozen SQLite pool snapshot. Reconnect once and
@@ -1768,6 +1842,7 @@ def _material_candidates(
                     source_date,
                     limit=config.candidate_pool_limit,
                     schema=config.mysql_database,
+                    allow_images=allow_images,
                 )
             _record_pool_checks_best_effort(
                 sidecar,
@@ -1792,6 +1867,8 @@ def _material_candidates(
                 capacity_skips=capacity_skips,
                 heartbeat=heartbeat,
             )
+            scanned += len(pool_batch)
+            material_shortage.observe_rejections(shortage_rejections, candidates, planning_rejections)
             _record_capacity_skip_proofs(
                 sidecar,
                 config,
@@ -1805,13 +1882,18 @@ def _material_candidates(
     finally:
         _close_source_connection(connection)
     if not planned:
-        raise ScheduleRunError(
+        exc = ScheduleRunError(
             "no FIFO material candidate passed media preflight",
             "x_post_schedule_material_preflight_shortage",
         )
+        exc.shortage_snapshot = material_shortage.snapshot(
+            accounts, [], scanned=scanned, scan_limit=config.scan_limit, rejections=shortage_rejections)
+        raise exc
     return MaterialScheduleCandidates(
         planned,
         fifo_capacity_skips=capacity_skips,
+        shortage_snapshot=material_shortage.snapshot(
+            accounts, planned, scanned=scanned, scan_limit=config.scan_limit, rejections=shortage_rejections),
     )
 
 
@@ -1827,10 +1909,16 @@ def _drama_candidates(
     repair_client,
     timestamp,
     configured_account_ids=None,
+    schedule_identity=None,
 ):
     del downloader, prober, repair_client
     account_ids = [int(account["id"]) for account in accounts]
     connection = _open_source_connection(config, connection_factory)
+
+    def reconnect_source():
+        nonlocal connection
+        _close_source_connection(connection)
+        connection=_open_source_connection(config,connection_factory)
 
     def reject_unassigned(pool_item_id, content_id, code, message):
         result = sidecar.record_drama_pool_checks(
@@ -1864,6 +1952,8 @@ def _drama_candidates(
                 accounts = _verify_accounts(sidecar, account_ids)
                 refresh_accounts = False
             scope_options = {}
+            if schedule_identity is not None:
+                scope_options["schedule_identity"] = schedule_identity
             if configured_account_ids is not None and list(configured_account_ids) != account_ids:
                 scope_options["configured_account_ids"] = list(configured_account_ids)
             pool_items = sidecar.available_drama_pool(
@@ -1882,13 +1972,13 @@ def _drama_candidates(
             for pool_item in pool_items:
                 try:
                     candidates.extend(
-                        select_drama_pool_episodes(
+                        _readonly_preflight_call(lambda:select_drama_pool_episodes(
                             connection,
                             [pool_item],
                             account_ids=account_ids,
                             schema=config.mysql_database,
                             app_id=config.drama_app_id,
-                        )
+                        ),reconnect=reconnect_source)
                     )
                 except DramaPoolProgressChanged as exc:
                     pool_id = int(pool_item["id"])
@@ -2151,71 +2241,32 @@ def _heartbeat_best_effort(sidecar, identity, *, plan_attempt=False):
 
 
 def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
-    results = []
-    stopped = False
-    for queue in queues:
-        entry = {
-            "queue_id": queue["id"],
-            "account_id": queue["account_id"],
-            "status": queue["status"],
-        }
-        relay_repost_resume = bool(
-            queue.get("delivery_mode") == "premium_relay_repost"
-            and queue.get("repost_status") == "source_published"
-            and not queue.get("unknown_outcome")
-        )
-        if queue.get("unknown_outcome") or (
-            queue["status"] == "publishing" and not relay_repost_resume
-        ):
-            entry.update(
-                {
-                    "status": "needs_review",
-                    "unknown_outcome": True,
-                    "error_code": "x_post_unknown_outcome",
-                }
-            )
-            results.append(entry)
-            stopped = True
-            break
-        if queue["status"] == "published":
-            results.append(entry)
-            continue
-        if queue["status"] == "failed":
-            entry["error_code"] = (
-                queue.get("error_code") or "x_post_retry_requires_review"
-            )
-            results.append(entry)
-            if queue.get("error_code") == "x_post_rate_limited":
-                stopped = True
-                break
-            continue
+    if pipeline_dispatch_enabled():
+        return queue_handoff(identity, queues, resumed=resumed)
+    if identity.get("schedule_policy") == "target_midnight_v1" and datetime.now(BEIJING_TZ) < _scheduled_at(identity):
+        return {"status": "ready", "planned_count": len(queues), "attempted_count": 0, "published_count": 0, "resumed_existing_plan": bool(resumed), **identity}
+    from scripts.x_post_dispatch import dispatch_queues
+
+    def publish(queue):
+        entry = {"queue_id": queue["id"], "account_id": queue["account_id"], "status": queue["status"]}
         try:
-            published = sidecar.publish_queue(
-                config.publish_path_template, queue["id"]
-            )
+            published = sidecar.publish_queue(config.publish_path_template, queue["id"])
             entry["status"] = published["status"]
-            for key in (
-                "log_id",
-                "preview_url",
-                "delivery_mode",
-                "preflight_duration",
-                "error_code",
-            ):
+            for key in ("log_id", "preview_url", "delivery_mode", "preflight_duration", "error_code"):
                 if key in published:
                     entry[key] = published[key]
         except SidecarError as exc:
-            entry.update(
-                {
-                    "status": "failed",
-                    "error_code": exc.code,
-                    "unknown_outcome": exc.unknown_outcome,
-                }
-            )
-            if exc.status == 429 or exc.unknown_outcome:
-                stopped = True
-        results.append(entry)
-        if stopped:
-            break
+            if exc.code in {"x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
+                entry.update(status="queued", error_code=exc.code, unknown_outcome=False)
+                return entry
+            entry.update(status="needs_review" if exc.unknown_outcome else "failed",
+                         error_code=exc.code, unknown_outcome=exc.unknown_outcome)
+            # X's generic rate response can describe a shared App limit. Stop
+            # new requests for this tick; independent account failures continue.
+            entry["shared_stop"] = exc.status == 429
+        return entry
+
+    results, stopped = dispatch_queues(queues, publish, workers=config.publish_workers)
     result_statuses = [item["status"] for item in results]
     return {
         "source_type": identity["source_type"],
@@ -2229,7 +2280,7 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
         "waiting_relay_count": sum(
             item["status"] == "waiting_relay" for item in results
         ),
-        "status": "stopped" if stopped else (
+        "status": "needs_review" if any(item.get("unknown_outcome") for item in results) else "stopped" if stopped else "running" if "queued" in result_statuses else (
             "published"
             if len(results) == len(queues)
             and all(status == "published" for status in result_statuses)
@@ -2248,6 +2299,39 @@ def _publish_frozen_queues(config, sidecar, identity, queues, *, resumed):
         ),
         "results": results,
     }
+
+
+def _execute_ordered_batches(identities, process, *, workers):
+    """Freeze new random pool slots in time order; release before publishing.
+
+    FIFO material choice is shared across accounts in one pool, while drama
+    episode choice also depends on prior reservations. Only their selection and
+    freeze are ordered. Other pools and legacy batches remain independent.
+    """
+    targets = iter(sorted((item for item in identities if item.get("schedule_policy") == "target_midnight_v1"), key=_scheduled_at))
+    ordered = [next(targets) if item.get("schedule_policy") == "target_midnight_v1" else item for item in identities]
+    previous = {}
+    entries = []
+    for identity in ordered:
+        ready = threading.Event()
+        dependency = None
+        if identity.get("schedule_policy") == "target_midnight_v1":
+            dependency = previous.get(identity["source_type"])
+            previous[identity["source_type"]] = ready
+        entries.append((identity, dependency, ready))
+
+    def execute(entry):
+        identity, dependency, ready = entry
+        if dependency is not None:
+            dependency.wait()
+        try:
+            return process(identity, ready.set)
+        finally:
+            # An account or material failure must not hold later slots.
+            ready.set()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(execute, entries))
 
 
 def execute_schedule_tick(
@@ -2313,190 +2397,290 @@ def execute_schedule_tick(
 
     batches = []
     retrying_downloader = _retrying_media_downloader(downloader)
-    for identity in accepted_due:
-        # Frozen state always wins. This query precedes token verification,
-        # source reads, media downloads, and GPU repair.
-        existing = sidecar.query_schedule_plan(
-            config.plan_query_path, identity
-        )
-        config = replace(config, duration_policy_version=duration_policy.version(existing["run"]) if existing["found"] else 2)
-        if existing["found"] and existing["queues"]:
-            result = _publish_frozen_queues(
-                config,
-                sidecar,
-                identity,
-                existing["queues"],
-                resumed=True,
+    def process_identity(identity, planning_finished):
+        local_results = []
+        def process():
+            # Frozen state always wins. This query precedes token verification,
+            # source reads, media downloads, and GPU repair.
+            existing = sidecar.query_schedule_plan(
+                config.plan_query_path, identity
             )
-            batches.append(result)
-            continue
-        if existing["found"] and existing["run"].get("plan_attempted_at"):
-            # The previous worker crossed the plan-write fence but did not
-            # leave queues. This successful ledger read makes it safe to
-            # terminalize; never reselect and issue another plan write.
-            exc = ScheduleRunError(
-                "上次计划创建结果未确认，已停止重复尝试",
-                "x_post_schedule_plan_unknown",
-            )
-            audit = _record_schedule_failure_best_effort(
-                sidecar, config, identity, exc
-            )
-            batches.append(_preflight_failure_result(identity, exc, audit))
-            continue
-        if existing["found"] and existing["run"].get("status") != "claimed":
-            raise ScheduleRunError(
-                "frozen schedule run has no queues",
-                "x_post_schedule_plan_incomplete",
-            )
-
-        try:
-            _heartbeat_best_effort(sidecar, identity)
-            sidecar.preflight_storage(config.storage_preflight_path)
-            skipped_accounts = []
-            accounts = _verify_accounts(
-                sidecar, identity["account_ids"], skip_blocked=True,
-                skipped_accounts=skipped_accounts,
-            )
-            while True:
-                source_date = previous_source_date(current)
-                timestamp = max(1, int(current.timestamp()))
-                if identity["source_type"] == "material":
-                    material_loader_options = {
-                        "source_date": source_date,
-                        "connection_factory": connection_factory,
-                        "downloader": retrying_downloader,
-                        "prober": prober,
-                        "repair_client": repair_client,
-                        "timestamp": timestamp,
-                    }
-                    if material_candidate_loader is _material_candidates:
-                        material_loader_options["assignment_identity"] = identity
-                        material_loader_options["heartbeat"] = lambda: (
-                            _heartbeat_best_effort(sidecar, identity)
-                        )
-                    candidates = material_candidate_loader(
-                        config,
-                        sidecar,
-                        accounts,
-                        **material_loader_options,
-                    )
-                else:
-                    drama_scope_options = {}
-                    if drama_candidate_loader is _drama_candidates:
-                        drama_scope_options["configured_account_ids"] = identity["account_ids"]
-                    candidates = drama_candidate_loader(
-                        config,
-                        sidecar,
-                        accounts,
-                        source_date=source_date,
-                        connection_factory=connection_factory,
-                        downloader=downloader,
-                        prober=prober,
-                        repair_client=repair_client,
-                        timestamp=timestamp,
-                        **drama_scope_options,
-                    )
-                candidate_account_ids = [
-                    int(item["account_id"]) for item in candidates
-                ]
-                if not _is_ordered_account_subset(
-                    candidate_account_ids, identity["account_ids"]
-                ):
-                    raise ScheduleRunError(
-                        "candidate account order does not match frozen schedule",
-                        "x_post_schedule_account_mismatch",
-                    )
-                # Material preflight/repair may outlive an access token. Refresh
-                # the frozen subset immediately before the atomic plan transaction;
-                # each later publish also verifies its account.
-                rechecked = _verify_accounts(
-                    sidecar, candidate_account_ids, skip_blocked=True,
-                    skipped_accounts=skipped_accounts,
+            batch_config = replace(config, duration_policy_version=duration_policy.version(existing["run"]) if existing["found"] else 2)
+            if existing["found"] and existing["queues"]:
+                planning_finished()
+                result = _publish_frozen_queues(
+                    batch_config,
+                    sidecar,
+                    identity,
+                    existing["queues"],
+                    resumed=True,
                 )
-                if len(rechecked) == len(candidate_account_ids):
-                    break
-                # No queue exists yet. Rebuild FIFO/language proofs instead of
-                # deleting prepared candidates. Each repeat removes an account.
-                excluded_ids = {item["account_id"] for item in skipped_accounts}
-                accounts = [item for item in accounts if item["id"] not in excluded_ids]
-            sidecar.preflight_storage(config.storage_preflight_path)
-            _heartbeat_best_effort(sidecar, identity)
-        except Exception as exc:
-            audit = _record_schedule_failure_best_effort(
-                sidecar,
-                config,
-                identity,
-                exc,
-            )
-            batches.append(
-                _preflight_failure_result(identity, exc, audit)
-            )
-            continue
-
-        try:
-            _heartbeat_best_effort(
-                sidecar, identity, plan_attempt=True
-            )
-            queues = sidecar.create_schedule_plan(
-                config.plan_path,
-                _plan_payload(identity, candidates),
-            )
-        except SidecarError as exc:
-            # A structured HTTP error proves the atomic transaction rolled
-            # back and must terminalize the claimed run. For a lost response,
-            # read the ledger first: publish only an already-frozen queue set;
-            # never reselect or issue a second plan write in this tick.
-            if exc.unknown_outcome:
-                try:
-                    reconciled = sidecar.query_schedule_plan(
-                        config.plan_query_path, identity
-                    )
-                except Exception:
-                    batches.append(
-                        {
-                            **_preflight_failure_result(identity, exc, None),
-                            "status": "stopped",
-                            "error_code": "x_post_schedule_plan_unknown",
-                            "error_message": "计划创建结果待核对，未继续发布",
-                        }
-                    )
-                    continue
-                if reconciled["found"] and reconciled["queues"]:
-                    result = _publish_frozen_queues(
-                        config,
-                        sidecar,
-                        identity,
-                        reconciled["queues"],
-                        resumed=True,
-                    )
-                    batches.append(result)
-                    continue
+                local_results.append(result)
+                return
+            if existing["found"] and existing["run"].get("plan_attempted_at"):
+                # The previous worker crossed the plan-write fence but did not
+                # leave queues. This successful ledger read makes it safe to
+                # terminalize; never reselect and issue another plan write.
                 exc = ScheduleRunError(
-                    "计划创建结果未确认，已停止重复尝试",
+                    "上次计划创建结果未确认，已停止重复尝试",
                     "x_post_schedule_plan_unknown",
                 )
-            audit = _record_schedule_failure_best_effort(
-                sidecar,
-                config,
-                identity,
-                exc,
+                audit = _record_schedule_failure_best_effort(
+                    sidecar, batch_config, identity, exc
+                )
+                local_results.append(_preflight_failure_result(identity, exc, audit))
+                return
+            if existing["found"] and existing["run"].get("status") != "claimed":
+                raise ScheduleRunError(
+                    "frozen schedule run has no queues",
+                    "x_post_schedule_plan_incomplete",
+                )
+
+            try:
+                scope_baseline = dict(existing["run"]) if existing["found"] else None
+                _heartbeat_best_effort(sidecar, identity)
+                # Account publishers run concurrently; reserve their bounded media slots.
+                if not pipeline_dispatch_enabled():
+                    sidecar.preflight_storage(
+                        batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
+                    )
+                skipped_accounts = []
+                accounts = _verify_accounts(
+                    sidecar, identity["account_ids"], skip_blocked=True,
+                    skipped_accounts=skipped_accounts,
+                )
+                planning_passes = 0
+                while True:
+                    planning_passes += 1
+                    source_date = previous_source_date(current)
+                    timestamp = max(1, int(current.timestamp()))
+                    if identity["source_type"] == "material":
+                        material_loader_options = {
+                            "source_date": source_date,
+                            "connection_factory": connection_factory,
+                            "downloader": retrying_downloader,
+                            "prober": prober,
+                            "repair_client": repair_client,
+                            "timestamp": timestamp,
+                        }
+                        if material_candidate_loader is _material_candidates:
+                            material_loader_options["assignment_identity"] = identity
+                            # Only the original frozen run determines template
+                            # compatibility; skip known images before media work.
+                            material_loader_options["allow_images"] = not bool(
+                                (existing.get("run") or {}).get("random_template_enabled")
+                            )
+                            material_loader_options["heartbeat"] = lambda: (
+                                _heartbeat_best_effort(sidecar, identity)
+                            )
+                        candidates = material_candidate_loader(
+                            batch_config,
+                            sidecar,
+                            accounts,
+                            **material_loader_options,
+                        )
+                        if (planning_passes == 1 and scope_baseline is not None
+                                and scope_baseline.get("material_pool_snapshot_max_id") is None):
+                            # The first pool read freezes the server-owned boundary.
+                            # Capture that boundary once, before any scope rebuild.
+                            frozen = sidecar.query_schedule_plan(batch_config.plan_query_path, identity)
+                            if (frozen.get("found") is True and frozen.get("queues") == []
+                                    and _same_scope_wait_identity(scope_baseline, frozen.get("run"), snapshot=False)
+                                    and _zero_write_claim(frozen["run"])):
+                                scope_baseline = dict(frozen["run"])
+                    else:
+                        drama_scope_options = {}
+                        if drama_candidate_loader is _drama_candidates:
+                            drama_scope_options["configured_account_ids"] = identity["account_ids"]
+                            drama_scope_options["schedule_identity"] = identity
+                        candidates = drama_candidate_loader(
+                            batch_config,
+                            sidecar,
+                            accounts,
+                            source_date=source_date,
+                            connection_factory=connection_factory,
+                            downloader=downloader,
+                            prober=prober,
+                            repair_client=repair_client,
+                            timestamp=timestamp,
+                            **drama_scope_options,
+                        )
+                    candidate_account_ids = [
+                        int(item["account_id"]) for item in candidates
+                    ]
+                    if not _is_ordered_account_subset(
+                        candidate_account_ids, identity["account_ids"]
+                    ):
+                        raise ScheduleRunError(
+                            "candidate account order does not match frozen schedule",
+                            "x_post_schedule_account_mismatch",
+                        )
+                    # Material FIFO capacity proofs depend on every currently
+                    # healthy account in the frozen scope, including accounts
+                    # omitted while an earlier publication held them. Recheck
+                    # that entire scope before writing the plan; a recovered
+                    # account can increase capacity just as a new hold reduces it.
+                    current_skips = []
+                    recheck_ids = (identity["account_ids"]
+                        if identity["source_type"] == "material" else candidate_account_ids)
+                    rechecked = _verify_accounts(
+                        sidecar, recheck_ids, skip_blocked=True,
+                        skipped_accounts=current_skips,
+                    )
+                    if identity["source_type"] == "material":
+                        skipped_accounts[:] = current_skips
+                        if [item["id"] for item in rechecked] == [item["id"] for item in accounts]:
+                            break
+                        if planning_passes >= 3:
+                            raise ScheduleAccountScopeChanged(
+                                "账号可用范围在预检期间持续变化，未尝试创建计划",
+                                "x_post_schedule_account_state_changed",
+                            )
+                        # The server-owned material snapshot and original run
+                        # identity remain unchanged; regenerate all FIFO proofs.
+                        accounts = rechecked
+                        continue
+                    skipped_accounts.extend(current_skips)
+                    if len(rechecked) == len(candidate_account_ids):
+                        break
+                    # No queue exists yet. Rebuild FIFO/language proofs instead of
+                    # deleting prepared candidates. Each repeat removes an account.
+                    excluded_ids = {item["account_id"] for item in skipped_accounts}
+                    accounts = [item for item in accounts if item["id"] not in excluded_ids]
+                if not pipeline_dispatch_enabled():
+                    sidecar.preflight_storage(
+                        batch_config.storage_preflight_path, required_media_count=batch_config.publish_workers
+                    )
+                _heartbeat_best_effort(sidecar, identity)
+            except ScheduleAccountScopeChanged as exc:
+                # Only this exact local pre-write exhaustion can wait. The fresh
+                # ledger and heartbeat must both retain the original empty run.
+                # A drift/lost read stops this tick without mutating its ledger.
+                try:
+                    waiting = _wait_for_account_scope(sidecar, batch_config, identity, scope_baseline)
+                except Exception:
+                    waiting = False
+                result = _preflight_failure_result(identity, exc, None)
+                result.update(status="waiting_account_state" if waiting else "stopped",
+                              error_message="账号占用持续变化，保留原冻结批次等待下次调度" if waiting else "未确认原批次仍未写入计划，本轮已停止并保留账本",
+                              retry_next_tick=waiting)
+                local_results.append(result)
+                return
+            except Exception as exc:
+                # A SidecarError from pool/audit mutation is not a read retry.
+                # Only explicit read wrappers or typed SELECT/connect failures
+                # may use this branch, never arbitrary same-code exceptions.
+                details=(_transient_read_details(exc) if isinstance(exc,
+                    (ScheduleReadPreflightTransient,CandidateSelectionError,DramaQueryError)) else None)
+                if details:
+                    try:
+                        waiting=_wait_for_account_scope(sidecar,batch_config,identity,scope_baseline,read_preflight=True)
+                    except Exception:
+                        waiting=False
+                    result=_preflight_failure_result(identity,exc,None)
+                    result.update(status="waiting_preflight" if waiting else "stopped",retry_next_tick=waiting,
+                                  read_failure=details,error_message="只读预检暂不可用，保留原批次等待下次调度" if waiting else "只读预检失败且未确认零写入状态，本轮停止并保留账本")
+                    local_results.append(result)
+                    return
+                audit = _record_schedule_failure_best_effort(
+                    sidecar,
+                    batch_config,
+                    identity,
+                    exc,
+                )
+                material_shortage.emit(identity, getattr(exc, "shortage_snapshot", None))
+                local_results.append(
+                    _preflight_failure_result(identity, exc, audit)
+                )
+                return
+
+            try:
+                _heartbeat_best_effort(
+                    sidecar, identity, plan_attempt=True
+                )
+                queues = sidecar.create_schedule_plan(
+                    batch_config.plan_path,
+                    _plan_payload(identity, candidates),
+                )
+            except SidecarError as exc:
+                # A structured HTTP error proves the atomic transaction rolled
+                # back and must terminalize the claimed run. For a lost response,
+                # read the ledger first: publish only an already-frozen queue set;
+                # never reselect or issue a second plan write in this tick.
+                if exc.unknown_outcome:
+                    try:
+                        reconciled = sidecar.query_schedule_plan(
+                            batch_config.plan_query_path, identity
+                        )
+                    except Exception:
+                        local_results.append(
+                            {
+                                **_preflight_failure_result(identity, exc, None),
+                                "status": "stopped",
+                                "error_code": "x_post_schedule_plan_unknown",
+                                "error_message": "计划创建结果待核对，未继续发布",
+                            }
+                        )
+                        return
+                    if reconciled["found"] and reconciled["queues"]:
+                        planning_finished()
+                        if [q["account_id"] for q in reconciled["queues"]] == candidate_account_ids:
+                            material_shortage.emit(identity, getattr(candidates, "shortage_snapshot", None))
+                        result = _publish_frozen_queues(
+                            batch_config,
+                            sidecar,
+                            identity,
+                            reconciled["queues"],
+                            resumed=True,
+                        )
+                        local_results.append(result)
+                        return
+                    exc = ScheduleRunError(
+                        "计划创建结果未确认，已停止重复尝试",
+                        "x_post_schedule_plan_unknown",
+                    )
+                audit = _record_schedule_failure_best_effort(
+                    sidecar,
+                    batch_config,
+                    identity,
+                    exc,
+                )
+                local_results.append(_preflight_failure_result(identity, exc, audit))
+                return
+            if [queue["account_id"] for queue in queues] != candidate_account_ids:
+                raise ScheduleRunError(
+                    "created queue order does not match frozen schedule",
+                    "x_post_schedule_plan_mismatch",
+                )
+            planning_finished()
+            material_shortage.emit(identity, getattr(candidates, "shortage_snapshot", None))
+            result = _publish_frozen_queues(
+                batch_config, sidecar, identity, queues, resumed=False
             )
-            batches.append(_preflight_failure_result(identity, exc, audit))
-            continue
-        if [queue["account_id"] for queue in queues] != candidate_account_ids:
-            raise ScheduleRunError(
-                "created queue order does not match frozen schedule",
-                "x_post_schedule_plan_mismatch",
-            )
-        result = _publish_frozen_queues(
-            config, sidecar, identity, queues, resumed=False
-        )
-        if skipped_accounts:
-            result["skipped_accounts"] = skipped_accounts
-        batches.append(result)
+            if skipped_accounts:
+                result["skipped_accounts"] = skipped_accounts
+            local_results.append(result)
+        try:
+            with _targeted_schedule_lock(config, identity) as acquired:
+                if acquired is None:
+                    local_results.append({
+                        "source_type": identity["source_type"], "run_date": identity["run_date"],
+                        "publish_time": identity["publish_time"], "status": "waiting_targeted_lock",
+                        "attempted_count": 0, "results": [],
+                    })
+                else:
+                    process()
+        except Exception as exc:
+            local_results.append({"source_type": identity["source_type"], "run_date": identity["run_date"],
+                                  "publish_time": identity["publish_time"], "status": "needs_review",
+                                  "error_code": getattr(exc, "code", "x_post_batch_unavailable")})
+        return local_results
+
+    for result in _execute_ordered_batches(accepted_due, process_identity, workers=config.batch_workers):
+        batches.extend(result)
 
     return {
-        "status": (
+        "status": "dispatch_queued" if batches and all(item["status"] == "dispatch_queued" for item in batches) else (
             "stopped"
             if any(item["status"] == "stopped" for item in batches)
             else (
@@ -2512,7 +2696,13 @@ def execute_schedule_tick(
                         item["status"] in {"published", "waiting_relay"}
                         for item in batches
                     )
-                    else "completed_with_errors"
+                    else (
+                        ("waiting_preflight" if any(item["status"]=="waiting_preflight" for item in batches) else
+                         "waiting_targeted_lock" if any(item["status"]=="waiting_targeted_lock" for item in batches) else "waiting_account_state")
+                        if any(item["status"] in {"waiting_account_state","waiting_preflight","waiting_targeted_lock"} for item in batches)
+                        and all(item["status"] in {"published", "dispatch_queued", "waiting_relay", "waiting_account_state", "waiting_preflight","waiting_targeted_lock"} for item in batches)
+                        else "completed_with_errors"
+                    )
                 )
             )
         ),
@@ -2539,6 +2729,10 @@ def main():
             "no_due",
             "skipped_before_start_date",
             "skipped_locked",
+            "dispatch_queued",
+            "waiting_account_state",
+            "waiting_preflight",
+            "waiting_targeted_lock",
         } else 1
     except (
         CandidateSelectionError,

@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <script src="/x-legacy-publish-redirect.js?v=20261112retirement1"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>X Post 素材池 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
@@ -644,7 +645,7 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=20260915retired"></script>
+  <script src="/quick-nav.js?v=20261112retirement1"></script>
   <script data-version="20261012-drama-language">
     (() => {
       const state = {
@@ -1511,7 +1512,7 @@
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? "可发布" : (selected ? "不可发布，请移除" : "不可发布"));
+          setText(status, eligible ? "可发布" : (selected ? "异常，保存时自动跳过" : "不可发布"));
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });
@@ -1554,7 +1555,7 @@
           : state.schedule.publishTimes.length;
         const total = accountCount * timeCount;
         const summary = document.createDocumentFragment();
-        const prefix = document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "随机批次" : "时间点"} = 每日最多 `);
+        const prefix = document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "独立随机时次" : "时间点"} = 每日最多 `);
         const strong = document.createElement("strong");
         setText(strong, `${total} 篇 Post`);
         summary.append(prefix, strong);
@@ -1568,14 +1569,18 @@
           ? state.schedule.randomDailyPlans
           : [];
         if (!plans.length) {
-          setText(container, "随机计划尚未生成；首次启用或修改后从次日生效。");
+          setText(container, "随机计划尚未生成；次日北京时间 00:00 按账号独立排期并开始备料。");
           return;
         }
+        container.appendChild(document.createTextNode("每天北京时间 00:00 开始备料；完成后等待各账号计划时间，迟到则完成后发布。"));
         plans.forEach(plan => {
-          const line = document.createElement("span");
-          const times = Array.isArray(plan.publish_times) ? plan.publish_times.join("、") : "";
-          setText(line, `${String(plan.run_date || "")}：${times || "尚无时间"}`);
-          container.appendChild(line);
+          const targets = Array.isArray(plan.target_plans) ? plan.target_plans : [plan];
+          targets.forEach(target => {
+            const line = document.createElement("span");
+            const times = Array.isArray(target.publish_times) ? target.publish_times.join("、") : "";
+            setText(line, `${String(plan.run_date || "")} ${target.account_id ? "账号 " + target.account_id : "原计划"}：${times || "尚无时间"}`);
+            container.appendChild(line);
+          });
         });
       }
       function renderScheduleMode() {
@@ -1696,10 +1701,10 @@
         }
         const invalidSelected = selectedIds.filter(id => {
           const item = state.accountOptions.find(account => accountId(account) === id);
-          return !item || !accountEligible(item);
+          return !item;
         });
         if (invalidSelected.length) {
-          setScheduleMessage("已选账号中存在不可发布或已失效账号，请移除后再保存。", true);
+          setScheduleMessage("已选账号中存在未找到的账号，请刷新账号列表后再保存。", true);
           return;
         }
         state.scheduleBusy = true;
@@ -1723,7 +1728,11 @@
             }),
           });
           applySchedule(result);
-          setScheduleMessage(scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
+          const skipped = scheduleItem(result).skipped_account_ids || [];
+          const skippedMessage = skipped.length
+            ? `已跳过 ${skipped.length} 个异常账号，不参与发布；恢复后可重新勾选。${state.schedule.accountIds.size ? "" : "当前无可发布账号，已保存并关闭自动发布。"}`
+            : "";
+          setScheduleMessage((scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。") + skippedMessage, false);
           showToast("素材池自动发布设置已保存。", false);
         } catch (error) {
           setScheduleMessage(`保存失败：${error.message}`, true);
@@ -2249,5 +2258,7 @@
       init();
     })();
   </script>
+<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" />
+<script src="/x-tag-publish-entry.js?v=1"></script>
 </body>
 </html>

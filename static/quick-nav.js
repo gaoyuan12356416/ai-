@@ -15,6 +15,16 @@
     "/x-tag-auto-publish-runs.html": "xTagAutoPublishTemplates",
     "/x-tag-material-pool.html": "xTagMaterialPool",
   };
+  const RETIRED_X_KEYS = new Set(["xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"]);
+  const RETIRED_X_PAGES = new Set([
+    "/x-auto-publish-templates.html", "/x-auto-publish-template.html",
+    "/x-auto-publish-runs.html", "/x-post-material-pool.html",
+  ]);
+  function retiredXItem(item) {
+    if (!item) return false;
+    const path = String(item.href || "").split(/[?#]/, 1)[0];
+    return RETIRED_X_KEYS.has(item.key) || RETIRED_X_KEYS.has(item.view) || RETIRED_X_PAGES.has(path);
+  }
   const DEFAULT_NAV = [
     {
       key: "pipeline_overview", label: "运行监测", order: 1,
@@ -308,42 +318,9 @@
           order: 20,
         },
         {
-          key: "xAutoPublishTemplates",
-          label: "X Post 自动发布模板",
-          description: "维护独立的选材、文案和发布时间模板",
-          kind: "page",
-          href: "/x-auto-publish-templates.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 21,
-        },
-        {
-          key: "xAutoPublishRuns",
-          label: "X Post 自动发布记录",
-          description: "查看模板运行、账号任务和最终发布结果",
-          kind: "page",
-          href: "/x-auto-publish-runs.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 22,
-        },
-        {
-          key: "xPostMaterialPool",
-          label: "Post素材池",
-          description: "维护定时发布使用的自定义素材",
-          kind: "page",
-          href: "/x-post-material-pool.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 30,
-        },
-        {
           key: "xPostDramaPool",
           label: "Post短剧池",
-          description: "按短剧免费集数顺序维护和发布Post",
+          description: "按频道标签画像分配新剧并顺序续发",
           kind: "page",
           href: "/x-post-drama-pool.html",
           module: "x_accounts",
@@ -604,11 +581,8 @@
     xAccountList: "/x-account-list.html",
     xVideoPublish: "/x-video-publish.html",
     xVideoPublishRecords: "/x-video-publish.html?view=records",
-    xAutoPublishTemplates: "/x-auto-publish-templates.html",
     xTagAutoPublishTemplates: "/x-tag-auto-publish-templates.html",
     xTagMaterialPool: "/x-tag-material-pool.html",
-    xAutoPublishRuns: "/x-auto-publish-runs.html",
-    xPostMaterialPool: "/x-post-material-pool.html",
     xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
     socialAnalytics: "/social-analytics.html",
@@ -867,58 +841,12 @@
           item.module = "x_accounts"; item.adminOnly = false;
         }
       });
-      const xAutoPublishTemplatesExists = xPlatform.items.some(
-        item => item && item.key === "xAutoPublishTemplates"
-      );
-      if (!xAutoPublishTemplatesExists) {
-        xPlatform.items.push({
-          key: "xAutoPublishTemplates",
-          label: "X Post 自动发布模板",
-          description: "维护独立的选材、文案和发布时间模板",
-          kind: "page",
-          href: "/x-auto-publish-templates.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 21,
-        });
-      }
-      const xAutoPublishRunsExists = xPlatform.items.some(
-        item => item && item.key === "xAutoPublishRuns"
-      );
-      if (!xAutoPublishRunsExists) {
-        xPlatform.items.push({
-          key: "xAutoPublishRuns",
-          label: "X Post 自动发布记录",
-          description: "查看模板运行、账号任务和最终发布结果",
-          kind: "page",
-          href: "/x-auto-publish-runs.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 22,
-        });
-      }
-      const exists = xPlatform.items.some(item => item && item.key === "xPostMaterialPool");
-      if (!exists) {
-        xPlatform.items.push({
-          key: "xPostMaterialPool",
-          label: "Post素材池",
-          description: "维护定时发布使用的自定义素材",
-          kind: "page",
-          href: "/x-post-material-pool.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 30,
-        });
-      }
       const dramaPoolExists = xPlatform.items.some(item => item && item.key === "xPostDramaPool");
       if (!dramaPoolExists) {
         xPlatform.items.push({
           key: "xPostDramaPool",
           label: "Post短剧池",
-          description: "按短剧免费集数顺序维护和发布Post",
+          description: "按频道标签画像分配新剧并顺序续发",
           kind: "page",
           href: "/x-post-drama-pool.html",
           module: "x_accounts",
@@ -937,7 +865,7 @@
     return normalized
       .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module))
       .map(group => Object.assign({}, group, {
-        items: (group.items || []).filter(item => !retiredModules.has(item.module)),
+        items: (group.items || []).filter(item => !retiredModules.has(item.module) && !retiredXItem(item)),
       }));
   }
 

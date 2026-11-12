@@ -35,6 +35,9 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from features.x_posts import duration_policy  # noqa: E402
+from features.x_posts.account_limits import MAX_PUBLISH_ACCOUNTS
+from features.x_posts.account_blockers import ACCOUNT_VERIFY_REJECTED, ACCOUNT_VERIFY_REJECTED_PREFIX
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import (  # noqa: E402
     DEFAULT_DRAMA_LANGUAGE,
     canonical_drama_language,
@@ -65,13 +68,14 @@ MAX_DAILY_PLAN_BODY_BYTES = 2 * 1024 * 1024
 MAX_DAILY_CHECK_BODY_BYTES = 128 * 1024
 MAX_DRAMA_POOL_BODY_BYTES = 5 * 1024 * 1024
 MAX_ERROR_TEXT = 240
-MAX_DAILY_ACCOUNTS = 50
+MAX_DAILY_ACCOUNTS = MAX_PUBLISH_ACCOUNTS
 AUTO_TEMPLATE_MAX_DURATION_SECONDS = 4.0 * 60.0 * 60.0
 TRANSIENT_VERIFY_ERROR_CODES = frozenset(
     {
         "x_post_rate_limited",
         "x_upstream_error",
         "x_accounts_unavailable",
+        ACCOUNT_VERIFY_REJECTED,
     }
 )
 EXPLICITLY_DISABLED_STATUSES = frozenset(
@@ -142,6 +146,8 @@ load_env_file(os.environ.get("X_POST_ENV_FILE", DEFAULT_ENV_FILE))
 
 CLIENT_ID = os.environ.get("X_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.environ.get("X_CLIENT_SECRET", "").strip()
+OAUTH_APP_NAME = os.environ.get("X_OAUTH_APP_NAME", "当前 API").strip()
+REQUIRE_APP_BOUND_TOKENS = env_bool("X_REQUIRE_APP_BOUND_TOKENS", False)
 INTERNAL_TOKEN = (
     os.environ.get("X_INTERNAL_TOKEN", "").strip()
     or os.environ.get("X_POST_AUTOMATION_INTERNAL_TOKEN", "").strip()
@@ -194,7 +200,7 @@ POST_MEDIA_ALLOWED_HOSTS = tuple(
 )
 POST_HTTP_TIMEOUT_SECONDS = env_int("X_POST_HTTP_TIMEOUT_SECONDS", 30, 5, 120)
 POST_MAX_MEDIA_BYTES = env_int(
-    "X_POST_MAX_MEDIA_BYTES", 512 * 1024 * 1024, 1024, 512 * 1024 * 1024
+    "X_POST_MAX_MEDIA_BYTES", MAX_POST_VIDEO_BYTES, 1024, MAX_POST_VIDEO_BYTES
 )
 POST_DRAMA_DURATION_ROUTING_ENABLED = env_bool(
     "X_POST_DRAMA_DURATION_ROUTING_ENABLED", False
@@ -393,6 +399,7 @@ def ensure_storage():
                 "disconnected_by_name": "TEXT NOT NULL DEFAULT ''",
                 "publish_approved": "INTEGER NOT NULL DEFAULT 0",
                 "drama_language": "TEXT NOT NULL DEFAULT 'en'",
+                "deleted_at": "TEXT NOT NULL DEFAULT ''",
             }
             existing = {row[1] for row in conn.execute("PRAGMA table_info(x_authorized_account)")}
             for column, definition in account_columns.items():
@@ -460,6 +467,7 @@ def normalize_actor(actor):
         "name": clean_text(actor.get("name", ""), 255),
         "email": clean_text(actor.get("email", ""), 255),
         "role": clean_text(actor.get("role", "user"), 32),
+        "x_platform_access": actor.get("x_platform_access") is True,
     }
 
 
@@ -639,7 +647,11 @@ def http_json(url, method="GET", headers=None, body=None, allow_revoked=False, a
             return {"revoked": True}
         if exc.code in {400, 401, 403} and upstream_code.lower() in {"invalid_grant", "unauthorized", "client forbidden"}:
             raise ServiceError("x_token_revoked", "X授权已失效，请重新授权", 409) from None
-        raise ServiceError("x_upstream_error", "X API请求失败（HTTP %s，%s）" % (exc.code, upstream_code), 502) from None
+        error = ServiceError("x_upstream_error", "X API请求失败（HTTP %s，%s）" % (exc.code, upstream_code), 502)
+        # Structured, non-secret context; never retain request bodies/tokens.
+        error.upstream_status = exc.code
+        error.upstream_code = upstream_code.lower()
+        raise error from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
         raise ServiceError("x_upstream_error", "X API网络请求失败", 502) from None
 
@@ -758,11 +770,24 @@ def actor_from_state(state_row):
     }
 
 
+def current_app_fingerprint():
+    return hashlib.sha256(CLIENT_ID.encode()).hexdigest()
+
+
+def token_matches_current_app(token):
+    fingerprint = str((token or {}).get("oauth_client_id_sha256", ""))
+    if not fingerprint:
+        return not REQUIRE_APP_BOUND_TOKENS
+    return secrets.compare_digest(fingerprint, current_app_fingerprint())
+
+
 def status_for(scopes, access_expires_at, token=None, stored="active"):
     scope_set = set(scopes)
     missing = [scope for scope in REQUIRED_SCOPES if scope not in scope_set]
     if stored in EXPLICITLY_DISABLED_STATUSES:
         return stored, missing
+    if stored == "reauth_required" or (token is not None and not token_matches_current_app(token)):
+        return "reauth_required", missing
     if stored in {"revoked", "error", "token_missing"}:
         return stored, missing
     if missing:
@@ -939,6 +964,7 @@ def complete_authorization(code, raw_state):
         )
         obtained = now_epoch()
         token["obtained_at"] = iso_utc(obtained)
+        token["oauth_client_id_sha256"] = current_app_fingerprint()
         scopes = parse_scopes(token.get("scope"), fallback=SCOPES)
         token["scope"] = " ".join(scopes)
         expires = iso_utc(obtained + int(token.get("expires_in", 0) or 0)) if token.get("expires_in") else ""
@@ -956,14 +982,13 @@ def complete_authorization(code, raw_state):
                     ).fetchone()
                 finally:
                     conn.close()
-            if existing_row and not same_owner(existing_row, actor):
-                raise ServiceError("x_account_owned_by_other", "该X账号已由其他后台用户管理", 409)
+            owner_changed = existing_row is not None and not same_owner(existing_row, actor)
             previous_token = None
             if token_file.exists():
                 try:
                     previous_token = token_file.read_bytes()
                 except OSError:
-                    # Completing OAuth for the same owner is an explicit
+                    # Completing OAuth is an explicit
                     # credential replacement. An unreadable stale token must
                     # not discard the newly exchanged credential; if the DB
                     # commit later fails, the new file is removed below.
@@ -981,7 +1006,7 @@ def complete_authorization(code, raw_state):
                 "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
                 "verified", "protected", "subscription_type", "location", "x_created_at", "profile_synced_at",
                 "disconnected_at", "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name",
-                "created_at", "updated_at",
+                "created_at", "updated_at", "deleted_at",
             )
             values = (
                 x_user_id, clean_text(account.get("username", ""), 255), clean_text(account.get("name", ""), 255),
@@ -993,15 +1018,16 @@ def complete_authorization(code, raw_state):
                 profile["listed_count"], profile["like_count"], profile["media_count"], profile["verified"],
                 profile["protected"], profile["subscription_type"], profile["location"], profile["x_created_at"],
                 profile["profile_synced_at"],
-                "", "", "", "", timestamp, timestamp,
+                "", "", "", "", timestamp, timestamp, "",
             )
             update_columns = (
                 "username", "display_name", "profile_image_url", "token_store_key", "token_type", "scopes_json",
                 "status", "last_authorized_at", "access_expires_at", "last_token_refresh_at", "last_verified_at",
                 "last_error_at", "last_error", "authorized_by_user_id", "authorized_by_name", "authorized_by_email",
+                "owner_tenant_key", "owner_user_id", "owner_name", "owner_email",
                 "followers_count", "following_count", "tweet_count", "listed_count", "like_count", "media_count",
                 "verified", "protected", "subscription_type", "location", "x_created_at", "profile_synced_at", "disconnected_at",
-                "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name", "updated_at",
+                "disconnected_by_tenant_key", "disconnected_by_user_id", "disconnected_by_name", "updated_at", "deleted_at",
             )
             try:
                 with _DB_LOCK:
@@ -1016,6 +1042,21 @@ def complete_authorization(code, raw_state):
                             ),
                             values,
                         )
+                        if owner_changed:
+                            # Commit old/new ownership evidence with the update.
+                            # X identity is verified above; other operations keep
+                            # their existing owner/permission checks.
+                            conn.executemany(
+                                "INSERT INTO x_oauth_event(event_type,outcome,x_user_id,actor_user_id,"
+                                "actor_tenant_key,actor_name,error_code,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                                [
+                                    ("ownership_transfer", "released", x_user_id,
+                                     existing_row["owner_user_id"], existing_row["owner_tenant_key"],
+                                     existing_row["owner_name"], "", timestamp),
+                                    ("ownership_transfer", "acquired", x_user_id,
+                                     actor["user_id"], actor["tenant_key"], actor["name"], "", timestamp),
+                                ],
+                            )
                         conn.commit()
                     finally:
                         conn.close()
@@ -1058,7 +1099,7 @@ def row_to_item(row):
         scopes = parse_scopes(json.loads(item.pop("scopes_json", "[]")))
     except (TypeError, ValueError, json.JSONDecodeError):
         scopes = []
-    stored_status = item.get("status", "active")
+    stored_status = "disabled" if item.get("deleted_at") else item.get("status", "active")
     token = None
     terminal_statuses = EXPLICITLY_DISABLED_STATUSES
     if stored_status not in terminal_statuses:
@@ -1067,6 +1108,10 @@ def row_to_item(row):
         except ServiceError:
             pass
     status, missing = status_for(scopes, item.get("access_expires_at", ""), token, stored_status)
+    item["oauth_app_name"] = OAUTH_APP_NAME
+    item["app_authorization_status"] = "authorized" if status == "active" else "pending"
+    if status == "reauth_required":
+        item["last_error"] = "API 已切换，请登录同一 X 账号重新授权至 " + OAUTH_APP_NAME
     publish_approved = bool(int(item.get("publish_approved") or 0))
     refresh_token_available = token_refresh_available(scopes, token)
     authorization_refreshable = bool(
@@ -1084,6 +1129,9 @@ def row_to_item(row):
         token,
         refreshable=authorization_refreshable,
     )
+    if status == "reauth_required":
+        item["access_token_status"] = "reauth_required"
+        item["refresh_token_available"] = False
     item["credential_publish_eligible"] = status == "active"
     item["publish_eligible"] = (
         status == "active" and publish_approved
@@ -1123,8 +1171,10 @@ def row_to_item(row):
 def normalize_account_scope(actor, scope):
     actor = require_actor_subject(actor)
     scope = str(scope or "mine").strip().lower()
-    if scope not in {"mine", "all"}:
+    if scope not in {"mine", "all", "platform"}:
         raise ServiceError("invalid_request", "X账号查询范围无效", 400)
+    if scope == "platform" and actor.get("x_platform_access") is not True:
+        raise ServiceError("x_platform_permission_denied", "需要 X 平台推广权限", 403)
     if scope == "all" and actor.get("role") != "admin":
         raise ServiceError("x_admin_required", "仅管理员可查看全部X账号", 403)
     return actor, scope
@@ -1135,11 +1185,11 @@ def list_accounts(actor, scope="mine"):
     with _DB_LOCK:
         conn = db_connect()
         try:
-            if scope == "all":
-                rows = conn.execute("SELECT * FROM x_authorized_account ORDER BY updated_at DESC,id DESC").fetchall()
+            if scope in {"all", "platform"}:
+                rows = conn.execute("SELECT * FROM x_authorized_account WHERE deleted_at='' ORDER BY updated_at DESC,id DESC").fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM x_authorized_account WHERE owner_tenant_key=? AND owner_user_id=? "
+                    "SELECT * FROM x_authorized_account WHERE deleted_at='' AND owner_tenant_key=? AND owner_user_id=? "
                     "ORDER BY updated_at DESC,id DESC",
                     (actor["tenant_key"], actor["user_id"]),
                 ).fetchall()
@@ -1195,7 +1245,7 @@ def find_scoped_account_row(account_id, actor, scope="mine"):
     with _DB_LOCK:
         conn = db_connect()
         try:
-            if scope == "all":
+            if scope in {"all", "platform"}:
                 row = conn.execute("SELECT * FROM x_authorized_account WHERE id=?", (int(account_id),)).fetchone()
             else:
                 row = conn.execute(
@@ -1225,11 +1275,13 @@ def set_account_publish_approval(account_id, approved, actor):
     if not isinstance(approved, bool):
         raise ServiceError("invalid_request", "approved必须是布尔值", 400)
     account_id = int(account_id)
-    actor, _scope = normalize_account_scope(actor, "all")
-    initial_row = find_scoped_account_row(account_id, actor, "all")
+    actor, _scope = normalize_account_scope(actor, "platform" if actor.get("x_platform_access") is True else "all")
+    initial_row = find_scoped_account_row(account_id, actor, _scope)
     x_user_id = str(initial_row["x_user_id"])
     with account_lock("x:" + x_user_id):
-        find_scoped_account_row(account_id, actor, "all")
+        row = find_scoped_account_row(account_id, actor, _scope)
+        if row["deleted_at"]:
+            raise ServiceError("x_account_not_found", "X账号已从后台移除", 404)
         timestamp = iso_utc()
         with _DB_LOCK:
             conn = db_connect()
@@ -1258,6 +1310,7 @@ def set_account_publish_approval(account_id, approved, actor):
 
 
 def set_account_drama_language(account_id, drama_language, actor):
+    personal_pool_paused = False
     try:
         normalized_language = canonical_drama_language(drama_language)
     except ValueError as exc:
@@ -1267,12 +1320,12 @@ def set_account_drama_language(account_id, drama_language, actor):
             400,
         ) from None
     account_id = int(account_id)
-    actor, _scope = normalize_account_scope(actor, "all")
-    initial_row = find_scoped_account_row(account_id, actor, "all")
+    actor, _scope = normalize_account_scope(actor, "platform" if actor.get("x_platform_access") is True else "all")
+    initial_row = find_scoped_account_row(account_id, actor, _scope)
     x_user_id = str(initial_row["x_user_id"])
     with account_lock("x:" + x_user_id):
         current = row_to_item(
-            find_scoped_account_row(account_id, actor, "all")
+            find_scoped_account_row(account_id, actor, _scope)
         )
         if same_drama_language(
             current.get("drama_language"), normalized_language
@@ -1333,6 +1386,15 @@ def set_account_drama_language(account_id, drama_language, actor):
                         "X account record does not exist",
                         404,
                     )
+                pool_schema = "xpost_language_guard" if attached else "main"
+                if conn.execute("SELECT 1 FROM %s.sqlite_master WHERE type='table' AND name='x_video_publish_pool'" % pool_schema).fetchone():
+                    changed = conn.execute(
+                        "UPDATE %s.x_video_publish_pool SET status='paused',language=?,"
+                        "pause_reason='account_language_changed',effective_at_utc=?,"
+                        "version=version+1,updated_at_utc=? WHERE account_id=? AND language<>?" % pool_schema,
+                        (normalized_language, timestamp, timestamp, account_id, normalized_language),
+                    )
+                    personal_pool_paused = bool(changed.rowcount)
                 conn.commit()
             finally:
                 if conn.in_transaction:
@@ -1346,7 +1408,10 @@ def set_account_drama_language(account_id, drama_language, actor):
         actor,
         x_user_id=x_user_id,
     )
-    return find_account(account_id)
+    result = find_account(account_id)
+    if personal_pool_paused:
+        result["personal_pool_paused"] = True
+    return result
 
 
 def update_account_error(account_id, status, error):
@@ -1386,13 +1451,15 @@ def verify_account(
     with account_lock("x:" + x_user_id):
         row = find_scoped_account_row(account_id, actor, scope)
         stored_status = str(row["status"] or "")
-        if stored_status == "disabled":
+        if stored_status == "disabled" or row["deleted_at"]:
             raise ServiceError("x_account_disabled", "X账号已在后台停用；重新授权后才能校验", 409)
         if stored_status == "disconnected":
             raise ServiceError("x_token_missing", "X账号已解除授权，请重新授权", 409)
         if stored_status == "revoke_pending":
             raise ServiceError("x_disconnect_pending", "X账号存在旧退出待处理状态，请先完成停用", 409)
         item = row_to_item(row)
+        if item["status"] == "reauth_required":
+            raise ServiceError("x_account_not_publishable", item["last_error"], 409)
         if require_publish_approved and item.get("publish_approved") is not True:
             raise ServiceError(
                 "x_account_publish_not_approved",
@@ -1405,6 +1472,7 @@ def verify_account(
                 "X账号授权当前不可用于发布，请先重新授权或校验",
                 409,
             )
+        verification_stage = "读取账号身份"
         try:
             expires_at = item.get("access_expires_at", "")
             refresh_required = bool(
@@ -1429,6 +1497,7 @@ def verify_account(
                     "x_token_invalid", TOKEN_INVALID_LOGIN_MESSAGE, 409
                 )
             if needs_token_refresh:
+                verification_stage = "刷新账号授权"
                 refresh_token = token.get("refresh_token")
                 if not refresh_token:
                     raise ServiceError("x_token_revoked", "X Refresh Token缺失，请重新授权", 409)
@@ -1438,10 +1507,12 @@ def verify_account(
                 if not refreshed.get("scope"):
                     refreshed["scope"] = token.get("scope", " ".join(item.get("scopes", [])))
                 refreshed["obtained_at"] = timestamp
+                refreshed["oauth_client_id_sha256"] = current_app_fingerprint()
                 token = refreshed
                 atomic_write_json(token_path(item["x_user_id"]), token)
                 refresh_at = timestamp
                 expires_at = iso_utc(now_epoch() + int(token.get("expires_in", 0) or 0)) if token.get("expires_in") else ""
+            verification_stage = "读取账号身份"
             account_payload = user_request(token.get("access_token", ""))
             account = account_payload.get("data", {}) if isinstance(account_payload, dict) else {}
             verified_x_user_id = str(account.get("id", "") or "")
@@ -1478,13 +1549,18 @@ def verify_account(
             safe_record_event("verify", "completed", actor, x_user_id=item["x_user_id"])
             return find_account(account_id)
         except ServiceError as exc:
-            if preserve_transient_status and exc.code in TRANSIENT_VERIFY_ERROR_CODES:
+            if (exc.code == "x_upstream_error"
+                    and getattr(exc, "upstream_status", None) == 400
+                    and getattr(exc, "upstream_code", "") == "invalid_request"):
+                exc = ServiceError(ACCOUNT_VERIFY_REJECTED,
+                    ACCOUNT_VERIFY_REJECTED_PREFIX + "%s被 X 拒绝（HTTP 400，invalid_request）；本账号暂时跳过，下次校验成功后恢复" % verification_stage, 409)
+            if exc.code == ACCOUNT_VERIFY_REJECTED or (preserve_transient_status and exc.code in TRANSIENT_VERIFY_ERROR_CODES):
                 state = None
             else:
                 state = "revoked" if exc.code == "x_token_revoked" else ("token_missing" if exc.code == "x_token_missing" else "error")
             update_account_error(account_id, state, str(exc))
             safe_record_event("verify", "failed", actor, x_user_id=item["x_user_id"], error_code=exc.code)
-            raise
+            raise exc from None
         except Exception:
             update_account_error(
                 account_id,
@@ -1585,13 +1661,14 @@ def youtube_share_request(action, payload):
     try:
         service = youtube_shares_service()
         result = getattr(service, action)(payload)
-        service.start_worker()
+        if os.environ.get("PIPELINE_X_DISPATCH_ENABLED") != "1":
+            service.start_worker()
         return result
     except YouTubeShareError as exc:
         raise ServiceError(exc.code, str(exc), exc.status) from None
 
 
-def publishing_token_provider(account_id, actor, frozen_language="", require_premium=False):
+def publishing_token_provider(account_id, actor, frozen_language="", require_premium=False, personal_run_id=None):
     """Refresh before each upload request without releasing the outer lock."""
     def current_token(*, verify_now=False):
         XPostError, _store, _publish = _x_posts_api()
@@ -1601,6 +1678,11 @@ def publishing_token_provider(account_id, actor, frozen_language="", require_pre
                 preserve_transient_status=True, require_publish_approved=True,
             )
             with publish_credentials(account_id, actor, "all") as (account, token):
+                if personal_run_id:
+                    # Recheck ownership and live operator permission before each
+                    # X request, including after a long upload. Do not reinterpret
+                    # our own in-flight post_creating ledger as a retry here.
+                    _personal_owner_guard(personal_run_id)
                 if frozen_language and not same_drama_language(account.get("drama_language"), frozen_language):
                     raise ServiceError("x_post_account_language_mismatch", "X account language changed during upload", 409)
                 if require_premium and (
@@ -2778,6 +2860,7 @@ def publish_queue_request(
                 manual_run_id,
                 expected_manual_trigger_source or "manual",
             )
+            _personal_run_guard(manual_run_id)
             if (
                 expected_manual_trigger_source == "auto_template"
                 and str(manual_run.get("status") or "")
@@ -3003,6 +3086,7 @@ def publish_queue_request(
                     publish_credentials(source_account_id, actor, "all")
                 )
                 try:
+                    _personal_run_guard(manual_run_id, account)
                     if frozen_drama_language and not same_drama_language(
                         account.get("drama_language"),
                         frozen_drama_language,
@@ -3034,6 +3118,7 @@ def publish_queue_request(
                         access_token_provider=publishing_token_provider(
                             source_account_id, actor, frozen_drama_language,
                             require_premium=relay_delivery or duration > duration_policy.standard_limit(queue),
+                            personal_run_id=manual_run_id,
                         ),
                         public_root=POST_PUBLIC_ROOT,
                         short_base_url=POST_SHORT_BASE_URL,
@@ -3446,18 +3531,35 @@ def save_post_schedule_request(payload, source_type, navigation_item):
             ).fetchall()
         finally:
             conn.close()
+    accounts = [row_to_item(row) for row in rows]
     eligible_ids = [
         int(account["id"])
-        for account in (row_to_item(row) for row in rows)
+        for account in accounts
         if account.get("publish_eligible")
     ]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
-        item = XPostStore(POST_DB_PATH).save_schedule_config(
+        store = XPostStore(POST_DB_PATH)
+        save_options = {}
+        if source_type == "material":
+            # Only trusted local account/ledger state may exclude an account.
+            # Saving settings never refreshes tokens or calls X.
+            blocked = {
+                account_id for account_id, hold in store.schedule_account_blockers(eligible_ids).items()
+                if hold.get("code") in {"x_post_account_locked", "x_account_not_publishable"}
+            }
+            # An active upload also has a needs-review fence while X responds.
+            # Keep that healthy selection; execution still honors its fence.
+            save_options["skippable_account_ids"] = [
+                int(account["id"]) for account in accounts
+                if not account.get("publish_eligible") or int(account["id"]) in blocked
+            ]
+        item = store.save_schedule_config(
             source_type,
             settings,
             actor,
             eligible_account_ids=eligible_ids,
+            **save_options,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3541,6 +3643,7 @@ def _public_manual_run(item):
         "unknown_count",
         "error_code",
         "error_message",
+        "preflight_failures",
         "started_at",
         "finished_at",
         "created_at",
@@ -3579,6 +3682,8 @@ def _auto_template_run(item):
     """Return the frozen execution identity required by the auto runner."""
     source = item if isinstance(item, dict) else {}
     allowed_run = (
+        "schedule_policy",
+        "planned_publish_at_utc",
         "id",
         "trigger_source",
         "external_task_key",
@@ -3665,6 +3770,7 @@ def create_post_auto_template_run_request(payload):
             AUTO_TEMPLATE_ACTOR,
             duration_policy_version=payload.get("duration_policy_version", 2),
             random_template_enabled=payload.get("random_template_enabled", False),
+            **({"schedule_policy": payload["schedule_policy"], "planned_publish_at_utc": payload.get("planned_publish_at_utc", "")} if payload.get("schedule_policy") else {}),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3801,7 +3907,8 @@ def create_post_auto_template_plan_request(payload):
         raise ServiceError("invalid_request", "preflight_duration is invalid", 400) from None
     if not math.isfinite(duration) or duration < 0:
         raise ServiceError("invalid_request", "preflight_duration is invalid", 400)
-    if duration <= 0 or duration > AUTO_TEMPLATE_MAX_DURATION_SECONDS:
+    deferred_dispatch = os.environ.get("PIPELINE_X_DISPATCH_ENABLED") == "1" and candidate.get("media_validation_mode") == "deferred"
+    if not deferred_dispatch and (duration <= 0 or duration > AUTO_TEMPLATE_MAX_DURATION_SECONDS):
         raise ServiceError(
             "x_post_auto_template_duration_exceeded",
             "automatic X material exceeds the supported upload duration",
@@ -3895,9 +4002,13 @@ def create_post_manual_run_request(payload):
 
 
 def query_post_manual_run_request(payload, run_id):
-    _material_pool_actor(payload)
+    actor = _material_pool_actor(payload)
+    from features.x_video_publish.core import read_personal_task
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
+        task = read_personal_task(POST_DB_PATH, run_id)
+        if task and (task["tenant_key"], task["user_id"]) != (actor["tenant_key"], actor["user_id"]):
+            raise ServiceError("x_video_batch_not_found", "发布任务不存在", 404)
         item = XPostStore(POST_DB_PATH).get_manual_run(run_id, "manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3913,6 +4024,52 @@ def claim_post_manual_run_request(payload):
     except XPostError as exc:
         _raise_x_post_error(exc)
     return {"item": item}
+
+
+def _personal_owner_guard(run_id):
+    """Permission-only guard usable while the current post is in flight."""
+    from features.x_video_publish.core import read_personal_task
+    from features.x_video_publish.transport import broker
+    from features.x_video_publish.errors import PublishingError
+    XPostError, _, _ = _x_posts_api()
+    try:
+        task = read_personal_task(POST_DB_PATH, run_id)
+        if task is None:
+            return None
+        owner = broker('identity', {'tenant_key': task['tenant_key'], 'user_id': task['user_id']}, INTERNAL_TOKEN)['actor']
+        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'platform' if owner.get('x_platform_access') is True else 'mine'))
+        frozen_account = task['account_snapshot']
+        if str(current.get('x_user_id') or '') != str(frozen_account.get('x_user_id') or ''):
+            raise ServiceError('x_video_account_changed', '账号身份已改变', 409)
+        return task, current
+    except PublishingError as exc:
+        raise ServiceError(exc.code, str(exc), exc.status) from None
+    except XPostError as exc:
+        _raise_x_post_error(exc)
+
+
+def _personal_run_guard(run_id, account=None):
+    """Revalidate personal owner and live backend permission before queue/X writes."""
+    if not run_id:
+        return None
+    from features.x_video_publish.core import read_personal_task, assert_personal_run_publishable
+    from features.x_video_publish.transport import broker
+    from features.x_video_publish.errors import PublishingError
+    XPostError, _, _ = _x_posts_api()
+    try:
+        task = read_personal_task(POST_DB_PATH, run_id)
+        if task is None:
+            return None
+        owner = broker('identity', {'tenant_key': task['tenant_key'], 'user_id': task['user_id']}, INTERNAL_TOKEN)['actor']
+        current = row_to_item(find_scoped_account_row(task['account_id'], owner, 'platform' if owner.get('x_platform_access') is True else 'mine'))
+        assert_personal_run_publishable(POST_DB_PATH, run_id, current, platform_access=owner.get("x_platform_access") is True)
+        if account is not None:
+            assert_personal_run_publishable(POST_DB_PATH, run_id, account, platform_access=owner.get("x_platform_access") is True)
+        return task
+    except PublishingError as exc:
+        raise ServiceError(exc.code, str(exc), exc.status) from None
+    except XPostError as exc:
+        _raise_x_post_error(exc)
 
 
 def create_post_manual_plan_request(payload):
@@ -3931,35 +4088,42 @@ def create_post_manual_plan_request(payload):
         frozen = store.get_manual_run(run_id, "manual")
     except XPostError as exc:
         _raise_x_post_error(exc)
-    if len(candidates) != len(frozen["account_ids"]):
-        raise ServiceError(
-            "x_post_manual_candidate_shortage",
-            "手动发布候选数量与冻结账号数量不一致",
-            409,
-        )
-    accounts = _manual_publish_accounts(list(frozen["account_ids"]))
+    failures = payload.get("preflight_failures")
+    if failures is not None:
+        from features.x_posts.manual_preflight import validate_partition
+        try:
+            failures = validate_partition(frozen["account_ids"], frozen["material_ids"], candidates, failures)
+        except XPostError as exc:
+            _raise_x_post_error(exc)
+    elif len(candidates) != len(frozen["account_ids"]):
+        raise ServiceError("x_post_manual_candidate_shortage", "候选数量与冻结账号数量不一致", 409)
+    personal_task = _personal_run_guard(run_id)
     trusted = []
-    for candidate, account in zip(candidates, accounts):
+    for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             raise ServiceError("invalid_request", "candidate必须是对象", 400)
-        _require_candidate_duration_capability(candidate, account, frozen)
+        account_id = candidate["account_id"] if failures is not None else frozen["account_ids"][index]
+        try:
+            account = _manual_publish_accounts([account_id])[0]
+            _require_candidate_duration_capability(candidate, account, frozen)
+        except ServiceError as exc:
+            if failures is None or exc.status not in {403, 409}:
+                raise
+            failures.append({"account_id": account_id, "material_id": str(candidate["material_id"]),
+                             "error_code": exc.code, "error_message": clean_text(exc)})
+            continue
         item = dict(candidate)
-        item.update(
-            {
-                "account_id": int(account["id"]),
-                "account_username": str(account.get("username", "") or ""),
-                "page_name": str(
-                    account.get("display_name", "")
-                    or account.get("username", "")
-                    or ""
-                ),
-                "page_id": str(account.get("x_user_id", "") or ""),
-            }
-        )
+        if personal_task is not None:
+            item['account_drama_language'] = personal_task['drama_language']
+            item['copy_contract_version'] = 2
+        item.update({"account_id": int(account["id"]), "account_username": str(account.get("username") or ""),
+                     "page_name": str(account.get("display_name") or account.get("username") or ""),
+                     "page_id": str(account.get("x_user_id") or "")})
         trusted.append(item)
-    preflight_post_storage_request(len(trusted))
+    if trusted:
+        preflight_post_storage_request(min(len(trusted), 4))
     try:
-        item = store.create_manual_plan(run_id, trusted, "manual")
+        item = store.create_manual_plan(run_id, trusted, "manual", preflight_failures=failures)
     except XPostError as exc:
         _raise_x_post_error(exc)
     return {"item": item}
@@ -4096,22 +4260,41 @@ def available_post_drama_pool_request(payload):
             if account_ids is not None
             else []
         )
+        store = XPostStore(POST_DB_PATH)
+        configured_ids = payload.get('configured_account_ids')
+        profile_scope_key = None
+        scope_accounts = accounts
+        identity = payload.get('schedule_identity')
+        if identity is not None:
+            if not isinstance(identity, dict):
+                raise ServiceError('invalid_request', 'schedule_identity无效', 400)
+            configured_ids = store.drama_profile_scope(identity.get('run_date'), identity.get('publish_time'), identity.get('version'))
+            scope_accounts = [find_account(int(value)) for value in configured_ids]
+            eligible_scope = [account for account in scope_accounts if account.get('publish_eligible')]
+            from features.x_posts import drama_profile
+            # The portrait API is read before the store takes any write lock.
+            snapshot = drama_profile.portrait_snapshot(eligible_scope)
+            profile_scope_key = store.prepare_drama_profile_plan(
+                identity.get('run_date'), identity.get('publish_time'), identity.get('version'),
+                eligible_scope, snapshot, limit=int(payload.get('limit', 50)))
         return {
-            "items": XPostStore(POST_DB_PATH).available_drama_pool_items(
+            "items": store.available_drama_pool_items(
                 payload.get("limit", 50),
                 account_ids=account_ids,
                 account_languages={
                     int(account["id"]): account.get(
                         "drama_language", DEFAULT_DRAMA_LANGUAGE
                     )
-                    for account in accounts
+                    for account in scope_accounts
                 },
                 premium_account_ids=[
                     int(account["id"])
                     for account in accounts
                     if account.get("long_video_eligible")
                 ],
-                configured_account_ids=payload.get("configured_account_ids"),
+                configured_account_ids=configured_ids,
+                schedule_identity=payload.get("schedule_identity"),
+                profile_scope_key=profile_scope_key,
             )
         }
     except XPostError as exc:
@@ -4307,6 +4490,8 @@ def _safe_schedule_plan_query_result(result):
             503,
         )
     allowed_run = (
+        "schedule_policy",
+        "planned_publish_at_utc",
         "id",
         "slot_key",
         "source_type",
@@ -4699,14 +4884,14 @@ def create_post_schedule_plan_request(payload):
     # Schedule queues download and probe one media file at a time. Reserve
     # capacity for that serialized working set, not the whole frozen batch.
     account_languages = None
+    drama_profile_scope_key = None
     if source_type == "drama":
         frozen = store.query_schedule_plan(
             source_type, payload.get("run_date"), payload.get("publish_time")
         )
-        configured_ids = (
-            frozen["run"]["account_ids"] if frozen.get("found")
-            else store.get_schedule_config(source_type)["account_ids"]
-        )
+        configured_ids = store.drama_profile_scope(payload.get('run_date'), payload.get('publish_time'), payload.get('version'))
+        from features.x_posts import drama_profile
+        drama_profile_scope_key = drama_profile.scope_key(payload.get('run_date'), payload.get('version'), configured_ids)
         # Reservation must replay the same language-aware selection as the
         # available-pool endpoint, including eligible accounts omitted by
         # candidate-local preflight. Request fields cannot supply this map.
@@ -4733,6 +4918,7 @@ def create_post_schedule_plan_request(payload):
             fifo_capacity_skips=fifo_capacity_skips,
             material_language_capacities=material_language_capacities,
             account_languages=account_languages,
+            drama_profile_scope_key=drama_profile_scope_key,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -4914,6 +5100,77 @@ def cleanup_disconnected_token_artifacts():
             delete_token_artifacts(x_user_id)
 
 
+def delete_account(account_id, actor):
+    """Hide and disable an account while preserving all publishing facts."""
+    actor, _scope = normalize_account_scope(actor, "all")
+    account_id = int(account_id)
+    initial_row = find_scoped_account_row(account_id, actor, "all")
+    x_user_id = str(initial_row["x_user_id"])
+    guard = account_lock("x:" + x_user_id)
+    if not guard.acquire(blocking=False):
+        raise ServiceError("x_account_busy", "该账号正在发布或同步，请完成后再删除", 409)
+    try:
+        with _DB_LOCK:
+            conn = db_connect()
+            try:
+                post_schema = "main"
+                if DB_PATH.resolve() != POST_DB_PATH.resolve():
+                    conn.execute("ATTACH DATABASE ? AS removal_posts", (str(POST_DB_PATH),))
+                    post_schema = "removal_posts"
+                shares = _YOUTUBE_SHARES
+                if shares is not None:
+                    conn.execute("ATTACH DATABASE ? AS removal_shares", (str(shares.db_path),))
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM x_authorized_account WHERE id=?", (account_id,)).fetchone()
+                if not row:
+                    raise ServiceError("x_account_not_found", "X账号记录不存在", 404)
+                if not row["deleted_at"]:
+                    # Node uploads hold short account locks while credentials
+                    # are issued. Their durable queue/log state covers the rest
+                    # of the upload; check it in the disabling transaction.
+                    has_posts = conn.execute(
+                        "SELECT 1 FROM %s.sqlite_master WHERE type='table' AND name='x_post_queue'" % post_schema
+                    ).fetchone()
+                    busy = has_posts and conn.execute(
+                        "SELECT 1 FROM {s}.x_post_queue q LEFT JOIN {s}.x_post_publish_log l ON l.queue_id=q.id "
+                        "WHERE (q.account_id=? OR q.relay_account_id=?) AND "
+                        "(q.status='publishing' OR l.status IN ('media_uploading','post_creating','repost_creating') "
+                        "OR COALESCE(l.unknown_outcome,0)=1) LIMIT 1".format(s=post_schema),
+                        (account_id, account_id),
+                    ).fetchone()
+                    share_busy = shares is not None and conn.execute(
+                        "SELECT 1 FROM removal_shares.youtube_share_item WHERE account_id=? "
+                        "AND status IN ('publishing','unknown_outcome') LIMIT 1", (account_id,),
+                    ).fetchone()
+                    if busy or share_busy:
+                        raise ServiceError("x_account_busy", "该账号有发布中或结果待核对的任务，请处理完成后再删除", 409)
+                    timestamp = iso_utc()
+                    conn.execute(
+                        "UPDATE x_authorized_account SET deleted_at=?,status='disabled',publish_approved=0,"
+                        "disconnected_at=?,disconnected_by_tenant_key=?,disconnected_by_user_id=?,"
+                        "disconnected_by_name=?,updated_at=? WHERE id=?",
+                        (timestamp, timestamp, actor["tenant_key"], actor["user_id"], actor["name"], timestamp, account_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO x_oauth_event(event_type,outcome,x_user_id,actor_user_id,"
+                        "actor_tenant_key,actor_name,error_code,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        ("account_deleted", "completed", x_user_id, actor["user_id"],
+                         actor["tenant_key"], actor["name"], "", timestamp),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        return {"id": account_id, "deleted": True}
+    finally:
+        guard.release()
+
+
+def query_api_credits(actor):
+    normalize_account_scope(actor, "platform" if actor.get("x_platform_access") is True else "all")
+    from features.x_accounts.credits import fetch_current_credits
+    return fetch_current_credits(os.environ.get("X_BILLING_BEARER_TOKEN", ""), OAUTH_APP_NAME)
+
+
 def logout_account(account_id, actor):
     account_id = int(account_id)
     actor = require_actor_subject(actor)
@@ -4972,6 +5229,7 @@ def config_payload():
     required_complete = all(scope in set(SCOPES) for scope in REQUIRED_SCOPES)
     return {
         "configured": bool(CLIENT_ID and CLIENT_SECRET and required_complete),
+        "oauth_app_name": OAUTH_APP_NAME,
         "callback_url": callback_url(),
         "scopes": list(SCOPES),
         "required_scopes": list(REQUIRED_SCOPES),
@@ -5136,6 +5394,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path.startswith("/internal/pipeline-dispatch/x/"):
+            from features.pipeline_dispatch.x_native import handle
+            return handle(self, sys.modules[__name__], parsed.path)
+        if parsed.path.startswith("/internal/video-publish/"):
+            from features.x_video_publish.runtime import dispatch
+            return dispatch(self, sys.modules[__name__], parsed.path)
         if not parsed.path.startswith("/internal/"):
             self.send_text(404, "not found\n")
             return
@@ -5267,6 +5531,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             request_body_limit = MAX_BODY_BYTES
+            from features.pipeline_dispatch.legacy_admission import handoff
+            dispatched = handoff("x", parsed.path)
+            if dispatched is not None:
+                self.send_json(200, dispatched)
+                return
             if parsed.path in {
                 "/internal/posts/daily-plan",
                 "/internal/posts/catchup-plan",
@@ -5497,7 +5766,10 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "item": preflight_post_storage_request(
-                            len(DAILY_ACCOUNT_IDS) if internal_role == "daily" else 1
+                            payload.get(
+                                "required_media_count",
+                                len(DAILY_ACCOUNT_IDS) if internal_role == "daily" else 1,
+                            )
                         )
                     },
                 )
@@ -5710,7 +5982,7 @@ class Handler(BaseHTTPRequestHandler):
                 if payload.get("schedule_preflight") is True:
                     XPostError, XPostStore, _publish_canary = _x_posts_api()
                     blocker = XPostStore(POST_DB_PATH).schedule_account_blockers([account_id]).get(account_id)
-                    if blocker:
+                    if blocker and blocker["code"] != ACCOUNT_VERIFY_REJECTED:
                         raise ServiceError(blocker["code"], blocker["message"], 409)
                 actor = {
                     "tenant_key": "internal",
@@ -5768,6 +6040,13 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     list_accounts(payload.get("actor", {}), payload.get("scope", "mine")),
                 )
+                return
+            if parsed.path == "/internal/accounts/credits":
+                self.send_json(200, query_api_credits(payload.get("actor", {})))
+                return
+            match = re.fullmatch(r"/internal/accounts/([0-9]+)/delete", parsed.path)
+            if match:
+                self.send_json(200, delete_account(match.group(1), payload.get("actor", {})))
                 return
             match = re.fullmatch(
                 r"/internal/accounts/([0-9]+)/publish-approval",
@@ -5872,7 +6151,8 @@ def serve():
     shares = None
     try:
         shares = youtube_shares_service()
-        shares.start_worker()
+        if os.environ.get("PIPELINE_X_DISPATCH_ENABLED") != "1":
+            shares.start_worker()
         print("X account sidecar listening on %s:%s" % (LISTEN_HOST, LISTEN_PORT), flush=True)
         server.serve_forever()
     finally:

@@ -322,7 +322,7 @@
       <header class="topbar">
         <div class="title">
           <h1>Post短剧池</h1>
-          <p>每个账号固定续发自己已开始的短剧；其他账号按上传时间倒序领取尚未发布过的新剧，并分别按免费集数正序发布。</p>
+          <p>已开播短剧由原频道持续续发；新短剧按标签画像匹配所选频道，并按免费集数正序发布。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -345,13 +345,13 @@
         <section class="panel">
           <div class="section-head">
             <h2>自动发布设置</h2>
-            <p>每个账号会持续发布自己已绑定短剧的下一集；该剧免费集发完后，才按账号顺序领取最新上传的未绑定短剧。调整账号顺序不会改变已有绑定。</p>
+            <p>新短剧优先匹配所选同语言频道的受众、题材画像；无有效画像时按原顺序分配。已开播短剧继续由原频道发布，调整频道顺序不会改变已有绑定。</p>
             <p>新任务按最终成片时长分配：20 分钟（1200 秒）以内可由普通账号直接发布；超过 20 分钟继续按会员资格及同语言会员代发规则处理。</p>
           </div>
           <div class="schedule-grid">
             <div class="field">
               <div class="field-head">
-                <label for="accountSearch">发布账号</label>
+                <label for="accountSearch">候选发布频道</label>
                 <div class="inline-actions">
                   <button id="refreshAccounts" class="button small" type="button">刷新账号</button>
                   <a class="text-link" href="/x-accounts.html">添加/授权新账号</a>
@@ -362,6 +362,7 @@
                 <div class="empty">正在加载账号…</div>
               </div>
               <div id="selectedAccountSummary" class="selection-summary">尚未选择发布账号。</div>
+              <span class="helper">仅从已勾选频道中按标签画像匹配新剧；高优短剧优先分配，同优先级按最新入池顺序处理。</span>
             </div>
             <div class="field">
               <label>发布方式</label>
@@ -511,7 +512,7 @@ Episode {{episode_number}}
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js"></script>
+  <script src="/quick-nav.js?v=20261112retirement1"></script>
   <script>
     (() => {
       const state = {
@@ -532,6 +533,7 @@ Episode {{episode_number}}
           enabled: false,
           timezone: "Asia/Shanghai",
           accountIds: new Set(),
+          savedAccountIds: [],
           publishTimes: [],
           scheduleMode: "fixed",
           randomDailyCount: 1,
@@ -761,7 +763,7 @@ Episode {{episode_number}}
         const total = accountCount * timeCount;
         const node = byId("scheduleSummary");
         node.replaceChildren();
-        node.appendChild(document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "随机批次" : "时间点"} = 每日最多 `));
+        node.appendChild(document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "独立随机时次" : "时间点"} = 每日最多 `));
         const strong = document.createElement("strong");
         setText(strong, `${total} 篇 Post`);
         node.appendChild(strong);
@@ -773,14 +775,18 @@ Episode {{episode_number}}
           ? state.schedule.randomDailyPlans
           : [];
         if (!plans.length) {
-          setText(container, "随机计划尚未生成；首次启用或修改后从次日生效。");
+          setText(container, "随机计划尚未生成；次日北京时间 00:00 按账号独立排期并开始备料。");
           return;
         }
+        container.appendChild(document.createTextNode("每天北京时间 00:00 开始备料；完成后等待各账号计划时间，迟到则完成后发布。"));
         plans.forEach(plan => {
-          const line = document.createElement("span");
-          const times = Array.isArray(plan.publish_times) ? plan.publish_times.join("、") : "";
-          setText(line, `${String(plan.run_date || "")}：${times || "尚无时间"}`);
-          container.appendChild(line);
+          const targets = Array.isArray(plan.target_plans) ? plan.target_plans : [plan];
+          targets.forEach(target => {
+            const line = document.createElement("span");
+            const times = Array.isArray(target.publish_times) ? target.publish_times.join("、") : "";
+            setText(line, `${String(plan.run_date || "")} ${target.account_id ? "账号 " + target.account_id : "原计划"}：${times || "尚无时间"}`);
+            container.appendChild(line);
+          });
         });
       }
       function renderScheduleMode() {
@@ -829,6 +835,7 @@ Episode {{episode_number}}
         state.schedule.accountIds = new Set(
           rawAccounts.map(value => String(value || "")).filter(value => /^\d+$/.test(value) && Number(value) > 0)
         );
+        state.schedule.savedAccountIds = Array.from(state.schedule.accountIds);
         state.schedule.publishTimes = Array.from(new Set(
           (Array.isArray(item.publish_times) ? item.publish_times : [])
             .map(value => String(value || "").trim()).filter(validPublishTime)
@@ -940,6 +947,9 @@ Episode {{episode_number}}
           setMessage("scheduleMessage", "已选账号中存在不可发布或已失效账号，请先校验或重新授权；已绑定短剧会保留并暂停续发。", true);
           return;
         }
+        const removedAccountIds = (state.schedule.savedAccountIds || []).filter(id => !state.schedule.accountIds.has(id));
+        const restartRemoved = removedAccountIds.length > 0;
+        if (restartRemoved && !window.confirm("确认移除这些账号？其中不可用账号绑定的未完结短剧将取消旧绑定，保留历史，并重新找同语言账号从第1集发布；正常账号的未完结绑定仍需保留。有执行中或未知结果的旧任务时将阻止重发。")) return;
         state.scheduleBusy = true;
         const button = byId("saveSchedule");
         button.disabled = true;
@@ -957,9 +967,11 @@ Episode {{episode_number}}
               body_template: bodyTemplate,
               random_template_enabled: byId("scheduleRandomTemplate").checked,
               version: state.schedule.version,
+              restart_removed_dramas: restartRemoved,
             }),
           });
           applySchedule(result);
+          await loadDramaPool();
           setMessage("scheduleMessage", scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
           showToast("短剧池自动发布设置已保存。", false);
         } catch (error) {
@@ -1373,7 +1385,7 @@ Episode {{episode_number}}
             assignmentLabel = "绑定异常";
             assignmentNote = "已暂停，请人工核查";
           } else {
-            assignmentNote = "首次发布时自动绑定";
+            assignmentNote = "首次分配时按标签画像匹配频道";
           }
           appendCell(
             row,

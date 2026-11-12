@@ -1248,7 +1248,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                     "long_video_eligible": False,
                 }
 
-            def available_drama_pool(self, _path, _limit, _account_ids):
+            def available_drama_pool(self, _path, _limit, _account_ids, *, schedule_identity=None):
                 self.available_calls += 1
                 second = (
                     {
@@ -1487,7 +1487,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                 )
                 return item
 
-            def available_drama_pool(self, _path, _limit, _account_ids):
+            def available_drama_pool(self, _path, _limit, _account_ids, *, schedule_identity=None):
                 return [dict(item) for item in pool_items]
 
             def record_drama_pool_checks(self, _path, checks):
@@ -1578,7 +1578,7 @@ class ScheduleRunnerTests(unittest.TestCase):
             def __init__(self):
                 self.checks = []
 
-            def available_drama_pool(self, _path, _limit, _account_ids):
+            def available_drama_pool(self, _path, _limit, _account_ids, *, schedule_identity=None):
                 return [
                     {
                         "id": 138,
@@ -1731,7 +1731,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                     side_effect=AssertionError("relay discovery called")
                 )
 
-            def available_drama_pool(self, _path, _limit, _account_ids):
+            def available_drama_pool(self, _path, _limit, _account_ids, *, schedule_identity=None):
                 return [
                     {
                         "id": 138,
@@ -1886,7 +1886,7 @@ class ScheduleRunnerTests(unittest.TestCase):
                     "long_video_eligible": account_id == 9,
                 }
 
-            def available_drama_pool(self, _path, _limit, _account_ids):
+            def available_drama_pool(self, _path, _limit, _account_ids, *, schedule_identity=None):
                 self.available_calls += 1
                 unassigned = (
                     {
