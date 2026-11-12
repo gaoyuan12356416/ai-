@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 
@@ -46,9 +47,17 @@ def install():
             targets.append(WEB / source.name)
         for destination in targets:
             old = destination.read_bytes() if destination.exists() else None
-            if old != baseline:
+            expected, new = baseline, source.read_bytes()
+            if relative == 'static/socialkit-analytics.html' and old is not None:
+                # Shared navigation cache versions are maintained independently.
+                pattern = rb'(?<=/quick-nav\.js\?v=)[^" ]+'
+                versions = re.findall(pattern, old)
+                if len(versions) == 1:
+                    expected = re.sub(pattern, lambda _: versions[0], baseline)
+                    new = re.sub(pattern, lambda _: versions[0], new)
+            if old != expected:
                 raise RuntimeError('Concurrent runtime change: ' + str(destination))
-            writes.append((destination, old, source.read_bytes()))
+            writes.append((destination, old, new))
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     backup = DATA / 'backups' / ('published-accounts-' + stamp)
     backup.mkdir(parents=True)
