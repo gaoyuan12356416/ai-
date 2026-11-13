@@ -4,6 +4,7 @@ from fractions import Fraction
 
 from .core import rounded_parts
 from .taxonomy import UNKNOWN, AUDIENCES, THEMES, classify
+from features.drama_audience.store import records as audience_records
 
 VERSION = 'x-audience-theme-20261110-v2'
 
@@ -11,8 +12,10 @@ VERSION = 'x-audience-theme-20261110-v2'
 def build_tree(dramas, classifications):
     leaves=defaultdict(dict)
     metadata={}
+    missing=audience_records([key[0] for key in dramas if key not in classifications])
     for key,drama in dramas.items():
-        data=classifications.get(key,classify([],status='missing_drama_info'))
+        data=classifications.get(key) or classify([],status='missing_drama_info',
+                            audience_record=missing.get(key[0]),expected_language=key[1])
         metadata[key]=data
         themes=data['themes']
         part=Fraction(drama['revenue_cents'],len(themes))

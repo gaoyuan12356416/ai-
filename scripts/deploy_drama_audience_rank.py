@@ -23,7 +23,7 @@ WEB=Path('/usr/share/nginx/html')
 HEALTH='/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
 POINTERS={'x':'/opt/x-tag-publisher/current','fb':'/opt/fb-auto-post/current','standard':'/opt/x-post-automation/current'}
 ASSETS=['drama-pay-rank.html','drama-pay-rank.js','drama-pay-rank.css','x-tag-revenue.js']
-SHARED=['features/x_tag_revenue/taxonomy.py']
+SHARED=['features/x_tag_revenue/taxonomy.py','features/x_tag_revenue/hierarchy.py']
 AUDIENCE=[str(p.relative_to(SOURCE)) for p in (SOURCE/'features/drama_audience').glob('*.py')]
 RANK=[str(p.relative_to(SOURCE)) for p in (SOURCE/'features/drama_pay_rank').glob('*.py')]
 

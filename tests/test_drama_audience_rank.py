@@ -92,6 +92,14 @@ class AudienceTests(unittest.TestCase):
         self.assertEqual(sum(a['revenue_cents'] for a in tree['audiences']),101)
         self.assertEqual(sum(t['revenue_cents'] for t in tree['audiences'][0]['children']),101)
 
+    def test_authoritative_audience_without_theme_metadata(self):
+        store.save(resolve('AbC',response(audience=['男性'])),self.db)
+        self.assertEqual(classification_index([],[],['AbC'])[('AbC','en')]['audience'],'male')
+        dramas={('AbC','en'):dict(content_id='AbC',language='en',name='n',revenue_cents=101,posts={'p'})}
+        tree=build_tree(dramas,{})
+        self.assertEqual(tree['audiences'][0]['key'],'male')
+        self.assertEqual(tree['audiences'][0]['children'][0]['key'],'__unknown__')
+
     def test_reprojection_preserves_exact_facts(self):
         from features.drama_audience.reproject import rebuild,facts
         old=classify(['sweet','revenge'],audience_record=resolve('AbC',response(audience=['女性'])))

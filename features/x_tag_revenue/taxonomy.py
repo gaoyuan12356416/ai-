@@ -75,7 +75,7 @@ def classify(raw, drama_type=UNKNOWN, *, status='matched', info_values=(), audie
                 taxonomy_version=VERSION, type_source='ads_drama_info.resource_type')
 
 
-def classification_index(resources, infos):
+def classification_index(resources, infos, content_ids=()):
     grouped, types=defaultdict(list),defaultdict(list)
     labels_index=label_index(resources)
     for row in resources:
@@ -83,8 +83,9 @@ def classification_index(resources, infos):
     for row in infos:
         if str(row.get('app_id'))=='1479':types[(str(row['content_id']),language(row.get('language')))].append(row)
     result={}
-    cache=audience_records([key[0] for key in set(grouped)|set(types)])
-    for key in set(grouped)|set(types):
+    cache=audience_records([key[0] for key in set(grouped)|set(types)]+list(content_ids))
+    keys=set(grouped)|set(types)|{(cid,language(lang)) for cid,r in cache.items() for lang in r['languages']}
+    for key in keys:
         info=types[key];values={str(r.get('resource_type')) for r in info}
         series={str(r.get('series_code') or '') for r in info}- {''}
         value=next(iter(values)) if len(values)==1 and len(series)<=1 else None
@@ -110,4 +111,4 @@ def collect_classifications(query, schema, ids):
                                            ('ads_drama_info','ac','content_id,app_id,language,series_code,resource_type',infos)]:
             sql='SELECT DISTINCT '+columns+' FROM `'+schema+'`.'+table+' FORCE INDEX('+index+') WHERE app_id=%s AND content_id IN ('+placeholders+')'
             target.extend(query(sql,[1479]+batch))
-    return classification_index(resources,infos)
+    return classification_index(resources,infos,ids)
