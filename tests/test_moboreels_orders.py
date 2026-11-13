@@ -472,6 +472,39 @@ class ReportStoreTest(unittest.TestCase):
         self.assertEqual(by_story["list"][0]["story_id"], "42")
         self.assertEqual(by_story["list"][0]["koc_code"], "")
 
+    def test_empty_ad_snapshots_count_complete_days_with_typed_date_bounds(self):
+        # Production regression: 31 complete, explicitly empty day pointers returned
+        # MAX(ad_time)=11-12 but COUNT(*)=0 with collated text date bounds. DATE casts
+        # return 31 on the same replica. Coverage is independent of owner revenue rows.
+        period = {"date_from": "2026-10-13", "date_to": "2026-11-12"}
+
+        def read(sql):
+            self.assertEqual(sql.count(" BETWEEN CAST("), 3)  # Orders, ads and coverage.
+            self.assertEqual(sql.count(" AS DATE) AND CAST("), 3)
+            coverage_sql = next(part for part in sql.split(";") if "'_kind','coverage'" in part)
+            self.assertIn("FROM " + AD_DAY_TABLE, coverage_sql)
+            self.assertIn("'complete_days',COUNT(*)", coverage_sql)
+            self.assertNotIn("row_count", coverage_sql)
+            return [{"_kind": "coverage", "ad_data_as_of": "2026-11-12", "complete_days": 31}]
+
+        for star_id in (None, "our-actor"):
+            with self.subTest(star_id=star_id):
+                report = ReportStore(self.settings, SimpleNamespace(_read=read)).query(period, star_id=star_id)
+                self.assertEqual(report["complete_ad_days"], 31)
+                self.assertEqual(report["ad_data_as_of"], "2026-11-12")
+                self.assertEqual(report["list"], [])
+                self.assertEqual(report["total"], 0)
+                self.assertEqual(report["summary"]["advertising_revenue_usd"], "0")
+                self.assertEqual(report["summary"]["total_revenue_usd"], "0")
+
+    def test_missing_ad_day_pointers_remain_incomplete(self):
+        reader = SimpleNamespace(_read=lambda sql: [
+            {"_kind": "coverage", "ad_data_as_of": None, "complete_days": 0}])
+        report = ReportStore(self.settings, reader).query(PERIOD)
+        self.assertEqual(report["complete_ad_days"], 0)
+        self.assertIsNone(report["ad_data_as_of"])
+        self.assertEqual(report["list"], [])
+
     def test_ambiguous_shared_code_ad_income_is_not_multiplied(self):
         reader = self.report_reader()
         original = reader._read

@@ -615,7 +615,9 @@ def _query_report_precise(store, params, star_id):
     query = _text(params.get("q"), "q", 200).strip()
     code = _text(params.get("code"), "code", 64)
     story = _text(params.get("story_id"), "story_id", 64)
-    period = " BETWEEN %s AND %s" % (_literal(start.isoformat()), _literal(end.isoformat()))
+    # The replica can miscount MAX/COUNT aggregates when DATE index bounds are
+    # collated CONVERT expressions. Keep all report date predicates explicitly typed.
+    period = " BETWEEN CAST(%s AS DATE) AND CAST(%s AS DATE)" % (_literal(start.isoformat()), _literal(end.isoformat()))
     order_where = store.scope() + " AND (source_date" + period + " OR source_date IS NULL)"
     ad_where = "a." + store.scope().replace(" AND project_type", " AND a.project_type") + " AND a.ad_time" + period
     if code:

@@ -15,6 +15,20 @@ spec.loader.exec_module(deploy)
 
 
 class DeploymentSafetyTests(unittest.TestCase):
+    def test_cancelled_fb_preparation_only_blocks_with_an_active_lease(self):
+        checks = json.loads((ROOT / 'ops/moboreels-attribution-20261113/activation-checks.template.json').read_text())
+        query = next(row['sql'] for row in checks['phases']['fb']['checks'] if row['name']=='fb_video_task_busy')
+        with closing(sqlite3.connect(':memory:')) as conn:
+            conn.execute('CREATE TABLE fb_video_task(status,prepare_state,link_state,prepare_lease,prepare_until,link_lease,link_until,execution_lease,execution_until)')
+            conn.execute("INSERT INTO fb_video_task VALUES('cancelled','preparing','ready','','','','','','')")
+            self.assertEqual(conn.execute(query).fetchone()[0], 0)
+            conn.execute("UPDATE fb_video_task SET prepare_lease='still-active',prepare_until='2999-01-01'")
+            self.assertEqual(conn.execute(query).fetchone()[0], 1)
+            conn.execute("UPDATE fb_video_task SET prepare_until='2000-01-01'")
+            self.assertEqual(conn.execute(query).fetchone()[0], 0)
+            conn.execute("UPDATE fb_video_task SET status='queued'")
+            self.assertEqual(conn.execute(query).fetchone()[0], 1)
+
     def test_sql_comment_semicolon_is_not_statement_boundary(self):
         sql = "-- ignored;\nCREATE TABLE IF NOT EXISTS ads_ai.example (\n id bigint NOT NULL COMMENT '说明;保留',\n PRIMARY KEY(id)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='表说明;保留';"
         self.assertEqual(len(deploy.split_sql(sql)), 1)
