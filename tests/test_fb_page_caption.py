@@ -1,6 +1,7 @@
 """Page-specific copy, tenant boundaries and immutable automatic task receipts."""
 import json
 import sqlite3
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -185,6 +186,31 @@ class OptionalDescriptionTests(unittest.TestCase):
             result=repo.candidate_snapshot(config)
             self.assertEqual([r.material_id for r in result.candidates], ['1'] if required else ['1','2'])
             self.assertEqual(result.candidates[0].drama_description, 'A valid story')
+
+
+class ExistingMetricReaderTests(unittest.TestCase):
+    def test_reader_can_open_while_migration_holds_shared_lock(self):
+        from features.fb_auto_posts.core import FBAutoPostStore
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'metrics.sqlite3'
+            FBAutoPostStore(path)
+            with closing(sqlite3.connect(path)) as migration:
+                migration.execute('BEGIN')
+                migration.execute('SELECT * FROM fb_auto_metric_active_pointer').fetchall()
+                before=path.stat().st_mtime_ns
+                reader=FBAutoPostStore(path,initialize_storage=False)
+                with reader.connect() as conn:
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM fb_auto_metric_active_pointer').fetchone()[0],0)
+                self.assertEqual(path.stat().st_mtime_ns,before)
+
+    def test_existing_reader_rejects_missing_schema_without_creating_it(self):
+        from features.fb_auto_posts.core import FBAutoPostStore
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'absent.sqlite3'
+            with self.assertRaisesRegex(ValueError,'existing_metric_database_required'):
+                FBAutoPostStore(path,initialize_storage=False)
+            self.assertFalse(path.exists())
 
 
 if __name__=='__main__':unittest.main()

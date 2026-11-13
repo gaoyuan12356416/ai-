@@ -7,6 +7,11 @@ MACROS={'name':'drama_name','drama_name':'drama_name','desc':'desc','url':'url',
         'material_name':'material_name','content_id':'content_id'}
 PATTERN=re.compile(r'\{\{([a-z_]+)\}\}|\{([a-z_]+)\}')
 
+def handles(config):
+    # Preserve the other product's independently frozen promotion receipts.
+    return '{m_url}' not in str(config.get('message_template') or '')
+
+
 def normalize(text):
     if not isinstance(text,str) or not text.strip():raise ValueError('page_caption_empty')
     if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]',text):raise ValueError('page_caption_invalid')

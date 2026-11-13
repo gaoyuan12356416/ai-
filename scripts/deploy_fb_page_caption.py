@@ -16,10 +16,29 @@ from scripts.deploy_pipeline_runtime import verify_source
 
 BASE = '1e2689e6cf0eaf5cc962db288b26284519d9d514'
 FILES = ['features/fb_auto_posts/' + name + '.py' for name in
-         ('core', 'repositories', 'hit_material', 'page_caption')]
+         ('core', 'repositories', 'hit_material', 'page_caption', 'service')]
 FILES += ['ops/fb-page-caption/approved-20261113.json']
 TESTS = ['tests.test_fb_page_caption', 'tests.test_fb_profile_integration', 'tests.test_fb_profile_selection',
          'scripts.test_fb_hit_drama', 'scripts.test_fb_target_midnight', 'scripts.test_fb_auto_validation']
+OVERLAY_BASES = {
+    'features/fb_auto_posts/core.py': 'bd93b870b6628a146bedeb899d6b86fe2f0de0e4da59832c164fee0d24d80fc6',
+    'features/fb_auto_posts/repositories.py': 'dc89fd6410657e1f125441673cc89f7b15f32978a54db4df8f43353b89f85f98',
+    'features/fb_auto_posts/service.py': 'a2c7a3fafc49e3d6911006d256e084d0719871ec6c02f69d231e7fd9f139c028',
+}
+
+
+def compose(baseline, changed, current):
+    """Apply exact source edits to the separately verified concurrent overlay."""
+    import difflib
+    old, new = baseline.splitlines(keepends=True), changed.splitlines(keepends=True)
+    result = current
+    for kind, i1, i2, j1, j2 in reversed(difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes()):
+        if kind=='equal':continue
+        context=''.join(old[max(0,i1-3):i1])
+        anchor=context+''.join(old[i1:i2])
+        assert anchor and result.count(anchor)==1,'overlay_edit_anchor_changed'
+        result=result.replace(anchor,context+''.join(new[j1:j2]),1)
+    return result
 
 
 def verify(candidate, folder):
@@ -79,11 +98,13 @@ def prepare(folder, tests):
         live, target = previous / name, candidate / name
         assert target.resolve().is_relative_to(candidate.resolve()), 'overlay_symlink_escape:' + name
         baseline = subprocess.run(['git', '-C', str(SOURCE), 'show', BASE + ':' + name], capture_output=True)
+        content = (SOURCE / name).read_bytes()
         if baseline.returncode == 0:
-            assert live.read_bytes().replace(b'\r\n', b'\n') == baseline.stdout, 'baseline_changed:' + name
+            if live.read_bytes().replace(b'\r\n', b'\n') != baseline.stdout:
+                assert release.sha(live)==OVERLAY_BASES.get(name),'baseline_changed:'+name
+                content=compose(baseline.stdout.decode(),content.decode(),live.read_text()).encode()
         else:
             assert not live.exists(), 'new_file_collision:' + name
-        content = (SOURCE / name).read_bytes()
         if name.endswith('.py'):
             compile(content, name, 'exec')
         else:

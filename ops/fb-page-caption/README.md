@@ -33,3 +33,11 @@ Rollback uses the same script with `rollback`. It restores the previous
 runtime pointer/static text, never the ledger. Page-copy rollback is a
 separate, version-checked configuration update based on `caption-update`
 preimages; never restore the SQLite backup over live publication state.
+
+Concurrent deployment integration: the source-only caption changes are composed
+onto explicitly hash-verified live core/repository/service files, preserving the
+independent Moboreels promotion branch. Its m_url flow retains its own receipts.
+The candidate also opens an already initialized metric database without DDL:
+a long-running read-only metric migration held a shared lock that otherwise
+blocked the API's repeated startup initialization. New metric databases still
+initialize normally; existing readers validate the required tables.

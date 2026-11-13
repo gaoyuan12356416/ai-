@@ -83,13 +83,20 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class FBAutoPostStore:
-    def __init__(self, path: str | Path, *, now_fn=utc_now, rng: random.Random | None = None, max_late_seconds: int = 600):
+    def __init__(self, path: str | Path, *, now_fn=utc_now, rng: random.Random | None = None, max_late_seconds: int = 600, initialize_storage: bool = True):
         self.path = str(path)
         self.now_fn, self.rng = now_fn, rng or random.SystemRandom()
         self.max_late_seconds = int(max_late_seconds)
         self._lock = threading.RLock()
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.ensure_storage()
+        if initialize_storage:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self.ensure_storage()
+        else:
+            if not Path(self.path).is_file():raise ValueError('existing_metric_database_required')
+            with self.connect() as conn:
+                tables={row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {'fb_auto_metric_generation','fb_auto_metric_daily','fb_auto_metric_active_pointer'} <= tables:
+                raise ValueError('existing_metric_schema_required')
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
@@ -760,9 +767,13 @@ class FBAutoPostStore:
                     status, reason = "skipped", "fb_auto_page_task_conflict"
                     values = (run_id, template_id, int(template["current_version"]), page.page_id, page.group_id, status, reason, material.material_id if material else "", material.content_id if material else "", "", self._message(config, material) if material else "", now, now, task_publish_at, str(config["video_template"]), gpu_job_id, material.media_url if material else "")
                     task_cursor = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
-                if status == "planned" and material is not None:
+                if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]):
                     task_id = int(task_cursor.lastrowid)
-                    selection['caption']=page_caption.freeze(self,conn,config,page,material,task_id,link_timestamp,caption_snapshot)
+                    short_url, long_url = self._link_values(page, material, task_id, link_timestamp)
+                    message_text = self._message(config, material, short_url)
+                    conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (message_text, short_url, long_url, task_id))
+                if status == 'planned' and material is not None and page_caption.handles(config):
+                    selection['caption']=page_caption.freeze(self,conn,config,page,material,int(task_cursor.lastrowid),link_timestamp,caption_snapshot)
                 if target_slot:
                     conn.execute("UPDATE fb_auto_task SET schedule_policy=? WHERE id=?", (target_daily.POLICY, int(task_cursor.lastrowid)))
                     target_daily.bind_slot(conn, target_schedule.source_key(template_id), day, page.page_id, ordinal, "fb_auto_task", int(task_cursor.lastrowid))
