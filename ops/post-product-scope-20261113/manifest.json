@@ -279,7 +279,7 @@
       "relative": "youtube-material-source.sql",
       "target": "/etc/youtube-auto-publish/material-source.sql",
       "before": "156f4e653b710172165ad654f141581b9748dc510a3fa6ac807ea5c249678446",
-      "after": "21d96fac46f39413c3a1d1c1390dab5708224e48a060f141f0a8c96023ce89d6",
+      "after": "4dd4ab45e0409e88485d5e079e5aeaf44ba93cbe37e5831506f51cb9d417c46a",
       "source": "ops/post-product-scope-20261113/youtube-material-source.sql"
     }
   ]
