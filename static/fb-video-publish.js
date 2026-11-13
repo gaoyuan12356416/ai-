@@ -268,6 +268,7 @@
 
   async function pageManagement() {
     let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false,listGeneration=0,sourceController=null;
+    let excelAsset=null;
     $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><select id="pageCreator" aria-label="按创建人筛选" disabled><option value="">全部创建人</option></select><button id="reloadPages" class="button">刷新列表</button></div><p id="pageAuthorizationNotice" class="helper" role="status" hidden></p><p id="pagePortraitNotice" class="helper">画像按近 7 个完整报告日统计，列表就绪后加载当前页摘要。</p><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>近 7 天收入（USD）</th><th>收入画像 / 比例</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
     function authorizationBadge(p) {
       if(p.authorization_pending||p.authorization_unknown)return `<span class="badge">${p.authorization_pending?"正在核验":"暂未核验"}</span>`;
@@ -317,6 +318,7 @@
         }else data=await api("/pages");
         if(generation!==listGeneration)return;
         setConfigs(data.items);
+        performance.mark("fb-page-list-ready");
         if(data.authorization_pending)void verifySource(generation);
       } finally {loading=false;render();}
     }
@@ -350,10 +352,19 @@
       });
     }
     $("createPage").onclick=()=>editor(null);
-    $("excelPublishButton").onclick=()=>{
-      if(!window.FbExcelPublish){errorAt("pageError",new Error("Excel 发布组件尚未加载，请刷新页面后重试。"));return;}
-      window.FbExcelPublish.open({auth,api,post,dialog,esc,atBJ,errorAt,toast,statuses}).catch(err=>errorAt("pageError",err));
-    };
+    $("excelPublishButton").onclick=event=>busy(event.target,async()=>{
+      try {
+        if(!window.FbExcelPublish){
+          if(!excelAsset)excelAsset=new Promise((resolve,reject)=>{
+            const script=document.createElement("script");script.src="/fb-excel-publish.js?v=20261023-manual-gates-v1";
+            script.onload=resolve;script.onerror=()=>{script.remove();reject(new Error("Excel 发布组件加载失败，请点击重试。"));};
+            document.head.append(script);
+          }).catch(error=>{excelAsset=null;throw error;});
+          await excelAsset;
+        }
+        await window.FbExcelPublish.open({auth,api,post,dialog,esc,atBJ,errorAt,toast,statuses});
+      }catch(error){errorAt("pageError",error);}
+    });
     $("pageRows").onclick=e=>{
       const profile=e.target.closest("[data-fpp-open]");
       if(profile){const row=configs.find(p=>p.page_id===profile.dataset.fppOpen);window.FbPagePortraits?.open(row.page_id,row.page_name,dialog);return;}

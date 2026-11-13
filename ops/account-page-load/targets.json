@@ -1,0 +1,67 @@
+[
+  {
+    "source": "static/x-account-list.html",
+    "target": "/root/drama_material_service/static/x-account-list.html",
+    "expected_sha256": "8322f19c678e492b69c091d4d8587a2c544d892184ca0e2cdc9b37da0564cd29"
+  },
+  {
+    "source": "static/x-account-list.html",
+    "target": "/usr/share/nginx/html/x-account-list.html",
+    "expected_sha256": "8322f19c678e492b69c091d4d8587a2c544d892184ca0e2cdc9b37da0564cd29"
+  },
+  {
+    "source": "static/x-account-list.html",
+    "target": "/opt/x-post-automation/current/static/x-account-list.html",
+    "expected_sha256": "675ad572808c4ddb920fe1a43ee249f8bc8f98c8d065b47d1aa58ea76f5925fc"
+  },
+  {
+    "source": "static/x-account-list.html",
+    "target": "/opt/x-tag-publisher/current/static/x-account-list.html",
+    "expected_sha256": "c4710d9c5c013cbda2b5a03a2c6f904ae94ad7a03931eeeb967423981d0552bf"
+  },
+  {
+    "source": "static/fb-pages.html",
+    "target": "/root/drama_material_service/static/fb-pages.html",
+    "expected_sha256": "250b79020fc037663a064e2129545e709d03de3cb992e382a57cfba7851fc9df"
+  },
+  {
+    "source": "static/fb-pages.html",
+    "target": "/usr/share/nginx/html/fb-pages.html",
+    "expected_sha256": "250b79020fc037663a064e2129545e709d03de3cb992e382a57cfba7851fc9df"
+  },
+  {
+    "source": "static/fb-pages.html",
+    "target": "/opt/fb-auto-post/current/static/fb-pages.html",
+    "expected_sha256": "7ee927121d752f078732dbf3837db6c5e1eaf38c7af895eb647cb30610234014"
+  },
+  {
+    "source": "static/fb-video-publish.js",
+    "target": "/root/drama_material_service/static/fb-video-publish.js",
+    "expected_sha256": "d928f764cd505632990f63374ebba331925dbdaedf6fe06e2a886c9259e9098f"
+  },
+  {
+    "source": "static/fb-video-publish.js",
+    "target": "/usr/share/nginx/html/fb-video-publish.js",
+    "expected_sha256": "d928f764cd505632990f63374ebba331925dbdaedf6fe06e2a886c9259e9098f"
+  },
+  {
+    "source": "static/fb-video-publish.js",
+    "target": "/opt/fb-auto-post/current/static/fb-video-publish.js",
+    "expected_sha256": "76da1afb723b95faab04c9a3c25769626ae95122062e8c1a9c2e7c6b3f6cb1e1"
+  },
+  {
+    "source": "ops/account-page-load/nginx/fb-page-portrait.conf",
+    "target": "/etc/nginx/default.d/fb-page-portrait.conf",
+    "expected_sha256": "03e4fe5b649f5477a90caf1eb5c5ef61c2402aff724bd7604b4030e4f0bad6ff"
+  },
+  {
+    "source": "ops/account-page-load/nginx/x-channel-tag-revenue.conf",
+    "target": "/etc/nginx/default.d/x-channel-tag-revenue.conf",
+    "expected_sha256": "b1fb7c9ec2752656b8a4c58f1b5d0a850e422fc1ee6cd9e074a8d58fd385c025"
+  },
+  {
+    "source": "ops/account-page-load/nginx/x-oauth.conf",
+    "target": "/etc/nginx/default.d/x-oauth.conf",
+    "expected_sha256": "cf8c96708e3754d0be23fa2d1ca3ae94faf5493e436ebc67b02039e500d3f1b8"
+  }
+]
