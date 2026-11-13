@@ -160,6 +160,42 @@ def prepare(folder, tests):
                           caption_read_check=info['caption_read_check'])), flush=True)
 
 
+def activate_stopped(folder):
+    """Recover an already stopped FB API; there are no accepted handlers to drain."""
+    from scripts import deploy_fb_skipped_recheck as fb
+    info=json.loads((folder/'manifest.json').read_text())
+    current=release.verify_current(info,False)
+    unit='fb-auto-post-service.service'
+    assert fb.show(unit,'MainPID')=='0','service_became_active'
+    release.run(sys.executable,release.HEALTH,'snapshot','--lane','fb','--output',folder/'schedulers-before-stopped.json')
+    states={name:fb.show(name) for name in fb.TIMERS};before=fb.configuration()
+    try:
+        fb.fb_enabled(False)
+        for name,state in states.items():
+            if state=='active':fb.run(['systemctl','stop',name])
+        assert fb.native_active()==0,'native_work_preserved'
+        assert not release.run('ss','-Hlnt','( sport = :18835 )'),'fb_listener_became_active'
+        release.run('systemctl','stop',unit)
+        assert fb.show(unit,'MainPID')=='0','fb_process_not_stopped'
+        release.verify_current(info,False)
+        for name,row in info['files'].items():assert release.sha(Path(info['candidate'])/name)==row['after'],'candidate_changed'
+        temporary=current.with_name('current.caption-next')
+        assert not temporary.exists() and not temporary.is_symlink()
+        temporary.symlink_to(info['candidate']);temporary.replace(current)
+        release.run('systemctl','start',unit)
+        release.health(18835)
+        release.publish_static(info)
+    finally:
+        fb.fb_enabled('fb' in before['enabled_channels'],'fb' in before.get('preparation_only_channels',[]))
+        for name,state in states.items():
+            if state=='active':fb.run(['systemctl','start',name])
+        release.run(sys.executable,release.HEALTH,'restore','--baseline',folder/'schedulers-before-stopped.json','--wait-seconds','25','--output',folder/'schedulers-after.json')
+    release.health(18835)
+    info.update(status='active',controller_commit=release.run('git','-C',SOURCE,'rev-parse','HEAD'),recovered_stopped_api=True)
+    release.save(folder/'manifest.json',info)
+    print(json.dumps(dict(status='active',commit=info['commit'],recovered_stopped_api=True)),flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('prepare', 'apply', 'rollback', 'verify'))
@@ -175,7 +211,10 @@ def main():
         current = release.verify_current(info, rollback=True)
         print(json.dumps(verify(current.resolve(), folder)), flush=True)
     else:
-        release.activate('fb', folder, args.action == 'rollback')
+        if args.action=='apply' and release.run('systemctl','show','fb-auto-post-service.service','-p','MainPID','--value')=='0':
+            activate_stopped(folder)
+        else:
+            release.activate('fb', folder, args.action == 'rollback')
         if args.action == 'apply':
             info = json.loads((folder / 'manifest.json').read_text())
             verify(Path(info['candidate']), folder)
