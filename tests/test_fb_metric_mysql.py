@@ -92,6 +92,7 @@ class MetricTests(unittest.TestCase):
             with sqlite3.connect(path) as db:
                 db.execute("CREATE TABLE task(metric_generation_id INTEGER, selection_json TEXT)")
                 db.execute("INSERT INTO task VALUES(7,?)", (json.dumps({"frozen": {"metric_generation_ids": ["9"]}}),))
+            db.close()
             found, evidence = collect_references([path])
             self.assertEqual(found, {7, 9})
             self.assertEqual(len(evidence), 2)
