@@ -45,6 +45,7 @@ def prepare(folder):
             info['files'][name]=dict(before=sha(previous/name),after=sha(target))
         save(base/'manifest.json',info);manifest['lanes'][lane]=info
     targets={MAIN/name:(SOURCE/name).read_bytes() for name in AUDIENCE+RANK+SHARED+['features/x_tag_revenue/refresh.py']}
+    targets[Path('/etc/nginx/default.d/drama-pay-rank.conf')]=(SOURCE/'deploy/drama-pay-rank.nginx.conf').read_bytes()
     targets[MAIN/'app.py']=patch_app((MAIN/'app.py').read_text()).encode()
     compile(targets[MAIN/'app.py'],'app.py','exec')
     for root in (MAIN/'static',WEB):
@@ -76,6 +77,8 @@ def main_files(manifest,rollback=False):
             # Additive libraries/assets can remain for newer consumers.
             continue
         atomic(name,Path(row['backup' if rollback else 'next']).read_bytes())
+    run('nginx','-t')
+    run('systemctl','reload','nginx')
 
 
 def check_no_writes(db_path):
