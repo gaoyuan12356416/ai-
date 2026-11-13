@@ -26,3 +26,5 @@ GitHub 提交推送后，在 CPU fetch 精确 SHA 并创建独立 checkout。
 `youtube` 阶段同步主 API 与静态文件、YouTube 素材 SQL，并重启受影响的 API/YouTube 拥有者。
 回滚同一脚本依次执行 `rollback-pause`、`busy`、`rollback`。保留最新业务库、短链、回执和凭据；不恢复旧库、不补发历史任务。
 候选版本与备份路径记录于返回的部署 manifest，运行目录漂移须重新核对后合并。
+
+本次 FB 排空期间，另一部署 `20281127` 更新了 Page 池混选。`rebase_fb.py` 逐文件核对已评审的三项改动，将本次四个素材文件叠加到该运行版本，并保留独立回滚与原调度快照。其余渠道使用原始部署版本。
