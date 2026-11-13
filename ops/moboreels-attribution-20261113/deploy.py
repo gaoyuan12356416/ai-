@@ -380,19 +380,56 @@ def busy(spec, deployment, phase):
     require(not any(r["busy"] for r in rows if not r["informational"]), "In-flight work; defer this lane")
 
 
-def backups(spec, deployment, phase):
+def backups(spec, deployment, phase, *, timeout_seconds=120):
     directory = deployment / "private" / ("ledgers-" + phase + "-" + datetime.datetime.utcnow().strftime("%H%M%S"))
     directory.mkdir(mode=0o700)
-    paths = set(spec.get("backup_databases", []) + [r["database"] for r in spec.get("checks", [])])
+    # A lane only migrates its own ledger. The coordinator is checked read-only
+    # and its tiny config change has a durable before/after receipt. Incremental
+    # SQLite backup of that continuously written shared DB can restart forever.
+    paths = set(spec.get("backup_databases") or [r["database"] for r in spec.get("checks", [])])
     for i, name in enumerate(sorted(paths)):
         path = Path(name).resolve()
         require(path.is_file(), "Missing ledger: " + name)
         destination = directory / ("%02d-%s" % (i, path.name))
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=10)) as src:
-            with closing(sqlite3.connect(str(destination))) as dst:
-                src.backup(dst, pages=256, sleep=0.05)
-                require(dst.execute("PRAGMA quick_check").fetchone()[0] == "ok", "Backup integrity failed")
-        os.chmod(str(destination), 0o600)
+        partial = destination.with_name(destination.name + ".partial")
+        deadline = time.monotonic() + timeout_seconds
+
+        def check_deadline(*_progress):
+            require(time.monotonic() < deadline, "SQLite backup deadline exceeded: " + str(path))
+
+        try:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=10)) as src:
+                src.execute("PRAGMA query_only=ON")
+                src.execute("BEGIN")
+                try:
+                    # BEGIN alone is deferred. Read a real database page to pin one
+                    # WAL snapshot before writers can make incremental backup restart.
+                    with closing(src.execute("SELECT COUNT(*) FROM sqlite_master")) as cursor:
+                        cursor.fetchone()
+                    check_deadline()
+                    with closing(sqlite3.connect(str(partial))) as dst:
+                        os.chmod(str(partial), 0o600)
+                        src.backup(dst, pages=256, sleep=0.05, progress=check_deadline)
+                        # Bound integrity checking as well as the backup loop.
+                        dst.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                        try:
+                            with closing(dst.execute("PRAGMA quick_check")) as cursor:
+                                require(cursor.fetchall() == [("ok",)], "Backup integrity failed")
+                        except sqlite3.OperationalError:
+                            check_deadline()
+                            raise
+                        finally:
+                            dst.set_progress_handler(None, 0)
+                        check_deadline()
+                finally:
+                    if src.in_transaction:
+                        src.rollback()  # Release the pinned read snapshot on success or failure.
+            os.replace(str(partial), str(destination))
+        finally:
+            # Incomplete copies never appear under the successful backup filename.
+            # All handles have closed before cleanup, including on Windows tests.
+            if partial.exists():
+                partial.unlink()
 
 
 def scheduler(spec, deployment, phase, restore=False):

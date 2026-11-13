@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("moboreels_deploy", ROOT / "ops/moboreels-attribution-20261113/deploy.py")
@@ -88,6 +89,79 @@ class DeploymentSafetyTests(unittest.TestCase):
                 conn.execute("INSERT INTO task VALUES('running',9999999999)")
             with self.assertRaisesRegex(RuntimeError, "In-flight"):
                 deploy.busy(spec, root, "x")
+
+    def test_backup_explicit_owner_list_excludes_coordinator_and_is_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "private").mkdir()
+            owner = root / "owner.sqlite3"
+            with closing(sqlite3.connect(str(owner))) as conn, conn:
+                conn.execute("CREATE TABLE receipt(id INTEGER PRIMARY KEY, status TEXT)")
+                conn.executemany("INSERT INTO receipt VALUES(?,?)", [(1, "unknown"), (2, "published")])
+            # If a read-only check database leaked into backup selection, this absent
+            # coordinator path would fail; only the explicitly owned ledger is copied.
+            deploy.backups({"backup_databases": [str(owner)], "checks": [
+                {"database": str(root / "coordinator-must-not-open.sqlite3")}]}, root, "x")
+            copies = list((root / "private").rglob("*.sqlite3"))
+            self.assertEqual(len(copies), 1)
+            with closing(sqlite3.connect(str(copies[0]))) as conn:
+                self.assertEqual(conn.execute("SELECT * FROM receipt ORDER BY id").fetchall(),
+                                 [(1, "unknown"), (2, "published")])
+                self.assertEqual(conn.execute("PRAGMA quick_check").fetchone(), ("ok",))
+
+    def test_backup_pins_snapshot_before_concurrent_wal_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "private").mkdir()
+            owner = root / "owner.sqlite3"
+            real_connect = sqlite3.connect
+            with closing(real_connect(str(owner))) as writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("CREATE TABLE receipt(id INTEGER PRIMARY KEY, value TEXT)")
+                writer.execute("INSERT INTO receipt VALUES(1,'before')")
+                writer.commit()
+                snapshots = []
+
+                class SourceConnection(sqlite3.Connection):
+                    def backup(self, destination, **kwargs):
+                        snapshots.append(self.in_transaction)
+                        # Commit after backups() pins its source read snapshot, but
+                        # before sqlite3_backup starts. A deferred BEGIN alone fails this test.
+                        writer.execute("UPDATE receipt SET value='after' WHERE id=1")
+                        writer.commit()
+                        return super().backup(destination, **kwargs)
+
+                def connect(path, **kwargs):
+                    if kwargs.get("uri"):
+                        kwargs["factory"] = SourceConnection
+                    return real_connect(path, **kwargs)
+
+                with patch.object(deploy.sqlite3, "connect", side_effect=connect):
+                    deploy.backups({"backup_databases": [str(owner)]}, root, "x")
+                self.assertEqual(snapshots, [True])
+                copied = next((root / "private").rglob("*.sqlite3"))
+                with closing(real_connect(str(copied))) as conn:
+                    self.assertEqual(conn.execute("SELECT value FROM receipt").fetchone(), ("before",))
+                self.assertEqual(writer.execute("SELECT value FROM receipt").fetchone(), ("after",))
+
+    def test_backup_deadline_discards_partial_and_releases_source_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "private").mkdir()
+            owner = root / "owner.sqlite3"
+            with closing(sqlite3.connect(str(owner))) as conn, conn:
+                conn.execute("CREATE TABLE receipt(id INTEGER PRIMARY KEY, status TEXT)")
+                conn.execute("INSERT INTO receipt VALUES(1,'unknown')")
+            # Deadline is reached in the sqlite3_backup progress callback.
+            with patch.object(deploy.time, "monotonic", side_effect=[0, 0, 121]):
+                with self.assertRaisesRegex(RuntimeError, "backup deadline exceeded"):
+                    deploy.backups({"backup_databases": [str(owner)]}, root, "x")
+            self.assertEqual(list((root / "private").rglob("*.sqlite3")), [])
+            self.assertEqual(list((root / "private").rglob("*.partial")), [])
+            with closing(sqlite3.connect(str(owner), timeout=0)) as conn:
+                conn.execute("BEGIN EXCLUSIVE")  # No leaked read transaction or connection.
+                self.assertEqual(conn.execute("SELECT status FROM receipt").fetchone(), ("unknown",))
+                conn.rollback()
 
 
 if __name__ == "__main__":
