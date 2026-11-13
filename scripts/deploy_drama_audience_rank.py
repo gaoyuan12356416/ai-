@@ -159,15 +159,17 @@ def apply(folder,rollback=False):
                         temp=pointer.with_name('current.audience-next');temp.symlink_to(info['candidate']);temp.replace(pointer)
                         run('systemctl','restart','x-tag-auto.service','x-tag-gateway.service','x-tag-post.service','x-channel-tag-revenue.service','drama-material-api.service',timeout=120)
                         manifest['main_x_active']=True;save(folder/'manifest.json',manifest)
-            # The existing FB release helper drains only FB and retains its states.
-            if json.loads((folder/'fb/manifest.json').read_text())['status']!='active':
-                activate_lane('fb',folder/'fb')
-            run('systemctl','restart','fb-page-portrait.service',timeout=30)
             install_jobs()
             # A standard-X upload holds only its own service switch. Completed
-            # portrait/UI/FB phases remain valid and a retry skips them.
+            # portrait/UI phases remain valid and a retry skips them.
             if str(Path(POINTERS['standard']).resolve())==manifest['lanes']['standard']['previous']:
                 switch_standard(folder)
+            # The existing FB release helper drains only FB and retains its states.
+            if json.loads((folder/'fb/manifest.json').read_text())['status']!='active':
+                from scripts.deploy_hit_drama import health
+                health(18835)
+                activate_lane('fb',folder/'fb')
+            run('systemctl','restart','fb-page-portrait.service',timeout=30)
         manifest['status']='rolled_back' if rollback else 'active';save(folder/'manifest.json',manifest)
     finally:
         for unit,state in states.items():
