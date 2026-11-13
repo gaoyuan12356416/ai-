@@ -50,28 +50,32 @@ class RecoveryTests(unittest.TestCase):
     def connect(self, write=False):
         conn = sqlite3.connect(self.central.as_uri()+'?mode='+('rw' if write else 'ro'),uri=True)
         conn.row_factory = sqlite3.Row
-        conn.execute('ATTACH DATABASE ? AS native',(self.native.as_uri()+'?mode=ro',))
+        native=sqlite3.connect(self.native.as_uri()+'?mode=ro',uri=True)
+        native.row_factory=sqlite3.Row
+        native.execute('PRAGMA query_only=ON')
+        native.execute('BEGIN')
         conn.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
         try:
-            yield conn
+            yield conn,native
         finally:
             conn.close()
+            native.close()
 
     def test_exact_requeue_preserves_native_and_other_jobs_and_is_idempotent(self):
         before_native = self.native.read_bytes()
-        with self.connect() as conn:
-            prepared = recovery.plan(conn,[11])
+        with self.connect() as (conn,native):
+            prepared = recovery.plan(conn,native,[11])
         self.assertEqual(prepared['excluded'],[])
-        with self.connect(True) as conn:
-            verified = recovery.plan(conn,[11])
+        with self.connect(True) as (conn,native):
+            verified = recovery.plan(conn,native,[11])
             self.assertEqual(verified['plan_sha256'],prepared['plan_sha256'])
             self.assertEqual(recovery.apply(conn,verified,self.root/'backup.json'),[11])
             conn.commit()
         self.assertEqual(self.native.read_bytes(),before_native)
-        with self.connect() as conn:
+        with self.connect() as (conn,native):
             self.assertEqual(conn.execute('SELECT status FROM pipeline_job WHERE id=100').fetchone()[0],'queued')
             self.assertEqual(conn.execute('SELECT status FROM pipeline_job WHERE id=200').fetchone()[0],'failed')
-            self.assertTrue(recovery.plan(conn,[11])['items'][0]['already_applied'])
+            self.assertTrue(recovery.plan(conn,native,[11])['items'][0]['already_applied'])
             self.assertEqual(conn.execute('SELECT generation FROM pipeline_job WHERE id=100').fetchone()[0],1)
         self.assertEqual(json.loads((self.root/'backup.json').read_text())['items'][0]['job']['status'],'failed')
 
@@ -96,19 +100,19 @@ class RecoveryTests(unittest.TestCase):
                 original=path.read_bytes()
                 with contextlib.closing(sqlite3.connect(path)) as conn, conn:
                     conn.execute(statement)
-                with self.connect() as conn:
-                    result=recovery.plan(conn,[11,22])
+                with self.connect() as (conn,native):
+                    result=recovery.plan(conn,native,[11,22])
                 self.assertEqual([x['task_id'] for x in result['excluded']],[11])
                 self.assertEqual([x['task_id'] for x in result['items']],[22])
                 path.write_bytes(original)
 
     def test_changed_proof_changes_plan_hash(self):
-        with self.connect() as conn:
-            original=recovery.plan(conn,[11])
+        with self.connect() as (conn,native):
+            original=recovery.plan(conn,native,[11])
         with contextlib.closing(sqlite3.connect(self.central)) as conn, conn:
             conn.execute("UPDATE pipeline_job SET generation=2 WHERE id=100")
-        with self.connect() as conn:
-            self.assertNotEqual(original['plan_sha256'],recovery.plan(conn,[11])['plan_sha256'])
+        with self.connect() as (conn,native):
+            self.assertNotEqual(original['plan_sha256'],recovery.plan(conn,native,[11])['plan_sha256'])
 
 
 if __name__ == '__main__':

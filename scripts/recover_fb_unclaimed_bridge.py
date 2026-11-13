@@ -35,7 +35,7 @@ def instant(value):
     return dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
 
 
-def proof(conn, task_id):
+def proof(conn, native, task_id):
     key = 'fb:auto:' + str(task_id)
     jobs = rows(conn, "SELECT * FROM pipeline_job WHERE source_key=? AND stage='publish'", (key,))
     require(len(jobs) == 1, 'publish_job_not_unique')
@@ -51,7 +51,7 @@ def proof(conn, task_id):
     for table in ('pipeline_operation', 'pipeline_receipt', 'pipeline_checkpoint', 'pipeline_resource', 'pipeline_legacy_resource'):
         require(not rows(conn, 'SELECT 1 FROM '+table+' WHERE job_id=? LIMIT 1', (job['id'],)), 'central_'+table+'_present')
     require(not rows(conn, 'SELECT 1 FROM pipeline_publication WHERE source_key=? LIMIT 1', (key,)), 'publication_present')
-    tasks = rows(conn, 'SELECT * FROM native.fb_auto_task WHERE id=?', (task_id,))
+    tasks = rows(native, 'SELECT * FROM fb_auto_task WHERE id=?', (task_id,))
     require(len(tasks) == 1, 'native_task_missing')
     task = tasks[0]
     require(task['status'] == 'ready' and not task['unknown_outcome'] and not task['graph_post_id'], 'native_outcome_changed')
@@ -60,20 +60,20 @@ def proof(conn, task_id):
             and task['media_url'] == task['prepared_media_url'] and task['media_url'] != task['source_media_url'], 'artifact_not_ready')
     require(instant(task['planned_publish_at_utc']) <= now, 'not_due')
     for table in ('fb_auto_publish_attempt', 'fb_auto_publish_ledger'):
-        require(not rows(conn, 'SELECT 1 FROM native.'+table+' WHERE task_id=? LIMIT 1', (task_id,)), 'native_'+table+'_present')
-    require(not rows(conn, "SELECT 1 FROM native.pipeline_fb_claim WHERE source_key=? AND stage='publish' LIMIT 1", (key,)), 'native_publish_claim_present')
+        require(not rows(native, 'SELECT 1 FROM '+table+' WHERE task_id=? LIMIT 1', (task_id,)), 'native_'+table+'_present')
+    require(not rows(native, "SELECT 1 FROM pipeline_fb_claim WHERE source_key=? AND stage='publish' LIMIT 1", (key,)), 'native_publish_claim_present')
     for table in ('pipeline_fb_operation', 'pipeline_canonical_hold'):
-        require(not rows(conn, 'SELECT 1 FROM native.'+table+' WHERE source_key=? LIMIT 1', (key,)), 'native_'+table+'_present')
+        require(not rows(native, 'SELECT 1 FROM '+table+' WHERE source_key=? LIMIT 1', (key,)), 'native_'+table+'_present')
     return {'task_id': task_id, 'job_id': job['id'], 'source_key': key,
             'generation': job['generation'], 'job': job, 'native_sha256': digest(task)}
 
 
-def plan(conn, ids):
+def plan(conn, native, ids):
     require(ids and len(ids) == len(set(ids)) and all(type(i) is int and i > 0 for i in ids), 'exact_unique_task_ids_required')
     items, excluded = [], []
     for task_id in sorted(ids):
         try:
-            items.append(proof(conn, task_id))
+            items.append(proof(conn, native, task_id))
         except ValueError as exc:
             excluded.append({'task_id': task_id, 'reason': str(exc)})
     body = {'items': items, 'excluded': excluded}
@@ -127,11 +127,15 @@ def main():
     args = parser.parse_args()
     ids = json.loads(Path(args.task_ids).read_text(encoding='utf-8-sig'))
     mode = 'rw' if args.apply else 'ro'
-    with contextlib.closing(sqlite3.connect(Path(args.central).resolve().as_uri()+'?mode='+mode, uri=True, timeout=5)) as conn:
+    with contextlib.ExitStack() as stack:
+        conn = stack.enter_context(contextlib.closing(sqlite3.connect(Path(args.central).resolve().as_uri()+'?mode='+mode, uri=True, timeout=5)))
+        native = stack.enter_context(contextlib.closing(sqlite3.connect(Path(args.native).resolve().as_uri()+'?mode=ro', uri=True, timeout=5)))
         conn.row_factory = sqlite3.Row
-        conn.execute('ATTACH DATABASE ? AS native', (Path(args.native).resolve().as_uri()+'?mode=ro',))
+        native.row_factory = sqlite3.Row
+        native.execute('PRAGMA query_only=ON')
         conn.execute('BEGIN IMMEDIATE' if args.apply else 'BEGIN')
-        result = plan(conn, ids)
+        native.execute('BEGIN')
+        result = plan(conn, native, ids)
         if args.apply:
             require(args.backup and args.plan_sha256 == result['plan_sha256'], 'matching_plan_and_backup_required')
             changed = apply(conn, result, args.backup)
