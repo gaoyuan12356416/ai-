@@ -53,6 +53,11 @@ generation does not publish a site or send a message.
 All SQL verification/reads use 63350. Writes use 63353 only for these three tables
 with one connection and bounded batches. Credentials remain in the established
 server-only configuration and are never logged or stored in report artifacts.
+Production reads use the `/usr/bin/mysql` FIFO. An operator performing the
+approved migration may pass `cli.py --manual-reader validate ...` to use
+`/usr/bin/mysql.real` in the reserved manual pool; keep at most one reader for
+this component. The port, compression and read-only role verification are
+unchanged. Do not set this option in scheduled production commands.
 
 The full import check compares ordered normalized rows. The consumer check also
 compares the filtered material IDs and their order, names, language, durations,

@@ -140,13 +140,15 @@ def native_json_rows(config,query):
     settings=json.loads(Path(config).read_text())['mysql']
     require(settings['host']=='101.32.56.53','unexpected_database_host')
     env=dict(os.environ,MYSQL_PWD=settings['password'])
-    command=['/usr/bin/mysql','--compress','--connect-timeout=5','--default-character-set=utf8mb4',
+    reader='/usr/bin/mysql.real' if os.environ.get('REPORT_MATERIAL_CATALOG_MANUAL_READ')=='1' else '/usr/bin/mysql'
+    command=[reader,'--compress','--connect-timeout=5','--default-character-set=utf8mb4',
         '--batch','--raw','--skip-column-names','-h',settings['host'],'-P','63350','-u',settings['user'],'-D','ads_ai']
     process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
         env=env,text=True,encoding='utf-8',start_new_session=True)
     try:
         output,error=process.communicate('SELECT @@read_only; SET SESSION MAX_EXECUTION_TIME=60000; '+query+';\n',timeout=90)
-        require(process.returncode==0,'catalog_native_read_failed:'+error[:500])
+        codes=re.findall(r'\bERROR\s+(\d+)\b',error)
+        require(process.returncode==0,'catalog_native_read_failed:exit='+str(process.returncode)+',codes='+','.join(codes))
         lines=output.splitlines();require(lines and lines[0].strip()=='1','database_role_mismatch')
         for line in lines[1:]:
             if line.strip():yield json.loads(line)

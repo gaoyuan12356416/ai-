@@ -1,8 +1,9 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import consumer
 import store
@@ -93,6 +94,24 @@ class CatalogTests(unittest.TestCase):
                 patch.object(consumer,'scoped_rows',return_value=[store.normalize(values[0])]):
             with self.assertRaisesRegex(ValueError,'localization_selection_changed'):
                 consumer.validate_legacy(self.root,'config','a'*64)
+
+    def test_native_manual_reader_is_explicit_and_still_checks_read_only(self):
+        config=self.root/'config.json';config.write_text(json.dumps({'mysql':{
+            'host':'101.32.56.53','user':'test','password':'secret'}}))
+        process=Mock(returncode=0);process.poll.return_value=0
+        for flag,reader in [('','/usr/bin/mysql'),('1','/usr/bin/mysql.real')]:
+            process.communicate.return_value=('1\n{"id":1}\n','')
+            with patch.dict(os.environ,{'REPORT_MATERIAL_CATALOG_MANUAL_READ':flag}), \
+                    patch.object(store.subprocess,'Popen',return_value=process) as popen:
+                self.assertEqual(list(store.native_json_rows(config,'SELECT 1')),[{'id':1}])
+                command=popen.call_args.args[0]
+                self.assertEqual(command[0],reader)
+                self.assertIn('63350',command)
+                self.assertIn('--compress',command)
+                self.assertNotIn('secret',' '.join(command))
+                process.communicate.return_value=('0\n{"id":1}\n','')
+                with self.assertRaisesRegex(ValueError,'database_role_mismatch'):
+                    list(store.native_json_rows(config,'SELECT 1'))
 
 
 if __name__=='__main__':unittest.main()

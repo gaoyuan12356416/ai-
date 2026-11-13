@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 from consumer import bind, validate_legacy
@@ -12,6 +13,7 @@ from store import activate, import_json, refresh_source
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',default='/root/.codex/plugins/feishu/config.json')
+    parser.add_argument('--manual-reader',action='store_true',help='Use the reserved manual read-only connection instead of the production FIFO')
     commands=parser.add_subparsers(dest='command',required=True)
     for name,argument in [('import-json','path'),('refresh-source','source_sql')]:
         command=commands.add_parser(name);command.add_argument(argument)
@@ -20,6 +22,7 @@ def main():
     command=commands.add_parser('bind');command.add_argument('workdir');command.add_argument('generation')
     command=commands.add_parser('activate');command.add_argument('report_key');command.add_argument('generation')
     args=parser.parse_args()
+    if args.manual_reader:os.environ['REPORT_MATERIAL_CATALOG_MANUAL_READ']='1'
     if args.command=='validate':result=validate_legacy(args.workdir,args.config,args.generation)
     elif args.command=='bind':result=bind(args.workdir,args.config,args.generation)
     elif args.command=='activate':
