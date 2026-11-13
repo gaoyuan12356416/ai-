@@ -1,0 +1,20 @@
+[Unit]
+Description=Asynchronous image generation API
+After=network.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/codex-image-api/current/ops/codex-image-api
+EnvironmentFile=/etc/codex-image-api.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 api.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

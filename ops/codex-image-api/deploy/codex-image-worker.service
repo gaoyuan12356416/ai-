@@ -1,0 +1,23 @@
+[Unit]
+Description=Durable image generation worker
+After=network-online.target codex-image-api.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/codex-image-api/current/ops/codex-image-api
+EnvironmentFile=/etc/codex-image-api.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 worker.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+# Generation runs in independent per-image units, so worker updates preserve it.
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
