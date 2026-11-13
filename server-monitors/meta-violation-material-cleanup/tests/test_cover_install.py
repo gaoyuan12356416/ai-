@@ -26,3 +26,11 @@ class InstallBackupTests(unittest.TestCase):
             state=self.state();state[unit][field]=value
             with self.assertRaises(RuntimeError):
                 installer.require_disabled_legacy({'live_enabled':False},state)
+
+    def test_disabled_legacy_is_preserved_without_optional_flag(self):
+        self.assertTrue(installer.preserve_frozen_legacy({'live_enabled':False},self.state()))
+
+    def test_unproven_legacy_still_gets_snapshot_unless_active_only_requested(self):
+        self.assertFalse(installer.preserve_frozen_legacy({'live_enabled':True},self.state()))
+        with self.assertRaisesRegex(RuntimeError, 'legacy_not_proven_disabled'):
+            installer.preserve_frozen_legacy({'live_enabled':True},self.state(),True)

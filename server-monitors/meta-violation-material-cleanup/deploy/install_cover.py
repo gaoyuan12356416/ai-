@@ -73,6 +73,17 @@ def require_disabled_legacy(config, state):
         raise RuntimeError('legacy_not_proven_disabled')
 
 
+def preserve_frozen_legacy(config, state, requested=False):
+    """A disabled legacy ledger stays in place instead of being copied per release."""
+    try:
+        require_disabled_legacy(config, state)
+    except RuntimeError:
+        if requested:
+            raise
+        return False
+    return True
+
+
 def prepare(release, active_ledgers_only=False):
     disk(); idle()
     release = release.resolve()
@@ -95,8 +106,8 @@ def prepare(release, active_ledgers_only=False):
             shutil.copy2(str(path),str(backup/unit))
         state[unit] = {field:subprocess.run(['systemctl',field,unit],capture_output=True,text=True).stdout.strip()
                        for field in ('is-enabled','is-active')}
-    if active_ledgers_only:
-        require_disabled_legacy(json.loads((backup/'config.json').read_text()),state)
+    active_ledgers_only = preserve_frozen_legacy(
+        json.loads((backup/'config.json').read_text()), state, active_ledgers_only)
     snapshot(SHARED,backup/'shared-tasks.sqlite3')
     ledgers = [(ROOT/'cover.sqlite3','cover.sqlite3'),
                (ROOT/'cover-audit/runs.sqlite3','cover-audit.sqlite3')]
