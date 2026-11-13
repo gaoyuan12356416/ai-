@@ -42,6 +42,7 @@ def ready(url):
 
 def prepare(folder):
     folder.mkdir(mode=0o755,parents=True,exist_ok=False)
+    folder.chmod(0o755)  # Service UID traversal must not depend on operator umask.
     previous=POINTER.resolve(strict=True);candidate=folder/'candidate'
     run('cp','-a','--reflink=auto',str(previous),str(candidate))
     r={'state':'prepared','source':str(ROOT),'revision':run('git','-C',str(ROOT),'rev-parse','HEAD'),
