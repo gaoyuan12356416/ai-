@@ -23,7 +23,8 @@ TIMERS = ["fb-auto-post-metric-" + name + ".timer" for name in ("hourly", "repai
 METRIC_ENV_KEYS = ("FB_AUTO_METRIC_STORAGE=", "FB_AUTO_METRIC_BROKER_PORT=")
 # Reviewed deployed Moboreels overlay (its two unrelated service.py hunks are
 # retained). The metric runner and aggregation source still match BASE exactly.
-LIVE_SERVICE_BASELINES = {"a2c7a3fafc49e3d6911006d256e084d0719871ec6c02f69d231e7fd9f139c028"}
+LIVE_SERVICE_BASELINES = {"a2c7a3fafc49e3d6911006d256e084d0719871ec6c02f69d231e7fd9f139c028",
+    "b91cff5c5cfc7aa8cb231b17895ad44ef66ed6c19871aed9f1070977f05b7bd5"}
 
 
 def metric_settings(text):
@@ -55,8 +56,10 @@ def stage(folder):
             actual = live.read_bytes().replace(b"\r\n", b"\n")
             if name == "features/fb_auto_posts/service.py":
                 assert actual == old.stdout or fb.digest(live) in LIVE_SERVICE_BASELINES, "service_baseline_changed"
-                anchor = b"    metric_store = FBAutoPostStore(metric_path)\n"
-                assert actual.count(anchor) == 1, "metric_factory_anchor_changed"
+                anchors = [b"    metric_store = FBAutoPostStore(metric_path)\n",
+                    b"    metric_store = FBAutoPostStore(metric_path, initialize_storage=not Path(metric_path).is_file())\n"]
+                assert sum(actual.count(anchor) for anchor in anchors) == 1, "metric_factory_anchor_changed"
+                anchor = next(anchor for anchor in anchors if anchor in actual)
                 content = actual.replace(anchor, b"    from .metric_mysql import metric_store_from_env\n    metric_store = metric_store_from_env(env)\n")
             else:
                 assert actual == old.stdout, "baseline_changed:" + name
