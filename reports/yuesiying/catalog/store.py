@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import sys
 import subprocess
 import time
@@ -141,15 +142,20 @@ def native_json_rows(config,query):
     env=dict(os.environ,MYSQL_PWD=settings['password'])
     command=['/usr/bin/mysql','--compress','--connect-timeout=5','--default-character-set=utf8mb4',
         '--batch','--raw','--skip-column-names','-h',settings['host'],'-P','63350','-u',settings['user'],'-D','ads_ai']
-    process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,text=True,encoding='utf-8')
+    process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+        env=env,text=True,encoding='utf-8',start_new_session=True)
     try:
-        process.stdin.write('SELECT @@read_only; SET SESSION MAX_EXECUTION_TIME=60000; '+query+';\n');process.stdin.close()
-        require(process.stdout.readline().strip()=='1','database_role_mismatch')
-        for line in process.stdout:
+        output,error=process.communicate('SELECT @@read_only; SET SESSION MAX_EXECUTION_TIME=60000; '+query+';\n',timeout=90)
+        require(process.returncode==0,'catalog_native_read_failed:'+error[:500])
+        lines=output.splitlines();require(lines and lines[0].strip()=='1','database_role_mismatch')
+        for line in lines[1:]:
             if line.strip():yield json.loads(line)
-        error=process.stderr.read();require(process.wait()==0,'catalog_native_read_failed:'+error[:500])
     finally:
-        if process.poll() is None:process.terminate();process.wait(timeout=10)
+        if process.poll() is None:
+            os.killpg(process.pid,signal.SIGTERM)
+            try:process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid,signal.SIGKILL);process.communicate()
 
 
 def catalog_pages(config,generation,content_ids=None):
