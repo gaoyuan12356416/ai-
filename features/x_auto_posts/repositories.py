@@ -113,7 +113,13 @@ def canonical_language(value: Any) -> str:
             "drama language is invalid",
             409,
         )
-    return text
+    # Catalog Portuguese is stored as pt; account snapshots retain pt-br.
+    # Normalize only the in-memory selection language, never frozen records.
+    return "pt" if text == "pt-br" else text
+
+
+def _catalog_languages(language: str) -> Tuple[str, ...]:
+    return ("pt", "pt-br") if language == "pt" else (language,)
 
 
 def canonical_material_id(value: Any) -> str:
@@ -489,20 +495,23 @@ class ReadOnlyMySQLRepository:
         resource_types: Sequence[str] = (),
     ) -> List[DramaSourceRow]:
         normalized_language = canonical_language(language)
+        languages = _catalog_languages(normalized_language)
         normalized_types = tuple(
             dict.fromkeys(_text(value, "resource type", limit=64) for value in resource_types)
         )
         predicates = [
             "i.app_id=%s",
             "i.release_status=%s",
-            "LOWER(TRIM(i.language))=LOWER(%s)",
+            "i.drama_status=%s",
+            "LOWER(TRIM(i.language)) IN (%s)" % ",".join("%s" for _ in languages),
             "i.deploy_time>%s",
             "i.deploy_time<=%s",
         ]
         params: List[Any] = [
             self.app_id,
             1,
-            normalized_language,
+            3,
+            *languages,
             0,
             int(now_epoch),
         ]
@@ -569,6 +578,7 @@ class ReadOnlyMySQLRepository:
     ) -> List[MaterialSourceRow]:
         normalized_content_id = _text(content_id, "content_id", limit=128)
         normalized_language = canonical_language(language)
+        languages = _catalog_languages(normalized_language)
         sql = """
             SELECT CAST(s.id AS CHAR) AS material_id,
                    s.data_source_id AS content_id,
@@ -584,18 +594,18 @@ class ReadOnlyMySQLRepository:
                AND s.product=%s
                AND s.type=%s
                AND s.is_delete=%s
-               AND LOWER(TRIM(s.language))=LOWER(%s)
+               AND LOWER(TRIM(s.language)) IN ({language_params})
                AND s.video_duration>%s
                AND s.video_duration<=%s
              ORDER BY s.id
-        """.format(schema=self.schema)
+        """.format(schema=self.schema, language_params=",".join("%s" for _ in languages))
         params = (
             self.material_data_source,
             normalized_content_id,
             self.product,
             2,
             0,
-            normalized_language,
+            *languages,
             0,
             MAX_X_AUTO_DURATION_SECONDS,
         )

@@ -31,7 +31,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .service import DEFAULT_MAX_MEDIA_BYTES, XPostError, download_media
+from .service import XPostError, download_media
+from .media_limits import MAX_POST_VIDEO_BYTES as DEFAULT_MAX_MEDIA_BYTES
 
 try:  # Linux production uses flock; the fallback keeps offline Windows tests usable.
     import fcntl
@@ -344,13 +345,13 @@ class WorkerConfig:
                 "X_POST_MEDIA_REPAIR_MAX_SOURCE_BYTES",
                 DEFAULT_MAX_MEDIA_BYTES,
                 1024,
-                4 * 1024 * 1024 * 1024,
+                DEFAULT_MAX_MEDIA_BYTES,
             ),
             max_output_bytes=_env_int(
                 "X_POST_MEDIA_REPAIR_MAX_OUTPUT_BYTES",
                 DEFAULT_OUTPUT_MAX_BYTES,
                 1024,
-                4 * 1024 * 1024 * 1024,
+                DEFAULT_MAX_MEDIA_BYTES,
             ),
             download_timeout=_env_int(
                 "X_POST_MEDIA_REPAIR_DOWNLOAD_TIMEOUT",
@@ -1027,7 +1028,7 @@ def validate_output(
     if size > int(max_output_bytes):
         raise MediaRepairError(
             "repaired_media_invalid",
-            "修复后视频超过512MB上限",
+            "修复后视频超过当前X上传体积上限",
             500,
         )
     return {
@@ -1136,7 +1137,7 @@ class CosObjectStore:
             and secrets.compare_digest(remote_sha.strip().lower(), expected_sha256)
         )
 
-    def upload(self, key, local_path, sha256_value, size):
+    def upload(self, key, local_path, sha256_value, size, content_type="video/mp4"):
         existing = self.head(key)
         if existing is not None:
             if self.validate_head(existing, size, sha256_value):
@@ -1157,7 +1158,7 @@ class CosObjectStore:
                     MAXThread=self.config.cos_max_threads,
                     EnableMD5=True,
                     ACL="public-read",
-                    ContentType="video/mp4",
+                    ContentType=content_type,
                     Metadata={
                         "x-cos-meta-sha256": sha256_value,
                         "x-cos-meta-profile": self.config.profile,
@@ -1425,7 +1426,7 @@ class MediaRepairProcessor:
             if output_size > int(self.config.max_output_bytes):
                 raise MediaRepairError(
                     "repaired_media_invalid",
-                    "修复后视频超过512MB上限",
+                    "修复后视频超过当前X上传体积上限",
                     500,
                 )
             output_probe = _probe_payload(self.config, output_path, self.runner)
@@ -1445,7 +1446,6 @@ class MediaRepairProcessor:
                     500,
                 )
             cos_key = self._cos_key(request, output_sha256)
-            self.cos.upload(cos_key, output_path, output_sha256, output_size)
             output_url = self.cos.url(cos_key)
             result = {
                 "job_key": request["job_key"],
@@ -1455,6 +1455,10 @@ class MediaRepairProcessor:
                 "output_size": output_size,
                 "probe": probe,
             }
+            callback = getattr(self, "qualified_artifact", None)
+            if callback is not None:
+                callback(result, cos_key)
+            self.cos.upload(cos_key, output_path, output_sha256, output_size)
             manifest = {
                 "version": 4,
                 "status": "ready",
@@ -1543,6 +1547,8 @@ class MediaRepairRequestHandler(BaseHTTPRequestHandler):
             200,
             {
                 "status": "ok",
+                "max_source_bytes": self.server.processor.config.max_source_bytes,
+                "max_output_bytes": self.server.processor.config.max_output_bytes,
                 "duration_policies": sorted(DURATION_POLICIES),
                 "profile": getattr(self.server.processor.config, "profile", REPAIR_PROFILE),
                 "random_template_enabled": self.server.random_template is not None,

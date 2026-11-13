@@ -14,7 +14,7 @@ from .validation import valid_internal_bearer
 
 
 X_AUTO_ADMIN_PREFIX = "/api/admin/x-auto-publish"
-DEFAULT_SERVICE_URL = "http://127.0.0.1:18833"
+DEFAULT_SERVICE_URL = "http://127.0.0.1:18843"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 _SENSITIVE_KEYS = {
@@ -200,7 +200,7 @@ def request_admin(
         service_url != DEFAULT_SERVICE_URL
         or parsed_base.scheme != "http"
         or parsed_base.hostname != "127.0.0.1"
-        or port != 18833
+        or port != 18843
         or parsed_base.username is not None
         or parsed_base.password is not None
         or parsed_base.path not in ("", "/")

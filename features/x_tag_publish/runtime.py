@@ -89,6 +89,8 @@ def install(runtime):
                      payload=dict(queue_id=queue_id, log_id=log_id), timeout=30)
         return attribution.validate_context(result['context'])
     attribution.resolve_via_loopback = attribution_resolver
+    from .dispatch_native import install_attribution
+    install_attribution(attribution_resolver)
 
 
 def serve():
@@ -103,7 +105,10 @@ def serve():
 
         def do_POST(self):
             path = urlsplit(self.path).path
-            # No OAuth, account mutation, legacy coordinator, video workspace or
+            if path.startswith('/internal/pipeline-dispatch/x/'):
+                from .dispatch_native import handle
+                return handle(self, runtime, path)
+            # No OAuth, account mutation, video workspace or
             # drama pool routes are exposed by this independent material lane.
             if not path.startswith('/internal/posts/') or '/drama-pool/' in path or path.endswith('/canary'):
                 return self.send_json(404, dict(error='not_found'))

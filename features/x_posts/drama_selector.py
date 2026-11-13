@@ -14,6 +14,7 @@ import re
 import unicodedata
 import urllib.parse
 from datetime import datetime, timezone
+from features.x_posts.read_failures import read_failure
 
 
 DEFAULT_SCHEMA = "kunlunads_dev"
@@ -37,6 +38,10 @@ class DramaQueryError(DramaSelectionError):
     """The read-only source query failed; the complete run must stop."""
 
     code = "x_post_drama_query_failed"
+
+    def __init__(self,message,*,read_failure=None):
+        self.read_failure=read_failure
+        super().__init__(message)
 
 
 class DramaPoolRejection(DramaSelectionError):
@@ -134,8 +139,9 @@ def _replay_episode_key(content_id, sub_number, replay_generation):
 def _cursor_rows(connection, sql, params):
     if not re.match(r"(?i)^SELECT\b", str(sql or "").lstrip()):
         raise DramaSelectionError("selector attempted a non-read-only statement")
-    cursor = connection.cursor()
+    cursor = None
     try:
+        cursor = connection.cursor()
         cursor.execute(sql, tuple(params))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
@@ -143,12 +149,13 @@ def _cursor_rows(connection, sql, params):
         raise
     except Exception as exc:
         raise DramaQueryError(
-            "read-only drama query failed: %s" % type(exc).__name__
+            "read-only drama query failed: %s" % type(exc).__name__,read_failure=read_failure(exc)
         ) from None
     finally:
         close = getattr(cursor, "close", None)
         if callable(close):
-            close()
+            try:close()
+            except Exception:pass  # Keep the safe query outcome, never driver text.
 
 
 def _normalize_media_url(value):

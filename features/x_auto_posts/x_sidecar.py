@@ -17,7 +17,7 @@ import requests
 from .validation import valid_internal_bearer
 
 
-DEFAULT_X_POST_INTERNAL_URL = "http://127.0.0.1:8810"
+DEFAULT_X_POST_INTERNAL_URL = "http://127.0.0.1:8821"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _SAFE_ERROR_CODE = re.compile(r"^[a-z0-9_]{1,96}$")
 _MATERIAL_ID = re.compile(r"^[1-9][0-9]{0,18}$")
@@ -104,7 +104,7 @@ class XPostAutoBridgeClient:
             normalized_url != DEFAULT_X_POST_INTERNAL_URL
             or parsed.scheme != "http"
             or parsed.hostname != "127.0.0.1"
-            or port != 8810
+            or port != 8821
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in ("", "/")

@@ -81,7 +81,7 @@ def _probe_raw_video_duration(
     )
     if file_size <= 0 or file_size > max_bytes:
         raise service.XPostError(
-            "media_too_large", "短剧源文件为空或超过512MB限制", 413,
+                "media_too_large", "短剧源文件为空或超过当前X上传体积上限", 413,
         )
     ffprobe_bin = str(
         os.environ.get("X_POST_FFPROBE_BIN", "/usr/bin/ffprobe")

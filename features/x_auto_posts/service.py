@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 from types import SimpleNamespace
 import json
 import os
@@ -10,6 +11,7 @@ import random
 import re
 import secrets
 import signal
+import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,6 +21,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from features.x_posts.selector import connect_read_only
+from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import canonical_drama_language
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
@@ -40,9 +43,11 @@ from .x_sidecar import (
 
 UTC = timezone.utc
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 18833
+DEFAULT_PORT = 18843
 MAX_BODY_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+RUN_EVENT_LIMIT = 200
+RUN_EVENT_DETAIL_BYTES = 4096
 
 
 class AutoPostServiceError(RuntimeError):
@@ -113,6 +118,9 @@ def _blacklist_dict(snapshot: Any) -> Dict[str, Any]:
 
 
 def _public_selection(value: Any) -> Any:
+    if isinstance(value, Mapping) and "policy_version" in value and "candidate_labels" in value:
+        from features.x_tag_revenue.tags import localize_audit
+        value = localize_audit(dict(value))
     if isinstance(value, Mapping):
         return {
             str(key): _public_selection(item)
@@ -191,7 +199,7 @@ class XAutoPostService:
         executor: AutoPostExecutor,
         *,
         now_fn=lambda: datetime.now(UTC),
-        runner_kick_path: Any = "/run/x-auto-post/manual-kick",
+        runner_kick_path: Any = "/run/x-tag-auto/manual-kick",
         schedule_grace_seconds: int = 600,
     ):
         self.store = store
@@ -290,6 +298,38 @@ class XAutoPostService:
             item["attention_task_count"] = sum(
                 task.status in {"failed", "canceled", "unknown"} for task in values
             )
+            # Legacy "completed" also includes no-candidate/skipped tasks.  Keep
+            # that field compatible, but expose disjoint publication outcomes
+            # so the UI never presents it as a count of successful Posts.
+            counts = dict.fromkeys((
+                "published", "no_candidate", "skipped", "failed", "canceled",
+                "unknown", "pending", "ready", "retry_wait", "waiting_result",
+                "active",
+            ), 0)
+            for task in values:
+                if task.status == "unknown" or bool(task.unknown_outcome):
+                    category = "unknown"
+                elif task.status == "retry_wait" and task.execution_queue_id:
+                    # Queue-bound waits observe the canonical publisher; they
+                    # are not permission to submit the same Post again.
+                    category = "waiting_result"
+                elif task.status in counts:
+                    category = task.status
+                else:
+                    category = "active"
+                counts[category] += 1
+            item["task_counts"] = counts
+            item["published_task_count"] = counts["published"]
+            item["unfinished_task_count"] = sum(
+                counts[key] for key in (
+                    "unknown", "pending", "ready", "retry_wait",
+                    "waiting_result", "active",
+                )
+            )
+            if (item.get("status") in {"queued", "running"}
+                    and counts["unknown"] > 0
+                    and item["unfinished_task_count"] == counts["unknown"]):
+                item["display_status"] = "needs_review"
         return item
 
     @staticmethod
@@ -408,14 +448,28 @@ class XAutoPostService:
         return {"ok": True, "template": item, "item": item}
 
     def _validate_accounts(self, config: Mapping[str, Any]) -> None:
-        for account_id in config.get("account_ids") or []:
-            account = self._account_snapshot(account_id)
+        account_ids = config.get("account_ids") or []
+        if not account_ids:
+            return
+        # account_snapshot reloads the whole projected list. Read it once per
+        # request so a large template does not make N full sidecar requests.
+        accounts_by_id: Dict[str, List[Mapping[str, Any]]] = {}
+        for account in self.account_bridge.accounts():
+            accounts_by_id.setdefault(str(account.get("id") or ""), []).append(account)
+        for account_id in account_ids:
+            matches = accounts_by_id.get(str(account_id), [])
+            if len(matches) != 1:
+                raise AutoPostServiceError(
+                    "x_auto_account_not_found", "X account was not found", 404
+                )
+            account = matches[0]
             if str(account.get("id") or "") != str(account_id) or not bool(
                 account.get("publish_eligible")
             ):
                 raise AutoPostServiceError(
                     "x_auto_account_not_publishable",
-                    "selected X account is not currently publishable",
+                    "X 账号 %s（ID %s）当前不可发布，请取消勾选或恢复授权后再保存。"
+                    % (str(account.get("username") or account_id)[:50], account_id),
                     409,
                 )
             self._account_language(account)
@@ -897,19 +951,54 @@ class XAutoPostService:
             },
         }
 
+    def _run_events(self, run_id: int) -> Tuple[List[Dict[str, Any]], int]:
+        """Read a bounded recent window without loading the full audit trail."""
+        uri = Path(self.store.db_path).resolve().as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            total = conn.execute(
+                "SELECT COUNT(*) FROM x_auto_event WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+            rows = conn.execute(
+                """SELECT id,run_id,task_id,event_type,from_status,to_status,message,created_at,
+                          CASE WHEN length(CAST(details_json AS BLOB))<=?
+                               THEN details_json ELSE '{}' END AS details_json,
+                          length(CAST(details_json AS BLOB))>? AS details_truncated
+                     FROM x_auto_event WHERE run_id=? ORDER BY id DESC LIMIT ?""",
+                (RUN_EVENT_DETAIL_BYTES, RUN_EVENT_DETAIL_BYTES, run_id, RUN_EVENT_LIMIT),
+            ).fetchall()
+        events = []
+        for row in reversed(rows):
+            item = dict(row)
+            details = json.loads(item.pop("details_json"))
+            item["details_truncated"] = bool(item["details_truncated"])
+            item["details"] = (
+                {"summary": "事件明细较长，完整内容保留在审计记录中"}
+                if item["details_truncated"] else _public_selection(details)
+            )
+            if item["message"]:
+                item["message"] = safe_public_message(item["message"])
+            events.append(item)
+        return events, int(total)
+
     def run(self, run_id: Any) -> Dict[str, Any]:
         run = self.store.get_run(run_id)
         template = self.store.get_template(run.template_id, version=run.template_version)
         tasks = self.store.list_tasks(run_id=run.id)
         public_run = self._run_item(run, template=template, tasks=tasks)
         public_tasks = [self._task_item(task) for task in tasks]
+        events, event_total = self._run_events(run.id)
         return {
             "ok": True,
             "run": public_run,
             "item": public_run,
             "tasks": public_tasks,
             "account_tasks": public_tasks,
-            "events": self.store.list_events(run_id=run.id),
+            "events": events,
+            "events_total": event_total,
+            "events_limit": RUN_EVENT_LIMIT,
+            "events_has_more": event_total > len(events),
         }
 
     def execute_next(self, raw: Mapping[str, Any]) -> Dict[str, Any]:
@@ -950,13 +1039,13 @@ def _env_int(
 
 def _isolated_db_path(source: Mapping[str, str]) -> str:
     root = Path(
-        str(source.get("X_AUTO_POST_STATE_ROOT", "/mnt/data-disk/x-auto-post-publisher"))
+        str(source.get("X_AUTO_POST_STATE_ROOT", "/mnt/data-disk/x-tag-publisher/auto"))
     ).expanduser()
     path = Path(
         str(
             source.get(
                 "X_AUTO_POST_DB_PATH",
-                "/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3",
+                "/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3",
             )
         )
     ).expanduser()
@@ -964,7 +1053,7 @@ def _isolated_db_path(source: Mapping[str, str]) -> str:
         str(
             source.get(
                 "X_POST_DB_PATH",
-                "/mnt/data-disk/x-post-automation/x-posts.sqlite3",
+                "/mnt/data-disk/x-tag-publisher/x-posts.sqlite3",
             )
         )
     ).expanduser()
@@ -1098,6 +1187,9 @@ def build_service_from_env(
         )
 
     store = XAutoPostStore(db_path)
+    from features.x_tag_publish.policy import initialize_ids, lane_paths
+    lane_paths()
+    initialize_ids(db_path)
     repository = ReadOnlyMySQLRepository(
         source_connection,
         schema=material_schema,
@@ -1168,12 +1260,12 @@ def build_service_from_env(
     media_config = _MediaConfig(
         media_allowed_hosts=_allowed_hosts(hosts_raw),
         max_media_bytes=_env_int(
-            source, "X_AUTO_POST_MAX_MEDIA_BYTES", 512 * 1024 * 1024, 1024, 512 * 1024 * 1024
+            source, "X_AUTO_POST_MAX_MEDIA_BYTES", MAX_POST_VIDEO_BYTES, 1024, MAX_POST_VIDEO_BYTES
         ),
         media_timeout=_env_int(source, "X_AUTO_POST_MEDIA_TIMEOUT", 30, 5, 120),
         work_dir=str(
             source.get(
-                "X_AUTO_POST_WORK_DIR", "/mnt/data-disk/x-post-automation/daily-work"
+                "X_AUTO_POST_WORK_DIR", "/mnt/data-disk/x-tag-publisher/daily-work"
             )
         ),
         repair_profile=str(
@@ -1264,6 +1356,7 @@ def build_service_from_env(
             )
         return dict(planned[0])
 
+    from features.pipeline_dispatch.x_planning import enabled as dispatch_enabled, cutoff as dispatch_cutoff
     executor = AutoPostExecutor(
         store,
         selector,
@@ -1273,14 +1366,17 @@ def build_service_from_env(
         gates=AutoLiveGates.from_env(source),
         lease_seconds=lease_seconds,
         max_concurrent_tasks=_env_int(source, "X_AUTO_POST_WORKER_COUNT", 1, 1, 4),
+        dispatch_enabled=dispatch_enabled(source),
+        dispatch_cutoff=dispatch_cutoff(source),
     )
-    return XAutoPostService(
+    from features.x_tag_publish.hit_drama import TagAutoPostService
+    return TagAutoPostService(
         store,
         bridge,
         selector,
         executor,
         runner_kick_path=str(
-            source.get("X_AUTO_POST_RUNNER_KICK_PATH", "/run/x-auto-post/manual-kick")
+            source.get("X_AUTO_POST_RUNNER_KICK_PATH", "/run/x-tag-auto/manual-kick")
         ),
         schedule_grace_seconds=_env_int(
             source, "X_AUTO_POST_SCHEDULE_GRACE_SECONDS", 600, 60, 3600
@@ -1302,7 +1398,7 @@ class XAutoPostHTTPServer(ThreadingHTTPServer):
         host, port = server_address
         if host != DEFAULT_HOST or int(port) != DEFAULT_PORT:
             raise AutoPostServiceError(
-                "x_auto_listen_invalid", "service may listen only on 127.0.0.1:18833", 500
+                "x_auto_listen_invalid", "service may listen only on 127.0.0.1:18843", 500
             )
         if not valid_internal_bearer(internal_token):
             raise AutoPostServiceError(
@@ -1387,6 +1483,16 @@ class XAutoPostRequestHandler(BaseHTTPRequestHandler):
                 "message": "access denied",
             }
         query = parse_qs(parsed.query, keep_blank_values=True)
+        if self.command == "POST" and path == "/internal/pipeline-dispatch/x-auto/pause":
+            if os.environ.get("PIPELINE_X_CANONICAL_BRIDGE_ENABLED") != "1":
+                raise AutoPostServiceError("pipeline_x_bridge_disabled", "pipeline control is disabled", 403)
+            payload = self._body()
+            job = payload.get("job", {})
+            identity = _positive_id(job.get("source_id"), "task ID") if isinstance(job, dict) else 0
+            if (not identity or job.get("channel") != "x" or job.get("family") != "auto" or job.get("stage") != "prepare"
+                or job.get("source_key") != "x:auto:" + str(identity)):
+                raise AutoPostServiceError("pipeline_x_auto_identity_invalid", "task identity is invalid", 400)
+            return 200, service.store.pause_pipeline_task(identity, payload.get("cutoff"))
         if self.command == "GET" and path == X_AUTO_ADMIN_PREFIX + "/accounts":
             return 200, service.accounts()
         match = re.fullmatch(
@@ -1504,3 +1610,6 @@ __all__ = [
     "build_service_from_env",
     "serve",
 ]
+
+# This import is installed only in the independent tag runtime.
+from features.x_tag_publish.selection import ProfileSelector as TwoStageSelector

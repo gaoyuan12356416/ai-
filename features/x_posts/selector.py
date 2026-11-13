@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from features.x_posts.source_duration import probe_source_duration
 from features.x_posts.service import XPostError
 from features.x_accounts.language import canonical_drama_language
+from features.x_posts.read_failures import read_failure
 
 
 SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -95,13 +96,14 @@ class CandidateQueryError(CandidateSelectionError):
         "deploy_time": "短剧可投放时间查询失败，请稍后重试",
     }
 
-    def __init__(self, query_stage="source"):
+    def __init__(self, query_stage="source", *, read_failure=None):
         normalized_stage = str(query_stage or "").strip().lower()
         if normalized_stage not in self._MESSAGES:
             normalized_stage = "source"
         self.query_stage = normalized_stage
         self.error_code = self.code
         self.error_message = self._MESSAGES[normalized_stage]
+        self.read_failure = read_failure
         super().__init__(self.error_message)
 
 
@@ -254,11 +256,11 @@ def _cursor_rows(connection, sql, params, *, query_stage="source"):
         return [dict(row) for row in rows]
     except CandidateSelectionError:
         raise
-    except Exception:
+    except Exception as exc:
         # The source exception can contain SQL text, connection details or
         # credentials.  Persist only a stable code, a bounded stage and the
         # corresponding operator-safe message.
-        raise CandidateQueryError(query_stage=query_stage) from None
+        raise CandidateQueryError(query_stage=query_stage,read_failure=read_failure(exc)) from None
     finally:
         close = getattr(cursor, "close", None)
         if callable(close):
@@ -422,6 +424,7 @@ class DramawaveCandidateSelector:
                 r.labels AS drama_labels, r.desc AS drama_description
               FROM `{schema}`.ads_drama_resource r FORCE INDEX (content_id)
              WHERE r.content_id = %s
+               AND r.app_id = 1479
                {language_clause}
              ORDER BY r.id ASC
         """.format(schema=self.schema, language_clause=language_clause)
@@ -775,6 +778,7 @@ class DramawaveCandidateSelector:
             "drama_name": drama["drama_name"],
             "drama_deploy_time": drama_deploy_time,
             "tag": drama["labels"][0],
+            "drama_labels": list(drama["labels"]),
             "description": drama["description"],
             "spend": 0.0,
             "facebook_violation_count": normalized_counts["facebook_count"],
@@ -880,6 +884,7 @@ class DramawaveCandidateSelector:
             "material_language": material_language,
             "drama_name": drama_name,
             "tag": labels[0],
+            "drama_labels": list(labels),
             "description": description,
             "spend": _float(row.get("spend"), "spend"),
             "facebook_violation_count": normalized_counts["facebook_count"],
@@ -920,7 +925,7 @@ class DramawaveCandidateSelector:
                 break
         return selected
 
-    def select_pool(self, pool_items, source_date, limit=3):
+    def select_pool(self, pool_items, source_date, limit=3, *, allow_images=True):
         """Hydrate the newest safe manual-pool items.
 
         Pool order is determined exclusively by ``created_at`` then ``id``.
@@ -1022,7 +1027,7 @@ class DramawaveCandidateSelector:
                 candidate = self._pool_candidate(
                     candidate_id,
                     source_date,
-                    allow_images=True,
+                    allow_images=allow_images,
                     allow_deleted_materials=True,
                     require_dramawave_product=False,
                     use_drama_language=True,
@@ -1206,6 +1211,8 @@ def select_pool_candidates(
     limit=3,
     schema=DEFAULT_SCHEMA,
     now=None,
+    *,
+    allow_images=True,
 ):
     """Hydrate manual-pool materials in newest-first order.
 
@@ -1220,6 +1227,7 @@ def select_pool_candidates(
         pool_items,
         source_date,
         limit=limit,
+        allow_images=allow_images,
     )
 
 
@@ -1375,6 +1383,6 @@ def connect_read_only(
     except CandidateSelectionError:
         raise
     except Exception as exc:
-        raise CandidateSelectionError(
-            "read-only MySQL connection failed: %s" % type(exc).__name__
-        ) from None
+        error=CandidateSelectionError("read-only MySQL connection failed: %s" % type(exc).__name__)
+        error.read_failure=read_failure(exc)
+        raise error from None
