@@ -206,7 +206,7 @@ def _task_policy(run, task, config):
         return None
     manifest = marker.get("manifest", {}) if isinstance(marker, dict) else {}
     request, entries = manifest.get("request", {}), manifest.get("entries", [])
-    if (run["trigger_type"] != "manual" or manifest.get("kind") != KIND or digest(manifest) != marker.get("sha256")
+    if (run["trigger_type"] != "manual" or manifest.get('kind') not in (KIND, 'profile_one_to_one_release_minus_30m_v1') or digest(manifest) != marker.get("sha256")
             or request.get("template_id") != run["template_id"] or request.get("expected_version") != run["template_version"]
             or len({entry["page_id"] for entry in entries}) != len(entries)
             or selection.get(MARKER) != marker["sha256"]):
@@ -217,4 +217,9 @@ def _task_policy(run, task, config):
     entry = entries[sequence - 1]
     if entry.get("sequence") != sequence or any(str(task[key]) != str(entry[key]) for key in ("page_id", "group_id", "material_id", "content_id", "source_media_url")):
         raise BatchError("Task differs from its frozen hit-material assignment")
+    if manifest.get('kind') == 'profile_one_to_one_release_minus_30m_v1':
+        if (len({e['material_id'] for e in entries}) != len(entries)
+                or task['planned_publish_at_utc'] != entry['timing']['publish_at_utc']
+                or selection.get('hit_publish_timing') != entry['timing']):
+            raise BatchError('Hit-material schedule or one-to-one assignment changed')
     return {"waive_drama_cooldown": True, "waiting_for_previous": False, "material_cooldown_basis": "created_at"}

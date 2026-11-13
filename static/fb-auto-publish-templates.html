@@ -136,24 +136,25 @@
       <div class="dialog-head"><h2 id="materialDialogTitle">爆款素材发布</h2></div>
       <div class="dialog-body material-body">
         <p id="materialTemplateName"></p>
-        <p id="materialScope">对该模板下各语言的 Page 各发布一次同一素材，沿用模板的视频制作和文案配置。此轮为手动加发，不占用日常自动发布次数。</p>
+        <p id="materialScope">依据语言、受众与题材画像匹配度，一条素材匹配一个 Page，每个 Page 本次只发一条。沿用模板的视频制作和文案配置。</p>
         <div class="field">
           <label for="hitMaterialId" class="required">素材 ID</label>
-          <input id="hitMaterialId" type="text" inputmode="numeric" pattern="[1-9][0-9]{0,19}" maxlength="20" autocomplete="off" placeholder="输入一个素材 ID" required />
-          <span class="helper">仅支持单个素材 ID。已暂停、缺授权、发布结果待核验，以及近 14 天已用或正在使用该素材的 Page 会跳过。</span>
+          <textarea id="hitMaterialId" rows="5" maxlength="6400" autocomplete="off" placeholder="输入多条素材 ID，可用换行、逗号或空格分隔" required></textarea>
+          <span class="helper">支持 1–200 条素材 ID，重复 ID 自动合并。不符合发布条件的 Page 会跳过。未到可投放时间的剧先制作素材，预约在可投放前 30 分钟发布；该时点已过则尽快发布。</span>
         </div>
         <p id="materialStatus" class="status-line" role="status" aria-live="polite"></p>
         <div id="materialResult" class="hidden">
           <a id="materialRunLink" class="button link-button" href="/fb-auto-publish-runs.html">查看发布记录</a>
+          <div id="materialAssignments"></div>
           <details id="materialSkipped" class="hidden">
             <summary id="materialSkippedSummary">跳过的 Page</summary>
-            <div class="material-skips"><table><thead><tr><th>Page ID</th><th>跳过原因</th></tr></thead><tbody id="materialSkippedRows"></tbody></table></div>
+            <div class="material-skips"><table><thead><tr><th>素材 ID</th><th>跳过原因</th></tr></thead><tbody id="materialSkippedRows"></tbody></table></div>
           </details>
         </div>
       </div>
       <div class="dialog-foot">
         <button id="materialClose" class="button" type="button">取消</button>
-        <button id="materialNew" class="button hidden" type="button">再发一个素材</button>
+        <button id="materialNew" class="button hidden" type="button">再发一批素材</button>
         <button id="materialSubmit" class="button primary" type="submit">确认发布</button>
       </div>
     </form>
@@ -164,7 +165,7 @@
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=20260915retired"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-templates.js?v=9b766c3d0279"></script>
-  <script src="/hit-drama-publish.js?v=565bb8ec000d"></script>
+  <script src="/fb-auto-publish-templates.js?v=d5b637cb5bfc"></script>
+  <script src="/hit-drama-publish.js?v=f62914ecf3f0"></script>
 </body>
 </html>

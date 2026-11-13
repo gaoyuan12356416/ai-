@@ -165,13 +165,20 @@
   function renderMaterialResult(result) {
     const queued = Number(result.queued || 0);
     const skipped = Number(result.skipped || 0);
-    materialStatus("运行 #" + result.run_id + " 已创建：" + queued + " 个 Page 已加入发布队列，" + skipped + " 个跳过。" + (queued ? "发布进度请查看记录。" : "本轮没有可发布的 Page。"));
+    materialStatus("运行 #" + result.run_id + " 已创建：" + queued + " 条素材已分别匹配 Page，" + skipped + " 条素材未匹配。" + (queued ? "发布进度请查看记录。" : "本轮没有可发布的 Page。"));
     ui.byId("materialResult").classList.remove("hidden");
+    ui.byId("materialAssignments").replaceChildren();
+    for (const entry of result.assignments || []) {
+      const row = document.createElement("p");
+      const time = new Date(entry.timing.publish_at_utc).toLocaleString("zh-CN", {timeZone:"Asia/Shanghai",hour12:false});
+      row.textContent = `素材 ${entry.material_id} → Page ${entry.page_id} · 北京时间 ${time}`;
+      ui.byId("materialAssignments").appendChild(row);
+    }
     ui.byId("materialRunLink").href = "/fb-auto-publish-runs.html?run_id=" + ui.positiveId(result.run_id);
-    const rows = Array.isArray(result.skipped_pages) ? result.skipped_pages : [];
+    const rows = Array.isArray(result.skipped_materials) ? result.skipped_materials : (result.skipped_pages || []);
     ui.byId("materialSkipped").classList.toggle("hidden", !rows.length);
-    ui.byId("materialSkippedSummary").textContent = "查看 " + rows.length + " 个 Page 的跳过原因";
-    ui.byId("materialSkippedRows").innerHTML = rows.map(row => "<tr><td>" + ui.escapeHtml(row.page_id) + "</td><td>" + ui.escapeHtml(row.message || skipReasons[row.reason] || row.reason || "暂不可发布") + "</td></tr>").join("");
+    ui.byId("materialSkippedSummary").textContent = "查看 " + rows.length + " 条未匹配记录的原因";
+    ui.byId("materialSkippedRows").innerHTML = rows.map(row => "<tr><td>" + ui.escapeHtml(row.material_id || row.page_id) + "</td><td>" + ui.escapeHtml(row.message || skipReasons[row.reason] || row.reason || "暂不可发布") + "</td></tr>").join("");
     ui.byId("materialSubmit").classList.add("hidden");
     ui.byId("materialNew").classList.remove("hidden");
     ui.byId("materialClose").textContent = "关闭";
@@ -187,7 +194,7 @@
     } catch (_error) { /* Submission will require durable browser storage. */ }
     state.material = {id, item, draft: saved && saved.draft || null, result: saved && saved.result || null};
     ui.byId("materialTemplateName").textContent = item.name || item.config?.name || "模板 " + id;
-    ui.byId("hitMaterialId").value = state.material.draft?.material_id || "";
+    ui.byId("hitMaterialId").value = state.material.draft?.material_ids?.join("\n") || state.material.draft?.material_id || "";
     ui.byId("hitMaterialId").readOnly = Boolean(state.material.draft);
     ui.byId("materialResult").classList.add("hidden");
     ui.byId("materialNew").classList.add("hidden");
@@ -205,12 +212,12 @@
     event.preventDefault();
     const current = state.material;
     if (!current || state.materialBusy || current.result) return;
-    const materialId = ui.byId("hitMaterialId").value.trim();
-    if (!/^[1-9][0-9]{0,19}$/.test(materialId)) {
-      materialStatus("请输入一个有效的数字素材 ID。", true);
+    const materialIds = [...new Set(ui.byId("hitMaterialId").value.trim().split(/[\s,，;；]+/))];
+    if (!materialIds.length || materialIds.length > 200 || materialIds.some(id => !/^[1-9][0-9]{0,30}$/.test(id))) {
+      materialStatus("请输入 1–200 条有效数字素材 ID，用换行、逗号或空格分隔。", true);
       return;
     }
-    if (!current.draft) current.draft = {expected_version: ui.templateVersion(current.item), material_id: materialId, operation_id: ui.operationId()};
+    if (!current.draft) current.draft = {expected_version: ui.templateVersion(current.item), material_ids: materialIds, operation_id: ui.operationId()};
     try {
       window.sessionStorage.setItem(materialStorageKey(current.id), JSON.stringify({draft: current.draft}));
     } catch (_error) {

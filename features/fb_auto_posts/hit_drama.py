@@ -68,6 +68,9 @@ def publish_drama(runtime, template_id, actor, payload):
         error = StoreError('hit_drama_no_matching_page', '没有语言、受众和题材收入画像同时匹配的可发布Page，未创建发布任务', 409)
         error.conflicts = target['skipped_pages']
         raise error
+    from features.hit_publish import release_times, POLICY
+    target['release_times'] = release_times(mysql.select, mysql.schema, config['app_id'], content_ids(target))
+    target['timing_policy'] = POLICY
     result = runtime.store.create_run(template_id, slot, 'manual', actor, runtime.pages, runtime.materials,
         expected_template_version=request['expected_version'], hit_drama=dict(target, request=request),
         max_publishable_pages=runtime.max_publishable_pages, max_jobs_per_slot=runtime.max_jobs_per_slot, max_daily_jobs=runtime.max_daily_jobs)

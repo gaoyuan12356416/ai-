@@ -404,7 +404,7 @@ class MaterialRepository:
             value = drama_language
         return page_language(value)
 
-    def exact_material(self, config: Mapping[str, Any], material_id: str) -> MaterialCandidate:
+    def exact_material(self, config: Mapping[str, Any], material_id: str, *, allow_future=False) -> MaterialCandidate:
         """Resolve one trusted source ID without automatic ranking or Page language filters."""
         from .languages import page_language
         from .manual_batch import BatchError, prepare_source_url
@@ -451,8 +451,8 @@ class MaterialRepository:
                    CAST(d.series_code AS CHAR) series_code
               FROM `{self.mysql.schema}`.ads_drama_info d
              WHERE d.app_id=%s AND d.content_id=%s AND d.release_status=1
-               AND d.deploy_time>0 AND d.deploy_time<=%s ORDER BY d.id DESC
-        """, (str(config["app_id"]), content_id, int(self.now_fn().timestamp())))
+               AND d.deploy_time>0 AND (%s=1 OR d.deploy_time<=%s) ORDER BY d.id DESC
+        """, (str(config["app_id"]), content_id, int(allow_future), int(self.now_fn().timestamp())))
         detail = (dramas[0] if dramas else None) if inherit_language else next(
             (item for item in dramas if page_language(item.get("language")) == language), None)
         if detail is None:
@@ -521,6 +521,11 @@ class MaterialRepository:
             product=str(config["metric_product"]), platform=int(config["metric_platform"]), dates=dates
         )
         language = str(config["language"])
+        from features.hit_publish import POLICY
+        hit = config.get('hit_drama_publish') or {}
+        selection_end_epoch = int(self.now_fn().timestamp())
+        if hit.get('timing_policy') == POLICY:
+            selection_end_epoch = max([selection_end_epoch, *hit.get('release_times', {}).values()])
         launch_days = int(config["drama_launch_window_days"])
         deploy_after = 0 if not launch_days else int((self.now_fn() - timedelta(days=launch_days)).timestamp())
         drama_rule, material_rule = config["drama_rule"], config["material_rule"]
@@ -602,7 +607,7 @@ class MaterialRepository:
                              GROUP BY d0.content_id) pick ON pick.id=d.id
                      ORDER BY d.content_id
                 """
-                end_epoch = int(self.now_fn().timestamp())
+                end_epoch = selection_end_epoch
                 metadata_rows = self.mysql.select(metadata_sql, (app_id, deploy_after, end_epoch, *allowed_types, *content_ids))
                 metadata = {str(item.get("content_id") or "").strip(): item for item in metadata_rows}
                 if fetch_description:
@@ -715,7 +720,7 @@ class MaterialRepository:
                  WHERE d.app_id=%s AND d.release_status=1
                    AND d.deploy_time>%s AND d.deploy_time<=%s{type_sql}
                    AND TRIM(COALESCE(d.content_id,''))<>''
-            """, (app_id, deploy_after, int(self.now_fn().timestamp()), *allowed_types))
+            """, (app_id, deploy_after, selection_end_epoch, *allowed_types))
             scan_content_ids = sorted({str(row["content_id"]) for row in eligible}, key=lambda value: value.encode("utf-8"))
         if complete_content_scan or len(scan_content_ids) >= self.metric_prefilter_min_content_ids:
             for start_at in range(0, len(scan_content_ids), self.metric_prefilter_batch_size):
@@ -743,7 +748,7 @@ class MaterialRepository:
                        AND s.video_duration>=%s AND s.video_duration<=%s
                      ORDER BY s.id
                 """
-                end_epoch = int(self.now_fn().timestamp())
+                end_epoch = selection_end_epoch
                 params: tuple[Any, ...] = (int(config["material_data_source"]), *batch, product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"])
                 add_rows(self.mysql.select(priority_sql, params), expected_content_ids=set(batch))
             if complete_content_scan or len(candidates) >= candidate_limit or (per_drama_limit and len({m.content_id for m in candidates}) >= 20):
@@ -755,7 +760,7 @@ class MaterialRepository:
         while True:
             if self.monotonic_fn() >= deadline:
                 raise RepositoryError("fb_auto_catalog_scan_timeout", "素材目录完整扫描超过整体安全时限，已停止选择", 409)
-            end_epoch = int(self.now_fn().timestamp())
+            end_epoch = selection_end_epoch
             params: tuple[Any, ...] = (int(config["material_data_source"]), product, language, app_id, deploy_after, end_epoch, *allowed_types, app_id, material_rule["duration_min_seconds"], material_rule["duration_max_seconds"], cursor_id, page_size)
             rows = self.mysql.select(keyset_sql, params)
             if not rows: break

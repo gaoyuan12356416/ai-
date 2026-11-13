@@ -4,6 +4,7 @@ Ordinary automatic publishing can fall back to its old order. This reverse
 match follows X hit-drama publishing: language, positive audience income and
 positive theme income under that audience are all required.
 """
+from features.hit_publish import profile_score
 from collections.abc import Mapping
 from copy import deepcopy
 
@@ -75,6 +76,7 @@ def _audit(decision, metadata, content_id, lang):
         profile_source_end=decision.meta.get("end", ""),
         profile_stale=bool(decision.meta.get("stale") or decision.meta.get("refresh_failed")),
         profile_status=decision.profile.get("status", ""), classification=classification,
+        match_score=profile_score(decision, metadata),
         matched_audience=dict(key=audience, name=AUDIENCES[audience], revenue_cents=decision.weights[audience]),
         matched_themes=[dict(key=key, name=THEMES[key], revenue_cents=weights[key]) for key in matched],
         selected_path=[audience, theme], selected_path_names=[AUDIENCES[audience], THEMES[theme]],

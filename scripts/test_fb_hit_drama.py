@@ -21,7 +21,7 @@ class HitDramaTests(unittest.TestCase):
         self.template=self.store.create_template(payload(),self.actor,dict(app_id='1479',product='Dramawave',metric_product='Dramawave',metric_platform=0))
         with self.store.connect() as conn:conn.execute("UPDATE fb_auto_template SET status='enabled'")
         self.pages=SimpleNamespace(list_pages=lambda *a,**k:[PageTarget('6',('6',),'11','1','UTC','en',1),PageTarget('6',('6',),'12','1','UTC','id',1)],legacy_conflicts=lambda *_:[])
-        self.mysql=SimpleNamespace(schema='ads',select=lambda sql,args:[dict(content_id='123',language='en')])
+        self.mysql=SimpleNamespace(schema='ads',select=lambda sql,args:[dict(content_id='123',language='en',deploy_time=1600000000)])
         def material(mid,cid,lang):return MaterialCandidate(mid,cid,'https://media.test/'+mid+'.mp4','m','drama',lang,Decimal(60),Decimal(0),None,Decimal(0),None,'1')
         self.configs=[]
         def candidates(config):
@@ -80,7 +80,7 @@ class HitDramaTests(unittest.TestCase):
         self.assertIn('s.data_source_id IN (%s)',queries[0][0]);self.assertIn('123',queries[0][1])
 
     def test_business_resource_selects_its_language_version_per_page(self):
-        self.mysql.select=lambda *_:[dict(content_id='enAbc',language='en'),dict(content_id='idXyz',language='id')]
+        self.mysql.select=lambda *_:[dict(content_id='enAbc',language='en',deploy_time=1600000000),dict(content_id='idXyz',language='id',deploy_time=1600000000)]
         def candidates(config):
             cid={'en':'enAbc','id':'idXyz'}[config['language']]
             m=MaterialCandidate('2' if cid=='enAbc' else '3',cid,'https://media.test/a.mp4','m','drama',config['language'],Decimal(60),Decimal(0),None,Decimal(0),None,'1')

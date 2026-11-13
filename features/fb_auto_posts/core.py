@@ -760,6 +760,11 @@ class FBAutoPostStore:
                             pre_reason = "fb_auto_no_video_after_drama_cooldown"
                         elif all(item.material_id in excluded for item in candidates):
                             pre_reason = "fb_auto_no_video_after_material_cooldown"
+                if material is not None and hit_drama and hit_drama.get('timing_policy'):
+                    from features.hit_publish import timing, POLICY
+                    if hit_drama['timing_policy'] == POLICY:
+                        selection['hit_publish_timing'] = timing(hit_drama['release_times'], material.content_id, language, now_dt)
+                        task_publish_at = selection['hit_publish_timing']['publish_at_utc']
                 reason = pre_reason or ("" if page.eligible_token_count > 0 else "fb_page_missing_eligible_token")
                 snapshot_status = "eligible" if not reason else "skipped"
                 conn.execute("INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, page.page_id, page.group_id, json.dumps(list(page.group_ids)), page.owner_user_id, page.timezone, language, page.eligible_token_count, snapshot_status, reason))

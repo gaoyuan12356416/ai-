@@ -315,8 +315,8 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "run-now" and "drama_id" in payload:
                 from .hit_drama import publish_drama
                 result = publish_drama(self.runtime, template_id, actor, payload)
-            elif action == "run-now" and "material_id" in payload:
-                from .hit_material import publish_material
+            elif action == "run-now" and ("material_id" in payload or "material_ids" in payload):
+                from .hit_material_batch import publish_material
                 result = publish_material(self.runtime, template_id, actor, payload)
             else:
                 if set(payload) != {"expected_version","operation_id"}: raise ServiceError("invalid_request", "手动执行请求字段无效", 400)
