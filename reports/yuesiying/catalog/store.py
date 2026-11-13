@@ -137,7 +137,7 @@ def _row(record):
 
 class NativeReadError(RuntimeError):
     def __init__(self,exit_code,codes):
-        self.retryable=bool(set(codes)&{'2003','2006','2013'})
+        self.retryable=bool(set(codes)&{'2002','2003','2006','2013','2055'})
         super().__init__('catalog_native_read_failed:exit='+str(exit_code)+',codes='+','.join(codes))
 
 

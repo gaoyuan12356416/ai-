@@ -136,5 +136,11 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaises(store.NativeReadError):list(store.native_json_rows('config','query'))
             self.assertEqual(read.call_count,3)
 
+    def test_only_known_connection_errors_are_retryable(self):
+        for code in ['2002','2003','2006','2013','2055']:
+            self.assertTrue(store.NativeReadError(1,[code]).retryable)
+        for code in ['1045','1064','1146','3024']:
+            self.assertFalse(store.NativeReadError(1,[code]).retryable)
+
 
 if __name__=='__main__':unittest.main()
