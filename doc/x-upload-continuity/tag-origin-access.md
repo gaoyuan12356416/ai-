@@ -7,12 +7,24 @@ owned by `x-post-daily` with mode 0700. Root-only diagnostics concealed this:
 publisher UID. It returned the generic `x_tag_dispatch_failed` before native
 claim creation. Existing manual tasks bypass this Auto-origin read.
 
-Deploy `scripts/repair_x_tag_origin_access.py apply --directory <private-record>`
-from an exact pushed GitHub checkout. It backs up ACLs, grants only directory
-traversal and database read access to the publisher, then tests SQLite `mode=ro`
-as that user. No restart or scheduler interruption is required. Roll back with
-`python3 <same-checkout>/scripts/repair_x_tag_origin_access.py rollback --directory <private-record>`.
-Never restore an old business database to undo this configuration fix.
+The Auto database also uses WAL: directory traversal alone is insufficient
+when SQLite needs shared-memory sidecars. The tested ACL approach was reverted.
+The publisher now uses an authenticated `/internal/x-tag/hit-origin` endpoint
+on the existing internal Tag gateway. It executes fixed read-only SQL as the
+Auto database owner with a minimal environment. No database or directory access
+is granted to the publisher. Frozen task/account/material/time checks are
+unchanged. Errors retain their codes; Tag bridge logs include only exception
+types and frame locations, never values or source lines.
+
+From the verified pushed checkout, run
+`scripts/deploy_x_tag_origin_broker.py prepare --directory <deployment>`, then
+`activate --directory <deployment>`. Only four files are overlaid on the live
+combination; concurrent release hashes are checked. It pauses the two local
+Tag intake triggers, fences new Tag claims, lets all active Tag jobs finish,
+switches Tag publisher and gateway, then restores triggers after readiness.
+Main X, coordinator, API and other channels continue. Rollback is
+`python3 <same-checkout>/scripts/deploy_x_tag_origin_broker.py rollback --directory <deployment>`;
+it follows the same safe drain. Never restore an old database over live facts.
 
 For explicitly authorized recovered jobs that failed before native admission,
 `scripts/resume_x_unentered_recovery.py plan --scope <private-scope> --output <plan>`
