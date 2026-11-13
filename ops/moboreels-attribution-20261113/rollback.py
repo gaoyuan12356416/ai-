@@ -6,19 +6,28 @@ from pathlib import Path
 import sys
 
 
+def load_deployer(manifest, deployer_sha=None):
+    # Tool fixes may be newer than the immutable business deployment manifest.
+    # Always load the helper beside this GitHub release's rollback script.
+    tool_release = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("moboreels_deploy", tool_release / "ops/moboreels-attribution-20261113/deploy.py")
+    deploy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(deploy)
+    deploy.verify(tool_release, deployer_sha or manifest["commit"])
+    deploy.verify(Path(manifest["release"]), manifest["commit"])
+    return deploy
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("deployment", type=Path)
     parser.add_argument("phase", choices=("main", "x", "fb", "tt", "tt_auto", "core-ui"))
     parser.add_argument("--checks", required=True, type=Path)
+    parser.add_argument("--deployer-sha", help="Exact tool-release SHA; defaults to the business manifest commit")
     args = parser.parse_args()
     deployment = args.deployment.resolve()
     manifest = json.loads((deployment / "manifest.json").read_text(encoding="utf-8"))
-    release = Path(manifest["release"])
-    spec = importlib.util.spec_from_file_location("moboreels_deploy", release / "ops/moboreels-attribution-20261113/deploy.py")
-    deploy = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(deploy)
-    deploy.verify(release, manifest["commit"])
+    deploy = load_deployer(manifest, args.deployer_sha)
     deploy.require(deployment.parent == (deploy.DATA / "deployments").resolve(), "Unexpected deployment")
     checks = json.loads(args.checks.read_text(encoding="utf-8"))
     deploy.require(checks.get("commit") == manifest["commit"], "Checks commit differs")

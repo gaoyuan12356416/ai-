@@ -5,16 +5,41 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("moboreels_deploy", ROOT / "ops/moboreels-attribution-20261113/deploy.py")
 deploy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(deploy)
+rollback_spec = importlib.util.spec_from_file_location("moboreels_rollback", ROOT / "ops/moboreels-attribution-20261113/rollback.py")
+rollback = importlib.util.module_from_spec(rollback_spec)
+rollback_spec.loader.exec_module(rollback)
 
 
 class DeploymentSafetyTests(unittest.TestCase):
+    def test_rollback_loads_current_tool_release_and_verifies_both_versions(self):
+        manifest = {"commit": "b" * 40, "release": str(ROOT / "original-business-release")}
+        helper = SimpleNamespace(verify=Mock())
+        module_spec = SimpleNamespace(loader=SimpleNamespace(exec_module=Mock()))
+        with patch.object(rollback.importlib.util, "spec_from_file_location", return_value=module_spec) as locate, \
+                patch.object(rollback.importlib.util, "module_from_spec", return_value=helper):
+            self.assertIs(rollback.load_deployer(manifest, "a" * 40), helper)
+        locate.assert_called_once_with("moboreels_deploy", ROOT / "ops/moboreels-attribution-20261113/deploy.py")
+        self.assertEqual(helper.verify.call_args_list, [call(ROOT, "a" * 40),
+                                                       call(Path(manifest["release"]), "b" * 40)])
+        self.assertEqual(manifest, {"commit": "b" * 40, "release": str(ROOT / "original-business-release")})
+
+    def test_rollback_deployer_sha_defaults_to_business_commit(self):
+        manifest = {"commit": "b" * 40, "release": str(ROOT)}
+        helper = SimpleNamespace(verify=Mock())
+        module_spec = SimpleNamespace(loader=SimpleNamespace(exec_module=Mock()))
+        with patch.object(rollback.importlib.util, "spec_from_file_location", return_value=module_spec), \
+                patch.object(rollback.importlib.util, "module_from_spec", return_value=helper):
+            rollback.load_deployer(manifest)
+        self.assertEqual(helper.verify.call_args_list, [call(ROOT, "b" * 40), call(ROOT, "b" * 40)])
+
     def test_cancelled_fb_preparation_only_blocks_with_an_active_lease(self):
         checks = json.loads((ROOT / 'ops/moboreels-attribution-20261113/activation-checks.template.json').read_text())
         query = next(row['sql'] for row in checks['phases']['fb']['checks'] if row['name']=='fb_video_task_busy')
