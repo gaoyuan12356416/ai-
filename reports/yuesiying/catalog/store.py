@@ -1,0 +1,218 @@
+"""Immutable material catalog generations; all verification uses the read replica."""
+import contextlib
+import datetime as dt
+from decimal import Decimal
+import hashlib
+import json
+from pathlib import Path
+import re
+import time
+
+FIELDS = {'id', 'name', 'language', 'data_source_id', 'video_duration', 'created_at'}
+GEN = 'ads_ai.report_material_catalog_generation'
+ROWS = 'ads_ai.report_material_catalog_row'
+POINTER = 'ads_ai.report_material_catalog_pointer'
+PROJECTION = 'source_ordinal,material_id,content_id,language,name,video_duration,source_created_at'
+
+
+def require(value, message):
+    if not value:
+        raise ValueError(message)
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def normalize(row):
+    require(set(row) == FIELDS, 'catalog_source_fields_changed')
+    require(isinstance(row['name'], str) and isinstance(row['language'], str), 'invalid_name_or_language')
+    material = int(row['id'])
+    duration = Decimal(str(row['video_duration'] or 0))
+    require(material > 0 and duration.is_finite(), 'invalid_material_or_duration')
+    # These are the exact conversions made by the existing localization builder.
+    result = {'id': material, 'data_source_id': str(row['data_source_id']),
+              'name': row['name'], 'language': row['language'],
+              'video_duration': format(duration.normalize(), 'f'), 'created_at': str(row['created_at'])}
+    require(len(result['data_source_id']) <= 128 and len(result['language']) <= 32
+            and len(result['created_at']) <= 40 and len(result['video_duration']) <= 64, 'catalog_field_too_long')
+    return result
+
+
+def iter_json_array(path, chunk_size=1024 * 1024):
+    """Stream an ordinary JSON array without retaining a full library.json."""
+    decoder = json.JSONDecoder()
+    with Path(path).open('r', encoding='utf-8-sig') as stream:
+        buffer = ''; ended = False; started = False; expect_value = True; seen_value = False
+        while True:
+            if not buffer.strip() and not ended:
+                piece = stream.read(chunk_size); ended = not piece; buffer += piece
+            buffer = buffer.lstrip()
+            if not started:
+                require(buffer.startswith('['), 'catalog_array_required')
+                buffer = buffer[1:]; started = True
+                continue
+            if buffer.startswith(']'):
+                require(not (expect_value and seen_value), 'trailing_catalog_separator')
+                require(not buffer[1:].strip() and not stream.read().strip(), 'trailing_catalog_data')
+                return
+            if not expect_value:
+                require(buffer.startswith(','), 'catalog_separator_required')
+                buffer = buffer[1:].lstrip(); expect_value = True
+            try:
+                value, offset = decoder.raw_decode(buffer)
+            except json.JSONDecodeError:
+                require(not ended, 'incomplete_catalog_json')
+                piece = stream.read(chunk_size); ended = not piece; buffer += piece
+                continue
+            require(isinstance(value, dict), 'catalog_row_object_required')
+            yield value
+            buffer = buffer[offset:]; expect_value = False; seen_value = True
+
+
+def file_sha(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def connect(config, writer=False, streaming=False, source=False):
+    import pymysql
+    settings = json.loads(Path(config).read_text())['mysql']
+    require(settings['host'] == '101.32.56.53', 'unexpected_database_host')
+    connection = pymysql.connect(host=settings['host'], port=63353 if writer else 63350,
+        user=settings['user'], password=settings['password'], database='kunlunads_dev' if source else 'ads_ai',
+        charset='utf8mb4', connect_timeout=5, read_timeout=60, write_timeout=60,
+        cursorclass=pymysql.cursors.SSDictCursor if streaming else pymysql.cursors.DictCursor,
+        autocommit=False)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT DATABASE() db,@@read_only ro')
+            identity = cursor.fetchone()
+        require(identity['db'] == ('kunlunads_dev' if source else 'ads_ai')
+                and int(identity['ro']) == (0 if writer else 1), 'database_role_mismatch')
+        return connection
+    except BaseException:
+        connection.close(); raise
+
+
+def metadata(config, generation):
+    require(re.fullmatch('[0-9a-f]{64}', generation or ''), 'invalid_catalog_generation')
+    with contextlib.closing(connect(config)) as db, db.cursor() as cursor:
+        cursor.execute('SELECT * FROM '+GEN+' WHERE generation_id=%s', (generation,))
+        return cursor.fetchone()
+
+
+def _row(record):
+    return {'id': int(record['material_id']), 'data_source_id': record['content_id'],
+            'name': record['name'], 'language': record['language'],
+            'video_duration': record['video_duration'], 'created_at': record['source_created_at']}
+
+
+def verify(config, generation, expected_count, expected_digest):
+    # A bounded poll tolerates replication lag without querying the writer.
+    deadline = time.monotonic() + 60
+    while True:
+        with contextlib.closing(connect(config)) as db, db.cursor() as cursor:
+            cursor.execute('SELECT COUNT(*) n FROM '+ROWS+' WHERE generation_id=%s', (generation,))
+            count = int(cursor.fetchone()['n'])
+        if count == expected_count:
+            break
+        require(time.monotonic() < deadline, 'catalog_replica_not_caught_up')
+        time.sleep(1)
+    digest = hashlib.sha256(); count = 0
+    with contextlib.closing(connect(config, streaming=True)) as db, db.cursor() as cursor:
+        cursor.execute('SELECT '+PROJECTION+' FROM '+ROWS+' WHERE generation_id=%s ORDER BY source_ordinal', (generation,))
+        for record in cursor:
+            count += 1
+            require(record['source_ordinal'] == count, 'catalog_ordinal_gap')
+            digest.update((canonical(_row(record))+'\n').encode())
+    require(count == expected_count and digest.hexdigest() == expected_digest, 'catalog_full_readback_mismatch')
+    return {'rows': count, 'row_sha256': digest.hexdigest()}
+
+
+def import_rows(config, generation, source_hash, kind, generated_at, source_bytes, values):
+    prior = metadata(config, generation)
+    if prior:
+        require(prior['status'] == 'verified', 'unfinished_catalog_generation_requires_review')
+        return {'generation_id': generation, 'rows': int(prior['row_count']), 'row_sha256': prior['row_sha256'], 'reused': True}
+    digest = hashlib.sha256(); count = 0; batch = []
+    with contextlib.closing(connect(config, writer=True)) as db:
+        with db.cursor() as cursor:
+            cursor.execute('INSERT INTO '+GEN+' (generation_id,status,source_sha256,source_kind,generated_at,source_bytes) VALUES(%s,%s,%s,%s,%s,%s)',
+                (generation,'staging',source_hash,kind,generated_at,source_bytes)); db.commit()
+            for raw in values:
+                row = normalize(raw); count += 1
+                digest.update((canonical(row)+'\n').encode())
+                batch.append((generation,count,row['id'],row['data_source_id'],row['language'],row['name'],row['video_duration'],row['created_at']))
+                if len(batch) >= 1000:
+                    cursor.executemany('INSERT INTO '+ROWS+' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',batch); db.commit(); batch.clear()
+            if batch:
+                cursor.executemany('INSERT INTO '+ROWS+' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',batch); db.commit()
+            require(count > 0, 'empty_catalog_requires_review')
+        checked = verify(config,generation,count,digest.hexdigest())
+        with db.cursor() as cursor:
+            cursor.execute('UPDATE '+GEN+" SET status='verified',row_count=%s,row_sha256=%s,verified_at=UTC_TIMESTAMP(6) WHERE generation_id=%s AND status='staging' LIMIT 1",
+                (count,digest.hexdigest(),generation)); require(cursor.rowcount==1,'catalog_state_changed'); db.commit()
+    return {'generation_id':generation,**checked,'reused':False}
+
+
+def import_json(config, path, generated_at):
+    path = Path(path); checksum = file_sha(path)
+    def stable_values():
+        yield from iter_json_array(path)
+        require(file_sha(path)==checksum,'catalog_source_changed_during_import')
+    return import_rows(config,checksum,checksum,'legacy-json',generated_at,path.stat().st_size,stable_values())
+
+
+def activate(config, report_key, generation):
+    require(re.fullmatch('[A-Za-z0-9_.-]{1,80}',report_key), 'invalid_report_key')
+    record = metadata(config,generation)
+    require(record and record['status']=='verified','catalog_not_verified')
+    with contextlib.closing(connect(config,writer=True)) as db, db.cursor() as cursor:
+        cursor.execute('INSERT INTO '+POINTER+' (report_key,generation_id) VALUES(%s,%s) ON DUPLICATE KEY UPDATE '
+            'previous_generation_id=IF(generation_id<>VALUES(generation_id),generation_id,previous_generation_id),'
+            'generation_id=VALUES(generation_id),updated_at=UTC_TIMESTAMP(6)',(report_key,generation));db.commit()
+
+
+def scoped_rows(config, generation, content_ids):
+    record = metadata(config,generation)
+    require(record and record['status']=='verified','catalog_not_verified')
+    result=[]; ids=sorted(set(map(str,content_ids)))
+    with contextlib.closing(connect(config)) as db, db.cursor() as cursor:
+        for offset in range(0,len(ids),200):
+            chunk=ids[offset:offset+200];last_content='';last_ordinal=0
+            while True:
+                cursor.execute('SELECT '+PROJECTION+' FROM '+ROWS+' FORCE INDEX(generation_content) '
+                    'WHERE generation_id=%s AND content_id IN ('+','.join(['%s']*len(chunk))+') '
+                    'AND (content_id>%s OR (content_id=%s AND source_ordinal>%s)) '
+                    'ORDER BY content_id,source_ordinal LIMIT 2000',
+                    [generation,*chunk,last_content,last_content,last_ordinal])
+                page=cursor.fetchall()
+                if not page:break
+                result.extend((int(r['source_ordinal']),_row(r)) for r in page)
+                last_content,last_ordinal=page[-1]['content_id'],page[-1]['source_ordinal']
+    result.sort(key=lambda item:item[0])
+    return [row for _,row in result]
+
+
+def source_rows(config, sql):
+    require(sql.lstrip().upper().startswith('SELECT ') and ';' not in sql
+            and re.search(r'\bkunlunads_dev\s*\.\s*ads_custom_source\b',sql,re.I), 'approved_catalog_source_select_required')
+    after=0
+    with contextlib.closing(connect(config,source=True)) as db, db.cursor() as cursor:
+        while True:
+            cursor.execute('SELECT * FROM ('+sql+') catalog_source WHERE id>%s ORDER BY id LIMIT 2000',(after,))
+            page=cursor.fetchall()
+            if not page:return
+            for row in page:yield row
+            next_after=int(page[-1]['id']);require(next_after>after,'catalog_source_cursor_stalled');after=next_after
+
+
+def refresh_source(config, sql_path, generated_at):
+    sql=Path(sql_path).read_text().strip().rstrip(';')
+    checksum=hashlib.sha256(sql.encode()).hexdigest()
+    generation=hashlib.sha256((checksum+'\n'+generated_at).encode()).hexdigest()
+    return import_rows(config,generation,checksum,'readonly-sql',generated_at,0,source_rows(config,sql))
