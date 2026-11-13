@@ -213,7 +213,7 @@ def main():
         if args.action=='apply' and release.run('systemctl','show','fb-auto-post-service.service','-p','MainPID','--value')=='0':
             activate_stopped(folder)
         else:
-            release.activate('fb', folder, args.action == 'rollback')
+            release.activate('fb', folder, args.action == 'rollback', native_wait_seconds=300)
         if args.action == 'apply':
             info = json.loads((folder / 'manifest.json').read_text())
             verify(Path(info['candidate']), folder)

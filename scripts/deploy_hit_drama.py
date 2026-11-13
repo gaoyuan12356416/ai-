@@ -116,7 +116,7 @@ def verify_current(info,rollback):
     for name,row in info['files'].items():assert sha(current/name)==row['after' if rollback else 'before'],'live_file_changed:'+name
     return current
 
-def activate(platform,folder,rollback=False):
+def activate(platform,folder,rollback=False,*,native_wait_seconds=55):
     info=json.loads((folder/'manifest.json').read_text());assert info['platform']==platform
     if not rollback and info['status']=='prepared' and str(settings(platform)[0].resolve())==info['candidate']:
         for name,row in info['files'].items():assert sha(Path(info['candidate'])/name)==row['after'],'candidate_changed'
@@ -140,7 +140,7 @@ def activate(platform,folder,rollback=False):
             fb.fb_enabled(False)
             for unit,state in states.items():
                 if state=='active':fb.run(['systemctl','stop',unit])
-            deadline=time.monotonic()+55
+            deadline=time.monotonic()+max(1,min(int(native_wait_seconds),1200))
             while fb.native_active():
                 assert time.monotonic()<deadline,'active_fb_work_preserved_retry_later';time.sleep(.5)
             manifest=dict(lanes=dict(fb=dict(previous_root=str(current.resolve()),candidate=destination,files={k:dict(before=v['after' if rollback else 'before'],after=v['before' if rollback else 'after']) for k,v in info['files'].items() if (Path(destination)/k).is_file()})))
