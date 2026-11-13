@@ -80,13 +80,16 @@ def bind(workdir,config,generation):
 
 def validate_legacy(workdir,config,generation):
     root=Path(workdir);catalog,originals,contents=inputs(root)
-    old=[normalize(row) for row in iter_json_array(root/'library.json') if str(row['data_source_id']) in contents]
+    old=[row for row in iter_json_array(root/'library.json') if str(row['data_source_id']) in contents]
     new=scoped_rows(config,generation,contents)
-    require(old==new,'catalog_filtered_rows_or_order_changed')
+    require(len(old)==len(new) and all(normalize(before)==after for before,after in zip(old,new)),
+            'catalog_filtered_rows_or_order_changed')
+    # Compare the real raw legacy input against stored values, so conversions
+    # cannot hide a change in material ID spelling or other consumer behavior.
     expected,actual=select(catalog,originals,old),select(catalog,originals,new)
     require(expected==actual,'localization_selection_changed')
     return {'generation_id':generation,'content_ids':len(contents),'matched_rows':len(old),
             'kept_materials':sum(map(len,expected['kept'].values())),'potential_materials':len(expected['potential']),
-            'ordered_rows_sha256':hashlib.sha256(canonical(old).encode()).hexdigest(),
+            'ordered_rows_sha256':hashlib.sha256(canonical(new).encode()).hexdigest(),
             'consumer_result_sha256':hashlib.sha256(canonical(expected).encode()).hexdigest(),
             'material_ids_and_order_equal':True,'key_fields_equal':True}

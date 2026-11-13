@@ -86,5 +86,13 @@ class CatalogTests(unittest.TestCase):
             actual=store.scoped_rows('config','a'*64,['source'])
         self.assertEqual([row['id'] for row in actual],[2])
 
+    def test_legacy_validation_compares_raw_consumer_behavior(self):
+        values=[row('001')]
+        (self.root/'library.json').write_text(json.dumps(values))
+        with patch.object(consumer,'inputs',return_value=({'source':{('123','en')}},{'123':{'001'}},{'source'})), \
+                patch.object(consumer,'scoped_rows',return_value=[store.normalize(values[0])]):
+            with self.assertRaisesRegex(ValueError,'localization_selection_changed'):
+                consumer.validate_legacy(self.root,'config','a'*64)
+
 
 if __name__=='__main__':unittest.main()
