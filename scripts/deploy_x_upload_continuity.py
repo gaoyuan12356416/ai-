@@ -129,13 +129,19 @@ def prepare(manifest, folder):
     emit(state='prepared', revision=revision, directory=str(folder))
 
 
-def activate(folder, rollback=False):
+def activate(folder, rollback=False, resume=False):
     record = json.loads((folder/'record.json').read_text())
     if not rollback and record['state'] != 'prepared':
         raise RuntimeError('deployment_not_prepared')
     # Bootstrap is needed only to activate the first coordinator that knows
     # the systemd admission hold. Every live claim still heartbeats/completes.
-    config_pause(record, folder)
+    if resume:
+        with contextlib.closing(sqlite3.connect(DB,timeout=30)) as c:
+            cfg=json.loads(c.execute('SELECT config_json FROM pipeline_config WHERE id=1').fetchone()[0])
+        if cfg['enabled_channels'] != [] or not record.get('enabled_channels_before'):
+            raise RuntimeError('resume_requires_original_admission_pause')
+    else:
+        config_pause(record, folder)
     previous = None
     while True:
         jobs = pending('pipeline-coordinator.service')
@@ -160,6 +166,12 @@ def activate(folder, rollback=False):
     # worker restarts, resets, lock expiry shortcuts, or external write retries.
     for entry in record['lanes']:
         pointer = Path(entry['pointer'])
+        if resume and str(pointer.resolve()) == entry['candidate']:
+            pid=subprocess.check_output(['systemctl','show',entry['unit'],'-p','MainPID','--value']).decode().strip()
+            if not pid.isdigit() or int(pid)<2 or (Path('/proc')/pid/'cwd').resolve() != Path(entry['candidate']).resolve():
+                raise RuntimeError('candidate_pointer_not_running:' + entry['lane'])
+            emit(already_running=entry['unit'])
+            continue
         expected = entry['candidate'] if rollback else entry['previous']
         if str(pointer.resolve()) != expected:
             raise RuntimeError('concurrent_release_change:' + entry['lane'])
@@ -187,7 +199,22 @@ def activate(folder, rollback=False):
         run('python3','/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py',
             'restore','--baseline',str(folder/('schedulers-before-'+lane+'.json')),
             '--wait-seconds','25','--output',str(folder/('schedulers-after-'+lane+'.json')))
+    # A separately observed native intake runner may need its new triggers
+    # paused while existing calls finish. Restore only the recorded active
+    # timer/path triggers; never directly start its publishing oneshot.
+    triggers=folder/'tag-triggers-before.json'
+    if triggers.exists():
+        before=json.loads(triggers.read_text())['states'];after={}
+        for unit,original in before.items():
+            if unit not in ('x-tag-auto-runner.timer','x-tag-auto-runner.path'):
+                raise RuntimeError('unexpected_intake_trigger')
+            enabled=subprocess.check_output(['systemctl','show',unit,'-p','UnitFileState','--value']).decode().strip()
+            if original['ActiveState']=='active' and enabled==original['UnitFileState']:
+                run('systemctl','start',unit)
+            after[unit]=subprocess.check_output(['systemctl','show',unit,'-p','ActiveState','--value']).decode().strip()
+        save(folder/'tag-triggers-after.json',after)
     record['state'] = 'rolled_back' if rollback else 'active'
+    record['controller_revision']=subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD']).decode().strip()
     record['finished_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
     save(folder/'record.json', record)
     emit(state=record['state'])
@@ -195,8 +222,8 @@ def activate(folder, rollback=False):
 
 if __name__ == '__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action',choices=('prepare','activate','rollback'))
+    p.add_argument('action',choices=('prepare','activate','resume','rollback'))
     p.add_argument('--directory',required=True);p.add_argument('--manifest')
     a=p.parse_args()
     if a.action=='prepare': prepare(json.loads(Path(a.manifest).read_text()),Path(a.directory))
-    else: activate(Path(a.directory),rollback=a.action=='rollback')
+    else: activate(Path(a.directory),rollback=a.action=='rollback',resume=a.action=='resume')
