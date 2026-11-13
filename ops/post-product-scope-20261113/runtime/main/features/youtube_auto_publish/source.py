@@ -61,13 +61,13 @@ class MaterialSource:
         if material_id:
             if re.fullmatch(r'[1-9][0-9]{0,18}', material_id) is None:
                 raise WorkflowError('invalid_material_id','素材标识无效')
-            condition += " AND CAST(pool.id AS CHAR)='%s'" % material_id
+            condition += " AND pool.id='%s'" % material_id
         if search:
             literal=str(search).encode('utf-8').hex()
             condition += " AND LOCATE(LOWER(CONVERT(0x%s USING utf8mb4)),LOWER(CONCAT(CAST(pool.id AS CHAR),' ',COALESCE(pool.name,''))))>0" % literal
         if uploader_id:
             condition += " AND CAST(pool.uploader_id AS CHAR)='%s'" % uploader_id
-        query = "SELECT HEX(JSON_OBJECT(%s)) FROM (%s) AS pool WHERE %s ORDER BY CAST(pool.id AS UNSIGNED) DESC LIMIT 100" % (projection,sql,condition)
+        query = "SELECT HEX(JSON_OBJECT(%s)) FROM (%s) AS pool WHERE %s ORDER BY pool.id DESC LIMIT 100" % (projection,sql,condition)
         try:
             rows = self.query_runner(query)
             items = []

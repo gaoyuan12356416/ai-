@@ -68,7 +68,7 @@ elif args.lane=='fb':
     from features.fb_video_publish.sources import SourceRepository
     source=SourceRepository(None,SimpleNamespace(mysql=sql))
     result=source.resolve_materials(args.material,need_desc=True,enforce_blacklist=False,manual=True)
-    print(json.dumps({'lane':'fb-source','items':[{k:v for k,v in row.items() if k in ('material_id','content_id','language','drama_name')} for row in result['items']], 'errors':result['errors']},ensure_ascii=False,default=str))
+    print(json.dumps({'lane':'fb-source','items':[{k:v for k,v in row.items() if k in ('material_id','content_id','language','drama_name')} for row in (result['items'].values() if isinstance(result['items'],dict) else result['items'])], 'errors':result['errors']},ensure_ascii=False,default=str))
     assert len(result['items'])==len(args.material),result['errors']
 else:
     from features.tt_posts.service import DramawaveMaterialResolver
