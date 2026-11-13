@@ -213,7 +213,7 @@ def rollback(folder, ui_only=False):
     # Older execution code cannot honor the new frozen future/material policy.
     # Keep its compatibility until these exact new batches are terminal.
     queries = {
-        'x-auto': "SELECT COUNT(*) FROM x_auto_task t JOIN x_auto_run r ON r.id=t.run_id WHERE r.blacklist_snapshot_json LIKE '%profile_one_to_one_release_minus_30m_v1%' AND t.status NOT IN ('published','failed','no_candidate','cancelled','skipped')",
+        'x-auto': "SELECT COUNT(*) FROM x_auto_task t JOIN x_auto_run r ON r.id=t.run_id WHERE r.blacklist_snapshot_json LIKE '%profile_one_to_one_release_minus_30m_v1%' AND t.status NOT IN ('published','failed','no_candidate','canceled','cancelled','skipped')",
         'fb': "SELECT COUNT(*) FROM fb_auto_task t JOIN fb_auto_run r ON r.id=t.run_id WHERE r.config_json LIKE '%profile_one_to_one_release_minus_30m_v1%' AND t.status NOT IN ('published','failed','skipped','cancelled')"}
     for name, query in queries.items():
         with closing(sqlite3.connect(DATABASES[name].as_uri()+'?mode=ro',uri=True)) as conn:
