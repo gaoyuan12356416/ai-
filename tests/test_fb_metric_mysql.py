@@ -48,16 +48,31 @@ class MetricTests(unittest.TestCase):
             db = sqlite3.connect(path)
             db.execute("CREATE TABLE fb_auto_metric_generation(id INTEGER,generation_key TEXT,row_count INTEGER,status TEXT)")
             db.execute("CREATE TABLE fb_auto_metric_active_pointer(platform INTEGER,metric_date TEXT,product TEXT,generation_id INTEGER)")
+            db.execute("CREATE TABLE fb_auto_metric_daily(generation_id INTEGER,content_id TEXT,material_id TEXT,spend TEXT,af_revenue0 TEXT)")
             db.execute("INSERT INTO fb_auto_metric_generation VALUES(1,'old',4,'ready')")
-            db.execute("INSERT INTO fb_auto_metric_active_pointer VALUES(0,'2026-11-12','Dramawave',1)");db.commit()
+            db.execute("INSERT INTO fb_auto_metric_active_pointer VALUES(0,'2026-11-12','Dramawave',1)")
+            sums = {}
+            for gid, count in ((1, 4), (2, 5)):
+                digest = hashlib.sha256()
+                for index in range(count):
+                    row = {'content_id':'A'+str(index),'material_id':'1','spend':'1','af_revenue0':'2'}
+                    digest_row(digest, row)
+                    if gid == 1: db.execute("INSERT INTO fb_auto_metric_daily VALUES(?,?,?,?,?)", (gid, *row.values()))
+                sums[gid] = digest.hexdigest()
+            db.commit()
             class Reader:
                 def query(self, _):
-                    return [{'kind':'generation','id':1,'generation_key':'old','row_count':4},
-                            {'kind':'generation','id':2,'generation_key':'new','row_count':5},
+                    return [{'kind':'generation','id':1,'generation_key':'old','row_count':4,'storage_checksum':sums[1]},
+                            {'kind':'generation','id':2,'generation_key':'new','row_count':5,'storage_checksum':sums[2]},
                             {'kind':'pointer','platform':0,'metric_date':'2026-11-12','product':'Dramawave','generation_id':2}]
             with self.assertRaisesRegex(AssertionError, 'restore_ads_ai_metric_delta'):
                 validate_rollback_snapshot(path, Reader())
             db.execute("INSERT INTO fb_auto_metric_generation VALUES(2,'new',5,'ready')");db.commit()
+            for index in range(5): db.execute("INSERT INTO fb_auto_metric_daily VALUES(2,?,'1','1','2')", ('A'+str(index),))
+            db.execute("UPDATE fb_auto_metric_daily SET spend='999' WHERE generation_id=2 AND content_id='A0'");db.commit()
+            with self.assertRaisesRegex(AssertionError, 'restored_metric_row_checksum_mismatch'):
+                validate_rollback_snapshot(path, Reader())
+            db.execute("UPDATE fb_auto_metric_daily SET spend='1' WHERE generation_id=2 AND content_id='A0'");db.commit()
             with self.assertRaisesRegex(AssertionError, 'restore_current_metric_pointers'):
                 validate_rollback_snapshot(path, Reader())
             db.execute("UPDATE fb_auto_metric_active_pointer SET generation_id=2");db.commit();db.close()

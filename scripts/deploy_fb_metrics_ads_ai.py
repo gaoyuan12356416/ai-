@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Overlay only the FB metric adapter; preserve the deployed publisher and its ledgers."""
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -42,19 +43,24 @@ def write_metric_settings(settings):
 def validate_rollback_snapshot(path, reader=None):
     # The old archive predates new MySQL generations. It is never sufficient by
     # itself once a refresh has run, even if the same calendar dates exist.
-    from features.fb_auto_posts.metric_mysql import GatedMetricReader, config_from_file
+    from features.fb_auto_posts.metric_mysql import GatedMetricReader, canonical_row, config_from_file, digest_row
     if reader is None:
         reader = GatedMetricReader(config_from_file("/etc/codex-private-storage-archive.json"))
     rows = reader.query([
-        "SELECT HEX(JSON_OBJECT('kind','generation','id',id,'generation_key',generation_key,'row_count',row_count)) FROM ads_ai.fb_auto_metric_generation WHERE status='ready'",
+        "SELECT HEX(JSON_OBJECT('kind','generation','id',id,'generation_key',generation_key,'row_count',row_count,'storage_checksum',storage_checksum)) FROM ads_ai.fb_auto_metric_generation WHERE status='ready'",
         "SELECT HEX(JSON_OBJECT('kind','pointer','platform',platform,'metric_date',metric_date,'product',product,'generation_id',generation_id)) FROM ads_ai.fb_auto_metric_active_pointer"])
     db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    db.row_factory = sqlite3.Row
     try:
         db.execute("PRAGMA query_only=ON"); db.execute("BEGIN")
         existing = {row[0]: (row[1], row[2]) for row in db.execute("SELECT id,generation_key,row_count FROM fb_auto_metric_generation WHERE status='ready'")}
         for row in rows:
             if row['kind'] == 'generation':
                 assert existing.get(row['id']) == (row['generation_key'], row['row_count']), "restore_ads_ai_metric_delta_before_rollback"
+                digest, count = hashlib.sha256(), 0
+                for raw in db.execute("SELECT content_id,material_id,spend,af_revenue0 FROM fb_auto_metric_daily WHERE generation_id=? ORDER BY content_id,LENGTH(material_id),material_id", (row['id'],)):
+                    digest_row(digest, canonical_row(raw)); count += 1
+                assert count == row['row_count'] and digest.hexdigest() == row['storage_checksum'], "restored_metric_row_checksum_mismatch"
         expected = {(row['platform'], row['metric_date'], row['product']): row['generation_id'] for row in rows if row['kind'] == 'pointer'}
         actual = {(row[0], row[1], row[2]): row[3] for row in db.execute("SELECT platform,metric_date,product,generation_id FROM fb_auto_metric_active_pointer")}
         assert actual == expected, "restore_current_metric_pointers_before_rollback"

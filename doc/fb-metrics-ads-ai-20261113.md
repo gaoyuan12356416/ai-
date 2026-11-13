@@ -64,8 +64,9 @@ restore all post-cutover MySQL generations, preserving their integer IDs and
 generation keys, and synchronize the current day pointers. Verify those restored
 rows and all active/history references against MySQL. Merely refreshing dates
 would create different identities and is not a valid restore. The rollback tool
-refuses a snapshot missing ready MySQL generation identities/counts or pointing
-at older day versions. Run
+refuses a snapshot missing ready MySQL generation identities/counts, whose actual
+rows do not match the verified MySQL exact-decimal checksum, or pointing at older
+day versions. Run
 `scripts/deploy_fb_metrics_ads_ai.py rollback --folder DEPLOYMENT` to restore the
 previous code pointer/environment and remove the metric unit overrides. Restore
 the saved metric timer states. Never restore the publication operational database.
