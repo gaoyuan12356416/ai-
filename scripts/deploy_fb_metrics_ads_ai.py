@@ -21,6 +21,9 @@ ENV = Path("/etc/fb-auto-post.env")
 BROKER = Path("/etc/systemd/system/fb-auto-metric-broker.service")
 TIMERS = ["fb-auto-post-metric-" + name + ".timer" for name in ("hourly", "repair")]
 METRIC_ENV_KEYS = ("FB_AUTO_METRIC_STORAGE=", "FB_AUTO_METRIC_BROKER_PORT=")
+# Reviewed deployed Moboreels overlay (its two unrelated service.py hunks are
+# retained). The metric runner and aggregation source still match BASE exactly.
+LIVE_SERVICE_BASELINES = {"a2c7a3fafc49e3d6911006d256e084d0719871ec6c02f69d231e7fd9f139c028"}
 
 
 def metric_settings(text):
@@ -47,12 +50,20 @@ def stage(folder):
     for name in FILES:
         live, target = previous / name, candidate / name
         old = subprocess.run(["git", "-C", str(SOURCE), "show", BASE + ":" + name], capture_output=True)
+        content = (SOURCE / name).read_bytes()
         if old.returncode == 0:
-            assert live.read_bytes().replace(b"\r\n", b"\n") == old.stdout, "baseline_changed:" + name
+            actual = live.read_bytes().replace(b"\r\n", b"\n")
+            if name == "features/fb_auto_posts/service.py":
+                assert actual == old.stdout or fb.digest(live) in LIVE_SERVICE_BASELINES, "service_baseline_changed"
+                anchor = b"    metric_store = FBAutoPostStore(metric_path)\n"
+                assert actual.count(anchor) == 1, "metric_factory_anchor_changed"
+                content = actual.replace(anchor, b"    from .metric_mysql import metric_store_from_env\n    metric_store = metric_store_from_env(env)\n")
+            else:
+                assert actual == old.stdout, "baseline_changed:" + name
         else:
             assert not live.exists(), "new_file_collision:" + name
         target.parent.mkdir(parents=True, exist_ok=True)
-        release.atomic(target, (SOURCE / name).read_bytes())
+        release.atomic(target, content)
         target.chmod(0o644)
         manifest["lanes"]["fb"]["files"][name] = {"before": fb.digest(live) if live.exists() else "", "after": fb.digest(target)}
     shutil.copy2(ENV, folder / "fb-auto-post.env.before"); (folder / "fb-auto-post.env.before").chmod(0o600)

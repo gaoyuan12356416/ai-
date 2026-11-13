@@ -47,6 +47,10 @@ Deployment sequence:
 4. Apply the staged overlay. It preserves all unrelated runtime files, uses the
    existing scoped FB owner drain, and verifies/restores FB scheduler dependencies.
    The metric broker is separate; the main AI API is not restarted.
+   Staging can preserve the reviewed concurrent Moboreels service overlay by
+   changing only the metric factory anchor in its live service file. Other
+   runtime files are copied from the actual current release, and source hashes
+   are checked again before switching its pointer.
    The immediate pre-switch environment is saved privately. A failed drain
    restores its prior metric settings, and a post-switch failure records the
    actual source pointer with the matching backend for explicit recovery.
