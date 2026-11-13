@@ -14,6 +14,27 @@ from meta_violation_cleanup.runtime import Runtime, RuntimeLedgerError
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_archived_ledger_cannot_be_recreated_as_empty(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder=Path(root);marker=folder/'runs.sqlite3.archive.json'
+            marker.write_text('{"restore_receipt":"private archive"}')
+            with patch.object(module.sqlite3,'connect') as connect:
+                with self.assertRaisesRegex(RuntimeLedgerError,'runs.sqlite3.archive.json') as error:Runtime(root)
+                self.assertEqual(error.exception.code,'runtime_ledger_archived_restore_required')
+                connect.assert_not_called()
+            self.assertFalse((folder/'runs.sqlite3').exists())
+            # Active cover audit uses its own directory and remains usable.
+            audit=Runtime(folder/'cover-audit');audit.close()
+            self.assertTrue((folder/'cover-audit/runs.sqlite3').is_file())
+
+    def test_archive_marker_blocks_even_an_accidental_replacement_database(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder=Path(root);(folder/'runs.sqlite3').write_bytes(b'not the archived ledger')
+            (folder/'runs.sqlite3.archive.json').write_text('{}')
+            with patch.object(module.sqlite3,'connect') as connect:
+                with self.assertRaises(RuntimeLedgerError):Runtime(root)
+                connect.assert_not_called()
+
     def test_creative_queue_survives_restart_and_rejects_account_change(self):
         entry={'basis':{'creative_id':'20','account_id':'100'},'blocked_ads':[{'ad_id':'10','state':'violating'}]}
         self.runtime.queue_creative(entry)

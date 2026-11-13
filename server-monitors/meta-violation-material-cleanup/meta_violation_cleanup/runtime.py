@@ -22,6 +22,10 @@ class RuntimeLedgerError(RuntimeError):
     code = 'runtime_ledger_unavailable'
 
 
+class ArchivedRuntimeLedgerError(RuntimeLedgerError):
+    code = 'runtime_ledger_archived_restore_required'
+
+
 def now():
     return datetime.now(CST).isoformat(timespec='seconds')
 
@@ -163,6 +167,12 @@ class Runtime:
     def __init__(self, root):
         self.root = Path(root).resolve()
         self._unhealthy = False
+        archive_marker = self.root / 'runs.sqlite3.archive.json'
+        if os.path.lexists(str(archive_marker)):
+            # An archived historical ledger must never be replaced by a new
+            # empty SQLite file. Its restore receipt remains beside this path.
+            raise ArchivedRuntimeLedgerError('Restore the verified ledger using ' + str(archive_marker)
+                + ' before removing the archive marker')
         try:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.db = sqlite3.connect(str(self.root / 'runs.sqlite3'), timeout=30,
