@@ -361,7 +361,8 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
     if operational_path == metric_path or (operational_path.exists() and metric_path.exists() and os.path.samefile(operational_path, metric_path)):
         raise ValueError("FB_AUTO_METRIC_DB_PATH must be independent from FB_AUTO_POST_DB_PATH")
     store = FBAutoPostStore(operational_path)
-    metric_store = FBAutoPostStore(metric_path)
+    # Existing metrics may be streamed by a migration reader; startup only reads them.
+    metric_store = FBAutoPostStore(metric_path, initialize_storage=not metric_path.exists())
     pages, materials = PagePoolRepository(mysql), MaterialRepository(mysql, metric_store)
     graph = RequestsGraphTransport(api_version=str(env.get("FB_GRAPH_API_VERSION", "v22.0")), timeout_seconds=int(env.get("FB_AUTO_GRAPH_TIMEOUT", "120")))
     live = str(env.get("FB_AUTO_POST_LIVE_ENABLED", "0")) == "1"

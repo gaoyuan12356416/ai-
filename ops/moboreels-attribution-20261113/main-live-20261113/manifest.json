@@ -1,0 +1,25 @@
+{
+  "captured_at_utc": "2026-11-13T04:26:43.659378+00:00",
+  "base": "49794d74",
+  "files": [
+    {
+      "file": "app.py",
+      "remote_path": "/root/drama_material_service/app.py",
+      "sha256": "60027162f1b045e004b94d0fcce77360e1947cbc81156468ca3bb63669779fb2",
+      "bytes": 1072855
+    },
+    {
+      "file": "quick-nav.js",
+      "remote_path": "/root/drama_material_service/static/quick-nav.js",
+      "sha256": "203bf1a08903d797f7002add7dcacae8cc05a1032cde32013e69657767ab88ea",
+      "bytes": 39189
+    },
+    {
+      "file": "quick-nav.js",
+      "remote_path": "/usr/share/nginx/html/quick-nav.js",
+      "sha256": "203bf1a08903d797f7002add7dcacae8cc05a1032cde32013e69657767ab88ea",
+      "same_as_main": true
+    }
+  ],
+  "credential_scan": "No credential literals or known secret patterns; FEISHU token URL constants excluded as endpoint URLs."
+}

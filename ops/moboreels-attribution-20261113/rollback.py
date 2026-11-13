@@ -1,8 +1,10 @@
 """Rollback social code only. Keep /m/, Moboreels sidecar, all data and receipts alive."""
 import argparse
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -16,6 +18,42 @@ def load_deployer(manifest, deployer_sha=None):
     deploy.verify(tool_release, deployer_sha or manifest["commit"])
     deploy.verify(Path(manifest["release"]), manifest["commit"])
     return deploy
+
+
+def fb_hotfix_candidate(manifest, deployment, deploy, entries):
+    """Recognize only the durable, activated two-module FB startup fix."""
+    hotfix = manifest.get("hotfixes", {}).get("fb-metric-startup")
+    if hotfix is None:
+        return manifest["candidates"]["fb"], entries
+    require = deploy.require
+    require(hotfix.get("status") == "activated" and hotfix.get("business_sha") == manifest["commit"],
+            "FB startup fix requires reconciliation")
+    receipt = Path(hotfix["receipt"]).resolve()
+    require((deployment / "private").resolve() in receipt.parents and
+            json.loads(receipt.read_text(encoding="utf-8")) == hotfix, "FB hotfix receipt differs")
+    release = Path(hotfix["release"])
+    deploy.verify(release, hotfix["commit"])
+    candidate = str(deploy.CANDIDATES / hotfix["commit"] / deployment.name / "fb-metric-fix")
+    require(hotfix["candidate"] == hotfix["current"] == candidate and
+            hotfix["previous_current"] == manifest["candidates"]["fb"] and
+            hotfix["previous_tree"] == manifest["candidate_trees"]["fb"], "FB hotfix candidate provenance differs")
+    require(deploy.tree_digest(candidate) == hotfix["candidate_tree"] and
+            deploy.tree_digest(hotfix["previous_current"]) == hotfix["previous_tree"], "FB hotfix tree drift")
+    expected = {"features/fb_auto_posts/core.py", "features/fb_auto_posts/service.py"}
+    files = hotfix.get("files", [])
+    require(len(files) == 2 and {row.get("relative") for row in files} == expected, "Unexpected FB hotfix scope")
+    revised = [dict(row) for row in entries]
+    for row in files:
+        source = release / "ops/moboreels-attribution-20261113/runtime/fb" / row["relative"]
+        target = str(Path(manifest["roots"]["fb"]["logical"]) / row["relative"])
+        matches = [entry for entry in revised if entry["target"] == target]
+        require(len(matches) == 1 and row["target"] == target and row["source"] == str(source), "FB source/target differs")
+        git_hash = hashlib.sha256(subprocess.check_output(["git", "-C", str(release), "show",
+            hotfix["commit"] + ":ops/moboreels-attribution-20261113/runtime/fb/" + row["relative"]])).hexdigest()
+        require(matches[0]["after"] == row["before"] and deploy.digest(row["backup"]) == row["before"] and
+                deploy.digest(source) == row["after"] == git_hash, "FB module receipt/source differs")
+        matches[0]["after"] = row["after"]
+    return candidate, revised
 
 
 def main():
@@ -37,6 +75,9 @@ def main():
     review = checks.get("phases", {}).get("rollback-" + args.phase)
     deploy.require(isinstance(review, dict), "Missing reviewed rollback busy checks")
     entries = [r for r in manifest["files"] if r["phase"] == phase]
+    active_candidate = manifest["candidates"].get(phase)
+    if phase == "fb":
+        active_candidate, entries = fb_hotfix_candidate(manifest, deployment, deploy, entries)
     if args.phase == "core-ui":
         # Preserve sidecar package/current, /m/ Nginx route, macro config and report timer.
         entries = [r for r in entries if r.get("nav") or
@@ -58,9 +99,9 @@ def main():
     if phase in manifest["candidates"]:
         root = manifest["roots"][phase]
         current = str(Path(root["logical"]).resolve())
-        deploy.require(current in (root["resolved"], manifest["candidates"][phase]), "Current was replaced by another release")
+        deploy.require(current in (root["resolved"], active_candidate), "Current was replaced by another release")
         if current != root["resolved"]:
-            deploy.switch(root["logical"], root["resolved"], manifest["candidates"][phase])
+            deploy.switch(root["logical"], root["resolved"], active_candidate)
     else:
         for entry in entries:
             target = Path(entry["target"])

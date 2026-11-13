@@ -618,6 +618,14 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    // DRAMA_PAY_RANK_NAV_V1
+    if (!normalized.some(g => (g.items || []).some(i => i.key === "dramaPayRank"))) {
+      const rankItem = {key:"dramaPayRank", label:"短剧付费 TOP100", kind:"page",
+        href:"/drama-pay-rank.html", module:"drama_pay_rank", enabled:true, order:5};
+      const reports = normalized.find(g => g.label === "数据报表");
+      if (reports) (reports.items || (reports.items=[])).push(rankItem);
+      else normalized.push({key:"drama_reports",label:"数据报表",enabled:true,order:70,items:[rankItem]});
+    }
     if (!normalized.some(group => (group.items || []).some(item => item.key === "pipelineMonitor"))) {
       normalized.unshift({ key: "pipeline_overview", label: "运行监测", order: 1,
         items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,

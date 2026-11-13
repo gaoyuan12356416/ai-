@@ -3652,6 +3652,7 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "drama_pay_rank": "短剧付费 TOP100",
     "moboreels_library": "Moboreels 短剧库",
     "moboreels_report": "Moboreels 收益报表",
     "video_editing": "视频剪辑",
@@ -3737,6 +3738,7 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "drama_pay_rank": False,
     "moboreels_library": False,
     "moboreels_report": False,
     "video_editing": False,
@@ -55966,13 +55968,14 @@ def delete_session(session_token):
 
 
 def load_navigation_config():
+    from features.drama_pay_rank.routes import ensure_navigation as ensure_drama_pay_navigation
     from features.moboreels_library.navigation import ensure_navigation as ensure_moboreels_navigation, ensure_report_navigation
     from features.socialkit_analytics.navigation import ensure_navigation as ensure_socialkit_navigation
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
         from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
         from features.pipeline_dispatch.monitor import ensure_navigation as ensure_pipeline_navigation
-        return ensure_report_navigation(ensure_moboreels_navigation(ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))))))
+        return ensure_drama_pay_navigation(ensure_report_navigation(ensure_moboreels_navigation(ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle)))))))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94225,6 +94228,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_GET(self):
+        if urlparse(self.path).path == "/api/drama-pay-rank/list":
+            from features.drama_pay_rank.routes import dispatch
+            return dispatch(self, urlparse(self.path), globals())
         if urlparse(self.path).path == "/api/moboreels" or urlparse(self.path).path.startswith("/api/moboreels/"):
             from features.moboreels_library.bridge import dispatch
             return dispatch(self, urlparse(self.path), globals())
@@ -94284,6 +94290,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in {
+            "/drama-pay-rank.html",
+            "/drama-pay-rank.js",
+            "/drama-pay-rank.css",
             "/moboreels-library.html",
             "/moboreels-report.html",
             "/moboreels-report.js",

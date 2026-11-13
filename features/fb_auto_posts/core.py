@@ -74,12 +74,38 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class FBAutoPostStore:
-    def __init__(self, path: str | Path, *, now_fn=utc_now, rng: random.Random | None = None):
+    def __init__(self, path: str | Path, *, now_fn=utc_now, rng: random.Random | None = None, initialize_storage: bool = True):
         self.path = str(path)
         self.now_fn, self.rng = now_fn, rng or random.SystemRandom()
         self._lock = threading.RLock()
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.ensure_storage()
+        if initialize_storage:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self.ensure_storage()
+        else:
+            self.validate_metric_storage()
+
+    def validate_metric_storage(self) -> None:
+        """Validate an existing metric source without ledger migrations or writes."""
+        required = {
+            "fb_auto_metric_generation": {
+                "id", "generation_key", "platform", "metric_date", "product", "status",
+                "row_count", "checksum", "refreshed_at_utc", "created_at_utc", "ready_at_utc",
+                "error_code", "error_message",
+            },
+            "fb_auto_metric_daily": {"generation_id", "content_id", "material_id", "spend", "af_revenue0"},
+            "fb_auto_metric_active_pointer": {"platform", "metric_date", "product", "generation_id", "activated_at_utc"},
+        }
+        try:
+            uri = Path(self.path).resolve().as_uri() + "?mode=ro"
+            with sqlite3.connect(uri, uri=True, timeout=30, isolation_level=None, factory=_ClosingConnection) as conn:
+                conn.execute("PRAGMA query_only=ON")
+                for table, expected in required.items():
+                    exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                    if not exists or not expected.issubset(columns):
+                        raise StoreError("fb_auto_metric_schema_invalid", "指标库缺少必需的表或字段，无法启动指标读取", 503)
+        except (sqlite3.Error, OSError):
+            raise StoreError("fb_auto_metric_schema_invalid", "指标库不可读取或已损坏，无法启动指标读取", 503) from None
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
