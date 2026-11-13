@@ -13,6 +13,14 @@ REGRESSION_FILES = ('test_x_auto_post_runner.py', 'test_x_auto_post_store.py',
                     'test_x_post_manual_sidecar.py', 'test_x_post_schedule_runner.py')
 
 
+def template_blacklist_notice(value):
+    """Correct notices copied from historical runtime snapshots."""
+    return value.replace(
+        '<strong>黑名单和历史素材永久排除属于强制安全条件。</strong>系统会在筛选和最终冻结前排除 ads_setting.ads_facebook_post_blacklist 中的剧/资源，',
+        '<strong>X 发布不限制剧黑名单。</strong>筛选和最终冻结均忽略剧黑名单；仍会排除资源黑名单命中的素材，',
+    ).replace('；模板不能关闭这些条件。</div>', '。历史素材永久防重继续生效。</div>')
+
+
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -163,6 +171,12 @@ def build(source, repo, target, *, verify=True):
         value = re.sub(r'(/' + re.escape(editor.name) + r')(?:\?[^"\']*)?',
                        r'\1?v=' + digest(editor)[:12], page.read_text(encoding='utf-8'))
         page.write_text(value, encoding='utf-8')
+    # Historical snapshots can still contain the obsolete drama-blacklist hint.
+    # Normalize both editors after overlays while keeping each lane's history scope.
+    for name in ('x-auto-publish-template.html', 'x-tag-auto-publish-template.html'):
+        page = target / 'static' / name
+        page.write_text(template_blacklist_notice(page.read_text(encoding='utf-8')),
+                        encoding='utf-8')
     (target / 'tag-runtime-manifest.json').write_text(json.dumps(dict(baseline=manifest,
         files={str(p.relative_to(target)).replace('\\', '/'): digest(p) for p in target.rglob('*') if p.is_file()}),
         indent=2), encoding='utf-8')
