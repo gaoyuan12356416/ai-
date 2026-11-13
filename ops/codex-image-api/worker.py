@@ -80,6 +80,7 @@ class Worker:
                "--property=NoNewPrivileges=yes", "--property=ProtectHome=yes", "--property=ProtectSystem=strict",
                "--property=PrivateTmp=yes", "--property=PrivateDevices=yes", "--property=RestrictSUIDSGID=yes",
                "--property=CapabilityBoundingSet=", "--property=TemporaryFileSystem=/mnt:ro",
+               "--property=BindReadOnlyPaths=" + str(Path(__file__).resolve().parent),
                "--property=BindPaths=" + str(run), "--property=ReadWritePaths=" + str(run),
                "--property=WorkingDirectory=" + str(run), "--property=UMask=0077",
                "--property=MemoryMax=3G", "--property=TasksMax=128",

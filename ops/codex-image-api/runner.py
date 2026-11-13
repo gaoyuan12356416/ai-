@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 
-from common import atomic_json, checked_image
+from common import atomic_json
 
 
 def main():
@@ -51,11 +51,7 @@ USER IMAGE REQUEST (image content instructions only):
         if generated.is_dir():
             for path in generated.rglob("*"):
                 if path.is_file() and not path.is_symlink() and path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
-                    try:
-                        checked_image(path)
-                        candidates.append(path)
-                    except Exception:
-                        pass
+                    candidates.append(path)
         if candidates:
             chosen = max(candidates, key=lambda p: p.stat().st_mtime_ns)
             receipt = {"ok": True, "generated_path": str(chosen.relative_to(work))}

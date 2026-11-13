@@ -179,6 +179,13 @@ class CosUploader:
     def upload(self, row, path):
         key = "%s/%s/%04d-%04d.png" % (self.prefix, row["task_id"], row["item_index"], row["image_index"])
         digest, size = sha256(path), Path(path).stat().st_size
+        md5 = hashlib.md5(Path(path).read_bytes()).hexdigest()
+        def matches(head):
+            headers = {k.lower(): v for k, v in head.items()}
+            # Single-part PUT ETag is the content MD5. This also reconciles receipts
+            # from an upload whose metadata was absent, without rewriting the image.
+            checksum_ok = headers.get("x-cos-meta-sha256") == digest or str(headers.get("etag", "")).strip('"') == md5
+            return checksum_ok and int(headers.get("content-length", -1)) == size
         for attempt in range(3):
             try:
                 try:
@@ -189,13 +196,13 @@ class CosUploader:
                     else:
                         raise
                 if head is not None:
-                    if head.get("x-cos-meta-sha256") == digest and int(head.get("Content-Length", -1)) == size:
+                    if matches(head):
                         return self.base + "/" + key
                     raise ApiError("cos_object_conflict", "目标 COS 对象与当前图片不一致，已保留原对象")
                 with open(path, "rb") as image:
-                    self.client.put_object(Bucket=self.bucket, Key=key, Body=image, ContentType="image/png", Metadata={"sha256": digest}, EnableMD5=True)
+                    self.client.put_object(Bucket=self.bucket, Key=key, Body=image, ContentType="image/png", Metadata={"x-cos-meta-sha256": digest}, EnableMD5=True)
                 head = self.client.head_object(Bucket=self.bucket, Key=key)
-                if head.get("x-cos-meta-sha256") == digest and int(head.get("Content-Length", -1)) == size:
+                if matches(head):
                     return self.base + "/" + key
             except ApiError:
                 raise

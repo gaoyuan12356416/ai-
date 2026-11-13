@@ -174,7 +174,7 @@ class UploadTests(unittest.TestCase):
             def put_object(self, **kw):
                 self.puts += 1
                 data = kw["Body"].read()
-                self.stored = {"Content-Length": str(len(data)), "x-cos-meta-sha256": kw["Metadata"]["sha256"]}
+                self.stored = {"Content-Length": str(len(data)), "x-cos-meta-sha256": kw["Metadata"]["x-cos-meta-sha256"]}
                 raise OSError("response lost")
         uploader = object.__new__(CosUploader)
         uploader.client, uploader.bucket, uploader.prefix, uploader.base = Client(), "bucket", "images", "https://cos.example"
