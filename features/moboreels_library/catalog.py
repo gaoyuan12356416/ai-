@@ -1,9 +1,13 @@
 """Catalog value normalization and presentation, without network access."""
 
 from copy import deepcopy
+from collections import OrderedDict
+from concurrent.futures import Future
 from datetime import datetime, timezone
 import json
 import re
+import threading
+import time
 
 
 BUSINESS_COLUMNS = (
@@ -170,10 +174,58 @@ def _utc_display_time(value):
         return value
 
 
+def _list_cache_key(params):
+    """Canonicalize exactly the filters used by Database.list_dramas before cache lookup."""
+    if not isinstance(params, dict):
+        raise ValueError("分页或筛选参数无效")
+
+    def scalar(name, default=None):
+        value = params.get(name, default)
+        return (value[0] if value else default) if isinstance(value, (list, tuple)) else value
+
+    def integer(name, default, minimum, maximum):
+        value = scalar(name, default)
+        try:
+            value = int(default if value in (None, "") else value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("分页或筛选参数无效")
+        if not minimum <= value <= maximum:
+            raise ValueError("分页或筛选参数超出范围")
+        return value
+
+    page = integer("page_index", 1, 1, 1000000)
+    size = integer("page_size", 50, 1, 100)
+    status = params.get("is_show", params.get("status", "1"))
+    if isinstance(status, (list, tuple)):
+        status = status[0] if status else "1"
+    status = str(status)
+    if status in ("all", "-1", ""):
+        status = "all"
+    elif status not in ("0", "1"):
+        raise ValueError("上下架筛选参数无效")
+    filters = tuple(None if scalar(name) in (None, "", "all") else integer(name, 0, -1, 32767)
+                    for name in ("lang_id", "local_type", "audio_type"))
+    query = params.get("q", params.get("search", ""))
+    if isinstance(query, (list, tuple)):
+        query = query[0] if query else ""
+    query = str(query or "").strip()
+    if len(query) > 200:
+        raise ValueError("搜索内容过长")
+    refresh = str(scalar("refresh", "0") or "0")
+    if refresh not in ("0", "1"):
+        raise ValueError("刷新参数无效")
+    return (page, size, status, query) + filters, refresh == "1"
+
+
 class Catalog:
     def __init__(self, settings, db):
         self.settings = settings
         self.db = db
+        self._list_lock = threading.Lock()
+        self._list_cache = OrderedDict()
+        self._list_inflight = {}
+        self._list_generation = object()
+        self._list_epoch = 0
 
     @staticmethod
     def _present(row):
@@ -186,10 +238,47 @@ class Catalog:
                 result[field] = _utc_display_time(result[field])
         return result
 
-    def list(self, params):
-        result = dict(self.db.list_dramas(params))
-        result["list"] = [self._present(row) for row in result.get("list", [])]
-        return result
+    def list(self, params, cache_generation=None):
+        params = deepcopy(params or {})
+        query_key, refresh = _list_cache_key(params)
+        with self._list_lock:
+            if cache_generation != self._list_generation:
+                self._list_generation = cache_generation
+                self._list_epoch += 1
+                self._list_cache.clear()
+            key = (self._list_epoch, query_key)
+            pending = self._list_inflight.get(key)
+            if pending is None:
+                cached = self._list_cache.get(key)
+                if not refresh and cached and cached[0] > time.monotonic():
+                    self._list_cache.move_to_end(key)
+                    return deepcopy(cached[1])
+                self._list_cache.pop(key, None)
+                pending = Future()
+                self._list_inflight[key] = pending
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            return deepcopy(pending.result())
+        try:
+            result = deepcopy(self.db.list_dramas(params))
+            result["list"] = [self._present(row) for row in result.get("list", [])]
+        except BaseException as exc:
+            with self._list_lock:
+                self._list_inflight.pop(key, None)
+                pending.set_exception(exc)
+            raise
+        with self._list_lock:
+            # An older in-flight read must not repopulate a newer sync generation.
+            if key[0] == self._list_epoch:
+                self._list_cache[key] = (time.monotonic() + 30, result)
+                while len(self._list_cache) > 64:
+                    self._list_cache.popitem(last=False)
+            self._list_inflight.pop(key, None)
+            pending.set_result(result)
+        # The service adds each user's promotion_status only to this detached response.
+        return deepcopy(result)
 
     def detail(self, story_id):
         return self._present(self.db.get_drama(str(story_id)))

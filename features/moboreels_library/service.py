@@ -50,7 +50,9 @@ class Application:
         identity(self.settings.institution_user_id, actor)
         query, body = request.get("query") or {}, request.get("body") or {}
         if method == "GET" and path == "/dramas":
-            data = self.catalog.list(query)
+            latest = self.sync.latest() or {}
+            generation = (latest.get("run_id") or latest.get("id"), latest.get("status"), latest.get("resume_count", 0))
+            data = self.catalog.list(query, cache_generation=generation)
             statuses = self.promotions.statuses(actor, [r["story_id"] for r in data["list"]])
             for row in data["list"]:
                 row["promotion_status"] = statuses.get(str(row["story_id"]))

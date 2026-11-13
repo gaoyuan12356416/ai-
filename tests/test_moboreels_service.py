@@ -200,10 +200,11 @@ class ServiceRouteTest(unittest.TestCase):
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02), daemon=True)
         thread.start()
 
-        def post(token):
+        def post(token, refresh=False):
             connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
             try:
-                envelope = json.dumps({"method": "GET", "path": "/dramas", "actor": ACTOR}).encode()
+                envelope = json.dumps({"method": "GET", "path": "/dramas", "actor": ACTOR,
+                                       "query": {"refresh": "1"} if refresh else {}}).encode()
                 connection.request("POST", "/internal/dispatch", envelope,
                                    {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
                 response = connection.getresponse()
@@ -217,7 +218,7 @@ class ServiceRouteTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(body["list"][0]["story_id"], "42")
             self.db.failure = True
-            status, body = post(self.settings.internal_token)
+            status, body = post(self.settings.internal_token, refresh=True)
             self.assertEqual(status, 503)
             self.assertEqual(body["error"], "database_unavailable")
             self.assertNotIn("private database", json.dumps(body))
