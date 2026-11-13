@@ -101,7 +101,7 @@ class ContractTest(unittest.TestCase):
 
     def test_frontend_contract(self):
         source = (ROOT / "index.html").read_text(encoding="utf-8")
-        self.assertIn("fetch('./api/data'", source)
+        self.assertIn("fetch('./api/data?view=cohort&'", source)
         self.assertIn("cache:'default'", source)
         self.assertIn("RAW.v===2", source)
         self.assertIn('data-level="0">Campaign', source)

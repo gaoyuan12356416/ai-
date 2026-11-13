@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 import pymysql
 
@@ -45,7 +45,7 @@ PLATFORM_LABELS = {0: "Meta", 3: "TikTok"}
 INSIGHT_CHUNK_SIZES = {0: 20000, 3: 20000}
 REFRESH_LOOKBACK_DAYS = 7
 REFRESH_BUDGET_SECONDS = 840
-COPY_LOG_PAGE_ROWS = 500000
+COPY_LOG_PAGE_ROWS = 50000
 METRIC_FIELDS = (
     "impressions",
     "clicks",
@@ -254,6 +254,9 @@ def report_connection():
         conn = mysql_connection()
         with conn.cursor() as cur:
             cur.execute("SET SESSION max_execution_time=15000")
+            # Large exact-Ad IN lists otherwise exceed the default range optimizer
+            # memory and fall back to scanning the entire statistics date.
+            cur.execute("SET SESSION range_optimizer_max_mem_size=67108864")
             cur.execute("SET SESSION time_zone='+08:00'")
             cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute("SET SESSION TRANSACTION READ ONLY")
@@ -949,17 +952,18 @@ def serialize_wire_payload(payload: dict, *, include_metadata: bool = True) -> b
     ).encode("utf-8")
 
 
-def public_cache_body(body: bytes) -> bytes:
+def public_cache_body(body: bytes, *, with_wire: bool = False):
     """Strip private reuse metadata when loading the durable seed at startup."""
     data = json.loads(body)
     fields = data.get("cf", [])
     if not PRIVATE_CAMPAIGN_FIELDS.intersection(fields):
-        return body
+        return (body, data) if with_wire else body
     keep = [i for i, field in enumerate(fields) if field not in PRIVATE_CAMPAIGN_FIELDS]
     data["cf"] = [fields[i] for i in keep]
     data["c"] = [[row[i] for i in keep] for row in data["c"]]
     data.get("m", {}).pop("mapping_metadata_next_bucket", None)
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    public = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return (public, data) if with_wire else public
 
 
 def validate_or_convert_cache_body(body: bytes) -> bytes:
@@ -969,7 +973,7 @@ def validate_or_convert_cache_body(body: bytes) -> bytes:
             raise ValueError("disk cache is not marked read-only verified")
         if not isinstance(data.get("c"), list) or not isinstance(data.get("d"), list):
             raise ValueError("disk cache wire rows are invalid")
-        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return body
     if not data.get("meta", {}).get("read_only_verified"):
         raise ValueError("legacy disk cache is not marked read-only verified")
     if not isinstance(data.get("campaigns"), list) or not isinstance(data.get("daily"), list):
@@ -985,6 +989,38 @@ def etag_matches(header_value: str, etag: str) -> bool:
     wanted = normalize(etag)
     return any(token.strip() == "*" or normalize(token) == wanted for token in header_value.split(","))
 
+
+
+def scoped_wire(wire, level, start, end):
+    """Select a copy cohort; keep every associated daily fact and original totals."""
+    result = {key: value for key, value in wire.items() if key not in ('c','d','x','xd')}
+    result['m'] = dict(wire.get('m', {}), view_level=level, view_start=start, view_end=end,
+                       view_scope='按复制日期加载，效果保留该范围全部统计日')
+    result.update(c=[],d=[],x=[],xd=[])
+    fields_key, rows_key = ('cf','c') if level == 0 else ('xf','x')
+    fields=wire.get(fields_key,[])
+    if not fields:return result
+    date_index=fields.index('copy_date')
+    level_index=fields.index('level') if level else None
+    keep=[]
+    for row in wire.get(rows_key,[]):
+        if level and int(row[level_index]) != level:continue
+        day=str(row[date_index] or '')
+        if (not start or day>=start) and (not end or day<=end):keep.append(row)
+    result[rows_key]=keep
+    if level == 0:
+        pi,ci=fields.index('platform'),fields.index('campaign_id')
+        ids={(int(row[pi] or 0),str(row[ci])) for row in keep}
+        df=wire.get('df',[])
+        if df:
+            pi,ci=df.index('platform'),df.index('campaign_id')
+            result['d']=[row for row in wire.get('d',[]) if (int(row[pi] or 0),str(row[ci])) in ids]
+    else:
+        ei=fields.index('entity_key');ids={str(row[ei]) for row in keep}
+        df=wire.get('xdf',[])
+        if df:
+            ei=df.index('entity_key');result['xd']=[row for row in wire.get('xd',[]) if str(row[ei]) in ids]
+    return result
 
 class ReportCache:
     def __init__(self, cache_path: Path | None = CACHE_PATH):
@@ -1002,6 +1038,9 @@ class ReportCache:
         self.last_refresh_duration: float | None = None
         self.last_error = ""
         self.scheduler_thread: threading.Thread | None = None
+        self.view_lock = threading.Lock()
+        self.views = collections.OrderedDict()
+        self.view_wire = None
 
     def snapshot(self) -> dict:
         with self.state_lock:
@@ -1018,9 +1057,14 @@ class ReportCache:
             }
 
     def _install_body(self, body: bytes, age_seconds: float = 0, *, public_body: bytes | None = None) -> None:
-        public_body = public_cache_body(body) if public_body is None else public_body
-        compressed = gzip.compress(public_body, compresslevel=6, mtime=0)
-        with self.state_lock:
+        if public_body is None:
+            public_body, view_wire = public_cache_body(body, with_wire=True)
+        else:
+            view_wire = json.loads(public_body)
+        compressed = gzip.compress(public_body, compresslevel=5, mtime=0)
+        with self.view_lock, self.state_lock:
+            self.view_wire = view_wire
+            self.views.clear()
             self.seed_body = body
             self.body = public_body
             self.gzip_body = compressed
@@ -1165,6 +1209,30 @@ class ReportCache:
         if self.scheduler_thread is not None:
             self.scheduler_thread.join(timeout=1)
 
+    def get_view(self, query):
+        level=int(query.get('level',['0'])[0])
+        if level not in (0,1,2):raise ValueError('invalid level')
+        today=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
+        start=query.get('copy_start',[(today-dt.timedelta(days=6)).isoformat()])[0]
+        end=query.get('copy_end',[today.isoformat()])[0]
+        for day in (start,end):
+            if day:dt.date.fromisoformat(day)
+        if start and end and start>end:raise ValueError('invalid date range')
+        self.get() # warm-start compatibility; no SQL on HTTP requests
+        with self.view_lock:
+            with self.state_lock:
+                wire=self.view_wire;revision=self.etag
+            key=(revision,level,start,end)
+            if key not in self.views:
+                body=json.dumps(scoped_wire(wire,level,start,end),ensure_ascii=False,separators=(',',':')).encode()
+                self.views[key]=(body,gzip.compress(body,compresslevel=5,mtime=0),'W/"'+hashlib.sha256(body).hexdigest()+'"')
+                # User ranges can be large: bound retained memory as well as entries.
+                while len(self.views)>4 or (len(self.views)>1 and sum(len(v[0]) for v in self.views.values())>64*1024*1024):
+                    self.views.popitem(last=False)
+            value=self.views[key]
+        snap=self.snapshot()
+        return (*value,'stale' if snap['age']>=CACHE_TTL_SECONDS else 'hit',snap['age'])
+
     def get(self) -> tuple[bytes, bytes, str, str, int]:
         snapshot = self.snapshot()
         if snapshot["body"] is not None:
@@ -1243,7 +1311,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/data":
             try:
-                body, compressed, etag, cache_state, cache_age = CACHE.get()
+                query=parse_qs(urlsplit(self.path).query,keep_blank_values=True)
+                body, compressed, etag, cache_state, cache_age = CACHE.get_view(query) if query.get("view")==["cohort"] else CACHE.get()
                 common_headers = [
                     ("ETag", etag),
                     ("Vary", "Accept-Encoding"),

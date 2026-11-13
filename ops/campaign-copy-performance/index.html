@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%23172033%22/><path d=%22M18 44V31h8v13zm11 0V21h8v23zm11 0V12h8v32z%22 fill=%22%23fff%22/></svg>">
 <title>广告规则复制效果报表</title>
-<script>window.__campaignCopyDataPromise=fetch('./api/data',{cache:'default',credentials:'same-origin'});</script>
+<script>window.__campaignCopyDataPromise=fetch('./api/data?view=cohort&'+new URLSearchParams([...new URLSearchParams(location.search)].filter(([key])=>['level','copy_start','copy_end'].includes(key))),{cache:'default',credentials:'same-origin'});</script>
 <style>
 :root{--bg:#f5f7fb;--panel:#fff;--line:#dce3ec;--text:#1d2430;--muted:#667085;--blue:#2357a5;--teal:#0f766e;--green:#07823f;--orange:#b75d00;--red:#c62828;--purple:#6d45a8;--shadow:0 1px 2px rgba(16,24,40,.06)}
 *{box-sizing:border-box}
@@ -64,6 +64,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     <div><strong id="loadingTitle">正在读取最近一次 15 分钟缓存...</strong><div class="muted" id="loadingDetail">数据下载后会自动渲染，无需重复刷新。</div></div>
   </section>
 
+  <section class="panel"><strong>按复制日期加载</strong> <span class="muted">默认近七天；修改复制日期可查询历史。切换层级时按需加载。</span> <button type="button" id="allHistoryBtn">全部历史（数据量大）</button></section>
   <section class="panel controls" aria-label="筛选条件">
     <div class="field"><label for="copyStartDate">复制起始日期</label><input type="date" id="copyStartDate"></div>
     <div class="field"><label for="copyEndDate">复制结束日期</label><input type="date" id="copyEndDate"></div>
@@ -127,8 +128,8 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   const wirePlatform=row=>Number(row.platform??0);
   const wirePlatformLabel=row=>row.platform_label||(wirePlatform(row)===3?'TikTok':'Meta');
   const wireEntityKey=(row,level,id)=>wirePlatform(row)+':'+level+':'+id;
-  const allEntities = baseCampaigns.map(row=>({...row,platform:wirePlatform(row),platform_label:wirePlatformLabel(row),level:0,entity_key:wireEntityKey(row,0,row.campaign_id),entity_id:row.campaign_id,entity_name:row.campaign_name,origin_entity_id:row.origin_campaign_id,adset_id:'',adset_name:'',ad_id:'',ad_name:''})).concat(extraEntities);
-  const allDaily = baseDaily.map(row=>({...row,platform:wirePlatform(row),level:0,entity_key:wireEntityKey(row,0,row.campaign_id),entity_id:row.campaign_id})).concat(extraDaily);
+  const allEntities = baseCampaigns.map(row=>Object.assign(row,{platform:wirePlatform(row),platform_label:wirePlatformLabel(row),level:0,entity_key:wireEntityKey(row,0,row.campaign_id),entity_id:row.campaign_id,entity_name:row.campaign_name,origin_entity_id:row.origin_campaign_id,adset_id:'',adset_name:'',ad_id:'',ad_name:''})).concat(extraEntities);
+  const allDaily = baseDaily.map(row=>Object.assign(row,{platform:wirePlatform(row),level:0,entity_key:wireEntityKey(row,0,row.campaign_id),entity_id:row.campaign_id})).concat(extraDaily);
   performance.mark('campaign-copy-data-ready');
   let campaigns = [];
   let dailyRows = [];
@@ -321,18 +322,21 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     allCopyStart=campaigns.map(row=>row.copy_date).filter(Boolean).sort()[0]||'';allCopyEnd=campaigns.map(row=>row.copy_date).filter(Boolean).sort().slice(-1)[0]||'';allStatStart=dailyRows.map(row=>row.dt).filter(Boolean).sort()[0]||'';allStatEnd=dailyRows.map(row=>row.dt).filter(Boolean).sort().slice(-1)[0]||'';
     campaigns.forEach(row=>{row.maturity_label=num(row.age_hours)>=24?'≥24h':num(row.age_hours)>=6?'6–24h':'<6h'});state.dims=[...defaultDims];state.sortKey='spend';state.sortDir=-1;buildDimensions();updateLevelTabs();
     fillSelect('ruleFilter','全部规则',unique('rule_label'));fillSelect('productFilter','全部产品',unique('product'));fillSelect('platformFilter','全部平台',unique('platform_label'));fillSelect('userFilter','全部操作人',unique('user_label'));fillSelect('accountFilter','全部账户',unique('account_id'));fillSelect('bandFilter','全部效果区间',bandOrder);
-    setCopyDateRange(allCopyStart,allCopyEnd);setStatDateRange(allStatStart,allStatEnd);buildPresets();buildChips();
+    setCopyDateRange(meta.view_start??allCopyStart,meta.view_end??allCopyEnd);setStatDateRange(allStatStart,allStatEnd);buildPresets();buildChips();
     const generated=meta.generated_at||'',copyStart=allCopyStart||'无成功样本',copyEnd=allCopyEnd||'无成功样本',statStart=allStatStart||'无效果数据',statEnd=allStatEnd||'无效果数据';
     get('metaLine').textContent=currentLevel().name+'｜复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+'｜更新 '+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
-    get('scopeHint').textContent=(staleReport?'数据尚未更新，当前展示上次成功快照；缺少日期不代表零消耗｜':'每15分钟后台自动刷新｜')+(meta.platform_scope||'0=Meta, 3=TikTok')+' · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
+    get('scopeHint').textContent=(staleReport?'数据尚未更新，当前展示上次成功快照；缺少日期不代表零消耗｜':'每15分钟后台自动刷新｜')+'当前复制范围 '+(meta.view_start||'最早')+' 至 '+(meta.view_end||'最新')+'｜'+(meta.platform_scope||'0=Meta, 3=TikTok')+' · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
     get('scopeHint').style.color=staleReport?'#b45309':'';
     if(state.level==='0'&&num(meta.metadata_stale_campaigns)>0){get('scopeHint').textContent+='｜部分广告名称、国家、语言等信息待更新（'+integer(meta.metadata_stale_campaigns)+' 个）；消耗和收入按本次快照统计';get('scopeHint').style.color='#b45309';}
     get('keyword').placeholder='搜索统计日期、规则、'+currentLevel().name+'、账户、短剧、产品、操作人...';render();
   }
 
+  function loadCohort(level,start,end){const url=new URL(location.href);url.search=new URLSearchParams({level:String(level),copy_start:start,copy_end:end});location.assign(url.href)}
   function init(){
+    get('allHistoryBtn').onclick=()=>loadCohort(state.level,'','');
+    ['copyStartDate','copyEndDate'].forEach(id=>get(id).addEventListener('change',()=>{normalizeDateRange(id);loadCohort(state.level,get('copyStartDate').value,get('copyEndDate').value)}));
     ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','platformFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>{normalizeDateRange(id);requestAnimationFrame(render)})});
-    get('levelTabs').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>applyLevel(button.dataset.level)));get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);applyLevel('0');
+    get('levelTabs').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>loadCohort(button.dataset.level,meta.view_start||'',meta.view_end||'')));get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);applyLevel(String(meta.view_level??0));
     get('resetBtn').disabled=false;get('exportBtn').disabled=false;get('loadingPanel').hidden=true;document.documentElement.dataset.reportReady='1';performance.mark('campaign-copy-render-ready');
   }
   function normalizeDateRange(changed){

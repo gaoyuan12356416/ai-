@@ -260,3 +260,21 @@ cannot start the serving scheduler or target the live cache. It keeps the FIFO
 permit, 15-second statement timeout and atomic complete-result publication.
 Verify the next warm cycle without this flag under the normal 840-second budget
 before activating the release; no production unit/configuration change is needed.
+
+## Fast cohort loading (2026-11-14)
+
+The default page loads only the last seven Beijing copy dates for the selected
+level using `/api/data?view=cohort`. Editing copy dates loads that exact cohort;
+all-history remains explicit. Every matched entity retains all its daily facts,
+including entities without facts. Platform identity stays part of matching keys.
+Pipeline counts remain full-level totals. The view range is displayed explicitly.
+The legacy full API is unchanged. Bounded revision-keyed view caches never query
+SQL from HTTP handlers; all money and ROAS definitions remain unchanged.
+Frontend entity decoration now reuses inflated objects instead of cloning them.
+
+Refresh SQL pages use 50,000 copy-log rows instead of 500,000 to stay inside the
+statement deadline. The read-only session allows 64 MiB range optimizer memory
+so exact-Ad IN lists do not fall back to a whole-date scan. Global SQL gate,
+consistent snapshot, 15-second statement/840-second cycle limits and atomic
+complete-refresh publishing remain enforced. Failed refreshes keep the visible
+stale timestamp. Verify a real candidate refresh before calling freshness fixed.
