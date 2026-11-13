@@ -23,6 +23,16 @@ sys.path.insert(0, str(ROOT))
 from scripts.pipeline_service_drain import DB, pending
 from features.pipeline_dispatch.maintenance import UNITS
 
+# The X service already has a later 92-pipeline-graceful.conf setting 6h.
+# This narrow override must sort after it; otherwise systemd can still kill a
+# sufficiently long upload despite the ExecStop barrier.
+TIMEOUT_OVERRIDE = Path('/etc/systemd/system/x-post-automation.service.d/99-upload-continuity-timeout.conf')
+
+
+def install_timeout_override():
+    TIMEOUT_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+    TIMEOUT_OVERRIDE.write_text('[Service]\nTimeoutStopSec=infinity\n')
+
 
 def run(*args):
     subprocess.run(args, check=True)
@@ -89,7 +99,8 @@ def prepare(manifest, folder):
     # plans, configuration snapshots and records have their own mode 0600.
     folder.mkdir(parents=True, mode=0o755, exist_ok=False)
     revision = subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD']).decode().strip()
-    record = {'revision': revision, 'source': str(ROOT), 'lanes': [], 'state': 'preparing', 'dropins': {}}
+    record = {'revision': revision, 'source': str(ROOT), 'lanes': [], 'state': 'preparing', 'dropins': {},
+              'timeout_override_before': TIMEOUT_OVERRIDE.read_text() if TIMEOUT_OVERRIDE.exists() else None}
     for entry in manifest['lanes']:
         pointer = Path(entry['pointer'])
         old = pointer.resolve(strict=True)
@@ -143,6 +154,7 @@ def activate(folder, rollback=False):
             helper = '/usr/bin/python3 /opt/x-upload-continuity/current/scripts/pipeline_service_drain.py'
             path.write_text('[Service]\nExecStop=+'+helper+' stop --unit='+unit+'\n'
                             'ExecStartPost=+'+helper+' start --unit='+unit+'\nTimeoutStopSec=infinity\n')
+        install_timeout_override()
         run('systemctl','daemon-reload')
     # Keep admission paused until all three services are ready; there are no
     # worker restarts, resets, lock expiry shortcuts, or external write retries.
@@ -165,6 +177,11 @@ def activate(folder, rollback=False):
                 path.unlink(missing_ok=True)
             else:
                 path.write_text(old)
+        old_timeout = record.get('timeout_override_before')
+        if old_timeout is None:
+            TIMEOUT_OVERRIDE.unlink(missing_ok=True)
+        else:
+            TIMEOUT_OVERRIDE.write_text(old_timeout)
         run('systemctl','daemon-reload')
     for lane in ('x','coordinator'):
         run('python3','/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py',
