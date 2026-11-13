@@ -1,2 +1,43 @@
-:root{font-family:Inter,"Microsoft YaHei",sans-serif;color:#17253e;background:#f3f6fa;font-size:14px}*{box-sizing:border-box}body{margin:0}.app{display:flex;min-height:100vh}.sidebar{width:244px;flex-shrink:0;padding:27px 18px;background:#fff;border-right:1px solid #e2e8f0}.brand{display:block;color:#17253e;text-decoration:none;font-weight:750;font-size:21px;padding:0 12px 28px}main{min-width:0;flex:1;padding:32px 40px 48px}.topbar,.top-actions,.panel-head{display:flex;align-items:center;justify-content:space-between;gap:20px}.topbar{margin-bottom:28px}.top-actions{gap:12px}.eyebrow{font-size:11px;letter-spacing:2px;font-weight:700;color:#57718f}h1{font-size:28px;letter-spacing:-.6px;margin:8px 0}h2{font-size:18px;margin:0}p{color:#64748b;margin:8px 0 0}.panel{background:#fff;border:1px solid #dfe6ee;border-radius:14px;overflow:hidden;box-shadow:0 4px 20px #152c4805}.panel-head{padding:24px 26px}button,select{font:inherit;border:1px solid #d4deea;border-radius:7px;padding:9px 14px;background:#fff;color:#233a55}button{cursor:pointer;font-weight:600}button:hover{background:#eef3fa}button.primary{background:#234f85;color:#fff;border-color:#234f85}button:disabled{opacity:.5;cursor:wait}form{display:flex;align-items:end;gap:16px;padding:0 26px 22px}label{display:flex;flex-direction:column;gap:7px;color:#51637b;font-size:12px}select{min-width:190px;font-size:14px}.meta{display:flex;gap:24px;flex-wrap:wrap;padding:15px 26px;background:#f8fafc;border-block:1px solid #e8edf3;color:#60738c;font-size:12px}.notice{margin:18px 26px;padding:12px 15px;background:#fff7e6;color:#875b14;border-radius:7px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left}th{padding:15px 26px;color:#73839a;font-size:12px;background:#fbfcfe;font-weight:600}td{padding:16px 26px;border-top:1px solid #edf1f6}tbody tr:hover{background:#f8fbff}td:first-child{width:90px;font-variant-numeric:tabular-nums}.rank{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:8px;background:#f0f4f9;font-weight:700}.rank.top{background:#e5eefb;color:#235594}.drama-name{font-weight:600;margin-bottom:6px}.drama-id{font:12px Consolas,monospace;color:#7c8ba0}.badge{display:inline-block;background:#edf3f9;color:#4b6684;border-radius:20px;padding:5px 12px;font-size:12px}.empty{text-align:center;color:#7a8ba0;padding:50px}footer{font-size:12px;line-height:1.7;color:#7d8a9c;padding:18px 26px;border-top:1px solid #e8edf3}@media(max-width:950px){main{padding:24px 20px}.sidebar{width:210px}.topbar{align-items:flex-start;flex-direction:column}}@media(max-width:650px){.app{display:block}.sidebar{width:auto;border-right:0;padding:18px}.brand{padding-bottom:14px}form{flex-wrap:wrap}select{min-width:140px}td,th{padding:14px}.meta{gap:10px}h1{font-size:24px}}
-#quickNav .nav-parent,#quickNav .nav-parent::after{color:#51637b}#quickNav .nav-parent:hover{background:#f1f5f9}#quickNav .nav-item span{color:#72839a}#quickNav .nav-item.active span,#quickNav .nav-item:hover span{color:#dbeafe}
+/* The page shell, navigation and controls use the existing backend theme. */
+.rank-main { width: 100%; max-width: 1920px; margin: 0 auto; gap: 20px; }
+.rank-main .topbar h1 { font-size: 30px; }
+.rank-main .topbar p { font-size: 13px; margin-top: 8px; }
+.rank-eyebrow { margin-bottom: 9px; color: #71839f; font-size: 10px; font-weight: 650; letter-spacing: 1.8px; }
+
+.rank-panel { min-width: 0; overflow: hidden; background: #fff; border: 1px solid #e0e7f1; border-radius: 16px; box-shadow: 0 3px 16px #14284903; }
+.rank-panel-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 14px; padding: 21px 24px 19px; }
+.rank-panel-head h2 { font-size: 16px; }
+.rank-panel-head p { color: var(--muted); font-size: 12px; }
+.rank-filters { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; padding: 0 24px 21px; }
+.rank-filter { display: grid; gap: 7px; color: #70819a; font-size: 12px; }
+.rank-filter select { width: 190px; height: 39px; padding: 8px 10px; border: 1px solid #dce4ef; border-radius: 8px; background: #fff; color: #344966; font-size: 13px; }
+.rank-filter select:focus-visible { outline: 3px solid #a9c7ff; outline-offset: 2px; }
+.rank-filters .btn { min-height: 39px; padding: 8px 16px; font-size: 13px; }
+.rank-meta { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 14px 24px; border-block: 1px solid #e8edf3; background: #f8fafc; color: var(--muted); font-size: 12px; }
+.rank-notice { margin: 16px 24px; padding: 12px 15px; border: 1px solid #eadcb7; border-radius: 11px; background: #fffaf0; color: #947225; font-size: 12px; }
+.rank-table-wrap { overflow: auto; }
+.rank-table { width: 100%; min-width: 640px; border-collapse: collapse; text-align: left; }
+.rank-table th { padding: 13px 24px; background: #fbfcfe; color: #73839a; font-size: 12px; font-weight: 600; }
+.rank-table td { padding: 14px 24px; border-top: 1px solid #edf1f6; }
+.rank-table tbody tr:hover { background: #f8fbff; }
+.rank-table th:first-child { width: 90px; }
+.rank-table th:nth-child(3) { width: 150px; }
+.rank-table th:nth-child(4) { width: 180px; }
+.rank-table .rank { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: #f0f4f9; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rank-table .rank.top { background: #edf2ff; color: #2457cf; }
+.rank-table .drama-name { margin-bottom: 4px; font-weight: 600; overflow-wrap: anywhere; }
+.rank-table .drama-id { color: #7c8ba0; font: 12px Consolas, monospace; }
+.rank-table .badge { background: #edf3f9; color: #4b6684; }
+.rank-table .empty { padding: 50px; color: var(--muted); text-align: center; }
+.rank-footnote { padding: 16px 24px; border-top: 1px solid #e8edf3; color: var(--muted); font-size: 12px; line-height: 1.8; }
+
+@media (max-width: 760px) {
+  .rank-main .topbar h1 { font-size: 27px; }
+  .rank-panel-head { padding: 18px 16px; gap: 6px 12px; }
+  .rank-filters { padding: 0 16px 18px; }
+  .rank-filter { flex: 1 1 140px; min-width: 0; }
+  .rank-filter select { width: 100%; }
+  .rank-meta, .rank-footnote { padding: 14px 16px; }
+  .rank-notice { margin: 14px 16px; }
+  .rank-table th, .rank-table td { padding: 13px 16px; }
+}
