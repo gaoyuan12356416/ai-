@@ -8,6 +8,7 @@ import time
 from features.youtube_daily_report.collector import BEIJING, DB_PATH, ENV_PATH, read_settings
 
 X_DB_PATH = "/var/lib/x-post-automation/accounts.sqlite3"
+X_PROFILE_DB_PATH = "/mnt/data-disk/x-tag-publisher/posts.sqlite3"
 FB_DB_PATH = "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3"
 FACEBOOK_ATTRIBUTION_DB_PATH = "/mnt/data-disk/social-analytics/attribution.sqlite3"
 METRICS = (
@@ -97,7 +98,8 @@ def present(shared, report_date):
 
 
 def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH,
-            fb_db_path=FB_DB_PATH, facebook_attribution_db_path=FACEBOOK_ATTRIBUTION_DB_PATH):
+            fb_db_path=FB_DB_PATH, facebook_attribution_db_path=FACEBOOK_ATTRIBUTION_DB_PATH,
+            x_profile_db_path=X_PROFILE_DB_PATH):
     from features.social_analytics.adapters import read_catalogs
     from features.social_analytics.routes import build_report
     from features.social_daily_report.billing import collect_financials
@@ -105,6 +107,7 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
     day = date.fromisoformat(report_date).isoformat()
     app = read_settings(env_path)
     app.update(JOB_DB_PATH=db_path, SOCIAL_ANALYTICS_X_DB_PATH=x_db_path,
+               SOCIAL_ANALYTICS_X_PROFILE_DB_PATH=x_profile_db_path,
                SOCIAL_ANALYTICS_FB_DB_PATH=fb_db_path,
                SOCIAL_ANALYTICS_FACEBOOK_ATTRIBUTION_DB=facebook_attribution_db_path,
                SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2,

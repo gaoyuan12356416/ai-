@@ -270,12 +270,25 @@ def read_x(path):
     return catalog
 
 
+def read_x_catalogs(app):
+    """Combine configured X ledgers; shared aggregation deduplicates Post IDs."""
+    path = app.get("SOCIAL_ANALYTICS_X_DB_PATH", "/var/lib/x-post-automation/accounts.sqlite3")
+    catalog = read_x(path)
+    profile_path = app.get("SOCIAL_ANALYTICS_X_PROFILE_DB_PATH")
+    if profile_path and Path(profile_path).resolve() != Path(path).resolve():
+        profile = read_x(profile_path)
+        for row in profile:
+            # Local log IDs are not identities across independent SQLite stores.
+            row["link_id"] = "x:profile:" + row["link_id"].removeprefix("x:")
+        catalog.extend(profile)
+    return catalog
+
+
 def read_catalogs(app, platforms):
     catalog, errors = [], CatalogErrors()
     readers = {
         "youtube": lambda: read_youtube(app["JOB_DB_PATH"]),
-        "x": lambda: read_x(app.get("SOCIAL_ANALYTICS_X_DB_PATH",
-                                   "/var/lib/x-post-automation/accounts.sqlite3")),
+        "x": lambda: read_x_catalogs(app),
     }
     for platform in platforms:
         try:

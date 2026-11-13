@@ -186,6 +186,8 @@ class DailyBillingTests(unittest.TestCase):
              patch.object(billing, "read_bills", return_value=[bill(cents=215988)]):
             result = collect(DAY)
         read.assert_called_once()
+        self.assertEqual(read.call_args.args[0]['SOCIAL_ANALYTICS_X_PROFILE_DB_PATH'],
+                         '/mnt/data-disk/x-tag-publisher/posts.sqlite3')
         self.assertIs(build.call_args.kwargs["catalog_snapshot"], snapshot)
         self.assertEqual(result["totals"]["revenue_cents"], 215988)
 

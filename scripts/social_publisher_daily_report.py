@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.post_daily_report.delivery import DefiniteFailure, DeliveryUnknown, send_card
 from features.social_daily_report.collector import (
-    BEIJING, DB_PATH, ENV_PATH, X_DB_PATH, FB_DB_PATH, FACEBOOK_ATTRIBUTION_DB_PATH, collect,
+    BEIJING, DB_PATH, ENV_PATH, X_DB_PATH, X_PROFILE_DB_PATH, FB_DB_PATH, FACEBOOK_ATTRIBUTION_DB_PATH, collect,
 )
 from features.social_daily_report.delivery import SocialDeliveryStore, deliver
 from features.social_daily_report.report import build_cards, payload_size, preview_html, require_complete
@@ -28,6 +28,7 @@ def main(argv=None):
     parser.add_argument("--state-dir", default="/mnt/data-disk/youtube-publisher-daily-report")
     parser.add_argument("--db", default=DB_PATH)
     parser.add_argument("--x-db", default=X_DB_PATH)
+    parser.add_argument("--x-profile-db", default=X_PROFILE_DB_PATH)
     parser.add_argument("--fb-db", default=FB_DB_PATH)
     parser.add_argument("--facebook-attribution-db", default=FACEBOOK_ATTRIBUTION_DB_PATH)
     parser.add_argument("--env-file", default=ENV_PATH)
@@ -71,7 +72,7 @@ def main(argv=None):
             report, cards = batch["report"], batch["cards"]
         else:
             report = collect(day, args.db, args.env_file, args.x_db,
-                             args.fb_db, args.facebook_attribution_db)
+                             args.fb_db, args.facebook_attribution_db, args.x_profile_db)
             if args.send:
                 try:
                     require_complete(report)

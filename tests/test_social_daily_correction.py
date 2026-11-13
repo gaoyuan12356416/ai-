@@ -38,4 +38,17 @@ class CorrectionTests(unittest.TestCase):
                     with self.assertRaises(DeliveryUnknown):cli.main(args+['--send'])
                 self.assertEqual(send.call_count,1)
 
+    def test_profile_revision_freezes_correct_label_and_sends_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            args=['--date',DAY,'--revision','x-profile-v1','--reason','x-profile','--state-dir',root]
+            with patch.object(cli,'ensure_storage'),patch.object(cli,'collect',return_value=present(fixture(),DAY)) as collect,patch.object(cli,'send_card',return_value={'message_id':'profile1'}) as send:
+                cli.main(args)
+                cli.main(args+['--send'])
+                cli.main(args+['--send'])
+                self.assertEqual(collect.call_count,1)
+                self.assertEqual(send.call_count,1)
+                card=send.call_args.args[2]
+                self.assertIn('画像发布补全',card['header']['title']['content'])
+                self.assertIn('效果归属',card['elements'][0]['text']['content'])
+
 if __name__=='__main__':unittest.main()

@@ -318,7 +318,7 @@ class PresentationTests(unittest.TestCase):
              patch("features.social_daily_report.billing.collect_financials",
                    side_effect=lambda report, app, catalog: report) as financials:
             result = collect(DAY, "/main.sqlite", "/not-read.env", "/x.sqlite",
-                             "/fb.sqlite", "/attribution.sqlite")
+                                    "/fb.sqlite", "/attribution.sqlite")
         self.assertEqual(result["totals"]["revenue_cents"], 169079)
         app, actor, query, options = captured[0]
         self.assertEqual(app["SOCIAL_ANALYTICS_X_DB_PATH"], "/x.sqlite")
@@ -524,7 +524,7 @@ class RunnerTests(unittest.TestCase):
             self.assertFalse((Path(folder) / "delivery.sqlite3").exists())
             self.assertTrue((Path(folder) / "previews" / DAY / "preview.html").exists())
 
-    def test_preview_passes_explicit_facebook_read_paths(self):
+    def test_preview_passes_explicit_facebook_and_profile_read_paths(self):
         from scripts.social_publisher_daily_report import main
         with tempfile.TemporaryDirectory() as folder, \
              patch("scripts.social_publisher_daily_report.collect",
@@ -532,9 +532,10 @@ class RunnerTests(unittest.TestCase):
              patch("scripts.social_publisher_daily_report.send_card", side_effect=AssertionError("no send")):
             main(["--date", DAY, "--preview", "--state-dir", folder,
                   "--db", "/main.sqlite", "--env-file", "/readonly.env", "--x-db", "/x.sqlite",
-                  "--fb-db", "/fb.sqlite", "--facebook-attribution-db", "/attribution.sqlite"])
+                  "--fb-db", "/fb.sqlite", "--facebook-attribution-db", "/attribution.sqlite",
+                  "--x-profile-db", "/profile.sqlite"])
             collect.assert_called_once_with(DAY, "/main.sqlite", "/readonly.env", "/x.sqlite",
-                                            "/fb.sqlite", "/attribution.sqlite")
+                                            "/fb.sqlite", "/attribution.sqlite", "/profile.sqlite")
             self.assertFalse((Path(folder) / "delivery.sqlite3").exists())
 
 

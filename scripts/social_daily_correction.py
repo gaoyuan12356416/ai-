@@ -16,18 +16,26 @@ from scripts.social_publisher_daily_report import CHAT_ID
 from scripts.post_daily_report import atomic_write,ensure_storage
 
 
-def corrected_cards(report,chat_id):
+def corrected_cards(report,chat_id,reason='pool-owner'):
     cards=build_cards(report,chat_id)
+    if reason == 'x-profile':
+        title = '【画像发布补全】'
+        explanation = ('**更正说明：已补入 X 画像发布的成功帖及其效果归属，并重新计算本统计日数据。**\n'
+                       '本版替代同日原日报；发布量按帖子 ID 去重，原始发布、支付记录及原日报回执保留。')
+    else:
+        title = '【归属更正】'
+        explanation = ('**更正说明：X 素材池、剧目池定时发布已按实际入池人归属。**\n'
+                       '本版替代同日原播报中的人员归属；原始发布与支付记录保留。')
     for card in cards:
-        card['header']['title']['content']='【归属更正】'+card['header']['title']['content']
-        card['elements'].insert(0,{'tag':'div','text':{'tag':'lark_md','content':
-            '**更正说明：X 素材池、剧目池定时发布已按实际入池人归属。**\n本版替代同日原播报中的人员归属；原始发布与支付记录保留。'}})
+        card['header']['title']['content']=title+card['header']['title']['content']
+        card['elements'].insert(0,{'tag':'div','text':{'tag':'lark_md','content':explanation}})
     return cards
 
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--date',required=True);p.add_argument('--revision',required=True)
+    p.add_argument('--reason',choices=['pool-owner','x-profile'],default='pool-owner')
     p.add_argument('--state-dir',default='/mnt/data-disk/youtube-publisher-daily-report')
     p.add_argument('--feishu-config',default='/root/.codex/plugins/feishu/config.json')
     p.add_argument('--send',action='store_true')
@@ -54,7 +62,7 @@ def main(argv=None):
                 report,cards=frozen['report'],frozen['cards']
             else:
                 report=collect(day);require_complete(report)
-                cards=corrected_cards(report,CHAT_ID)
+                cards=corrected_cards(report,CHAT_ID,args.reason)
                 from features.social_daily_report.report import payload_size,SAFE_PAYLOAD_BYTES
                 if any(payload_size(c,CHAT_ID)>SAFE_PAYLOAD_BYTES for c in cards):raise ValueError('correction_card_too_large')
                 store.freeze(day,key,report,cards)

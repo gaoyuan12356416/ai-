@@ -239,6 +239,38 @@ class XCatalogTests(unittest.TestCase):
         self.assertEqual(result["totals"]["repost_count"], 1)
         self.assertEqual(result["all_rows"][0]["owner_label"], "郜远")
 
+    def test_profile_ledger_adds_effects_and_unique_successes(self):
+        import shutil
+        self.insert(1)
+        ordinary = self.path
+        self.path = ordinary.with_name("profile.sqlite3")
+        shutil.copy2(ordinary, self.path)
+        self.insert(2)
+        self.insert(3, unknown=1)
+        self.insert(4, repost=True)
+        catalogs, errors = adapters.read_catalogs({
+            "SOCIAL_ANALYTICS_X_DB_PATH": ordinary,
+            "SOCIAL_ANALYTICS_X_PROFILE_DB_PATH": self.path,
+        }, ["x"])
+        self.assertFalse(errors)
+        result = summarize(catalogs, [metric("x", "1", 100), metric("x", "2", 250)], platform=["x"])
+        self.assertEqual(result["totals"]["published_count"], 3)
+        self.assertEqual(result["totals"]["post_count"], 2)
+        self.assertEqual(result["totals"]["repost_count"], 1)
+        self.assertEqual(result["totals"]["revenue_cents"], 350)
+        self.assertEqual(result["quality"]["publication_conflicts"], 0)
+
+    def test_missing_profile_never_reports_ordinary_only_as_complete(self):
+        self.insert(1)
+        missing = self.path.with_name("missing-profile.sqlite3")
+        catalogs, errors = adapters.read_catalogs({
+            "SOCIAL_ANALYTICS_X_DB_PATH": self.path,
+            "SOCIAL_ANALYTICS_X_PROFILE_DB_PATH": missing,
+        }, ["x"])
+        self.assertEqual(catalogs, [])
+        self.assertIn("x:2116", errors)
+        self.assertFalse(missing.exists())
+
     def test_repost_time_converts_to_utc(self):
         self.insert(1, repost=True)
         with closing(sqlite3.connect(self.path)) as c, c:
