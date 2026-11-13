@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import sqlite3
 from contextlib import closing
 from unittest.mock import patch
 
@@ -147,6 +148,24 @@ class RouteTests(unittest.TestCase):
             def _require_cookie_module(self,key):calls.append(key);return False
         dispatch(Handler(),urlparse('/api/drama-pay-rank/list'),{})
         self.assertEqual(calls,['drama_pay_rank'])
+
+class MetricReaderTests(unittest.TestCase):
+    def test_existing_reader_does_not_write_during_read_snapshot(self):
+        from features.drama_audience.fb_metric_reader import open_existing_metrics
+        class Store:
+            def __init__(self,path):self.path=path;self.ensure_storage()
+            def ensure_storage(self):raise AssertionError('schema_write_called')
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'metrics.sqlite3'
+            with closing(sqlite3.connect(path)) as db:
+                for t in ('fb_auto_metric_generation','fb_auto_metric_daily','fb_auto_metric_active_pointer'):
+                    db.execute('CREATE TABLE '+t+' (id INTEGER)')
+                db.commit();db.execute('BEGIN');db.execute('SELECT * FROM fb_auto_metric_daily').fetchall()
+                before=path.read_bytes();reader=open_existing_metrics(Store,path)
+                self.assertEqual(reader.path,path);self.assertEqual(path.read_bytes(),before)
+            missing=Path(tmp)/'absent.sqlite3'
+            with self.assertRaises(sqlite3.OperationalError):open_existing_metrics(Store,missing)
+            self.assertFalse(missing.exists())
     def test_navigation_idempotent(self):
         from features.drama_pay_rank.routes import ensure_navigation
         a=ensure_navigation([]);self.assertEqual(ensure_navigation(a),a)
