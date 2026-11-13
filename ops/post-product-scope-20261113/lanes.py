@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 
-EXPECTED_ROOT = '/mnt/data-disk/hit-publish-20261113/deployment/candidates/coordinator'
+EXPECTED_ROOT = '/mnt/data-disk/x-upload-continuity-20261113/deployment/candidates/coordinator'
 DB = '/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3'
 
 
@@ -32,7 +32,7 @@ def set_lane_scoped(lane, enabled, expected_version, expected_enabled, receipt_p
     assert isinstance(enabled, bool) and isinstance(expected_enabled, bool) and isinstance(preparation_only, bool)
     root = Path('/opt/pipeline-dispatch/current').resolve()
     assert str(root) == EXPECTED_ROOT, 'Coordinator current changed; re-review source'
-    assert hashlib.sha256((root / 'features/pipeline_dispatch/core.py').read_bytes()).hexdigest() == 'ec9e87d82fe4bda42748a6f953a01169c5b0b778742fa62bad8207b943f2f113', 'Coordinator code changed'
+    assert hashlib.sha256((root / 'features/pipeline_dispatch/core.py').read_bytes()).hexdigest() == '6926f24236fe35968e26c8828ca91cecaf8eb89d12d18603893cede71f001d75', 'Coordinator code changed'
     assert not Path(receipt_path).exists(), 'Keep the original operation receipt; reconcile it first'
     sys.path.insert(0, str(root))
     from features.pipeline_dispatch.core import DispatchStore, utcnow

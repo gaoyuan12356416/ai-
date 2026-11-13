@@ -24,7 +24,7 @@ GitHub 提交推送后，在 CPU fetch 精确 SHA 并创建独立 checkout。
 按 `x`、`fb`、`tt`、`youtube` 分别执行 `pause`、`busy`、`activate`、`resume`，均附 `--deployment DEPLOYMENT --group GROUP`。
 仅暂停该渠道新领取，等待其在途执行自然结束，恢复原有调度触发器。
 `youtube` 阶段同步主 API 与静态文件、YouTube 素材 SQL，并重启受影响的 API/YouTube 拥有者。
-回滚同一脚本依次执行 `rollback-pause`、`busy`、`rollback`。保留最新业务库、短链、回执和凭据；不恢复旧库、不补发历史任务。
+回滚使用最新回滚工具 `rollback.py SHA`，依次执行 `rollback-pause`、`busy`、`rollback`，均附 `--deployment DEPLOYMENT --group GROUP`。保留最新业务库、短链、回执和凭据；不恢复旧库、不补发历史任务。
 候选版本与备份路径记录于返回的部署 manifest，运行目录漂移须重新核对后合并。
 
 本次 FB 排空期间，另一部署 `20281127` 更新了 Page 池混选。`rebase_fb.py` 逐文件核对已评审的三项改动，将本次四个素材文件叠加到该运行版本，并保留独立回滚与原调度快照。其余渠道使用原始部署版本。
@@ -34,3 +34,5 @@ GitHub 提交推送后，在 CPU fetch 精确 SHA 并创建独立 checkout。
 等待在途 X 视频完成期间，FB 后续部署 `31711512` 已保留全部产品支持文件，并更新旧池队列独立性。`record_fb_followup.py` 核对后只更新部署记录及隔离回滚目录，不修改线上文件、不重启服务。回滚基线保留这次后续部署和此前的 Page 池混选。
 
 X 同期的上传连续性部署 `d6c66c58` 同样保留本次所有文件，仅另更新 `x_video_publish/transport.py`。`record_x_followup.py` 复用相同记录流程，使产品范围回滚保留该传输修复。
+
+最终协调器也已切换到上传连续性版本。已逐方法核对 `DispatchStore.connect/config/channel_enabled/_save_config` 与原版本 AST 一致；回滚工具仅更新当前路径和核心摘要校验，继续使用原有原子版本检查及单渠道恢复逻辑。
