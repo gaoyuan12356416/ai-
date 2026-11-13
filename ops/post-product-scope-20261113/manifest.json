@@ -278,7 +278,7 @@
       "lane": "main",
       "relative": "youtube-material-source.sql",
       "target": "/etc/youtube-auto-publish/material-source.sql",
-      "before": "449223ccd873b10358aab82a4fc31c426d094f7cd2168a105b9b4d3106c9290c",
+      "before": "156f4e653b710172165ad654f141581b9748dc510a3fa6ac807ea5c249678446",
       "after": "21d96fac46f39413c3a1d1c1390dab5708224e48a060f141f0a8c96023ce89d6",
       "source": "ops/post-product-scope-20261113/youtube-material-source.sql"
     }

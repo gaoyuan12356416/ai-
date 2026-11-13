@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 
-EXPECTED_ROOT = '/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/coordinator'
+EXPECTED_ROOT = '/mnt/data-disk/hit-publish-20261113/deployment/candidates/coordinator'
 DB = '/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3'
 
 
