@@ -90,7 +90,7 @@ def apply(folder, rollback=False):
         migration = json.loads((folder.parent / "migration.json").read_text())
         assert migration.get("verified") is True and migration.get("pointers_verified", 0) > 0
         assert (SOURCE.parent / "venv/bin/python").is_file(), "metric_python_environment_missing"
-        assert not release.run("ss", "-Hlnt", "( sport = :8849 )"), "metric_broker_port_in_use"
+        assert not release.run("ss", "-Hlnt", "( sport = :18449 )"), "metric_broker_port_in_use"
         broker_root = Path("/opt/fb-auto-metrics"); broker_root.mkdir(exist_ok=True)
         target = broker_root / "current"
         assert not target.exists() and not target.is_symlink(), "metric_release_already_exists"
@@ -98,7 +98,7 @@ def apply(folder, rollback=False):
         shutil.copy2(SOURCE / "deploy/fb-auto-metric-broker.service", BROKER)
         release.run("systemctl", "daemon-reload")
         release.run("systemctl", "enable", "--now", BROKER.name)
-        release.health(8849)
+        release.health(18449)
     lane = dict(manifest["lanes"]["fb"])
     if rollback:
         lane = {"previous_root": lane["candidate"], "candidate": lane["previous_root"],
@@ -116,7 +116,7 @@ def apply(folder, rollback=False):
             previous = manifest.get("metric_env_before", metric_settings((folder / "fb-auto-post.env.before").read_text()))
             write_metric_settings(previous)
         else:
-            write_metric_settings(["FB_AUTO_METRIC_STORAGE=mysql", "FB_AUTO_METRIC_BROKER_PORT=8849"])
+            write_metric_settings(["FB_AUTO_METRIC_STORAGE=mysql", "FB_AUTO_METRIC_BROKER_PORT=18449"])
         switch_folder = folder / ("rollback-switch" if rollback else "switch"); switch_folder.mkdir(exist_ok=True)
         fb.switch("fb", switch_folder, switch_manifest, audit)
         for mode in ("hourly", "repair"):

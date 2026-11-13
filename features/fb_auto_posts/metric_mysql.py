@@ -295,7 +295,7 @@ class MetricBrokerClient:
     """The unprivileged publisher sends only a fixed window DTO, never SQL."""
     def __init__(self, env):
         self.token = str(env.get("FB_AUTO_POST_INTERNAL_TOKEN", ""))
-        self.port = int(env.get("FB_AUTO_METRIC_BROKER_PORT", "8849"))
+        self.port = int(env.get("FB_AUTO_METRIC_BROKER_PORT", "18449"))
 
     def load_metric_window(self, *, product, platform, dates):
         import requests
