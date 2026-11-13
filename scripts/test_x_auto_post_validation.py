@@ -55,6 +55,18 @@ def valid_payload(**overrides):
 
 
 class XAutoPostValidationTests(unittest.TestCase):
+    def test_account_scope_has_no_count_cap_and_keeps_input_order(self):
+        for count in (101, 124, 201, 1001):
+            accounts = [str(value) for value in range(count, 0, -1)]
+            with self.subTest(count=count):
+                result = normalize_template_payload(valid_payload(account_ids=accounts))
+                self.assertEqual(result["account_ids"], accounts)
+
+    def test_account_scope_still_requires_valid_unique_ids(self):
+        for accounts in (None, [], "101", ["0"], ["invalid"], ["101", 101]):
+            with self.subTest(accounts=accounts), self.assertRaises(ValidationError):
+                normalize_template_payload(valid_payload(account_ids=accounts))
+
     def test_valid_payload_freezes_account_language_source_and_body(self):
         normalized = normalize_template_payload(valid_payload())
         self.assertEqual(normalized["language_source"], "account")

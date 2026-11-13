@@ -375,7 +375,6 @@
     const name = ui.byId("templateName").value.trim();
     if (!name) throw new Error("请填写模板名称。");
     if (!state.selectedAccountIds.size) throw new Error("请至少选择一个 X 账号。");
-    if (state.selectedAccountIds.size > 100) throw new Error("一个模板最多选择 100 个 X 账号。");
     const bodyTemplate = ui.byId("bodyTemplate").value.replace(/\r\n?/g, "\n").trim();
     if (!bodyTemplate) throw new Error("请填写 X Post 正文模板。");
     if (bodyTemplate.length > 2000) throw new Error("X Post 正文模板不能超过 2000 个字符。");

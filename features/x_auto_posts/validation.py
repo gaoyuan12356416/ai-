@@ -332,15 +332,17 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     if type(value.get("random_template_enabled", False)) is not bool:
         raise ValidationError("invalid_request", "random_template_enabled必须是布尔值")
     accounts = value.get("account_ids")
-    if not isinstance(accounts, list) or not 1 <= len(accounts) <= 100:
-        raise ValidationError("invalid_request", "至少选择一个且最多100个账号")
+    if not isinstance(accounts, list) or not accounts:
+        raise ValidationError("invalid_request", "至少选择一个账号")
     account_ids = []
+    seen_account_ids = set()
     for item in accounts:
         normalized = str(item or "").strip()
         if not re.fullmatch(r"[1-9][0-9]{0,30}", normalized):
             raise ValidationError("invalid_request", "账号ID无效")
-        if normalized in account_ids:
+        if normalized in seen_account_ids:
             raise ValidationError("invalid_request", "账号ID不能重复")
+        seen_account_ids.add(normalized)
         account_ids.append(normalized)
     platform = _integer(value.get("platform", 0), "平台", 0, 9)
     if platform != 0:

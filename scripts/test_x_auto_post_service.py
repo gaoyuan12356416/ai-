@@ -152,6 +152,30 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertEqual(original.config["material_rule"]["duration_max_seconds"], 600)
         self.assertEqual(self.bridge.verify_calls, [])
 
+    def test_124_account_save_roundtrip_and_idempotent_task_creation(self):
+        service = self.service(AutoLiveGates(True, True, True))
+        account_ids = [str(value) for value in range(101, 225)]
+        for account_id in account_ids:
+            self.bridge.accounts_by_id[account_id] = {
+                **self.bridge.accounts_by_id["101"], "id": int(account_id),
+                "x_user_id": "x-" + account_id, "username": "account" + account_id,
+            }
+        created = service.create_template(self.actor(valid_payload()))["template"]
+        updated = service.update_template(created["id"], self.actor(valid_payload(
+            account_ids=account_ids, expected_version=1,
+        )))["template"]
+        self.assertEqual(updated["account_count"], 124)
+        self.assertEqual(service.template(created["id"])["template"]["config"]["account_ids"], account_ids)
+        self.assertEqual(self.store.get_template(created["id"], version=1).config["account_ids"], ["101", "102"])
+        request = self.actor({"expected_version": 2, "confirmed": True,
+                              "idempotency_key": "large-account-scope-0001"})
+        first = service.run_now(created["id"], request)
+        second = service.run_now(created["id"], request)
+        self.assertTrue(second["idempotent"])
+        tasks = self.store.list_tasks(run_id=first["run_id"])
+        self.assertEqual([task.account_id for task in tasks], account_ids)
+        self.assertEqual(len(self.bridge.verify_calls), 124)
+
     def test_account_list_is_read_only_and_explicit_refresh_uses_all_three_guards(self):
         service = self.service()
         accounts = service.accounts()

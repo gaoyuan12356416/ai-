@@ -151,6 +151,18 @@ def build(source, repo, target, *, verify=True):
             destination = target / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(repo / name, destination)
+    # Keep the template account policy after historical runtime overlays.
+    shutil.copy2(repo / 'features/x_auto_posts/validation.py',
+                 target / 'features/x_auto_posts/validation.py')
+    for prefix in ('x-auto-publish', 'x-tag-auto-publish'):
+        editor = target / 'static' / (prefix + '-template.js')
+        value = editor.read_text(encoding='utf-8')
+        value = value.replace('    if (state.selectedAccountIds.size > 100) throw new Error("一个模板最多选择 100 个 X 账号。");\n', '')
+        editor.write_text(value, encoding='utf-8')
+        page = target / 'static' / (prefix + '-template.html')
+        value = re.sub(r'(/' + re.escape(editor.name) + r')(?:\?[^"\']*)?',
+                       r'\1?v=' + digest(editor)[:12], page.read_text(encoding='utf-8'))
+        page.write_text(value, encoding='utf-8')
     (target / 'tag-runtime-manifest.json').write_text(json.dumps(dict(baseline=manifest,
         files={str(p.relative_to(target)).replace('\\', '/'): digest(p) for p in target.rglob('*') if p.is_file()}),
         indent=2), encoding='utf-8')
