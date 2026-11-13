@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <script src="/x-legacy-publish-redirect.js?v=20261112retirement1"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>X Post 素材池 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
@@ -73,7 +74,7 @@
     .hidden { display: none !important; }
     .gate { padding: 48px 24px; text-align: center; color: var(--muted); }
     .gate strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 18px; }
-    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
     .stat { min-height: 104px; padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
     .stat span { color: var(--muted); font-size: 13px; }
     .stat strong { display: block; margin-top: 11px; font-size: 26px; }
@@ -202,6 +203,7 @@
     .schedule-message { min-height: 20px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .schedule-message.error { color: var(--red); }
     .add-actions { display: grid; gap: 8px; min-width: 150px; }
+    .manual-recent-runs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
     .manual-dialog {
       width: min(760px, calc(100vw - 32px));
       max-height: min(820px, calc(100vh - 32px));
@@ -235,6 +237,33 @@
       font-size: 13px;
       line-height: 1.55;
     }
+    .manual-mode-options {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px;
+    }
+    .manual-mode-option {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+      color: #344760;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .manual-mode-option:has(input:checked) {
+      border-color: #86a8f8;
+      color: #2457b8;
+      background: #f3f7ff;
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, .08);
+    }
+    .manual-mode-option input { width: 17px; height: 17px; accent-color: var(--blue); }
+    .manual-schedule-field input { width: 100%; }
     .manual-mapping, .manual-status-box {
       display: grid;
       gap: 7px;
@@ -327,11 +356,17 @@
     }
     .badge.published, .badge.available { color: #08734f; background: #e8f8f1; }
     .badge.unpublished, .badge.queued, .badge.reserved, .badge.occupied { color: #2457b8; background: #eef4ff; }
+    .badge.deferred { color: #925d00; background: #fff4d9; }
     .badge.validation_failed, .badge.failed { color: #ad2f3b; background: #ffedef; }
     .badge.unknown, .badge.needs_review { color: #925d00; background: #fff4d9; }
+    .badge.repaired_pending, .badge.batch_blocked { color: #925d00; background: #fff4d9; }
+    .badge.published_elsewhere { color: #08734f; background: #e8f8f1; }
     .badge.other { color: #56657b; background: #edf1f6; }
     .subtle { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .batch-note { max-width: 320px; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .batch-note summary { cursor: pointer; }
     .error { max-width: 320px; color: #a62f3a; line-height: 1.45; word-break: break-word; }
+    .deferred-info { max-width: 320px; color: #7a5600; line-height: 1.45; word-break: break-word; }
     .links { display: flex; flex-direction: column; gap: 6px; min-width: 116px; }
     .links a { color: var(--blue); font-weight: 700; text-decoration: none; }
     .links a:hover { text-decoration: underline; }
@@ -377,7 +412,7 @@
       <header class="topbar">
         <div class="title">
           <h1>X Post 素材池</h1>
-          <p>手动加入自定义素材 ID；定时任务按加入时间从早到晚选择未发布且未占用的素材。</p>
+          <p>手动加入自定义素材 ID；定时任务按加入时间从新到旧选择未发布且未占用的素材，并按语言匹配账号。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -393,14 +428,16 @@
         <section class="stats">
           <article class="stat"><span>池内素材</span><strong id="totalCount">—</strong></article>
           <article class="stat"><span>未发布</span><strong id="unpublishedCount">—</strong></article>
-          <article class="stat"><span>可供发布</span><strong id="availableCount">—</strong></article>
+          <article class="stat"><span>未占用（待排期预检）</span><strong id="availableCount">—</strong></article>
+          <article class="stat"><span>待可投放</span><strong id="deferredCount">—</strong></article>
           <article class="stat"><span>已发布</span><strong id="publishedCount">—</strong></article>
         </section>
+        <p id="poolStatusSummary" class="helper" role="status">未发布包含历史占用、失败和待核查素材，不等于当前排期可用数量。</p>
 
         <section class="panel">
           <div class="section-head">
             <h2>自动发布设置</h2>
-            <p>只有这里选中的账号才会从素材池取素材发布；可用素材按上传时间倒序、最新上传优先。超过 140 秒的视频只会分配给通过个号 token 确认有 X Basic、Premium 或 Premium+ 的账号；会员账号不再受素材池原 600 秒上限限制，仍按 X 接口的 4 小时、512 MiB 门禁执行。每个账号会在每个发布时间点各发布一篇。</p>
+            <p>只有这里选中的账号才会从素材池取素材发布；可用素材按上传时间倒序、最新上传优先。超过 20 分钟（1200 秒）的视频只会分配给通过个号 token 确认有 X Basic、Premium 或 Premium+ 的账号；会员账号不再受素材池原 600 秒上限限制，仍按 X 接口的 4 小时、512 MiB 门禁执行。每个账号会在每个发布时间点各发布一篇。</p>
           </div>
           <div class="schedule-grid">
             <div class="field">
@@ -440,6 +477,11 @@
               </div>
             </div>
           </div>
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input id="scheduleRandomTemplate" type="checkbox" style="width:auto" />是否启用随机模板</label>
+            <span class="helper">仅对视频生效；关闭时保持原有发布处理。保存后按新排程生效。</span>
+            <span id="randomTemplateSummary" class="helper">已保存：随机模板关闭</span>
+          </div>
           <div class="schedule-footer">
             <div>
               <label class="switch-row"><input id="scheduleEnabled" type="checkbox" />启用素材池自动发布</label>
@@ -454,13 +496,13 @@
         <section class="panel">
           <div class="section-head">
             <h2>添加素材</h2>
-            <p>支持一次粘贴多个自定义素材库 ID，以逗号、空格或换行分隔；允许加入超过 140 秒的视频，发布时会自动匹配有会员资格的账号。重复或已被历史队列占用的素材不会再次加入。</p>
+            <p>支持一次粘贴多个自定义素材库 ID，以逗号、空格或换行分隔；允许加入超过 20 分钟（1200 秒）的视频，发布时会自动匹配有会员资格的账号。重复或已被历史队列占用的素材不会再次加入。</p>
           </div>
           <div class="add-layout">
             <div class="field">
               <label for="materialIds">自定义素材 ID</label>
               <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
-              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。加入后立即检查素材、违规记录、色情/暴力标签和短剧映射；长视频在排期预检时按账号会员资格路由。</span>
+              <span id="materialHelp" class="helper">每次最多提交 100 个正整数 ID。检查素材身份、关联短剧的语言和媒体条件，并按短剧语言匹配账号；长视频在排期预检时按账号会员资格路由。</span>
             </div>
             <div class="add-actions">
               <button id="manualPublish" class="button danger" type="button">手动发布</button>
@@ -468,6 +510,7 @@
               <button id="clearMaterials" class="button" type="button">清空输入</button>
             </div>
           </div>
+          <div id="manualRecentRuns" class="manual-recent-runs hidden" aria-label="最近手动发布任务"></div>
           <div class="template-box">
             <strong>素材 Post 描述模板</strong>
             <textarea id="materialPostTemplate" maxlength="2000" aria-describedby="materialPostTemplateHelp">🎬 {{drama_name}}
@@ -481,7 +524,7 @@
         <section class="panel">
           <div class="section-head">
             <h2>素材池明细</h2>
-            <p>主状态仅区分已发布/未发布；“不可用”表示素材ID不存在或未通过 X 发布标准。发布失败或结果待确认的队列不会自动重发。</p>
+            <p>主状态仅区分已发布/未发布；“待可投放”表示关联短剧尚未到开放时间，系统会在到点后的下一次自然排期自动复检，不会提前建队列或发布；“不可用”才表示素材ID不存在或未通过 X 发布标准。发布失败或结果待确认的队列不会自动重发。</p>
           </div>
           <form id="filters" class="filters">
             <input id="materialIdFilter" inputmode="numeric" placeholder="素材 ID" aria-label="素材 ID" />
@@ -493,8 +536,12 @@
             <select id="availabilityFilter" aria-label="可用状态">
               <option value="">全部可用状态</option>
               <option value="available">可供发布</option>
+              <option value="deferred">待可投放</option>
               <option value="validation_failed">不可用</option>
               <option value="occupied">已被队列占用</option>
+              <option value="repaired_pending">媒体已修复，待安排发布</option>
+              <option value="batch_blocked">批次暂停，本条未执行</option>
+              <option value="published_elsewhere">历史已手动发布</option>
               <option value="failed">发布失败（不重发）</option>
               <option value="needs_review">结果待核查（不重发）</option>
               <option value="published">已发布</option>
@@ -515,7 +562,7 @@
                   <th>X 账号</th>
                   <th>素材预览</th>
                   <th>Post 预览</th>
-                  <th>校验/发布错误</th>
+                  <th>排期/校验/发布信息</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -537,17 +584,39 @@
   <dialog id="manualPublishDialog" class="manual-dialog" aria-labelledby="manualPublishTitle">
     <div class="manual-dialog-head">
       <div>
-        <h2 id="manualPublishTitle">手动立即发布</h2>
-        <p>本批素材不会进入素材池；后台完成整批预检和原子建队列后，按顺序向所选 X 个号各发布一次。</p>
+        <h2 id="manualPublishTitle">手动发布</h2>
+        <p>可立即发布，也可按北京时间定时发布。本批素材不会进入素材池，并允许复用已在素材池或历史队列中的素材；到达执行时间后，后台完成整批预检和原子建队列，再按顺序向所选 X 个号各发布一次。</p>
       </div>
       <button id="manualDialogCloseTop" class="button small" type="button" aria-label="关闭手动发布弹窗">关闭</button>
     </div>
     <div class="manual-dialog-body">
-      <div class="manual-warning"><strong>不可回滚：</strong>X 写入开始后，本批可能部分成功、部分失败，系统无法撤回已经发布的帖子。遇到限流或未知结果会停止后续发布，需先人工核对。手动和素材池自动发布使用同一会员时长规则：超过 140 秒仅在最终发布账号通过 token 确认为 Premium 时进入原片预检；会员账号不再受原 600 秒上限限制，当前统一按 4 小时时长、512 MiB 文件门禁执行，已实测原片 763.938 秒可发布。</div>
+      <div class="manual-warning"><strong>不可回滚：</strong>X 写入开始后，本批可能部分成功、部分失败，系统无法撤回已经发布的帖子。历史素材复用会创建新的 Post 和独立账本记录，不会重试或改写旧队列。遇到限流或未知结果会停止后续发布，需先人工核对。手动和素材池自动发布使用同一会员时长规则：超过 20 分钟（1200 秒）仅在最终发布账号通过 token 确认为 Premium 时进入原片预检；会员账号不再受原 600 秒上限限制，当前统一按 4 小时时长、512 MiB 文件门禁执行，已实测原片 763.938 秒可发布。</div>
       <div id="manualSelectionPanel">
         <div class="field">
           <strong id="manualMaterialSummary">尚未选择素材。</strong>
           <span class="helper">必须选择相同数量且不重复的账号；整批预检会在所选账号之间按视频时长路由，最终保证每个账号一条。下方两列只展示所选集合，不代表固定配对；弹窗选择不会改动自动发布设置。</span>
+        </div>
+        <div class="field" style="margin-top: 12px">
+          <label>发布时间</label>
+          <div class="manual-mode-options" role="radiogroup" aria-label="选择手动发布时间">
+            <label class="manual-mode-option">
+              <input type="radio" name="manualPublishMode" value="immediate" checked />
+              <span>立即发布</span>
+            </label>
+            <label class="manual-mode-option">
+              <input type="radio" name="manualPublishMode" value="scheduled" />
+              <span>定时发布</span>
+            </label>
+          </div>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label style="display:flex;align-items:center;gap:8px"><input id="manualRandomTemplate" type="checkbox" style="width:auto" />是否启用随机模板</label>
+          <span class="helper">仅对视频生效；只影响本次批次，每个新批次默认关闭。</span>
+        </div>
+        <div id="manualScheduleField" class="field manual-schedule-field hidden" style="margin-top: 12px">
+          <label for="manualScheduledAt">定时发布时间（北京时间）</label>
+          <input id="manualScheduledAt" class="time-input" type="datetime-local" step="60" />
+          <div id="manualScheduleHint" class="helper">请选择晚于当前时间的日期和分钟。</div>
         </div>
         <div class="field" style="margin-top: 12px">
           <label for="manualAccountSearch">本批目标 X 个号</label>
@@ -560,6 +629,7 @@
       <div id="manualRunPanel" class="manual-status-box hidden" aria-live="polite">
         <div id="manualRunTitle" class="manual-run-title"></div>
         <div id="manualRunCounts" class="manual-run-counts"></div>
+        <div class="helper">任务已交给后台处理，可继续发布下一批，无需等待本批完成。已有任务可从“最近手动任务”查看。</div>
         <div id="manualRunError" class="manual-run-error hidden"></div>
         <div id="manualQueueRows"></div>
         <a class="text-link" href="/x-post-logs.html">查看 X Post 发布日志</a>
@@ -567,6 +637,7 @@
     </div>
     <div class="manual-dialog-footer">
       <button id="manualDialogClose" class="button" type="button">取消</button>
+      <button id="manualPublishNext" class="button primary hidden" type="button">继续发布下一批</button>
       <button id="manualPublishSubmit" class="button danger" type="button" disabled>确认并立即发布</button>
     </div>
   </dialog>
@@ -574,8 +645,8 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js"></script>
-  <script>
+  <script src="/quick-nav.js?v=97b22a40182f"></script>
+  <script data-version="20261012-drama-language">
     (() => {
       const state = {
         auth: null,
@@ -603,16 +674,21 @@
         manual: {
           materialIds: [],
           accountIds: new Set(),
+          publishMode: "immediate",
           submitting: false,
           runId: 0,
           run: null,
           terminal: false,
           pollTimer: null,
+          pollGeneration: 0,
+          recentRunIds: [],
         },
       };
       const byId = id => document.getElementById(id);
       const MANUAL_LAST_RUN_STORAGE_KEY = "xPostMaterialManualLastRunV1";
+      const MANUAL_RECENT_RUNS_STORAGE_KEY = "xPostMaterialManualRecentRunsV1";
       const MANUAL_DRAFT_STORAGE_KEY = "xPostMaterialManualDraftV1";
+      const BEIJING_TIME_ZONE = "Asia/Shanghai";
       const MANUAL_TERMINAL_STATUSES = new Set([
         "completed",
         "completed_with_errors",
@@ -620,6 +696,44 @@
         "stopped",
         "failed_preflight",
       ]);
+      const MANUAL_ERROR_LABELS = Object.freeze({
+        drama_not_yet_deliverable: "短剧尚未到可投放时间，请选择开放时间之后的定时发布",
+        material_not_found: "素材不存在",
+        material_source_ambiguous: "素材源数据重复",
+        material_product_mismatch: "素材不属于Dramawave",
+        material_not_video: "素材不是视频",
+        material_inactive: "素材已删除或不可用",
+        material_duration_invalid: "视频时长数据无效",
+        material_duration_missing: "视频时长缺失或为0秒",
+        material_duration_exceeds_limit: "视频时长超过4小时上限",
+        material_metadata_invalid: "素材信息不完整",
+        drama_language_missing: "关联短剧缺少语言信息",
+        drama_language_invalid: "关联短剧的语言格式无效",
+        drama_language_ambiguous: "关联短剧存在多个语言，无法确定发布语言",
+        material_url_not_https: "素材地址不可用",
+        material_source_tag_invalid: "素材标签无法检查",
+        material_source_tag_unsafe: "素材标签包含禁发内容",
+        invalid_media_type: "素材文件不是视频",
+        invalid_media_codec: "视频编码或音频格式不符合X要求",
+        invalid_media_dimensions: "视频分辨率或画面比例不符合X要求",
+        invalid_media_scan: "视频不是逐行扫描格式",
+        invalid_media_duration: "视频时长不符合发布要求",
+        x_long_video_requires_premium: "视频超过1200秒，所选账号没有长视频会员资格",
+        media_too_large: "视频超过512MB上限",
+        repaired_media_too_large: "修复后视频超过512MB上限",
+        repaired_media_empty: "修复后视频文件为空",
+        repaired_media_missing: "修复后视频文件不存在",
+        repaired_media_duration_invalid: "修复后视频时长不符合发布要求",
+        repaired_media_duration_too_long: "修复后视频时长超过账号上限",
+        repaired_media_duration_mismatch: "修复后视频时长与预期不一致",
+        media_download_failed: "视频下载失败",
+        media_probe_failed: "无法读取视频信息",
+        source_not_repairable: "视频无法自动修复",
+        x_post_storage_unavailable: "发布服务存储不可用",
+        x_post_manual_account_mismatch: "所选账号与任务不一致",
+        x_post_manual_material_mismatch: "所选素材与任务不一致",
+        material_not_found_or_ineligible: "素材不存在、不是有效视频或时长数据缺失",
+      });
       const setText = (node, value, fallback = "—") => {
         node.textContent = value == null || value === "" ? fallback : String(value);
       };
@@ -742,16 +856,16 @@
         return /^\d+$/.test(String(value || "")) && Number(value) > 0 ? String(value) : "";
       }
       function accountEligible(item) {
-        return !!item && item.status === "active" && item.publish_eligible === true;
+        return !!item && item.publish_eligible === true;
       }
       function subscriptionLabel(item) {
         return ({
           basic: "X Basic",
           premium: "X Premium",
           premium_plus: "X Premium+",
-          none: "无会员",
-          unknown: "会员未知",
-        })[String(item && item.subscription_type || "unknown")] || "会员未知";
+          none: "无会员 · 最长 20 分钟（1200 秒）",
+          unknown: "会员未知 · 最长 20 分钟（1200 秒）",
+        })[String(item && item.subscription_type || "unknown")] || "会员未知 · 最长 20 分钟（1200 秒）";
       }
       function accountTitle(item) {
         const username = String(item && item.username || "").trim().replace(/^@/, "");
@@ -778,8 +892,14 @@
         if (!suffix) suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
         return `x-post-manual-ui-${suffix}`;
       }
-      function stableManualIdempotencyKey(materialIds, accountIds) {
-        const fingerprint = JSON.stringify({ material_ids: materialIds, account_ids: accountIds });
+      function stableManualIdempotencyKey(materialIds, accountIds, publishMode, scheduledAt, randomTemplateEnabled) {
+        const fingerprint = JSON.stringify({
+          material_ids: materialIds,
+          account_ids: accountIds,
+          publish_mode: publishMode,
+          scheduled_at: scheduledAt,
+          random_template_enabled: randomTemplateEnabled,
+        });
         try {
           const stored = JSON.parse(sessionRead(MANUAL_DRAFT_STORAGE_KEY) || "{}");
           if (stored.fingerprint === fingerprint && typeof stored.key === "string" && stored.key) {
@@ -791,6 +911,79 @@
         const key = newManualIdempotencyKey();
         sessionWrite(MANUAL_DRAFT_STORAGE_KEY, JSON.stringify({ fingerprint, key }));
         return key;
+      }
+      function beijingInputValue(value) {
+        const date = value instanceof Date ? value : new Date(value);
+        if (Number.isNaN(date.getTime())) return "";
+        const parts = Object.fromEntries(
+          new Intl.DateTimeFormat("en-CA", {
+            timeZone: BEIJING_TIME_ZONE,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+          }).formatToParts(date).filter(part => part.type !== "literal").map(part => [part.type, part.value])
+        );
+        return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+      }
+      function nextManualScheduleValue() {
+        const interval = 5 * 60 * 1000;
+        const earliest = Date.now() + interval;
+        return beijingInputValue(new Date(Math.ceil(earliest / interval) * interval));
+      }
+      function manualScheduleValidation() {
+        if (state.manual.publishMode !== "scheduled") {
+          return { valid: true, scheduledAt: "", normalized: "", message: "" };
+        }
+        const raw = String(byId("manualScheduledAt").value || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) {
+          return { valid: false, scheduledAt: "", normalized: "", message: "请选择完整的日期和分钟。" };
+        }
+        const scheduledAt = `${raw}:00+08:00`;
+        const date = new Date(scheduledAt);
+        if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) {
+          return { valid: false, scheduledAt: "", normalized: "", message: "定时发布时间必须晚于当前时间。" };
+        }
+        return {
+          valid: true,
+          scheduledAt,
+          normalized: date.toISOString().replace(".000Z", "Z"),
+          message: `将于北京时间 ${raw.replace("T", " ")} 开始执行。`,
+        };
+      }
+      function formatBeijingTime(value) {
+        if (!value) return "—";
+        const date = new Date(String(value));
+        if (Number.isNaN(date.getTime())) return String(value);
+        return new Intl.DateTimeFormat("zh-CN", {
+          timeZone: BEIJING_TIME_ZONE,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(date);
+      }
+      function renderManualTiming() {
+        byId("manualRandomTemplate").disabled = state.manual.submitting;
+        const scheduled = state.manual.publishMode === "scheduled";
+        byId("manualScheduleField").classList.toggle("hidden", !scheduled);
+        byId("manualScheduledAt").disabled = state.manual.submitting || !scheduled;
+        document.querySelectorAll('input[name="manualPublishMode"]').forEach(input => {
+          input.disabled = state.manual.submitting;
+          input.checked = input.value === state.manual.publishMode;
+        });
+        const validation = manualScheduleValidation();
+        setText(
+          byId("manualScheduleHint"),
+          scheduled ? validation.message : "",
+          ""
+        );
+        byId("manualScheduleHint").classList.toggle("error", scheduled && !validation.valid);
+        syncManualSelection();
       }
       function showManualDialog() {
         const dialog = byId("manualPublishDialog");
@@ -842,6 +1035,7 @@
       function syncManualSelection() {
         const expected = state.manual.materialIds.length;
         const selected = state.manual.accountIds.size;
+        const timing = manualScheduleValidation();
         setText(
           byId("manualMaterialSummary"),
           expected
@@ -855,7 +1049,14 @@
         );
         byId("manualPublishSubmit").disabled = state.manual.submitting
           || expected < 1
-          || selected !== expected;
+          || selected !== expected
+          || !timing.valid;
+        if (!state.manual.submitting) {
+          setText(
+            byId("manualPublishSubmit"),
+            state.manual.publishMode === "scheduled" ? "确认定时发布" : "确认并立即发布"
+          );
+        }
         renderManualMapping();
       }
       function renderManualAccountOptions() {
@@ -895,14 +1096,14 @@
           setText(strong, accountTitle(item));
           const username = String(item.username || "").trim().replace(/^@/, "");
           const secondary = document.createElement("span");
-          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · ${subscriptionLabel(item)}`);
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · 剧语言 ${String(item.drama_language || "en")} · ${subscriptionLabel(item)}`);
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
           setText(
             status,
             eligible
-              ? `${selected ? `第 ${position} 个 · ` : ""}${item.long_video_publish_eligible === true ? "支持长视频" : "最长 140 秒"}`
+              ? `${selected ? `第 ${position} 个 · ` : ""}可发布`
               : "不可发布"
           );
           label.append(checkbox, textWrap, status);
@@ -910,16 +1111,53 @@
         });
         syncManualSelection();
       }
-      function manualStatusLabel(status) {
+      function manualStatusLabel(status, run) {
+        if (
+          String(status || "") === "queued"
+          && run
+          && run.publish_mode === "scheduled"
+          && run.scheduled_at
+        ) {
+          return `等待定时发布（北京时间 ${formatBeijingTime(run.scheduled_at)}）`;
+        }
         return ({
           queued: "等待后台处理",
-          running: "正在预检或发布",
+          running: "正在检查视频或发布",
           completed: "全部发布成功",
           completed_with_errors: "已结束，部分失败",
           needs_review: "已停止，存在未知结果待核对",
           stopped: "已停止，后续未继续发布",
-          failed_preflight: "整批预检失败，未开始发布",
+          failed_preflight: "发布前检查未通过，未发布",
         })[String(status || "")] || String(status || "状态未知");
+      }
+      function manualFailureReason(run) {
+        const code = String(run && run.error_code || "").trim();
+        const message = String(run && run.error_message || "").trim();
+        const lowerMessage = message.toLowerCase();
+        const materialMatch = message.match(/素材\s+(\d+)/);
+        const prefix = materialMatch ? `素材 ${materialMatch[1]}：` : "";
+
+        if (code === "repaired_media_invalid") {
+          if (lowerMessage.includes("size")) return `${prefix}修复后视频超过512MB上限`;
+          if (lowerMessage.includes("duration")) return `${prefix}修复后视频时长不符合发布要求`;
+          return `${prefix}修复后视频不符合发布要求`;
+        }
+        if (code === "invalid_media_duration") {
+          if (lowerMessage.includes("4 hour") || message.includes("4小时")) return `${prefix}视频时长超过4小时上限`;
+          if (lowerMessage.includes("0.5")) return `${prefix}视频时长不足0.5秒`;
+        }
+        if (code === "repaired_media_duration_invalid" || code === "repaired_media_duration_too_long") {
+          if (message.includes("4小时")) return `${prefix}修复后视频时长超过4小时上限`;
+          if (message.includes("1200秒")) return `${prefix}修复后视频时长超过1200秒上限`;
+          if (message.includes("140秒")) return `${prefix}修复后视频时长超过140秒上限`;
+          if (message.includes("0.5秒")) return `${prefix}修复后视频时长不足0.5秒`;
+        }
+        const label = MANUAL_ERROR_LABELS[code];
+        if (label) return `${prefix}${label}`;
+        if (message && /[\u3400-\u9fff]/.test(message) && message.length <= 80) {
+          return message;
+        }
+        return code || message ? "发布前检查失败，请联系技术人员" : "";
       }
       function renderManualRun(run) {
         if (!run || !/^\d+$/.test(String(run.id || ""))) return;
@@ -929,19 +1167,22 @@
         byId("manualSelectionPanel").classList.add("hidden");
         byId("manualRunPanel").classList.remove("hidden");
         byId("manualPublishSubmit").classList.add("hidden");
+        byId("manualPublishNext").classList.remove("hidden");
         setText(byId("manualDialogClose"), "关闭");
-        setText(byId("manualRunTitle"), `任务 #${run.id} · ${manualStatusLabel(run.status)}`, "");
+        const modeLabel = run.publish_mode === "scheduled" ? "定时发布" : "立即发布";
+        setText(byId("manualRunTitle"), `任务 #${run.id} · ${modeLabel} · ${manualStatusLabel(run.status, run)}`, "");
         const expected = Number(run.expected_count || 0);
         const published = Number(run.published_count || 0);
         const failed = Number(run.failed_count || 0);
         const unknown = Number(run.unknown_count || 0);
         setText(
           byId("manualRunCounts"),
-          `目标 ${expected} 个 · 已成功 ${published} 个 · 已失败 ${failed} 个 · 待核对 ${unknown} 个`,
+          `目标 ${expected} 个 · 已成功 ${published} 个 · 已失败 ${failed} 个 · 待核对 ${unknown} 个 · 随机模板：${run.random_template_enabled === true ? "开启" : "关闭"}（仅对视频生效）`,
           ""
         );
         const errorNode = byId("manualRunError");
-        const error = [run.error_code, run.error_message].filter(Boolean).join("：");
+        const reason = manualFailureReason(run);
+        const error = reason ? `拦截原因：${reason}` : "";
         setText(errorNode, error, "");
         errorNode.classList.toggle("hidden", !error);
         const queueRows = byId("manualQueueRows");
@@ -950,7 +1191,10 @@
         if (!queues.length) {
           const waiting = document.createElement("div");
           waiting.className = "helper";
-          setText(waiting, state.manual.terminal ? "本任务未生成发布队列。" : "后台正在执行整批预检，尚未生成发布队列。", "");
+          const waitingText = !state.manual.terminal && run.publish_mode === "scheduled" && run.status === "queued"
+            ? `任务已保留所选素材，将于北京时间 ${formatBeijingTime(run.scheduled_at)} 到点后开始预检。`
+            : (state.manual.terminal ? "本次没有开始发布。" : "后台正在检查所选视频，尚未开始发布。");
+          setText(waiting, waitingText, "");
           queueRows.appendChild(waiting);
         } else {
           queues.forEach(queue => {
@@ -979,36 +1223,102 @@
             queueRows.appendChild(row);
           });
         }
-        if (state.manual.terminal) sessionRemove(MANUAL_LAST_RUN_STORAGE_KEY);
+      }
+      function stopManualTracking() {
+        if (state.manual.pollTimer) window.clearTimeout(state.manual.pollTimer);
+        state.manual.pollTimer = null;
+        state.manual.pollGeneration += 1;
+      }
+      function renderRecentManualRuns() {
+        const container = byId("manualRecentRuns");
+        container.replaceChildren();
+        container.classList.toggle("hidden", !state.manual.recentRunIds.length);
+        if (!state.manual.recentRunIds.length) return;
+        const label = document.createElement("span");
+        label.className = "helper";
+        setText(label, "最近手动任务：");
+        container.appendChild(label);
+        state.manual.recentRunIds.forEach(runId => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "button small";
+          button.dataset.manualRunId = String(runId);
+          setText(button, `查看任务 #${runId}`);
+          container.appendChild(button);
+        });
+      }
+      function rememberManualRun(runId) {
+        state.manual.recentRunIds = [Number(runId), ...state.manual.recentRunIds]
+          .filter((id, index, all) => Number.isSafeInteger(id) && id > 0 && all.indexOf(id) === index)
+          .slice(0, 10);
+        sessionWrite(MANUAL_RECENT_RUNS_STORAGE_KEY, JSON.stringify(state.manual.recentRunIds));
+        renderRecentManualRuns();
+      }
+      function restoreRecentManualRuns() {
+        try {
+          const stored = JSON.parse(sessionRead(MANUAL_RECENT_RUNS_STORAGE_KEY) || "[]");
+          state.manual.recentRunIds = Array.isArray(stored) ? stored.map(Number) : [];
+        } catch (_) {
+          state.manual.recentRunIds = [];
+        }
+        rememberManualRun(Number(sessionRead(MANUAL_LAST_RUN_STORAGE_KEY)));
+      }
+      function viewManualRun(runId) {
+        if (state.manual.submitting || !Number.isSafeInteger(runId) || runId <= 0) return;
+        stopManualTracking();
+        state.manual.runId = runId;
+        state.manual.run = null;
+        state.manual.terminal = false;
+        byId("manualSelectionPanel").classList.add("hidden");
+        byId("manualRunPanel").classList.remove("hidden");
+        byId("manualPublishSubmit").classList.add("hidden");
+        byId("manualPublishNext").classList.remove("hidden");
+        setText(byId("manualDialogClose"), "关闭");
+        setText(byId("manualRunTitle"), `正在读取任务 #${runId}…`);
+        setText(byId("manualRunCounts"), "", "");
+        byId("manualRunError").classList.add("hidden");
+        byId("manualQueueRows").replaceChildren();
+        showManualDialog();
+        pollManualRun();
       }
       function scheduleManualPoll(delay = 2000) {
         if (state.manual.pollTimer) window.clearTimeout(state.manual.pollTimer);
         if (!state.manual.runId || state.manual.terminal) return;
         state.manual.pollTimer = window.setTimeout(pollManualRun, delay);
       }
+      function manualPollDelay(run) {
+        if (run && run.status === "queued" && run.publish_mode === "scheduled" && run.scheduled_at) {
+          const remaining = new Date(run.scheduled_at).getTime() - Date.now();
+          if (Number.isFinite(remaining) && remaining > 60000) return Math.min(30000, Math.max(5000, remaining - 30000));
+        }
+        return 2500;
+      }
       async function pollManualRun() {
         const runId = Number(state.manual.runId || 0);
+        const generation = state.manual.pollGeneration;
         if (!runId || state.manual.terminal) return;
+        let nextDelay = 5000;
         try {
           const result = await api(`/api/admin/x-posts/material-pool/manual-runs/${encodeURIComponent(runId)}`);
-          if (runId !== state.manual.runId) return;
+          if (runId !== state.manual.runId || generation !== state.manual.pollGeneration) return;
           const run = scheduleItem(result);
           if (Number(run.id || 0) !== runId) throw new Error("手动发布任务响应不一致");
           const wasTerminal = state.manual.terminal;
           renderManualRun(run);
           if (!wasTerminal && state.manual.terminal) {
-            showToast(`手动发布任务 #${runId}：${manualStatusLabel(run.status)}。`, !["completed"].includes(String(run.status || "")));
+            showToast(`手动发布任务 #${runId}：${manualStatusLabel(run.status, run)}。`, !["completed"].includes(String(run.status || "")));
           }
+          nextDelay = manualPollDelay(run);
         } catch (error) {
-          if (runId !== state.manual.runId) return;
+          if (runId !== state.manual.runId || generation !== state.manual.pollGeneration) return;
           const errorNode = byId("manualRunError");
           setText(errorNode, `状态查询失败，将自动重试：${error.message}`, "");
           errorNode.classList.remove("hidden");
         }
-        scheduleManualPoll(state.manual.terminal ? 0 : 2500);
+        scheduleManualPoll(state.manual.terminal ? 0 : nextDelay);
       }
       function resetManualSelection(materialIds) {
-        if (state.manual.pollTimer) window.clearTimeout(state.manual.pollTimer);
+        stopManualTracking();
         state.manual.materialIds = materialIds.slice();
         state.manual.accountIds = new Set(
           Array.from(state.schedule.accountIds).filter(id => {
@@ -1016,6 +1326,8 @@
             return accountEligible(item);
           })
         );
+        state.manual.publishMode = "immediate";
+        byId("manualRandomTemplate").checked = false;
         state.manual.submitting = false;
         state.manual.runId = 0;
         state.manual.run = null;
@@ -1024,21 +1336,17 @@
         byId("manualSelectionPanel").classList.remove("hidden");
         byId("manualRunPanel").classList.add("hidden");
         byId("manualPublishSubmit").classList.remove("hidden");
-        setText(byId("manualPublishSubmit"), "确认并立即发布");
+        byId("manualPublishNext").classList.add("hidden");
         setText(byId("manualDialogClose"), "取消");
         byId("manualAccountSearch").value = "";
+        const scheduledInput = byId("manualScheduledAt");
+        scheduledInput.min = beijingInputValue(new Date(Date.now() + 60000));
+        scheduledInput.value = nextManualScheduleValue();
+        renderManualTiming();
         renderManualAccountOptions();
       }
       function openManualPublish() {
         if (state.busy || state.manual.submitting) return;
-        if (state.manual.runId && !state.manual.terminal) {
-          byId("manualSelectionPanel").classList.add("hidden");
-          byId("manualRunPanel").classList.remove("hidden");
-          byId("manualPublishSubmit").classList.add("hidden");
-          showManualDialog();
-          pollManualRun();
-          return;
-        }
         let materialIds;
         try {
           materialIds = parseMaterialIds(50, "手动发布");
@@ -1049,10 +1357,24 @@
         resetManualSelection(materialIds);
         showManualDialog();
       }
+      function continueManualPublish() {
+        if (state.manual.submitting) return;
+        stopManualTracking();
+        state.manual.runId = 0;
+        state.manual.run = null;
+        byId("manualPublishDialog").close();
+        if (byId("materialIds").value.trim()) {
+          openManualPublish();
+        } else {
+          byId("materialIds").focus();
+          showToast("请输入下一批素材 ID，然后点击手动发布。", false);
+        }
+      }
       async function submitManualPublish() {
         if (state.manual.submitting) return;
         const materialIds = state.manual.materialIds.slice();
         const accountIds = selectedManualAccounts();
+        const timing = manualScheduleValidation();
         if (!materialIds.length || accountIds.length !== materialIds.length) {
           showToast("手动发布的素材数量必须与目标账号数量一致。", true);
           return;
@@ -1065,11 +1387,23 @@
           showToast("所选账号中存在当前不可发布的账号，请刷新后重新选择。", true);
           return;
         }
+        if (!timing.valid) {
+          showToast(timing.message || "定时发布时间无效。", true);
+          return;
+        }
+        const randomTemplateEnabled = byId("manualRandomTemplate").checked;
         state.manual.submitting = true;
+        renderManualTiming();
         renderManualAccountOptions();
         const button = byId("manualPublishSubmit");
         setText(button, "正在创建任务…");
-        const idempotencyKey = stableManualIdempotencyKey(materialIds, accountIds);
+        const idempotencyKey = stableManualIdempotencyKey(
+          materialIds,
+          accountIds,
+          state.manual.publishMode,
+          timing.scheduledAt,
+          randomTemplateEnabled
+        );
         try {
           const result = await api("/api/admin/x-posts/material-pool/manual-publish", {
             method: "POST",
@@ -1077,6 +1411,9 @@
               material_ids: materialIds,
               account_ids: accountIds.map(Number),
               idempotency_key: idempotencyKey,
+              publish_mode: state.manual.publishMode,
+              scheduled_at: timing.scheduledAt,
+              random_template_enabled: randomTemplateEnabled,
             }),
           });
           const run = scheduleItem(result);
@@ -1086,29 +1423,31 @@
             !/^\d+$/.test(String(run.id || ""))
             || JSON.stringify(returnedMaterials) !== JSON.stringify(materialIds)
             || JSON.stringify(returnedAccounts) !== JSON.stringify(accountIds.map(Number))
+            || String(run.publish_mode || "immediate") !== state.manual.publishMode
+            || String(run.scheduled_at || "") !== timing.normalized
+            || (run.random_template_enabled === true) !== randomTemplateEnabled
           ) {
             throw new Error("后台返回的手动发布任务与本次选择不一致，请勿重复更换参数，直接重试");
           }
           sessionRemove(MANUAL_DRAFT_STORAGE_KEY);
           sessionWrite(MANUAL_LAST_RUN_STORAGE_KEY, String(run.id));
+          rememberManualRun(run.id);
           byId("materialIds").value = "";
           state.manual.submitting = false;
           renderManualRun(run);
-          showToast(`手动发布任务 #${run.id} 已创建，后台将先完成整批预检。`, false);
-          scheduleManualPoll(800);
+          showToast(
+            run.publish_mode === "scheduled"
+              ? `定时发布任务 #${run.id} 已创建，将于北京时间 ${formatBeijingTime(run.scheduled_at)} 执行。`
+              : `手动发布任务 #${run.id} 已创建，后台将先完成整批预检。`,
+            false
+          );
+          scheduleManualPoll(run.publish_mode === "scheduled" ? manualPollDelay(run) : 800);
         } catch (error) {
           state.manual.submitting = false;
+          renderManualTiming();
           renderManualAccountOptions();
-          setText(button, "确认并立即发布");
           showToast(`手动发布任务创建失败：${error.message}`, true);
         }
-      }
-      async function resumeManualRunTracking() {
-        const raw = sessionRead(MANUAL_LAST_RUN_STORAGE_KEY);
-        if (!/^\d+$/.test(raw) || Number(raw) <= 0) return;
-        state.manual.runId = Number(raw);
-        state.manual.terminal = false;
-        await pollManualRun();
       }
       function closeManualDialog() {
         if (state.manual.submitting) return;
@@ -1169,11 +1508,11 @@
           setText(strong, accountTitle(item));
           const username = String(item.username || "").trim().replace(/^@/, "");
           const secondary = document.createElement("span");
-          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · ${subscriptionLabel(item)}`);
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · 剧语言 ${String(item.drama_language || "en")} · ${subscriptionLabel(item)}`);
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? (item.long_video_publish_eligible === true ? "可发布 · 长视频" : "可发布 · 最长 140 秒") : (selected ? "不可发布，请移除" : "不可发布"));
+          setText(status, eligible ? "可发布" : (selected ? "异常，保存时自动跳过" : "不可发布"));
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });
@@ -1216,7 +1555,7 @@
           : state.schedule.publishTimes.length;
         const total = accountCount * timeCount;
         const summary = document.createDocumentFragment();
-        const prefix = document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "随机批次" : "时间点"} = 每日最多 `);
+        const prefix = document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "独立随机时次" : "时间点"} = 每日最多 `);
         const strong = document.createElement("strong");
         setText(strong, `${total} 篇 Post`);
         summary.append(prefix, strong);
@@ -1230,14 +1569,18 @@
           ? state.schedule.randomDailyPlans
           : [];
         if (!plans.length) {
-          setText(container, "随机计划尚未生成；首次启用或修改后从次日生效。");
+          setText(container, "随机计划尚未生成；次日北京时间 00:00 按账号独立排期并开始备料。");
           return;
         }
+        container.appendChild(document.createTextNode("每天北京时间 00:00 开始备料；完成后等待各账号计划时间，迟到则完成后发布。"));
         plans.forEach(plan => {
-          const line = document.createElement("span");
-          const times = Array.isArray(plan.publish_times) ? plan.publish_times.join("、") : "";
-          setText(line, `${String(plan.run_date || "")}：${times || "尚无时间"}`);
-          container.appendChild(line);
+          const targets = Array.isArray(plan.target_plans) ? plan.target_plans : [plan];
+          targets.forEach(target => {
+            const line = document.createElement("span");
+            const times = Array.isArray(target.publish_times) ? target.publish_times.join("、") : "";
+            setText(line, `${String(plan.run_date || "")} ${target.account_id ? "账号 " + target.account_id : "原计划"}：${times || "尚无时间"}`);
+            container.appendChild(line);
+          });
         });
       }
       function renderScheduleMode() {
@@ -1272,6 +1615,8 @@
         state.schedule.nextDueAt = String(item.next_due_at || "");
         byId("scheduleEnabled").checked = state.schedule.enabled;
         byId("materialPostTemplate").value = state.schedule.bodyTemplate;
+        byId("scheduleRandomTemplate").checked = item.random_template_enabled === true;
+        setText(byId("randomTemplateSummary"), `已保存：随机模板${item.random_template_enabled === true ? "开启" : "关闭"}`);
         renderAccountOptions();
         renderPublishTimes();
         renderScheduleMode();
@@ -1356,10 +1701,10 @@
         }
         const invalidSelected = selectedIds.filter(id => {
           const item = state.accountOptions.find(account => accountId(account) === id);
-          return !item || !accountEligible(item);
+          return !item;
         });
         if (invalidSelected.length) {
-          setScheduleMessage("已选账号中存在不可发布或已失效账号，请移除后再保存。", true);
+          setScheduleMessage("已选账号中存在未找到的账号，请刷新账号列表后再保存。", true);
           return;
         }
         state.scheduleBusy = true;
@@ -1378,11 +1723,16 @@
               schedule_mode: scheduleMode,
               random_daily_count: scheduleMode === "random" ? randomDailyCount : 0,
               body_template: bodyTemplate,
+              random_template_enabled: byId("scheduleRandomTemplate").checked,
               version: state.schedule.version,
             }),
           });
           applySchedule(result);
-          setScheduleMessage(scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
+          const skipped = scheduleItem(result).skipped_account_ids || [];
+          const skippedMessage = skipped.length
+            ? `已跳过 ${skipped.length} 个异常账号，不参与发布；恢复后可重新勾选。${state.schedule.accountIds.size ? "" : "当前无可发布账号，已保存并关闭自动发布。"}`
+            : "";
+          setScheduleMessage((scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。") + skippedMessage, false);
           showToast("素材池自动发布设置已保存。", false);
         } catch (error) {
           setScheduleMessage(`保存失败：${error.message}`, true);
@@ -1428,11 +1778,17 @@
           rejected: "validation_failed",
           error: "validation_failed",
           unknown: "needs_review",
+          waiting: "deferred",
+          scheduled_for_delivery: "deferred",
         };
         const value = aliases[explicit] || explicit;
         const labels = {
           available: "可供发布",
+          deferred: "待可投放",
           occupied: "已被队列占用",
+          repaired_pending: "媒体已修复，待安排发布",
+          batch_blocked: "批次暂停，本条未执行",
+          published_elsewhere: "历史已手动发布",
           published: "已发布",
           validation_failed: "不可用",
           failed: "发布失败（不重发）",
@@ -1491,7 +1847,8 @@
         link.href = href;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        setText(link, "预览 Post");
+        setText(link, item.delivery_mode === "premium_relay_repost" && mainStatus(item).value !== "published"
+          ? "中转原帖（目标未完成）" : "预览 Post");
         cell.appendChild(link);
       }
       function renderRows(items) {
@@ -1522,11 +1879,28 @@
           availabilityCell.appendChild(badge(available.label, available.value));
           row.appendChild(availabilityCell);
 
-          appendCell(
+          const queueCell = appendCell(
             row,
             item.queue_id ? `队列 ${item.queue_id}` : "—",
-            item.queue_status ? `状态：${item.queue_status}` : ""
+            item.queue_status
+              ? `状态：${item.queue_status}${item.schedule_run_id ? `；批次 ${item.schedule_run_id}：${item.batch_status || "未知"}` : ""}`
+              : ""
           );
+          if (item.batch_error_code || item.batch_error_message) {
+            const details = document.createElement("details");
+            details.className = "batch-note";
+            const summary = document.createElement("summary");
+            setText(summary, "批次说明");
+            details.appendChild(summary);
+            const explanation = document.createElement("div");
+            explanation.className = "subtle";
+            setText(explanation, "以下说明适用于整个批次；本条结果请以发布状态为准。");
+            details.appendChild(explanation);
+            const message = document.createElement("div");
+            setText(message, [item.batch_error_code, item.batch_error_message].filter(Boolean).join("："));
+            details.appendChild(message);
+            queueCell.appendChild(details);
+          }
           const accountName = item.account_username
             ? `@${String(item.account_username).replace(/^@/, "")}`
             : (item.account_id ? `账号 ${item.account_id}` : "—");
@@ -1540,12 +1914,24 @@
           appendPostPreview(previewCell, item);
           row.appendChild(previewCell);
 
-          const errorCode =
-            item.last_error_code || item.publish_error_code || item.error_code || "";
-          const errorMessage =
-            item.last_error_message || item.publish_error_message || item.error_message || "";
-          const errorCell = appendCell(row, errorCode || "—", errorMessage);
-          if (errorCode || errorMessage) errorCell.className = "error";
+          const confirmedPublished = status.value === "published" || available.value === "published_elsewhere";
+          const errorCode = confirmedPublished ? "" :
+            (item.last_error_code || item.publish_error_code || item.error_code || "");
+          const errorMessage = confirmedPublished ? "" :
+            (item.last_error_message || item.publish_error_message || item.error_message || "");
+          const isDeferred = available.value === "deferred";
+          const errorCell = appendCell(
+            row,
+            isDeferred ? "等待短剧可投放时间" : (item.status_hint ? available.label : (errorCode || "—")),
+            isDeferred
+              ? `${errorMessage || "当前尚未到可投放时间"}；系统将在到点后的下一次自然排期自动复检。`
+              : [item.status_hint, errorMessage].filter(Boolean).join(" ")
+          );
+          if (isDeferred) {
+            errorCell.className = "deferred-info";
+          } else if (errorCode || errorMessage) {
+            errorCell.className = "error";
+          }
 
           const actionCell = document.createElement("td");
           const canDelete = status.value === "unpublished" && !item.queue_id;
@@ -1585,28 +1971,19 @@
         });
         return params.toString();
       }
-      async function countFor(params) {
-        const query = new URLSearchParams(Object.assign({ page: "1", page_size: "1" }, params || {}));
-        const result = await api(`/api/admin/x-posts/material-pool?${query.toString()}`);
-        return extractPagination(result).total;
-      }
-      async function loadStats() {
-        const results = await Promise.allSettled([
-          countFor({}),
-          countFor({ status: "unpublished" }),
-          countFor({ availability: "available" }),
-          countFor({ status: "published" }),
-        ]);
-        const targets = ["totalCount", "unpublishedCount", "availableCount", "publishedCount"];
-        results.forEach((result, index) => {
-          setText(byId(targets[index]), result.status === "fulfilled" ? result.value : "—");
-        });
+      function renderStats(summary) {
+        const fields = {totalCount: "total", unpublishedCount: "unpublished", availableCount: "available", deferredCount: "deferred", publishedCount: "published"};
+        Object.entries(fields).forEach(([id, key]) => setText(byId(id), summary?.[key] ?? "—"));
+        setText(byId("poolStatusSummary"), summary
+          ? `池内未发布 ${summary.unpublished} 个中，已有队列或预约占用 ${summary.occupied} 个；其中媒体已修复待安排 ${summary.repaired_pending ?? "—"} 个、批次暂停 ${summary.batch_blocked ?? "—"} 个、发布失败 ${summary.failed ?? "—"} 个、结果待核查 ${summary.needs_review ?? "—"} 个、历史已手动发布 ${summary.published_elsewhere ?? "—"} 个。未占用素材仍需通过语言、账号和媒体预检。`
+          : "统计暂不可用，请刷新重试；未发布不等于当前排期可用数量。");
       }
       async function loadPool() {
         setEmpty("正在加载…");
         try {
           const result = await api(`/api/admin/x-posts/material-pool?${queryString()}`);
           const items = Array.isArray(result.items) ? result.items : [];
+          if (result.summary) renderStats(result.summary);
           const pagination = extractPagination(result);
           state.total = pagination.total;
           state.page = pagination.page;
@@ -1618,6 +1995,7 @@
           byId("nextPage").disabled = state.page >= pages;
         } catch (error) {
           setEmpty(`加载失败：${error.message}`);
+          renderStats(null);
         }
       }
       function parseMaterialIds(maxCount = 100, actionLabel = "加入素材池") {
@@ -1650,6 +2028,7 @@
             body: JSON.stringify({ material_ids: materialIds }),
           });
           const addedCount = Number(result.added_count ?? result.created_count ?? materialIds.length);
+          const deferredCount = Number(result.deferred_count ?? 0);
           const unavailableCount = Number(result.validation_failed_count ?? 0);
           const skippedCount = Number(result.skipped_count ?? 0);
           const duplicateInputCount = Number(result.duplicate_input_count ?? 0);
@@ -1662,7 +2041,11 @@
           ];
           if (unavailableCount) {
             messages.push(`新增素材中 ${unavailableCount} 个未通过 X 发布校验，已标记不可用`);
-          } else if (addedCount) {
+          }
+          if (deferredCount) {
+            messages.push(`新增素材中 ${deferredCount} 个尚未到短剧可投放时间，已进入待可投放排期`);
+          }
+          if (!unavailableCount && !deferredCount && addedCount) {
             messages.push("新增素材均已通过入池校验");
           }
           if (skippedCount) {
@@ -1675,7 +2058,7 @@
             );
           }
           showToast(`${messages.join("；")}。`, false);
-          await Promise.all([loadPool(), loadStats()]);
+          await Promise.all([loadPool()]);
         } catch (error) {
           showToast(`添加失败：${error.message}`, true);
         } finally {
@@ -1695,7 +2078,7 @@
             body: "{}",
           });
           showToast(`素材 ${materialId || poolId} 已从素材池删除。`, false);
-          await Promise.all([loadPool(), loadStats()]);
+          await Promise.all([loadPool()]);
           const lastPage = Math.max(1, Math.ceil(state.total / state.pageSize));
           if (state.page > lastPage) {
             state.page = lastPage;
@@ -1738,8 +2121,8 @@
           return;
         }
         byId("pageRoot").classList.remove("hidden");
-        await Promise.all([loadPool(), loadStats(), loadScheduleSettings()]);
-        await resumeManualRunTracking();
+        restoreRecentManualRuns();
+        await Promise.all([loadPool(), loadScheduleSettings()]);
       }
 
       byId("accountSearch").addEventListener("input", renderAccountOptions);
@@ -1797,6 +2180,11 @@
       });
       byId("saveSchedule").addEventListener("click", saveSchedule);
       byId("manualPublish").addEventListener("click", openManualPublish);
+      byId("manualPublishNext").addEventListener("click", continueManualPublish);
+      byId("manualRecentRuns").addEventListener("click", event => {
+        const button = event.target.closest("button[data-manual-run-id]");
+        if (button) viewManualRun(Number(button.dataset.manualRunId));
+      });
       byId("addMaterials").addEventListener("click", addMaterials);
       byId("clearMaterials").addEventListener("click", () => {
         byId("materialIds").value = "";
@@ -1830,6 +2218,14 @@
         deleteMaterial(button.dataset.poolId, button.dataset.materialId);
       });
       byId("manualAccountSearch").addEventListener("input", renderManualAccountOptions);
+      document.querySelectorAll('input[name="manualPublishMode"]').forEach(input => {
+        input.addEventListener("change", event => {
+          if (state.manual.submitting || !event.target.checked) return;
+          state.manual.publishMode = event.target.value === "scheduled" ? "scheduled" : "immediate";
+          renderManualTiming();
+        });
+      });
+      byId("manualScheduledAt").addEventListener("input", renderManualTiming);
       byId("manualAccountOptions").addEventListener("change", event => {
         const checkbox = event.target.closest("input[data-manual-account-id]");
         if (!checkbox || checkbox.disabled || state.manual.submitting) return;
@@ -1862,5 +2258,7 @@
       init();
     })();
   </script>
+<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" />
+<script src="/x-tag-publish-entry.js?v=1"></script>
 </body>
 </html>

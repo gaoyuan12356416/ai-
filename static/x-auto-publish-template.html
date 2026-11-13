@@ -2,12 +2,13 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <script src="/x-legacy-publish-redirect.js?v=20261112retirement1"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <title>编辑 X Post 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/x-auto-publish.css?v=20260812account1" />
+  <link rel="stylesheet" href="/x-auto-publish.css?v=20261105membership1" />
 </head>
 <body>
   <div class="app">
@@ -23,7 +24,7 @@
       <header class="topbar">
         <div class="title">
           <h1 id="pageTitle">创建 X Post 自动发布模板</h1>
-          <p>模板先按指定剧语言筛选和排序，再在入选剧中按素材规则选择；账号仍由现有 X 授权和发布资格控制。</p>
+          <p>按每个 X 账户设置的剧语言筛选和排序，再在入选剧中按素材规则选择。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -65,9 +66,9 @@
                     <input id="templateName" maxlength="100" autocomplete="off" placeholder="例如：英语剧 ROAS 优先" required />
                   </div>
                   <div class="field">
-                    <label class="required" for="templateLanguage">剧语言</label>
-                    <input id="templateLanguage" minlength="2" maxlength="32" pattern="[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*" autocomplete="off" placeholder="例如：en 或 en-us" required />
-                    <span class="helper">模板级单语言；不会回写 X 账号。</span>
+                    <label>剧语言</label>
+                    <span>读取 X 账户设置</span>
+                    <span class="helper">支持选择不同语言的账户，每个账户筛选对应语言的剧。</span>
                   </div>
                   <div class="field">
                     <label for="platform">指标平台</label>
@@ -81,6 +82,8 @@
                     <span class="helper">未填写时按最近 7 个完整北京时间自然日。</span>
                   </div>
                   <div class="field span-2">
+                    <label style="display:flex;align-items:center;gap:8px"><input id="randomTemplateEnabled" type="checkbox" style="width:auto" />是否启用随机模板</label>
+                    <span class="helper">仅对视频生效；默认关闭，只影响此模板产生的新任务。</span>
                     <label class="required" for="bodyTemplate">X Post 正文模板</label>
                     <textarea id="bodyTemplate" maxlength="2000" aria-describedby="bodyTemplateHelp">🎬 {{drama_name}}
 {{desc}}
@@ -97,6 +100,12 @@
                   <span id="selectedAccountCount" class="badge">已选 0 个</span>
                 </div>
                 <div class="account-toolbar">
+                  <select id="accountMembershipFilter" aria-label="会员状态筛选">
+                    <option value="all">全部会员状态</option>
+                    <option value="member">会员</option>
+                    <option value="non_member">非会员</option>
+                    <option value="unknown">会员状态未知</option>
+                  </select>
                   <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称、账号 ID 或订阅类型" />
                   <button id="refreshAccountEligibility" class="button small" type="button" disabled>刷新可选账号资格</button>
                   <button id="selectVisibleAccounts" class="button small" type="button">选择当前结果</button>
@@ -125,7 +134,7 @@
                   <div class="field">
                     <label for="cooldownDays">同剧冷却窗口（天）</label>
                     <input id="cooldownDays" type="number" min="0" max="3650" step="1" value="0" />
-                    <span class="helper">仅在当前模板内按短剧身份冷却；填 0 不限制。</span>
+                    <span class="helper">同一模板内，每个目标频道独立计算剧目冷却，从素材预占时起算；填 0 不限制。</span>
                   </div>
                 </div>
 
@@ -189,9 +198,10 @@
                     <div class="field" style="margin-bottom: 11px;">
                       <span class="field-label">素材时长（秒）</span>
                       <div class="range-grid">
-                        <input id="materialDurationMin" type="number" min="1" max="600" step="1" value="1" placeholder="最短时长" aria-label="素材最短时长" />
-                        <input id="materialDurationMax" type="number" min="1" max="600" step="1" value="600" placeholder="最长时长" aria-label="素材最长时长" />
+                        <input id="materialDurationMin" type="number" min="0" step="1" value="1" placeholder="最短时长（不限）" aria-label="素材最短时长" />
+                        <input id="materialDurationMax" type="number" min="1" step="1" placeholder="最长时长（不限）" aria-label="素材最长时长" />
                       </div>
+                      <span class="helper">留空表示不限筛选时长；实际发布按账号资格和媒体校验执行。</span>
                     </div>
                     <div class="field" style="margin-bottom: 11px;">
                       <span class="field-label">素材维度 D0 ROAS（%）</span>
@@ -235,7 +245,7 @@
                 <div id="randomScheduleFields" class="field hidden" style="margin-top: 15px; max-width: 320px;">
                   <label for="randomDailyCount">每天随机发布次数</label>
                   <input id="randomDailyCount" type="number" min="1" max="24" step="1" value="1" />
-                  <span class="helper">模板每天生成一组稳定的随机时刻；每个时刻为所选账号分别创建任务，同账号保持串行。</span>
+                  <span class="helper">每个账号每天独立生成随机时刻；每天北京时间 00:00 开始备料，完成后等待发布时间，迟到则完成后发布。配置修改次日生效。</span>
                 </div>
               </section>
             </div>
@@ -245,7 +255,7 @@
                 <div class="section-head"><div><h2>保存摘要</h2><p>保存只更新模板配置，不会立即执行。</p></div></div>
                 <div class="summary-list">
                   <div class="summary-item"><span>模板版本</span><strong id="summaryVersion">新模板</strong></div>
-                  <div class="summary-item"><span>剧语言</span><strong id="summaryLanguage">未设置</strong></div>
+                  <div class="summary-item"><span>剧语言</span><strong id="summaryLanguage">读取 X 账户设置</strong></div>
                   <div class="summary-item"><span>已选账号</span><strong id="summaryAccounts">0 个</strong></div>
                   <div class="summary-item"><span>指标口径</span><strong id="summaryMetric">platform=0 / 7 天</strong></div>
                   <div class="summary-item"><span>剧排序</span><strong id="summaryDramaSort">D0 ROAS / 倒序</strong></div>
@@ -277,8 +287,8 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js"></script>
-  <script src="/x-auto-publish-common.js?v=20260812account1"></script>
-  <script src="/x-auto-publish-template.js?v=20260812account1"></script>
+  <script src="/quick-nav.js?v=97b22a40182f"></script>
+  <script src="/x-auto-publish-common.js?v=20260814language1"></script>
+  <script src="/x-auto-publish-template.js?v=20261110-target-midnight"></script>
 </body>
 </html>

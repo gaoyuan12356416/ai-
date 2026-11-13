@@ -256,7 +256,7 @@
     .badge.completed, .badge.published, .badge.available { color: #08734f; background: #e8f8f1; }
     .badge.pending, .badge.publishing, .badge.reserved, .badge.queued { color: #2457b8; background: #eef4ff; }
     .badge.validation_failed, .badge.failed, .badge.blocked { color: #ad2f3b; background: #ffedef; }
-    .badge.needs_review, .badge.paused { color: #925d00; background: #fff4d9; }
+    .badge.needs_review, .badge.paused, .badge.waiting_relay { color: #925d00; background: #fff4d9; }
     .badge.other { color: #56657b; background: #edf1f6; }
     .progress { width: 150px; height: 7px; margin: 8px 0 5px; overflow: hidden; border-radius: 99px; background: #e9eef6; }
     .progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2563eb, #20ba85); }
@@ -322,7 +322,7 @@
       <header class="topbar">
         <div class="title">
           <h1>Post短剧池</h1>
-          <p>每个账号固定续发自己已开始的短剧；其他账号按上传时间倒序领取尚未发布过的新剧，并分别按免费集数正序发布。</p>
+          <p>已开播短剧由原频道持续续发；新短剧按标签画像匹配所选频道，并按免费集数正序发布。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -345,12 +345,13 @@
         <section class="panel">
           <div class="section-head">
             <h2>自动发布设置</h2>
-            <p>每个账号会持续发布自己已绑定短剧的下一集；该剧免费集发完后，才按账号顺序领取最新上传的未绑定短剧。调整账号顺序不会改变已有绑定。</p>
+            <p>新短剧优先匹配所选同语言频道的受众、题材画像；无有效画像时按原顺序分配。已开播短剧继续由原频道发布，调整频道顺序不会改变已有绑定。</p>
+            <p>新任务按最终成片时长分配：20 分钟（1200 秒）以内可由普通账号直接发布；超过 20 分钟继续按会员资格及同语言会员代发规则处理。</p>
           </div>
           <div class="schedule-grid">
             <div class="field">
               <div class="field-head">
-                <label for="accountSearch">发布账号</label>
+                <label for="accountSearch">候选发布频道</label>
                 <div class="inline-actions">
                   <button id="refreshAccounts" class="button small" type="button">刷新账号</button>
                   <a class="text-link" href="/x-accounts.html">添加/授权新账号</a>
@@ -361,6 +362,7 @@
                 <div class="empty">正在加载账号…</div>
               </div>
               <div id="selectedAccountSummary" class="selection-summary">尚未选择发布账号。</div>
+              <span class="helper">仅从已勾选频道中按标签画像匹配新剧；高优短剧优先分配，同优先级按最新入池顺序处理。</span>
             </div>
             <div class="field">
               <label>发布方式</label>
@@ -384,6 +386,11 @@
                 <div id="randomPlanPreview" class="random-plan" aria-live="polite">随机计划尚未生成。</div>
               </div>
             </div>
+          </div>
+          <div class="field">
+            <label style="display:flex;align-items:center;gap:8px;margin-top:12px"><input id="scheduleRandomTemplate" type="checkbox" style="width:auto" />是否启用随机模板</label>
+            <span class="helper">仅对视频生效；关闭时保持原有发布处理。保存后按新排程生效。</span>
+            <span id="randomTemplateSummary" class="helper">已保存：随机模板关闭</span>
           </div>
           <div class="schedule-footer">
             <div>
@@ -505,7 +512,7 @@ Episode {{episode_number}}
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js"></script>
+  <script src="/quick-nav.js?v=97b22a40182f"></script>
   <script>
     (() => {
       const state = {
@@ -522,12 +529,11 @@ Episode {{episode_number}}
         selectedPoolIds: new Set(),
         accountOptions: [],
         scheduleBusy: false,
-        accountVerifyBusy: false,
-        verifyingAccountIds: new Set(),
         schedule: {
           enabled: false,
           timezone: "Asia/Shanghai",
           accountIds: new Set(),
+          savedAccountIds: [],
           publishTimes: [],
           scheduleMode: "fixed",
           randomDailyCount: 1,
@@ -540,7 +546,6 @@ Episode {{episode_number}}
         },
       };
       const byId = id => document.getElementById(id);
-      const AUTO_VERIFY_CONCURRENCY = 3;
       const setText = (node, value, fallback = "—") => {
         node.textContent = value == null || value === "" ? fallback : String(value);
       };
@@ -679,10 +684,7 @@ Episode {{episode_number}}
         return /^\d+$/.test(String(value || "")) && Number(value) > 0 ? String(value) : "";
       }
       function accountEligible(item) {
-        return !!item && item.status === "active" && item.publish_eligible === true;
-      }
-      function accountNeedsAutoVerify(item) {
-        return !!item && item.status === "refresh_required";
+        return !!item && item.publish_eligible === true;
       }
       function accountTitle(item) {
         const username = String(item && item.username || "").trim().replace(/^@/, "");
@@ -722,126 +724,32 @@ Episode {{episode_number}}
           if (!id) return;
           const selected = state.schedule.accountIds.has(id);
           const eligible = accountEligible(item);
-          const verifying = state.verifyingAccountIds.has(id);
           const label = document.createElement("label");
           label.className = `account-option${eligible ? "" : " disabled"}`;
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
           checkbox.checked = selected;
-          checkbox.disabled = verifying || (!eligible && !selected);
+          checkbox.disabled = !eligible && !selected;
           checkbox.dataset.accountId = id;
           const textWrap = document.createElement("span");
           const strong = document.createElement("strong");
           setText(strong, accountTitle(item));
           const secondary = document.createElement("span");
           const username = String(item.username || "").trim().replace(/^@/, "");
-          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id}`);
+          setText(secondary, `${username ? `@${username}` : "无用户名"} · 账号 ID ${id} · 剧语言 ${String(item.drama_language || "en")}`);
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
           setText(
             status,
-            verifying
-              ? "自动校验中"
-              : eligible
-                ? "可发布"
-                : (selected ? "不可发布，请校验或重新授权" : "不可发布")
+            eligible
+              ? (item.status === "expired" ? "可尝试发布 · Token 已到期" : "可发布")
+              : (selected ? "不可发布，请重新授权" : "不可发布")
           );
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });
         renderSelectedAccountSummary();
-      }
-      async function autoVerifyAccountOptions() {
-        if (state.accountVerifyBusy) {
-          return { checked: 0, failed: 0, deferred: 0, busy: true };
-        }
-        const targets = state.accountOptions.filter(item =>
-          accountId(item) && accountNeedsAutoVerify(item)
-        );
-        if (!targets.length) {
-          return { checked: 0, failed: 0, deferred: 0, busy: false };
-        }
-
-        state.accountVerifyBusy = true;
-        state.verifyingAccountIds = new Set(targets.map(accountId));
-        byId("refreshAccounts").disabled = true;
-        byId("saveSchedule").disabled = true;
-        renderAccountOptions();
-        setMessage(
-          "scheduleMessage",
-          `正在自动校验 ${targets.length} 个待刷新的 X 账号…`,
-          false
-        );
-
-        let cursor = 0;
-        let attempted = 0;
-        let failed = 0;
-        let stopRequested = false;
-        const worker = async () => {
-          while (!stopRequested && cursor < targets.length) {
-            const item = targets[cursor++];
-            const id = accountId(item);
-            attempted += 1;
-            try {
-              const verified = responseItem(await api(
-                `/api/admin/x-posts/drama-pool/account-options/${id}/verify`,
-                { method: "POST", body: "{}" }
-              ));
-              if (accountId(verified) !== id) {
-                throw new Error("账号校验结果不匹配");
-              }
-              state.accountOptions = state.accountOptions.map(account =>
-                accountId(account) === id ? verified : account
-              );
-            } catch (error) {
-              failed += 1;
-              if (error && error.code === "x_post_rate_limited") {
-                stopRequested = true;
-              }
-              state.accountOptions = state.accountOptions.map(account =>
-                accountId(account) === id
-                  ? Object.assign({}, account, {
-                      auto_verify_error: String(error.message || error),
-                    })
-                  : account
-              );
-            } finally {
-              state.verifyingAccountIds.delete(id);
-              renderAccountOptions();
-            }
-          }
-        };
-
-        try {
-          const workerCount = Math.min(
-            AUTO_VERIFY_CONCURRENCY,
-            targets.length
-          );
-          await Promise.all(
-            Array.from({ length: workerCount }, () => worker())
-          );
-          try {
-            state.accountOptions = responseItems(await api(
-              "/api/admin/x-posts/drama-pool/account-options"
-            ));
-          } catch (_) {
-            // Keep the verified per-account results if the final list refresh fails.
-          }
-          renderAccountOptions();
-          return {
-            checked: attempted,
-            failed,
-            deferred: Math.max(0, targets.length - attempted),
-            busy: false,
-          };
-        } finally {
-          state.accountVerifyBusy = false;
-          state.verifyingAccountIds.clear();
-          byId("refreshAccounts").disabled = false;
-          byId("saveSchedule").disabled = state.scheduleBusy;
-          renderAccountOptions();
-        }
       }
       function validPublishTime(value) {
         return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
@@ -855,7 +763,7 @@ Episode {{episode_number}}
         const total = accountCount * timeCount;
         const node = byId("scheduleSummary");
         node.replaceChildren();
-        node.appendChild(document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "随机批次" : "时间点"} = 每日最多 `));
+        node.appendChild(document.createTextNode(`${accountCount} 个账号 × ${timeCount} 个${randomMode ? "独立随机时次" : "时间点"} = 每日最多 `));
         const strong = document.createElement("strong");
         setText(strong, `${total} 篇 Post`);
         node.appendChild(strong);
@@ -867,14 +775,18 @@ Episode {{episode_number}}
           ? state.schedule.randomDailyPlans
           : [];
         if (!plans.length) {
-          setText(container, "随机计划尚未生成；首次启用或修改后从次日生效。");
+          setText(container, "随机计划尚未生成；次日北京时间 00:00 按账号独立排期并开始备料。");
           return;
         }
+        container.appendChild(document.createTextNode("每天北京时间 00:00 开始备料；完成后等待各账号计划时间，迟到则完成后发布。"));
         plans.forEach(plan => {
-          const line = document.createElement("span");
-          const times = Array.isArray(plan.publish_times) ? plan.publish_times.join("、") : "";
-          setText(line, `${String(plan.run_date || "")}：${times || "尚无时间"}`);
-          container.appendChild(line);
+          const targets = Array.isArray(plan.target_plans) ? plan.target_plans : [plan];
+          targets.forEach(target => {
+            const line = document.createElement("span");
+            const times = Array.isArray(target.publish_times) ? target.publish_times.join("、") : "";
+            setText(line, `${String(plan.run_date || "")} ${target.account_id ? "账号 " + target.account_id : "原计划"}：${times || "尚无时间"}`);
+            container.appendChild(line);
+          });
         });
       }
       function renderScheduleMode() {
@@ -923,6 +835,7 @@ Episode {{episode_number}}
         state.schedule.accountIds = new Set(
           rawAccounts.map(value => String(value || "")).filter(value => /^\d+$/.test(value) && Number(value) > 0)
         );
+        state.schedule.savedAccountIds = Array.from(state.schedule.accountIds);
         state.schedule.publishTimes = Array.from(new Set(
           (Array.isArray(item.publish_times) ? item.publish_times : [])
             .map(value => String(value || "").trim()).filter(validPublishTime)
@@ -937,6 +850,8 @@ Episode {{episode_number}}
         state.schedule.nextDueAt = String(item.next_due_at || "");
         byId("scheduleEnabled").checked = state.schedule.enabled;
         byId("dramaPostTemplate").value = state.schedule.bodyTemplate;
+        byId("scheduleRandomTemplate").checked = item.random_template_enabled === true;
+        setText(byId("randomTemplateSummary"), `已保存：随机模板${item.random_template_enabled === true ? "开启" : "关闭"}`);
         renderAccountOptions();
         renderPublishTimes();
         renderScheduleMode();
@@ -958,16 +873,7 @@ Episode {{episode_number}}
           ]);
           state.accountOptions = responseItems(accountsResult);
           applySchedule(scheduleResult);
-          const verification = await autoVerifyAccountOptions();
-          if (!verification.busy) {
-            setMessage(
-              "scheduleMessage",
-              verification.checked
-                ? `发布设置已加载；自动校验 ${verification.checked} 个账号，${verification.failed} 个未通过${verification.deferred ? `，因 X 限流暂缓 ${verification.deferred} 个` : ""}。`
-                : "发布设置已加载。",
-              verification.failed > 0
-            );
-          }
+          setMessage("scheduleMessage", "发布设置已加载。", false);
         } catch (error) {
           setMessage("scheduleMessage", `发布设置加载失败：${error.message}`, true);
           renderAccountOptions();
@@ -981,20 +887,11 @@ Episode {{episode_number}}
         try {
           state.accountOptions = responseItems(await api("/api/admin/x-posts/drama-pool/account-options"));
           renderAccountOptions();
-          const verification = await autoVerifyAccountOptions();
-          if (!verification.busy) {
-            setMessage(
-              "scheduleMessage",
-              verification.checked
-                ? `账号列表已刷新；自动校验 ${verification.checked} 个账号，${verification.failed} 个未通过${verification.deferred ? `，因 X 限流暂缓 ${verification.deferred} 个` : ""}。`
-                : "账号列表已刷新。",
-              verification.failed > 0
-            );
-          }
+          setMessage("scheduleMessage", "账号列表已刷新。", false);
         } catch (error) {
           setMessage("scheduleMessage", `账号刷新失败：${error.message}`, true);
         } finally {
-          button.disabled = state.accountVerifyBusy;
+          button.disabled = false;
         }
       }
       function addPublishTime() {
@@ -1017,10 +914,6 @@ Episode {{episode_number}}
       }
       async function saveSchedule() {
         if (state.scheduleBusy) return;
-        if (state.accountVerifyBusy) {
-          setMessage("scheduleMessage", "账号正在自动校验，请完成后再保存。", true);
-          return;
-        }
         const enabled = byId("scheduleEnabled").checked;
         const selectedIds = Array.from(state.schedule.accountIds);
         const scheduleMode = document.querySelector('input[name="scheduleMode"]:checked')?.value === "random" ? "random" : "fixed";
@@ -1054,6 +947,9 @@ Episode {{episode_number}}
           setMessage("scheduleMessage", "已选账号中存在不可发布或已失效账号，请先校验或重新授权；已绑定短剧会保留并暂停续发。", true);
           return;
         }
+        const removedAccountIds = (state.schedule.savedAccountIds || []).filter(id => !state.schedule.accountIds.has(id));
+        const restartRemoved = removedAccountIds.length > 0;
+        if (restartRemoved && !window.confirm("确认移除这些账号？其中不可用账号绑定的未完结短剧将取消旧绑定，保留历史，并重新找同语言账号从第1集发布；正常账号的未完结绑定仍需保留。有执行中或未知结果的旧任务时将阻止重发。")) return;
         state.scheduleBusy = true;
         const button = byId("saveSchedule");
         button.disabled = true;
@@ -1069,10 +965,13 @@ Episode {{episode_number}}
               schedule_mode: scheduleMode,
               random_daily_count: scheduleMode === "random" ? randomDailyCount : 0,
               body_template: bodyTemplate,
+              random_template_enabled: byId("scheduleRandomTemplate").checked,
               version: state.schedule.version,
+              restart_removed_dramas: restartRemoved,
             }),
           });
           applySchedule(result);
+          await loadDramaPool();
           setMessage("scheduleMessage", scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。", false);
           showToast("短剧池自动发布设置已保存。", false);
         } catch (error) {
@@ -1221,10 +1120,35 @@ Episode {{episode_number}}
           validation_failed: "不可用",
           failed: "发布失败",
           blocked: "已阻塞",
+          waiting_relay: "等待同语言会员号",
           needs_review: "结果待核查",
           paused: "已暂停",
         };
         return { value: labels[value] ? value : "other", label: labels[value] || value || "未知" };
+      }
+      function finalDurationLabel(value) {
+        const duration = Number(value);
+        return Number.isFinite(duration) && duration > 0
+          ? `最终时长 ${duration.toFixed(3)}s`
+          : "最终时长待检测";
+      }
+      function deliveryRouteLabel(item) {
+        const deliveryMode = String(item.delivery_mode || "");
+        const queueStatus = String(item.queue_status || item.publish_status || item.status || "").toLowerCase();
+        const duration = finalDurationLabel(item.preflight_duration ?? item.final_duration);
+        if (deliveryMode === "duration_pending") {
+          return queueStatus === "waiting_relay"
+            ? `等待同语言会员号 · ${duration}`
+            : `正在检测最终成片时长 · ${duration}`;
+        }
+        if (deliveryMode === "premium_relay_repost") {
+          const relay = item.relay_account_username
+            ? `@${String(item.relay_account_username).replace(/^@/, "")}`
+            : (item.relay_account_id ? `账号 ${item.relay_account_id}` : "待分配会员号");
+          return `会员号 ${relay} 发原帖，目标账号 Repost · ${duration}`;
+        }
+        if (deliveryMode === "direct") return `目标账号直接发布 · ${duration}`;
+        return "";
       }
       function extractPagination(result) {
         const pagination = result && result.pagination && typeof result.pagination === "object" ? result.pagination : (result || {});
@@ -1461,7 +1385,7 @@ Episode {{episode_number}}
             assignmentLabel = "绑定异常";
             assignmentNote = "已暂停，请人工核查";
           } else {
-            assignmentNote = "首次发布时自动绑定";
+            assignmentNote = "首次分配时按标签画像匹配频道";
           }
           appendCell(
             row,
@@ -1585,14 +1509,21 @@ Episode {{episode_number}}
           items.forEach(item => {
             const row = document.createElement("tr");
             appendCell(row, `Episode ${item.sub_num ?? item.episode_number ?? "—"}`);
+            const queueStatus = String(item.queue_status || "").toLowerCase();
             const status = poolStatus({
-              status: item.publish_status || item.queue_status || "pending",
+              status: queueStatus === "waiting_relay"
+                ? queueStatus
+                : (item.publish_status || item.queue_status || "pending"),
             });
             const statusCell = document.createElement("td");
             statusCell.appendChild(badge(status.label, status.value));
             row.appendChild(statusCell);
             const username = String(item.account_username || "").replace(/^@/, "");
-            appendCell(row, username ? `@${username}` : (item.account_id ? `账号 ${item.account_id}` : "—"));
+            appendCell(
+              row,
+              username ? `@${username}` : (item.account_id ? `账号 ${item.account_id}` : "—"),
+              deliveryRouteLabel(item)
+            );
             appendCell(
               row,
               item.run_date && item.publish_time

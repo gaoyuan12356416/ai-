@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from features.x_posts.selector import connect_read_only
+from features.x_accounts.language import same_drama_language
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
 from .core import AuditActor, XAutoPostStore
@@ -288,6 +289,38 @@ class XAutoPostService:
             item["attention_task_count"] = sum(
                 task.status in {"failed", "canceled", "unknown"} for task in values
             )
+            # Legacy "completed" also includes no-candidate/skipped tasks.  Keep
+            # that field compatible, but expose disjoint publication outcomes
+            # so the UI never presents it as a count of successful Posts.
+            counts = dict.fromkeys((
+                "published", "no_candidate", "skipped", "failed", "canceled",
+                "unknown", "pending", "ready", "retry_wait", "waiting_result",
+                "active",
+            ), 0)
+            for task in values:
+                if task.status == "unknown" or bool(task.unknown_outcome):
+                    category = "unknown"
+                elif task.status == "retry_wait" and task.execution_queue_id:
+                    # Queue-bound waits observe the canonical publisher; they
+                    # are not permission to submit the same Post again.
+                    category = "waiting_result"
+                elif task.status in counts:
+                    category = task.status
+                else:
+                    category = "active"
+                counts[category] += 1
+            item["task_counts"] = counts
+            item["published_task_count"] = counts["published"]
+            item["unfinished_task_count"] = sum(
+                counts[key] for key in (
+                    "unknown", "pending", "ready", "retry_wait",
+                    "waiting_result", "active",
+                )
+            )
+            if (item.get("status") in {"queued", "running"}
+                    and counts["unknown"] > 0
+                    and item["unfinished_task_count"] == counts["unknown"]):
+                item["display_status"] = "needs_review"
         return item
 
     @staticmethod
@@ -333,6 +366,22 @@ class XAutoPostService:
     def accounts(self) -> Dict[str, Any]:
         items = self.account_bridge.accounts()
         return {"ok": True, "accounts": items, "items": items, "total": len(items)}
+
+    def _account_snapshot(self, account_id: Any) -> Dict[str, Any]:
+        loader = getattr(self.account_bridge, "account_snapshot", None)
+        if callable(loader):
+            return dict(loader(account_id))
+        expected = int(account_id)
+        matches = [
+            dict(item)
+            for item in self.account_bridge.accounts()
+            if int(item.get("id") or 0) == expected
+        ]
+        if len(matches) != 1:
+            raise AutoPostServiceError(
+                "x_auto_account_not_found", "X account was not found", 404
+            )
+        return matches[0]
 
     def refresh_account(self, account_id: Any) -> Dict[str, Any]:
         expected_id = _positive_id(account_id, "account ID")
@@ -390,7 +439,7 @@ class XAutoPostService:
 
     def _validate_accounts(self, config: Mapping[str, Any]) -> None:
         for account_id in config.get("account_ids") or []:
-            account = self.account_bridge.verify_account(account_id)
+            account = self._account_snapshot(account_id)
             if str(account.get("id") or "") != str(account_id) or not bool(
                 account.get("publish_eligible")
             ):
@@ -399,6 +448,20 @@ class XAutoPostService:
                     "selected X account is not currently publishable",
                     409,
                 )
+            self._assert_account_language(account, config.get("language"))
+
+    @staticmethod
+    def _assert_account_language(
+        account: Mapping[str, Any], template_language: Any
+    ) -> None:
+        if not same_drama_language(
+            account.get("drama_language"), template_language
+        ):
+            raise AutoPostServiceError(
+                "x_auto_account_language_mismatch",
+                "selected X account drama language does not match the template language",
+                409,
+            )
 
     @staticmethod
     def _confirmation(actor: AuditActor, now: datetime) -> Dict[str, Any]:
@@ -522,13 +585,16 @@ class XAutoPostService:
         results = []
         for index, account_id in enumerate(account_ids, start=1):
             try:
-                account = self.account_bridge.verify_account(account_id)
+                account = self._account_snapshot(account_id)
                 if not bool(account.get("publish_eligible")):
                     raise AutoPostServiceError(
                         "x_auto_account_not_publishable",
                         "selected X account is not currently publishable",
                         409,
                     )
+                self._assert_account_language(
+                    account, template.config.get("language")
+                )
                 selection = self._preview_selector().select_and_reserve(
                     SelectionRequest(
                         run_id=index,
@@ -537,7 +603,7 @@ class XAutoPostService:
                         template_version=template.version,
                         account_id=account_id,
                         language=str(template.config.get("language") or ""),
-                        rules=selector_rules(template.config),
+                        rules=selector_rules(template.config, account=account),
                         now=self._now(),
                     )
                 )
@@ -568,13 +634,29 @@ class XAutoPostService:
                 tasks.append(existing[account_id])
                 continue
             try:
-                account = self.account_bridge.verify_account(account_id)
+                account = dict(
+                    self.account_bridge.verify_account(
+                        account_id,
+                        only_refresh_required=False,
+                        preserve_transient_status=True,
+                        require_publish_approved=True,
+                    )
+                )
+                if str(account.get("id") or "") != str(account_id):
+                    raise AutoPostServiceError(
+                        "x_auto_x_bridge_response_invalid",
+                        "X account verification returned an invalid account",
+                        502,
+                    )
                 if not bool(account.get("publish_eligible")):
                     raise AutoPostServiceError(
                         "x_auto_account_not_publishable",
                         "selected X account is not currently publishable",
                         409,
                     )
+                self._assert_account_language(
+                    account, config.get("language")
+                )
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,
@@ -678,7 +760,7 @@ class XAutoPostService:
             )
         if not self.executor.gates.is_open:
             raise AutoPostServiceError(
-                "x_auto_live_gates_closed", "all X automatic publishing gates must be open", 409
+                "x_auto_live_gates_closed", "X 自动发布生产门禁未全部开启", 409
             )
         template = self.store.get_template(template_id)
         if expected_version(payload.get("expected_version")) != template.version:

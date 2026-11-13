@@ -1,8 +1,9 @@
 """Read-only Dramawave candidate selection for the daily X publisher.
 
 The selector deliberately keeps the reporting database outside the publishing
-transaction.  It only returns candidates whose source metadata, four violation
-stores, material tags and drama mapping can all be checked unambiguously.
+transaction.  It only returns candidates whose source metadata, material tags
+and drama mapping can all be checked unambiguously.  Violation-history stores
+are intentionally outside the X publishing eligibility contract.
 """
 
 from __future__ import annotations
@@ -10,6 +11,10 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
+
+from features.x_posts.source_duration import probe_source_duration
+from features.x_posts.service import XPostError
+from features.x_accounts.language import canonical_drama_language
 
 
 SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -20,7 +25,7 @@ DEFAULT_DRAMAWAVE_APP_ID = 1479
 # that can be routed to a token-confirmed Premium account.  Keep only the
 # platform/API upload boundary used by the final account-aware preflight.
 MAX_X_SOURCE_DURATION_SECONDS = 4 * 60 * 60
-AUTO_TEMPLATE_MAX_SOURCE_DURATION_SECONDS = 600
+AUTO_TEMPLATE_MAX_SOURCE_DURATION_SECONDS = MAX_X_SOURCE_DURATION_SECONDS
 MAX_SUPPORTED_EPOCH_SECONDS = 253402300799
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
@@ -82,6 +87,23 @@ class CandidateSelectionError(RuntimeError):
 class CandidateQueryError(CandidateSelectionError):
     """A read-only database query failed; the entire run must stop."""
 
+    code = "x_post_source_query_failed"
+    _MESSAGES = {
+        "source": "候选来源数据查询失败，请稍后重试",
+        "material": "素材来源数据查询失败，请稍后重试",
+        "drama": "短剧映射数据查询失败，请稍后重试",
+        "deploy_time": "短剧可投放时间查询失败，请稍后重试",
+    }
+
+    def __init__(self, query_stage="source"):
+        normalized_stage = str(query_stage or "").strip().lower()
+        if normalized_stage not in self._MESSAGES:
+            normalized_stage = "source"
+        self.query_stage = normalized_stage
+        self.error_code = self.code
+        self.error_message = self._MESSAGES[normalized_stage]
+        super().__init__(self.error_message)
+
 
 class PoolCandidateRejection(CandidateSelectionError):
     """A single pool item is unsafe or incomplete and must be skipped."""
@@ -123,8 +145,8 @@ def material_key(material_id):
     if not _MATERIAL_ID.fullmatch(value):
         raise CandidateSelectionError("invalid material id")
     # The ledger's global key is the canonical positive decimal material ID.
-    # Dramawave is the only eligible product, so a product prefix would make
-    # the runner disagree with the store migration and its unique index.
+    # Source IDs are global across products. Product metadata never changes
+    # the established automatic de-duplication identity.
     parsed = int(value)
     if parsed <= 0 or parsed > 9223372036854775807:
         raise CandidateSelectionError("invalid material id")
@@ -186,6 +208,21 @@ def _text(value, label, required=True, limit=4096):
     return value
 
 
+def _required_drama_language(value):
+    if value is None or str(value).strip() == "":
+        raise PoolCandidateRejection(
+            "drama_language_missing", "关联短剧缺少语言信息"
+        )
+    try:
+        return canonical_drama_language(
+            _text(value, "drama language", limit=32), default=""
+        )
+    except (CandidateSelectionError, ValueError):
+        raise PoolCandidateRejection(
+            "drama_language_invalid", "关联短剧的语言格式无效"
+        ) from None
+
+
 def _integer(value, label):
     if isinstance(value, bool):
         raise CandidateSelectionError("%s is invalid" % label)
@@ -205,29 +242,36 @@ def _float(value, label):
     return result
 
 
-def _cursor_rows(connection, sql, params):
+def _cursor_rows(connection, sql, params, *, query_stage="source"):
     statement = str(sql or "").lstrip()
     if not re.match(r"(?i)^SELECT\b", statement):
         raise CandidateSelectionError("selector attempted a non-read-only statement")
-    cursor = connection.cursor()
+    cursor = None
     try:
+        cursor = connection.cursor()
         cursor.execute(sql, tuple(params))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
     except CandidateSelectionError:
         raise
-    except Exception as exc:
-        raise CandidateQueryError(
-            "read-only candidate query failed: %s" % type(exc).__name__
-        ) from None
+    except Exception:
+        # The source exception can contain SQL text, connection details or
+        # credentials.  Persist only a stable code, a bounded stage and the
+        # corresponding operator-safe message.
+        raise CandidateQueryError(query_stage=query_stage) from None
     finally:
         close = getattr(cursor, "close", None)
         if callable(close):
-            close()
+            try:
+                close()
+            except Exception:
+                # Cleanup failures must not replace the stable query outcome
+                # with a driver exception that may contain connection detail.
+                pass
 
 
-def _cursor_row(connection, sql, params):
-    rows = _cursor_rows(connection, sql, params)
+def _cursor_row(connection, sql, params, *, query_stage="source"):
+    rows = _cursor_rows(connection, sql, params, query_stage=query_stage)
     if len(rows) != 1:
         raise CandidateSelectionError("candidate check returned an ambiguous result")
     return rows[0]
@@ -291,29 +335,7 @@ class DramawaveCandidateSelector:
                 MAX_X_SOURCE_DURATION_SECONDS,
                 int(scan_limit),
             ),
-        )
-
-    def _violation_counts(self, material_id):
-        schema = self.schema
-        sql = """
-            SELECT
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_facebook_violations f
-                WHERE f.source_id = %s) AS facebook_count,
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_tiktok_violations t
-                WHERE t.source_id = %s OR t.original_source_id = %s) AS tiktok_count,
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_twitter_violations x
-                WHERE x.source_id = %s OR x.original_source_id = %s) AS twitter_count,
-              (SELECT COUNT(*)
-                 FROM `{schema}`.ads_resource_audit a
-                WHERE a.resource_id = %s) AS resource_audit_count
-        """.format(schema=schema)
-        return _cursor_row(
-            self.connection,
-            sql,
-            (material_id, material_id, material_id, material_id, material_id, material_id),
+            query_stage="material",
         )
 
     def _material_tags(self, material_id):
@@ -323,7 +345,15 @@ class DramawaveCandidateSelector:
              WHERE rt.source_id = %s
              ORDER BY rt.id ASC
         """.format(schema=self.schema)
-        return [row.get("tag_name") for row in _cursor_rows(self.connection, sql, (material_id,))]
+        return [
+            row.get("tag_name")
+            for row in _cursor_rows(
+                self.connection,
+                sql,
+                (material_id,),
+                query_stage="material",
+            )
+        ]
 
     def _drama_rows(self, content_id, series_code, language):
         sql = """
@@ -335,7 +365,12 @@ class DramawaveCandidateSelector:
                AND r.series_code = %s
                AND r.language = %s
         """.format(schema=self.schema)
-        return _cursor_rows(self.connection, sql, (content_id, series_code, language))
+        return _cursor_rows(
+            self.connection,
+            sql,
+            (content_id, series_code, language),
+            query_stage="drama",
+        )
 
     def _pool_material_rows(
         self,
@@ -344,25 +379,20 @@ class DramawaveCandidateSelector:
         allow_long_duration=False,
         max_duration_seconds=None,
     ):
-        """Load one eligible video directly from the custom material library.
+        """Load one material directly from the custom material library.
 
-        Material-pool and manual selection may hydrate a positive-duration
-        source through the X API's four-hour upload boundary.  The later
-        account-aware preflight is authoritative: standard accounts still fail
-        closed above 140 seconds, while only a token-confirmed Premium account
-        may keep the long source.
+        Eligibility is checked in Python after the exact ID lookup so a manual
+        run can persist a precise rejection such as missing material, non-video
+        material, inactive material, missing duration, or duration overflow.
+        The later account-aware media preflight remains authoritative for the
+        downloaded file and the selected account's current entitlement.
         """
-        duration_predicate = (
-            "AND cs.video_duration >= %s"
-            if allow_long_duration
-            else "AND cs.video_duration BETWEEN %s AND %s"
-        )
-        if max_duration_seconds is None:
-            max_duration_seconds = MAX_X_SOURCE_DURATION_SECONDS
         sql = """
             SELECT
                 CAST(cs.id AS CHAR) AS material_id,
                 cs.product AS product,
+                cs.type AS material_type,
+                cs.is_delete AS material_is_deleted,
                 cs.url AS material_url,
                 cs.name AS material_name,
                 cs.language AS material_language,
@@ -371,64 +401,69 @@ class DramawaveCandidateSelector:
                 cs.video_duration AS video_duration
              FROM `{schema}`.ads_custom_source cs
              WHERE cs.id = %s
-               AND cs.product = %s
-               AND cs.type = %s
-               AND cs.is_delete = %s
-               {duration_predicate}
-             LIMIT 2
-        """.format(
-            schema=self.schema,
-            duration_predicate=duration_predicate,
-        )
-        duration_params = (
-            (1,)
-            if allow_long_duration
-            else (1, int(max_duration_seconds))
-        )
+              LIMIT 2
+        """.format(schema=self.schema)
         return _cursor_rows(
             self.connection,
             sql,
-            (
-                material_id,
-                DEFAULT_PRODUCT,
-                2,
-                0,
-            )
-            + duration_params,
+            (material_id,),
+            query_stage="material",
         )
 
-    def _pool_drama_rows(self, content_id, language):
+    def _pool_drama_rows(self, content_id, language=None):
         """Resolve a manual material without depending on delivery insight rows."""
+        language_clause = (
+            "AND LOWER(TRIM(r.language)) = LOWER(%s)"
+            if language is not None else ""
+        )
         sql = """
             SELECT
                 r.content_id, r.series_code, r.language, r.name AS drama_name,
                 r.labels AS drama_labels, r.desc AS drama_description
               FROM `{schema}`.ads_drama_resource r FORCE INDEX (content_id)
              WHERE r.content_id = %s
-               AND LOWER(TRIM(r.language)) = LOWER(%s)
+               AND r.app_id = 1479
+               {language_clause}
              ORDER BY r.id ASC
-        """.format(schema=self.schema)
-        return _cursor_rows(self.connection, sql, (content_id, language))
+        """.format(schema=self.schema, language_clause=language_clause)
+        return _cursor_rows(
+            self.connection,
+            sql,
+            (content_id, language) if language is not None else (content_id,),
+            query_stage="drama",
+        )
 
-    def _drama_deploy_rows(self, content_id, language):
+    def _drama_deploy_rows(self, content_id, language, *, canonical_language=False):
         """Load the authoritative Dramawave delivery time for one drama."""
+        languages = [language]
+        if canonical_language:
+            language = canonical_drama_language(language, default="")
+            languages = [language, "jp"] if language == "ja" else [language]
+        language_clause = (
+            "LOWER(REPLACE(TRIM(i.language), '_', '-')) IN (%s)"
+            % ",".join("%s" for _ in languages)
+            if canonical_language else "LOWER(TRIM(i.language)) = LOWER(%s)"
+        )
         sql = """
             SELECT
                 i.content_id, i.app_id, i.app, i.language, i.deploy_time
               FROM `{schema}`.ads_drama_info i FORCE INDEX (ac)
              WHERE i.content_id = %s
                AND i.app_id = %s
-               AND LOWER(TRIM(i.language)) = LOWER(%s)
+               AND {language_clause}
              ORDER BY i.app ASC
-        """.format(schema=self.schema)
+        """.format(schema=self.schema, language_clause=language_clause)
         return _cursor_rows(
             self.connection,
             sql,
-            (content_id, DEFAULT_DRAMAWAVE_APP_ID, language),
+            (content_id, DEFAULT_DRAMAWAVE_APP_ID, *languages),
+            query_stage="deploy_time",
         )
 
-    def _validate_drama_deploy_time(self, content_id, language):
-        rows = self._drama_deploy_rows(content_id, language)
+    def _validate_drama_deploy_time(self, content_id, language, *, canonical_language=False):
+        rows = self._drama_deploy_rows(
+            content_id, language, canonical_language=canonical_language
+        )
         if not rows:
             raise PoolCandidateRejection(
                 "drama_deploy_time_missing",
@@ -444,10 +479,12 @@ class DramawaveCandidateSelector:
                 mapped_language = _text(
                     row.get("language"), "delivery language", limit=32
                 )
+                if canonical_language:
+                    mapped_language = canonical_drama_language(mapped_language, default="")
                 deploy_time = _integer(
                     row.get("deploy_time"), "drama deploy_time"
                 )
-            except CandidateSelectionError as exc:
+            except (CandidateSelectionError, ValueError) as exc:
                 raise PoolCandidateRejection(
                     "drama_deploy_time_invalid",
                     "短剧可投放时间数据无效：%s" % exc,
@@ -484,16 +521,25 @@ class DramawaveCandidateSelector:
         *,
         allow_long_duration=False,
         max_duration_seconds=None,
+        allow_images=False,
+        allow_deleted_materials=False,
+        require_dramawave_product=True,
+        use_drama_language=False,
     ):
         material_rows = self._pool_material_rows(
             material_id,
             allow_long_duration=allow_long_duration,
             max_duration_seconds=max_duration_seconds,
         )
+        if not material_rows:
+            raise PoolCandidateRejection(
+                "material_not_found",
+                "素材 %s 不存在" % material_id,
+            )
         if len(material_rows) != 1:
             raise PoolCandidateRejection(
-                "material_not_found_or_ineligible",
-                "material is missing or is not an eligible active video",
+                "material_source_ambiguous",
+                "素材 %s 存在重复源数据" % material_id,
             )
         row = material_rows[0]
         try:
@@ -501,14 +547,18 @@ class DramawaveCandidateSelector:
             key = material_key(candidate_id)
             if key != material_id:
                 raise CandidateSelectionError("material identity mismatch")
-            product = _text(row.get("product"), "product", limit=64)
-            if product != DEFAULT_PRODUCT:
-                raise PoolCandidateRejection(
-                    "material_product_mismatch",
-                    "material does not belong to Dramawave",
+            product = (
+                _text(row.get("product"), "product", limit=64)
+                if require_dramawave_product else None
+            )
+            material_type = _integer(row.get("material_type"), "material_type")
+            material_is_deleted = _integer(
+                row.get("material_is_deleted"), "material_is_deleted"
+            )
+            material_language = (
+                None if use_drama_language else _text(
+                    row.get("material_language"), "material_language", limit=32
                 )
-            material_language = _text(
-                row.get("material_language"), "material_language", limit=32
             )
             content_id = _text(row.get("content_id"), "content_id", limit=128)
             material_url = normalize_material_url(
@@ -522,64 +572,101 @@ class DramawaveCandidateSelector:
         except CandidateSelectionError as exc:
             raise PoolCandidateRejection(
                 "material_metadata_invalid",
-                "material metadata is incomplete or invalid: %s" % exc,
+                "素材 %s 的基础信息不完整" % material_id,
             ) from None
+        if require_dramawave_product and product != DEFAULT_PRODUCT:
+            raise PoolCandidateRejection(
+                "material_product_mismatch",
+                "素材 %s 不属于Dramawave" % material_id,
+            )
+        source_duration = 0.0
+        if material_type == 1:
+            if not allow_images:
+                raise PoolCandidateRejection(
+                    "material_not_video",
+                    "素材 %s 不是视频" % material_id,
+                )
+            media_kind = "image"
+        elif material_type == 2:
+            media_kind = "video"
+        else:
+            raise PoolCandidateRejection(
+                "material_type_unsupported",
+                "素材 %s 的媒体类型不受支持" % material_id,
+            )
+        # Exact operator-selected IDs may refer to soft-deleted source rows.
+        # The source record, media object and all downstream checks still apply.
+        if material_is_deleted != 0 and not allow_deleted_materials:
+            raise PoolCandidateRejection(
+                (
+                    "material_deleted_image_unsupported"
+                    if media_kind == "image"
+                    else "material_inactive"
+                ),
+                "素材 %s 已删除或不可用" % material_id,
+            )
+        if media_kind == "video":
+            try:
+                source_duration = _float(
+                    row.get("video_duration") or 0, "video_duration"
+                )
+            except CandidateSelectionError:
+                raise PoolCandidateRejection(
+                    "material_duration_invalid",
+                    "素材 %s 的视频时长数据无效" % material_id,
+                ) from None
+            if source_duration <= 0:
+                try:
+                    source_duration = _float(probe_source_duration(material_url), "video_duration")
+                    if source_duration <= 0:
+                        raise CandidateSelectionError("empty measured duration")
+                except (XPostError, OSError, CandidateSelectionError):
+                    # Do not expose a signed media URL or subprocess details.
+                    # Failure stays item-local and is eligible for later recheck.
+                    raise PoolCandidateRejection(
+                        "material_duration_missing",
+                        "素材 %s 的视频时长缺失，读取视频文件时长失败，请稍后重试" % material_id,
+                    ) from None
+            if max_duration_seconds is None:
+                max_duration_seconds = MAX_X_SOURCE_DURATION_SECONDS
+            try:
+                duration_limit = float(max_duration_seconds)
+            except (TypeError, ValueError, OverflowError):
+                raise CandidateSelectionError(
+                    "material duration limit is invalid"
+                ) from None
+            if not math.isfinite(duration_limit) or duration_limit <= 0:
+                raise CandidateSelectionError("material duration limit is invalid")
+            if source_duration > duration_limit:
+                limit_label = (
+                    "4小时"
+                    if duration_limit == MAX_X_SOURCE_DURATION_SECONDS
+                    else "%d秒" % int(duration_limit)
+                )
+                raise PoolCandidateRejection(
+                    "material_duration_exceeds_limit",
+                    "素材 %s 的视频时长超过%s上限"
+                    % (material_id, limit_label),
+                )
         if not material_url.startswith("https://"):
             raise PoolCandidateRejection(
                 "material_url_not_https",
                 "material URL is not HTTPS",
             )
 
-        violation_counts = self._violation_counts(candidate_id)
-        normalized_counts = {}
-        try:
-            for field in (
-                "facebook_count",
-                "tiktok_count",
-                "twitter_count",
-                "resource_audit_count",
-            ):
-                normalized_counts[field] = _integer(violation_counts.get(field), field)
-        except CandidateSelectionError as exc:
-            raise PoolCandidateRejection(
-                "violation_check_invalid",
-                "violation check returned invalid data: %s" % exc,
-            ) from None
-        if any(value != 0 for value in normalized_counts.values()):
-            raise PoolCandidateRejection(
-                "material_has_violation",
-                "material has a violation record",
-            )
+        # Keep the frozen compliance shape stable without consulting external
+        # violation-history tables. X publishing eligibility is independent of
+        # whether the material has a historical violation record.
+        normalized_counts = {
+            "facebook_count": 0,
+            "tiktok_count": 0,
+            "twitter_count": 0,
+            "resource_audit_count": 0,
+        }
 
-        source_tag = row.get("source_tag_name")
-        if source_tag not in (None, ""):
-            try:
-                source_tag_is_unsafe = contains_dangerous_tag(source_tag)
-            except CandidateSelectionError as exc:
-                raise PoolCandidateRejection(
-                    "material_source_tag_invalid",
-                    "material source tag cannot be checked safely: %s" % exc,
-                ) from None
-            if source_tag_is_unsafe:
-                raise PoolCandidateRejection(
-                    "material_source_tag_unsafe",
-                    "material source tag is unsafe",
-                )
-
-        material_tags = self._material_tags(candidate_id)
-        for tag_value in material_tags:
-            try:
-                tag_is_unsafe = contains_dangerous_tag(tag_value)
-            except CandidateSelectionError as exc:
-                raise PoolCandidateRejection(
-                    "material_tag_invalid",
-                    "material tag cannot be checked safely: %s" % exc,
-                ) from None
-            if tag_is_unsafe:
-                raise PoolCandidateRejection(
-                    "material_tag_unsafe",
-                    "material tag is unsafe",
-                )
+        # Source and resource tags are descriptive metadata, not X publishing
+        # eligibility gates. Historical tag classifications remain visible in
+        # the source system, but they do not remove an otherwise valid item.
 
         drama_rows = self._pool_drama_rows(content_id, material_language)
         if not drama_rows:
@@ -597,8 +684,11 @@ class DramawaveCandidateSelector:
                 series_code = _text(
                     drama.get("series_code"), "drama series_code", limit=128
                 )
-                mapped_language = _text(
-                    drama.get("language"), "drama language", limit=32
+                mapped_language = (
+                    _required_drama_language(drama.get("language"))
+                    if use_drama_language else _text(
+                        drama.get("language"), "drama language", limit=32
+                    )
                 )
                 drama_name = _text(drama.get("drama_name"), "drama name", limit=500)
                 raw_labels = _text(
@@ -609,6 +699,8 @@ class DramawaveCandidateSelector:
                     "drama description",
                     limit=4096,
                 )
+            except PoolCandidateRejection:
+                raise
             except CandidateSelectionError as exc:
                 raise PoolCandidateRejection(
                     "drama_mapping_invalid",
@@ -616,7 +708,8 @@ class DramawaveCandidateSelector:
                 ) from None
             if (
                 mapped_content_id != content_id
-                or mapped_language.casefold() != material_language.casefold()
+                or (not use_drama_language
+                    and mapped_language.casefold() != material_language.casefold())
             ):
                 raise PoolCandidateRejection(
                     "drama_mapping_invalid",
@@ -633,17 +726,28 @@ class DramawaveCandidateSelector:
                 series_code,
                 mapped_language.casefold(),
                 drama_name,
-                tuple(label.casefold() for label in labels),
                 description,
             )
-            canonical.setdefault(
+            mapped = canonical.setdefault(
                 canonical_key,
                 {
                     "series_code": series_code,
+                    "language": mapped_language,
                     "drama_name": drama_name,
-                    "labels": labels,
+                    "labels": [],
                     "description": description,
                 },
+            )
+            # Labels describe a drama; differences must not change its identity.
+            # Preserve the first source row's tag order and append unseen labels.
+            seen_labels = {label.casefold() for label in mapped["labels"]}
+            for label in labels:
+                if label.casefold() not in seen_labels:
+                    mapped["labels"].append(label)
+                    seen_labels.add(label.casefold())
+        if use_drama_language and len({item["language"] for item in canonical.values()}) > 1:
+            raise PoolCandidateRejection(
+                "drama_language_ambiguous", "关联短剧存在多个语言，无法确定发布语言"
             )
         if len(canonical) != 1:
             raise PoolCandidateRejection(
@@ -651,15 +755,20 @@ class DramawaveCandidateSelector:
                 "drama mapping is ambiguous",
             )
         drama = next(iter(canonical.values()))
+        if use_drama_language:
+            material_language = drama["language"]
         drama_deploy_time = self._validate_drama_deploy_time(
             content_id,
             material_language,
+            canonical_language=use_drama_language,
         )
 
         return {
             "source_date": source_date,
             "material_key": key,
             "material_id": candidate_id,
+            "media_kind": media_kind,
+            "source_duration": source_duration,
             "content_id": content_id,
             "material_url": material_url,
             "material_name": material_name,
@@ -703,30 +812,24 @@ class DramawaveCandidateSelector:
         if not material_url.startswith("https://"):
             raise CandidateSelectionError("material URL is not HTTPS")
 
-        violation_counts = self._violation_counts(candidate_id)
-        normalized_counts = {}
-        for field in (
-            "facebook_count",
-            "tiktok_count",
-            "twitter_count",
-            "resource_audit_count",
-        ):
-            normalized_counts[field] = _integer(violation_counts.get(field), field)
-            if normalized_counts[field] != 0:
-                raise CandidateSelectionError("material has a violation record")
+        # Preserve the queue audit fields, but do not query or gate on
+        # violation-history tables for any X publishing path.
+        normalized_counts = {
+            "facebook_count": 0,
+            "tiktok_count": 0,
+            "twitter_count": 0,
+            "resource_audit_count": 0,
+        }
 
-        source_tag = row.get("source_tag_name")
-        if source_tag not in (None, "") and contains_dangerous_tag(source_tag):
-            raise CandidateSelectionError("material source tag is unsafe")
-        material_tags = self._material_tags(candidate_id)
-        for tag_value in material_tags:
-            if contains_dangerous_tag(tag_value):
-                raise CandidateSelectionError("material tag is unsafe")
+        # Keep legacy selection aligned with the material-pool path: tags are
+        # retained as source metadata but do not gate X publishing.
 
         drama_rows = self._drama_rows(content_id, series_code, material_language)
         if not drama_rows:
             raise CandidateSelectionError("drama mapping is missing")
         canonical = set()
+        labels = []
+        seen_labels = set()
         for drama in drama_rows:
             mapped_content_id = _text(drama.get("content_id"), "drama content_id", limit=128)
             mapped_series_code = _text(drama.get("series_code"), "drama series_code", limit=128)
@@ -742,13 +845,19 @@ class DramawaveCandidateSelector:
                 or mapped_language.casefold() != material_language.casefold()
             ):
                 raise CandidateSelectionError("drama mapping identity mismatch")
+            row_labels = [item.strip() for item in drama_labels.split(",") if item.strip()]
+            if not row_labels:
+                raise CandidateSelectionError("drama labels are incomplete")
+            for label in row_labels:
+                if label.casefold() not in seen_labels:
+                    labels.append(label)
+                    seen_labels.add(label.casefold())
             canonical.add(
                 (
                     mapped_content_id,
                     mapped_series_code,
                     mapped_language.casefold(),
                     drama_name,
-                    drama_labels,
                     description,
                 )
             )
@@ -759,12 +868,8 @@ class DramawaveCandidateSelector:
             _mapped_series_code,
             _mapped_language,
             drama_name,
-            drama_labels,
             description,
         ) = next(iter(canonical))
-        labels = [item.strip() for item in drama_labels.split(",") if item.strip()]
-        if not labels:
-            raise CandidateSelectionError("drama labels are incomplete")
 
         return {
             "source_date": source_date,
@@ -915,7 +1020,14 @@ class DramawaveCandidateSelector:
                 continue
             seen_material_keys.add(candidate_id)
             try:
-                candidate = self._pool_candidate(candidate_id, source_date)
+                candidate = self._pool_candidate(
+                    candidate_id,
+                    source_date,
+                    allow_images=True,
+                    allow_deleted_materials=True,
+                    require_dramawave_product=False,
+                    use_drama_language=True,
+                )
             except CandidateQueryError:
                 raise
             except PoolCandidateRejection as exc:
@@ -983,6 +1095,10 @@ class DramawaveCandidateSelector:
                     candidate_id,
                     source_date,
                     allow_long_duration=True,
+                    allow_images=True,
+                    allow_deleted_materials=True,
+                    require_dramawave_product=False,
+                    use_drama_language=True,
                 )
             except CandidateQueryError:
                 raise
@@ -1014,10 +1130,9 @@ class DramawaveCandidateSelector:
         return selected, rejections
 
     def select_auto_template(self, material_ids, source_date, limit=1):
-        """Hydrate one exact auto-template material under its 600-second ceiling.
+        """Hydrate one exact auto-template material within the upload boundary.
 
-        The execution bridge deliberately resembles the manual exact-ID flow,
-        but it must never inherit the operator-only long-source exception.
+        Keep automatic source gates; the final preflight checks account entitlement.
         """
         source_date = normalize_date(source_date)
         try:
@@ -1137,7 +1252,7 @@ def select_auto_template_candidates(
     schema=DEFAULT_SCHEMA,
     now=None,
 ):
-    """Hydrate one exact auto-template material under its separate 600s gate."""
+    """Hydrate one exact auto-template material within the upload boundary."""
     return DramawaveCandidateSelector(
         connection,
         schema=schema,
@@ -1200,6 +1315,7 @@ def ranked_material_ids(
             MAX_X_SOURCE_DURATION_SECONDS,
             scan_limit,
         ),
+        query_stage="material",
     )
     values = []
     seen = set()

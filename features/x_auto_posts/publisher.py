@@ -12,7 +12,10 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Mapping, Optional
+
+from features.x_accounts.language import same_drama_language
 
 from .client import safe_public_message
 from .core import TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
@@ -26,6 +29,9 @@ from .x_sidecar import XPostAutoBridgeClient, XPostBridgeError
 
 
 UTC = timezone.utc
+STANDARD_VIDEO_MAX_DURATION_SECONDS = 140
+AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS = 600
+LONG_VIDEO_SUBSCRIPTION_TYPES = frozenset({"basic", "premium", "premium_plus"})
 
 
 class AutoPostExecutionError(RuntimeError):
@@ -84,7 +90,32 @@ class AutoLiveGates:
         }
 
 
-def selector_rules(config: Mapping[str, Any]) -> SelectionRules:
+def account_duration_limit_seconds(account: Optional[Mapping[str, Any]]) -> int:
+    """Return the fail-closed auto-template duration limit for one account."""
+
+    value = account if isinstance(account, Mapping) else {}
+    subscription_type = (
+        str(value.get("subscription_type", "unknown") or "unknown")
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+    if subscription_type == "premiumplus":
+        subscription_type = "premium_plus"
+    if (
+        value.get("long_video_eligible") is True
+        and subscription_type in LONG_VIDEO_SUBSCRIPTION_TYPES
+    ):
+        return AUTO_TEMPLATE_VIDEO_MAX_DURATION_SECONDS
+    return STANDARD_VIDEO_MAX_DURATION_SECONDS
+
+
+def selector_rules(
+    config: Mapping[str, Any],
+    *,
+    account: Optional[Mapping[str, Any]] = None,
+) -> SelectionRules:
     drama = (
         config.get("drama_rule")
         if isinstance(config.get("drama_rule"), Mapping)
@@ -95,6 +126,25 @@ def selector_rules(config: Mapping[str, Any]) -> SelectionRules:
         if isinstance(config.get("material_rule"), Mapping)
         else {}
     )
+    duration_min = material.get("duration_min_seconds")
+    duration_max = material.get("duration_max_seconds")
+    if account is not None:
+        account_limit = Decimal(account_duration_limit_seconds(account))
+        try:
+            configured_min = (
+                None if duration_min in (None, "") else Decimal(str(duration_min))
+            )
+            configured_max = (
+                None if duration_max in (None, "") else Decimal(str(duration_max))
+            )
+        except (InvalidOperation, ValueError):
+            # Preserve the existing validation error for malformed historical data.
+            pass
+        else:
+            if configured_min is not None and configured_min > account_limit:
+                raise NoEligibleMaterial({"account_duration_limit": 1})
+            if configured_max is None or configured_max > account_limit:
+                duration_max = account_limit
     return SelectionRules.from_mapping(
         {
             "metric_window_days": config.get("metric_window_days", 7),
@@ -134,8 +184,8 @@ def selector_rules(config: Mapping[str, Any]) -> SelectionRules:
                     "direction": material.get("sort_direction", "desc"),
                 },
                 "duration_seconds": {
-                    "min": material.get("duration_min_seconds"),
-                    "max": material.get("duration_max_seconds"),
+                    "min": duration_min,
+                    "max": duration_max,
                 },
             },
         }
@@ -265,7 +315,7 @@ class AutoPostExecutor:
             template_version=task.template_version,
             account_id=task.account_id,
             language=task.language,
-            rules=selector_rules(template.config),
+            rules=selector_rules(template.config, account=task.account_snapshot),
             now=self._now(),
         )
         self._phase_selector(claim_token).select_and_reserve(request)
@@ -281,10 +331,21 @@ class AutoPostExecutor:
                 "verified X account does not match the frozen task",
                 409,
             )
-        if not bool(account.get("publish_eligible")):
+        status = str(account.get("status") or "").strip().lower()
+        if status in {"disabled", "disconnected", "revoke_pending"} or not bool(
+            account.get("publish_approved")
+        ):
             raise AutoPostExecutionError(
                 "x_auto_account_not_publishable",
                 "X account is not currently publishable",
+                409,
+            )
+        if not same_drama_language(
+            account.get("drama_language"), task.language
+        ):
+            raise AutoPostExecutionError(
+                "x_auto_account_language_mismatch",
+                "X account drama language no longer matches the frozen task language",
                 409,
             )
         return account
@@ -425,9 +486,7 @@ class AutoPostExecutor:
         )
         body_template = str(template.config.get("body_template") or "")
         body_hash = hashlib.sha256(body_template.encode("utf-8")).hexdigest()
-        account = self._validate_account(
-            task, self.bridge.verify_account(int(task.account_id))
-        )
+        account = self._validate_account(task, task.account_snapshot)
         if task.status != "preparing":
             task = self.store.transition_task(
                 task.id,
@@ -975,5 +1034,6 @@ __all__ = [
     "AutoLiveGates",
     "AutoPostExecutionError",
     "AutoPostExecutor",
+    "account_duration_limit_seconds",
     "selector_rules",
 ]

@@ -30,6 +30,11 @@
     { value: "100", label: "小说" },
   ]);
   const RESOURCE_TYPE_V2_VALUES = new Set(RESOURCE_TYPE_V2_OPTIONS.map(item => item.value));
+  const DEFAULT_VIDEO_TEMPLATE = "random_overlay";
+  const VIDEO_TEMPLATE_LABELS = Object.freeze({
+    random_overlay: "随机排重",
+    direct_outro: "拼接结尾",
+  });
   const state = {
     accounts: [],
     selectedAccountIds: new Set(),
@@ -199,6 +204,11 @@
     setValue("captionTemplate", configValue("caption_template", ""));
     setValue("dramaLaunchWindowDays", configValue("drama_launch_window_days", 0), "0");
     setValue("cooldownDays", configValue("cooldown_days", 0), "0");
+    const videoTemplate = String(configValue("video_template", DEFAULT_VIDEO_TEMPLATE) || "").trim();
+    if (!Object.prototype.hasOwnProperty.call(VIDEO_TEMPLATE_LABELS, videoTemplate)) {
+      throw new Error("模板的视频制作模板配置无效，请联系管理员。");
+    }
+    setValue("videoTemplate", videoTemplate, DEFAULT_VIDEO_TEMPLATE);
 
     const drama = ui.objectValue(configValue("drama_rule", {}));
     const material = ui.objectValue(configValue("material_rule", {}));
@@ -230,6 +240,20 @@
     setValue("randomDailyCount", schedule.daily_count || schedule.random_daily_count, "1");
     renderScheduleMode();
 
+    const planContainer = ui.byId("targetRandomDayPlan");
+    ui.clear(planContainer);
+    const dayPlan = state.template.random_day_plan;
+    if (dayPlan && Array.isArray(dayPlan.targets)) {
+      planContainer.appendChild(ui.element("div", { text: `${dayPlan.local_date} 已冻结的账号计划` }));
+      dayPlan.targets.forEach(target => {
+        const account = state.accounts.find(item => String(item.source_account_id || item.account_id) === String(target.target_id));
+        const label = account ? (account.display_name || account.username || target.target_id) : target.target_id;
+        planContainer.appendChild(ui.element("div", { text: `${label}：${(target.times || []).join("、")}` }));
+      });
+    } else if (randomMode) {
+      planContainer.textContent = "次日零点生成各账号当天计划。";
+    }
+
     ui.setText(ui.byId("pageTitle"), `编辑 TT 自动发布模板 · ${state.template.name || templateId}`, "");
     const badge = ui.byId("templateStatusBadge");
     ui.setText(badge, statusText(state.template), "");
@@ -260,8 +284,10 @@
     ui.setText(ui.byId("summaryMetric"), `platform=${ui.byId("platform").value || "0"} / ${ui.byId("metricWindowDays").value || "7"} 天`, "");
     ui.setText(ui.byId("summaryDramaSort"), sortSummary("drama"), "");
     ui.setText(ui.byId("summaryMaterialSort"), sortSummary("material"), "");
+    const videoTemplate = ui.byId("videoTemplate").value;
+    ui.setText(ui.byId("summaryVideoTemplate"), VIDEO_TEMPLATE_LABELS[videoTemplate], "未选择");
     if (selectedScheduleMode() === "random") {
-      ui.setText(ui.byId("summarySchedule"), `每天随机 ${ui.byId("randomDailyCount").value || "1"} 次`, "");
+      ui.setText(ui.byId("summarySchedule"), `每账号每天随机 ${ui.byId("randomDailyCount").value || "1"} 次 · 零点备料`, "");
     } else {
       const times = timeValues();
       ui.setText(ui.byId("summarySchedule"), times.length ? `每天 ${times.join("、")}` : "未设置", "");
@@ -318,6 +344,10 @@
     if (!Number.isInteger(durationMin) || durationMin < 0 || durationMin > 3600) throw new Error("素材最小时长必须为 0–3600 秒的整数。");
     if (!Number.isInteger(durationMax) || durationMax < 1 || durationMax > 3600) throw new Error("素材最长时长必须为 1–3600 秒的整数。");
     if (durationMin > durationMax) throw new Error("素材时长最小值不能大于最大值。");
+    const videoTemplate = ui.byId("videoTemplate").value;
+    if (!Object.prototype.hasOwnProperty.call(VIDEO_TEMPLATE_LABELS, videoTemplate)) {
+      throw new Error("请选择有效的视频制作模板。");
+    }
 
     const mode = selectedScheduleMode();
     let schedule;
@@ -336,6 +366,7 @@
       name,
       account_ids: Array.from(state.selectedAccountIds),
       caption_template: caption,
+      video_template: videoTemplate,
       metric_window_days: metricWindowDays,
       drama_launch_window_days: launchWindow,
       cooldown_days: cooldown,

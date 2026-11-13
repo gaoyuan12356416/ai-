@@ -49,6 +49,19 @@ class DramaPoolRejection(DramaSelectionError):
         super().__init__(str(message or "drama is not publishable")[:240])
 
 
+class DramaPoolProgressChanged(DramaPoolRejection):
+    """A fully audited source range differs from the current pool snapshot."""
+
+    def __init__(self, pool, audit):
+        super().__init__(
+            "x_post_drama_free_range_changed",
+            "短剧免费集数已变化，需要先同步发布进度",
+            pool["id"], pool["content_id"],
+        )
+        self.free_episode_count = audit["free_episode_count"]
+        self.language = audit["language"]
+
+
 def _text(
     value,
     label,
@@ -473,6 +486,11 @@ class DramawaveDramaSelector:
                 raise DramaSelectionError("account_ids is invalid")
             seen_accounts.add(account_id)
             normalized_accounts.append(account_id)
+        account_positions = {
+            account_id: index
+            for index, account_id in enumerate(normalized_accounts)
+        }
+        previous_account_position = -1
         if len(pool_items) > len(normalized_accounts):
             raise DramaSelectionError(
                 "drama pool response exceeds the configured account scope"
@@ -480,7 +498,7 @@ class DramawaveDramaSelector:
         normalized_pool = []
         seen_ids = set()
         seen_content_ids = set()
-        for index, raw in enumerate(pool_items):
+        for raw in pool_items:
             if not isinstance(raw, dict):
                 raise DramaSelectionError("drama pool item must be an object")
             pool_item_id = _positive_int(raw.get("id"), "drama pool item id")
@@ -513,13 +531,18 @@ class DramawaveDramaSelector:
                 raw.get("candidate_account_id"),
                 "candidate_account_id",
             )
+            candidate_account_position = account_positions.get(
+                candidate_account_id
+            )
             if (
-                candidate_account_id != normalized_accounts[index]
+                candidate_account_position is None
+                or candidate_account_position <= previous_account_position
                 or assigned_account_id not in (0, candidate_account_id)
             ):
                 raise DramaSelectionError(
                     "drama pool account assignment is invalid"
                 )
+            previous_account_position = candidate_account_position
             assigned_at = _text(
                 raw.get("assigned_at"),
                 "assigned_at",
@@ -555,6 +578,10 @@ class DramawaveDramaSelector:
                     "replay_generation": replay_generation,
                     "assigned_account_id": assigned_account_id,
                     "candidate_account_id": candidate_account_id,
+                    "free_episode_count": (
+                        _positive_int(raw["free_episode_count"], "free_episode_count")
+                        if "free_episode_count" in raw else None
+                    ),
                 }
             )
 
@@ -569,6 +596,11 @@ class DramawaveDramaSelector:
                     pool["id"],
                     pool["content_id"],
                 ) from None
+            if (
+                pool["free_episode_count"] is not None
+                and pool["free_episode_count"] != audit["free_episode_count"]
+            ):
+                raise DramaPoolProgressChanged(pool, audit)
             labels = _label_values(audit["labels"])
             primary_tag = labels[0] if labels else audit["drama_name"]
             start = pool["next_sub_number"]

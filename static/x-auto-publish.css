@@ -304,6 +304,7 @@ tbody tr:hover td { background: #fbfdff; }
 
 .account-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
 .account-toolbar input { flex: 1 1 360px; }
+.account-toolbar select { width: auto; flex: 0 1 auto; }
 .success-text { color: #197047; }
 .warning-text { color: #9a5d00; }
 .account-list {

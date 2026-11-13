@@ -9,6 +9,17 @@ import urllib.request
 
 
 SAFE_ERROR_CODES = {
+    "x_account_busy",
+    "identity_inactive",
+    "identity_permission_denied",
+    "identity_unavailable",
+    "x_platform_permission_denied",
+    "youtube_share_forbidden",
+    "youtube_share_not_found",
+    "youtube_share_idempotency_conflict",
+    "youtube_share_source_stale",
+    "youtube_share_text_too_long",
+    "youtube_share_storage_unavailable",
     "invalid_random_daily_count",
     "invalid_schedule_mode",
     "invalid_post_template",
@@ -18,6 +29,8 @@ SAFE_ERROR_CODES = {
     "x_account_publish_not_approved",
     "x_account_owned_by_other",
     "x_account_not_found",
+    "x_account_drama_language_conflict",
+    "x_account_drama_language_invalid",
     "x_admin_required",
     "x_accounts_unavailable",
     "x_disconnect_failed",
@@ -26,6 +39,7 @@ SAFE_ERROR_CODES = {
     "x_internal_auth_failed",
     "x_oauth_not_configured",
     "x_post_account_day_already_reserved",
+    "x_post_account_language_mismatch",
     "x_post_daily_candidate_shortage",
     "x_post_daily_run_exists",
     "x_post_idempotency_conflict",
@@ -49,7 +63,10 @@ SAFE_ERROR_CODES = {
     "x_post_schedule_run_exists",
     "x_post_schedule_run_not_found",
     "x_post_schedule_version_conflict",
+    "x_post_schedule_slot_in_progress",
+    "x_post_drama_owner_not_configured",
     "x_post_drama_already_used",
+    "x_post_drama_account_language_mismatch",
     "x_post_drama_episode_already_used",
     "x_post_drama_pool_item_exists",
     "x_post_drama_pool_item_not_found",
@@ -71,6 +88,7 @@ SAFE_ERROR_CODES = {
     "x_posts_unavailable",
     "x_publish_unknown",
     "x_token_missing",
+    "x_token_invalid",
     "x_token_revoked",
     "x_upstream_error",
 }
@@ -168,14 +186,26 @@ def normalize_actor(actor):
         "name": str(actor.get("name", "") or "")[:255],
         "email": str(actor.get("email", "") or "")[:255],
         "role": str(actor.get("role", "user") or "user")[:32],
+        "x_platform_access": actor.get("x_platform_access") is True,
     }
 
 
 def normalize_scope(scope):
     value = str(scope or "mine").strip().lower()
-    if value not in {"mine", "all"}:
+    if value not in {"mine", "all", "platform"}:
         raise XAccountsClientError("invalid_request", "X账号查询范围无效", 400)
     return value
+
+
+def query_x_api_credits(actor):
+    return _request("/internal/accounts/credits", method="POST", payload={"actor": normalize_actor(actor)})
+
+
+def delete_x_account(account_id, actor):
+    account_id = str(account_id or "")
+    if not account_id.isdigit():
+        raise XAccountsClientError("invalid_request", "X账号记录ID无效", 400)
+    return _request("/internal/accounts/%s/delete" % account_id, method="POST", payload={"actor": normalize_actor(actor)})
 
 
 def query_x_accounts(actor, scope="mine"):
@@ -183,6 +213,19 @@ def query_x_accounts(actor, scope="mine"):
         "/internal/accounts/query",
         method="POST",
         payload={"actor": normalize_actor(actor), "scope": normalize_scope(scope)},
+    )
+
+
+def youtube_share_request(action, actor, scope="mine", **payload):
+    if action not in {"query", "create", "run"}:
+        raise XAccountsClientError("invalid_request", "分享操作无效", 400)
+    body = dict(payload)
+    body["actor"] = normalize_actor(actor)
+    body["scope"] = normalize_scope(scope)
+    return _request(
+        "/internal/youtube-shares/" + action,
+        method="POST",
+        payload=body,
     )
 
 
@@ -230,6 +273,23 @@ def set_x_account_publish_approval(account_id, approved, actor):
     )
 
 
+def set_x_account_drama_language(account_id, drama_language, actor):
+    account_id = str(account_id or "")
+    if not account_id.isdigit():
+        raise XAccountsClientError(
+            "invalid_request", "X account record ID is invalid", 400
+        )
+    return _request(
+        "/internal/accounts/%s/drama-language" % account_id,
+        method="POST",
+        payload={
+            "actor": normalize_actor(actor),
+            "scope": "all",
+            "drama_language": drama_language,
+        },
+    )
+
+
 def logout_x_account(account_id, actor):
     account_id = str(account_id or "")
     if not account_id.isdigit():
@@ -250,7 +310,7 @@ def _post_query_payload(params):
     }
     for field in (
         "page", "page_size", "run_date", "source_date", "account_id", "status",
-        "material_id", "unknown_outcome",
+        "material_id", "unknown_outcome", "task_source",
     ):
         if field in params and params[field] not in (None, ""):
             result[field] = params[field]
@@ -323,6 +383,9 @@ def create_x_post_manual_run(
     idempotency_key,
     actor,
     navigation_item="",
+    publish_mode="immediate",
+    scheduled_at="",
+    random_template_enabled=False,
 ):
     if not isinstance(material_ids, (list, tuple)) or not isinstance(
         account_ids, (list, tuple)
@@ -338,6 +401,9 @@ def create_x_post_manual_run(
         "material_ids": list(material_ids),
         "account_ids": list(account_ids),
         "idempotency_key": str(idempotency_key or ""),
+        "publish_mode": str(publish_mode or "immediate"),
+        "scheduled_at": str(scheduled_at or ""),
+        "random_template_enabled": random_template_enabled,
     }
     if navigation_item:
         payload["navigation_item"] = str(navigation_item)

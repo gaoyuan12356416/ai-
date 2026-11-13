@@ -2,12 +2,13 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <script src="/x-legacy-publish-redirect.js?v=20261112retirement1"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <title>X Post 自动发布记录 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
-  <link rel="stylesheet" href="/x-auto-publish.css?v=20260812account1" />
+  <link rel="stylesheet" href="/x-auto-publish.css?v=20260814language1" />
 </head>
 <body>
   <div class="app">
@@ -45,7 +46,7 @@
       <div id="pageRoot" class="hidden">
         <section class="stats" aria-label="运行统计">
           <article class="stat"><span>运行总数</span><strong id="totalCount">—</strong></article>
-          <article class="stat"><span>执行中</span><strong id="activeCount">—</strong></article>
+          <article class="stat"><span>未结束</span><strong id="activeCount">—</strong></article>
           <article class="stat"><span>已完成</span><strong id="completedCount">—</strong></article>
           <article class="stat"><span>失败 / 待确认</span><strong id="attentionCount">—</strong></article>
         </section>
@@ -74,7 +75,7 @@
               <select id="filterStatus">
                 <option value="">全部状态</option>
                 <option value="queued">等待执行</option>
-                <option value="running">执行中</option>
+                <option value="running">未结束</option>
                 <option value="completed">已完成</option>
                 <option value="partial_failed">部分失败</option>
                 <option value="failed">失败</option>
@@ -158,8 +159,8 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js"></script>
-  <script src="/x-auto-publish-common.js?v=20260812account1"></script>
-  <script src="/x-auto-publish-runs.js?v=20260812account1"></script>
+  <script src="/quick-nav.js?v=97b22a40182f"></script>
+  <script src="/x-auto-publish-common.js?v=20260814language1"></script>
+  <script src="/x-auto-publish-runs.js?v=20261110-target-midnight"></script>
 </body>
 </html>

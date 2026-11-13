@@ -1,0 +1,77 @@
+"""Fail-closed TikTok organic Post pool and loopback service.
+
+The package exposes the four-table ledger, safe snapshot-account repository,
+strict Dramawave material resolver, encrypted GPU client, and CPU sidecar
+facade.  Production Direct Post remains gated off unless all three explicit
+compliance settings are enabled.
+"""
+
+from .core import (
+    AccountSourceError,
+    FIXED_CAPTION_TEMPLATE,
+    LiveGates,
+    MaterialResolution,
+    PublishCredentials,
+    QueueClaim,
+    SafeAccount,
+    SnapshotAccountSource,
+    TTPostAccountSettings,
+    TTPostError,
+    TTPostPolicy,
+    TTPostStore,
+    beijing_to_utc,
+    caption_uses_drama_name_macro,
+    ensure_storage,
+    normalize_drama_language,
+    render_fixed_caption,
+    render_caption_template,
+    resolve_material,
+)
+from .service import (
+    ACCOUNT_LIST_SQL,
+    ACCOUNT_METADATA_SQL,
+    ACCOUNT_STATUS_SQL,
+    ACCOUNT_TOKEN_SQL,
+    GPUClient,
+    GPUClientError,
+    MySQLSnapshotAccountRepository,
+    SnapshotMySQLConfig,
+    TTPostHTTPServer,
+    TTPostService,
+    TTPostServiceError,
+    DramawaveMaterialResolver,
+)
+
+__all__ = [
+    "AccountSourceError",
+    "ACCOUNT_LIST_SQL",
+    "ACCOUNT_METADATA_SQL",
+    "ACCOUNT_STATUS_SQL",
+    "ACCOUNT_TOKEN_SQL",
+    "DramawaveMaterialResolver",
+    "FIXED_CAPTION_TEMPLATE",
+    "GPUClient",
+    "GPUClientError",
+    "LiveGates",
+    "MaterialResolution",
+    "PublishCredentials",
+    "QueueClaim",
+    "SafeAccount",
+    "SnapshotAccountSource",
+    "SnapshotMySQLConfig",
+    "MySQLSnapshotAccountRepository",
+    "TTPostHTTPServer",
+    "TTPostAccountSettings",
+    "TTPostService",
+    "TTPostServiceError",
+    "TTPostError",
+    "TTPostPolicy",
+    "TTPostStore",
+    "beijing_to_utc",
+    "caption_uses_drama_name_macro",
+    "ensure_storage",
+    "normalize_drama_language",
+    "render_fixed_caption",
+    "render_caption_template",
+    "resolve_material",
+]

@@ -54,10 +54,31 @@
     return String(item && (item.subscription_type || item.membership_type) || "unknown").trim().toLowerCase();
   }
 
+  function canonicalLanguage(value) {
+    const parts = String(value || "en").trim().toLowerCase().replaceAll("_", "-").split("-");
+    if (parts[0] === "jp") parts[0] = "ja";
+    return parts.join("-");
+  }
+
+  function accountLanguage(item) {
+    return canonicalLanguage(item && item.drama_language || "en");
+  }
+
+  function accountMembershipLabel(item) {
+    return ({
+      basic: "X Basic",
+      premium: "X Premium",
+      premium_plus: "X Premium+",
+      none: "无会员 · 最长 20 分钟（1200 秒）",
+      unknown: "会员资格未知 · 最长 20 分钟（1200 秒）",
+    })[accountSubscription(item)] || "会员资格未知 · 最长 20 分钟（1200 秒）";
+  }
+
   function accountEligible(item) {
     if (item && item.publish_eligible !== undefined) return ui.boolValue(item.publish_eligible);
     const status = String(item && item.status || "").toLowerCase();
-    return status === "active" && ui.boolValue(item && item.publish_approved);
+    return !["disabled", "disconnected", "revoke_pending"].includes(status)
+      && ui.boolValue(item && item.publish_approved);
   }
 
   function accountApproved(item) {
@@ -65,16 +86,15 @@
   }
 
   function accountRefreshable(item) {
-    return !accountEligible(item)
-      && accountApproved(item)
-      && String(item && item.status || "").trim().toLowerCase() === "refresh_required";
+    return accountApproved(item)
+      && String(item && item.status || "").trim().toLowerCase() === "expired";
   }
 
   function accountEligibilityText(item) {
-    if (accountEligible(item)) return "可发布";
     const status = String(item && item.status || "").trim().toLowerCase();
-    if (!accountApproved(item)) return status === "refresh_required" ? "待刷新 / 未批准发布" : "未批准发布";
-    if (status === "refresh_required") return "Token 已过期，可刷新";
+    if (!accountApproved(item)) return status === "expired" ? "已到期 / 未批准发布" : "未批准发布";
+    if (status === "expired") return "可尝试发布 / Token 已到期";
+    if (accountEligible(item)) return "可发布";
     if (["revoked", "token_missing", "disconnected"].includes(status)) return "需重新授权";
     if (status === "scope_missing") return "授权范围不完整";
     if (status === "disabled") return "账号已停用";
@@ -105,9 +125,14 @@
     const list = ui.byId("accountList");
     ui.clear(list);
     const query = ui.byId("accountSearch").value.trim().toLowerCase();
+    const membershipFilter = ui.byId("accountMembershipFilter").value;
     const visible = state.accounts.filter(item => {
+      const subscription = accountSubscription(item);
+      const membership = ["basic", "premium", "premium_plus"].includes(subscription)
+        ? "member" : (subscription === "none" ? "non_member" : "unknown");
+      if (membershipFilter !== "all" && membership !== membershipFilter) return false;
       if (!query) return true;
-      return `${accountId(item)} ${accountName(item)} ${accountSubscription(item)} ${item && item.status || ""}`.toLowerCase().includes(query);
+      return `${accountId(item)} ${accountName(item)} ${accountSubscription(item)} ${accountLanguage(item)} ${item && item.status || ""}`.toLowerCase().includes(query);
     });
     if (!visible.length) {
       list.appendChild(ui.element("div", { className: "empty", text: "没有匹配的账号。" }));
@@ -123,7 +148,10 @@
       const checkbox = ui.element("input", {
         type: "checkbox",
         attributes: { "aria-label": `选择 ${accountName(item)}` },
-        dataset: { accountId: id, accountEligible: eligible ? "1" : "0" },
+        dataset: {
+          accountId: id,
+          accountEligible: eligible ? "1" : "0",
+        },
       });
       checkbox.checked = state.selectedAccountIds.has(id);
       checkbox.disabled = !eligible && !checkbox.checked;
@@ -131,12 +159,15 @@
       details.appendChild(ui.element("strong", { text: accountName(item) }));
       details.appendChild(ui.element("span", { className: "secondary mono", text: id }));
       const meta = ui.element("div");
-      const subscription = accountSubscription(item);
       meta.appendChild(ui.element("span", {
         className: `language-chip${eligible ? "" : " badge warning"}`,
         text: accountEligibilityText(item),
       }));
-      meta.appendChild(ui.element("span", { className: "secondary", text: `订阅 ${subscription}` }));
+      meta.appendChild(ui.element("span", { className: "secondary", text: accountMembershipLabel(item) }));
+      meta.appendChild(ui.element("span", {
+        className: "language-chip",
+        text: `剧语言 ${accountLanguage(item)}`,
+      }));
       label.append(checkbox, details, meta);
       list.appendChild(label);
     });
@@ -239,10 +270,10 @@
     const configValue = (key, fallback) => state.template[key] !== undefined ? state.template[key] : config[key] !== undefined ? config[key] : fallback;
     state.version = Math.max(0, ui.numberValue(state.template.version || state.template.current_version, 0));
     setValue("templateName", state.template.name);
-    setValue("templateLanguage", configValue("language", ""));
     setValue("platform", configValue("platform", 0), "0");
     setValue("metricWindowDays", configValue("metric_window_days", 7), "7");
     setValue("bodyTemplate", configValue("body_template", ""));
+    document.getElementById("randomTemplateEnabled").checked = configValue("random_template_enabled", false) === true;
     setValue("dramaLaunchWindowDays", configValue("drama_launch_window_days", 0), "0");
     setValue("cooldownDays", configValue("cooldown_days", 0), "0");
 
@@ -302,7 +333,11 @@
     const count = state.selectedAccountIds.size;
     ui.setText(ui.byId("selectedAccountCount"), `已选 ${count} 个`, "");
     ui.setText(ui.byId("summaryVersion"), state.version ? `v${state.version}` : "新模板", "");
-    ui.setText(ui.byId("summaryLanguage"), ui.byId("templateLanguage").value.trim() || "未设置", "");
+    const languages = Array.from(new Set(state.accounts
+      .filter(item => state.selectedAccountIds.has(accountId(item)))
+      .map(accountLanguage))).sort();
+    ui.setText(ui.byId("summaryLanguage"), languages.length
+      ? `账户设置：${languages.join("、")}` : "读取 X 账户设置", "");
     ui.setText(ui.byId("summaryAccounts"), `${count} 个`, "");
     ui.setText(ui.byId("summaryMetric"), `platform=${ui.byId("platform").value || "0"} / ${ui.byId("metricWindowDays").value || "7"} 天`, "");
     ui.setText(ui.byId("summaryDramaSort"), sortSummary("drama"), "");
@@ -344,9 +379,6 @@
   function buildPayload() {
     const name = ui.byId("templateName").value.trim();
     if (!name) throw new Error("请填写模板名称。");
-    const language = ui.byId("templateLanguage").value.trim().toLowerCase();
-    if (!language) throw new Error("请填写模板剧语言。");
-    if (language.length < 2 || language.length > 32 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(language)) throw new Error("模板剧语言必须为 2–32 位语言代码，例如 en 或 en-us。");
     if (!state.selectedAccountIds.size) throw new Error("请至少选择一个 X 账号。");
     if (state.selectedAccountIds.size > 100) throw new Error("一个模板最多选择 100 个 X 账号。");
     const bodyTemplate = ui.byId("bodyTemplate").value.replace(/\r\n?/g, "\n").trim();
@@ -374,11 +406,11 @@
     validateRange("materialRoasMin", "materialRoasMax", "素材 D0 ROAS");
     validateRange("materialSpendMin", "materialSpendMax", "素材消耗");
     validateRange("materialDurationMin", "materialDurationMax", "素材时长");
-    const durationMin = integerValue("materialDurationMin");
-    const durationMax = integerValue("materialDurationMax");
-    if (!Number.isInteger(durationMin) || durationMin < 1 || durationMin > 600) throw new Error("素材最小时长必须为 1–600 秒的整数。");
-    if (!Number.isInteger(durationMax) || durationMax < 1 || durationMax > 600) throw new Error("素材最长时长必须为 1–600 秒的整数。");
-    if (durationMin > durationMax) throw new Error("素材时长最小值不能大于最大值。");
+    const durationMin = integerValue("materialDurationMin", null);
+    const durationMax = integerValue("materialDurationMax", null);
+    if (durationMin != null && (!Number.isSafeInteger(durationMin) || durationMin < 0)) throw new Error("素材最小时长必须为非负整数，或留空不限。");
+    if (durationMax != null && (!Number.isSafeInteger(durationMax) || durationMax < 1)) throw new Error("素材最长时长必须为正整数，或留空不限。");
+    if (durationMin != null && durationMax != null && durationMin > durationMax) throw new Error("素材时长最小值不能大于最大值。");
 
     const mode = selectedScheduleMode();
     let schedule;
@@ -395,9 +427,9 @@
 
     const payload = {
       name,
-      language,
       account_ids: Array.from(state.selectedAccountIds),
       body_template: bodyTemplate,
+      random_template_enabled: document.getElementById("randomTemplateEnabled").checked,
       metric_window_days: metricWindowDays,
       drama_launch_window_days: launchWindow,
       cooldown_days: cooldown,
@@ -511,21 +543,25 @@
     ui.byId("saveTemplate").disabled = true;
     ui.setText(ui.byId("formStatus"), "正在保存模板…", "");
     ui.byId("formStatus").className = "status-line";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
       const path = templateId ? `${ui.API_BASE}/templates/${templateId}` : `${ui.API_BASE}/templates`;
-      const response = await ui.api(path, { method: "POST", body: JSON.stringify(payload) });
-      const saved = ui.readItem(response, ["template", "item"]);
-      const savedId = ui.positiveId(saved.id || saved.template_id || response.template_id || templateId);
+      await ui.api(path, { method: "POST", body: JSON.stringify(payload), signal: controller.signal });
       state.dirty = false;
       ui.setText(ui.byId("formStatus"), "模板已保存。", "");
       ui.byId("formStatus").className = "status-line success";
       ui.showToast("模板已保存；新模板默认保持关闭。", false);
-      location.href = savedId ? `/x-auto-publish-template.html?id=${encodeURIComponent(savedId)}` : "/x-auto-publish-templates.html";
+      location.href = "/x-auto-publish-templates.html";
     } catch (error) {
-      ui.setText(ui.byId("formStatus"), error.message || "模板保存失败。", "");
+      const message = controller.signal.aborted
+        ? "保存请求超时，结果尚未确认。请先到模板列表核对，确认未保存后再重试；当前填写内容已保留。"
+        : (error.message || "模板保存失败。");
+      ui.setText(ui.byId("formStatus"), message, "");
       ui.byId("formStatus").className = "status-line error";
-      ui.showToast(error.message || "模板保存失败", true);
+      ui.showToast(message, true);
     } finally {
+      clearTimeout(timeout);
       state.busy = false;
       ui.byId("saveTemplate").disabled = false;
     }
@@ -560,6 +596,7 @@
       if (event.key === "Escape") setResourceTypeMenuOpen(false);
     });
     ui.byId("accountSearch").addEventListener("input", renderAccounts);
+    ui.byId("accountMembershipFilter").addEventListener("change", renderAccounts);
     ui.byId("refreshAccountEligibility").addEventListener("click", () => void refreshAccountEligibility());
     ui.byId("accountList").addEventListener("change", event => {
       const checkbox = event.target.closest("input[data-account-id]");
@@ -598,11 +635,13 @@
     });
     ui.byId("scheduleModeFixed").addEventListener("change", renderScheduleMode);
     ui.byId("scheduleModeRandom").addEventListener("change", renderScheduleMode);
-    ui.byId("templateForm").addEventListener("input", () => {
+    ui.byId("templateForm").addEventListener("input", event => {
+      if (event.target.matches("#accountSearch, #accountMembershipFilter")) return;
       state.dirty = true;
       updateSummary();
     });
-    ui.byId("templateForm").addEventListener("change", () => {
+    ui.byId("templateForm").addEventListener("change", event => {
+      if (event.target.matches("#accountSearch, #accountMembershipFilter")) return;
       state.dirty = true;
       updateSummary();
     });

@@ -68,7 +68,7 @@
     const schedule = ui.objectValue(item && item.schedule || config.schedule);
     if (schedule.mode === "random") {
       const count = ui.numberValue(schedule.daily_count || schedule.random_daily_count, 0);
-      return count ? `每天随机 ${count} 次` : "随机计划未配置";
+      return count ? `每账号每天独立随机 ${count} 次 · 00:00 备料` : "随机计划未配置";
     }
     const times = Array.isArray(schedule.times) ? schedule.times : [];
     return times.length ? `每天 ${times.join("、")}` : "固定时间未配置";
@@ -155,6 +155,7 @@
     }
 
     state.templates.forEach(item => {
+      const config = ui.objectValue(item && item.config);
       const id = templateId(item);
       const enabled = isEnabled(item);
       const version = templateVersion(item);
@@ -165,20 +166,24 @@
       primary.appendChild(ui.element("strong", { text: item.name || `模板 ${id}` }));
       primary.appendChild(ui.element("span", { className: "secondary mono", text: `ID ${id || "—"} · v${version}` }));
       nameCell.appendChild(primary);
+      nameCell.appendChild(ui.element("div", { className: "secondary", text: `随机模板：${config.random_template_enabled === true ? "开启" : "关闭"}` }));
       row.appendChild(nameCell);
 
       const statusCell = ui.element("td");
       statusCell.appendChild(ui.statusBadge(statusLabel(item.status, enabled), enabled ? "success" : "warning"));
       row.appendChild(statusCell);
 
-      const config = ui.objectValue(item.config);
       const accountsCell = ui.element("td");
       accountsCell.appendChild(ui.element("strong", { text: `${accountCount(item)} 个账号` }));
-      const languageSummary = item.language || config.language;
-      if (languageSummary) accountsCell.appendChild(ui.element("div", { className: "secondary", text: languageSummary }));
+      accountsCell.appendChild(ui.element("div", { className: "secondary", text: "剧语言读取账户设置" }));
       row.appendChild(accountsCell);
 
-      ui.appendTextCell(row, scheduleSummary(item));
+      const scheduleCell = ui.element("td");
+      scheduleCell.appendChild(ui.element("div", { text: scheduleSummary(item) }));
+      (Array.isArray(item.target_daily_plans) ? item.target_daily_plans : []).forEach(plan => {
+        (plan.targets || []).forEach(target => scheduleCell.appendChild(ui.element("div", { className: "secondary", text: `${plan.local_date} · 账号 ${target.target_id}：${(target.times || []).join("、")}` })));
+      });
+      row.appendChild(scheduleCell);
 
       const sortCell = ui.element("td");
       sortCell.appendChild(ui.element("div", { text: `剧：${sortLabel(item.drama_rule || config.drama_rule)}` }));

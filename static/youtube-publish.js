@@ -1,0 +1,915 @@
+/* YouTube automatic publishing. Task outcomes and permissions are server-owned. */
+(() => {
+  'use strict';
+  const BASE = '/api/youtube-auto-publish';
+  const $ = selector => document.querySelector(selector);
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const chars = value => Array.from(String(value ?? '')).length;
+  const bytes = value => new TextEncoder().encode(String(value ?? '')).length;
+  const uid = () => crypto.randomUUID();
+  function safeUrl(value, local = false) {
+    const raw = String(value || '');
+    if (local && raw.startsWith('blob:')) return raw;
+    try { const u = new URL(raw, location.origin); return raw && ['http:','https:'].includes(u.protocol) ? u.href : ''; } catch (_) { return ''; }
+  }
+  const paths = {plus:'M12 5v14M5 12h14',search:'m21 21-4.4-4.4M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0',x:'m6 6 12 12M6 18 18 6',check:'m5 12 4 4L19 6',upload:'M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4',image:'M4 3h16v18H4zM4 16l5-5 4 4 3-3 4 4M8 7h.01',arrow:'M5 12h14m-6-6 6 6-6 6',play:'m9 5 10 7-10 7z',spark:'m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7z',retry:'M3 11a9 9 0 1 1 2.5 7M3 4v7h7',warning:'m12 3 10 18H2zM12 9v5m0 3v.1',video:'M3 5h13v14H3zM16 10l5-3v10l-5-3',folder:'M3 6h7l2 3h9v11H3z',chevron:'m9 5 7 7-7 7',info:'M12 11v6m0-10v.1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0'};
+  const icon = name => `<svg class="ui-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name] || paths.info}"/></svg>`;
+  const statuses = {queued:['等待执行','blue'],queued_generation:['等待生成封面','blue'],generating:['封面生成中','blue'],review:['待审核封面','amber'],enqueue_pending:['等待上传发布','blue'],enqueue_failed:['提交发布失败','red'],uploading:['上传发布中','blue'],processing:['视频处理中','blue'],published:['已发布','green'],generation_failed:['封面生成失败','red'],thumbnail_failed:['封面设置失败','red'],upload_failed:['视频上传失败','red'],processing_failed:['视频处理失败','red'],publish_failed:['视频发布失败','red'],comment_failed:['首评失败','amber'],failed:['执行失败','red']};
+  Object.assign(statuses,{scheduled:['已预约','blue'],schedule_missed:['已错过预约时间','amber'],schedule_pending:['预约变更待确认','amber'],cancelled:['已取消发布','gray']});
+  const phaseLabels = {cover:'准备封面',upload:'私享上传视频',thumbnail:'设置最终封面',processing:'等待视频处理',public:'公开视频',comment:'发送首条评论',complete:'发布完成',pending:'等待发布',scheduled:'等待定时公开',schedule:'设置预约公开',schedule_missed:'已错过预约时间',schedule_pending:'预约变更待确认',cancelled:'已取消发布'};
+  const activeStatuses = ['queued','queued_generation','generating','enqueue_pending','uploading','processing','scheduled','schedule_pending'];
+  const badge = status => `<span class="badge badge-${statuses[status]?.[1] || 'gray'}"><span class="status-dot"></span>${esc(statuses[status]?.[0] || status)}</span>`;
+  const image = (url, alt, cls = '', local = false) => safeUrl(url, local) ? `<img class="${cls}" src="${esc(safeUrl(url, local))}" alt="${esc(alt)}" loading="lazy" decoding="async"/>` : `<span class="${cls} task-placeholder" aria-label="暂无封面">${icon('image')}</span>`;
+  const time = value => { if (!value) return '—'; if (typeof value === 'number') return new Date(value < 1e12 ? value * 1000 : value).toLocaleString('zh-CN',{hour12:false}); const d = new Date(value); return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString('zh-CN',{hour12:false}); };
+  // A datetime-local control has no timezone. Interpret its digits as Beijing
+  // time explicitly, including on a browser running in another timezone.
+  function beijingInput(value) {
+    if (!value) return '';
+    const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
+    return Number.isNaN(date.getTime()) ? '' : new Date(date.getTime() + 8 * 3600000).toISOString().slice(0,16);
+  }
+  function publishAtIso(value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text)) return null;
+    const date = new Date(text + ':00+08:00');
+    if (Number.isNaN(date.getTime()) || beijingInput(date.toISOString()) !== text) return null;
+    return date.toISOString();
+  }
+  function scheduleError(value, required = false) {
+    const iso = publishAtIso(value);
+    if (iso === null) return '请选择有效的日期和时间。';
+    if (!iso) return required ? '请选择新的预约公开时间。' : '';
+    return new Date(iso).getTime() <= Date.now() ? '预约时间必须晚于当前北京时间，请选择未来时间。' : '';
+  }
+  const beijingTime = value => { const digits = beijingInput(value); return digits ? digits.replace('T',' ') + '（北京时间）' : '—'; };
+  const pendingSchedule = t => ['pending','requested','applying','unknown'].includes(t.schedule_control?.state) || t.status === 'schedule_pending';
+  const missedSchedule = t => t.status === 'schedule_missed' || t.schedule_state === 'schedule_missed' || t.schedule_state === 'missed';
+  const canSchedule = t => t.can_schedule === true && !pendingSchedule(t) && !['published','comment_failed','cancelled'].includes(t.status);
+  const scheduleSummary = t => t.publish_at ? '预约公开：' + beijingTime(t.publish_at) : t.cover_source === 'ai' ? '审核后立即发布' : '准备完成后立即发布';
+  function scheduleCard(t, controls = false) {
+    const control = t.schedule_control || {}, pending = pendingSchedule(t), missed = missedSchedule(t), cancelled = t.status === 'cancelled';
+    return `<div class="schedule-card${pending || missed ? ' schedule-attention' : ''}" data-schedule-task="${esc(t.id)}"><div class="schedule-card-heading"><strong>发布安排</strong><span class="schedule-timezone">北京时间 UTC+8</span></div><p class="schedule-value">${esc(cancelled ? '已取消本次发布' : scheduleSummary(t))}</p>${pending ? `<div class="schedule-notice" role="status"><strong>${esc({reschedule:'修改预约时间待确认',immediate:'立即发布请求待确认',cancel:'取消发布请求待确认'}[control.action] || '预约变更待确认')}</strong>${control.action === 'reschedule' && control.publish_at ? `<span>申请改为：${esc(beijingTime(control.publish_at))}</span>` : ''}<span>${esc(control.message || '正在核对平台状态，确认前仍以原发布安排为准。')}</span></div>` : missed ? '<div class="schedule-notice" role="status">已错过预约时间。完成封面审核后，需重新定时或选择立即发布。</div>' : control.state === 'failed' ? `<div class="schedule-notice" role="status">${esc(control.message || '发布安排变更失败，请核对后重新操作。')}</div>` : cancelled ? '' : `<span class="field-hint">${t.publish_at ? '提前准备视频，等待指定时间公开。首评在确认视频公开后发送。' : '封面确认、上传及视频处理完成后公开。'}</span>`}${controls && canSchedule(t) ? '<div class="schedule-actions"><button class="btn btn-secondary btn-sm" data-action="schedule-reschedule">修改预约时间</button>' + (t.publish_at || missed ? '<button class="btn btn-secondary btn-sm" data-action="schedule-immediate">立即发布</button>' : '') + '<button class="btn btn-danger btn-sm" data-action="schedule-cancel">取消本次发布</button></div>' : ''}</div>`;
+  }
+  const state = {auth:null,bootstrap:null,tasks:[],counts:{},total:0,bounded:false,limit:200,materials:[],source:null,search:'',status:'all',tab:'all',listError:'',listRefreshError:'',listLoading:false,listLoaded:false,listRevision:'',listKey:'',ready:false,channels:{items:[],loaded:false,loading:false,error:'',loadedAt:0}};
+  let draft = null, stack = [], modalSerial = 0, lastFocus = null, busy = false, listSerial = 0, listAbort = null, materialSerial = 0, pollTimer = null, searchTimer = null, materialTimer = null, channelPromise = null, channelSerial = 0, initSerial = 0, initBusy = false, pollInFlight = false;
+  const carets = new Map();
+  const taskCache = new Map(), taskRevisions = new Map(), taskReads = new Map();
+  const materialCache = new Map(), materialReads = new Map(), materialRefreshes = new Map();
+  let channelPollTimer = null, channelPollUntil = 0, materialPollTimer = null;
+  const task = id => taskCache.get(String(id)) || state.tasks.find(t => String(t.id) === String(id));
+  const top = () => stack.at(-1);
+  const versions = t => Array.isArray(t.versions) ? t.versions : [];
+  function coverPreview(t) {
+    if (Object.prototype.hasOwnProperty.call(t,'cover_preview')) {
+      const preview = t.cover_preview, url = safeUrl(preview?.url);
+      return url ? {url,version:Number(preview.version) || 0,is_current:preview.is_current === true && Number(preview.version) === Number(t.current_version)} : null;
+    }
+    // Older DTOs have no preview field. Only generated/uploaded cover versions
+    // are eligible; the video's thumbnail is never a generated-cover fallback.
+    const available = versions(t).filter(v => safeUrl(v.url) && Number(v.number) > 0 && !['failed','error'].includes(v.status)).sort((a,b) => Number(b.number) - Number(a.number));
+    const version = available.find(v => Number(v.number) === Number(t.current_version)) || available[0];
+    if (version) return {url:safeUrl(version.url),version:Number(version.number),is_current:Number(version.number) === Number(t.current_version)};
+    return safeUrl(t.cover_url) ? {url:safeUrl(t.cover_url),version:Number(t.current_version) || 0,is_current:true} : null;
+  }
+  const currentCover = t => coverPreview(t)?.url || '';
+  function coverPreviewLabel(t, preview = coverPreview(t)) {
+    if (!preview) return t.cover_source === 'local' ? '暂无有效封面' : '暂无有效生成封面';
+    if (preview.is_current) return '当前封面' + (preview.version ? ' V' + preview.version : '');
+    const reason = t.status === 'generation_failed' ? '本次生成失败' : ['queued','queued_generation','generating'].includes(t.status) ? '本次生成未完成' : '非当前版本';
+    return `历史封面 V${preview.version || '—'}（${reason}）`;
+  }
+  function detailCover(t) {
+    const preview = coverPreview(t), caption = coverPreviewLabel(t,preview);
+    return `<div class="task-cover-preview">${preview ? image(preview.url,caption,'detail-cover') : `<div class="detail-cover cover-empty" role="status">${icon('image')}<strong>${esc(caption)}</strong><span>生成成功后将在这里展示封面</span></div>`}<p class="cover-preview-caption${preview && !preview.is_current ? ' is-history' : ''}">${preview ? esc(caption) : ''}</p></div>`;
+  }
+  function failureNotice(t) {
+    const notice = t.failure_notification;
+    if (!notice) return '';
+    const current = typeof notice.is_current === 'boolean' ? notice.is_current : t.status === 'failed' || String(t.status).endsWith('_failed');
+    const status = {pending:'待发送',sending:'正在发送',sent:'已发送',failed:'发送失败',unknown:'发送结果待核对',superseded:'已失效'}[notice.status] || '状态待核对';
+    const stage = {cover:'封面生成',enqueue:'提交发布',upload:'视频上传',thumbnail:'设置封面',processing:'视频处理',public:'公开视频',comment:'首条评论'}[notice.stage] || '任务处理';
+    const color = !current ? '' : ['failed','unknown'].includes(notice.status) ? ' note-amber' : ' note-blue';
+    return `<div class="note-box failure-notification${color}" data-event-id="${esc(notice.event_id || '')}" role="status"><div class="failure-notification-heading"><strong>异常飞书提醒</strong><span class="badge badge-${current ? 'amber' : 'gray'}">${current ? '当前异常提醒' : '历史异常提醒'}</span></div><span class="failure-notification-status">${esc(status)}</span>${notice.message ? `<span>${esc(notice.message)}</span>` : ''}<span class="field-hint">异常阶段：${esc(stage)}</span>${!current ? '<span class="field-hint">这是历史异常的提醒记录，当前任务状态以上方状态为准。</span>' : ''}</div>`;
+  }
+  // Keep mounted layers and media alive. Polling only patches changed markup;
+  // it must not restart entrance animations or replace a playing preview.
+  const renderedMarkup = new WeakMap();
+  function domKey(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const tag = node.localName;
+    if (node.hasAttribute('data-modal-key')) return 'modal:' + node.getAttribute('data-modal-key');
+    if (node.hasAttribute('data-task-id')) return 'task:' + node.getAttribute('data-task-id');
+    if (node.id) return tag + '#' + node.id;
+    if (['img','video','audio'].includes(tag)) return tag + ':' + node.getAttribute('src');
+    if (tag === 'option') return 'option:' + node.getAttribute('value');
+    if (node.hasAttribute('data-action')) return tag + ':' + ['data-action','data-id','data-target','data-macro'].map(name => node.getAttribute(name) || '').join(':');
+    return '';
+  }
+  function compatibleNode(current, next) {
+    return current.nodeType === next.nodeType && (current.nodeType !== Node.ELEMENT_NODE || (current.localName === next.localName && current.namespaceURI === next.namespaceURI && domKey(current) === domKey(next)));
+  }
+  function syncNode(current, next) {
+    if (current.nodeType !== Node.ELEMENT_NODE) { if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue; return; }
+    // An expanded link-rules panel belongs to the reader, not to the poll DTO.
+    const keepAttribute = name => current.localName === 'details' && name === 'open';
+    for (const attribute of [...current.attributes]) if (!keepAttribute(attribute.name) && !next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+    for (const attribute of [...next.attributes]) if (!keepAttribute(attribute.name) && current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name,attribute.value);
+    if (current.localName === 'textarea') { if (current.value !== next.value) current.value = next.value; return; }
+    syncChildren(current,next);
+    if (current.localName === 'input' && current.type !== 'file') {
+      if (current.value !== next.value) current.value = next.value;
+      if (current.checked !== next.checked) current.checked = next.checked;
+    }
+    if (current.localName === 'select' && current.value !== next.value) current.value = next.value;
+  }
+  function syncChildren(parent, nextParent) {
+    const previous = [...parent.childNodes], used = new Set();
+    let cursor = parent.firstChild;
+    for (const next of [...nextParent.childNodes]) {
+      const key = domKey(next);
+      const current = cursor && !used.has(cursor) && compatibleNode(cursor,next) ? cursor : previous.find(node => !used.has(node) && compatibleNode(node,next) && (key || !domKey(node)));
+      const node = current || next.cloneNode(true);
+      if (node !== cursor) parent.insertBefore(node,cursor);
+      if (current) { used.add(current); syncNode(current,next); }
+      cursor = node.nextSibling;
+    }
+    for (const node of previous) if (!used.has(node)) node.remove();
+  }
+  function syncMarkup(root, html, variant = '') {
+    const previous = renderedMarkup.get(root);
+    if (previous?.html === html && previous.variant === variant) return false;
+    const template = document.createElement('template'); template.innerHTML = html;
+    syncChildren(root,template.content);
+    renderedMarkup.set(root,{html,variant});
+    return true;
+  }
+  const setText = (node,value) => { if (node.textContent !== String(value)) node.textContent = value; };
+  async function api(path, options = {}) {
+    const isPost = String(options.method || 'GET').toUpperCase() === 'POST';
+    const controller = new AbortController(), timeoutMs = isPost ? 45000 : 12000;
+    const externalSignal = options.signal;
+    let timedOut = false;
+    const cancel = () => controller.abort();
+    if (externalSignal?.aborted) cancel(); else externalSignal?.addEventListener('abort',cancel,{once:true});
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); },timeoutMs);
+    try {
+      const response = await fetch(path.startsWith('/api/') ? path : BASE + path, {credentials:'same-origin',cache:'no-store',...options,signal:controller.signal,headers:{'Accept':'application/json',...(options.body ? {'Content-Type':'application/json'} : {}),...options.headers}});
+      let data;
+      try { data = await response.json(); }
+      catch (parseError) {
+        if (controller.signal.aborted) throw parseError;
+        if (!response.ok) data = {};
+        else { const error = new Error(isPost ? '服务端响应不完整，提交结果待确认。请保留当前内容后重试核对。' : '服务端响应不完整，请重试。'); error.apiError = true; error.uncertain = isPost; throw error; }
+      }
+      if (!data || typeof data !== 'object') { const error = new Error('服务端响应格式无效，请重试。'); error.apiError = true; error.uncertain = isPost; throw error; }
+      if (!response.ok || data.ok === false) {
+        const raw = data.error;
+        const error = new Error(data.message || (typeof raw === 'string' ? raw : raw?.message) || (response.status === 401 ? '登录已失效，请先重新登录。当前填写内容仍保留。' : `请求失败（${response.status}），请重试。`));
+        error.apiError = true; error.status = response.status; error.code = typeof raw === 'object' ? raw?.code : data.code || raw; error.uncertain = response.status >= 500 && isPost; throw error;
+      }
+      return data;
+    } catch (cause) {
+      if (cause.apiError) throw cause;
+      const error = new Error(timedOut ? (isPost ? '提交请求超时，结果待确认。请保留当前内容，重新提交核对时将使用同一操作标识。' : '请求超时（12 秒），请重试。') : controller.signal.aborted ? '请求已取消。' : '网络连接失败，请检查网络后重试。');
+      error.code = timedOut ? 'request_timeout' : controller.signal.aborted ? 'request_cancelled' : 'network_error'; error.uncertain = isPost; throw error;
+    } finally { clearTimeout(timer); externalSignal?.removeEventListener('abort',cancel); }
+  }
+  const post = (path, body) => api(path,{method:'POST',body:JSON.stringify(body)});
+  function toast(message, kind = 'success') { const node = document.createElement('div'); node.className = `toast toast-${kind}`; node.setAttribute('role','status'); node.innerHTML = `${icon(kind === 'success' ? 'check' : 'warning')}<span>${esc(message)}</span>`; $('#toast-root').replaceChildren(node); setTimeout(() => node.remove(),4800); }
+  function rememberCaret(el) { if (el?.matches?.('#draft-title,#draft-description,#draft-comment,#default-description,#x-share-description')) carets.set(el.id,[el.selectionStart,el.selectionEnd]); }
+  // Share drafts survive closing the dialog. An uncertain submit always keeps
+  // the same operation and body; only explicit user actions can submit it.
+  const shareXDrafts = new Map();
+  const shareXMacros = ['title','youtube_url','short_url','channel_name','channel_url','name','desc'];
+  const shareXItemStatuses = {queued:['等待转发','blue'],publishing:['正在转发','blue'],published:['转发成功','green'],failed:['转发失败','red'],unknown_outcome:['结果待核对','amber']};
+  function shareXBlockReason(t) {
+    if (!t) return '任务信息尚未加载';
+    // Compact list DTOs own this gate and do not carry the detailed steps.
+    if (t.can_share_x === true) return '';
+    if (t.can_share_x === false && t.share_x_block_reason) return String(t.share_x_block_reason);
+    if (!/^[A-Za-z0-9_-]{11}$/.test(String(t.video_id || ''))) return '尚未取得有效的 YouTube 视频链接';
+    if (typeof t.can_share_x !== 'boolean' && (['published','comment_failed'].includes(t.status) || (Array.isArray(t.steps) && t.steps.some(s => s.key === 'public' && ['complete','completed','success','done'].includes(s.status))))) return '';
+    if (t.status === 'cancelled') return '本次发布已取消';
+    if (t.status === 'scheduled') return '视频已预约，等待公开后可转发';
+    if (pendingSchedule(t)) return '预约变更待确认，尚未确认视频公开';
+    if (missedSchedule(t)) return '已错过预约时间，视频尚未公开';
+    if (t.status === 'thumbnail_failed') return '封面设置失败，视频仍为私享';
+    if (t.unknown_outcome) return 'YouTube 发布结果待核对';
+    return '视频尚未确认公开，完成公开后可转发';
+  }
+  function shareXButton(t) {
+    const reason = shareXBlockReason(t);
+    return `<div class="x-share-row-action"><button type="button" class="btn btn-secondary btn-sm" data-action="share-x" data-id="${esc(t.id)}"${reason ? ` disabled title="${esc(reason)}" aria-describedby="x-share-reason-${esc(t.id)}"` : ''}>转发到X平台</button>${reason ? `<span class="x-share-row-reason" id="x-share-reason-${esc(t.id)}">${esc(reason)}</span>` : ''}</div>`;
+  }
+  const shareXPath = v => '/tasks/' + encodeURIComponent(v.id) + '/x-share';
+  const shareXLocked = v => Boolean(v.pendingPayload || v.run || v.submitting);
+  const shareXAccountEligible = a => a.selectable === true && Number.isSafeInteger(Number(a.id)) && Number(a.id) > 0;
+  const shareXSelected = v => (v.accounts || []).filter(a => shareXAccountEligible(a) && v.selected.has(Number(a.id))).map(a => Number(a.id));
+  function shareXPreviewValid(v) {
+    return v.loaded && !v.loading && v.playerCard?.eligible === true && !v.contextError && !v.previewLoading && !v.previewError && v.previewFor === v.description && v.preview?.valid === true && typeof v.preview.text === 'string' && Number.isFinite(v.preview.weighted_length) && v.preview.weighted_length >= 0 && v.preview.weighted_length <= 280 && Array.isArray(v.preview.errors) && !v.preview.errors.length;
+  }
+  function shareXRender(v) { if (stack.includes(v)) renderModals(); }
+  function shareXRunItems(run) {
+    return `<div class="x-share-results">${(Array.isArray(run.items) ? run.items : []).map(item => {
+      const [label,color] = shareXItemStatuses[item.status] || ['状态待核对','amber'], link = safeUrl(item.post_url);
+      return `<div class="x-share-result"><div class="x-share-result-head"><strong>${esc(item.username ? '@' + String(item.username).replace(/^@/,'') : '账号 ' + item.account_id)}</strong><span class="badge badge-${color}">${label}</span></div>${item.duplicate ? '<span class="field-hint">沿用已有转发记录</span>' : ''}${item.message ? `<p>${esc(item.message)}</p>` : ''}${item.status === 'unknown_outcome' ? '<p class="x-share-unknown">需核对该账号的实际发布结果，系统不会自动重发。</p>' : ''}${link ? `<a class="text-button" href="${esc(link)}" target="_blank" rel="noopener noreferrer">查看 X 帖子 ${icon('arrow')}</a>` : ''}</div>`;
+    }).join('')}</div>`;
+  }
+  function shareXRunView(run) {
+    const items = Array.isArray(run.items) ? run.items : [], counts = items.reduce((out,item) => { out[item.status] = (out[item.status] || 0) + 1; return out; },{});
+    const finished = run.status === 'completed', attention = (counts.failed || 0) + (counts.unknown_outcome || 0);
+    const summary = [`成功 ${counts.published || 0}`,`失败 ${counts.failed || 0}`,`待核对 ${counts.unknown_outcome || 0}`];
+    if (!finished) summary.push(`处理中 ${(counts.queued || 0) + (counts.publishing || 0)}`);
+    return `<section class="x-share-run" aria-label="本次转发结果"><div class="note-box ${attention ? 'note-amber' : finished ? 'note-green' : 'note-blue'}" role="status"><strong>${finished ? attention ? '本次转发已结束，部分账号需要处理' : '本次转发已完成' : '正在处理本次转发'}</strong><span>${summary.join(' · ')}</span></div>${shareXRunItems(run)}</section>`;
+  }
+  function shareXPreviewView(v) {
+    const preview = v.preview, fixed = Boolean(v.run), current = v.previewFor === v.description && !v.previewLoading, errors = Array.isArray(preview?.errors) ? preview.errors : [];
+    const card = v.playerCard, cardNotice = fixed ? '' : `<div class="note-box ${card?.eligible === true ? '' : 'note-amber'}" role="status"><strong>${card?.eligible === true ? 'YouTube 播放卡片已确认' : '暂不能以播放卡片转发'}</strong><span>${esc(card?.message || '尚未确认视频的播放卡片，请重新检查。')}</span>${card?.eligible === true ? '' : `<button type="button" class="text-button" data-action="reload-share-x" ${shareXLocked(v) || v.loading ? 'disabled' : ''}>重新检查播放器</button>`}</div>`;
+    return `${cardNotice}<div class="x-share-preview-heading"><strong>发布预览</strong><span class="${current && !fixed && !shareXPreviewValid(v) ? 'error-message' : 'field-hint'}">${fixed ? '已提交内容' : v.previewLoading ? '正在更新…' : current && Number.isFinite(preview?.weighted_length) ? esc(preview.weighted_length) + ' / 280' : '等待校验'}</span></div><div class="x-share-post-preview" aria-busy="${Boolean(v.previewLoading)}"><div class="x-share-preview-account"><span class="x-share-mark" aria-hidden="true">𝕏</span><div><strong>所选 X 账号</strong><span>将向每个所选账号发布相同内容</span></div></div><div id="x-share-preview-text" class="x-share-preview-text">${esc(preview?.text || '填写描述后，这里将展示宏替换后的实际发布内容。')}</div></div><div class="x-share-preview-status" aria-live="polite">${v.previewError ? `<p class="error-message">${esc(v.previewError)}</p><button type="button" class="text-button" data-action="preview-share-x" ${shareXLocked(v) ? 'disabled' : ''}>重新校验预览</button>` : current && errors.length ? errors.map(error => `<p class="error-message">${esc(typeof error === 'string' ? error : error.message || error.code || '文案校验失败')}</p>`).join('') : current && preview?.valid === false ? '<p class="error-message">当前内容未通过校验，请修改描述。</p>' : ''}${current && preview?.appended_url ? '<p class="field-hint">描述中未包含视频链接，已自动补充 YouTube 原链接。</p>' : ''}${v.previewLoading ? '<p class="field-hint">等待最新预览完成后可确认转发。</p>' : ''}</div><p class="x-share-card-note">X 将发布文案和 YouTube 链接。卡片样式及能否直接播放由 YouTube 和 X 决定。</p>`;
+  }
+  function shareXView(v) {
+    if (!v.loaded) return shell(v,'转发到X平台','将已公开的 YouTube 视频链接分享给所选 X 账号。',v.loading ? '<div class="empty-state" role="status"><span class="loading-spinner" aria-hidden="true"></span><h3>正在加载转发信息</h3></div>' : '<div class="empty-state"><h3>转发信息加载失败</h3><button type="button" class="btn btn-secondary" data-action="reload-share-x">重新加载</button></div>','<button type="button" class="btn btn-secondary" data-action="close-modal">关闭</button>',true);
+    const locked = shareXLocked(v), source = v.source || {}, url = safeUrl(source.youtube_url), selected = v.pendingPayload?.account_ids || v.run?.account_ids || shareXSelected(v), search = String(v.accountSearch || '').trim().toLowerCase();
+    const accounts = v.accounts.filter(a => !search || `${a.username || ''} ${a.name || ''}`.toLowerCase().includes(search));
+    const sourceCard = `<div class="x-share-source">${image(source.thumbnail_url,'YouTube 视频封面','x-share-source-image')}<div><strong>${esc(source.title || 'YouTube 视频')}</strong><span>${esc(source.channel_name || '')}</span>${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开 YouTube 视频 ${icon('arrow')}</a>` : ''}</div></div>`;
+    const accountPicker = `<section class="field"><div class="x-share-section-heading"><span class="field-label">选择 X 账号 <span class="required">*</span></span><span class="field-hint">已选 ${selected.length} / 20 个</span></div><div class="x-share-account-toolbar"><input class="input" id="x-share-account-search" type="search" placeholder="搜索账号名称或 @用户名" aria-label="搜索 X 账号" value="${esc(v.accountSearch || '')}"/><button type="button" class="text-button" data-action="select-all-share-x" ${locked || !v.accounts.some(shareXAccountEligible) ? 'disabled' : ''}>${v.accounts.filter(shareXAccountEligible).length > 20 ? '选前 20 个可用账号' : '全选可用'}</button><button type="button" class="text-button" data-action="clear-share-x" ${locked || !selected.length ? 'disabled' : ''}>清空</button></div><div class="x-share-account-list" role="group" aria-label="可转发的 X 账号">${accounts.length ? accounts.map(a => { const eligible = shareXAccountEligible(a), handle = a.username ? '@' + String(a.username).replace(/^@/,'') : ''; return `<label class="x-share-account ${eligible ? '' : 'is-blocked'}"><input type="checkbox" id="x-share-account-${esc(a.id)}" data-share-account="${esc(a.id)}" ${v.selected.has(Number(a.id)) ? 'checked' : ''} ${locked || !eligible || (selected.length >= 20 && !v.selected.has(Number(a.id))) ? 'disabled' : ''}/><span><strong>${esc(a.name || handle || '账号 ' + a.id)}</strong>${handle ? `<span>${esc(handle)}</span>` : ''}${!eligible ? `<small>${esc(a.block_reason || '该账号当前不可用于发布')}</small>` : ''}</span>${eligible ? '<span class="badge badge-green">可发布</span>' : '<span class="badge badge-gray">不可用</span>'}</label>`; }).join('') : `<p class="x-share-empty">${v.accounts.length ? '没有匹配的账号' : '暂无可用的 X 账号，请先完成账号授权和发布审批。'}</p>`}</div></section>`;
+    const composer = `<section class="field">${label('转发描述',true,'x-share-description')}<textarea id="x-share-description" class="textarea" rows="6" aria-describedby="x-share-description-hint" ${locked ? 'disabled' : ''}>${esc(v.description)}</textarea><div class="macro-toolbar"><span>插入宏参数</span>${v.macros.filter(m => shareXMacros.includes(m.key)).map(m => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="x-share-description" data-macro="${esc(m.key)}" title="${esc(m.label || m.key)}" ${locked ? 'disabled' : ''}>${esc(m.label || m.key)} {${esc(m.key)}}</button>`).join('')}</div><p class="field-hint" id="x-share-description-hint">支持 280 字符；汉字、表情与链接由服务端计数，以最新预览校验为准。视频原链接将始终保留。</p></section>`;
+    const history = v.history.filter(run => run.id !== v.run?.id);
+    const historyView = history.length ? `<details class="x-share-history"><summary>历史转发记录（${history.length}）</summary>${history.map(run => `<section class="x-share-history-run"><div class="x-share-section-heading"><strong>${esc(time(run.created_at || run.created_at_utc))}</strong><span class="field-hint">${esc({queued:'等待处理',running:'处理中',completed:'已结束'}[run.status] || run.status || '')}</span></div>${run.text ? `<p class="x-share-history-text">${esc(run.text)}</p>` : ''}${shareXRunItems(run)}</section>`).join('')}</details>` : '';
+    const uncertain = v.uncertain ? '<div class="note-box note-amber x-share-notice" role="status"><strong>提交结果待确认</strong><span>已保留本次账号与文案。可先刷新核对；再次确认将核对同一次提交。</span></div>' : '';
+    const errors = v.contextError || v.pollError;
+    const footer = `<span class="footer-hint">${v.run ? '关闭后可从列表重新打开查看结果' : locked ? '本次提交内容已固定' : '仅点击确认转发后才会发布'}</span><div class="inline-actions"><button type="button" class="btn btn-secondary" data-action="close-modal">关闭</button>${v.run || v.uncertain || v.contextError ? `<button type="button" class="btn btn-secondary" data-action="check-share-x" ${v.checking || v.loading ? 'disabled' : ''}>${v.checking || v.loading ? '核对中…' : '刷新核对结果'}</button>` : ''}${v.run ? v.run.status === 'completed' ? '<button type="button" class="btn btn-primary" data-action="new-share-x">转发到其他账号</button>' : '' : `<button type="button" class="btn btn-primary" data-action="submit-share-x" ${v.submitting || v.checking || v.loading || (!v.uncertain && (!selected.length || selected.length > 20 || !shareXPreviewValid(v))) ? 'disabled' : ''}>${v.submitting ? '正在提交…' : v.uncertain ? '按原内容核对提交' : `确认转发到 ${selected.length} 个账号`}</button>`}</div>`;
+    return shell(v,'转发到X平台','选择账号并确认发布预览。',`${sourceCard}${uncertain}${errors ? `<div class="note-box note-amber x-share-notice" role="status">${esc(errors)}</div>` : ''}<div class="x-share-layout"><div class="x-share-compose">${accountPicker}${composer}</div><aside class="x-share-preview">${shareXPreviewView(v)}</aside></div>${v.run ? shareXRunView(v.run) : ''}${historyView}`,footer,true);
+  }
+  function shareXAcceptRun(v, run) {
+    if (!run || !/^[a-f0-9]{32}$/i.test(String(run.id || '')) || !['queued','running','completed'].includes(run.status) || !Array.isArray(run.items) || (v.pendingPayload && run.operation_id && run.operation_id !== v.pendingPayload.operation_id)) {
+      const error = new Error('转发结果响应不完整，请刷新核对本次提交。'); error.uncertain = true; throw error;
+    }
+    v.run = run; v.uncertain = false; v.error = ''; v.pollError = ''; v.pollFailures = 0;
+    if (typeof run.description_template === 'string') v.description = run.description_template;
+    if (Array.isArray(run.account_ids)) v.selected = new Set(run.account_ids.map(Number));
+    if (typeof run.text === 'string') { v.preview = {text:run.text,valid:true,weighted_length:run.weighted_length,errors:[],appended_url:false}; v.previewFor = v.description; v.previewLoading = false; }
+    v.history = [run,...(v.history || []).filter(item => item.id !== run.id)];
+  }
+  function scheduleShareXPoll(v) {
+    clearTimeout(v.pollTimer);
+    if (!stack.includes(v) || (!v.uncertain && !['queued','running'].includes(v.run?.status))) return;
+    v.pollTimer = setTimeout(() => { if (!document.hidden) void checkShareX(v); else scheduleShareXPoll(v); },Math.min(15000,(v.uncertain ? 5000 : 2000) * (1 + (v.pollFailures || 0))));
+  }
+  async function loadShareX(v) {
+    if (v.loading) return;
+    v.loading = true; v.error = ''; v.contextError = ''; shareXRender(v);
+    try {
+      const data = await api(shareXPath(v));
+      if (!data.source || !Array.isArray(data.accounts) || !Array.isArray(data.macros) || !Array.isArray(data.history)) throw new Error('转发信息响应不完整，请重新加载。');
+      v.source = data.source; v.accounts = data.accounts; v.macros = data.macros; v.history = data.history; v.playerCard = data.player_card;
+      if (!v.loaded) v.description = String(data.default_template ?? '{title}\n\n{youtube_url}');
+      v.loaded = true; v.contextError = ''; v.pollError = ''; v.pollFailures = 0;
+      if (!shareXLocked(v)) v.selected = new Set(shareXSelected(v));
+      const previous = v.pendingPayload ? data.history.find(run => run.operation_id === v.pendingPayload.operation_id) : v.run ? data.history.find(run => run.id === v.run.id) : data.history.find(run => ['queued','running'].includes(run.status));
+      if (previous) shareXAcceptRun(v,previous);
+      if (!shareXLocked(v)) scheduleShareXPreview(v,0);
+    } catch (error) { if (v.loaded) v.contextError = error.message; else v.error = error.message; v.pollFailures = (v.pollFailures || 0) + 1; }
+    finally { v.loading = false; shareXRender(v); scheduleShareXPoll(v); }
+  }
+  function scheduleShareXPreview(v, delay = 350) {
+    if (shareXLocked(v)) return;
+    clearTimeout(v.previewTimer); v.previewAbort?.abort();
+    const serial = ++v.previewSerial, description = v.description;
+    v.previewLoading = true; v.previewError = ''; shareXRender(v);
+    v.previewTimer = setTimeout(() => { if (stack.includes(v)) void updateShareXPreview(v,serial,description); },delay);
+  }
+  async function updateShareXPreview(v, serial, description) {
+    const controller = new AbortController(); v.previewAbort = controller;
+    try {
+      const preview = await api(shareXPath(v) + '/preview',{method:'POST',body:JSON.stringify({description_template:description}),signal:controller.signal});
+      if (serial !== v.previewSerial) return;
+      if (!preview || typeof preview.text !== 'string' || typeof preview.valid !== 'boolean' || !Array.isArray(preview.errors)) throw new Error('预览响应不完整，请重新校验。');
+      v.preview = preview; v.previewFor = description;
+    } catch (error) { if (serial === v.previewSerial) v.previewError = error.message; }
+    finally { if (serial === v.previewSerial) { v.previewLoading = false; v.previewAbort = null; shareXRender(v); } }
+  }
+  function openShareX(id) {
+    const t = state.tasks.find(item => String(item.id) === String(id)) || task(id), reason = shareXBlockReason(t);
+    if (reason || !/^[a-f0-9]{32}$/i.test(String(id))) { toast(reason || '任务标识无效','error'); return; }
+    let v = shareXDrafts.get(String(id));
+    if (!v) { v = {type:'shareX',id:String(id),loaded:false,loading:false,accounts:[],macros:[],history:[],selected:new Set(),description:'',operationId:uid(),previewSerial:0}; shareXDrafts.set(String(id),v); }
+    if (stack.includes(v)) return;
+    if (!stack.length) lastFocus = document.activeElement;
+    v.key = ++modalSerial; stack.push(v); renderModals(true); void loadShareX(v);
+    if (v.run) void checkShareX(v); else scheduleShareXPoll(v);
+  }
+  async function checkShareX(v = top()) {
+    if (v?.type !== 'shareX' || v.checking) return;
+    v.checking = true; v.pollError = ''; shareXRender(v);
+    try {
+      if (!v.run) await loadShareX(v);
+      if (v.run) { const data = await api(shareXPath(v) + '/runs/' + encodeURIComponent(v.run.id)); shareXAcceptRun(v,data.run); }
+    } catch (error) { v.pollError = error.message; v.pollFailures = (v.pollFailures || 0) + 1; }
+    finally { v.checking = false; shareXRender(v); scheduleShareXPoll(v); }
+  }
+  async function submitShareX(v = top()) {
+    if (v?.type !== 'shareX' || v.submitting || v.run) return;
+    const wasUncertain = v.uncertain === true;
+    if (!v.pendingPayload) {
+      const accountIds = shareXSelected(v);
+      if (!accountIds.length || accountIds.length > 20 || !shareXPreviewValid(v)) return;
+      v.pendingPayload = Object.freeze({operation_id:v.operationId,account_ids:Object.freeze(accountIds),description_template:v.description});
+    } else if (!v.uncertain) return;
+    v.submitting = true; v.error = ''; v.pollError = ''; clearTimeout(v.pollTimer); shareXRender(v);
+    try {
+      const data = await post(shareXPath(v),v.pendingPayload);
+      shareXAcceptRun(v,data.run);
+    } catch (error) {
+      v.error = error.message;
+      // A later permission/validation rejection cannot disprove an earlier
+      // request whose response was lost. Keep that original operation frozen.
+      const operationConflict = ['operation_conflict','youtube_share_idempotency_conflict','idempotency_conflict'].includes(error.code);
+      if (wasUncertain || error.uncertain || operationConflict) v.uncertain = true;
+      else {
+        v.pendingPayload = null; v.uncertain = false; v.operationId = uid();
+        if (['youtube_player_unavailable','youtube_not_embeddable'].includes(error.code)) v.playerCard = {eligible:false,message:error.message};
+      }
+    } finally { v.submitting = false; shareXRender(v); scheduleShareXPoll(v); }
+  }
+  function newShareX(v = top()) {
+    if (v?.type !== 'shareX' || v.submitting || v.run?.status !== 'completed') return;
+    v.run = null; v.pendingPayload = null; v.uncertain = false; v.selected = new Set(); v.operationId = uid(); v.error = ''; v.pollError = '';
+    void loadShareX(v);
+  }
+  function stopShareX(v) { clearTimeout(v.pollTimer); clearTimeout(v.previewTimer); v.previewAbort?.abort(); ++v.previewSerial; v.previewAbort = null; v.previewLoading = false; }
+  function resolve(template, source) {
+    const missing = [], unknown = [], used = [];
+    const value = String(template ?? '').replace(/\{+[^{}\r\n]*\}+/g, token => {
+      const key = token.slice(1,-1);
+      if (!['url','desc','name'].includes(key)) { unknown.push(token); return token; }
+      used.push(key); const replacement = source?.[`macro_${key}`];
+      if (replacement === undefined || replacement === null || replacement === '') { missing.push(key); return token; }
+      return String(replacement).trim();
+    });
+    return {value:value.trim(),unknown:[...new Set(unknown)],missing:[...new Set(missing)],used:[...new Set(used)]};
+  }
+  const limit = field => field === 'title' ? 100 : field === 'description' ? 5000 : 1000;
+  const count = (field,value) => field === 'description' ? bytes(value) : chars(value);
+  function validateText(field, template, source, settings = false) {
+    const r = resolve(template,source);
+    if (r.unknown.length) return `不支持宏参数 ${r.unknown.join('、')}，仅支持 {url}、{desc}、{name}。`;
+    if (field !== 'comment' && !r.value.trim()) return `请填写${field === 'title' ? '视频标题' : '视频描述'}。`;
+    if (!settings && source) {
+      const required = r.missing.filter(key => key !== 'url');
+      if (required.length) return source.drama_message || `所选素材缺少 ${required.map(k => `{${k}}`).join('、')}，请更换素材。`;
+      if (r.missing.includes('url') && !(source.link_ready ?? Boolean(source.long_url || (source.source_job_id && source.content_id)))) return source.drama_message || '素材缺少生成跳转链接所需的剧集关联，请更换素材。';
+    }
+    if (!r.missing.length && count(field,r.value) > limit(field)) return `替换后的${field === 'title' ? '标题' : field === 'description' ? '描述' : '首评'}不能超过 ${limit(field)} ${field === 'description' ? 'UTF-8 字节' : '字符'}。`;
+    return '';
+  }
+  function macroPreview(field, template, source, settings = false) {
+    const r = resolve(template,source), warning = String(template || '').trim() ? validateText(field,template,source,settings) : '', pending = r.missing.length > 0;
+    let visible = r.value;
+    if (r.missing.includes('url') && source) visible = visible.replace(/\{url\}/g,'[提交时生成跳转链接]');
+    const hint = warning || (pending ? (settings ? '宏参数将在新建发布时，按所选素材替换并校验。' : source ? '跳转链接将在提交时生成，最终长度由服务端校验。' : '选择素材后预览宏参数替换结果。') : '');
+    return `<div class="macro-preview${warning ? ' has-warning' : ''}" data-macro-preview="${settings ? 'settings' : field}"><div class="macro-preview-header"><span>${settings ? '默认描述模板预览' : '发布预览' + (source ? ' · ' + esc(source.name) : '')}</span><span>${pending ? '待替换' : count(field,r.value) + '/' + limit(field) + (field === 'description' ? ' 字节' : ' 字符')}</span></div><div class="macro-preview-body">${esc(visible || (field === 'comment' ? '未填写，发布时将跳过首评。' : '尚未填写'))}</div>${hint ? `<div class="macro-warning" role="status">${esc(hint)}</div>` : ''}</div>`;
+  }
+  function macroControls(field, template, settings = false) {
+    const id = settings ? 'default-description' : `draft-${field}`;
+    return `<div class="macro-toolbar"><span>插入宏参数</span>${['url','desc','name'].map(key => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="${id}" data-macro="${key}">{${key}}</button>`).join('')}</div><span class="macro-source">{url} 剧集跳转链接 · {desc} 剧情简介 · {name} 剧名</span>${macroPreview(field,template,settings ? null : draft?.material,settings)}`;
+  }
+  function linkHelp(m) { return `<details class="macro-link-help"><summary>查看 {url} 链接规则与长链</summary><div class="macro-link-details"><p>{url} 沿用剧集合成中 YouTube 发布的长链及跳转链接生成规则。</p>${m ? `<span class="field-hint">发布文案中的链接</span><code class="macro-link-value">${esc(m.macro_url || '提交时生成跳转链接')}</code><span class="field-hint">目标长链</span><code class="macro-link-value">${esc(m.long_url || '提交时由服务端根据剧集关联生成')}</code><div class="macro-link-meta"><span>源剧集 ID</span><code>${esc(m.content_id || '未关联')}</code><span>关联剧名</span><code>${esc(m.macro_name || m.drama_message || '未关联')}</code><span>源合成任务 ID</span><code>${esc(m.source_job_id || '独立素材（无需合成任务）')}</code><span>链接归因任务 ID</span><code>${esc(m.source_job_id || m.link_job_id || '提交时生成本次发布任务 ID')}</code></div>` : '<p class="field-hint">选择素材后查看对应链接与来源关联。</p>'}</div></details>`; }
+  function refreshPreview(field, settings = false) { const input = $('#' + (settings ? 'default-description' : 'draft-' + field)); const el = $(`[data-macro-preview="${settings ? 'settings' : field}"]`); if (input && el) el.outerHTML = macroPreview(field,input.value,settings ? null : draft?.material,settings); }
+  function upsert(t, mutation = false) { if (!t?.id) throw new Error('服务端未返回有效任务，请刷新任务列表确认。'); const key = String(t.id); taskCache.set(key,t); if (mutation) { taskRevisions.set(key,(taskRevisions.get(key) || 0) + 1); state.listRevision = ''; } const i = state.tasks.findIndex(x => String(x.id) === key); if (i >= 0) state.tasks[i] = t; return t; }
+  function showSource() { const source = state.source || state.bootstrap?.source; const el = $('#source-message'); el.classList.toggle('hidden',source?.configured !== false); el.innerHTML = source?.configured === false ? '<strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后即可选择视频素材。</span>' : ''; }
+  function playerCardBadge(t) {
+    if (t.can_share_x !== true) return '';
+    const card = t.x_player_card || {}, expires = Date.parse(card.expires_at || '');
+    const fresh = Number.isFinite(expires) && expires > Date.now();
+    let label = '卡片待检测', tone = 'muted', glyph = 'clock';
+    if (card.state === 'checking') label = card.checked_at ? '卡片复查中…' : '卡片检测中…';
+    else if (card.state === 'pending') label = '卡片待检测';
+    else if (card.checked_at && !fresh) label = '卡片待复查';
+    else if (fresh && card.state === 'ready' && card.eligible === true) { label = '可发播放器卡片'; tone = 'ready'; glyph = 'play'; }
+    else if (fresh && card.state === 'restricted') { label = '卡片播放受限'; tone = 'restricted'; glyph = 'warning'; }
+    else if (fresh && card.state === 'not_player') { label = '暂无播放器卡片'; glyph = 'image'; }
+    else if (fresh && card.state === 'not_public') label = '视频当前未公开';
+    else if (fresh && card.state === 'not_embeddable') label = '不可嵌入播放';
+    else if (card.state === 'unavailable' || card.state === 'ready') label = '卡片暂未确认';
+    const checked = card.checked_at ? beijingTime(card.checked_at) : '';
+    const hint = [label,card.message || '后台自动检测，结果会自动更新。',checked ? '上次检测：' + checked + '（北京时间）' : '', '转发前会重新核验，以平台实际展示与播放为准。'].filter(Boolean).join('\n');
+    return `<div class="player-card-mark" title="${esc(hint)}"><span class="player-card-badge player-card-${tone}">${icon(glyph)}${label}</span>${checked ? `<span class="player-card-stamp">检测 ${esc(checked)}</span>` : ''}</div>`;
+  }
+  function renderList() {
+    const c = state.counts || {}, all = Number(c.all ?? state.total ?? 0), reviewed = Number(c.review ?? 0), published = Number(c.published ?? 0), failed = Number(c.failed ?? 0);
+    syncMarkup($('#stats'),[['全部发布任务',all,'video','blue','当前权限范围内的全部任务'],['待审核封面',reviewed,'image','amber','确认封面后自动进入发布'],['视频已公开',published,'check','green','包含视频已公开、首评待处理'],['需要处理',failed,'warning','red','按失败阶段单独处理']].map(([label,n,glyph,color,caption]) => `<div class="stat-card"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-icon stat-icon-${color}">${icon(glyph)}</span></div><div class="stat-number">${state.listLoaded ? n : '—'}</div><div class="stat-caption">${caption}</div></div>`).join(''));
+    syncMarkup($('#task-tabs'),[['all','全部任务',all],['review','待审核',reviewed],['running','进行中',Number(c.running || 0)],['published','已发布',published],['failed','异常任务',failed]].map(([id,label,n]) => `<button class="tab ${state.tab === id ? 'active' : ''}" type="button" data-action="tab" data-id="${id}" role="tab" aria-selected="${state.tab === id}">${label}<span>${state.listLoaded ? n : '—'}</span></button>`).join(''));
+    if ($('#task-table').getAttribute('aria-busy') !== String(state.listLoading)) $('#task-table').setAttribute('aria-busy',String(state.listLoading));
+    if (!state.listLoaded) {
+      setText($('#task-count'),state.listError ? '任务加载失败' : '正在加载任务…'); setText($('#footer-total'),'等待任务数据');
+      if (!state.listError) { syncMarkup($('#task-table'),'<tr><td colspan="6"><div class="empty-state task-loading" role="status"><span class="loading-spinner" aria-hidden="true"></span><h3>正在加载发布任务</h3><p>可以先新建发布，任务数据将在加载完成后展示。</p></div></td></tr>'); return; }
+    }
+    if (state.listLoaded) { setText($('#task-count'),state.listRefreshError ? '自动刷新失败，稍后重试（保留上次数据）' : `共 ${state.total} 条任务${state.bounded ? ' · 最近 ' + state.limit + ' 条内查询' : ''}`); setText($('#footer-total'),`已显示 ${state.tasks.length} 条 / 共 ${state.total} 条${state.bounded ? '（最近 ' + state.limit + ' 条）' : ''}`); }
+    if (state.listError) { syncMarkup($('#task-table'),`<tr><td colspan="6"><div class="empty-state table-error">${icon('warning')}<h3>任务加载失败</h3><p>${esc(state.listError)}</p><button class="btn btn-secondary" data-action="reload-tasks">重新加载</button></div></td></tr>`); return; }
+    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(t.thumbnail_url || currentCover(t),coverPreviewLabel(t))}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div><div class="task-subtitle cover-preview-label">${esc(coverPreviewLabel(t))}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${playerCardBadge(t)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div><div class="task-subtitle schedule-list-time">${esc(t.publish_at ? '预约：' + beijingTime(t.publish_at) : '未设置预约')}</div>${pendingSchedule(t) ? '<div class="task-subtitle schedule-list-notice">发布安排变更待确认</div>' : missedSchedule(t) && t.status !== 'schedule_missed' ? '<div class="task-subtitle schedule-list-notice">已错过预约时间</div>' : ''}</td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}${shareXButton(t)}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
+  }
+  async function loadTasks(quiet = false) {
+    const serial = ++listSerial;
+    listAbort?.abort(); listAbort = new AbortController();
+    const query = new URLSearchParams({search:state.search,status:state.status !== 'all' ? state.status : state.tab,compact:'1'}), key = query.toString();
+    const revision = state.listKey === key ? state.listRevision : '';
+    if (revision) query.set('since',revision);
+    state.listLoading = true; if (!quiet || !state.listLoaded) { state.listError = ''; renderList(); }
+    try {
+      const data = await api('/tasks?' + query,{signal:listAbort.signal});
+      if (serial !== listSerial) return;
+      if (data.unchanged === true) {
+        if (!revision || data.revision !== revision || state.listKey !== key) throw new Error('任务数据版本已变化，请重试。');
+      } else {
+        if (!Array.isArray(data.items)) throw new Error('任务数据格式无效，请重试。');
+        state.tasks = data.items; state.total = Number(data.total ?? state.tasks.length); state.counts = data.counts || {}; state.bounded = data.bounded === true; state.limit = Number(data.limit || 200);
+        state.listKey = key; state.listRevision = data.revision || '';
+      }
+      state.listError = ''; state.listRefreshError = ''; state.listLoaded = true;
+    }
+    catch (error) { if (serial !== listSerial) return; if (!quiet || !state.listLoaded) state.listError = error.message; else state.listRefreshError = error.message; }
+    finally { if (serial === listSerial) { state.listLoading = false; if (!quiet || !state.listLoaded || !state.listError) renderList(); } }
+  }
+  function channelsValid() { return state.channels.loaded && !state.channels.loading && !state.channels.error; }
+  async function loadChannels(force = false, polling = false) {
+    if (channelPromise) return force ? channelPromise.then(() => loadChannels(true)) : channelPromise;
+    // Reopen reads current tenant language settings; server still caches OAuth checks.
+    clearTimeout(channelPollTimer);
+    if (!polling) channelPollUntil = Date.now() + 90000;
+    const serial = ++channelSerial;
+    state.channels.loading = !polling; state.channels.error = ''; renderModals();
+    channelPromise = (async () => {
+      try {
+        const data = await api('/channels' + (force ? '?refresh=1' : ''));
+        if (serial !== channelSerial) return;
+        if (!Array.isArray(data.channels)) throw new Error('频道数据格式无效，请重试。');
+        if (data.error) {
+          // A background failure may accompany a 200 response and an empty DTO.
+          // Retain the last visible inventory, but never permit stale selection.
+          if (data.channels.length) state.channels.items = data.channels;
+          state.channels.checking = false;
+          throw new Error(typeof data.error === 'string' ? data.error : data.error.message || '频道列表更新失败，请重试。');
+        }
+        Object.assign(state.channels,{items:data.channels,loaded:true,loadedAt:Date.now(),checking:data.checking === true,checkedAt:data.checked_at,pollExpired:false});
+        state.bootstrap.channels = data.channels;
+        if (draft?.channelId && !data.channels.some(c => String(c.id) === String(draft.channelId) && c.eligible === true)) draft.channelId = '';
+        if (state.channels.checking && stack.some(v => v.type === 'publish')) {
+          if (Date.now() < channelPollUntil) channelPollTimer = setTimeout(() => { if (stack.some(v => v.type === 'publish')) void loadChannels(false,true); },2000);
+          else state.channels.pollExpired = true;
+        }
+        return data.channels;
+      }
+      catch (error) { if (serial === channelSerial) { state.channels.error = error.message; state.channels.loaded = false; } }
+      finally { if (serial === channelSerial) { state.channels.loading = false; channelPromise = null; renderModals(); } }
+    })();
+    return channelPromise;
+  }
+  async function loadTask(id, options = {}) { const key = String(id), revision = taskRevisions.get(key) || 0, serial = (taskReads.get(key) || 0) + 1; taskReads.set(key,serial); const data = await api('/tasks/' + encodeURIComponent(id),options); if ((taskRevisions.get(key) || 0) !== revision || taskReads.get(key) !== serial) { if (taskCache.has(key)) return taskCache.get(key); } return upsert(data.task); }
+  const materialKey = (search, uploaderId = '') => JSON.stringify([search,uploaderId]);
+  function readMaterials(search, force = false, uploaderId = '') {
+    const key = materialKey(search,uploaderId);
+    if (materialRefreshes.has(key)) return materialRefreshes.get(key);
+    const pending = materialReads.get(key);
+    if (pending) {
+      if (!force || pending.force) return pending.promise;
+      // All force callers share exactly one refresh after the ordinary read,
+      // including when that ordinary read fails. Never recursively queue it.
+      const refresh = pending.promise.catch(() => {}).then(() => startMaterialRead(search,true,uploaderId)).finally(() => materialRefreshes.delete(key));
+      materialRefreshes.set(key,refresh); return refresh;
+    }
+    const cached = materialCache.get(key), ttl = Math.min(60000,Math.max(0,Number(cached?.data.cache?.ttl_seconds ?? 60) - Number(cached?.data.cache?.age_seconds || 0)) * 1000);
+    if (!force && cached && !cached.data.cache?.refreshing && !cached.data.cache?.stale && Date.now() - cached.at < ttl) return Promise.resolve(cached.data);
+    return startMaterialRead(search,force,uploaderId);
+  }
+  function startMaterialRead(search, force, uploaderId) {
+    const key = materialKey(search,uploaderId);
+    const query = new URLSearchParams({search}); if (force) query.set('refresh','1');
+    if (uploaderId) query.set('uploader_id',uploaderId);
+    const request = api('/materials?' + query).then(data => {
+      if (!Array.isArray(data.items)) throw new Error('素材数据格式无效，请重试。');
+      materialCache.delete(key); materialCache.set(key,{data,at:Date.now()});
+      if (materialCache.size > 20) materialCache.delete(materialCache.keys().next().value);
+      return data;
+    }).finally(() => materialReads.delete(key));
+    materialReads.set(key,{promise:request,force}); return request;
+  }
+  async function loadMaterials(view, force = false, polling = false) {
+    const search = view.search || '', uploaderId = view.uploaderId || '', key = materialKey(search,uploaderId), serial = ++materialSerial;
+    clearTimeout(materialPollTimer);
+    if (!polling) view.pollUntil = Date.now() + 90000;
+    view.loading = true; view.error = ''; view.pollExpired = false;
+    const cached = materialCache.get(key);
+    if (view.loadedKey !== key) { view.items = cached?.data.items || []; view.cache = cached?.data.cache; view.cacheAt = cached?.at; }
+    renderModals();
+    try {
+      const data = await readMaterials(search,force,uploaderId);
+      if (serial !== materialSerial || !stack.includes(view) || materialKey(view.search || '',view.uploaderId || '') !== key) return;
+      state.materials = data.items; view.items = data.items; view.uploaders = data.uploaders || []; view.cache = data.cache; view.cacheAt = materialCache.get(key)?.at || Date.now(); view.loadedKey = key;
+      state.source = {configured:data.configured,message:data.message}; view.loading = false; showSource();
+      if (data.cache?.refreshing) {
+        if (Date.now() < view.pollUntil) materialPollTimer = setTimeout(() => { if (stack.includes(view) && materialKey(view.search || '',view.uploaderId || '') === key) void loadMaterials(view,false,true); },2000);
+        else view.pollExpired = true;
+      }
+      renderModals();
+    } catch (error) { if (serial !== materialSerial || !stack.includes(view) || materialKey(view.search || '',view.uploaderId || '') !== key) return; view.loading = false; view.error = error.message; renderModals(); }
+  }
+  function newDraft() { return {channelTemplate:{status:'idle',serial:0,channelId:'',fields:[],error:''},operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',publishAt:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
+  function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
+  function releaseCover(cover) { if (cover?.preview) URL.revokeObjectURL(cover.preview); }
+  function closeModal() { if (busy) return; const v = stack.pop(); v?.readController?.abort(); if (v?.type === 'shareX') stopShareX(v); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (v?.type === 'publish') { clearTimeout(channelPollTimer); } if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) { lastFocus?.focus(); if (v && ['details','review'].includes(v.type)) void loadTasks(true); } }
+  function closeAll() { stack.forEach(v => { v.readController?.abort(); releaseCover(v.manualCover); if (v.type === 'shareX') stopShareX(v); }); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
+  function shell(v,title,subtitle,body,footer = '',large = false) { return `<div class="modal-overlay${top() !== v ? ' modal-behind' : ''}" data-modal-key="${v.key}" ${top() !== v ? 'inert aria-hidden="true"' : ''}><section class="modal${large ? ' modal-lg' : ''}" role="dialog" aria-modal="${top() === v}" aria-labelledby="modal-title-${v.key}" tabindex="-1"><header class="modal-header"><div><h2 class="modal-title" id="modal-title-${v.key}">${title}</h2><p class="modal-subtitle">${subtitle}</p></div><button class="icon-btn close-modal" data-action="close-modal" aria-label="关闭弹窗">${icon('x')}</button></header><div class="modal-body">${v.error ? `<div class="note-box note-error inline-error" role="alert">${esc(v.error)}</div>` : ''}${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ''}</section></div>`; }
+  const label = (text,required = false,id = '') => `<label class="field-label"${id ? ` for="${id}"` : ''}>${text}${required ? '<span class="required">*</span>' : ''}</label>`;
+  const fieldError = field => draft?.errors[field] ? `<span class="error-message" role="alert">${esc(draft.errors[field])}</span>` : '';
+  function coverInput(cover, kind) { return `${cover ? `<div class="upload-preview-row">${image(cover.preview,'本地封面预览','cover-preview',true)}<div><strong>${esc(cover.file.name)}</strong><p class="field-hint">确认提交后上传封面图片</p><button class="btn btn-secondary btn-sm" data-action="upload-${kind}">更换图片</button></div></div>` : `<button class="upload-zone" data-action="upload-${kind}">${icon('upload')}<strong>点击选择封面图片</strong><span>支持 JPG、PNG，最大 2 MB · 推荐 16:9</span></button>`}<input id="${kind}-cover-file" type="file" accept="image/jpeg,image/png" data-file="${kind}" hidden/>`; }
+  const hasDramaCover = material => material?.drama_cover_status === 'available' && Boolean(safeUrl(material.drama_cover_url));
+  function dramaCoverMessage(material) {
+    return material?.drama_cover_message || ({missing:'所选素材所属剧暂无原剧封面。',ambiguous:'所选素材的剧集关联不唯一，无法确定原剧封面。',invalid:'所选素材的原剧封面链接无效。'}[material?.drama_cover_status]) || '所选素材暂无可用的原剧封面。';
+  }
+  function referenceCard(url, dramaName, frozen = false) {
+    const href = safeUrl(url);
+    return `<div class="drama-reference-card${frozen ? ' is-frozen' : ''}"><a class="drama-reference-image" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="查看原剧封面大图">${image(href,'参考原剧封面')}</a><div class="drama-reference-copy"><strong>参考原剧封面</strong><span class="drama-reference-name">${esc(dramaName || '剧名未提供')}</span><p>${frozen ? '已固定为本任务的参考原图，可与生成封面对照。' : '将以原剧封面为参考，结合封面要求生成16:9图片'}</p><a href="${esc(href)}" class="text-button" target="_blank" rel="noopener noreferrer">查看原图${icon('arrow')}</a></div></div>`;
+  }
+  function materialReference(material) {
+    if (!material) return '<div class="note-box note-blue drama-reference-empty">选择视频素材后，展示素材所属剧的原剧封面。</div>';
+    if (hasDramaCover(material)) return referenceCard(material.drama_cover_url,material.macro_name);
+    return `<div class="note-box note-amber drama-reference-empty" role="status"><strong>原剧封面暂不可用</strong><span>${esc(dramaCoverMessage(material))}</span><span>暂无法使用 AI 生成，请更换素材或选择「本地上传」。</span></div>`;
+  }
+  const taskReference = t => safeUrl(t.reference_cover?.url) ? referenceCard(t.reference_cover.url,t.reference_cover.drama_name,t.reference_cover.frozen === true) : '';
+  function thumbnailRecovery(channel) {
+    if (channel.auth_status !== 'blocked' || channel.thumbnail_permission !== 'denied') return '';
+    return state.bootstrap?.can_manage_settings === true ? `<button type="button" class="btn btn-secondary btn-sm" data-action="verify-thumbnail" data-id="${esc(channel.id)}">已核验封面权限</button>` : '<span>请联系管理员在 YouTube Studio 核验自定义缩略图权限。</span>';
+  }
+  function verifyThumbnailView(v) {
+    return shell(v,'确认频道封面权限','仅在已完成 YouTube Studio 核验后确认。',`<div class="note-box note-amber"><strong>${esc(v.channel.name)}</strong><span>请在对应频道的 YouTube Studio 中确认自定义缩略图功能已可用。</span><span>确认会记录管理员核验结果，并重新检查频道授权。后续如再次被 YouTube 拒绝，该频道仍会禁选。</span></div><label class="thumbnail-confirm"><input type="checkbox" id="studio-thumbnail-confirm" ${v.confirmed ? 'checked' : ''}/>我已在「${esc(v.channel.name)}」的 YouTube Studio 确认自定义缩略图可用。</label>`,`<div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-thumbnail" ${!v.confirmed ? 'disabled' : ''}>确认核验并重新鉴权</button></div>`);
+  }
+  async function verifyThumbnail(v) {
+    if (v?.type !== 'verifyThumbnail' || !v.confirmed || state.bootstrap?.can_manage_settings !== true || busy) return;
+    busy = true; v.error = ''; renderModals();
+    try {
+      await post('/channels/verify-thumbnail',{channel_id:v.channel.id,failure_at:v.channel.failure_at,confirmation:'studio_thumbnail_verified'});
+      busy = false; closeModal(); toast('已记录管理员核验，正在重新检查频道授权。');
+      await loadChannels(true);
+    } catch (error) { v.error = error.message; if (error.uncertain) v.error += ' 系统不会自动重新提交，请先刷新频道核对结果。'; }
+    finally { busy = false; renderModals(); }
+  }
+  async function applyChannelTemplate() {
+    const current = draft;
+    if (!current || current.pendingPayload) return;
+    const previous = current.channelTemplate;
+    previous.controller?.abort();
+    const selection = {status:current.channelId ? 'loading' : 'idle', serial:previous.serial + 1,
+      channelId:String(current.channelId), fields:[], error:'', controller:new AbortController()};
+    current.channelTemplate = selection;
+    renderModals();
+    if (!selection.channelId) return;
+    try {
+      const response = await api('/channels/' + encodeURIComponent(selection.channelId) + '/template', {signal:selection.controller.signal});
+      if (draft !== current || current.channelTemplate !== selection || String(current.channelId) !== selection.channelId) return;
+      const value = response.template;
+      const channel = state.channels.items.find(c => String(c.id) === selection.channelId);
+      if (!value || typeof value.version !== 'number' || typeof value.channel_id !== 'string' || value.channel_id !== channel?.channel_id ||
+          ['title','description','comment'].some(f => typeof value[f + '_template'] !== 'string')) throw new Error('频道模板响应不完整，请重试。');
+      if (value.cover_requirements_template !== undefined && typeof value.cover_requirements_template !== 'string') throw new Error('频道模板响应不完整，请重试。');
+      for (const field of ['title','description','comment']) {
+        const text = value[field + '_template'];
+        if (text.trim()) { current[field] = text; selection.fields.push(field); delete current.errors[field]; }
+      }
+      if (value.cover_requirements_template?.trim()) {
+        current.requirements = value.cover_requirements_template;
+        selection.fields.push('cover_requirements');
+        delete current.errors.requirements;
+      }
+      selection.status = 'ready';
+    } catch (error) {
+      if (draft !== current || current.channelTemplate !== selection) return;
+      selection.status = 'error'; selection.error = error.message;
+    } finally { if (draft === current && current.channelTemplate === selection) renderModals(); }
+  }
+  function channelTemplateHint() {
+    const t = draft.channelTemplate;
+    if (!draft.channelId) return '';
+    if (t.status === 'loading') return '<div class="note-box note-blue" role="status">正在读取频道模板…</div>';
+    if (t.status === 'error') return `<div class="note-box note-error" role="alert"><span>${esc(t.error)} 当前内容已保留。</span><button type="button" class="btn btn-secondary btn-sm" data-action="retry-channel-template">重试读取模板</button></div>`;
+    return `<div class="note-box note-blue" role="status">${t.fields.length ? '已套用频道模板：' + t.fields.map(f => ({title:'标题',description:'描述',comment:'首评',cover_requirements:'封面要求'}[f])).join('、') + '。可继续修改本次内容。' : '该频道未配置模板，保留当前内容。'}</div>`;
+  }
+  function publishView(v) {
+    const m = draft.material, channels = state.channels.items;
+    const channelPlaceholder = state.channels.loading ? '正在加载频道…' : state.channels.error ? '频道加载失败，请重试' : '请选择 YouTube 频道';
+    const selectedChannel = channels.find(c => String(c.id) === String(draft.channelId));
+    const channelDetails = channels.length ? `<details class="channel-auth-details"><summary>查看全部频道鉴权详情</summary>${channels.map(c => `<div class="channel-auth-row"><strong>${esc(c.name)} · ${esc(c.eligible === true ? '鉴权通过' : ({pending:'待鉴权',checking:'鉴权中',blocked:'不可发布',unknown:'结果未知'}[c.auth_status]) || '未通过鉴权')}</strong><span>${esc(c.reason || '尚未完成发布权限检查')}</span><span>鉴权时间：${esc(time(c.checked_at))}</span>${thumbnailRecovery(c)}</div>`).join('')}</details>` : '';
+    const checking = state.channels.loading || state.channels.checking;
+    const channelHint = `<div class="channel-check-status" role="status">${state.channels.error ? `<div id="channel-state" class="channel-error" role="alert"><span>${esc(state.channels.error)}</span></div>` : `<span class="field-hint">${state.channels.pollExpired ? '鉴权仍未完成，已暂停自动查询，请手动刷新。' : checking ? '正在检查频道授权，其他内容可继续填写。' : channels.length ? '仅预检通过的频道可选，最终发布结果以 YouTube 返回为准。' : '暂无已授权频道，请联系管理员完成频道授权。'}</span>`}<div class="channel-check-actions"><span class="field-hint">鉴权时间：${esc(time(selectedChannel?.checked_at || state.channels.checkedAt))}</span><button class="btn btn-secondary btn-sm" type="button" data-action="retry-channels" ${state.channels.loading ? 'disabled' : ''}>${state.channels.error ? '重试加载频道' : '刷新频道鉴权'}</button></div>${selectedChannel?.reason ? `<span class="field-hint">${esc(selectedChannel.reason)}</span>` : ''}</div>`;
+    const fields = ['title','description','comment'].map(field => {
+      const title = {title:'视频标题',description:'视频描述',comment:'首条评论 <span class="optional-label">选填</span>'}[field];
+      return `<div class="field span-2 copy-field-${field}">${label(title,field !== 'comment','draft-' + field)}${field === 'title' ? `<input id="draft-title" class="input ${draft.errors.title ? 'invalid' : ''}" data-field="title" value="${esc(draft.title)}" placeholder="例如：{name} | Watch the full story"/>` : `<textarea id="draft-${field}" class="textarea ${draft.errors[field] ? 'invalid' : ''}" data-field="${field}" rows="${field === 'description' ? 3 : 2}" placeholder="${field === 'comment' ? '可填写互动引导文案，留空则不发送首评' : '请输入视频描述'}">${esc(draft[field])}</textarea>`}${fieldError(field)}${field === 'description' ? '<span class="field-hint">已带入默认描述，可为本次发布单独修改。</span>' : field === 'comment' ? '<span class="field-hint">视频公开后自动发送；留空会跳过此步骤。</span>' : ''}${macroControls(field,draft[field])}</div>`;
+    });
+    const body = `${draft.pendingPayload ? '<div class="note-box note-amber inline-error">上次提交结果待确认。请重新点击提交，系统会使用同一操作标识核对，不会重复创建任务。</div>' : ''}<div class="form-grid"><div class="field">${label('发布素材',true)}<button class="selection-summary ${draft.errors.material ? 'invalid' : ''}" data-action="choose-material">${m ? `${image(m.thumbnail_url,'素材缩略图','mini-cover')}<span><strong>${esc(m.name)}</strong><small>${esc(m.language || '—')} · ${esc(m.duration || '—')}</small></span><span class="selection-link">更换</span>` : `<span class="selection-icon">${icon('folder')}</span><span>选择一条视频素材</span>${icon('chevron')}`}</button>${fieldError('material')}<span class="field-hint">${state.source?.configured === false ? '素材筛选规则待配置' : '仅展示符合筛选范围的素材'}</span></div><div class="field">${label('发布频道',true,'draft-channel')}<select id="draft-channel" class="select ${draft.errors.channelId ? 'invalid' : ''}" data-field="channelId" ${!channelsValid() ? 'disabled' : ''} aria-busy="${state.channels.loading}"><option value="">${channelPlaceholder}</option>${channels.map(c => `<option value="${esc(c.id)}" ${String(draft.channelId) === String(c.id) ? 'selected' : ''} ${c.eligible !== true ? 'disabled' : ''}>${esc(c.name)} · ${esc(c.language_label || c.language || '未设置语种')}（${esc(c.eligible === true ? '鉴权通过' : c.reason || ({pending:'待鉴权',checking:'鉴权中',blocked:'不可发布',unknown:'鉴权结果未知'}[c.auth_status]) || '尚未通过鉴权')}）</option>`).join('')}</select>${fieldError('channelId')}${channelHint}${channelTemplateHint()}${channelDetails}</div><div class="field span-2">${linkHelp(m)}</div>${fields[0]}<div class="field span-2">${label('封面来源',true)}<div class="source-options">${[['ai','AI 生成','参考原剧封面生成，审核后发布','spark'],['local','本地上传','使用已准备好的封面图片','upload']].map(([value,title,desc,glyph]) => `<button class="source-option ${draft.coverSource === value ? 'selected' : ''}" data-action="cover-source" data-id="${value}" aria-pressed="${draft.coverSource === value}"><span class="source-option-icon">${icon(glyph)}</span><span><strong>${title}</strong><small>${desc}</small></span><span class="source-radio"></span></button>`).join('')}</div></div>${draft.coverSource === 'ai' ? `<div class="field span-2 drama-reference-field">${materialReference(m)}${fieldError('reference')}</div><div class="field span-2 ai-prompt-field">${label('封面要求',true,'draft-requirements')}<textarea id="draft-requirements" class="textarea ${draft.errors.requirements ? 'invalid' : ''}" data-field="requirements" rows="3" maxlength="2000" placeholder="请描述人物、场景、风格、文字及构图要求，系统将生成 16:9 横版封面。">${esc(draft.requirements)}</textarea>${fieldError('requirements')}<span class="field-hint">生成封面后发送飞书审核提醒，最终确认后才会上传视频。</span></div>` : `<div class="field span-2">${label('封面图片',true)}${coverInput(draft.cover,'draft')}${fieldError('cover')}</div>`}${fields[1]}${fields[2]}<div class="field span-2 publish-schedule-field">${label('定时发布时间 <span class="optional-label">选填</span>',false,'draft-publish-at')}<div class="schedule-input-row"><input type="datetime-local" id="draft-publish-at" class="input ${draft.errors.publishAt ? 'invalid' : ''}" data-field="publishAt" value="${esc(draft.publishAt)}" step="60" aria-describedby="draft-publish-at-hint"/><button class="btn btn-secondary" type="button" data-action="clear-publish-at" ${!draft.publishAt ? 'disabled' : ''}>清空</button><span class="schedule-timezone">北京时间 UTC+8</span></div>${fieldError('publishAt')}<span class="field-hint" id="draft-publish-at-hint">留空则在封面确认、上传及视频处理完成后立即发布。填写后提前准备视频，到指定时间公开。</span></div></div>`;
+    return shell(v,`${icon('video')}新建发布`,'选择素材与频道，准备好这条视频的发布信息。',body,`<span class="footer-hint">${icon('info')}${esc(draft.publishAt ? '预约公开：' + beijingTime(publishAtIso(draft.publishAt)) : draft.coverSource === 'ai' ? '审核后立即发布' : '准备完成后立即发布')}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="submit-publish">${icon(draft.coverSource === 'ai' ? 'spark' : 'upload')}${draft.coverSource === 'ai' ? '提交并生成封面' : '确认并上传'}</button></div>`,true);
+  }
+  function pickerView(v) {
+    const configured = state.source?.configured !== false, materials = v.items || [];
+    const cacheStatus = v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
+    const age = v.cache?.age_seconds == null ? NaN : Number(v.cache.age_seconds);
+    const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>`;
+    const uploaders = [...(v.uploaders || [])];
+    if (v.uploaderId && !uploaders.some(u => String(u.id) === v.uploaderId)) uploaders.push({id:v.uploaderId,name:'用户 ' + v.uploaderId});
+    const uploaderFilter = `<label class="material-uploader-filter" for="material-uploader"><span>上传人</span><select class="select" id="material-uploader" aria-label="上传人筛选"><option value="">全部上传人</option>${uploaders.map(u => `<option value="${esc(u.id)}" ${String(u.id) === (v.uploaderId || '') ? 'selected' : ''}>${esc(u.name)}${String(u.id) === '0' ? '' : '（' + esc(u.id) + '）'}</option>`).join('')}</select></label>`;
+    const body = `<div class="picker-toolbar">${uploaderFilter}<div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${String(v.selected?.id) === String(m.id) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${String(v.selected?.id) === String(m.id)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${String(v.selected?.id) === String(m.id) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请调整上传人或关键词，或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
+    return shell(v,'选择发布素材','按素材 ID 倒序排列，每个任务选择一条视频素材。',body,`<span class="footer-hint">${v.selected ? '已选择：' + esc(v.selected.name) : '尚未选择素材'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-material" ${!v.selected || !configured || v.loading ? 'disabled' : ''}>确认选择</button></div>`,true);
+  }
+  function previewView(v) { const m = v.material; return shell(v,'素材预览',esc(m.name),`${safeUrl(m.url) ? `<video class="material-video" controls preload="metadata" ${safeUrl(m.thumbnail_url) ? `poster="${esc(safeUrl(m.thumbnail_url))}"` : ''} src="${esc(safeUrl(m.url))}"></video>` : '<div class="note-box note-amber">该素材暂无可用的视频预览链接。</div>'}<div class="summary-grid"><div class="summary-item"><span>素材名称</span><strong>${esc(m.name)}</strong></div><div class="summary-item"><span>素材 ID</span><strong>${esc(m.id)}</strong></div><div class="summary-item"><span>时长 / 大小</span><strong>${esc(m.duration || '—')} / ${esc(m.size || '—')}</strong></div><div class="summary-item"><span>语言</span><strong>${esc(m.language || '—')}</strong></div></div>`,'<button class="btn btn-secondary" data-action="close-modal">返回素材列表</button>',true); }
+  function reviewView(v) {
+    const t = task(v.id); if (!t) return shell(v,'审核封面','正在加载任务…','');
+    if (!t.can_review || t.status !== 'review') return detailsView(v);
+    const requestedVersion = Number(v.viewVersion || t.current_version), version = versions(t).find(x => Number(x.number) === requestedVersion), isCurrent = requestedVersion === Number(t.current_version);
+    const preview = coverPreview(t), reviewUrl = isCurrent ? (preview?.is_current ? preview.url : '') : safeUrl(version?.url);
+    let inline = '';
+    if (v.mode === 'reject') inline = `<div class="review-inline-panel"><div class="split-row"><strong>修改意见</strong><span class="badge badge-amber">必填</span></div><textarea id="reject-reason" class="textarea" maxlength="2000" rows="3" placeholder="请说明需要调整的人物、背景、文字或构图。">${esc(v.feedback || '')}</textarea><div class="inline-actions"><button class="btn btn-secondary btn-sm" data-action="cancel-review-mode">取消</button><button class="btn btn-primary btn-sm" data-action="confirm-reject">确认打回并重做</button></div></div>`;
+    if (v.mode === 'manual') inline = `<div class="review-inline-panel"><strong>手动替换封面</strong>${coverInput(v.manualCover,'manual')}<div class="inline-actions"><button class="btn btn-secondary btn-sm" data-action="cancel-review-mode">取消</button><button class="btn btn-primary btn-sm" data-action="confirm-manual" ${!v.manualCover ? 'disabled' : ''}>确认替换并上传</button></div></div>`;
+    return shell(v,'审核封面','确认视觉效果，或提出修改意见后重新生成。',`<div class="review-task-heading"><div><strong>${esc(t.title)}</strong><span class="task-subtitle">${esc(t.channel?.name)} · ${esc(t.id)}</span></div>${badge(t.status)}</div><div class="review-layout"><div><div class="review-image">${reviewUrl ? image(reviewUrl,'封面预览') : '<div class="cover-empty" role="status">暂无有效生成封面</div>'}<span class="image-corner-badge">${isCurrent ? '当前封面' : '历史版本'} V${esc(requestedVersion)}</span></div><div class="review-image-meta"><span>16:9 横版封面</span><span>V${esc(requestedVersion)} · ${esc(time(version?.created_at))}</span></div><div class="note-box note-blue">${icon('info')}<span>${missedSchedule(t) ? '当前预约已过期。通过封面审核后仍需重新定时或选择立即发布。' : t.publish_at ? '通过即确认最终封面。系统将提前私享上传、设置封面并等待预约时间公开。' : '通过即为最终发布确认。系统将先私享上传视频，设置封面并完成处理后再公开。'}</span></div>${inline}</div><aside class="review-side">${scheduleCard(t,true)}${taskReference(t)}${failureNotice(t)}<h3>封面要求</h3><p class="review-requirements">${esc(t.requirements || '本地上传封面')}</p><h3>版本记录 <span class="task-subtitle">${versions(t).length} 个版本</span></h3><div class="version-list">${[...versions(t)].reverse().map(x => `<button class="version-item ${Number(x.number) === Number(version?.number) ? 'selected' : ''}" data-action="view-version" data-id="${esc(x.number)}">${image(x.url,'封面版本 ' + x.number,'version-thumb')}<span><strong>V${esc(x.number)}${Number(x.number) === Number(t.current_version) ? ' · 当前版本' : ''}</strong><small>${esc(x.feedback || '首次生成')}</small><small>${esc(time(x.created_at))}</small></span></button>`).join('')}</div><div class="note-box"><strong>当前素材</strong><span>${esc(t.material?.name)}</span><span>${esc(t.material?.duration || '—')} · ${esc(t.channel?.language || '—')}</span></div></aside></div>`,`<span class="footer-hint">${isCurrent ? missedSchedule(t) ? '通过后仍需重新安排发布时间' : esc(scheduleSummary(t)) : '正在查看历史版本，切回当前版本后处理'}</span><div class="review-actions"><button class="btn btn-secondary" data-action="reject" ${!isCurrent ? 'disabled' : ''}>${icon('retry')}打回重做</button><button class="btn btn-secondary" data-action="manual" ${!isCurrent ? 'disabled' : ''}>${icon('upload')}手动上传</button><button class="btn btn-primary" data-action="approve" ${!isCurrent || !reviewUrl || v.mode ? 'disabled' : ''}>${icon('check')}通过</button></div>`,true);
+  }
+  function copyField(t, field, title) { const template = t[field + '_template']; return `<h3>${title}</h3>${template && /\{(?:url|desc|name)\}/.test(template) ? `<div class="detail-template"><span class="field-hint">提交时的文案模板</span><p>${esc(template)}</p><span class="field-hint">服务端替换后固定的发布内容</span></div>` : ''}<p>${esc(t[field] || (field === 'comment' ? '未填写，已跳过' : '—'))}</p>`; }
+  function timeline(t) { return `<div class="timeline">${(Array.isArray(t.steps) ? t.steps : []).map((s,i) => { const cls = {success:'complete',completed:'complete',complete:'complete',done:'complete',running:'active',active:'active',failed:'error',error:'error',skipped:'skipped'}[s.status] || ''; return `<div class="timeline-step ${cls}"><span class="timeline-dot">${cls === 'complete' ? icon('check') : cls === 'error' ? icon('x') : i + 1}</span><div><strong>${esc(s.label)}</strong><p>${esc(s.message || (s.status === 'pending' ? '等待执行' : ''))}</p></div><span class="step-result">${esc({success:'完成',completed:'完成',complete:'完成',done:'完成',running:'执行中',active:'执行中',failed:'失败',error:'失败',skipped:'已跳过',pending:'待执行'}[s.status] || s.status)}</span></div>`; }).join('') || '<p class="field-hint">暂无执行阶段记录</p>'}</div>`; }
+  function manualCoverPanel(v,t) {
+    if (v.mode !== 'manual' || !t.can_upload_cover) return '';
+    return `<div class="review-inline-panel"><strong>手动上传封面</strong>${coverInput(v.manualCover,'manual')}<p class="field-hint">${missedSchedule(t) || (t.publish_at && Date.parse(t.publish_at) <= Date.now()) ? '原预约已过期。确认封面后，请重新定时或选择立即发布。' : t.publish_at ? '确认后使用此封面，按预约安排继续发布。' : '确认后使用此封面并继续上传发布。'}</p><div class="inline-actions"><button class="btn btn-secondary btn-sm" data-action="cancel-review-mode">取消</button><button class="btn btn-primary btn-sm" data-action="confirm-manual" ${!v.manualCover ? 'disabled' : ''}>确认使用此封面</button></div></div>`;
+  }
+  function detailsView(v) {
+    const t = task(v.id); if (!t) return shell(v,'发布任务详情','正在加载任务…','');
+    const notification = t.notification;
+    return shell(v,'发布任务详情','查看封面、发布文案与每个处理阶段。',`<div class="review-task-heading"><div><strong>${esc(t.title || t.title_template)}</strong><span class="task-subtitle">${esc(t.id)} · 创建于 ${esc(time(t.created_at))}</span></div>${badge(t.status)}</div><div class="detail-layout"><div>${scheduleCard(t,true)}${detailCover(t)}${manualCoverPanel(v,t)}${taskReference(t)}<div class="summary-grid"><div class="summary-item"><span>发布频道</span><strong>${esc(t.channel?.name)}</strong></div><div class="summary-item"><span>封面来源</span><strong>${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</strong></div><div class="summary-item"><span>素材</span><strong>${esc(t.material?.name)}</strong></div><div class="summary-item"><span>当前阶段</span><strong>${esc(phaseLabels[t.phase] || statuses[t.status]?.[0] || t.status)}</strong></div></div><div class="detail-copy">${copyField(t,'title','视频标题')}${copyField(t,'description','视频描述')}${copyField(t,'comment','首条评论 <span class="optional-label">选填</span>')}</div>${linkHelp(t.material)}</div><div>${t.error?.message ? `<div class="note-box note-error"><strong>${esc(statuses[t.status]?.[0] || '任务异常')}</strong><span>${esc(t.error.message)}</span></div>` : ''}${['queued','queued_generation','generating','generation_failed','review'].includes(t.status) ? `<div class="generation-summary"><span class="generation-icon">${icon(t.status === 'generation_failed' ? 'warning' : 'spark')}</span><div><strong>${t.status === 'review' ? '当前封面 V' + esc(t.current_version) + ' 待审核' : esc(statuses[t.status]?.[0])}</strong><p>${esc(t.requirements || '')}</p>${t.status === 'generating' ? '<div class="progress-track"><span class="progress-fill indeterminate"></span></div>' : ''}</div></div>` : ''}${notification ? `<div class="note-box ${notification.status === 'failed' ? 'note-amber' : 'note-blue'}"><strong>飞书审核提醒</strong><span>${esc(notification.message || {sent:'已发送审核提醒',pending:'等待发送提醒',failed:'提醒发送失败，请在当前页面完成审核',none:'尚未发送审核提醒'}[notification.status] || notification.status)}</span></div>` : ''}${failureNotice(t)}<h3 class="section-heading">发布进度</h3>${timeline(t)}${safeUrl(t.video_url) ? `<a class="btn btn-secondary" href="${esc(safeUrl(t.video_url))}" target="_blank" rel="noopener noreferrer">打开 YouTube 视频${icon('arrow')}</a>` : ''}</div></div>`,`<span class="footer-hint">${activeStatuses.includes(t.status) ? '执行中，任务状态会自动更新' : '发布结果以各阶段记录为准'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">关闭</button>${t.can_upload_cover ? `<button class="btn btn-secondary" data-action="manual">${icon('upload')}上传封面</button>` : ''}${t.can_review ? '<button class="btn btn-primary" data-action="details-review">审核封面</button>' : t.can_retry ? `<button class="btn btn-primary" data-action="retry">${icon('retry')}${t.status === 'comment_failed' ? '仅重试首评' : t.status === 'generation_failed' ? '重新生成封面' : '重试失败阶段'}</button>` : ''}</div>`,true);
+  }
+  function scheduleView(v) {
+    const t = task(v.id); if (!t) return shell(v,'发布安排','正在加载任务…','');
+    const title = {reschedule:'修改预约时间',immediate:'立即发布',cancel:'取消本次发布'}[v.action];
+    const explanation = v.action === 'cancel' ? '确认后停止本次发布。如已在 YouTube 预约，将先取消平台预约并核验结果；已上传的视频会保留。' : v.action === 'immediate' ? '取消定时等待，封面确认、上传和视频处理完成后立即公开。AI 封面仍需审核。' : '按北京时间选择新的公开时间。系统会提前准备视频，确认变更后按新时间公开。';
+    return shell(v,title,esc(t.title || t.title_template),`${scheduleCard(t)}<p class="schedule-explanation">${explanation}</p>${v.action === 'reschedule' ? `<div class="field">${label('预约公开时间',true,'schedule-publish-at')}<input class="input ${v.dateError ? 'invalid' : ''}" id="schedule-publish-at" type="datetime-local" step="60" value="${esc(v.publishAt)}" ${v.uncertain ? 'disabled' : ''} aria-describedby="schedule-edit-hint"/><span class="field-hint" id="schedule-edit-hint">北京时间（UTC+8），必须晚于当前时间。</span>${v.dateError ? `<span class="error-message" role="alert">${esc(v.dateError)}</span>` : ''}</div>` : ''}${v.uncertain ? '<div class="note-box note-amber schedule-uncertain" role="status">上次请求结果待确认，请刷新核对最新发布安排。确认前不会自动重复提交。</div>' : ''}`,`<div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">返回</button>${v.uncertain ? '<button class="btn btn-secondary" data-action="refresh-schedule">刷新核对结果</button>' : `<button class="btn btn-${v.action === 'cancel' ? 'danger' : 'primary'}" data-action="save-schedule" ${!canSchedule(t) ? 'disabled' : ''}>${v.action === 'reschedule' ? '确认修改预约' : v.action === 'cancel' ? '确认取消发布' : '确认立即发布'}</button>`}</div>`);
+  }
+  function settingsView(v) { return shell(v,'默认描述设置','新建发布时自动带入，已提交任务不会受影响。',`<div class="field">${label('默认视频描述',true,'default-description')}<textarea id="default-description" class="textarea" rows="6">${esc(v.value)}</textarea><span class="field-hint">当前租户共用的默认文案。支持宏参数，发布时按所选素材替换并校验最终长度。</span>${macroControls('description',v.value,true)}</div>`,'<button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="save-settings">保存默认描述</button>'); }
+  function renderModals(focus = false) {
+    const root = $('#modal-root');
+    if (!stack.length) { syncMarkup(root,''); document.body.style.overflow = ''; return; }
+    const active = document.activeElement, activeId = active?.id;
+    const offsets = [...root.querySelectorAll('.modal-body')].map(node => ({node,top:node.scrollTop,left:node.scrollLeft}));
+    let selection; try { selection = [active.selectionStart,active.selectionEnd,active.selectionDirection]; } catch (_) {}
+    const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView,verifyThumbnail:verifyThumbnailView,schedule:scheduleView,shareX:shareXView};
+    const changed = syncMarkup(root,stack.map(v => v.loadingTask || v.taskLoadFailed ? taskLoadingView(v) : views[v.type](v)).join(''),String(busy));
+    document.body.style.overflow = 'hidden';
+    if (!changed && !focus) return;
+    if (busy) root.querySelectorAll('button,input,textarea,select').forEach(el => { el.disabled = true; });
+    if (draft?.channelTemplate?.status === 'loading' && top()?.type === 'publish') root.lastElementChild.querySelectorAll('#draft-title,#draft-description,#draft-comment,#draft-requirements,.copy-field-title button,.copy-field-description button,.copy-field-comment button').forEach(el => { el.disabled = true; });
+    if (draft?.channelId && draft.channelTemplate?.status !== 'ready' && !draft.pendingPayload && top()?.type === 'publish') root.lastElementChild.querySelector('[data-action="submit-publish"]')?.setAttribute('disabled','');
+    if (draft?.pendingPayload && top()?.type === 'publish') root.lastElementChild.querySelectorAll('input,textarea,select,button:not([data-action="submit-publish"]):not([data-action="close-modal"])').forEach(el => { el.disabled = true; });
+    const retained = active?.isConnected && root.lastElementChild.contains(active) ? active : activeId ? root.lastElementChild.querySelector('#' + CSS.escape(activeId)) : null;
+    if (retained && !retained.disabled) {
+      if (document.activeElement !== retained) retained.focus({preventScroll:true});
+      if (selection && typeof selection[0] === 'number' && (retained.selectionStart !== selection[0] || retained.selectionEnd !== selection[1] || retained.selectionDirection !== selection[2])) { try { retained.setSelectionRange(...selection); } catch (_) {} }
+    } else if (focus) (root.lastElementChild.querySelector('input:not([type=file]):not([disabled]),textarea:not([disabled]),select:not([disabled]),button:not(.close-modal):not([disabled])') || root.lastElementChild.querySelector('.modal'))?.focus({preventScroll:true});
+    offsets.forEach(({node,top,left}) => { if (node.isConnected) { if (node.scrollTop !== top) node.scrollTop = top; if (node.scrollLeft !== left) node.scrollLeft = left; } });
+  }
+  async function readFile(file,kind) {
+    if (!file || busy) return; const view = top();
+    try {
+      if (!['image/jpeg','image/png'].includes(file.type)) throw new Error('请选择 JPG 或 PNG 格式的图片。');
+      if (file.size > 2 * 1024 * 1024) throw new Error('图片不能超过 2 MB，请压缩后重新选择。');
+      if (!file.size) throw new Error('图片文件为空，请重新选择。');
+      const preview = URL.createObjectURL(file), img = new Image();
+      try { await new Promise((ok,no) => { img.onload = ok; img.onerror = () => no(new Error('无法解析图片，请选择有效的 JPG 或 PNG 文件。')); img.src = preview; }); } catch (error) { URL.revokeObjectURL(preview); throw error; }
+      if (!stack.includes(view)) { URL.revokeObjectURL(preview); return; }
+      const cover = {file,preview,asset:null};
+      if (kind === 'draft') { releaseCover(draft.cover); draft.cover = cover; delete draft.errors.cover; } else { releaseCover(view.manualCover); view.manualCover = cover; }
+      view.error = ''; renderModals(); if (Math.abs(img.width / img.height - 16 / 9) > .08) toast('图片已加载并保留原比例，建议使用 16:9 横版封面。','info');
+    } catch (error) { if (stack.includes(view)) { view.error = error.message; renderModals(); } }
+  }
+  async function uploadCover(cover) {
+    if (cover.asset) return cover.asset;
+    const data = await new Promise((ok,no) => { const reader = new FileReader(); reader.onload = () => ok(String(reader.result).split(',')[1]); reader.onerror = () => no(new Error('图片读取失败，请重新选择。')); reader.readAsDataURL(cover.file); });
+    const result = await post('/covers',{file_name:cover.file.name,data});
+    if (!result.asset?.id) throw new Error('封面上传未返回有效图片，请重试。'); cover.asset = result.asset; return cover.asset;
+  }
+  function validateDraft() {
+    const e = {};
+    if (!draft.material || state.source?.configured === false) e.material = state.source?.configured === false ? '素材筛选规则待配置，暂无法发布。' : '请选择一条视频素材。';
+    if (!channelsValid()) e.channelId = state.channels.loading ? '频道正在加载，请加载完成后选择频道。' : '请先成功加载并选择发布频道。';
+    else if (!draft.channelId || !state.channels.items.some(c => String(c.id) === String(draft.channelId) && c.eligible === true)) e.channelId = '请选择可发布的 YouTube 频道。';
+    if (draft.channelId && (draft.channelTemplate.status !== 'ready' || draft.channelTemplate.channelId !== String(draft.channelId))) e.channelId = '请先成功读取所选频道的模板。';
+    ['title','description','comment'].forEach(f => { const error = validateText(f,draft[f],draft.material); if (error) e[f] = error; });
+    const selectedChannel = state.channels.items.find(c => String(c.id) === String(draft.channelId));
+    if (draft.comment.trim() && selectedChannel?.comment_eligible === false) e.comment = '该频道尚未获得首评权限，请留空首评或完成频道授权。';
+    if (draft.coverSource === 'ai' && !draft.requirements.trim()) e.requirements = '请填写封面要求。';
+    if (draft.coverSource === 'ai' && draft.material && !hasDramaCover(draft.material)) e.reference = `${dramaCoverMessage(draft.material)} 请更换素材或选择「本地上传」。`;
+    if (draft.coverSource === 'local' && !draft.cover) e.cover = '请选择封面图片。';
+    const dateError = scheduleError(draft.publishAt); if (dateError) e.publishAt = dateError;
+    draft.errors = e; return Object.keys(e).length === 0;
+  }
+  async function submitPublish() {
+    if (busy || (!draft.pendingPayload && !validateDraft())) { renderModals(); $('.error-message')?.scrollIntoView({block:'center'}); return; }
+    const v = top(); busy = true; v.error = ''; renderModals();
+    try {
+      let payload = draft.pendingPayload;
+      if (!payload) {
+        const asset = draft.coverSource === 'local' ? await uploadCover(draft.cover) : null;
+        payload = {operation_id:draft.operationId,material_id:draft.material.id,channel_id:draft.channelId,title_template:draft.title,description_template:draft.description,comment_template:draft.comment,cover_source:draft.coverSource,requirements:draft.requirements.trim(),cover_asset_id:asset?.id || '',publish_at:publishAtIso(draft.publishAt)};
+      }
+      let data;
+      try { data = await post('/tasks',payload); if (!data.task?.id) { const error = new Error('服务端未返回有效任务，提交结果待确认。请保持原内容重试核对。'); error.uncertain = true; throw error; } } catch (error) { if (error.uncertain) draft.pendingPayload = payload; else draft.pendingPayload = null; throw error; }
+      const t = upsert(data.task,true); busy = false; closeAll(); openModal('details',{id:t.id}); toast('发布任务已创建。'); void loadTasks(true);
+    } catch (error) { v.error = error.message; }
+    finally { busy = false; renderModals(); }
+  }
+  function taskLoadingView(v) {
+    const title = v.requestedType === 'review' ? '审核封面' : '发布任务详情';
+    const cached = task(v.id);
+    return shell(v,title,esc(cached?.title || '正在读取最新任务…'),`<div class="empty-state task-detail-loading" role="status" aria-live="polite">${v.loadingTask ? '<span class="loading-spinner" aria-hidden="true"></span><h3>正在加载任务详情</h3><p>正在核对最新封面与发布状态，请稍候。</p>' : '<h3>任务详情暂未加载</h3><p>请重试读取最新状态。</p>'}</div>`,`<button class="btn btn-secondary" data-action="close-modal">关闭</button>${v.loadingTask ? '' : '<button class="btn btn-primary" data-action="reload-task">重新加载</button>'}`,true);
+  }
+  async function refreshOpenTask(v) {
+    if (!stack.includes(v) || v.readingTask) return;
+    v.readingTask = true; v.loadingTask = true; v.error = '';
+    v.readController = new AbortController(); renderModals();
+    try {
+      const t = await loadTask(v.id,{signal:v.readController.signal});
+      if (!stack.includes(v)) return;
+      v.type = v.requestedType === 'review' && t.can_review ? 'review' : 'details';
+      v.viewVersion = v.requestedVersion || t.current_version; v.version = t.current_version;
+      v.loadingTask = false; v.taskLoadFailed = false;
+      if (v.requestedVersion && Number(v.requestedVersion) !== Number(t.current_version)) v.error = '此审核链接对应历史版本。请查看当前版本后再处理。';
+    } catch (error) {
+      if (!stack.includes(v)) return;
+      v.loadingTask = false; v.taskLoadFailed = true; v.error = error.message;
+    } finally {
+      v.readingTask = false;
+      if (stack.includes(v)) renderModals();
+    }
+  }
+  async function openTask(id,type = 'details',version = null) {
+    // Render before starting the request; closing or choosing another task must
+    // never be blocked by a slow read, nor may a late response reopen a dialog.
+    if (state.listLoaded && state.listLoading) { ++listSerial; listAbort?.abort(); state.listLoading = false; }
+    openModal(type,{id,requestedType:type,requestedVersion:version,loadingTask:true});
+    await refreshOpenTask(top());
+  }
+  async function review(action) {
+    const v = top(), t = task(v.id); if (busy || !(action === 'manual' ? t?.can_upload_cover || t?.can_review : t?.can_review)) return;
+    if (Number(v.viewVersion || t.current_version) !== Number(t.current_version)) { v.error = '请切换到当前封面版本后再处理。'; renderModals(); return; }
+    if (action === 'approve' && !coverPreview(t)?.is_current) { v.error = '当前版本暂无有效生成封面，请等待生成完成或手动上传。'; renderModals(); return; }
+    if (action === 'reject' && !v.feedback?.trim()) { v.error = '请填写修改意见后再打回重做。'; renderModals(); $('#reject-reason')?.focus(); return; }
+    if (action === 'manual' && !v.manualCover) { v.error = '请先选择替代封面并确认预览。'; renderModals(); return; }
+    busy = true; v.error = ''; renderModals();
+    try {
+      const asset = action === 'manual' ? await uploadCover(v.manualCover) : null;
+      const data = await post('/tasks/' + encodeURIComponent(t.id) + '/review',{action,version:Number(v.version || t.current_version),feedback:v.feedback?.trim() || '',cover_asset_id:asset?.id || ''});
+      upsert(data.task,true); releaseCover(v.manualCover); v.manualCover = null; v.mode = ''; v.type = 'details'; busy = false; renderModals(); toast(action === 'reject' ? '已打回重做，生成新封面后将再次提醒审核。' : data.task.status === 'schedule_missed' ? '封面已确认，请重新安排发布时间。' : '封面已确认，任务进入上传发布流程。'); void loadTasks(true);
+    } catch (error) {
+      v.error = error.message;
+      if (error.status === 409) { try { const latest = await loadTask(t.id); v.version = latest.current_version; v.viewVersion = latest.current_version; v.mode = ''; v.error = '当前封面已更新或已被处理，已重新加载最新状态。请重新查看后操作。'; } catch (refreshError) { v.error += ' 最新状态加载失败：' + refreshError.message; } }
+    } finally { busy = false; renderModals(); }
+  }
+  async function saveSchedule() {
+    const v = top(), t = task(v?.id); if (busy || v?.type !== 'schedule' || v.uncertain || !t || !canSchedule(t)) return;
+    v.dateError = v.action === 'reschedule' ? scheduleError(v.publishAt,true) : '';
+    if (v.dateError) { renderModals(); $('#schedule-publish-at')?.focus(); return; }
+    busy = true; v.error = ''; renderModals();
+    try {
+      const payload = {action:v.action,schedule_version:v.scheduleVersion,operation_id:v.operationId};
+      if (v.action === 'reschedule') payload.publish_at = publishAtIso(v.publishAt);
+      const data = await post('/tasks/' + encodeURIComponent(t.id) + '/schedule',payload);
+      if (!data.task?.id) { const error = new Error('服务端未返回有效任务，发布安排变更结果待确认。'); error.uncertain = true; throw error; }
+      const updated = upsert(data.task,true);
+      const confirmed = !pendingSchedule(updated) && (v.action === 'cancel' ? updated.status === 'cancelled' : v.action === 'immediate' ? !updated.publish_at : publishAtIso(beijingInput(updated.publish_at)) === payload.publish_at);
+      busy = false; closeModal();
+      toast(confirmed ? ({reschedule:'预约时间已更新。',immediate:'已改为准备完成后立即发布。',cancel:'已确认取消本次发布。'}[v.action]) : '请求已受理，发布安排变更待确认。',confirmed ? 'success' : 'warning');
+      void loadTasks(true);
+    } catch (error) {
+      v.error = error.message;
+      if (error.uncertain) v.uncertain = true;
+      if (error.status === 409) {
+        try { const latest = await loadTask(t.id); v.scheduleVersion = Number(latest.schedule_version); v.operationId = uid(); v.error = '发布安排已变化，已加载最新状态并保留你的填写。请核对后再次操作。'; }
+        catch (readError) { v.error += ' 最新状态加载失败：' + readError.message; }
+      }
+    } finally { busy = false; renderModals(); }
+  }
+  async function refreshSchedule() {
+    const v = top(); if (busy || v?.type !== 'schedule') return;
+    busy = true; renderModals();
+    try { await loadTask(v.id); v.error = ''; toast('已刷新最新发布安排，请核对任务状态。'); }
+    catch (error) { v.error = error.message; }
+    finally { busy = false; renderModals(); }
+  }
+  async function retryTask() { const v = top(), t = task(v.id); if (busy || !t?.can_retry) return; busy = true; v.error = ''; renderModals(); try { const data = await post('/tasks/' + encodeURIComponent(t.id) + '/retry',{}); upsert(data.task,true); busy = false; renderModals(); toast('已提交失败阶段重试。'); void loadTasks(true); } catch (error) { v.error = error.message; } finally { busy = false; renderModals(); } }
+  async function saveSettings() { const v = top(); if (busy || !state.bootstrap.can_manage_settings) return; const error = validateText('description',v.value,null,true); if (error) { v.error = error; renderModals(); return; } busy = true; v.error = ''; renderModals(); try { const data = await post('/settings',{default_description:v.value}); state.bootstrap.settings = data.settings || {default_description:v.value}; busy = false; closeModal(); toast('默认描述已保存。'); } catch (error) { v.error = error.message; } finally { busy = false; renderModals(); } }
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        if (!state.ready || document.hidden) return;
+        const v = top();
+        // An open task owns the polling budget. Refresh the list on return.
+        if (v && ['details','review'].includes(v.type) && !busy && !v.loadingTask && !v.taskLoadFailed) {
+          try { const old = task(v.id); const updated = await loadTask(v.id); if (!stack.includes(v)) return; if (v.type === 'details') renderModals(); else if (!v.mode && Number(updated.current_version) !== Number(v.version)) { v.error = '任务封面已更新，请查看最新版本后审核。'; v.version = updated.current_version; v.viewVersion = updated.current_version; renderModals(); } else if (old?.status !== updated.status || old?.schedule_version !== updated.schedule_version || old?.schedule_state !== updated.schedule_state || JSON.stringify(old?.schedule_control) !== JSON.stringify(updated.schedule_control) || !updated.can_review) renderModals(); } catch (_) {}
+        } else if (!v && !state.listLoading) await loadTasks(true);
+      } finally { pollInFlight = false; if (state.ready) schedulePoll(); }
+    },6000);
+  }
+  document.addEventListener('click', event => {
+    const b = event.target.closest('[data-action]'); if (!b || b.disabled || busy) return;
+    const action = b.dataset.action, id = b.dataset.id, v = top();
+    if (action === 'retry-init') init();
+    else if (action === 'retry-channels') void loadChannels(true);
+    else if (action === 'retry-channel-template') void applyChannelTemplate();
+    else if (action === 'verify-thumbnail') { const channel = state.channels.items.find(c => String(c.id) === String(id)); if (state.bootstrap?.can_manage_settings === true && channel?.auth_status === 'blocked' && channel?.thumbnail_permission === 'denied') openModal('verifyThumbnail',{channel:{...channel},confirmed:false}); }
+    else if (action === 'confirm-thumbnail') void verifyThumbnail(v);
+    else if (action === 'close-modal') closeModal();
+    else if (action === 'tab') { state.tab = id; state.status = 'all'; $('#status-filter').value = 'all'; loadTasks(); }
+    else if (action === 'reload-tasks') loadTasks();
+    else if (action === 'share-x') openShareX(id);
+    else if (action === 'reload-share-x') void loadShareX(v);
+    else if (action === 'preview-share-x') scheduleShareXPreview(v,0);
+    else if (action === 'check-share-x') void checkShareX(v);
+    else if (action === 'submit-share-x') void submitShareX(v);
+    else if (action === 'new-share-x') newShareX(v);
+    else if (action === 'select-all-share-x' && !shareXLocked(v)) { v.selected = new Set(v.accounts.filter(shareXAccountEligible).slice(0,20).map(a => Number(a.id))); shareXRender(v); }
+    else if (action === 'clear-share-x' && !shareXLocked(v)) { v.selected = new Set(); shareXRender(v); }
+    else if (action === 'reload-task') void refreshOpenTask(v);
+    else if (action === 'reload-materials') loadMaterials(v,true);
+    else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(`{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
+    else if (action === 'choose-material') { openModal('picker',{selected:draft.material,search:'',uploaderId:'',loading:true}); loadMaterials(top()); }
+    else if (action === 'select-material') { v.selected = (v.items || state.materials).find(m => String(m.id) === String(id)); renderModals(); }
+    else if (action === 'confirm-material') { draft.material = v.selected; if (!draft.title.trim()) draft.title = '{name}'; delete draft.errors.material; delete draft.errors.reference; closeModal(); }
+    else if (action === 'preview-material') { const material = (v.items || state.materials).find(m => String(m.id) === String(id)); if (material) openModal('preview',{material}); }
+    else if (action === 'cover-source') { draft.coverSource = id; renderModals(); }
+    else if (action === 'upload-draft') $('#draft-cover-file')?.click();
+    else if (action === 'upload-manual') $('#manual-cover-file')?.click();
+    else if (action === 'clear-publish-at') { draft.publishAt = ''; delete draft.errors.publishAt; renderModals(); }
+    else if (action === 'submit-publish') submitPublish();
+    else if (['schedule-reschedule','schedule-immediate','schedule-cancel'].includes(action)) { const t = task(v.id); if (canSchedule(t)) openModal('schedule',{id:t.id,action:action.slice(9),publishAt:beijingInput(t.publish_at),scheduleVersion:Number(t.schedule_version),operationId:uid()}); }
+    else if (action === 'save-schedule') void saveSchedule();
+    else if (action === 'refresh-schedule') void refreshSchedule();
+    else if (action === 'review' || action === 'details') openTask(id,action);
+    else if (action === 'details-review') { const t = task(v.id); v.type = 'review'; v.version = t.current_version; v.viewVersion = t.current_version; renderModals(true); }
+    else if (action === 'view-version') { v.viewVersion = Number(id); if (v.viewVersion === Number(task(v.id)?.current_version)) v.version = v.viewVersion; v.mode = ''; v.error = ''; renderModals(); }
+    else if (action === 'reject' || action === 'manual') { v.mode = action; v.error = ''; renderModals(); if (action === 'reject') $('#reject-reason')?.focus(); }
+    else if (action === 'cancel-review-mode') { v.mode = ''; v.error = ''; renderModals(); }
+    else if (action === 'approve') review('approve');
+    else if (action === 'confirm-reject') review('reject');
+    else if (action === 'confirm-manual') review('manual');
+    else if (action === 'retry') retryTask();
+    else if (action === 'save-settings') saveSettings();
+  });
+  document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) refreshPreview(el.dataset.field); if (el.dataset.field === 'publishAt') renderModals(); } if (el.id === 'x-share-description' && top()?.type === 'shareX' && !shareXLocked(top())) { top().description = el.value; top().error = ''; scheduleShareXPreview(top()); } if (el.id === 'x-share-account-search' && top()?.type === 'shareX') { top().accountSearch = el.value; shareXRender(top()); } if (el.id === 'schedule-publish-at' && top()?.type === 'schedule') { top().publishAt = el.value; top().operationId = uid(); top().dateError = ''; } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
+  document.addEventListener('change', event => { const el = event.target; if (el.dataset.shareAccount && top()?.type === 'shareX' && !shareXLocked(top())) { const v = top(), accountId = Number(el.dataset.shareAccount), account = v.accounts.find(a => Number(a.id) === accountId); if (account && shareXAccountEligible(account)) { if (el.checked && v.selected.size < 20) v.selected.add(accountId); else v.selected.delete(accountId); shareXRender(v); } } if (el.id === 'material-uploader' && top()?.type === 'picker') { const v = top(); v.uploaderId = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); void loadMaterials(v); } if (el.id === 'studio-thumbnail-confirm' && top()?.type === 'verifyThumbnail') { top().confirmed = el.checked; renderModals(); } if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; if (el.dataset.field === 'channelId') void applyChannelTemplate(); } if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
+  ['keyup','mouseup','select','focusout'].forEach(name => document.addEventListener(name,event => rememberCaret(event.target)));
+  document.addEventListener('keydown', event => {
+    if (!stack.length) return; if (event.key === 'Escape') { event.preventDefault(); closeModal(); return; }
+    if (event.key !== 'Tab') return;
+    const elements = [...$('#modal-root').lastElementChild.querySelectorAll('button:not([disabled]),input:not([disabled]):not([type=file]),textarea:not([disabled]),select:not([disabled]),a[href],summary')].filter(el => el.getClientRects().length);
+    if (!elements.length) { event.preventDefault(); return; } const first = elements[0], last = elements.at(-1);
+    if (event.shiftKey && (document.activeElement === first || !elements.includes(document.activeElement))) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && (document.activeElement === last || !elements.includes(document.activeElement))) { event.preventDefault(); first.focus(); }
+  });
+  $('#new-publish').addEventListener('click', () => { if (!state.ready || busy || state.bootstrap.enabled === false) return; draft = newDraft(); openModal('publish'); void loadChannels(); void readMaterials('').catch(() => {}); });
+  $('#settings-button').addEventListener('click', () => { if (state.bootstrap?.can_manage_settings && !busy) openModal('settings',{value:state.bootstrap.settings?.default_description || ''}); });
+  $('#task-search').addEventListener('input', event => { state.search = event.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(() => loadTasks(),300); });
+  $('#status-filter').addEventListener('change', event => { state.status = event.target.value; state.tab = 'all'; loadTasks(); });
+  // Refresh stays available even while the very first auth request is pending.
+  if (!$('#refreshPage').dataset.topbarBound) {
+    $('#refreshPage').dataset.topbarBound = '1';
+    $('#refreshPage').addEventListener('click', () => location.reload());
+  }
+  async function init() {
+    if (initBusy) return;
+    const serial = ++initSerial; initBusy = true; state.ready = false;
+    clearTimeout(pollTimer); listAbort?.abort();
+    $('#page-message').className = 'note-box note-blue'; $('#page-message').textContent = '正在加载发布工作台…';
+    try {
+      // Both endpoints enforce permissions; render the workspace only after both succeed.
+      const bootstrapRead = api('/bootstrap?include_channels=0').then(data => ({data}),error => ({error}));
+      state.auth = await api('/api/ui/topbar');
+      if (serial !== initSerial) return;
+      UiTopbar.render({auth:state.auth,userCard:'#userCard',authButton:'#authButton',refreshButton:'#refreshPage'});
+      if (!$('#authButton').dataset.youtubeAuthBound) { $('#authButton').dataset.youtubeAuthBound = '1'; $('#authButton').addEventListener('click', () => UiTopbar.handleAuthAction({auth:state.auth,api})); }
+      // QuickNav paints its cached/default menu synchronously. Its refresh is independent.
+      try { void Promise.resolve(QuickNav.render({container:'#quickNav',auth:state.auth,activeKey:'youtubeAutoPublish'})).catch(() => {}); } catch (_) {}
+      if (!state.auth.authenticated) { $('#page-message').innerHTML = '<strong>请先登录</strong><span>使用飞书登录后查看 YouTube 发布任务。</span>'; return; }
+      void loadTasks();
+      const bootstrapResult = await bootstrapRead;
+      if (bootstrapResult.error) throw bootstrapResult.error;
+      const bootstrap = bootstrapResult.data;
+      if (serial !== initSerial) return;
+      if (!bootstrap.settings || !bootstrap.source) throw new Error('工作台配置响应不完整，请重试。');
+      state.bootstrap = bootstrap; state.source = bootstrap.source; state.ready = true;
+      if (bootstrap.channels_loaded === true && Array.isArray(bootstrap.channels)) state.channels = {items:bootstrap.channels,loaded:true,loading:false,error:'',loadedAt:Date.now()};
+      $('#new-publish').disabled = state.bootstrap.enabled === false;
+      if (state.bootstrap.enabled === false) $('#new-publish').title = 'YouTube 自动发布暂未启用';
+      $('#page-message').classList.add('hidden'); $('#page-content').classList.remove('hidden'); $('#settings-button').hidden = !state.bootstrap.can_manage_settings; showSource();
+      const params = new URLSearchParams(location.search); if (params.get('task_id')) void openTask(params.get('task_id'),'review',Number(params.get('version')) || null);
+      schedulePoll();
+    } catch (error) { if (serial !== initSerial) return; $('#page-message').className = 'note-box note-error'; $('#page-message').innerHTML = `<strong>${error.status === 403 ? '暂无 YouTube 自动发布权限' : '发布工作台加载失败'}</strong><span>${esc(error.message)}</span><button type="button" class="btn btn-secondary btn-sm boot-retry" data-action="retry-init">重新加载工作台</button>`; }
+    finally { if (serial === initSerial) initBusy = false; }
+  }
+  window.addEventListener('pagehide', () => { clearTimeout(pollTimer); clearTimeout(channelPollTimer); clearTimeout(materialPollTimer); clearTimeout(materialTimer); releaseCover(draft?.cover); stack.forEach(v => { releaseCover(v.manualCover); if (v.type === 'shareX') stopShareX(v); }); });
+  init();
+})();

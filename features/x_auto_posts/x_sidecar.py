@@ -240,6 +240,22 @@ class XPostAutoBridgeClient:
             )
         return [dict(item) for item in items]
 
+    def account_snapshot(self, account_id: Any) -> Dict[str, Any]:
+        """Return the local projected account without refreshing its X token."""
+        account = int(account_id)
+        if account <= 0:
+            raise XPostBridgeError("invalid_request", "account ID is invalid", 400)
+        matches = [
+            item
+            for item in self.accounts()
+            if int(item.get("id") or 0) == account
+        ]
+        if len(matches) != 1:
+            raise XPostBridgeError(
+                "x_auto_account_not_found", "X account was not found", 404
+            )
+        return matches[0]
+
     def verify_account(
         self,
         account_id: Any,
