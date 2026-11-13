@@ -263,7 +263,10 @@ def scoped_rows(config, generation, content_ids):
     require(record and record['status']=='verified','catalog_not_verified')
     result=[]; ids=sorted(set(map(str,content_ids)))
     for offset in range(0,len(ids),200):
-        result.extend((int(r['source_ordinal']),_row(r)) for r in catalog_pages(config,generation,ids[offset:offset+200]))
+        chunk=ids[offset:offset+200];exact=set(chunk)
+        # MySQL VARCHAR equality can ignore trailing spaces; the old Python
+        # catalog membership test does not. Keep its exact string semantics.
+        result.extend((int(r['source_ordinal']),_row(r)) for r in catalog_pages(config,generation,chunk) if r['content_id'] in exact)
     result.sort(key=lambda item:item[0])
     return [row for _,row in result]
 

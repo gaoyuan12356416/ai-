@@ -79,5 +79,12 @@ class CatalogTests(unittest.TestCase):
         source.write_text('changed')
         with self.assertRaisesRegex(ValueError,'legacy_library_changed'):consumer.load_library(self.root,'config')
 
+    def test_content_filter_keeps_python_exact_string_membership(self):
+        rows=[{'source_ordinal':i,'material_id':i,'content_id':content,'language':'en','name':'test',
+               'video_duration':'0','source_created_at':'now'} for i,content in [(1,'source '),(2,'source')]]
+        with patch.object(store,'metadata',return_value={'status':'verified'}),patch.object(store,'catalog_pages',return_value=iter(rows)):
+            actual=store.scoped_rows('config','a'*64,['source'])
+        self.assertEqual([row['id'] for row in actual],[2])
+
 
 if __name__=='__main__':unittest.main()
