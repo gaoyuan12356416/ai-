@@ -56,14 +56,17 @@ class WindowBroker:
                 raise StoreError("fb_auto_metric_query_timeout", "指标查询排队超时，请重试同一操作", 503)
             with self.lock:
                 self.active += 1
-            generations = self.reader.window_generations(product, platform, days, deadline=deadline)
-            window = window_from_rows(product, platform, days, generations)
-            version = (key, window.generation_ids)
-            with self.lock:
-                body = self.cache.get(version)
-                if body is not None:
-                    self.cache.move_to_end(version)
-                    self.hits += 1
+                cached = any(version[0] == key for version in self.cache)
+            body = None
+            if cached:
+                generations = self.reader.window_generations(product, platform, days, deadline=deadline)
+                window = window_from_rows(product, platform, days, generations)
+                version = (key, window.generation_ids)
+                with self.lock:
+                    body = self.cache.get(version)
+                    if body is not None:
+                        self.cache.move_to_end(version)
+                        self.hits += 1
             if body is None:
                 # Cold reads retain the original consistent-snapshot query. If a
                 # pointer changed since the probe, cache its actual generation IDs.

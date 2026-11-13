@@ -45,7 +45,7 @@ class BrokerTests(unittest.TestCase):
                 time.sleep(0.005)
             reader.release.set()
             results = [task.result(2) for task in tasks]
-        self.assertEqual(reader.probes, 1)
+        self.assertEqual(reader.probes, 0)
         self.assertEqual(reader.aggregates, 1)
         self.assertEqual(broker.state()["shared_requests"], 5)
         self.assertTrue(all(result == results[0] for result in results))
@@ -54,7 +54,7 @@ class BrokerTests(unittest.TestCase):
         reader = Reader(); broker = WindowBroker(reader)
         first = broker.get("Dramawave", 0, ["2026-11-12"])
         self.assertEqual(first, broker.get("Dramawave", 0, ["2026-11-12"]))
-        self.assertEqual((reader.probes, reader.aggregates), (2, 1))
+        self.assertEqual((reader.probes, reader.aggregates), (1, 1))
         reader.version = 2
         updated = json.loads(broker.get("Dramawave", 0, ["2026-11-12"]))
         self.assertEqual(updated["rows"][0]["id"], 2)
@@ -67,14 +67,16 @@ class BrokerTests(unittest.TestCase):
 
     def test_pointer_change_during_cold_read_caches_actual_snapshot(self):
         reader = Reader(); broker = WindowBroker(reader)
+        broker.get("Dramawave", 0, ["2026-11-12"])
+        reader.version = 2
         original = reader.window
         def updated(*args, **kwargs):
-            reader.version = 2
+            reader.version = 3
             return original(*args, **kwargs)
         reader.window = updated
         first = broker.get("Dramawave", 0, ["2026-11-12"])
         self.assertEqual(first, broker.get("Dramawave", 0, ["2026-11-12"]))
-        self.assertEqual(reader.aggregates, 1)
+        self.assertEqual(reader.aggregates, 2)
 
     def test_errors_do_not_poison_retry_or_leave_slots_occupied(self):
         reader = Reader(); reader.fail = True
