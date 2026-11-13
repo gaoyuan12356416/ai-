@@ -25,11 +25,15 @@ source checksum and normalized ordered rows; no committed prefix is overwritten.
 ```
 python3 cli.py import-json /REPORT/library.json --generated-at 'SOURCE INVENTORY TIME'
 python3 cli.py validate /REPORT GENERATION_SHA256
+python3 cli.py bind /REPORT GENERATION_SHA256
 python3 cli.py activate yuesiying-material-library GENERATION_SHA256
 ```
 
-After validation, save `{ "generation_id": "GENERATION_SHA256" }` as the work
-directory's `catalog-generation.json`. The existing build entry is retained;
+After validation, `bind` records the source timestamp/checksum and fixed version
+in the work directory's `catalog-generation.json` and inventory timestamp.
+A later legacy manual export cannot silently use an older bound generation:
+changed inventory time or legacy-file checksum stops the build with the refresh
+instruction. The existing build entry is retained;
 it dispatches to the verified shared builder with the same work directory.
 The compatibility fallback reads the legacy JSON only when no binding exists.
 Rollback restores the small entry script and removes that binding only after

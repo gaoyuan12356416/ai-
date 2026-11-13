@@ -5,7 +5,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from consumer import validate_legacy
+from consumer import bind, validate_legacy
 from store import activate, import_json, refresh_source
 
 
@@ -17,9 +17,11 @@ def main():
         command=commands.add_parser(name);command.add_argument(argument)
         command.add_argument('--generated-at',required=True);command.add_argument('--activate')
     command=commands.add_parser('validate');command.add_argument('workdir');command.add_argument('generation')
+    command=commands.add_parser('bind');command.add_argument('workdir');command.add_argument('generation')
     command=commands.add_parser('activate');command.add_argument('report_key');command.add_argument('generation')
     args=parser.parse_args()
     if args.command=='validate':result=validate_legacy(args.workdir,args.config,args.generation)
+    elif args.command=='bind':result=bind(args.workdir,args.config,args.generation)
     elif args.command=='activate':
         activate(args.config,args.report_key,args.generation);result={'activated':args.generation,'report_key':args.report_key}
     else:

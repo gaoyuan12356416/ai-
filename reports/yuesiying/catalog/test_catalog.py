@@ -62,5 +62,22 @@ class CatalogTests(unittest.TestCase):
                       'SELECT * FROM kunlunads_dev.ads_custom_source; SELECT 1'):
             with self.assertRaisesRegex(ValueError,'source_select_required'):list(store.source_rows('config',query))
 
+    def test_changed_manual_inventory_cannot_claim_old_generation_is_fresh(self):
+        (self.root/'catalog-generation.json').write_text(json.dumps({'generation_id':'a'*64,'generated_at':'old',
+            'source_kind':'legacy-json','source_sha256':'b'*64}))
+        (self.root/'inventory-time.txt').write_text('new')
+        with self.assertRaisesRegex(ValueError,'binding_stale'):consumer.load_library(self.root,'config')
+
+    def test_bind_keeps_source_time_and_checksum_and_requires_verified_version(self):
+        source=self.root/'library.json';source.write_text(json.dumps([row(1)]))
+        record={'generation_id':'a'*64,'status':'verified','generated_at':'source time',
+                'source_kind':'legacy-json','source_sha256':store.file_sha(source)}
+        with patch.object(consumer,'metadata',return_value=record):
+            consumer.bind(self.root,'config','a'*64)
+        self.assertEqual((self.root/'inventory-time.txt').read_text().strip(),'source time')
+        self.assertEqual(json.loads((self.root/'catalog-generation.json').read_text())['source_sha256'],record['source_sha256'])
+        source.write_text('changed')
+        with self.assertRaisesRegex(ValueError,'legacy_library_changed'):consumer.load_library(self.root,'config')
+
 
 if __name__=='__main__':unittest.main()

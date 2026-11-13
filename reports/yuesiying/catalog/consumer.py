@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import re
 
-from store import canonical, iter_json_array, normalize, require, scoped_rows
+from store import canonical, file_sha, iter_json_array, metadata, normalize, require, scoped_rows
 
 
 def norm(s):
@@ -52,8 +52,26 @@ def load_library(workdir, config):
     if not manifest.exists():
         return iter_json_array(root/'library.json')
     binding=json.loads(manifest.read_text())
+    require((root/'inventory-time.txt').read_text().strip()==binding['generated_at'],
+            'catalog_binding_stale_use_refresh_source_and_bind')
+    legacy=root/'library.json'
+    if binding['source_kind']=='legacy-json' and legacy.exists():
+        require(file_sha(legacy)==binding['source_sha256'],'legacy_library_changed_refresh_catalog_binding')
     _,_,contents=inputs(root)
     return scoped_rows(config,binding['generation_id'],contents)
+
+
+def bind(workdir,config,generation):
+    root=Path(workdir);record=metadata(config,generation)
+    require(record and record['status']=='verified','catalog_not_verified')
+    legacy=root/'library.json'
+    if record['source_kind']=='legacy-json' and legacy.exists():
+        require(file_sha(legacy)==record['source_sha256'],'legacy_library_does_not_match_generation')
+    binding={key:record[key] for key in ('generation_id','generated_at','source_kind','source_sha256')}
+    for name,text in [('inventory-time.txt',record['generated_at']+'\n'),('catalog-generation.json',canonical(binding)+'\n')]:
+        temporary=root/('.'+name+'.catalog-tmp');temporary.write_text(text,encoding='utf-8');temporary.chmod(0o600)
+        temporary.replace(root/name)
+    return binding
 
 
 def validate_legacy(workdir,config,generation):
