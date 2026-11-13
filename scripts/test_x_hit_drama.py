@@ -11,7 +11,7 @@ from features.x_tag_publish.hit_drama import TagAutoPostService, match_reason, n
 from features.x_tag_publish.policy import Decision
 from features.x_tag_revenue.tags import VERSION as TAG_VERSION
 from features.x_tag_revenue.hierarchy import VERSION as HIERARCHY_VERSION
-from features.x_tag_revenue.taxonomy import classify
+from features.x_tag_revenue.taxonomy import classify, VERSION as TAXONOMY_VERSION
 from scripts.test_x_auto_post_service import FakeBridge, FakeSelector, FakeExecutor, Clock
 from scripts.test_x_auto_post_validation import valid_payload
 from scripts import test_x_auto_post_selector as fixture
@@ -21,7 +21,7 @@ from features.x_tag_publish.selection import ProfileSelector
 def snapshot():
     def profile(audience, theme):
         return dict(status='complete',revenue_cents=100,hierarchy_version=HIERARCHY_VERSION,audiences=[dict(key=audience,revenue_cents=100,share_bp=10000,matchable=True,children=[dict(key=theme,revenue_cents=100,share_bp=10000,matchable=True)])])
-    return ({'accounts':{'x-101':profile('female','sweet_romance'),'x-102':profile('male','revenge')}},dict(version='test',tag_mapping_version=TAG_VERSION,hierarchy_version=HIERARCHY_VERSION))
+    return ({'accounts':{'x-101':profile('female','sweet_romance'),'x-102':profile('male','revenge')}},dict(version='test',tag_mapping_version=TAG_VERSION,audience_taxonomy_version=TAXONOMY_VERSION,hierarchy_version=HIERARCHY_VERSION))
 
 
 class HitDramaTests(unittest.TestCase):
@@ -31,6 +31,11 @@ class HitDramaTests(unittest.TestCase):
         self.service=TagAutoPostService(self.store,FakeBridge(),FakeSelector(),FakeExecutor(AutoLiveGates(True,True,True)),now_fn=Clock())
         self.actor={'user_id':'803','name':'operator'}
         self.template=self.service.create_template(dict(valid_payload(),_actor=self.actor))['template']
+        self.service.selector.source._stream_select = lambda sql, args: []
+        self.service.selector.source.schema = 'ads'
+        self.service.selector.source.app_id = 1479
+        time_patch = patch('features.hit_publish.release_times', return_value={cid+':'+lang:1600000000 for cid in ['123','enA','idB','idBad','ptA','ptB','C1'] for lang in ['en','id','pt-br']})
+        time_patch.start();self.addCleanup(time_patch.stop)
         self.payload=dict(expected_version=1,drama_id='123',id_type='content_id',idempotency_key='operation123',confirmed=True,_actor=self.actor)
 
     def test_only_matching_channel_created_and_replay_uses_frozen_scope(self):
@@ -100,7 +105,7 @@ class HitDramaTests(unittest.TestCase):
         for account in self.service.account_bridge.accounts_by_id.values():account['drama_language']='pt-br'
         source=SimpleNamespace(schema='ads',app_id=1479,_stream_select=lambda *a:[dict(content_id='C1',language='pt')])
         target=resolve(source,dict(id_type='resource_id',drama_id='123'))
-        catalog={('C1','pt-br'):classify('Female Growth,Overpowered Dominance,Sweet')}
+        catalog={('C1','pt-br'):dict(audience='female',themes=['sweet_romance'],raw_labels=['Female Growth','Overpowered Dominance','Sweet'])}
         with patch('features.x_tag_publish.hit_drama.resolve',return_value=target),patch('features.x_tag_publish.hit_drama.catalog_labels',return_value=catalog),patch('features.x_tag_publish.hit_drama.portrait_snapshot',return_value=snapshot()):
             result=self.service.run_now(self.template['id'],dict(self.payload,id_type='resource_id'))
         self.assertEqual(result['matched_channels'],1)

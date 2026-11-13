@@ -25,7 +25,18 @@ def handle(handler, runtime, path):
             raise AdapterError('x_tag_source_namespace_invalid')
         with _lock:
             if _bridge is None:
-                _bridge = x_native.XNativeBridge(runtime)
+                from .hit_timing import assert_due
+                from .policy import lane_paths
+                class HitBridge(x_native.XNativeBridge):
+                    def reserve(self, job, claim):
+                        if job['stage'] == 'publish':
+                            assert_due(lane_paths()['X_AUTO_POST_DB_PATH'].as_uri(), self.store, job['source_id'])
+                        return super().reserve(job, claim)
+
+                    def begin_operation(self, job, claim, operation):
+                        assert_due(lane_paths()['X_AUTO_POST_DB_PATH'].as_uri(), self.store, job['source_id'])
+                        return super().begin_operation(job, claim, operation)
+                _bridge = HitBridge(runtime)
         result = _bridge.dispatch(path.rsplit('/', 1)[-1], payload)
         return handler.send_json(200, result)
     except Exception as exc:

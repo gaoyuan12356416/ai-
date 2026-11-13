@@ -505,7 +505,11 @@ class AutoPostExecutor:
         existing = self._run_queue(run)
         if existing is not None:
             return dict(run)
-        candidate = dict(self.candidate_loader(task, run))
+        from features.hit_publish import future_scope
+        frozen_run = self.store.get_run(task.run_id).blacklist_snapshot
+        hit = frozen_run.get('hit_material_publish') or frozen_run.get('hit_drama_publish') or {}
+        with future_scope(hit.get('release_times', {})):
+            candidate = dict(self.candidate_loader(task, run))
         candidate["duration_policy_version"] = self.store.get_run(task.run_id).duration_policy_version
         candidate["body_template"] = str(run.get("body_template") or task.body_template)
         candidate["source_type"] = "material"

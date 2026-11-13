@@ -1225,6 +1225,8 @@ def build_service_from_env(
                 )
             item = dict(candidates[0])
             return {
+                "source_duration": item.get("source_duration"),
+                "drama_deploy_time": item.get("drama_deploy_time"),
                 "material_id": str(item.get("material_id") or ""),
                 "content_id": str(item.get("content_id") or ""),
                 "material_language": str(item.get("material_language") or ""),

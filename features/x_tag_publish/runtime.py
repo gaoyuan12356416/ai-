@@ -83,6 +83,13 @@ def install(runtime):
         return result
     runtime.create_post_schedule_plan_request = create_plan
 
+    from .hit_timing import assert_due
+    original_publish = runtime.publish_queue_request
+    def publish_when_due(queue_id, *args, **kwargs):
+        assert_due(paths['X_AUTO_POST_DB_PATH'].as_uri(), service.XPostStore(paths['X_POST_DB_PATH']), queue_id)
+        return original_publish(queue_id, *args, **kwargs)
+    runtime.publish_queue_request = publish_when_due
+
     from features.x_posts import attribution
     def attribution_resolver(queue_id, log_id):
         result = rpc('http://127.0.0.1:8898', '/internal/x-tag/attribution', runtime.INTERNAL_TOKEN,

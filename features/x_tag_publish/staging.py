@@ -143,6 +143,14 @@ def build(source, repo, target, *, verify=True):
             version=digest(target / 'static' / asset)[:12]
             value=re.sub(r'(/'+re.escape(asset)+r')(?:\?[^"\']*)?',r'\1?v='+version,value)
         p.write_text(value, encoding='utf-8')
+    # Later scoped releases own these files after the historical transformations.
+    # This keeps rebuilds compatible with explicit material and future-time runs.
+    hit_overlay = repo / 'deploy/hit-publish-overlay.json'
+    if hit_overlay.exists():
+        for name in json.loads(hit_overlay.read_text(encoding='utf-8'))['x']['files']:
+            destination = target / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repo / name, destination)
     (target / 'tag-runtime-manifest.json').write_text(json.dumps(dict(baseline=manifest,
         files={str(p.relative_to(target)).replace('\\', '/'): digest(p) for p in target.rglob('*') if p.is_file()}),
         indent=2), encoding='utf-8')

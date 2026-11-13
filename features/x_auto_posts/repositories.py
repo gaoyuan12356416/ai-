@@ -9,6 +9,8 @@ only activated daily generations from the local auto-post store.
 
 from __future__ import annotations
 
+from features.hit_publish import FUTURE_TIMES
+
 import hashlib
 import json
 import re
@@ -513,7 +515,7 @@ class ReadOnlyMySQLRepository:
             3,
             *languages,
             0,
-            int(now_epoch),
+            max([int(now_epoch), *FUTURE_TIMES.get().values()]),
         ]
         if deploy_since_epoch is not None:
             predicates.append("i.deploy_time>=%s")

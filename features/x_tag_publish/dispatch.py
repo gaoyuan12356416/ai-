@@ -18,12 +18,27 @@ def tag_identity(value):
 
 
 class TagLedgerAdapter(LedgerAdapter):
+    def enrich(self, conn, raw):
+        import json
+        row = super().enrich(conn, raw)
+        selection = row.get('selection_json')
+        if self.spec.family == 'queue' and row.get('ancestor_source_keys'):
+            aid = row['ancestor_source_keys'][0].rsplit(':', 1)[-1]
+            origin = conn.execute('SELECT selection_json FROM pipeline_x_auto.x_auto_task WHERE id=?', (aid,)).fetchone()
+            selection = origin[0] if origin else None
+        row['_hit_publish_timing'] = json.loads(selection or '{}').get('hit_publish_timing')
+        return row
+
     def project(self, row, now=None):
         if not tag_identity(row[self.spec.identity]):
             raise AdapterError('x_tag_source_namespace_invalid')
         offer = super().project(row, now)
         if offer and self.spec.family == 'queue' and offer.get('ancestor_source_keys'):
             offer['details_url'] = '/x-tag-auto-publish-runs.html'
+        if offer and offer['stage'] == 'prepare' and row.get('_hit_publish_timing'):
+            from features.pipeline_dispatch.adapters import stamp
+            offer['scheduled_at'] = max(stamp(row['_hit_publish_timing']['prepare_at_utc']),
+                                        stamp(row['next_attempt_at_utc']) if row.get('next_attempt_at_utc') else '')
         return offer
 
 

@@ -2345,7 +2345,7 @@ class XAutoPostStore:
                         AND (next_attempt_at_utc='' OR next_attempt_at_utc<=?)
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
                     )
-                    OR (status='ready' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
+                    OR (status='ready' AND scheduled_at_utc<=? AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
                         status IN ('publishing','reconciling','unknown')
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
@@ -2362,7 +2362,7 @@ class XAutoPostStore:
                     template_id ASC,
                     id ASC
                 """,
-                    (current, current, current, current, current, current, current, current),
+                    (current, current, current, current, current, current, current, current, current),
                 )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
@@ -2701,6 +2701,13 @@ class XAutoPostStore:
                     normalized_task_id,
                 ),
             )
+            hit_timing = _json_object(selection_json).get('hit_publish_timing')
+            if hit_timing:
+                from features.hit_publish import POLICY
+                if hit_timing.get('policy') != POLICY:
+                    raise XAutoPostStoreError('x_auto_hit_timing_invalid', 'invalid hit timing', 409)
+                conn.execute('UPDATE x_auto_task SET scheduled_at_utc=? WHERE id=?',
+                             (_utc_iso(hit_timing['publish_at_utc']), normalized_task_id))
             self._event(
                 conn,
                 run_id=int(task["run_id"]),

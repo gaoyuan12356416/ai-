@@ -1,0 +1,42 @@
+{
+  "x": {
+    "base": "0578d4cd378794336b5354535dd00f9a4656c338",
+    "files": [
+      "features/hit_publish.py",
+      "features/x_auto_posts/core.py",
+      "features/x_auto_posts/publisher.py",
+      "features/x_auto_posts/repositories.py",
+      "features/x_auto_posts/selector.py",
+      "features/x_auto_posts/service.py",
+      "features/x_posts/selector.py",
+      "features/x_tag_publish/dispatch.py",
+      "features/x_tag_publish/dispatch_native.py",
+      "features/x_tag_publish/hit_drama.py",
+      "features/x_tag_publish/hit_material.py",
+      "features/x_tag_publish/hit_timing.py",
+      "features/x_tag_publish/runtime.py",
+      "features/x_tag_publish/selection.py",
+      "features/x_tag_publish/staging.py",
+      "static/hit-drama-publish.js",
+      "static/hit-material-publish.js",
+      "static/x-tag-auto-publish-templates.html",
+      "static/x-tag-auto-publish-templates.js"
+    ]
+  },
+  "fb": {
+    "base": "c84b5e4dc9466ffa1d417d3e84090e38e4af99c3",
+    "files": [
+      "features/fb_auto_posts/core.py",
+      "features/fb_auto_posts/hit_drama.py",
+      "features/fb_auto_posts/hit_material.py",
+      "features/fb_auto_posts/hit_material_batch.py",
+      "features/fb_auto_posts/hit_profile.py",
+      "features/fb_auto_posts/repositories.py",
+      "features/fb_auto_posts/service.py",
+      "features/hit_publish.py",
+      "static/fb-auto-publish-templates.html",
+      "static/fb-auto-publish-templates.js",
+      "static/hit-drama-publish.js"
+    ]
+  }
+}

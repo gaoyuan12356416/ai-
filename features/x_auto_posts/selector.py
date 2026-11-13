@@ -8,6 +8,8 @@ constraint are all evaluated before the selected identity leaves this layer.
 
 from __future__ import annotations
 
+from features.hit_publish import future_allowed
+
 import re
 import urllib.parse
 from dataclasses import dataclass, field, replace
@@ -725,7 +727,7 @@ class TwoStageSelector:
                 or row.release_status != 1
                 or row.language != language
                 or row.deploy_time <= 0
-                or row.deploy_time > now_epoch
+                or (row.deploy_time > now_epoch and not future_allowed(row.content_id, row.language, row.deploy_time))
                 or (earliest is not None and row.deploy_time < earliest)
                 or (allowed_types and row.resource_type_v2 not in allowed_types)
             ):

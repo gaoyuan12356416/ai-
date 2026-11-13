@@ -201,6 +201,7 @@
       actions.appendChild(actionButton("预览", "preview", id));
       actions.appendChild(actionButton(enabled ? "关闭" : "开启", enabled ? "disable" : "enable", id, enabled ? "danger" : ""));
       actions.appendChild(actionButton("手动执行", "run", id, "primary"));
+      actions.appendChild(actionButton("爆款素材发布", "material", id, "primary"));
       actions.appendChild(actionButton("爆款剧发布", "drama", id, "primary"));
       actions.appendChild(actionButton("记录", "runs", id));
       if (state.busyIds.has(id)) actions.querySelectorAll("button").forEach(button => { button.disabled = true; });
@@ -325,6 +326,7 @@
     const item = findTemplate(id);
     if (!item || state.busyIds.has(id)) return;
     const action = button.dataset.action;
+    if (action === "material") { await window.HitMaterialPublish.open(id); return; }
     if (action === "drama") { await window.HitDramaPublish.open("x", id); return; }
     if (action === "edit") {
       location.href = `/x-tag-auto-publish-template.html?id=${encodeURIComponent(id)}`;

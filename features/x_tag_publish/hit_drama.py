@@ -48,6 +48,9 @@ def match_reason(decision, metadata):
 
 class TagAutoPostService(XAutoPostService):
     def run_now(self, template_id, raw):
+        if 'material_ids' in raw or 'material_id' in raw:
+            from .hit_material import publish_material
+            return publish_material(self, template_id, raw)
         if 'drama_id' not in raw:
             return super().run_now(template_id, raw)
         payload = dict(raw)
@@ -97,7 +100,9 @@ class TagAutoPostService(XAutoPostService):
                         audits[account_id] = decision.audit(catalog[(eligible[0], language(lang))])
                 if not matched:
                     raise AutoPostServiceError('hit_drama_no_matching_channel', '没有语言、受众和题材画像均匹配的可发布频道，未创建任务', 409)
-                frozen = dict(request=request, target=target, account_ids=matched, account_content_ids=account_targets, skipped=skipped, profiles=audits)
+                from features.hit_publish import release_times, POLICY
+                times = release_times(self.selector.source._stream_select, self.selector.source.schema, self.selector.source.app_id, content_ids(target))
+                frozen = dict(release_times=times, timing_policy=POLICY, request=request, target=target, account_ids=matched, account_content_ids=account_targets, skipped=skipped, profiles=audits)
                 now = self._now()
                 run = self.store.create_run(run_key=key, template_id=template.id, template_version=template.version,
                     trigger_type='manual', scheduled_at_utc=now, shanghai_date=now.astimezone(BEIJING_TZ).date().isoformat(),
