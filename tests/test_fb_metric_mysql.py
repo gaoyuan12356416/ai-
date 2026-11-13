@@ -71,6 +71,7 @@ class MetricTests(unittest.TestCase):
                  "selection": [{"metric_generations": {"en": [4, 5]}}]}
         self.assertEqual(json_metric_refs(value), {2, 3, 4, 5})
         self.assertEqual(integer_ids({"en": [1, 2]}), {1, 2})
+        self.assertEqual(integer_ids({"en": ["1", "2", 3, True, ""]}), {1, 2, 3})
 
     def test_writer_publishes_only_after_exact_readback(self):
         writer = FakeWriter(); store = MySQLMetricStore({}, reader=FakeReader(writer), writer_factory=lambda: writer)

@@ -30,6 +30,8 @@ def integer_ids(value):
         return {item for child in value for item in integer_ids(child)}
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return {value}
+    if isinstance(value, str) and value.isascii() and value.isdecimal() and int(value) > 0:
+        return {int(value)}
     return set()
 
 
