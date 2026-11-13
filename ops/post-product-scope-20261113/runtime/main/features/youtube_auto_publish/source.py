@@ -117,6 +117,13 @@ class MaterialSource:
                  "FROM (%s) AS pool "
                  "GROUP BY pool.uploader_id ORDER BY MAX(pool.uploader_name),pool.uploader_id" % sql)
         try:
+            # Large pools can provide an equivalent indexed options SELECT next
+            # to the source SQL, without grouping every material and metadata join.
+            options_path = Path(self.sql_file).with_suffix('.uploaders.sql') if self.sql_file else None
+            if options_path is not None and options_path.is_file():
+                if options_path.stat().st_size > 32768:
+                    raise ValueError('invalid uploader SQL file')
+                query = validate_sql(options_path.read_text(encoding='utf-8-sig'))
             options = []
             for row in self.query_runner(query):
                 item = json.loads(bytes.fromhex(row[0]).decode('utf-8'))

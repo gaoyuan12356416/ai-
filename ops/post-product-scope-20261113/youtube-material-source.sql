@@ -20,5 +20,5 @@ SELECT
 FROM `kunlunads_dev`.`ads_custom_source` s
 LEFT JOIN `kunlunads_dev`.`admin_users` u ON u.id=s.user_id
 LEFT JOIN `kunlunads_dev`.`ads_apps_setting` app
-  ON LOWER(TRIM(app.name))=LOWER(TRIM(s.product)) COLLATE utf8mb4_unicode_ci
+  ON app.name=TRIM(s.product) COLLATE utf8mb4_unicode_ci
 WHERE s.type=2

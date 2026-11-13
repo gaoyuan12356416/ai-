@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -100,6 +101,32 @@ class ProductScopeTests(unittest.TestCase):
         self.assertNotIn("pool.app_id AS CHAR)='1479'",statements[0])
         row['url']='https://untrusted.test/video.mp4'
         self.assertEqual(source._read('SELECT * FROM configured_pool',material_id='12'),[])
+
+    def test_youtube_indexed_uploaders_and_legacy_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'source.sql'
+            path.write_text('SELECT * FROM configured_pool',encoding='utf-8')
+            queries=[]
+            def query(sql):
+                queries.append(sql)
+                return [(json.dumps({'id':'7','name':'Uploader'}).encode().hex(),)]
+            source=MaterialSource(path,query)
+            self.assertEqual(source._read_uploaders(path.read_text()),[{'id':'7','name':'Uploader'}])
+            self.assertIn('GROUP BY pool.uploader_id',queries[-1])
+            indexed='SELECT HEX(JSON_OBJECT(\'id\',\'7\',\'name\',\'Uploader\'))'
+            path.with_suffix('.uploaders.sql').write_text(indexed,encoding='utf-8')
+            self.assertEqual(source._read_uploaders(path.read_text()),[{'id':'7','name':'Uploader'}])
+            self.assertEqual(queries[-1],indexed)
+
+    def test_youtube_uploader_sql_cannot_execute_writes(self):
+        from features.youtube_auto_publish.templates import WorkflowError
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'source.sql'
+            path.with_suffix('.uploaders.sql').write_text('DELETE FROM users',encoding='utf-8')
+            queries=[]
+            source=MaterialSource(path,lambda sql:queries.append(sql) or [])
+            with self.assertRaises(WorkflowError):source._read_uploaders('SELECT * FROM configured_pool')
+            self.assertEqual(queries,[])
 
     def test_auto_material_query_only_removes_product_for_explicit_moboreels(self):
         from features.x_posts.moboreels import source_policy
