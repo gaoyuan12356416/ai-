@@ -49,8 +49,13 @@ def prepare(folder):
     atomic_copy(SOURCE / FILE, candidate / FILE)
     compile((candidate / FILE).read_bytes(), FILE, 'exec')
     manifest['lanes']['fb']['files'][FILE] = dict(before=ops.sha(previous / FILE), after=ops.sha(candidate / FILE))
-    main_text = patch((MAIN / FILE).read_text(encoding='utf-8'), [
-        (legacy_method(original), legacy_method((SOURCE / FILE).read_text(encoding='utf-8')))])
+    main_text = (MAIN / FILE).read_text(encoding='utf-8')
+    old_method = legacy_method(original)
+    # The API copy has the same retired query with qualified ORDER BY columns.
+    if old_method not in main_text:
+        old_method = old_method.replace('ORDER BY queue_id,overlap_page_id', 'ORDER BY q.id,li.page_id')
+    main_text = patch(main_text, [
+        (old_method, legacy_method((SOURCE / FILE).read_text(encoding='utf-8')))])
     compile(main_text, FILE, 'exec')
     stage(folder, MAIN / FILE, main_text, manifest)
     for name in ('test_fb_legacy_queue_independence.py', 'test_fb_mixed_product_pools.py'):
