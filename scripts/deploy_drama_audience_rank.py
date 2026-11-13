@@ -81,6 +81,23 @@ def main_files(manifest,rollback=False):
     run('systemctl','reload','nginx')
 
 
+def rebase_fb(folder):
+    """Preserve a concurrent FB release and overlay only catalog classification."""
+    commit=verify_source(SOURCE,'HEAD');manifest=json.loads((folder/'manifest.json').read_text())
+    base=folder/'fb-followup';base.mkdir(exist_ok=False)
+    previous=Path(POINTERS['fb']).resolve();candidate=base/'candidate'
+    shutil.copytree(previous,candidate,symlinks=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc','.git'))
+    preserve_tree_owners(previous,candidate)
+    info=dict(platform='fb',commit=commit,source=str(SOURCE),previous=str(previous),candidate=str(candidate),files={},static={},status='prepared')
+    for name in AUDIENCE+SHARED:
+        target=candidate/name;assert target.resolve().is_relative_to(candidate.resolve())
+        atomic(target,(SOURCE/name).read_bytes());compile(target.read_bytes(),name,'exec')
+        info['files'][name]=dict(before=sha(previous/name),after=sha(target))
+    save(base/'manifest.json',info);manifest['fb_folder']=str(base);manifest['lanes']['fb']=info
+    save(folder/'manifest.json',manifest)
+    print(json.dumps(dict(status='prepared',lane='fb',previous=str(previous),commit=commit)))
+
+
 def check_no_writes(db_path):
     with closing(sqlite3.connect('file:'+db_path+'?mode=ro',uri=True)) as db:
         return db.execute("SELECT count(*) FROM x_post_publish_log WHERE unknown_outcome=0 AND status IN ('media_uploading','post_creating','repost_creating')").fetchone()[0]==0
@@ -107,6 +124,7 @@ def install_jobs():
 
 def apply(folder,rollback=False):
     manifest=json.loads((folder/'manifest.json').read_text())
+    fb_folder=Path(manifest.get('fb_folder',str(folder/'fb')))
     import features
     features.__path__.append('/opt/pipeline-dispatch/current/features')
     from scripts.deploy_x_hierarchy import switch_window
@@ -122,7 +140,7 @@ def apply(folder,rollback=False):
     try:
         if rollback:
             # Do not rewind confirmed audience facts or any publication ledger.
-            activate_lane('fb',folder/'fb',True)
+            activate_lane('fb',fb_folder,True)
             with switch_window(folder,55):
                 main_files(manifest,True);switch_standard(folder,True)
                 info=manifest['lanes']['x'];pointer=Path(POINTERS['x'])
@@ -165,10 +183,10 @@ def apply(folder,rollback=False):
             if str(Path(POINTERS['standard']).resolve())==manifest['lanes']['standard']['previous']:
                 switch_standard(folder)
             # The existing FB release helper drains only FB and retains its states.
-            if json.loads((folder/'fb/manifest.json').read_text())['status']!='active':
+            if json.loads((fb_folder/'manifest.json').read_text())['status']!='active':
                 from scripts.deploy_hit_drama import health
                 health(18835)
-                activate_lane('fb',folder/'fb')
+                activate_lane('fb',fb_folder)
             run('systemctl','restart','fb-page-portrait.service',timeout=30)
         manifest['status']='rolled_back' if rollback else 'active';save(folder/'manifest.json',manifest)
     finally:
@@ -180,6 +198,8 @@ def apply(folder,rollback=False):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','apply','rollback']);p.add_argument('--folder',type=Path,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','apply','rollback','rebase-fb']);p.add_argument('--folder',type=Path,required=True);a=p.parse_args()
     assert a.folder.resolve().is_relative_to('/mnt/data-disk')
-    prepare(a.folder) if a.action=='prepare' else apply(a.folder,a.action=='rollback')
+    if a.action=='prepare':prepare(a.folder)
+    elif a.action=='rebase-fb':rebase_fb(a.folder)
+    else:apply(a.folder,a.action=='rollback')
