@@ -20,6 +20,11 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS pipeline_x_unentered_recovery (
  state TEXT NOT NULL,proof_json TEXT NOT NULL,actor TEXT NOT NULL,updated_at TEXT NOT NULL,
  PRIMARY KEY(job_id,generation))'''
 HOLD='operator_verified_unentered_recovery'
+ACK='pipeline_x_unentered_failure_ack'
+ACK_SCHEMA='''CREATE TABLE IF NOT EXISTS pipeline_x_unentered_failure_ack (
+ source_key TEXT NOT NULL,generation INTEGER NOT NULL,claim_hash TEXT NOT NULL,
+ error_code TEXT NOT NULL,proof_json TEXT NOT NULL,created_at TEXT NOT NULL,
+ PRIMARY KEY(source_key,generation))'''
 require=original.require
 
 
@@ -38,8 +43,13 @@ def validate(p):
     require(q['status']=='queued' and l['status']=='reserved' and not l['unknown_outcome']
             and not any(l[k] for k in ('x_media_id','x_post_id','published_at')),'native_changed')
     require(not any(p[k] for k in ('publications','reposts','holds','resources','legacy_resources')),'active_or_fenced')
-    for name in ('operations','checkpoints','deliveries','receipts','native_operations','native_checkpoints'):
+    for name in ('operations','checkpoints','receipts','native_operations','native_checkpoints'):
         require(not any(r['generation']>=g for r in p[name]),'current_generation_'+name)
+    for d in p['deliveries']:
+        if d['generation']>=g:
+            response=json.loads(d['response_json'])
+            require(d['generation']==g and d['claim_hash']==j['claim_hash'] and response.get('accepted') is True
+                    and response.get('status')=='failed','non_failure_delivery')
     require(not any(r['stage']=='publish' and r['generation']>=g for r in p['native_claims']),'native_claim_exists')
     auth=[a for a in p['authorizations'] if a['state']=='armed']
     require(len(auth)==1 and auth[0]['to_generation']==g and auth[0]['prior_attempts']==l['attempt_count'],'permission_changed')
@@ -56,6 +66,26 @@ def plan(scope):
                 require(authorization(n,p['queue'],p['log'],p['job']),'runtime_permission_invalid')
                 out['items'].append({'native':scope['natives']['tag'],'proof':p})
     out['plan_sha256']=digest(out);return out
+
+
+def stage_receipt_ack(p,actor,backup_dir):
+    unsigned=dict(p);unsigned.pop('plan_sha256');require(digest(unsigned)==p['plan_sha256'],'plan_changed')
+    require(actor.strip(),'actor_required')
+    for i,path in enumerate(sorted({x['native'] for x in p['items']})):
+        if not (Path(backup_dir)/(str(i)+'.sqlite3')).exists():original.backup(path,Path(backup_dir),str(i))
+    for item in p['items']:
+        saved=item['proof'];j=saved['job'];validate(saved)
+        with contextlib.closing(original.connect(p['central'])) as c,contextlib.closing(original.connect(item['native'],False)) as n:
+            c.execute('BEGIN');n.execute('BEGIN IMMEDIATE')
+            require(original.stable(collect(c,n,j['id']))==original.stable(saved),'execution_facts_changed')
+            n.execute(ACK_SCHEMA)
+            old=n.execute('SELECT * FROM '+ACK+' WHERE source_key=? AND generation=?',(j['source_key'],j['generation'])).fetchone()
+            if old:
+                require(old['claim_hash']==j['claim_hash'] and old['error_code']==j['error_code'],'ack_authorization_changed')
+            else:
+                n.execute('INSERT INTO '+ACK+' VALUES(?,?,?,?,?,?)',(j['source_key'],j['generation'],j['claim_hash'],j['error_code'],encoded({'actor':actor,'proof':saved,'plan_sha256':p['plan_sha256']}),original.now()))
+            n.commit();c.rollback()
+    return {'receipt_ack_authorized_job_ids':[i['proof']['job']['id'] for i in p['items']],'platform_called':False}
 
 
 def matches(saved,current,held=False,armed=False):
@@ -77,6 +107,9 @@ def matches(saved,current,held=False,armed=False):
 def apply(p,folder,actor,stop_after=None):
     unsigned=dict(p);unsigned.pop('plan_sha256');require(digest(unsigned)==p['plan_sha256'],'plan_changed')
     require(actor.strip(),'actor_required');folder=Path(folder)
+    for item in p['items']:
+        j=item['proof']['job']
+        require(len([d for d in item['proof']['deliveries'] if d['generation']==j['generation']])==1,'current_failure_receipt_not_acknowledged')
     for i,path in enumerate(sorted({p['central']}|{x['native'] for x in p['items']})):
         if not (folder/(str(i)+'.sqlite3')).exists():original.backup(path,folder,str(i))
     done=[]
@@ -117,8 +150,10 @@ def apply(p,folder,actor,stop_after=None):
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=('plan','apply'));p.add_argument('--scope');p.add_argument('--plan');p.add_argument('--backup-dir');p.add_argument('--actor');p.add_argument('--output',required=True);a=p.parse_args()
-    result=plan(json.loads(Path(a.scope).read_text())) if a.action=='plan' else apply(json.loads(Path(a.plan).read_text()),a.backup_dir,a.actor)
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=('plan','apply','stage-receipt-ack'));p.add_argument('--scope');p.add_argument('--plan');p.add_argument('--backup-dir');p.add_argument('--actor');p.add_argument('--output',required=True);a=p.parse_args()
+    if a.action=='plan': result=plan(json.loads(Path(a.scope).read_text()))
+    elif a.action=='stage-receipt-ack': result=stage_receipt_ack(json.loads(Path(a.plan).read_text()),a.actor,a.backup_dir)
+    else: result=apply(json.loads(Path(a.plan).read_text()),a.backup_dir,a.actor)
     with open(a.output,'x') as f:json.dump(result,f,ensure_ascii=False,indent=2)
     Path(a.output).chmod(0o600);print(json.dumps({'ok':True,'count':len(result.get('items',result.get('continued_job_ids',[])))}))
 

@@ -58,6 +58,33 @@ class Tests(unittest.TestCase):
                 row['account_id']=9
                 with self.assertRaises(Exception) as e:timing.assert_due('',store,1)
                 self.assertEqual(e.exception.code,'x_auto_hit_origin_invalid')
+    def test_operator_audited_failure_ack_is_exact_and_has_no_platform_intent(self):
+        import contextlib,hashlib
+        spec=importlib.util.spec_from_file_location('dispatch_native',ROOT/'features/x_tag_publish/dispatch_native.py')
+        native=importlib.util.module_from_spec(spec);spec.loader.exec_module(native)
+        c=sqlite3.connect(':memory:');self.addCleanup(c.close);c.row_factory=sqlite3.Row
+        c.executescript("""CREATE TABLE pipeline_x_unentered_failure_ack(source_key,generation,claim_hash,error_code);
+            CREATE TABLE pipeline_x_claim(source_key,generation);
+            CREATE TABLE pipeline_x_operation(source_key,generation);
+            CREATE TABLE pipeline_x_checkpoint(source_key,generation);
+            CREATE TABLE x_post_queue(id); CREATE TABLE x_post_publish_log(queue_id);""")
+        token='unit-test-claim-secret-at-least-32-characters';hashed=hashlib.sha256(token.encode()).hexdigest()
+        c.execute("INSERT INTO pipeline_x_unentered_failure_ack VALUES('x:queue:1',2,?,'x_tag_dispatch_failed')",(hashed,))
+        c.execute('INSERT INTO x_post_queue VALUES(1)');c.execute('INSERT INTO x_post_publish_log VALUES(1)')
+        @contextlib.contextmanager
+        def connect():yield c
+        bridge=types.SimpleNamespace(connect=connect,claim_hash=lambda claim:hashlib.sha256(claim['claim_token'].encode()).hexdigest())
+        job=dict(source_key='x:queue:1',source_id='1',generation=2,stage='publish');claim={'claim_token':token};receipt=dict(error_code='x_tag_dispatch_failed',unknown_outcome=False)
+        with patch('features.pipeline_dispatch.x_prepost_recovery.authorization',return_value={'state':'armed'}):
+            self.assertTrue(native.acknowledge_unentered_failure(bridge,job,claim,receipt))
+            self.assertFalse(native.acknowledge_unentered_failure(bridge,job,{'claim_token':'wrong'},receipt))
+            self.assertFalse(native.acknowledge_unentered_failure(bridge,job,claim,dict(receipt,unknown_outcome=True)))
+            c.execute("INSERT INTO pipeline_x_operation VALUES('x:queue:1',2)")
+            self.assertFalse(native.acknowledge_unentered_failure(bridge,job,claim,receipt))
+            c.execute('DELETE FROM pipeline_x_operation')
+        with patch('features.pipeline_dispatch.x_prepost_recovery.authorization',return_value=None):
+            self.assertFalse(native.acknowledge_unentered_failure(bridge,job,claim,receipt))
+
     def test_endpoint_authentication_precedes_read(self):
         handler=next(x for x in module.body if isinstance(x,ast.ClassDef) and x.name=='Handler')
         dispatch=next(x for x in handler.body if isinstance(x,ast.FunctionDef) and x.name=='dispatch')

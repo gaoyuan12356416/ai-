@@ -8,6 +8,31 @@ _bridge = None
 _lock = threading.Lock()
 
 
+ACK_TABLE = 'pipeline_x_unentered_failure_ack'
+
+
+def acknowledge_unentered_failure(bridge, job, claim, receipt):
+    """Only an operator-audited, exact unentered claim may ACK without native fail."""
+    from features.pipeline_dispatch.x_prepost_recovery import authorization
+    if job.get('stage') != 'publish' or receipt.get('unknown_outcome', False):
+        return False
+    with bridge.connect() as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name=?",(ACK_TABLE,)).fetchone():
+            return False
+        saved = conn.execute('SELECT * FROM '+ACK_TABLE+' WHERE source_key=? AND generation=?',
+                             (job['source_key'],job['generation'])).fetchone()
+        if (not saved or not secrets.compare_digest(saved['claim_hash'],bridge.claim_hash(claim))
+                or receipt.get('error_code') != saved['error_code']):
+            return False
+        for table in ('pipeline_x_claim','pipeline_x_operation','pipeline_x_checkpoint'):
+            if conn.execute('SELECT 1 FROM '+table+' WHERE source_key=? AND generation>=? LIMIT 1',
+                            (job['source_key'],job['generation'])).fetchone():
+                return False
+        queue = conn.execute('SELECT * FROM x_post_queue WHERE id=?',(int(job['source_id']),)).fetchone()
+        log = conn.execute('SELECT * FROM x_post_publish_log WHERE queue_id=?',(int(job['source_id']),)).fetchone()
+        return bool(queue and log and authorization(conn,queue,log,job))
+
+
 def handle(handler, runtime, path):
     global _bridge
     from features.pipeline_dispatch import x_native
@@ -32,6 +57,12 @@ def handle(handler, runtime, path):
                         if job['stage'] == 'publish':
                             assert_due(lane_paths()['X_AUTO_POST_DB_PATH'].as_uri(), self.store, job['source_id'])
                         return super().reserve(job, claim)
+
+                    def fail(self, job, claim, receipt):
+                        with self._source_lock(job):
+                            if acknowledge_unentered_failure(self,job,claim,receipt):
+                                return {'canonical_no_write': True}
+                            return super().fail(job,claim,receipt)
 
                     def begin_operation(self, job, claim, operation):
                         assert_due(lane_paths()['X_AUTO_POST_DB_PATH'].as_uri(), self.store, job['source_id'])

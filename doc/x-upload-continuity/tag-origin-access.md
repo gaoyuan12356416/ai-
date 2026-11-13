@@ -47,3 +47,16 @@ Validation: `python3 -m unittest scripts.test_x_unentered_recovery scripts.test_
 Also rehearse the exact private plan on database copies, including interrupted
 staged/armed states and repeated apply; verify old claims, operations, receipts,
 queue/log identity and attempt counts are unchanged.
+
+Separate reservation means a worker may own a central claim even though native
+admission failed. Its failure receipt must not be discarded. For the exact
+reviewed unentered plan, use `stage-receipt-ack --plan <plan> --backup-dir <backup>
+--actor <actor> --output <result>` before deploying the Tag bridge. This archives
+explicit source/generation/claim-hash permissions in the native ledger. The
+bridge may then acknowledge only those exact false-unknown failure receipts
+while an unchanged original recovery permission remains armed and no native
+claim/operation/checkpoint exists in that generation. It performs no native
+failure or platform write. Normal coordinator delivery acknowledgement remains
+responsible for durable ACK and dedupe. Rebuild the continuation plan after all
+current-generation failure deliveries have been accepted; `apply` requires one
+such acknowledged delivery for every job before arming another generation.

@@ -13,9 +13,15 @@ def proof():
 class Tests(unittest.TestCase):
     def test_unentered_only(self):self.assertEqual(validate(proof())['to_generation'],2)
     def test_every_new_execution_fact_blocks(self):
-        for name in ('operations','checkpoints','deliveries','receipts','native_operations','native_checkpoints'):
+        for name in ('operations','checkpoints','receipts','native_operations','native_checkpoints'):
             p=proof();p[name]=[{'generation':2}]
             with self.subTest(name=name),self.assertRaises(ValueError):validate(p)
+    def test_only_exact_failed_delivery_can_continue(self):
+        p=proof();p['job']['claim_hash']='same'
+        p['deliveries']=[dict(generation=2,claim_hash='same',response_json='{"accepted":true,"status":"failed"}')]
+        validate(p)
+        p['deliveries'][0]['response_json']='{"accepted":true,"status":"published"}'
+        with self.assertRaises(ValueError):validate(p)
     def test_claim_or_fence_blocks(self):
         for name,record in [('native_claims',dict(stage='publish',generation=2)),('resources',{'job_id':1}),('holds',{})]:
             p=proof();p[name]=[record]
