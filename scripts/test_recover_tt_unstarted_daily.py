@@ -24,6 +24,8 @@ class RecoveryTests(unittest.TestCase):
         f, store, central = self.fixture()
         plan = self.plan(f, central)
         self.assertEqual(len(plan['items']), 1)
+        with store.transaction() as c:
+            c.execute("INSERT INTO pipeline_delivery VALUES('old-failure',?,0,'claim','request',?)", (plan['items'][0]['job_id'], recovery.dump({'accepted':True,'duplicate':True,'status':'failed'})))
         result = recovery.apply_plan(f.store.db_path, central, plan, plan['sha256'], Path(f.fixture.temp.name)/'backup', f.fixture.clock())
         self.assertEqual(result['applied'], 1)
         row = f.adapter.read(f.task.id)
@@ -33,6 +35,8 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(c.execute('SELECT shanghai_date FROM tt_auto_run').fetchone()[0], '2026-08-05')
             self.assertEqual(c.execute("SELECT count(*) FROM tt_auto_event WHERE event_type='authorized_unstarted_daily_recovery'").fetchone()[0], 1)
         self.assertEqual(store.get_job(plan['items'][0]['job_id'])['status'], 'queued')
+        with store.connect() as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM pipeline_delivery').fetchone()[0], 1)
         with self.assertRaisesRegex(ValueError, 'already_recorded'):
             recovery.apply_plan(f.store.db_path, central, plan, plan['sha256'], Path(f.fixture.temp.name)/'backup-again', f.fixture.clock())
 

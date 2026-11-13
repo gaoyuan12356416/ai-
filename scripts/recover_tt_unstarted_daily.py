@@ -56,8 +56,12 @@ def inspect(c, dates, now):
         elif c.execute('SELECT 1 FROM tt_auto_material_ledger WHERE task_id=? LIMIT 1', (t['id'],)).fetchone():
             reason = 'native_material_reservation'
         elif any(c.execute('SELECT 1 FROM dispatch.' + table + ' WHERE job_id=? LIMIT 1', (jobs[0]['id'],)).fetchone()
-                 for table in ('pipeline_operation', 'pipeline_receipt', 'pipeline_checkpoint', 'pipeline_delivery', 'pipeline_resource', 'pipeline_legacy_resource')):
+                 for table in ('pipeline_operation', 'pipeline_receipt', 'pipeline_checkpoint', 'pipeline_resource', 'pipeline_legacy_resource')):
             reason = 'central_operation_receipt_or_resource'
+        elif any(json.loads(ack['response_json']) != {'accepted': True, 'duplicate': True, 'status': 'failed'}
+                 or int(ack['generation']) > int(jobs[0]['generation'])
+                 for ack in c.execute('SELECT generation,response_json FROM dispatch.pipeline_delivery WHERE job_id=?', (jobs[0]['id'],))):
+            reason = 'central_delivery_not_explicit_failure_ack'
         snapshot, donors = None, []
         if not reason and (t['drama_language'] == 'und' or json.loads(t['account_settings_json']).get('configured') is False):
             siblings = c.execute("SELECT s.* FROM tt_auto_task s JOIN tt_auto_run r ON r.id=s.run_id WHERE s.account_id=? AND s.template_id=? AND s.template_version=? AND r.shanghai_date=? AND s.id<>? AND s.drama_language<>'und' AND s.account_setting_version>0", (t['account_id'], t['template_id'], t['template_version'], t['shanghai_date'], t['id'])).fetchall()
