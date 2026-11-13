@@ -108,6 +108,22 @@ class ArchiveTest(unittest.TestCase):
                 a.get('storage-archive/v1/object', p, old_hash, 3)
             self.assertEqual(p.read_bytes(), b'new data')
 
+    def test_application_manifest_hash_mismatch_preserves_original(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'report.json'
+            p.write_bytes(b'original')
+            sig = m.signature(p)
+            plan = Path(td) / 'plan.json'
+            plan.write_text(json.dumps({'namespace': 'test', 'allowed_roots': [td],
+                'files': [{'path': str(p), 'signature': sig, 'expected_sha256': '0' * 64}]}))
+            journal = Path(td) / 'journal.jsonl'
+            args = types.SimpleNamespace(plan=str(plan), manifest=str(journal), delete_verified=True)
+            a = types.SimpleNamespace(put=lambda *args: {'path': str(p), 'signature': sig,
+                'sha256': hashlib.sha256(b'original').hexdigest()})
+            self.assertEqual(m.batch(a, args), 1)
+            self.assertEqual(p.read_bytes(), b'original')
+            self.assertEqual([json.loads(x)['event'] for x in journal.read_text().splitlines()], ['failed'])
+
     def test_removing_one_hardlink_does_not_claim_released_blocks(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / 'copy.db'

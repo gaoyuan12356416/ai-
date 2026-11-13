@@ -272,6 +272,8 @@ def batch(archive, args):
             if signature(path) != item['signature']:
                 raise RuntimeError('source changed since approved plan')
             receipt = archive.put(path, plan['namespace'])
+            if item.get('expected_sha256') and receipt['sha256'] != item['expected_sha256']:
+                raise RuntimeError('source does not match the application migration manifest')
             append_receipt(manifest, dict(receipt, event='verified'))
             if args.delete_verified:
                 if signature(path) != receipt['signature'] or open_inode(receipt['signature']):
