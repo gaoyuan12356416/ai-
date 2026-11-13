@@ -209,7 +209,7 @@ def import_rows(config, generation, source_hash, kind, generated_at, source_byte
             cursor.execute('SELECT COUNT(*) n,COALESCE(MAX(source_ordinal),0) last_ordinal FROM '+ROWS+' WHERE generation_id=%s',(generation,))
             state=cursor.fetchone();resume_count=int(state['n'])
             require(resume_count==int(state['last_ordinal']),'catalog_staging_ordinal_gap')
-    digest = hashlib.sha256(); count = 0; batch = []
+    digest = hashlib.sha256(); count = 0; batch = []; batch_bytes=0; reported=0
     with contextlib.closing(connect(config, writer=True)) as db:
         with db.cursor() as cursor:
             if not prior:
@@ -224,9 +224,11 @@ def import_rows(config, generation, source_hash, kind, generated_at, source_byte
                         print(json.dumps({'phase':'resumed_verified_prefix','rows':resume_count}),file=sys.stderr,flush=True)
                     continue
                 batch.append((generation,count,row['id'],row['data_source_id'],row['language'],row['name'],row['video_duration'],row['created_at']))
-                if len(batch) >= 1000:
-                    cursor.executemany('INSERT INTO '+ROWS+' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',batch); db.commit(); batch.clear()
-                    if count%10000==0:print(json.dumps({'phase':'importing','rows':count}),file=sys.stderr,flush=True)
+                batch_bytes+=len(canonical(row).encode())+100
+                if len(batch)>=5000 or batch_bytes>=1024*1024:
+                    cursor.executemany('INSERT INTO '+ROWS+' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',batch); db.commit(); batch.clear();batch_bytes=0
+                    if count-reported>=10000:
+                        print(json.dumps({'phase':'importing','rows':count}),file=sys.stderr,flush=True);reported=count
             if batch:
                 cursor.executemany('INSERT INTO '+ROWS+' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',batch); db.commit()
             require(count > 0, 'empty_catalog_requires_review')
