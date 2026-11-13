@@ -3,8 +3,11 @@ from collections import defaultdict
 from contextlib import closing
 import json
 import sqlite3
+from urllib.parse import urlencode
+from urllib.request import Request
 
 from features.drama_audience.store import language, now
+from features.drama_audience.client import read_json, URL
 from features.x_tag_revenue.taxonomy import classify, raw_labels
 from .core import ROOT, database
 
@@ -38,7 +41,27 @@ def read(root=ROOT):
         return {}
 
 
-def refresh(reader, root=ROOT):
+def resolve_details(cid, data):
+    if data.get('code') != 200:
+        raise ValueError('upstream_business_error')
+    resources = []
+    for row in (data.get('data') or {}).get('list', []):
+        if row.get('app_id') != 'com.dramawave.app' or row.get('id') != cid:
+            continue
+        if not isinstance(row.get('language'), list) or not isinstance(row.get('labels'), (str, list)):
+            continue
+        for lang in row['language']:
+            if lang:
+                resources.append(dict(app_id=1479, content_id=cid, language=lang,
+                                      series_code=row.get('resource_id'), labels=row['labels']))
+    return index(resources, [])
+
+
+def fetch_details(cid):
+    return resolve_details(cid, read_json(Request(URL+'?'+urlencode({'content_id':cid}))))
+
+
+def refresh(reader, root=ROOT, fetcher=fetch_details):
     with closing(database(root, True)) as db:
         db.execute('''CREATE TABLE IF NOT EXISTS rank_metadata (
             app_id INTEGER NOT NULL, content_id TEXT NOT NULL COLLATE BINARY,
@@ -74,7 +97,22 @@ def refresh(reader, root=ROOT):
                            (*key, json.dumps(value, ensure_ascii=False), now()))
                 saved += 1
         print(json.dumps(dict(event='rank_metadata_progress',processed=min(offset+50,len(ids)),total=len(ids),saved=saved)),flush=True)
-    return dict(requested=len(missing), saved=saved, unresolved=len(missing)-saved)
+    # Some newly listed language versions precede the SQL material catalog.
+    # Fill only those gaps from the exact product/content/language API row.
+    latest = read(root)
+    pending = {key for key in missing if key not in latest or latest[key]['status'] == 'partial'}
+    for cid in sorted({key[0] for key in pending}):
+        try:
+            details = fetcher(cid)
+            with closing(database(root, True)) as db, db:
+                for key, value in details.items():
+                    if key in pending and key[0] == cid and value['status'] != 'partial':
+                        db.execute('INSERT OR REPLACE INTO rank_metadata VALUES(1479,?,?,?,?)',
+                                   (*key, json.dumps(value, ensure_ascii=False), now()))
+                        pending.remove(key)
+        except Exception as exc:
+            print(json.dumps(dict(event='rank_metadata_api_pending',error=type(exc).__name__)),flush=True)
+    return dict(requested=len(missing), saved=len(missing)-len(pending), unresolved=len(pending))
 
 
 def main():

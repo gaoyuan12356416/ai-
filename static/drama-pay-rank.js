@@ -3,6 +3,7 @@
   const $ = id => document.getElementById(id);
   const names={en:'英语',es:'西班牙语',pt:'葡萄牙语',ar:'阿拉伯语',bn:'孟加拉语',cs:'捷克语',de:'德语',el:'希腊语',fr:'法语',hi:'印地语',hu:'匈牙利语',id:'印度尼西亚语',it:'意大利语',ja:'日语',ko:'韩语',ms:'马来语',nb:'挪威语',nl:'荷兰语',pl:'波兰语',ro:'罗马尼亚语',ru:'俄语',sv:'瑞典语',ta:'泰米尔语',te:'泰卢固语',th:'泰语',tl:'菲律宾语',tr:'土耳其语',uk:'乌克兰语',vi:'越南语','zh-TW':'繁体中文'};
   let auth = {}, generation = 0, currentData = null;
+  let loadedDay = '', loadedLanguage = '';
   const searchIds = ['resourceFilter', 'contentFilter', 'audienceFilter', 'labelsFilter'];
   function el(tag, text, className) {
     const node = document.createElement(tag);
@@ -72,6 +73,7 @@
       const {data} = await api('/api/drama-pay-rank/list?' + new URLSearchParams({date: day, language_code: lang}));
       if (stamp !== generation) return;
       currentData = data;
+      loadedDay = day; loadedLanguage = lang;
       options($('dateFilter'), ['', ...data.dates], day, value => value || '最新榜单');
       options($('languageFilter'), Array.from(new Set(['en', ...data.languages])), lang, value => (names[value] || value) + ' · ' + value);
       const selectedAudience = $('audienceFilter').value;
@@ -93,7 +95,11 @@
       if (stamp === generation) $('filters').setAttribute('aria-busy', 'false');
     }
   }
-  $('filters').addEventListener('submit', event => { event.preventDefault(); load(); });
+  $('filters').addEventListener('submit', event => {
+    event.preventDefault();
+    if (currentData && $('dateFilter').value === loadedDay && $('languageFilter').value === loadedLanguage) renderRows();
+    else load();
+  });
   $('resetSearch').addEventListener('click', () => { searchIds.forEach(id => { $(id).value = ''; }); renderRows(); });
   $('loginBtn').addEventListener('click', () => UiTopbar.handleAuthAction({auth}));
   async function init() {

@@ -208,8 +208,35 @@ class RankMetadataTests(unittest.TestCase):
             class Reader:
                 def query(inner,statements,timeout):
                     return [{**self.resource(),'content_id':'abc','kind':'ads_drama_resource'}]
-            self.assertEqual(metadata.refresh(Reader(),root)['saved'],0)
+            self.assertEqual(metadata.refresh(Reader(),root,fetcher=lambda _: {})['saved'],0)
             self.assertEqual(metadata.read(root),{})
+
+    def test_api_gap_fill_exact_identity(self):
+        from features.drama_pay_rank.metadata import resolve_details
+        row=dict(app_id='com.dramawave.app',id='AbC',language=['pt'],resource_id=42,labels='Sweet')
+        data=dict(code=200,data=dict(list=[row,{**row,'app_id':'other','resource_id':99},{**row,'id':'abc','resource_id':10}]))
+        result=resolve_details('AbC',data)
+        self.assertEqual(list(result),[('AbC','pt-br')])
+        self.assertEqual(result[('AbC','pt-br')]['resource_id'],'42')
+        with self.assertRaises(ValueError):resolve_details('AbC',dict(code=401))
+
+    def test_api_failure_retry_then_cache_reuse(self):
+        from features.drama_pay_rank import metadata
+        with tempfile.TemporaryDirectory() as root:
+            payload=dict(code=200,data=dict(date='2026-11-13',list=[dict(date='2026-11-13',language_code='pt',series_key='AbC',rank=1)]))
+            core.update('s',root,fetcher=lambda _:payload,today='2026-11-13')
+            class Reader:
+                def query(self,statements,timeout):return []
+            calls=[]
+            def fetch(cid):
+                calls.append(cid)
+                if len(calls)==1:raise TimeoutError()
+                return metadata.index([self.resource()],[])
+            self.assertEqual(metadata.refresh(Reader(),root,fetch)['unresolved'],1)
+            self.assertEqual(metadata.read(root),{})
+            self.assertEqual(metadata.refresh(Reader(),root,fetch)['unresolved'],0)
+            self.assertEqual(metadata.refresh(Reader(),root,fetch)['requested'],0)
+            self.assertEqual(calls,['AbC','AbC'])
 
 
 if __name__=='__main__':unittest.main()
