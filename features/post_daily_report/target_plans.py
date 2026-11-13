@@ -8,7 +8,7 @@ from .common import parse_time, BEIJING
 POLICY = 'target_midnight_v1'
 
 
-def load_target_plans(db, prefix='tt_auto', day=None):
+def load_target_plans(db, prefix='tt_auto', day=None, numeric_id=True):
     names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     effective = '9999-12-31'
     if 'social_random_policy' in names:
@@ -24,7 +24,8 @@ def load_target_plans(db, prefix='tt_auto', day=None):
         sql += ' AND local_date=?'
         args.append(day)
     for source, local_date, version, raw_config, raw_targets in db.execute(sql, args):
-        template_id = int(source[len(prefix) + 1:])
+        suffix = source[len(prefix) + 1:]
+        template_id = int(suffix) if numeric_id else suffix
         plan = {'version': 0, 'config': {}, 'slots': [], 'error': ''}
         plans[(template_id, local_date)] = plan
         try:

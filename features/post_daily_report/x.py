@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from .common import in_window, json_value, parse_time, read_db
 from .accounting import load_dispatch, daily_override, REASONS
+from .target_plans import load_target_plans, POLICY
 
 
 BJ = timezone(timedelta(hours=8))
@@ -99,14 +100,24 @@ def _delivery(queue, log, relay):
         return "unknown", None, form, "unknown_outcome"
     if log.get("status") in {"post_creating", "repost_creating", "needs_review", "unknown_outcome"} or queue.get("status") == "needs_review":
         return "unknown", None, form, "unknown_outcome"
+    if queue.get("status") in {"cancelled", "canceled"} or log.get("error_code") == "x_ordinary_lane_retired":
+        return "policy_skipped", None, form, "plan_cancelled"
     if log.get("status") == "failed" or queue.get("status") in {"failed", "stopped", "cancelled"} or relay.get("status") == "failed":
         return "failed", None, form, relay.get("error_code") or log.get("error_code") or "publish_failed"
     code = "relay_pending" if relay.get("source_post_id") or log.get("status") == "source_published" else "execution_pending"
     return "pending", None, form, code
 
 
-def _record(row, outcome, window):
-    state, stamp, form, code = outcome
+def _record(row, outcome, window, seen=None, counted_expected=True):
+    state, stamp, form, code = outcome[:4]
+    if seen is not None and len(outcome) > 4:
+        identity = outcome[4]
+        if identity in seen:
+            if counted_expected and row['expected'] is not None:
+                row['expected'] = max(0, row['expected'] - 1)
+            row['warnings'].append('重复发布证据按 Post／队列身份只计一次。')
+            return
+        seen.add(identity)
     if state == "published":
         if stamp and stamp < window.end:
             row["published"] += 1
@@ -187,11 +198,27 @@ def _pool_plans(db, window, runs, row_by_source):
     plans = {}
     missing_quotas = {}
     available_sources = set()
+    _, target_plans = load_target_plans(db, 'x:pool', window.date, numeric_id=False)
+    target_sources = {source for source, _ in target_plans}
+    for (source, _), plan in target_plans.items():
+        if source not in {'material', 'drama'}:
+            continue
+        available_sources.add(source)
+        if plan['error']:
+            row_by_source[source + '_pool']['expected'] = None
+            row_by_source[source + '_pool']['warnings'].append(plan['error'])
+        for slot in plan['slots']:
+            key = (source, slot['due'].astimezone(BJ).strftime('%H:%M'))
+            accounts = plans.setdefault(key, [])
+            if slot['account_id'] not in accounts:
+                accounts.append(slot['account_id'])
     for plan in _rows(db, "x_post_schedule_random_plan", ["source_type", "run_date", "account_ids_json", "publish_times_json"]):
         if plan.get("run_date") != window.date:
             continue
         source = plan.get("source_type")
         if source not in {"material", "drama"}:
+            continue
+        if source in target_sources:
             continue
         available_sources.add(source)
         for time in json_value(plan.get("publish_times_json"), []):
@@ -201,6 +228,8 @@ def _pool_plans(db, window, runs, row_by_source):
     # usable when an audit interval covers the slot; current config is not history.
     audits = _rows(db, "x_post_schedule_config_audit", ["source_type", "config_version", "snapshot_json", "created_at"])
     for source in ("material", "drama"):
+        if source in target_sources:
+            continue
         ordered = sorted([a for a in audits if a.get("source_type") == source and parse_time(a.get("created_at"))], key=lambda a: parse_time(a["created_at"]))
         audit_covers_day = bool(ordered and parse_time(ordered[0]["created_at"]) <= window.start)
         missing_random = False
@@ -246,7 +275,8 @@ def _pool_plans(db, window, runs, row_by_source):
     for run in runs.values():
         if run.get("run_date") == window.date and run.get("source_type") in {"material", "drama"}:
             key = (run["source_type"], run.get("publish_time", ""))
-            plans.setdefault(key, _accounts(run.get("account_ids_json")))
+            accounts = plans.setdefault(key, [])
+            accounts.extend(a for a in _accounts(run.get('account_ids_json')) if a not in accounts)
     for source in ("material", "drama"):
         if source not in available_sources:
             row = row_by_source[source + "_pool"]
@@ -256,13 +286,13 @@ def _pool_plans(db, window, runs, row_by_source):
 
 
 def _shared_outcome(outcome, context, source_key, window):
-    if outcome[0] in {'published', 'unknown'}:
+    if outcome[0] in {'published', 'unknown', 'policy_skipped'}:
         return outcome
     override = daily_override(context, source_key, window.cutoff)
-    return (override[0], None, outcome[2], override[1]) if override else outcome
+    return (override[0], None, outcome[2], override[1]) + outcome[4:] if override else outcome
 
 
-def _collect_primary(db, window, output, row_by_source, context=None):
+def _collect_primary(db, window, output, row_by_source, context=None, seen=None, lane='ordinary'):
     context = context or {}
     if not list(db.execute('PRAGMA table_info(x_post_queue)')):
         raise sqlite3.OperationalError("missing X target ledger")
@@ -278,6 +308,12 @@ def _collect_primary(db, window, output, row_by_source, context=None):
     queue_outcomes, counted_prior = {}, set()
     for queue in queues:
         outcome = _shared_outcome(_delivery(queue, logs.get(queue["id"], {}), relays.get(queue["id"], {})), context, 'x:queue:' + str(queue['id']), window)
+        log, relay = logs.get(queue['id'], {}), relays.get(queue['id'], {})
+        identity = ('queue', lane, queue['id'])
+        if outcome[0] == 'published':
+            identity = (('repost', str(relay.get('source_post_id')), str(queue['account_id']))
+                        if outcome[2] == '目标转发' else ('post', str(log.get('x_post_id'))))
+        outcome += (identity,)
         queue_outcomes[queue["id"]] = outcome
         manual = manuals.get(queue.get("manual_run_id"), {})
         plan_date = queue.get("run_date", "")
@@ -296,9 +332,12 @@ def _collect_primary(db, window, output, row_by_source, context=None):
         elif plan_date == window.date:
             row = row_by_source.setdefault("unclassified", _row("unclassified"))
             row["expected"] = None
-            _record(row, outcome, window)
+            _record(row, outcome, window, seen)
         if plan_date and plan_date < window.date and outcome[0] == "published" and in_window(outcome[1], window.start, window.end):
-            output["prior_completed"] += 1
+            if seen is None or identity not in seen:
+                output["prior_completed"] += 1
+                if seen is not None:
+                    seen.add(identity)
             counted_prior.add(queue["id"])
 
     plans, missing_quotas = _pool_plans(db, window, runs, row_by_source)
@@ -311,26 +350,31 @@ def _collect_primary(db, window, output, row_by_source, context=None):
         row['unqueued'] += count
         _reason(row, "random_plan_not_created", count)
         output["evidence"].setdefault("unmaterialized_random_targets", {})[source] = count
-    by_slot = {(r["source_type"], r.get("publish_time", "")): r for r in runs.values() if r.get("run_date") == window.date}
+    by_slot = defaultdict(list)
+    for run in runs.values():
+        if run.get('run_date') == window.date:
+            by_slot[(run['source_type'], run.get('publish_time', ''))].append(run)
     for (source, time), accounts in plans.items():
         row = row_by_source[source + "_pool"]
         if row["expected"] is not None:
             row["expected"] += len(accounts)
-        run = by_slot.get((source, time), {})
+        slot_runs = by_slot.get((source, time), [])
         by_account = defaultdict(list)
-        for queue in by_schedule.get(run.get("id"), []):
-            by_account[str(queue["account_id"])].append(queue_outcomes[queue["id"]])
+        for run in slot_runs:
+            for queue in by_schedule.get(run.get("id"), []):
+                by_account[str(queue["account_id"])].append(queue_outcomes[queue["id"]])
         for account in accounts:
             if by_account.get(account):
-                _record(row, _best(by_account[account]), window)
+                _record(row, _best(by_account[account]), window, seen)
             else:
+                run = next((r for r in slot_runs if account in _accounts(r.get('account_ids_json'))), {})
                 missing_run = dict(run, status='cancelled') if (run.get('id'), str(account)) in cancellations else run
                 _missing(row, missing_run, 1, account=account, logs_by_id=logs_by_id)
         extra = set(by_account) - set(accounts)
         if extra:
             row["warnings"].append("存在冻结计划以外的目标账号，请核对补偿批次")
             for account in extra:
-                _record(row, _best(by_account[account]), window)
+                _record(row, _best(by_account[account]), window, seen, counted_expected=False)
 
     for run in manuals.values():
         if run.get("trigger_source", "manual") != "manual" or _manual_date(run) != window.date:
@@ -341,7 +385,7 @@ def _collect_primary(db, window, output, row_by_source, context=None):
         row["expected"] += len(accounts) or int(run.get("expected_count") or 0)
         rows = by_manual.get(run["id"], [])
         for queue in rows:
-            _record(row, queue_outcomes[queue["id"]], window)
+            _record(row, queue_outcomes[queue["id"]], window, seen)
         _missing(row, run, max(0, (len(accounts) or int(run.get("expected_count") or 0)) - len(rows)))
 
     for table, source, grouped in (("x_post_daily_run", "legacy_daily", by_daily), ("x_post_catchup_run", "catchup", by_catchup)):
@@ -353,7 +397,7 @@ def _collect_primary(db, window, output, row_by_source, context=None):
             row["expected"] += expected
             rows = grouped.get(run["id"], [])
             for queue in rows:
-                _record(row, queue_outcomes[queue["id"]], window)
+                _record(row, queue_outcomes[queue["id"]], window, seen)
             _missing(row, run, max(0, expected - len(rows)))
     output["evidence"]["x_schedule_run_ids"] = sorted(r["id"] for r in runs.values() if r.get("run_date") == window.date)
     output["evidence"]["x_manual_run_ids"] = sorted(r["id"] for r in manuals.values() if _manual_date(r) == window.date)
@@ -366,10 +410,45 @@ def _manual_date(run):
     return _day(run.get("created_at")) or run.get("run_date", "")
 
 
-def _auto_plans(db, window, runs, versions, row):
+def _target_account(run, tasks=()):
+    """The new run key freezes one account even before its task exists."""
+    if run.get('trigger_type') == 'manual':
+        return None
+    match = re.search(r':target_midnight_v1:[^:]+:\d{4}-\d{2}-\d{2}:([^:]+):\d+$', str(run.get('run_key') or ''))
+    if run.get('target_account_id'):
+        return str(run['target_account_id'])
+    if match:
+        return match.group(1)
+    if run.get('schedule_policy') == POLICY:
+        accounts = {str(t['account_id']) for t in tasks}
+        return next(iter(accounts)) if len(accounts) == 1 else ''
+    return None
+
+
+def _auto_plans(db, window, runs, versions, row, tasks_by_run=None):
     plans = {}
+    tasks_by_run = tasks_by_run or {}
+    activation, frozen = load_target_plans(db, 'x:auto', window.date)
+    target_templates = {template for template, _ in frozen}
+    for (template, _), plan in frozen.items():
+        if plan['error']:
+            row['expected'] = None
+            row['warnings'].append(plan['error'])
+        for slot in plan['slots']:
+            plans[('target', template, slot['due'], slot['account_id'])] = ({}, [slot['account_id']])
     for run in runs.values():
         if run.get("shanghai_date") == window.date:
+            target = _target_account(run, tasks_by_run.get(run['id'], []))
+            if target is not None:
+                target_templates.add(run['template_id'])
+                if not target:
+                    row['expected'] = None
+                    row['warnings'].append('账号随机运行缺少目标账号，未按整个模板放大数量。')
+                    plans[('unknown-target', run['id'])] = (run, [])
+                else:
+                    due = parse_time(run.get('scheduled_at_utc')) or _slot(window.date, run.get('publish_time'))
+                    plans[('target', run['template_id'], due, target)] = (run, [target])
+                continue
             config = versions.get((run["template_id"], run["template_version"]))
             if config is None:
                 row["expected"] = None
@@ -385,6 +464,8 @@ def _auto_plans(db, window, runs, versions, row):
                 history[detail["template_id"]].append((parse_time(event["created_at"]), event["event_type"], detail))
     templates = _rows(db, "x_auto_template", ["id", "enabled", "created_at"])
     for template in templates:
+        if (template['id'], window.date) in frozen:
+            continue
         if not history.get(template["id"]) and (not parse_time(template.get("created_at")) or parse_time(template["created_at"]) < window.end):
             row["expected"] = None
             row["warnings"].append("X Auto 缺少模板启停历史，不能排除未建运行的计划时点")
@@ -398,6 +479,13 @@ def _auto_plans(db, window, runs, versions, row):
             version = detail.get("version")
             config = versions.get((template_id, version), {})
             schedule = config.get("schedule", {})
+            if (template_id, window.date) in frozen:
+                continue
+            if schedule.get('mode') != 'fixed' and (window.date >= activation or template_id in target_templates):
+                if began <= window.start < until:
+                    row['expected'] = None
+                    row['warnings'].append('账号随机日计划缺失，原计划总数待核对。')
+                continue
             times = schedule.get("times", []) if schedule.get("mode") == "fixed" else random_plans.get((template_id, version))
             if times is None and began < window.end and until > window.start:
                 row["expected"] = None
@@ -410,11 +498,11 @@ def _auto_plans(db, window, runs, versions, row):
     return plans
 
 
-def _collect_auto(db, window, output, row, queue_outcomes, counted_prior, context=None):
+def _collect_auto(db, window, output, row, queue_outcomes, counted_prior, context=None, seen=None, lane='ordinary'):
     context = context or {}
     if not list(db.execute('PRAGMA table_info(x_auto_run)')):
         raise sqlite3.OperationalError("missing X Auto run ledger")
-    runs = {r["id"]: r for r in _rows(db, "x_auto_run", ["id", "template_id", "template_version", "trigger_type", "shanghai_date", "publish_time", "status", "error_code"])}
+    runs = {r["id"]: r for r in _rows(db, "x_auto_run", ["id", "template_id", "template_version", "trigger_type", "shanghai_date", "publish_time", "status", "error_code", "run_key", "schedule_policy", "scheduled_at_utc", "target_account_id"])}
     versions = {(r["template_id"], r["version"]): json_value(r.get("config_json"), {}) for r in _rows(db, "x_auto_template_version", ["template_id", "version", "config_json"])}
     tasks_by_run = defaultdict(list)
     for task in _rows(db, "x_auto_task", ["id", "run_id", "account_id", "status", "execution_queue_id", "publish_id", "published_at_utc", "unknown_outcome", "error_code"]):
@@ -427,44 +515,50 @@ def _collect_auto(db, window, output, row, queue_outcomes, counted_prior, contex
             return "unknown", None, "直接发布", "unknown_outcome"
         if task.get("status") == "published" and task.get("publish_id") and parse_time(task.get("published_at_utc")):
             return "published", parse_time(task["published_at_utc"]), "直接发布", ""
-        if task.get('status') in {'no_candidate', 'cancelled', 'skipped'}:
+        if task.get('status') in {'no_candidate', 'cancelled', 'canceled', 'skipped'}:
             return 'policy_skipped', None, '直接发布', task.get('error_code') or 'source_closed'
         if task.get("status") == "failed":
             return "failed", None, "直接发布", task.get("error_code") or "publish_failed"
         return "pending", None, "直接发布", "execution_pending"
     def outcome(task):
-        return _shared_outcome(native_outcome(task), context, 'x:auto:' + str(task['id']), window)
+        result = _shared_outcome(native_outcome(task), context, 'x:auto:' + str(task['id']), window)
+        if len(result) > 4:
+            return result
+        identity = ('post', str(task['publish_id'])) if result[0] == 'published' else ('task', lane, task['id'])
+        return result + (identity,)
     for run_id, tasks in tasks_by_run.items():
         if runs.get(run_id, {}).get("shanghai_date", "") < window.date:
             for task in tasks:
                 result = outcome(task)
                 if result[0] == "published" and in_window(result[1], window.start, window.end) and task.get("execution_queue_id") not in counted_prior:
-                    output["prior_completed"] += 1
-    plans = _auto_plans(db, window, runs, versions, row)
+                    if seen is None or result[4] not in seen:
+                        output["prior_completed"] += 1
+                        if seen is not None:
+                            seen.add(result[4])
+    plans = _auto_plans(db, window, runs, versions, row, tasks_by_run)
     for run, accounts in plans.values():
         tasks = {str(t["account_id"]): t for t in tasks_by_run.get(run.get("id"), [])}
         if row["expected"] is not None:
             row["expected"] += len(accounts)
         for account in accounts:
             if account in tasks:
-                _record(row, outcome(tasks[account]), window)
+                _record(row, outcome(tasks[account]), window, seen)
             else:
                 _missing(row, run, 1)
         for account in set(tasks) - set(accounts):
-            _record(row, outcome(tasks[account]), window)
+            _record(row, outcome(tasks[account]), window, seen, counted_expected=False)
             row["warnings"].append("执行账号不在可读取的冻结模板中，请核对计划记录")
     output["evidence"]["x_auto_run_ids"] = sorted(r["id"] for r in runs.values() if r.get("shanghai_date") == window.date)
 
 
-def collect(paths: dict, window) -> dict:
-    """Report plan-cohort final target deliveries and separate prior-plan arrivals."""
+def _collect_lane(paths, window, seen, lane):
     output = {"channel": "X", "rows": [], "prior_completed": 0, "warnings": [], "evidence": {}}
     context = paths.get('_accounting') or load_dispatch(paths, window.cutoff)
     row_by_source = {source: _row(source) for source in ("material_pool", "drama_pool", "auto_template", "manual_immediate", "manual_scheduled")}
     queue_outcomes, counted_prior = {}, set()
     try:
         with read_db(paths["x"]) as db:
-            queue_outcomes, counted_prior = _collect_primary(db, window, output, row_by_source, context)
+            queue_outcomes, counted_prior = _collect_primary(db, window, output, row_by_source, context, seen, lane)
     except (OSError, sqlite3.Error, KeyError) as exc:
         output["warnings"].append("X 主发布台账读取失败：" + type(exc).__name__)
         for source in ("material_pool", "drama_pool", "manual_immediate", "manual_scheduled"):
@@ -472,7 +566,7 @@ def collect(paths: dict, window) -> dict:
             row_by_source[source]["data_available"] = False
     try:
         with read_db(paths["x_auto"]) as db:
-            _collect_auto(db, window, output, row_by_source["auto_template"], queue_outcomes, counted_prior, context)
+            _collect_auto(db, window, output, row_by_source["auto_template"], queue_outcomes, counted_prior, context, seen, lane)
     except (OSError, sqlite3.Error, KeyError) as exc:
         row_by_source["auto_template"]["expected"] = None
         row_by_source["auto_template"]["data_available"] = False
@@ -481,6 +575,23 @@ def collect(paths: dict, window) -> dict:
         row["warnings"] = list(dict.fromkeys(row["warnings"]))
         row["reasons"].sort(key=lambda item: (-item["count"], item["code"]))
     output["rows"] = list(row_by_source.values())
+    return output
+
+
+def collect(paths: dict, window) -> dict:
+    """Count both publishing lanes, keeping native bridge and Post identities."""
+    seen = set()
+    output = _collect_lane(paths, window, seen, 'ordinary')
+    if paths.get('x_tag') or paths.get('x_tag_auto'):
+        profile_paths = dict(paths, x=paths.get('x_tag'), x_auto=paths.get('x_tag_auto'))
+        profile = _collect_lane(profile_paths, window, seen, 'profile')
+        for row in profile['rows']:
+            row['source'] = 'profile_' + row['source']
+            row['label'] = '画像·' + row['label']
+        output['rows'].extend(profile['rows'])
+        output['prior_completed'] += profile['prior_completed']
+        output['warnings'].extend('画像：' + w for w in profile['warnings'])
+        output['evidence']['profile'] = profile['evidence']
     from .x_cost import collect_cost
     output["cost"] = collect_cost(paths, window.start, window.end)
     return output

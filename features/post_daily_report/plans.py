@@ -78,10 +78,10 @@ def _days(begin, cutoff, channel, unavailable):
 
 def _auto_slots(db, prefix, channel, runs, versions, cutoff, add, unavailable):
     existing = {(r['template_id'],r['template_version'],r['shanghai_date'],r.get('publish_time')) for r in runs if r.get('trigger_type') != 'manual'}
-    activation, target_plans = load_target_plans(db, prefix) if channel == 'tt' else ('9999-12-31', {})
+    activation, target_plans = load_target_plans(db, 'x:auto' if channel == 'x' else prefix)
     target_runs = set()
     target_days = set()
-    if channel == 'tt':
+    if channel in {'tt', 'x'}:
         for run in runs:
             if run.get('trigger_type') == 'manual':
                 continue
@@ -128,7 +128,7 @@ def _auto_slots(db, prefix, channel, runs, versions, cutoff, add, unavailable):
             schedule=config.get('schedule',{})
             for day in _days(begin,finish,channel,unavailable):
                 if _slot(day,'00:00')>=finish:break
-                if channel == 'tt':
+                if channel in {'tt', 'x'}:
                     # A saved day survives later template edits and owns its
                     # target times; the old whole-template draw is not additive.
                     if (template['id'], day) in target_plans:
@@ -233,7 +233,9 @@ def _collect_plan_gaps(paths, cutoff, channels):
                         day = last - timedelta(days=370)
                     while day <= last:
                         dates.add(day.isoformat()); day += timedelta(days=1)
-                by_slot = {(r['source_type'], r['run_date'], r.get('publish_time')): r for r in runs.values()}
+                by_slot = defaultdict(list)
+                for run in runs.values():
+                    by_slot[(run['source_type'], run['run_date'], run.get('publish_time'))].append(run)
                 for day in sorted(dates):
                     if day > cutoff.astimezone(BEIJING).date().isoformat():
                         continue
@@ -242,11 +244,11 @@ def _collect_plan_gaps(paths, cutoff, channels):
                     plans, quotas = _pool_plans(db, window, runs, groups)
                     for (source, when), accounts in plans.items():
                         due = _slot(day, when)
-                        run = by_slot.get((source, day, when), {})
                         for account in accounts:
+                            run = next((r for r in by_slot.get((source, day, when), []) if account in _accounts(r.get('account_ids_json'))), {})
                             if (run.get('id'), str(account)) not in queued:
                                 add('x', 'schedule:' + str(run.get('id') or f'{source}:{day}:{when}'), account, due,
-                                    run.get('error_code'), (run.get('id'), str(account)) in cancelled)
+                                    run.get('error_code'), (run.get('id'), str(account)) in cancelled or run.get('status') in {'cancelled', 'canceled'} or run.get('error_code') == 'x_ordinary_lane_retired')
                     # A missing random time is a proven whole-day quota only after day end.
                     if window.end <= cutoff:
                         for source, number in quotas.items():
@@ -279,10 +281,20 @@ def _collect_plan_gaps(paths, cutoff, channels):
                 runs = read_rows(db, prefix + '_run')
                 versions = {(r['template_id'],r['version']): object_value(r['config_json'], {}) for r in read_rows(db,prefix+'_template_version')}
                 tasks = read_rows(db,prefix+'_task')
+                if channel == 'x':
+                    from .x import _target_account
+                    tasks_by_run = defaultdict(list)
+                    for task in tasks:
+                        tasks_by_run[task['run_id']].append(task)
+                    for run in runs:
+                        target = _target_account(run, tasks_by_run[run['id']])
+                        if target is not None:
+                            run['target_account_id'] = target
+                            run['schedule_policy'] = POLICY
                 actual = {(r['run_id'],str(r['account_id'])) for r in tasks}
                 for run in runs:
                     due = parse_time(run.get('scheduled_at_utc')) or _slot(run.get('shanghai_date'), run.get('publish_time'))
-                    is_target_run = channel == 'tt' and run.get('trigger_type') != 'manual'
+                    is_target_run = run.get('trigger_type') != 'manual'
                     target = str(run.get('target_account_id') or '') if is_target_run else ''
                     if target:
                         accounts = [target]
@@ -358,4 +370,15 @@ def _collect_plan_gaps(paths, cutoff, channels):
                 _legacy_tt_slots(db, occupied, cutoff, add, unavailable)
         except (KeyError, ValueError, OSError, sqlite3.Error) as exc:
             unavailable('tt',type(exc).__name__)
+    if 'x' in channels and (paths.get('x_tag') or paths.get('x_tag_auto')):
+        profile = _collect_plan_gaps({'x': paths.get('x_tag'), 'x_auto': paths.get('x_tag_auto')}, cutoff, ('x',))
+        if not profile['available']:
+            out['available'] = out['channel_available']['x'] = False
+        out['warnings'].extend('画像：' + w for w in profile['warnings'])
+        for item in profile['items']:
+            item = dict(item, plan_key='profile:' + item['plan_key'])
+            identity = (item['channel'], item['plan_key'], item['account_id'])
+            if identity not in seen:
+                seen.add(identity)
+                out['items'].append(item)
     return out

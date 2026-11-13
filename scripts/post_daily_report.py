@@ -24,6 +24,8 @@ DEFAULT_PATHS = {
     "fb": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
     "x": "/var/lib/x-post-automation/accounts.sqlite3",
     "x_auto": "/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3",
+    "x_tag": "/mnt/data-disk/x-tag-publisher/posts.sqlite3",
+    "x_tag_auto": "/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3",
 }
 CHAT_ID = "oc_7c683c5770aef2e6c84a456e52cad389"
 DISK_UUID = "3e8ac4e8-7770-456d-9e89-2ec5dd405fa8"

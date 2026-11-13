@@ -53,53 +53,63 @@ def collect_cost(paths, start, end):
             unpriced += 1
         operations.append({"kind": kind, "source": source, "date": parse_time(stamp).astimezone(BEIJING).date().isoformat()})
 
-    try:
-        with read_db(paths["x"]) as db:
-            queues = {r["id"]: r for r in _rows(db, "x_post_queue", ["id", "delivery_mode"], True)}
-            queue_ids = set(queues)
-            logs = _rows(db, "x_post_publish_log", ["queue_id", "status", "x_post_id", "post_text", "published_at",
-                "unknown_outcome", "started_at", "attempt_count"], True)
-            by_queue = {r["queue_id"]: r for r in logs}
-            relays = _rows(db, "x_post_repost_ledger", ["queue_id", "status", "source_post_id", "source_published_at",
-                "reposted_at", "unknown_outcome"])
-            relay_ids = {r["queue_id"] for r in relays}
-            for log in logs:
-                if log.get("unknown_outcome") and in_window(log.get("started_at"), start, end):
-                    unresolved += 1
-                if (log.get("status") == "published" and not log.get("unknown_outcome")
-                        and log["queue_id"] not in relay_ids
-                        and queues.get(log["queue_id"], {}).get("delivery_mode") != "premium_relay_repost"):
-                    add_post(log.get("x_post_id"), log.get("published_at"), log.get("post_text"), "direct")
-            for relay in relays:
-                log = by_queue.get(relay["queue_id"], {})
-                add_post(relay.get("source_post_id"), relay.get("source_published_at"), log.get("post_text"), "relay_original")
-                if (relay.get("status") == "reposted" and not relay.get("unknown_outcome")
-                        and relay.get("source_post_id") and in_window(relay.get("reposted_at"), start, end)):
-                    operations.append({"kind": "repost", "source": "target_repost",
-                        "date": parse_time(relay["reposted_at"]).astimezone(BEIJING).date().isoformat()})
-    except (OSError, sqlite3.Error, KeyError):
-        unreadable.append("x")
-        warnings.append("X 主台账费用读取失败；费用总额未知，已读取部分单列。")
+    lanes = [('x', 'x_auto')]
+    if paths.get('x_tag') or paths.get('x_tag_auto'):
+        lanes.append(('x_tag', 'x_tag_auto'))
+    seen_reposts = set()
+    for primary_key, auto_key in lanes:
+        queue_ids = set()
+        try:
+            with read_db(paths[primary_key]) as db:
+                queues = {r["id"]: r for r in _rows(db, "x_post_queue", ["id", "delivery_mode", "account_id"], True)}
+                queue_ids = set(queues)
+                logs = _rows(db, "x_post_publish_log", ["queue_id", "status", "x_post_id", "post_text", "published_at",
+                    "unknown_outcome", "started_at", "attempt_count"], True)
+                by_queue = {r["queue_id"]: r for r in logs}
+                relays = _rows(db, "x_post_repost_ledger", ["queue_id", "status", "source_post_id", "source_published_at",
+                    "reposted_at", "unknown_outcome"])
+                relay_ids = {r["queue_id"] for r in relays}
+                for log in logs:
+                    if log.get("unknown_outcome") and in_window(log.get("started_at"), start, end):
+                        unresolved += 1
+                    if (log.get("status") == "published" and not log.get("unknown_outcome")
+                            and log["queue_id"] not in relay_ids
+                            and queues.get(log["queue_id"], {}).get("delivery_mode") != "premium_relay_repost"):
+                        add_post(log.get("x_post_id"), log.get("published_at"), log.get("post_text"), "direct")
+                for relay in relays:
+                    log = by_queue.get(relay["queue_id"], {})
+                    add_post(relay.get("source_post_id"), relay.get("source_published_at"), log.get("post_text"), "relay_original")
+                    if (relay.get("status") == "reposted" and not relay.get("unknown_outcome")
+                            and relay.get("source_post_id") and in_window(relay.get("reposted_at"), start, end)):
+                        identity = (str(relay.get("source_post_id")), str(queues.get(relay["queue_id"], {}).get("account_id")))
+                        if identity in seen_reposts:
+                            continue
+                        seen_reposts.add(identity)
+                        operations.append({"kind": "repost", "source": "target_repost",
+                            "date": parse_time(relay["reposted_at"]).astimezone(BEIJING).date().isoformat()})
+        except (OSError, sqlite3.Error, KeyError):
+            unreadable.append(primary_key)
+            warnings.append(primary_key + " 主台账费用读取失败；费用总额未知，已读取部分单列。")
 
-    try:
-        with read_db(paths["x_auto"]) as db:
-            tasks = _rows(db, "x_auto_task", ["status", "execution_queue_id", "publish_id", "published_at_utc",
-                "unknown_outcome", "post_text", "body_template", "selection_json"], True)
-            for task in tasks:
-                if task.get("status") != "published" or task.get("unknown_outcome"):
-                    continue
-                # A bridge is represented by the primary queue. If its primary
-                # result is unresolved, Auto must not overwrite that evidence.
-                if task.get("execution_queue_id") in queue_ids:
-                    continue
-                text = task.get("post_text")
-                if text is None:
-                    selection = json_value(task.get("selection_json"), {})
-                    text = selection.get("post_text") if isinstance(selection, dict) else None
-                add_post(task.get("publish_id"), task.get("published_at_utc"), text, "auto_unbridged")
-    except (OSError, sqlite3.Error, KeyError):
-        unreadable.append("x_auto")
-        warnings.append("X Auto 台账费用读取失败；费用总额未知，已读取部分单列。")
+        try:
+            with read_db(paths[auto_key]) as db:
+                tasks = _rows(db, "x_auto_task", ["status", "execution_queue_id", "publish_id", "published_at_utc",
+                    "unknown_outcome", "post_text", "body_template", "selection_json"], True)
+                for task in tasks:
+                    if task.get("status") != "published" or task.get("unknown_outcome"):
+                        continue
+                    # A bridge is represented by the primary queue. If its primary
+                    # result is unresolved, Auto must not overwrite that evidence.
+                    if task.get("execution_queue_id") in queue_ids:
+                        continue
+                    text = task.get("post_text")
+                    if text is None:
+                        selection = json_value(task.get("selection_json"), {})
+                        text = selection.get("post_text") if isinstance(selection, dict) else None
+                    add_post(task.get("publish_id"), task.get("published_at_utc"), text, "auto_unbridged")
+        except (OSError, sqlite3.Error, KeyError):
+            unreadable.append(auto_key)
+            warnings.append(auto_key + " 台账费用读取失败；费用总额未知，已读取部分单列。")
 
     counts = Counter(o["kind"] for o in operations if o["kind"])
     amounts = defaultdict(lambda: Decimal("0"))
