@@ -8,7 +8,8 @@ from pathlib import Path
 import sqlite3
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.recover_fb_unpublished import backup, require, sha
+from scripts.recover_fb_unpublished import require, sha
+from scripts.recovery_batch_backup import batch_backup, write_audit
 from features.fb_auto_posts.core import FBAutoPostStore
 from features.pipeline_dispatch.core import dumps, stamp
 
@@ -65,15 +66,15 @@ def main():
     for name in ('native','central','evidence','output'):
         p.add_argument('--'+name,required=True)
     p.add_argument('--task-id',type=int,required=True);p.add_argument('--apply',action='store_true');p.add_argument('--plan-sha256');p.add_argument('--backup-dir')
+    p.add_argument('--backup-batch', help='One shared batch ID for every task using the same backup directory')
     a=p.parse_args(); evidence=json.loads(Path(a.evidence).read_text())
     require(evidence.get('get_only') is True, 'get_evidence_required')
     items=[i for i in evidence['items'] if i['id']==a.task_id];require(len(items)==1,'task_evidence_missing')
     if a.apply:
-        require(a.backup_dir and a.plan_sha256,'apply_arguments_required')
-        folder=Path(a.backup_dir);folder.mkdir(mode=0o700,parents=True,exist_ok=True)
-        backup(a.native,folder/'fb.sqlite3');backup(a.central,folder/'dispatch.sqlite3')
+        require(a.backup_dir and a.backup_batch and a.plan_sha256,'apply_arguments_required')
     mode='rw' if a.apply else 'ro'
-    with contextlib.closing(sqlite3.connect(Path(a.native).resolve().as_uri()+'?mode='+mode,uri=True,timeout=30)) as c:
+    guard=batch_backup(a.backup_dir,a.backup_batch,a.native,a.central,'fb-observed-video') if a.apply else contextlib.nullcontext()
+    with guard as folder, contextlib.closing(sqlite3.connect(Path(a.native).resolve().as_uri()+'?mode='+mode,uri=True,timeout=30)) as c:
         c.row_factory=sqlite3.Row;c.execute('ATTACH DATABASE ? AS dispatch',(Path(a.central).resolve().as_uri()+'?mode='+mode,))
         c.execute('BEGIN IMMEDIATE' if a.apply else 'BEGIN')
         task=dict(c.execute('SELECT * FROM fb_auto_task WHERE id=?',(a.task_id,)).fetchone())
@@ -97,6 +98,14 @@ def main():
         result['plan_sha256']=sha(result)
         if a.apply:
             require(result['plan_sha256']==a.plan_sha256,'plan_changed')
+            before={'plan':result,'task':task,'job':job,'operations':operations,'native_operations':native_operations,'attempts':attempts}
+            for table,where,args in (
+                ('fb_auto_publish_ledger','task_id=?',(task['id'],)),
+                ('fb_auto_run','id=?',(task['run_id'],)),
+                ('dispatch.pipeline_resource','job_id=?',(job['id'],)),
+                ('dispatch.pipeline_legacy_resource','job_id=?',(job['id'],))):
+                before[table]=[dict(row) for row in c.execute('SELECT * FROM '+table+' WHERE '+where,args)]
+            write_audit(folder/('task-'+str(task['id'])+'-'+result['plan_sha256']+'-before.json'),before)
             now=stamp();published=result['published_at']
             proof={'source_key':key,'publish_id':video['id'],'status':'published','published_at':published,'get_verified':True,'evidence_sha256':result['evidence_sha256']}
             c.execute("UPDATE fb_auto_task SET status='published',graph_post_id=?,unknown_outcome=0,error_code='',error_message='',next_reconcile_at_utc='',completed_at_utc=? WHERE id=?",(video['id'],published,task['id']))
@@ -108,6 +117,8 @@ def main():
             c.execute('DELETE FROM dispatch.pipeline_legacy_resource WHERE job_id=?',(job['id'],))
             c.execute('INSERT INTO dispatch.pipeline_event(job_id,event_type,details_json,created_at) VALUES(?,?,?,?)',(job['id'],'fb_unknown_resolved_by_exact_video_get',dumps({**result,'previous_error':task['error_code']}),now))
             c.commit()
+            write_audit(folder/('task-'+str(task['id'])+'-'+result['plan_sha256']+'-committed.json'),
+                        {'plan':result,'applied':True,'proof':proof})
         else:c.rollback()
     result['applied']=a.apply;path=Path(a.output);path.write_text(json.dumps(result,indent=2));path.chmod(0o600)
     print(json.dumps(result))

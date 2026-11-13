@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.pipeline_dispatch.core import dumps
+from scripts.recovery_batch_backup import batch_backup, write_audit
 
 PREWRITE = {'identity_unavailable', 'group_pool_source_unavailable', 'source_busy'}
 REJECTED = {'fb_graph_190', 'fb_graph_368'}
@@ -140,21 +141,30 @@ def main():
     for name in ('central', 'native', 'job-ids', 'output'):
         p.add_argument('--'+name, required=True)
     p.add_argument('--apply', action='store_true'); p.add_argument('--plan-sha256'); p.add_argument('--backup-dir')
+    p.add_argument('--backup-batch', help='One shared batch ID for all exact-task recovery invocations')
     p.add_argument('--retry-query-failure', action='store_true', help='One bounded continuation of an already recovered task stopped by an unissued busy credential lookup')
     a = p.parse_args(); ids = json.loads(Path(a.job_ids).read_text())
     if a.apply:
-        require(a.plan_sha256 and a.backup_dir, 'apply_requires_plan_and_backup')
-        folder = Path(a.backup_dir); folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        backup(a.central, folder/'dispatch.sqlite3'); backup(a.native, folder/'fb.sqlite3')
+        require(a.plan_sha256 and a.backup_dir and a.backup_batch, 'apply_requires_plan_and_backup')
     mode = 'rw' if a.apply else 'ro'
-    with contextlib.closing(sqlite3.connect(Path(a.central).resolve().as_uri()+'?mode='+mode, uri=True, timeout=30)) as c:
+    guard = batch_backup(a.backup_dir,a.backup_batch,a.native,a.central,'fb-unpublished-recovery') if a.apply else contextlib.nullcontext()
+    with guard as folder, contextlib.closing(sqlite3.connect(Path(a.central).resolve().as_uri()+'?mode='+mode, uri=True, timeout=30)) as c:
         c.row_factory = sqlite3.Row
         c.execute('ATTACH DATABASE ? AS native', (Path(a.native).resolve().as_uri()+'?mode='+mode,))
         c.execute('BEGIN IMMEDIATE' if a.apply else 'BEGIN')
         result = plan(c, ids, a.retry_query_failure)
         if a.apply:
             require(result['plan_sha256'] == a.plan_sha256, 'plan_changed')
+            before={'plan':result,'jobs':[]}
+            for item in result['items']:
+                if item.get('already_recovered'):continue
+                table,key=('fb_video_task','task_id') if item['family']=='video' else ('fb_auto_task','id')
+                before['jobs'].append({'job':rows(c,'SELECT * FROM pipeline_job WHERE id=?',(item['job_id'],)),
+                    'native':rows(c,'SELECT * FROM native.'+table+' WHERE '+key+'=?',(item['source_id'],)),
+                    'operations':rows(c,'SELECT * FROM pipeline_operation WHERE job_id=?',(item['job_id'],))})
+            write_audit(folder/(result['plan_sha256']+'-before.json'),before)
             apply(c, result); c.commit()
+            write_audit(folder/(result['plan_sha256']+'-committed.json'),{'plan':result,'applied':True})
         else:
             c.rollback()
     result['applied'] = a.apply
