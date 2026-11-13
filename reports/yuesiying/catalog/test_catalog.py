@@ -113,5 +113,28 @@ class CatalogTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'database_role_mismatch'):
                     list(store.native_json_rows(config,'SELECT 1'))
 
+    def test_transport_retry_never_yields_a_partial_or_duplicate_page(self):
+        attempts=[]
+        def read(config,query):
+            attempts.append(1)
+            yield {'id':1}
+            if len(attempts)==1:raise store.NativeReadError(1,['2013'])
+            yield {'id':2}
+        with patch.object(store,'_native_json_rows_once',side_effect=read),patch.object(store.time,'sleep'):
+            self.assertEqual(list(store.native_json_rows('config','query')),[{'id':1},{'id':2}])
+        self.assertEqual(len(attempts),2)
+
+    def test_read_content_failure_is_not_retried(self):
+        with patch.object(store,'_native_json_rows_once',side_effect=ValueError('checksum mismatch')) as read:
+            with self.assertRaisesRegex(ValueError,'checksum mismatch'):
+                list(store.native_json_rows('config','query'))
+            self.assertEqual(read.call_count,1)
+
+    def test_transport_retries_are_bounded(self):
+        with patch.object(store,'_native_json_rows_once',side_effect=store.NativeReadError(1,['2013'])) as read, \
+                patch.object(store.time,'sleep'):
+            with self.assertRaises(store.NativeReadError):list(store.native_json_rows('config','query'))
+            self.assertEqual(read.call_count,3)
+
 
 if __name__=='__main__':unittest.main()

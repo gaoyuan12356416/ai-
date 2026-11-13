@@ -135,7 +135,29 @@ def _row(record):
             'video_duration': record['video_duration'], 'created_at': record['source_created_at']}
 
 
+class NativeReadError(RuntimeError):
+    def __init__(self,exit_code,codes):
+        self.retryable=bool(set(codes)&{'2003','2006','2013'})
+        super().__init__('catalog_native_read_failed:exit='+str(exit_code)+',codes='+','.join(codes))
+
+
 def native_json_rows(config,query):
+    for attempt in range(3):
+        try:
+            # Collect the complete page before exposing any rows. A transport
+            # retry cannot duplicate a partially yielded page.
+            page=list(_native_json_rows_once(config,query))
+        except (NativeReadError,subprocess.TimeoutExpired) as error:
+            if attempt==2 or isinstance(error,NativeReadError) and not error.retryable:raise
+            print(json.dumps({'phase':'read_transport_retry','attempt':attempt+1,
+                'error_type':type(error).__name__}),file=sys.stderr,flush=True)
+            time.sleep(attempt+1)
+            continue
+        yield from page
+        return
+
+
+def _native_json_rows_once(config,query):
     """Native compressed protocol avoids the pure Python driver's large-packet bug."""
     settings=json.loads(Path(config).read_text())['mysql']
     require(settings['host']=='101.32.56.53','unexpected_database_host')
@@ -148,7 +170,7 @@ def native_json_rows(config,query):
     try:
         output,error=process.communicate('SELECT @@read_only; SET SESSION MAX_EXECUTION_TIME=60000; '+query+';\n',timeout=90)
         codes=re.findall(r'\bERROR\s+(\d+)\b',error)
-        require(process.returncode==0,'catalog_native_read_failed:exit='+str(process.returncode)+',codes='+','.join(codes))
+        if process.returncode!=0:raise NativeReadError(process.returncode,codes)
         lines=output.splitlines();require(lines and lines[0].strip()=='1','database_role_mismatch')
         for line in lines[1:]:
             if line.strip():yield json.loads(line)
@@ -269,6 +291,9 @@ def scoped_rows(config, generation, content_ids):
         # MySQL VARCHAR equality can ignore trailing spaces; the old Python
         # catalog membership test does not. Keep its exact string semantics.
         result.extend((int(r['source_ordinal']),_row(r)) for r in catalog_pages(config,generation,chunk) if r['content_id'] in exact)
+        if offset%2000==0 or offset+200>=len(ids):
+            print(json.dumps({'phase':'scoped_read','content_ids_completed':min(offset+200,len(ids)),
+                'content_ids_total':len(ids),'rows':len(result)}),file=sys.stderr,flush=True)
     result.sort(key=lambda item:item[0])
     return [row for _,row in result]
 
