@@ -15,6 +15,11 @@ error contract is retained; there is no old SQLite fallback or source rebuild.
 The writer uses a dedicated venv with `requirements-fb-metrics.txt`, compressed
 MySQL protocol and one persistent connection/cursor per generation. FIFO readers
 also enable wire compression for the cross-region connection.
+An explicitly invoked migration may pass `--manual-reader` to use the reserved
+operator read pool. This option is not available through runtime environment
+settings; production readers always use FIFO. Transport failures are classified
+without exposing SQL or credentials and retried at most three times. Integrity
+failures are never retried as transport errors.
 
 Amounts use DECIMAL(38,12). Imports reject precision loss. Each imported generation
 is checked against the original ordered checksum, then read back through the
@@ -42,6 +47,9 @@ Deployment sequence:
 4. Apply the staged overlay. It preserves all unrelated runtime files, uses the
    existing scoped FB owner drain, and verifies/restores FB scheduler dependencies.
    The metric broker is separate; the main AI API is not restarted.
+   The immediate pre-switch environment is saved privately. A failed drain
+   restores its prior metric settings, and a post-switch failure records the
+   actual source pointer with the matching backend for explicit recovery.
 5. Restore the metric timers to their saved states. Verify the real read client,
    refresh unit and next triggers. Archive and remove the old metric file only
    after its processes have released it and the private archive verifies.

@@ -20,6 +20,18 @@ FILES = ["features/fb_auto_posts/service.py", "features/fb_auto_posts/metric_mys
 ENV = Path("/etc/fb-auto-post.env")
 BROKER = Path("/etc/systemd/system/fb-auto-metric-broker.service")
 TIMERS = ["fb-auto-post-metric-" + name + ".timer" for name in ("hourly", "repair")]
+METRIC_ENV_KEYS = ("FB_AUTO_METRIC_STORAGE=", "FB_AUTO_METRIC_BROKER_PORT=")
+
+
+def metric_settings(text):
+    return [line for line in text.splitlines() if line.startswith(METRIC_ENV_KEYS)]
+
+
+def write_metric_settings(settings):
+    # Preserve unrelated environment edits made since the release was staged.
+    lines = [line for line in ENV.read_text().splitlines() if not line.startswith(METRIC_ENV_KEYS)]
+    release.atomic(ENV, ("\n".join(lines + list(settings)) + "\n").encode())
+    ENV.chmod(0o600)
 
 
 def stage(folder):
@@ -50,6 +62,12 @@ def stage(folder):
 
 def apply(folder, rollback=False):
     manifest = json.loads((folder / "manifest.json").read_text())
+    environment_before = ENV.read_text()
+    if not rollback:
+        release.atomic(folder / "fb-auto-post.env.before-apply", environment_before.encode())
+        (folder / "fb-auto-post.env.before-apply").chmod(0o600)
+        manifest["metric_env_before"] = metric_settings(environment_before)
+        fb.save(folder / "manifest.json", manifest)
     if rollback:
         # Do not roll back to a missing/old archive. The current snapshot must
         # first be restored by the archive operator when the source was removed.
@@ -81,11 +99,10 @@ def apply(folder, rollback=False):
             if state == "active": release.run("systemctl", "stop", unit)
         # Gate and drain accepted owner requests before changing its import.
         if rollback:
-            release.atomic(ENV, (folder / "fb-auto-post.env.before").read_bytes()); ENV.chmod(0o600)
+            previous = manifest.get("metric_env_before", metric_settings((folder / "fb-auto-post.env.before").read_text()))
+            write_metric_settings(previous)
         else:
-            text = ENV.read_text()
-            text = "\n".join(line for line in text.splitlines() if not line.startswith(("FB_AUTO_METRIC_STORAGE=", "FB_AUTO_METRIC_BROKER_PORT=")))
-            release.atomic(ENV, (text + "\nFB_AUTO_METRIC_STORAGE=mysql\nFB_AUTO_METRIC_BROKER_PORT=8849\n").encode()); ENV.chmod(0o600)
+            write_metric_settings(["FB_AUTO_METRIC_STORAGE=mysql", "FB_AUTO_METRIC_BROKER_PORT=8849"])
         switch_folder = folder / ("rollback-switch" if rollback else "switch"); switch_folder.mkdir(exist_ok=True)
         fb.switch("fb", switch_folder, switch_manifest, audit)
         for mode in ("hourly", "repair"):
@@ -101,6 +118,23 @@ def apply(folder, rollback=False):
         release.run("systemctl", "daemon-reload")
         manifest["status"] = "rolled_back" if rollback else "active"
         fb.save(folder / "manifest.json", manifest)
+    except BaseException:
+        actual = str(Path("/opt/fb-auto-post/current").resolve())
+        # A failed drain leaves the old process/source in place. Restore its
+        # matching backend before restoring triggers. If the pointer switched,
+        # retain the matching new backend and record the exact recovery state.
+        if actual == lane["previous_root"]:
+            write_metric_settings(metric_settings(environment_before))
+            if not rollback:
+                release.run("systemctl", "disable", "--now", BROKER.name)
+                target = Path("/opt/fb-auto-metrics/current")
+                if target.is_symlink() and target.resolve() == SOURCE:
+                    target.unlink()
+        fb.save(folder / "failure-state.json", {"owner_source": actual,
+            "metric_settings": metric_settings(ENV.read_text()),
+            "owner_pointer_changed": actual == lane["candidate"],
+            "source_is_known": actual in (lane["candidate"], lane["previous_root"])})
+        raise
     finally:
         fb.fb_enabled("fb" in config["enabled_channels"], "fb" in config.get("preparation_only_channels", []))
         for unit, state in states.items():
