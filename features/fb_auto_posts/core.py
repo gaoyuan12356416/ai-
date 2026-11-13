@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from features.fb_video_publish import moboreels as moboreels_fb
+
 import json
 import random
 import re
@@ -17,8 +19,9 @@ from .links import FBPostLinkError, build_short_url, build_w2a_url
 from .strategy import daily_capacity, in_slot, planned_time, cooldown_content_ids, diverse_candidates
 from features import social_random_schedule as target_daily
 from . import target_schedule
+from . import page_caption
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
-from .languages import candidate_snapshots_for_pages,page_language
+from .languages import page_language
 from .profile_selection import Decision, load_profiles
 from .profile_material import choose_profile_material
 from features.hit_drama_target import content_ids as target_content_ids
@@ -82,13 +85,20 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class FBAutoPostStore:
-    def __init__(self, path: str | Path, *, now_fn=utc_now, rng: random.Random | None = None, max_late_seconds: int = 600):
+    def __init__(self, path: str | Path, *, now_fn=utc_now, rng: random.Random | None = None, max_late_seconds: int = 600, initialize_storage: bool = True):
         self.path = str(path)
         self.now_fn, self.rng = now_fn, rng or random.SystemRandom()
         self.max_late_seconds = int(max_late_seconds)
         self._lock = threading.RLock()
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.ensure_storage()
+        if initialize_storage:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self.ensure_storage()
+        else:
+            if not Path(self.path).is_file():raise ValueError('existing_metric_database_required')
+            with self.connect() as conn:
+                tables={row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {'fb_auto_metric_generation','fb_auto_metric_daily','fb_auto_metric_active_pointer'} <= tables:
+                raise ValueError('existing_metric_schema_required')
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
@@ -196,6 +206,7 @@ class FBAutoPostStore:
                 "video_template": "TEXT NOT NULL DEFAULT ''",
             })
             self._ensure_columns(conn, "fb_auto_task", {
+                "moboreels_json": "TEXT NOT NULL DEFAULT '{}'",
                 "planned_publish_at_utc": "TEXT NOT NULL DEFAULT ''",
                 "schedule_policy": "TEXT NOT NULL DEFAULT ''",
                 "video_template": "TEXT NOT NULL DEFAULT ''",
@@ -437,7 +448,10 @@ class FBAutoPostStore:
                 | manual_excluded_materials(conn, page_id, manual_cutoff))
 
     @staticmethod
-    def _message(config: Mapping[str, Any], material: Any, short_url: str = "") -> str:
+    def _message(config: Mapping[str, Any], material: Any, short_url: str = "", *, strict_length: bool = False) -> str:
+        if moboreels_fb.contains(config.get("message_template")):
+            from dataclasses import asdict
+            return moboreels_fb.render_auto(config["message_template"], asdict(material), short_url)
         replacements = {
             "drama_name": material.drama_name,
             "material_name": material.material_name,
@@ -450,7 +464,7 @@ class FBAutoPostStore:
             lambda match: str(replacements[match.group(1)] or ""),
             str(config["message_template"]),
         )
-        if short_url and len(text) > 5000:
+        if (short_url or strict_length) and len(text) > 5000:
             raise StoreError("fb_auto_message_length_invalid", "宏展开后的发布文案超过5000字符，未创建任务", 409)
         return text[:5000]
 
@@ -608,13 +622,16 @@ class FBAutoPostStore:
                 raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
         with self.connect() as conn:
             max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in page_rows),default=0)
+            caption_snapshot=page_caption.load(conn,template['created_by'],[p.page_id for p in page_rows])
         candidate_limit=min(5000,max(1000 if config.get("drama_cooldown_hours") else 500,max_reserved+100))
         profile_supported = not hit_drama and str(config.get('app_id')) == '1479'
         profile_snapshot = load_profiles([p.page_id for p in page_rows]) if profile_supported else ({'pages': {}}, {})
         profile_identity = [template_id, int(template['current_version']), slot_key]
         profile_enabled = profile_supported and any(not Decision(p.page_id, profile_identity, profile_snapshot).reason for p in page_rows)
-        candidate_snapshots = candidate_snapshots_for_pages({**config,'_candidate_limit':candidate_limit,
-            '_profile_selection':profile_enabled},page_rows,materials)
+        caption_languages={page.page_id:page_language(page.language) for page in page_rows}
+        candidate_snapshots = page_caption.candidate_snapshots({**config,'_candidate_limit':candidate_limit,
+            '_profile_selection':profile_enabled,
+            '_page_caption_description':page_caption.needs_description(caption_snapshot)},page_rows,materials,caption_snapshot)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
         # Catalog/metric freezing can be the longest read in planning.  Re-read
         # every mutable Page-side input afterwards so a pool disable, membership
@@ -629,7 +646,8 @@ class FBAutoPostStore:
         if hit_drama and hit_drama.get('match_policy'):
             from .hit_profile import filter_pages
             page_rows = filter_pages(page_rows, hit_drama)
-        if any(page_language(page.language) and page_language(page.language) not in candidate_snapshots for page in page_rows):
+        if any(page_language(page.language) and (page.page_id not in candidate_snapshots or
+                page_language(page.language)!=caption_languages.get(page.page_id)) for page in page_rows):
             raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
         for other in self.enabled_template_sources(template_id):
@@ -722,13 +740,14 @@ class FBAutoPostStore:
                         raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化，请重试',409)
                     blocked_content = cooldown_content_ids(conn, page.page_id, task_publish_at, int(config.get("drama_cooldown_hours", 0)), now)
                     allowed = set(hit_drama['page_content_ids'].get(page.page_id, [])) if hit_drama and hit_drama.get('match_policy') else (set(target_content_ids(hit_drama, language)) if hit_drama else None)
-                    page_snapshot = candidate_snapshots[language]
+                    page_snapshot = candidate_snapshots[page.page_id]
                     decision = Decision(page.page_id, profile_identity, profile_snapshot)
                     candidate_pool = page_snapshot.candidates
                     if not hit_drama and (decision.reason or page_snapshot.profile_error or not profile_supported):
                         candidate_pool = diverse_candidates(candidate_pool, candidate_limit,
                             20 if int(config.get('drama_cooldown_hours', 0)) else 0)
-                    scoped_candidates = [item for item in candidate_pool if allowed is None or item.content_id in allowed]
+                    scoped_candidates = [item for item in candidate_pool if (allowed is None or item.content_id in allowed)
+                        and page_caption.material_eligible(config,page.page_id,item,caption_snapshot)]
                     candidates = [item for item in scoped_candidates if item.content_id not in blocked_content]
                     if hit_drama:
                         material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)
@@ -757,11 +776,14 @@ class FBAutoPostStore:
                     status, reason = "skipped", "fb_auto_page_task_conflict"
                     values = (run_id, template_id, int(template["current_version"]), page.page_id, page.group_id, status, reason, material.material_id if material else "", material.content_id if material else "", "", self._message(config, material) if material else "", now, now, task_publish_at, str(config["video_template"]), gpu_job_id, material.media_url if material else "")
                     task_cursor = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
-                if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]):
+                if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]) and not moboreels_fb.contains(config["message_template"]):
                     task_id = int(task_cursor.lastrowid)
-                    short_url, long_url = self._link_values(page, material, task_id, link_timestamp)
-                    message_text = self._message(config, material, short_url)
-                    conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (message_text, short_url, long_url, task_id))
+                    selection['caption']=page_caption.freeze(self,conn,config,page,material,task_id,link_timestamp,caption_snapshot)
+                if status == 'planned' and material is not None and page_caption.handles(config) and '{{url}}' not in config['message_template']:
+                    selection['caption']=page_caption.freeze(self,conn,config,page,material,int(task_cursor.lastrowid),link_timestamp,caption_snapshot)
+                if status == "planned" and material is not None and moboreels_fb.contains(config["message_template"]):
+                    from .moboreels import intent
+                    conn.execute("UPDATE fb_auto_task SET moboreels_json=? WHERE id=?", (json.dumps(intent(config,material,dict(template)),ensure_ascii=False),int(task_cursor.lastrowid)))
                 if target_slot:
                     conn.execute("UPDATE fb_auto_task SET schedule_policy=? WHERE id=?", (target_daily.POLICY, int(task_cursor.lastrowid)))
                     target_daily.bind_slot(conn, target_schedule.source_key(template_id), day, page.page_id, ordinal, "fb_auto_task", int(task_cursor.lastrowid))

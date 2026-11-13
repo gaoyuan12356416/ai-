@@ -200,6 +200,12 @@ class GroupPoolService:
         conn.commit()
         return response
 
+    def _moboreels_options(self, actor):
+        from .moboreels import contains
+        with self.store.connect() as conn:
+            pool = pool_row(conn, actor["tenant_key"])
+        return {"moboreels": True} if contains(pool["caption_template"]) else {}
+
     def _mutate(self, actor, suffix, payload):
         extras = {"/items": {"material_ids"}, "/items/remove": {"item_ids"},
                   "/schedule": {"group_ids", "schedule_mode", "times", "daily_batches", "caption_template", "processing_mode"},
@@ -214,7 +220,7 @@ class GroupPoolService:
         resolved, clean = None, None
         if suffix == "/items":
             mids = ids(payload["material_ids"])
-            resolved = self.sources.resolve_materials(mids, need_desc=False)
+            resolved = self.sources.resolve_materials(mids, need_desc=False, **self._moboreels_options(actor))
         elif suffix == "/items/remove":
             clean = ids(payload["item_ids"])
         elif suffix == "/schedule":
@@ -423,7 +429,9 @@ class GroupPoolService:
                     chunk.append(row)
             if not chunk:
                 continue
-            resolved = self.sources.resolve_materials([r["material_id"] for r in chunk], need_desc="{desc}" in pool["caption_template"])
+            from .moboreels import contains
+            options = {"moboreels": True} if contains(pool["caption_template"]) else {}
+            resolved = self.sources.resolve_materials([r["material_id"] for r in chunk], need_desc="{desc}" in pool["caption_template"], **options)
             excluded.extend(resolved["errors"])
             fresh = {str(m["material_id"]): m for m in resolved["items"]}
             for row in chunk:
@@ -618,7 +626,7 @@ class GroupPoolService:
             return prior
         if method == "POST" and suffix == "/items/resolve":
             self._keys(payload, {"material_ids"})
-            return {"ok": True, **self.sources.resolve_materials(ids(payload["material_ids"]), need_desc=False)}
+            return {"ok": True, **self.sources.resolve_materials(ids(payload["material_ids"]), need_desc=False, **self._moboreels_options(actor))}
         if method == "POST" and suffix == "/preview":
             return self.preview(actor, payload)
         if method == "POST" and suffix == "/pages/preview":

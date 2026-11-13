@@ -180,7 +180,7 @@ class SourceRepository:
                 raise SourceError("page_unavailable", f"Page {pid}：" + page["blocked_reason"], 409)
         return {pid: available[pid] for pid in wanted}
 
-    def _conditions(self, *, enforce_blacklist=True, manual=False, page_pool=False):
+    def _conditions(self, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False):
         schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
         source_language, drama_language = _language_sql("s.language"), _language_sql("d.language")
         sql = f"""
@@ -189,18 +189,20 @@ class SourceRepository:
         """
         params = ["6"]
         if not page_pool:
-            sql += " AND s.product=%s AND s.is_delete=0 AND s.video_duration>0 AND s.video_duration<=3600"
-            params.append("Dramawave")
+            sql += " AND s.is_delete=0 AND s.video_duration>0 AND s.video_duration<=3600"
+            if not moboreels:
+                sql += " AND s.product=%s"
+                params.append("Dramawave")
         if not manual:
             sql += " AND TRIM(COALESCE(s.language,''))<>''"
-        if not (manual or page_pool):
+        if not (manual or page_pool or moboreels):
             sql += f"""
             AND EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
                 WHERE d.content_id=s.data_source_id AND d.app_id=%s AND d.release_status=1
                 AND d.deploy_time>0 AND d.deploy_time<=%s AND {drama_language}={source_language})
         """
             params.extend(["1479", int(self.now_fn().timestamp())])
-        if enforce_blacklist:
+        if enforce_blacklist and not moboreels:
             sql += f"""
             AND NOT EXISTS (SELECT 1 FROM `{blocked}`.ads_facebook_post_blacklist b
                 WHERE b.is_delete=0 AND b.type=1 AND b.content_id=s.data_source_id)
@@ -212,9 +214,9 @@ class SourceRepository:
             params.append("1479")
         return sql, params
 
-    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False):
+    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False):
         condition, base_params = self._conditions(enforce_blacklist=enforce_blacklist, manual=manual,
-                                                page_pool=page_pool)
+                                                page_pool=page_pool, moboreels=moboreels)
         sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
@@ -325,6 +327,10 @@ class SourceRepository:
     def search_materials(self, query: Mapping[str, Any], *, enforce_blacklist=True, manual=False) -> dict:
         if not isinstance(query, Mapping):
             raise SourceError("invalid_request", "素材筛选格式无效")
+        moboreels = query.get("catalog") == "moboreels"
+        if moboreels:
+            from .moboreels import institution_id
+            institution = institution_id()
         search = str(query.get("search") or "").strip()
         raw_language = str(query.get("language") or "").strip()
         language = page_language(raw_language) if raw_language else ""
@@ -341,7 +347,7 @@ class SourceRepository:
         if (len(search) > 200 or (raw_language and not language)
                 or (uploader and not re.fullmatch(r"0|[1-9][0-9]{0,18}", uploader))):
             raise SourceError("invalid_request", "素材筛选条件无效")
-        filters = [search, language, uploader]
+        filters = [search, language, uploader] + (["moboreels"] if moboreels else [])
         fingerprint = hashlib.sha256(json.dumps(filters, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         extra, params, boundary = [], [], ""
         numeric_search = bool(re.fullmatch(r"[0-9]+", search))
@@ -352,6 +358,9 @@ class SourceRepository:
             # requested row fails eligibility and a LIMIT cannot stop a scan).
             extra.append("AND s.id=%s")
             params.append(int(search))
+        elif search and moboreels:
+            extra.append("AND (LOCATE(LOWER(%s),LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0 OR EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND LOCATE(LOWER(%s),LOWER(d.story_name))>0))")
+            params.extend([search, institution, search])
         elif search:
             released_search = "" if manual else " AND ds.release_status=1 AND ds.deploy_time>0 AND ds.deploy_time<=%s"
             search_release_params = [] if manual else [int(self.now_fn().timestamp())]
@@ -385,7 +394,10 @@ class SourceRepository:
                 params.extend([decoded["before"], boundary])
             except (ValueError, TypeError, KeyError, UnicodeError):
                 raise SourceError("invalid_cursor", "分页标识无效或筛选条件已改变，请从第一页重新加载") from None
-        rows = self._select(" ".join(extra), params, limit + 1, enforce_blacklist=enforce_blacklist, manual=manual)
+        if moboreels:
+            extra.append("AND EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1)")
+            params.append(institution)
+        rows = self._select(" ".join(extra), params, limit + 1, enforce_blacklist=enforce_blacklist, manual=manual, **({"moboreels": True} if moboreels else {}))
         raw_ids = [str(row.get("material_id") or "") for row in rows]
         if (any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in raw_ids)
                 or len(raw_ids) != len(set(raw_ids)) or raw_ids != sorted(raw_ids, key=int, reverse=True)):
@@ -397,14 +409,18 @@ class SourceRepository:
                 materials.append(self._material(row, manual=manual))
             except SourceError:
                 continue
-        items = self._enrich(materials, strict=False, need_desc=False, manual=manual)
+        if moboreels:
+            from .moboreels import enrich
+            items = [enrich(item) for item in materials]
+        else:
+            items = self._enrich(materials, strict=False, need_desc=False, manual=manual)
         has_more = len(rows) > limit
         next_cursor = ""
         if has_more and scanned:
             value = {"v": 1, "before": str(scanned[-1]["material_id"]), "bound": boundary or raw_ids[0], "filter": fingerprint}
             next_cursor = base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
         result = {"items": items, "next_cursor": next_cursor, "has_more": has_more, "limit": limit}
-        if numeric_search and not items and not cursor:
+        if numeric_search and not items and not cursor and not moboreels:
             result["empty_reason"] = self._exact_search_reason(int(search), language, uploader, enforce_blacklist=enforce_blacklist, manual=manual)
         return result
 
@@ -436,7 +452,15 @@ class SourceRepository:
         gates = "视频来源" if manual else ("上架、黑名单、视频来源" if enforce_blacklist else "上架、视频来源")
         return f"已找到该素材，但未满足{gates}或同语言剧集信息等发布条件。"
 
-    def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, page_pool=False) -> dict[str, dict]:
+    def get_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False) -> dict[str, dict]:
+        if moboreels:
+            from .moboreels import source_materials
+            result = source_materials(self, material_ids, manual=manual, page_pool=page_pool)
+            if result["errors"]:
+                first = next(iter(result["errors"].values()))
+                raise SourceError(first["code"], first["message"], 409)
+            return result["items"]
+
         wanted = _ids(material_ids, None if manual or page_pool else MAX_MATERIALS, "素材")
         if any(len(value) > 19 for value in wanted):
             raise SourceError("invalid_request", "素材ID无效")
@@ -524,7 +548,12 @@ class SourceRepository:
             result[mid] = {"code": code, "message": message}
         return result
 
-    def resolve_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, page_pool=False) -> dict:
+    def resolve_materials(self, material_ids, need_desc: bool = False, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False) -> dict:
+        if moboreels:
+            from .moboreels import source_materials
+            result = source_materials(self, material_ids, manual=manual, page_pool=page_pool)
+            return result
+
         """Bounded partial resolution for ID admission and Excel previews.
 
         Per-row data errors are returned without weakening the strict legacy

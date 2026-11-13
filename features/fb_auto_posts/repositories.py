@@ -480,7 +480,8 @@ class MaterialRepository:
             if not duration.is_finite() or not 0 < duration <= 3600:
                 raise RepositoryError("fb_auto_material_duration_invalid", "实际媒体时长无效或超过当前1小时制作上限", 409)
         description = ""
-        if "{{desc}}" in str(config.get("message_template") or ""):
+        required_description = "{{desc}}" in str(config.get("message_template") or "")
+        if required_description or config.get('_page_caption_description'):
             descriptions = self.mysql.select(f"""
                 SELECT MAX(TRIM(r.`desc`)) drama_description,
                        COUNT(DISTINCT BINARY TRIM(r.`desc`)) description_count
@@ -490,7 +491,7 @@ class MaterialRepository:
             """, (str(config["app_id"]), content_id, language))
             if len(descriptions) == 1 and int(descriptions[0].get("description_count") or 0) == 1:
                 description = _description(descriptions[0].get("drama_description"))
-            if not description:
+            if required_description and not description:
                 raise RepositoryError("fb_auto_material_description_invalid", "模板使用短剧简介，但指定素材没有唯一有效的同语言简介", 409)
         return MaterialCandidate(str(material_id), content_id, source_url,
                                  str(row.get("material_name") or ""), str(detail.get("drama_name") or ""),
@@ -499,6 +500,10 @@ class MaterialRepository:
                                  str(row.get("material_tag") or "FBmanual"))
 
     def candidate_snapshot(self, config: Mapping[str, Any]) -> CandidateSnapshot:
+        from features.fb_video_publish.moboreels import contains
+        if contains(config.get("message_template")):
+            from .moboreels import candidate_snapshot
+            return candidate_snapshot(self, config)
         # Trusted planner-only bound: retain enough ranked rows for every known
         # Page cooldown plus the unchanged random choice among its first 50.
         candidate_limit=max(1,min(int(config.get("_candidate_limit",self.candidate_limit)),self.candidate_limit))
@@ -553,6 +558,7 @@ class MaterialRepository:
         # drama metadata, metrics and attribution. Legacy configs keep their scope.
         allowed_type_set = set(allowed_types)
         uses_description = "{{desc}}" in str(config.get("message_template") or "")
+        fetch_description = uses_description or config.get('_page_caption_description')
         from .strategy import diverse_candidates
         per_drama_limit = 20 if int(config.get("drama_cooldown_hours", 0)) else 0
         candidates: List[MaterialCandidate] = []
@@ -599,7 +605,7 @@ class MaterialRepository:
                 end_epoch = int(self.now_fn().timestamp())
                 metadata_rows = self.mysql.select(metadata_sql, (app_id, deploy_after, end_epoch, *allowed_types, *content_ids))
                 metadata = {str(item.get("content_id") or "").strip(): item for item in metadata_rows}
-                if uses_description:
+                if fetch_description:
                     description_sql = f"""
                         SELECT r.content_id,MAX(TRIM(r.`desc`)) drama_description,
                                COUNT(DISTINCT BINARY TRIM(r.`desc`)) description_count

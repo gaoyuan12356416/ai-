@@ -46,6 +46,8 @@ def build_manifest(conn, template, pages, materials, input_ids, operation_id,
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,70}", operation_id):
         raise BatchError("Invalid operation ID")
     config = json.loads(template["config_json"])
+    from features.fb_video_publish.moboreels import contains
+    is_moboreels = contains(config.get("message_template"))
     if template["status"] != "enabled" or config["video_template"] != "random_overlay":
         raise BatchError("An enabled random-overlay template is required")
     if len(set(input_ids)) != len(input_ids) or set(input_ids) != set(materials):
@@ -67,7 +69,7 @@ def build_manifest(conn, template, pages, materials, input_ids, operation_id,
     by_language = defaultdict(list)
     for mid in input_ids:
         m = materials[mid]
-        if m["series_code"] != waived_series or not m["media_url"] or not 0 < float(m["duration_seconds"]) <= 3600:
+        if (not is_moboreels and m["series_code"] != waived_series) or not m["media_url"] or not 0 < float(m["duration_seconds"]) <= 3600:
             raise BatchError("Material identity, series or duration is invalid")
         by_language[page_language(m["language"])].append(mid)
     queues, skipped = {}, []
@@ -172,8 +174,13 @@ def reserve_batch(store, manifest, *, max_jobs, max_daily_jobs, automatic_daily_
             tid = cur.lastrowid
             from .repositories import PageTarget
             page = PageTarget(**p)
-            short, long = store._link_values(page, m, tid, int(store.now_fn().timestamp()))
-            conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (store._message(config, m, short), short, long, tid))
+            from features.fb_video_publish.moboreels import contains
+            if contains(config.get("message_template")):
+                from .moboreels import intent
+                conn.execute("UPDATE fb_auto_task SET message_text=?,moboreels_json=? WHERE id=?", (store._message(config,m),canonical(intent(config,m,dict(template))),tid))
+            else:
+                short, long = store._link_values(page, m, tid, int(store.now_fn().timestamp()))
+                conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (store._message(config, m, short), short, long, tid))
         conn.commit()
     return {"run_id": rid, "idempotent": False, **summary(manifest)}
 

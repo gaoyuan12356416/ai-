@@ -33,7 +33,7 @@
         : "启用 Page 每天上限 " + activeCounts[0] + "–" + activeCounts[activeCounts.length - 1] + " 次（按 Page 配置）";
     const timing = schedule.mode === "fixed"
       ? "固定 " + maximum + " 个候选时段：" + (schedule.times || []).join(", ") + (config.stagger_minutes ? "（各时段后错峰 " + config.stagger_minutes + " 分钟）" : "")
-      : "各 Page 每日独立随机 " + maximum + " 次，00:00 备料；窗口：" + String(schedule.start || "—") + "–" + String(schedule.end || "—");
+      : "每日随机 " + maximum + " 个候选时刻：" + String(schedule.start || "—") + "–" + String(schedule.end || "—");
     const details = [timing + "（北京时间）"];
     if (custom) {
       details.push("已配置 " + counts.filter(count => count > 0).length + " 个 Page 安排发布、" + counts.filter(count => count === 0).length + " 个暂停");

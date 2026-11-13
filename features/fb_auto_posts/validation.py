@@ -14,7 +14,7 @@ TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 LANGUAGE_RE = re.compile(r"[a-z0-9]{2,8}(?:-[a-z0-9]{1,8}){0,3}")
 LANGUAGE_ALIASES = {"english":"en","spanish":"es","portuguese":"pt","indonesian":"id","french":"fr","german":"de","japanese":"ja","korean":"ko","thai":"th","vietnamese":"vi","arabic":"ar","russian":"ru","filipino":"tl"}
 MACRO_RE = re.compile(r"\{\{([a-z_][a-z0-9_]*)\}\}")
-ALLOWED_MACROS = {"drama_name", "material_name", "content_id", "desc", "url"}
+ALLOWED_MACROS = {"m_url", "desc", "drama_name", "material_name", "content_id", "url"}
 
 
 class ValidationError(ValueError):
@@ -144,6 +144,8 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         raise ValidationError("invalid_request", "模板名称或发布文案无效")
     if re.search(r"(?i)(access[_ -]?token|refresh[_ -]?token|authorization\s*:|bearer\s+[A-Za-z0-9])", message):
         raise ValidationError("fb_auto_message_template_invalid", "发布文案疑似包含凭证信息")
+    if "{{m_url}}" in message and "{{url}}" in message:
+        raise ValidationError("fb_auto_message_template_invalid", "Moboreels文案不可混用{{url}}，请仅使用{{m_url}}")
     macros = MACRO_RE.findall(message)
     remainder = MACRO_RE.sub("", message)
     if "{{" in remainder or "}}" in remainder or set(macros) - ALLOWED_MACROS:
