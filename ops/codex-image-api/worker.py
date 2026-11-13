@@ -82,10 +82,12 @@ class Worker:
                "--property=CapabilityBoundingSet=", "--property=TemporaryFileSystem=/mnt:ro",
                "--property=BindReadOnlyPaths=" + str(Path(__file__).resolve().parent),
                "--property=BindPaths=" + str(run), "--property=ReadWritePaths=" + str(run),
-               "--property=WorkingDirectory=" + str(run), "--property=UMask=0077",
+               # systemd 239 uses this mask for mount-namespace parent directories.
+               # The pre-created task is 0700; runner.py sets 0077 before any writes.
+               "--property=WorkingDirectory=" + str(run), "--property=UMask=0022",
                "--property=MemoryMax=3G", "--property=TasksMax=128",
                "--property=RuntimeMaxSec=" + str(self.config.timeout + 90),
-               "--property=StandardOutput=null", "--property=StandardError=null",
+               "--property=StandardOutput=null", "--property=StandardError=journal",
                "/usr/bin/python3", runner, str(run)]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
         if result.returncode:
