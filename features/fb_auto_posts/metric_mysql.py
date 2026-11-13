@@ -19,7 +19,7 @@ from .metrics import MetricTotals, MetricWindow, checksum_rows, metric_date, non
 
 SCHEMA = "ads_ai"
 TABLES = tuple("fb_auto_metric_" + name for name in ("generation", "daily", "active_pointer"))
-BATCH_SIZE = 1000
+BATCH_SIZE = 5000
 
 
 def exact_amount(value):
