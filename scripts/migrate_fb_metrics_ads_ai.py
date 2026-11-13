@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from features.fb_auto_posts.metric_mysql import MySQLMetricStore, config_from_file, exact_add
+from features.fb_auto_posts.metric_mysql import GatedMetricReader, MySQLMetricStore, config_from_file, exact_add
 
 
 def readonly(path):
@@ -126,6 +126,7 @@ def main():
     parser.add_argument("--reference-db", action="append", default=[])
     parser.add_argument("--config", default="/etc/codex-private-storage-archive.json")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--manual-reader", action="store_true", help="Use the operator read pool for this explicitly invoked migration only")
     args = parser.parse_args()
     if args.mode == "install":
         install(config_from_file(args.config)); print(json.dumps({"ok": True, "ddl_tables": 3})); return
@@ -136,7 +137,8 @@ def main():
         Path(args.output).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         if args.mode == "plan":
             print(json.dumps({key: manifest[key] for key in ("plan_sha256", "source_generation_count", "source_rows", "selected_rows")} | {"selected_generations": len(manifest["selected_headers"]), "active_days": len(manifest["pointers"])})); return
-        store, proof = MySQLMetricStore(config_from_file(args.config)), []
+        config = config_from_file(args.config)
+        store, proof = MySQLMetricStore(config, reader=GatedMetricReader(config, manual_migration=args.manual_reader)), []
         for index, header in enumerate(manifest["selected_headers"]):
             generation_id = int(header["id"])
             if args.mode == "migrate":

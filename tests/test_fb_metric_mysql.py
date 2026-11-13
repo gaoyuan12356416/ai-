@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from features.fb_auto_posts.core import StoreError
-from features.fb_auto_posts.metric_mysql import (MetricBrokerClient, MySQLMetricStore, amount_text,
+from features.fb_auto_posts.metric_mysql import (GatedMetricReader, MetricBrokerClient, MySQLMetricStore, amount_text,
     canonical_row, digest_row, exact_add, exact_amount, metric_store_from_env, window_from_rows)
 from scripts.fb_auto_metric_broker import validate_window
 from scripts.migrate_fb_metrics_ads_ai import json_metric_refs, integer_ids
@@ -40,6 +40,18 @@ class FakeReader:
 
 
 class MetricTests(unittest.TestCase):
+    def test_manual_reader_is_explicit_and_retries_only_transport_errors(self):
+        with patch.dict("os.environ", {"SQL_GATE_BYPASS": "1"}):
+            self.assertEqual(GatedMetricReader({}).client, "/usr/bin/mysql")
+            self.assertEqual(GatedMetricReader({}, manual_migration=True).client, "/usr/bin/mysql.real")
+        reader = GatedMetricReader({})
+        with patch.object(reader, "_query_once", side_effect=[StoreError("fb_auto_metric_query_mysql_2013", "", 503), []]) as query, patch("time.sleep"):
+            self.assertEqual(reader.query([]), [])
+            self.assertEqual(query.call_count, 2)
+        with patch.object(reader, "_query_once", side_effect=StoreError("fb_auto_metric_checksum_mismatch", "", 500)) as query:
+            with self.assertRaises(StoreError): reader.query([])
+            self.assertEqual(query.call_count, 1)
+
     def test_exact_decimal_and_no_rounding(self):
         self.assertEqual(amount_text("0.000000000001"), "0.000000000001")
         self.assertEqual(amount_text("12.300000"), "12.3")

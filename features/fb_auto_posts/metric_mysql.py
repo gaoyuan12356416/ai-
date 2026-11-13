@@ -70,10 +70,27 @@ def literal(value):
 
 class GatedMetricReader:
     """Root-owned fixed metric queries through the existing host FIFO wrapper."""
-    def __init__(self, config):
+    def __init__(self, config, *, manual_migration=False):
         self.config = config
+        # The explicit migration CLI may use the operator pool. Production
+        # callers never set this flag; no environment variable can bypass FIFO.
+        self.client = "/usr/bin/mysql.real" if manual_migration else "/usr/bin/mysql"
 
     def query(self, statements, *, timeout=60, execution_ms=20000):
+        for attempt in range(3):
+            try:
+                return self._query_once(statements, timeout=timeout, execution_ms=execution_ms)
+            except StoreError as error:
+                transient = error.code in {
+                    "fb_auto_metric_query_timeout", "fb_auto_metric_query_mysql_1040",
+                    "fb_auto_metric_query_mysql_2002", "fb_auto_metric_query_mysql_2003",
+                    "fb_auto_metric_query_mysql_2006", "fb_auto_metric_query_mysql_2013",
+                    "fb_auto_metric_query_mysql_2055"}
+                if not transient or attempt == 2:
+                    raise
+                time.sleep(attempt + 1)
+
+    def _query_once(self, statements, *, timeout, execution_ms):
         env = os.environ.copy()
         env.pop("SQL_GATE_BYPASS", None)
         env["MYSQL_PWD"] = self.config["password"]
@@ -84,16 +101,22 @@ class GatedMetricReader:
                + ";".join(statements) + "; ROLLBACK;\n")
         process = None
         try:
-            process = subprocess.Popen(["/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350",
+            process = subprocess.Popen([self.client, "-h", "101.32.56.53", "-P", "63350",
                                      "-u", self.config["user"], "--batch", "--raw", "--skip-column-names",
-                                     "--default-character-set=utf8mb4", "--connect-timeout=3", "--compress"],
+                                     "--default-character-set=utf8mb4", "--connect-timeout=10", "--compress"],
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     env=env, start_new_session=True)
-            output, _ = process.communicate(sql.encode(), timeout=timeout)
+            output, errors = process.communicate(sql.encode(), timeout=timeout)
             lines = output.splitlines()
-            if process.returncode or not lines or lines[0] != b"1":
-                raise ValueError("read failed")
+            if process.returncode:
+                match = re.search(rb"ERROR\s+(\d{3,5})\b", errors)
+                reason = "mysql_" + match.group(1).decode() if match else "exit_" + str(process.returncode)
+                raise StoreError("fb_auto_metric_query_" + reason, "指标只读数据库暂不可用", 503)
+            if not lines or lines[0] != b"1":
+                raise StoreError("fb_auto_metric_query_endpoint", "指标只读端点验证失败", 503)
             return [json.loads(bytes.fromhex(line.decode()).decode("utf-8")) for line in lines[1:] if line]
+        except subprocess.TimeoutExpired:
+            raise StoreError("fb_auto_metric_query_timeout", "指标只读查询超时", 503) from None
         except (OSError, ValueError, subprocess.SubprocessError):
             raise StoreError("fb_auto_metric_query_failed", "指标只读数据库暂不可用", 503) from None
         finally:
