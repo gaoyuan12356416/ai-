@@ -103,5 +103,14 @@ class MetricTests(unittest.TestCase):
             store = metric_store_from_env({"FB_AUTO_METRIC_STORAGE": "mysql", "FB_AUTO_POST_INTERNAL_TOKEN": "x" * 40})
             self.assertIsInstance(store, MetricBrokerClient)
 
+    def test_idempotent_refresh_preserves_row_count_contract(self):
+        writer = FakeWriter(); reader = FakeReader(writer)
+        store = MySQLMetricStore({}, reader=reader, writer_factory=lambda: writer)
+        existing = {"id": 7, "status": "ready", "checksum": "source", "storage_checksum": "target", "row_count": 12}
+        with patch.object(reader, "generation", return_value=existing), patch.object(store, "verify", return_value={"rows": 12}):
+            result = store.import_generation({"generation_key": "same"}, [])
+        self.assertEqual(result["row_count"], 12)
+        self.assertTrue(result["idempotent"])
+
 
 if __name__ == "__main__": unittest.main()

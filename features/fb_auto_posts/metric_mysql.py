@@ -234,7 +234,7 @@ class MySQLMetricStore:
             if activate:
                 with closing(self.writer_factory()) as db, db.cursor() as cursor:
                     self.activate(cursor, existing, utc_iso(datetime.now(timezone.utc))); db.commit()
-            return dict(result, id=existing["id"], status="ready", checksum=existing["checksum"], idempotent=True)
+            return dict(result, id=existing["id"], row_count=result["rows"], status="ready", checksum=existing["checksum"], idempotent=True)
         now = utc_iso(datetime.now(timezone.utc))
         keys = ("id", "generation_key", "platform", "metric_date", "product", "refreshed_at_utc", "created_at_utc")
         values = {key: header[key] for key in keys if key in header}
