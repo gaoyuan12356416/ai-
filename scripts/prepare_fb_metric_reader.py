@@ -16,12 +16,12 @@ def prepare(folder):
     assert Path('/opt/fb-auto-post/current').resolve()==previous,'fb_release_changed'
     name='features/fb_auto_posts/service.py';target=candidate/name
     old='    metric_store = FBAutoPostStore(metric_path)'
-    new='    from features.drama_audience.fb_metric_reader import open_existing_metrics\n    metric_store = open_existing_metrics(FBAutoPostStore, metric_path)'
+    new='    from features.fb_auto_posts.metric_reader import open_existing_metrics\n    metric_store = open_existing_metrics(FBAutoPostStore, metric_path)'
     text=target.read_text();assert text.count(old)==1
     assert sha(target)==sha(previous/name),'service_baseline_changed'
     content=text.replace(old,new,1).encode();compile(content,name,'exec');atomic(target,content)
     manifest['files'][name]=dict(before=sha(previous/name),after=sha(target))
-    name='features/drama_audience/fb_metric_reader.py';atomic(candidate/name,(source/name).read_bytes())
+    name='features/fb_auto_posts/metric_reader.py';atomic(candidate/name,(source/name).read_bytes())
     manifest['files'][name]=dict(before=sha(previous/name),after=sha(candidate/name))
     manifest['controller_commit']=commit;save(folder/'manifest.json',manifest)
     print(json.dumps(dict(status='prepared',commit=commit,scope='FB metric reader startup')))

@@ -151,7 +151,7 @@ class RouteTests(unittest.TestCase):
 
 class MetricReaderTests(unittest.TestCase):
     def test_existing_reader_does_not_write_during_read_snapshot(self):
-        from features.drama_audience.fb_metric_reader import open_existing_metrics
+        from features.fb_auto_posts.metric_reader import open_existing_metrics
         class Store:
             def __init__(self,path):self.path=path;self.ensure_storage()
             def ensure_storage(self):raise AssertionError('schema_write_called')
