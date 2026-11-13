@@ -1063,10 +1063,12 @@ class DispatchStore:
 
     def defer_blocked(self, claim, reason):
         """A native pre-claim account conflict waits without freezing a failure."""
-        if reason not in {"canonical_account_busy", "canonical_source_busy", "canonical_source_unavailable", "x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
+        if reason not in {"canonical_account_busy", "canonical_source_busy", "canonical_source_unavailable", "x_post_schedule_not_due", "x_post_drama_previous_episode_pending", "tt_auto_metric_window_not_ready"}:
             raise DispatchError("defer_reason_invalid")
         with self.transaction() as c:
             row = self._validate_claim(c, claim)
+            if reason == "tt_auto_metric_window_not_ready" and (row["channel"], row["family"], row["stage"]) != ("tt", "auto", "prepare"):
+                raise DispatchError("defer_reason_invalid")
             if reason in {"canonical_source_busy", "canonical_source_unavailable"} and (row["channel"], row["stage"]) != ("fb", "publish"):
                 raise DispatchError("defer_reason_invalid")
             operation_sql = "SELECT 1 FROM pipeline_operation WHERE job_id=?"
@@ -1081,7 +1083,8 @@ class DispatchStore:
                 raise DispatchError("operation_requires_reconciliation")
             c.execute("UPDATE pipeline_job SET status='queued',lease_expires_at='',updated_at=?,error_code=? WHERE id=?", (self.now(), reason, row["id"]))
             c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND generation=?", (row["id"], row["generation"]))
-            c.execute("INSERT INTO pipeline_cooldown VALUES(?,?,?) ON CONFLICT(resource_key) DO UPDATE SET until_at=excluded.until_at,reason=excluded.reason", ("job:" + str(row["id"]), stamp(self.clock() + dt.timedelta(seconds=30)), reason))
+            delay = 300 if reason == "tt_auto_metric_window_not_ready" else 30
+            c.execute("INSERT INTO pipeline_cooldown VALUES(?,?,?) ON CONFLICT(resource_key) DO UPDATE SET until_at=excluded.until_at,reason=excluded.reason", ("job:" + str(row["id"]), stamp(self.clock() + dt.timedelta(seconds=delay)), reason))
             self.event(c, row["id"], "admission_deferred", {"reason": reason}, self.now())
             return {"accepted": True, "deferred": True}
 

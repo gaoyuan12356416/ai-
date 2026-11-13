@@ -158,6 +158,18 @@ class Coordinator:
         except Exception as exc:
             if getattr(exc, "code", "") in {"claim_expired", "claim_conflict"}:
                 return {"job": None, "idle_reason": "claim_expired_during_reservation"}
+            if (getattr(exc, "code", "") == "tt_auto_metric_window_not_ready"
+                    and (job["channel"], job["family"], job["stage"]) == ("tt", "auto", "prepare")):
+                observed = self.registry.reconcile(job)
+                offer = observed.get("next_offer") or {}
+                proof = observed.get("canonical_receipt") or {}
+                if (observed.get("canonical_status") == "retry_wait"
+                        and proof.get("source_key") == job["source_key"]
+                        and not proof.get("publish_id")
+                        and not any(offer.get(key) for key in (
+                            "unknown_outcome", "publish_id", "source_attempt_count", "reconcile_only"))):
+                    self.store.defer_blocked(job, exc.code)
+                    return {"job": None, "idle_reason": exc.code}
             if getattr(exc, "code", "") in {"canonical_account_busy", "canonical_source_busy", "canonical_source_unavailable", "x_post_schedule_not_due", "x_post_drama_previous_episode_pending"}:
                 reason = exc.code
                 self.store.defer_blocked(job, reason)

@@ -404,7 +404,10 @@ class TTNativeBridge:
             except Exception as exc:
                 if native_token:
                     from features.tt_auto_posts.selector import NoEligibleMaterial
-                    if self.automatic and isinstance(exc, NoEligibleMaterial):
+                    if self.automatic and (isinstance(exc, NoEligibleMaterial) or (
+                            job["stage"] == "prepare"
+                            and getattr(exc, "code", "") == "tt_auto_metric_window_not_ready"
+                            and native.claim_phase == "selection")):
                         current = self._native(job)
                         result = self.service.executor._retry_or_fail(current, "selection", exc, native_token)
                         self.service.executor._update_run(result.run_id)
