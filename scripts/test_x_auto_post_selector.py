@@ -208,7 +208,7 @@ class FakeStore:
     def reserved_material_ids(self, material_ids):
         return set(material_ids).intersection(self.reserved)
 
-    def cooldown_content_ids(self, *, template_id, content_ids, since_utc):
+    def cooldown_content_ids(self, *, template_id, content_ids, since_utc, account_id=None):
         return set(content_ids).intersection(self.cooldown)
 
     def reserve_material(self, **kwargs):
