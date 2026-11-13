@@ -198,6 +198,10 @@ class Archive:
                    'size': sig['size'], 'stored_size': int(lower['content-length']), 'encoding': encoding,
                    'etag': lower.get('etag', ''), 'verified': True, 'private': True, 'reused': reused,
                    'path': str(path), 'namespace': namespace, 'signature': sig, 'verified_at': time.time()}
+        source_stat = os.lstat(str(path))
+        receipt.update(source_mode=stat.S_IMODE(source_stat.st_mode),
+                       source_uid=source_stat.st_uid, source_gid=source_stat.st_gid,
+                       source_nlink=source_stat.st_nlink)
         source_id = hashlib.sha256(str(path).encode()).hexdigest()
         receipt_key = '{}/receipts/{}/{}/{}.json'.format(self.prefix, namespace, source_id, sha256)
         self.client.put_object(Bucket=self.bucket, Key=receipt_key, ACL='private',
@@ -214,6 +218,10 @@ class Archive:
         if headers.get('x-cos-meta-source-sha256') != sha256 or headers.get('x-cos-meta-source-size') != str(size):
             raise RuntimeError('requested identity does not match archive metadata')
         target = Path(output).absolute()
+        if target.exists():
+            if target.is_file() and not target.is_symlink() and target.stat().st_size == size and digest_file(target) == sha256:
+                return {'path': str(target), 'sha256': sha256, 'size': size, 'verified': True, 'already_present': True}
+            raise FileExistsError('restore target exists with different content')
         target.parent.mkdir(parents=True, exist_ok=True)
         temp = target.with_name(target.name + '.archive-restore-' + str(os.getpid()))
         try:
@@ -260,9 +268,11 @@ def batch(archive, args):
                 if signature(path) != receipt['signature'] or open_inode(receipt['signature']):
                     raise RuntimeError('source changed or remains open; not removed')
                 # The restore receipt exists in private COS and in a durable local journal.
+                links = os.lstat(str(path)).st_nlink
                 path.unlink()
-                released += receipt['signature']['allocated']
-                append_receipt(manifest, dict(receipt, event='deleted', deleted_at=time.time()))
+                freed = receipt['signature']['allocated'] if links == 1 else 0
+                released += freed
+                append_receipt(manifest, dict(receipt, event='deleted', deleted_at=time.time(), released_bytes=freed))
             done += 1
             print(json.dumps({'done': done, 'path': str(path), 'released_bytes': released,
                               'source_bytes': receipt['size'], 'stored_bytes': receipt['stored_size']}), flush=True)
