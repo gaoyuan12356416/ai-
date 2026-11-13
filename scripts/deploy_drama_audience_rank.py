@@ -138,12 +138,18 @@ def apply(folder,rollback=False):
                 with switch_window(folder,55):
                     with (Path('/mnt/data-disk/fb-page-portraits')/'refresh.lock').open('a') as fblock:
                         fcntl.flock(fblock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                        preview(folder/'reprojection')
+                        proof=preview(folder/'reprojection')
                         # Catalog backup is online and remains outside publication DBs.
                         with closing(sqlite3.connect('file:/mnt/data-disk/drama-audience/catalog.sqlite3?mode=ro',uri=True)) as src,closing(sqlite3.connect(folder/'audience-before.sqlite3')) as dst:src.backup(dst)
                         assert check_no_writes('/mnt/data-disk/x-tag-publisher/posts.sqlite3'),'tag_write_inflight'
                         main_files(manifest)
-                        publish(folder/'reprojection')
+                        from features.drama_audience.store import VERSION
+                        before=[json.loads((folder/'reprojection'/(kind+'-before.json')).read_text()) for kind in ('x','fb')]
+                        already_current=all(d['meta'].get('audience_taxonomy_version')==VERSION for d in before)
+                        if not (already_current and not proof['missing_ids'] and all(not proof[k]['changed_channels'] for k in ('x','fb'))):
+                            publish(folder/'reprojection')
+                        else:
+                            save(folder/'reprojection/reused-versions.json',{k:d['meta']['version'] for k,d in zip(('x','fb'),before)})
                         info=manifest['lanes']['x'];pointer=Path(POINTERS['x'])
                         assert str(pointer.resolve())==info['previous'],'x_release_drift'
                         for name,row in info['files'].items():assert sha(pointer/name)==row['before'],'x_file_drift'
