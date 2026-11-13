@@ -1,4 +1,4 @@
-"""Record a compatible later FB release and preserve it in our rollback base."""
+"""Record a compatible later runtime release and preserve it in our rollback base."""
 import argparse
 import json
 import os
@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy
 
+GROUP = 'fb'
 CURRENT = Path('/mnt/data-disk/fb-legacy-pool-unblock-20261113/deployment-v3/candidate')
 FOLLOWUP = '3171151268611909609ef649e051482dbd102d71'
 CHANGED = {
@@ -27,11 +28,11 @@ def main():
     directory = args.deployment.resolve()
     d.require(directory.parent == d.DATA / 'deployments' and directory.name.startswith('post-products-'), 'Unexpected deployment')
     state = json.loads((directory / 'manifest.json').read_text())
-    d.require(state['groups']['fb']['status'] == 'activated' and state['groups']['fb']['resumed'], 'FB not active')
-    d.require('fb_followup' not in state, 'Followup already recorded')
-    old = Path(state['candidates']['fb'])
-    d.require(d.tree_digest(old) == state['candidate_trees']['fb'], 'Our FB candidate changed')
-    d.require(Path(state['roots']['fb']['logical']).resolve() == CURRENT, 'FB current changed again')
+    d.require(state['groups'][GROUP]['status'] == 'activated' and state['groups'][GROUP]['resumed'], 'FB not active')
+    d.require(GROUP + '_followup' not in state, 'Followup already recorded')
+    old = Path(state['candidates'][GROUP])
+    d.require(d.tree_digest(old) == state['candidate_trees'][GROUP], 'Our FB candidate changed')
+    d.require(Path(state['roots'][GROUP]['logical']).resolve() == CURRENT, 'FB current changed again')
 
     def files(root):
         return {str(p.relative_to(root)): d.digest(p) for p in root.rglob('*')
@@ -41,11 +42,11 @@ def main():
     d.require({k for k in a.keys() | b.keys() if a.get(k) != b.get(k)} == set(CHANGED), 'Unreviewed FB followup files')
     for relative, digest in CHANGED.items():
         d.require(b[relative] == digest, 'FB followup file changed')
-    rows = [r for r in state['files'] if r['lane'] == 'fb']
+    rows = [r for r in state['files'] if r['lane'] == GROUP]
     for row in rows:
         d.fence(row, installed=True)
     current_tree = d.tree_digest(CURRENT)
-    rollback = Path('/mnt/data-disk/post-product-scope-rollback') / args.sha / 'fb'
+    rollback = Path('/mnt/data-disk/post-product-scope-rollback') / args.sha / GROUP
     d.require(not rollback.exists(), 'Rollback tree already exists')
     rollback.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(CURRENT, rollback, symlinks=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
@@ -61,17 +62,18 @@ def main():
     for relative, digest in CHANGED.items():
         d.require(d.digest(rollback / relative) == digest, 'Rollback lost followup changes')
     d.require(d.tree_digest(CURRENT) == current_tree, 'FB changed during rollback staging')
-    receipt = directory / 'private/manifest-before-fb-followup.json'
+    receipt = directory / ('private/manifest-before-' + GROUP + '-followup.json')
     shutil.copy2(directory / 'manifest.json', receipt); os.chmod(receipt, 0o600)
-    state['fb_followup'] = {'record_commit': args.sha, 'preserved_commit': FOLLOWUP,
+    state[GROUP + '_followup'] = {'record_commit': args.sha, 'preserved_commit': FOLLOWUP,
                            'previous_candidate': str(old), 'preserved_files': CHANGED}
-    state['roots']['fb']['resolved'] = str(rollback)
-    state['original_trees']['fb'] = d.tree_digest(rollback)
-    state['candidates']['fb'] = str(CURRENT)
-    state['candidate_trees']['fb'] = current_tree
+    state['roots'][GROUP]['resolved'] = str(rollback)
+    state['original_trees'][GROUP] = d.tree_digest(rollback)
+    state['candidates'][GROUP] = str(CURRENT)
+    state['candidate_trees'][GROUP] = current_tree
     d.save(directory / 'manifest.json', state)
     print(json.dumps({'status': 'recorded', 'live': str(CURRENT), 'rollback': str(rollback), 'live_files_changed': 0}))
 
 
 if __name__ == '__main__':
     main()
+

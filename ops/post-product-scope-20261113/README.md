@@ -32,3 +32,5 @@ GitHub 提交推送后，在 CPU fetch 精确 SHA 并创建独立 checkout。
 线上 MySQL 5.7 全产品列表验收发现全表分组超时，追加 `refine_youtube.py` 部署索引优化：产品名称使用现有不区分大小写的 `name` 索引；上传人采用同目录 `material-source.uploaders.sql`，用 `user_id` 索引枚举后验证确有视频，保持完整上传人范围。没有同名 `.uploaders.sql` 的其他配置仍使用原查询。配置文件均为服务端只读 SELECT；修改素材范围时须同步其上传人 SELECT。此次优化通过父部署 manifest 保留原始备份，父部署回滚会一并撤销。
 
 等待在途 X 视频完成期间，FB 后续部署 `31711512` 已保留全部产品支持文件，并更新旧池队列独立性。`record_fb_followup.py` 核对后只更新部署记录及隔离回滚目录，不修改线上文件、不重启服务。回滚基线保留这次后续部署和此前的 Page 池混选。
+
+X 同期的上传连续性部署 `d6c66c58` 同样保留本次所有文件，仅另更新 `x_video_publish/transport.py`。`record_x_followup.py` 复用相同记录流程，使产品范围回滚保留该传输修复。
