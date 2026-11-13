@@ -4,9 +4,11 @@ import datetime as dt
 from decimal import Decimal
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import time
 
 FIELDS = {'id', 'name', 'language', 'data_source_id', 'video_duration', 'created_at'}
@@ -81,9 +83,20 @@ def file_sha(path):
 
 
 def connect(config, writer=False, streaming=False, source=False):
-    import mysql.connector
     settings = json.loads(Path(config).read_text())['mysql']
     require(settings['host'] == '101.32.56.53', 'unexpected_database_host')
+    if not writer:
+        import pymysql
+        connection=pymysql.connect(host=settings['host'],port=63350,user=settings['user'],password=settings['password'],
+            database='kunlunads_dev' if source else 'ads_ai',charset='utf8mb4',connect_timeout=5,
+            read_timeout=60,write_timeout=60,cursorclass=pymysql.cursors.DictCursor,autocommit=False)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT DATABASE() db,@@read_only ro');identity=cursor.fetchone()
+            require(identity['db']==('kunlunads_dev' if source else 'ads_ai') and int(identity['ro'])==1,'database_role_mismatch')
+            return connection
+        except BaseException:connection.close();raise
+    import mysql.connector
     raw = mysql.connector.connect(host=settings['host'], port=63353 if writer else 63350,
         user=settings['user'], password=settings['password'], database='kunlunads_dev' if source else 'ads_ai',
         charset='utf8mb4', connection_timeout=5, read_timeout=60, write_timeout=60,
@@ -121,6 +134,42 @@ def _row(record):
             'video_duration': record['video_duration'], 'created_at': record['source_created_at']}
 
 
+def native_json_rows(config,query):
+    """Native compressed protocol avoids the pure Python driver's large-packet bug."""
+    settings=json.loads(Path(config).read_text())['mysql']
+    require(settings['host']=='101.32.56.53','unexpected_database_host')
+    env=dict(os.environ,MYSQL_PWD=settings['password'])
+    command=['/usr/bin/mysql','--compress','--connect-timeout=5','--default-character-set=utf8mb4',
+        '--batch','--raw','--skip-column-names','-h',settings['host'],'-P','63350','-u',settings['user'],'-D','ads_ai']
+    process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,text=True,encoding='utf-8')
+    try:
+        process.stdin.write('SELECT @@read_only; SET SESSION MAX_EXECUTION_TIME=60000; '+query+';\n');process.stdin.close()
+        require(process.stdout.readline().strip()=='1','database_role_mismatch')
+        for line in process.stdout:
+            if line.strip():yield json.loads(line)
+        error=process.stderr.read();require(process.wait()==0,'catalog_native_read_failed:'+error[:500])
+    finally:
+        if process.poll() is None:process.terminate();process.wait(timeout=10)
+
+
+def catalog_pages(config,generation,content_ids=None):
+    require(re.fullmatch('[0-9a-f]{64}',generation or ''),'invalid_catalog_generation')
+    columns=PROJECTION.split(',')
+    projection='JSON_OBJECT('+','.join("'"+name+"',"+name for name in columns)+')'
+    clause="generation_id='"+generation+"'"
+    if content_ids is not None:
+        if not content_ids:return
+        clause+=' AND content_id IN ('+','.join("CONVERT(0x"+value.encode().hex()+" USING utf8mb4)" if value else "''" for value in content_ids)+')'
+    after=0
+    while True:
+        count=0
+        query='SELECT '+projection+' FROM '+ROWS+' WHERE '+clause+' AND source_ordinal>'+str(after)+' ORDER BY source_ordinal LIMIT 25000'
+        for record in native_json_rows(config,query):
+            ordinal=int(record['source_ordinal']);require(ordinal>after,'catalog_ordinal_not_increasing');after=ordinal;count+=1
+            yield record
+        if count<25000:return
+
+
 def verify(config, generation, expected_count, expected_digest):
     # A bounded poll tolerates replication lag without querying the writer.
     deadline = time.monotonic() + 60
@@ -133,12 +182,10 @@ def verify(config, generation, expected_count, expected_digest):
         require(time.monotonic() < deadline, 'catalog_replica_not_caught_up')
         time.sleep(1)
     digest = hashlib.sha256(); count = 0
-    with contextlib.closing(connect(config, streaming=True)) as db, db.cursor() as cursor:
-        cursor.execute('SELECT '+PROJECTION+' FROM '+ROWS+' WHERE generation_id=%s ORDER BY source_ordinal', (generation,))
-        for record in cursor:
-            count += 1
-            require(record['source_ordinal'] == count, 'catalog_ordinal_gap')
-            digest.update((canonical(_row(record))+'\n').encode())
+    for record in catalog_pages(config,generation):
+        count += 1
+        require(record['source_ordinal'] == count, 'catalog_ordinal_gap')
+        digest.update((canonical(_row(record))+'\n').encode())
     require(count == expected_count and digest.hexdigest() == expected_digest, 'catalog_full_readback_mismatch')
     return {'rows': count, 'row_sha256': digest.hexdigest()}
 
@@ -207,19 +254,8 @@ def scoped_rows(config, generation, content_ids):
     record = metadata(config,generation)
     require(record and record['status']=='verified','catalog_not_verified')
     result=[]; ids=sorted(set(map(str,content_ids)))
-    with contextlib.closing(connect(config)) as db, db.cursor() as cursor:
-        for offset in range(0,len(ids),200):
-            chunk=ids[offset:offset+200];last_content='';last_ordinal=0
-            while True:
-                cursor.execute('SELECT '+PROJECTION+' FROM '+ROWS+' FORCE INDEX(generation_content) '
-                    'WHERE generation_id=%s AND content_id IN ('+','.join(['%s']*len(chunk))+') '
-                    'AND (content_id>%s OR (content_id=%s AND source_ordinal>%s)) '
-                    'ORDER BY content_id,source_ordinal LIMIT 2000',
-                    [generation,*chunk,last_content,last_content,last_ordinal])
-                page=cursor.fetchall()
-                if not page:break
-                result.extend((int(r['source_ordinal']),_row(r)) for r in page)
-                last_content,last_ordinal=page[-1]['content_id'],page[-1]['source_ordinal']
+    for offset in range(0,len(ids),200):
+        result.extend((int(r['source_ordinal']),_row(r)) for r in catalog_pages(config,generation,ids[offset:offset+200]))
     result.sort(key=lambda item:item[0])
     return [row for _,row in result]
 
