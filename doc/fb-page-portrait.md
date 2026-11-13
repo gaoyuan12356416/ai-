@@ -4,17 +4,17 @@ Page 管理 gains creator filtering and a seven-complete-report-day income portr
 
 ## Accounting
 
-- Paid: Dramawave/platform 0, `ads_custom_source_insight.af_revenue0`, report `dt`, USD (same D0 metric and currency as current Dramawave material reports).
+- Paid: Dramawave and FreeReels/platform 0, `ads_custom_source_insight.af_revenue0`, report `dt`, USD. The operator approved adding FreeReels on 2026-11-13; see [the scoped collector update](fb-page-portrait-products-20261113.md).
 - Social: the verified AI-backend social warehouse, native Facebook 2049/2310, confirmed publications only. Current X audience/theme taxonomy is imported from the active shared backend. SocialKit and old-platform campaigns are outside that existing X-compatible attribution scope.
 - The latest seven complete UTC report dates are used. No historical fallback. A social-only Page is eligible. Current language configuration does not erase historical in-window activity in another language.
-- Exact content ID + normalized language classification; product 1479 only. Unknown or ambiguous labels stay unmarked. Revenue is divided across distinct broad themes using X's cent-conserving largest-remainder allocation. Audience shares use Page total; theme shares use their audience parent. This is an income preference proxy, not demographic user counts.
+- Exact app ID + content ID + normalized language classification, with app 1479 for DramaWave and 979 for FreeReels. Each product uses its own drama metadata; FreeReels never borrows the DramaWave-only authoritative audience cache. Unknown or ambiguous labels stay unmarked. Revenue is divided across distinct broad themes using X's cent-conserving largest-remainder allocation. Audience shares use Page total; theme shares use their audience parent. This is an income preference proxy, not demographic user counts.
 - Signed corrections remain in financial totals; an affected Page does not display misleading positive audience proportions.
 
 ## Performance and permissions
 
 Public GET `/api/fb-page-portraits?ids=...` accepts at most 20 unique IDs. Every request checks the existing Cookie and navigation/module gates. Active administrators have no source-owner filter: their current active admin membership and tenant's configured Page IDs are re-read from indexed local SQLite, avoiding a second full source list. Ordinary users retain the existing fresh Page-list source-owner gate. There is no authorization cache. Invalid or mixed unauthorized scope fails closed. No credentials or user-supplied actors are accepted. Local immutable SQLite indexes serve summaries, trees, and 50-drama pages. Portrait data reads never query source SQL. Only currently displayed rows load summaries; trees and drama pages load on demand with abort/generation protection. Creator filtering narrows the already authorized list using the immutable creator ID.
 
-The collector pins the verified social warehouse and reads seven bounded paid date aggregations through the existing FIFO-gated reader (63350). It writes only `ads_ai.fb_page_revenue_profile` on 63353, verifies payload hashes and sums on the replica, then atomically publishes the local serving version. Any incomplete source aborts the refresh and preserves the last successful snapshot. An independent timer runs hourly at :25 plus jitter. There is no dependency on or restart of the publisher.
+The collector pins the verified social warehouse and reads seven paid dates through the existing FIFO-gated reader (63350). Paid queries use contiguous series-code ranges on the existing index, with one repeatable-read snapshot per product/day and exact decimal merging before cent rounding. It writes only `ads_ai.fb_page_revenue_profile` on 63353, verifies payload hashes and sums on the replica, then atomically publishes the local serving version. Any incomplete source aborts the refresh and preserves the last successful snapshot. An independent timer runs hourly at :25 plus jitter. There is no dependency on or restart of the publisher.
 
 ## Deployment and rollback
 
