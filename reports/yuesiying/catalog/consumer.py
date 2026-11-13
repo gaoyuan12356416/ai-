@@ -68,7 +68,11 @@ def bind(workdir,config,generation):
     if record['source_kind']=='legacy-json' and legacy.exists():
         require(file_sha(legacy)==record['source_sha256'],'legacy_library_does_not_match_generation')
     binding={key:record[key] for key in ('generation_id','generated_at','source_kind','source_sha256')}
-    for name,text in [('inventory-time.txt',record['generated_at']+'\n'),('catalog-generation.json',canonical(binding)+'\n')]:
+    files=[('catalog-generation.json',canonical(binding)+'\n')]
+    inventory=root/'inventory-time.txt'
+    if not inventory.exists() or inventory.read_text().strip()!=record['generated_at']:
+        files.insert(0,('inventory-time.txt',record['generated_at']))
+    for name,text in files:
         temporary=root/('.'+name+'.catalog-tmp');temporary.write_text(text,encoding='utf-8');temporary.chmod(0o600)
         temporary.replace(root/name)
     return binding
