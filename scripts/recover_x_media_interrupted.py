@@ -183,7 +183,9 @@ def backup(path,directory,label):
     require(not target.exists(),'backup_exists')
     temporary=target.with_suffix('.sqlite3.tmp')
     with contextlib.closing(connect(path)) as c,contextlib.closing(sqlite3.connect(temporary)) as dest:
-        c.backup(dest)
+        # Native ledgers use rollback journals. Release the source read lock
+        # between small backup steps so active publishers can keep committing.
+        c.backup(dest,pages=256,sleep=.01)
         require(dest.execute('PRAGMA quick_check').fetchone()[0]=='ok','backup_integrity_failed')
     temporary.chmod(0o600);temporary.replace(target)
     return str(target)
@@ -202,6 +204,16 @@ def check_current(saved,current,armed=False,held=False):
     require(stable(current)==stable(saved),'execution_facts_changed')
 
 
+def check_job(saved,current,held=False):
+    current=dict(current)
+    if held:
+        require(current['hold_reason']==HOLD,'recovery_hold_changed')
+        current['hold_reason']=saved['hold_reason']
+    ignored={'updated_at','source_status','source_meta_json'}
+    require({k:v for k,v in current.items() if k not in ignored}==
+            {k:v for k,v in saved.items() if k not in ignored},'job_changed_during_reconciliation')
+
+
 def apply(plan,backup_dir,actor,stop_after=None):
     check_plan(plan);require(actor.strip(),'actor_required');timestamp=now()
     # One backup per owning DB before any mutation. On resume, original backups
@@ -213,18 +225,24 @@ def apply(plan,backup_dir,actor,stop_after=None):
     for item in plan['items']:
         p=item['proof'];j,q,l=p['job'],p['queue'],p['log'];key=j['source_key'];g=j['generation']
         with contextlib.closing(connect(plan['central'],False)) as c,contextlib.closing(connect(item['native'],False)) as n:
-            c.execute('BEGIN IMMEDIATE');c.execute(SCHEMA)
+            c.execute(SCHEMA);c.commit()
             audit=rows(c,'SELECT * FROM '+AUDIT+' WHERE job_id=? AND generation=?',(j['id'],g))
             if audit:
                 require(audit[0]['plan_sha256']==plan['plan_sha256'],'different_recovery_plan')
                 if audit[0]['state']=='committed':c.rollback();completed.append(j['id']);continue
             else:
-                n.execute('BEGIN');check_current(p,collect(c,n,j['id']));n.rollback()
+                c.execute('BEGIN');n.execute('BEGIN')
+                check_current(p,collect(c,n,j['id']));n.rollback();c.rollback()
+                c.execute('BEGIN IMMEDIATE')
+                check_job(j,one(c,'SELECT * FROM pipeline_job WHERE id=?',(j['id'],)))
                 c.execute('INSERT INTO '+AUDIT+' VALUES(?,?,?,?,?,?,?)',(j['id'],g,plan['plan_sha256'],'staged',encoded(item),actor,timestamp))
                 c.execute('UPDATE pipeline_job SET hold_reason=? WHERE id=?',(HOLD,j['id']))
             c.commit()
             if stop_after=='staged':raise RuntimeError('injected_after_stage')
-            c.execute('BEGIN IMMEDIATE');n.execute('BEGIN IMMEDIATE');n.execute(AUTH_SCHEMA);n.execute(SCHEMA)
+            # The terminal job's explicit hold revokes admission. Full evidence
+            # scans must not hold the shared coordinator writer lock while
+            # unrelated workers are issuing permits or refreshing their leases.
+            c.execute('BEGIN');n.execute('BEGIN IMMEDIATE');n.execute(AUTH_SCHEMA);n.execute(SCHEMA)
             auth=rows(n,'SELECT * FROM '+AUTH+' WHERE source_key=? AND stage=? AND from_generation=?',(key,'publish',g))
             check_current(p,collect(c,n,j['id']),armed=bool(auth),held=True)
             if auth:
@@ -240,11 +258,13 @@ def apply(plan,backup_dir,actor,stop_after=None):
                 XPostStore._sync_run(n,q['id'],timestamp)
             n.commit();c.rollback()
             if stop_after=='armed':raise RuntimeError('injected_after_arm')
-            c.execute('BEGIN IMMEDIATE');n.execute('BEGIN IMMEDIATE')
+            c.execute('BEGIN');n.execute('BEGIN IMMEDIATE')
             check_current(p,collect(c,n,j['id']),armed=True,held=True)
             from features.pipeline_dispatch.x_prepost_recovery import authorization
             require(authorization(n,one(n,'SELECT * FROM x_post_queue WHERE id=?',(q['id'],)),
                                   one(n,'SELECT * FROM x_post_publish_log WHERE id=?',(l['id'],))), 'runtime_authorization_invalid')
+            c.rollback();c.execute('BEGIN IMMEDIATE')
+            check_job(j,one(c,'SELECT * FROM pipeline_job WHERE id=?',(j['id'],)),held=True)
             meta=json.loads(one(c,'SELECT source_meta_json FROM pipeline_job WHERE id=?',(j['id'],))['source_meta_json'])
             meta.update(reconcile_only=False,legacy_inflight=False,unknown_outcome=False)
             c.execute("UPDATE pipeline_job SET status='ready',hold_reason='',external_intent=0,started_at='',finished_at='',lease_expires_at='',claim_hash='',node_id='',worker_id='',source_meta_json=?,updated_at=? WHERE id=?",(encoded(meta),timestamp,j['id']))
