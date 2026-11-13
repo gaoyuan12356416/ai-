@@ -34,10 +34,10 @@ def collect(c,n,jid):
     return p
 
 
-def validate(p):
+def validate(p, *, ack_only=False):
     j,q,l=p['job'],p['queue'],p['log'];g=j['generation']
     require(j['channel']=='x' and j['stage']=='publish' and j['status']=='failed' and g>=2
-            and j['error_code']=='x_tag_dispatch_failed' and not j['external_intent']
+            and j['error_code'] in ({'x_tag_dispatch_failed','x_post_premium_relay_unavailable'} if ack_only else {'x_tag_dispatch_failed'}) and not j['external_intent']
             and not j['hold_reason'] and not j['canonical_receipt'],'not_unentered_failure')
     require(p['prepare']['status']=='completed','prepare_changed')
     require(q['status']=='queued' and l['status']=='reserved' and not l['unknown_outcome']
@@ -57,12 +57,12 @@ def validate(p):
     return auth[0]
 
 
-def plan(scope):
-    out={'central':scope['central'],'items':[],'kind':'explicit_unentered_continuation','utc':original.now()}
+def plan(scope,ack_only=False):
+    out={'central':scope['central'],'items':[],'kind':'explicit_failure_ack_only' if ack_only else 'explicit_unentered_continuation','utc':original.now()}
     with contextlib.closing(original.connect(scope['central'])) as c:
         for jid in scope['job_ids']:
             with contextlib.closing(original.connect(scope['natives']['tag'])) as n:
-                p=collect(c,n,jid);validate(p)
+                p=collect(c,n,jid);validate(p,ack_only=ack_only)
                 require(authorization(n,p['queue'],p['log'],p['job']),'runtime_permission_invalid')
                 out['items'].append({'native':scope['natives']['tag'],'proof':p})
     out['plan_sha256']=digest(out);return out
@@ -74,7 +74,7 @@ def stage_receipt_ack(p,actor,backup_dir):
     for i,path in enumerate(sorted({x['native'] for x in p['items']})):
         if not (Path(backup_dir)/(str(i)+'.sqlite3')).exists():original.backup(path,Path(backup_dir),str(i))
     for item in p['items']:
-        saved=item['proof'];j=saved['job'];validate(saved)
+        saved=item['proof'];j=saved['job'];validate(saved,ack_only=p['kind']=='explicit_failure_ack_only')
         with contextlib.closing(original.connect(p['central'])) as c,contextlib.closing(original.connect(item['native'],False)) as n:
             c.execute('BEGIN');n.execute('BEGIN IMMEDIATE')
             require(original.stable(collect(c,n,j['id']))==original.stable(saved),'execution_facts_changed')
@@ -106,6 +106,7 @@ def matches(saved,current,held=False,armed=False):
 
 def apply(p,folder,actor,stop_after=None):
     unsigned=dict(p);unsigned.pop('plan_sha256');require(digest(unsigned)==p['plan_sha256'],'plan_changed')
+    require(p['kind']=='explicit_unentered_continuation','receipt_ack_plan_cannot_rearm')
     require(actor.strip(),'actor_required');folder=Path(folder)
     for item in p['items']:
         j=item['proof']['job']
@@ -150,11 +151,11 @@ def apply(p,folder,actor,stop_after=None):
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=('plan','apply','stage-receipt-ack'));p.add_argument('--scope');p.add_argument('--plan');p.add_argument('--backup-dir');p.add_argument('--actor');p.add_argument('--output',required=True);a=p.parse_args()
-    if a.action=='plan': result=plan(json.loads(Path(a.scope).read_text()))
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=('plan','plan-receipt-ack','apply','stage-receipt-ack'));p.add_argument('--scope');p.add_argument('--plan');p.add_argument('--backup-dir');p.add_argument('--actor');p.add_argument('--output',required=True);a=p.parse_args()
+    if a.action in ('plan','plan-receipt-ack'): result=plan(json.loads(Path(a.scope).read_text()),ack_only=a.action=='plan-receipt-ack')
     elif a.action=='stage-receipt-ack': result=stage_receipt_ack(json.loads(Path(a.plan).read_text()),a.actor,a.backup_dir)
     else: result=apply(json.loads(Path(a.plan).read_text()),a.backup_dir,a.actor)
     with open(a.output,'x') as f:json.dump(result,f,ensure_ascii=False,indent=2)
-    Path(a.output).chmod(0o600);print(json.dumps({'ok':True,'count':len(result.get('items',result.get('continued_job_ids',[])))}))
+    Path(a.output).chmod(0o600);print(json.dumps({'ok':True,'count':len(result.get('items',result.get('continued_job_ids',result.get('receipt_ack_authorized_job_ids',[]))))}))
 
 if __name__=='__main__':main()

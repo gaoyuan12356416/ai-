@@ -1,6 +1,6 @@
 import copy
 import unittest
-from scripts.resume_x_unentered_recovery import validate,matches
+from scripts.resume_x_unentered_recovery import validate,matches,apply,digest
 
 
 def proof():
@@ -16,6 +16,12 @@ class Tests(unittest.TestCase):
         for name in ('operations','checkpoints','receipts','native_operations','native_checkpoints'):
             p=proof();p[name]=[{'generation':2}]
             with self.subTest(name=name),self.assertRaises(ValueError):validate(p)
+    def test_capability_failure_is_ack_only_and_never_new_execution(self):
+        p=proof();p['job']['error_code']='x_post_premium_relay_unavailable'
+        with self.assertRaises(ValueError):validate(p)
+        validate(p,ack_only=True)
+        plan={'kind':'explicit_failure_ack_only','items':[{'proof':p}]};plan['plan_sha256']=digest(plan)
+        with self.assertRaisesRegex(ValueError,'receipt_ack_plan_cannot_rearm'):apply(plan,'unused','test')
     def test_only_exact_failed_delivery_can_continue(self):
         p=proof();p['job']['claim_hash']='same'
         p['deliveries']=[dict(generation=2,claim_hash='same',response_json='{"accepted":true,"status":"failed"}')]
