@@ -58,7 +58,10 @@ Deployment sequence:
    refresh unit and next triggers. Archive and remove the old metric file only
    after its processes have released it and the private archive verifies.
 
-Rollback: retain the MySQL data. Restore the original SQLite archive to the
+Rollback: retain the MySQL data. First save and stop both metric timers and wait
+for their active refresh services to finish, so no new day version can race with
+the restore check; the rollback tool requires both timers/services inactive.
+Restore the original SQLite archive to the
 original metric path first if it was removed. Before making it authoritative,
 restore all post-cutover MySQL generations, preserving their integer IDs and
 generation keys, and synchronize the current day pointers. Verify those restored

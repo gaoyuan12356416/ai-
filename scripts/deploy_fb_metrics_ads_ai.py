@@ -116,6 +116,8 @@ def apply(folder, rollback=False):
         # Do not roll back to a missing/old archive. The current snapshot must
         # first be restored by the archive operator when the source was removed.
         assert Path("/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3").is_file(), "restore_metric_archive_first"
+        for timer in TIMERS:
+            assert fb.show(timer) == "inactive" and fb.show(timer.replace(".timer", ".service")) == "inactive", "pause_metric_refresh_before_rollback"
         validate_rollback_snapshot("/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3")
     else:
         migration = json.loads((folder.parent / "migration.json").read_text())
