@@ -218,7 +218,7 @@ class Archive:
         if headers.get('x-cos-meta-source-sha256') != sha256 or headers.get('x-cos-meta-source-size') != str(size):
             raise RuntimeError('requested identity does not match archive metadata')
         target = Path(output).absolute()
-        if target.exists():
+        if os.path.lexists(str(target)):
             if target.is_file() and not target.is_symlink() and target.stat().st_size == size and digest_file(target) == sha256:
                 return {'path': str(target), 'sha256': sha256, 'size': size, 'verified': True, 'already_present': True}
             raise FileExistsError('restore target exists with different content')
@@ -230,7 +230,16 @@ class Archive:
                 self.verify(key, sha256, size, headers['x-cos-meta-archive-encoding'], output=f)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(str(temp), str(target))
+            # Publish without replacement: a writer may have created the target
+            # during the download, including a dangling symbolic link.
+            os.link(str(temp), str(target))
+            temp.unlink()
+            if os.name == 'posix':
+                parent_fd = os.open(str(target.parent), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
         finally:
             if temp.exists():
                 temp.unlink()

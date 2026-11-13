@@ -126,6 +126,37 @@ class ArchiveTest(unittest.TestCase):
             self.assertTrue(other.exists())
             self.assertEqual(json.loads(journal.read_text().splitlines()[-1])['released_bytes'], 0)
 
+    def test_restore_does_not_overwrite_target_created_during_download(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'live.db'
+            a = self.archive()
+            old_hash = hashlib.sha256(b'old').hexdigest()
+            a.head = lambda key: {'x-cos-meta-source-sha256': old_hash,
+                                  'x-cos-meta-source-size': '3', 'x-cos-meta-archive-encoding': 'identity'}
+            def download(*args, output):
+                output.write(b'old')
+                p.write_bytes(b'new data')
+            a.verify = download
+            with self.assertRaises(FileExistsError):
+                a.get('storage-archive/v1/object', p, old_hash, 3)
+            self.assertEqual(p.read_bytes(), b'new data')
+            self.assertEqual(list(Path(td).glob('*.archive-restore-*')), [])
+
+    def test_restore_refuses_dangling_symbolic_link(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'live.db'
+            try:
+                p.symlink_to(Path(td) / 'missing')
+            except OSError:
+                self.skipTest('symbolic link creation unavailable')
+            a = self.archive()
+            old_hash = hashlib.sha256(b'old').hexdigest()
+            a.head = lambda key: {'x-cos-meta-source-sha256': old_hash,
+                                  'x-cos-meta-source-size': '3', 'x-cos-meta-archive-encoding': 'identity'}
+            with self.assertRaises(FileExistsError):
+                a.get('storage-archive/v1/object', p, old_hash, 3)
+            self.assertTrue(p.is_symlink())
+
 
 if __name__ == '__main__':
     unittest.main()
