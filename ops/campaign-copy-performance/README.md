@@ -272,9 +272,17 @@ The legacy full API is unchanged. Bounded revision-keyed view caches never query
 SQL from HTTP handlers; all money and ROAS definitions remain unchanged.
 Frontend entity decoration now reuses inflated objects instead of cloning them.
 
-Refresh SQL pages use 50,000 copy-log rows instead of 500,000 to stay inside the
+Refresh SQL pages use 250,000 copy-log rows instead of 500,000 to stay inside the
 statement deadline. The read-only session allows 64 MiB range optimizer memory
 so exact-Ad IN lists do not fall back to a whole-date scan. Global SQL gate,
 consistent snapshot, 15-second statement/840-second cycle limits and atomic
 complete-refresh publishing remain enforced. Failed refreshes keep the visible
 stale timestamp. Verify a real candidate refresh before calling freshness fixed.
+
+The report now uses mysql-connector-python 9.4.0's native C driver with negotiated
+MySQL compression. Install this directory's requirements before switching. The
+pure-Python compressed broker failed a real multi-packet probe and is explicitly
+not used. A dedicated duplicate of the sole report SQL socket preserves forced
+shutdown on SQL gate loss/deadline; the HTTP server never opens SQL connections.
+Read-only port and database flags are still checked in the same gated transaction.
+A real probe confirmed Compression=ON and a SELECT SLEEP deadline was interrupted.

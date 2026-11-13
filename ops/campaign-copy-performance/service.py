@@ -45,7 +45,7 @@ PLATFORM_LABELS = {0: "Meta", 3: "TikTok"}
 INSIGHT_CHUNK_SIZES = {0: 20000, 3: 20000}
 REFRESH_LOOKBACK_DAYS = 7
 REFRESH_BUDGET_SECONDS = 840
-COPY_LOG_PAGE_ROWS = 50000
+COPY_LOG_PAGE_ROWS = 250000
 METRIC_FIELDS = (
     "impressions",
     "clicks",
@@ -208,18 +208,52 @@ def mysql_connection():
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
         raise RuntimeError("missing MySQL settings: " + ", ".join(missing))
-    return pymysql.connect(
-        host=os.environ["ADMIN_MAPPING_MYSQL_HOST"],
-        port=port,
+    # This report transfers hundreds of MB over a lossy cross-region link.
+    # Negotiate MySQL protocol compression without bypassing the SQL gate.
+    import mysql.connector
+    connection = mysql.connector.connect(
+        host=os.environ["ADMIN_MAPPING_MYSQL_HOST"], port=port,
         user=os.environ["ADMIN_MAPPING_MYSQL_USER"],
-        password=os.environ["ADMIN_MAPPING_MYSQL_PASSWORD"],
-        database="ads_business",
-        charset="utf8mb4",
-        connect_timeout=5,
-        read_timeout=60,
-        write_timeout=5,
-        cursorclass=pymysql.cursors.DictCursor,
+        password=os.environ["ADMIN_MAPPING_MYSQL_PASSWORD"], database="ads_business",
+        charset="utf8mb4", connection_timeout=5, read_timeout=60,
+        write_timeout=15, compress=True, use_pure=False,
     )
+    # The C driver does not expose its descriptor. Capture the sole socket
+    # to this exact endpoint (HTTP requests never open SQL connections) so gate expiry can interrupt a blocked read.
+    guards = []
+    endpoint = socket.gethostbyname(os.environ["ADMIN_MAPPING_MYSQL_HOST"])
+    for descriptor in os.listdir('/proc/self/fd'):
+        guard = None
+        try:
+            guard = socket.fromfd(int(descriptor), socket.AF_INET, socket.SOCK_STREAM)
+            if guard.getpeername()[:2] == (endpoint, port):guards.append(guard)
+            else:guard.close()
+        except OSError:
+            if guard is not None:guard.close()
+    if len(guards) != 1:
+        for guard in guards:guard.close()
+        connection.close()
+        raise RuntimeError('compressed SQL cancellation socket unavailable')
+    return CompressedConnection(connection, guards[0])
+
+
+class CompressedConnection:
+    """Preserve DictCursor/context management and socket shutdown on gate loss."""
+    def __init__(self, connection, guard):
+        self.connection = connection
+        self.guard = guard
+
+    @property
+    def _sock(self):
+        return self.guard
+
+    def cursor(self):
+        return self.connection.cursor(dictionary=True, buffered=True)
+
+    def close(self):
+        try:self.connection.close()
+        finally:self.guard.close()
+
 
 
 @contextmanager

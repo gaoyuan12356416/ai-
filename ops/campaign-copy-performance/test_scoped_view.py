@@ -24,4 +24,18 @@ class ScopeTests(unittest.TestCase):
    self.assertEqual(c.get_view({'level':['0'],'copy_start':['2026-11-10'],'copy_end':['2026-11-10']})[2],etag)
    with self.assertRaises(ValueError):c.get_view({'level':['9']})
    with self.assertRaises(ValueError):c.get_view({'copy_start':['invalid']})
+
+class CompressedConnectionTests(unittest.TestCase):
+ def test_native_connection_preserves_buffered_dictionary_cursor(self):
+  from unittest.mock import Mock
+  native,guard=Mock(),Mock();wrapped=service.CompressedConnection(native,guard)
+  wrapped.cursor();native.cursor.assert_called_once_with(dictionary=True,buffered=True)
+  self.assertIs(wrapped._sock,guard)
+  wrapped.close();native.close.assert_called_once();guard.close.assert_called_once()
+ def test_cancellation_guard_closes_even_when_driver_close_raises(self):
+  from unittest.mock import Mock
+  native,guard=Mock(),Mock();native.close.side_effect=RuntimeError('driver close failed')
+  with self.assertRaises(RuntimeError):service.CompressedConnection(native,guard).close()
+  guard.close.assert_called_once()
+
 if __name__=='__main__':unittest.main()
