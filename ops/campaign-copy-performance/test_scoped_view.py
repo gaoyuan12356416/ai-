@@ -38,7 +38,6 @@ class CompressedConnectionTests(unittest.TestCase):
   with self.assertRaises(RuntimeError):service.CompressedConnection(native,guard).close()
   guard.close.assert_called_once()
 
-if __name__=='__main__':unittest.main()
 
 class BoundedRefreshTests(unittest.TestCase):
  def test_resume_pending_dates_without_regressing_watermark(self):
@@ -56,3 +55,5 @@ class BoundedRefreshTests(unittest.TestCase):
   old={'m':{'refreshed_through':'2026-11-14','stat_end':'2026-11-14','history_next_date':'2026-08-28','pending_refresh_dates':['2026-08-28']}}
   days,cursor,pending=service.bounded_refresh_dates(old,[date(2026,11,14),date(2026,8,28)],'2026-08-29')
   self.assertEqual(cursor,'2026-08-29');self.assertEqual(pending,[])
+
+if __name__=='__main__':unittest.main()
