@@ -134,26 +134,31 @@ def apply(folder,rollback=False):
             while any(run('systemctl','show',u.replace('.timer','.service'),'-p','ActiveState','--value') in ('active','activating') for u in portrait_timers):
                 if time.monotonic()>deadline:raise RuntimeError('portrait_refresh_running_retry')
                 time.sleep(2)
-            with switch_window(folder,55):
-                with (Path('/mnt/data-disk/fb-page-portraits')/'refresh.lock').open('a') as fblock:
-                    fcntl.flock(fblock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                    assert check_no_writes('/var/lib/x-post-automation/accounts.sqlite3'),'standard_write_inflight'
-                    preview(folder/'reprojection')
-                    # Catalog backup is online and remains outside publication DBs.
-                    with closing(sqlite3.connect('file:/mnt/data-disk/drama-audience/catalog.sqlite3?mode=ro',uri=True)) as src,closing(sqlite3.connect(folder/'audience-before.sqlite3')) as dst:src.backup(dst)
-                    assert check_no_writes('/mnt/data-disk/x-tag-publisher/posts.sqlite3'),'tag_write_inflight'
-                    main_files(manifest)
-                    publish(folder/'reprojection')
-                    info=manifest['lanes']['x'];pointer=Path(POINTERS['x'])
-                    assert str(pointer.resolve())==info['previous'],'x_release_drift'
-                    for name,row in info['files'].items():assert sha(pointer/name)==row['before'],'x_file_drift'
-                    temp=pointer.with_name('current.audience-next');temp.symlink_to(info['candidate']);temp.replace(pointer)
-                    switch_standard(folder)
-                    run('systemctl','restart','x-tag-auto.service','x-tag-gateway.service','x-tag-post.service','x-channel-tag-revenue.service','drama-material-api.service',timeout=120)
+            if not manifest.get('main_x_active'):
+                with switch_window(folder,55):
+                    with (Path('/mnt/data-disk/fb-page-portraits')/'refresh.lock').open('a') as fblock:
+                        fcntl.flock(fblock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                        preview(folder/'reprojection')
+                        # Catalog backup is online and remains outside publication DBs.
+                        with closing(sqlite3.connect('file:/mnt/data-disk/drama-audience/catalog.sqlite3?mode=ro',uri=True)) as src,closing(sqlite3.connect(folder/'audience-before.sqlite3')) as dst:src.backup(dst)
+                        assert check_no_writes('/mnt/data-disk/x-tag-publisher/posts.sqlite3'),'tag_write_inflight'
+                        main_files(manifest)
+                        publish(folder/'reprojection')
+                        info=manifest['lanes']['x'];pointer=Path(POINTERS['x'])
+                        assert str(pointer.resolve())==info['previous'],'x_release_drift'
+                        for name,row in info['files'].items():assert sha(pointer/name)==row['before'],'x_file_drift'
+                        temp=pointer.with_name('current.audience-next');temp.symlink_to(info['candidate']);temp.replace(pointer)
+                        run('systemctl','restart','x-tag-auto.service','x-tag-gateway.service','x-tag-post.service','x-channel-tag-revenue.service','drama-material-api.service',timeout=120)
+                        manifest['main_x_active']=True;save(folder/'manifest.json',manifest)
             # The existing FB release helper drains only FB and retains its states.
-            activate_lane('fb',folder/'fb')
+            if json.loads((folder/'fb/manifest.json').read_text())['status']!='active':
+                activate_lane('fb',folder/'fb')
             run('systemctl','restart','fb-page-portrait.service',timeout=30)
             install_jobs()
+            # A standard-X upload holds only its own service switch. Completed
+            # portrait/UI/FB phases remain valid and a retry skips them.
+            if str(Path(POINTERS['standard']).resolve())==manifest['lanes']['standard']['previous']:
+                switch_standard(folder)
         manifest['status']='rolled_back' if rollback else 'active';save(folder/'manifest.json',manifest)
     finally:
         for unit,state in states.items():
