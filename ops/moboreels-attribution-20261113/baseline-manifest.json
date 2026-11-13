@@ -20,7 +20,7 @@
     },
     "tt_auto": {
       "logical": "/opt/tt-auto-post/current",
-      "resolved": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto"
+      "resolved": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt"
     },
     "public_static": {
       "logical": "/usr/share/nginx/html",
@@ -3239,266 +3239,6 @@
       "repo_path": "ops/moboreels-attribution-20261113/runtime/tt/scripts/tt_post_service.py"
     },
     {
-      "local_path": "tt_auto/features/__init__.py",
-      "remote_path": "/opt/tt-auto-post/current/features/__init__.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/__init__.py",
-      "runtime": "tt_auto",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "size": 0,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/__init__.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/__init__.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/__init__.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/__init__.py",
-      "runtime": "tt_auto",
-      "sha256": "a22f1741ca1ddf7eeb8fe1ac6cff6de1a82087a533cf4a1c37829cb16c6ca66d",
-      "size": 432,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/__init__.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/automation_health.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/automation_health.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/automation_health.py",
-      "runtime": "tt_auto",
-      "sha256": "3d3df50b8d3593da39aa0c3a4659c8afff50182d96b92ee0dcb54dab37dc6e29",
-      "size": 3039,
-      "mtime_ns": 1791456867963378763,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/automation_health.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/client.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/client.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/client.py",
-      "runtime": "tt_auto",
-      "sha256": "7b6167f1cebc7a12b45e81a9e52ee5d73e139bb7224c403833be1efe1dd79860",
-      "size": 10498,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/client.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/code_broker.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/code_broker.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/code_broker.py",
-      "runtime": "tt_auto",
-      "sha256": "d175040c7ef06d7de0211bc63ab597629a3f40ce9593ce4051d1b6503403288e",
-      "size": 20277,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/code_broker.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/code_broker_client.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/code_broker_client.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/code_broker_client.py",
-      "runtime": "tt_auto",
-      "sha256": "ccedcb914dc21d5811f19a73dd67687c22c95073658ecd5ca1a9f240aba1c1dd",
-      "size": 5155,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/code_broker_client.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/core.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/core.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/core.py",
-      "runtime": "tt_auto",
-      "sha256": "91b606cd2cc94dce1d32c32381af09625201d15305a67833df8ec74f30ad6215",
-      "size": 157851,
-      "mtime_ns": 1794282651068441797,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/core.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/legacy_reader.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/legacy_reader.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/legacy_reader.py",
-      "runtime": "tt_auto",
-      "sha256": "7d62e0416a31fdad43e2a4c711598c2196c840ed775ddc79ba5654dbe86f4eab",
-      "size": 26026,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/legacy_reader.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/links.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/links.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/links.py",
-      "runtime": "tt_auto",
-      "sha256": "35f9471d3016e91d084d2797b5f55762fbd607f46d46dc51e636a0be15d31215",
-      "size": 9155,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/links.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/publisher.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/publisher.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/publisher.py",
-      "runtime": "tt_auto",
-      "sha256": "da713109c6630fea1df7bba314053ee9f1ad9b837207a93ebf9a8785719a6afb",
-      "size": 49277,
-      "mtime_ns": 1792121389799383288,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/publisher.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/repositories.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/repositories.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/repositories.py",
-      "runtime": "tt_auto",
-      "sha256": "7ccb62d62e7189b65c098c2395be6511c3e003cbc5594775df6a72baa87f3c29",
-      "size": 31310,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/repositories.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/selector.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/selector.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/selector.py",
-      "runtime": "tt_auto",
-      "sha256": "193d6592ad48c72b470aa9ff8ba95c4e9a6d10204bb94feffe27a84651d701c1",
-      "size": 39382,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/selector.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/service.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/service.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/service.py",
-      "runtime": "tt_auto",
-      "sha256": "369351bc15382282b6f2af198145fbd2d73fcd44409ad1231ddc669f9d5c571e",
-      "size": 67549,
-      "mtime_ns": 1794282651100441204,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/service.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_auto_posts/validation.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/validation.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_auto_posts/validation.py",
-      "runtime": "tt_auto",
-      "sha256": "d05ac2fc37b5e1d1b297e88586a371a8e879cc863a6857515af5f69661b2544c",
-      "size": 13707,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_auto_posts/validation.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_posts/__init__.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/__init__.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_posts/__init__.py",
-      "runtime": "tt_auto",
-      "sha256": "edddc29b907b9ebbe58cf80df7ef9b7a826332e6ea80507c97ac3345ceb9bd11",
-      "size": 1975,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_posts/__init__.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_posts/code_routes.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/code_routes.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_posts/code_routes.py",
-      "runtime": "tt_auto",
-      "sha256": "29282309790cc4e9822a1c314fb64ed22b3ba4a35b6f2e87df7646b88a2904be",
-      "size": 28496,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_posts/code_routes.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_posts/core.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/core.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_posts/core.py",
-      "runtime": "tt_auto",
-      "sha256": "1e99fdd86f104121f27ea3817b26808db372066680d86ff7d21aebb450797ce2",
-      "size": 400135,
-      "mtime_ns": 1793623934001054933,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_posts/core.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_posts/links.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/links.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_posts/links.py",
-      "runtime": "tt_auto",
-      "sha256": "8294b4f7680c00def7c8557fdac2a97ed26ac034b59ae66c6222714e0f0c4f7f",
-      "size": 18289,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_posts/links.py"
-    },
-    {
-      "local_path": "tt_auto/features/tt_posts/service.py",
-      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/service.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/tt_posts/service.py",
-      "runtime": "tt_auto",
-      "sha256": "fa85720a0c6cb00f2fd45f0cb648da1842edb059c283173f9921f84167ed67be",
-      "size": 270624,
-      "mtime_ns": 1793626800797658159,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/tt_posts/service.py"
-    },
-    {
-      "local_path": "tt_auto/features/x_posts/__init__.py",
-      "remote_path": "/opt/tt-auto-post/current/features/x_posts/__init__.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/x_posts/__init__.py",
-      "runtime": "tt_auto",
-      "sha256": "6b42d19e586f309e8d0bfdb0556215906529b594f1b7684279af38f8fddc8de5",
-      "size": 681,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/x_posts/__init__.py"
-    },
-    {
-      "local_path": "tt_auto/features/x_posts/drama_selector.py",
-      "remote_path": "/opt/tt-auto-post/current/features/x_posts/drama_selector.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/x_posts/drama_selector.py",
-      "runtime": "tt_auto",
-      "sha256": "a501e62bddb6cf538ea85a8aaa8ad796b9c092b15f622b36cf269c5ae412a6b1",
-      "size": 24781,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/x_posts/drama_selector.py"
-    },
-    {
-      "local_path": "tt_auto/features/x_posts/media_repair.py",
-      "remote_path": "/opt/tt-auto-post/current/features/x_posts/media_repair.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/x_posts/media_repair.py",
-      "runtime": "tt_auto",
-      "sha256": "31a93239aa39c61da8a825c299081225af81f01676571481d7c642ab958bd00f",
-      "size": 50810,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/x_posts/media_repair.py"
-    },
-    {
-      "local_path": "tt_auto/features/x_posts/selector.py",
-      "remote_path": "/opt/tt-auto-post/current/features/x_posts/selector.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/x_posts/selector.py",
-      "runtime": "tt_auto",
-      "sha256": "1e459f8040a0474639a59ff79c2e6191991123a98cc1d304a7708eefa1c15b87",
-      "size": 41732,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/x_posts/selector.py"
-    },
-    {
-      "local_path": "tt_auto/features/x_posts/service.py",
-      "remote_path": "/opt/tt-auto-post/current/features/x_posts/service.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/features/x_posts/service.py",
-      "runtime": "tt_auto",
-      "sha256": "3407cb5f57b7e667bd93d689f76d1f6edb085cbdd539b408e811bdeecef33832",
-      "size": 364357,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/features/x_posts/service.py"
-    },
-    {
-      "local_path": "tt_auto/scripts/tt_auto_post_runner.py",
-      "remote_path": "/opt/tt-auto-post/current/scripts/tt_auto_post_runner.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/scripts/tt_auto_post_runner.py",
-      "runtime": "tt_auto",
-      "sha256": "b5bf486714ff10306ad5091536feacc79f784b9f17e7923acf1eda90817a7bcd",
-      "size": 15078,
-      "mtime_ns": 1793623934091053250,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/scripts/tt_auto_post_runner.py"
-    },
-    {
-      "local_path": "tt_auto/scripts/tt_auto_post_service.py",
-      "remote_path": "/opt/tt-auto-post/current/scripts/tt_auto_post_service.py",
-      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt_auto/scripts/tt_auto_post_service.py",
-      "runtime": "tt_auto",
-      "sha256": "69a0f0a8b52566f2292f66997fdd40041431868eb3f750048d0f1c72327eddb2",
-      "size": 413,
-      "mtime_ns": 1786589885000000000,
-      "repo_path": "ops/moboreels-attribution-20261113/runtime/tt_auto/scripts/tt_auto_post_service.py"
-    },
-    {
       "local_path": "public_static/fb-auto-publish-common.js",
       "remote_path": "/usr/share/nginx/html/fb-auto-publish-common.js",
       "resolved_remote_path": "/usr/share/nginx/html/fb-auto-publish-common.js",
@@ -3911,10 +3651,762 @@
       "sha256": "33b92b06a263e22f3416c6045428ecafd56c7c6e658727e8822810e38d8b325e",
       "size": 125654,
       "mtime_ns": 1792383737822121821
+    },
+    {
+      "local_path": "tt_auto/features/__init__.py",
+      "remote_path": "/opt/tt-auto-post/current/features/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/__init__.py",
+      "runtime": "tt_auto",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/__init__.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/__init__.py",
+      "runtime": "tt_auto",
+      "sha256": "a22f1741ca1ddf7eeb8fe1ac6cff6de1a82087a533cf4a1c37829cb16c6ca66d",
+      "size": 432,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/automation_health.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/automation_health.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/automation_health.py",
+      "runtime": "tt_auto",
+      "sha256": "3d3df50b8d3593da39aa0c3a4659c8afff50182d96b92ee0dcb54dab37dc6e29",
+      "size": 3039,
+      "mtime_ns": 1791456867963378763
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/client.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/client.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/client.py",
+      "runtime": "tt_auto",
+      "sha256": "7b6167f1cebc7a12b45e81a9e52ee5d73e139bb7224c403833be1efe1dd79860",
+      "size": 10498,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/code_broker.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/code_broker.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/code_broker.py",
+      "runtime": "tt_auto",
+      "sha256": "d175040c7ef06d7de0211bc63ab597629a3f40ce9593ce4051d1b6503403288e",
+      "size": 20277,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/code_broker_client.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/code_broker_client.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/code_broker_client.py",
+      "runtime": "tt_auto",
+      "sha256": "ccedcb914dc21d5811f19a73dd67687c22c95073658ecd5ca1a9f240aba1c1dd",
+      "size": 5155,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/core.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/core.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/core.py",
+      "runtime": "tt_auto",
+      "sha256": "91b606cd2cc94dce1d32c32381af09625201d15305a67833df8ec74f30ad6215",
+      "size": 157851,
+      "mtime_ns": 1794282651068441797
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/legacy_reader.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/legacy_reader.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/legacy_reader.py",
+      "runtime": "tt_auto",
+      "sha256": "7d62e0416a31fdad43e2a4c711598c2196c840ed775ddc79ba5654dbe86f4eab",
+      "size": 26026,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/links.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/links.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/links.py",
+      "runtime": "tt_auto",
+      "sha256": "35f9471d3016e91d084d2797b5f55762fbd607f46d46dc51e636a0be15d31215",
+      "size": 9155,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/publisher.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/publisher.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/publisher.py",
+      "runtime": "tt_auto",
+      "sha256": "da713109c6630fea1df7bba314053ee9f1ad9b837207a93ebf9a8785719a6afb",
+      "size": 49277,
+      "mtime_ns": 1792121389799383288
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/repositories.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/repositories.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/repositories.py",
+      "runtime": "tt_auto",
+      "sha256": "7ccb62d62e7189b65c098c2395be6511c3e003cbc5594775df6a72baa87f3c29",
+      "size": 31310,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/selector.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/selector.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/selector.py",
+      "runtime": "tt_auto",
+      "sha256": "193d6592ad48c72b470aa9ff8ba95c4e9a6d10204bb94feffe27a84651d701c1",
+      "size": 39382,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/service.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/service.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/service.py",
+      "runtime": "tt_auto",
+      "sha256": "369351bc15382282b6f2af198145fbd2d73fcd44409ad1231ddc669f9d5c571e",
+      "size": 67549,
+      "mtime_ns": 1794282651100441204
+    },
+    {
+      "local_path": "tt_auto/features/tt_auto_posts/validation.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_auto_posts/validation.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_auto_posts/validation.py",
+      "runtime": "tt_auto",
+      "sha256": "d05ac2fc37b5e1d1b297e88586a371a8e879cc863a6857515af5f69661b2544c",
+      "size": 13707,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_posts/__init__.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_posts/__init__.py",
+      "runtime": "tt_auto",
+      "sha256": "edddc29b907b9ebbe58cf80df7ef9b7a826332e6ea80507c97ac3345ceb9bd11",
+      "size": 1975,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_posts/code_routes.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/code_routes.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_posts/code_routes.py",
+      "runtime": "tt_auto",
+      "sha256": "29282309790cc4e9822a1c314fb64ed22b3ba4a35b6f2e87df7646b88a2904be",
+      "size": 28496,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_posts/core.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/core.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_posts/core.py",
+      "runtime": "tt_auto",
+      "sha256": "1e99fdd86f104121f27ea3817b26808db372066680d86ff7d21aebb450797ce2",
+      "size": 400135,
+      "mtime_ns": 1793623934001054933
+    },
+    {
+      "local_path": "tt_auto/features/tt_posts/links.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/links.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_posts/links.py",
+      "runtime": "tt_auto",
+      "sha256": "8294b4f7680c00def7c8557fdac2a97ed26ac034b59ae66c6222714e0f0c4f7f",
+      "size": 18289,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/tt_posts/service.py",
+      "remote_path": "/opt/tt-auto-post/current/features/tt_posts/service.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/tt_posts/service.py",
+      "runtime": "tt_auto",
+      "sha256": "fa85720a0c6cb00f2fd45f0cb648da1842edb059c283173f9921f84167ed67be",
+      "size": 270624,
+      "mtime_ns": 1793626800797658159
+    },
+    {
+      "local_path": "tt_auto/features/x_posts/__init__.py",
+      "remote_path": "/opt/tt-auto-post/current/features/x_posts/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/x_posts/__init__.py",
+      "runtime": "tt_auto",
+      "sha256": "6b42d19e586f309e8d0bfdb0556215906529b594f1b7684279af38f8fddc8de5",
+      "size": 681,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/x_posts/drama_selector.py",
+      "remote_path": "/opt/tt-auto-post/current/features/x_posts/drama_selector.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/x_posts/drama_selector.py",
+      "runtime": "tt_auto",
+      "sha256": "a501e62bddb6cf538ea85a8aaa8ad796b9c092b15f622b36cf269c5ae412a6b1",
+      "size": 24781,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/x_posts/media_repair.py",
+      "remote_path": "/opt/tt-auto-post/current/features/x_posts/media_repair.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/x_posts/media_repair.py",
+      "runtime": "tt_auto",
+      "sha256": "31a93239aa39c61da8a825c299081225af81f01676571481d7c642ab958bd00f",
+      "size": 50810,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/x_posts/selector.py",
+      "remote_path": "/opt/tt-auto-post/current/features/x_posts/selector.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/x_posts/selector.py",
+      "runtime": "tt_auto",
+      "sha256": "1e459f8040a0474639a59ff79c2e6191991123a98cc1d304a7708eefa1c15b87",
+      "size": 41732,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/features/x_posts/service.py",
+      "remote_path": "/opt/tt-auto-post/current/features/x_posts/service.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/x_posts/service.py",
+      "runtime": "tt_auto",
+      "sha256": "3407cb5f57b7e667bd93d689f76d1f6edb085cbdd539b408e811bdeecef33832",
+      "size": 364357,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "tt_auto/scripts/tt_auto_post_runner.py",
+      "remote_path": "/opt/tt-auto-post/current/scripts/tt_auto_post_runner.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/scripts/tt_auto_post_runner.py",
+      "runtime": "tt_auto",
+      "sha256": "b5bf486714ff10306ad5091536feacc79f784b9f17e7923acf1eda90817a7bcd",
+      "size": 15078,
+      "mtime_ns": 1793623934091053250
+    },
+    {
+      "local_path": "tt_auto/scripts/tt_auto_post_service.py",
+      "remote_path": "/opt/tt-auto-post/current/scripts/tt_auto_post_service.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/scripts/tt_auto_post_service.py",
+      "runtime": "tt_auto",
+      "sha256": "69a0f0a8b52566f2292f66997fdd40041431868eb3f750048d0f1c72327eddb2",
+      "size": 413,
+      "mtime_ns": 1786589885000000000
+    },
+    {
+      "local_path": "main/features/x_accounts/__init__.py",
+      "remote_path": "/root/drama_material_service/features/x_accounts/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/features/x_accounts/__init__.py",
+      "runtime": "main",
+      "sha256": "a7c35bd869d5bfbc950e701208b3b3423d6675d0aacb6461911747e07e20711a",
+      "size": 42,
+      "mtime_ns": 1784002418063664052
+    },
+    {
+      "local_path": "main/features/x_accounts/credits.py",
+      "remote_path": "/root/drama_material_service/features/x_accounts/credits.py",
+      "resolved_remote_path": "/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/features/x_accounts/credits.py",
+      "runtime": "main",
+      "sha256": "542b1dfdc4897d5f86bf6f7e9eaa477417d54e77a70bcafbb6c3b0d3e57aaec3",
+      "size": 2420,
+      "mtime_ns": 1793765066047724253
+    },
+    {
+      "local_path": "main/features/x_accounts/language.py",
+      "remote_path": "/root/drama_material_service/features/x_accounts/language.py",
+      "resolved_remote_path": "/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/features/x_accounts/language.py",
+      "runtime": "main",
+      "sha256": "2a641d33ac725dc08dce0f37f9a74c1e54ca1eecd08617fd4d9b1f247c43fc7c",
+      "size": 1650,
+      "mtime_ns": 1793863351272014289
+    },
+    {
+      "local_path": "main/features/x_accounts/oauth_service.py",
+      "remote_path": "/root/drama_material_service/features/x_accounts/oauth_service.py",
+      "resolved_remote_path": "/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/features/x_accounts/oauth_service.py",
+      "runtime": "main",
+      "sha256": "25835bb9c804806686aafb6f6035aeb880942eabb1403bf34bda5af247b91aca",
+      "size": 201918,
+      "mtime_ns": 1787219284872490000
+    },
+    {
+      "local_path": "main/features/x_accounts/youtube_share_text.py",
+      "remote_path": "/root/drama_material_service/features/x_accounts/youtube_share_text.py",
+      "resolved_remote_path": "/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service/features/x_accounts/youtube_share_text.py",
+      "runtime": "main",
+      "sha256": "2e73bab04cffd091191366a9e2dc05dd07bb0df0ca522d32ab08bb8f33e938b7",
+      "size": 6163,
+      "mtime_ns": 1789616310472319066
+    },
+    {
+      "local_path": "x/features/x_accounts/credits.py",
+      "remote_path": "/opt/x-post-automation/current/features/x_accounts/credits.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/x_accounts/credits.py",
+      "runtime": "x",
+      "sha256": "542b1dfdc4897d5f86bf6f7e9eaa477417d54e77a70bcafbb6c3b0d3e57aaec3",
+      "size": 2420,
+      "mtime_ns": 1793765066047724253
+    },
+    {
+      "local_path": "x/features/x_accounts/language.py",
+      "remote_path": "/opt/x-post-automation/current/features/x_accounts/language.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/x_accounts/language.py",
+      "runtime": "x",
+      "sha256": "2a641d33ac725dc08dce0f37f9a74c1e54ca1eecd08617fd4d9b1f247c43fc7c",
+      "size": 1650,
+      "mtime_ns": 1793863351272014289
+    },
+    {
+      "local_path": "x/features/x_accounts/youtube_share_text.py",
+      "remote_path": "/opt/x-post-automation/current/features/x_accounts/youtube_share_text.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/x_accounts/youtube_share_text.py",
+      "runtime": "x",
+      "sha256": "7033ac3cf2b481b8202d65100820d68c49edcdbc8057753b96542c17ae18cdc1",
+      "size": 5847,
+      "mtime_ns": 1789556734039630264
+    },
+    {
+      "local_path": "x/features/x_accounts/youtube_shares.py",
+      "remote_path": "/opt/x-post-automation/current/features/x_accounts/youtube_shares.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/x_accounts/youtube_shares.py",
+      "runtime": "x",
+      "sha256": "e06e9366806b35d58d4ab23d075713a78bda8942c7ac21ec7f06af310f30b4e4",
+      "size": 31261,
+      "mtime_ns": 1793621421567056586
+    },
+    {
+      "local_path": "x/features/social_random_schedule.py",
+      "remote_path": "/opt/x-post-automation/current/features/social_random_schedule.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/social_random_schedule.py",
+      "runtime": "x",
+      "sha256": "524449e723a2340ee2f7cb752572e468301a633803123d142d7d490c228452be",
+      "size": 6141,
+      "mtime_ns": 1794282650187458125
+    },
+    {
+      "local_path": "tt/features/social_random_schedule.py",
+      "remote_path": "/opt/tt-post/current/features/social_random_schedule.py",
+      "resolved_remote_path": "/mnt/data-disk/social-target-random-20261110/deployment-v4/candidates/tt/features/social_random_schedule.py",
+      "runtime": "tt",
+      "sha256": "524449e723a2340ee2f7cb752572e468301a633803123d142d7d490c228452be",
+      "size": 6141,
+      "mtime_ns": 1794282650187458125
+    },
+    {
+      "local_path": "tt_auto/features/social_random_schedule.py",
+      "remote_path": "/opt/tt-auto-post/current/features/social_random_schedule.py",
+      "resolved_remote_path": "/mnt/data-disk/tt-metric-wait-20261113/deployment-20261113T024331Z/tt/features/social_random_schedule.py",
+      "runtime": "tt_auto",
+      "sha256": "524449e723a2340ee2f7cb752572e468301a633803123d142d7d490c228452be",
+      "size": 6141,
+      "mtime_ns": 1794282650187458125
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/__init__.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/__init__.py",
+      "runtime": "x",
+      "sha256": "9bb1c623b6d9216a2e802092f0bf356c3d1c2f598d74ef72530858dae7a5e438",
+      "size": 76,
+      "mtime_ns": 1793615344290443648
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/adapters.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/adapters.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/adapters.py",
+      "runtime": "x",
+      "sha256": "619f2d8051248d7a1b65f60fb83361dc15e0f5c3f9370bbcd6836c96dfbfc3e4",
+      "size": 57254,
+      "mtime_ns": 1794282650610450285
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/backlog_contract.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/backlog_contract.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/backlog_contract.py",
+      "runtime": "x",
+      "sha256": "a1f182de694ef2475c8a976791455e33b7839ac9666f64d748ab5380c9aa09dd",
+      "size": 5277,
+      "mtime_ns": 1793679141343150943
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/canonical_holds.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/canonical_holds.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/canonical_holds.py",
+      "runtime": "x",
+      "sha256": "8df3701c804476587edbb9bd896053d99a3056d87213e42d15ade5e5a80309c7",
+      "size": 2424,
+      "mtime_ns": 1793615344290443648
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/client.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/client.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/client.py",
+      "runtime": "x",
+      "sha256": "3c1257269b573a9567f965a1f04324cdac5e8d64ce31fc2813033e67c3c30ed9",
+      "size": 3454,
+      "mtime_ns": 1793673343609423610
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/core.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/core.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/core.py",
+      "runtime": "x",
+      "sha256": "030710055556b3954aaea6a2aa7c4b56beae9cc181909746d1842e5102f485f1",
+      "size": 82688,
+      "mtime_ns": 1793673343620423409
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/credentials.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/credentials.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/credentials.py",
+      "runtime": "x",
+      "sha256": "df910593f9f83afbbc0a3fcd170a7c34ab7a434dba4689671d9d33336a36342d",
+      "size": 4401,
+      "mtime_ns": 1793615344290443648
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/cutover.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/cutover.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/cutover.py",
+      "runtime": "x",
+      "sha256": "b3cf909bfbea2806f08fc018cb28c1eb279b3bdf3975d1e46ff26f71d18f34bf",
+      "size": 7750,
+      "mtime_ns": 1793615780193228869
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/diagnostics.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/diagnostics.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/diagnostics.py",
+      "runtime": "x",
+      "sha256": "c5dc3160352f55fba82e0edfb4d9ae3e61ea0d75bff3847cdacfe672948d73ca",
+      "size": 2191,
+      "mtime_ns": 1793632006899410372
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/executors.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/executors.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/executors.py",
+      "runtime": "x",
+      "sha256": "0def164d2639687c3b7af3440de00693122fdf4fcfd0b999c0b88f1a05c2885f",
+      "size": 55827,
+      "mtime_ns": 1793673343648422898
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/fb_native.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/fb_native.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/fb_native.py",
+      "runtime": "x",
+      "sha256": "b7b66f6aa67ee5bccce75432ea8ceb1d2cb60b9abf5e4351c3d9d5dd24a1879a",
+      "size": 36245,
+      "mtime_ns": 1793673343666422569
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/legacy_admission.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/legacy_admission.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/legacy_admission.py",
+      "runtime": "x",
+      "sha256": "060a904798a0852d8e102f3ea9bb9f639edf80fc76dc91fada4451f66a36669f",
+      "size": 1510,
+      "mtime_ns": 1793618571276061766
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/monitor.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/monitor.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/monitor.py",
+      "runtime": "x",
+      "sha256": "b020529d766ac4e61fb2aad1a3c396d0d37022eb20bf680c2f1b79a0d7da9afc",
+      "size": 11853,
+      "mtime_ns": 1793632012457305417
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/monitor_contract.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/monitor_contract.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/monitor_contract.py",
+      "runtime": "x",
+      "sha256": "3e9de7c2151979d4ed2a82731f99f4aabaadad962c78b85a409a0b8c19de831c",
+      "size": 2273,
+      "mtime_ns": 1793615344290443648
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/native_common.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/native_common.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/native_common.py",
+      "runtime": "x",
+      "sha256": "700b3dadb9521fa4f0beb74df50afb76d513b53ae7e9630cf11d05b38ab08ee4",
+      "size": 1048,
+      "mtime_ns": 1793622851179308118
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/native_gateway.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/native_gateway.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/native_gateway.py",
+      "runtime": "x",
+      "sha256": "e1afd22fa8143105a5713065e0316388d0654bdb48e213b34ccc798a41af2898",
+      "size": 1335,
+      "mtime_ns": 1793615344290443648
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/owners.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/owners.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/owners.py",
+      "runtime": "x",
+      "sha256": "58dd249ddbabe61ba43d3a10f79ea7bcf30f739ef09fc3d8bd5898e946484760",
+      "size": 1672,
+      "mtime_ns": 1793615344290443648
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/receipt_outbox.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/receipt_outbox.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/receipt_outbox.py",
+      "runtime": "x",
+      "sha256": "0e91db0afdbaef278ccc3f5ad476e05b1283b5f8bc1667d552eb6dd6e6b48bc7",
+      "size": 9305,
+      "mtime_ns": 1793672956080638035
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/service.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/service.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/service.py",
+      "runtime": "x",
+      "sha256": "5936b094d3e1395eb1ba2943e8cba2e1e104d6432013411dd363d8083c1c0300",
+      "size": 26505,
+      "mtime_ns": 1793673343702421911
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/snapshots.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/snapshots.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/snapshots.py",
+      "runtime": "x",
+      "sha256": "0cb987ba96181f508fe2d2efb79438b3721a01f758b103936c1dfb770ac6a390",
+      "size": 3325,
+      "mtime_ns": 1793615344291443629
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/tt_native.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/tt_native.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/tt_native.py",
+      "runtime": "x",
+      "sha256": "7e094aff2cc2259ec386fcb5b22b7db25d24fec72ff4bf75589710b7dbfc2e97",
+      "size": 43099,
+      "mtime_ns": 1793673343718421619
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/tt_profiles.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/tt_profiles.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/tt_profiles.py",
+      "runtime": "x",
+      "sha256": "18963ec9ba1e640e42f243070efe08b4e554946bc0e2388c3f126655140915e4",
+      "size": 3023,
+      "mtime_ns": 1793629245580987594
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/tt_readback.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/tt_readback.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/tt_readback.py",
+      "runtime": "x",
+      "sha256": "fe55fa608b744997633a186ead800d5e7d73df016e092f7d42e5de646a7c3b84",
+      "size": 4629,
+      "mtime_ns": 1793623562620990501
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/views.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/views.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/views.py",
+      "runtime": "x",
+      "sha256": "6e6d773b046799502c159714ce9742226c45b104add1b910f03618ac922edce3",
+      "size": 28653,
+      "mtime_ns": 1793632012510304416
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/worker.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/worker.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/worker.py",
+      "runtime": "x",
+      "sha256": "7abc1300e57bc515a504d9295708b3d449e40c1ad9ba1dff6e6eb76a8e160b06",
+      "size": 19987,
+      "mtime_ns": 1793673343742421181
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/x_manual_recovery.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/x_manual_recovery.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/x_manual_recovery.py",
+      "runtime": "x",
+      "sha256": "91a64c457efca06244c1b79c1a82ddfcea8d572a89d93641a9a66dbc80ee3257",
+      "size": 2152,
+      "mtime_ns": 1793702119731514067
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/x_native.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/x_native.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/x_native.py",
+      "runtime": "x",
+      "sha256": "659f71aba66b6c01acbc1db35cd5a7802085c08e4c967c251efb2e4d9e0ea28a",
+      "size": 49412,
+      "mtime_ns": 1794386717881118282
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/x_planning.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/x_planning.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/x_planning.py",
+      "runtime": "x",
+      "sha256": "e287c6e0e479d50a569f247ff2c2bc5fff07c23b9a9fc0a4473fe75aea4fd88b",
+      "size": 2041,
+      "mtime_ns": 1793615344291443629
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/x_prepost_recovery.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/x_prepost_recovery.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/x_prepost_recovery.py",
+      "runtime": "x",
+      "sha256": "1c57468f4ecdba49bd7c4f88bc03759f16f654a3338fa51634ff343d726dc415",
+      "size": 5196,
+      "mtime_ns": 1793702119722514234
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/x_schedule_recovery.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/x_schedule_recovery.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/x_schedule_recovery.py",
+      "runtime": "x",
+      "sha256": "0aee844dd857d08d502a2bf2355ba2a53ff552464ea2bbe0dd0e3921aa0ca7bf",
+      "size": 1647,
+      "mtime_ns": 1793702119738513938
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/x_share_native.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/x_share_native.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/x_share_native.py",
+      "runtime": "x",
+      "sha256": "99a8ed851ff7a8ac4f34a1ad2132954d8460e999cc2b18dfa2c18aee3e988df2",
+      "size": 10620,
+      "mtime_ns": 1793620739089831946
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/youtube_cover.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/youtube_cover.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/youtube_cover.py",
+      "runtime": "x",
+      "sha256": "52fcd7fcd49b98b5a680f066bc89272b1913ff73af6b8fcea7c1f3bbf06fcd15",
+      "size": 3074,
+      "mtime_ns": 1793620739090831927
+    },
+    {
+      "local_path": "x/features/pipeline_dispatch/youtube_native.py",
+      "remote_path": "/opt/x-post-automation/current/features/pipeline_dispatch/youtube_native.py",
+      "resolved_remote_path": "/mnt/data-disk/x-profile-retirement-20261112/deployment/standard/features/pipeline_dispatch/youtube_native.py",
+      "runtime": "x",
+      "sha256": "0ce9069e8a42e1ac5805b70a7997e52361f4f585ef901cbb93391e6a4f1252c5",
+      "size": 46770,
+      "mtime_ns": 1793673343778420523
+    },
+    {
+      "local_path": "fb/features/hit_drama_target.py",
+      "remote_path": "/opt/fb-auto-post/current/features/hit_drama_target.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/hit_drama_target.py",
+      "runtime": "fb",
+      "sha256": "41e9c014603dae9003de1fff2afaba69d5e2a7ecb3c48c12401cbf14cfd7ccca",
+      "size": 3395,
+      "mtime_ns": 1794472843702517179
+    },
+    {
+      "local_path": "fb/features/social_random_schedule.py",
+      "remote_path": "/opt/fb-auto-post/current/features/social_random_schedule.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/social_random_schedule.py",
+      "runtime": "fb",
+      "sha256": "524449e723a2340ee2f7cb752572e468301a633803123d142d7d490c228452be",
+      "size": 6141,
+      "mtime_ns": 1794282650187458125
+    },
+    {
+      "local_path": "fb/features/x_tag_revenue/__init__.py",
+      "remote_path": "/opt/fb-auto-post/current/features/x_tag_revenue/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/x_tag_revenue/__init__.py",
+      "runtime": "fb",
+      "sha256": "f9d449228af94d7ade71553543f2e71dc79fa379f8c5bdcb573a7edf574a65b1",
+      "size": 78,
+      "mtime_ns": 1794456997936746781
+    },
+    {
+      "local_path": "fb/features/x_tag_revenue/core.py",
+      "remote_path": "/opt/fb-auto-post/current/features/x_tag_revenue/core.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/x_tag_revenue/core.py",
+      "runtime": "fb",
+      "sha256": "34456b887060e23dc0016407308f965a79e840a020805d2f7873071440ed7980",
+      "size": 8184,
+      "mtime_ns": 1794456997940746706
+    },
+    {
+      "local_path": "fb/features/x_tag_revenue/hierarchy.py",
+      "remote_path": "/opt/fb-auto-post/current/features/x_tag_revenue/hierarchy.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/x_tag_revenue/hierarchy.py",
+      "runtime": "fb",
+      "sha256": "ca05d3adf88368551db9fa65e0adf1edff83b355991bdf972a86085cc2d0e3e8",
+      "size": 4981,
+      "mtime_ns": 1794456997949746537
+    },
+    {
+      "local_path": "fb/features/x_tag_revenue/tags.py",
+      "remote_path": "/opt/fb-auto-post/current/features/x_tag_revenue/tags.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/x_tag_revenue/tags.py",
+      "runtime": "fb",
+      "sha256": "cd05452da0d4717d230bf93ceeba2b4167d8561da3628baadc802ff06cc2c349",
+      "size": 2872,
+      "mtime_ns": 1794456997942746668
+    },
+    {
+      "local_path": "fb/features/x_tag_revenue/taxonomy.py",
+      "remote_path": "/opt/fb-auto-post/current/features/x_tag_revenue/taxonomy.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/x_tag_revenue/taxonomy.py",
+      "runtime": "fb",
+      "sha256": "7df8554349f2640f3924ded4b9b2ab4574c249f5f5f12b91669a34bb92784db7",
+      "size": 10371,
+      "mtime_ns": 1794456997946746593
+    },
+    {
+      "local_path": "fb/features/x_tag_revenue/tag_dictionary.json",
+      "remote_path": "/opt/fb-auto-post/current/features/x_tag_revenue/tag_dictionary.json",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/x_tag_revenue/tag_dictionary.json",
+      "runtime": "fb",
+      "sha256": "6115cd7bcf5f5feca196ddd218adcc491f94ecbd64a7e8803d98c676535e55f5",
+      "size": 61559,
+      "mtime_ns": 1794456997951746500
+    },
+    {
+      "local_path": "fb/features/pipeline_dispatch/__init__.py",
+      "remote_path": "/opt/fb-auto-post/current/features/pipeline_dispatch/__init__.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/pipeline_dispatch/__init__.py",
+      "runtime": "fb",
+      "sha256": "9bb1c623b6d9216a2e802092f0bf356c3d1c2f598d74ef72530858dae7a5e438",
+      "size": 76,
+      "mtime_ns": 1793615344290443648,
+      "repo_path": "ops/moboreels-attribution-20261113/runtime/fb/features/pipeline_dispatch/__init__.py"
+    },
+    {
+      "local_path": "fb/features/pipeline_dispatch/adapters.py",
+      "remote_path": "/opt/fb-auto-post/current/features/pipeline_dispatch/adapters.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/pipeline_dispatch/adapters.py",
+      "runtime": "fb",
+      "sha256": "9c23f21bbfa7bb5cf0bc4e2ce77622708a75cc863049b5a80536ff63da927aa9",
+      "size": 55649,
+      "mtime_ns": 1793673343988416687,
+      "repo_path": "ops/moboreels-attribution-20261113/runtime/fb/features/pipeline_dispatch/adapters.py"
+    },
+    {
+      "local_path": "fb/features/pipeline_dispatch/fb_native.py",
+      "remote_path": "/opt/fb-auto-post/current/features/pipeline_dispatch/fb_native.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/pipeline_dispatch/fb_native.py",
+      "runtime": "fb",
+      "sha256": "e95b0e4ac300c85912c5c1a730f186eef97ac6b2204244dea602a9b29d428032",
+      "size": 45357,
+      "mtime_ns": 1794302693424027235,
+      "repo_path": "ops/moboreels-attribution-20261113/runtime/fb/features/pipeline_dispatch/fb_native.py"
+    },
+    {
+      "local_path": "fb/features/pipeline_dispatch/native_common.py",
+      "remote_path": "/opt/fb-auto-post/current/features/pipeline_dispatch/native_common.py",
+      "resolved_remote_path": "/mnt/data-disk/fb-hit-profile-20261112/deployment/candidate/features/pipeline_dispatch/native_common.py",
+      "runtime": "fb",
+      "sha256": "700b3dadb9521fa4f0beb74df50afb76d513b53ae7e9630cf11d05b38ab08ee4",
+      "size": 1048,
+      "mtime_ns": 1793622851179308118,
+      "repo_path": "ops/moboreels-attribution-20261113/runtime/fb/features/pipeline_dispatch/native_common.py"
     }
   ],
   "missing_optional": [
     "x/scripts/x_post_schedule_claim.py",
     "fb/scripts/fb_auto_post_scheduler.py"
-  ]
+  ],
+  "tt_auto_refreshed_at_utc": "2026-11-13T02:54:36.705801+00:00"
 }

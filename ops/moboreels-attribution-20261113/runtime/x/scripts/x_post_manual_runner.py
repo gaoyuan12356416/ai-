@@ -421,6 +421,8 @@ def _manual_candidates(
     repair_client=None,
     now=None,
 ):
+    from features.x_posts.moboreels import contains_macro
+    use_moboreels = contains_macro(run.get("body_template"))
     connection = _open_source_connection(config, connection_factory)
     try:
         episode_ids = [mid for mid in run["material_ids"] if is_episode_id(mid)]
@@ -429,7 +431,7 @@ def _manual_candidates(
         if material_ids:
             candidates, selector_rejections = select_manual_candidates(
                 connection, material_ids, run["source_date"], limit=len(material_ids),
-                schema=config.mysql_database, now=now,
+                schema=config.mysql_database, now=now, moboreels=use_moboreels,
             )
         if episode_ids:
             if int(run.get("copy_contract_version", 1)) != 2:
@@ -443,7 +445,7 @@ def _manual_candidates(
                 def select(self, sql, params):
                     return _cursor_rows(connection, sql, params)
 
-            resolved = SourceRepository(ExactSourceReader()).resolve(episode_ids)
+            resolved = SourceRepository(ExactSourceReader()).resolve(episode_ids, moboreels=use_moboreels)
             candidates.extend(resolved["items"].values())
             selector_rejections.extend({"material_id": mid, "error_code": error["code"],
                 "error_message": error["message"]} for mid, error in resolved.get("errors", {}).items())

@@ -212,6 +212,7 @@ def render_auto_caption(
     content_id: Any,
     *,
     short_url: Any,
+    m_url: Any = None,
     description: Any,
 ) -> str:
     if caption_uses_code_macro(template):
@@ -226,6 +227,7 @@ def render_auto_caption(
             template,
             content_id,
             description=description,
+            m_url=m_url,
             defer_url=True,
         )
     except TTPostError as exc:

@@ -1,0 +1,13 @@
+[Unit]
+Description=Enqueue Moboreels orders and advertising revenue refresh
+After=network-online.target moboreels-library.service
+Requires=moboreels-library.service
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/moboreels-library/current
+EnvironmentFile=/etc/moboreels-library.env
+ExecStart=/usr/bin/python3 -m features.moboreels_library.cli report-sync
+TimeoutStartSec=45
+UMask=0077

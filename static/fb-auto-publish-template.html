@@ -83,7 +83,7 @@
                 <option value="DramawaveSource">dramawavesource 素材</option>
                 <option value="Dramawave">Dramawave 素材</option>
               </datalist>
-              <span class="helper">可选择 DramawaveSource，或输入其他素材产品名称。剧目、效果指标和归因仍使用 Page 目标产品。</span>
+              <span class="helper">可选择 DramawaveSource，或输入其他素材产品名称。使用 {{m_url}} 时读取 Moboreels 剧目并归属模板创建者，旧消耗和 ROAS 筛选需留空；素材产品范围不变。</span>
             </div>
             <div class="field">
               <label for="dataSource">素材来源</label>
@@ -116,7 +116,7 @@
             </div>
             <div class="field wide">
               <label class="required" for="message">发布文案</label>
-              <textarea id="message" required placeholder="可用宏：{{drama_name}} {{material_name}} {{content_id}} {{desc}} {{url}}"></textarea>
+              <textarea id="message" required placeholder="可用宏：{{drama_name}} {{material_name}} {{content_id}} {{desc}} {{url}} {{m_url}}"></textarea>
               <div class="hint">{{desc}} 为短剧描述；{{url}} 为带 AIpost 归因的短链，每份文案最多使用一次。</div>
             </div>
             <div class="field">
@@ -192,7 +192,7 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=97b22a40182f"></script>
+  <script src="/quick-nav.js?v=ac11d7b304fb"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
   <script src="/fb-auto-publish-template.js?v=compact-plan-20261111-v1"></script>
 </body>

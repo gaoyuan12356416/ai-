@@ -511,18 +511,20 @@ class TTAutoPostService:
         for index, account_id in enumerate(account_ids, start=1):
             try:
                 setting = self.legacy_reader.get_account_setting(account_id)
-                selection = self._preview_selector().select_and_reserve(
-                    SelectionRequest(
-                        run_id=index,
-                        task_id=index,
-                        template_id=template.id,
-                        template_version=template.version,
-                        account_id=account_id,
-                        language=setting.drama_language,
-                        rules=selector_rules(template.config),
-                        now=self._now(),
+                from features.x_posts.moboreels import source_policy, contains_macro
+                with source_policy(contains_macro(template.config.get("caption_template"))):
+                    selection = self._preview_selector().select_and_reserve(
+                        SelectionRequest(
+                            run_id=index,
+                            task_id=index,
+                            template_id=template.id,
+                            template_version=template.version,
+                            account_id=account_id,
+                            language=setting.drama_language,
+                            rules=selector_rules(template.config),
+                            now=self._now(),
+                        )
                     )
-                )
             except Exception as exc:
                 results.append(
                     {

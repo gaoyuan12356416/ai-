@@ -1,0 +1,285 @@
+{
+  "commit": "REPLACE_WITH_FULL_GITHUB_SHA",
+  "notes": [
+    "Snapshot schedulers before pausing. Pause only the current coordinator channel with Store.channel_enabled; preserve config version and preparation_only state.",
+    "Stop only listed timer/path units, never an active oneshot. Wait for natural drain. Fill scheduler_baselines paths.",
+    "TT and TT Auto share the coordinator tt channel. Keep it paused until both phases activate.",
+    "main phase runs last after all owners. review/queued/scheduled preparation states are not active without a current lease.",
+    "Unresolved external outcomes remain untouched; informational counts do not authorize reset or retry."
+  ],
+  "phases": {
+    "core": {
+      "scheduler_lanes": [],
+      "restart_services": [],
+      "must_be_inactive": [],
+      "backup_databases": [],
+      "checks": [
+        {
+          "database": "/mnt/data-disk/moboreels-library/data/sync.sqlite3",
+          "name": "catalog_sync_active",
+          "sql": "SELECT COUNT(*) FROM sync_run WHERE json_extract(payload,'$.status') IN ('queued','running')"
+        },
+        {
+          "database": "/mnt/data-disk/moboreels-library/data/promotions.sqlite3",
+          "name": "promotion_request_active",
+          "sql": "SELECT COUNT(*) FROM promotions WHERE json_extract(record_json,'$.status')='creating'"
+        }
+      ]
+    },
+    "x": {
+      "scheduler_lanes": [
+        "x"
+      ],
+      "scheduler_baselines": {
+        "x": "REPLACE_WITH_PRE_PAUSE_SCHEDULER_SNAPSHOT"
+      },
+      "restart_services": [
+        "x-post-automation.service",
+        "x-auto-post-service.service"
+      ],
+      "must_be_inactive": [
+        "x-auto-post-runner.service",
+        "x-auto-post-scheduler.service",
+        "x-post-manual.service",
+        "x-post-schedule.service",
+        "x-post-schedule-claim.service",
+        "x-post-manual.timer",
+        "x-post-schedule.timer",
+        "x-post-schedule-claim.timer",
+        "x-auto-post-runner.timer",
+        "x-auto-post-scheduler.timer",
+        "x-auto-post-runner.path"
+      ],
+      "checks": [
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_admission_must_be_paused",
+          "sql": "SELECT COUNT(*) FROM pipeline_config WHERE EXISTS (SELECT 1 FROM json_each(json_extract(config_json,'$.enabled_channels')) WHERE value='x')"
+        },
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_active_leases",
+          "sql": "SELECT COUNT(*) FROM pipeline_job WHERE channel='x' AND status NOT IN ('completed','published','failed','cancelled','canceled','archived') AND claim_hash<>'' AND julianday(lease_expires_at)>julianday('now')"
+        },
+        {
+          "database": "/var/lib/x-post-automation/accounts.sqlite3",
+          "name": "x_non_unknown_publish_attempt",
+          "sql": "SELECT COUNT(*) FROM x_post_publish_log WHERE status IN ('uploading','media_uploaded','post_creating','repost_creating') AND unknown_outcome=0"
+        },
+        {
+          "database": "/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3",
+          "name": "x_auto_task_active_lease",
+          "sql": "SELECT COUNT(*) FROM x_auto_task WHERE claim_token<>'' AND julianday(lease_expires_at_utc)>julianday('now')"
+        },
+        {
+          "database": "/mnt/data-disk/x-post-automation/youtube-shares/ledger.sqlite3",
+          "name": "youtube_x_share_publishing",
+          "sql": "SELECT COUNT(*) FROM youtube_share_item WHERE status='publishing'"
+        }
+      ],
+      "backup_databases": [
+        "/var/lib/x-post-automation/accounts.sqlite3",
+        "/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3",
+        "/mnt/data-disk/x-post-automation/youtube-shares/ledger.sqlite3"
+      ]
+    },
+    "tt": {
+      "scheduler_lanes": [
+        "tt"
+      ],
+      "scheduler_baselines": {
+        "tt": "REPLACE_WITH_PRE_PAUSE_SCHEDULER_SNAPSHOT"
+      },
+      "restart_services": [
+        "tt-post-service.service"
+      ],
+      "must_be_inactive": [
+        "tt-post-runner.service",
+        "tt-post-prepare.service",
+        "tt-post-runner.timer",
+        "tt-post-prepare.timer",
+        "tt-post-runner.path",
+        "tt-post-prepare.path"
+      ],
+      "checks": [
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_admission_must_be_paused",
+          "sql": "SELECT COUNT(*) FROM pipeline_config WHERE EXISTS (SELECT 1 FROM json_each(json_extract(config_json,'$.enabled_channels')) WHERE value='tt')"
+        },
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_active_leases",
+          "sql": "SELECT COUNT(*) FROM pipeline_job WHERE channel='tt' AND status NOT IN ('completed','published','failed','cancelled','canceled','archived') AND claim_hash<>'' AND julianday(lease_expires_at)>julianday('now')"
+        },
+        {
+          "database": "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3",
+          "name": "tt_post_queue_active_lease",
+          "sql": "SELECT COUNT(*) FROM tt_post_queue WHERE claim_token<>'' AND julianday(lease_expires_at_utc)>julianday('now')"
+        },
+        {
+          "database": "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3",
+          "name": "tt_post_direct_test_active_lease",
+          "sql": "SELECT COUNT(*) FROM tt_post_direct_test WHERE claim_token<>'' AND julianday(lease_expires_at_utc)>julianday('now')"
+        },
+        {
+          "database": "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3",
+          "name": "tt_post_material_intake_active_lease",
+          "sql": "SELECT COUNT(*) FROM tt_post_material_intake WHERE claim_token<>'' AND julianday(lease_expires_at_utc)>julianday('now')"
+        },
+        {
+          "database": "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3",
+          "name": "schedule_execution_lease",
+          "sql": "SELECT COUNT(*) FROM tt_post_schedule_run WHERE execution_token<>'' AND julianday(execution_lease_expires_at_utc)>julianday('now')"
+        }
+      ],
+      "backup_databases": [
+        "/mnt/data-disk/tt-post-publisher/tt-post.sqlite3"
+      ],
+      "defer_scheduler_restore": true
+    },
+    "tt_auto": {
+      "scheduler_lanes": [
+        "tt"
+      ],
+      "scheduler_baselines": {
+        "tt": "REPLACE_WITH_PRE_PAUSE_SCHEDULER_SNAPSHOT"
+      },
+      "restart_services": [
+        "tt-auto-post-service.service"
+      ],
+      "must_be_inactive": [
+        "tt-auto-post-runner.service",
+        "tt-auto-post-scheduler.service",
+        "tt-auto-post-runner.timer",
+        "tt-auto-post-scheduler.timer",
+        "tt-auto-post-runner.path"
+      ],
+      "checks": [
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_admission_must_be_paused",
+          "sql": "SELECT COUNT(*) FROM pipeline_config WHERE EXISTS (SELECT 1 FROM json_each(json_extract(config_json,'$.enabled_channels')) WHERE value='tt')"
+        },
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_active_leases",
+          "sql": "SELECT COUNT(*) FROM pipeline_job WHERE channel='tt' AND status NOT IN ('completed','published','failed','cancelled','canceled','archived') AND claim_hash<>'' AND julianday(lease_expires_at)>julianday('now')"
+        },
+        {
+          "database": "/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3",
+          "name": "tt_auto_task_active_lease",
+          "sql": "SELECT COUNT(*) FROM tt_auto_task WHERE claim_token<>'' AND julianday(lease_expires_at_utc)>julianday('now')"
+        }
+      ],
+      "backup_databases": [
+        "/mnt/data-disk/tt-auto-post-publisher/tt-auto-post.sqlite3"
+      ]
+    },
+    "fb": {
+      "scheduler_lanes": [
+        "fb"
+      ],
+      "scheduler_baselines": {
+        "fb": "REPLACE_WITH_PRE_PAUSE_SCHEDULER_SNAPSHOT"
+      },
+      "restart_services": [
+        "fb-auto-post-service.service"
+      ],
+      "must_be_inactive": [
+        "fb-auto-post-runner.service",
+        "fb-auto-post-scheduler.service",
+        "fb-auto-post-prepare.service",
+        "fb-auto-post-reconcile.service",
+        "fb-video-publish-prepare.service",
+        "fb-auto-post-runner.timer",
+        "fb-auto-post-scheduler.timer",
+        "fb-auto-post-prepare.timer",
+        "fb-auto-post-reconcile.timer",
+        "fb-video-publish-prepare.timer"
+      ],
+      "checks": [
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_admission_must_be_paused",
+          "sql": "SELECT COUNT(*) FROM pipeline_config WHERE EXISTS (SELECT 1 FROM json_each(json_extract(config_json,'$.enabled_channels')) WHERE value='fb')"
+        },
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_active_leases",
+          "sql": "SELECT COUNT(*) FROM pipeline_job WHERE channel='fb' AND status NOT IN ('completed','published','failed','cancelled','canceled','archived') AND claim_hash<>'' AND julianday(lease_expires_at)>julianday('now')"
+        },
+        {
+          "database": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
+          "name": "fb_auto_task_busy",
+          "sql": "SELECT COUNT(*) FROM fb_auto_task WHERE status IN ('preparing','running') OR (lease_owner<>'' AND julianday(lease_expires_at_utc)>julianday('now'))"
+        },
+        {
+          "database": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
+          "name": "fb_auto_due_slot_busy",
+          "sql": "SELECT COUNT(*) FROM fb_auto_due_slot WHERE status='preparing' OR (lease_owner<>'' AND julianday(lease_expires_at_utc)>julianday('now'))"
+        },
+        {
+          "database": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
+          "name": "fb_video_task_busy",
+          "sql": "SELECT COUNT(*) FROM fb_video_task WHERE status='running' OR prepare_state='preparing' OR link_state='writing' OR (prepare_lease<>'' AND julianday(prepare_until)>julianday('now')) OR (link_lease<>'' AND julianday(link_until)>julianday('now')) OR (execution_lease<>'' AND julianday(execution_until)>julianday('now'))"
+        }
+      ],
+      "backup_databases": [
+        "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
+        "/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3"
+      ],
+      "informational_checks": [
+        {
+          "database": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
+          "name": "pending_pipeline_operations_preserve",
+          "sql": "SELECT COUNT(*) FROM pipeline_fb_operation WHERE result_json=''"
+        },
+        {
+          "database": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
+          "name": "pending_pipeline_claim_receipts_preserve",
+          "sql": "SELECT COUNT(*) FROM pipeline_fb_claim WHERE receipt_json=''"
+        }
+      ]
+    },
+    "main": {
+      "scheduler_lanes": [
+        "youtube"
+      ],
+      "scheduler_baselines": {
+        "youtube": "REPLACE_WITH_PRE_PAUSE_SCHEDULER_SNAPSHOT"
+      },
+      "restart_services": [
+        "drama-material-api.service",
+        "youtube-auto-publish-worker.service",
+        "pipeline-youtube-canonical.service"
+      ],
+      "must_be_inactive": [],
+      "checks": [
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_admission_must_be_paused",
+          "sql": "SELECT COUNT(*) FROM pipeline_config WHERE EXISTS (SELECT 1 FROM json_each(json_extract(config_json,'$.enabled_channels')) WHERE value='youtube')"
+        },
+        {
+          "database": "/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3",
+          "name": "coordinator_active_leases",
+          "sql": "SELECT COUNT(*) FROM pipeline_job WHERE channel='youtube' AND status NOT IN ('completed','published','failed','cancelled','canceled','archived') AND claim_hash<>'' AND julianday(lease_expires_at)>julianday('now')"
+        },
+        {
+          "database": "/root/drama_material_service/data/drama_material_jobs.sqlite3",
+          "name": "youtube_preparation_active_lease",
+          "sql": "SELECT COUNT(*) FROM youtube_auto_preparation WHERE lease_token<>'' AND lease_until>strftime('%s','now')"
+        },
+        {
+          "database": "/root/drama_material_service/data/drama_material_jobs.sqlite3",
+          "name": "youtube_publish_active_lease",
+          "sql": "SELECT COUNT(*) FROM drama_youtube_publish WHERE lease_owner<>'' AND julianday(lease_expires_at_utc)>julianday('now')"
+        }
+      ],
+      "backup_databases": [
+        "/root/drama_material_service/data/drama_material_jobs.sqlite3"
+      ]
+    }
+  }
+}

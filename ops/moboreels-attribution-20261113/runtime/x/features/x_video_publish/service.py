@@ -99,6 +99,31 @@ class PublishingService:
             lambda actor,mids:call('source',self.source.resolve,mids),
             lambda tenant,user:call('identity',self.identity,tenant,user),enabled=self.enabled)
 
+    def _resolve_rows(self, actor, rows):
+        from features.x_posts.moboreels import contains_macro
+        groups = {False: [], True: []}
+        for row in rows:
+            mid = row.get('material_id')
+            if not isinstance(mid, str) or not (re.fullmatch(r'[1-9][0-9]{0,30}', mid) or is_episode_id(mid)):
+                continue
+            caption = row.get('caption') or row.get('caption_template')
+            if not caption and row.get('account_id'):
+                caption = self.store.get_settings(actor, row['account_id']).get('default_copy')
+            group = groups[contains_macro(caption)]
+            if mid not in group:
+                group.append(mid)
+        overlap = set(groups[False]) & set(groups[True])
+        if overlap:
+            raise PublishingError('material_provider_conflict','同一素材不能在同次批次混用旧剧目宏与 {{m_url}}',409)
+        result = {'items': {}, 'errors': {}}
+        for enabled, mids in groups.items():
+            if not mids:
+                continue
+            resolved = self.source.resolve(mids, moboreels=True) if enabled else self.source.resolve(mids)
+            for key in result:
+                result[key].update(resolved.get(key, {}))
+        return result
+
     def preview(self,actor,payload,*,excel=False):
         accounts=self.accounts(actor)
         rows=[]
@@ -145,7 +170,7 @@ class PublishingService:
                 raise PublishingError('unassigned_material','存在未分配目标账号的素材',400)
         mids=list(dict.fromkeys(r['material_id'] for r in rows if isinstance(r['material_id'],str)
             and (re.fullmatch(r'[1-9][0-9]{0,30}',r['material_id']) or (excel and is_episode_id(r['material_id'])))))
-        resolved=self.source.resolve(mids) if mids else {'items':{},'errors':{}}
+        resolved=self._resolve_rows(actor, rows)
         result=self.store.preview(actor,{'source':'excel' if excel else 'manual','rows':rows},accounts,resolved['items'])
         return self.preview_dto(result,resolved.get('errors',{}))
 
@@ -213,7 +238,7 @@ class PublishingService:
                 if frozen['source']=='manual' and len(rows)!=len(frozen['rows']):
                     raise PublishingError('manual_preflight_failed','请修正所有手动发布配对后重新核对',409)
                 mids=list(dict.fromkeys(r['material_id'] for r in rows))
-                resolved=self.source.resolve(mids) if mids else {'items':{}}
+                resolved=self._resolve_rows(actor, rows)
                 batch=self.store.commit(actor,token,key,self.accounts(actor),resolved['items'],allow_repeat_success=payload.get('allow_repeat') is True)
             value=batch_dto(batch)
             return {'batch_id':value['batch_id'],'batch':value}

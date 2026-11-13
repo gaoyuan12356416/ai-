@@ -10,6 +10,7 @@ from datetime import timedelta
 
 from .core import DomainError, actor_checked, canonical, digest, id_text, normalize_batch, plan_pairs, stamp
 from .templates import render_preview, manual_text
+from .moboreels import contains
 
 PREFIX = "/api/fb-video-publish"
 PLACEHOLDER = "[提交后生成独立短链]"
@@ -69,13 +70,36 @@ class Service:
         except (ValueError, KeyError, TypeError, UnicodeError):
             raise DomainError("invalid_preview", "确认预览校验失败，请重新预览", 409) from None
 
+    def resolve_pair_materials(self, actor, pairs, material_ids, *, partial=False, configs=None):
+        configs = self.store.configs(actor) if configs is None else configs
+        modes = {}
+        for pair in pairs:
+            mode = contains(*manual_text(pair, configs.get(pair["page_id"], {})))
+            mid = pair["material_id"]
+            if mid in modes and modes[mid] != mode:
+                raise DomainError("material_product_ambiguous", "同一素材不能在同批中混用Moboreels和其他产品链接模板", 409)
+            modes[mid] = mode
+        result = {"items": {}, "errors": {}}
+        for mode in (False, True):
+            wanted = [mid for mid in material_ids if modes.get(mid, False) == mode]
+            if not wanted:
+                continue
+            options = {"moboreels": True} if mode else {}
+            if partial:
+                subset = self.sources.resolve_materials(wanted, need_desc=False, enforce_blacklist=False, manual=True, **options)
+                result["items"].update(subset["items"])
+                result["errors"].update(subset["errors"])
+            else:
+                result["items"].update(self.sources.get_materials(wanted, need_desc=False, enforce_blacklist=False, manual=True, **options))
+        return result if partial else result["items"]
+
     def resolve(self, actor, request):
         if not re.fullmatch("[1-9][0-9]{0,30}", actor["sub_user_id"]):
             raise DomainError("actor_mapping_missing", "发布人邮箱未唯一映射到有效sub_user_id", 403)
         pages = self.sources.get_pages(actor, request["page_ids"], manual=True)
         if request["processing_mode"] == "random_overlay" and not self.prepare_enabled:
             raise DomainError("prepare_gate_closed", "视频加工服务未启用，请选择不加工", 409)
-        materials = self.sources.get_materials(request["material_ids"], need_desc=False, enforce_blacklist=False, manual=True)
+        materials = self.resolve_pair_materials(actor, request["pairs"], request["material_ids"])
         if set(pages) != set(request["page_ids"]) or set(materials) != set(request["material_ids"]):
             raise DomainError("source_scope_changed", "素材或Page不再可用", 409)
         return {"pages": pages, "materials": materials}

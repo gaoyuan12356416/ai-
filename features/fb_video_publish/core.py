@@ -403,13 +403,23 @@ class Store:
                        "tag": material.get("material_tag") or "none", "sub_user_id": actor["sub_user_id"], "task_id": tid}
             if not pool and not group_pool:
                 context["drama_name"] = str(context["drama_name"] or "none").replace("*", " ")[:512]
-            long = build_attribution_url(context, lid, now)
+            from .moboreels import contains
+            from .templates import render_preview
             caption_template, title = manual_text(pair, config) if not pool and not group_pool else (pair["caption_template"], "")
-            caption = render_template(caption_template, material, short, manual=not pool and not group_pool)
+            is_moboreels = contains(caption_template, title)
+            if is_moboreels and re.search(r"(?<![A-Za-z0-9_])\{\{?url\}\}?", caption_template + title):
+                raise DomainError("mixed_link_macros", "Moboreels文案不可混用{url}，请仅使用{{m_url}}", 409)
+            long = "" if is_moboreels else build_attribution_url(context, lid, now)
+            short = "" if is_moboreels else short
+            caption = (render_preview(caption_template, material, manual=True) if is_moboreels else
+                       render_template(caption_template, material, short, manual=not pool and not group_pool))
             snapshot = {"page": page, "material": material, "config_instance_id": config["config_instance_id"],
                         "template_version": config["version"], "caption_template": caption_template,
                         "language": config["language"], "actor": actor, "attribution": context,
                         "repeat_history": repeats.get(pid + ":" + mid, [])}
+            if is_moboreels:
+                snapshot["moboreels"] = {"creator": {"user_id": actor["user_id"], "tenant_key": actor["tenant_key"], "name": actor["user_name"]},
+                                         "caption_template": caption_template, "title_template": title}
             if not pool and not group_pool:
                 snapshot.update(title=title, manual_policy="operator-v2")
             if pool:
@@ -604,6 +614,30 @@ class Store:
             conn.commit()
             result = dict(conn.execute("SELECT * FROM fb_video_task WHERE task_id=?", (row["task_id"],)).fetchone())
             result["claim_token"], result["worker_id"] = lease, worker_id
+            return result
+
+    def freeze_moboreels_link(self, task, material, link, caption, title, *, kind):
+        """CAS a remotely resolved receipt after the caller has released all DB locks."""
+        from .moboreels import validate, MoboreelsFBError
+        validate(link, task["content_id"])
+        prefix = "prepare" if kind == "prepare" else "link"
+        now = stamp(self.now_fn())
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(f"SELECT * FROM fb_video_task WHERE task_id=? AND status='queued' AND {prefix}_lease=? AND {prefix}_until>?", (task["task_id"],task["claim_token"],now)).fetchone()
+            if row is None:
+                raise MoboreelsFBError("Moboreels链接返回时任务已取消或租约失效，未调用平台")
+            snap = json.loads(row["snapshot_json"])
+            old = (snap.get("moboreels") or {}).get("link")
+            if old and canonical(old) != canonical(link):
+                raise MoboreelsFBError("任务已有不同的冻结推广回执，未覆盖原链接")
+            snap["moboreels"]["link"] = link
+            snap["material"], snap["title"] = material, title
+            conn.execute("UPDATE fb_video_task SET snapshot_json=?,caption=?,short_url=?,long_url=?,link_state='ready',link_sha256=?,updated_at_utc=? WHERE task_id=?", (canonical(snap),caption,link["short_url"],link["target_url"],digest(link),now,task["task_id"]))
+            conn.execute("UPDATE fb_video_link SET short_url=?,long_url=? WHERE task_id=?", (link["short_url"],link["target_url"],task["task_id"]))
+            conn.commit()
+            result = dict(conn.execute("SELECT * FROM fb_video_task WHERE task_id=?",(task["task_id"],)).fetchone())
+            result.update(claim_token=task["claim_token"],worker_id=task.get("worker_id",""))
             return result
 
     def claim_is_current(self, task, *, status="running"):

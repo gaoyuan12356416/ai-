@@ -1,0 +1,22 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const root = path.resolve(__dirname, '..');
+const source = fs.readFileSync(path.join(root, 'static/fb-video-publish.js'), 'utf8');
+const expandLine = source.split('\n').find(line => line.trim().startsWith('function expand('));
+const buttonLine = source.split('\n').find(line => line.trim().startsWith('const macroButtons ='));
+const insertLine = source.split('\n').find(line => line.trim().startsWith('function insertMacro('));
+const input = { value: 'abc', selectionStart: 1, selectionEnd: 2, disabled: false,
+  setRangeText(...args) { this.args = args; }, focus() {}, dispatchEvent() {} };
+const context = vm.createContext({ LINK_PLACEHOLDER: '[链接占位]', $: () => input, Event: class Event {} });
+vm.runInContext(`${expandLine}\n${buttonLine}\n${insertLine}\nthis.expand=expand;this.buttons=macroButtons;this.insert=insertMacro;`, context);
+assert.equal(context.expand('{name} {{m_url}} {desc}', { drama_name: '剧名', drama_description: '简介' }), '剧名 [链接占位] 简介');
+assert.equal(context.expand('{{name}} {m_url} {url}', { drama_name: '<b>{{m_url}}</b>' }), '<b>{{m_url}}</b> {m_url} [链接占位]');
+assert.match(context.buttons('caption'), /data-macro="m_url"[^>]+>\{\{m_url\}\}/);
+context.insert({ dataset: { target: 'caption', macro: 'm_url' } });
+assert.equal(input.args[0], '{{m_url}}');
+assert.match(source, /catalog:\$\("materialCatalog"\)\.value/);
+assert.match(fs.readFileSync(path.join(root, 'static/fb-auto-publish-template.html'), 'utf8'), /\{\{m_url\}\}/);
+assert.match(fs.readFileSync(path.join(root, 'static/fb-post-material-pool.html'), 'utf8'), /\{\{m_url\}\}/);
+console.log('FB Moboreels preview/insertion/UI scope tests passed');

@@ -16,7 +16,7 @@
     const normalized = new Date(stamp + 8 * 3600000).toISOString().slice(0, raw.length);
     return normalized === raw ? stamp : NaN;
   };
-  P.templateError = text => !String(text || "").trim() ? "发布文案不能为空。" : /[{}]/.test(String(text).replace(/\{(?:name|desc|url)\}/g,"")) ? "仅支持 {name}、{desc}、{url} 宏参数。" : new TextEncoder().encode(text).length > 8000 ? "文案模板超过 8,000 UTF-8 字节。" : "";
+  P.templateError = text => !String(text || "").trim() ? "发布文案不能为空。" : /[{}]/.test(String(text).replace(/\{\{m_url\}\}/g,"").replace(/\{(?:name|desc|url)\}/g,"")) ? "仅支持 {name}、{desc}、{url}、{{m_url}} 宏参数。" : new TextEncoder().encode(text).length > 8000 ? "文案模板超过 8,000 UTF-8 字节。" : "";
   P.status = code => ({active:"有效",stopped:"已停止",queued:"等待",preparing:"加工中",ready:"待发布",running:"处理中",processing:"处理中",submitted:"平台处理中",published:"成功",completed:"已完成",partial:"部分完成",failed:"失败",blocked:"已阻止",unknown:"结果待核对",cancelled:"已取消",skipped:"已跳过",pending:"待发布",removed:"已移除",disabled:"已停用"}[code] || code || "—");
   P.error = (id, error) => { const node=P.$(id); if(node) { node.textContent=error?.message || String(error || ""); node.hidden=!node.textContent; } };
   P.toast = message => { let node=P.$("xpToast"); if(!node) { node=document.createElement("div");node.id="xpToast";node.className="xp-toast";node.setAttribute("role","status");document.body.appendChild(node); } node.textContent=message;node.hidden=false;clearTimeout(P.toast.timer);P.toast.timer=setTimeout(()=>node.hidden=true,4500); };
@@ -34,8 +34,8 @@
     node.innerHTML=`<header class="xp-dialog-head"><h2 id="${id}Title">${P.esc(title)}</h2><button type="button" class="xp-button" data-xp-close aria-label="关闭${P.esc(title)}">×</button></header><div class="xp-dialog-body">${body}</div><footer class="xp-dialog-foot">${footer || '<button class="xp-button" data-xp-close>关闭</button>'}</footer>`;
     node.addEventListener("close",()=>node.remove());node.addEventListener("click",event=>{if(event.target.closest("[data-xp-close]"))node.close();const macro=event.target.closest("[data-xp-macro]");if(macro)P.insertMacro(macro);});document.body.appendChild(node);node.showModal();return node;
   };
-  P.macros = target => `<div class="xp-macros">${["name","desc","url"].map(key=>`<button type="button" class="xp-button small" data-xp-macro="${key}" data-xp-target="${target}">{${key}}</button>`).join("")}<span class="xp-muted">剧名 / 简介 / 真实短链</span></div>`;
-  P.insertMacro = button => {const input=P.$(button.dataset.xpTarget);if(!input || input.disabled)return;input.setRangeText(`{${button.dataset.xpMacro}}`,input.selectionStart ?? input.value.length,input.selectionEnd ?? input.value.length,"end");input.focus();input.dispatchEvent(new Event("input",{bubbles:true}));};
+  P.macros = target => `<div class="xp-macros">${["name","desc","url","m_url"].map(key=>`<button type="button" class="xp-button small" data-xp-macro="${key}" data-xp-target="${target}">${key==="m_url"?"{{m_url}}":`{${key}}`}</button>`).join("")}<span class="xp-muted">剧名 / 简介 / 原短链 / Moboreels 推广短链</span></div>`;
+  P.insertMacro = button => {const input=P.$(button.dataset.xpTarget);if(!input || input.disabled)return;input.setRangeText(button.dataset.xpMacro==="m_url"?"{{m_url}}":`{${button.dataset.xpMacro}}`,input.selectionStart ?? input.value.length,input.selectionEnd ?? input.value.length,"end");input.focus();input.dispatchEvent(new Event("input",{bubbles:true}));};
   P.key = suffix => `x-video-production-v1:${P.auth?.user?.tenant_key || ""}:${P.auth?.user?.user_id || ""}:${suffix}`;
   P.pending = suffix => {try{return JSON.parse(sessionStorage.getItem(P.key(suffix)) || "null");}catch(_){throw new Error("无法读取待核对操作，请检查浏览器会话存储后重试。");}};
   P.remember = (suffix, value) => { const key=P.key(suffix);if(value){const text=JSON.stringify(value);sessionStorage.setItem(key,text);if(sessionStorage.getItem(key)!==text)throw new Error("无法保存原操作，尚未提交。");}else sessionStorage.removeItem(key); };

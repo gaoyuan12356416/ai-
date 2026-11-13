@@ -95,7 +95,9 @@ class SourceRepository:
             s.is_delete material_is_deleted,s.url material_url,s.name material_name,s.language material_language,
             TRIM(s.data_source_id) content_id,s.tag_name source_tag_name,s.video_duration,s.cover thumbnail_url'''
 
-    def resolve(self, material_ids):
+    def resolve(self, material_ids, *, moboreels=False):
+        if moboreels:
+            return self._resolve_moboreels(material_ids)
         deadline = time.monotonic() + (8 if self.allow_pending_episode_duration else 65)
         material_ids = ids(material_ids)
         originals = [mid for mid in material_ids if not is_episode_id(mid)]
@@ -109,6 +111,23 @@ class SourceRepository:
             from .episode_sources import EpisodeRepository
             resolved = EpisodeRepository(self.mysql, self.schema,
                 allow_pending_duration=self.allow_pending_episode_duration).resolve(episodes, deadline=deadline)
+            for key in result:
+                result[key].update(resolved[key])
+        return result
+
+    def _resolve_moboreels(self, material_ids):
+        from features.x_posts.moboreels import source_policy
+        material_ids = ids(material_ids)
+        originals = [mid for mid in material_ids if not is_episode_id(mid)]
+        result = {'items': {}, 'errors': {mid: {'code': 'moboreels_story_missing',
+            'message': '免费剧集没有 Moboreels story_id，不能使用 {{m_url}}'}
+            for mid in material_ids if is_episode_id(mid)}}
+        if originals:
+            marks = ','.join('%s' for _ in originals)
+            rows = self.mysql.select(f'SELECT {self._projection()} FROM `{self.schema}`.ads_custom_source s '
+                f'WHERE s.id IN ({marks}) LIMIT 200', originals)
+            with source_policy(True):
+                resolved = self._resolve_rows(originals, rows, recover_duration=True, mappings=([], []))
             for key in result:
                 result[key].update(resolved[key])
         return result
@@ -290,6 +309,17 @@ class SourceRepository:
                 WHERE {' AND '.join(clauses)} ORDER BY s.id DESC LIMIT %s''', [*params,limit+1])
         selected = [str(r['material_id']) for r in raw[:limit]]
         resolved = self._resolve_rows(selected,raw[:limit],recover_duration=exact_id,mappings=mappings) if selected else {'items':{},'errors':{}}
+        # Browsing precedes copy selection. Keep exact material IDs reviewable;
+        # commit still re-resolves them using the explicit frozen macro policy.
+        for row in raw[:limit]:
+            mid = str(row['material_id'])
+            failure = resolved.get('errors', {}).get(mid, {})
+            if mid not in resolved['items'] and str(failure.get('code', '')).startswith('drama_') and safe_url(row.get('material_url')):
+                resolved['items'][mid] = {'id':mid,'material_id':mid,'material_name':row.get('material_name',''),
+                    'material_url':safe_url(row.get('material_url')), 'preview_url':safe_url(row.get('material_url')),
+                    'thumbnail_url':safe_url(row.get('thumbnail_url')), 'content_id':row.get('content_id',''),
+                    'language':row.get('material_language',''), 'duration_seconds':row.get('video_duration') or 0,
+                    'drama_name':'', 'description':'', 'drama_description':'', 'source_pending':True}
         items = [resolved['items'][mid] for mid in selected if mid in resolved['items']
                  and (not language or same_drama_language(resolved['items'][mid]['language'], language))]
         return {'items':items,'next_cursor':selected[-1] if len(raw)>limit else '',
@@ -298,8 +328,12 @@ class SourceRepository:
 class SourceClient:
     def __init__(self, token):
         self.token = token
-    def resolve(self, material_ids):
-        return broker('source',{'action':'resolve','material_ids':ids(material_ids)},self.token)
+    def resolve(self, material_ids, *, moboreels=None):
+        from features.x_posts.moboreels import source_enabled
+        payload = {'action':'resolve','material_ids':ids(material_ids)}
+        if moboreels is True or (moboreels is None and source_enabled()):
+            payload['moboreels'] = True
+        return broker('source',payload,self.token)
     def listing(self, query):
         return broker('source',{'action':'list','query':query},self.token)
 

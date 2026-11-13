@@ -2473,12 +2473,14 @@ def execute_schedule_tick(
                             material_loader_options["heartbeat"] = lambda: (
                                 _heartbeat_best_effort(sidecar, identity)
                             )
-                        candidates = material_candidate_loader(
-                            batch_config,
-                            sidecar,
-                            accounts,
-                            **material_loader_options,
-                        )
+                        from features.x_posts.moboreels import source_policy, contains_macro
+                        with source_policy(contains_macro((existing.get("run") or {}).get("body_template"))):
+                            candidates = material_candidate_loader(
+                                batch_config,
+                                sidecar,
+                                accounts,
+                                **material_loader_options,
+                            )
                         if (planning_passes == 1 and scope_baseline is not None
                                 and scope_baseline.get("material_pool_snapshot_max_id") is None):
                             # The first pool read freezes the server-owned boundary.

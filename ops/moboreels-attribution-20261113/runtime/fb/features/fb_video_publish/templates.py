@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 CAPTION_MAX_BYTES = 5000
 TEMPLATE_MAX_BYTES = 16000
 MACROS = {"name": "drama_name", "desc": "drama_description", "url": "short_url"}
-TOKEN_RE = re.compile(r"\{(name|desc|url)\}")
+TOKEN_RE = re.compile(r"\{\{(name|desc|url|m_url)\}\}|(?<!\{)\{(name|desc|url)\}(?!\})")
 PREVIEW_LINK = "[提交后生成独立短链]"
 
 
@@ -32,6 +32,8 @@ def _text(value: Any) -> str:
 
 def validate_template(template: str, *, manual=False) -> str:
     value = _text(template)
+    if re.search(r"(?<!\{)\{m_url\}(?!\})", value):
+        raise TemplateError("unknown_macro", "Moboreels链接宏必须使用双花括号{{m_url}}")
     if manual:
         return value
     if not value:
@@ -40,7 +42,7 @@ def validate_template(template: str, *, manual=False) -> str:
         raise TemplateError("template_too_long", "发布文案模板超过16000字节")
     residual = TOKEN_RE.sub("", value)
     if "{" in residual or "}" in residual:
-        raise TemplateError("unknown_macro", "仅支持 {name}、{desc}、{url}，请检查宏参数和花括号")
+        raise TemplateError("unknown_macro", "仅支持 {name}、{desc}、{url}、{{m_url}}，请检查宏参数和花括号")
     return value
 
 
@@ -54,13 +56,14 @@ def _render(template: str, material: Mapping[str, Any], short_url: str, *, previ
         "name": str(material.get("drama_name") or "").strip(),
         "desc": str(material.get("drama_description") or "").strip(),
         "url": str(short_url or "").strip(),
+        "m_url": str(short_url or "").strip(),
     }
 
     def replace(match):
-        key = match.group(1)
+        key = match.group(1) or match.group(2)
         replacement = values[key]
         if not replacement:
-            if manual and key != "url":
+            if manual and key not in {"url", "m_url"}:
                 return ""
             raise TemplateError("macro_source_missing", "素材缺少 " + match.group(0) + " 的有效值", 409)
         if key == "url" and not preview:
@@ -69,6 +72,10 @@ def _render(template: str, material: Mapping[str, Any], short_url: str, *, previ
                     or not re.fullmatch(r"/s2l/facebook/[1-9][0-9]{0,18}\.html", parsed.path)
                     or parsed.query or parsed.fragment):
                 raise TemplateError("macro_source_missing", "{url}必须为本次发布的Facebook短链", 409)
+        if key == "m_url" and not preview:
+            parsed = urlsplit(replacement)
+            if (parsed.scheme != "https" or parsed.netloc != "ai.yingliangads.com" or not re.fullmatch(r"/m/[A-Za-z0-9_-]{8,128}", parsed.path) or parsed.query or parsed.fragment):
+                raise TemplateError("macro_source_missing", "{{m_url}}必须为本次任务冻结的Moboreels短链", 409)
         # Do not recursively expand braces that occur in source metadata.
         return _text(replacement)
 
@@ -80,7 +87,9 @@ def _render(template: str, material: Mapping[str, Any], short_url: str, *, previ
 
 def render_preview(template: str, material: Mapping[str, Any], placeholder: str = PREVIEW_LINK, *, manual=False) -> str:
     """Read-only preview: budget the maximum real ID, never allocate a link."""
-    _render(template, material, "https://gy.g2flow.com/s2l/facebook/9223372036854775807.html", manual=manual)
+    from .moboreels import contains
+    link = "https://ai.yingliangads.com/m/preview0000000000" if contains(template) else "https://gy.g2flow.com/s2l/facebook/9223372036854775807.html"
+    _render(template, material, link, manual=manual)
     return _render(template, material, placeholder, preview=True, manual=manual)
 
 

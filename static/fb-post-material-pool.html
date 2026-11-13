@@ -29,7 +29,7 @@
               <div class="field full page-language-selection"><label for="pageLanguageMode">目标 Page 语言</label><select id="pageLanguageMode"><option value="all">全部已设置语言</option><option value="selected">指定语言（可多选）</option></select><div id="pageLanguageChoices" class="page-language-choices" role="group" aria-label="指定目标 Page 语言" hidden></div><label class="check unrestricted-choice"><input id="includeBlankLanguage" type="checkbox"><span>空语言（不限素材语言）</span></label><p class="helper">已设置语言的 Page 匹配同语言素材；勾选空语言后，这些 Page 可接收任意素材语言。语言冲突或无效的 Page 会排除。</p><div id="pageLanguageError" class="error" role="alert" hidden></div></div>
               <label class="field full"><span>发布文案模板</span><textarea id="captionTemplate" rows="3" aria-label="发布文案模板">{name}
 {desc}
-{url}</textarea><span class="helper">支持 {name} 剧名、{desc} 简介、{url} 独立 FB 短链；视频标题留空。</span></label>
+{url}</textarea><span class="helper">支持 {name} 剧名、{desc} 简介、{url} 独立 FB 短链、{{m_url}} Moboreels推广链接（不可混用两种链接宏）；视频标题留空。</span></label>
             </div>
             <div class="row spread settings-footer"><span id="settingsHint" class="helper"></span><div class="actions"><button class="button" id="saveSchedule">保存设置</button><button class="button primary" id="enableSchedule">启用计划</button><button class="button danger" id="pauseSchedule">暂停计划</button></div></div>
           </fieldset>
@@ -60,6 +60,6 @@
     </main>
   </div>
   <div id="toast" class="fb-toast" role="status" hidden></div><noscript>请启用 JavaScript 后使用 FB Post 素材池。</noscript>
-  <script src="/quick-nav.js?v=97b22a40182f"></script><script src="/ui-topbar.js"></script><script src="/fb-post-material-pool.js?v=target-midnight-20261110-20261026-page-language-v2"></script>
+  <script src="/quick-nav.js?v=ac11d7b304fb"></script><script src="/ui-topbar.js"></script><script src="/fb-post-material-pool.js?v=target-midnight-20261110-20261026-page-language-v2"></script>
 </body>
 </html>

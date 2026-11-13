@@ -499,6 +499,10 @@ class MaterialRepository:
                                  str(row.get("material_tag") or "FBmanual"))
 
     def candidate_snapshot(self, config: Mapping[str, Any]) -> CandidateSnapshot:
+        from features.fb_video_publish.moboreels import contains
+        if contains(config.get("message_template")):
+            from .moboreels import candidate_snapshot
+            return candidate_snapshot(self, config)
         # Trusted planner-only bound: retain enough ranked rows for every known
         # Page cooldown plus the unchanged random choice among its first 50.
         candidate_limit=max(1,min(int(config.get("_candidate_limit",self.candidate_limit)),self.candidate_limit))

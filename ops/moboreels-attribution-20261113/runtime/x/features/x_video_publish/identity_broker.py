@@ -43,8 +43,10 @@ def dispatch(handler,app,kind):
             return send(200,{'actor':resolve_identity(app,payload['tenant_key'],payload['user_id'])})
         from .sources import for_main
         source=for_main(app)
-        if set(payload)=={'action','material_ids'} and payload['action']=='resolve':
-            result=source.resolve(payload['material_ids'])
+        if set(payload) in ({'action','material_ids'}, {'action','material_ids','moboreels'}) and payload['action']=='resolve':
+            if 'moboreels' in payload and payload['moboreels'] is not True:
+                raise PublishingError('invalid_request','素材来源标记无效',400)
+            result=source.resolve(payload['material_ids'], moboreels=payload.get('moboreels') is True)
         elif set(payload)=={'action','query'} and payload['action']=='list' and isinstance(payload['query'],dict):
             result=source.listing(payload['query'])
         else:

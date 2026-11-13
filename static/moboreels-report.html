@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moboreels 收益报表 - AI自动后台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/ui-topbar.css?v=20261113report1">
+  <link rel="stylesheet" href="/moboreels-report.css?v=1d4ca2c5447d">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="brand-mark">AI</span><span><strong>AI 自动后台</strong><small>创作与运营工作台</small></span></a>
+      <nav id="quickNav" class="nav" aria-label="功能导航"></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><h1>Moboreels 收益报表</h1><p class="muted">查看订单充值、退款与广告收益，核对推广归因。</p></div>
+        <div class="top-actions"><div id="userCard" class="user-card">正在确认登录状态…</div><button id="loginBtn" class="btn" type="button">登录</button></div>
+      </header>
+      <div id="accessNotice" class="notice hidden" role="alert"></div>
+      <section class="panel filters-panel" aria-label="报表筛选">
+        <form id="filterForm">
+          <fieldset id="filterFields" class="filters" disabled>
+            <label>来源起始日期<input id="dateFrom" type="date" required></label>
+            <label>来源结束日期<input id="dateTo" type="date" required></label>
+            <label>汇总方式<select id="groupBy"><option value="promotion">按推广口令</option><option value="day">按来源日期</option><option value="story">按短剧</option></select></label>
+            <label class="search-field">剧目 ID / 推广口令<input id="searchInput" type="search" maxlength="200" placeholder="搜索剧目 ID 或口令"></label>
+            <button class="btn btn-primary" type="submit">查询</button><button id="resetBtn" class="btn" type="button">最近 31 天</button>
+          </fieldset>
+        </form>
+        <div class="filter-meta"><span id="scopeLabel" class="badge">范围：待确认</span><span id="queryPeriod" class="muted">默认查询截至昨日的最近 31 个日历日期，单次最多 31 天。</span></div>
+        <div id="filterError" class="error-text hidden" role="alert"></div>
+      </section>
+      <section class="report-notes" aria-label="统计口径">
+        <p><strong>金额单位：USD。</strong>订单净额＝充值−退款，不含未分类订单金额，不代表机构佣金。</p>
+        <p>日期按供应方原始日期展示，来源时区未注明，不换算为北京时间。广告收益为 T+1；同一来源日期、口令的广告收益只计算一次，不按多个渠道重复分摊。</p>
+        <p>未匹配归因金额已包含在对应的订单净额或广告收益中，请勿再次相加。<span id="adCoverage">广告数据更新日期：待查询</span></p>
+        <p id="undatedNote" class="hidden"></p>
+      </section>
+      <section id="summaryCards" class="summary-grid" aria-label="查询范围汇总" aria-live="polite"></section>
+      <section class="panel" aria-labelledby="reportHeading">
+        <div class="panel-head"><div><h2 id="reportHeading">收益明细</h2><p id="resultCount" class="muted">正在加载…</p></div><button id="refreshBtn" class="btn" type="button" disabled>刷新报表</button></div>
+        <div id="reportError" class="notice error hidden" role="alert"></div>
+        <div class="table-wrap">
+          <table><thead><tr><th id="dimensionHeading" scope="col">推广口令 / 短剧</th><th scope="col">归属 / 匹配状态</th><th class="number" scope="col">充值 USD</th><th class="number" scope="col">退款 USD</th><th class="number" scope="col">订单净额 USD</th><th class="number" scope="col">广告收益 USD</th><th class="number" scope="col">未分类订单 USD</th><th class="number" scope="col">未匹配归因 USD</th></tr></thead><tbody id="reportRows"><tr><td colspan="8" class="empty">正在读取报表…</td></tr></tbody></table>
+        </div>
+        <footer class="pagination"><span id="pageSummary" class="muted">每页 50 条</span><div><button id="prevPage" class="btn" type="button" disabled>上一页</button><span id="pageNumber">1 / 1</span><button id="nextPage" class="btn" type="button" disabled>下一页</button></div></footer>
+      </section>
+      <section class="panel sync-panel" aria-labelledby="syncHeading">
+        <div class="panel-head"><div><h2 id="syncHeading">报表同步</h2><p class="muted">更新所选日期范围的订单与广告数据。任务在后台执行，刷新页面后仍可查看进度。</p></div><button id="syncBtn" class="btn btn-primary" type="button" disabled>更新当前日期范围</button></div>
+        <div class="sync-body">
+          <div class="sync-meta"><span id="syncStatus" class="badge">正在读取同步状态</span><span id="lastSuccess" class="muted">最近成功：—</span></div>
+          <p id="syncRange" class="muted"></p>
+          <div id="progressWrap" class="hidden"><progress id="syncProgress" value="0" max="100" aria-label="报表同步进度"></progress><p id="progressText" class="muted" aria-live="polite"></p></div>
+          <p id="syncError" class="error-text hidden" role="alert"></p>
+          <details id="syncDetails" class="hidden"><summary>查看订单和广告日期的同步明细</summary><div id="syncParts" class="sync-parts"></div></details>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/quick-nav.js?v=ac11d7b304fb"></script>
+  <script src="/ui-topbar.js?v=20261113report1"></script>
+  <script src="/moboreels-report.js?v=80c9e1c13432"></script>
+</body>
+</html>

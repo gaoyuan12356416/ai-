@@ -3653,6 +3653,7 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 MODULE_PERMISSIONS = {
     "moboreels_library": "Moboreels 短剧库",
+    "moboreels_report": "Moboreels 收益报表",
     "video_editing": "视频剪辑",
     "x_video_publish": "X 个人视频发布",
     "fb_video_publish": "Facebook 视频批量发布", # FB_VIDEO_PUBLISH_INTEGRATION_V1
@@ -3737,6 +3738,7 @@ MODULE_PERMISSIONS = {
 
 DEFAULT_USER_PERMISSIONS = {
     "moboreels_library": False,
+    "moboreels_report": False,
     "video_editing": False,
     "x_video_publish": False,
     "fb_video_publish": False,
@@ -55964,13 +55966,13 @@ def delete_session(session_token):
 
 
 def load_navigation_config():
-    from features.moboreels_library.navigation import ensure_navigation as ensure_moboreels_navigation
+    from features.moboreels_library.navigation import ensure_navigation as ensure_moboreels_navigation, ensure_report_navigation
     from features.socialkit_analytics.navigation import ensure_navigation as ensure_socialkit_navigation
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
         from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
         from features.pipeline_dispatch.monitor import ensure_navigation as ensure_pipeline_navigation
-        return ensure_moboreels_navigation(ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle)))))))
+        return ensure_report_navigation(ensure_moboreels_navigation(ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -94283,8 +94285,15 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         if parsed.path in {
             "/moboreels-library.html",
+            "/moboreels-report.html",
+            "/moboreels-report.js",
+            "/moboreels-report.css",
             "/moboreels-library.js",
             "/moboreels-library.css",
+            "/moboreels-recommendations.html",
+            "/moboreels-media-accounts.html",
+            "/moboreels-tools.js",
+            "/moboreels-tools.css",
             "/pipeline-monitor.html",
             "/pipeline-monitor.css",
             "/pipeline-monitor.js",
@@ -98745,7 +98754,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         "请求体必须是对象",
                         400,
                     )
-                if parsed.path == "/api/admin/tt-posts/test-publish":
+                if parsed.path in ("/api/admin/tt-posts/test-publish", "/api/admin/tt-posts/material-pool"):
                     request_payload = {key: value for key, value in request_payload.items() if key not in {
                         "_internal_actor", "actor", "actor_user_id", "actor_name", "user_id", "name",
                         "created_by_user_id", "created_by_name", "owner_user_id", "owner_name",
@@ -98754,6 +98763,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     request_payload["_internal_actor"] = {
                         "user_id": str(session.get("user_id") or ""),
                         "name": str(session.get("name") or ""),
+                        "tenant_key": str(session.get("tenant_key") or ""),
                     }
                 if parsed.path.endswith("/batch"):
                     raw_targets = request_payload.get("targets")

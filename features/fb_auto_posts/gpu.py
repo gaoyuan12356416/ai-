@@ -10,6 +10,8 @@ from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
 
 from .core import FBAutoPostStore, StoreError
+from .moboreels import ensure_link
+from features.fb_video_publish.moboreels import MoboreelsFBError
 from .validation import valid_internal_bearer
 
 
@@ -81,8 +83,11 @@ class PrepareExecutor:
         if task is None:
             return {"ok": True, "status": "no_planned", "claimed": False}
         try:
+            task = ensure_link(self.store, task)
             prepared = self.gpu.prepare(job_id=task["gpu_job_id"], content_id=task["content_id"], source_url=task["source_media_url"], video_template=task["video_template"])
             return self.store.complete_prepare(int(task["id"]), prepared)
+        except MoboreelsFBError as exc:
+            return self.store.fail_prepare(int(task["id"]), exc.code, str(exc))
         except GPUPrepareError as exc:
             permanent = {
                 "fb_auto_gpu_request_invalid", "fb_auto_prepared_identity_mismatch",

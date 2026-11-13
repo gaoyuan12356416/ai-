@@ -35,11 +35,14 @@ class Settings:
     api_interval: float = 0.4
     bind_host: str = "127.0.0.1"
     bind_port: int = 8864
+    job_db_path: str = "/root/drama_material_service/data/drama_material_jobs.sqlite3"
+    macro_token: str = ""
 
     @classmethod
     def from_env(cls):
         env = read_env_file(os.environ.get("MOBOREELS_BACKEND_ENV", "/root/drama_material_service/.env"))
         env.update(read_env_file(os.environ.get("MOBOREELS_ENV_FILE", "/etc/moboreels-library.env")))
+        env.update(read_env_file(os.environ.get("MOBOREELS_MACRO_ENV_FILE", "/etc/moboreels-macro.env")))
         env.update(os.environ)
         return cls(
             data_dir=Path(env.get("MOBOREELS_DATA_DIR", "/mnt/data-disk/moboreels-library")),
@@ -50,4 +53,6 @@ class Settings:
             db_password=env.get("MOBOREELS_DB_PASSWORD", env.get("ADMIN_MAPPING_MYSQL_PASSWORD", "")),
             mysql_binary=env.get("MOBOREELS_MYSQL_BINARY", "/usr/bin/mysql"),
             bind_port=int(env.get("MOBOREELS_PORT", "8864")),
+            job_db_path=env.get("DRAMA_JOB_DB_PATH", "/root/drama_material_service/data/drama_material_jobs.sqlite3"),
+            macro_token=env.get("MOBOREELS_MACRO_TOKEN", ""),
         )

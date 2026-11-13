@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from features.fb_video_publish import moboreels as moboreels_fb
+
 import json
 import random
 import re
@@ -196,6 +198,7 @@ class FBAutoPostStore:
                 "video_template": "TEXT NOT NULL DEFAULT ''",
             })
             self._ensure_columns(conn, "fb_auto_task", {
+                "moboreels_json": "TEXT NOT NULL DEFAULT '{}'",
                 "planned_publish_at_utc": "TEXT NOT NULL DEFAULT ''",
                 "schedule_policy": "TEXT NOT NULL DEFAULT ''",
                 "video_template": "TEXT NOT NULL DEFAULT ''",
@@ -438,6 +441,9 @@ class FBAutoPostStore:
 
     @staticmethod
     def _message(config: Mapping[str, Any], material: Any, short_url: str = "") -> str:
+        if moboreels_fb.contains(config.get("message_template")):
+            from dataclasses import asdict
+            return moboreels_fb.render_auto(config["message_template"], asdict(material), short_url)
         replacements = {
             "drama_name": material.drama_name,
             "material_name": material.material_name,
@@ -757,11 +763,14 @@ class FBAutoPostStore:
                     status, reason = "skipped", "fb_auto_page_task_conflict"
                     values = (run_id, template_id, int(template["current_version"]), page.page_id, page.group_id, status, reason, material.material_id if material else "", material.content_id if material else "", "", self._message(config, material) if material else "", now, now, task_publish_at, str(config["video_template"]), gpu_job_id, material.media_url if material else "")
                     task_cursor = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
-                if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]):
+                if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]) and not moboreels_fb.contains(config["message_template"]):
                     task_id = int(task_cursor.lastrowid)
                     short_url, long_url = self._link_values(page, material, task_id, link_timestamp)
                     message_text = self._message(config, material, short_url)
                     conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (message_text, short_url, long_url, task_id))
+                if status == "planned" and material is not None and moboreels_fb.contains(config["message_template"]):
+                    from .moboreels import intent
+                    conn.execute("UPDATE fb_auto_task SET moboreels_json=? WHERE id=?", (json.dumps(intent(config,material,dict(template)),ensure_ascii=False),int(task_cursor.lastrowid)))
                 if target_slot:
                     conn.execute("UPDATE fb_auto_task SET schedule_policy=? WHERE id=?", (target_daily.POLICY, int(task_cursor.lastrowid)))
                     target_daily.bind_slot(conn, target_schedule.source_key(template_id), day, page.page_id, ordinal, "fb_auto_task", int(task_cursor.lastrowid))

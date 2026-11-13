@@ -614,18 +614,20 @@ class XAutoPostService:
                         409,
                     )
                 language = self._account_language(account)
-                selection = self._preview_selector().select_and_reserve(
-                    SelectionRequest(
-                        run_id=index,
-                        task_id=index,
-                        template_id=template.id,
-                        template_version=template.version,
-                        account_id=account_id,
-                        language=language,
-                        rules=selector_rules(template.config, account=account),
-                        now=self._now(),
+                from features.x_posts.moboreels import source_policy, contains_macro
+                with source_policy(contains_macro(template.config.get("body_template"))):
+                    selection = self._preview_selector().select_and_reserve(
+                        SelectionRequest(
+                            run_id=index,
+                            task_id=index,
+                            template_id=template.id,
+                            template_version=template.version,
+                            account_id=account_id,
+                            language=language,
+                            rules=selector_rules(template.config, account=account),
+                            now=self._now(),
+                        )
                     )
-                )
             except Exception as exc:
                 results.append(
                     {

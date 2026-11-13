@@ -181,7 +181,7 @@
   // Share drafts survive closing the dialog. An uncertain submit always keeps
   // the same operation and body; only explicit user actions can submit it.
   const shareXDrafts = new Map();
-  const shareXMacros = ['title','youtube_url','short_url','channel_name','channel_url','name','desc'];
+  const shareXMacros = ['title','youtube_url','short_url','channel_name','channel_url','name','desc','m_url'];
   const shareXItemStatuses = {queued:['等待转发','blue'],publishing:['正在转发','blue'],published:['转发成功','green'],failed:['转发失败','red'],unknown_outcome:['结果待核对','amber']};
   function shareXBlockReason(t) {
     if (!t) return '任务信息尚未加载';
@@ -234,7 +234,7 @@
     const accounts = v.accounts.filter(a => !search || `${a.username || ''} ${a.name || ''}`.toLowerCase().includes(search));
     const sourceCard = `<div class="x-share-source">${image(source.thumbnail_url,'YouTube 视频封面','x-share-source-image')}<div><strong>${esc(source.title || 'YouTube 视频')}</strong><span>${esc(source.channel_name || '')}</span>${url ? `<a class="text-button" href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开 YouTube 视频 ${icon('arrow')}</a>` : ''}</div></div>`;
     const accountPicker = `<section class="field"><div class="x-share-section-heading"><span class="field-label">选择 X 账号 <span class="required">*</span></span><span class="field-hint">已选 ${selected.length} / 20 个</span></div><div class="x-share-account-toolbar"><input class="input" id="x-share-account-search" type="search" placeholder="搜索账号名称或 @用户名" aria-label="搜索 X 账号" value="${esc(v.accountSearch || '')}"/><button type="button" class="text-button" data-action="select-all-share-x" ${locked || !v.accounts.some(shareXAccountEligible) ? 'disabled' : ''}>${v.accounts.filter(shareXAccountEligible).length > 20 ? '选前 20 个可用账号' : '全选可用'}</button><button type="button" class="text-button" data-action="clear-share-x" ${locked || !selected.length ? 'disabled' : ''}>清空</button></div><div class="x-share-account-list" role="group" aria-label="可转发的 X 账号">${accounts.length ? accounts.map(a => { const eligible = shareXAccountEligible(a), handle = a.username ? '@' + String(a.username).replace(/^@/,'') : ''; return `<label class="x-share-account ${eligible ? '' : 'is-blocked'}"><input type="checkbox" id="x-share-account-${esc(a.id)}" data-share-account="${esc(a.id)}" ${v.selected.has(Number(a.id)) ? 'checked' : ''} ${locked || !eligible || (selected.length >= 20 && !v.selected.has(Number(a.id))) ? 'disabled' : ''}/><span><strong>${esc(a.name || handle || '账号 ' + a.id)}</strong>${handle ? `<span>${esc(handle)}</span>` : ''}${!eligible ? `<small>${esc(a.block_reason || '该账号当前不可用于发布')}</small>` : ''}</span>${eligible ? '<span class="badge badge-green">可发布</span>' : '<span class="badge badge-gray">不可用</span>'}</label>`; }).join('') : `<p class="x-share-empty">${v.accounts.length ? '没有匹配的账号' : '暂无可用的 X 账号，请先完成账号授权和发布审批。'}</p>`}</div></section>`;
-    const composer = `<section class="field">${label('转发描述',true,'x-share-description')}<textarea id="x-share-description" class="textarea" rows="6" aria-describedby="x-share-description-hint" ${locked ? 'disabled' : ''}>${esc(v.description)}</textarea><div class="macro-toolbar"><span>插入宏参数</span>${v.macros.filter(m => shareXMacros.includes(m.key)).map(m => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="x-share-description" data-macro="${esc(m.key)}" title="${esc(m.label || m.key)}" ${locked ? 'disabled' : ''}>${esc(m.label || m.key)} {${esc(m.key)}}</button>`).join('')}</div><p class="field-hint" id="x-share-description-hint">支持 280 字符；汉字、表情与链接由服务端计数，以最新预览校验为准。视频原链接将始终保留。</p></section>`;
+    const composer = `<section class="field">${label('转发描述',true,'x-share-description')}<textarea id="x-share-description" class="textarea" rows="6" aria-describedby="x-share-description-hint" ${locked ? 'disabled' : ''}>${esc(v.description)}</textarea><div class="macro-toolbar"><span>插入宏参数</span>${v.macros.filter(m => shareXMacros.includes(m.key)).map(m => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="x-share-description" data-macro="${esc(m.key)}" title="${esc(m.label || m.key)}" ${locked ? 'disabled' : ''}>${esc(m.label || m.key)} ${m.key === "m_url" ? "{{m_url}}" : `{${esc(m.key)}}`}</button>`).join('')}</div><p class="field-hint" id="x-share-description-hint">支持 280 字符；汉字、表情与链接由服务端计数，以最新预览校验为准。视频原链接将始终保留。</p></section>`;
     const history = v.history.filter(run => run.id !== v.run?.id);
     const historyView = history.length ? `<details class="x-share-history"><summary>历史转发记录（${history.length}）</summary>${history.map(run => `<section class="x-share-history-run"><div class="x-share-section-heading"><strong>${esc(time(run.created_at || run.created_at_utc))}</strong><span class="field-hint">${esc({queued:'等待处理',running:'处理中',completed:'已结束'}[run.status] || run.status || '')}</span></div>${run.text ? `<p class="x-share-history-text">${esc(run.text)}</p>` : ''}${shareXRunItems(run)}</section>`).join('')}</details>` : '';
     const uncertain = v.uncertain ? '<div class="note-box note-amber x-share-notice" role="status"><strong>提交结果待确认</strong><span>已保留本次账号与文案。可先刷新核对；再次确认将核对同一次提交。</span></div>' : '';
@@ -339,11 +339,14 @@
     void loadShareX(v);
   }
   function stopShareX(v) { clearTimeout(v.pollTimer); clearTimeout(v.previewTimer); v.previewAbort?.abort(); ++v.previewSerial; v.previewAbort = null; v.previewLoading = false; }
+  function usesMoboreelsDraft(template = '') { return [template,draft?.title,draft?.description,draft?.comment].some(value => String(value || '').includes('{{m_url}}')); }
+  function pendingMoboreels(source, template = '') { return Boolean(source && usesMoboreelsDraft(template) && source.promotion_provider !== 'moboreels'); }
+  function previewSource(source, template, settings) { return !settings && pendingMoboreels(source,template) ? {...source,macro_name:'',macro_desc:''} : source; }
   function resolve(template, source) {
     const missing = [], unknown = [], used = [];
     const value = String(template ?? '').replace(/\{+[^{}\r\n]*\}+/g, token => {
-      const key = token.slice(1,-1);
-      if (!['url','desc','name'].includes(key)) { unknown.push(token); return token; }
+      const key = token === '{{m_url}}' ? 'm_url' : token.slice(1,-1);
+      if (!['url','desc','name','m_url'].includes(key) || (key === 'm_url' && token !== '{{m_url}}')) { unknown.push(token); return token; }
       used.push(key); const replacement = source?.[`macro_${key}`];
       if (replacement === undefined || replacement === null || replacement === '') { missing.push(key); return token; }
       return String(replacement).trim();
@@ -353,11 +356,13 @@
   const limit = field => field === 'title' ? 100 : field === 'description' ? 5000 : 1000;
   const count = (field,value) => field === 'description' ? bytes(value) : chars(value);
   function validateText(field, template, source, settings = false) {
-    const r = resolve(template,source);
-    if (r.unknown.length) return `不支持宏参数 ${r.unknown.join('、')}，仅支持 {url}、{desc}、{name}。`;
+    const r = resolve(template,previewSource(source,template,settings));
+    if (r.unknown.length) return `不支持宏参数 ${r.unknown.join('、')}，仅支持 {url}、{desc}、{name}、{{m_url}}。`;
     if (field !== 'comment' && !r.value.trim()) return `请填写${field === 'title' ? '视频标题' : '视频描述'}。`;
     if (!settings && source) {
-      const required = r.missing.filter(key => key !== 'url');
+      const moboreels = usesMoboreelsDraft(template);
+      if (moboreels && r.used.includes('url')) return 'Moboreels 素材请使用 {{m_url}}，不能与旧 {url} 链接混用。';
+      const required = r.missing.filter(key => key !== 'url' && key !== 'm_url' && !(pendingMoboreels(source,template) && ['name','desc'].includes(key)));
       if (required.length) return source.drama_message || `所选素材缺少 ${required.map(k => `{${k}}`).join('、')}，请更换素材。`;
       if (r.missing.includes('url') && !(source.link_ready ?? Boolean(source.long_url || (source.source_job_id && source.content_id)))) return source.drama_message || '素材缺少生成跳转链接所需的剧集关联，请更换素材。';
     }
@@ -365,18 +370,24 @@
     return '';
   }
   function macroPreview(field, template, source, settings = false) {
-    const r = resolve(template,source), warning = String(template || '').trim() ? validateText(field,template,source,settings) : '', pending = r.missing.length > 0;
+    const r = resolve(template,previewSource(source,template,settings)), warning = String(template || '').trim() ? validateText(field,template,source,settings) : '', pending = r.missing.length > 0;
     let visible = r.value;
     if (r.missing.includes('url') && source) visible = visible.replace(/\{url\}/g,'[提交时生成跳转链接]');
-    const hint = warning || (pending ? (settings ? '宏参数将在新建发布时，按所选素材替换并校验。' : source ? '跳转链接将在提交时生成，最终长度由服务端校验。' : '选择素材后预览宏参数替换结果。') : '');
+    if (r.missing.includes('m_url') && source) visible = visible.replace(/\{\{m_url\}\}/g,'[提交时生成 Moboreels 推广短链]');
+    const hint = warning || (pending ? (settings ? '宏参数将在新建发布时，按所选素材替换并校验。' : pendingMoboreels(source,template) ? '剧名、简介与推广短链将在提交时从 Moboreels 核验，最终长度由服务端校验。' : source ? '跳转链接将在提交时生成，最终长度由服务端校验。' : '选择素材后预览宏参数替换结果。') : '');
     return `<div class="macro-preview${warning ? ' has-warning' : ''}" data-macro-preview="${settings ? 'settings' : field}"><div class="macro-preview-header"><span>${settings ? '默认描述模板预览' : '发布预览' + (source ? ' · ' + esc(source.name) : '')}</span><span>${pending ? '待替换' : count(field,r.value) + '/' + limit(field) + (field === 'description' ? ' 字节' : ' 字符')}</span></div><div class="macro-preview-body">${esc(visible || (field === 'comment' ? '未填写，发布时将跳过首评。' : '尚未填写'))}</div>${hint ? `<div class="macro-warning" role="status">${esc(hint)}</div>` : ''}</div>`;
   }
   function macroControls(field, template, settings = false) {
     const id = settings ? 'default-description' : `draft-${field}`;
-    return `<div class="macro-toolbar"><span>插入宏参数</span>${['url','desc','name'].map(key => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="${id}" data-macro="${key}">{${key}}</button>`).join('')}</div><span class="macro-source">{url} 剧集跳转链接 · {desc} 剧情简介 · {name} 剧名</span>${macroPreview(field,template,settings ? null : draft?.material,settings)}`;
+    return `<div class="macro-toolbar"><span>插入宏参数</span>${['url','desc','name','m_url'].map(key => `<button type="button" class="macro-chip" data-action="insert-macro" data-target="${id}" data-macro="${key}">${key === "m_url" ? "{{m_url}}" : `{${key}}`}</button>`).join('')}</div><span class="macro-source">{url} 剧集跳转链接 · {desc} 剧情简介 · {name} 剧名</span>${macroPreview(field,template,settings ? null : draft?.material,settings)}`;
   }
   function linkHelp(m) { return `<details class="macro-link-help"><summary>查看 {url} 链接规则与长链</summary><div class="macro-link-details"><p>{url} 沿用剧集合成中 YouTube 发布的长链及跳转链接生成规则。</p>${m ? `<span class="field-hint">发布文案中的链接</span><code class="macro-link-value">${esc(m.macro_url || '提交时生成跳转链接')}</code><span class="field-hint">目标长链</span><code class="macro-link-value">${esc(m.long_url || '提交时由服务端根据剧集关联生成')}</code><div class="macro-link-meta"><span>源剧集 ID</span><code>${esc(m.content_id || '未关联')}</code><span>关联剧名</span><code>${esc(m.macro_name || m.drama_message || '未关联')}</code><span>源合成任务 ID</span><code>${esc(m.source_job_id || '独立素材（无需合成任务）')}</code><span>链接归因任务 ID</span><code>${esc(m.source_job_id || m.link_job_id || '提交时生成本次发布任务 ID')}</code></div>` : '<p class="field-hint">选择素材后查看对应链接与来源关联。</p>'}</div></details>`; }
   function refreshPreview(field, settings = false) { const input = $('#' + (settings ? 'default-description' : 'draft-' + field)); const el = $(`[data-macro-preview="${settings ? 'settings' : field}"]`); if (input && el) el.outerHTML = macroPreview(field,input.value,settings ? null : draft?.material,settings); }
+  function refreshCopyPreviews() {
+    for (const field of ['title','description','comment']) refreshPreview(field);
+    const reference = $('.drama-reference-field');
+    if (reference && draft?.coverSource === 'ai') reference.innerHTML = materialReference(draft.material) + fieldError('reference');
+  }
   function upsert(t, mutation = false) { if (!t?.id) throw new Error('服务端未返回有效任务，请刷新任务列表确认。'); const key = String(t.id); taskCache.set(key,t); if (mutation) { taskRevisions.set(key,(taskRevisions.get(key) || 0) + 1); state.listRevision = ''; } const i = state.tasks.findIndex(x => String(x.id) === key); if (i >= 0) state.tasks[i] = t; return t; }
   function showSource() { const source = state.source || state.bootstrap?.source; const el = $('#source-message'); el.classList.toggle('hidden',source?.configured !== false); el.innerHTML = source?.configured === false ? '<strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后即可选择视频素材。</span>' : ''; }
   function playerCardBadge(t) {
@@ -534,6 +545,7 @@
   }
   function materialReference(material) {
     if (!material) return '<div class="note-box note-blue drama-reference-empty">选择视频素材后，展示素材所属剧的原剧封面。</div>';
+    if (pendingMoboreels(material)) return '<div class="note-box note-blue drama-reference-empty" role="status"><strong>Moboreels 原剧封面待核验</strong><span>提交时将按素材的上游短剧 ID，从 Moboreels 读取原剧封面并核验；可用后生成 AI 封面。</span></div>';
     if (hasDramaCover(material)) return referenceCard(material.drama_cover_url,material.macro_name);
     return `<div class="note-box note-amber drama-reference-empty" role="status"><strong>原剧封面暂不可用</strong><span>${esc(dramaCoverMessage(material))}</span><span>暂无法使用 AI 生成，请更换素材或选择「本地上传」。</span></div>`;
   }
@@ -700,7 +712,8 @@
     const selectedChannel = state.channels.items.find(c => String(c.id) === String(draft.channelId));
     if (draft.comment.trim() && selectedChannel?.comment_eligible === false) e.comment = '该频道尚未获得首评权限，请留空首评或完成频道授权。';
     if (draft.coverSource === 'ai' && !draft.requirements.trim()) e.requirements = '请填写封面要求。';
-    if (draft.coverSource === 'ai' && draft.material && !hasDramaCover(draft.material)) e.reference = `${dramaCoverMessage(draft.material)} 请更换素材或选择「本地上传」。`;
+    const usesMoboreels = usesMoboreelsDraft();
+    if (draft.coverSource === 'ai' && draft.material && !usesMoboreels && !hasDramaCover(draft.material)) e.reference = `${dramaCoverMessage(draft.material)} 请更换素材或选择「本地上传」。`;
     if (draft.coverSource === 'local' && !draft.cover) e.cover = '请选择封面图片。';
     const dateError = scheduleError(draft.publishAt); if (dateError) e.publishAt = dateError;
     draft.errors = e; return Object.keys(e).length === 0;
@@ -836,7 +849,7 @@
     else if (action === 'clear-share-x' && !shareXLocked(v)) { v.selected = new Set(); shareXRender(v); }
     else if (action === 'reload-task') void refreshOpenTask(v);
     else if (action === 'reload-materials') loadMaterials(v,true);
-    else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(`{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
+    else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(b.dataset.macro === "m_url" ? "{{m_url}}" : `{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
     else if (action === 'choose-material') { openModal('picker',{selected:draft.material,search:'',uploaderId:'',loading:true}); loadMaterials(top()); }
     else if (action === 'select-material') { v.selected = (v.items || state.materials).find(m => String(m.id) === String(id)); renderModals(); }
     else if (action === 'confirm-material') { draft.material = v.selected; if (!draft.title.trim()) draft.title = '{name}'; delete draft.errors.material; delete draft.errors.reference; closeModal(); }
@@ -860,7 +873,7 @@
     else if (action === 'retry') retryTask();
     else if (action === 'save-settings') saveSettings();
   });
-  document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) refreshPreview(el.dataset.field); if (el.dataset.field === 'publishAt') renderModals(); } if (el.id === 'x-share-description' && top()?.type === 'shareX' && !shareXLocked(top())) { top().description = el.value; top().error = ''; scheduleShareXPreview(top()); } if (el.id === 'x-share-account-search' && top()?.type === 'shareX') { top().accountSearch = el.value; shareXRender(top()); } if (el.id === 'schedule-publish-at' && top()?.type === 'schedule') { top().publishAt = el.value; top().operationId = uid(); top().dateError = ''; } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
+  document.addEventListener('input', event => { const el = event.target; if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; delete draft.errors[el.dataset.field]; if (['title','description','comment'].includes(el.dataset.field)) { delete draft.errors.reference; refreshCopyPreviews(); } if (el.dataset.field === 'publishAt') renderModals(); } if (el.id === 'x-share-description' && top()?.type === 'shareX' && !shareXLocked(top())) { top().description = el.value; top().error = ''; scheduleShareXPreview(top()); } if (el.id === 'x-share-account-search' && top()?.type === 'shareX') { top().accountSearch = el.value; shareXRender(top()); } if (el.id === 'schedule-publish-at' && top()?.type === 'schedule') { top().publishAt = el.value; top().operationId = uid(); top().dateError = ''; } if (el.id === 'default-description') { top().value = el.value; refreshPreview('description',true); } if (el.id === 'reject-reason') top().feedback = el.value; if (el.id === 'material-search') { const v = top(); v.search = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); materialTimer = setTimeout(() => { if (stack.includes(v)) loadMaterials(v); },280); } rememberCaret(el); });
   document.addEventListener('change', event => { const el = event.target; if (el.dataset.shareAccount && top()?.type === 'shareX' && !shareXLocked(top())) { const v = top(), accountId = Number(el.dataset.shareAccount), account = v.accounts.find(a => Number(a.id) === accountId); if (account && shareXAccountEligible(account)) { if (el.checked && v.selected.size < 20) v.selected.add(accountId); else v.selected.delete(accountId); shareXRender(v); } } if (el.id === 'material-uploader' && top()?.type === 'picker') { const v = top(); v.uploaderId = el.value; ++materialSerial; clearTimeout(materialPollTimer); clearTimeout(materialTimer); void loadMaterials(v); } if (el.id === 'studio-thumbnail-confirm' && top()?.type === 'verifyThumbnail') { top().confirmed = el.checked; renderModals(); } if (el.dataset.field && draft) { draft[el.dataset.field] = el.value; if (el.dataset.field === 'channelId') void applyChannelTemplate(); } if (el.dataset.file) readFile(el.files[0],el.dataset.file); });
   ['keyup','mouseup','select','focusout'].forEach(name => document.addEventListener(name,event => rememberCaret(event.target)));
   document.addEventListener('keydown', event => {

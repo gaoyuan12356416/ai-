@@ -43,7 +43,7 @@ RESOURCE_TYPE_V2_LABELS = {
 
 MAX_X_AUTO_DURATION_SECONDS = 600
 POST_TEMPLATE_MACRO_RE = re.compile(r"\{\{([a-z_]+)\}\}")
-POST_TEMPLATE_ALLOWED_MACROS = frozenset({"drama_name", "desc", "url"})
+POST_TEMPLATE_ALLOWED_MACROS = frozenset({"drama_name", "desc", "url", "m_url"})
 LANGUAGE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -284,6 +284,8 @@ def _language(value: Any) -> str:
 def _body_template(value: Any) -> str:
     template = _text(value, "X Post正文模板", minimum=1, maximum=2000)
     template = template.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if "{{m_url}}" in template and "{{url}}" in template:
+        raise ValidationError("x_auto_body_template_invalid", "Moboreels 推广宏与旧 url 宏不能混用")
     macros = POST_TEMPLATE_MACRO_RE.findall(template)
     unmatched = POST_TEMPLATE_MACRO_RE.sub("", template)
     if "{{" in unmatched or "}}" in unmatched:

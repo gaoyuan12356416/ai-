@@ -8,6 +8,7 @@ import sys
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -114,7 +115,7 @@ class ServiceRouteTest(unittest.TestCase):
     def setUp(self):
         self.settings = Settings(Path("unused"), "institution", "not-used", "internal-test-only", "unused", "unused")
         self.db, self.sync, self.promotions = FakeDatabase(), FakeSync(), FakePromotions()
-        self.app = Application(self.settings, db=self.db, provider=object(), sync=self.sync, promotions=self.promotions)
+        self.app = Application(self.settings, db=self.db, provider=object(), sync=self.sync, promotions=self.promotions, short_links=object(), reports=object())
 
     def request(self, method, path, **extra):
         return self.app.dispatch(dict(method=method, path=path, actor=copy.deepcopy(ACTOR), **extra))
@@ -176,6 +177,16 @@ class ServiceRouteTest(unittest.TestCase):
         self.app.dispatch({"method": "POST", "path": "/sync-runs", "actor": actor, "body": {"trigger": "scheduled"}})
         self.assertEqual(self.sync.started[-1], ("scheduled", actor))
 
+    def test_report_scope_ignores_client_admin_query(self):
+        reports = Mock()
+        reports.query.return_value = {"list": []}
+        self.app.reports = reports
+        status, _ = self.request("GET", "/reports", query={"is_admin": "true", "all_users": "true"})
+        self.assertEqual(status, 200)
+        self.assertFalse(reports.query.call_args.kwargs["all_users"])
+        self.app.dispatch({"method": "GET", "path": "/reports", "actor": dict(ACTOR, is_admin=True)})
+        self.assertTrue(reports.query.call_args.kwargs["all_users"])
+
     def test_promotion_routes_ignore_frontend_identity_and_preserve_creating_response(self):
         status, body = self.request("POST", "/dramas/42/promotion", body={"star_user_id": "attacker", "actor": {"user_id": "attacker"}})
         self.assertEqual(status, 200)
@@ -200,12 +211,12 @@ class ServiceRouteTest(unittest.TestCase):
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02), daemon=True)
         thread.start()
 
-        def post(token, refresh=False):
+        def post(token, refresh=False, path='/internal/dispatch', body=None):
             connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
             try:
-                envelope = json.dumps({"method": "GET", "path": "/dramas", "actor": ACTOR,
+                envelope = json.dumps(body if body is not None else {"method": "GET", "path": "/dramas", "actor": ACTOR,
                                        "query": {"refresh": "1"} if refresh else {}}).encode()
-                connection.request("POST", "/internal/dispatch", envelope,
+                connection.request("POST", path, envelope,
                                    {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
                 response = connection.getresponse()
                 return response.status, json.loads(response.read())
@@ -214,6 +225,9 @@ class ServiceRouteTest(unittest.TestCase):
 
         try:
             self.assertEqual(post("wrong")[0], 403)
+            self.settings.macro_token = 'macro-test-token'
+            self.assertEqual(post(self.settings.macro_token)[0], 403)
+            self.assertEqual(post(self.settings.macro_token, path='/internal/story-metadata', body={'story_id':'42'})[0], 200)
             status, body = post(self.settings.internal_token)
             self.assertEqual(status, 200)
             self.assertEqual(body["list"][0]["story_id"], "42")

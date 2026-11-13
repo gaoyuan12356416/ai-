@@ -21,6 +21,7 @@ from .templates import WorkflowError
 REFERENCE_HOSTS = DEFAULT_HOSTS + (
     'static-v1.mydramawave.com', 'static-v2.mydramawave.com',
     'cdn.usrgrow.com', 'ads-cdn.yingliang.tech',
+    'video-cdn3.cdreader.com',
 )
 MAX_REFERENCE_BYTES = 8 * 1024 * 1024
 _DNS_SLOTS = threading.BoundedSemaphore(2)

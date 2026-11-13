@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .images import decode_cover
 from .templates import DEFAULT_DESCRIPTION, WorkflowError, has_link_source, long_url, render
+from features.moboreels_library.macro_client import contains_macro, resolve_m_url, MoboreelsLinkError
 from .channel_templates import ChannelTemplateStore
 from .channel_languages import decorate as decorate_channel_languages
 from .scheduling import normalize_publish_at, is_due
@@ -158,7 +159,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         # Older pending/rejected tasks predate cover metadata. Resolve the same
         # material again, without changing frozen copy or its publishing identity.
         if 'drama_cover_status' not in material:
-            fresh=self.source.get(str(material['id']))
+            fresh=self.source.get(str(material['id']), **({'moboreels':True} if material.get('promotion_provider')=='moboreels' else {}))
             if (str(fresh.get('content_id','')).strip(),str(fresh.get('language','')).strip().casefold())!=(str(material.get('content_id','')).strip(),str(material.get('language','')).strip().casefold()):
                 raise WorkflowError('reference_drama_changed','素材所属剧集已变化，请重新创建发布任务',409)
             for field in ('drama_cover_url','drama_cover_status','drama_cover_message'):
@@ -403,7 +404,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             if previous['request_sha']!=digest:raise WorkflowError('idempotency_conflict','同一提交标识的内容已变化，请重新提交',409)
             return {'task':self._dto(json.loads(previous['body']),actor)}
         normalize_publish_at(publish_at,future=True)
-        material=self.source.get(str(request['material_id']))
+        needs_m_url=contains_macro(*(request[field+'_template'] for field in ('title','description','comment')))
+        material=self.source.get(str(request['material_id']), **({'moboreels':True} if needs_m_url else {}))
         if self.channel_directory is not None:
             channel=self.channel_directory.validate(actor,str(request['channel_id']),comment=bool(request['comment_template']))
         else:
@@ -428,13 +430,20 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         if needs_url:
             material['link_job_id']=material.get('source_job_id') or task_id
             material['long_url']=long_url(material)
-        preflight=dict(material,macro_url='{url}')
+        preflight=dict(material,macro_url='{url}',macro_m_url='https://ai.yingliangads.com/m/0000000000000000')
         for field in ('title','description','comment'):
             render(request[field+'_template'],preflight,field)
         if needs_url:
             if self.attribution_links is not None:
                 material=self.attribution_links.prepare(material,channel,actor,task_id)
             else:material['macro_url']=str(self.short_link(material))
+        if needs_m_url:
+            try:
+                link=resolve_m_url(actor, story_id=material['content_id'], platform='youtube',
+                    account_id=channel['channel_id'], task_id=task_id, material_id=material['id'])
+            except MoboreelsLinkError as exc:
+                raise WorkflowError('moboreels_link_unavailable', str(exc), 409) from None
+            material.update(macro_m_url=link['short_url'], moboreels_promotion=link)
         resolved={field:render(request[field+'_template'],material,field) for field in ('title','description','comment')}
         created=now()
         body=dict(resolved,id=task_id,operation_id=op,material=material,channel=channel,creator=dict(actor),request=request,

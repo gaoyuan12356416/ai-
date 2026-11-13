@@ -318,7 +318,9 @@ class AutoPostExecutor:
             rules=selector_rules(template.config, account=task.account_snapshot),
             now=self._now(),
         )
-        self._phase_selector(claim_token).select_and_reserve(request)
+        from features.x_posts.moboreels import source_policy, contains_macro
+        with source_policy(contains_macro(template.config.get("body_template"))):
+            self._phase_selector(claim_token).select_and_reserve(request)
         return self.store.get_task(task.id)
 
     @staticmethod
@@ -434,7 +436,9 @@ class AutoPostExecutor:
         existing = self._run_queue(run)
         if existing is not None:
             return dict(run)
-        candidate = dict(self.candidate_loader(task, run))
+        from features.x_posts.moboreels import contains_macro, source_policy
+        with source_policy(contains_macro(run.get("body_template") or task.body_template)):
+            candidate = dict(self.candidate_loader(task, run))
         candidate["body_template"] = str(run.get("body_template") or task.body_template)
         candidate["source_type"] = "material"
         candidate["source_date"] = str(run.get("source_date") or "")

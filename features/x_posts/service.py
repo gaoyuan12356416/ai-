@@ -716,7 +716,7 @@ DEFAULT_DRAMA_POST_TEMPLATE = (
 )
 POST_TEMPLATE_MACRO_RE = re.compile(r"\{\{([a-z_]+)\}\}")
 POST_TEMPLATE_ALLOWED_MACROS = frozenset(
-    {"drama_name", "episode_number", "desc", "url"}
+    {"drama_name", "episode_number", "desc", "url", "m_url"}
 )
 
 
@@ -730,6 +730,10 @@ def _default_post_template(source_type):
 
 
 def _normalize_post_template(value, source_type):
+    if source_type == "drama" and "{{m_url}}" in str(value or ""):
+        raise XPostError("invalid_post_template", "剧集池没有 Moboreels 素材 story_id，请从素材发布入口使用 m_url", 400)
+    if "{{m_url}}" in str(value or "") and "{{url}}" in str(value or ""):
+        raise XPostError("invalid_post_template", "Moboreels 推广宏与旧 url 宏不能在同一模板混用", 400)
     source_type = _schedule_source_type(source_type)
     if value in (None, ""):
         value = _default_post_template(source_type)
@@ -804,6 +808,7 @@ def _render_post_text(
     description,
     episode_number=None,
     body_template=None,
+    m_url=None,
 ):
     """Render a validated frozen template while truncating only ``desc``."""
     parsed = urllib.parse.urlsplit(str(short_url or ""))
@@ -823,6 +828,7 @@ def _render_post_text(
     substitutions = {
         "drama_name": normalized_name,
         "url": str(short_url),
+        "m_url": m_url or "https://ai.yingliangads.com/m/preview",
     }
     if episode_number is not None:
         substitutions["episode_number"] = str(_positive_int(
@@ -863,10 +869,10 @@ def _render_post_text(
     return before_description + rendered_description + after_description
 
 
-def build_post_text(short_url, drama_name, description, body_template=None, *, copy_contract_version=1):
+def build_post_text(short_url, drama_name, description, body_template=None, *, copy_contract_version=1, m_url=None):
     if copy_contract_version == 2:
         from features.x_video_publish.templates import render_caption
-        return render_caption(body_template, drama_name, description, short_url)
+        return render_caption(body_template, drama_name, description, short_url, m_url=m_url)
     if copy_contract_version != 1:
         raise XPostError("invalid_post_template", "Unknown copy contract version", 400)
     return _render_post_text(
@@ -874,6 +880,7 @@ def build_post_text(short_url, drama_name, description, body_template=None, *, c
         drama_name,
         description,
         body_template=body_template,
+        m_url=m_url,
     )
 
 
@@ -883,6 +890,7 @@ def build_drama_episode_post_text(
     drama_name,
     description,
     body_template=None,
+    m_url=None,
 ):
     return _render_post_text(
         short_url,
@@ -890,6 +898,7 @@ def build_drama_episode_post_text(
         description,
         episode_number=sub_num,
         body_template=body_template,
+        m_url=m_url,
     )
 
 
@@ -5187,7 +5196,7 @@ class XPostStore:
         item["supported_macros"] = ["drama_name"]
         if item["source_type"] == "drama":
             item["supported_macros"].append("episode_number")
-        item["supported_macros"].extend(["desc", "url"])
+        item["supported_macros"].extend(["desc", "url", "m_url"])
         item["posts_per_day"] = (
             len(account_ids)
             * (
@@ -5890,6 +5899,8 @@ class XPostStore:
                     "自动发布设置已被其他人修改，请刷新后重试",
                     409,
                 )
+            from .moboreels import freeze_schedule_actor
+            freeze_schedule_actor(conn, source_type, expected_version + 1, actor, body_template)
             if settings_changed:
                 conn.execute(
                     "DELETE FROM x_post_schedule_random_plan "
@@ -19336,6 +19347,13 @@ def publish_canary(
             post_text = log["post_text"]
         else:
             short_url = _build_short_url(short_base_url, log["id"])
+            from .moboreels import contains_macro, resolve_x_url
+            m_url = None
+            if contains_macro(queue.get("body_template")):
+                try:
+                    m_url = resolve_x_url(store.db_path, queue, log)
+                except Exception as exc:
+                    raise XPostError("moboreels_link_unavailable", str(exc), 409) from None
             if queue.get("source_type") == "drama":
                 post_text = build_drama_episode_post_text(
                     short_url,
@@ -19343,6 +19361,7 @@ def publish_canary(
                     queue.get("drama_name"),
                     queue["description"],
                     queue.get("body_template"),
+                    m_url=m_url,
                 )
             else:
                 post_text = build_post_text(
@@ -19350,6 +19369,7 @@ def publish_canary(
                     queue.get("drama_name"),
                     queue["description"],
                     queue.get("body_template"),
+                    m_url=m_url,
                     copy_contract_version=int(queue.get("copy_contract_version", 1)),
                 )
             if not prepare_link_after_probe:

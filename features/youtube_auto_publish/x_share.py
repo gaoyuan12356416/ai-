@@ -33,10 +33,13 @@ def source_context(service, actor, task_id, *, require_public=True):
         'thumbnail_url': 'https://i.ytimg.com/vi/' + video_id + '/hqdefault.jpg' if re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id) else '',
     }
     material = body.get('material') or {}
+    source['moboreels_story_id'] = str(material.get('moboreels_story_id') or material.get('content_id') or '')
+    source['material_id'] = str(material.get('id') or '')
     values = {key: source.get(key, '') for key, _ in MACROS}
     # Reuse this task's frozen promotional link; never reserve or rebuild a link here.
     values.update(short_url=str(material.get('macro_url') or ''),
-                  name=str(material.get('macro_name') or ''), desc=str(material.get('macro_desc') or ''))
+                  name=str(material.get('macro_name') or ''), desc=str(material.get('macro_desc') or ''),
+                  m_url='https://ai.yingliangads.com/m/preview' if source['moboreels_story_id'] and source['material_id'] else '')
     return source, values, ledger, channel_id
 
 
@@ -143,9 +146,15 @@ def handle(service, app, actor, task_id, action, payload=None, run_id='', *, x_r
     card = card_check(source['video_id'])
     if card.get('eligible') is not True:
         raise WorkflowError('youtube_player_unavailable', card.get('message') or '暂时无法确认 YouTube 播放卡片', 409)
+    extra = {}
+    if '{{m_url}}' in template:
+        if not source.get('moboreels_story_id') or not source.get('material_id'):
+            raise WorkflowError('moboreels_story_missing', '该视频素材缺少 Moboreels story_id，无法生成推广链接', 409)
+        extra['moboreels'] = {'story_id':source['moboreels_story_id'], 'material_id':source['material_id']}
+        rendered['text'] = rendered['text'].replace(values['m_url'], '{{m_url}}')
     return x_request('create', actor, scope=scope, task_id=task_id, video_id=source['video_id'],
                      youtube_url=source['youtube_url'], title=source['title'], text=rendered['text'],
-                     description_template=template, operation_id=operation_id, account_ids=ids, source_verified_at=verified_at)
+                     description_template=template, operation_id=operation_id, account_ids=ids, source_verified_at=verified_at, **extra)
 
 
 def dispatch(handler, parsed, actor, env):

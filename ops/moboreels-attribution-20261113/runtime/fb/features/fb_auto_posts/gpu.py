@@ -10,6 +10,8 @@ from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
 
 from .core import FBAutoPostStore, StoreError
+from .moboreels import ensure_link
+from features.fb_video_publish.moboreels import MoboreelsFBError
 from .validation import valid_internal_bearer
 
 
@@ -93,6 +95,7 @@ class PrepareExecutor:
         if task is None:
             return {"ok": True, "status": "no_planned", "claimed": False}
         try:
+            task = ensure_link(self.store, task)
             from .manual_batch import BatchError, prepare_source_url, task_policy
             with self.store.connect() as conn:
                 policy = task_policy(conn, task)
@@ -100,6 +103,8 @@ class PrepareExecutor:
             prepared = self.gpu.prepare(job_id=task["gpu_job_id"], content_id=task["content_id"], source_url=source_url, video_template=task["video_template"])
             return self.store.complete_prepare(int(task["id"]), prepared)
         except BatchError as exc:
+            return self.store.fail_prepare(int(task["id"]), exc.code, str(exc))
+        except MoboreelsFBError as exc:
             return self.store.fail_prepare(int(task["id"]), exc.code, str(exc))
         except GPUPrepareError as exc:
             permanent = {

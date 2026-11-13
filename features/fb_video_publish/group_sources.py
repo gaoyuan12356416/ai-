@@ -360,7 +360,7 @@ class GroupPoolSource:
             raise SourceError("drama_not_yet_deliverable", "尚未到达剧目可投放时间", 409)
         return {**material, **drama, "drama_deploy_time": max(deploy_times), "policy_version": POLICY_VERSION}
 
-    def resolve_materials(self, material_ids, need_desc=True) -> dict:
+    def resolve_materials(self, material_ids, need_desc=True, *, moboreels=False) -> dict:
         if material_ids == []:
             return {"items": [], "errors": []}
         wanted = _ids(material_ids, None, "素材")
@@ -385,18 +385,25 @@ class GroupPoolSource:
             if not materials:
                 continue
             content_ids = sorted({item["content_id"] for item in materials})
-            resources, releases = self._metadata(content_ids)
+            resources, releases = ({}, {}) if moboreels else self._metadata(content_ids)
             for material in materials:
                 mid, content_id = material["material_id"], material["content_id"]
                 try:
-                    found[mid] = self._enrich(material, resources[content_id], releases[content_id], need_desc=need_desc)
+                    if moboreels:
+                        from .moboreels import enrich, MoboreelsFBError
+                        try:
+                            found[mid] = {**enrich(material), "policy_version": POLICY_VERSION}
+                        except MoboreelsFBError as exc:
+                            raise SourceError(exc.code, str(exc), 409) from None
+                    else:
+                        found[mid] = self._enrich(material, resources[content_id], releases[content_id], need_desc=need_desc)
                 except SourceError as exc:
                     errors[mid] = {"material_id": mid, "code": exc.code, "message": str(exc)}
         return {"items": [found[mid] for mid in wanted if mid in found],
                 "errors": [errors[mid] for mid in wanted if mid in errors]}
 
-    def get_materials(self, material_ids, need_desc=True) -> dict[str, dict]:
-        resolved = self.resolve_materials(material_ids, need_desc=need_desc)
+    def get_materials(self, material_ids, need_desc=True, *, moboreels=False) -> dict[str, dict]:
+        resolved = self.resolve_materials(material_ids, need_desc=need_desc, moboreels=moboreels)
         if resolved["errors"]:
             first = resolved["errors"][0]
             raise SourceError(first["code"], first["message"], 409)

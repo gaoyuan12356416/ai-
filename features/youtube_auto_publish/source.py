@@ -55,7 +55,7 @@ class MaterialSource:
             return '', {'configured':False,'message':'素材筛选规则待配置，请等待管理员提供最终 SQL。'}
         return validate_sql(text), {'configured':True,'message':''}
 
-    def _read(self, sql, material_id='', search='', uploader_id=''):
+    def _read(self, sql, material_id='', search='', uploader_id='', moboreels=False):
         projection = ','.join("'%s',COALESCE(CAST(pool.`%s` AS CHAR),'')" % (key,key) for key in COLUMNS)
         condition = "CAST(pool.app_id AS CHAR)='1479'"
         if material_id:
@@ -85,7 +85,21 @@ class MaterialSource:
             ids=[item['id'] for item in items]
             if len(ids)!=len(set(ids)):
                 raise WorkflowError('material_source_ambiguous','素材查询存在重复 ID，请管理员调整 SQL',503)
-            if self.drama_resolver:
+            if moboreels:
+                from features.moboreels_library.macro_client import lookup_story, MoboreelsLinkError
+                from .reference import normalize_reference_url
+                for item in items:
+                    try:
+                        drama = lookup_story(item['content_id'])
+                    except MoboreelsLinkError as exc:
+                        raise WorkflowError('moboreels_drama_unavailable', str(exc), 409) from None
+                    item.update(promotion_provider='moboreels', moboreels_story_id=item['content_id'],
+                                macro_name=drama.get('story_name') or item['name'], macro_desc=drama.get('introduce') or '',
+                                drama_status='moboreels', drama_message='',
+                                drama_cover_url=normalize_reference_url(drama.get('img_src')))
+                    item['drama_cover_status'] = 'available' if item['drama_cover_url'] else 'missing'
+                    item['drama_cover_message'] = '' if item['drama_cover_url'] else 'Moboreels 原剧封面暂不可用，请选择本地上传'
+            elif self.drama_resolver:
                 items = self.drama_resolver(items)
             for item in items:
                 item['long_url'] = long_url(item)
@@ -137,11 +151,11 @@ class MaterialSource:
             rows=[dict(row) for row in self.cache[2]]
         return dict(state,items=rows,uploaders=uploaders)
 
-    def get(self, material_id):
+    def get(self, material_id, *, moboreels=False):
         sql, state = self.configuration()
         if not sql:
             raise WorkflowError('material_source_unconfigured',state['message'],409)
-        rows=self._read(sql,str(material_id))
+        rows=self._read(sql,str(material_id),moboreels=moboreels)
         if len(rows)!=1:
             raise WorkflowError('material_unavailable','素材不在当前可发布范围内，请重新选择',409)
         return rows[0]

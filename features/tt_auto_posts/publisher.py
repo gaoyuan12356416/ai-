@@ -410,7 +410,9 @@ class AutoPostExecutor:
             rules=rules,
             now=self._now(),
         )
-        self._phase_selector(claim_token).select_and_reserve(request)
+        from features.x_posts.moboreels import source_policy, contains_macro
+        with source_policy(contains_macro(template.config.get("caption_template"))):
+            self._phase_selector(claim_token).select_and_reserve(request)
         return self.store.get_task(task.id)
 
     def _prepare(
@@ -582,6 +584,12 @@ class AutoPostExecutor:
         template = self.store.get_template(
             task.template_id, version=task.template_version
         )
+        if task.caption and "{{m_url}}" in str(template.config.get("caption_template") or ""):
+            if "{{m_url}}" in task.caption:
+                raise AutoPostExecutionError("moboreels_caption_unresolved", "冻结文案仍含未展开推广宏", 409)
+            return task.caption
+        from features.tt_posts.moboreels import auto_url
+        m_url = auto_url(self.store, task, template.config.get("caption_template"))
         material = self._selection_material(task)
         drama = self._selection_drama(task)
         short_url = build_auto_short_url(task.id)
@@ -618,6 +626,7 @@ class AutoPostExecutor:
             template.config.get("caption_template"),
             task.content_id,
             short_url=short_url,
+            m_url=m_url,
             description=description,
         )
 

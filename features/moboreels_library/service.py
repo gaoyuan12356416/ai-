@@ -16,6 +16,11 @@ from .promotions import PromotionError, PromotionManager, identity
 from .provider import ProviderClient
 from .settings import Settings
 from .sync import SyncManager
+from .short_links import ShortLinks
+from .orders import Reports
+from .actors import resolve_actor
+from .content_tools import ContentTools
+from .media_accounts import MediaAccounts
 
 
 def public_run(run):
@@ -35,7 +40,7 @@ def public_run(run):
 
 
 class Application:
-    def __init__(self, settings, db=None, provider=None, sync=None, promotions=None):
+    def __init__(self, settings, db=None, provider=None, sync=None, promotions=None, short_links=None, reports=None):
         self.settings = settings
         self.db = db or Database(settings)
         self.provider = provider or ProviderClient(settings)
@@ -43,12 +48,57 @@ class Application:
         self.promotions = promotions or PromotionManager(settings, self.db, self.provider)
         self.promotions.recover()
         self.sync = sync or SyncManager(settings, self.db, self.provider)
+        self.short_links = short_links if short_links is not None else ShortLinks(settings, self.db, self.promotions)
+        self.reports = reports if reports is not None else Reports(settings, db=self.db, provider=self.provider)
+        self.content = ContentTools(settings, self.catalog, self.provider)
+        self._media = None
+        self._media_lock = threading.Lock()
+        if (settings.data_dir / 'media-accounts' / 'registrations.sqlite3').exists():
+            self.media
+
+    @property
+    def media(self):
+        with self._media_lock:
+            if self._media is None:
+                self._media = MediaAccounts(self.settings, self.db, self.provider)
+            return self._media
 
     def dispatch(self, request):
         method, path = request.get("method"), request.get("path", "")
         actor = request.get("actor") or {}
         identity(self.settings.institution_user_id, actor)
         query, body = request.get("query") or {}, request.get("body") or {}
+        if method == 'GET' and path == '/recommendations':
+            return 200, self.content.recommendations(query)
+        if path == '/media-accounts/preview' and method == 'POST':
+            return 200, self.media.preview(actor, body)
+        if path == '/media-accounts':
+            if method == 'GET':
+                return 200, self.media.list(actor, query)
+            if method == 'POST':
+                return 202, self.media.submit(actor, body)
+        resolve = re.fullmatch(r'/media-accounts/([0-9a-f]{64})/resolve', path)
+        if resolve and method == 'POST':
+            return 200, self.media.resolve(actor, resolve.group(1), body)
+        episodes = re.fullmatch(r'/dramas/([^/]{1,192})/episodes', path)
+        if episodes and method == 'GET':
+            story = unquote(episodes.group(1))
+            if not story or len(story) > 64 or any(ord(c) < 32 for c in story):
+                raise ValueError('剧目 ID 无效')
+            return 200, self.content.episodes(story, refresh=query.get('refresh') == '1')
+        if method == 'GET' and path == '/reports':
+            return 200, self.reports.query(query, actor, all_users=actor.get('is_admin') is True)
+        if method == 'POST' and path == '/report-sync-runs':
+            previous = self.reports.latest()
+            scheduled = actor.get('user_id') == 'moboreels-scheduler' and body.get('trigger') == 'scheduled'
+            params = {key: body[key] for key in ('date_from','date_to') if key in body}
+            run = self.reports.start(params, trigger='scheduled' if scheduled else 'manual', actor=actor)
+            return 202, {'run': run, 'reused': bool(previous and previous['run_id']==run['run_id'])}
+        if method == 'GET' and path == '/report-sync-runs/latest':
+            return 200, {'run': self.reports.latest(), 'last_success_at': self.reports.last_success_at()}
+        if method == 'GET' and re.fullmatch(r'/report-sync-runs/[0-9a-f]{32}', path):
+            run = self.reports.get(path.rsplit('/',1)[1])
+            return (200, {'run': run}) if run else (404, {'error': 'not_found'})
         if method == "GET" and path == "/dramas":
             latest = self.sync.latest() or {}
             generation = (latest.get("run_id") or latest.get("id"), latest.get("status"), latest.get("resume_count", 0))
@@ -107,14 +157,29 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.respond(200, {"ok": True, "service": "moboreels-library"})
+        elif self.path.startswith('/m/'):
+            target = self.server.app.short_links.target(self.path.split('?', 1)[0][3:])
+            if not target:
+                return self.respond(404, {'error': 'not_found'})
+            self.send_response(302)
+            self.send_header('Location', target)
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
         else:
             self.respond(404, {"error": "not_found"})
 
     def do_POST(self):
-        if self.path != "/internal/dispatch":
+        if self.path not in ("/internal/dispatch", "/internal/short-links", "/internal/story-metadata", "/internal/actor"):
             return self.respond(404, {"error": "not_found"})
-        expected = "Bearer " + self.server.app.settings.internal_token
-        if not self.server.app.settings.internal_token or not secrets.compare_digest(self.headers.get("Authorization", ""), expected):
+        settings = self.server.app.settings
+        supplied = self.headers.get('Authorization', '')
+        authorized = bool(settings.internal_token and secrets.compare_digest(supplied, 'Bearer '+settings.internal_token))
+        if self.path != '/internal/dispatch':
+            macro_token = getattr(settings, 'macro_token', '')
+            authorized = authorized or bool(macro_token and secrets.compare_digest(supplied, 'Bearer '+macro_token))
+        if not authorized:
             return self.respond(403, {"error": "internal_auth_failed"})
         try:
             self.connection.settimeout(15)
@@ -122,12 +187,27 @@ class Handler(BaseHTTPRequestHandler):
             if len(lengths) != 1 or self.headers.get("Transfer-Encoding"):
                 raise ValueError("请求格式无效")
             length = int(lengths[0])
-            if not 0 < length <= 32768:
+            limit = 300000 if self.path == '/internal/dispatch' else 32768
+            if not 0 < length <= limit:
                 raise ValueError("请求过大")
             envelope = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(envelope, dict):
                 raise ValueError("请求格式无效")
-            status, payload = self.server.app.dispatch(envelope)
+            if self.path == '/internal/actor':
+                status, payload = 200, {'actor': resolve_actor(self.server.app.settings, envelope.get('user_id'), envelope.get('tenant_key'))}
+            elif self.path == '/internal/short-links':
+                status, payload = 200, self.server.app.short_links.resolve(envelope)
+            elif self.path == '/internal/story-metadata':
+                story = str(envelope.get('story_id') or '').strip()
+                if not story or len(story)>64 or any(ord(c)<32 for c in story):
+                    raise ValueError('剧目 ID 无效')
+                drama = self.server.app.catalog.detail(story)
+                if not drama:
+                    status, payload = 404, {'error': 'drama_not_found', 'message': 'Moboreels 剧库中未找到该剧 ID'}
+                else:
+                    status, payload = 200, {'drama': drama}
+            else:
+                status, payload = self.server.app.dispatch(envelope)
         except PromotionError as exc:
             status, payload = exc.status, {"error": exc.code, "message": str(exc)}
         except (ValueError, TypeError, UnicodeError):
@@ -161,6 +241,9 @@ def main():
         while not stop.is_set():
             try:
                 app.promotions.flush_outbox()
+                app.short_links.flush_outbox()
+                if app._media is not None:
+                    app._media.flush_outbox()
             except Exception as exc:
                 logging.warning("promotion outbox retained: %s", type(exc).__name__)
             stop.wait(15)

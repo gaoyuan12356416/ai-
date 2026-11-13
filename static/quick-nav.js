@@ -28,7 +28,9 @@
   const DEFAULT_NAV = [
     {key:"partner_libraries", label:"合作方剧库", order:16, enabled:true,
      items:[{key:"moboreelsLibrary", label:"Moboreels 短剧库", order:10,
-       href:"/moboreels-library.html", module:"moboreels_library", enabled:true}]},
+       href:"/moboreels-library.html", module:"moboreels_library", enabled:true},
+       {key:"moboreelsRecommendations",label:"Moboreels 推荐剧单",order:20,href:"/moboreels-recommendations.html",module:"moboreels_library",enabled:true},
+       {key:"moboreelsMediaAccounts",label:"Moboreels 媒体账号报备",order:30,href:"/moboreels-media-accounts.html",module:"moboreels_library",enabled:true}]},
     {
       key: "pipeline_overview", label: "运行监测", order: 1,
       items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,

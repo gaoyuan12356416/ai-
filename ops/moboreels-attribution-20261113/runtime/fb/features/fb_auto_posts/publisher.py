@@ -146,12 +146,18 @@ class AutoPostExecutor:
         task = self.store.claim_next(worker_id, lease_seconds)
         if task is None:
             return {"ok": True, "status": "no_pending", "claimed": False}
+        from .moboreels import ensure_link
+        from features.fb_video_publish.moboreels import MoboreelsFBError
+        try:
+            task = ensure_link(self.store, task)
+        except MoboreelsFBError as exc:
+            return self.store.complete_task(int(task["id"]), {"status":"failed","error_code":exc.code,"error_message":str(exc),"definite_attempts":0})
         if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or task.get("prepared_media_url") == task.get("source_media_url"):
             return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_prepared_media_required", "error_message": "任务缺少独立GPU成片，已禁止发布", "definite_attempts": 0})
         short_url, long_url = str(task.get("short_url") or ""), str(task.get("long_url") or "")
         if bool(short_url) != bool(long_url):
             return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_short_link_snapshot_invalid", "error_message": "任务短链快照不完整，已禁止发布", "definite_attempts": 0})
-        if short_url:
+        if short_url and not json.loads(task.get("moboreels_json") or "{}").get("link"):
             try:
                 normalized_short = validate_short_url(short_url)
                 expected_short = build_short_url(task["id"])

@@ -287,6 +287,10 @@ class MaterialRepository:
         return (low is None or value >= Decimal(str(low))) and (high is None or value <= Decimal(str(high)))
 
     def candidate_snapshot(self, config: Mapping[str, Any]) -> CandidateSnapshot:
+        from features.fb_video_publish.moboreels import contains
+        if contains(config.get("message_template")):
+            from .moboreels import candidate_snapshot
+            return candidate_snapshot(self, config)
         if self.metric_store is None:
             raise RepositoryError("fb_auto_metric_cache_not_configured", "FB指标缓存尚未配置", 503)
         days = int(config["metric_window_days"])

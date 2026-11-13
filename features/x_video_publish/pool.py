@@ -323,7 +323,10 @@ class PoolService:
         return result, {}
 
     def _validate_materials(self, actor, aid, account, mids, mode):
-        materials, failures = self._materials(actor, mids)
+        from features.x_posts.moboreels import contains_macro, source_policy
+        caption = self.store.get_settings(actor, aid).get("default_copy")
+        with source_policy(contains_macro(caption)):
+            materials, failures = self._materials(actor, mids)
         rows = [{"material_id": mid, "account_id": aid, "processing": mode} for mid in mids if mid in materials and mid not in failures]
         result = self.store.preview(actor, {"source": "pool", "rows": rows}, {aid: account}, materials, now=self.now_fn()) if rows else {"rows": []}
         valid, errors = {}, dict(failures)

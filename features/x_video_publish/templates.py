@@ -6,7 +6,7 @@ import urllib.parse
 
 DEFAULT_COPY = "{name}\n{desc}\n{url}"
 COPY_CONTRACT_VERSION = 2
-_MACRO = re.compile(r"\{(name|desc|url)\}")
+_MACRO = re.compile(r"\{\{(m_url)\}\}|\{(name|desc|url)\}")
 _URL = re.compile(r"https?://[^\s<>]+", re.I)
 
 
@@ -17,9 +17,11 @@ def normalize_caption(value):
     value = value.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not value or len(value) > 4000 or any(ord(c) < 32 and c not in "\n\t" for c in value):
         raise XPostError("x_video_caption_invalid", "发布文案不能为空、含控制字符或超过4000字符", 400)
+    if "{{m_url}}" in value and "{url}" in value:
+        raise XPostError("x_video_caption_macro_conflict", "Moboreels 推广宏与旧 url 宏不能在同一模板混用", 400)
     remainder = _MACRO.sub("", value)
     if "{" in remainder or "}" in remainder:
-        raise XPostError("x_video_caption_macro_invalid", "文案仅支持 {name}、{desc}、{url}，请检查宏格式", 400)
+        raise XPostError("x_video_caption_macro_invalid", "文案仅支持 {name}、{desc}、{url}、{{m_url}}，请检查宏格式", 400)
     return value
 
 
@@ -32,17 +34,18 @@ def weighted_length(value):
     return total + sum(_tweet_char_weight(c) for c in value[end:])
 
 
-def render_caption(caption, name, description, short_url):
+def render_caption(caption, name, description, short_url, *, m_url=None):
     from features.x_posts.service import XPostError
     template = normalize_caption(caption)
     parsed = urllib.parse.urlsplit(str(short_url))
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise XPostError("x_video_short_url_invalid", "发布短链无效", 400)
-    values = {"name": str(name or "").strip(), "desc": str(description or "").strip(), "url": str(short_url)}
-    for key in _MACRO.findall(template):
+    values = {"name": str(name or "").strip(), "desc": str(description or "").strip(), "url": str(short_url), "m_url": m_url or "https://ai.yingliangads.com/m/preview"}
+    for match in _MACRO.finditer(template):
+        key = match.group(1) or match.group(2)
         if not values[key]:
             raise XPostError("x_video_caption_source_missing", "文案宏所需的剧名或描述缺失", 400)
-    rendered = _MACRO.sub(lambda match: values[match.group(1)], template).strip()
+    rendered = _MACRO.sub(lambda match: values[match.group(1) or match.group(2)], template).strip()
     if not rendered or weighted_length(rendered) > 280:
         raise XPostError("x_post_copy_too_long", "展开后的发布文案超过 X 的 280 加权字符限制，请缩减文案", 400)
     return rendered

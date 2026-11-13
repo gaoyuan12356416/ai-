@@ -2910,20 +2910,26 @@ class TTPostService:
         )
         return result
 
+    def _resolve_material(self, material_id, caption_template=""):
+        from features.x_posts.moboreels import contains_macro, source_policy
+        with source_policy(contains_macro(caption_template)):
+            return self.material_resolver.resolve(material_id)
+
     def _resolve_and_prepare(
         self,
         material_id: Any,
         *,
         gpu_job_id: str = "",
+        caption_template: str = "",
     ) -> Dict[str, Any]:
         return self._prepare_resolved(
-            self.material_resolver.resolve(material_id),
+            self._resolve_material(material_id, caption_template),
             gpu_job_id=gpu_job_id,
         )
 
     def material_preview(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         material_id = _positive_decimal(payload.get("material_id"), "素材ID", 19)
-        resolved = dict(self.material_resolver.resolve(material_id))
+        resolved = dict(self._resolve_material(material_id, payload.get("caption_template") or self.store.get_auto_publish_config().get("caption_template")))
         publication = self.store.get_material_publication_state(material_id)
         resolved.update(
             {
@@ -2980,7 +2986,7 @@ class TTPostService:
             raise TTPostServiceError("invalid_request", "立即测试发布字段无效", 400)
         payload = dict(payload)
         actor = payload.pop("_internal_actor", {})
-        if not isinstance(actor, Mapping) or set(actor) - {"user_id", "name"}:
+        if not isinstance(actor, Mapping) or set(actor) - {"user_id", "name", "tenant_key"}:
             raise TTPostServiceError("invalid_request", "内部操作人身份无效", 400)
         required = {
             "source_account_id",
@@ -3091,7 +3097,7 @@ class TTPostService:
             {"source_account_id": account_id}
         )["item"]
         self._assert_creator_settings(creator, settings)
-        resolved = dict(self.material_resolver.resolve(material_id))
+        resolved = dict(self._resolve_material(material_id, config.get("caption_template")))
 
         # A same-key retry is allowed. A different active or unknown attempt
         # for the same material is fail-closed until it reaches a clear result.
@@ -3822,6 +3828,8 @@ class TTPostService:
     ) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
             raise TTPostServiceError("invalid_request", "请求体必须是对象", 400)
+        payload = dict(payload)
+        moboreels_actor = payload.pop("_internal_actor", {})
         allowed = {
             "idempotency_key",
             "source_account_id",
@@ -3915,7 +3923,7 @@ class TTPostService:
                 )
             }
         )
-        resolved = dict(self.material_resolver.resolve(material_id))
+        resolved = dict(self._resolve_material(material_id, (auto_config or {}).get("caption_template") or payload.get("caption_template")))
         if resolved["content_id"] != requested_content_id:
             raise TTPostServiceError(
                 "tt_content_id_mismatch",
@@ -3981,6 +3989,8 @@ class TTPostService:
             material_language=resolved.get("material_language"),
             material_tag=resolved.get("material_tag"),
             description=resolved.get("description"),
+            actor_user_id=str(moboreels_actor.get("user_id") or ""),
+            actor_name=str(moboreels_actor.get("name") or ""),
         )
         result = self._material_intake_api_item(item)
         result["account_name_snapshot"] = str(
@@ -5532,6 +5542,8 @@ class TTPostService:
         return existing
 
     def queue_create(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        payload = dict(payload)
+        moboreels_actor = payload.pop("_internal_actor", {})
         if not isinstance(payload, Mapping):
             raise TTPostServiceError("invalid_request", "请求体必须是对象", 400)
         idempotency_key = _bounded_text(
@@ -5590,6 +5602,7 @@ class TTPostService:
         )
         existing = self._existing_queue(
             idempotency_key=idempotency_key,
+            moboreels_actor=moboreels_actor,
             account_id=account_id,
             material_id=material_id,
             content_id=requested_content_id,
@@ -5649,7 +5662,7 @@ class TTPostService:
         creator_synced_at = _now_utc(self._now_fn).replace(
             microsecond=0
         ).isoformat().replace("+00:00", "Z")
-        prepared = self._resolve_and_prepare(material_id)
+        prepared = self._resolve_and_prepare(material_id, caption_template=candidate_template)
         gpu_job_id = prepared["gpu_job_id"]
         if prepared["content_id"] != requested_content_id:
             raise TTPostServiceError(
@@ -5926,6 +5939,8 @@ class TTPostService:
         """Persist and materialize the immutable redirect before Direct Post."""
 
         current = dict(queue)
+        from .moboreels import prepare_caption
+        current = prepare_caption(self.store, current, claim_token, direct=False)
         short_url = str(current.get("short_url") or "")
         if not short_url:
             if int(current.get("short_link_id") or 0) or str(
@@ -6090,6 +6105,8 @@ class TTPostService:
         claim_token: str,
     ) -> Dict[str, Any]:
         current = dict(item)
+        from .moboreels import prepare_caption
+        current = prepare_caption(self.store, current, claim_token, direct=True)
         short_url = str(current.get("short_url") or "")
         if not short_url:
             return current

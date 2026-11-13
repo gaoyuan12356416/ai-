@@ -771,7 +771,7 @@ Drama ID: {{contect_id}}
 
 Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
                 <div class="caption-meta">
-                  <span id="captionHelp">可选使用 {{contect_id}} 或 {{content_id}} 填入当前剧 ID、{{drama_name}} 填入剧名；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。使用 {{drama_name}} 时，缺少剧名会阻止发布。</span>
+                  <span id="captionHelp">新增 {{m_url}}：按素材上游剧 ID 生成 Moboreels 推广短链，归属任务创建者。可选使用 {{contect_id}} 或 {{content_id}} 填入当前剧 ID、{{drama_name}} 填入剧名；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。使用 {{drama_name}} 时，缺少剧名会阻止发布。</span>
                   <span id="captionCount">0 / 2200</span>
                 </div>
               </div>
@@ -901,13 +901,13 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=97b22a40182f"></script>
+  <script src="/quick-nav.js?v=ac11d7b304fb"></script>
   <script>
     (() => {
       const API_BASE = "/api/admin/tt-posts";
       const CAPTION_TEMPLATE = "Watch the full story in the app 🎬\n\nDrama ID: {{contect_id}}\n\nVisit my profile → Open the link → Search the Drama ID → Watch now.";
       const CAPTION_PLACEHOLDER_PATTERN = /\{\{([^{}]*)\}\}/g;
-      const CAPTION_PLACEHOLDERS = new Set(["contect_id", "content_id", "drama_name"]);
+      const CAPTION_PLACEHOLDERS = new Set(["contect_id", "content_id", "drama_name", "m_url"]);
       const CAPTION_SINGLE_PLACEHOLDER_PATTERN = /\{([^{}]*)\}/g;
       const CAPTION_URL_PLACEHOLDER = "{url}";
       const CAPTION_DESC_PLACEHOLDER = "{desc}";
@@ -2587,7 +2587,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
             try {
               const result = await api(`${API_BASE}/materials/preview`, {
                 method: "POST",
-                body: JSON.stringify({ material_id: materialId }),
+                body: JSON.stringify({ material_id: materialId, caption_template: byId("caption").value }),
               });
               applyGates(result);
               const item = readPayloadItem(result, ["item", "material"]);
@@ -2665,6 +2665,7 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           placeholderPattern,
           (match, name) => {
             const normalizedName = String(name || "").trim();
+            if (match === "{{m_url}}") return "https://ai.yingliangads.com/m/preview";
             if (["contect_id", "content_id"].includes(normalizedName)) return cleanId(contentId);
             if (normalizedName === "drama_name") return normalizeDramaName(dramaName);
             return match;
@@ -2690,6 +2691,9 @@ Visit my profile → Open the link → Search the Drama ID → Watch now.</texta
           template.matchAll(placeholderPattern),
           match => String(match[1] || "").trim()
         );
+        if (Array.from(template.matchAll(new RegExp(CAPTION_PLACEHOLDER_PATTERN.source,"g"))).some(match => String(match[1]).trim()==="m_url" && match[0]!=="{{m_url}}")) {
+          return {error:"Moboreels 宏请使用精确的 {{m_url}}。",maxRenderedUnits:0};
+        }
         const remainder = template.replace(
           new RegExp(CAPTION_PLACEHOLDER_PATTERN.source, "g"),
           ""

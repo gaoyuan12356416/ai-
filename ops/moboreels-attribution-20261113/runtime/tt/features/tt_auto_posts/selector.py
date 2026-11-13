@@ -8,6 +8,8 @@ constraint are all evaluated before the selected identity leaves this layer.
 
 from __future__ import annotations
 
+from features.x_posts.moboreels import source_enabled
+
 import re
 import urllib.parse
 from dataclasses import dataclass, field
@@ -744,10 +746,10 @@ class TwoStageSelector:
                 continue
             series_code, row_language, resource_type, name = next(iter(identities))
             totals = metrics.drama(content_id)
-            if not request.rules.drama.spend.contains(totals.spend):
+            if not source_enabled() and not request.rules.drama.spend.contains(totals.spend):
                 self._reject(rejection_counts, "drama_spend")
                 continue
-            if not request.rules.drama.d0_roas.contains(totals.d0_roas):
+            if not source_enabled() and not request.rules.drama.d0_roas.contains(totals.d0_roas):
                 self._reject(rejection_counts, "drama_d0_roas")
                 continue
             candidates.append(
@@ -830,10 +832,10 @@ class TwoStageSelector:
                 self._reject(rejection_counts, "material_hard_gate")
                 continue
             totals = metrics.material(drama.content_id, material_id)
-            if not rule.spend.contains(totals.spend):
+            if not source_enabled() and not rule.spend.contains(totals.spend):
                 self._reject(rejection_counts, "material_spend")
                 continue
-            if not rule.d0_roas.contains(totals.d0_roas):
+            if not source_enabled() and not rule.d0_roas.contains(totals.d0_roas):
                 self._reject(rejection_counts, "material_d0_roas")
                 continue
             prepared.append(MaterialCandidate(row, totals))
@@ -886,6 +888,12 @@ class TwoStageSelector:
         return MaterialCandidate(material.source, material.metrics, public_fields)
 
     def select_and_reserve(self, request: SelectionRequest) -> ReservedSelection:
+        from features.x_posts.moboreels import source_enabled
+        from features.x_posts.moboreels_auto import Source, adapt
+        if source_enabled() and not isinstance(self.source, Source):
+            from . import repositories
+            selected = adapt(self, request.rules, repositories)
+            return selected.select_and_reserve(request)
         existing = self.store.get_task_reservation(int(request.task_id))
         if existing is not None:
             existing_mapping = _object_mapping(existing)
@@ -987,7 +995,8 @@ class TwoStageSelector:
 
                 snapshot = {
                     "rules": request.rules.as_dict(),
-                    "metric_dates": list(metric_dates),
+                    "metric_dates": [] if source_enabled() else list(metric_dates),
+                    "source_provider": "moboreels" if source_enabled() else "dramawave",
                     "drama": _drama_snapshot(drama),
                     "material": _material_snapshot(validated),
                     "blacklist": {

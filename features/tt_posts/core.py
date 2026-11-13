@@ -844,6 +844,7 @@ def render_caption_template(
     content_id: Any,
     *,
     url: Any = None,
+    m_url: Any = None,
     description: Any = None,
     code: Any = None,
     defer_url: bool = False,
@@ -863,6 +864,17 @@ def render_caption_template(
     """
 
     text = str(template or "")
+    has_m_url = "{{m_url}}" in text
+    if has_m_url and ("{url}" in text or "{code}" in text):
+        raise TTPostError("caption_provider_conflict", "Moboreels 推广宏不能与旧 url/code 宏混用", 400)
+    marker = "__MOBOREELS_MACRO_SENTINEL__"
+    if marker in text:
+        raise TTPostError("caption_placeholder_invalid", "发布描述含保留标记", 400)
+    text = text.replace("{{m_url}}", marker)
+    m_value = "{{m_url}}"
+    if m_url is not None:
+        from features.x_posts.moboreels import validated_url
+        m_value = validated_url(m_url)
     if not text.strip() or "\x00" in text or len(text) > 20000:
         raise TTPostError("invalid_caption_template", "发布描述模板无效", 400)
     normalized_content_id = str(content_id or "").strip()
@@ -870,7 +882,7 @@ def render_caption_template(
         raise TTPostError("tt_content_id_invalid", "content_id无效", 400)
     matches = list(_PLACEHOLDER_RE.finditer(text))
     placeholders = [match.group(1).strip() for match in matches]
-    if not placeholders:
+    if not placeholders and not has_m_url:
         raise TTPostError(
             "caption_content_id_required",
             "发布描述模板必须包含{{contect_id}}",
@@ -981,6 +993,8 @@ def render_caption_template(
         lambda match: render_single(match, measuring=True),
         rendered_base,
     ).strip()
+    rendered = rendered.replace(marker, m_value)
+    measured = measured.replace(marker, m_value if m_url else "https://ai.yingliangads.com/m/preview")
     try:
         rendered_units = len(measured.encode("utf-16-le")) // 2
     except UnicodeEncodeError:
@@ -8285,6 +8299,7 @@ class TTPostStore:
         material_resolver: Any,
         *,
         idempotency_key: str = "",
+        moboreels_actor: Any = None,
         is_aigc: bool = False,
         publish_mode: str = "hold",
         account_display_name: str = "",
@@ -8908,6 +8923,10 @@ class TTPostStore:
                     "TikTok素材状态已变更",
                     409,
                 )
+            from features.x_posts.moboreels import contains_macro
+            if contains_macro(frozen_caption_template):
+                from .moboreels import freeze_queue_actor
+                freeze_queue_actor(conn, queue_id, moboreels_actor, recurring_run_id=normalized_recurring_run_id)
             self._event(
                 conn,
                 event_type="queue_frozen",

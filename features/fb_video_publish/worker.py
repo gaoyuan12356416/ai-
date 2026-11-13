@@ -12,6 +12,7 @@ import requests
 
 from features.fb_auto_posts.publisher import GraphResult
 from .core import DomainError
+from . import moboreels
 from .links import publish_link, short_url, validate_long_url
 
 
@@ -80,12 +81,34 @@ class Worker:
                 raise DomainError("group_pool_membership_changed", "Page语言规则已改变，未调用平台", 409)
             if (kind == "unrestricted") != (page.get("language") == ""):
                 raise DomainError("group_pool_policy_invalid", "Page语言规则与冻结语言不一致，未调用平台", 409)
-        fresh = self.group_sources.get_materials([task["material_id"]], need_desc=False)[task["material_id"]]
+        fresh = self.group_sources.get_materials([task["material_id"]], need_desc=False, **({"moboreels": True} if snap.get("moboreels") else {}))[task["material_id"]]
         if any(str(fresh.get(k, "")) != str(snap["material"].get(k, "")) for k in ("material_id", "content_id", "language", "media_url")):
             raise DomainError("material_identity_changed", "素材来源身份已变化，未调用平台", 409)
         is_unrestricted = policy_version == POLICY_VERSION and page.get("language_kind") == "unrestricted"
         if not is_unrestricted and fresh["language"] != page["language"]:
             raise DomainError("language_mismatch", "Page与素材当前语言不匹配，未调用平台", 409)
+
+    def _moboreels_link(self, task, *, kind):
+        snap = json.loads(task["snapshot_json"])
+        intent = snap.get("moboreels")
+        if not intent:
+            return task
+        if intent.get("link"):
+            link = moboreels.validate(intent["link"], task["content_id"])
+            if task["short_url"] != link["short_url"] or task["long_url"] != link["target_url"]:
+                raise moboreels.MoboreelsFBError("任务链接与冻结推广回执不一致")
+            return task
+        if kind not in {"prepare", "link"}:
+            raise moboreels.MoboreelsFBError("Moboreels推广链接未冻结，未调用平台")
+        creator = intent.get("creator") or {}
+        if creator.get("user_id") != task["owner_user_id"] or creator.get("tenant_key") != task["tenant_key"]:
+            raise moboreels.MoboreelsFBError("任务的推广创建者身份与冻结归属不一致")
+        material = moboreels.enrich(snap["material"])
+        link = moboreels.resolve(creator, material, page_id=task["page_id"], task_id="fb:video:"+task["task_id"])
+        from .templates import render_template
+        caption = render_template(intent["caption_template"],material,link["short_url"],manual=task.get("source_kind")=="manual" or "pool" in snap)
+        title = render_template(intent.get("title_template", ""),material,link["short_url"],manual=True)
+        return self.store.freeze_moboreels_link(task,material,link,caption,title,kind=kind)
 
     def _task_credentials(self, task, snapshot=None):
         """Re-read only the credential scope frozen for this publication."""
@@ -112,6 +135,7 @@ class Worker:
             if task is None:
                 return {"ok": True, "status": "no_pending"}
             try:
+                task = self._moboreels_link(task, kind="prepare")
                 snap = json.loads(task["snapshot_json"])
                 result = self.gpu.prepare(job_id=task["gpu_job_id"], content_id=task["content_id"],
                                           source_url=snap["material"]["media_url"], video_template="random_overlay")
@@ -135,6 +159,9 @@ class Worker:
         if task is None:
             return {"ok": True, "status": "no_pending"}
         try:
+            task = self._moboreels_link(task, kind="link")
+            if json.loads(task["snapshot_json"]).get("moboreels"):
+                return self.store.finish_stage(task, "link", {"sha256":task["link_sha256"]})
             if short_url(task["ledger_id"]) != task["short_url"]:
                 raise DomainError("short_link_identity_mismatch", "短链冻结身份不一致", 409)
             validate_long_url(task["long_url"], task["ledger_id"])
@@ -164,6 +191,8 @@ class Worker:
                 # Keep source video identity and Page language validation intact.
                 enforce_blacklist = task.get("source_kind") not in {"manual", "pool"}
                 material_policy = {"page_pool": True} if task.get("source_kind") == "pool" or "pool" in snap else {}
+                if snap.get("moboreels"):
+                    material_policy["moboreels"] = True
                 fresh = self.sources.get_materials([task["material_id"]], need_desc=False,
                                                    enforce_blacklist=enforce_blacklist, manual=manual,
                                                    **material_policy)[task["material_id"]]
@@ -176,9 +205,12 @@ class Worker:
                     raise DomainError("prepared_media_invalid", "任务缺少独立加工成片", 409)
             elif media_url != snap["material"]["media_url"]:
                 raise DomainError("original_media_invalid", "原片身份与冻结来源不一致", 409)
-            if short_url(task["ledger_id"]) != task["short_url"]:
-                raise DomainError("short_link_identity_mismatch", "短链身份不一致", 409)
-            validate_long_url(task["long_url"], task["ledger_id"])
+            if snap.get("moboreels"):
+                task = self._moboreels_link(task, kind="execute")
+            else:
+                if short_url(task["ledger_id"]) != task["short_url"]:
+                    raise DomainError("short_link_identity_mismatch", "短链身份不一致", 409)
+                validate_long_url(task["long_url"], task["ledger_id"])
             title = snap.get("title", "")
             if not isinstance(title, str):
                 raise DomainError("title_invalid", "任务的视频标题无效，未调用平台", 409)

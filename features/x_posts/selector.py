@@ -526,6 +526,11 @@ class DramawaveCandidateSelector:
         require_dramawave_product=True,
         use_drama_language=False,
     ):
+        from .moboreels import source_enabled, story_metadata
+        moboreels = source_enabled()
+        if moboreels:
+            require_dramawave_product = False
+            use_drama_language = True
         material_rows = self._pool_material_rows(
             material_id,
             allow_long_duration=allow_long_duration,
@@ -668,101 +673,109 @@ class DramawaveCandidateSelector:
         # eligibility gates. Historical tag classifications remain visible in
         # the source system, but they do not remove an otherwise valid item.
 
-        drama_rows = self._pool_drama_rows(content_id, material_language)
-        if not drama_rows:
-            raise PoolCandidateRejection(
-                "drama_mapping_missing",
-                "drama mapping is missing",
-            )
-
-        canonical = {}
-        for drama in drama_rows:
+        if moboreels:
+            from features.moboreels_library.macro_client import MoboreelsLinkError
             try:
-                mapped_content_id = _text(
-                    drama.get("content_id"), "drama content_id", limit=128
-                )
-                series_code = _text(
-                    drama.get("series_code"), "drama series_code", limit=128
-                )
-                mapped_language = (
-                    _required_drama_language(drama.get("language"))
-                    if use_drama_language else _text(
-                        drama.get("language"), "drama language", limit=32
-                    )
-                )
-                drama_name = _text(drama.get("drama_name"), "drama name", limit=500)
-                raw_labels = _text(
-                    drama.get("drama_labels"), "drama labels", limit=4096
-                )
-                description = _text(
-                    drama.get("drama_description"),
-                    "drama description",
-                    limit=4096,
-                )
-            except PoolCandidateRejection:
-                raise
-            except CandidateSelectionError as exc:
-                raise PoolCandidateRejection(
-                    "drama_mapping_invalid",
-                    "drama mapping is incomplete or invalid: %s" % exc,
-                ) from None
-            if (
-                mapped_content_id != content_id
-                or (not use_drama_language
-                    and mapped_language.casefold() != material_language.casefold())
-            ):
-                raise PoolCandidateRejection(
-                    "drama_mapping_invalid",
-                    "drama mapping identity does not match the material",
-                )
-            labels = [item.strip() for item in raw_labels.split(",") if item.strip()]
-            if not labels:
-                raise PoolCandidateRejection(
-                    "drama_mapping_invalid",
-                    "drama labels are incomplete",
-                )
-            canonical_key = (
-                mapped_content_id,
-                series_code,
-                mapped_language.casefold(),
-                drama_name,
-                description,
-            )
-            mapped = canonical.setdefault(
-                canonical_key,
-                {
-                    "series_code": series_code,
-                    "language": mapped_language,
-                    "drama_name": drama_name,
-                    "labels": [],
-                    "description": description,
-                },
-            )
-            # Labels describe a drama; differences must not change its identity.
-            # Preserve the first source row's tag order and append unseen labels.
-            seen_labels = {label.casefold() for label in mapped["labels"]}
-            for label in labels:
-                if label.casefold() not in seen_labels:
-                    mapped["labels"].append(label)
-                    seen_labels.add(label.casefold())
-        if use_drama_language and len({item["language"] for item in canonical.values()}) > 1:
-            raise PoolCandidateRejection(
-                "drama_language_ambiguous", "关联短剧存在多个语言，无法确定发布语言"
-            )
-        if len(canonical) != 1:
-            raise PoolCandidateRejection(
-                "drama_mapping_ambiguous",
-                "drama mapping is ambiguous",
-            )
-        drama = next(iter(canonical.values()))
-        if use_drama_language:
+                drama = story_metadata(content_id)
+            except MoboreelsLinkError as exc:
+                raise PoolCandidateRejection("moboreels_story_invalid", str(exc)) from None
             material_language = drama["language"]
-        drama_deploy_time = self._validate_drama_deploy_time(
-            content_id,
-            material_language,
-            canonical_language=use_drama_language,
-        )
+            drama_deploy_time = ""
+        else:
+            drama_rows = self._pool_drama_rows(content_id, material_language)
+            if not drama_rows:
+                raise PoolCandidateRejection(
+                    "drama_mapping_missing",
+                    "drama mapping is missing",
+                )
 
+            canonical = {}
+            for drama in drama_rows:
+                try:
+                    mapped_content_id = _text(
+                        drama.get("content_id"), "drama content_id", limit=128
+                    )
+                    series_code = _text(
+                        drama.get("series_code"), "drama series_code", limit=128
+                    )
+                    mapped_language = (
+                        _required_drama_language(drama.get("language"))
+                        if use_drama_language else _text(
+                            drama.get("language"), "drama language", limit=32
+                        )
+                    )
+                    drama_name = _text(drama.get("drama_name"), "drama name", limit=500)
+                    raw_labels = _text(
+                        drama.get("drama_labels"), "drama labels", limit=4096
+                    )
+                    description = _text(
+                        drama.get("drama_description"),
+                        "drama description",
+                        limit=4096,
+                    )
+                except PoolCandidateRejection:
+                    raise
+                except CandidateSelectionError as exc:
+                    raise PoolCandidateRejection(
+                        "drama_mapping_invalid",
+                        "drama mapping is incomplete or invalid: %s" % exc,
+                    ) from None
+                if (
+                    mapped_content_id != content_id
+                    or (not use_drama_language
+                        and mapped_language.casefold() != material_language.casefold())
+                ):
+                    raise PoolCandidateRejection(
+                        "drama_mapping_invalid",
+                        "drama mapping identity does not match the material",
+                    )
+                labels = [item.strip() for item in raw_labels.split(",") if item.strip()]
+                if not labels:
+                    raise PoolCandidateRejection(
+                        "drama_mapping_invalid",
+                        "drama labels are incomplete",
+                    )
+                canonical_key = (
+                    mapped_content_id,
+                    series_code,
+                    mapped_language.casefold(),
+                    drama_name,
+                    description,
+                )
+                mapped = canonical.setdefault(
+                    canonical_key,
+                    {
+                        "series_code": series_code,
+                        "language": mapped_language,
+                        "drama_name": drama_name,
+                        "labels": [],
+                        "description": description,
+                    },
+                )
+                # Labels describe a drama; differences must not change its identity.
+                # Preserve the first source row's tag order and append unseen labels.
+                seen_labels = {label.casefold() for label in mapped["labels"]}
+                for label in labels:
+                    if label.casefold() not in seen_labels:
+                        mapped["labels"].append(label)
+                        seen_labels.add(label.casefold())
+            if use_drama_language and len({item["language"] for item in canonical.values()}) > 1:
+                raise PoolCandidateRejection(
+                    "drama_language_ambiguous", "关联短剧存在多个语言，无法确定发布语言"
+                )
+            if len(canonical) != 1:
+                raise PoolCandidateRejection(
+                    "drama_mapping_ambiguous",
+                    "drama mapping is ambiguous",
+                )
+            drama = next(iter(canonical.values()))
+            if use_drama_language:
+                material_language = drama["language"]
+            drama_deploy_time = self._validate_drama_deploy_time(
+                content_id,
+                material_language,
+                canonical_language=use_drama_language,
+            )
         return {
             "source_date": source_date,
             "material_key": key,
@@ -1231,18 +1244,20 @@ def select_manual_candidates(
     limit=50,
     schema=DEFAULT_SCHEMA,
     now=None,
+    moboreels=False,
 ):
     """Hydrate an exact manual batch without adding it to the material pool."""
-    return DramawaveCandidateSelector(
-        connection,
-        schema=schema,
-        now=now,
-    ).select_manual(
-        material_ids,
-        source_date,
-        limit=limit,
-    )
-
+    from .moboreels import source_policy
+    with source_policy(moboreels):
+        return DramawaveCandidateSelector(
+            connection,
+            schema=schema,
+            now=now,
+        ).select_manual(
+            material_ids,
+            source_date,
+            limit=limit,
+        )
 
 def select_auto_template_candidates(
     connection,

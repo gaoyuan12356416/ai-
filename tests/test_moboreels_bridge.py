@@ -122,7 +122,7 @@ class BridgeTests(unittest.TestCase):
         envelope = json.loads(request.data)
         self.assertEqual(request.full_url, "http://127.0.0.1:8864/internal/dispatch")
         self.assertEqual(request.get_header("Authorization"), "Bearer test-only-internal-token")
-        self.assertEqual(envelope["actor"], SESSION)
+        self.assertEqual(envelope["actor"], dict(SESSION, is_admin=False))
         self.assertEqual(envelope["body"], {})
         self.assertEqual(envelope["path"], "/dramas/story-a/promotion")
         self.assertEqual(envelope["method"], "POST")
@@ -136,6 +136,24 @@ class BridgeTests(unittest.TestCase):
         envelope = json.loads(self.opener.open.call_args.args[0].data)
         self.assertEqual(envelope["query"], {"is_show": "", "page_index": "2", "search": "测试"})
         self.assertEqual(handler.same_origin_checks, 0)
+
+    def test_report_has_separate_permission_and_only_accepts_date_body(self):
+        self.dispatch(FakeHandler(method='GET'), '/api/moboreels/reports')
+        self.assertEqual(self.responses[-1][0], 403)
+        self.app['has_module_permission'] = lambda session, module: module == 'moboreels_report'
+        self.app['navigation_item_access'] = lambda session, key, config: {'allowed': key == 'moboreelsReport'}
+        self.dispatch(FakeHandler(body=b'{"date_from":"2026-11-01","date_to":"2026-11-12"}'), '/api/moboreels/report-sync-runs')
+        self.assertEqual(self.responses[-1][0], 200)
+        envelope = json.loads(self.opener.open.call_args.args[0].data)
+        self.assertFalse(envelope['actor']['is_admin'])
+        self.dispatch(FakeHandler(body=b'{"is_admin":true}'), '/api/moboreels/report-sync-runs')
+        self.assertEqual(self.responses[-1][0], 400)
+
+    def test_administrator_scope_comes_from_cookie_only(self):
+        self.session['is_admin'] = True
+        self.dispatch(FakeHandler(method='GET'), '/api/moboreels/dramas?is_admin=false')
+        envelope = json.loads(self.opener.open.call_args.args[0].data)
+        self.assertTrue(envelope['actor']['is_admin'])
 
     def test_invalid_body_framing_is_not_forwarded(self):
         for setup in ["absent", "duplicate", "negative", "too-large", "transfer", "invalid-json", "invalid-utf8"]:
@@ -157,6 +175,28 @@ class BridgeTests(unittest.TestCase):
                     handler.rfile = io.BytesIO(b"\xff\xff")
                 self.dispatch(handler)
                 self.assertEqual(self.responses[-1][0], 400)
+        self.opener.open.assert_not_called()
+
+    def test_media_preview_uses_dedicated_navigation_and_trusted_actor(self):
+        seen = []
+        self.app['navigation_item_access'] = lambda session,key,config: seen.append(key) or {'allowed': key == 'moboreelsMediaAccounts'}
+        body = {'platform_type': 3, 'account_ids': ['12345']}
+        self.dispatch(FakeHandler(body=json.dumps(body).encode()), '/api/moboreels/media-accounts/preview')
+        envelope = json.loads(self.opener.open.call_args.args[0].data)
+        self.assertEqual(envelope['actor'], dict(SESSION, is_admin=False))
+        self.assertEqual(envelope['body'], body)
+        self.assertEqual(seen, ['moboreelsMediaAccounts'])
+
+    def test_media_actor_forgery_is_rejected_before_proxy(self):
+        self.app['navigation_item_access'] = lambda *args: {'allowed': True}
+        body = {'platform_type': 3, 'accounts': [], 'actor': {'role': 'admin'}}
+        self.dispatch(FakeHandler(body=json.dumps(body).encode()), '/api/moboreels/media-accounts')
+        self.assertEqual(self.responses[-1][0], 400)
+        self.opener.open.assert_not_called()
+
+    def test_recommendations_require_their_navigation_access(self):
+        self.dispatch(FakeHandler(method='GET', body=b''), '/api/moboreels/recommendations')
+        self.assertEqual(self.responses[-1][0], 403)
         self.opener.open.assert_not_called()
 
     def test_transport_failure_does_not_retry_creation(self):

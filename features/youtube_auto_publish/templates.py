@@ -11,10 +11,13 @@ class WorkflowError(ValueError):
 
 DEFAULT_DESCRIPTION = 'Watch more exciting short dramas on DramaWave. Subscribe for more stories!'
 TOKENS = re.compile(r'\{+[^{}\r\n]*\}+')
-FIELDS = {'url': 'macro_url', 'desc': 'macro_desc', 'name': 'macro_name'}
+FIELDS = {'url': 'macro_url', 'desc': 'macro_desc', 'name': 'macro_name', 'm_url': 'macro_m_url'}
 
 
 def long_url(material):
+    if material.get('promotion_provider') == 'moboreels':
+        # An explicit Moboreels story ID must never be reused as a DramaWave ID.
+        return ''
     if material.get('attribution'):
         return str(material.get('long_url') or '')
     try:
@@ -24,6 +27,8 @@ def long_url(material):
 
 
 def has_link_source(material):
+    if material.get('promotion_provider') == 'moboreels':
+        return False
     if material.get('source_job_id'):
         return bool(long_url(material))
     content_id = str(material.get('content_id') or '').strip()
@@ -37,11 +42,13 @@ def render(template, material, field, *, allow_unresolved=False):
         raise WorkflowError('template_too_long', '文案模板过长')
     def replace(match):
         token = match.group(0)
-        key = token[1:-1]
-        if key not in FIELDS:
-            raise WorkflowError('unknown_macro', '仅支持 {url}、{desc}、{name} 宏参数')
+        key = 'm_url' if token == '{{m_url}}' else token[1:-1]
+        if key not in FIELDS or (key == 'm_url' and token != '{{m_url}}'):
+            raise WorkflowError('unknown_macro', '仅支持 {url}、{desc}、{name}、{{m_url}} 宏参数')
         if allow_unresolved:
             return token
+        if key == 'url' and material.get('promotion_provider') == 'moboreels':
+            raise WorkflowError('macro_source_missing', 'Moboreels 素材请使用 {{m_url}}，不能与旧 {url} 链接混用', 409)
         value = str(material.get(FIELDS[key]) or '').strip()
         if not value or (key == 'url' and not (long_url(material) or (material.get('attribution') and material.get('link_job_id') and material.get('content_id')))):
             raise WorkflowError('macro_source_missing', '素材缺少 %s 的值或有效剧集关联' % token, 409)

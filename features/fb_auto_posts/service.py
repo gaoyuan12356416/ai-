@@ -105,7 +105,12 @@ class Runtime:
             raise ServiceError("fb_auto_video_template_required", "视频制作模板必填，当前仅支持随机排重模板", 409)
         today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).date()
         metric_dates = [(today - timedelta(days=offset)).isoformat() for offset in range(int(config["metric_window_days"]), 0, -1)]
-        self.metric_store.load_metric_window(product="Dramawave", platform=0, dates=metric_dates)
+        from features.fb_video_publish.moboreels import contains
+        if contains(config.get("message_template")):
+            from .moboreels import validate_rules
+            validate_rules(config)
+        else:
+            self.metric_store.load_metric_window(product="Dramawave", platform=0, dates=metric_dates)
         return summary
 
     def tick(self) -> Dict[str, Any]:
@@ -244,7 +249,8 @@ class Handler(BaseHTTPRequestHandler):
         try: self.dispatch()
         except Exception as exc: self.handle_error(exc)
     def handle_error(self, exc: Exception) -> None:
-        known = isinstance(exc, (ServiceError, StoreError, RepositoryError, ValidationError))
+        from features.fb_video_publish.moboreels import MoboreelsFBError
+        known = isinstance(exc, (ServiceError, StoreError, RepositoryError, ValidationError, MoboreelsFBError))
         code, status, message = (getattr(exc, "code", "fb_auto_internal_error"), getattr(exc, "status", 500), str(exc)) if known else ("fb_auto_internal_error", 500, "FB自动发布服务内部错误")
         payload: Dict[str, Any] = {"ok": False, "code": code, "error": code, "message": message}
         conflicts = getattr(exc, "conflicts", [])

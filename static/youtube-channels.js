@@ -88,8 +88,8 @@
     finally { current.saving = false; $('#save-template').disabled = false; $('#template-fields').disabled = false; $('#reload-template').disabled = false; $('#close-template').disabled = false; }
   }
   document.querySelectorAll('.template-macros').forEach(node => {
-    for (const macro of ['name','desc','url']) {
-      const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-secondary'; button.textContent = '{' + macro + '}';
+    for (const macro of ['name','desc','url','m_url']) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-secondary'; button.textContent = macro === 'm_url' ? '{{m_url}}' : '{' + macro + '}';
       button.addEventListener('click', () => { const input = $('#' + node.dataset.target); input.setRangeText(button.textContent,input.selectionStart,input.selectionEnd,'end'); input.focus(); }); node.appendChild(button);
     }
   });

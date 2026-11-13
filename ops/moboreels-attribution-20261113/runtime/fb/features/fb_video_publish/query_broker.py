@@ -19,7 +19,7 @@ TABLES = {
     "ads_facebook_page_group", "ads_apps_setting", "ads_facebook_page_group_ins",
     "ads_facebook_page_post", "ads_facebook_post_publish_queue", "ads_custom_source",
     "ads_drama_info", "ads_facebook_post_blacklist", "ads_drama_resource", "ads_facebook_info",
-    "ads_facebook_page_ins",
+    "ads_facebook_page_ins", "cdreader_koc_drama",
 }
 
 _TOKEN = re.compile(
@@ -89,7 +89,7 @@ def _validate_sources(sql):
                     or source[1] != ("symbol", ".") or source[2][0] != "word"):
                 raise ValueError("Expected qualified base table")
             schema, table = source[0][1][1:-1], source[2][1]
-            expected_schema = BLACKLIST_SCHEMA if table == "ads_facebook_post_blacklist" else SCHEMA
+            expected_schema = "ads_ai" if table == "cdreader_koc_drama" else (BLACKLIST_SCHEMA if table == "ads_facebook_post_blacklist" else SCHEMA)
             if schema != expected_schema or table not in TABLES:
                 raise ValueError("Unapproved source table")
             if tokens[index + 4:index + 5] == [("symbol", ".")]:
