@@ -223,11 +223,15 @@
           "database": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
           "name": "fb_video_task_busy",
           "sql": "SELECT COUNT(*) FROM fb_video_task WHERE status='running' OR (status<>'cancelled' AND (prepare_state='preparing' OR link_state='writing')) OR (prepare_lease<>'' AND julianday(prepare_until)>julianday('now')) OR (link_lease<>'' AND julianday(link_until)>julianday('now')) OR (execution_lease<>'' AND julianday(execution_until)>julianday('now'))"
+        },
+        {
+          "database": "/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3",
+          "name": "metric_task_table_must_be_empty",
+          "sql": "SELECT COUNT(*) FROM fb_auto_task"
         }
       ],
       "backup_databases": [
-        "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3",
-        "/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3"
+        "/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3"
       ],
       "informational_checks": [
         {
@@ -240,7 +244,8 @@
           "name": "pending_pipeline_claim_receipts_preserve",
           "sql": "SELECT COUNT(*) FROM pipeline_fb_claim WHERE receipt_json=''"
         }
-      ]
+      ],
+      "backup_scope_note": "Metric database: only its empty fb_auto_task gains moboreels_json TEXT NOT NULL DEFAULT '{}'. Preserve its schema/index/trigger/column and zero-row evidence separately; no metric-history table changes or full metric backup. Abort if that task table is not empty."
     },
     "main": {
       "scheduler_lanes": [

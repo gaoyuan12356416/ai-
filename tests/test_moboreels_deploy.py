@@ -19,6 +19,27 @@ rollback_spec.loader.exec_module(rollback)
 
 
 class DeploymentSafetyTests(unittest.TestCase):
+    def test_fb_metric_history_is_not_backed_up_but_nonempty_task_table_blocks(self):
+        checks = json.loads((ROOT / 'ops/moboreels-attribution-20261113/activation-checks.template.json').read_text())
+        fb = checks['phases']['fb']
+        self.assertEqual(fb['backup_databases'], ['/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3'])
+        guard = next(row for row in fb['checks'] if row['name'] == 'metric_task_table_must_be_empty')
+        self.assertEqual(guard['database'], '/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3')
+        self.assertEqual(guard['sql'], 'SELECT COUNT(*) FROM fb_auto_task')
+        self.assertNotIn(guard, fb.get('informational_checks', []))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'private').mkdir()
+            metric = root / 'metric.sqlite3'
+            with closing(sqlite3.connect(str(metric))) as conn, conn:
+                conn.execute('CREATE TABLE fb_auto_task(id INTEGER PRIMARY KEY)')
+            spec = {'checks': [dict(guard, database=str(metric))]}
+            deploy.busy(spec, root, 'fb')
+            with closing(sqlite3.connect(str(metric))) as conn, conn:
+                conn.execute('INSERT INTO fb_auto_task VALUES(1)')
+            with self.assertRaisesRegex(RuntimeError, 'In-flight'):
+                deploy.busy(spec, root, 'fb')
+
     def test_rollback_loads_current_tool_release_and_verifies_both_versions(self):
         manifest = {"commit": "b" * 40, "release": str(ROOT / "original-business-release")}
         helper = SimpleNamespace(verify=Mock())
