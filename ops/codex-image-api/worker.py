@@ -29,7 +29,7 @@ def unit_state(name):
 
 
 def active_unit(values):
-    return values.get("ActiveState") in ("active", "activating", "deactivating", "reloading") or int(values.get("MainPID", "0")) > 0
+    return values.get("ActiveState") in ("active", "activating", "deactivating", "reloading") or int(values.get("MainPID") or "0") > 0
 
 
 class Worker:
@@ -93,6 +93,8 @@ class Worker:
         if result.returncode:
             # Keep non-secret launcher diagnostics private for support.
             (directory / "launcher-error.txt").write_text(result.stderr[-4000:], encoding="utf-8")
+            if active_unit(unit_state(unit_name(row))) or (run / "receipt.json").is_file():
+                return
             raise ApiError("generation_launch_failed", "生图子进程启动失败")
 
     def sync_auth(self, directory, run):
@@ -171,8 +173,15 @@ class Worker:
         except ApiError as exc:
             self.store.update(row, "failed", state="failed", error={"code": exc.code, "message": exc.message})
         except Exception:
-            # Manager/network uncertainty does not authorize stealing a live process claim.
-            logging.exception("worker reconciliation deferred for %s/%d", row["task_id"], row["ordinal"])
+            logging.exception("worker item error for %s/%d", row["task_id"], row["ordinal"])
+            try:
+                # An unavailable manager or live process retains its claim. A confirmed
+                # dead item with a local error must not indefinitely block later images.
+                if not active_unit(unit_state(unit_name(row))):
+                    self.store.update(row, "failed", state="failed", error={"code": "processing_failed", "message": "该图片处理异常，已保留执行记录，未自动重新生成"})
+                    return
+            except Exception:
+                logging.warning("image claim retained pending reconciliation")
             time.sleep(5)
 
     def run(self):

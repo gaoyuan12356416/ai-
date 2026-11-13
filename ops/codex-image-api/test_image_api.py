@@ -160,6 +160,25 @@ class DownloadTests(unittest.TestCase):
             with self.assertRaises(ApiError):
                 checked_image(path)
 
+    def test_redirect_to_private_address_is_rejected_before_connection(self):
+        from common import download_once
+        class Response:
+            status = 302
+            def getheader(self, key): return "http://127.0.0.1/private"
+        class Connection:
+            def __init__(self, host, port, **kw): self.host, self.port = host, port
+            def request(self, *args, **kw): self._create_connection((self.host, self.port), 45)
+            def getresponse(self): return Response()
+            def close(self): pass
+        real_target = public_target
+        def resolve(url):
+            return real_target(url, self.resolver("127.0.0.1" if "127.0.0.1" in url else "8.8.8.8"))
+        with patch("common.public_target", side_effect=resolve), patch("common.http.client.HTTPSConnection", Connection), patch("common.socket.create_connection") as connect:
+            with self.assertRaises(ApiError) as cm:
+                download_once("https://reference.example/image.png", "unused")
+            self.assertEqual(cm.exception.code, "unsafe_image_url")
+            connect.assert_called_once_with(("8.8.8.8", 443), 45, None)
+
 
 class UploadTests(unittest.TestCase):
     def test_unknown_put_is_reconciled_without_second_upload(self):
@@ -204,6 +223,30 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(ApiError) as cm:
                 worker.collect(row, Path(d))
             self.assertEqual(cm.exception.code, "execution_interrupted")
+
+    def test_no_image_receipt_is_terminal_failure(self):
+        from worker import Worker
+        row = {"attempt_id": "abc", "task_id": "ig_test", "ordinal": 0}
+        worker = Worker(types.SimpleNamespace(), None)
+        with tempfile.TemporaryDirectory() as d, patch("worker.unit_state", return_value={"ActiveState": "inactive", "MainPID": "0"}), patch.object(worker, "sync_auth"):
+            run = Path(d) / "abc"
+            run.mkdir()
+            (run / "receipt.json").write_text(json.dumps({"ok": False, "code": "generation_no_image"}))
+            with self.assertRaises(ApiError) as cm:
+                worker.collect(row, Path(d))
+            self.assertEqual(cm.exception.code, "generation_no_image")
+
+    def test_output_cannot_escape_generated_artifact_directory(self):
+        from worker import Worker
+        row = {"attempt_id": "abc", "task_id": "ig_test", "ordinal": 0}
+        worker = Worker(types.SimpleNamespace(), None)
+        with tempfile.TemporaryDirectory() as d, patch("worker.unit_state", return_value={"ActiveState": "inactive", "MainPID": "0"}), patch.object(worker, "sync_auth"):
+            run = Path(d) / "abc"
+            run.mkdir()
+            (run / "receipt.json").write_text(json.dumps({"ok": True, "generated_path": "/etc/passwd"}))
+            with self.assertRaises(ApiError) as cm:
+                worker.collect(row, Path(d))
+            self.assertEqual(cm.exception.code, "invalid_output")
 
 
 if __name__ == "__main__":

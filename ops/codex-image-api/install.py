@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -45,6 +46,15 @@ def main():
         if path.exists():
             shutil.copy2(path, destination)
     manifest = {"commit": commit, "previous_release": previous, "files": saved}
+    ledger = state / "state.sqlite3"
+    if ledger.exists():
+        original = sqlite3.connect(str(ledger))
+        snapshot = sqlite3.connect(str(backup / "state-before.sqlite3"))
+        try:
+            original.backup(snapshot)
+        finally:
+            snapshot.close()
+            original.close()
     (backup / "manifest.json").write_text(json.dumps(manifest, indent=2))
     try:
         pwd.getpwnam("codex-image-runner")
