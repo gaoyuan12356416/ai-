@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 
-from features.x_tag_revenue.taxonomy import classify, UNKNOWN
+from features.x_tag_revenue.taxonomy import classify, UNKNOWN, VERSION as TAXONOMY_VERSION
 from features.drama_audience.store import records as audience_records
 from features.x_tag_revenue.tags import VERSION as TAG_VERSION
 from features.x_tag_revenue.hierarchy import VERSION as HIERARCHY_VERSION
@@ -58,6 +58,7 @@ def channel_score(account, classification, snapshot):
     elif meta.get('tag_mapping_version') != TAG_VERSION: reason = 'portrait_mapping_outdated'
     elif meta.get('hierarchy_version') != HIERARCHY_VERSION or profile.get('hierarchy_version') != HIERARCHY_VERSION: reason = 'portrait_hierarchy_outdated'
     elif not profile or profile.get('revenue_cents', 0) <= 0: reason = 'no_positive_revenue'
+    elif meta.get('audience_taxonomy_version') != TAXONOMY_VERSION: reason = 'portrait_mapping_outdated'
     elif classification.get('audience') == UNKNOWN: reason = 'drama_audience_unlabeled'
     audiences = profile.get('audiences') or []
     audience = next((v for v in audiences if v.get('key') == classification.get('audience') and v.get('matchable')), {})

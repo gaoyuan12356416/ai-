@@ -1,0 +1,8 @@
+[Unit]
+Description=Hourly new-drama audience discovery
+[Timer]
+OnCalendar=*-*-* *:05:00 Asia/Shanghai
+Persistent=true
+Unit=drama-audience-sync.service
+[Install]
+WantedBy=timers.target

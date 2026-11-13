@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily payment ranking at 11:00 Beijing time
+[Timer]
+OnCalendar=*-*-* 11:00:00 Asia/Shanghai
+Persistent=true
+Unit=drama-pay-rank-refresh.service
+[Install]
+WantedBy=timers.target

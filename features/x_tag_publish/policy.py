@@ -11,7 +11,7 @@ from pathlib import Path
 from features.x_tag_revenue.core import label_index, labels, language
 from .transport import rpc, Error as TransportError
 from features.x_tag_revenue.tags import VERSION as TAG_MAPPING_VERSION, lookup
-from features.x_tag_revenue.taxonomy import UNKNOWN, AUDIENCES, THEMES, classify, collect_classifications
+from features.x_tag_revenue.taxonomy import UNKNOWN, AUDIENCES, THEMES, classify, collect_classifications, VERSION as TAXONOMY_VERSION
 from features.x_tag_revenue.hierarchy import VERSION as HIERARCHY_VERSION
 
 VERSION = 'revenue-audience-theme-weighted-v4'
@@ -65,6 +65,8 @@ class Decision:
             self.reason = 'portrait_incomplete'
         elif not profile or profile.get('status') == 'no_history':
             self.reason = 'no_revenue_history'
+        elif meta.get('audience_taxonomy_version') != TAXONOMY_VERSION:
+            self.reason = 'portrait_mapping_outdated'
         elif meta.get('tag_mapping_version') != TAG_MAPPING_VERSION:
             self.reason = 'portrait_mapping_outdated'
         elif meta.get('hierarchy_version') != HIERARCHY_VERSION or profile.get('hierarchy_version') != HIERARCHY_VERSION:

@@ -1,0 +1,10 @@
+[Unit]
+Description=Discover new dramas and append authoritative audience labels
+After=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/drama-catalog/current
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -B -m features.drama_audience.sync
+TimeoutStartSec=3600
+UMask=0022

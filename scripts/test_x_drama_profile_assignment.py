@@ -4,6 +4,8 @@ import json
 import sqlite3
 import sys
 import unittest
+import tempfile
+from features.drama_audience import store as audience_store
 from pathlib import Path
 from datetime import datetime
 from unittest import mock
@@ -24,21 +26,28 @@ def snapshot(weights=None, version='portrait-one'):
             'audiences':[{'key':'female','matchable':True,'revenue_cents':audience*100,'share_bp':audience*100,
                 'children':[{'key':'ceo_wealth','matchable':True,'revenue_cents':audience*theme,'share_bp':theme*100}]}]}
     return data,{'version':version,'hierarchy_version':drama_profile.HIERARCHY_VERSION,
-                 'tag_mapping_version':drama_profile.TAG_VERSION}
+                 'tag_mapping_version':drama_profile.TAG_VERSION,'audience_taxonomy_version':drama_profile.TAXONOMY_VERSION}
 
 
 class DramaProfileTests(unittest.TestCase):
     def setUp(self):
+        self.audience_tmp=tempfile.TemporaryDirectory()
+        self.audience_db=str(Path(self.audience_tmp.name)/'audience.sqlite3')
+        audience_store.initialize(self.audience_db)
+        self.audience_env=mock.patch.dict('os.environ',{'DRAMA_AUDIENCE_DB':self.audience_db});self.audience_env.start()
         self.fixture=fixtures.XPostMultiScheduleStoreTests(methodName='runTest');self.fixture.setUp()
         self.store=self.fixture.store;self.path=self.fixture.db_path
         self.fixture.save_schedule('drama',[2,3,4],['09:00','10:00'])
         self.fixture.claim_schedule_slot('2026-07-27','09:00')
         self.accounts=[{'id':v,'x_user_id':str(9000+v),'drama_language':'en','publish_eligible':True} for v in [2,3,4]]
 
-    def tearDown(self):self.fixture.tearDown()
+    def tearDown(self):
+        self.fixture.tearDown();self.audience_env.stop();self.audience_tmp.cleanup()
 
     def add(self,name='D1',labels='female,CEO'):
-        return self.fixture.add_drama(name,labels=labels)
+        result=self.fixture.add_drama(name,labels=labels)
+        audience_store.save(dict(content_id=result['content_id'],languages=['en'],audience_labels=['女性'],audience='female',status='matched',name=name),self.audience_db)
+        return result
 
     def freeze(self,profiles=None):
         return self.store.prepare_drama_profile_plan('2026-07-27','09:00',2,self.accounts,profiles or snapshot())

@@ -81,6 +81,16 @@ class AudienceTests(unittest.TestCase):
         self.assertEqual(sum(a['revenue_cents'] for a in tree['audiences']),101)
         self.assertEqual(sum(t['revenue_cents'] for t in tree['audiences'][0]['children']),101)
 
+    def test_reprojection_preserves_exact_facts(self):
+        from features.drama_audience.reproject import rebuild,facts
+        old=classify(['sweet','revenge'],audience_record=resolve('AbC',response(audience=['女性'])))
+        dramas={('AbC','en'):dict(content_id='AbC',language='en',name='n',revenue_cents=101,posts={'p1','p2'})}
+        profile=dict(revenue_cents=101,drama_count=1,published_count=2,status='ready',**build_tree(dramas,{('AbC','en'):old}))
+        updated=rebuild(profile,{'AbC':resolve('AbC',response(audience=['男性']))})
+        self.assertEqual(updated['audiences'][0]['key'],'male')
+        self.assertEqual(facts(profile),facts(updated))
+        self.assertEqual(updated['published_count'],2)
+
 
 class RankTests(unittest.TestCase):
     def setUp(self):self.tmp=tempfile.TemporaryDirectory();self.root=self.tmp.name

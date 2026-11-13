@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh daily language payment ranking
+After=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/drama-catalog/current
+EnvironmentFile=/etc/drama-material-service/a-group-expansion.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -B -m features.drama_pay_rank.refresh
+TimeoutStartSec=2100
+UMask=0022
