@@ -78,7 +78,7 @@ class Worker:
         cmd = ["systemd-run", "--quiet", "--collect", "--unit=" + unit_name(row),
                "--property=User=" + self.config.runner_user, "--property=Group=" + self.config.runner_user,
                "--property=NoNewPrivileges=yes", "--property=ProtectHome=yes", "--property=ProtectSystem=strict",
-               "--property=PrivateTmp=yes", "--property=PrivateDevices=yes", "--property=RestrictSUIDSGID=yes",
+               "--property=PrivateTmp=yes", "--property=PrivateDevices=yes",
                "--property=CapabilityBoundingSet=", "--property=TemporaryFileSystem=/mnt:ro",
                "--property=BindReadOnlyPaths=" + str(Path(__file__).resolve().parent),
                "--property=BindPaths=" + str(run), "--property=ReadWritePaths=" + str(run),

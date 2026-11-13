@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Explicit deployment acceptance; never scheduled. Does not print credentials."""
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -16,7 +17,10 @@ def main():
     token = config.tokens()[0]
     headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
     base = "http://127.0.0.1:%d/api/image-generation/tasks" % config.port
-    record = validation / "canary.json"
+    label = sys.argv[2] if len(sys.argv) > 2 else "v1"
+    if not re.fullmatch(r"[a-z0-9-]{1,40}", label):
+        raise SystemExit("invalid canary label")
+    record = validation / ("canary-" + label + ".json")
     if sys.argv[1] == "submit":
         if record.exists():
             print(record.read_text())
@@ -29,7 +33,7 @@ def main():
         draw.rectangle((90, 368, 422, 406), fill="#70543c")
         image.save(path)
         reference = CosUploader(config).upload({"task_id": "validation-20261113", "item_index": 0, "image_index": 0}, path)
-        payload = {"request_id": "deployment-canary-20261113-v1", "items": [
+        payload = {"request_id": "deployment-canary-20261113-" + label, "items": [
             {"image_urls": [reference], "prompt": "Create a polished square product photograph inspired by this orange sphere on a wooden shelf. Make the sphere a blue ceramic vase, natural studio lighting, no text."},
             {"image_urls": [reference], "prompt": "Create a square watercolor illustration inspired by this orange sphere on a wooden shelf. Make the sphere a small orange pumpkin with a green stem. No text."},
             {"image_urls": [reference + ".missing"], "prompt": "Generate one image from this reference."}
