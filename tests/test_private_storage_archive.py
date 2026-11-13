@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import types
 import unittest
@@ -94,6 +95,36 @@ class ArchiveTest(unittest.TestCase):
             a = types.SimpleNamespace(put=lambda *args: (_ for _ in ()).throw(RuntimeError('failed')))
             self.assertEqual(m.batch(a, args), 1)
             self.assertTrue(p.exists())
+
+    def test_restore_refuses_to_replace_different_live_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'live.db'
+            p.write_bytes(b'new data')
+            a = self.archive()
+            old_hash = hashlib.sha256(b'old').hexdigest()
+            a.head = lambda key: {'x-cos-meta-source-sha256': old_hash,
+                                  'x-cos-meta-source-size': '3', 'x-cos-meta-archive-encoding': 'identity'}
+            with self.assertRaises(FileExistsError):
+                a.get('storage-archive/v1/object', p, old_hash, 3)
+            self.assertEqual(p.read_bytes(), b'new data')
+
+    def test_removing_one_hardlink_does_not_claim_released_blocks(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'copy.db'
+            p.write_bytes(b'database')
+            other = Path(td) / 'live.db'
+            os.link(p, other)
+            plan = Path(td) / 'plan.json'
+            sig = m.signature(p)
+            plan.write_text(json.dumps({'namespace': 'test', 'allowed_roots': [td],
+                                        'files': [{'path': str(p), 'signature': sig}]}))
+            journal = Path(td) / 'journal.jsonl'
+            args = types.SimpleNamespace(plan=str(plan), manifest=str(journal), delete_verified=True)
+            a = types.SimpleNamespace(put=lambda *args: {'path': str(p), 'signature': sig, 'size': 8, 'stored_size': 8})
+            with patch.object(m, 'open_inode', return_value=False):
+                self.assertEqual(m.batch(a, args), 0)
+            self.assertTrue(other.exists())
+            self.assertEqual(json.loads(journal.read_text().splitlines()[-1])['released_bytes'], 0)
 
 
 if __name__ == '__main__':
