@@ -16,6 +16,8 @@ from .promotions import PromotionError, PromotionManager, identity
 from .provider import ProviderClient
 from .settings import Settings
 from .sync import SyncManager
+from .content_tools import ContentTools
+from .media_accounts import MediaAccounts
 
 
 def public_run(run):
@@ -43,12 +45,42 @@ class Application:
         self.promotions = promotions or PromotionManager(settings, self.db, self.provider)
         self.promotions.recover()
         self.sync = sync or SyncManager(settings, self.db, self.provider)
+        self.content = ContentTools(settings, self.catalog, self.provider)
+        self._media = None
+        self._media_lock = threading.Lock()
+        if (settings.data_dir / "media-accounts" / "registrations.sqlite3").exists():
+            self.media  # Recover durable in-flight requests before the first browser visit.
+
+    @property
+    def media(self):
+        with self._media_lock:
+            if self._media is None:
+                self._media = MediaAccounts(self.settings, self.db, self.provider)
+            return self._media
 
     def dispatch(self, request):
         method, path = request.get("method"), request.get("path", "")
         actor = request.get("actor") or {}
         identity(self.settings.institution_user_id, actor)
         query, body = request.get("query") or {}, request.get("body") or {}
+        if method == "GET" and path == "/recommendations":
+            return 200, self.content.recommendations(query)
+        if path == "/media-accounts/preview" and method == "POST":
+            return 200, self.media.preview(actor, body)
+        if path == "/media-accounts":
+            if method == "GET":
+                return 200, self.media.list(actor, query)
+            if method == "POST":
+                return 202, self.media.submit(actor, body)
+        resolve = re.fullmatch(r"/media-accounts/([0-9a-f]{64})/resolve", path)
+        if resolve and method == "POST":
+            return 200, self.media.resolve(actor, resolve.group(1), body)
+        episodes = re.fullmatch(r"/dramas/([^/]{1,192})/episodes", path)
+        if episodes and method == "GET":
+            story = unquote(episodes.group(1))
+            if not story or len(story) > 64 or any(ord(c) < 32 for c in story):
+                raise ValueError("剧目 ID 无效")
+            return 200, self.content.episodes(story, refresh=query.get("refresh") == "1")
         if method == "GET" and path == "/dramas":
             latest = self.sync.latest() or {}
             generation = (latest.get("run_id") or latest.get("id"), latest.get("status"), latest.get("resume_count", 0))
@@ -122,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(lengths) != 1 or self.headers.get("Transfer-Encoding"):
                 raise ValueError("请求格式无效")
             length = int(lengths[0])
-            if not 0 < length <= 32768:
+            if not 0 < length <= 300000:
                 raise ValueError("请求过大")
             envelope = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(envelope, dict):
@@ -161,6 +193,8 @@ def main():
         while not stop.is_set():
             try:
                 app.promotions.flush_outbox()
+                if app._media is not None:
+                    app._media.flush_outbox()
             except Exception as exc:
                 logging.warning("promotion outbox retained: %s", type(exc).__name__)
             stop.wait(15)

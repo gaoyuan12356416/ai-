@@ -1,0 +1,12 @@
+const assert=require('node:assert/strict');
+const ui=require('../static/moboreels-tools.js');
+assert.deepEqual(ui.parseIDs('123\n456，123;789'),['123','456','789']);
+assert.equal(ui.https('javascript:alert(1)'), '');
+assert.equal(ui.https('https://secret@evil.example/'), '');
+assert.equal(ui.csvCell('=HYPERLINK("x")'), '"\'=HYPERLINK(""x"")"');
+const html=ui.recommendationRow({story_id:'<img onerror=alert(1)>',story_name:'<script>x</script>',tags:'<svg onload=x>'},2);
+assert.ok(!html.includes('<script>'));assert.ok(!html.includes('<svg'));
+const account=ui.accountRow({id:'x',nickname:'<img src=x>',status:'unknown',platform_link:'javascript:alert(1)'},false);
+assert.ok(!account.includes('data-resolve'));assert.ok(!account.includes('href="javascript'));
+assert.ok(ui.accountRow({id:'x',status:'unknown'},true).includes('data-resolve'));
+console.log('Moboreels tools UI helpers passed');

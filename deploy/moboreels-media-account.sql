@@ -1,0 +1,25 @@
+-- Reviewed standalone migration. Run only on the approved ads_ai writer during deployment.
+CREATE TABLE IF NOT EXISTS ads_ai.cdreader_koc_media_account (
+  record_key char(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '机构、媒体类型与平台账号ID的确定性记录键',
+  institution_user_id char(32) NOT NULL COMMENT '供应方机构用户ID',
+  tenant_key varchar(128) NOT NULL COMMENT '创建报备的登录租户',
+  user_id varchar(128) NOT NULL COMMENT '创建报备的登录用户ID',
+  star_user_id char(32) NOT NULL COMMENT '与推广链接共用的稳定达人ID',
+  star_name varchar(255) NOT NULL COMMENT '提交时登录用户姓名',
+  project_type tinyint NOT NULL COMMENT '业务类型：2短剧',
+  platform_type tinyint NOT NULL COMMENT '媒体类型：1 TikTok、2 YouTube、3 Facebook、4 Instagram',
+  account_id varchar(100) NOT NULL COMMENT '平台原始账号或频道ID，不是后台内部ID',
+  nickname varchar(255) NOT NULL COMMENT '报备账号名称',
+  platform_link varchar(2048) NOT NULL COMMENT '已匹配或由操作人补全的账号主页链接',
+  status varchar(24) NOT NULL COMMENT 'queued待提交、submitting提交中、succeeded成功、failed失败、unknown待核实',
+  message varchar(500) NOT NULL COMMENT '当前报备状态说明',
+  provider_id varchar(64) DEFAULT NULL COMMENT '供应方返回的报备记录ID',
+  request_id char(32) NOT NULL COMMENT '本次供应方请求唯一ID',
+  request_json json NOT NULL COMMENT '提交参数快照，不含凭据或签名',
+  response_json json DEFAULT NULL COMMENT '供应方响应回执，不含凭据',
+  created_at datetime(3) NOT NULL COMMENT '创建时间，UTC',
+  updated_at datetime(3) NOT NULL COMMENT '最新状态更新时间，UTC',
+  PRIMARY KEY (record_key),
+  KEY owner_state (tenant_key,user_id,status),
+  KEY provider_record (institution_user_id,provider_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Moboreels媒体账号报备记录；供应方成功即报备成功';

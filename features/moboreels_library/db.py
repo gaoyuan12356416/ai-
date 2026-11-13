@@ -131,6 +131,20 @@ class Database:
     def _scope(self):
         return "institution_user_id=%s AND project_type=2" % _literal(self.settings.institution_user_id)
 
+    def save_media_registration(self, record):
+        columns = ("record_key", "institution_user_id", "tenant_key", "user_id", "star_user_id", "star_name",
+                   "project_type", "platform_type", "account_id", "nickname", "platform_link", "status", "message",
+                   "provider_id", "request_id", "request_json", "response_json", "created_at", "updated_at")
+        row = dict(record, record_key=record["id"], request_json=json.dumps(record["request"], ensure_ascii=False),
+                   response_json=json.dumps(record.get("response"), ensure_ascii=False),
+                   created_at=_utc_datetime(record["created_at"]), updated_at=_utc_datetime(record["updated_at"]))
+        updates = [c for c in columns if c not in {"record_key", "institution_user_id", "tenant_key", "user_id", "star_user_id", "created_at"}]
+        accept = "(VALUES(updated_at)>=updated_at AND (status<>'succeeded' OR VALUES(status)='succeeded'))"
+        assignments = ",".join("`%s`=IF(%s,VALUES(`%s`),`%s`)" % (c,accept,c,c) for c in updates)
+        sql = "INSERT INTO ads_ai.cdreader_koc_media_account (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s" % (
+            ",".join("`%s`" % c for c in columns), ",".join(["%s"] * len(columns)), assignments)
+        self._write(sql, tuple(row.get(c) for c in columns))
+
     def list_dramas(self, params=None):
         params = params or {}
         def integer(key, default, minimum, maximum):

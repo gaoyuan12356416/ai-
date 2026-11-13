@@ -196,7 +196,7 @@ class CatalogCacheTest(unittest.TestCase):
         sync = SimpleNamespace(latest=lambda: dict(run))
         promotions = SimpleNamespace(recover=lambda: None,
                                      statuses=lambda actor, stories: {"42": actor["user_id"]})
-        app = Application(SimpleNamespace(institution_user_id="institution"), db=self.db,
+        app = Application(SimpleNamespace(institution_user_id="institution", data_dir=Path("unused")), db=self.db,
                           provider=object(), sync=sync, promotions=promotions)
 
         def request(user):

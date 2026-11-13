@@ -137,6 +137,28 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(envelope["query"], {"is_show": "", "page_index": "2", "search": "测试"})
         self.assertEqual(handler.same_origin_checks, 0)
 
+    def test_media_preview_uses_dedicated_navigation_and_trusted_actor(self):
+        seen = []
+        self.app["navigation_item_access"] = lambda session,key,config: seen.append(key) or {"allowed": key == "moboreelsMediaAccounts"}
+        body = {"platform_type": 3, "account_ids": ["12345"]}
+        self.dispatch(FakeHandler(body=json.dumps(body).encode()), "/api/moboreels/media-accounts/preview")
+        envelope = json.loads(self.opener.open.call_args.args[0].data)
+        self.assertEqual(envelope["actor"], SESSION)
+        self.assertEqual(envelope["body"], body)
+        self.assertEqual(seen, ["moboreelsMediaAccounts"])
+
+    def test_media_actor_forgery_is_rejected_before_proxy(self):
+        self.app["navigation_item_access"] = lambda *args: {"allowed": True}
+        body = {"platform_type": 3, "accounts": [], "actor": {"role": "admin"}}
+        self.dispatch(FakeHandler(body=json.dumps(body).encode()), "/api/moboreels/media-accounts")
+        self.assertEqual(self.responses[-1][0], 400)
+        self.opener.open.assert_not_called()
+
+    def test_recommendations_require_their_navigation_access(self):
+        self.dispatch(FakeHandler(method="GET", body=b""), "/api/moboreels/recommendations")
+        self.assertEqual(self.responses[-1][0], 403)
+        self.opener.open.assert_not_called()
+
     def test_invalid_body_framing_is_not_forwarded(self):
         for setup in ["absent", "duplicate", "negative", "too-large", "transfer", "invalid-json", "invalid-utf8"]:
             with self.subTest(setup=setup):
