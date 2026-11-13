@@ -26,6 +26,17 @@ def grams(key):
     return {key[i:i+3] for i in range(len(key)-2)}
 
 
+def pack_matches(matches):
+    """Share identical candidate lists and compact fields without truncation."""
+    refs={};sets={};seen={}
+    for mid,hits in matches.items():
+        packed=tuple((h['mid'],h['score'],int(h['reason']=='核心名称包含')) for h in hits)
+        if packed not in seen:
+            group=str(len(seen));seen[packed]=group;sets[group]=packed
+        refs[mid]=seen[packed]
+    return {'matchRefs':refs,'matchSets':sets}
+
+
 def fuzzy_matches(mats, original_ids):
     """Bounded, same-resource candidate retrieval; every result needs review.
 

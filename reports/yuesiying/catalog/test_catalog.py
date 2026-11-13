@@ -14,6 +14,13 @@ def row(i,name='EN-123-00:00-a',lang='en',cid='source',duration=0):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_compact_lists_are_lossless_and_shared(self):
+        hits=[{'mid':'2','score':0.75,'reason':'核心名称部分相似'}]
+        packed=consumer.pack_matches({'1':hits,'3':hits,'4':[]})
+        self.assertEqual(packed['matchRefs']['1'],packed['matchRefs']['3'])
+        self.assertEqual(len(packed['matchSets']),2)
+        self.assertEqual(list(packed['matchSets'][packed['matchRefs']['1']]),[('2',.75,0)])
+
     def test_loose_fuzzy_known_korean_pair_and_partial_core(self):
         original='跑量迭代_18M_30702_39_10_吃醋_EN_精剪_hupeixuan_11.8_4.mp4'
         korean='AI小语种-ko-30702-18:14-EN验证_18M_30702_39_10_吃醋_EN_精剪_hupeixuan_11_8_4'
