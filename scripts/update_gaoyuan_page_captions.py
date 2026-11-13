@@ -44,7 +44,9 @@ def main():
         digest=hashlib.sha256((folder/'plan.json').read_bytes()).hexdigest()
         print(json.dumps(dict(status='prepared',pages=len(plan),english=sum((r['before']['language'] or 'en')=='en' for r in plan),sha256=digest)));return
     plan=json.loads((folder/'plan.json').read_text());assert a.sha256==hashlib.sha256((folder/'plan.json').read_bytes()).hexdigest()
-    assert not (folder/'receipt.json').exists(),'existing_receipt_requires_reconciliation'
+    previous=json.loads((folder/'receipt.json').read_text()) if (folder/'receipt.json').exists() else None
+    if previous and previous.get('status')=='verified':
+        print(json.dumps({k:v for k,v in previous.items() if k!='results'}));return
     env=envfile('/etc/fb-auto-post.env')
     env.update({k:v for k,v in envfile('/etc/fb-auto-post-app.env').items() if k.startswith('FB_AUTO_POST_')})
     req=urllib.request.Request('http://127.0.0.1:8787/internal/fb-video-publish/identity',data=json.dumps(dict(tenant_key=TENANT,user_id=CREATOR)).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+env['FB_AUTO_POST_INTERNAL_TOKEN']},method='POST')
@@ -52,20 +54,26 @@ def main():
     assert actor['user_name']=='郜远' and actor['is_admin']
     current={r['page_id']:r for r in rows()}
     assert all(current[item['before']['page_id']]==item['before'] for item in plan),'configuration_changed_since_plan'
-    with closing(sqlite3.connect(DB.as_uri()+'?mode=ro',uri=True)) as source,closing(sqlite3.connect(folder/'before.sqlite3')) as target:source.backup(target)
+    if previous:
+        assert previous.get('verified')==0 and all(r['status']=='failed' for r in previous['results']),'partial_receipt_requires_reconciliation'
+        assert not (folder/'receipt-route-rejected.json').exists(),'only_one_reconciled_retry_allowed'
+        (folder/'receipt.json').rename(folder/'receipt-route-rejected.json')
+    if not (folder/'before.sqlite3').exists():
+        with closing(sqlite3.connect(DB.as_uri()+'?mode=ro',uri=True)) as source,closing(sqlite3.connect(folder/'before.sqlite3')) as target:source.backup(target)
     (folder/'before.sqlite3').chmod(0o600)
     receipt=dict(status='applying',expected=len(plan),results=[]);lock=threading.Lock();save(folder/'receipt.json',receipt)
     def update(item):
-        old=item['before'];pid=old['page_id']
+        old=item['before'];pid=old['page_id'];error=''
         try:
-            request('PUT','/api/fb-video-publish/pages/'+pid,actor=actor,environ=env,payload=dict(config_instance_id=old['config_instance_id'],expected_version=old['version'],language=old['language'],caption_template=item['caption'],title=old['title']))
+            request('POST','/api/fb-video-publish/pages/'+pid,actor=actor,environ=env,payload=dict(config_instance_id=old['config_instance_id'],expected_version=old['version'],language=old['language'],caption_template=item['caption'],title=old['title']))
             status='saved'
         except Exception as exc:
             # Do not replay an uncertain write; reconcile the persistent row.
             now=next((r for r in rows() if r['page_id']==pid),None)
             status='saved_readback' if now and now['caption_template']==item['caption'] and now['version']==old['version']+1 else 'failed'
+            error=str(getattr(exc,'code',type(exc).__name__))[:80]
         with lock:
-            receipt['results'].append(dict(page_id=pid,status=status));save(folder/'receipt.json',receipt)
+            receipt['results'].append(dict(page_id=pid,status=status,error=error));save(folder/'receipt.json',receipt)
             if len(receipt['results'])%20==0:print(json.dumps(dict(done=len(receipt['results']),failed=sum(r['status']=='failed' for r in receipt['results']))),flush=True)
     with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(update,plan))
     after={r['page_id']:r for r in rows()};target_ids={r['before']['page_id'] for r in plan}
