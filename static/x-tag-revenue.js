@@ -39,7 +39,7 @@
   }
   async function refresh(){if(loading)return;loading=true;error='';try{const d=await api('/api/x-channel-tag-revenue');items=d.items;meta=d.meta;}catch(e){items={};meta=null;error=e.message;}finally{loading=false;paint();}}
   function ensureDialog(){if(dialog)return;dialog=document.createElement('dialog');dialog.className='xtr-dialog';dialog.setAttribute('aria-labelledby','xtrTitle');dialog.innerHTML='<div class="xtr-head"><h2 id="xtrTitle">受众与题材收入画像</h2><button type="button" class="button small" data-xtr-close aria-label="关闭画像详情">关闭</button></div><div id="xtrBody" aria-live="polite"></div>';document.body.append(dialog);dialog.addEventListener('click',e=>{if(e.target===dialog||e.target.closest('[data-xtr-close]'))dialog.close();});dialog.addEventListener('close',()=>sequence++);}
-  function intro(d){return `<p class="xtr-note">${esc(d.meta.start)} 至 ${esc(d.meta.end)} · UTC · USD · 收入快照 ${esc(clock(d.meta.source_generated_at))}（北京时间）<br>受众优先明确标签，再按现有标签规则推导；缺失或冲突列为“未标注”。收入按受众 → 题材汇总，不区分剧类型。</p>${warning(d.meta)}`;}
+  function intro(d){return `<p class="xtr-note">${esc(d.meta.start)} 至 ${esc(d.meta.end)} · UTC · USD · 收入快照 ${esc(clock(d.meta.source_generated_at))}（北京时间）<br>受众使用剧目接口的受众字段；缺失或冲突列为“未标注”。题材继续按原标签规则归类，收入按受众 → 题材汇总。</p>${warning(d.meta)}`;}
   async function open(id,path=[],page=1,reset=false){
     if(reset||String(id)!==String(currentId)){currentVersion='';detailRoot=null;detailPages.clear();}
     ensureDialog();currentId=id;currentPath=path;if(!dialog.open)dialog.showModal();const request=++sequence,body=document.getElementById('xtrBody');body.innerHTML='<p>正在读取详情…</p>';
