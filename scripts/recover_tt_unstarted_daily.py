@@ -100,7 +100,7 @@ def apply_plan(native, central, plan, expected, backup_dir, now):
     if now >= dt.datetime.fromisoformat(plan['apply_before']):
         raise ValueError('recovery_application_window_expired')
     folder = Path(backup_dir)
-    folder.mkdir(parents=True, exist_ok=False)
+    folder.mkdir(parents=True, exist_ok=False, mode=0o700)
     (folder / 'approved-plan.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
     # Online backup for evidence only. Never restore an old publishing database.
     for source, label in ((native, 'native'), (central, 'dispatch')):

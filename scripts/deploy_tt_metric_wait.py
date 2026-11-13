@@ -51,7 +51,7 @@ def stage(commit, report_commit):
     assert run(['findmnt', '-rn', '-o', 'UUID', '--mountpoint', '/mnt/data-disk']) == '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
     assert shutil.disk_usage('/mnt/data-disk').free > 3 * 1024**3
     folder = ROOT / ('deployment-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
-    folder.mkdir(parents=True, mode=0o700)
+    folder.mkdir(parents=True, mode=0o755)
     env = dict(os.environ, GIT_SSH_COMMAND='ssh -i /root/.ssh/github_codex_cpu_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes')
     assert 'gaoyuan12356416/ai-' in run(['git', '-C', str(GIT), 'remote', 'get-url', 'origin'])
     for revision in (commit, report_commit):
@@ -79,6 +79,9 @@ def stage(commit, report_commit):
         assert {k:v for k,v in before.items() if k not in changed} == {k:v for k,v in after.items() if k not in changed}
         interpreter = '/usr/bin/python3' if lane == 'tt' else '/opt/pipeline-dispatch/coordinator-venv/bin/python'
         run([interpreter, '-B', '-c', 'from features.pipeline_dispatch import tt_native, core, service'], cwd=candidate)
+        if lane == 'tt':
+            run(['runuser', '-u', 'tt-post', '--', interpreter, '-B', '-c',
+                 'from features.pipeline_dispatch import tt_native'], cwd=candidate)
         if lane == 'coordinator':
             run([interpreter, '-B', '-c', 'from features.post_daily_report import plans, target_plans, x'], cwd=candidate)
         rollback = original
@@ -127,7 +130,7 @@ def switch(lane, target, folder):
         if stopped: run(['systemctl', 'start', unit], timeout=20)
         raise
     finally:
-        if gated: run(['iptables', '-D', 'INPUT', *rule])
+        if gated: subprocess.run(['iptables', '-D', 'INPUT', *rule], capture_output=True)
         subprocess.run(['systemctl', 'stop', marker+'.timer'], capture_output=True)
         write(folder / ('switch-'+lane+'.json'), {'old': str(previous), 'new': str(link.resolve()), 'rule_removed': marker not in run(['iptables','-S','INPUT'])})
 
