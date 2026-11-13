@@ -11,6 +11,7 @@ from decimal import Decimal
 from .core import ActorScope, BEIJING, StoreError, utc_iso
 from .manual_batch import BatchError, canonical, digest
 from .strategy import daily_capacity, daily_limit
+from . import page_caption
 
 
 KIND = "exact_material_all_pages_v1"
@@ -109,7 +110,10 @@ def publish_material(runtime, template_id, actor, payload):
         other_pages = runtime.pages.list_pages(other["config"]["group_ids"], is_admin=other["scope_is_admin"], owner_user_id=other["owner_user_id"])
         automatic_daily_jobs += daily_capacity(other["config"], other_pages)
         fingerprint.add((int(other["template_id"]), int(other["template_version"])))
-    material = runtime.materials.exact_material(config, request["material_id"])
+    with store.connect() as conn:
+        caption_snapshot = page_caption.load(conn, template['created_by'], [p.page_id for p in pages])
+    material = runtime.materials.exact_material(
+        dict(config, _page_caption_description=page_caption.needs_description(caption_snapshot)), request["material_id"])
     if str(material.material_id) != request["material_id"]:
         raise StoreError("fb_auto_material_identity_invalid", "素材仓库返回的ID与指定素材不一致", 409)
     # No remote writes or GPU calls occur above or inside the reservation.
@@ -177,10 +181,9 @@ def publish_material(runtime, template_id, actor, payload):
                  material.media_url, canonical(selection)))
             if not reason:
                 task_id = int(cur.lastrowid)
-                short, long = (store._link_values(page, material, task_id, int(now.timestamp()))
-                               if "{{url}}" in config["message_template"] else ("", ""))
-                conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?",
-                             (store._message(config, material, short), short, long, task_id))
+                selection['caption'] = page_caption.freeze(store, conn, config, page, material,
+                    task_id, int(now.timestamp()), caption_snapshot)
+                conn.execute('UPDATE fb_auto_task SET selection_json=? WHERE id=?', (canonical(selection), task_id))
         conn.commit()
     return {"ok": True, "run_id": run_id, "idempotent": False, "operation_id": request["operation_id"], **result}
 

@@ -28,7 +28,7 @@ def save(path,value):
     temp=path.with_suffix('.tmp');temp.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8');temp.chmod(0o600);temp.replace(path)
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('action',choices=('prepare','apply'));p.add_argument('--folder',type=Path,required=True);p.add_argument('--sha256');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=('prepare','apply','resume'));p.add_argument('--folder',type=Path,required=True);p.add_argument('--sha256');a=p.parse_args()
     folder=a.folder.resolve();assert folder.is_relative_to('/mnt/data-disk/fb-page-caption-20261113')
     bank=json.loads((SOURCE/'ops/fb-page-caption/approved-20261113.json').read_text())
     if a.action=='prepare':
@@ -53,15 +53,29 @@ def main():
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=30) as response:actor=json.load(response)['actor']
     assert actor['user_name']=='郜远' and actor['is_admin']
     current={r['page_id']:r for r in rows()}
-    assert all(current[item['before']['page_id']]==item['before'] for item in plan),'configuration_changed_since_plan'
-    if previous:
+    pending=plan;completed=[]
+    if a.action=='resume':
+        assert previous and previous['status']=='partial','only_completed_partial_batch_may_resume'
+        pending=[]
+        for item in plan:
+            old=item['before'];now=current[old['page_id']]
+            if now==old:pending.append(item);continue
+            assert now['caption_template']==item['caption'] and now['version']==old['version']+1,'configuration_changed_since_plan'
+            assert all(now[k]==v for k,v in old.items() if k not in {'caption_template','version','updated_by','updated_at_utc'}),'unrelated_page_field_changed'
+            completed.append(dict(page_id=old['page_id'],status='saved_readback',error=''))
+        archive=folder/('receipt-before-resume-'+str(len(completed))+'.json')
+        assert not archive.exists(),'resume_without_progress_requires_review'
+        (folder/'receipt.json').rename(archive)
+    else:
+        assert all(current[item['before']['page_id']]==item['before'] for item in plan),'configuration_changed_since_plan'
+    if previous and a.action!='resume':
         assert previous.get('verified')==0 and all(r['status']=='failed' for r in previous['results']),'partial_receipt_requires_reconciliation'
         assert not (folder/'receipt-route-rejected.json').exists(),'only_one_reconciled_retry_allowed'
         (folder/'receipt.json').rename(folder/'receipt-route-rejected.json')
     if not (folder/'before.sqlite3').exists():
         with closing(sqlite3.connect(DB.as_uri()+'?mode=ro',uri=True)) as source,closing(sqlite3.connect(folder/'before.sqlite3')) as target:source.backup(target)
     (folder/'before.sqlite3').chmod(0o600)
-    receipt=dict(status='applying',expected=len(plan),results=[]);lock=threading.Lock();save(folder/'receipt.json',receipt)
+    receipt=dict(status='applying',expected=len(plan),results=completed);lock=threading.Lock();save(folder/'receipt.json',receipt)
     def update(item):
         old=item['before'];pid=old['page_id'];error=''
         try:
@@ -75,7 +89,7 @@ def main():
         with lock:
             receipt['results'].append(dict(page_id=pid,status=status,error=error));save(folder/'receipt.json',receipt)
             if len(receipt['results'])%20==0:print(json.dumps(dict(done=len(receipt['results']),failed=sum(r['status']=='failed' for r in receipt['results']))),flush=True)
-    with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(update,plan))
+    with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(update,pending))
     after={r['page_id']:r for r in rows()};target_ids={r['before']['page_id'] for r in plan}
     changed_fields={'caption_template','version','updated_by','updated_at_utc'}
     good=[]

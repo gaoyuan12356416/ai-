@@ -17,6 +17,7 @@ from .links import FBPostLinkError, build_short_url, build_w2a_url
 from .strategy import daily_capacity, in_slot, planned_time, cooldown_content_ids, diverse_candidates
 from features import social_random_schedule as target_daily
 from . import target_schedule
+from . import page_caption
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
 from .languages import candidate_snapshots_for_pages,page_language
 from .profile_selection import Decision, load_profiles
@@ -437,7 +438,7 @@ class FBAutoPostStore:
                 | manual_excluded_materials(conn, page_id, manual_cutoff))
 
     @staticmethod
-    def _message(config: Mapping[str, Any], material: Any, short_url: str = "") -> str:
+    def _message(config: Mapping[str, Any], material: Any, short_url: str = "", *, strict_length: bool = False) -> str:
         replacements = {
             "drama_name": material.drama_name,
             "material_name": material.material_name,
@@ -450,7 +451,7 @@ class FBAutoPostStore:
             lambda match: str(replacements[match.group(1)] or ""),
             str(config["message_template"]),
         )
-        if short_url and len(text) > 5000:
+        if (short_url or strict_length) and len(text) > 5000:
             raise StoreError("fb_auto_message_length_invalid", "宏展开后的发布文案超过5000字符，未创建任务", 409)
         return text[:5000]
 
@@ -608,13 +609,15 @@ class FBAutoPostStore:
                 raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
         with self.connect() as conn:
             max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in page_rows),default=0)
+            caption_snapshot=page_caption.load(conn,template['created_by'],[p.page_id for p in page_rows])
         candidate_limit=min(5000,max(1000 if config.get("drama_cooldown_hours") else 500,max_reserved+100))
         profile_supported = not hit_drama and str(config.get('app_id')) == '1479'
         profile_snapshot = load_profiles([p.page_id for p in page_rows]) if profile_supported else ({'pages': {}}, {})
         profile_identity = [template_id, int(template['current_version']), slot_key]
         profile_enabled = profile_supported and any(not Decision(p.page_id, profile_identity, profile_snapshot).reason for p in page_rows)
         candidate_snapshots = candidate_snapshots_for_pages({**config,'_candidate_limit':candidate_limit,
-            '_profile_selection':profile_enabled},page_rows,materials)
+            '_profile_selection':profile_enabled,
+            '_page_caption_description':page_caption.needs_description(caption_snapshot)},page_rows,materials)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
         # Catalog/metric freezing can be the longest read in planning.  Re-read
         # every mutable Page-side input afterwards so a pool disable, membership
@@ -757,11 +760,9 @@ class FBAutoPostStore:
                     status, reason = "skipped", "fb_auto_page_task_conflict"
                     values = (run_id, template_id, int(template["current_version"]), page.page_id, page.group_id, status, reason, material.material_id if material else "", material.content_id if material else "", "", self._message(config, material) if material else "", now, now, task_publish_at, str(config["video_template"]), gpu_job_id, material.media_url if material else "")
                     task_cursor = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
-                if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]):
+                if status == "planned" and material is not None:
                     task_id = int(task_cursor.lastrowid)
-                    short_url, long_url = self._link_values(page, material, task_id, link_timestamp)
-                    message_text = self._message(config, material, short_url)
-                    conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (message_text, short_url, long_url, task_id))
+                    selection['caption']=page_caption.freeze(self,conn,config,page,material,task_id,link_timestamp,caption_snapshot)
                 if target_slot:
                     conn.execute("UPDATE fb_auto_task SET schedule_policy=? WHERE id=?", (target_daily.POLICY, int(task_cursor.lastrowid)))
                     target_daily.bind_slot(conn, target_schedule.source_key(template_id), day, page.page_id, ordinal, "fb_auto_task", int(task_cursor.lastrowid))

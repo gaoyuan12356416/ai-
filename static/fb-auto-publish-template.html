@@ -115,9 +115,9 @@
               <div id="poolList" class="pool-list">加载中…</div>
             </div>
             <div class="field wide">
-              <label class="required" for="message">发布文案</label>
+              <label class="required" for="message">兜底发布文案</label>
               <textarea id="message" required placeholder="可用宏：{{drama_name}} {{material_name}} {{content_id}} {{desc}} {{url}}"></textarea>
-              <div class="hint">{{desc}} 为短剧描述；{{url}} 为带 AIpost 归因的短链，每份文案最多使用一次。</div>
+              <div class="hint">新任务优先使用 Page 管理中的文案；未配置、无法匹配或文案无法展开时使用这里的兜底文案。{{desc}} 为短剧描述；{{url}} 为观看短链，每份文案最多使用一次。</div>
             </div>
             <div class="field">
               <label for="launchDays">短剧上线窗口（0 不限）</label>
