@@ -16,6 +16,11 @@ versions. No generation is automatically deleted. Live report inputs pin a
 generation rather than following a moving pointer during a build.
 
 Run using `/opt/report-material-catalog/current/reports/yuesiying/catalog/cli.py`:
+Use `/mnt/data-disk/report-material-catalog/venv/bin/python` with the pinned
+`mysql-connector-python==9.2.0` dependency. Connections use MySQL protocol
+compression and reuse the writer cursor across batches. An interrupted staging
+import can resume only after its complete stored prefix matches the immutable
+source checksum and normalized ordered rows; no committed prefix is overwritten.
 
 ```
 python3 cli.py import-json /REPORT/library.json --generated-at 'SOURCE INVENTORY TIME'

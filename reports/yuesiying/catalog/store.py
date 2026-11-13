@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import time
 
 FIELDS = {'id', 'name', 'language', 'data_source_id', 'video_duration', 'created_at'}
@@ -79,18 +80,26 @@ def file_sha(path):
 
 
 def connect(config, writer=False, streaming=False, source=False):
-    import pymysql
+    import mysql.connector
     settings = json.loads(Path(config).read_text())['mysql']
     require(settings['host'] == '101.32.56.53', 'unexpected_database_host')
-    connection = pymysql.connect(host=settings['host'], port=63353 if writer else 63350,
+    raw = mysql.connector.connect(host=settings['host'], port=63353 if writer else 63350,
         user=settings['user'], password=settings['password'], database='kunlunads_dev' if source else 'ads_ai',
-        charset='utf8mb4', connect_timeout=5, read_timeout=60, write_timeout=60,
-        cursorclass=pymysql.cursors.SSDictCursor if streaming else pymysql.cursors.DictCursor,
-        autocommit=False)
+        charset='utf8mb4', connection_timeout=5, read_timeout=60, write_timeout=60,
+        compress=True, use_pure=True, autocommit=False)
+    class Connection:
+        def cursor(self):return raw.cursor(dictionary=True,buffered=not streaming)
+        def commit(self):return raw.commit()
+        def rollback(self):return raw.rollback()
+        def close(self):return raw.close()
+        def __enter__(self):return self
+        def __exit__(self,*args):self.close()
+    connection=Connection()
     try:
         with connection.cursor() as cursor:
             cursor.execute('SELECT DATABASE() db,@@read_only ro')
             identity = cursor.fetchone()
+            cursor.fetchall()
         require(identity['db'] == ('kunlunads_dev' if source else 'ads_ai')
                 and int(identity['ro']) == (0 if writer else 1), 'database_role_mismatch')
         return connection
@@ -135,23 +144,39 @@ def verify(config, generation, expected_count, expected_digest):
 
 def import_rows(config, generation, source_hash, kind, generated_at, source_bytes, values):
     prior = metadata(config, generation)
+    resume_count=0
     if prior:
-        require(prior['status'] == 'verified', 'unfinished_catalog_generation_requires_review')
-        return {'generation_id': generation, 'rows': int(prior['row_count']), 'row_sha256': prior['row_sha256'], 'reused': True}
+        require(prior['source_sha256']==source_hash and prior['source_kind']==kind
+                and prior['generated_at']==generated_at and int(prior['source_bytes'])==source_bytes,'catalog_source_identity_changed')
+        if prior['status']=='verified':
+            return {'generation_id': generation, 'rows': int(prior['row_count']), 'row_sha256': prior['row_sha256'], 'reused': True}
+        require(prior['status']=='staging','catalog_state_not_resumable')
+        with contextlib.closing(connect(config)) as db,db.cursor() as cursor:
+            cursor.execute('SELECT COUNT(*) n,COALESCE(MAX(source_ordinal),0) last_ordinal FROM '+ROWS+' WHERE generation_id=%s',(generation,))
+            state=cursor.fetchone();resume_count=int(state['n'])
+            require(resume_count==int(state['last_ordinal']),'catalog_staging_ordinal_gap')
     digest = hashlib.sha256(); count = 0; batch = []
     with contextlib.closing(connect(config, writer=True)) as db:
         with db.cursor() as cursor:
-            cursor.execute('INSERT INTO '+GEN+' (generation_id,status,source_sha256,source_kind,generated_at,source_bytes) VALUES(%s,%s,%s,%s,%s,%s)',
-                (generation,'staging',source_hash,kind,generated_at,source_bytes)); db.commit()
+            if not prior:
+                cursor.execute('INSERT INTO '+GEN+' (generation_id,status,source_sha256,source_kind,generated_at,source_bytes) VALUES(%s,%s,%s,%s,%s,%s)',
+                    (generation,'staging',source_hash,kind,generated_at,source_bytes)); db.commit()
             for raw in values:
                 row = normalize(raw); count += 1
                 digest.update((canonical(row)+'\n').encode())
+                if count<=resume_count:
+                    if count==resume_count:
+                        verify(config,generation,resume_count,digest.hexdigest())
+                        print(json.dumps({'phase':'resumed_verified_prefix','rows':resume_count}),file=sys.stderr,flush=True)
+                    continue
                 batch.append((generation,count,row['id'],row['data_source_id'],row['language'],row['name'],row['video_duration'],row['created_at']))
                 if len(batch) >= 1000:
                     cursor.executemany('INSERT INTO '+ROWS+' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',batch); db.commit(); batch.clear()
+                    if count%10000==0:print(json.dumps({'phase':'importing','rows':count}),file=sys.stderr,flush=True)
             if batch:
                 cursor.executemany('INSERT INTO '+ROWS+' VALUES(%s,%s,%s,%s,%s,%s,%s,%s)',batch); db.commit()
             require(count > 0, 'empty_catalog_requires_review')
+            require(count>=resume_count,'catalog_source_shorter_than_staging')
         checked = verify(config,generation,count,digest.hexdigest())
         with db.cursor() as cursor:
             cursor.execute('UPDATE '+GEN+" SET status='verified',row_count=%s,row_sha256=%s,verified_at=UTC_TIMESTAMP(6) WHERE generation_id=%s AND status='staging' LIMIT 1",
