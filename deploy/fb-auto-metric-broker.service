@@ -1,0 +1,18 @@
+[Unit]
+Description=Read verified Facebook metric generations from ads_ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/fb-auto-metrics/current
+EnvironmentFile=/etc/fb-auto-post.env
+ExecStart=/usr/bin/python3 scripts/fb_auto_metric_broker.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

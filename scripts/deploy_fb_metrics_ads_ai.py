@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Overlay only the FB metric adapter; preserve the deployed publisher and its ledgers."""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SOURCE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE))
+from scripts import deploy_fb_skipped_recheck as fb
+from scripts import deploy_hit_drama as release
+from scripts.deploy_pipeline_runtime import preserve_tree_owners, verify_source
+
+BASE = "1e2689e6cf0eaf5cc962db288b26284519d9d514"
+FILES = ["features/fb_auto_posts/service.py", "features/fb_auto_posts/metric_mysql.py",
+         "scripts/fb_auto_post_metric_runner.py", "scripts/fb_auto_metric_broker.py"]
+ENV = Path("/etc/fb-auto-post.env")
+BROKER = Path("/etc/systemd/system/fb-auto-metric-broker.service")
+TIMERS = ["fb-auto-post-metric-" + name + ".timer" for name in ("hourly", "repair")]
+
+
+def stage(folder):
+    assert release.run("findmnt", "-rn", "-o", "UUID", "--mountpoint", "/mnt/data-disk") == "3e8ac4e8-7770-456d-9e89-2ec5dd405fa8"
+    commit = verify_source(SOURCE, "HEAD")
+    current = Path("/opt/fb-auto-post/current")
+    previous = current.resolve(); candidate = folder / "candidate"
+    folder.mkdir(parents=True, exist_ok=False); folder.chmod(0o755)
+    shutil.copytree(previous, candidate, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
+    preserve_tree_owners(previous, candidate)
+    manifest = {"commit": commit, "source": str(SOURCE), "status": "staged", "lanes": {
+        "fb": {"previous_root": str(previous), "candidate": str(candidate), "files": {}}}}
+    for name in FILES:
+        live, target = previous / name, candidate / name
+        old = subprocess.run(["git", "-C", str(SOURCE), "show", BASE + ":" + name], capture_output=True)
+        if old.returncode == 0:
+            assert live.read_bytes().replace(b"\r\n", b"\n") == old.stdout, "baseline_changed:" + name
+        else:
+            assert not live.exists(), "new_file_collision:" + name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        release.atomic(target, (SOURCE / name).read_bytes())
+        target.chmod(0o644)
+        manifest["lanes"]["fb"]["files"][name] = {"before": fb.digest(live) if live.exists() else "", "after": fb.digest(target)}
+    shutil.copy2(ENV, folder / "fb-auto-post.env.before"); (folder / "fb-auto-post.env.before").chmod(0o600)
+    fb.save(folder / "manifest.json", manifest)
+    print(json.dumps({"staged": True, "commit": commit, "candidate": str(candidate)}))
+
+
+def apply(folder, rollback=False):
+    manifest = json.loads((folder / "manifest.json").read_text())
+    if rollback:
+        # Do not roll back to a missing/old archive. The current snapshot must
+        # first be restored by the archive operator when the source was removed.
+        assert Path("/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3").is_file(), "restore_metric_archive_first"
+    else:
+        migration = json.loads((folder.parent / "migration.json").read_text())
+        assert migration.get("verified") is True and migration.get("pointers_verified", 0) > 0
+        assert not release.run("ss", "-Hlnt", "( sport = :8849 )"), "metric_broker_port_in_use"
+        broker_root = Path("/opt/fb-auto-metrics"); broker_root.mkdir(exist_ok=True)
+        target = broker_root / "current"
+        assert not target.exists() and not target.is_symlink(), "metric_release_already_exists"
+        target.symlink_to(SOURCE, target_is_directory=True)
+        shutil.copy2(SOURCE / "deploy/fb-auto-metric-broker.service", BROKER)
+        release.run("systemctl", "daemon-reload")
+        release.run("systemctl", "enable", "--now", BROKER.name)
+        release.health(8849)
+    lane = dict(manifest["lanes"]["fb"])
+    if rollback:
+        lane = {"previous_root": lane["candidate"], "candidate": lane["previous_root"],
+                "files": {name: {"before": row["after"], "after": row["before"]}
+                          for name, row in lane["files"].items() if row["before"]}}
+    switch_manifest = {"lanes": {"fb": lane}}
+    states = {unit: fb.show(unit) for unit in fb.TIMERS}; config = fb.configuration(); audit = {}
+    release.run(sys.executable, release.HEALTH, "snapshot", "--lane", "fb", "--output", folder / "schedulers-before.json")
+    try:
+        fb.fb_enabled(False)
+        for unit, state in states.items():
+            if state == "active": release.run("systemctl", "stop", unit)
+        # Gate and drain accepted owner requests before changing its import.
+        if rollback:
+            release.atomic(ENV, (folder / "fb-auto-post.env.before").read_bytes()); ENV.chmod(0o600)
+        else:
+            text = ENV.read_text()
+            text = "\n".join(line for line in text.splitlines() if not line.startswith(("FB_AUTO_METRIC_STORAGE=", "FB_AUTO_METRIC_BROKER_PORT=")))
+            release.atomic(ENV, (text + "\nFB_AUTO_METRIC_STORAGE=mysql\nFB_AUTO_METRIC_BROKER_PORT=8849\n").encode()); ENV.chmod(0o600)
+        switch_folder = folder / ("rollback-switch" if rollback else "switch"); switch_folder.mkdir(exist_ok=True)
+        fb.switch("fb", switch_folder, switch_manifest, audit)
+        for mode in ("hourly", "repair"):
+            dropin = Path("/etc/systemd/system/fb-auto-post-metric-" + mode + ".service.d/90-ads-ai.conf")
+            if rollback:
+                dropin.unlink(missing_ok=True)
+            else:
+                dropin.parent.mkdir(parents=True, exist_ok=True)
+                dropin.write_text("[Service]\nUser=root\nGroup=root\nWorkingDirectory=/opt/fb-auto-metrics/current\n")
+        release.run("systemctl", "daemon-reload")
+        manifest["status"] = "rolled_back" if rollback else "active"
+        fb.save(folder / "manifest.json", manifest)
+    finally:
+        fb.fb_enabled("fb" in config["enabled_channels"], "fb" in config.get("preparation_only_channels", []))
+        for unit, state in states.items():
+            if state == "active": release.run("systemctl", "start", unit)
+        fb.save(folder / "switch-audit.json", audit)
+        release.run(sys.executable, release.HEALTH, "restore", "--baseline", folder / "schedulers-before.json",
+                    "--wait-seconds", "25", "--output", folder / "schedulers-after.json")
+    if rollback:
+        release.run("systemctl", "disable", "--now", BROKER.name)
+    print(json.dumps({"status": manifest["status"], "commit": manifest["commit"], "audit": audit}))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(); parser.add_argument("mode", choices=("stage", "apply", "rollback"))
+    parser.add_argument("--folder", required=True); args = parser.parse_args(); folder = Path(args.folder).resolve()
+    assert folder.is_relative_to("/mnt/data-disk")
+    if args.mode == "stage": stage(folder)
+    else: apply(folder, args.mode == "rollback")

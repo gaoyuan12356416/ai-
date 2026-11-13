@@ -38,7 +38,10 @@ def main() -> int:
         import pymysql
         return pymysql.connect(host=os.environ.get("FB_AUTO_MYSQL_HOST", "127.0.0.1"), port=int(os.environ.get("FB_AUTO_MYSQL_PORT", "63350")), user=os.environ.get("FB_AUTO_MYSQL_USER", ""), password=os.environ.get("FB_AUTO_MYSQL_PASSWORD", ""), database=os.environ.get("FB_AUTO_MYSQL_DATABASE", "kunlunads_dev"), charset="utf8mb4", autocommit=True, connect_timeout=10, read_timeout=180, write_timeout=10)
     mysql = ReadOnlyMySQL(connect, os.environ.get("FB_AUTO_MYSQL_DATABASE", "kunlunads_dev"), os.environ.get("FB_AUTO_BLACKLIST_MYSQL_DATABASE", "ads_setting"))
-    store = FBAutoPostStore(os.environ.get("FB_AUTO_METRIC_DB_PATH", "/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3"))
+    from features.fb_auto_posts.metric_mysql import metric_store_from_env, GatedMetricSource
+    store = metric_store_from_env(os.environ, writer=True)
+    if os.environ.get("FB_AUTO_METRIC_STORAGE") == "mysql":
+        mysql = GatedMetricSource(store.config)
     refresher = MetricRefresher(mysql, store)
     today = datetime.now(timezone.utc).astimezone(BEIJING).date()
     dates = [today - timedelta(days=1)] if args.mode == "yesterday" else [today - timedelta(days=days) for days in range(1, 31)]
