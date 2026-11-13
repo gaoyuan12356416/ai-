@@ -100,16 +100,24 @@ class WarehouseWriter:
         self.version = None
 
     def __enter__(self):
-        import pymysql
-        self.connection = pymysql.connect(**self.config, charset='utf8mb4', connect_timeout=5,
-                                          read_timeout=15, write_timeout=15, autocommit=False,
-                                          cursorclass=pymysql.cursors.DictCursor)
-        with self.connection.cursor() as cursor:
-            cursor.execute('SELECT DATABASE() AS db,@@read_only AS ro')
-            identity = cursor.fetchone()
-            if identity['db'] != 'ads_ai' or int(identity['ro']) != 0:
-                raise CollectionError('dedicated writer did not prove ads_ai/read_only=0')
+        self.connection = self._connect()
         return self
+
+    def _connect(self):
+        import pymysql
+        connection = pymysql.connect(**self.config, charset='utf8mb4', connect_timeout=5,
+                                     read_timeout=60, write_timeout=15, autocommit=False,
+                                     cursorclass=pymysql.cursors.DictCursor)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT DATABASE() AS db,@@read_only AS ro')
+                identity = cursor.fetchone()
+                if identity['db'] != 'ads_ai' or int(identity['ro']) != 0:
+                    raise CollectionError('dedicated writer did not prove ads_ai/read_only=0')
+        except Exception:
+            connection.close()
+            raise
+        return connection
 
     def __exit__(self, exc_type, exc, traceback):
         if self.connection:
@@ -136,12 +144,34 @@ class WarehouseWriter:
                 TABLES[kind], ','.join('`%s`' % f for f in columns), ','.join(['%s'] * len(columns)),
                 ','.join('`%s`=VALUES(`%s`)' % (f, f) for f in fields))
             rows = day[kind]
-            for offset in range(0, len(rows), 250):
+            for offset in range(0, len(rows), 100):
                 values = [(version, row_key(kind, row)) + tuple(row[f] for f in fields)
-                          for row in rows[offset:offset + 250]]
+                          for row in rows[offset:offset + 100]]
+                self._write_fact_batch(sql, values)
+
+    def _write_fact_batch(self, sql, values):
+        import pymysql
+        for attempt in range(3):
+            try:
+                if self.connection is None:
+                    self.connection = self._connect()
                 with self.connection.cursor() as cursor:
                     cursor.executemany(sql, values)
                 self.connection.commit()
+                return
+            except pymysql.err.OperationalError as exc:
+                code = exc.args[0] if exc.args else None
+                if code not in (2006, 2013) or attempt == 2:
+                    raise
+                # Only replay the identical version/row-key upsert. A lost COMMIT
+                # reply may already be durable; absolute values cannot double-count.
+                with contextlib.suppress(Exception):
+                    if self.connection is not None:
+                        self.connection.close()
+                self.connection = None
+                print(json.dumps(dict(event='warehouse_fact_write_retry', attempt=attempt + 2,
+                                      error_code=code, rows=len(values))), flush=True)
+                time.sleep((2, 5)[attempt])
 
     def finish(self, version, manifest):
         with self.connection.cursor() as cursor:
