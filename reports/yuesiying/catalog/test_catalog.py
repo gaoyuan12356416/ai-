@@ -14,6 +14,29 @@ def row(i,name='EN-123-00:00-a',lang='en',cid='source',duration=0):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_loose_fuzzy_known_korean_pair_and_partial_core(self):
+        original='跑量迭代_18M_30702_39_10_吃醋_EN_精剪_hupeixuan_11.8_4.mp4'
+        korean='AI小语种-ko-30702-18:14-EN验证_18M_30702_39_10_吃醋_EN_精剪_hupeixuan_11_8_4'
+        mats={'8166308':{'n':original,'l':'en'},'8181355':{'n':korean,'l':'ko'},
+              '2':{'n':'18M_30702_39_10_吃醋_精剪_修改字幕_hupeixuan_11_8_4','l':'fr'},
+              '3':{'n':korean,'l':'en'},'4':{'n':'completely unrelated content','l':'ja'}}
+        hits=consumer.fuzzy_matches(mats,{'8166308'})['8166308']
+        self.assertEqual({r['mid'] for r in hits},{'8181355','2'})
+        self.assertEqual(next(r['score'] for r in hits if r['mid']=='8181355'),1.0)
+
+    def test_fuzzy_never_crosses_resources_or_same_language(self):
+        values=[row(1,name='abcdefg1234567-original',cid='en'),
+                row(2,name='abcdefg1234567-original-ko',lang='ko',cid='ko'),
+                row(3,name='abcdefg1234567-original-ko',lang='ko',cid='other'),
+                row(4,name='abcdefg1234567-original',cid='en')]
+        cat={'en':{('A','en')},'ko':{('A','ko')},'other':{('B','ko')}}
+        result=consumer.select(cat,{'A':{'1'}},values)
+        self.assertEqual([h['mid'] for h in result['matches']['A']['1']],['2'])
+        self.assertNotIn('B',result['kept'])
+
+    def test_blank_names_do_not_create_false_fuzzy_matches(self):
+        self.assertEqual(consumer.fuzzy_matches({'1':{'n':'','l':'en'},'2':{'n':'','l':'ko'}},{'1'}),{'1':[]})
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
 

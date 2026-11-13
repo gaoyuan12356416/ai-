@@ -16,6 +16,56 @@ def norm(s):
     return re.sub(r'[^\w\u4e00-\u9fff]','',s).replace('_','')
 
 
+def fuzzy_key(name):
+    """Name evidence only, never a statement that video contents are identical."""
+    name=re.sub(r'^(?:跑量迭代[_\-\s]*)+', '', name, flags=re.I)
+    return norm(name)
+
+
+def grams(key):
+    return {key[i:i+3] for i in range(len(key)-2)}
+
+
+def fuzzy_matches(mats, original_ids):
+    """Bounded, same-resource candidate retrieval; every result needs review.
+
+    Index distinct names, not every pair of material IDs. Match 3-gram Dice
+    >= .55 with >= 6 common grams, or containment of >= 12 characters.
+    Neither duration nor a high score can waive human review.
+    """
+    keys=collections.defaultdict(list)
+    for mid,row in mats.items():
+        if row['l'].lower()!='en':keys[fuzzy_key(row['n'])].append(mid)
+    keygrams={key:grams(key) for key in keys}
+    index=collections.defaultdict(set)
+    for key,parts in keygrams.items():
+        for part in parts:index[part].add(key)
+    found={};cached={}
+    for mid in sorted(original_ids):
+        if mid not in mats:continue
+        mother=mats[mid];key=fuzzy_key(mother['n'])
+        if key not in cached:
+            parts=grams(key);counts=collections.Counter()
+            for part in parts:counts.update(index.get(part,()))
+            if key and key in keys:counts[key]=len(parts)
+            candidates=[]
+            for other,common in counts.items():
+                exact=bool(key) and key==other
+                if common<6 and not exact:continue
+                score=1.0 if exact else 2*common/(len(parts)+len(keygrams[other]))
+                contained=min(len(key),len(other))>=12 and (key in other or other in key)
+                if exact or score>=.55 or contained:
+                    candidates.append((other,round(score,4),'核心名称包含' if contained else '核心名称部分相似'))
+            cached[key]=candidates
+        hits=[]
+        for other,score,reason in cached[key]:
+            for target in keys[other]:
+                if target!=mid and mats[target]['l'].lower()!=mother['l'].lower():
+                    hits.append({'mid':target,'score':score,'reason':reason})
+        found[mid]=sorted(hits,key=lambda r:(-r['score'],int(r['mid'])))
+    return found
+
+
 def inputs(workdir):
     root=Path(workdir);site=root/'site'
     data=json.loads((site/'data.json').read_text());catalog=collections.defaultdict(set)
@@ -38,12 +88,14 @@ def select(catalog,originals,library):
         mid=str(row['id']);scoped[resource][mid]={'n':row['name'],'l':row['language'],'d':float(row['video_duration'] or 0),
             'k':norm(row['name']),'c':str(row['created_at']),'ids':[],'cid':cid,
             'v':next((v for v in ['AI翻转','AI解说','AI小语种'] if v in row['name']),'普通版本')}
-    kept={};potential=set()
+    kept={};potential=set();matches={}
     for resource,mats in scoped.items():
-        signatures={row['k'] for mid,row in mats.items() if mid in originals[resource]}
-        kept[resource]={mid:row for mid,row in mats.items() if mid in originals[resource] or row['k'] in signatures and row['l'].lower()!='en'}
+        matches[resource]=fuzzy_matches(mats,originals[resource])
+        candidates={hit['mid'] for hits in matches[resource].values() for hit in hits}
+        kept[resource]={mid:row for mid,row in mats.items() if mid in originals[resource] or mid in candidates}
         potential.update(mid for mid,row in kept[resource].items() if row['l'].lower()!='en')
     return {'kept':kept,'potential':sorted(potential),
+            'matches':matches,
             'order':[(resource,list(rows)) for resource,rows in kept.items()]}
 
 
