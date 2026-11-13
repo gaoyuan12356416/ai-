@@ -86,7 +86,7 @@ class GatedMetricReader:
         try:
             process = subprocess.Popen(["/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350",
                                      "-u", self.config["user"], "--batch", "--raw", "--skip-column-names",
-                                     "--default-character-set=utf8mb4", "--connect-timeout=3"],
+                                     "--default-character-set=utf8mb4", "--connect-timeout=3", "--compress"],
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     env=env, start_new_session=True)
             output, _ = process.communicate(sql.encode(), timeout=timeout)
@@ -162,10 +162,11 @@ class MySQLMetricStore:
         self.writer_factory = writer_factory or self._connect_writer
 
     def _connect_writer(self):
-        import pymysql
-        return pymysql.connect(host="101.32.56.53", port=63353, user=self.config["user"],
-                               password=self.config["password"], database=SCHEMA, charset="utf8mb4",
-                               connect_timeout=3, read_timeout=30, write_timeout=30, autocommit=False)
+        import mysql.connector
+        return mysql.connector.connect(host="101.32.56.53", port=63353, user=self.config["user"],
+                                       password=self.config["password"], database=SCHEMA, charset="utf8mb4",
+                                       connection_timeout=10, read_timeout=60, write_timeout=60,
+                                       compress=True, use_pure=True, autocommit=False)
 
     def load_metric_window(self, *, product, platform, dates):
         normalized = tuple(dict.fromkeys(metric_date(day) for day in dates))

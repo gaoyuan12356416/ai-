@@ -57,6 +57,7 @@ def apply(folder, rollback=False):
     else:
         migration = json.loads((folder.parent / "migration.json").read_text())
         assert migration.get("verified") is True and migration.get("pointers_verified", 0) > 0
+        assert (SOURCE.parent / "venv/bin/python").is_file(), "metric_python_environment_missing"
         assert not release.run("ss", "-Hlnt", "( sport = :8849 )"), "metric_broker_port_in_use"
         broker_root = Path("/opt/fb-auto-metrics"); broker_root.mkdir(exist_ok=True)
         target = broker_root / "current"
@@ -93,7 +94,10 @@ def apply(folder, rollback=False):
                 dropin.unlink(missing_ok=True)
             else:
                 dropin.parent.mkdir(parents=True, exist_ok=True)
-                dropin.write_text("[Service]\nUser=root\nGroup=root\nWorkingDirectory=/opt/fb-auto-metrics/current\n")
+                argument = "yesterday" if mode == "hourly" else "repair"
+                dropin.write_text("[Service]\nUser=root\nGroup=root\nWorkingDirectory=/opt/fb-auto-metrics/current\n"
+                                  "ExecStart=\nExecStart=" + str(SOURCE.parent / "venv/bin/python")
+                                  + " /opt/fb-auto-metrics/current/scripts/fb_auto_post_metric_runner.py " + argument + "\n")
         release.run("systemctl", "daemon-reload")
         manifest["status"] = "rolled_back" if rollback else "active"
         fb.save(folder / "manifest.json", manifest)

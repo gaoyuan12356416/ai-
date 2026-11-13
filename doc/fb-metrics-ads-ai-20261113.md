@@ -12,6 +12,9 @@ host FIFO and port 63350. The separate root metric refresh units read the same
 source aggregation through FIFO and write only the dedicated tables on 63353.
 Neither runtime path creates tables. On unavailable or incomplete data the prior
 error contract is retained; there is no old SQLite fallback or source rebuild.
+The writer uses a dedicated venv with `requirements-fb-metrics.txt`, compressed
+MySQL protocol and one persistent connection/cursor per generation. FIFO readers
+also enable wire compression for the cross-region connection.
 
 Amounts use DECIMAL(38,12). Imports reject precision loss. Each imported generation
 is checked against the original ordered checksum, then read back through the
