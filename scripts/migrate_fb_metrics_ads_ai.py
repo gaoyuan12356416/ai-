@@ -76,7 +76,7 @@ def collect_references(paths):
                     found, rows = set(), 0
                     for row in db.execute(query):
                         if not row[0]: continue
-                        try: value = json.loads(row[0])
+                        try: value = row[0] if direct and isinstance(row[0], int) else json.loads(row[0])
                         except (ValueError, TypeError):
                             if direct: raise RuntimeError("invalid metric reference JSON")
                             continue

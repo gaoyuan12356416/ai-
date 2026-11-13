@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
@@ -10,7 +11,7 @@ from features.fb_auto_posts.core import StoreError
 from features.fb_auto_posts.metric_mysql import (GatedMetricReader, MetricBrokerClient, MySQLMetricStore, amount_text,
     canonical_row, digest_row, exact_add, exact_amount, metric_store_from_env, window_from_rows)
 from scripts.fb_auto_metric_broker import validate_window
-from scripts.migrate_fb_metrics_ads_ai import json_metric_refs, integer_ids
+from scripts.migrate_fb_metrics_ads_ai import collect_references, json_metric_refs, integer_ids
 
 
 class FakeCursor:
@@ -84,6 +85,16 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(json_metric_refs(value), {2, 3, 4, 5})
         self.assertEqual(integer_ids({"en": [1, 2]}), {1, 2})
         self.assertEqual(integer_ids({"en": ["1", "2", 3, True, ""]}), {1, 2, 3})
+
+    def test_reference_collection_includes_integer_columns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "references.sqlite3"
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE task(metric_generation_id INTEGER, selection_json TEXT)")
+                db.execute("INSERT INTO task VALUES(7,?)", (json.dumps({"frozen": {"metric_generation_ids": ["9"]}}),))
+            found, evidence = collect_references([path])
+            self.assertEqual(found, {7, 9})
+            self.assertEqual(len(evidence), 2)
 
     def test_writer_publishes_only_after_exact_readback(self):
         writer = FakeWriter(); store = MySQLMetricStore({}, reader=FakeReader(writer), writer_factory=lambda: writer)
