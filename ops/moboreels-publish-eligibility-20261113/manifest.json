@@ -1,0 +1,266 @@
+{
+  "roots": {
+    "main": {
+      "logical": "/root/drama_material_service",
+      "resolved": "/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service"
+    },
+    "x": {
+      "logical": "/opt/x-post-automation/current",
+      "resolved": "/mnt/data-disk/drama-audience-20261113/final-release/standard/candidate"
+    },
+    "fb": {
+      "logical": "/opt/fb-auto-post/current",
+      "resolved": "/mnt/data-disk/fb-page-caption-20261113/qa-fix/candidate"
+    },
+    "tt": {
+      "logical": "/opt/tt-post/current",
+      "resolved": "/mnt/data-disk/moboreels-social-releases/b53d3ac4c34b9e5c5164b7e56696f13e9a59de09/attribution-20261113T033327Z/tt"
+    },
+    "tt_auto": {
+      "logical": "/opt/tt-auto-post/current",
+      "resolved": "/mnt/data-disk/moboreels-social-releases/b53d3ac4c34b9e5c5164b7e56696f13e9a59de09/attribution-20261113T033327Z/tt_auto"
+    }
+  },
+  "files": [
+    {
+      "lane": "main",
+      "relative": "features/moboreels_library/macro_client.py",
+      "before": "1e993f9f4cf26bd6f2914147c956524df8da16a48b8d6465f276d37f88bc2d66",
+      "after": "72c9e93255eeb37791ed4422bde2f610f8f16effedd49b6fed0d936ebefa1fbf",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/moboreels_library/macro_client.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/moboreels_library/macro_client.py",
+      "before": "1e993f9f4cf26bd6f2914147c956524df8da16a48b8d6465f276d37f88bc2d66",
+      "after": "72c9e93255eeb37791ed4422bde2f610f8f16effedd49b6fed0d936ebefa1fbf",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/x/features/moboreels_library/macro_client.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/moboreels_library/macro_client.py",
+      "before": "1e993f9f4cf26bd6f2914147c956524df8da16a48b8d6465f276d37f88bc2d66",
+      "after": "72c9e93255eeb37791ed4422bde2f610f8f16effedd49b6fed0d936ebefa1fbf",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/fb/features/moboreels_library/macro_client.py"
+    },
+    {
+      "lane": "tt",
+      "relative": "features/moboreels_library/macro_client.py",
+      "before": "1e993f9f4cf26bd6f2914147c956524df8da16a48b8d6465f276d37f88bc2d66",
+      "after": "72c9e93255eeb37791ed4422bde2f610f8f16effedd49b6fed0d936ebefa1fbf",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt/features/moboreels_library/macro_client.py"
+    },
+    {
+      "lane": "tt_auto",
+      "relative": "features/moboreels_library/macro_client.py",
+      "before": "1e993f9f4cf26bd6f2914147c956524df8da16a48b8d6465f276d37f88bc2d66",
+      "after": "72c9e93255eeb37791ed4422bde2f610f8f16effedd49b6fed0d936ebefa1fbf",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt_auto/features/moboreels_library/macro_client.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/fb_video_publish/moboreels.py",
+      "before": "a2d0cdab5bb308488b1271518bd50b5e93751fd4914a84b04f2483270ce0c081",
+      "after": "75703033b06132ec849e794f090ca6b4444f747dfa88ab08c8a15fdf02a254cb",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/fb_video_publish/moboreels.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/fb_video_publish/moboreels.py",
+      "before": "a2d0cdab5bb308488b1271518bd50b5e93751fd4914a84b04f2483270ce0c081",
+      "after": "75703033b06132ec849e794f090ca6b4444f747dfa88ab08c8a15fdf02a254cb",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/fb/features/fb_video_publish/moboreels.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/tt_posts/moboreels.py",
+      "before": "2339664c97f6f7c67d11295d96816720a8781246895a259f10163b26ee5e2a22",
+      "after": "83361c237afe5aabf42492171bd8c322f264dd9d1686c3576587eb7da94c9903",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/tt_posts/moboreels.py"
+    },
+    {
+      "lane": "tt",
+      "relative": "features/tt_posts/moboreels.py",
+      "before": "2339664c97f6f7c67d11295d96816720a8781246895a259f10163b26ee5e2a22",
+      "after": "83361c237afe5aabf42492171bd8c322f264dd9d1686c3576587eb7da94c9903",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt/features/tt_posts/moboreels.py"
+    },
+    {
+      "lane": "tt_auto",
+      "relative": "features/tt_posts/moboreels.py",
+      "before": "2339664c97f6f7c67d11295d96816720a8781246895a259f10163b26ee5e2a22",
+      "after": "83361c237afe5aabf42492171bd8c322f264dd9d1686c3576587eb7da94c9903",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt_auto/features/tt_posts/moboreels.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/tt_auto_posts/publisher.py",
+      "before": "1b04b92e0b6e66783cf8c9eeba0195ef6d319aed0009e168023d7b8478b07087",
+      "after": "09818042715d3b46ed25b42d45ea94ca51bce7c0c359f0083a236e624f88a1ea",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/tt_auto_posts/publisher.py"
+    },
+    {
+      "lane": "tt_auto",
+      "relative": "features/tt_auto_posts/publisher.py",
+      "before": "fb40dce9922f478f98f9d2b78351b1d9b619d8ffa8fd32844746e0fd93e725ef",
+      "after": "d0319d37b03ed82469b6280caa4d242ca6dbbe224a96626578970ec37c64f287",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt_auto/features/tt_auto_posts/publisher.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/x_posts/moboreels.py",
+      "before": "4bc48eedf663bdeb6835bca100914cca6cc862ef7c16e04b1b71fb058578e45e",
+      "after": "de3d80b443f35de289f4c09bdd3fa25398c9a9643258d15370f7e3477ef5fd15",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/x_posts/moboreels.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/x_posts/moboreels.py",
+      "before": "4bc48eedf663bdeb6835bca100914cca6cc862ef7c16e04b1b71fb058578e45e",
+      "after": "de3d80b443f35de289f4c09bdd3fa25398c9a9643258d15370f7e3477ef5fd15",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/x/features/x_posts/moboreels.py"
+    },
+    {
+      "lane": "tt",
+      "relative": "features/x_posts/moboreels.py",
+      "before": "4bc48eedf663bdeb6835bca100914cca6cc862ef7c16e04b1b71fb058578e45e",
+      "after": "de3d80b443f35de289f4c09bdd3fa25398c9a9643258d15370f7e3477ef5fd15",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt/features/x_posts/moboreels.py"
+    },
+    {
+      "lane": "tt_auto",
+      "relative": "features/x_posts/moboreels.py",
+      "before": "4bc48eedf663bdeb6835bca100914cca6cc862ef7c16e04b1b71fb058578e45e",
+      "after": "de3d80b443f35de289f4c09bdd3fa25398c9a9643258d15370f7e3477ef5fd15",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt_auto/features/x_posts/moboreels.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/x_posts/service.py",
+      "before": "0569e715db054c43fe055b485b2348d9ef7697689ed2c009fc06764024b6367d",
+      "after": "af176b7cfb0535d32a05d29edfecfc6fbe8f9997004e0e4f0b245aeab6e83c59",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/x_posts/service.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/x_posts/service.py",
+      "before": "8ef8d904ce25cb0c082221b2b3a7a7c204d88467d80524c5a344f8b030b6147c",
+      "after": "63a66dadcb908f5f7ac17ad532add8fe4315fac2fe452fa0fb822058a6258ace",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/x/features/x_posts/service.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/youtube_auto_publish/service.py",
+      "before": "5fdf67e9ba4d3adaae3ae069a87d7828b0809d5aa77ca4f10b5b3f581854b4d3",
+      "after": "cd9b46b3da3a5b37aac2609c0bbe72b8b5138e151ab78e2389f752373e34c0de",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/youtube_auto_publish/service.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/youtube_auto_publish/engine.py",
+      "before": "c96aa3c9f6e0254131c6b31f4a1de545af056ee0452dcf8a0384e10d91caa461",
+      "after": "6a37e1ae06350d77e57398a46560ababacddd2e196115bcdf5d6f321b27f35b2",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/youtube_auto_publish/engine.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/youtube_auto_publish/eligibility.py",
+      "before": null,
+      "after": "29dfa8c369bcad447a2b604869cbba6c63678916948813114ed406b33c695c7f",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/youtube_auto_publish/eligibility.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/pipeline_dispatch/x_native.py",
+      "before": "5e0c9444a547ed5ce81aacd93f8bcf4bc3a0af290f6faed7a17b885c84b8356f",
+      "after": "14733ea4a4e3d2ea3010c9d55e2eefbdb29570096dfc021f97f5cacdd5652124",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/x/features/pipeline_dispatch/x_native.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/x_accounts/youtube_shares.py",
+      "before": "ed5b72d982def40555499024a39e63e3a76eea9af9acd680d2eaee250492ea53",
+      "after": "a8cadca2f166854c2d04bef6ca5f87dae3ebc97705e863c1e363e728e1127c06",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/x/features/x_accounts/youtube_shares.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/pipeline_dispatch/x_share_native.py",
+      "before": "d6333e4a4ad297d5946e1119bc42809c0724292fa0563e2609ae4131d9fc7def",
+      "after": "93f91fb5f59d883bf115e02f3bc71992cbf389af0a571e684f61025bb13cdcd1",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/x/features/pipeline_dispatch/x_share_native.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/pipeline_dispatch/fb_native.py",
+      "before": "2b6acb718022bd6d36255204a0beabafab83d559674bf2d1a27a2bc0311df54f",
+      "after": "0d51d7c91515ec4cfd0fee2d31ce10faccec40e8445d2183735d61c7a6cd1589",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/fb/features/pipeline_dispatch/fb_native.py"
+    },
+    {
+      "lane": "tt",
+      "relative": "features/pipeline_dispatch/tt_native.py",
+      "before": "7e094aff2cc2259ec386fcb5b22b7db25d24fec72ff4bf75589710b7dbfc2e97",
+      "after": "287f76d4434248ad383085cc2f537e5d302049d21a2a363698b1caeead8a708d",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt/features/pipeline_dispatch/tt_native.py"
+    },
+    {
+      "lane": "tt_auto",
+      "relative": "features/pipeline_dispatch/tt_native.py",
+      "before": "feb049270733c7451140a3faf97f4d01eae8091c0567fd2034fc974bdcc089cc",
+      "after": "5469a49dc75b58e1070632207dea5e6505272b4fd3d63651bc8a923dab1b9bda",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/tt_auto/features/pipeline_dispatch/tt_native.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/pipeline_dispatch/youtube_native.py",
+      "before": "5726dce95b5983d92606f10175b0246acbc0deb99d2c0b10da0e969a2cd11633",
+      "after": "08f7be04c1786d46f22e51dea6fca217c0ce580949ce83b7ba03755b6e38cf9f",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/features/pipeline_dispatch/youtube_native.py"
+    },
+    {
+      "lane": "main",
+      "relative": "static/fb-video-publish.js",
+      "before": "5e63594b47b7607d4211380d24ae9d621721a5bcf9f4dbd3164162762a32bf5b",
+      "after": "b79e2b17a630c11f613ca2a3ad94a67fc457f11829840eeac5494f404445682d",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/static/fb-video-publish.js"
+    },
+    {
+      "lane": "main",
+      "relative": "static/x-video-publish.js",
+      "before": "6f6d427b38d6fd0ceb3850952c6bf8ea11497b5501f8ecf30d6a0fb624d5ba49",
+      "after": "0740a9c7295770df9f5ddd58109e2c7476a5722bb734b7f6f587fcec7f636f1c",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/static/x-video-publish.js"
+    },
+    {
+      "lane": "main",
+      "relative": "static/tt-post-pool.html",
+      "before": "eed88e6df1c8b83a9ab174af8bda18985b9865a5b2810ec0f7ce768e985212fa",
+      "after": "829239ccdd1f4f72ca302e448086d64a446a1616bd47d9d2c3cbda7e81ce08f0",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/static/tt-post-pool.html"
+    },
+    {
+      "lane": "main",
+      "relative": "static/youtube-publish.html",
+      "before": "d4529e97cfcff3d73cc0a74a836e9fde8b0e260be06db3937b60442db5e67fe8",
+      "after": "b10a182345aec1c1336e151e59dbd983a8501e1c50608428a55c5a8dd154edd8",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/static/youtube-publish.html"
+    },
+    {
+      "lane": "main",
+      "relative": "static/fb-video-publish.html",
+      "before": "0d6e5dcaabb2301031cd8b6802470d6ee6811730c3b0d806c4eb88c9a901a8e3",
+      "after": "fda4744571a3ac49d970cc3fb1b59b462dd6dbbbad585f24db1faf9dffa50d56",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/static/fb-video-publish.html"
+    },
+    {
+      "lane": "main",
+      "relative": "static/x-video-publish.html",
+      "before": "06c0f9f4bae755fe5d9a36f86928fafc7b5e0e81b057ca1e89da8943d18e1f67",
+      "after": "0c2cec463b0d06dc6f7eabe4624d23813729937c259e9ad29f333855a37afb51",
+      "source": "ops/moboreels-publish-eligibility-20261113/runtime/main/static/x-video-publish.html"
+    }
+  ],
+  "scope": "Moboreels only; exact m_url or frozen Moboreels identity",
+  "baseline_commit": "1dae3bb711bfd669bf9d8231c79fab2782f083b1"
+}

@@ -268,6 +268,7 @@
 
   async function pageManagement() {
     let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false,listGeneration=0,sourceController=null;
+    let excelAsset=null;
     $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><select id="pageCreator" aria-label="按创建人筛选" disabled><option value="">全部创建人</option></select><button id="reloadPages" class="button">刷新列表</button></div><p id="pageAuthorizationNotice" class="helper" role="status" hidden></p><p id="pagePortraitNotice" class="helper">画像按近 7 个完整报告日统计，列表就绪后加载当前页摘要。</p><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>近 7 天收入（USD）</th><th>收入画像 / 比例</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
     function authorizationBadge(p) {
       if(p.authorization_pending||p.authorization_unknown)return `<span class="badge">${p.authorization_pending?"正在核验":"暂未核验"}</span>`;
@@ -317,6 +318,7 @@
         }else data=await api("/pages");
         if(generation!==listGeneration)return;
         setConfigs(data.items);
+        performance.mark("fb-page-list-ready");
         if(data.authorization_pending)void verifySource(generation);
       } finally {loading=false;render();}
     }
@@ -350,10 +352,19 @@
       });
     }
     $("createPage").onclick=()=>editor(null);
-    $("excelPublishButton").onclick=()=>{
-      if(!window.FbExcelPublish){errorAt("pageError",new Error("Excel 发布组件尚未加载，请刷新页面后重试。"));return;}
-      window.FbExcelPublish.open({auth,api,post,dialog,esc,atBJ,errorAt,toast,statuses}).catch(err=>errorAt("pageError",err));
-    };
+    $("excelPublishButton").onclick=event=>busy(event.target,async()=>{
+      try {
+        if(!window.FbExcelPublish){
+          if(!excelAsset)excelAsset=new Promise((resolve,reject)=>{
+            const script=document.createElement("script");script.src="/fb-excel-publish.js?v=20261023-manual-gates-v1";
+            script.onload=resolve;script.onerror=()=>{script.remove();reject(new Error("Excel 发布组件加载失败，请点击重试。"));};
+            document.head.append(script);
+          }).catch(error=>{excelAsset=null;throw error;});
+          await excelAsset;
+        }
+        await window.FbExcelPublish.open({auth,api,post,dialog,esc,atBJ,errorAt,toast,statuses});
+      }catch(error){errorAt("pageError",error);}
+    });
     $("pageRows").onclick=e=>{
       const profile=e.target.closest("[data-fpp-open]");
       if(profile){const row=configs.find(p=>p.page_id===profile.dataset.fppOpen);window.FbPagePortraits?.open(row.page_id,row.page_name,dialog);return;}
@@ -462,7 +473,7 @@
     });
     async function confirmation(request,result,retrying=false){
       preview=result;
-      const modal=dialog("publishConfirmation","确认本次发布",`<div class="notice">这里只做预检，尚未创建发布任务、真实短链或加工任务。点击“确认提交”后才生成每条任务独立的真实短链。</div><div class="summary"><span><strong>${result.items?.length || 0}</strong>条任务</span><span>${request.processing_mode==="random_overlay"?"随机加工":"原片发布"}</span><span>按每条素材的预约时间执行</span></div><div id="confirmError" class="error" role="alert" hidden></div>${result.repeat_required?'<div class="notice warning"><strong>所选配对包含历史成功发布记录</strong><p>请逐条核对后勾选确认再次发布。活动任务和未知结果不能通过此确认绕过。</p><label class="check"><input type="checkbox" id="allowRepeat">我已核对，确认再次发布这些历史成功配对</label></div>':""}${(result.items || []).map(item=>`<article class="task-card"><h3>${esc(item.material_name || item.material_id)} → ${esc(item.page_name || item.page_id)}</h3><div class="detail-grid"><span>素材 ${esc(item.material_id)}</span><span>Page ${esc(item.page_id)}</span><span>配置 v${esc(item.config_version)}</span><span>${item.schedule_kind==="immediate" || (request.schema_version===2&&!request.material_schedules[item.material_id]) || request.schedule_mode==="now"?"立即发布（提交后按顺序开始）":"预约 "+esc(atBJ(item.planned_at_utc))+" 北京时间"}</span></div><p class="helper">标题：${esc(item.title || "未填写")}</p><div class="task-caption">${esc(item.caption)}</div><div class="task-link">短链：<span class="mono">${esc(item.short_url || LINK_PLACEHOLDER)}</span>（占位）</div><details><summary>查看长链参数规则</summary><p class="mono">${esc(result.landing_url || LANDING)}</p><p class="helper">任务编号、记录编号和创建时间在最终提交时冻结；以下由服务端预检返回。</p><div class="detail-grid">${Object.entries(item.long_url_parameters || {}).map(([key,value])=>`<span class="mono"><strong>${esc(key)}</strong><br>${esc(value)}</span>`).join("")}</div></details>${item.repeat_required||item.repeated?'<span class="badge bad">历史已成功发布</span>':""}</article>`).join("")}`,`<button class="button" data-close>返回核对</button><button class="button primary" id="confirmSubmit"${result.repeat_required?" disabled":""}>${retrying?"按原操作确认提交":"确认提交"}</button>`);
+      const modal=dialog("publishConfirmation","确认本次发布",`<div class="notice">Moboreels 发布仅允许当前剧库已上架的剧目；未匹配、已下架或状态无法核实时会拦截，执行前再次校验。Moboreels 发布仅允许当前剧库已上架的剧目；未匹配、已下架或状态无法核实时会拦截，执行前再次校验。Moboreels 发布仅允许当前剧库已上架的剧目；未匹配、已下架或状态无法核实时会拦截，执行前再次校验。这里只做预检，尚未创建发布任务、真实短链或加工任务。点击“确认提交”后才生成每条任务独立的真实短链。</div><div class="summary"><span><strong>${result.items?.length || 0}</strong>条任务</span><span>${request.processing_mode==="random_overlay"?"随机加工":"原片发布"}</span><span>按每条素材的预约时间执行</span></div><div id="confirmError" class="error" role="alert" hidden></div>${result.repeat_required?'<div class="notice warning"><strong>所选配对包含历史成功发布记录</strong><p>请逐条核对后勾选确认再次发布。活动任务和未知结果不能通过此确认绕过。</p><label class="check"><input type="checkbox" id="allowRepeat">我已核对，确认再次发布这些历史成功配对</label></div>':""}${(result.items || []).map(item=>`<article class="task-card"><h3>${esc(item.material_name || item.material_id)} → ${esc(item.page_name || item.page_id)}</h3><div class="detail-grid"><span>素材 ${esc(item.material_id)}</span><span>Page ${esc(item.page_id)}</span><span>配置 v${esc(item.config_version)}</span><span>${item.schedule_kind==="immediate" || (request.schema_version===2&&!request.material_schedules[item.material_id]) || request.schedule_mode==="now"?"立即发布（提交后按顺序开始）":"预约 "+esc(atBJ(item.planned_at_utc))+" 北京时间"}</span></div><p class="helper">标题：${esc(item.title || "未填写")}</p><div class="task-caption">${esc(item.caption)}</div><div class="task-link">短链：<span class="mono">${esc(item.short_url || LINK_PLACEHOLDER)}</span>（占位）</div><details><summary>查看长链参数规则</summary><p class="mono">${esc(result.landing_url || LANDING)}</p><p class="helper">任务编号、记录编号和创建时间在最终提交时冻结；以下由服务端预检返回。</p><div class="detail-grid">${Object.entries(item.long_url_parameters || {}).map(([key,value])=>`<span class="mono"><strong>${esc(key)}</strong><br>${esc(value)}</span>`).join("")}</div></details>${item.repeat_required||item.repeated?'<span class="badge bad">历史已成功发布</span>':""}</article>`).join("")}`,`<button class="button" data-close>返回核对</button><button class="button primary" id="confirmSubmit"${result.repeat_required?" disabled":""}>${retrying?"按原操作确认提交":"确认提交"}</button>`);
       if($("allowRepeat"))$("allowRepeat").onchange=e=>$("confirmSubmit").disabled=!e.target.checked;
       $("confirmSubmit").onclick=e=>busy(e.target,async()=>{if(Date.parse(result.expires_at_utc)<=Date.now()){errorAt("confirmError",new Error("预检已过期，请返回后重新核对。"));return;}const allowed=!!$("allowRepeat")?.checked;modal.close();await submitFrozen(request,result.preview_token,allowed);});
     }

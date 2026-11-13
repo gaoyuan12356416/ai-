@@ -359,6 +359,8 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
 
     def _write_schedule(self, task: Mapping[str, Any], token: str, worker_id: str,
                         state: Mapping[str, Any], *, action: str = "reschedule") -> dict[str, Any]:
+        if action != "cancel":
+            self._assert_moboreels_publishable(task)
         remote = self._remote_schedule(state)
         if (action == "reschedule" and self._schedule_close(task["publish_at"])) or (remote and self._schedule_close(remote)):
             return self._schedule_rejected(task, worker_id, state, YouTubeHTTPError(
@@ -407,6 +409,16 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
             raise YouTubeHTTPError("youtube_schedule_preflight_unknown", "已预约视频的封面或处理状态尚未确认，暂停操作", unknown=True)
         return self._write_schedule(task, token, worker_id, state, action=action)
 
+    def _assert_moboreels_publishable(self, task):
+        if not task.get('preparation_id'):
+            return
+        from .eligibility import assert_task_publishable
+        from .templates import WorkflowError
+        try:
+            assert_task_publishable(self.store.db_path, task)
+        except WorkflowError as exc:
+            raise YouTubeHTTPError(exc.code, str(exc), status=exc.status) from None
+
     def run_once(self, worker_id: str) -> dict[str, Any]:
         task = self.store.claim_reviewed_youtube(str(worker_id), self._lease_expiry())
         if task is None:
@@ -449,6 +461,8 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
                     return {"ok": task["status"] not in {"unknown", "failed", "schedule_missed"}, "status": task["status"], "task_id": task_id, "claimed": True}
             if not task.get("video_id"):
                 stage = "upload"
+                if not task.get('resumable_session_uri') and not task.get('video_attempt_count'):
+                    self._assert_moboreels_publishable(task)
                 task = self._phase(task, worker_id, stage)
                 task = self._publish_video(task, token, worker_id)
                 return {"ok": task["status"] not in {"failed", "unknown"}, "status": task["status"], "task_id": task_id, "claimed": True}
@@ -487,6 +501,8 @@ class ReviewedYouTubePublishEngine(YouTubePublishEngine):
                     return {"ok": task["status"] not in {"unknown", "failed", "schedule_missed"}, "status": task["status"], "task_id": task_id, "claimed": True}
                 stage = "public"
                 public_attempted = task["public_status"] in {"running", "unknown"}
+                if state["visibility"] == "private" and not public_attempted:
+                    self._assert_moboreels_publishable(task)
                 task = self._phase(task, worker_id, stage, public_status="running")
                 if state["visibility"] == "private" and not public_attempted:
                     self._renew(task, worker_id)

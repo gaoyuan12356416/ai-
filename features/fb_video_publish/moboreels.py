@@ -51,6 +51,10 @@ def validate(record, story):
     if (short.scheme != "https" or short.netloc != "ai.yingliangads.com" or not re.fullmatch(r"/m/[A-Za-z0-9_-]{8,128}",short.path)
             or short.query or short.fragment or target.scheme not in ("http","https") or not target.netloc or target.username or target.password):
         raise MoboreelsFBError("Moboreels 短链冻结数据无效，未调用平台")
+    try:
+        macro_client.assert_publishable(story)
+    except macro_client.MoboreelsLinkError as exc:
+        raise MoboreelsFBError(str(exc)) from None
     return record
 
 def resolve(creator, material, *, page_id, task_id):

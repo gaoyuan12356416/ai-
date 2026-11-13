@@ -92,6 +92,8 @@ class CaptionFreezeTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
+        gate = patch.object(moboreels.macro_client, '_request', return_value={'drama': {'story_id': '123', 'is_show': 1}})
+        gate.start(); self.addCleanup(gate.stop)
         self.db=Path(self.tmp.name)/'ledger.sqlite'
         self.store=SimpleNamespace(db_path=str(self.db))
         self.row=dict(id=1,caption_template='Watch {{m_url}}',caption='Watch {{m_url}}',content_id='123',

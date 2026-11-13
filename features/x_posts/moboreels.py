@@ -37,6 +37,11 @@ def source_enabled():
     return _SOURCE.get()
 
 
+def assert_queue_publishable(queue):
+    if contains_macro(queue.get('body_template')):
+        return macro_client.assert_publishable(queue.get('content_id'))
+
+
 def story_metadata(story_id):
     story = macro_client.lookup_story(str(story_id or "").strip())
     if str(story.get("story_id")) != str(story_id) or str(story.get("is_show")) != "1":

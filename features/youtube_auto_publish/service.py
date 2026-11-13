@@ -618,6 +618,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                 else:
                     approved=body['versions'][-1]
                     if not approved.get('approved'):raise WorkflowError('cover_not_approved','封面尚未审核',409)
+                    from .eligibility import assert_body_publishable
+                    assert_body_publishable(body)
                     with self.db() as c:asset=self._asset(c,approved['asset_id'],body['creator'])
                     m=body['material'];ch=body['channel']
                     if self.channel_directory is not None:

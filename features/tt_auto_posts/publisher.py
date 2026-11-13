@@ -585,6 +585,11 @@ class AutoPostExecutor:
             task.template_id, version=task.template_version
         )
         if task.caption and "{{m_url}}" in str(template.config.get("caption_template") or ""):
+            from features.moboreels_library.macro_client import assert_publishable, MoboreelsLinkError
+            try:
+                assert_publishable(task.content_id)
+            except MoboreelsLinkError as exc:
+                raise AutoPostExecutionError("moboreels_drama_not_publishable", str(exc), 409) from None
             if "{{m_url}}" in task.caption:
                 raise AutoPostExecutionError("moboreels_caption_unresolved", "冻结文案仍含未展开推广宏", 409)
             return task.caption

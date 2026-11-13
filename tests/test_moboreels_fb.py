@@ -21,6 +21,10 @@ import features.fb_auto_posts
 # Canonical checkout omits production-only helpers; load those from the fetched baseline.
 features.fb_auto_posts.__path__.append(str(ROOT / "ops/moboreels-attribution-20261113/runtime/fb/features/fb_auto_posts"))
 from features.fb_video_publish import moboreels, templates
+if os.environ.get("FB_ELIGIBILITY_OVERLAY") == "1":
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('features.fb_video_publish.moboreels', ROOT / 'ops/moboreels-publish-eligibility-20261113/runtime/fb/features/fb_video_publish/moboreels.py')
+    spec.loader.exec_module(moboreels)
 from features.fb_video_publish.core import Store, canonical
 from features.fb_video_publish.worker import Worker
 from features.fb_video_publish.sources import SourceRepository
@@ -265,7 +269,8 @@ class AutoTests(unittest.TestCase):
                 receipt=json.loads(conn.execute("SELECT task_json FROM pipeline_fb_claim").fetchone()[0])
             self.assertEqual(json.loads(receipt["moboreels_json"])["link"],LINK)
             task.update(prepared_media_url="https://cdn.example/prepared.mp4",media_url="https://cdn.example/prepared.mp4")
-            request=bridge._auto_preflight(task)
+            with patch.object(moboreels.macro_client,"lookup_story",return_value=STORY):
+                request=bridge._auto_preflight(task)
             self.assertIn(LINK["short_url"],request["message"])
             runtime.executor.short_link_writer.assert_not_called()
 
@@ -324,7 +329,7 @@ class NativeBridgeTests(unittest.TestCase):
             frozen=json.loads(conn.execute("SELECT task_json FROM pipeline_fb_claim").fetchone()[0])
         self.assertEqual(json.loads(frozen["snapshot_json"])["moboreels"]["link"],LINK)
         self.store.finish_stage(frozen,"prepare",dict(media_url="https://cdn.example/prepared.mp4",sha256="a"*64,profile="cpu",random_overlay_recipe={"a":1}))
-        with patch.object(moboreels.macro_client,"resolve_m_url",side_effect=AssertionError("must reuse")):
+        with patch.object(moboreels.macro_client,"lookup_story",return_value=STORY), patch.object(moboreels.macro_client,"resolve_m_url",side_effect=AssertionError("must reuse")):
             publication=bridge.reserve(dict(job,stage="publish",generation=2),dict(claim,claim_token="b"*32))
         self.assertIn(LINK["short_url"],publication["request"]["message"])
         bridge.runtime.manual_worker.link_writer.assert_not_called()

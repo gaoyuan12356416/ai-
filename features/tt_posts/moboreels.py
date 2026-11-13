@@ -62,6 +62,7 @@ def prepare_caption(store, current, claim_token, *, direct=False):
             raise macro_client.MoboreelsLinkError('TikTok 任务缺少冻结创建者，请重新创建任务')
         binding = dict(binding)
         conn.commit()
+    macro_client.assert_publishable(row.get('content_id'))
     if binding['short_url']:
         if row['caption'] != binding['caption'] or binding['short_url'] not in row['caption']:
             raise macro_client.MoboreelsLinkError('TikTok 冻结推广文案不一致')

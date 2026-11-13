@@ -1,0 +1,3451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TT Post 发布池 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #13233a;
+      --muted: #687894;
+      --line: #dce5f1;
+      --blue: #2563eb;
+      --cyan: #10a8b8;
+      --green: #14885f;
+      --amber: #a66a05;
+      --red: #c43b49;
+      --surface: rgba(255, 255, 255, .95);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 75% -8%, rgba(37, 99, 235, .13), transparent 35%),
+        radial-gradient(circle at 20% 10%, rgba(16, 168, 184, .08), transparent 26%),
+        #f4f7fb;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { touch-action: manipulation; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 270px minmax(0, 1fr); }
+    .sidebar { padding: 24px 18px; background: linear-gradient(180deg, #0e1d35, #162c50); color: #fff; }
+    .brand { display: flex; align-items: center; gap: 12px; margin: 0 8px 22px; }
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #2f66ff, #21c78b);
+      font-weight: 900;
+    }
+    .brand strong, .brand span { display: block; }
+    .brand span { margin-top: 3px; color: rgba(230, 239, 255, .62); font-size: 12px; }
+    .main { min-width: 0; padding: 26px 30px 48px; }
+    .topbar { margin-bottom: 22px; }
+    .title h1 { margin: 0; font-size: 28px; letter-spacing: -.02em; }
+    .title p { margin: 7px 0 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .button {
+      min-height: 40px;
+      padding: 0 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 750;
+      box-shadow: 0 7px 18px rgba(31, 51, 82, .06);
+    }
+    .button:hover:not(:disabled) { border-color: #9fb8df; }
+    .button.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    .button.primary:hover:not(:disabled) { background: #1d55d1; }
+    .button.warning { border-color: #e5b74f; color: #7a4d00; background: #fffaf0; }
+    .button.danger { border-color: #e5a8af; color: #a12636; background: #fff7f8; }
+    .button.small { min-height: 32px; padding: 0 11px; border-radius: 9px; font-size: 12px; }
+    .button:disabled { opacity: .52; cursor: not-allowed; }
+    .panel {
+      padding: 20px;
+      border: 1px solid rgba(210, 222, 238, .92);
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: 0 16px 42px rgba(30, 51, 83, .07);
+    }
+    .panel + .panel { margin-top: 18px; }
+    .hidden { display: none !important; }
+    .gate { padding: 48px 24px; text-align: center; color: var(--muted); }
+    .gate strong { display: block; margin-bottom: 8px; color: var(--ink); font-size: 18px; }
+    .notice {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 13px;
+      align-items: start;
+      margin-bottom: 18px;
+      padding: 16px 18px;
+      border: 1px solid #efdba8;
+      border-radius: 16px;
+      color: #744d05;
+      background: #fff9e9;
+      line-height: 1.58;
+      font-size: 13px;
+    }
+    .notice-mark {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: #d18b13;
+      font-weight: 900;
+    }
+    .notice strong { display: block; margin-bottom: 3px; color: #654300; }
+    .section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    .section-head h2 { margin: 0; font-size: 18px; }
+    .section-head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .gate-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .gate-card {
+      min-height: 92px;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: #fff;
+    }
+    .gate-card span { color: var(--muted); font-size: 12px; }
+    .gate-card strong { display: block; margin-top: 10px; font-size: 15px; }
+    .gate-card.ready { border-color: #b9e5d4; background: #f2fbf7; }
+    .gate-card.ready strong { color: var(--green); }
+    .gate-card.blocked { border-color: #efc9ce; background: #fff7f8; }
+    .gate-card.blocked strong { color: var(--red); }
+    .gate-card.unknown { border-color: #ecd9a8; background: #fffaf0; }
+    .gate-card.unknown strong { color: var(--amber); }
+    .create-grid {
+      display: grid;
+      grid-template-columns: minmax(300px, .9fr) minmax(440px, 1.35fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .column { display: grid; gap: 15px; min-width: 0; }
+    .step {
+      display: inline-grid;
+      place-items: center;
+      width: 27px;
+      height: 27px;
+      margin-right: 7px;
+      border-radius: 9px;
+      color: #fff;
+      background: linear-gradient(135deg, var(--blue), var(--cyan));
+      font-size: 13px;
+    }
+    .field { display: grid; gap: 7px; min-width: 0; }
+    .field > label, .field-label { color: #3f506a; font-size: 13px; font-weight: 800; }
+    .field input[type="text"],
+    .field input[type="search"],
+    .field input[type="number"],
+    .field input[type="time"],
+    .field select,
+    .field textarea,
+    .filters input,
+    .filters select {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+    .field textarea { min-height: 150px; resize: vertical; line-height: 1.55; }
+    #materialIds { min-height: 104px; }
+    .field textarea[readonly] { background: #f5f7fb; color: #24324a; cursor: default; }
+    .field input:focus, .field select:focus, .field textarea:focus,
+    .filters input:focus, .filters select:focus {
+      border-color: #86a8f8;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, .11);
+    }
+    .helper { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .helper.error { color: var(--red); }
+    .helper.success { color: var(--green); }
+    .helper.warning { color: var(--amber); }
+    .search-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .account-list {
+      max-height: 272px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+    .account-option {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 58px;
+      padding: 9px 12px;
+      border-bottom: 1px solid #edf2f8;
+      cursor: pointer;
+    }
+    .account-option:last-child { border-bottom: 0; }
+    .account-option:hover { background: #f7faff; }
+    .account-option.ineligible { opacity: .72; background: #fafbfc; }
+    .account-option input { width: 17px; height: 17px; accent-color: var(--blue); }
+    .account-copy { min-width: 0; }
+    .account-copy strong, .account-copy span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .account-copy span { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .account-state { color: var(--green); font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .account-option.ineligible .account-state { color: var(--red); }
+    .account-state.paused { color: var(--amber); }
+    .account-state.attention-required { color: var(--red); }
+    .account-state.not-selected { color: var(--muted); }
+    .selection-summary { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .operation-account {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      color: var(--ink);
+      background: #fff;
+      outline: none;
+    }
+    .operation-account:focus { border-color: #86a8f8; box-shadow: 0 0 0 3px rgba(37, 99, 235, .11); }
+    .info-card {
+      min-height: 82px;
+      padding: 14px;
+      border: 1px solid #dbe5f2;
+      border-radius: 13px;
+      background: #f8faff;
+    }
+    .info-card strong { display: block; font-size: 14px; }
+    .info-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .account-settings-card {
+      min-height: 104px;
+      padding: 13px;
+      border: 1px solid #dbe5f2;
+      border-radius: 13px;
+      background: #f8faff;
+    }
+    .account-settings-card.warning { border-color: #ead5a5; background: #fffaf0; }
+    .account-settings-card.success { border-color: #b9dfd1; background: #f2fbf7; }
+    .account-settings-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+    .account-settings-head span { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .account-settings-head a { color: var(--blue); font-size: 12px; font-weight: 800; text-decoration: none; }
+    .account-settings-head a:hover { text-decoration: underline; }
+    .account-settings-card strong { display: block; font-size: 14px; }
+    .account-settings-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .creator-head { display: flex; align-items: center; gap: 11px; }
+    .creator-avatar {
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+      overflow: hidden;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: linear-gradient(135deg, #111827, #384860);
+      font-weight: 850;
+    }
+    .creator-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .material-progress {
+      min-height: 20px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .material-progress.success { color: var(--green); }
+    .material-progress.error { color: var(--red); }
+    .material-results {
+      display: grid;
+      gap: 8px;
+      max-height: 290px;
+      overflow: auto;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8faff;
+    }
+    .material-result {
+      width: 100%;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 11px;
+      border: 1px solid #dfe7f3;
+      border-radius: 10px;
+      color: var(--ink);
+      background: #fff;
+      text-align: left;
+    }
+    button.material-result { cursor: pointer; }
+    button.material-result:hover,
+    button.material-result.active {
+      border-color: #86a8f8;
+      background: #f1f6ff;
+    }
+    .material-result.failure {
+      border-color: #efc9ce;
+      color: #9f2d3a;
+      background: #fff7f8;
+    }
+    .material-result.success {
+      border-color: #b9dfd1;
+      background: #f2fbf7;
+    }
+    .material-result.saving {
+      border-color: #bfd2f6;
+      background: #f3f7ff;
+    }
+    .material-result-copy { min-width: 0; }
+    .material-result-copy strong,
+    .material-result-copy span {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+    .material-result-copy span { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .material-result.failure .material-result-copy span { color: #a94b56; }
+    .material-result-state { color: var(--green); font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .material-result.failure .material-result-state { color: var(--red); }
+    .material-result.saving .material-result-state { color: var(--blue); }
+    .queue-submit-panel {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8faff;
+    }
+    .queue-submit-panel > strong { font-size: 13px; }
+    .preparation-table { min-width: 920px; }
+    .preparation-summary { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .schedule-panel {
+      grid-column: span 2;
+      display: grid;
+      gap: 13px;
+      padding: 15px;
+      border: 1px solid #cddcf5;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #f5f8ff, #f8fffd);
+    }
+    .schedule-panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .schedule-panel-head strong { display: block; font-size: 14px; }
+    .schedule-panel-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .schedule-controls {
+      display: grid;
+      grid-template-columns: minmax(260px, 1.3fr) minmax(190px, .8fr);
+      gap: 10px;
+      align-items: start;
+    }
+    .schedule-controls input[type="time"],
+    .schedule-controls input[type="number"] {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+    .schedule-time-editor { display: grid; gap: 8px; }
+    .schedule-mode-toggle { margin-bottom: 8px; }
+    .publish-time-list { display: grid; gap: 7px; }
+    .publish-time-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: center;
+    }
+    .publish-time-row .button { min-height: 42px; }
+    .random-schedule-fields {
+      display: grid;
+      gap: 7px;
+      padding: 10px;
+      border: 1px solid #dbe5f2;
+      border-radius: 11px;
+      background: #fff;
+    }
+    .random-plan-preview {
+      grid-column: 1 / -1;
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .random-plan-item {
+      padding: 8px 10px;
+      border: 1px solid #dbe5f2;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .88);
+      overflow-wrap: anywhere;
+    }
+    .schedule-toggle {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff;
+      color: #40516a;
+      font-size: 13px;
+      font-weight: 750;
+    }
+    .schedule-toggle input { width: 17px; height: 17px; accent-color: var(--blue); }
+    .schedule-facts {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .schedule-fact {
+      min-height: 65px;
+      padding: 10px;
+      border: 1px solid #dbe5f2;
+      border-radius: 11px;
+      background: rgba(255, 255, 255, .88);
+    }
+    .schedule-fact span { color: var(--muted); font-size: 11px; }
+    .schedule-fact strong { display: block; margin-top: 7px; font-size: 13px; overflow-wrap: anywhere; }
+    .run-now-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #dfe8f5;
+    }
+    .button.run-now {
+      min-height: 46px;
+      padding: 0 22px;
+      border-color: #d62a5e;
+      color: #fff;
+      background: linear-gradient(135deg, #e43b72, #c92754);
+      box-shadow: 0 10px 22px rgba(201, 39, 84, .2);
+    }
+    .button.run-now:hover:not(:disabled) { background: linear-gradient(135deg, #cf2d62, #b51d48); }
+    .run-now-help { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .direct-test-panel {
+      grid-column: auto;
+      display: grid;
+      gap: 10px;
+      padding: 15px;
+      border: 1px solid #f0c0ce;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #fff7fa, #fff);
+    }
+    .direct-test-panel strong { font-size: 14px; }
+    .direct-test-panel p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .direct-test-list { display: grid; gap: 8px; }
+    .direct-test-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px 12px;
+      padding: 10px 11px;
+      border: 1px solid #ead8df;
+      border-radius: 11px;
+      background: #fff;
+    }
+    .direct-test-item-copy { min-width: 0; }
+    .direct-test-item-copy strong,
+    .direct-test-item-copy span { display: block; overflow-wrap: anywhere; }
+    .direct-test-item-copy span { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .direct-test-error { grid-column: 1 / -1; color: var(--red); font-size: 12px; line-height: 1.45; }
+    .direct-test-selection { color: #344760; font-size: 12px; font-weight: 750; }
+    .caption-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .setting-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 13px;
+      align-items: start;
+    }
+    .check-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+    .check-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      min-height: 64px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      color: #40516a;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .check-card input { width: 17px; height: 17px; flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--blue); }
+    .check-card.disabled { opacity: .55; background: #f4f5f7; }
+    .disclosure {
+      display: grid;
+      gap: 10px;
+      padding: 13px;
+      border: 1px solid #e5d8b7;
+      border-radius: 13px;
+      background: #fffbf2;
+    }
+    .inline-check { display: flex; align-items: flex-start; gap: 9px; color: #40516a; font-size: 13px; line-height: 1.5; }
+    .inline-check input { width: 17px; height: 17px; flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--blue); }
+    .disclosure-options { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding-left: 26px; }
+    .consent {
+      padding: 14px;
+      border: 1px solid #cbdaf7;
+      border-radius: 13px;
+      background: #f3f7ff;
+    }
+    .form-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding-top: 15px;
+      border-top: 1px solid #e6edf6;
+    }
+    .form-state { min-height: 20px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .form-state.error { color: var(--red); }
+    .form-state.success { color: var(--green); }
+    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .stat { min-height: 94px; padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: #fff; }
+    .stat span { color: var(--muted); font-size: 12px; }
+    .stat strong { display: block; margin-top: 10px; font-size: 24px; }
+    .filters {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(140px, .9fr) minmax(150px, 1fr) auto auto;
+      gap: 9px;
+      margin-bottom: 15px;
+    }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
+    table { width: 100%; min-width: 1500px; border-collapse: collapse; background: #fff; }
+    th, td {
+      padding: 12px 13px;
+      border-bottom: 1px solid #e8eef6;
+      vertical-align: top;
+      text-align: left;
+      font-size: 13px;
+    }
+    th { position: sticky; top: 0; z-index: 1; color: #5d6d86; background: #f7f9fc; font-size: 12px; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    .badge {
+      display: inline-flex;
+      min-height: 27px;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .badge.success { color: #08734f; background: #e8f8f1; }
+    .badge.progress { color: #2457b8; background: #eef4ff; }
+    .badge.warning { color: #925d00; background: #fff4d9; }
+    .badge.failure { color: #ad2f3b; background: #ffedef; }
+    .badge.neutral { color: #56657b; background: #edf1f6; }
+    .subtle { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .error-copy { max-width: 300px; color: #a62f3a; line-height: 1.45; overflow-wrap: anywhere; }
+    .caption-cell { max-width: 300px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .code-cell {
+      min-width: 76px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 800;
+      letter-spacing: .08em;
+      white-space: nowrap;
+    }
+    .empty { padding: 38px 18px; text-align: center; color: var(--muted); }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+    .pager-actions { display: flex; gap: 8px; }
+    .queue-actions { display: flex; flex-wrap: wrap; gap: 7px; min-width: 190px; }
+    dialog {
+      width: min(940px, calc(100vw - 32px));
+      max-height: calc(100vh - 48px);
+      padding: 0;
+      border: 0;
+      border-radius: 18px;
+      box-shadow: 0 24px 70px rgba(18, 35, 62, .28);
+    }
+    dialog::backdrop { background: rgba(13, 25, 44, .52); }
+    .dialog-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .dialog-head h2 { margin: 0; font-size: 18px; }
+    .dialog-body { max-height: 68vh; overflow: auto; padding: 18px 20px 22px; }
+    .event-list { display: grid; gap: 10px; }
+    .event-item {
+      display: grid;
+      grid-template-columns: 160px minmax(0, 1fr);
+      gap: 14px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8faff;
+    }
+    .event-item strong { display: block; font-size: 13px; }
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 30;
+      max-width: min(440px, calc(100vw - 32px));
+      padding: 13px 16px;
+      border-radius: 12px;
+      color: #fff;
+      background: #1d3150;
+      box-shadow: 0 16px 36px rgba(20, 38, 66, .28);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .toast.error { background: #a72d3a; }
+    @media (max-width: 1680px) {
+      .setting-grid { grid-template-columns: minmax(0, 1fr); }
+      .schedule-panel { grid-column: auto; }
+    }
+    @media (max-width: 1180px) {
+      .gate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .create-grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 820px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { padding: 18px; }
+      .main { padding: 20px 16px 38px; }
+      .gate-grid, .stats, .setting-grid, .check-grid, .disclosure-options, .filters,
+      .schedule-controls, .schedule-facts { grid-template-columns: 1fr; }
+      .schedule-panel { grid-column: auto; }
+      .direct-test-panel { grid-column: auto; }
+      .run-now-row { align-items: stretch; flex-direction: column; }
+      .form-footer { align-items: stretch; flex-direction: column; }
+      .form-footer .button { width: 100%; }
+      .event-item { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>TT Post 发布池</h1>
+          <p>为 TikTok 个号维护自动发布素材池与每日时间；立即测试从已校验结果中明确选择一条素材，独立发布且不占用素材池。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <a class="button" href="/tt-publish-logs.html?publish_source=material_pool">发布日志</a>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能查看和维护 TT Post 发布池。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 TT Post 发布池权限</strong>
+        <span>请联系管理员在用户管理中开启 tt_posts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="notice" aria-label="TikTok 合规提醒">
+          <div class="notice-mark">!</div>
+          <div>
+            <strong>当前片尾保留 DramaWave 跳转引导，正片不再叠加品牌 Logo；正式直发前仍须完成平台审核确认。</strong>
+            TikTok 官方 Direct Post 对内部账号管理工具和推广引导有额外限制。页面未显示全部开放时，素材与配置仍可保存；自动发布不会从素材池取下一条，立即测试也不会创建发布任务，且任何时候都不占用素材池。
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>发布与合规状态</h2>
+              <p>三个条件全部通过后，自动发布才会按时消费素材池中的下一条；立即测试使用明确选择的已校验素材独立发布，不占用或消费素材池。状态缺失一律按未开放处理。</p>
+            </div>
+            <button id="refreshGates" class="button small" type="button">刷新状态</button>
+          </div>
+          <div class="gate-grid">
+            <article id="liveGateCard" class="gate-card unknown"><span>真实发布开关</span><strong id="liveGateText">正在确认…</strong></article>
+            <article id="auditGateCard" class="gate-card unknown"><span>Direct Post 审核</span><strong id="auditGateText">正在确认…</strong></article>
+            <article id="urlGateCard" class="gate-card unknown"><span>媒体域名验证</span><strong id="urlGateText">正在确认…</strong></article>
+            <article id="modeGateCard" class="gate-card unknown"><span>自动 / 立即发布</span><strong id="modeGateText">已阻断，不发送</strong></article>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>自动发布配置与素材测试</h2>
+              <p>自动发布账号、描述模板、时间和开关作为一份配置统一保存；立即发布测试使用单独明确选择的账号与已校验素材，不会从素材池取素材。</p>
+            </div>
+          </div>
+
+          <div id="createFormFields" class="create-grid">
+            <div class="column">
+              <div class="field">
+                <label for="accountSearch"><span class="step">1</span>选择自动发布 TikTok 个号（可多选）</label>
+                <div class="search-line">
+                  <input id="accountSearch" type="search" autocomplete="off" placeholder="搜索账号名称或账号 ID" />
+                  <button id="refreshAccounts" class="button" type="button">刷新账号</button>
+                </div>
+                <div id="accountList" class="account-list" role="group" aria-label="选择自动发布 TikTok 账号">
+                  <div class="empty">正在加载账号…</div>
+                </div>
+                <div id="selectedAccountSummary" class="selection-summary">尚未选择自动发布账号。</div>
+                <span id="accountHelp" class="helper">勾选状态由已保存配置回填；列表不会显示或下发任何凭证。</span>
+              </div>
+
+              <div class="field">
+                <label for="operationAccountId">本次测试账号（单选，仅用于立即发布）</label>
+                <select id="operationAccountId" class="operation-account" aria-describedby="operationAccountHelp">
+                  <option value="">请明确选择一个账号</option>
+                </select>
+                <span id="operationAccountHelp" class="helper">该选择只用于本次立即发布测试。素材校验通过后可直接入池；发布时由剧语言匹配的自动发布账号领取。</span>
+              </div>
+
+              <div id="creatorCard" class="info-card" aria-live="polite">
+                <strong>等待确认目标账号</strong>
+                <p>选择账号后会实时确认 TikTok 昵称和最长视频时长。</p>
+              </div>
+
+              <div class="field">
+                <label for="materialIds"><span class="step">2</span>批量填写素材 ID</label>
+                <textarea id="materialIds" inputmode="numeric" autocomplete="off" placeholder="例如：5221348&#10;5221349, 5221350" aria-describedby="materialHelp"></textarea>
+                <button id="previewMaterial" class="button primary" type="button">批量校验素材</button>
+                <span id="materialHelp" class="helper">支持逗号、空格、分号或换行分隔，每次最多 100 个正整数 ID。这里只校验素材与真实 Drama ID，校验通过即可入池；视频下载和随机透明模板制作会在后台进行。</span>
+                <div id="materialProgress" class="material-progress" role="status" aria-live="polite">尚未校验素材。</div>
+                <div id="materialResults" class="material-results hidden" aria-label="素材校验结果"></div>
+              </div>
+            </div>
+
+            <div class="column">
+              <div class="field">
+                <label for="caption"><span class="step">3</span>发布描述模板（可编辑）</label>
+                <textarea id="caption" maxlength="2200" aria-describedby="captionHelp">Watch the full story in the app 🎬
+
+Drama ID: {{contect_id}}
+
+Visit my profile → Open the link → Search the Drama ID → Watch now.</textarea>
+                <div class="caption-meta">
+                  <span id="captionHelp">Moboreels 发布仅允许当前剧库已上架的剧目；未匹配、已下架或状态无法核实时会拦截，执行前再次校验。Moboreels 发布仅允许当前剧库已上架的剧目；未匹配、已下架或状态无法核实时会拦截，执行前再次校验。Moboreels 发布仅允许当前剧库已上架的剧目；未匹配、已下架或状态无法核实时会拦截，执行前再次校验。新增 {{m_url}}：按素材上游剧 ID 生成 Moboreels 推广短链，归属任务创建者。可选使用 {{contect_id}} 或 {{content_id}} 填入当前剧 ID、{{drama_name}} 填入剧名；可使用 {url} 生成专属投放短链、{desc} 填入当前剧描述、{code} 填入四位剧情查询码（仅自动/排期正式队列支持，立即测试不支持）。使用 {{drama_name}} 时，缺少剧名会阻止发布。</span>
+                  <span id="captionCount">0 / 2200</span>
+                </div>
+              </div>
+
+              <div class="setting-grid">
+                <div class="schedule-panel">
+                  <div class="schedule-panel-head">
+                    <div>
+                      <strong><span class="step">4</span>自动发布配置</strong>
+                      <p>描述模板、发布时间、开关及勾选账号是一份配置；只有点击保存后才生效。关闭后素材池内容仍保留。</p>
+                    </div>
+                    <button id="saveSchedule" class="button primary" type="button" aria-describedby="scheduleState">保存自动发布配置</button>
+                  </div>
+                  <div class="schedule-controls">
+                    <div class="schedule-time-editor">
+                      <label class="schedule-toggle schedule-mode-toggle">
+                        <input id="randomScheduleEnabled" type="checkbox" />
+                        <span>随机时间发布（每个账号独立生成）</span>
+                      </label>
+                      <div id="fixedScheduleFields" class="field">
+                        <label for="dailyPublishTime">每天固定发布时间（Asia/Shanghai，可添加多个）</label>
+                        <div id="dailyPublishTimes" class="publish-time-list">
+                          <div class="publish-time-row">
+                            <input id="dailyPublishTime" class="daily-publish-time" type="time" step="60" value="11:00" />
+                            <button class="button small" type="button" data-remove-publish-time disabled>删除</button>
+                          </div>
+                        </div>
+                        <button id="addPublishTime" class="button small" type="button">添加时间点</button>
+                      </div>
+                      <div id="randomScheduleFields" class="random-schedule-fields hidden">
+                        <label for="randomDailyCount">每天随机发布次数</label>
+                        <input id="randomDailyCount" type="number" min="1" max="24" step="1" value="1" />
+                        <span class="helper">每账号独立随机，避开整点且相邻至少间隔 1 小时。每天北京时间 00:00 提前选材并复用已制作成片，等待各自发布时间；首次启用或修改次数后从次日生效。</span>
+                      </div>
+                    </div>
+                    <label class="schedule-toggle">
+                      <input id="scheduleEnabled" type="checkbox" />
+                      <span>启用素材池自动发布</span>
+                    </label>
+                    <span id="scheduleState" class="helper">正在加载自动发布配置。</span>
+                    <div id="randomPlanPreview" class="random-plan-preview hidden" aria-live="polite"></div>
+                  </div>
+                  <div class="schedule-facts" aria-live="polite">
+                    <div class="schedule-fact"><span>配置状态</span><strong id="scheduleStatus">未加载</strong></div>
+                    <div class="schedule-fact"><span>自动发布账号</span><strong id="autoAccountCount">—</strong></div>
+                    <div class="schedule-fact"><span>配置版本</span><strong id="scheduleVersion">—</strong></div>
+                    <div class="schedule-fact"><span>当前草稿</span><strong id="scheduleDraftStatus">—</strong></div>
+                  </div>
+                </div>
+                <div id="accountSettingsCard" class="account-settings-card warning" aria-live="polite">
+                  <div class="account-settings-head">
+                    <span>账号发布设置</span>
+                    <a href="/tt-account-settings.html">前往管理</a>
+                  </div>
+                  <strong id="accountSettingsStatus">请选择账号</strong>
+                  <p id="accountSettingsSummary">选择账号后，这里会显示已保存的隐私、互动和内容声明设置。</p>
+                </div>
+              </div>
+
+              <div class="direct-test-panel">
+                <strong>立即发布测试（不入池）</strong>
+                <p>只发布当前明确选择的一个校验通过素材；即使该素材历史上已经发布过也允许再次测试。不会读取、占用或消费素材池。</p>
+                <div id="directTestSelection" class="direct-test-selection">尚未选择测试账号和素材。</div>
+                <div class="run-now-row">
+                  <button id="runNow" class="button run-now" type="button" disabled>立即发布所选素材</button>
+                  <span id="runNowHelp" class="run-now-help">请先明确选择本次测试账号，并从校验通过结果中选择一个素材。</span>
+                </div>
+                <div id="directTestSummary" class="helper" role="status" aria-live="polite">正在加载最近测试任务…</div>
+                <div id="directTestRows" class="direct-test-list" aria-label="最近立即发布测试任务">
+                  <div class="empty">正在加载最近测试任务…</div>
+                </div>
+              </div>
+
+              <div class="consent">
+                <label class="inline-check">
+                  <input id="publishConsent" type="checkbox" />
+                  <span id="consentText">我已核对自动发布账号、描述、时间、开关、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试另需明确选择账号，且不会从素材池选择素材。</span>
+                </label>
+              </div>
+
+              <div id="queueSubmitPanel" class="queue-submit-panel hidden" aria-live="polite">
+                <strong id="queueSubmitSummary">最近一批入池结果</strong>
+                <div id="queueSubmitResults" class="material-results" aria-label="逐素材入池结果"></div>
+              </div>
+
+              <div class="form-footer">
+                <div id="formState" class="form-state" role="status" aria-live="polite">请先保存自动发布配置并校验素材。</div>
+                <button id="addMaterialsToPool" class="button primary" type="button" disabled>加入素材池</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="preparationPanel">
+          <div class="section-head">
+            <div>
+              <h2>后台预制作状态</h2>
+              <p>素材入池后立即显示在这里。系统会在后台下载、拼接片尾并校验成片；只有“制作完成”的素材才会进入待发布数量。</p>
+            </div>
+            <button id="refreshPreparationStatus" class="button small" type="button">刷新制作状态</button>
+          </div>
+          <div id="preparationSummary" class="preparation-summary" role="status" aria-live="polite">正在加载素材池…</div>
+          <div class="table-wrap">
+            <table class="preparation-table">
+              <thead>
+                <tr>
+                  <th>入池时间</th>
+                  <th>领取账号</th>
+                  <th>素材 / Drama ID</th>
+                  <th>剧语言</th>
+                  <th>发布状态</th>
+                  <th>可用状态</th>
+                  <th>预制作状态</th>
+                  <th>详情</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="preparationRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js?v=ac11d7b304fb"></script>
+  <script>
+    (() => {
+      const API_BASE = "/api/admin/tt-posts";
+      const CAPTION_TEMPLATE = "Watch the full story in the app 🎬\n\nDrama ID: {{contect_id}}\n\nVisit my profile → Open the link → Search the Drama ID → Watch now.";
+      const CAPTION_PLACEHOLDER_PATTERN = /\{\{([^{}]*)\}\}/g;
+      const CAPTION_PLACEHOLDERS = new Set(["contect_id", "content_id", "drama_name", "m_url"]);
+      const CAPTION_SINGLE_PLACEHOLDER_PATTERN = /\{([^{}]*)\}/g;
+      const CAPTION_URL_PLACEHOLDER = "{url}";
+      const CAPTION_DESC_PLACEHOLDER = "{desc}";
+      const CAPTION_CODE_PLACEHOLDER = "{code}";
+      const CAPTION_URL_PREVIEW = "https://gy.g2flow.com/s2l/tt/123.html";
+      const CAPTION_CODE_PREVIEW = "A1B2";
+      const CONSENT_VERSION = "tt-direct-post-consent-20260729";
+      const RUN_NOW_NOT_PUBLISHED_STATUSES = new Set([
+        "preflight_failed", "failed", "canceled", "cancelled", "missed", "blocked_compliance",
+      ]);
+      const RUN_NOW_SUBMITTED_STATUSES = new Set([
+        "queued", "preparing", "ready", "scheduled", "claimed", "publishing", "reconciling",
+      ]);
+      const DEFAULT_DAILY_PUBLISH_TIME = "11:00";
+      const RUN_NOW_PENDING_STORAGE_KEY = "tt-post:pending-direct-test:v3";
+      const RUN_NOW_PENDING_STORAGE_MAX_BYTES = 32768;
+      const RUN_NOW_PENDING_MAX_TARGETS = 100;
+      const DIRECT_TEST_POLL_INTERVAL_MS = 10000;
+      const DIRECT_TEST_POLL_STATUSES = new Set([
+        "queued", "preparing", "ready", "publishing", "reconciling",
+      ]);
+      const PREPARATION_ACTIVE_STATUSES = new Set(["queued", "preparing", "retry_wait"]);
+      const PREPARATION_POLL_INTERVAL_MS = 10000;
+      const state = {
+        auth: null,
+        accounts: [],
+        autoAccountIds: new Set(),
+        savedAutoAccountIds: new Set(),
+        savedAutoEnabled: false,
+        selectedAccountId: "",
+        selectedDirectMaterialId: "",
+        creatorInfo: null,
+        creatorRequestVersion: 0,
+        materials: [],
+        failures: [],
+        validationCompleted: 0,
+        validationTotal: 0,
+        queueSummary: "",
+        queueSummaryIsError: false,
+        queueResults: [],
+        preparationItems: [],
+        preparationSummary: {},
+        preparationHasActive: false,
+        preparationLoading: false,
+        preparationReloadPending: false,
+        preparationPollTimer: null,
+        preparationScheduleRefreshPendingByAccount: Object.create(null),
+        schedule: null,
+        scheduleRequestVersion: 0,
+        scheduleDraftDirty: false,
+        scheduleDraftBaseVersion: 0,
+        scheduleStale: false,
+        scheduleBusy: false,
+        runNowBusy: false,
+        pendingRunNowByTarget: Object.create(null),
+        directTests: [],
+        directTestsLoading: false,
+        directTestPollTimer: null,
+        gates: {
+          liveEnabled: undefined,
+          auditApproved: undefined,
+          urlVerified: undefined,
+        },
+        formKey: "",
+        consentAcceptedAt: "",
+        busy: false,
+        toastTimer: null,
+      };
+
+      const byId = id => document.getElementById(id);
+      const setText = (node, value, fallback = "—") => {
+        if (!node) return;
+        node.textContent = value == null || value === "" ? fallback : String(value);
+      };
+      const show = node => node && node.classList.remove("hidden");
+      const hide = node => node && node.classList.add("hidden");
+      const asObject = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+      const firstDefined = (...values) => values.find(value => value !== undefined && value !== null);
+      const boolValue = value => {
+        if (value === true || value === 1 || value === "1" || value === "true") return true;
+        if (value === false || value === 0 || value === "0" || value === "false") return false;
+        return undefined;
+      };
+      const cleanId = value => String(value == null ? "" : value).trim();
+      const accountId = item => cleanId(
+        firstDefined(item && item.source_account_id, item && item.account_id, item && item.id)
+      );
+      const accountName = item => String(
+        firstDefined(item && item.account_name, item && item.display_name, item && item.creator_nickname, `账号 ${accountId(item)}`) || ""
+      );
+      const formatTime = value => {
+        if (!value) return "—";
+        const raw = String(value);
+        const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(raw) ? raw : raw.replace(" ", "T") + "Z";
+        const date = new Date(normalized);
+        if (Number.isNaN(date.getTime())) return raw;
+        return new Intl.DateTimeFormat("zh-CN", {
+          timeZone: "Asia/Shanghai",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(date);
+      };
+      const utf16Units = value => Array.from(String(value || "")).reduce(
+        (total, character) => total + (character.codePointAt(0) > 0xffff ? 2 : 1),
+        0
+      );
+      const safeHttpsUrl = value => {
+        try {
+          const url = new URL(String(value || ""), window.location.origin);
+          if (url.protocol !== "https:" || url.username || url.password) return "";
+          return url.href;
+        } catch (_) {
+          return "";
+        }
+      };
+      const safeAvatarUrl = value => {
+        const href = safeHttpsUrl(value);
+        if (!href) return "";
+        try {
+          const url = new URL(href);
+          return /(^|\.)tiktokcdn\.com$/i.test(url.hostname) ||
+            /(^|\.)tiktokcdn-us\.com$/i.test(url.hostname) ||
+            url.hostname === window.location.hostname
+            ? href
+            : "";
+        } catch (_) {
+          return "";
+        }
+      };
+      const showToast = (message, isError = false) => {
+        const toast = byId("toast");
+        setText(toast, message, "");
+        toast.classList.toggle("error", !!isError);
+        show(toast);
+        window.clearTimeout(state.toastTimer);
+        state.toastTimer = window.setTimeout(() => hide(toast), 4200);
+      };
+      async function api(path, options = {}) {
+        const init = Object.assign({
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "Accept": "application/json" },
+        }, options);
+        init.headers = Object.assign({}, init.headers || {});
+        if (init.body && !init.headers["Content-Type"]) {
+          init.headers["Content-Type"] = "application/json; charset=UTF-8";
+        }
+        const response = await fetch(path, init);
+        const raw = await response.text();
+        let payload = {};
+        try { payload = raw ? JSON.parse(raw) : {}; } catch (_) { payload = {}; }
+        if (!response.ok) {
+          const error = new Error(
+            payload.message || payload.error_message || payload.error || `请求失败（HTTP ${response.status}）`
+          );
+          error.code = payload.code || payload.error || "";
+          error.status = response.status;
+          throw error;
+        }
+        return payload;
+      }
+      function readPayloadItem(payload, keys = []) {
+        for (const key of keys) {
+          const value = payload && payload[key];
+          if (value && typeof value === "object" && !Array.isArray(value)) return value;
+        }
+        if (payload && payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+          return payload.data;
+        }
+        return asObject(payload);
+      }
+      function gateValue(payload, raw, names) {
+        const candidates = [];
+        names.forEach(name => {
+          candidates.push(raw[name]);
+          candidates.push(payload && payload[name]);
+        });
+        return boolValue(firstDefined(...candidates));
+      }
+      function applyGates(payload) {
+        const raw = asObject(firstDefined(
+          payload && payload.gates,
+          payload && payload.live_gate,
+          payload && payload.compliance,
+          payload && payload.config
+        ));
+        const liveEnabled = gateValue(payload, raw, [
+          "live_enabled", "live_publish_enabled", "direct_post_live_enabled",
+        ]);
+        const auditApproved = gateValue(payload, raw, [
+          "audit_approved", "direct_audit_approved", "direct_post_audit_approved",
+        ]);
+        const urlVerified = gateValue(payload, raw, [
+          "url_property_verified", "media_url_verified", "media_url_property_verified",
+        ]);
+        if (liveEnabled !== undefined) state.gates.liveEnabled = liveEnabled;
+        if (auditApproved !== undefined) state.gates.auditApproved = auditApproved;
+        if (urlVerified !== undefined) state.gates.urlVerified = urlVerified;
+        renderGates();
+      }
+      const gatesOpen = () => (
+        state.gates.liveEnabled === true &&
+        state.gates.auditApproved === true &&
+        state.gates.urlVerified === true
+      );
+      function renderGate(cardId, textId, value, readyText, blockedText) {
+        const card = byId(cardId);
+        card.classList.remove("ready", "blocked", "unknown");
+        if (value === true) {
+          card.classList.add("ready");
+          setText(byId(textId), readyText);
+        } else if (value === false) {
+          card.classList.add("blocked");
+          setText(byId(textId), blockedText);
+        } else {
+          card.classList.add("unknown");
+          setText(byId(textId), "未确认，按未开放处理");
+        }
+      }
+      function renderGates() {
+        renderGate("liveGateCard", "liveGateText", state.gates.liveEnabled, "已开放", "未开放");
+        renderGate("auditGateCard", "auditGateText", state.gates.auditApproved, "审核已确认", "审核未确认");
+        renderGate("urlGateCard", "urlGateText", state.gates.urlVerified, "媒体域名已验证", "媒体域名未验证");
+        const modeCard = byId("modeGateCard");
+        modeCard.classList.remove("ready", "blocked", "unknown");
+        if (gatesOpen()) {
+          modeCard.classList.add("ready");
+          setText(byId("modeGateText"), "允许自动发布与手动测试");
+          setText(
+            byId("consentText"),
+            "我已核对自动发布账号、描述、时间、开关、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。立即测试另需明确选择账号，且不会从素材池选择素材。"
+          );
+        } else {
+          modeCard.classList.add("blocked");
+          setText(byId("modeGateText"), "已阻断，不发送");
+          setText(
+            byId("consentText"),
+            "我已核对自动发布账号、描述、时间、开关、素材与 Drama ID，并同意 TikTok Music Usage Confirmation。当前门禁未全部开放，不会自动或立即发送到 TikTok。"
+          );
+        }
+        validateForm();
+      }
+      function accountEligible(item) {
+        if (!item) return false;
+        const explicit = firstDefined(
+          item.publish_eligible,
+          item.eligible,
+          item.eligible_by_snapshot,
+          item.is_publishable
+        );
+        if (explicit !== undefined) return boolValue(explicit) === true;
+        if (Number(item.is_active) === 0) return false;
+        if (item.token_status != null && Number(item.token_status) !== 2) return false;
+        if (item.account_status != null && Number(item.account_status) !== 2) return false;
+        if (Number(item.disable_publish || 0) !== 0) return false;
+        return true;
+      }
+      function accountReason(item) {
+        return String(firstDefined(
+          item && item.eligibility_reason,
+          item && item.block_reason,
+          item && item.status_label,
+          accountEligible(item) ? "可进行账号实时确认" : "当前不可用于发布"
+        ) || "");
+      }
+      function selectedAccount() {
+        return state.accounts.find(item => accountId(item) === state.selectedAccountId) || null;
+      }
+      function accountSettingsFor(item) {
+        const settings = asObject(item && item.account_settings);
+        return settings.configured === true ? settings : null;
+      }
+      function selectedAccountSettings() {
+        return accountSettingsFor(selectedAccount());
+      }
+      function privacyLabel(value) {
+        return {
+          PUBLIC_TO_EVERYONE: "所有人可见",
+          MUTUAL_FOLLOW_FRIENDS: "互相关注的朋友可见",
+          FOLLOWER_OF_CREATOR: "关注者可见",
+          SELF_ONLY: "仅自己可见",
+        }[String(value || "")] || String(value || "未设置");
+      }
+      function renderAccountSettings() {
+        const card = byId("accountSettingsCard");
+        const status = byId("accountSettingsStatus");
+        const summary = byId("accountSettingsSummary");
+        const item = selectedAccount();
+        const settings = selectedAccountSettings();
+        card.classList.toggle("success", !!settings);
+        card.classList.toggle("warning", !settings);
+        if (!item) {
+          setText(status, "请选择账号");
+          setText(summary, "选择账号后，这里会显示已保存的隐私、互动和内容声明设置。");
+          return;
+        }
+        if (!settings) {
+          setText(status, "该账号尚未配置");
+          setText(summary, "请先前往“TT 个号管理”保存设置，再回到发布池排期。");
+          return;
+        }
+        const interactions = [];
+        if (boolValue(settings.allow_comment) === true) interactions.push("评论");
+        if (boolValue(settings.allow_duet) === true) interactions.push("Duet");
+        if (boolValue(settings.allow_stitch) === true) interactions.push("Stitch");
+        const disclosure = [];
+        if (boolValue(settings.brand_organic_toggle) === true) disclosure.push("自有品牌");
+        if (boolValue(settings.brand_content_toggle) === true) disclosure.push("第三方品牌");
+        setText(status, `已配置 · 版本 ${settings.version || 1}`);
+        setText(
+          summary,
+          [
+            privacyLabel(settings.privacy_level),
+            interactions.length ? `互动：${interactions.join("、")}` : "互动：全部关闭",
+            disclosure.length ? `商业声明：${disclosure.join("、")}` : "商业声明：关闭",
+            boolValue(settings.is_aigc) === true ? "AI 内容：声明" : "AI 内容：不声明",
+          ].join(" · ")
+        );
+      }
+      function setAccountListEmpty(message) {
+        const list = byId("accountList");
+        list.replaceChildren();
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        setText(empty, message);
+        list.appendChild(empty);
+      }
+      function autoAccountStatus(id) {
+        const selected = state.autoAccountIds.has(id);
+        const saved = state.savedAutoAccountIds.has(id);
+        const account = state.accounts.find(item => accountId(item) === id);
+        const savedState = String(account && account.auto_publish_state || "").trim();
+        const savedStateVersion = Number(account && account.auto_publish_config_version);
+        const currentConfigVersion = Number(state.schedule && state.schedule.version);
+        const savedStateIsCurrent = Number.isInteger(savedStateVersion) &&
+          Number.isInteger(currentConfigVersion) &&
+          savedStateVersion === currentConfigVersion;
+        if (selected && !saved) {
+          return { type: "active", draft: "add", label: "待保存加入" };
+        }
+        if (!selected && saved) {
+          return { type: "not_selected", draft: "remove", label: "待保存移除" };
+        }
+        if (selected && saved && savedStateIsCurrent && savedState === "attention_required") {
+          return { type: "attention_required", draft: "", label: "已加入 · 需要处理" };
+        }
+        if (selected && saved && savedStateIsCurrent && savedState === "active") {
+          return { type: "active", draft: "", label: "已加入自动发布" };
+        }
+        if (selected && saved && savedStateIsCurrent && savedState === "paused") {
+          return { type: "paused", draft: "", label: "已加入 · 自动发布关闭" };
+        }
+        if (selected && state.savedAutoEnabled) {
+          return { type: "active", draft: "", label: "已加入自动发布" };
+        }
+        if (selected) {
+          return { type: "paused", draft: "", label: "已加入 · 自动发布关闭" };
+        }
+        return { type: "not_selected", draft: "", label: "未加入自动发布" };
+      }
+      function renderSelectedAccountSummary() {
+        const selected = state.autoAccountIds.size;
+        const saved = state.savedAutoAccountIds.size;
+        const added = Array.from(state.autoAccountIds).filter(id => !state.savedAutoAccountIds.has(id)).length;
+        const removed = Array.from(state.savedAutoAccountIds).filter(id => !state.autoAccountIds.has(id)).length;
+        const draft = [
+          added ? `待加入 ${added} 个` : "",
+          removed ? `待移除 ${removed} 个` : "",
+        ].filter(Boolean).join("，");
+        setText(
+          byId("selectedAccountSummary"),
+          `当前勾选 ${selected} 个；已保存 ${saved} 个${draft ? `；${draft}` : "。"}`
+        );
+      }
+      function renderOperationAccountOptions() {
+        const select = byId("operationAccountId");
+        const current = state.selectedAccountId;
+        select.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        setText(placeholder, "请明确选择一个账号");
+        select.appendChild(placeholder);
+        state.accounts.forEach(item => {
+          const id = accountId(item);
+          if (!id) return;
+          const option = document.createElement("option");
+          option.value = id;
+          option.disabled = !accountEligible(item);
+          setText(
+            option,
+            `${accountName(item)} · 账号 ID ${firstDefined(item.external_account_id, item.main_account_id, id)}`
+          );
+          select.appendChild(option);
+        });
+        if (current && Array.from(select.options).some(option => option.value === current && !option.disabled)) {
+          select.value = current;
+        } else {
+          state.selectedAccountId = "";
+          select.value = "";
+        }
+      }
+      function renderAccounts() {
+        const query = byId("accountSearch").value.trim().toLowerCase();
+        const items = state.accounts.filter(item => {
+          if (!query) return true;
+          return [
+            accountName(item),
+            accountId(item),
+            item.external_account_id,
+            item.main_account_id,
+          ].some(value => String(value || "").toLowerCase().includes(query));
+        });
+        if (!items.length) {
+          setAccountListEmpty(query ? "没有匹配账号。" : "暂无可显示账号。");
+          renderSelectedAccountSummary();
+          return;
+        }
+        const list = byId("accountList");
+        list.replaceChildren();
+        items.forEach(item => {
+          const id = accountId(item);
+          const eligible = accountEligible(item);
+          const selected = state.autoAccountIds.has(id);
+          const membership = autoAccountStatus(id);
+          const label = document.createElement("label");
+          label.className = `account-option${eligible ? "" : " ineligible"}`;
+          label.dataset.autoStatus = membership.type;
+          if (membership.draft) label.dataset.draftChange = membership.draft;
+
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.value = id;
+          checkbox.dataset.autoAccountId = id;
+          checkbox.checked = selected;
+          checkbox.disabled = state.scheduleBusy;
+          label.appendChild(checkbox);
+
+          const copy = document.createElement("div");
+          copy.className = "account-copy";
+          const name = document.createElement("strong");
+          setText(name, accountName(item));
+          const detail = document.createElement("span");
+          const publicId = firstDefined(item.external_account_id, item.main_account_id, id);
+          setText(detail, `账号 ID ${publicId || id} · 粉丝 ${Number(item.fan_count || 0).toLocaleString("zh-CN")}`);
+          copy.append(name, detail);
+          label.appendChild(copy);
+
+          const status = document.createElement("span");
+          status.className = `account-state ${membership.type.replace("_", "-")}`;
+          setText(status, eligible ? membership.label : (selected ? "不可发布 · 配置可保存" : "不可发布 · 可加入配置"));
+          status.title = accountReason(item);
+          label.appendChild(status);
+
+          list.appendChild(label);
+        });
+        renderSelectedAccountSummary();
+      }
+      function resetCreatorInfo(message = "选择账号后会实时确认 TikTok 昵称和最长视频时长。") {
+        state.creatorInfo = null;
+        const card = byId("creatorCard");
+        card.replaceChildren();
+        const title = document.createElement("strong");
+        setText(title, "等待确认目标账号");
+        const copy = document.createElement("p");
+        setText(copy, message);
+        card.append(title, copy);
+        renderAccountSettings();
+        validateForm();
+      }
+      function renderCreatorInfo(info) {
+        const card = byId("creatorCard");
+        card.replaceChildren();
+        const head = document.createElement("div");
+        head.className = "creator-head";
+        const avatar = document.createElement("div");
+        avatar.className = "creator-avatar";
+        const avatarUrl = safeAvatarUrl(info.creator_avatar_url || info.avatar_url);
+        if (avatarUrl) {
+          const image = document.createElement("img");
+          image.src = avatarUrl;
+          image.alt = "";
+          image.loading = "lazy";
+          image.referrerPolicy = "no-referrer";
+          avatar.appendChild(image);
+        } else {
+          setText(avatar, String(info.creator_nickname || info.creator_username || "TT").slice(0, 1));
+        }
+        const copy = document.createElement("div");
+        const name = document.createElement("strong");
+        setText(name, info.creator_nickname || info.creator_username || "TikTok账号");
+        const username = document.createElement("p");
+        const maxDuration = Number(info.max_video_post_duration_sec || 0);
+        const usernameCopy = info.creator_username ? `@${String(info.creator_username).replace(/^@/, "")}` : "用户名未返回";
+        setText(username, `${usernameCopy}${maxDuration ? ` · 最长视频 ${maxDuration} 秒` : ""}`);
+        copy.append(name, username);
+        head.append(avatar, copy);
+        card.appendChild(head);
+        renderAccountSettings();
+      }
+      async function loadCreatorInfo() {
+        const requestVersion = ++state.creatorRequestVersion;
+        const item = selectedAccount();
+        const requestedAccountId = accountId(item);
+        if (!item || !accountEligible(item)) {
+          resetCreatorInfo("该账号当前不可用于发布，请刷新账号状态。");
+          return;
+        }
+        resetCreatorInfo("正在向 TikTok 确认账号昵称和发布能力…");
+        setText(byId("accountHelp"), "正在实时确认目标账号…");
+        try {
+          const result = await api(`${API_BASE}/creator-info`, {
+            method: "POST",
+            body: JSON.stringify({ source_account_id: requestedAccountId }),
+          });
+          if (
+            requestVersion !== state.creatorRequestVersion ||
+            state.selectedAccountId !== requestedAccountId
+          ) return;
+          applyGates(result);
+          const info = readPayloadItem(result, ["item", "creator_info"]);
+          if (!info.creator_nickname && !info.creator_username) {
+            throw new Error("TikTok 未返回可确认的账号昵称");
+          }
+          state.creatorInfo = info;
+          renderCreatorInfo(info);
+          setText(byId("accountHelp"), "已实时确认目标账号；发布时间前系统会再次确认。");
+        } catch (error) {
+          if (
+            requestVersion !== state.creatorRequestVersion ||
+            state.selectedAccountId !== requestedAccountId
+          ) return;
+          state.creatorInfo = null;
+          resetCreatorInfo(`账号确认失败：${error.message}`);
+          setText(byId("accountHelp"), `账号确认失败：${error.message}`);
+          byId("accountHelp").className = "helper error";
+        }
+        validateForm();
+      }
+      function emptySchedule() {
+        return {
+          loaded: false,
+          enabled: false,
+          timezone: "Asia/Shanghai",
+          publish_times: [],
+          schedule_mode: "fixed",
+          random_daily_count: 0,
+          random_effective_date: "",
+          random_daily_plans: [],
+          account_ids: [],
+          caption_template: CAPTION_TEMPLATE,
+          version: 0,
+        };
+      }
+      function schedulePublishTime(item) {
+        const raw = String(firstDefined(
+          item && item.publish_time,
+          item && Array.isArray(item.publish_times) && item.publish_times[0],
+          ""
+        ) || "").trim();
+        return /^\d{2}:\d{2}$/.test(raw) ? raw : "";
+      }
+      function schedulePublishTimes(item) {
+        const values = item && Array.isArray(item.publish_times)
+          ? item.publish_times
+          : [];
+        return Array.from(new Set(values
+          .map(value => String(value || "").trim())
+          .filter(value => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value))))
+          .sort();
+      }
+      function fixedPublishTimesFromDraft() {
+        return Array.from(byId("dailyPublishTimes").querySelectorAll("input.daily-publish-time"))
+          .map(input => String(input.value || "").trim())
+          .filter(Boolean)
+          .sort();
+      }
+      function appendFixedPublishTime(value = DEFAULT_DAILY_PUBLISH_TIME) {
+        const list = byId("dailyPublishTimes");
+        if (list.children.length >= 24) return;
+        const row = document.createElement("div");
+        row.className = "publish-time-row";
+        const input = document.createElement("input");
+        input.className = "daily-publish-time";
+        input.type = "time";
+        input.step = "60";
+        input.value = value;
+        if (!list.querySelector("#dailyPublishTime")) input.id = "dailyPublishTime";
+        const remove = document.createElement("button");
+        remove.className = "button small";
+        remove.type = "button";
+        remove.dataset.removePublishTime = "1";
+        setText(remove, "删除");
+        row.append(input, remove);
+        list.appendChild(row);
+        Array.from(list.querySelectorAll("button[data-remove-publish-time]"))
+          .forEach(button => { button.disabled = list.children.length <= 1; });
+      }
+      function renderFixedPublishTimes(values) {
+        const normalized = Array.isArray(values) && values.length
+          ? values
+          : [DEFAULT_DAILY_PUBLISH_TIME];
+        byId("dailyPublishTimes").replaceChildren();
+        normalized.forEach(value => appendFixedPublishTime(value));
+      }
+      function randomModeFromDraft() {
+        return byId("randomScheduleEnabled").checked;
+      }
+      function syncScheduleModeControls() {
+        const randomMode = randomModeFromDraft();
+        byId("fixedScheduleFields").classList.toggle("hidden", randomMode);
+        byId("randomScheduleFields").classList.toggle("hidden", !randomMode);
+      }
+      function preparationItemAccountId(item) {
+        return cleanId(firstDefined(
+          item && item.source_account_id,
+          item && item.account_id
+        ));
+      }
+      function preparationItemIdentity(item) {
+        return cleanId(firstDefined(
+          item && item.intake_id,
+          item && item.id,
+          item && item.pool_item_id,
+          item && item.material_id
+        ));
+      }
+      function preparationStatusFingerprint(items, sourceAccountId, summary = {}) {
+        const normalizedAccountId = cleanId(sourceAccountId);
+        if (!normalizedAccountId) return "";
+        const counts = asObject(summary);
+        const activeCount = Number(firstDefined(
+          counts.active,
+          Number(counts.queued || 0) +
+            Number(counts.preparing || 0) +
+            Number(counts.retry_wait || 0),
+          0
+        ) || 0);
+        const summaryFingerprint = [
+          `active:${activeCount}`,
+          `ready:${Number(counts.ready || 0)}`,
+          `available:${Number(counts.available || 0)}`,
+          `total:${Number(counts.total || 0)}`,
+        ].join(",");
+        const itemFingerprint = (Array.isArray(items) ? items : [])
+          .filter(item => preparationItemAccountId(item) === normalizedAccountId)
+          .map(item => `${preparationItemIdentity(item)}:${preparationStatusMeta(item).status}`)
+          .sort()
+          .join("|");
+        return `${summaryFingerprint}|${itemFingerprint}`;
+      }
+      function selectedPreparationState() {
+        const selectedId = cleanId(state.selectedAccountId);
+        const items = state.preparationItems.filter(
+          item => preparationItemAccountId(item) === selectedId
+        );
+        const activeItems = items.filter(item => (
+          PREPARATION_ACTIVE_STATUSES.has(preparationStatusMeta(item).status)
+        ));
+        return {
+          activeCount: activeItems.length,
+          activeMaterialIds: activeItems
+            .map(item => cleanId(item.material_id))
+            .filter(Boolean),
+        };
+      }
+      function scheduleWantsDisable() {
+        return !!state.schedule &&
+          boolValue(state.schedule.enabled) === true &&
+          byId("scheduleEnabled").checked === false;
+      }
+      function selectedDirectMaterial() {
+        return state.materials.find(
+          item => cleanId(item.material_id) === state.selectedDirectMaterialId
+        ) || null;
+      }
+      function setsEqual(left, right) {
+        return left.size === right.size && Array.from(left).every(value => right.has(value));
+      }
+      function scheduleDraftMatchesSaved() {
+        if (!state.schedule) return false;
+        const currentTimes = fixedPublishTimesFromDraft();
+        const savedTimes = schedulePublishTimes(state.schedule);
+        const currentMode = randomModeFromDraft() ? "random" : "fixed";
+        const savedMode = String(state.schedule.schedule_mode || "fixed");
+        const currentRandomCount = Number(byId("randomDailyCount").value || 0);
+        const savedRandomCount = Number(state.schedule.random_daily_count || 0);
+        return setsEqual(state.autoAccountIds, state.savedAutoAccountIds) &&
+          byId("scheduleEnabled").checked === state.savedAutoEnabled &&
+          currentMode === savedMode &&
+          JSON.stringify(currentTimes) === JSON.stringify(savedTimes.length ? savedTimes : [DEFAULT_DAILY_PUBLISH_TIME]) &&
+          (currentMode !== "random" || currentRandomCount === savedRandomCount) &&
+          byId("caption").value === String(state.schedule.caption_template || CAPTION_TEMPLATE);
+      }
+      function markScheduleDirty() {
+        const wasDirty = state.scheduleDraftDirty;
+        state.scheduleDraftDirty = !scheduleDraftMatchesSaved();
+        if (state.scheduleDraftDirty && !wasDirty) {
+          state.scheduleDraftBaseVersion = Number(state.schedule && state.schedule.version || 0);
+        }
+        if (!state.scheduleDraftDirty) state.scheduleStale = false;
+        state.consentAcceptedAt = "";
+        renderSchedule({ hydrateDraft: false });
+        validateForm();
+      }
+      function scheduleSaveError() {
+        if (!state.schedule) return "请等待自动发布配置加载完成。";
+        if (state.scheduleStale) return "配置已被其他操作更新；请刷新配置后重新修改。";
+        const captionValidation = captionTemplateValidation([]);
+        if (captionValidation.error) return captionValidation.error;
+        const randomMode = randomModeFromDraft();
+        const publishTimes = fixedPublishTimesFromDraft();
+        if (!randomMode) {
+          if (!publishTimes.length || publishTimes.length > 24) {
+            return "固定模式需要设置1到24个发布时间。";
+          }
+          if (publishTimes.some(value => !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value))) {
+            return "请选择有效的每日上海发布时间。";
+          }
+          if (new Set(publishTimes).size !== publishTimes.length) {
+            return "固定发布时间不能重复。";
+          }
+        } else {
+          const count = Number(byId("randomDailyCount").value);
+          if (!Number.isInteger(count) || count < 1 || count > 24) {
+            return "每天随机发布次数必须是1到24。";
+          }
+        }
+        const selectedIds = Array.from(state.autoAccountIds);
+        if (byId("scheduleEnabled").checked && !selectedIds.length) {
+          return "启用自动发布前，请至少勾选一个账号。";
+        }
+        const invalid = selectedIds.find(id => {
+          const item = state.accounts.find(account => accountId(account) === id);
+          return !item || !accountSettingsFor(item);
+        });
+        if (byId("scheduleEnabled").checked && invalid) {
+          return "已选账号中存在尚未配置的账号，请移除或完成配置。";
+        }
+        if (byId("scheduleEnabled").checked && !byId("publishConsent").checked) {
+          return "请核对内容并勾选发布确认。";
+        }
+        return "";
+      }
+      function runNowDisabledReason() {
+        const item = selectedAccount();
+        const material = selectedDirectMaterial();
+        const settings = selectedAccountSettings();
+        if (!item) return "请明确选择本次测试账号。";
+        if (!material) return "请从校验通过结果中选择一个本次测试素材。";
+        if (!state.schedule) return "正在加载已保存的自动发布配置。";
+        if (Number(state.schedule.version || 0) <= 0) {
+          return "请先保存自动发布配置，再进行立即测试。";
+        }
+        if (state.scheduleDraftDirty || state.scheduleStale) {
+          return "描述或自动发布配置有未保存变更，请先保存配置。";
+        }
+        if (!accountEligible(item) || !settings || !state.creatorInfo) {
+          return "该账号尚未完成可发布配置或实时确认。";
+        }
+        if (
+          settings.privacy_level !== "PUBLIC_TO_EVERYONE" ||
+          boolValue(settings.allow_comment) !== true
+        ) {
+          return "立即测试要求账号设置为所有人可见并允许评论。";
+        }
+        if (!gatesOpen()) {
+          return "发布门禁尚未全部开放，立即发布已禁用。";
+        }
+        const captionValidation = captionTemplateValidation([material]);
+        if (captionValidation.error) return captionValidation.error;
+        if (!byId("publishConsent").checked) return "请核对内容并勾选发布确认。";
+        return "";
+      }
+      function updateScheduleActions() {
+        const scheduleControlsLocked = state.scheduleBusy || !state.schedule;
+        byId("dailyPublishTimes").querySelectorAll("input.daily-publish-time")
+          .forEach(input => { input.disabled = scheduleControlsLocked; });
+        byId("dailyPublishTimes").querySelectorAll("button[data-remove-publish-time]")
+          .forEach(button => {
+            button.disabled = scheduleControlsLocked || byId("dailyPublishTimes").children.length <= 1;
+          });
+        byId("addPublishTime").disabled = scheduleControlsLocked || byId("dailyPublishTimes").children.length >= 24;
+        byId("randomScheduleEnabled").disabled = scheduleControlsLocked;
+        byId("randomDailyCount").disabled = scheduleControlsLocked;
+        byId("scheduleEnabled").disabled = scheduleControlsLocked;
+        byId("refreshAccounts").disabled = state.scheduleBusy;
+        byId("accountList")
+          .querySelectorAll("input[data-auto-account-id]")
+          .forEach(checkbox => {
+            checkbox.disabled = scheduleControlsLocked;
+          });
+        const saveButton = byId("saveSchedule");
+        const saveError = scheduleSaveError();
+        saveButton.disabled = state.scheduleBusy || !state.schedule || state.scheduleStale;
+        saveButton.title = saveError;
+        if (!state.scheduleBusy) {
+          setText(
+            saveButton,
+            scheduleWantsDisable()
+              ? "关闭自动发布"
+              : !state.savedAutoEnabled &&
+                byId("scheduleEnabled").checked
+              ? "启用自动发布"
+              : "保存自动发布配置"
+          );
+        }
+        const runButton = byId("runNow");
+        const runError = runNowDisabledReason();
+        runButton.disabled = !!runError || state.scheduleBusy || state.runNowBusy || state.busy;
+        if (!state.runNowBusy) {
+          setText(runButton, "立即发布所选素材");
+        }
+        const material = selectedDirectMaterial();
+        const pendingRun = pendingRunNowEntry(
+          state.selectedAccountId,
+          material && material.material_id
+        );
+        const hasPendingRetry = !!pendingRun;
+        const pendingNeedsReview = hasPendingRetry && pendingRun.status === "unknown";
+        setText(
+          byId("runNowHelp"),
+          runError || (
+            pendingNeedsReview
+              ? "上次立即发布结果未知，需人工核对；系统已保留同一请求标识，不会生成新的重复请求。"
+              : hasPendingRetry
+              ? "上次立即发布结果尚未确认；再次点击会复用同一请求标识安全重试，不会额外创建第二次请求。"
+              : "只使用当前明确选择的账号和素材；不会读取、占用或消费素材池，历史已发布素材也允许再次测试。"
+          )
+        );
+        setText(
+          byId("directTestSelection"),
+          state.selectedAccountId && material
+            ? `测试账号：${accountName(selectedAccount())} · 测试素材：${material.material_id}`
+            : state.selectedAccountId
+            ? `测试账号：${accountName(selectedAccount())} · 尚未选择测试素材`
+            : material
+            ? `测试素材：${material.material_id} · 尚未选择测试账号`
+            : "尚未选择测试账号和素材。"
+        );
+      }
+      function renderRandomPlanPreview(item) {
+        const container = byId("randomPlanPreview");
+        container.replaceChildren();
+        const randomMode = String(item && item.schedule_mode || "fixed") === "random";
+        container.classList.toggle("hidden", !randomMode);
+        if (!randomMode) return;
+        const plans = Array.isArray(item.random_daily_plans)
+          ? item.random_daily_plans
+          : [];
+        if (!plans.length) {
+          const empty = document.createElement("div");
+          empty.className = "random-plan-item";
+          setText(
+            empty,
+            item.random_effective_date
+              ? `随机计划将从 ${item.random_effective_date}（北京时间）开始生成。`
+              : "随机计划尚未生成。"
+          );
+          container.appendChild(empty);
+          return;
+        }
+        plans.forEach(plan => {
+          const row = document.createElement("div");
+          row.className = "random-plan-item";
+          const id = cleanId(plan.account_id);
+          const account = state.accounts.find(candidate => accountId(candidate) === id);
+          const times = Array.isArray(plan.publish_times) ? plan.publish_times : [];
+          setText(
+            row,
+            `${account ? accountName(account) : `账号 ${id}`} · ${plan.shanghai_date}：${times.join("、") || "尚未生成"}`
+          );
+          container.appendChild(row);
+        });
+      }
+      function renderSchedule({ hydrateDraft = true } = {}) {
+        const item = state.schedule;
+        if (!item) {
+          if (hydrateDraft) {
+            renderFixedPublishTimes([DEFAULT_DAILY_PUBLISH_TIME]);
+            byId("randomScheduleEnabled").checked = false;
+            byId("randomDailyCount").value = "1";
+            byId("scheduleEnabled").checked = false;
+          }
+          syncScheduleModeControls();
+          renderRandomPlanPreview(null);
+          setText(byId("scheduleStatus"), "正在加载");
+          setText(byId("autoAccountCount"), "—");
+          setText(byId("scheduleVersion"), "—");
+          setText(byId("scheduleDraftStatus"), "—");
+          renderAccounts();
+          updateScheduleActions();
+          return;
+        }
+        const publishTimes = schedulePublishTimes(item);
+        const randomMode = String(item.schedule_mode || "fixed") === "random";
+        const randomCount = Number(item.random_daily_count || 0);
+        if (hydrateDraft && !state.scheduleDraftDirty) {
+          renderFixedPublishTimes(publishTimes.length ? publishTimes : [DEFAULT_DAILY_PUBLISH_TIME]);
+          byId("randomScheduleEnabled").checked = randomMode;
+          byId("randomDailyCount").value = String(randomCount || 1);
+          byId("scheduleEnabled").checked = boolValue(item.enabled) === true;
+          byId("caption").value = String(item.caption_template || CAPTION_TEMPLATE);
+          state.autoAccountIds = new Set(state.savedAutoAccountIds);
+          state.scheduleDraftBaseVersion = Number(item.version || 0);
+          state.scheduleStale = false;
+        }
+        syncScheduleModeControls();
+        renderRandomPlanPreview(item);
+        setText(
+          byId("scheduleStatus"),
+          boolValue(item.enabled) === true
+            ? randomMode
+              ? `已启用 · 每账号随机 ${randomCount} 次/天`
+              : `已启用 · 每天 ${publishTimes.join("、") || fixedPublishTimesFromDraft().join("、")}`
+            : "已停用"
+        );
+        const version = Number(item.version || 0);
+        setText(byId("scheduleVersion"), version > 0 ? `版本 ${version}` : "尚未保存");
+        setText(byId("autoAccountCount"), `${state.savedAutoAccountIds.size} 个`);
+        setText(
+          byId("scheduleDraftStatus"),
+          state.scheduleStale ? "配置已过期" : state.scheduleDraftDirty ? "有未保存变更" : "已保存"
+        );
+        setText(
+          byId("scheduleState"),
+          state.scheduleStale
+            ? "配置已被其他操作更新；当前草稿未覆盖，请刷新配置后重新修改。"
+            : state.scheduleDraftDirty && scheduleWantsDisable()
+            ? "自动发布将关闭；关闭不需要发布确认，点击“关闭自动发布”后生效。"
+            : state.scheduleDraftDirty
+            ? "账号、描述、时间或开关已修改；统一保存后生效。"
+            : boolValue(item.enabled) === true
+            ? "自动发布配置已加载并启用。"
+            : "自动发布配置已加载；当前为关闭状态。"
+        );
+        byId("scheduleState").className = `helper${state.scheduleStale ? " error" : ""}`;
+        renderAccounts();
+        renderSelectedAccountSummary();
+        updateCaptionState();
+        updateScheduleActions();
+      }
+      function applySchedule(payload, { hydrateDraft = true } = {}) {
+        const raw = Object.assign(emptySchedule(), readPayloadItem(payload, ["item", "auto_config", "schedule"]));
+        const accountIds = Array.isArray(raw.account_ids) ? raw.account_ids : [];
+        const publishTimes = Array.isArray(raw.publish_times) ? raw.publish_times : [];
+        const randomPlans = Array.isArray(raw.random_daily_plans) ? raw.random_daily_plans : [];
+        const scheduleMode = String(raw.schedule_mode || "fixed") === "random" ? "random" : "fixed";
+        const normalized = Object.assign(emptySchedule(), raw, {
+          loaded: true,
+          timezone: String(raw.timezone || "Asia/Shanghai"),
+          account_ids: Array.from(new Set(accountIds.map(cleanId).filter(id => /^[1-9]\d*$/.test(id)))),
+          publish_times: Array.from(new Set(publishTimes.map(value => String(value || "").trim()).filter(value => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)))).sort(),
+          schedule_mode: scheduleMode,
+          random_daily_count: Number(raw.random_daily_count || 0),
+          random_effective_date: String(raw.random_effective_date || ""),
+          random_daily_plans: randomPlans,
+          caption_template: String(raw.caption_template || CAPTION_TEMPLATE),
+          version: Number(raw.version || 0),
+          enabled: boolValue(raw.enabled) === true,
+        });
+        if (
+          state.scheduleDraftDirty &&
+          normalized.version !== state.scheduleDraftBaseVersion
+        ) {
+          state.scheduleStale = true;
+        }
+        state.schedule = normalized;
+        state.savedAutoAccountIds = new Set(normalized.account_ids);
+        state.savedAutoEnabled = normalized.enabled;
+        if (hydrateDraft && !state.scheduleDraftDirty) {
+          state.autoAccountIds = new Set(normalized.account_ids);
+        }
+        renderSchedule({ hydrateDraft });
+      }
+      async function loadSchedule({ preserveDraft = false, allowWhileSaving = false } = {}) {
+        if (state.scheduleBusy && !allowWhileSaving) return false;
+        const requestVersion = ++state.scheduleRequestVersion;
+        if (!preserveDraft && !state.scheduleDraftDirty) {
+          state.scheduleDraftDirty = false;
+          state.schedule = null;
+          renderSchedule();
+        }
+        if (!preserveDraft) {
+          setText(byId("scheduleState"), "正在加载自动发布账号、描述、时间和开关…");
+        }
+        try {
+          const result = await api(`${API_BASE}/auto-config`);
+          if (
+            requestVersion !== state.scheduleRequestVersion ||
+            (state.scheduleBusy && !allowWhileSaving)
+          ) return false;
+          applyGates(result);
+          applySchedule(result, { hydrateDraft: !preserveDraft || !state.scheduleDraftDirty });
+          return true;
+        } catch (error) {
+          if (
+            requestVersion !== state.scheduleRequestVersion ||
+            (state.scheduleBusy && !allowWhileSaving)
+          ) return false;
+          if (!preserveDraft && !state.scheduleDraftDirty) {
+            state.schedule = null;
+            renderSchedule();
+          }
+          setText(byId("scheduleState"), `自动发布配置加载失败：${error.message}`);
+          byId("scheduleState").className = "helper error";
+          return false;
+        }
+      }
+      async function saveSchedule() {
+        const error = scheduleSaveError();
+        if (error || state.scheduleBusy) {
+          if (error) {
+            setText(byId("scheduleState"), error);
+            byId("scheduleState").className = "helper error";
+            showToast(error, true);
+          }
+          return;
+        }
+        state.scheduleBusy = true;
+        state.scheduleRequestVersion += 1;
+        updateScheduleActions();
+        const button = byId("saveSchedule");
+        const requestedEnabled = byId("scheduleEnabled").checked;
+        const requestedMode = randomModeFromDraft() ? "random" : "fixed";
+        const requestedPublishTimes = requestedMode === "fixed"
+          ? fixedPublishTimesFromDraft()
+          : [];
+        const requestedRandomCount = requestedMode === "random"
+          ? Number(byId("randomDailyCount").value)
+          : 0;
+        const expectedVersion = Number(state.schedule && state.schedule.version || 0);
+        const schedulePayload = {
+          expected_version: expectedVersion,
+          enabled: requestedEnabled,
+          timezone: "Asia/Shanghai",
+          schedule_mode: requestedMode,
+          publish_times: requestedPublishTimes,
+          random_daily_count: requestedRandomCount,
+          source_account_ids: Array.from(state.autoAccountIds),
+          caption_template: byId("caption").value,
+          consent: {
+            accepted: byId("publishConsent").checked,
+            version: CONSENT_VERSION,
+            accepted_at: byId("publishConsent").checked ? ensureConsentAcceptedAt() : "",
+          },
+        };
+        setText(button, "正在保存…");
+        try {
+          const result = await api(`${API_BASE}/auto-config`, {
+            method: "POST",
+            body: JSON.stringify(schedulePayload),
+          });
+          state.scheduleRequestVersion += 1;
+          applyGates(result);
+          state.scheduleDraftDirty = false;
+          state.scheduleStale = false;
+          applySchedule(result, { hydrateDraft: true });
+          byId("publishConsent").checked = false;
+          state.consentAcceptedAt = "";
+          showToast(
+            boolValue(state.schedule.enabled) === true
+              ? state.schedule.schedule_mode === "random"
+                ? `已保存：${state.savedAutoAccountIds.size} 个账号各自随机 ${state.schedule.random_daily_count} 次/天。`
+                : `已保存：${state.savedAutoAccountIds.size} 个账号每天 ${schedulePublishTimes(state.schedule).join("、")} 自动发布。`
+              : "自动发布配置已保存并关闭；账号、模板与素材池仍保留。"
+          );
+        } catch (error) {
+          if (["tt_post_auto_config_version_conflict", "tt_post_schedule_version_conflict"].includes(error.code)) {
+            const refreshed = await loadSchedule({
+              preserveDraft: true,
+              allowWhileSaving: true,
+            });
+            state.scheduleStale = true;
+            const message = refreshed
+              ? "自动发布配置已被其他操作更新；当前草稿未覆盖，请刷新后重新修改。"
+              : "自动发布配置已变更且刷新失败；当前草稿未提交。";
+            setText(byId("scheduleState"), message);
+            byId("scheduleState").className = "helper error";
+            showToast(message, true);
+          } else {
+            const message = `自动发布配置保存失败：${error.message}`;
+            setText(byId("scheduleState"), message);
+            byId("scheduleState").className = "helper error";
+            showToast(message, true);
+          }
+        } finally {
+          state.scheduleBusy = false;
+          validateForm();
+        }
+      }
+      function validPendingRunNowId(value) {
+        return /^[1-9]\d{0,29}$/.test(String(value || ""));
+      }
+      function pendingRunNowTarget(accountIdValue, materialIdValue) {
+        return `${String(accountIdValue || "")}:${String(materialIdValue || "")}`;
+      }
+      function validPendingRunNowKey(accountIdValue, materialIdValue, value) {
+        const account = String(accountIdValue || "");
+        const material = String(materialIdValue || "");
+        const key = String(value || "");
+        const prefix = `tt-post:test-publish:${account}:${material}:`;
+        if (
+          !validPendingRunNowId(account) ||
+          !validPendingRunNowId(material) ||
+          key.length <= prefix.length ||
+          key.length > 255 ||
+          !key.startsWith(prefix)
+        ) return false;
+        return /^[A-Za-z0-9:-]{8,180}$/.test(key.slice(prefix.length));
+      }
+      function validPendingRunNowEntry(target, value) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+        const account = String(value.account_id || "");
+        const material = String(value.material_id || "");
+        const configVersion = Number(value.expected_config_version);
+        const acceptedAt = String(value.consent_accepted_at || "");
+        const status = String(value.status || "").trim().toLowerCase();
+        if (target !== pendingRunNowTarget(account, material)) return false;
+        if (!validPendingRunNowKey(account, material, value.key)) return false;
+        if (!Number.isInteger(configVersion) || configVersion <= 0 || configVersion > 2147483647) return false;
+        if (!acceptedAt || acceptedAt.length > 64 || !Number.isFinite(Date.parse(acceptedAt))) return false;
+        if (value.direct_test_id && !validPendingRunNowId(value.direct_test_id)) return false;
+        return status === "" || status === "unknown" || RUN_NOW_SUBMITTED_STATUSES.has(status);
+      }
+      function persistPendingRunNowState() {
+        const payload = Object.create(null);
+        Object.keys(state.pendingRunNowByTarget)
+          .sort()
+          .slice(0, RUN_NOW_PENDING_MAX_TARGETS)
+          .forEach(target => {
+            const entry = state.pendingRunNowByTarget[target];
+            if (validPendingRunNowEntry(target, entry)) {
+              payload[target] = {
+                account_id: entry.account_id,
+                material_id: entry.material_id,
+                key: entry.key,
+                status: entry.status,
+                expected_config_version: entry.expected_config_version,
+                consent_accepted_at: entry.consent_accepted_at,
+                direct_test_id: entry.direct_test_id || "",
+              };
+            }
+          });
+        try {
+          window.sessionStorage.setItem(RUN_NOW_PENDING_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_) {
+          // sessionStorage may be unavailable; the in-memory idempotency guard remains active.
+        }
+      }
+      function loadPendingRunNowState() {
+        const clean = Object.create(null);
+        let raw = "";
+        try {
+          raw = window.sessionStorage.getItem(RUN_NOW_PENDING_STORAGE_KEY) || "";
+        } catch (_) {
+          state.pendingRunNowByTarget = clean;
+          return;
+        }
+        if (!raw || raw.length > RUN_NOW_PENDING_STORAGE_MAX_BYTES) {
+          if (raw) try { window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY); } catch (_) {}
+          state.pendingRunNowByTarget = clean;
+          return;
+        }
+        let decoded;
+        try { decoded = JSON.parse(raw); } catch (_) { decoded = null; }
+        if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+          try { window.sessionStorage.removeItem(RUN_NOW_PENDING_STORAGE_KEY); } catch (_) {}
+          state.pendingRunNowByTarget = clean;
+          return;
+        }
+        let accepted = 0;
+        Object.entries(decoded).forEach(([target, entry]) => {
+          if (accepted < RUN_NOW_PENDING_MAX_TARGETS && validPendingRunNowEntry(target, entry)) {
+            clean[target] = {
+              account_id: String(entry.account_id),
+              material_id: String(entry.material_id),
+              key: entry.key,
+              status: String(entry.status || "").trim().toLowerCase(),
+              expected_config_version: Number(entry.expected_config_version),
+              consent_accepted_at: String(entry.consent_accepted_at),
+              direct_test_id: String(entry.direct_test_id || ""),
+            };
+            accepted += 1;
+          }
+        });
+        state.pendingRunNowByTarget = clean;
+        persistPendingRunNowState();
+      }
+      function pendingRunNowEntry(accountIdValue, materialIdValue) {
+        const target = pendingRunNowTarget(accountIdValue, materialIdValue);
+        const entry = state.pendingRunNowByTarget[target];
+        return validPendingRunNowEntry(target, entry) ? entry : null;
+      }
+      function pendingRunNowRequestForTarget(accountIdValue, materialIdValue) {
+        const account = String(accountIdValue || "");
+        const material = String(materialIdValue || "");
+        const target = pendingRunNowTarget(account, material);
+        const existing = pendingRunNowEntry(account, material);
+        if (existing) return existing;
+        const suffix = window.crypto && typeof window.crypto.randomUUID === "function"
+          ? window.crypto.randomUUID()
+          : `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        const requestKey = `tt-post:test-publish:${account}:${material}:${suffix}`;
+        if (!validPendingRunNowKey(account, material, requestKey)) {
+          throw new Error("无法生成有效的立即发布请求标识");
+        }
+        state.pendingRunNowByTarget[target] = {
+          account_id: account,
+          material_id: material,
+          key: requestKey,
+          status: "",
+          expected_config_version: Number(state.schedule && state.schedule.version || 0),
+          consent_accepted_at: ensureConsentAcceptedAt(),
+          direct_test_id: "",
+        };
+        persistPendingRunNowState();
+        return state.pendingRunNowByTarget[target];
+      }
+      function clearPendingRunNowKey(accountIdValue, materialIdValue, requestKey) {
+        const target = pendingRunNowTarget(accountIdValue, materialIdValue);
+        const existing = pendingRunNowEntry(accountIdValue, materialIdValue);
+        if (existing && existing.key === requestKey) {
+          delete state.pendingRunNowByTarget[target];
+          persistPendingRunNowState();
+        }
+      }
+      function updatePendingRunNowEntry(accountIdValue, materialIdValue, requestKey, changes) {
+        const target = pendingRunNowTarget(accountIdValue, materialIdValue);
+        const existing = pendingRunNowEntry(accountIdValue, materialIdValue);
+        if (existing && existing.key === requestKey) {
+          state.pendingRunNowByTarget[target] = Object.assign({}, existing, changes || {});
+          persistPendingRunNowState();
+        }
+      }
+      function markPendingRunNowUnknown(accountIdValue, materialIdValue, requestKey) {
+        updatePendingRunNowEntry(accountIdValue, materialIdValue, requestKey, { status: "unknown" });
+      }
+      function classifyRunNowResponse(run) {
+        const item = asObject(run);
+        const status = String(item.status || item.run_status || "").trim().toLowerCase();
+        if (RUN_NOW_NOT_PUBLISHED_STATUSES.has(status)) {
+          return { kind: "not_published", status };
+        }
+        if (status === "unknown") {
+          return { kind: "unknown", status };
+        }
+        if (status === "published") {
+          return { kind: "published", status };
+        }
+        if (RUN_NOW_SUBMITTED_STATUSES.has(status) || cleanId(item.queue_id)) {
+          return { kind: "submitted", status };
+        }
+        return { kind: "unconfirmed", status };
+      }
+      function reconcilePendingRunNowState(items) {
+        const byKey = new Map();
+        (Array.isArray(items) ? items : []).forEach(item => {
+          const key = String(item && item.idempotency_key || "");
+          if (key) byKey.set(key, item);
+        });
+        let changed = false;
+        Object.entries(state.pendingRunNowByTarget).forEach(([target, entry]) => {
+          if (!validPendingRunNowEntry(target, entry)) return;
+          const item = byKey.get(entry.key);
+          if (!item) return;
+          const outcome = classifyRunNowResponse(item);
+          if (outcome.kind === "published" || outcome.kind === "not_published") {
+            delete state.pendingRunNowByTarget[target];
+            changed = true;
+            return;
+          }
+          if (outcome.kind === "submitted" || outcome.kind === "unknown") {
+            state.pendingRunNowByTarget[target] = Object.assign({}, entry, {
+              status: outcome.status || (outcome.kind === "unknown" ? "unknown" : entry.status),
+              direct_test_id: String(item.id || entry.direct_test_id || ""),
+            });
+            changed = true;
+          }
+        });
+        if (changed) persistPendingRunNowState();
+      }
+      function renderDirectTests(items) {
+        const list = byId("directTestRows");
+        list.replaceChildren();
+        if (!items.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          setText(empty, "暂无立即发布测试任务。");
+          list.appendChild(empty);
+          return;
+        }
+        items.slice(0, 5).forEach(item => {
+          const row = document.createElement("article");
+          row.className = "direct-test-item";
+          const copy = document.createElement("div");
+          copy.className = "direct-test-item-copy";
+          const title = document.createElement("strong");
+          setText(title, `测试任务 ${item.id || "—"} · 素材 ${item.material_id || "—"}`);
+          const account = document.createElement("span");
+          setText(
+            account,
+            `账号 ${item.source_account_id || item.account_id || "—"} · 阶段 ${item.claim_phase || item.status || "—"}`
+          );
+          const job = document.createElement("span");
+          setText(job, `制作任务 ${item.gpu_job_id || "—"} · 更新 ${formatTime(item.updated_at)}`);
+          copy.append(title, account, job);
+          row.appendChild(copy);
+          const meta = statusMeta(item);
+          row.appendChild(badge(meta.label, meta.kind));
+          const safeError = [item.error_code, item.error_message || item.safe_message]
+            .filter(Boolean)
+            .join(" · ");
+          if (safeError) {
+            const error = document.createElement("div");
+            error.className = "direct-test-error";
+            setText(error, safeError);
+            row.appendChild(error);
+          }
+          list.appendChild(row);
+        });
+      }
+      function directTestPollingNeeded() {
+        if (state.directTests.some(item => DIRECT_TEST_POLL_STATUSES.has(String(item.status || "").toLowerCase()))) {
+          return true;
+        }
+        return Object.entries(state.pendingRunNowByTarget).some(
+          ([target, entry]) => (
+            validPendingRunNowEntry(target, entry) && entry.status !== "unknown"
+          )
+        );
+      }
+      function stopDirectTestPolling() {
+        if (state.directTestPollTimer) {
+          window.clearTimeout(state.directTestPollTimer);
+          state.directTestPollTimer = null;
+        }
+      }
+      function syncDirectTestPolling() {
+        stopDirectTestPolling();
+        if (document.hidden || !directTestPollingNeeded()) return;
+        state.directTestPollTimer = window.setTimeout(() => {
+          state.directTestPollTimer = null;
+          void loadDirectTests({ quiet: true, reschedule: false })
+            .finally(syncDirectTestPolling);
+        }, DIRECT_TEST_POLL_INTERVAL_MS);
+      }
+      async function runNow() {
+        const error = runNowDisabledReason();
+        if (error || state.runNowBusy) {
+          if (error) showToast(error, true);
+          return;
+        }
+        const item = selectedAccount();
+        const material = selectedDirectMaterial();
+        const confirmed = window.confirm(
+          `确定使用“${accountName(item)}”立即发布素材 ${material.material_id}？本次测试不入池、不消费素材池；即使历史已发布也允许再次测试。`
+        );
+        if (!confirmed) return;
+        const requestedAccountId = state.selectedAccountId;
+        const requestedMaterialId = cleanId(material.material_id);
+        const requestedAccountName = accountName(item);
+        const pendingRequest = pendingRunNowRequestForTarget(requestedAccountId, requestedMaterialId);
+        const requestKey = pendingRequest.key;
+        state.runNowBusy = true;
+        updateScheduleActions();
+        const button = byId("runNow");
+        setText(button, "正在提交…");
+        try {
+          const result = await api(`${API_BASE}/test-publish`, {
+            method: "POST",
+            body: JSON.stringify({
+              source_account_id: requestedAccountId,
+              material_id: requestedMaterialId,
+              expected_config_version: pendingRequest.expected_config_version,
+              idempotency_key: requestKey,
+              consent: {
+                accepted: true,
+                version: CONSENT_VERSION,
+                accepted_at: pendingRequest.consent_accepted_at,
+              },
+            }),
+          });
+          applyGates(result);
+          const run = readPayloadItem(result, ["item", "run", "queue"]);
+          const runId = run.id || run.run_id || run.queue_id || "";
+          const outcome = classifyRunNowResponse(run);
+          const safeDetail = String(
+            run.error_message || run.safe_message || run.message || ""
+          ).trim();
+          if (outcome.kind === "not_published") {
+            clearPendingRunNowKey(requestedAccountId, requestedMaterialId, requestKey);
+            showToast(
+              `“${requestedAccountName}”本次未发布（${outcome.status}）${
+                safeDetail ? `：${safeDetail}` : "。"
+              }`,
+              true
+            );
+          } else if (outcome.kind === "unknown") {
+            markPendingRunNowUnknown(requestedAccountId, requestedMaterialId, requestKey);
+            showToast(
+              `“${requestedAccountName}”立即发布结果未知，需人工核对；系统已保留同一请求标识，不会生成新的重复请求。`,
+              true
+            );
+          } else if (outcome.kind === "published") {
+            clearPendingRunNowKey(requestedAccountId, requestedMaterialId, requestKey);
+            showToast(
+              `“${requestedAccountName}”立即发布已完成${runId ? `（${runId}）` : "。"}`
+            );
+          } else if (outcome.kind === "submitted") {
+            updatePendingRunNowEntry(
+              requestedAccountId,
+              requestedMaterialId,
+              requestKey,
+              { status: outcome.status, direct_test_id: String(runId || "") }
+            );
+            showToast(
+              `“${requestedAccountName}”立即发布已提交${runId ? `（${runId}）` : ""}，请到 TT 发布日志查看进度。`
+            );
+          } else {
+            throw new Error(
+              outcome.status
+                ? `服务端返回未识别状态 ${outcome.status}`
+                : "服务端未返回可确认的立即发布状态"
+            );
+          }
+          await loadDirectTests();
+        } catch (error) {
+          if (Number(error.status) >= 400 && Number(error.status) < 500) {
+            clearPendingRunNowKey(requestedAccountId, requestedMaterialId, requestKey);
+            showToast(`立即发布请求未创建：${error.message}`, true);
+          } else {
+            markPendingRunNowUnknown(requestedAccountId, requestedMaterialId, requestKey);
+            showToast(
+              `立即发布结果未确认：${error.message}。可再次点击，系统会复用同一请求标识安全重试。`,
+              true
+            );
+          }
+          await loadDirectTests();
+        } finally {
+          state.runNowBusy = false;
+          setText(button, "立即发布所选素材");
+          updateScheduleActions();
+        }
+      }
+      async function loadDirectTests({ quiet = false, reschedule = true } = {}) {
+        if (state.directTestsLoading) return false;
+        state.directTestsLoading = true;
+        try {
+          const result = await api(`${API_BASE}/direct-tests?page=1&page_size=20`);
+          applyGates(result);
+          state.directTests = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.direct_tests) ? result.direct_tests : []);
+          reconcilePendingRunNowState(state.directTests);
+          renderDirectTests(state.directTests);
+          const latest = state.directTests[0];
+          byId("directTestSummary").className = "helper";
+          setText(
+            byId("directTestSummary"),
+            latest
+              ? `最近测试：素材 ${latest.material_id || "—"} · 账号 ${latest.source_account_id || latest.account_id || "—"} · ${statusMeta(latest).label}`
+              : "暂无立即发布测试任务。"
+          );
+          return true;
+        } catch (error) {
+          if (!quiet) {
+            setText(byId("directTestSummary"), `测试任务加载失败：${error.message}`);
+            byId("directTestSummary").className = "helper error";
+          }
+          return false;
+        } finally {
+          state.directTestsLoading = false;
+          if (reschedule) syncDirectTestPolling();
+        }
+      }
+      async function loadAccounts() {
+        setAccountListEmpty("正在加载账号…");
+        try {
+          const result = await api(`${API_BASE}/accounts`);
+          applyGates(result);
+          const items = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.accounts) ? result.accounts : []);
+          state.accounts = items.filter(item => accountId(item));
+          if (state.selectedAccountId && !state.accounts.some(item => accountId(item) === state.selectedAccountId)) {
+            state.selectedAccountId = "";
+            resetCreatorInfo();
+          }
+          renderAccounts();
+          renderOperationAccountOptions();
+          renderAccountSettings();
+          if (boolValue(result.account_source_available) === false) {
+            setText(
+              byId("accountHelp"),
+              String(result.warning || "账号来源暂不可用；当前仅显示可管理的匿名排期占位。")
+            );
+            byId("accountHelp").className = "helper warning";
+          } else {
+            setText(byId("accountHelp"), `已加载 ${state.accounts.length} 个账号；列表不包含任何凭证。`);
+            byId("accountHelp").className = "helper";
+          }
+        } catch (error) {
+          state.accounts = [];
+          setAccountListEmpty(`账号加载失败：${error.message}`);
+          renderOperationAccountOptions();
+          setText(byId("accountHelp"), "账号列表不可用，已停止新建任务。");
+          byId("accountHelp").className = "helper error";
+        }
+        validateForm();
+      }
+      function resetBatchConfirmation() {
+        state.formKey = "";
+        state.consentAcceptedAt = "";
+        state.queueSummary = "";
+        state.queueSummaryIsError = false;
+        byId("publishConsent").checked = false;
+      }
+      function normalizeMaterialIdToken(value, index) {
+        if (!/^\d+$/.test(value)) {
+          throw new Error(`第 ${index + 1} 个素材 ID 不是正整数`);
+        }
+        const withoutLeadingZeros = value.replace(/^0+/, "");
+        if (!/^[1-9]\d{0,18}$/.test(withoutLeadingZeros)) {
+          throw new Error(`第 ${index + 1} 个素材 ID 规范化后必须是 1 到 19 位正整数`);
+        }
+        return String(BigInt(withoutLeadingZeros));
+      }
+      function parseMaterialIds() {
+        const raw = byId("materialIds").value.trim();
+        if (!raw) throw new Error("请先输入至少一个素材 ID");
+        const tokens = raw.split(/[\s,，;；]+/).filter(Boolean);
+        const normalized = tokens.map((value, index) => normalizeMaterialIdToken(value, index));
+        const ids = Array.from(new Set(normalized));
+        if (ids.length > 100) throw new Error("每次最多提交 100 个素材 ID");
+        return ids;
+      }
+      function updateMaterialProgress(message, kind = "") {
+        const progress = byId("materialProgress");
+        setText(progress, message, "");
+        progress.className = `material-progress${kind ? ` ${kind}` : ""}`;
+      }
+      function renderMaterialResults() {
+        const container = byId("materialResults");
+        container.replaceChildren();
+        if (!state.materials.length && !state.failures.length) {
+          hide(container);
+          return;
+        }
+        state.materials.forEach(item => {
+          const materialId = cleanId(item.material_id);
+          const selected = materialId === state.selectedDirectMaterialId;
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = `material-result success${selected ? " active" : ""}`;
+          row.dataset.directMaterialId = materialId;
+          row.setAttribute("aria-pressed", selected ? "true" : "false");
+          const copy = document.createElement("span");
+          copy.className = "material-result-copy";
+          const title = document.createElement("strong");
+          setText(title, `素材 ${item.material_id}`);
+          const detail = document.createElement("span");
+          setText(detail, `Drama ID：${item.content_id} · ${item.title || item.drama_name || item.material_name || "素材身份已确认"}`);
+          copy.append(title, detail);
+          const status = document.createElement("span");
+          status.className = "material-result-state";
+          setText(status, selected ? "已选测试" : "校验通过 · 可选测试");
+          row.append(copy, status);
+          container.appendChild(row);
+        });
+        state.failures.forEach(item => {
+          const row = document.createElement("div");
+          row.className = "material-result failure";
+          const copy = document.createElement("span");
+          copy.className = "material-result-copy";
+          const title = document.createElement("strong");
+          setText(title, `素材 ${item.material_id}`);
+          const detail = document.createElement("span");
+          setText(detail, item.message || "素材校验失败");
+          copy.append(title, detail);
+          const status = document.createElement("span");
+          status.className = "material-result-state";
+          setText(status, "校验失败");
+          row.append(copy, status);
+          container.appendChild(row);
+        });
+        show(container);
+      }
+      function renderQueueSubmitResults() {
+        const panel = byId("queueSubmitPanel");
+        const container = byId("queueSubmitResults");
+        container.replaceChildren();
+        if (!state.queueResults.length) {
+          hide(panel);
+          return;
+        }
+        const counts = state.queueResults.reduce(
+          (result, item) => {
+            result[item.status] = (result[item.status] || 0) + 1;
+            return result;
+          },
+          {}
+        );
+        setText(
+          byId("queueSubmitSummary"),
+          `最近一批共 ${state.queueResults.length} 条：成功 ${counts.success || 0}，失败 ${counts.failure || 0}，处理中 ${counts.saving || 0}，待处理 ${counts.pending || 0}`
+        );
+        const labels = {
+          pending: "等待入池",
+          saving: "正在入池",
+          success: "已入池，后台预制作",
+          failure: "入池失败",
+        };
+        state.queueResults.forEach(item => {
+          const row = document.createElement("div");
+          row.className = `material-result ${item.status || "pending"}`;
+          const copy = document.createElement("span");
+          copy.className = "material-result-copy";
+          const title = document.createElement("strong");
+          setText(title, `素材 ${item.material_id}`);
+          const detail = document.createElement("span");
+          const pieces = [];
+          if (item.message) pieces.push(item.message);
+          setText(detail, pieces.join(" · ") || "等待加入自动发布素材池");
+          copy.append(title, detail);
+          const status = document.createElement("span");
+          status.className = "material-result-state";
+          setText(status, labels[item.status] || "等待入池");
+          row.append(copy, status);
+          container.appendChild(row);
+        });
+        show(panel);
+      }
+      function resetMaterials(message = "支持一次校验最多 100 个素材；系统只确认素材身份和真实 Drama ID。") {
+        state.materials = [];
+        state.failures = [];
+        state.selectedDirectMaterialId = "";
+        state.validationCompleted = 0;
+        state.validationTotal = 0;
+        byId("materialResults").replaceChildren();
+        hide(byId("materialResults"));
+        updateMaterialProgress(message);
+        setText(byId("materialHelp"), message);
+        byId("materialHelp").className = "helper";
+        resetBatchConfirmation();
+        validateForm();
+      }
+      async function validateMaterials() {
+        if (state.busy) return;
+        let materialIds;
+        try {
+          materialIds = parseMaterialIds();
+        } catch (error) {
+          setText(byId("materialHelp"), error.message);
+          byId("materialHelp").className = "helper error";
+          updateMaterialProgress(error.message, "error");
+          return;
+        }
+        byId("materialIds").value = materialIds.join("\n");
+        resetMaterials(`准备校验 ${materialIds.length} 个素材…`);
+        state.validationTotal = materialIds.length;
+        state.busy = true;
+        const button = byId("previewMaterial");
+        button.disabled = true;
+        byId("materialIds").disabled = true;
+        setText(button, `校验中 0/${materialIds.length}`);
+        try {
+          for (let index = 0; index < materialIds.length; index += 1) {
+            const materialId = materialIds[index];
+            updateMaterialProgress(
+              `正在校验 ${index + 1}/${materialIds.length}：素材 ${materialId}`
+            );
+            setText(button, `校验中 ${index + 1}/${materialIds.length}`);
+            try {
+              const result = await api(`${API_BASE}/materials/preview`, {
+                method: "POST",
+                body: JSON.stringify({ material_id: materialId, caption_template: byId("caption").value }),
+              });
+              applyGates(result);
+              const item = readPayloadItem(result, ["item", "material"]);
+              const returnedMaterialId = cleanId(item.material_id || materialId);
+              const contentId = cleanId(item.content_id);
+              if (returnedMaterialId !== materialId) throw new Error("返回素材与输入素材不一致");
+              if (!/^[A-Za-z0-9_-]{1,128}$/.test(contentId)) {
+                throw new Error("素材没有可用的真实 Drama ID");
+              }
+              state.materials.push(Object.assign({}, item, {
+                material_id: materialId,
+                content_id: contentId,
+                input_index: index,
+              }));
+            } catch (error) {
+              state.failures.push({
+                material_id: materialId,
+                input_index: index,
+                message: error.message || "素材校验失败",
+              });
+            }
+            state.validationCompleted = index + 1;
+            renderMaterialResults();
+          }
+          const summary = `校验完成：通过 ${state.materials.length} 个，失败 ${state.failures.length} 个。`;
+          if (state.materials.length === 1) {
+            state.selectedDirectMaterialId = cleanId(state.materials[0].material_id);
+          } else if (!state.materials.some(item => cleanId(item.material_id) === state.selectedDirectMaterialId)) {
+            state.selectedDirectMaterialId = "";
+          }
+          renderMaterialResults();
+          updateMaterialProgress(summary, state.failures.length ? "error" : "success");
+          setText(
+            byId("materialHelp"),
+            state.failures.length
+              ? `${summary} 失败项不会阻塞已通过素材入池；入池后由后台预制作视频。`
+              : `${summary} 已通过素材可以立即入池，视频将在后台预制作。`
+          );
+          byId("materialHelp").className = `helper ${state.failures.length ? "error" : "success"}`;
+        } finally {
+          state.busy = false;
+          button.disabled = false;
+          byId("materialIds").disabled = false;
+          setText(button, "批量校验素材");
+        }
+        resetBatchConfirmation();
+        updateCaptionState();
+        validateForm();
+      }
+      function normalizeDramaDescription(value) {
+        const raw = String(value || "");
+        if (raw.includes("\u0000")) return "";
+        const normalized = raw.replace(/\s+/g, " ").trim();
+        if (
+          !normalized ||
+          Array.from(normalized).length > 4096 ||
+          /[\u0000-\u001f]/.test(normalized)
+        ) return "";
+        return normalized;
+      }
+      function normalizeDramaName(value) {
+        const raw = String(value || "");
+        if (raw.includes("\u0000")) return "";
+        const normalized = raw.replace(/\s+/g, " ").trim();
+        if (
+          !normalized ||
+          Array.from(normalized).length > 500 ||
+          /[\u0000-\u001f]/.test(normalized)
+        ) return "";
+        return normalized;
+      }
+      function renderCaptionTemplate(template, contentId, description, dramaName) {
+        const placeholderPattern = new RegExp(CAPTION_PLACEHOLDER_PATTERN.source, "g");
+        const renderedContent = String(template || "").replace(
+          placeholderPattern,
+          (match, name) => {
+            const normalizedName = String(name || "").trim();
+            if (match === "{{m_url}}") return "https://ai.yingliangads.com/m/preview";
+            if (["contect_id", "content_id"].includes(normalizedName)) return cleanId(contentId);
+            if (normalizedName === "drama_name") return normalizeDramaName(dramaName);
+            return match;
+          }
+        );
+        const normalizedDescription = normalizeDramaDescription(description);
+        return renderedContent.replace(
+          new RegExp(CAPTION_SINGLE_PLACEHOLDER_PATTERN.source, "g"),
+          (match, name) => {
+            if (name === "url") return CAPTION_URL_PREVIEW;
+            if (name === "desc") return normalizedDescription;
+            if (name === "code") return CAPTION_CODE_PREVIEW;
+            return match;
+          }
+        ).trim();
+      }
+      function captionTemplateValidation(materials = state.materials) {
+        const template = byId("caption").value;
+        if (!template.trim()) return { error: "发布描述模板不能为空。", maxRenderedUnits: 0 };
+        if (template.includes("\u0000")) return { error: "发布描述模板包含无效字符。", maxRenderedUnits: 0 };
+        const placeholderPattern = new RegExp(CAPTION_PLACEHOLDER_PATTERN.source, "g");
+        const placeholders = Array.from(
+          template.matchAll(placeholderPattern),
+          match => String(match[1] || "").trim()
+        );
+        if (Array.from(template.matchAll(new RegExp(CAPTION_PLACEHOLDER_PATTERN.source,"g"))).some(match => String(match[1]).trim()==="m_url" && match[0]!=="{{m_url}}")) {
+          return {error:"Moboreels 宏请使用精确的 {{m_url}}。",maxRenderedUnits:0};
+        }
+        const remainder = template.replace(
+          new RegExp(CAPTION_PLACEHOLDER_PATTERN.source, "g"),
+          ""
+        );
+        const singlePlaceholderPattern = new RegExp(
+          CAPTION_SINGLE_PLACEHOLDER_PATTERN.source,
+          "g"
+        );
+        const singlePlaceholders = Array.from(
+          remainder.matchAll(singlePlaceholderPattern),
+          match => String(match[1] || "")
+        );
+        const braceRemainder = remainder.replace(
+          new RegExp(CAPTION_SINGLE_PLACEHOLDER_PATTERN.source, "g"),
+          ""
+        );
+        if (
+          braceRemainder.includes("{") ||
+          braceRemainder.includes("}")
+        ) {
+          return {
+            error: "发布描述模板包含不完整占位符。",
+            maxRenderedUnits: 0,
+          };
+        }
+        const unknown = Array.from(new Set(
+          placeholders.filter(name => !CAPTION_PLACEHOLDERS.has(name))
+        ));
+        if (unknown.length) {
+          return {
+            error: `发布描述模板包含未知占位符：${unknown.slice(0, 5).join("、")}`,
+            maxRenderedUnits: 0,
+          };
+        }
+        const unknownSingle = Array.from(new Set(
+          singlePlaceholders.filter(name => !["url", "desc", "code"].includes(name))
+        ));
+        if (unknownSingle.length) {
+          return {
+            error: `发布描述模板包含未知占位符：${unknownSingle.slice(0, 5).join("、")}`,
+            maxRenderedUnits: 0,
+          };
+        }
+        let maxRenderedUnits = 0;
+        for (const material of materials) {
+          if (
+            placeholders.includes("drama_name") &&
+            !normalizeDramaName(material.drama_name)
+          ) {
+            return {
+              error: `素材 ${material.material_id} 缺少有效剧名，不能使用 {{drama_name}}。`,
+              maxRenderedUnits,
+            };
+          }
+          if (
+            singlePlaceholders.includes("desc") &&
+            !normalizeDramaDescription(material.description)
+          ) {
+            return {
+              error: `素材 ${material.material_id} 缺少有效剧描述，不能使用 {desc}。`,
+              maxRenderedUnits,
+            };
+          }
+          const units = utf16Units(renderCaptionTemplate(
+            template,
+            material.content_id,
+            material.description,
+            material.drama_name
+          ));
+          maxRenderedUnits = Math.max(maxRenderedUnits, units);
+          if (units > 2200) {
+            return {
+              error: `素材 ${material.material_id} 的描述渲染后超过 2200 个 UTF-16 单位。`,
+              maxRenderedUnits,
+            };
+          }
+        }
+        return { error: "", maxRenderedUnits };
+      }
+      function updateCaptionState() {
+        const templateUnits = utf16Units(byId("caption").value);
+        const validation = captionTemplateValidation();
+        setText(byId("captionCount"), `${templateUnits} / 2200（模板）`);
+        if (validation.error) {
+          setText(byId("captionHelp"), validation.error);
+          byId("captionHelp").className = "helper error";
+        } else if (!state.materials.length) {
+          setText(
+            byId("captionHelp"),
+            "模板有效；校验素材后会逐条替换真实 Drama ID 并检查最终长度。"
+          );
+          byId("captionHelp").className = "helper success";
+        } else {
+          setText(
+            byId("captionHelp"),
+            `模板有效；${state.materials.length} 个成功素材渲染后最长 ${validation.maxRenderedUnits} / 2200。`
+          );
+          byId("captionHelp").className = "helper success";
+        }
+        validateForm();
+      }
+      function formValidationError() {
+        if (!state.schedule) return "请等待自动发布配置加载完成。";
+        if (Number(state.schedule.version || 0) <= 0) return "请先保存自动发布配置，再加入素材池。";
+        if (state.scheduleDraftDirty || state.scheduleStale) return "描述或自动发布配置有未保存变更，请先保存配置。";
+        if (!state.savedAutoAccountIds.size) return "请先保存至少一个自动发布账号，再加入素材池。";
+        if (!state.materials.length) return "请先批量校验素材，并至少确认一个真实 Drama ID。";
+        const captionValidation = captionTemplateValidation();
+        if (captionValidation.error) return captionValidation.error;
+        if (!byId("publishConsent").checked) return "请核对内容并勾选发布确认。";
+        return "";
+      }
+      function validateForm() {
+        const error = formValidationError();
+        const formState = byId("formState");
+        const create = byId("addMaterialsToPool");
+        create.disabled = !!error || state.busy;
+        formState.className = `form-state${error || state.queueSummaryIsError ? " error" : " success"}`;
+        if (error) {
+          setText(formState, error);
+        } else if (state.queueSummary) {
+          setText(formState, state.queueSummary);
+        } else {
+          setText(
+            formState,
+            `信息完整，将把 ${state.materials.length} 条素材加入素材池；发布时由同剧语言账号领取最早可用素材。`
+          );
+        }
+        const count = state.materials.length;
+        setText(
+          create,
+          `加入素材池${count ? `（${count} 条）` : ""}`
+        );
+        updateScheduleActions();
+      }
+      function ensureFormKey() {
+        if (state.formKey) return state.formKey;
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+          state.formKey = `tt-post:${window.crypto.randomUUID()}`;
+        } else {
+          state.formKey = `tt-post:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        }
+        return state.formKey;
+      }
+      function ensureConsentAcceptedAt() {
+        if (!state.consentAcceptedAt) {
+          state.consentAcceptedAt = new Date().toISOString();
+        }
+        return state.consentAcceptedAt;
+      }
+      function materialPoolPayload(material) {
+        return {
+          idempotency_key: `${ensureFormKey()}:${material.material_id}`,
+          material_id: material.material_id,
+          content_id: material.content_id,
+          expected_config_version: Number(state.schedule && state.schedule.version || 0),
+          caption_template: byId("caption").value,
+          consent: {
+            accepted: true,
+            version: CONSENT_VERSION,
+            accepted_at: ensureConsentAcceptedAt(),
+          },
+        };
+      }
+      function resetMaterialPoolForm() {
+        state.formKey = "";
+        state.consentAcceptedAt = "";
+        byId("materialIds").value = "";
+        byId("caption").value = String(
+          state.schedule && state.schedule.caption_template || CAPTION_TEMPLATE
+        );
+        byId("publishConsent").checked = false;
+        resetMaterials();
+        updateCaptionState();
+      }
+      async function addMaterialsToPool() {
+        const error = formValidationError();
+        if (error || state.busy) {
+          if (error) showToast(error, true);
+          return;
+        }
+        state.busy = true;
+        byId("createFormFields").inert = true;
+        byId("createFormFields").setAttribute("aria-busy", "true");
+        validateForm();
+        const button = byId("addMaterialsToPool");
+        const materials = state.materials.slice();
+        const created = [];
+        const poolFailures = [];
+        ensureFormKey();
+        const payloads = materials.map(material => materialPoolPayload(material));
+        state.queueResults = payloads.map(payload => ({
+          material_id: payload.material_id,
+          status: "pending",
+          message: "",
+        }));
+        renderQueueSubmitResults();
+        try {
+          for (let index = 0; index < materials.length; index += 1) {
+            const material = materials[index];
+            const poolResult = state.queueResults[index];
+            poolResult.status = "saving";
+            poolResult.message = "";
+            renderQueueSubmitResults();
+            setText(button, `正在入池 ${index + 1}/${materials.length}`);
+            try {
+              const result = await api(`${API_BASE}/material-pool`, {
+                method: "POST",
+                body: JSON.stringify(payloads[index]),
+              });
+              applyGates(result);
+              const item = readPayloadItem(result, ["item", "material"]);
+              poolResult.status = "success";
+              poolResult.message = item.id || item.pool_item_id
+                ? `池记录 ${item.id || item.pool_item_id} 已入池，后台预制作`
+                : "已入池，后台预制作";
+              created.push({
+                material_id: material.material_id,
+                item,
+              });
+            } catch (requestError) {
+              poolResult.status = "failure";
+              poolResult.message = requestError.message || "入池失败";
+              poolFailures.push({
+                material_id: material.material_id,
+                message: poolResult.message,
+              });
+            }
+            renderQueueSubmitResults();
+          }
+          if (created.length) {
+            await loadSchedule({ preserveDraft: true });
+            void loadPreparationStatus({ quiet: true });
+          }
+          const previewFailureCount = state.failures.length;
+          if (!poolFailures.length && !previewFailureCount) {
+            showToast(`已入池 ${created.length} 条，后台预制作。`);
+            resetMaterialPoolForm();
+          } else {
+            const details = poolFailures
+              .slice(0, 5)
+              .map(item => `素材 ${item.material_id}：${item.message}`)
+              .join("；");
+            const parts = [
+              `已入池 ${created.length} 条`,
+              poolFailures.length ? `入池失败 ${poolFailures.length} 条` : "",
+              previewFailureCount ? `校验失败未入池 ${previewFailureCount} 条` : "",
+            ].filter(Boolean);
+            state.queueSummary = `${parts.join("，")}。${
+              details ? ` ${details}。` : ""
+            }页面已保留，可修正后使用同一批次重试；已成功素材不会重复入池。`;
+            state.queueSummaryIsError = true;
+            showToast(state.queueSummary, true);
+          }
+        } finally {
+          state.busy = false;
+          byId("createFormFields").inert = false;
+          byId("createFormFields").removeAttribute("aria-busy");
+          validateForm();
+        }
+      }
+      function publicationStatusMeta(item) {
+        const raw = String(item.publication_status || "unpublished").trim().toLowerCase();
+        if (raw === "published") return { status: "published", label: "已发布", kind: "success" };
+        if (raw === "unknown") return { status: "unknown", label: "发布结果待确认", kind: "warning" };
+        return { status: "unpublished", label: "未发布", kind: "neutral" };
+      }
+      function poolAvailabilityMeta(item) {
+        const raw = String(
+          item.availability || item.pool_availability || item.status || item.preparation_status || ""
+        ).trim().toLowerCase();
+        const map = {
+          available: ["可用于自动发布", "success"],
+          reserved: ["已被发布任务占用", "progress"],
+          consumed: ["已消费（以发布状态为准）", "neutral"],
+          canceled: ["已取消", "neutral"],
+          queued: ["等待制作", "progress"],
+          preparing: ["制作中", "progress"],
+          retry_wait: ["等待重试", "warning"],
+          ready: ["制作完成", "success"],
+          failed: ["不可用", "failure"],
+          unknown: ["待核查", "warning"],
+        };
+        const value = map[raw] || [raw || "未入可用池", "neutral"];
+        return { status: raw || "not_available", label: value[0], kind: value[1] };
+      }
+      function preparationStatusMeta(item) {
+        const raw = String(
+          item.preparation_status || item.prepare_status || item.status || "queued"
+        ).trim().toLowerCase();
+        const status = ["available", "reserved", "consumed"].includes(raw) ? "ready" : raw;
+        const map = {
+          queued: ["等待制作", "neutral"],
+          preparing: ["制作中", "progress"],
+          retry_wait: ["等待自动重试", "warning"],
+          ready: ["制作完成", "success"],
+          failed: ["制作失败", "failure"],
+        };
+        const value = map[status] || [status || "未知", "neutral"];
+        return { status, label: value[0], kind: value[1] };
+      }
+      function stopPreparationPolling() {
+        if (state.preparationPollTimer !== null) {
+          window.clearTimeout(state.preparationPollTimer);
+          state.preparationPollTimer = null;
+        }
+      }
+      function selectedPreparationScheduleRefreshPending() {
+        const accountIdValue = cleanId(state.selectedAccountId);
+        return !!(
+          accountIdValue &&
+          state.preparationScheduleRefreshPendingByAccount[accountIdValue]
+        );
+      }
+      function preparationPollingNeeded() {
+        return state.preparationHasActive || selectedPreparationScheduleRefreshPending();
+      }
+      function schedulePreparationPolling() {
+        stopPreparationPolling();
+        if (!preparationPollingNeeded() || document.hidden) return;
+        state.preparationPollTimer = window.setTimeout(() => {
+          state.preparationPollTimer = null;
+          void loadPreparationStatus({ quiet: true });
+        }, PREPARATION_POLL_INTERVAL_MS);
+      }
+      function setPreparationEmpty(message) {
+        const body = byId("preparationRows");
+        body.replaceChildren();
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 9;
+        cell.className = "empty";
+        setText(cell, message);
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
+      function preparationAccountCopy(item) {
+        const id = cleanId(item.source_account_id || item.account_id);
+        const poolStatus = String(item.status || "").trim();
+        const claimed = Boolean(
+          item.run_id ||
+          item.queue_id ||
+          ["reserved", "consumed"].includes(poolStatus)
+        );
+        if (!id || !claimed) {
+          return {
+            primary: "等待同剧语言账号领取",
+            secondary: `剧语言 ${String(item.material_language || "").trim() || "en"}`,
+          };
+        }
+        const account = state.accounts.find(candidate => accountId(candidate) === id);
+        return {
+          primary: String(
+            item.account_name_snapshot ||
+            item.account_display_name ||
+            item.creator_nickname_snapshot ||
+            (account ? accountName(account) : `账号 ${id || "—"}`)
+          ),
+          secondary: id ? `账号 ID ${id}` : "",
+        };
+      }
+      function preparationDetail(item, status) {
+        const error = String(
+          item.preparation_error ||
+          item.preparation_error_message ||
+          item.error_message ||
+          item.safe_message ||
+          item.fail_reason ||
+          ""
+        ).trim();
+        if (error) return error;
+        if (status === "queued") return "已入池，等待后台领取";
+        if (status === "preparing") return "正在下载并拼接片尾";
+        if (status === "retry_wait") {
+          const nextRetry = formatTime(
+            item.next_attempt_at_utc || item.next_retry_at || item.retry_at
+          );
+          return nextRetry === "—" ? "后台将自动重试" : `下次重试：${nextRetry}`;
+        }
+        if (status === "ready") {
+          const duration = Number(item.prepared_duration_sec || item.duration_sec || 0);
+          return duration > 0
+            ? `成片已校验，可发布 · ${duration.toFixed(2)} 秒`
+            : "成片已校验，可发布";
+        }
+        if (status === "failed") return "预制作未完成，请查看后台错误";
+        return String(item.preparation_status_label || item.status_label || "状态已更新");
+      }
+      function renderPreparationRows(items) {
+        const body = byId("preparationRows");
+        body.replaceChildren();
+        if (!items.length) {
+          setPreparationEmpty("素材池暂无记录。");
+          return;
+        }
+        items.forEach(item => {
+          const row = document.createElement("tr");
+          appendCell(row, formatTime(item.created_at || item.queued_at));
+          const account = preparationAccountCopy(item);
+          appendCell(row, account.primary, account.secondary);
+          appendCell(
+            row,
+            `素材 ${item.material_id || "—"}`,
+            `Drama ID ${item.content_id || "—"}`
+          );
+          appendCell(row, String(item.material_language || "").trim() || "en");
+          const publicationCell = document.createElement("td");
+          const publication = publicationStatusMeta(item);
+          publicationCell.appendChild(badge(publication.label, publication.kind));
+          if (item.published_at) {
+            const publishedAt = document.createElement("div");
+            publishedAt.className = "subtle";
+            setText(publishedAt, formatTime(item.published_at));
+            publicationCell.appendChild(publishedAt);
+          }
+          row.appendChild(publicationCell);
+          const availabilityCell = document.createElement("td");
+          const availability = poolAvailabilityMeta(item);
+          availabilityCell.appendChild(badge(availability.label, availability.kind));
+          row.appendChild(availabilityCell);
+          const statusCell = document.createElement("td");
+          const meta = preparationStatusMeta(item);
+          statusCell.appendChild(badge(meta.label, meta.kind));
+          row.appendChild(statusCell);
+          appendCell(
+            row,
+            preparationDetail(item, meta.status),
+            meta.status === "failed" ? "待处理" : "",
+            meta.status === "failed" ? "error-copy" : ""
+          );
+          appendCell(row, formatTime(item.preparation_updated_at || item.updated_at));
+          body.appendChild(row);
+        });
+      }
+      function renderPreparationSummary(result, items) {
+        const visibleCounts = {
+          queued: 0,
+          preparing: 0,
+          retry_wait: 0,
+          ready: 0,
+          failed: 0,
+        };
+        const publicationCounts = { published: 0, unknown: 0, unpublished: 0 };
+        items.forEach(item => {
+          const status = preparationStatusMeta(item).status;
+          if (Object.prototype.hasOwnProperty.call(visibleCounts, status)) {
+            visibleCounts[status] += 1;
+          }
+          publicationCounts[publicationStatusMeta(item).status] += 1;
+        });
+        const summary = asObject(result.summary);
+        const allPublicationCounts = {
+          published: Number(firstDefined(summary.published, publicationCounts.published, 0) || 0),
+          unpublished: Number(firstDefined(summary.unpublished, publicationCounts.unpublished, 0) || 0),
+          unknown: Number(firstDefined(summary.unknown_publication, publicationCounts.unknown, 0) || 0),
+        };
+        const counts = {};
+        Object.keys(visibleCounts).forEach(status => {
+          counts[status] = Number(
+            firstDefined(summary[status], visibleCounts[status], 0) || 0
+          );
+        });
+        const pagination = asObject(result.pagination);
+        const total = Number(
+          firstDefined(summary.total, pagination.total, result.total, items.length) || 0
+        );
+        setText(
+          byId("preparationSummary"),
+          `共 ${total} 条 · 未发布 ${allPublicationCounts.unpublished} · 已发布 ${allPublicationCounts.published} · 结果待确认 ${allPublicationCounts.unknown} · 等待制作 ${counts.queued} · 制作中 ${counts.preparing} · 制作完成 ${counts.ready} · 制作失败 ${counts.failed}`
+        );
+      }
+      async function loadPreparationStatus({ quiet = false, force = false } = {}) {
+        if (state.preparationLoading) {
+          if (force) state.preparationReloadPending = true;
+          return false;
+        }
+        state.preparationLoading = true;
+        state.preparationReloadPending = false;
+        const requestedAccountId = cleanId(state.selectedAccountId);
+        const previousFingerprint = preparationStatusFingerprint(
+          state.preparationItems,
+          requestedAccountId,
+          state.preparationSummary
+        );
+        if (!quiet) {
+          setText(byId("preparationSummary"), "正在加载素材池…");
+          setPreparationEmpty("正在加载…");
+        }
+        try {
+          const params = new URLSearchParams({ page: "1", page_size: "100" });
+          if (requestedAccountId) {
+            params.set("source_account_id", requestedAccountId);
+          }
+          const result = await api(`${API_BASE}/material-pool?${params.toString()}`);
+          if (requestedAccountId !== cleanId(state.selectedAccountId)) {
+            state.preparationReloadPending = true;
+            return false;
+          }
+          applyGates(result);
+          const items = Array.isArray(result.items)
+            ? result.items
+            : (Array.isArray(result.materials) ? result.materials : []);
+          const summary = asObject(result.summary);
+          state.preparationItems = items;
+          state.preparationSummary = summary;
+          state.preparationHasActive = Array.from(PREPARATION_ACTIVE_STATUSES).some(
+            status => Number(summary[status] || 0) > 0
+          ) || items.some(item => (
+            PREPARATION_ACTIVE_STATUSES.has(preparationStatusMeta(item).status)
+          ));
+          renderPreparationRows(items);
+          renderPreparationSummary(result, items);
+          renderSchedule({ hydrateDraft: false });
+          const currentFingerprint = preparationStatusFingerprint(
+            items,
+            requestedAccountId,
+            summary
+          );
+          if (
+            requestedAccountId &&
+            currentFingerprint !== previousFingerprint
+          ) {
+            state.preparationScheduleRefreshPendingByAccount[requestedAccountId] = true;
+          }
+          if (
+            requestedAccountId &&
+            requestedAccountId === cleanId(state.selectedAccountId) &&
+            state.preparationScheduleRefreshPendingByAccount[requestedAccountId]
+          ) {
+            const scheduleRefreshed = await loadSchedule({ preserveDraft: true });
+            if (scheduleRefreshed) {
+              delete state.preparationScheduleRefreshPendingByAccount[requestedAccountId];
+            }
+          }
+          return true;
+        } catch (error) {
+          if (
+            requestedAccountId === cleanId(state.selectedAccountId) &&
+            (!quiet || !state.preparationItems.length)
+          ) {
+            setPreparationEmpty(`制作状态加载失败：${error.message}`);
+            setText(byId("preparationSummary"), "制作状态暂不可用。");
+          }
+          return false;
+        } finally {
+          state.preparationLoading = false;
+          const reloadRequested = state.preparationReloadPending;
+          state.preparationReloadPending = false;
+          if (reloadRequested) {
+            stopPreparationPolling();
+            void loadPreparationStatus({ quiet: true, force: true });
+          } else {
+            schedulePreparationPolling();
+          }
+        }
+      }
+      function statusMeta(item) {
+        const status = String(item.status || item.queue_status || "unknown").toLowerCase();
+        if (Number(item.unknown_outcome || 0) === 1 || status === "needs_review") {
+          return { status: "needs_review", label: "结果待确认", kind: "warning" };
+        }
+        if (item.schedule_policy === "target_midnight_v1" && ["scheduled", "ready"].includes(status)) {
+          const due = Date.parse(item.scheduled_at_utc || item.scheduled_at || "") <= Date.now();
+          return { status, label: due ? "已备好，等待执行发布" : "已备好，等待发布时间", kind: "progress" };
+        }
+        const map = {
+          draft: ["草稿", "neutral"],
+          queued: ["等待制作", "progress"],
+          preparing: ["视频准备中", "progress"],
+          ready: ["等待发布", "progress"],
+          ready_for_consent: ["等待确认", "warning"],
+          hold: ["安全待处理", "warning"],
+          scheduled: ["等待发布时间", "progress"],
+          claimed: ["已领取任务", "progress"],
+          creator_recheck: ["确认账号中", "progress"],
+          initializing: ["提交 TikTok 中", "warning"],
+          processing_download: ["TikTok处理中", "progress"],
+          publishing: ["提交 TikTok 中", "warning"],
+          reconciling: ["状态核对中", "warning"],
+          unknown: ["结果待确认", "warning"],
+          published: ["已发布", "success"],
+          failed: ["发布失败", "failure"],
+          missed: ["已错过时间", "failure"],
+          canceled: ["已取消", "neutral"],
+          cancelled: ["已取消", "neutral"],
+        };
+        const value = map[status] || [status || "未知", "neutral"];
+        return { status, label: value[0], kind: value[1] };
+      }
+      function appendCell(row, primary, secondary, className = "") {
+        const cell = document.createElement("td");
+        if (className) cell.className = className;
+        setText(cell, primary);
+        if (secondary) {
+          const detail = document.createElement("div");
+          detail.className = "subtle";
+          setText(detail, secondary);
+          cell.appendChild(detail);
+        }
+        row.appendChild(cell);
+        return cell;
+      }
+      function badge(label, kind) {
+        const node = document.createElement("span");
+        node.className = `badge ${kind || "neutral"}`;
+        setText(node, label);
+        return node;
+      }
+      async function init() {
+        loadPendingRunNowState();
+        updateCaptionState();
+        renderGates();
+        try {
+          state.auth = await api("/api/ui/topbar");
+        } catch (_) {
+          state.auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
+        }
+        await window.QuickNav.render({
+          container: "#quickNav",
+          auth: state.auth,
+          activeKey: "ttPostPool",
+        });
+        window.UiTopbar.render({
+          auth: state.auth,
+          userCard: "#userCard",
+          authButton: "#authButton",
+          refreshButton: "#refreshPage",
+        });
+        byId("authButton").addEventListener("click", () => (
+          window.UiTopbar.handleAuthAction({ auth: state.auth, api })
+        ));
+        const user = state.auth && state.auth.user;
+        if (!(state.auth && state.auth.authenticated && user)) {
+          show(byId("loginGate"));
+          return;
+        }
+        const allowed = !!(user.is_admin || (user.permissions && user.permissions.tt_posts));
+        if (!allowed) {
+          show(byId("permissionGate"));
+          return;
+        }
+        show(byId("pageRoot"));
+        await Promise.all([
+          loadAccounts(),
+          loadSchedule(),
+          loadDirectTests(),
+          loadPreparationStatus(),
+        ]);
+      }
+
+      byId("accountSearch").addEventListener("input", renderAccounts);
+      byId("accountList").addEventListener("change", event => {
+        const checkbox = event.target.closest("input[data-auto-account-id]");
+        if (!checkbox || checkbox.disabled) return;
+        const id = cleanId(checkbox.dataset.autoAccountId);
+        if (checkbox.checked) {
+          state.autoAccountIds.add(id);
+        } else {
+          state.autoAccountIds.delete(id);
+        }
+        resetBatchConfirmation();
+        markScheduleDirty();
+        renderAccounts();
+      });
+      byId("operationAccountId").addEventListener("change", event => {
+        state.selectedAccountId = cleanId(event.target.value);
+        state.creatorInfo = null;
+        state.creatorRequestVersion += 1;
+        resetBatchConfirmation();
+        renderAccountSettings();
+        if (state.selectedAccountId) loadCreatorInfo();
+        else resetCreatorInfo();
+        void loadPreparationStatus({ quiet: true, force: true });
+      });
+      byId("refreshAccounts").addEventListener("click", loadAccounts);
+      byId("refreshGates").addEventListener("click", async () => {
+        await Promise.all([
+          loadAccounts(),
+          loadSchedule({ preserveDraft: true }),
+          loadDirectTests(),
+          loadPreparationStatus(),
+        ]);
+        showToast("发布与合规状态已刷新。");
+      });
+      byId("previewMaterial").addEventListener("click", validateMaterials);
+      byId("materialResults").addEventListener("click", event => {
+        const button = event.target.closest("button[data-direct-material-id]");
+        if (!button) return;
+        state.selectedDirectMaterialId = cleanId(button.dataset.directMaterialId);
+        resetBatchConfirmation();
+        renderMaterialResults();
+        validateForm();
+      });
+      byId("materialIds").addEventListener("input", () => {
+        if (state.materials.length || state.failures.length) {
+          resetMaterials("素材 ID 已修改，请重新批量校验素材。");
+        } else {
+          resetBatchConfirmation();
+          validateForm();
+        }
+      });
+      byId("materialIds").addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          validateMaterials();
+        }
+      });
+      byId("caption").addEventListener("input", () => {
+        resetBatchConfirmation();
+        markScheduleDirty();
+      });
+      byId("dailyPublishTimes").addEventListener("change", event => {
+        if (event.target.matches("input.daily-publish-time")) markScheduleDirty();
+      });
+      byId("dailyPublishTimes").addEventListener("click", event => {
+        const button = event.target.closest("button[data-remove-publish-time]");
+        if (!button || byId("dailyPublishTimes").children.length <= 1) return;
+        button.closest(".publish-time-row").remove();
+        const first = byId("dailyPublishTimes").querySelector("input.daily-publish-time");
+        if (first && !byId("dailyPublishTime")) first.id = "dailyPublishTime";
+        markScheduleDirty();
+      });
+      byId("addPublishTime").addEventListener("click", () => {
+        appendFixedPublishTime(DEFAULT_DAILY_PUBLISH_TIME);
+        markScheduleDirty();
+      });
+      byId("randomScheduleEnabled").addEventListener("change", () => {
+        syncScheduleModeControls();
+        markScheduleDirty();
+      });
+      byId("randomDailyCount").addEventListener("change", markScheduleDirty);
+      byId("scheduleEnabled").addEventListener("change", markScheduleDirty);
+      byId("publishConsent").addEventListener("change", () => {
+        validateForm();
+      });
+      byId("saveSchedule").addEventListener("click", saveSchedule);
+      byId("runNow").addEventListener("click", runNow);
+      byId("addMaterialsToPool").addEventListener("click", addMaterialsToPool);
+      byId("refreshPreparationStatus").addEventListener("click", () => {
+        void loadPreparationStatus();
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          stopPreparationPolling();
+          stopDirectTestPolling();
+        } else if (preparationPollingNeeded()) {
+          void loadPreparationStatus({ quiet: true });
+        }
+        if (!document.hidden) syncDirectTestPolling();
+      });
+      init();
+    })();
+  </script>
+</body>
+</html>

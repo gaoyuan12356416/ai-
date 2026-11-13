@@ -11,6 +11,11 @@ class MoboreelsLinkError(RuntimeError):
     pass
 
 
+class MoboreelsEligibilityError(MoboreelsLinkError):
+    code = 'moboreels_drama_not_publishable'
+    status = 409
+
+
 def contains_macro(*texts):
     return any('{{m_url}}' in str(value or '') for value in texts)
 
@@ -53,9 +58,24 @@ def _request(path, body):
 
 
 def lookup_story(story_id):
-    row = _request('/internal/story-metadata', {'story_id': str(story_id)}).get('drama') or {}
+    story = str(story_id or '').strip()
+    if not story or len(story) > 64 or any(ord(c) < 32 for c in story):
+        raise MoboreelsEligibilityError('素材缺少有效的 Moboreels 剧 ID，已拦截发布')
+    try:
+        row = _request('/internal/story-metadata', {'story_id': story}).get('drama') or {}
+    except MoboreelsLinkError as exc:
+        raise MoboreelsEligibilityError('无法核实 Moboreels 剧目 %s 的当前上架状态，已拦截发布：%s' % (story, exc)) from None
+    if str(row.get('story_id') or '') != story:
+        raise MoboreelsEligibilityError('Moboreels 剧库未匹配到素材剧目 %s，已拦截发布' % story)
+    if str(row.get('is_show')) != '1':
+        raise MoboreelsEligibilityError('Moboreels 剧目 %s 当前未上架，已拦截发布，请选择已上架可投放的剧目' % story)
     return dict(row, name=row.get('story_name',''), description=row.get('introduce',''),
                 language=row.get('language_name',''))
+
+
+def assert_publishable(story_id):
+    """Read the current institution catalog; never trust a frozen link or UI flag."""
+    return lookup_story(story_id)
 
 
 def resolve_actor(user_id, tenant_key='', name=''):
@@ -64,6 +84,7 @@ def resolve_actor(user_id, tenant_key='', name=''):
 
 
 def resolve_m_url(actor, *, story_id, platform, account_id, task_id, material_id, purpose='post'):
+    assert_publishable(story_id)
     result = _request('/internal/short-links', {
         'actor': {key: str((actor or {}).get(key) or '') for key in ('tenant_key', 'user_id', 'name')},
         'story_id': str(story_id), 'platform': str(platform), 'account_id': str(account_id),

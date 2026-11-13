@@ -19342,6 +19342,11 @@ def publish_canary(
             deferred_media_validation or expected_duration <= 0
         )
         if log["long_url"]:
+            from .moboreels import assert_queue_publishable
+            try:
+                assert_queue_publishable(queue)
+            except Exception as exc:
+                raise XPostError("moboreels_drama_not_publishable", str(exc), 409) from None
             long_url = log["long_url"]
             short_url = log["short_url"]
             post_text = log["post_text"]
@@ -19571,6 +19576,11 @@ def publish_canary(
         if callable(storage_guard):
             storage_guard()
         store.mark_media_uploaded(log["id"], uploaded["media_id"])
+        from .moboreels import assert_queue_publishable
+        try:
+            assert_queue_publishable(queue)
+        except Exception as exc:
+            raise XPostError("moboreels_drama_not_publishable", str(exc), 409) from None
         created = x_client.create_post(access_token, post_text, uploaded["media_id"])
         post_url = "https://x.com/%s/status/%s" % (username, created["post_id"])
         confirmed_post = created["post_id"]
