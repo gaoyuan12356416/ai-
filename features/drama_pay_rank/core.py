@@ -82,10 +82,16 @@ def read(day='', lang='en', root=ROOT, audience_db=None):
     languages=sorted({r['language_code'] for r in payload['list']})
     rows=sorted([dict(r) for r in payload['list'] if not lang or r['language_code']==lang],key=lambda r:(r['language_code'],r['rank']))
     catalog=records([r['series_key'] for r in rows],audience_db)
+    from .metadata import read as read_metadata
+    details=read_metadata(root)
     for r in rows:
         info=catalog.get(r['series_key'])
         exact=bool(info and language(r['language_code']) in info['languages'])
         r.update(name=info['name'] if exact else '',audience=AUDIENCES.get(info['audience'],'未标注') if exact else '',metadata_status=info['status'] if exact else 'unmatched')
+        detail=details.get((r['series_key'],language(r['language_code'])),{})
+        r.update(resource_id=detail.get('resource_id',''),labels=detail.get('labels',[]),
+                 label_names=detail.get('label_names',[]),secondary_labels=detail.get('secondary_labels',[]),
+                 detail_status=detail.get('status','missing'))
     return dict(date=selected,dates=dates,languages=languages,language_code=lang,list=rows,
                 fetched_at=row[0] if row else '',status=status,
                 availability='available' if row and rows else 'language_empty' if row else 'not_generated',

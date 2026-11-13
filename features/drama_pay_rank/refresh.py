@@ -28,6 +28,12 @@ def main():
                     initialize();enqueue([r['series_key'] for r in payload['list']],priority=50)
                 except Exception as exc:
                     print(json.dumps(dict(event='rank_metadata_pending',error=type(exc).__name__)),flush=True)
+                try:
+                    from .metadata import refresh as refresh_metadata
+                    from features.social_analytics.warehouse_refresh import Reader, environment
+                    print(json.dumps(dict(event='rank_details',**refresh_metadata(Reader(environment('/root/drama_material_service/.env'))))),flush=True)
+                except Exception as exc:
+                    print(json.dumps(dict(event='rank_details_pending',error=type(exc).__name__)),flush=True)
                 return
             if attempt < 3 and not args.once:time.sleep(600)
         raise SystemExit(1)

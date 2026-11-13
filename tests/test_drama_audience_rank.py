@@ -153,4 +153,63 @@ class RouteTests(unittest.TestCase):
         a=ensure_navigation([]);self.assertEqual(ensure_navigation(a),a)
 
 
+class RankMetadataTests(unittest.TestCase):
+    def resource(self, **changes):
+        return dict(app_id=1479, content_id='AbC', language='pt', series_code='30702',
+                    labels='Sweet,Hidden Identity', **changes)
+
+    def test_resource_id_and_same_portrait_themes(self):
+        from features.drama_pay_rank.metadata import index
+        row=self.resource()
+        result=index([row,row],[])[('AbC','pt-br')]
+        self.assertEqual(result['resource_id'],'30702')
+        self.assertEqual(result['labels'],['Sweet','Hidden Identity'])
+        self.assertEqual(result['secondary_labels'],classify(row['labels'])['theme_names'])
+
+    def test_product_id_language_and_conflict(self):
+        from features.drama_pay_rank.metadata import index
+        row=self.resource(); other={**row,'app_id':3360,'series_code':'wrong'}
+        result=index([row,other],[])
+        self.assertEqual(len(result),1)
+        self.assertNotIn(('abc','pt-br'),result)
+        conflict=index([row],[{**row,'series_code':'999'}])[('AbC','pt-br')]
+        self.assertEqual((conflict['status'],conflict['resource_id'],conflict['labels']),('conflict','',[]))
+
+    def test_cached_metadata_and_failed_retry(self):
+        from features.drama_pay_rank import metadata
+        with tempfile.TemporaryDirectory() as root:
+            payload=dict(code=200,data=dict(date='2026-11-13',list=[
+                dict(date='2026-11-13',language_code='pt',series_key='AbC',rank=7)]))
+            core.update('s',root,fetcher=lambda _:payload,today='2026-11-13')
+            class Reader:
+                failed=True
+                calls=0
+                def query(inner,statements,timeout):
+                    inner.calls+=1
+                    if inner.failed:raise RuntimeError('source_unavailable')
+                    return [dict(self.resource(),kind='ads_drama_resource')]
+            reader=Reader()
+            with self.assertRaises(RuntimeError):metadata.refresh(reader,root)
+            self.assertEqual(metadata.read(root),{})
+            reader.failed=False
+            self.assertEqual(metadata.refresh(reader,root)['saved'],1)
+            self.assertEqual(metadata.refresh(reader,root)['requested'],0)
+            self.assertEqual(reader.calls,2)
+            result=core.read(lang='pt',root=root)['list'][0]
+            self.assertEqual((result['rank'],result['resource_id']),(7,'30702'))
+            self.assertTrue(result['secondary_labels'])
+            self.assertEqual(core.read(lang='en',root=root)['list'],[])
+
+    def test_wrong_case_source_row_not_saved(self):
+        from features.drama_pay_rank import metadata
+        with tempfile.TemporaryDirectory() as root:
+            payload=dict(code=200,data=dict(date='2026-11-13',list=[dict(date='2026-11-13',language_code='pt',series_key='AbC',rank=1)]))
+            core.update('s',root,fetcher=lambda _:payload,today='2026-11-13')
+            class Reader:
+                def query(inner,statements,timeout):
+                    return [{**self.resource(),'content_id':'abc','kind':'ads_drama_resource'}]
+            self.assertEqual(metadata.refresh(Reader(),root)['saved'],0)
+            self.assertEqual(metadata.read(root),{})
+
+
 if __name__=='__main__':unittest.main()

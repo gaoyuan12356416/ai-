@@ -6,7 +6,7 @@
   <title>短剧付费 TOP100 · AI 自动后台</title>
   <link rel="stylesheet" href="/youtube-publish.css?v=20260917-player-badges-v1">
   <link rel="stylesheet" href="/ui-topbar.css">
-  <link rel="stylesheet" href="/drama-pay-rank.css?v=20261113c">
+  <link rel="stylesheet" href="/drama-pay-rank.css?v=20261113d">
 </head>
 <body>
 <div class="app">
@@ -36,25 +36,32 @@
         <h2 id="rankHeading">每日榜单</h2>
         <p>每天北京时间 11:00 更新</p>
       </div>
+      <p class="rank-order"><strong>排序方式：近三日去重付费人数降序</strong><span>人数相同按剧 ID 升序 · 各语种独立排名 · 当前接口仅提供此榜单</span></p>
       <form id="filters" class="rank-filters" aria-label="榜单筛选">
         <label class="rank-filter" for="dateFilter">榜单日期<select id="dateFilter"><option value="">最新榜单</option></select></label>
         <label class="rank-filter" for="languageFilter">语种<select id="languageFilter"><option value="en">英语 · en</option></select></label>
+        <label class="rank-filter" for="resourceFilter">资源 ID<input id="resourceFilter" type="search" placeholder="输入资源 ID" maxlength="100"></label>
+        <label class="rank-filter" for="contentFilter">剧 ID<input id="contentFilter" type="search" placeholder="输入剧 ID（区分大小写）" maxlength="100"></label>
+        <label class="rank-filter" for="audienceFilter">受众（一级标签）<select id="audienceFilter"><option value="">全部受众</option></select></label>
+        <label class="rank-filter rank-label-filter" for="labelsFilter">labels / 二级标签<input id="labelsFilter" type="search" placeholder="输入题材或原始 labels，支持中英文" maxlength="200"></label>
         <button class="btn btn-primary" type="submit">查看榜单</button>
+        <button id="resetSearch" class="btn btn-secondary" type="button">清空搜索</button>
+        <p class="rank-search-hint">搜索当前日期与语种的 TOP100，多个条件同时满足；筛选后保留原榜单排名。</p>
       </form>
       <div class="rank-meta"><span id="windowLabel">正在加载…</span><span id="updatedLabel"></span><span id="countLabel"></span></div>
       <div id="notice" class="rank-notice" role="status" hidden></div>
       <div class="rank-table-wrap" tabindex="0" role="region" aria-label="可横向滚动的榜单明细">
         <table class="rank-table">
-          <thead><tr><th scope="col">排名</th><th scope="col">短剧 / 剧 ID</th><th scope="col">语种</th><th scope="col">受众</th></tr></thead>
-          <tbody id="rows"><tr><td colspan="4" class="empty">正在读取榜单…</td></tr></tbody>
+          <thead><tr><th scope="col">排名</th><th scope="col">短剧 / 剧 ID / 资源 ID</th><th scope="col">语种</th><th scope="col">受众（一级标签）</th><th scope="col">题材（二级标签）</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="5" class="empty">正在读取榜单…</td></tr></tbody>
         </table>
       </div>
-      <footer class="rank-footnote">排名依据榜单生成日前三个完整 UTC 自然日的去重付费人数；接口仅提供名次。支付关联的剧不等同于专为该剧解锁付费。</footer>
+      <footer class="rank-footnote">排名依据榜单生成日前三个完整 UTC 自然日的去重付费人数；接口仅提供名次。支付关联的剧不等同于专为该剧解锁付费。二级标签使用当前频道画像的题材分类规则，展开原始 labels 可查看源标签。</footer>
     </section>
   </main>
 </div>
 <script src="/quick-nav.js?v=20261113rank1"></script>
 <script src="/ui-topbar.js"></script>
-<script src="/drama-pay-rank.js?v=20261113a"></script>
+<script src="/drama-pay-rank.js?v=20261113d"></script>
 </body>
 </html>

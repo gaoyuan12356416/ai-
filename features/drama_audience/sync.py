@@ -127,6 +127,13 @@ def main():
         with closing(store.connect(args.db, True)) as db, db:
             db.execute("INSERT OR REPLACE INTO metadata VALUES('last_sync',?)", (json.dumps(result),))
         print(json.dumps(result),flush=True)
+        if not args.priority_only:
+            # Retry missing rank display metadata without refreshing stored audiences.
+            try:
+                from features.drama_pay_rank.metadata import refresh as refresh_rank_metadata
+                print(json.dumps(dict(event='rank_details',**refresh_rank_metadata(Reader(environment(args.env))))),flush=True)
+            except Exception as exc:
+                print(json.dumps(dict(event='rank_details_pending',error=type(exc).__name__)),flush=True)
 
 
 if __name__ == '__main__':

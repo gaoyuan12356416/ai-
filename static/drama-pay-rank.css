@@ -10,19 +10,19 @@
 .rank-panel-head p { color: var(--muted); font-size: 12px; }
 .rank-filters { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; padding: 0 24px 21px; }
 .rank-filter { display: grid; gap: 7px; color: #70819a; font-size: 12px; }
-.rank-filter select { width: 190px; height: 39px; padding: 8px 10px; border: 1px solid #dce4ef; border-radius: 8px; background: #fff; color: #344966; font-size: 13px; }
-.rank-filter select:focus-visible { outline: 3px solid #a9c7ff; outline-offset: 2px; }
+.rank-filter select, .rank-filter input { width: 190px; height: 39px; padding: 8px 10px; border: 1px solid #dce4ef; border-radius: 8px; background: #fff; color: #344966; font-size: 13px; }
+.rank-filter select:focus-visible, .rank-filter input:focus-visible { outline: 3px solid #a9c7ff; outline-offset: 2px; }
 .rank-filters .btn { min-height: 39px; padding: 8px 16px; font-size: 13px; }
 .rank-meta { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 14px 24px; border-block: 1px solid #e8edf3; background: #f8fafc; color: var(--muted); font-size: 12px; }
 .rank-notice { margin: 16px 24px; padding: 12px 15px; border: 1px solid #eadcb7; border-radius: 11px; background: #fffaf0; color: #947225; font-size: 12px; }
 .rank-table-wrap { overflow: auto; }
-.rank-table { width: 100%; min-width: 640px; border-collapse: collapse; text-align: left; }
+.rank-table { width: 100%; min-width: 960px; border-collapse: collapse; text-align: left; }
 .rank-table th { padding: 13px 24px; background: #fbfcfe; color: #73839a; font-size: 12px; font-weight: 600; }
 .rank-table td { padding: 14px 24px; border-top: 1px solid #edf1f6; }
 .rank-table tbody tr:hover { background: #f8fbff; }
 .rank-table th:first-child { width: 90px; }
-.rank-table th:nth-child(3) { width: 150px; }
-.rank-table th:nth-child(4) { width: 180px; }
+.rank-table th:nth-child(3) { width: 110px; }
+.rank-table th:nth-child(4) { width: 165px; }
 .rank-table .rank { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: #f0f4f9; font-weight: 700; font-variant-numeric: tabular-nums; }
 .rank-table .rank.top { background: #edf2ff; color: #2457cf; }
 .rank-table .drama-name { margin-bottom: 4px; font-weight: 600; overflow-wrap: anywhere; }
@@ -36,8 +36,26 @@
   .rank-panel-head { padding: 18px 16px; gap: 6px 12px; }
   .rank-filters { padding: 0 16px 18px; }
   .rank-filter { flex: 1 1 140px; min-width: 0; }
-  .rank-filter select { width: 100%; }
+  .rank-filter select, .rank-filter input { width: 100%; }
   .rank-meta, .rank-footnote { padding: 14px 16px; }
   .rank-notice { margin: 14px 16px; }
   .rank-table th, .rank-table td { padding: 13px 16px; }
+}
+
+.rank-order { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin: 0 24px 20px; color: var(--muted); font-size: 12px; }
+.rank-order strong { color: #435c7c; font-weight: 600; }
+.rank-search-hint { width: 100%; color: var(--muted); font-size: 12px; }
+.rank-label-filter { flex: 1 1 260px; max-width: 340px; }
+.rank-label-filter input { width: 100%; }
+.rank-table th:nth-child(5) { width: 32%; }
+.rank-table .drama-id { line-height: 1.9; overflow-wrap: anywhere; }
+.rank-themes { display: flex; flex-wrap: wrap; gap: 5px; }
+.rank-themes .badge { background: #f2f5fb; color: #536b8b; font-weight: 400; }
+.rank-labels { margin-top: 7px; color: var(--muted); font-size: 12px; }
+.rank-labels summary { cursor: pointer; }
+.rank-labels p { margin-top: 7px; line-height: 1.8; overflow-wrap: anywhere; }
+.rank-detail-note { margin-top: 5px; color: #947225; font-size: 12px; }
+@media (max-width: 760px) {
+  .rank-order { margin: 0 16px 18px; }
+  .rank-label-filter { max-width: none; }
 }
