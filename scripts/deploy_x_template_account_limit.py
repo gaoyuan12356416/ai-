@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.request
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -75,6 +76,19 @@ def scheduler(action, folder):
     result = subprocess.run(args, capture_output=True, text=True)
     (folder / ('schedulers-' + action + '.txt')).write_text(result.stdout + result.stderr)
     return result.returncode
+
+
+def health_ready():
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:18843/health', timeout=5) as response:
+                assert response.status == 200
+                return json.load(response)
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.5)
 
 
 def prepare():
@@ -170,9 +184,17 @@ def activate(folder, rollback=False):
     finally:
         for unit in active:
             run('systemctl', 'start', unit)
-    with urllib.request.urlopen('http://127.0.0.1:18843/health', timeout=15) as response:
-        assert response.status == 200
-        info['health'] = json.load(response)
+    verify(folder, rollback)
+
+
+def verify(folder, rollback=False):
+    folder = Path(folder).resolve()
+    assert folder.parent == ROOT and re.fullmatch('[0-9a-f]{12}', folder.name)
+    info = json.loads((folder / 'manifest.json').read_text())
+    assert str(CURRENT.resolve()) == info['runtime'], 'runtime_changed'
+    after = 'before' if rollback else 'after'
+    active = [unit for unit in TRIGGERS if info['before_states'][unit]['ActiveState'] == 'active']
+    info['health'] = health_ready()
     info['scheduler_restore_exit'] = scheduler('restore', folder)
     info['after_states'] = states((AUTO, *TRIGGERS, *OTHER))
     for unit in OTHER:
@@ -190,9 +212,14 @@ def activate(folder, rollback=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('prepare', 'activate', 'rollback'))
+    parser.add_argument('action', choices=('prepare', 'activate', 'rollback', 'verify'))
     parser.add_argument('--folder')
     args = parser.parse_args()
     if args.action != 'prepare' and not args.folder:
         parser.error('--folder is required')
-    prepare() if args.action == 'prepare' else activate(args.folder, args.action == 'rollback')
+    if args.action == 'prepare':
+        prepare()
+    elif args.action == 'verify':
+        verify(args.folder)
+    else:
+        activate(args.folder, args.action == 'rollback')
