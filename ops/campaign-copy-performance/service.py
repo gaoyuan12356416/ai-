@@ -411,6 +411,8 @@ class MeasuredCursor:
         stat["queries"] += 1
         try:
             count = self.cursor.execute(sql, args)
+            if count is None:
+                count = getattr(self.cursor, "rowcount", 0)
             stat["rows"] += max(0, count or 0)
             return count
         except Exception as exc:
