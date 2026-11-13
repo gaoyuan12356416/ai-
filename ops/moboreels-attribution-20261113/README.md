@@ -79,4 +79,3 @@ manifest 在 live mutation 前记 installing，成功记 activated，异常记 n
 回滚 checks key 为 rollback-x/fb/tt/tt_auto/main，按同样 busy/scheduler 规则填入。默认只退社媒代码与 current 链接，保留 sidecar、/m/、macro 配置、五表、所有 SQLite 与回执。core-ui 只退界面/导航，仍保留短链服务。
 
 不可将 SQLite 备份覆盖回活跃账本，不可 DROP 新表或删除成功短链。需回退 sidecar 时，应部署兼容现有短链/schema 的修复版本，不能使已发布 /m/ 返回 404。
-

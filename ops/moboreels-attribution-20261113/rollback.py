@@ -81,4 +81,3 @@ if __name__ == "__main__":
         print(json.dumps({"status": "stopped", "type": type(exc).__name__,
                           "reason": str(exc) if isinstance(exc, RuntimeError) else "inspect restricted evidence"}))
         sys.exit(1)
-
