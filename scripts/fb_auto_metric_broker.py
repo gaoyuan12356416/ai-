@@ -146,7 +146,7 @@ def main():
     token = os.environ["FB_AUTO_POST_INTERNAL_TOKEN"]
     if len(token) < 32: raise ValueError("internal token missing")
     config = config_from_file(os.environ.get("FB_AUTO_METRIC_CONFIG", "/etc/codex-private-storage-archive.json"))
-    server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("FB_AUTO_METRIC_BROKER_PORT", "8849"))), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("FB_AUTO_METRIC_BROKER_PORT", "18449"))), Handler)
     server.token, server.broker = token, WindowBroker(GatedMetricReader(config))
     server.serve_forever()
 

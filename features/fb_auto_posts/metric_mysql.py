@@ -247,7 +247,7 @@ class MySQLMetricStore:
             if activate:
                 with closing(self.writer_factory()) as db, db.cursor() as cursor:
                     self.activate(cursor, existing, utc_iso(datetime.now(timezone.utc))); db.commit()
-            return dict(result, id=existing["id"], status="ready", checksum=existing["checksum"], idempotent=True)
+            return dict(result, id=existing["id"], row_count=result["rows"], status="ready", checksum=existing["checksum"], idempotent=True)
         now = utc_iso(datetime.now(timezone.utc))
         keys = ("id", "generation_key", "platform", "metric_date", "product", "refreshed_at_utc", "created_at_utc")
         values = {key: header[key] for key in keys if key in header}
@@ -308,7 +308,7 @@ class MetricBrokerClient:
     """The unprivileged publisher sends only a fixed window DTO, never SQL."""
     def __init__(self, env):
         self.token = str(env.get("FB_AUTO_POST_INTERNAL_TOKEN", ""))
-        self.port = int(env.get("FB_AUTO_METRIC_BROKER_PORT", "8849"))
+        self.port = int(env.get("FB_AUTO_METRIC_BROKER_PORT", "18449"))
 
     def load_metric_window(self, *, product, platform, dates):
         import requests

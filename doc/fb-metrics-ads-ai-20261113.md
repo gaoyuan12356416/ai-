@@ -15,6 +15,11 @@ error contract is retained; there is no old SQLite fallback or source rebuild.
 The writer uses a dedicated venv with `requirements-fb-metrics.txt`, compressed
 MySQL protocol and one persistent connection/cursor per generation. FIFO readers
 also enable wire compression for the cross-region connection.
+An explicitly invoked migration may pass `--manual-reader` to use the reserved
+operator read pool. This option is not available through runtime environment
+settings; production readers always use FIFO. Transport failures are classified
+without exposing SQL or credentials and retried at most three times. Integrity
+failures are never retried as transport errors.
 
 Amounts use DECIMAL(38,12). Imports reject precision loss. Each imported generation
 is checked against the original ordered checksum, then read back through the
@@ -42,13 +47,29 @@ Deployment sequence:
 4. Apply the staged overlay. It preserves all unrelated runtime files, uses the
    existing scoped FB owner drain, and verifies/restores FB scheduler dependencies.
    The metric broker is separate; the main AI API is not restarted.
+   Staging can preserve the reviewed concurrent Moboreels service overlay by
+   changing only the metric factory anchor in its live service file. Other
+   runtime files are copied from the actual current release, and source hashes
+   are checked again before switching its pointer.
+   The immediate pre-switch environment is saved privately. A failed drain
+   restores its prior metric settings, and a post-switch failure records the
+   actual source pointer with the matching backend for explicit recovery.
 5. Restore the metric timers to their saved states. Verify the real read client,
    refresh unit and next triggers. Archive and remove the old metric file only
    after its processes have released it and the private archive verifies.
 
-Rollback: retain the MySQL data. Restore the original SQLite archive to the
-original metric path first if it was removed, then refresh any now-stale dates
-before making that older snapshot authoritative. Run
+Rollback: retain the MySQL data. First save and stop both metric timers and wait
+for their active refresh services to finish, so no new day version can race with
+the restore check; the rollback tool requires both timers/services inactive.
+Restore the original SQLite archive to the
+original metric path first if it was removed. Before making it authoritative,
+restore all post-cutover MySQL generations, preserving their integer IDs and
+generation keys, and synchronize the current day pointers. Verify those restored
+rows and all active/history references against MySQL. Merely refreshing dates
+would create different identities and is not a valid restore. The rollback tool
+refuses a snapshot missing ready MySQL generation identities/counts, whose actual
+rows do not match the verified MySQL exact-decimal checksum, or pointing at older
+day versions. Run
 `scripts/deploy_fb_metrics_ads_ai.py rollback --folder DEPLOYMENT` to restore the
 previous code pointer/environment and remove the metric unit overrides. Restore
 the saved metric timer states. Never restore the publication operational database.

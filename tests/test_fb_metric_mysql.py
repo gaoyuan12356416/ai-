@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
@@ -10,7 +11,8 @@ from features.fb_auto_posts.core import StoreError
 from features.fb_auto_posts.metric_mysql import (GatedMetricReader, MetricBrokerClient, MySQLMetricStore, amount_text,
     canonical_row, digest_row, exact_add, exact_amount, metric_store_from_env, window_from_rows)
 from scripts.fb_auto_metric_broker import validate_window
-from scripts.migrate_fb_metrics_ads_ai import json_metric_refs, integer_ids
+from scripts.migrate_fb_metrics_ads_ai import collect_references, json_metric_refs, integer_ids
+from scripts.deploy_fb_metrics_ads_ai import validate_rollback_snapshot
 
 
 class FakeCursor:
@@ -40,6 +42,42 @@ class FakeReader:
 
 
 class MetricTests(unittest.TestCase):
+    def test_rollback_rejects_archive_missing_post_cutover_generation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "rollback.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE fb_auto_metric_generation(id INTEGER,generation_key TEXT,row_count INTEGER,status TEXT)")
+            db.execute("CREATE TABLE fb_auto_metric_active_pointer(platform INTEGER,metric_date TEXT,product TEXT,generation_id INTEGER)")
+            db.execute("CREATE TABLE fb_auto_metric_daily(generation_id INTEGER,content_id TEXT,material_id TEXT,spend TEXT,af_revenue0 TEXT)")
+            db.execute("INSERT INTO fb_auto_metric_generation VALUES(1,'old',4,'ready')")
+            db.execute("INSERT INTO fb_auto_metric_active_pointer VALUES(0,'2026-11-12','Dramawave',1)")
+            sums = {}
+            for gid, count in ((1, 4), (2, 5)):
+                digest = hashlib.sha256()
+                for index in range(count):
+                    row = {'content_id':'A'+str(index),'material_id':'1','spend':'1','af_revenue0':'2'}
+                    digest_row(digest, row)
+                    if gid == 1: db.execute("INSERT INTO fb_auto_metric_daily VALUES(?,?,?,?,?)", (gid, *row.values()))
+                sums[gid] = digest.hexdigest()
+            db.commit()
+            class Reader:
+                def query(self, _):
+                    return [{'kind':'generation','id':1,'generation_key':'old','row_count':4,'storage_checksum':sums[1]},
+                            {'kind':'generation','id':2,'generation_key':'new','row_count':5,'storage_checksum':sums[2]},
+                            {'kind':'pointer','platform':0,'metric_date':'2026-11-12','product':'Dramawave','generation_id':2}]
+            with self.assertRaisesRegex(AssertionError, 'restore_ads_ai_metric_delta'):
+                validate_rollback_snapshot(path, Reader())
+            db.execute("INSERT INTO fb_auto_metric_generation VALUES(2,'new',5,'ready')");db.commit()
+            for index in range(5): db.execute("INSERT INTO fb_auto_metric_daily VALUES(2,?,'1','1','2')", ('A'+str(index),))
+            db.execute("UPDATE fb_auto_metric_daily SET spend='999' WHERE generation_id=2 AND content_id='A0'");db.commit()
+            with self.assertRaisesRegex(AssertionError, 'restored_metric_row_checksum_mismatch'):
+                validate_rollback_snapshot(path, Reader())
+            db.execute("UPDATE fb_auto_metric_daily SET spend='1' WHERE generation_id=2 AND content_id='A0'");db.commit()
+            with self.assertRaisesRegex(AssertionError, 'restore_current_metric_pointers'):
+                validate_rollback_snapshot(path, Reader())
+            db.execute("UPDATE fb_auto_metric_active_pointer SET generation_id=2");db.commit();db.close()
+            validate_rollback_snapshot(path, Reader())
+
     def test_manual_reader_is_explicit_and_retries_only_transport_errors(self):
         with patch.dict("os.environ", {"SQL_GATE_BYPASS": "1"}):
             self.assertEqual(GatedMetricReader({}).client, "/usr/bin/mysql")
@@ -85,6 +123,17 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(integer_ids({"en": [1, 2]}), {1, 2})
         self.assertEqual(integer_ids({"en": ["1", "2", 3, True, ""]}), {1, 2, 3})
 
+    def test_reference_collection_includes_integer_columns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "references.sqlite3"
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE task(metric_generation_id INTEGER, selection_json TEXT)")
+                db.execute("INSERT INTO task VALUES(7,?)", (json.dumps({"frozen": {"metric_generation_ids": ["9"]}}),))
+            db.close()
+            found, evidence = collect_references([path])
+            self.assertEqual(found, {7, 9})
+            self.assertEqual(len(evidence), 2)
+
     def test_writer_publishes_only_after_exact_readback(self):
         writer = FakeWriter(); store = MySQLMetricStore({}, reader=FakeReader(writer), writer_factory=lambda: writer)
         result = store.record_metric_generation_streaming(platform=0, product="Dramawave", metric_date="2026-11-12",
@@ -102,6 +151,15 @@ class MetricTests(unittest.TestCase):
         with patch("features.fb_auto_posts.metric_mysql.config_from_file", side_effect=AssertionError("must stay privileged")):
             store = metric_store_from_env({"FB_AUTO_METRIC_STORAGE": "mysql", "FB_AUTO_POST_INTERNAL_TOKEN": "x" * 40})
             self.assertIsInstance(store, MetricBrokerClient)
+
+    def test_idempotent_refresh_preserves_row_count_contract(self):
+        writer = FakeWriter(); reader = FakeReader(writer)
+        store = MySQLMetricStore({}, reader=reader, writer_factory=lambda: writer)
+        existing = {"id": 7, "status": "ready", "checksum": "source", "storage_checksum": "target", "row_count": 12}
+        with patch.object(reader, "generation", return_value=existing), patch.object(store, "verify", return_value={"rows": 12}):
+            result = store.import_generation({"generation_key": "same"}, [])
+        self.assertEqual(result["row_count"], 12)
+        self.assertTrue(result["idempotent"])
 
 
 if __name__ == "__main__": unittest.main()
