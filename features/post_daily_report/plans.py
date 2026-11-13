@@ -282,7 +282,7 @@ def _collect_plan_gaps(paths, cutoff, channels):
                 versions = {(r['template_id'],r['version']): object_value(r['config_json'], {}) for r in read_rows(db,prefix+'_template_version')}
                 tasks = read_rows(db,prefix+'_task')
                 if channel == 'x':
-                    from .x import _target_account
+                    from .x import _target_account, _frozen_run_accounts
                     tasks_by_run = defaultdict(list)
                     for task in tasks:
                         tasks_by_run[task['run_id']].append(task)
@@ -304,7 +304,7 @@ def _collect_plan_gaps(paths, cutoff, channels):
                         config = versions.get((run['template_id'],run['template_version']))
                         if config is None:
                             unavailable(channel,'模板冻结版本缺失'); continue
-                        accounts = _accounts(config.get('account_ids'))
+                        accounts = _frozen_run_accounts(run, config) if channel == 'x' else _accounts(config.get('account_ids'))
                     for account in accounts:
                         if (run['id'],account) not in actual:
                             add(channel,f'auto:{run["id"]}',account,due,run.get('error_code'),run.get('status') in {'cancelled','canceled'})

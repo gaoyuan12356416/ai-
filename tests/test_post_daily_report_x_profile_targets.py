@@ -162,3 +162,15 @@ class ProfileTargetTests(unittest.TestCase):
         result, rows = self.result()
         self.assertFalse(rows['profile_auto_template']['data_available'])
         self.assertIn('x_tag_auto', result['cost']['unreadable_sources'])
+
+    def test_hit_drama_manual_scope_uses_frozen_selected_accounts(self):
+        self.target_plan(accounts=('1', '2', '3'))
+        self.auto.execute('ALTER TABLE x_auto_run ADD COLUMN blacklist_snapshot_json TEXT')
+        self.auto.execute('DELETE FROM x_auto_run WHERE id>1')
+        self.auto.execute('DELETE FROM x_auto_task WHERE id>1')
+        self.auto.execute('DELETE FROM social_random_day')
+        self.auto.execute('DELETE FROM x_auto_template')  # This test has only a manual run.
+        self.auto.execute("UPDATE x_auto_run SET trigger_type='manual',blacklist_snapshot_json=?", (json.dumps({'hit_drama_publish': {'account_ids': ['1']}}),))
+        _, rows = self.result()
+        self.assertEqual((rows['auto_template']['expected'], rows['auto_template']['failed'], rows['auto_template']['blocked']), (1, 1, 0))
+        self.assertEqual(collect_plan_gaps(self.paths, self.window.cutoff, ('x',))['items'], [])

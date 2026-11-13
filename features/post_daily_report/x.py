@@ -289,6 +289,8 @@ def _shared_outcome(outcome, context, source_key, window):
     if outcome[0] in {'published', 'unknown', 'policy_skipped'}:
         return outcome
     override = daily_override(context, source_key, window.cutoff)
+    if override and override[1] == 'failure_reason_unrecorded' and outcome[0] == 'failed' and outcome[3]:
+        return outcome
     return (override[0], None, outcome[2], override[1]) + outcome[4:] if override else outcome
 
 
@@ -425,6 +427,14 @@ def _target_account(run, tasks=()):
     return None
 
 
+def _frozen_run_accounts(run, config):
+    snapshot = json_value(run.get('blacklist_snapshot_json'), {})
+    hit = snapshot.get('hit_drama_publish') if isinstance(snapshot, dict) else None
+    if run.get('trigger_type') == 'manual' and isinstance(hit, dict) and 'account_ids' in hit:
+        return _accounts(hit['account_ids'])
+    return _accounts(config.get('account_ids'))
+
+
 def _auto_plans(db, window, runs, versions, row, tasks_by_run=None):
     plans = {}
     tasks_by_run = tasks_by_run or {}
@@ -454,7 +464,7 @@ def _auto_plans(db, window, runs, versions, row, tasks_by_run=None):
                 row["expected"] = None
                 row["warnings"].append("X Auto 批次缺少冻结模板版本，原计划总数待核对")
                 config = {}
-            plans[(run["template_id"], run.get("publish_time"), run.get("trigger_type", "auto"), run.get("id") if run.get("trigger_type") == "manual" else None)] = (run, _accounts(config.get("account_ids")))
+            plans[(run["template_id"], run.get("publish_time"), run.get("trigger_type", "auto"), run.get("id") if run.get("trigger_type") == "manual" else None)] = (run, _frozen_run_accounts(run, config))
     events = _rows(db, "x_auto_event", ["event_type", "details_json", "created_at"])
     history = defaultdict(list)
     for event in events:
@@ -502,7 +512,7 @@ def _collect_auto(db, window, output, row, queue_outcomes, counted_prior, contex
     context = context or {}
     if not list(db.execute('PRAGMA table_info(x_auto_run)')):
         raise sqlite3.OperationalError("missing X Auto run ledger")
-    runs = {r["id"]: r for r in _rows(db, "x_auto_run", ["id", "template_id", "template_version", "trigger_type", "shanghai_date", "publish_time", "status", "error_code", "run_key", "schedule_policy", "scheduled_at_utc", "target_account_id"])}
+    runs = {r["id"]: r for r in _rows(db, "x_auto_run", ["id", "template_id", "template_version", "trigger_type", "shanghai_date", "publish_time", "status", "error_code", "run_key", "schedule_policy", "scheduled_at_utc", "target_account_id", "blacklist_snapshot_json"])}
     versions = {(r["template_id"], r["version"]): json_value(r.get("config_json"), {}) for r in _rows(db, "x_auto_template_version", ["template_id", "version", "config_json"])}
     tasks_by_run = defaultdict(list)
     for task in _rows(db, "x_auto_task", ["id", "run_id", "account_id", "status", "execution_queue_id", "publish_id", "published_at_utc", "unknown_outcome", "error_code"]):
