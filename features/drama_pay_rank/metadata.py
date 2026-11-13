@@ -51,8 +51,8 @@ def refresh(reader, root=ROOT):
     missing = {key for key in wanted if key not in known or known[key]['status'] == 'partial'}
     ids = sorted({cid for cid, _ in missing})
     saved = 0
-    for offset in range(0, len(ids), 250):
-        batch_ids = set(ids[offset:offset+250])
+    for offset in range(0, len(ids), 50):
+        batch_ids = set(ids[offset:offset+50])
         values = ','.join('0x' + cid.encode('utf-8').hex() for cid in sorted(batch_ids))
         statements = []
         for table, hint, extra in [('ads_drama_resource', 'content_id', ",'labels',labels"),
@@ -73,6 +73,7 @@ def refresh(reader, root=ROOT):
                 db.execute('INSERT OR REPLACE INTO rank_metadata VALUES(1479,?,?,?,?)',
                            (*key, json.dumps(value, ensure_ascii=False), now()))
                 saved += 1
+        print(json.dumps(dict(event='rank_metadata_progress',processed=min(offset+50,len(ids)),total=len(ids),saved=saved)),flush=True)
     return dict(requested=len(missing), saved=saved, unresolved=len(missing)-saved)
 
 
