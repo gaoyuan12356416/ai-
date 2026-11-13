@@ -41,34 +41,35 @@ def normalize(row):
 
 
 def iter_json_array(path, chunk_size=1024 * 1024):
-    """Stream an ordinary JSON array without retaining a full library.json."""
-    decoder = json.JSONDecoder()
-    with Path(path).open('r', encoding='utf-8-sig') as stream:
-        buffer = ''; ended = False; started = False; expect_value = True; seen_value = False
+    """Stream JSON with an offset cursor; do not recopy a megabyte per row."""
+    decoder=json.JSONDecoder()
+    with Path(path).open('r',encoding='utf-8-sig') as stream:
+        buffer='';position=0;ended=False;mode='start'
         while True:
-            if not buffer.strip() and not ended:
-                piece = stream.read(chunk_size); ended = not piece; buffer += piece
-            buffer = buffer.lstrip()
-            if not started:
-                require(buffer.startswith('['), 'catalog_array_required')
-                buffer = buffer[1:]; started = True
+            while position<len(buffer) and buffer[position].isspace():position+=1
+            if position==len(buffer):
+                require(not ended,'incomplete_catalog_json')
+                buffer=stream.read(chunk_size);position=0;ended=not buffer
                 continue
-            if buffer.startswith(']'):
-                require(not (expect_value and seen_value), 'trailing_catalog_separator')
-                require(not buffer[1:].strip() and not stream.read().strip(), 'trailing_catalog_data')
+            char=buffer[position]
+            if mode=='start':
+                require(char=='[','catalog_array_required');position+=1;mode='first';continue
+            if char==']':
+                require(mode in ('first','separator'),'trailing_catalog_separator')
+                require(not buffer[position+1:].strip(),'trailing_catalog_data')
+                for piece in iter(lambda:stream.read(chunk_size),''):
+                    require(not piece.strip(),'trailing_catalog_data')
                 return
-            if not expect_value:
-                require(buffer.startswith(','), 'catalog_separator_required')
-                buffer = buffer[1:].lstrip(); expect_value = True
-            try:
-                value, offset = decoder.raw_decode(buffer)
+            if mode=='separator':
+                require(char==',','catalog_separator_required');position+=1;mode='value';continue
+            try:value,offset=decoder.raw_decode(buffer,position)
             except json.JSONDecodeError:
-                require(not ended, 'incomplete_catalog_json')
-                piece = stream.read(chunk_size); ended = not piece; buffer += piece
-                continue
-            require(isinstance(value, dict), 'catalog_row_object_required')
+                require(not ended,'incomplete_catalog_json')
+                piece=stream.read(chunk_size);ended=not piece
+                buffer=buffer[position:]+piece;position=0;continue
+            require(isinstance(value,dict),'catalog_row_object_required')
             yield value
-            buffer = buffer[offset:]; expect_value = False; seen_value = True
+            position=offset;mode='separator'
 
 
 def file_sha(path):
