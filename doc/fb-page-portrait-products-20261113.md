@@ -1,0 +1,13 @@
+# Page income portraits: FreeReels and bounded paid queries
+
+Managed Pages now include both DramaWave and FreeReels paid D0 revenue for the latest seven complete UTC report days. Confirmed AI-backend Facebook social attribution retains its existing DramaWave 2049/2310 scope. Financial facts, drama names and classification evidence use `(app_id, content_id, language)` so the same ID in different products cannot merge. No older-history fallback is introduced.
+
+FreeReels uses its own app 979 drama metadata and the existing theme taxonomy. The authoritative audience cache currently only covers app 1479; absent FreeReels audience evidence stays unmarked rather than borrowing another product's classification. This does not erase its income or theme distribution. Existing DramaWave API audiences, including metadata-missing fallbacks, remain intact.
+
+The former daily aggregation scanned over 500,000 paid source rows and exceeded the shared reader's 20-second SQL deadline after the managed scope grew to 937 Pages. Paid reads now use the existing `(product,dt,series_code)` index to construct contiguous half-open ranges. New and empty series are still covered. All ranges for a product/day share one read-only repeatable-read transaction, with the original per-statement deadline and FIFO reader. Exact decimal partial sums merge before cent rounding. Metadata reads use the owning content/app indexes instead of repeatedly scanning a whole product. No source schema or index changes are required.
+
+Validate with the deployed shared taxonomy: `python3 -m unittest discover -s tests -p test_fb_portrait_products.py -v` and `python3 -m unittest discover -s tests -p test_fb_page_portrait.py -v`. Fixtures use authoritative audience records, not retired inferred gender tags. Verify a live refresh, exact current Page coverage, conservation against the writer receipt, and serving projections before declaring completion.
+
+After pushing to GitHub and fetching the exact commit, run `python3 SOURCE/ops/fb-page-portrait/deploy_products.py --source SOURCE --commit COMMIT --deployment /mnt/data-disk/fb-page-portrait-products-20261113/deployment`. It updates only three collector files while holding the collector lock. The read API, publisher, main API and their schedules are not restarted. Then start `fb-page-portrait-refresh.service` and follow it to a verified serving version.
+
+Code rollback: `python3 SOURCE/ops/fb-page-portrait/deploy_products.py --deployment /mnt/data-disk/fb-page-portrait-products-20261113/deployment --rollback`. This preserves current profiles, Page configuration, publisher receipts and all financial facts. Do not restore an old publishing database or the old 260-Page profile snapshot over the expanded scope.

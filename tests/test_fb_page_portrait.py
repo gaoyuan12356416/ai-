@@ -4,6 +4,7 @@ import tempfile
 import sqlite3
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from features.fb_page_portrait.build import build
 from features.fb_page_portrait.runtime import encoded
 from features.fb_page_portrait.storage import publish,Store,projections
@@ -20,6 +21,12 @@ def fixture():
 
 
 class PortraitTests(unittest.TestCase):
+    def setUp(self):
+        authority = patch('features.x_tag_revenue.taxonomy.audience_records',
+            side_effect=lambda ids: {'A':dict(status='matched',audience='female',languages=['en'],
+                audience_labels=['女性'],fetched_at='fixture')} if 'A' in ids else {})
+        authority.start();self.addCleanup(authority.stop)
+
     def test_fast_admin_scope_is_current_and_tenant_bound(self):
         with tempfile.TemporaryDirectory() as root:
             users=Path(root)/'users.db';configs=Path(root)/'pages.db'

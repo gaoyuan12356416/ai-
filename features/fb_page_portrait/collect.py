@@ -2,6 +2,7 @@
 from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import json
 from pathlib import Path
 import sqlite3
@@ -10,6 +11,7 @@ shared()
 from features.social_analytics.warehouse_refresh import Reader, environment
 from features.social_analytics.report import campaign_index, resolve
 from features.social_analytics.backend_scope import eligible
+from .classification import PRODUCTS
 
 CONFIG_DB = '/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3'
 WAREHOUSE = '/mnt/data-disk/social-analytics-warehouse'
@@ -47,26 +49,58 @@ def social(scope, start, end, root=WAREHOUSE):
             pid = str(row['channel']).removeprefix('facebook:')
             if pid not in scope: continue
             if not any(eligible(c, r['date']) for c in candidates): raise RuntimeError('social_publication_date_mismatch')
-            result.append(dict(page_id=pid, date=r['date'], content_id=row['drama'], language=row['language'],
+            result.append(dict(page_id=pid, date=r['date'], app_id=1479, content_id=row['drama'], language=row['language'],
                           revenue_cents=r['revenue_cents'], posts=sorted({p['id'] for c in candidates for p in c.get('publications',[]) if p['date']<=r['date']})))
     return result, meta['version']
+
+
+def series_ranges(rows, target=25000):
+    """Collation-ordered half-open ranges cover new/empty series as well."""
+    lower, count, ranges = None, 0, []
+    for row in rows:
+        if count >= target:
+            ranges.append((lower, row['series_code']))
+            lower, count = row['series_code'], 0
+        count += int(row['rows'])
+    ranges.append((lower, None))
+    return ranges
+
+
+def merge_paid(rows):
+    merged = {}
+    for row in rows:
+        key = (row['page_id'], row['date'], row['app_id'], row['content_id'], row['language'])
+        value = merged.setdefault(key, dict(row, spend=Decimal(0), revenue=Decimal(0)))
+        value['spend'] += Decimal(str(row['spend']))
+        value['revenue'] += Decimal(str(row['revenue']))
+    return [dict(value, spend=str(value['spend']), revenue=str(value['revenue'])) for value in merged.values()]
 
 
 def paid(reader, scope, start, end):
     result = []
     ids = ','.join(map(literal,scope))
+    text_literal = lambda value: '_utf8mb4 ' + literal(value)
     for i in range(7):
         day = (date.fromisoformat(start)+timedelta(days=i)).isoformat()
-        sql = """SELECT HEX(JSON_OBJECT('page_id',page_id,'date',CAST(dt AS CHAR),
+        for app_id, product in PRODUCTS.items():
+            counts = reader.query(["SELECT HEX(JSON_OBJECT('series_code',series_code,'rows',COUNT(*))) "
+                "FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX(pss) "
+                "WHERE product=%s AND dt=%s GROUP BY series_code ORDER BY series_code" % (text_literal(product),text_literal(day))],timeout=60)
+            statements = []
+            for lower, upper in series_ranges(counts):
+                bounds = ('' if lower is None else ' AND series_code>='+text_literal(lower)) + ('' if upper is None else ' AND series_code<'+text_literal(upper))
+                statements.append("""SELECT HEX(JSON_OBJECT('page_id',page_id,'date',CAST(dt AS CHAR),'app_id',%d,
            'content_id',MIN(data_source_id),'language',MIN(COALESCE(NULLIF(drama_language,''),NULLIF(language,''),'unknown') COLLATE utf8mb4_bin),
            'spend',SUM(spend),'revenue',SUM(af_revenue0)))
            FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX(pss)
-           WHERE product='Dramawave' AND platform=0 AND dt='%s' AND page_id IN (%s)
-           GROUP BY page_id,dt,BINARY data_source_id,BINARY COALESCE(NULLIF(drama_language,''),NULLIF(language,''),'unknown')""" % (day,ids)
-        rows = reader.query([sql], timeout=60)
-        if len(rows)>100000: raise RuntimeError('paid_day_overflow')
-        result.extend(rows)
-        print(json.dumps(dict(event='paid_day',day=day,rows=len(rows))),flush=True)
+           WHERE product=%s AND platform=0 AND dt=%s AND page_id IN (%s)%s
+           GROUP BY page_id,dt,BINARY data_source_id,BINARY COALESCE(NULLIF(drama_language,''),NULLIF(language,''),'unknown')""" % (app_id,text_literal(product),text_literal(day),ids,bounds))
+            # All ranges for one product/day share the reader's repeatable-read
+            # snapshot. Per-statement execution remains capped at 20 seconds.
+            rows = merge_paid(reader.query(statements, timeout=max(60, len(statements)*20)))
+            if len(rows)>100000: raise RuntimeError('paid_day_overflow')
+            result.extend(rows)
+            print(json.dumps(dict(event='paid_day',day=day,product=product,rows=len(rows),queries=len(statements))),flush=True)
     return result
 
 
@@ -81,16 +115,17 @@ def collect(env_path, config_path=CONFIG_DB, warehouse=WAREHOUSE):
     raw = dict(start=str(start), end=str(end), page_ids=scope)
     raw['social'], raw['social_version'] = social(set(scope),str(start),str(end),warehouse)
     raw['paid'] = paid(reader,scope,str(start),str(end))
-    ids = sorted({str(r['content_id']) for kind in ('paid','social') for r in raw[kind] if r.get('content_id')})
-    for table,columns,key in [('ads_drama_resource',['content_id','app_id','language','series_code','labels'],'resources'),
-                              ('ads_drama_info',['content_id','app_id','language','series_code','resource_type','name'],'infos')]:
+    for table,index,columns,key in [('ads_drama_resource','content_id',['content_id','app_id','language','series_code','labels'],'resources'),
+                              ('ads_drama_info','ac',['content_id','app_id','language','series_code','resource_type','name'],'infos')]:
         rows = []
         fields = ','.join("'%s',%s" % (c,c) for c in columns)
-        for offset in range(0,len(ids),100):
-            statement = 'SELECT DISTINCT HEX(JSON_OBJECT('+fields+')) FROM kunlunads_dev.'+table+' WHERE app_id=1479 AND content_id IN ('+','.join(map(literal,ids[offset:offset+100]))+') LIMIT 20001'
-            batch = reader.query([statement],timeout=60)
-            if len(batch)>20000: raise RuntimeError('drama_metadata_overflow')
-            rows.extend(batch)
+        for app_id in PRODUCTS:
+            ids = sorted({str(r['content_id']) for kind in ('paid','social') for r in raw[kind] if r.get('content_id') and r.get('app_id',1479)==app_id})
+            for offset in range(0,len(ids),100):
+                statement = 'SELECT DISTINCT HEX(JSON_OBJECT('+fields+')) FROM kunlunads_dev.'+table+' FORCE INDEX('+index+') WHERE app_id='+str(app_id)+' AND content_id IN ('+','.join(map(literal,ids[offset:offset+100]))+') LIMIT 20001'
+                batch = reader.query([statement],timeout=60)
+                if len(batch)>20000: raise RuntimeError('drama_metadata_overflow')
+                rows.extend(batch)
         raw[key] = rows
     if configured(config_path) != scope: raise RuntimeError('page_scope_changed_during_collection')
     return raw, env, reader
