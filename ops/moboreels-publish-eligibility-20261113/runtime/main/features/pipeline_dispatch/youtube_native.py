@@ -233,12 +233,6 @@ class YouTubeNativeBridge:
             if name in {"youtube_begin_resumable", "youtube_visibility"} or (name == "youtube_schedule_control" and (details.get("control") or {}).get("action") != "cancel"):
                 from features.youtube_auto_publish.eligibility import assert_task_publishable
                 assert_task_publishable(self.store.db_path, task)
-            if name in {"youtube_begin_resumable", "youtube_visibility"} or (name == "youtube_schedule_control" and (details.get("control") or {}).get("action") != "cancel"):
-                from features.youtube_auto_publish.eligibility import assert_task_publishable
-                assert_task_publishable(self.store.db_path, task)
-            if name in {"youtube_begin_resumable", "youtube_visibility"} or (name == "youtube_schedule_control" and (details.get("control") or {}).get("action") != "cancel"):
-                from features.youtube_auto_publish.eligibility import assert_task_publishable
-                assert_task_publishable(self.store.db_path, task)
             if name == "youtube_begin_resumable":
                 privacy = "public" if task["workflow"] == "legacy" else "private"
                 if details != {"title": task["title"], "description": task["description_rendered"], "size": task["source_size"], "privacy_status": privacy} or not task["source_sha256"]:

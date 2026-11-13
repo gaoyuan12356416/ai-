@@ -455,18 +455,6 @@ class TTNativeBridge:
                     template_text = self.store.get_template(current["template_id"], version=current["template_version"]).config.get("caption_template")
                 if contains_macro(template_text):
                     assert_publishable(current.get("content_id"))
-                from features.moboreels_library.macro_client import contains_macro, assert_publishable
-                template_text = current.get("caption_template")
-                if self.automatic:
-                    template_text = self.store.get_template(current["template_id"], version=current["template_version"]).config.get("caption_template")
-                if contains_macro(template_text):
-                    assert_publishable(current.get("content_id"))
-                from features.moboreels_library.macro_client import contains_macro, assert_publishable
-                template_text = current.get("caption_template")
-                if self.automatic:
-                    template_text = self.store.get_template(current["template_id"], version=current["template_version"]).config.get("caption_template")
-                if contains_macro(template_text):
-                    assert_publishable(current.get("content_id"))
                 if job["family"] == "direct_test":
                     self.store.renew_direct_test_publish(int(job["source_id"]), stored["native_token"], lease_seconds=10800)
                 elif not self.automatic:

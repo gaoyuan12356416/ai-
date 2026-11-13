@@ -603,14 +603,6 @@ class YouTubeShares:
             raise YouTubeShareError("moboreels_drama_not_publishable", 409)
         from features.moboreels_library.macro_client import assert_publishable
         assert_publishable(context["story_id"])
-        if not context:
-            raise YouTubeShareError("moboreels_drama_not_publishable", 409)
-        from features.moboreels_library.macro_client import assert_publishable
-        assert_publishable(context["story_id"])
-        if not context:
-            raise YouTubeShareError("moboreels_drama_not_publishable", 409)
-        from features.moboreels_library.macro_client import assert_publishable
-        assert_publishable(context["story_id"])
         if frozen:
             return frozen["text"]
         if not context or "{{m_url}}" not in run["text"]:

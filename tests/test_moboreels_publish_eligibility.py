@@ -99,6 +99,12 @@ class EligibilityTests(unittest.TestCase):
             with self.assertRaises(client.MoboreelsEligibilityError):
                 links(object(), {'body_template': '{{m_url}}', 'content_id': '123'}, {'post_text': 'frozen', 'long_url': 'old', 'short_url': 'old'})
 
+    def test_x_cached_link_performs_one_read_per_guard(self):
+        links = method('x', 'features/pipeline_dispatch/x_native.py', '_links')
+        with patch.object(client, '_request', return_value={'drama': {'story_id': '123', 'is_show': 1}}) as request:
+            links(object(), {'body_template': '{{m_url}}', 'content_id': '123'}, {'post_text': 'frozen', 'long_url': 'old', 'short_url': 'old'})
+            self.assertEqual(request.call_count, 1)
+
     def test_tt_native_blocks_before_publish_intent_but_preserves_reconciliation(self):
         begin = method('tt', 'features/pipeline_dispatch/tt_native.py', 'begin_operation')
         current = {'caption_template': '{{m_url}}', 'content_id': '123', 'publish_id': '', 'unknown_outcome': 0}

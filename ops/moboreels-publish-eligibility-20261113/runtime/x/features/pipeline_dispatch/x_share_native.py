@@ -89,12 +89,6 @@ class XShareBridge:
         if "{{m_url}}" in item["run"]["description_template"]:
             if self.service._moboreels_text(item) != descriptor["request"]["text"]:
                 raise AdapterError("moboreels_caption_changed")
-        if "{{m_url}}" in item["run"]["description_template"]:
-            if self.service._moboreels_text(item) != descriptor["request"]["text"]:
-                raise AdapterError("moboreels_caption_changed")
-        if "{{m_url}}" in item["run"]["description_template"]:
-            if self.service._moboreels_text(item) != descriptor["request"]["text"]:
-                raise AdapterError("moboreels_caption_changed")
         if not self.service._begin_attempt(item):
             raise AdapterError("share_already_attempted")
         with self.runtime.publish_credentials(item["account_id"], actor, item["run"]["scope"]) as (_, token):

@@ -208,10 +208,6 @@ class XNativeBridge:
     def _links(self, queue, log):
         from features.x_posts.moboreels import assert_queue_publishable
         assert_queue_publishable(queue)
-        from features.x_posts.moboreels import assert_queue_publishable
-        assert_queue_publishable(queue)
-        from features.x_posts.moboreels import assert_queue_publishable
-        assert_queue_publishable(queue)
         if log.get("post_text") and log.get("long_url") and log.get("short_url"):
             return log
         duration = float(queue.get("preflight_duration") or 0)
@@ -380,12 +376,6 @@ class XNativeBridge:
                         or original["operation"] != "x:" + method + ":" + path.split("?")[0]
                         or original["request_sha256"] != fingerprint):
                     raise AdapterError("x_media_retry_invalid")
-            if method == "POST" and not log.get("unknown_outcome") and (path in ("/2/tweets", "/2/media/upload/initialize") or "/retweets" in path):
-                from features.x_posts.moboreels import assert_queue_publishable
-                assert_queue_publishable(queue)
-            if method == "POST" and not log.get("unknown_outcome") and (path in ("/2/tweets", "/2/media/upload/initialize") or "/retweets" in path):
-                from features.x_posts.moboreels import assert_queue_publishable
-                assert_queue_publishable(queue)
             if method == "POST" and not log.get("unknown_outcome") and (path in ("/2/tweets", "/2/media/upload/initialize") or "/retweets" in path):
                 from features.x_posts.moboreels import assert_queue_publishable
                 assert_queue_publishable(queue)
