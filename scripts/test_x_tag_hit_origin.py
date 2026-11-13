@@ -85,6 +85,15 @@ class Tests(unittest.TestCase):
         with patch('features.pipeline_dispatch.x_prepost_recovery.authorization',return_value=None):
             self.assertFalse(native.acknowledge_unentered_failure(bridge,job,claim,receipt))
 
+    def test_type_simple_readiness_waits_for_listener(self):
+        from scripts import deploy_x_tag_origin_broker as deploy
+        import urllib.error
+        response=unittest.mock.MagicMock();response.__enter__.return_value.status=200
+        opener=types.SimpleNamespace(open=unittest.mock.Mock(side_effect=[urllib.error.URLError('not-bound'),response]))
+        with patch('urllib.request.build_opener',return_value=opener),patch.object(deploy.time,'sleep') as sleep:
+            deploy.ready('http://127.0.0.1:8898/healthz')
+        self.assertEqual(opener.open.call_count,2);sleep.assert_called_once_with(.5)
+
     def test_endpoint_authentication_precedes_read(self):
         handler=next(x for x in module.body if isinstance(x,ast.ClassDef) and x.name=='Handler')
         dispatch=next(x for x in handler.body if isinstance(x,ast.FunctionDef) and x.name=='dispatch')

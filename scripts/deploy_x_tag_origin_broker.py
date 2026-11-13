@@ -29,8 +29,15 @@ def emit(**r):print(json.dumps(r),flush=True)
 def state(unit):return dict(x.split('=',1) for x in run('systemctl','show',unit,'-p','ActiveState','-p','SubState','-p','UnitFileState','-p','MainPID').splitlines())
 def ready(url):
     import urllib.request
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url,timeout=5) as r:
-        if r.status!=200:raise RuntimeError('service_not_ready')
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for attempt in range(120):
+        try:
+            with opener.open(url,timeout=2) as response:
+                if response.status==200:return
+        except (OSError,ValueError):
+            pass
+        time.sleep(.5)
+    raise RuntimeError('service_not_ready')
 
 
 def prepare(folder):
