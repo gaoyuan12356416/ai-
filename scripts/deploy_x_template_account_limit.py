@@ -53,6 +53,13 @@ def atomic(path, data):
     temp.replace(path)
 
 
+def version_page(original, editor):
+    page, count = re.subn(r'(/' + re.escape(EDITOR) + r')(?:\?[^"\']*)?',
+                         r'\1?v=' + digest(editor)[:12], original.decode('utf-8'))
+    assert count == 1, 'editor_script_reference_changed'
+    return page.encode('utf-8')
+
+
 def states(units):
     result = {}
     for unit in units:
@@ -88,10 +95,8 @@ def prepare():
     editor = (live / 'static' / EDITOR).read_text(encoding='utf-8')
     assert editor.count(GUARD) == 1
     editor = editor.replace(GUARD, '').encode('utf-8')
-    page, count = re.subn(r'(/' + re.escape(EDITOR) + r')(?:\?[^"\']*)?',
-                         r'\1?v=' + digest(editor)[:12], (live / 'static' / PAGE).read_text(encoding='utf-8'))
-    assert count == 1
-    payloads = {VALIDATION: validation, 'static/' + EDITOR: editor, 'static/' + PAGE: page.encode('utf-8')}
+    page = version_page((live / 'static' / PAGE).read_bytes(), editor)
+    payloads = {VALIDATION: validation, 'static/' + EDITOR: editor, 'static/' + PAGE: page}
     for relative, data in payloads.items():
         (staged / relative).write_bytes(data)
     for name in ('test_x_auto_post_validation.py', 'test_x_auto_post_service.py'):
@@ -104,10 +109,19 @@ def prepare():
         print(result.stdout + result.stderr)
         raise RuntimeError('isolated_tests_failed')
     targets = {live / relative: staged / relative for relative in payloads}
-    for root in (Path('/usr/share/nginx/html'), Path('/root/drama_material_service/static')):
-        for name in (EDITOR, PAGE):
-            assert digest((root / name).read_bytes()) == BASE['static/' + name], 'static_changed:' + str(root / name)
-            targets[root / name] = staged / 'static' / name
+    expected = {live / relative: sha for relative, sha in BASE.items()}
+    for index, root in enumerate((Path('/usr/share/nginx/html'), Path('/root/drama_material_service/static'))):
+        assert digest((root / EDITOR).read_bytes()) == BASE['static/' + EDITOR], 'static_changed:' + str(root / EDITOR)
+        targets[root / EDITOR] = staged / 'static' / EDITOR
+        expected[root / EDITOR] = BASE['static/' + EDITOR]
+        # Public pages have newer navigation and profile copy than the runtime
+        # snapshot. Change only this script reference in each existing page.
+        original = (root / PAGE).read_bytes()
+        candidate = folder / ('public-page-' + str(index) + '.html')
+        candidate.write_bytes(version_page(original, editor))
+        targets[root / PAGE] = candidate
+        expected[root / PAGE] = digest(original)
+    expected[live / 'tag-runtime-manifest.json'] = digest((live / 'tag-runtime-manifest.json').read_bytes())
     manifest = json.loads((live / 'tag-runtime-manifest.json').read_text())
     for relative, data in payloads.items():
         manifest['files'][relative] = digest(data)
@@ -118,6 +132,7 @@ def prepare():
     for index, (target, source) in enumerate(targets.items()):
         backup = folder / 'backups' / str(index)
         shutil.copy2(target, backup)
+        assert digest(backup.read_bytes()) == expected[target], 'concurrent_file_change:' + str(target)
         info['files'][str(target)] = dict(backup=str(backup), source=str(source),
                                        before=digest(backup.read_bytes()), after=digest(source.read_bytes()))
     db = Path('/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3')
