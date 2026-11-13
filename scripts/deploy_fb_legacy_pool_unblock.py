@@ -58,7 +58,8 @@ def prepare(folder):
         (old_method, legacy_method((SOURCE / FILE).read_text(encoding='utf-8')))])
     compile(main_text, FILE, 'exec')
     stage(folder, MAIN / FILE, main_text, manifest)
-    for name in ('test_fb_legacy_queue_independence.py', 'test_fb_mixed_product_pools.py'):
+    for name in ('test_fb_legacy_queue_independence.py', 'test_fb_mixed_product_pools.py',
+                 'test_fb_page_task_isolation.py'):
         atomic_copy(SOURCE / 'tests' / name, candidate / 'tests' / name)
     proof = subprocess.run([sys.executable, '-B', '-m', 'unittest', *TESTS, '-q'],
                            cwd=candidate, capture_output=True, text=True, timeout=60)
