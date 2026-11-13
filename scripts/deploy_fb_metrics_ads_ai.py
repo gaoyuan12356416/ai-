@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,29 @@ def write_metric_settings(settings):
     lines = [line for line in ENV.read_text().splitlines() if not line.startswith(METRIC_ENV_KEYS)]
     release.atomic(ENV, ("\n".join(lines + list(settings)) + "\n").encode())
     ENV.chmod(0o600)
+
+
+def validate_rollback_snapshot(path, reader=None):
+    # The old archive predates new MySQL generations. It is never sufficient by
+    # itself once a refresh has run, even if the same calendar dates exist.
+    from features.fb_auto_posts.metric_mysql import GatedMetricReader, config_from_file
+    if reader is None:
+        reader = GatedMetricReader(config_from_file("/etc/codex-private-storage-archive.json"))
+    rows = reader.query([
+        "SELECT HEX(JSON_OBJECT('kind','generation','id',id,'generation_key',generation_key,'row_count',row_count)) FROM ads_ai.fb_auto_metric_generation WHERE status='ready'",
+        "SELECT HEX(JSON_OBJECT('kind','pointer','platform',platform,'metric_date',metric_date,'product',product,'generation_id',generation_id)) FROM ads_ai.fb_auto_metric_active_pointer"])
+    db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        db.execute("PRAGMA query_only=ON"); db.execute("BEGIN")
+        existing = {row[0]: (row[1], row[2]) for row in db.execute("SELECT id,generation_key,row_count FROM fb_auto_metric_generation WHERE status='ready'")}
+        for row in rows:
+            if row['kind'] == 'generation':
+                assert existing.get(row['id']) == (row['generation_key'], row['row_count']), "restore_ads_ai_metric_delta_before_rollback"
+        expected = {(row['platform'], row['metric_date'], row['product']): row['generation_id'] for row in rows if row['kind'] == 'pointer'}
+        actual = {(row[0], row[1], row[2]): row[3] for row in db.execute("SELECT platform,metric_date,product,generation_id FROM fb_auto_metric_active_pointer")}
+        assert actual == expected, "restore_current_metric_pointers_before_rollback"
+    finally:
+        db.close()
 
 
 def stage(folder):
@@ -86,6 +110,7 @@ def apply(folder, rollback=False):
         # Do not roll back to a missing/old archive. The current snapshot must
         # first be restored by the archive operator when the source was removed.
         assert Path("/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3").is_file(), "restore_metric_archive_first"
+        validate_rollback_snapshot("/mnt/data-disk/fb-auto-post-publisher/fb-auto-metric.sqlite3")
     else:
         migration = json.loads((folder.parent / "migration.json").read_text())
         assert migration.get("verified") is True and migration.get("pointers_verified", 0) > 0

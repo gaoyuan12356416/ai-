@@ -12,6 +12,7 @@ from features.fb_auto_posts.metric_mysql import (GatedMetricReader, MetricBroker
     canonical_row, digest_row, exact_add, exact_amount, metric_store_from_env, window_from_rows)
 from scripts.fb_auto_metric_broker import validate_window
 from scripts.migrate_fb_metrics_ads_ai import collect_references, json_metric_refs, integer_ids
+from scripts.deploy_fb_metrics_ads_ai import validate_rollback_snapshot
 
 
 class FakeCursor:
@@ -41,6 +42,27 @@ class FakeReader:
 
 
 class MetricTests(unittest.TestCase):
+    def test_rollback_rejects_archive_missing_post_cutover_generation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "rollback.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE fb_auto_metric_generation(id INTEGER,generation_key TEXT,row_count INTEGER,status TEXT)")
+            db.execute("CREATE TABLE fb_auto_metric_active_pointer(platform INTEGER,metric_date TEXT,product TEXT,generation_id INTEGER)")
+            db.execute("INSERT INTO fb_auto_metric_generation VALUES(1,'old',4,'ready')")
+            db.execute("INSERT INTO fb_auto_metric_active_pointer VALUES(0,'2026-11-12','Dramawave',1)");db.commit()
+            class Reader:
+                def query(self, _):
+                    return [{'kind':'generation','id':1,'generation_key':'old','row_count':4},
+                            {'kind':'generation','id':2,'generation_key':'new','row_count':5},
+                            {'kind':'pointer','platform':0,'metric_date':'2026-11-12','product':'Dramawave','generation_id':2}]
+            with self.assertRaisesRegex(AssertionError, 'restore_ads_ai_metric_delta'):
+                validate_rollback_snapshot(path, Reader())
+            db.execute("INSERT INTO fb_auto_metric_generation VALUES(2,'new',5,'ready')");db.commit()
+            with self.assertRaisesRegex(AssertionError, 'restore_current_metric_pointers'):
+                validate_rollback_snapshot(path, Reader())
+            db.execute("UPDATE fb_auto_metric_active_pointer SET generation_id=2");db.commit();db.close()
+            validate_rollback_snapshot(path, Reader())
+
     def test_manual_reader_is_explicit_and_retries_only_transport_errors(self):
         with patch.dict("os.environ", {"SQL_GATE_BYPASS": "1"}):
             self.assertEqual(GatedMetricReader({}).client, "/usr/bin/mysql")

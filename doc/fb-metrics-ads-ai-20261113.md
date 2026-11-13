@@ -59,8 +59,13 @@ Deployment sequence:
    after its processes have released it and the private archive verifies.
 
 Rollback: retain the MySQL data. Restore the original SQLite archive to the
-original metric path first if it was removed, then refresh any now-stale dates
-before making that older snapshot authoritative. Run
+original metric path first if it was removed. Before making it authoritative,
+restore all post-cutover MySQL generations, preserving their integer IDs and
+generation keys, and synchronize the current day pointers. Verify those restored
+rows and all active/history references against MySQL. Merely refreshing dates
+would create different identities and is not a valid restore. The rollback tool
+refuses a snapshot missing ready MySQL generation identities/counts or pointing
+at older day versions. Run
 `scripts/deploy_fb_metrics_ads_ai.py rollback --folder DEPLOYMENT` to restore the
 previous code pointer/environment and remove the metric unit overrides. Restore
 the saved metric timer states. Never restore the publication operational database.
