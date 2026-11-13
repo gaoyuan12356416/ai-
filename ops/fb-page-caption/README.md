@@ -41,3 +41,14 @@ The candidate also opens an already initialized metric database without DDL:
 a long-running read-only metric migration held a shared lock that otherwise
 blocked the API's repeated startup initialization. New metric databases still
 initialize normally; existing readers validate the required tables.
+
+Follow-up QA reproduced a selection bug: a valid Page caption without `{desc}`
+could lose all materials because the automatic fallback required `{{desc}}`.
+Material reads now share separate language/description-required pools; strict
+fallback Pages retain their original filtered top-N. Exact-material runs permit
+valid Pages and skip only Pages lacking required caption metadata. Neither path
+can publish an empty required description. The publisher-path test uses a mock
+transport and verifies that the frozen Page message reaches it unchanged.
+`scripts/check_fb_page_caption.py` additionally reads the 236 approved live
+configs and renders every enabled-template/Page pair in memory, with no network
+publication, short-link allocation or production task writes.

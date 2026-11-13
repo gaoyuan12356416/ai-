@@ -114,6 +114,26 @@ class PageCaptionTests(unittest.TestCase):
         self.run_once()
         self.assertEqual(self.tasks()[0]['message_text'],'Page copy')
 
+    def test_page_without_desc_can_select_material_even_if_fallback_requires_desc(self):
+        from features.fb_auto_posts.repositories import MaterialRepository
+        self.template=self.store.create_template(dict(self.raw,message_template='Fallback {{desc}} {{url}}'),self.actor,
+            dict(app_id='1479',product='Dramawave',metric_product='Dramawave',metric_platform=0))
+        self.configure('11','Watch {url}')
+        def select(sql,params):
+            if 'FORCE INDEX(PRIMARY)' in sql:
+                return [dict(material_id='1',content_id='drama',media_url='https://media.test/1.mp4',language='en',video_duration=60)]
+            if 'MAX(d0.id)' in sql:return [dict(content_id='drama',drama_name='Drama',language='en',resource_type_v2='1')]
+            if 'description_count' in sql:return []
+            raise AssertionError(sql)
+        metrics=SimpleNamespace(load_metric_window=lambda **_:SimpleNamespace(by_drama={},by_material={},generation_ids=(),dates=()))
+        self.materials=MaterialRepository(SimpleNamespace(schema='ads',blacklist_schema='ads',select=select),metrics,now_fn=lambda:fixtures.NOW)
+        with patch('features.fb_auto_posts.core.load_profiles',return_value=({'pages':{}},{})):
+            self.run_slot('optional-description')
+        first,second=self.tasks()
+        self.assertEqual(first['status'],'planned')
+        self.assertEqual(first['message_text'],'Watch '+first['short_url'])
+        self.assertEqual(second['status'],'skipped')
+
     def test_oversized_expansion_falls_back_without_truncating_page_copy(self):
         self.configure('11', '{desc}')
         self.rows = tuple(replace(row, drama_description='x'*5001) for row in self.rows)
@@ -164,6 +184,47 @@ class PageCaptionTests(unittest.TestCase):
         self.configure('11', 'New text')
         self.assertTrue(publish_material(runtime, self.template['id'], self.actor, request)['idempotent'])
         self.assertEqual(before, self.tasks())
+
+    def test_exact_material_missing_desc_only_skips_pages_that_require_it(self):
+        self.template=self.store.create_template(dict(self.raw,message_template='Fallback {{desc}} {{url}}'),self.actor,
+            dict(app_id='1479',product='Dramawave',metric_product='Dramawave',metric_platform=0))
+        self.configure('11','Watch {url}')
+        with self.store.connect() as conn:
+            conn.execute("UPDATE fb_auto_template SET status='enabled' WHERE id=?",(self.template['id'],))
+        def exact(config,mid):
+            self.assertNotIn('{{desc}}',config['message_template'])
+            self.assertTrue(config['_page_caption_description'])
+            return replace(self.rows[0],drama_description='')
+        runtime=SimpleNamespace(store=self.store,pages=self.pages,materials=SimpleNamespace(exact_material=exact),
+            executor=SimpleNamespace(live_enabled=True),prebuild_enabled=True,resolve_source=lambda *a:None,
+            max_publishable_pages=100,max_jobs_per_slot=100,max_daily_jobs=1000)
+        result=publish_material(runtime,self.template['id'],self.actor,
+            {'expected_version':1,'material_id':'1','operation_id':'optional-desc'})
+        self.assertEqual((result['queued'],result['skipped']),(1,1))
+        self.assertEqual(self.tasks()[0]['message_text'],'Watch '+self.tasks()[0]['short_url'])
+        self.assertEqual(self.tasks()[1]['skip_reason'],'fb_auto_caption_source_missing')
+
+    def test_executor_sends_frozen_page_copy_with_mock_transport_only(self):
+        from features.fb_auto_posts.publisher import AutoPostExecutor,GraphResult
+        from features.fb_auto_posts.repositories import PageCredential
+        self.page_rows=self.page_rows[:1]
+        self.run_once()
+        original=self.tasks()[0]
+        self.configure('11','Changed after planning')
+        with self.store.connect() as conn:
+            conn.execute("UPDATE fb_auto_template SET status='enabled' WHERE id=?",(self.template['id'],))
+            conn.execute("UPDATE fb_auto_task SET status='ready',media_url='https://media.test/prepared.mp4',prepared_media_url='https://media.test/prepared.mp4',prepared_at_utc=?",(fixtures.NOW.isoformat(),))
+        sent=[];links=[]
+        def publish(pid,credential,media,message,**kwargs):
+            sent.append((pid,message));return GraphResult('success',post_id='fixture-only')
+        pages=SimpleNamespace(eligible_credentials=lambda pid:[PageCredential(pid,'fixture-user','fixture-credential','fixture-not-a-token')])
+        executor=AutoPostExecutor(self.store,pages,SimpleNamespace(publish_video=publish),live_enabled=True,
+            min_request_interval_seconds=0,short_link_writer=lambda *args:links.append(args))
+        with patch('requests.sessions.Session.request',side_effect=AssertionError('network forbidden in fixture')):
+            executor.execute_next('fixture-worker')
+        self.assertEqual(sent,[('11',original['message_text'])])
+        self.assertEqual(len(links),1)
+        self.assertEqual(self.tasks()[0]['status'],'submitted')
 
 
 class OptionalDescriptionTests(unittest.TestCase):

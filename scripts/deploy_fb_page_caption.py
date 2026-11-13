@@ -14,16 +14,13 @@ sys.path.insert(0, str(SOURCE))
 from scripts import deploy_hit_drama as release
 from scripts.deploy_pipeline_runtime import verify_source
 
-BASE = '0aaa0d486f42bf8a67632a1ce2f47324ac011961'
+BASE = '7de3b074216efacb1c7f001932facd430b82712d'
 FILES = ['features/fb_auto_posts/' + name + '.py' for name in
-         ('core', 'repositories', 'hit_material', 'page_caption', 'service')]
-FILES += ['ops/fb-page-caption/approved-20261113.json']
+         ('core', 'hit_material', 'page_caption')]
 TESTS = ['tests.test_fb_page_caption', 'tests.test_fb_profile_integration', 'tests.test_fb_profile_selection',
          'scripts.test_fb_hit_drama', 'scripts.test_fb_target_midnight', 'scripts.test_fb_auto_validation']
 OVERLAY_BASES = {
-    'features/fb_auto_posts/core.py': '72ac1e554d22727f2090bada34805a2f10011b9fe9581b8f209ed0b52baeb6db',
-    'features/fb_auto_posts/repositories.py': '0ba04176f2a71a09ba1954b8ff89dc8ce70fd799261b19867017a0bc65dfde89',
-    'features/fb_auto_posts/service.py': 'b91cff5c5cfc7aa8cb231b17895ad44ef66ed6c19871aed9f1070977f05b7bd5',
+    'features/fb_auto_posts/core.py': '477a884c180cf0b45431f4dc430816777d03e3698ee960ee848e691df11ec0a2',
 }
 
 

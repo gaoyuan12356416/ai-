@@ -19,7 +19,7 @@ from features import social_random_schedule as target_daily
 from . import target_schedule
 from . import page_caption
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
-from .languages import candidate_snapshots_for_pages,page_language
+from .languages import page_language
 from .profile_selection import Decision, load_profiles
 from .profile_material import choose_profile_material
 from features.hit_drama_target import content_ids as target_content_ids
@@ -622,9 +622,10 @@ class FBAutoPostStore:
         profile_snapshot = load_profiles([p.page_id for p in page_rows]) if profile_supported else ({'pages': {}}, {})
         profile_identity = [template_id, int(template['current_version']), slot_key]
         profile_enabled = profile_supported and any(not Decision(p.page_id, profile_identity, profile_snapshot).reason for p in page_rows)
-        candidate_snapshots = candidate_snapshots_for_pages({**config,'_candidate_limit':candidate_limit,
+        caption_languages={page.page_id:page_language(page.language) for page in page_rows}
+        candidate_snapshots = page_caption.candidate_snapshots({**config,'_candidate_limit':candidate_limit,
             '_profile_selection':profile_enabled,
-            '_page_caption_description':page_caption.needs_description(caption_snapshot)},page_rows,materials)
+            '_page_caption_description':page_caption.needs_description(caption_snapshot)},page_rows,materials,caption_snapshot)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
         # Catalog/metric freezing can be the longest read in planning.  Re-read
         # every mutable Page-side input afterwards so a pool disable, membership
@@ -639,7 +640,8 @@ class FBAutoPostStore:
         if hit_drama and hit_drama.get('match_policy'):
             from .hit_profile import filter_pages
             page_rows = filter_pages(page_rows, hit_drama)
-        if any(page_language(page.language) and page_language(page.language) not in candidate_snapshots for page in page_rows):
+        if any(page_language(page.language) and (page.page_id not in candidate_snapshots or
+                page_language(page.language)!=caption_languages.get(page.page_id)) for page in page_rows):
             raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
         for other in self.enabled_template_sources(template_id):
@@ -732,13 +734,14 @@ class FBAutoPostStore:
                         raise StoreError('fb_auto_candidate_reservations_changed','Page素材占用在计划期间变化，请重试',409)
                     blocked_content = cooldown_content_ids(conn, page.page_id, task_publish_at, int(config.get("drama_cooldown_hours", 0)), now)
                     allowed = set(hit_drama['page_content_ids'].get(page.page_id, [])) if hit_drama and hit_drama.get('match_policy') else (set(target_content_ids(hit_drama, language)) if hit_drama else None)
-                    page_snapshot = candidate_snapshots[language]
+                    page_snapshot = candidate_snapshots[page.page_id]
                     decision = Decision(page.page_id, profile_identity, profile_snapshot)
                     candidate_pool = page_snapshot.candidates
                     if not hit_drama and (decision.reason or page_snapshot.profile_error or not profile_supported):
                         candidate_pool = diverse_candidates(candidate_pool, candidate_limit,
                             20 if int(config.get('drama_cooldown_hours', 0)) else 0)
-                    scoped_candidates = [item for item in candidate_pool if allowed is None or item.content_id in allowed]
+                    scoped_candidates = [item for item in candidate_pool if (allowed is None or item.content_id in allowed)
+                        and page_caption.material_eligible(config,page.page_id,item,caption_snapshot)]
                     candidates = [item for item in scoped_candidates if item.content_id not in blocked_content]
                     if hit_drama:
                         material, selection = choose_material(candidates, excluded, materials=materials, config=config, page_id=page.page_id, slot_key=slot_key, scores=effect_scores)

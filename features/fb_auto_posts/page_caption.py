@@ -44,6 +44,36 @@ def load(conn,creator_id,page_ids):
 def needs_description(snapshot):
     return any('{{desc}}' in row.get('template','') for row in snapshot['pages'].values())
 
+
+def description_required(config,page_id,snapshot):
+    if '{{desc}}' not in config.get('message_template',''):return False
+    row=snapshot['pages'].get(str(page_id),{})
+    return not handles(config) or not row.get('template') or '{{desc}}' in row['template']
+
+
+def source_config(config,pages,snapshot):
+    result=dict(config,_page_caption_description=needs_description(snapshot) or '{{desc}}' in config.get('message_template',''))
+    if handles(config) and any(not description_required(config,p.page_id,snapshot) for p in pages):
+        result['message_template']=config['message_template'].replace('{{desc}}','')
+    return result
+
+
+def candidate_snapshots(config,pages,materials,snapshot):
+    """Share bounded reads by language and whether description is mandatory.
+
+    Keep strict and optional pools separate so missing-description rows cannot
+    crowd valid fallback candidates out of the existing top-N bound.
+    """
+    from .languages import candidate_snapshots_for_pages,page_language
+    groups={}
+    for page in pages:
+        groups.setdefault(description_required(config,page.page_id,snapshot),[]).append(page)
+    result={}
+    for grouped in groups.values():
+        by_language=candidate_snapshots_for_pages(source_config(config,grouped,snapshot),grouped,materials)
+        result.update({p.page_id:by_language[page_language(p.language)] for p in grouped if page_language(p.language) in by_language})
+    return result
+
 def choose(config,page_id,material,snapshot):
     row=snapshot['pages'].get(str(page_id))
     reason=snapshot['reason'] if row is None else row.get('reason','')
@@ -60,6 +90,13 @@ def choose(config,page_id,material,snapshot):
         return dict(config,message_template=row['template']),audit
     return config,audit
 
+
+def material_eligible(config,page_id,material,snapshot):
+    if not handles(config):return True
+    selected,_=choose(config,page_id,material,snapshot)
+    return '{{desc}}' not in selected['message_template'] or bool(str(getattr(material,'drama_description','') or '').strip())
+
+
 def freeze(store,conn,config,page,material,task_id,timestamp,snapshot):
     selected,audit=choose(config,page.page_id,material,snapshot)
     from .links import build_short_url
@@ -70,6 +107,9 @@ def freeze(store,conn,config,page,material,task_id,timestamp,snapshot):
         selected=config;audit.update(source='auto_template',fallback_reason='page_caption_expanded_too_long')
         short=build_short_url(task_id) if '{{url}}' in selected['message_template'] else ''
         message=store._message(selected,material,short)
+    if '{{desc}}' in selected['message_template'] and not str(getattr(material,'drama_description','') or '').strip():
+        from .core import StoreError
+        raise StoreError('fb_auto_caption_source_missing','发布文案缺少必需的短剧简介，未创建任务',409)
     long=''
     if short:short,long=store._link_values(page,material,task_id,timestamp)
     conn.execute('UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?',(message,short,long,task_id))
