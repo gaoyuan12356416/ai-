@@ -1,6 +1,7 @@
 """Bounded, redirect-free loopback calls. Never serialize credentials."""
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,4 +59,21 @@ def sidecar(method, path, actor, payload=None, query=None):
 def broker(kind, payload, token):
     if kind not in {'identity', 'source'}:
         raise PublishingError('invalid_request', '内部请求无效', 400)
-    return request('http://127.0.0.1:8787/internal/x-video-publish/' + kind, token, payload)
+    url = 'http://127.0.0.1:8787/internal/x-video-publish/' + kind
+    if kind != 'identity':
+        return request(url, token, payload)
+    # This endpoint only reads the current owner/permission record. Retrying it
+    # cannot duplicate a publication. Never apply this policy to dispatch,
+    # credential permits, source operations, or any platform write.
+    deadline = time.monotonic() + 12
+    delays = (0.25, 0.5, 1, 2, 3)
+    for attempt in range(len(delays) + 1):
+        try:
+            return request(url, token, payload, timeout=min(3, max(.1, deadline - time.monotonic())))
+        except PublishingError as exc:
+            remaining = deadline - time.monotonic()
+            if (exc.status not in (502, 503, 504)
+                    or exc.code not in ('service_unavailable', 'identity_unavailable')
+                    or attempt == len(delays) or remaining <= delays[attempt]):
+                raise
+            time.sleep(delays[attempt])

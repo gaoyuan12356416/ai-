@@ -973,7 +973,12 @@ class DispatchStore:
                 rank = {channel: index for index, channel in enumerate(order)}
                 rows = sorted(rows, key=lambda item: rank.get(item["channel"], 0))
             blocked = []
+            from .maintenance import active_holds, blocking_service
+            maintenance_holds = active_holds()
             for row in rows:
+                if blocking_service(row, maintenance_holds):
+                    blocked.append('service_draining')
+                    continue
                 if c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", ("job:" + str(row["id"]), now)).fetchone():
                     blocked.append("account_busy")
                     continue

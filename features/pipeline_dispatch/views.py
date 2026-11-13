@@ -432,11 +432,22 @@ def query(store, view, actor, filters):
                             item['effective_reason'] = state.get('reason', '')
                             item['effective_code'] = state.get('code', '')
                             item['source_status'] = state.get('source_status', '')
+                    from .failure_context import phases_for, display_code
+                    from features.post_daily_report.accounting import reason_label
+                    phases = phases_for(conn, result['items'])
+                    for item in result['items']:
+                        if item['channel'] == 'x' and item['stage'] == 'publish' and item['status'] in ('failed', 'unknown'):
+                            code = display_code(item, phases.get(item['id'], ()))
+                            item['effective_code'] = code
+                            item['effective_reason'] = reason_label(code)
             except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
                 result['warnings'].append('跨日期核对暂不可用（' + type(exc).__name__ + '），数量不按零统计')
                 if view == 'summary':
                     result['backlog'] = {'available': False, 'unfinished': None, 'unqueued': None, 'channels': []}
     if view == 'summary':
+        from .maintenance import active_holds
+        if active_holds():
+            result['warnings'].append('相关服务正在安全切换：在途任务继续执行，新任务暂缓领取；服务就绪后自动恢复')
         from .support_health import read_snapshot
         support = read_snapshot(now, safe_actor, channels)
         if support is not None:

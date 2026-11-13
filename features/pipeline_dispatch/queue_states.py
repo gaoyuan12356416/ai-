@@ -97,18 +97,19 @@ def add_summary(conn, scope, args, by, totals, common, now, start, end):
         item["oldest_pending_seconds"] = None
     # Keep receipt/closure semantics, including unresolved post-publication
     # comments, while scoping both counts and their reason details to the window.
-    outcomes = conn.execute("SELECT j.channel,j.stage,j.status,j.error_code,COUNT(*) n FROM pipeline_job j WHERE " + scope +
+    outcomes = conn.execute("SELECT j.id,j.channel,j.stage,j.status,j.error_code,j.error_message FROM pipeline_job j WHERE " + scope +
         " AND j.status IN ('failed','unknown') AND j.hold_reason<>'metadata_only'"
         " AND (j.status='unknown' OR (j.source_status NOT IN ('skipped','cancelled','canceled','abandoned','duplicate','no_candidate')"
         " AND NOT EXISTS (SELECT 1 FROM pipeline_publication p WHERE p.source_key=j.source_key)))"
-        " AND " + anomaly_time + ">=? AND " + anomaly_time + "<=?"
-        " GROUP BY j.channel,j.stage,j.status,j.error_code", args + [start, end]).fetchall()
+        " AND " + anomaly_time + ">=? AND " + anomaly_time + "<=?", args + [start, end]).fetchall()
     from features.post_daily_report.accounting import reason_label
+    from .failure_context import phases_for, display_code
+    phases = phases_for(conn, outcomes)
     for outcome in outcomes:
         item = by[(outcome['channel'], outcome['stage'])]
-        item['abnormal'] = (item['abnormal'] or 0) + outcome['n']
-        code = 'unknown' if outcome['status'] == 'unknown' else outcome['error_code'] or 'failed'
-        item['abnormal_reasons'][code] = item['abnormal_reasons'].get(code, 0) + outcome['n']
+        item['abnormal'] = (item['abnormal'] or 0) + 1
+        code = display_code(outcome, phases.get(outcome['id'], ()))
+        item['abnormal_reasons'][code] = item['abnormal_reasons'].get(code, 0) + 1
     if len(rows) > LIMIT:
         for item in by.values():
             item.update({key: None for key in KEYS})

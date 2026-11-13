@@ -43,7 +43,13 @@ REASONS = {
     'x_auto_no_eligible_material': '没有符合筛选条件的素材，本次计划已跳过',
     'x_post_pool_fifo_conflict': '素材选择顺序与冻结计划冲突，未形成队列',
     'x_post_schedule_partial_capacity': '部分计划账号未形成执行队列',
-    'x_upstream_error': '上游预检失败，未形成执行队列',
+    'x_upstream_error': 'X 平台请求失败，需查看原任务错误',
+    'x_account_temporarily_locked': 'X 账号临时锁定，媒体上传失败',
+    'coordinator_operation_failed': '协调服务内部异常，需核对原任务记录',
+    'coordinator_unavailable': '协调服务暂不可用，需核对原任务记录',
+    'service_unavailable': '内部服务暂不可用，需核对原任务记录',
+    'unknown': '结果待核对，尚不能认定发布失败',
+    'service_draining': '服务切换中，等待在途任务完成后继续接单',
     'plan_not_enqueued': '已到期的冻结计划尚未形成执行任务',
     'plan_cancelled': '未入队计划已明确取消，保留取消记录',
     'source_closed': '原任务已取消或正常策略跳过',
@@ -57,6 +63,11 @@ CLOSED_NATIVE = {'skipped', 'cancelled', 'canceled', 'abandoned', 'duplicate', '
 
 
 def reason_label(code):
+    if isinstance(code, str) and code.startswith(('x_upload_interrupted:', 'x_post_outcome_unknown:')):
+        phase, original = code.split(':', 1)
+        if re.fullmatch(r'[A-Za-z0-9_.:-]{1,96}', original):
+            return ('媒体上传阶段中断，待核对' if phase == 'x_upload_interrupted' else
+                    '媒体已上传，发帖结果待核对') + '（' + original + '）'
     if code in REASONS:
         return REASONS[code]
     safe = str(code or '')

@@ -57,10 +57,10 @@ class QueueStatesTests(unittest.TestCase):
         result = self.summary()
         self.assertEqual(result['queue_state_version'], 1)
         self.assertEqual({k: result['totals'][k] for k in queue_states.KEYS},
-                         dict(waiting=2, executing=2, scheduled=2, abnormal=4))
+                         dict(waiting=2, executing=2, scheduled=2, abnormal=3))
         row = result['channels'][0]
         self.assertEqual(row['oldest_pending_seconds'], 3600)
-        self.assertEqual(row['abnormal_reasons'], dict(held=1, failed=2, unknown=1))
+        self.assertEqual(row['abnormal_reasons'], dict(held=1, failed=1, unknown=1))
         self.assertEqual(result['totals']['backlog_paused'], 1)
 
     def test_unknown_account_blocker_does_not_leak_other_owner(self):

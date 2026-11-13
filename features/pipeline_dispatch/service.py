@@ -460,7 +460,16 @@ def handler_type(coordinator):
                 self.reply(exc.status, {"ok": False, "code": exc.code})
             except (ValueError, TypeError, KeyError):
                 self.reply(400, {"ok": False, "code": "request_invalid"})
-            except Exception:
+            except Exception as exc:
+                # Preserve a useful stack without exception text, local values,
+                # request bodies, headers, or credential-bearing source lines.
+                import logging
+                import traceback
+                frames = traceback.extract_tb(exc.__traceback__)
+                stack = ' > '.join('%s:%s:%s' % (Path(f.filename).name, f.lineno, f.name)
+                                   for f in frames[-12:])
+                logging.getLogger(__name__).error('coordinator_operation_failed type=%s stack=%s',
+                                                  type(exc).__name__, stack)
                 self.reply(503, {"ok": False, "code": "coordinator_operation_failed"})
     return Handler
 
