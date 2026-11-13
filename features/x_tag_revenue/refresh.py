@@ -85,7 +85,7 @@ def refresh(root, warehouse_root, env_path):
             result['meta'].update(hierarchy_version=HIERARCHY_VERSION,
                                   audience_taxonomy_version=TAXONOMY_VERSION,
                                   allocation='audience_distinct_broad_themes',
-                                  type_source='ads_drama_info.resource_type',audience_source='versioned_label_rules')
+                                  type_source='ads_drama_info.resource_type',audience_source='material_list2.audience_labels')
             directory = root / 'snapshots'
             directory.mkdir(exist_ok=True)
             filename = 'snapshots/' + version + '.json'

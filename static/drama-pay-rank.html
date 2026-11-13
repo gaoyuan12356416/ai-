@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>短剧付费 TOP100 · AI 自动后台</title>
+<link rel="stylesheet" href="/ui-topbar.css"><link rel="stylesheet" href="/drama-pay-rank.css?v=20261113a">
+</head><body><div class="app"><aside class="sidebar"><a class="brand" href="/">AI 自动后台</a><nav id="quickNav"></nav></aside>
+<main><header class="topbar"><div><span class="eyebrow">DRAMA RANKING</span><h1>短剧付费 TOP100</h1><p>按语种查看近三日付费人数排名</p></div><div class="top-actions"><div id="userCard" class="user-card"></div><button id="loginBtn">登录</button></div></header>
+<section class="panel"><div class="panel-head"><div><h2>每日榜单</h2><p>每天北京时间 11:00 更新</p></div><button id="refreshBtn">刷新页面</button></div>
+<form id="filters"><label>榜单日期<select id="dateFilter"><option value="">最新榜单</option></select></label><label>语种<select id="languageFilter"><option value="en">英语 · en</option></select></label><button class="primary" type="submit">查看榜单</button></form>
+<div class="meta"><span id="windowLabel">正在加载…</span><span id="updatedLabel"></span><span id="countLabel"></span></div>
+<div id="notice" class="notice" role="status" hidden></div>
+<div class="table-wrap"><table><thead><tr><th>排名</th><th>短剧 / 剧 ID</th><th>语种</th><th>受众</th></tr></thead><tbody id="rows"><tr><td colspan="4" class="empty">正在读取榜单…</td></tr></tbody></table></div>
+<footer>排名依据榜单生成日前三个完整 UTC 自然日的去重付费人数；接口仅提供名次。支付关联的剧不等同于专为该剧解锁付费。</footer></section></main></div>
+<script src="/quick-nav.js?v=20261113rank1"></script><script src="/ui-topbar.js"></script><script src="/drama-pay-rank.js?v=20261113a"></script></body></html>

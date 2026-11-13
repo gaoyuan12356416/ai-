@@ -10,6 +10,7 @@ import json
 import os
 
 from features.x_tag_revenue.taxonomy import classify, UNKNOWN
+from features.drama_audience.store import records as audience_records
 from features.x_tag_revenue.tags import VERSION as TAG_VERSION
 from features.x_tag_revenue.hierarchy import VERSION as HIERARCHY_VERSION
 from features.x_accounts.language import canonical_drama_language
@@ -121,6 +122,7 @@ def freeze_assignments(conn, *, run_date, config_version, configured_account_ids
     remaining = [v for v in configured_account_ids if v in account_by_id and v not in occupied]
     unassigned = [r for r in rows if not int(r['assigned_account_id']) and
                   r['last_error_code'] in ('', 'x_long_video_requires_premium')][:limit]
+    audience_cache = audience_records([r['content_id'] for r in unassigned])
     for row in unassigned:
         if not remaining: break
         if int(row['id']) in frozen_pool_ids: continue
@@ -134,7 +136,7 @@ def freeze_assignments(conn, *, run_date, config_version, configured_account_ids
         language = canonical_drama_language(row['language'])
         eligible = [v for v in remaining if canonical_drama_language(account_by_id[v].get('drama_language')) == language]
         if not eligible: continue
-        classification = classify(row['labels'])
+        classification = classify(row['labels'], audience_record=audience_cache.get(row['content_id']), expected_language=language)
         scores = {v:channel_score(account_by_id[v], classification, snapshot) for v in eligible}
         selected = max(eligible, key=lambda v:scores[v][0])
         score, reason = scores[selected]

@@ -5,10 +5,9 @@ import json
 from .core import labels, label_index, language
 from .tags import normalized
 
-VERSION = 'x-hierarchy-20261111-v2'
+from features.drama_audience.store import AUDIENCES, VERSION, records as audience_records, direction as audience_direction
 UNKNOWN = '__unknown__'
 TYPES = {'local': '本土剧', 'translated': '翻译剧', UNKNOWN: '未标注'}
-AUDIENCES = {'female': '女性', 'male': '男性', 'lgbtq': 'LGBTQ+', 'general': '通用', UNKNOWN: '未标注'}
 THEMES = {'ceo_wealth': '豪门总裁', 'sweet_romance': '甜宠恋爱', 'marital': '婚恋纠葛',
           'family': '萌宝家庭', 'revenge': '逆袭复仇', 'period_intrigue': '古装权谋',
           'fantasy': '奇幻穿越', 'suspense': '悬疑冒险', 'growth': '生活成长', UNKNOWN: '未标注'}
@@ -54,25 +53,6 @@ for _theme, _names in THEME_TAGS.items():
         if _name in TAG_THEME:raise ValueError('duplicate_theme_mapping:'+_name)
         TAG_THEME[_name] = _theme
 
-EXPLICIT = {
-    'female': ('女性','女频','女向','女性向','female','female oriented','female-oriented','for women'),
-    'male': ('男性','男频','男向','男性向','male','male oriented','male-oriented','for men'),
-    'lgbtq': ('lgbtq','lgbtq+','lgbt','bl','gl','耽美','百合','boys love','girls love'),
-    'general': ('通用','大众向','全年龄向','general audience','general audiences','universal audience'),
-}
-EXPLICIT_IDS = {'bl': 'lgbtq', 'gl': 'lgbtq', 'gay_for_you': 'lgbtq',
-                'female_oriented_reverse_harem': 'female'}
-FEMALE_SIGNALS = set('''sweet sweet_love loving_hubby winning_back_wife love_after_vows
-    substitute_bride contract_vows flash_marriage female_growth female_lead strong_woman
-    pregnant_runaway hot_daddy xxl_wife'''.split())
-# Dominance describes a plot, not the audience's gender. It still contributes
-# to the revenge theme, including female-led stories.
-MALE_SIGNALS = set('''war_god super_warrior live_in_son_in_law cultivator harem'''.split())
-GENERAL_SIGNALS = set('''crime crime_investigation mystery thrilling_suspenseful adventurous survival
-    extreme_survival confined_survival survival_game disaster apocalypse action medical_drama lawyer
-    firefighter workplace inspirational sports_competition heartwarming_healing family_affection'''.split())
-
-
 def raw_labels(value):
     if isinstance(value, str):
         try:parsed=json.loads(value)
@@ -81,33 +61,14 @@ def raw_labels(value):
     return list(dict.fromkeys(v.strip() for v in value or [] if isinstance(v,str) and v.strip()))
 
 
-def audience(raw, semantic):
-    normalized_raw={normalized(v) for v in raw}
-    explicit={key for key, aliases in EXPLICIT.items() if normalized_raw & {normalized(v) for v in aliases}}
-    explicit.update(EXPLICIT_IDS[tag] for tag in semantic if tag in EXPLICIT_IDS)
-    if len(explicit)==1:
-        return dict(key=next(iter(explicit)), basis='explicit', rules=['explicit_audience_label'], evidence=raw)
-    if len(explicit)>1:
-        return dict(key=UNKNOWN, basis='conflict', rules=['conflicting_explicit_audiences'], evidence=raw)
-    female=sorted(set(semantic)&FEMALE_SIGNALS);male=sorted(set(semantic)&MALE_SIGNALS)
-    if female and male:
-        return dict(key=UNKNOWN,basis='conflict',rules=['conflicting_audience_signals'],evidence=female+male)
-    if female or male:
-        return dict(key='female' if female else 'male',basis='inferred',
-                    rules=['relationship_and_female_story' if female else 'male_power_and_son_in_law_story'],evidence=female or male)
-    general=sorted(set(semantic)&GENERAL_SIGNALS)
-    if general:
-        return dict(key='general',basis='inferred',rules=['general_subject_without_directional_signal'],evidence=general)
-    return dict(key=UNKNOWN,basis='unlabeled',rules=['insufficient_audience_evidence'],evidence=[])
-
-
-def classify(raw, drama_type=UNKNOWN, *, status='matched', info_values=()):
+def classify(raw, drama_type=UNKNOWN, *, status='matched', info_values=(), audience_record=None, expected_language=None):
     raw=raw_labels(raw);semantic=labels(raw)
-    direction=audience(raw,semantic)
+    direction=audience_direction(audience_record, expected_language)
     topics=list(dict.fromkeys(TAG_THEME[tag] for tag in semantic if tag in TAG_THEME)) or [UNKNOWN]
     return dict(drama_type=drama_type, drama_type_name=TYPES[drama_type],
                 audience=direction['key'], audience_name=AUDIENCES[direction['key']], audience_basis=direction['basis'],
                 audience_rules=direction['rules'], audience_evidence=direction['evidence'],
+                audience_source=direction['source'], audience_fetched_at=direction['fetched_at'], audience_status=direction['status'],
                 themes=topics, theme_names=[THEMES[k] for k in topics], raw_labels=raw,
                 semantic_tags=semantic, mapping_status=status, resource_type_values=list(info_values),
                 unmapped_labels=[v for k,v in semantic.items() if k.startswith(('unmapped_','ambiguous_'))],
@@ -122,6 +83,7 @@ def classification_index(resources, infos):
     for row in infos:
         if str(row.get('app_id'))=='1479':types[(str(row['content_id']),language(row.get('language')))].append(row)
     result={}
+    cache=audience_records([key[0] for key in set(grouped)|set(types)])
     for key in set(grouped)|set(types):
         info=types[key];values={str(r.get('resource_type')) for r in info}
         series={str(r.get('series_code') or '') for r in info}- {''}
@@ -130,7 +92,7 @@ def classification_index(resources, infos):
         status='missing_drama_info' if not info else 'ambiguous_drama_info' if len(values)>1 or len(series)>1 else 'unlabeled_type' if dtype==UNKNOWN else 'matched'
         label_status=labels_index.get(key,{}).get('status','missing_labels')
         raw=[tag for row in grouped[key] for tag in raw_labels(row.get('labels'))] if label_status!='ambiguous_drama' else []
-        result[key]=classify(raw,dtype,status=status,info_values=sorted(values))
+        result[key]=classify(raw,dtype,status=status,info_values=sorted(values), audience_record=cache.get(key[0]), expected_language=key[1])
         result[key]['label_status']=label_status
         result[key]['content_id'],result[key]['language']=key
     return result
