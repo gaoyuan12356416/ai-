@@ -76,10 +76,14 @@ class GatedMetricReader:
         # callers never set this flag; no environment variable can bypass FIFO.
         self.client = "/usr/bin/mysql.real" if manual_migration else "/usr/bin/mysql"
 
-    def query(self, statements, *, timeout=60, execution_ms=20000):
+    def query(self, statements, *, timeout=60, execution_ms=20000, deadline=None):
         for attempt in range(3):
+            remaining = timeout if deadline is None else min(timeout, deadline - time.monotonic())
+            if remaining <= 0:
+                raise StoreError("fb_auto_metric_query_timeout", "指标只读查询超时", 503)
             try:
-                return self._query_once(statements, timeout=timeout, execution_ms=execution_ms)
+                return self._query_once(statements, timeout=remaining,
+                                        execution_ms=max(1, min(execution_ms, int(remaining * 1000))))
             except StoreError as error:
                 transient = error.code in {
                     "fb_auto_metric_query_timeout", "fb_auto_metric_query_mysql_1040",
@@ -88,7 +92,10 @@ class GatedMetricReader:
                     "fb_auto_metric_query_mysql_2055"}
                 if not transient or attempt == 2:
                     raise
-                time.sleep(attempt + 1)
+                delay = attempt + 1
+                if deadline is not None:
+                    delay = min(delay, max(0, deadline - time.monotonic()))
+                time.sleep(delay)
 
     def _query_once(self, statements, *, timeout, execution_ms):
         env = os.environ.copy()
@@ -143,17 +150,23 @@ class GatedMetricReader:
         return self.query(["SELECT HEX(JSON_OBJECT('n',COUNT(*))) FROM ads_ai.fb_auto_metric_daily WHERE generation_id="
                            + str(int(generation_id))])[0]["n"]
 
-    def window(self, product, platform, dates):
+    def window_statements(self, product, platform, dates):
         scope = ("p.platform=" + str(int(platform)) + " AND p.product=" + literal(product)
                  + " AND p.metric_date IN (" + ",".join(literal(day) for day in dates) + ")")
-        return self.query([
+        return [
             "SELECT HEX(JSON_OBJECT('kind','generation','day',p.metric_date,'id',p.generation_id,'status',g.status)) "
             "FROM ads_ai.fb_auto_metric_active_pointer p JOIN ads_ai.fb_auto_metric_generation g ON g.id=p.generation_id WHERE " + scope,
             "SELECT HEX(JSON_OBJECT('kind','row','content_id',d.content_id,'material_id',d.material_id,"
             "'spend',CAST(SUM(d.spend) AS CHAR),'af_revenue0',CAST(SUM(d.af_revenue0) AS CHAR))) "
             "FROM ads_ai.fb_auto_metric_active_pointer p JOIN ads_ai.fb_auto_metric_generation g ON g.id=p.generation_id "
             "JOIN ads_ai.fb_auto_metric_daily d ON d.generation_id=g.id WHERE " + scope +
-            " AND g.status='ready' GROUP BY d.content_id,d.material_id"])
+            " AND g.status='ready' GROUP BY d.content_id,d.material_id"]
+
+    def window_generations(self, product, platform, dates, *, deadline=None):
+        return self.query(self.window_statements(product, platform, dates)[:1], deadline=deadline)
+
+    def window(self, product, platform, dates, *, deadline=None):
+        return self.query(self.window_statements(product, platform, dates), deadline=deadline)
 
 
 def window_from_rows(product, platform, dates, rows):
