@@ -92,7 +92,11 @@ def validate(p):
             and l['unknown_outcome']==1 and l['attempt_count']>=1
             and not any(l[k] for k in ('x_media_id','x_post_id','published_at')),'native_unknown_changed')
     require(json.loads(j['source_meta_json'])['canonical_fingerprint']==canonical_fingerprint(q,'id'), 'canonical_identity_changed')
-    require(not any(p[k] for k in ('publications','reposts','holds','legacy_resources')),'other_hold_or_publication')
+    require(not any(p[k] for k in ('publications','reposts','holds')),'other_hold_or_publication')
+    # The current isolated-queue projection mirrors terminal unknowns into the
+    # legacy resource table too. Only this same task fence can be reconciled.
+    require(all(r['job_id']==j['id'] and r['resource_key']=='task:'+j['source_key']
+                for r in p['legacy_resources']),'other_legacy_resource')
     require(all(r['quarantined']==1 and r['generation']==g and r['legacy']==0 for r in p['resources']),'active_resource')
     require(p['operations'] and p['native_operations'] and all(no_post_operation(r['operation']) for r in p['operations']+p['native_operations']),
             'post_or_finalize_intent')
@@ -247,6 +251,7 @@ def apply(plan,backup_dir,actor,stop_after=None):
             # Only quarantined resources of this audited, terminal execution;
             # the previous full rows remain in both recovery journals.
             c.execute('DELETE FROM pipeline_resource WHERE job_id=? AND generation=? AND quarantined=1 AND legacy=0',(j['id'],g))
+            c.execute('DELETE FROM pipeline_legacy_resource WHERE job_id=? AND resource_key=?',(j['id'],'task:'+key))
             c.execute('INSERT INTO pipeline_event(job_id,event_type,details_json,created_at) VALUES(?,?,?,?)',
                 (j['id'],'audited_media_only_recovery',encoded({'plan_sha256':plan['plan_sha256'],'from_generation':g,'to_generation':g+1,
                  'prior_attempt_count':l['attempt_count'],'prior_unknown':True,'actor':actor}),timestamp))
