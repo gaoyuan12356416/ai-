@@ -1,4 +1,5 @@
 """Fixed, bounded X catalog reads using the existing exact-material policy."""
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql
 import os
 import json
 import re
@@ -68,7 +69,7 @@ class CachedSelector(DramawaveCandidateSelector):
         return [row]
 
     def _pool_drama_rows(self, content_id, language=None):
-        rows = self.dramas.get(str(content_id), [])
+        rows = self.dramas.get((current_app_id(), str(content_id)), self.dramas.get(str(content_id), []))
         return rows if language is None else [r for r in rows if str(r.get('language','')).lower() == language.lower()]
 
     def _drama_deploy_rows(self, content_id, language, *, canonical_language=False):
@@ -77,7 +78,7 @@ class CachedSelector(DramawaveCandidateSelector):
                 return canonical_drama_language(row.get('language'),default='') == canonical_drama_language(language,default='')
             except ValueError:
                 return False
-        return [r for r in self.deploy.get(str(content_id), []) if match(r)]
+        return [r for r in self.deploy.get((current_app_id(), str(content_id)), self.deploy.get(str(content_id), [])) if match(r)]
 
 class SourceRepository:
     def __init__(self, mysql, *, allow_pending_episode_duration=False):
@@ -89,9 +90,8 @@ class SourceRepository:
         # Execution readers keep the strict default before creating a queue.
         self.allow_pending_episode_duration = allow_pending_episode_duration is True
 
-    @staticmethod
-    def _projection():
-        return '''CAST(s.id AS CHAR) material_id,s.product,s.type material_type,
+    def _projection(self):
+        return f'''CAST(s.id AS CHAR) material_id,s.product,{source_app_sql("s", self.schema)} source_app_id,s.type material_type,
             s.is_delete material_is_deleted,s.url material_url,s.name material_name,s.language material_language,
             TRIM(s.data_source_id) content_id,s.tag_name source_tag_name,s.video_duration,s.cover thumbnail_url'''
 
@@ -139,12 +139,12 @@ class SourceRepository:
         rows together would multiply duplicates and hide the original limits.
         Only exact-ID callers may use this path; broad catalog scans stay separate.
         """
-        contents = f'''SELECT DISTINCT TRIM(s.data_source_id) content_id
+        contents = f'''SELECT DISTINCT TRIM(s.data_source_id) content_id,{source_app_sql("s", self.schema)} source_app_id
             FROM `{self.schema}`.ads_custom_source s WHERE {where}
             AND TRIM(s.data_source_id)<>'' LIMIT 200'''
         records = self.mysql.select(f'''SELECT bundle.row_kind,bundle.row_json FROM (
             (SELECT 'material' row_kind,JSON_OBJECT(
-                'material_id',CAST(s.id AS CHAR),'product',s.product,'material_type',s.type,
+                'material_id',CAST(s.id AS CHAR),'product',s.product,'source_app_id',{source_app_sql('s', self.schema)},'material_type',s.type,
                 'material_is_deleted',s.is_delete,'material_url',s.url,'material_name',s.name,
                 'material_language',s.language,'content_id',TRIM(s.data_source_id),
                 'source_tag_name',s.tag_name,'video_duration',s.video_duration,
@@ -152,12 +152,12 @@ class SourceRepository:
              FROM `{self.schema}`.ads_custom_source s WHERE {where} LIMIT 200)
             UNION ALL
             (SELECT 'drama' row_kind,JSON_OBJECT(
-                'content_id',r.content_id,'series_code',r.series_code,'language',r.language,
+                'content_id',r.content_id,'app_id',r.app_id,'series_code',r.series_code,'language',r.language,
                 'drama_name',r.name,'drama_labels',r.labels,'drama_description',r.desc) row_json
              FROM ({contents}) selected_contents
              STRAIGHT_JOIN `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
                 ON r.content_id=selected_contents.content_id
-             WHERE r.app_id=1479 ORDER BY r.id LIMIT 4001)
+             WHERE r.app_id=selected_contents.source_app_id ORDER BY r.id LIMIT 4001)
             UNION ALL
             (SELECT 'deploy' row_kind,JSON_OBJECT(
                 'content_id',i.content_id,'app_id',i.app_id,'app',i.app,
@@ -165,7 +165,7 @@ class SourceRepository:
              FROM ({contents}) selected_contents
              STRAIGHT_JOIN `{self.schema}`.ads_drama_info i FORCE INDEX(ac)
                 ON i.content_id=selected_contents.content_id
-             WHERE i.app_id=1479 ORDER BY i.app LIMIT 4001)
+             WHERE i.app_id=selected_contents.source_app_id ORDER BY i.app LIMIT 4001)
             ) bundle''', [*params,*params,*params])
         buckets = {'material': [], 'drama': [], 'deploy': []}
         try:
@@ -185,24 +185,25 @@ class SourceRepository:
         # browsing reuses its source rows and fetches the same bounded mappings.
         raw = {str(r['material_id']):r for r in rows}
         contents = list(dict.fromkeys(str(r.get('content_id') or '') for r in rows if r.get('content_id')))
+        app_ids = ",".join(str(int(r.get("source_app_id") or 1479)) for r in rows) or "1479"
         dramas, deploy = defaultdict(list), defaultdict(list)
         resource_rows, deployment_rows = mappings if mappings is not None else ([], [])
         if contents and mappings is None:
             marks = ','.join('%s' for _ in contents)
-            resource_rows = self.mysql.select(f'''SELECT r.content_id,r.series_code,r.language,r.name drama_name,
+            resource_rows = self.mysql.select(f'''SELECT r.content_id,r.app_id,r.series_code,r.language,r.name drama_name,
                 r.labels drama_labels,r.desc drama_description
                 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
-                WHERE r.content_id IN ({marks}) AND r.app_id=1479
+                WHERE r.content_id IN ({marks}) AND r.app_id IN ({app_ids})
                 ORDER BY r.id LIMIT 4001''', contents)
             deployment_rows = self.mysql.select(f'''SELECT i.content_id,i.app_id,i.app,i.language,i.deploy_time
-                FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac) WHERE i.content_id IN ({marks}) AND i.app_id=1479
+                FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac) WHERE i.content_id IN ({marks}) AND i.app_id IN ({app_ids})
                 ORDER BY i.app LIMIT 4001''', contents)
         if len(resource_rows) > 4000 or len(deployment_rows) > 4000:
             raise PublishingError('source_mapping_too_large','关联剧目或投放数据超出校验范围，请缩小素材选择后重试',503)
         for r in resource_rows:
-            dramas[str(r['content_id'])].append(r)
+            dramas[(int(r.get('app_id') or 1479), str(r['content_id']))].append(r)
         for r in deployment_rows:
-            deploy[str(r['content_id'])].append(r)
+            deploy[(int(r.get('app_id') or 1479), str(r['content_id']))].append(r)
         selector = CachedSelector(raw,dramas,deploy,
                                   probe_deadline=time.monotonic()+8 if recover_duration else None)
         result, errors = {}, {}
@@ -236,8 +237,8 @@ class SourceRepository:
         if exact_ids is None and len(q)>80:
             raise PublishingError('invalid_query','搜索内容最多 80 字',400)
         product = str(query.get('product') or DEFAULT_PRODUCT).strip()
-        if product not in CATALOG_PRODUCTS:
-            raise PublishingError('invalid_query','请选择 Dramawave 或 Drama-社媒专用素材',400)
+        if len(product) > 128 or any(ord(ch) < 32 for ch in product):
+            raise PublishingError('invalid_query','产品筛选无效',400)
         try:
             limit = min(50,max(1,int(query.get('limit') or 30)))
             cursor = str(query.get('cursor') or '')
@@ -250,7 +251,7 @@ class SourceRepository:
         exact_id = exact_ids is not None
         # Browse/name searches stay in one indexed product. Exact IDs retain
         # the existing cross-product manual publishing policy.
-        if not exact_id:
+        if not exact_id and product != 'all':
             clauses.append('s.product=%s');params.append(product)
         if cursor:
             clauses.append('s.id<%s');params.append(cursor)
@@ -265,16 +266,16 @@ class SourceRepository:
             titles = self.mysql.select(f'''SELECT DISTINCT matched.content_id FROM (
                 (SELECT DISTINCT r.content_id
                  FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(name)
-                 WHERE r.app_id=1479 AND r.name=%s LIMIT 101)
+                 WHERE r.name=%s LIMIT 101)
                 UNION ALL
                 (SELECT DISTINCT i.content_id
                  FROM (SELECT DISTINCT r.series_code
                        FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(name)
-                       WHERE r.app_id=1479 AND r.name=%s
+                       WHERE r.name=%s
                          AND TRIM(r.series_code) NOT IN ('','0') LIMIT 101) title_series
                  STRAIGHT_JOIN `{self.schema}`.ads_drama_info i FORCE INDEX(scoo)
                    ON i.series_code=title_series.series_code
-                 WHERE i.app_id=1479 AND TRIM(i.content_id)<>'' LIMIT 101)
+                 WHERE TRIM(i.content_id)<>'' LIMIT 101)
                 ) matched LIMIT 101''', [q,q])
             if len(titles) > 100:
                 raise PublishingError('source_mapping_too_large','同名剧目过多，请使用完整素材 ID 查询',503)
@@ -288,14 +289,14 @@ class SourceRepository:
                 params.extend(content_ids)
             else:
                 clauses.append(f'''(LOCATE(%s,s.name)>0 OR EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_resource r FORCE INDEX(content_id)
-                    WHERE r.content_id=s.data_source_id AND r.app_id=1479 AND LOCATE(%s,r.name)>0))''');params.extend([q,q])
+                    WHERE r.content_id=s.data_source_id AND LOCATE(%s,r.name)>0))''');params.extend([q,q])
         if language:
             aliases = ['pt', 'pt-br'] if language in {'pt', 'pt-br'} else [language,'jp'] if language=='ja' else [language]
             # Every eligible result also needs a same-language deployment row.
             # Use its small indexed set for the prefilter; full resource identity
             # and language validation still runs below before returning a video.
             clauses.append(f'''EXISTS(SELECT 1 FROM `{self.schema}`.ads_drama_info i FORCE INDEX(ac)
-                WHERE i.content_id=s.data_source_id AND i.app_id=1479 AND LOWER(REPLACE(TRIM(i.language),'_','-'))
+                WHERE i.content_id=s.data_source_id AND LOWER(REPLACE(TRIM(i.language),'_','-'))
                 IN ({','.join('%s' for _ in aliases)}))''');params.extend(aliases)
         mappings = None
         if exact_id:

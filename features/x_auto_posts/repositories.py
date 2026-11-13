@@ -567,6 +567,8 @@ class ReadOnlyMySQLRepository:
         content_id: str,
         language: str,
     ) -> List[MaterialSourceRow]:
+        from features.x_posts.moboreels import source_enabled
+        product_filter = "" if source_enabled() else " AND s.product=%s"
         normalized_content_id = _text(content_id, "content_id", limit=128)
         normalized_language = canonical_language(language)
         sql = """
@@ -581,18 +583,18 @@ class ReadOnlyMySQLRepository:
                    FORCE INDEX (idx_source_type_source_id)
              WHERE s.data_source=%s
                AND s.data_source_id=%s
-               AND s.product=%s
+               {product_filter}
                AND s.type=%s
                AND s.is_delete=%s
                AND LOWER(TRIM(s.language))=LOWER(%s)
                AND s.video_duration>%s
                AND s.video_duration<=%s
              ORDER BY s.id
-        """.format(schema=self.schema)
+        """.format(schema=self.schema, product_filter=product_filter)
         params = (
             self.material_data_source,
             normalized_content_id,
-            self.product,
+            *((self.product,) if product_filter else ()),
             2,
             0,
             normalized_language,

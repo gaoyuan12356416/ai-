@@ -1,6 +1,7 @@
 """Bounded, read-only Page and video catalog adapters for manual publishing."""
 from __future__ import annotations
 
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql
 import base64
 import hashlib
 import json
@@ -188,18 +189,15 @@ class SourceRepository:
             AND s.video_duration>0 AND s.video_duration<=3600
         """
         params = ["6"]
-        if not page_pool and not moboreels:
-            sql += " AND s.product=%s"
-            params.append("Dramawave")
         if not manual:
             sql += " AND TRIM(COALESCE(s.language,''))<>''"
         if not (manual or page_pool or moboreels):
             sql += f"""
             AND EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
-                WHERE d.content_id=s.data_source_id AND d.app_id=%s AND d.release_status=1
-                AND d.deploy_time>0 AND d.deploy_time<=%s AND {drama_language}={source_language})
+                WHERE d.content_id=s.data_source_id AND d.app_id={source_app_sql("s", schema)} AND d.release_status=1
+                AND (d.app_id<>1479 OR d.deploy_time>0) AND d.deploy_time>=0 AND d.deploy_time<=%s AND {drama_language}={source_language})
         """
-            params.extend(["1479", int(self.now_fn().timestamp())])
+            params.append(int(self.now_fn().timestamp()))
         if enforce_blacklist and not moboreels:
             sql += f"""
             AND NOT EXISTS (SELECT 1 FROM `{blocked}`.ads_facebook_post_blacklist b
@@ -207,9 +205,8 @@ class SourceRepository:
             AND NOT EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info db FORCE INDEX(ac)
                 JOIN `{blocked}`.ads_facebook_post_blacklist b
                   ON b.is_delete=0 AND b.type=0 AND b.content_id=db.series_code
-                WHERE db.content_id=s.data_source_id AND db.app_id=%s)
+                WHERE db.content_id=s.data_source_id AND db.app_id={source_app_sql("s", schema)})
             """
-            params.append("1479")
         return sql, params
 
     def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False):
@@ -218,6 +215,7 @@ class SourceRepository:
         sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
+                   {source_app_sql("s", self.mysql.schema)} source_app_id,
                    COALESCE(s.url,'') media_url,COALESCE(s.cover,'') thumbnail_url,
                    COALESCE(s.language,'') language,s.video_duration,
                    COALESCE(CAST(s.user_id AS CHAR),'0') uploader_id
@@ -243,6 +241,7 @@ class SourceRepository:
         except (ValueError, InvalidOperation, RuntimeError):
             raise SourceError("material_unavailable", "素材缺少有效视频、时长、剧集或语言信息", 409) from None
         return {
+            "source_app_id": int(row.get("source_app_id") or 1479),
             "material_id": material_id, "material_name": str(row["material_name"]).strip(),
             "content_id": content_id, "language": language, "media_url": url,
             "duration_seconds": float(duration), "material_tag": str(row.get("material_tag") or "").strip(),
@@ -258,24 +257,25 @@ class SourceRepository:
         languages = sorted({item["language"] for item in materials})
         language_slots = ",".join("%s" for _ in languages)
         schema = self.mysql.schema
+        app_ids = ",".join(str(int(item.get("source_app_id") or 1479)) for item in materials)
         optional_metadata = manual or page_pool
-        released = "" if optional_metadata else " AND d.release_status=1 AND d.deploy_time>0 AND d.deploy_time<=%s"
+        released = "" if optional_metadata else " AND d.release_status=1 AND (d.app_id<>1479 OR d.deploy_time>0) AND d.deploy_time>=0 AND d.deploy_time<=%s"
         release_params = [] if optional_metadata else [int(self.now_fn().timestamp())]
         # One bounded query per metadata kind, never one query per Page or material.
         dramas = self.mysql.select(f"""
-            SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(d.content_id AS CHAR) content_id,COALESCE(d.language,'') language,
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ d.app_id,CAST(d.content_id AS CHAR) content_id,COALESCE(d.language,'') language,
                    TRIM(COALESCE(d.name,'')) drama_name
               FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
-             WHERE d.app_id=%s AND d.content_id IN ({placeholders}){released}
+             WHERE d.app_id IN ({app_ids}) AND d.content_id IN ({placeholders}){released}
                AND {_language_sql("d.language")} IN ({language_slots}) LIMIT 1001
-        """, ["1479"] + ids + release_params + languages)
+        """, ids + release_params + languages)
         descriptions = self.mysql.select(f"""
-            SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT CAST(r.content_id AS CHAR) content_id,COALESCE(r.language,'') language,
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT r.app_id,CAST(r.content_id AS CHAR) content_id,COALESCE(r.language,'') language,
                    TRIM(COALESCE(r.`desc`,'')) drama_description
               FROM `{schema}`.ads_drama_resource r FORCE INDEX(content_id)
-             WHERE r.app_id=%s AND r.content_id IN ({placeholders}) AND r.type=2
+             WHERE r.app_id IN ({app_ids}) AND r.content_id IN ({placeholders}) AND r.type=2
                AND {_language_sql("r.language")} IN ({language_slots}) LIMIT 1001
-        """, ["1479"] + ids + languages)
+        """, ids + languages)
         if optional_metadata and (len(dramas) > 1000 or len(descriptions) > 1000):
             dramas, descriptions = [], []
         if len(dramas) > 1000 or len(descriptions) > 1000:
@@ -283,13 +283,13 @@ class SourceRepository:
         names, descs = {}, {}
         for rows, target, field in ((dramas, names, "drama_name"), (descriptions, descs, "drama_description")):
             for row in rows:
-                key = (str(row.get("content_id") or "").strip(), page_language(row.get("language")))
+                key = (int(row.get("app_id") or 1479), str(row.get("content_id") or "").strip(), page_language(row.get("language")))
                 text = str(row.get(field) or "").strip()
                 if text:
                     target.setdefault(key, set()).add(text)
         result = []
         for item in materials:
-            key = (item["content_id"], item["language"])
+            key = (int(item.get("source_app_id") or 1479), item["content_id"], item["language"])
             named, described = names.get(key, set()), descs.get(key, set())
             if not optional_metadata and (len(named) != 1 or (need_desc and len(described) != 1)):
                 if strict:
@@ -339,15 +339,15 @@ class SourceRepository:
             extra.append("AND (LOCATE(LOWER(%s),LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0 OR EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND LOCATE(LOWER(%s),LOWER(d.story_name))>0))")
             params.extend([search, institution, search])
         elif search:
-            released_search = "" if manual else " AND ds.release_status=1 AND ds.deploy_time>0 AND ds.deploy_time<=%s"
+            released_search = "" if manual else " AND ds.release_status=1 AND (ds.app_id<>1479 OR ds.deploy_time>0) AND ds.deploy_time>=0 AND ds.deploy_time<=%s"
             search_release_params = [] if manual else [int(self.now_fn().timestamp())]
             extra.append(f"""AND (
                 LOCATE(BINARY LOWER(%s),BINARY LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0
                 OR EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
-                    WHERE ds.content_id=s.data_source_id AND ds.app_id=%s{released_search}
+                    WHERE ds.content_id=s.data_source_id AND ds.app_id={source_app_sql("s", self.mysql.schema)}{released_search}
                       AND {_language_sql("ds.language")}={_language_sql("s.language")}
                       AND LOCATE(BINARY LOWER(%s),BINARY LOWER(COALESCE(ds.name,'')))>0))""")
-            params.extend([search, "1479"] + search_release_params + [search])
+            params.extend([search] + search_release_params + [search])
         if language:
             extra.append("AND " + _language_sql("s.language") + "=%s")
             params.append(language)
@@ -408,8 +408,8 @@ class SourceRepository:
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ s.is_delete,s.video_duration,
                    COALESCE(s.language,'') language,COALESCE(CAST(s.user_id AS CHAR),'0') uploader_id
               FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
-             WHERE s.id=%s AND s.data_source=%s AND s.product=%s AND s.type=2 LIMIT 1
-        """, [material_id, "6", "Dramawave"])
+             WHERE s.id=%s AND s.data_source=%s AND s.type=2 LIMIT 1
+        """, [material_id, "6"])
         if not rows:
             return "未找到这个素材ID，请核对完整ID。"
         row = rows[0]
@@ -466,7 +466,7 @@ class SourceRepository:
         schema, blocked = self.mysql.schema, self.mysql.blacklist_schema
         slots = ",".join("%s" for _ in ids)
         blocked_fields = "0 content_blocked,0 series_blocked"
-        params = ["1479", int(self.now_fn().timestamp())]
+        params = [int(self.now_fn().timestamp())]
         if enforce_blacklist:
             blocked_fields = f"""
                    EXISTS(SELECT 1 FROM `{blocked}`.ads_facebook_post_blacklist b
@@ -474,15 +474,14 @@ class SourceRepository:
                    EXISTS(SELECT 1 FROM `{schema}`.ads_drama_info db FORCE INDEX(ac)
                      JOIN `{blocked}`.ads_facebook_post_blacklist b
                        ON b.is_delete=0 AND b.type=0 AND b.content_id=db.series_code
-                     WHERE db.content_id=s.data_source_id AND db.app_id=%s) series_blocked"""
-            params.append("1479")
+                     WHERE db.content_id=s.data_source_id AND db.app_id={source_app_sql("s", schema)}) series_blocked"""
         rows = self.mysql.select(f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,
                    s.data_source,s.product,s.type,s.is_delete,s.video_duration,
                    COALESCE(s.data_source_id,'') content_id,COALESCE(s.language,'') language,
                    EXISTS(SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
-                     WHERE d.content_id=s.data_source_id AND d.app_id=%s AND d.release_status=1
-                       AND d.deploy_time>0 AND d.deploy_time<=%s
+                     WHERE d.content_id=s.data_source_id AND d.app_id={source_app_sql("s", schema)} AND d.release_status=1
+                       AND (d.app_id<>1479 OR d.deploy_time>0) AND d.deploy_time>=0 AND d.deploy_time<=%s
                        AND {_language_sql('d.language')}={_language_sql('s.language')}) drama_released,
                    {blocked_fields}
               FROM `{schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
@@ -502,8 +501,6 @@ class SourceRepository:
                 code, message = "material_not_found", "素材ID不存在"
             elif str(row.get("is_delete")) != "0":
                 code, message = "material_deleted", "素材已删除"
-            elif not page_pool and str(row.get("product") or "").casefold() != "dramawave":
-                code, message = "material_product_mismatch", "素材不属于Dramawave"
             elif str(row.get("data_source")) != "6":
                 code, message = "material_source_mismatch", "素材不是当前支持的来源6素材"
             elif str(row.get("type")) != "2":
@@ -521,7 +518,7 @@ class SourceRepository:
                 elif enforce_blacklist and (str(row.get("content_blocked")) == "1" or str(row.get("series_blocked")) == "1"):
                     code, message = "material_blacklisted", "素材关联剧目已被列入Facebook发布黑名单"
                 elif not (manual or page_pool) and str(row.get("drama_released")) != "1":
-                    code, message = "material_not_released", "素材未匹配到已上架的同语言Dramawave剧目"
+                    code, message = "material_not_released", "素材未匹配到已上架的同语言所属产品剧目"
             result[mid] = {"code": code, "message": message}
         return result
 

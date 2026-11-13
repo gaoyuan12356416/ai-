@@ -6,6 +6,7 @@ It still uses the existing FIFO SQL adapter and current Page authorization.
 """
 from __future__ import annotations
 
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql
 import logging
 import re
 from collections import defaultdict
@@ -127,7 +128,7 @@ class GroupPoolSource:
                 except ValueError:
                     raise SourceError("group_source_invalid", "Page组来源数据无效", 503) from None
                 if (not ID_RE.fullmatch(gid) or gid in found or group_type not in (0, 1)
-                        or str(row.get("app_id")) != "1479"
+
                         or str(row.get("product") or "").casefold() != "dramawave"
                         or (not admin and group_owner != owner) or (chunk is not None and gid not in chunk)):
                     raise SourceError("group_source_invalid", "Page组来源范围发生变化，请刷新重试", 503)
@@ -267,6 +268,7 @@ class GroupPoolSource:
         return self._select(f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,
                    s.type material_type,COALESCE(s.data_source_id,'') content_id,
+                   {source_app_sql("s", self.mysql.schema)} source_app_id,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
                    COALESCE(s.url,'') media_url,COALESCE(s.cover,'') thumbnail_url,
                    s.video_duration,COALESCE(CAST(s.user_id AS CHAR),'0') uploader_id
@@ -286,6 +288,7 @@ class GroupPoolSource:
             raise SourceError("material_duration_invalid", "素材时长缺失或不在0至3600秒范围内", 409) from None
         return {
             "material_id": str(row["material_id"]),
+            "source_app_id": int(row.get("source_app_id") or 1479),
             "content_id": _clean_text(row.get("content_id"), maximum=256),
             "material_name": _clean_text(row.get("material_name"), maximum=512),
             "material_tag": _clean_text(row.get("material_tag"), maximum=512, required=False, campaign=True),
@@ -294,7 +297,8 @@ class GroupPoolSource:
             "uploader_id": str(row.get("uploader_id") or "0")[:31],
         }
 
-    def _metadata(self, content_ids):
+    def _metadata(self, content_ids, app_ids=None):
+        apps = ",".join(str(int(value)) for value in (app_ids or [1479]))
         slots = ",".join("%s" for _ in content_ids)
         resources = self._select(f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT BINARY CAST(r.content_id AS CHAR) content_id,
@@ -302,7 +306,7 @@ class GroupPoolSource:
                    BINARY COALESCE(r.language,'') language,BINARY COALESCE(r.name,'') drama_name,
                    BINARY COALESCE(r.`desc`,'') drama_description
               FROM `{self.mysql.schema}`.ads_drama_resource r FORCE INDEX(content_id)
-             WHERE r.app_id=1479 AND r.content_id IN ({slots})
+             WHERE r.app_id IN ({apps}) AND r.content_id IN ({slots})
              LIMIT 10001
         """, content_ids, maximum=MAX_METADATA_ROWS)
         releases = self._select(f"""
@@ -310,20 +314,23 @@ class GroupPoolSource:
                    CAST(d.app_id AS CHAR) app_id,COALESCE(d.language,'') language,
                    d.release_status,d.deploy_time
               FROM `{self.mysql.schema}`.ads_drama_info d FORCE INDEX(ac)
-             WHERE d.app_id=1479 AND d.content_id IN ({slots}) LIMIT 10001
+             WHERE d.app_id IN ({apps}) AND d.content_id IN ({slots}) LIMIT 10001
         """, content_ids, maximum=MAX_METADATA_ROWS)
         grouped, deployed = defaultdict(list), defaultdict(list)
         for rows, target in ((resources, grouped), (releases, deployed)):
             for row in rows:
                 content_id = str(row.get("content_id") or "").strip()
-                if content_id not in content_ids or str(row.get("app_id")) != "1479":
-                    raise SourceError("material_source_ambiguous", "剧目来源返回了非请求或非Dramawave映射", 503)
+                if content_id not in content_ids:
+                    raise SourceError("material_source_ambiguous", "剧目来源返回了非请求剧目映射", 503)
                 target[content_id].append(row)
         return grouped, deployed
 
     def _enrich(self, material, resources, releases, *, need_desc):
+        app_id = int(material.get("source_app_id") or 1479)
+        resources = [r for r in resources if int(r.get("app_id") or 1479) == app_id]
+        releases = [r for r in releases if int(r.get("app_id") or 1479) == app_id]
         if not resources:
-            raise SourceError("drama_mapping_missing", "素材未关联到Dramawave剧目", 409)
+            raise SourceError("drama_mapping_missing", "素材未关联到所属产品剧目", 409)
         canonical = {}
         for row in resources:
             language = normalize_language(row.get("language"))
@@ -343,7 +350,7 @@ class GroupPoolSource:
         drama = next(iter(canonical.values()))
         matched = [row for row in releases if normalize_language(row.get("language")) == drama["language"]]
         if not matched:
-            raise SourceError("drama_not_released", "剧目缺少同语言Dramawave上架和投放时间", 409)
+            raise SourceError("drama_not_released", "剧目缺少同语言上架和投放时间", 409)
         now_fn = getattr(self.source, "now_fn", None) or (lambda: datetime.now(timezone.utc))
         now = int(now_fn().timestamp())
         deploy_times = []
@@ -353,7 +360,7 @@ class GroupPoolSource:
                 released = _integer(row.get("release_status"))
             except ValueError:
                 raise SourceError("drama_deploy_time_invalid", "剧目上架或投放时间数据无效", 409) from None
-            if released != 1 or deploy <= 0:
+            if released != 1 or deploy < 0 or (app_id == 1479 and deploy == 0):
                 raise SourceError("drama_not_released", "剧目尚未上架或缺少有效投放时间", 409)
             deploy_times.append(deploy)
         if max(deploy_times) > now:
@@ -385,7 +392,7 @@ class GroupPoolSource:
             if not materials:
                 continue
             content_ids = sorted({item["content_id"] for item in materials})
-            resources, releases = ({}, {}) if moboreels else self._metadata(content_ids)
+            resources, releases = ({}, {}) if moboreels else self._metadata(content_ids, [m.get("source_app_id", 1479) for m in materials])
             for material in materials:
                 mid, content_id = material["material_id"], material["content_id"]
                 try:

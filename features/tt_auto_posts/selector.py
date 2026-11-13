@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from features.x_posts.moboreels import source_enabled
 
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql
+from features.x_posts.moboreels import source_enabled
 import re
 import urllib.parse
 from dataclasses import dataclass, field
@@ -820,7 +822,7 @@ class TwoStageSelector:
             if (
                 row.content_id != drama.content_id
                 or row.language != language
-                or row.product != self.product
+                or (not source_enabled() and row.product != self.product)
                 or row.material_type != 2
                 or row.is_delete != 0
                 or row.data_source != self.material_data_source

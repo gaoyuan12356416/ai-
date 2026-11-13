@@ -14,6 +14,7 @@ AI backend.  It never writes to the source MySQL databases.
 
 from __future__ import annotations
 
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql
 import contextlib
 import hashlib
 import http.client
@@ -856,6 +857,7 @@ class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
             SELECT
                 CAST(cs.id AS CHAR) AS material_id,
                 cs.product AS product,
+                {source_app_sql} AS source_app_id,
                 cs.type AS material_type,
                 cs.is_delete AS is_delete,
                 cs.url AS material_url,
@@ -867,7 +869,7 @@ class _TTDramawaveCandidateSelector(DramawaveCandidateSelector):
              FROM `{schema}`.ads_custom_source cs
              WHERE cs.id = %s
              LIMIT 2
-        """.format(schema=self.schema)
+        """.format(schema=self.schema, source_app_sql=source_app_sql("cs", self.schema))
         cursor = None
         try:
             cursor = self.connection.cursor()

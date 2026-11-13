@@ -57,7 +57,7 @@ class MaterialSource:
 
     def _read(self, sql, material_id='', search='', uploader_id='', moboreels=False):
         projection = ','.join("'%s',COALESCE(CAST(pool.`%s` AS CHAR),'')" % (key,key) for key in COLUMNS)
-        condition = "CAST(pool.app_id AS CHAR)='1479'"
+        condition = "1=1"
         if material_id:
             if re.fullmatch(r'[1-9][0-9]{0,18}', material_id) is None:
                 raise WorkflowError('invalid_material_id','素材标识无效')
@@ -114,7 +114,7 @@ class MaterialSource:
         # Read the entire configured pool, independently of the first 100 videos
         # and the current keyword/uploader filter. Never expose unrelated users.
         query = ("SELECT HEX(JSON_OBJECT('id',CAST(pool.uploader_id AS CHAR),'name',MAX(pool.uploader_name))) "
-                 "FROM (%s) AS pool WHERE CAST(pool.app_id AS CHAR)='1479' "
+                 "FROM (%s) AS pool "
                  "GROUP BY pool.uploader_id ORDER BY MAX(pool.uploader_name),pool.uploader_id" % sql)
         try:
             options = []

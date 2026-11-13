@@ -8,6 +8,7 @@ are intentionally outside the X publishing eligibility contract.
 
 from __future__ import annotations
 
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -391,6 +392,7 @@ class DramawaveCandidateSelector:
             SELECT
                 CAST(cs.id AS CHAR) AS material_id,
                 cs.product AS product,
+                {source_app_sql} AS source_app_id,
                 cs.type AS material_type,
                 cs.is_delete AS material_is_deleted,
                 cs.url AS material_url,
@@ -402,7 +404,7 @@ class DramawaveCandidateSelector:
              FROM `{schema}`.ads_custom_source cs
              WHERE cs.id = %s
               LIMIT 2
-        """.format(schema=self.schema)
+        """.format(schema=self.schema, source_app_sql=source_app_sql("cs", self.schema))
         return _cursor_rows(
             self.connection,
             sql,
@@ -422,10 +424,10 @@ class DramawaveCandidateSelector:
                 r.labels AS drama_labels, r.desc AS drama_description
               FROM `{schema}`.ads_drama_resource r FORCE INDEX (content_id)
              WHERE r.content_id = %s
-               AND r.app_id = 1479
+               AND r.app_id = {source_app_id}
                {language_clause}
              ORDER BY r.id ASC
-        """.format(schema=self.schema, language_clause=language_clause)
+        """.format(schema=self.schema, source_app_id=current_app_id(), language_clause=language_clause)
         return _cursor_rows(
             self.connection,
             sql,
@@ -456,7 +458,7 @@ class DramawaveCandidateSelector:
         return _cursor_rows(
             self.connection,
             sql,
-            (content_id, DEFAULT_DRAMAWAVE_APP_ID, *languages),
+            (content_id, current_app_id(), *languages),
             query_stage="deploy_time",
         )
 
@@ -467,7 +469,7 @@ class DramawaveCandidateSelector:
         if not rows:
             raise PoolCandidateRejection(
                 "drama_deploy_time_missing",
-                "短剧没有可核验的Dramawave可投放时间",
+                "短剧没有可核验的素材所属产品可投放时间",
             )
         deploy_times = []
         for row in rows:
@@ -491,14 +493,14 @@ class DramawaveCandidateSelector:
                 ) from None
             if (
                 mapped_content_id != content_id
-                or mapped_app_id != DEFAULT_DRAMAWAVE_APP_ID
+                or mapped_app_id != current_app_id()
                 or mapped_language.casefold() != language.casefold()
                 or deploy_time < 0
                 or deploy_time > MAX_SUPPORTED_EPOCH_SECONDS
             ):
                 raise PoolCandidateRejection(
                     "drama_deploy_time_invalid",
-                    "短剧可投放时间与Dramawave素材映射不一致",
+                    "短剧可投放时间与素材所属产品素材映射不一致",
                 )
             deploy_times.append(deploy_time)
 
@@ -552,10 +554,7 @@ class DramawaveCandidateSelector:
             key = material_key(candidate_id)
             if key != material_id:
                 raise CandidateSelectionError("material identity mismatch")
-            product = (
-                _text(row.get("product"), "product", limit=64)
-                if require_dramawave_product else None
-            )
+            product = str(row.get("product") or "").strip()
             material_type = _integer(row.get("material_type"), "material_type")
             material_is_deleted = _integer(
                 row.get("material_is_deleted"), "material_is_deleted"
@@ -579,11 +578,6 @@ class DramawaveCandidateSelector:
                 "material_metadata_invalid",
                 "素材 %s 的基础信息不完整" % material_id,
             ) from None
-        if require_dramawave_product and product != DEFAULT_PRODUCT:
-            raise PoolCandidateRejection(
-                "material_product_mismatch",
-                "素材 %s 不属于Dramawave" % material_id,
-            )
         source_duration = 0.0
         if material_type == 1:
             if not allow_images:
@@ -682,100 +676,101 @@ class DramawaveCandidateSelector:
             material_language = drama["language"]
             drama_deploy_time = ""
         else:
-            drama_rows = self._pool_drama_rows(content_id, material_language)
-            if not drama_rows:
-                raise PoolCandidateRejection(
-                    "drama_mapping_missing",
-                    "drama mapping is missing",
-                )
+            with source_app_scope(row.get("source_app_id", 1479)):
+                drama_rows = self._pool_drama_rows(content_id, material_language)
+                if not drama_rows:
+                    raise PoolCandidateRejection(
+                        "drama_mapping_missing",
+                        "drama mapping is missing",
+                    )
 
-            canonical = {}
-            for drama in drama_rows:
-                try:
-                    mapped_content_id = _text(
-                        drama.get("content_id"), "drama content_id", limit=128
-                    )
-                    series_code = _text(
-                        drama.get("series_code"), "drama series_code", limit=128
-                    )
-                    mapped_language = (
-                        _required_drama_language(drama.get("language"))
-                        if use_drama_language else _text(
-                            drama.get("language"), "drama language", limit=32
+                canonical = {}
+                for drama in drama_rows:
+                    try:
+                        mapped_content_id = _text(
+                            drama.get("content_id"), "drama content_id", limit=128
                         )
+                        series_code = _text(
+                            drama.get("series_code"), "drama series_code", limit=128
+                        )
+                        mapped_language = (
+                            _required_drama_language(drama.get("language"))
+                            if use_drama_language else _text(
+                                drama.get("language"), "drama language", limit=32
+                            )
+                        )
+                        drama_name = _text(drama.get("drama_name"), "drama name", limit=500)
+                        raw_labels = _text(
+                            drama.get("drama_labels"), "drama labels", limit=4096
+                        )
+                        description = _text(
+                            drama.get("drama_description"),
+                            "drama description",
+                            limit=4096,
+                        )
+                    except PoolCandidateRejection:
+                        raise
+                    except CandidateSelectionError as exc:
+                        raise PoolCandidateRejection(
+                            "drama_mapping_invalid",
+                            "drama mapping is incomplete or invalid: %s" % exc,
+                        ) from None
+                    if (
+                        mapped_content_id != content_id
+                        or (not use_drama_language
+                            and mapped_language.casefold() != material_language.casefold())
+                    ):
+                        raise PoolCandidateRejection(
+                            "drama_mapping_invalid",
+                            "drama mapping identity does not match the material",
+                        )
+                    labels = [item.strip() for item in raw_labels.split(",") if item.strip()]
+                    if not labels:
+                        raise PoolCandidateRejection(
+                            "drama_mapping_invalid",
+                            "drama labels are incomplete",
+                        )
+                    canonical_key = (
+                        mapped_content_id,
+                        series_code,
+                        mapped_language.casefold(),
+                        drama_name,
+                        description,
                     )
-                    drama_name = _text(drama.get("drama_name"), "drama name", limit=500)
-                    raw_labels = _text(
-                        drama.get("drama_labels"), "drama labels", limit=4096
+                    mapped = canonical.setdefault(
+                        canonical_key,
+                        {
+                            "series_code": series_code,
+                            "language": mapped_language,
+                            "drama_name": drama_name,
+                            "labels": [],
+                            "description": description,
+                        },
                     )
-                    description = _text(
-                        drama.get("drama_description"),
-                        "drama description",
-                        limit=4096,
-                    )
-                except PoolCandidateRejection:
-                    raise
-                except CandidateSelectionError as exc:
+                    # Labels describe a drama; differences must not change its identity.
+                    # Preserve the first source row's tag order and append unseen labels.
+                    seen_labels = {label.casefold() for label in mapped["labels"]}
+                    for label in labels:
+                        if label.casefold() not in seen_labels:
+                            mapped["labels"].append(label)
+                            seen_labels.add(label.casefold())
+                if use_drama_language and len({item["language"] for item in canonical.values()}) > 1:
                     raise PoolCandidateRejection(
-                        "drama_mapping_invalid",
-                        "drama mapping is incomplete or invalid: %s" % exc,
-                    ) from None
-                if (
-                    mapped_content_id != content_id
-                    or (not use_drama_language
-                        and mapped_language.casefold() != material_language.casefold())
-                ):
-                    raise PoolCandidateRejection(
-                        "drama_mapping_invalid",
-                        "drama mapping identity does not match the material",
+                        "drama_language_ambiguous", "关联短剧存在多个语言，无法确定发布语言"
                     )
-                labels = [item.strip() for item in raw_labels.split(",") if item.strip()]
-                if not labels:
+                if len(canonical) != 1:
                     raise PoolCandidateRejection(
-                        "drama_mapping_invalid",
-                        "drama labels are incomplete",
+                        "drama_mapping_ambiguous",
+                        "drama mapping is ambiguous",
                     )
-                canonical_key = (
-                    mapped_content_id,
-                    series_code,
-                    mapped_language.casefold(),
-                    drama_name,
-                    description,
+                drama = next(iter(canonical.values()))
+                if use_drama_language:
+                    material_language = drama["language"]
+                drama_deploy_time = self._validate_drama_deploy_time(
+                    content_id,
+                    material_language,
+                    canonical_language=use_drama_language,
                 )
-                mapped = canonical.setdefault(
-                    canonical_key,
-                    {
-                        "series_code": series_code,
-                        "language": mapped_language,
-                        "drama_name": drama_name,
-                        "labels": [],
-                        "description": description,
-                    },
-                )
-                # Labels describe a drama; differences must not change its identity.
-                # Preserve the first source row's tag order and append unseen labels.
-                seen_labels = {label.casefold() for label in mapped["labels"]}
-                for label in labels:
-                    if label.casefold() not in seen_labels:
-                        mapped["labels"].append(label)
-                        seen_labels.add(label.casefold())
-            if use_drama_language and len({item["language"] for item in canonical.values()}) > 1:
-                raise PoolCandidateRejection(
-                    "drama_language_ambiguous", "关联短剧存在多个语言，无法确定发布语言"
-                )
-            if len(canonical) != 1:
-                raise PoolCandidateRejection(
-                    "drama_mapping_ambiguous",
-                    "drama mapping is ambiguous",
-                )
-            drama = next(iter(canonical.values()))
-            if use_drama_language:
-                material_language = drama["language"]
-            drama_deploy_time = self._validate_drama_deploy_time(
-                content_id,
-                material_language,
-                canonical_language=use_drama_language,
-            )
         return {
             "source_date": source_date,
             "material_key": key,

@@ -44,10 +44,10 @@ class Source:
         sql = f'''SELECT d.story_id,d.story_name,d.lang_id FROM `ads_ai`.cdreader_koc_drama d
             WHERE d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1 AND d.lang_id=%s
             AND EXISTS (SELECT 1 FROM `{repo.schema}`.ads_custom_source s
-                WHERE s.data_source_id=d.story_id AND s.data_source=%s AND s.product=%s
+                WHERE s.data_source_id=d.story_id AND s.data_source=%s
                   AND s.type=2 AND s.is_delete=0 AND LOWER(TRIM(s.language))=LOWER(%s))
             ORDER BY d.story_id LIMIT 10001'''
-        rows = list(repo._stream_select(sql, (institution,ids[0],repo.material_data_source,repo.product,language)))
+        rows = list(repo._stream_select(sql, (institution,ids[0],repo.material_data_source,language)))
         if len(rows) > 10000:
             raise MoboreelsLinkError('Moboreels 候选范围过大，请缩小素材池')
         result = []

@@ -161,9 +161,10 @@ class AutoSourceTests(unittest.TestCase):
         with patch.dict('os.environ',{'MOBOREELS_INSTITUTION_USER_ID':'institution'}):
             rows=source.list_drama_rows(language='en',now_epoch=1)
         self.assertEqual(rows[0].content_id,'123')
-        self.assertIn('s.data_source=%s AND s.product=%s',statements[0][0])
+        self.assertIn('s.data_source=%s',statements[0][0])
+        self.assertNotIn('s.product=%s',statements[0][0])
         self.assertNotIn('ads_drama_info',statements[0][0])
-        self.assertEqual(statements[0][1],('institution',3,1,'Dramawave','en'))
+        self.assertEqual(statements[0][1],('institution',3,1,'en'))
         self.assertFalse(source.blacklist_snapshot().drama_series_codes)
         with self.assertRaises(MoboreelsLinkError):
             validate_rules(selector.SelectionRules.from_mapping({'drama':{'spend':{'min':1}}}))

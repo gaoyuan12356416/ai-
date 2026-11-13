@@ -222,7 +222,7 @@ class AutoTests(unittest.TestCase):
         self.assertNotIn("ads_drama_info",sql)
         self.assertIn("d.institution_user_id=%s",sql)
         self.assertEqual(mysql.select.call_args.args[1][0],"institution")
-        self.assertIn("s.product=%s",sql)
+        self.assertNotIn("s.product=%s",sql)
         for rule in ({"spend_min":"1"},{"roas_max":"0"}):
             with self.assertRaises(Exception):auto.validate_rules(dict(config,drama_rule=rule))
 
