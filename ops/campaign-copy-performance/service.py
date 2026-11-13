@@ -350,6 +350,23 @@ def refresh_dates(previous: dict | None, logs: list[dict], max_dt: dt.date) -> t
     return sorted(set(selected), reverse=True), next_history.isoformat()
 
 
+def bounded_refresh_dates(previous, proposed, next_history):
+    """Commit one complete statistics day, then resume the frozen date queue."""
+    if not previous:return proposed, next_history, []
+    meta=previous.get('m', {})
+    pending=[dt.date.fromisoformat(day) for day in meta.get('pending_refresh_dates', [])]
+    newest=max(proposed)
+    through=dt.date.fromisoformat(meta.get('refreshed_through') or meta['stat_end'])
+    if newest>through:
+        queue=[newest]+[day for day in pending+proposed if day!=newest]
+    else:queue=pending or list(proposed)
+    queue=list(dict.fromkeys(queue))
+    selected=queue[0]
+    historical=meta.get('history_next_date')
+    cursor=next_history if historical==selected.isoformat() else (historical or next_history)
+    return [selected], cursor, [day.isoformat() for day in queue[1:]]
+
+
 def merge_history(payload: dict, previous: dict | None, dates: list[str], next_history: str) -> dict:
     refreshed = set(dates)
     if previous:
@@ -367,7 +384,7 @@ def merge_history(payload: dict, previous: dict | None, dates: list[str], next_h
                     payload[target].append(row)
     stat_dates = [row["dt"] for row in payload["daily"] + payload["extra_daily"]]
     payload["meta"].update(stat_start=min(stat_dates, default=""), stat_end=max(stat_dates, default=""),
-                           refreshed_through=max(dates, default=""), history_next_date=next_history,
+                           refreshed_through=max([*dates, ((previous or {}).get("m", {}).get("refreshed_through") or (previous or {}).get("m", {}).get("stat_end", ""))], default=""), history_next_date=next_history,
                            refreshed_dates=sorted(dates), refresh_lookback_days=REFRESH_LOOKBACK_DAYS)
     return payload
 
@@ -551,6 +568,8 @@ def query_raw_connection(conn, previous: dict | None = None) -> dict:
         if not isinstance(max_dt, dt.date):
             raise RuntimeError("insight date unavailable")
         selected_dates, next_history = refresh_dates(previous, successful_logs, max_dt)
+        selected_dates, next_history, pending_dates = bounded_refresh_dates(previous, selected_dates, next_history)
+        payload["pending_refresh_dates"] = pending_dates
         payload["refresh_dates"] = [value.isoformat() for value in selected_dates]
         payload["history_next_date"] = next_history
         print(json.dumps({"event": "campaign_copy_report_query_plan", "dates": payload["refresh_dates"],
@@ -1169,6 +1188,12 @@ class ReportCache:
             previous = json.loads(prior_body) if prior_body else None
             raw = query_raw(previous)
             payload = merge_history(build_payload(raw), previous, raw["refresh_dates"], raw["history_next_date"])
+            prior_meta=(previous or {}).get('m', {})
+            freshness=dict(prior_meta.get('date_refreshed_at', {}))
+            if not freshness:
+                freshness.update({day:prior_meta.get('generated_at','') for day in prior_meta.get('refreshed_dates',[])})
+            freshness.update({day:payload['meta']['generated_at'] for day in raw['refresh_dates']})
+            payload['meta'].update(rolling_refresh=True, pending_refresh_dates=raw.get('pending_refresh_dates', []), date_refreshed_at=freshness)
             del raw, previous, prior_body
             body = serialize_wire_payload(payload)
             public_body = serialize_wire_payload(payload, include_metadata=False)

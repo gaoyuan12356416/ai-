@@ -286,3 +286,18 @@ not used. A dedicated duplicate of the sole report SQL socket preserves forced
 shutdown on SQL gate loss/deadline; the HTTP server never opens SQL connections.
 Read-only port and database flags are still checked in the same gated transaction.
 A real probe confirmed Compression=ON and a SELECT SLEEP deadline was interrupted.
+
+### Bounded daily refresh queue
+
+A seeded refresh commits one complete statistics date at a time. Previously
+queued dates resume after the last atomic success; a genuinely new source date
+preempts but does not discard older queued dates. The historical cursor advances
+only when that historical date is committed; refreshed_through never regresses.
+Each published snapshot records date_refreshed_at and pending_refresh_dates.
+The UI explicitly says which date was updated and that other dates retain their
+individual historical snapshots. Do not describe one batch as all seven days
+being fresh. The 15-minute timer is batch cadence, not a full-history SLA.
+The original all-date planner remains for cold builds and an explicit source
+snapshot remains read-only and gated; every selected day's queries must finish
+before it replaces previous values. validate_cache.py verifies retained history
+and exact nonduplicate keys before the separately warmed candidate is installed.

@@ -39,3 +39,20 @@ class CompressedConnectionTests(unittest.TestCase):
   guard.close.assert_called_once()
 
 if __name__=='__main__':unittest.main()
+
+class BoundedRefreshTests(unittest.TestCase):
+ def test_resume_pending_dates_without_regressing_watermark(self):
+  from datetime import date
+  old={'m':{'refreshed_through':'2026-11-14','stat_end':'2026-11-14','history_next_date':'2026-08-28','pending_refresh_dates':['2026-11-13','2026-08-28']}}
+  days,cursor,pending=service.bounded_refresh_dates(old,[date(2026,11,14),date(2026,8,28)],'2026-08-29')
+  self.assertEqual(days,[date(2026,11,13)]);self.assertEqual(cursor,'2026-08-28');self.assertEqual(pending,['2026-08-28'])
+ def test_new_day_preempts_but_preserves_backfill_queue(self):
+  from datetime import date
+  old={'m':{'refreshed_through':'2026-11-13','stat_end':'2026-11-13','history_next_date':'2026-08-28','pending_refresh_dates':['2026-11-12']}}
+  days,cursor,pending=service.bounded_refresh_dates(old,[date(2026,11,14),date(2026,11,13),date(2026,8,28)],'2026-08-29')
+  self.assertEqual(days,[date(2026,11,14)]);self.assertIn('2026-11-12',pending);self.assertEqual(cursor,'2026-08-28')
+ def test_historical_cursor_advances_only_when_that_day_is_committed(self):
+  from datetime import date
+  old={'m':{'refreshed_through':'2026-11-14','stat_end':'2026-11-14','history_next_date':'2026-08-28','pending_refresh_dates':['2026-08-28']}}
+  days,cursor,pending=service.bounded_refresh_dates(old,[date(2026,11,14),date(2026,8,28)],'2026-08-29')
+  self.assertEqual(cursor,'2026-08-29');self.assertEqual(pending,[])
