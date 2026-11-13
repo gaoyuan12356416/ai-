@@ -280,27 +280,12 @@ class PagePoolRepository:
         return [PageTarget(sorted(item["group_ids"], key=int)[0], tuple(sorted(item["group_ids"], key=int)), page_id, item["owner_user_id"], item["timezone"], item["language"], item["tokens"], item["page_name"]) for page_id, item in sorted(grouped.items())]
 
     def legacy_conflicts(self, group_ids: Sequence[str]) -> List[Dict[str, str]]:
-        ids = list(dict.fromkeys(str(item) for item in group_ids))
-        if not ids:
-            return []
-        placeholders = ",".join("%s" for _ in ids)
-        sql = f"""
-            SELECT DISTINCT CAST(q.id AS CHAR) AS queue_id,COALESCE(q.name,'') AS queue_name,
-                   CAST(q.page_group_id AS CHAR) AS group_id,CAST(si.group_id AS CHAR) AS selected_group_id,
-                   CAST(li.page_id AS CHAR) AS overlap_page_id,CAST(q.execute_switch AS CHAR) AS execute_switch
-              FROM `{self.mysql.schema}`.ads_facebook_post_publish_queue q
-              JOIN `{self.mysql.schema}`.ads_facebook_page_group lg
-                ON lg.id=q.page_group_id AND lg.is_delete=0 AND lg.type IN (0,1)
-              JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins li
-                ON li.group_id=lg.id AND li.deleted_at=0 AND TRIM(li.page_id)<>''
-              JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins si
-                ON si.page_id=li.page_id AND si.deleted_at=0 AND TRIM(si.page_id)<>''
-              JOIN `{self.mysql.schema}`.ads_facebook_page_group sg
-                ON sg.id=si.group_id AND sg.is_delete=0 AND sg.type IN (0,1)
-             WHERE q.execute_switch=1 AND CAST(si.group_id AS CHAR) IN ({placeholders})
-             ORDER BY queue_id,overlap_page_id
+        """Compatibility hook: external legacy queues do not reserve these Pages.
+
+        Activation and planning share this policy. Real publication exclusion,
+        material dedupe, leases and unknown outcomes remain in the native ledger.
         """
-        return [{"queue_id": str(row.get("queue_id") or ""), "queue_name": str(row.get("queue_name") or "")[:200], "group_id": str(row.get("group_id") or ""), "selected_group_id": str(row.get("selected_group_id") or ""), "overlap_page_id": str(row.get("overlap_page_id") or ""), "status": "enabled"} for row in self.mysql.select(sql, ids)]
+        return []
 
     @staticmethod
     def _credential_owner(owner_user_id):
