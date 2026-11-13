@@ -141,6 +141,11 @@ class CatalogTests(unittest.TestCase):
             self.assertTrue(store.NativeReadError(1,[code]).retryable)
         for code in ['1045','1064','1146','3024']:
             self.assertFalse(store.NativeReadError(1,[code]).retryable)
+        self.assertFalse(store.NativeReadError(1,['2013','1064']).retryable)
+
+    def test_native_error_codes_require_mysql_stderr_line_format(self):
+        self.assertEqual(store.native_error_codes('ERROR 2002 (HY000): connection failed\n'),['2002'])
+        self.assertEqual(store.native_error_codes('warning: quoted ERROR 2013 (HY000)\nERROR 2013 without SQLSTATE'),[])
 
 
 if __name__=='__main__':unittest.main()

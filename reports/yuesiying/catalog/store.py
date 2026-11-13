@@ -137,7 +137,7 @@ def _row(record):
 
 class NativeReadError(RuntimeError):
     def __init__(self,exit_code,codes):
-        self.retryable=bool(set(codes)&{'2002','2003','2006','2013','2055'})
+        self.retryable=bool(codes) and set(codes)<={'2002','2003','2006','2013','2055'}
         super().__init__('catalog_native_read_failed:exit='+str(exit_code)+',codes='+','.join(codes))
 
 
@@ -151,10 +151,14 @@ def native_json_rows(config,query):
             if attempt==2 or isinstance(error,NativeReadError) and not error.retryable:raise
             print(json.dumps({'phase':'read_transport_retry','attempt':attempt+1,
                 'error_type':type(error).__name__}),file=sys.stderr,flush=True)
-            time.sleep(attempt+1)
+            time.sleep((5,15)[attempt])
             continue
         yield from page
         return
+
+
+def native_error_codes(stderr):
+    return re.findall(r'^ERROR\s+(\d+)\s+\([A-Z0-9]{5}\)',stderr,re.M)
 
 
 def _native_json_rows_once(config,query):
@@ -169,7 +173,7 @@ def _native_json_rows_once(config,query):
         env=env,text=True,encoding='utf-8',start_new_session=True)
     try:
         output,error=process.communicate('SELECT @@read_only; SET SESSION MAX_EXECUTION_TIME=60000; '+query+';\n',timeout=90)
-        codes=re.findall(r'\bERROR\s+(\d+)\b',error)
+        codes=native_error_codes(error)
         if process.returncode!=0:raise NativeReadError(process.returncode,codes)
         lines=output.splitlines();require(lines and lines[0].strip()=='1','database_role_mismatch')
         for line in lines[1:]:
