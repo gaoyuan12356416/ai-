@@ -769,10 +769,8 @@ class FBAutoPostStore:
                     task_cursor = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,material_id,content_id,media_url,message_text,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
                 if status == "planned" and material is not None and "{{url}}" in str(config["message_template"]):
                     task_id = int(task_cursor.lastrowid)
-                    short_url, long_url = self._link_values(page, material, task_id, link_timestamp)
-                    message_text = self._message(config, material, short_url)
-                    conn.execute("UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?", (message_text, short_url, long_url, task_id))
-                if status == 'planned' and material is not None and page_caption.handles(config):
+                    selection['caption']=page_caption.freeze(self,conn,config,page,material,task_id,link_timestamp,caption_snapshot)
+                if status == 'planned' and material is not None and page_caption.handles(config) and '{{url}}' not in config['message_template']:
                     selection['caption']=page_caption.freeze(self,conn,config,page,material,int(task_cursor.lastrowid),link_timestamp,caption_snapshot)
                 if target_slot:
                     conn.execute("UPDATE fb_auto_task SET schedule_policy=? WHERE id=?", (target_daily.POLICY, int(task_cursor.lastrowid)))

@@ -14,16 +14,16 @@ sys.path.insert(0, str(SOURCE))
 from scripts import deploy_hit_drama as release
 from scripts.deploy_pipeline_runtime import verify_source
 
-BASE = '1e2689e6cf0eaf5cc962db288b26284519d9d514'
+BASE = '0aaa0d486f42bf8a67632a1ce2f47324ac011961'
 FILES = ['features/fb_auto_posts/' + name + '.py' for name in
          ('core', 'repositories', 'hit_material', 'page_caption', 'service')]
 FILES += ['ops/fb-page-caption/approved-20261113.json']
 TESTS = ['tests.test_fb_page_caption', 'tests.test_fb_profile_integration', 'tests.test_fb_profile_selection',
          'scripts.test_fb_hit_drama', 'scripts.test_fb_target_midnight', 'scripts.test_fb_auto_validation']
 OVERLAY_BASES = {
-    'features/fb_auto_posts/core.py': 'bd93b870b6628a146bedeb899d6b86fe2f0de0e4da59832c164fee0d24d80fc6',
-    'features/fb_auto_posts/repositories.py': 'dc89fd6410657e1f125441673cc89f7b15f32978a54db4df8f43353b89f85f98',
-    'features/fb_auto_posts/service.py': 'a2c7a3fafc49e3d6911006d256e084d0719871ec6c02f69d231e7fd9f139c028',
+    'features/fb_auto_posts/core.py': '72ac1e554d22727f2090bada34805a2f10011b9fe9581b8f209ed0b52baeb6db',
+    'features/fb_auto_posts/repositories.py': '0ba04176f2a71a09ba1954b8ff89dc8ce70fd799261b19867017a0bc65dfde89',
+    'features/fb_auto_posts/service.py': 'b91cff5c5cfc7aa8cb231b17895ad44ef66ed6c19871aed9f1070977f05b7bd5',
 }
 
 
@@ -34,9 +34,11 @@ def compose(baseline, changed, current):
     result = current
     for kind, i1, i2, j1, j2 in reversed(difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes()):
         if kind=='equal':continue
-        context=''.join(old[max(0,i1-3):i1])
-        anchor=context+''.join(old[i1:i2])
-        assert anchor and result.count(anchor)==1,'overlay_edit_anchor_changed'
+        for size in (3,2,1):
+            context=''.join(old[max(0,i1-size):i1])
+            anchor=context+''.join(old[i1:i2])
+            if anchor and result.count(anchor)==1:break
+        else:raise AssertionError('overlay_edit_anchor_changed')
         result=result.replace(anchor,context+''.join(new[j1:j2]),1)
     return result
 
@@ -143,7 +145,7 @@ def prepare(folder, tests):
         original=path.read_text()
         content=re.sub(r'<label class="required" for="message">.*?</label>',lambda _:label,original,count=1)
         anchor='<div class="hint">{{desc}} 为短剧描述；{{url}} 为带 AIpost 归因的短链，每份文案最多使用一次。</div>'
-        assert content.count(anchor)==1,'caption_help_anchor_changed:'+str(path)
+        assert content.count(anchor)==1 or content.count(hint)==1,'caption_help_anchor_changed:'+str(path)
         content=content.replace(anchor,hint,1).encode()
         if root==candidate/'static':
             release.atomic(path,content);continue

@@ -105,6 +105,15 @@ class PageCaptionTests(unittest.TestCase):
         first = self.tasks()[0]
         self.assertEqual((first['message_text'], first['short_url'], first['long_url']), ('Page copy', '', ''))
 
+    def test_valid_page_copy_does_not_expand_an_oversized_unused_fallback(self):
+        self.template=self.store.create_template(dict(self.raw,message_template='Fallback {{desc}} {{url}}'),self.actor,
+            dict(app_id='1479',product='Dramawave',metric_product='Dramawave',metric_platform=0))
+        self.configure('11','Page copy')
+        self.page_rows=self.page_rows[:1]
+        self.rows=tuple(replace(row,drama_description='x'*6000) for row in self.rows)
+        self.run_once()
+        self.assertEqual(self.tasks()[0]['message_text'],'Page copy')
+
     def test_oversized_expansion_falls_back_without_truncating_page_copy(self):
         self.configure('11', '{desc}')
         self.rows = tuple(replace(row, drama_description='x'*5001) for row in self.rows)
