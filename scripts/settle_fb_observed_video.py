@@ -3,6 +3,7 @@ import argparse
 import contextlib
 import datetime as dt
 import json
+import re
 from pathlib import Path
 import sqlite3
 import sys
@@ -24,6 +25,40 @@ def validate(task, item, operation):
     require(began - dt.timedelta(minutes=2) <= created <= finished + dt.timedelta(minutes=2), 'publication_time_outside_original_attempt')
     require(any(x.get('status') == 200 and x.get('rows', 0) > 0 for x in item['checks']), 'successful_page_video_read_required')
     return video
+
+def select_observed_operation(operations, native_operations, attempts):
+    """Allow one final unknown write only after fully recorded Graph rejections."""
+    require(bool(operations), 'platform_attempt_missing')
+    if len(operations) == 1:
+        return operations[0]
+    central = {row['operation_id']: row for row in operations}
+    native = sorted(native_operations, key=lambda row: row['sequence'])
+    by_sequence = {row['sequence']: row for row in attempts}
+    require(len(central) == len(native) == len(attempts)
+            and {row['operation_id'] for row in native} == set(central)
+            and [row['sequence'] for row in native] == list(range(1, len(native) + 1))
+            and set(by_sequence) == set(range(1, len(native) + 1)), 'attempt_chain_incomplete')
+    for index, row in enumerate(native):
+        operation = central[row['operation_id']]
+        attempt = by_sequence[row['sequence']]
+        result, checkpoint = json.loads(row['result_json']), json.loads(row['checkpoint_json'])
+        require(row['stage'] == 'publish' and operation['operation'] == 'fb_video_publish'
+                and row['generation'] == operation['generation']
+                and row['request_sha256'] == operation['request_sha256']
+                and row['credential_id'] == attempt['credential_id']
+                and row['fb_user_id'] == attempt['fb_user_id']
+                and result == checkpoint and result.get('operation_id') == row['operation_id']
+                and not result.get('post_id')
+                and result.get('kind') == attempt['result_kind']
+                and result.get('error_code') == attempt['error_code']
+                and result.get('trace_id', '') == attempt['trace_id'], 'attempt_proof_mismatch')
+        if index < len(native) - 1:
+            require(result['kind'] == 'definite_failure'
+                    and re.fullmatch(r'fb_graph_[0-9]+', result['error_code'])
+                    and bool(result.get('trace_id')), 'prior_attempt_not_explicit_graph_rejection')
+        else:
+            require(result['kind'] == 'unknown', 'final_attempt_not_unknown')
+    return central[native[-1]['operation_id']]
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -47,12 +82,18 @@ def main():
         require(task['status']=='unknown' and not task['graph_post_id'] and not task['lease_owner'] and not task['lease_expires_at_utc'], 'original_task_not_idle_unknown')
         require(job['status']=='unknown','central_state_changed')
         operations=[dict(r) for r in c.execute('SELECT * FROM dispatch.pipeline_operation WHERE job_id=?',(job['id'],))]
-        require(len(operations)==1,'multiple_platform_attempts_require_manual_review')
-        video=validate(task,items[0],operations[0])
+        native_operations=[dict(r) for r in c.execute('SELECT * FROM pipeline_fb_operation WHERE source_key=? AND stage=?',(key,'publish'))]
+        attempts=[dict(r) for r in c.execute('SELECT * FROM fb_auto_publish_attempt WHERE task_id=?',(a.task_id,))]
+        observed_operation=select_observed_operation(operations,native_operations,attempts)
+        video=validate(task,items[0],observed_operation)
         require(not c.execute('SELECT 1 FROM fb_auto_task WHERE id<>? AND graph_post_id=?',(task['id'],video['id'])).fetchone(),'video_already_bound')
+        require(not c.execute('SELECT 1 FROM fb_video_task WHERE graph_post_id=?',(video['id'],)).fetchone(),'video_already_bound_to_video_task')
+        require(not c.execute('SELECT 1 FROM dispatch.pipeline_publication WHERE channel=? AND publish_id=?',('fb',video['id'])).fetchone(),'video_already_recorded')
         require(not c.execute('SELECT 1 FROM dispatch.pipeline_publication WHERE source_key=?',(key,)).fetchone(),'publication_already_recorded')
         result={'task_id':task['id'],'source_key':key,'job_id':job['id'],'page_id':task['page_id'],'video_id':video['id'],
-                'published_at':stamp(dt.datetime.strptime(video['created_time'], '%Y-%m-%dT%H:%M:%S%z')),'evidence_sha256':sha(evidence),'state_sha256':sha({'task':task,'job':job,'operations':operations})}
+                'published_at':stamp(dt.datetime.strptime(video['created_time'], '%Y-%m-%dT%H:%M:%S%z')),'evidence_sha256':sha(evidence),
+                'observed_operation_id':observed_operation['operation_id'],
+                'state_sha256':sha({'task':task,'job':job,'operations':operations,'native_operations':native_operations,'attempts':attempts})}
         result['plan_sha256']=sha(result)
         if a.apply:
             require(result['plan_sha256']==a.plan_sha256,'plan_changed')
