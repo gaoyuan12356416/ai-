@@ -19,6 +19,22 @@
       "remote_path": "/usr/share/nginx/html/quick-nav.js",
       "sha256": "203bf1a08903d797f7002add7dcacae8cc05a1032cde32013e69657767ab88ea",
       "same_as_main": true
+    },
+    {
+      "file": "fb-auto-publish-template.html",
+      "remote_path": "/root/drama_material_service/static/fb-auto-publish-template.html",
+      "sha256": "4c43afe01dadeb1bcc842dae4f35ff4227f6c1d292458beebf698d0d43443959",
+      "bytes": 11269,
+      "captured_at_utc": "2026-11-13T04:38:07.204309+00:00",
+      "credential_scan": "No credential literals or known secret patterns."
+    },
+    {
+      "file": "fb-auto-publish-template.html",
+      "remote_path": "/usr/share/nginx/html/fb-auto-publish-template.html",
+      "sha256": "4c43afe01dadeb1bcc842dae4f35ff4227f6c1d292458beebf698d0d43443959",
+      "bytes": 11269,
+      "captured_at_utc": "2026-11-13T04:38:07.204335+00:00",
+      "credential_scan": "No credential literals or known secret patterns."
     }
   ],
   "credential_scan": "No credential literals or known secret patterns; FEISHU token URL constants excluded as endpoint URLs."
