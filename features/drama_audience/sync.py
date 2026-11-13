@@ -31,8 +31,20 @@ def priority_ids():
 
 def discover(db_path, reader, pages=200):
     with closing(store.connect(db_path, True)) as db:
-        row = db.execute("SELECT value FROM metadata WHERE key='drama_info_cursor'").fetchone()
-        cursor = int(row[0]) if row else 0
+        def get(key):
+            row=db.execute('SELECT value FROM metadata WHERE key=?',(key,)).fetchone()
+            return int(row[0]) if row else None
+        def save(key,value):
+            with db:db.execute('INSERT OR REPLACE INTO metadata VALUES(?,?)',(key,str(value)))
+        cursor=get('drama_info_cursor')
+        if cursor is None:
+            # Pin a head for new arrivals independently of the historical backlog.
+            rows=reader.query(["SELECT HEX(JSON_OBJECT('id',id)) FROM kunlunads_dev.ads_drama_info "
+                               "WHERE app_id=1479 ORDER BY id DESC LIMIT 1"],timeout=40)
+            cursor=int(rows[0]['id']) if rows else 0
+            with db:
+                db.executemany('INSERT OR REPLACE INTO metadata VALUES(?,?)',
+                    [('drama_info_cursor',str(cursor)),('drama_info_backfill',str(cursor+1))])
         total = 0
         for _ in range(pages):
             rows = reader.query(["SELECT HEX(JSON_OBJECT('id',id,'content_id',content_id)) "
@@ -40,13 +52,22 @@ def discover(db_path, reader, pages=200):
                                  "ORDER BY id LIMIT 1000" % cursor], timeout=40)
             if not rows:
                 break
-            store.enqueue([r['content_id'] for r in rows], db_path)
+            store.enqueue([r['content_id'] for r in rows], db_path,priority=10)
             cursor = max(int(r['id']) for r in rows)
-            with db:
-                db.execute("INSERT OR REPLACE INTO metadata VALUES('drama_info_cursor',?)", (str(cursor),))
+            save('drama_info_cursor',cursor)
             total += len(rows)
             if len(rows) < 1000:
                 break
+        backfill=get('drama_info_backfill') or 0
+        for _ in range(min(pages,10)):
+            if not backfill:break
+            rows=reader.query(["SELECT HEX(JSON_OBJECT('id',id,'content_id',content_id)) "
+                               "FROM kunlunads_dev.ads_drama_info WHERE app_id=1479 AND id<%d "
+                               "ORDER BY id DESC LIMIT 1000" % backfill],timeout=40)
+            store.enqueue([r['content_id'] for r in rows],db_path)
+            backfill=min(int(r['id']) for r in rows) if len(rows)==1000 else 0
+            save('drama_info_backfill',backfill)
+            total+=len(rows)
     return total
 
 

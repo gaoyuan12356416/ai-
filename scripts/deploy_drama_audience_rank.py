@@ -104,6 +104,8 @@ def install_jobs():
 
 def apply(folder,rollback=False):
     manifest=json.loads((folder/'manifest.json').read_text())
+    import features
+    features.__path__.append('/opt/pipeline-dispatch/current/features')
     from scripts.deploy_x_hierarchy import switch_window
     from scripts.reproject_drama_audiences import preview,publish
     from contextlib import ExitStack
@@ -111,7 +113,7 @@ def apply(folder,rollback=False):
     for lane in ('x','fb','youtube','coordinator'):
         run(sys.executable,HEALTH,'snapshot','--lane',lane,'--output',folder/('health-'+lane+'-before.json'))
     portrait_timers=['x-channel-tag-revenue-refresh.timer','fb-page-portrait-refresh.timer']
-    states={unit:run('systemctl','is-active',unit) for unit in portrait_timers}
+    states={unit:run('systemctl','show',unit,'-p','ActiveState','--value') for unit in portrait_timers}
     for unit,state in states.items():
         if state=='active':run('systemctl','stop',unit)
     try:
@@ -129,12 +131,13 @@ def apply(folder,rollback=False):
         else:
             # Wait for the two read-only refresh jobs, not unrelated publishing.
             deadline=time.monotonic()+600
-            while any(subprocess.run(['systemctl','is-active','--quiet',u.replace('.timer','.service')]).returncode==0 for u in portrait_timers):
+            while any(run('systemctl','show',u.replace('.timer','.service'),'-p','ActiveState','--value') in ('active','activating') for u in portrait_timers):
                 if time.monotonic()>deadline:raise RuntimeError('portrait_refresh_running_retry')
                 time.sleep(2)
             with switch_window(folder,55):
                 with (Path('/mnt/data-disk/fb-page-portraits')/'refresh.lock').open('a') as fblock:
                     fcntl.flock(fblock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    assert check_no_writes('/var/lib/x-post-automation/accounts.sqlite3'),'standard_write_inflight'
                     preview(folder/'reprojection')
                     # Catalog backup is online and remains outside publication DBs.
                     with closing(sqlite3.connect('file:/mnt/data-disk/drama-audience/catalog.sqlite3?mode=ro',uri=True)) as src,closing(sqlite3.connect(folder/'audience-before.sqlite3')) as dst:src.backup(dst)

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import closing
 from unittest.mock import patch
 
 from features.drama_audience import store
@@ -66,11 +67,21 @@ class AudienceTests(unittest.TestCase):
         self.assertEqual((r['stored'],r['pending']),(1,0))
     def test_discovery_cursor_and_dedup(self):
         class Reader:
+            arrived=False
             def query(self,queries,timeout):
-                return [] if 'id>10 ' in queries[0] else [{'id':10,'content_id':'AbC'}]
-        self.assertEqual(discover(self.db,Reader()),1)
-        self.assertEqual(discover(self.db,Reader()),0)
-        self.assertEqual(store.counts(self.db)['pending'],1)
+                q=queries[0]
+                if 'DESC LIMIT 1' in q and 'id<' not in q:return [{'id':10}]
+                if 'id<11 ' in q:return [{'id':10,'content_id':'AbC'}]
+                if self.arrived and 'id>10 ' in q:return [{'id':11,'content_id':'New'}]
+                return []
+        reader=Reader()
+        self.assertEqual(discover(self.db,reader),1)
+        self.assertEqual(discover(self.db,reader),0)
+        reader.arrived=True
+        self.assertEqual(discover(self.db,reader),1)
+        self.assertEqual(store.counts(self.db)['pending'],2)
+        with closing(store.connect(self.db)) as db:
+            self.assertEqual(dict(db.execute('SELECT content_id,priority FROM pending')),{'AbC':0,'New':10})
     def test_income_conservation_and_theme_preserved(self):
         store.save(resolve('AbC',response(audience=['合家欢'])),self.db)
         resources=[dict(app_id=1479,content_id='AbC',language='en',series_code='s',labels='sweet,revenge')]
@@ -108,6 +119,7 @@ class RankTests(unittest.TestCase):
         d=core.read(root=self.root);self.assertEqual(d['status']['status'],'error');self.assertEqual(len(d['list']),1)
     def test_stale_date_not_current_success(self):
         self.assertEqual(core.update('s',self.root,fetcher=lambda _:self.data('2026-11-12'),today='2026-11-13')['status'],'not_generated')
+        self.assertEqual(core.update('s',self.root,fetcher=lambda _:dict(code=200,data=dict(date='',list=[])),today='2026-11-13')['status'],'not_generated')
     def test_duplicates_bad_rank_empty(self):
         d=self.data();d['data']['list']*=2
         with self.assertRaises(ValueError):core.validate(d)

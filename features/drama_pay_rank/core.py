@@ -59,7 +59,8 @@ def update(token, root=ROOT, fetcher=read_json, today=None):
                 db.execute('INSERT OR REPLACE INTO status VALUES(1,?)',(json.dumps(status),))
             return status
         except Exception as exc:
-            status=dict(status='error',attempted_at=now(),expected_date=today,error=type(exc).__name__)
+            status=dict(status='not_generated' if str(exc)=='not_generated' else 'error',
+                        attempted_at=now(),expected_date=today,error=type(exc).__name__)
             with db:
                 db.execute('INSERT OR REPLACE INTO status VALUES(1,?)',(json.dumps(status),))
             return status
