@@ -1,0 +1,11 @@
+[Unit]
+Description=Check locked personal Excel accounts once per minute
+
+[Timer]
+OnBootSec=60
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=x-video-account-recovery.service
+
+[Install]
+WantedBy=timers.target

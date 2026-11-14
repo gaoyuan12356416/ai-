@@ -1,0 +1,19 @@
+[Unit]
+Description=Release unpublished personal Excel tasks after explicit X account lock
+RequiresMountsFor=/mnt/data-disk /var/lib/x-post-automation
+
+[Service]
+Type=oneshot
+User=x-post-automation
+Group=x-post-automation
+WorkingDirectory=/opt/x-video-account-recovery/current
+ExecStart=/usr/bin/python3 /opt/x-video-account-recovery/current/scripts/x_video_account_recovery.py --apply
+Environment=PYTHONDONTWRITEBYTECODE=1
+TimeoutStartSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/x-post-automation
