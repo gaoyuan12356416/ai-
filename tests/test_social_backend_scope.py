@@ -153,6 +153,18 @@ class BackendScopeTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertTrue(any(row.get("_coverage_only") for row in rows))
 
+    def test_daily_scope_uses_frozen_exact_triples_and_keeps_coverage(self):
+        from features.social_analytics import routes
+        candidates = [metric(), metric(cid="outside", cents=90000),
+                      metric(cid="", adset_id="", ad_id="", cents=0, _coverage_only=1)]
+        settings = {"SOCIAL_DAILY_FB_SOURCES": {"2049": [("6", "page", "material")]}}
+        with patch.object(routes, "query_source_rows", return_value=candidates) as query:
+            rows, _ = facebook_source(settings, DAY, DAY, "2049")
+        self.assertIn("BINARY adset_id IN", query.call_args.args[1])
+        self.assertIn("UNION ALL", query.call_args.args[1])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sum(row["revenue_cents"] for row in rows), 100)
+
     def test_candidate_overflow_fails_before_exact_tuple_filter(self):
         from features.social_analytics import routes
         with patch.object(routes, "MAX_ROWS", 1), patch.object(routes, "query_source_rows",

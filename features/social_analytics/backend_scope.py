@@ -19,6 +19,8 @@ def eligible(row, day):
 
 def facebook_source(app, start, end, site, allowed_sources=None):
     from .routes import MAX_ROWS, metric_sql, query_source_rows
+    if allowed_sources is None and "SOCIAL_DAILY_FB_SOURCES" in app:
+        allowed_sources = app["SOCIAL_DAILY_FB_SOURCES"].get(site, [])
     # Broad web reads must not put a month of legacy Page/material matches in
     # one statement. Keep the exact triple verification within each disjoint
     # four-day window; fail the whole source if any window fails or overflows.

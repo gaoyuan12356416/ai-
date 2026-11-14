@@ -114,6 +114,18 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
                SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + 120)
     catalog_snapshot = read_catalogs(app, ["youtube", "x", "facebook"])
+    # Freeze candidates globally, before source SQL. Exact triple membership and
+    # publication-date/owner verification remain in the shared source boundary.
+    from features.social_analytics.backend_scope import eligible
+    app["SOCIAL_DAILY_FB_SOURCES"] = {
+        site: sorted({(str(row["key"][0]), row["effect_source"]["adset_id"],
+                       row["effect_source"]["ad_id"])
+                      for row in catalog_snapshot[0]
+                      if row["platform"] == "facebook" and row["site_id"] == site
+                      and row.get("effect_source") and eligible(row, day)
+                      and not row.get("excluded")})
+        for site in ("2049", "2310")
+    }
     shared = build_report(
         app, {"role": "admin", "_system_report": True},
         {"start": [day], "end": [day], "group_by": ["owner,platform"], "page_size": ["100"]},
