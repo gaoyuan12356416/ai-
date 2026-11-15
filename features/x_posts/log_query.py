@@ -13,7 +13,7 @@ def _readonly(path):
     conn.execute('PRAGMA query_only=ON')
     return conn
 
-def query_logs(db_path, payload=None, *, connection=None):
+def query_logs(db_path, payload=None, *, connection=None, profile_db=None):
     payload = payload if isinstance(payload, dict) else {}
     page, page_size = XPostStore._pagination(payload)
     clauses = []
@@ -96,7 +96,8 @@ def query_logs(db_path, payload=None, *, connection=None):
         "LEFT JOIN pipeline_canonical_hold h ON h.source_key='x:queue:'||q.id"
     )
     select = (
-        "SELECT q.id AS queue_id,q.run_id,q.catchup_run_id,"
+        ("SELECT q.ledger_source," if profile_db is not None else "SELECT 'ordinary' AS ledger_source,") +
+        "q.id AS queue_id,q.run_id,q.catchup_run_id,"
         "q.schedule_run_id,q.manual_run_id,"
         "CASE WHEN q.run_id IS NOT NULL THEN 'daily' "
         "WHEN q.catchup_run_id IS NOT NULL THEN 'catchup' "
@@ -135,16 +136,42 @@ def query_logs(db_path, payload=None, *, connection=None):
         "q.created_at,q.updated_at"
         + from_sql
     )
+    cte = ""
+    if profile_db is not None:
+        # Project the exact columns used by this query, tolerating unrelated
+        # schema extensions in either lane. Join on lane AND ID, never ID alone.
+        sql_text = select + where
+        ctes = []
+        for alias, table in (("q", "x_post_queue"), ("l", "x_post_publish_log"),
+                             ("r", "x_post_repost_ledger"), ("d", "x_post_drama_delivery_route"),
+                             ("mr", "x_post_manual_run"), ("h", "pipeline_canonical_hold")):
+            fields = sorted(set(re.findall(r"\b" + alias + r"\.([a-z_]+)", sql_text)) - {"ledger_source"})
+            columns = ",".join('"' + name + '"' for name in fields)
+            ctes.append("merged_%s AS (SELECT %s,'ordinary' AS ledger_source FROM main.%s "
+                        "UNION ALL SELECT %s,'profile' AS ledger_source FROM profile.%s)"
+                        % (alias, columns, table, columns, table))
+            from_sql = from_sql.replace(table + " " + alias, "merged_" + alias + " " + alias)
+        for alias, condition in (("l", "l.queue_id=q.id"), ("r", "r.queue_id=q.id"),
+                                 ("d", "d.queue_id=q.id"), ("mr", "mr.id=q.manual_run_id"),
+                                 ("h", "h.source_key='x:queue:'||q.id")):
+            from_sql = from_sql.replace(condition, condition + " AND " + alias + ".ledger_source=q.ledger_source")
+        select = select[:select.index(" FROM x_post_queue q ")] + from_sql
+        cte = "WITH " + ",".join(ctes) + " "
     offset = (page - 1) * page_size
     with (contextlib.nullcontext(connection) if connection is not None else contextlib.closing(_readonly(db_path))) as conn:
+        if profile_db is not None:
+            conn.execute("ATTACH DATABASE ? AS profile", (Path(profile_db).resolve().as_uri() + "?mode=ro",))
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
         total = int(
             conn.execute(
-                "SELECT COUNT(*)" + from_sql + where,
+                cte + "SELECT COUNT(*)" + from_sql + where,
                 tuple(values),
             ).fetchone()[0]
         )
         rows = conn.execute(
-            select + where + " ORDER BY q.id DESC LIMIT ? OFFSET ?",
+            cte + select + where + (" ORDER BY q.created_at DESC,q.ledger_source DESC,q.id DESC LIMIT ? OFFSET ?"
+                                   if profile_db is not None else " ORDER BY q.id DESC LIMIT ? OFFSET ?"),
             tuple(values) + (page_size, offset),
         ).fetchall()
     items = []

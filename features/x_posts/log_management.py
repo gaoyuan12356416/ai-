@@ -141,6 +141,39 @@ class LogManager:
                 item.update(can_reset=False, can_stop=False, reset_reason='调度状态暂不可用，请刷新后重试', stop_reason='调度状态暂不可用，请刷新后重试')
         return result
 
+    def query_unified(self, payload, profile_db=None):
+        from .log_query import query_logs
+        profile_db = profile_db or os.environ.get(
+            'X_PROFILE_POST_LOG_DB_PATH', '/mnt/data-disk/x-tag-publisher/posts.sqlite3')
+        result = query_logs(self.post_db, payload, profile_db=profile_db)
+        # Profile IDs/actions belong to its own dispatcher. Ordinary controls
+        # retain the original transactional, versioned eligibility checks.
+        ordinary = [item for item in result['items'] if item['ledger_source'] == 'ordinary']
+        for item in result['items']:
+            if item['ledger_source'] == 'profile':
+                item.update(can_reset=False, can_stop=False,
+                            reset_reason='画像发布记录；此处仅查看', stop_reason='画像发布记录；此处仅查看')
+        if ordinary:
+            try:
+                with contextlib.closing(self.connect(readonly=True)) as conn:
+                    conn.execute('BEGIN')
+                    has_audit = conn.execute("SELECT 1 FROM sqlite_master WHERE name='x_post_queue_control_audit'").fetchone()
+                    for item in ordinary:
+                        snapshot = self.snapshot(conn, item['queue_id'])
+                        item['action_version'] = self.version(snapshot)
+                        for action in ('reset','stop'):
+                            item[action+'_reason'] = self.reason(snapshot, action)
+                            item['can_'+action] = not item[action+'_reason']
+                        if has_audit:
+                            prior = conn.execute("SELECT before_json,created_at FROM x_post_queue_control_audit WHERE queue_id=? AND action='reset' AND json_extract(result_json,'$.ok')=1 ORDER BY id DESC LIMIT 1", (item['queue_id'],)).fetchone()
+                            if prior:
+                                old = json.loads(prior['before_json']).get('log', {})
+                                item.update(last_reset_at=prior['created_at'],previous_error_code=old.get('error_code',''),previous_attempt_count=old.get('attempt_count',0))
+            except sqlite3.Error:
+                for item in ordinary:
+                    item.update(can_reset=False,can_stop=False,reset_reason='调度状态暂不可用，请刷新后重试',stop_reason='调度状态暂不可用，请刷新后重试')
+        return result
+
     def apply(self, payload, actor):
         if not isinstance(payload, dict) or set(payload) != {'operation_id','action','items'}:
             raise XPostError('invalid_request', '操作参数无效', 400)
@@ -248,7 +281,7 @@ def dispatch(handler, parsed, app):
         manager = LogManager()
         if handler.command == 'GET':
             params = app['x_post_admin_query_params'](parsed.query)
-            return reply(200, manager.query(params))
+            return reply(200, manager.query_unified(params))
         from features.x_video_publish.gateway import read_json
         payload = read_json(handler, limit=64 * 1024)
         if payload is None:

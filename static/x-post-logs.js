@@ -134,7 +134,7 @@
                 : (item.run_id ? `日批次 ${item.run_id}` : "测试批次"))));
           appendCell(row, item.run_date, `队列 ${item.queue_id} · 数据：${item.source_date || "—"} · ${batchLabel}`);
           const sourceLabels = { drama_pool:"短剧池", material_pool:"素材池", auto_publish:"自动发布", manual_publish:"手动发布" };
-          appendCell(row, sourceLabels[item.task_source] || "—");
+          appendCell(row, (item.ledger_source === "profile" ? "画像 · " : "") + (sourceLabels[item.task_source] || "—"));
           const relayDelivery = String(item.delivery_mode || "direct") === "premium_relay_repost";
           const accountSecondary = [
             item.account_display_name || item.page_name || "",
