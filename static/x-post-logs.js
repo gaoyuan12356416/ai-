@@ -71,7 +71,9 @@
       const safeShortUrl = value => {
         try {
           const url = new URL(String(value || ""));
-          return url.protocol === "https:" && url.hostname === "ai.yingliangads.com" && /^\/s2l\/\d+\.html$/.test(url.pathname) ? url.href : "";
+          const knownPath = (url.hostname === "ai.yingliangads.com" && /^\/s2l\/\d+\.html$/.test(url.pathname))
+            || (url.hostname === "gy.g2flow.com" && /^\/s\/\d+$/.test(url.pathname));
+          return url.protocol === "https:" && !url.username && !url.password && !url.port && knownPath ? url.href : "";
         } catch (_) { return ""; }
       };
       async function api(path, options = {}) {
