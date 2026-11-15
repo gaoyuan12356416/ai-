@@ -28,7 +28,7 @@ def install(folder):
     subprocess.check_call(['systemctl','restart','drama-material-api.service'])
     for _ in range(30):
         try:
-            with urllib.request.urlopen('http://127.0.0.1:8787/health',timeout=2) as response:
+            with urllib.request.urlopen('http://127.0.0.1:8787/api/ui/topbar',timeout=2) as response:
                 if response.status==200:break
         except Exception:time.sleep(1)
     else:raise RuntimeError('admin_api_health_failed; use manifest code rollback')
