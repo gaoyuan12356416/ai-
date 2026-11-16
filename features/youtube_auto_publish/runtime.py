@@ -27,6 +27,25 @@ from .attribution import AttributionLinks, mapped_user_id
 READ_LIMIT = threading.BoundedSemaphore(2)
 
 
+def logged_in_uploader_ids(app, reader):
+    """Map backend login history to material uploader IDs through email."""
+    def resolve():
+        with closing(sqlite3.connect('file:' + str(app.JOB_DB_PATH) + '?mode=ro', uri=True, timeout=3)) as c:
+            rows = c.execute("SELECT email FROM drama_admin_user WHERE login_count>0 "
+                             "AND TRIM(COALESCE(email,''))<>''").fetchall()
+        emails = sorted({str(row[0]).strip().lower() for row in rows})
+        if not emails:
+            return set()
+        database = str(app.ADMIN_MAPPING_MYSQL_DATABASE or app.DB_NAME)
+        if not re.fullmatch(r'[A-Za-z0-9_]+', database):
+            raise WorkflowError('material_query_failed', '上传人映射数据库配置无效', 503)
+        literals = ','.join('BINARY CONVERT(0x' + email.encode('utf-8').hex() + ' USING utf8mb4)' for email in emails)
+        query = ('SELECT DISTINCT CAST(sub_user_id AS CHAR) FROM `' + database + '`.admin_user_group '
+                 'WHERE BINARY LOWER(TRIM(email)) IN (' + literals + ') AND sub_user_id IS NOT NULL')
+        return {str(row[0]) for row in reader(query) if row and re.fullmatch(r'[1-9][0-9]{0,18}', str(row[0]))}
+    return resolve
+
+
 def attribution_user_resolver(app):
     def resolve(actor):
         # The authenticated actor can omit email; use its tenant-scoped account.
@@ -245,7 +264,8 @@ def build_service(app):
     hosts=tuple(x.strip().lower() for x in os.environ.get('DRAMA_YOUTUBE_SOURCE_HOSTS',','.join(DEFAULT_HOSTS)).split(',') if x.strip())
     from .drama import DramaMetadataResolver
     source=MaterialSource(os.environ.get('YOUTUBE_AUTO_MATERIAL_SQL_FILE',''),reader,allowed_hosts=hosts,
-                          drama_resolver=DramaMetadataResolver(reader),async_cache=True)
+                          drama_resolver=DramaMetadataResolver(reader),async_cache=True,
+                          uploader_ids_provider=logged_in_uploader_ids(app,reader))
     repository=YouTubeCredentialRepository(reader,schema=app.DB_NAME)
     directory=ChannelDirectory(repository,failures=ChannelFailures(app.JOB_DB_PATH,root/'failure-notifications.sqlite3'))
     from .player_cards import PlayerCardStatusCache, YouTubeCardProbe

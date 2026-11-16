@@ -29,10 +29,11 @@ def validate_sql(sql):
 
 
 class MaterialSource:
-    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS, drama_resolver=None, async_cache=False):
+    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS, drama_resolver=None, async_cache=False, uploader_ids_provider=None):
         self.sql_file, self.query_runner = str(sql_file or ''), query_runner
         self.allowed_hosts = tuple(allowed_hosts)
         self.drama_resolver = drama_resolver
+        self.uploader_ids_provider = uploader_ids_provider
         self.lock = threading.Lock()
         self.cache = None
         self.read_cache = ReadCache() if async_cache else None
@@ -133,6 +134,9 @@ class MaterialSource:
                 if re.fullmatch(r'0|[1-9][0-9]{0,18}', value):
                     name = str(item.get('name') or '').strip() or ('未知上传人' if value == '0' else '用户 ' + value)
                     options.append({'id': value, 'name': name})
+            if self.uploader_ids_provider is not None:
+                allowed = self.uploader_ids_provider()
+                options = [item for item in options if item['id'] in allowed]
             return options
         except Exception:
             raise WorkflowError('material_query_failed','上传人查询失败，请稍后刷新',503) from None
