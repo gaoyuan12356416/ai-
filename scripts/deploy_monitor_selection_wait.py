@@ -1,9 +1,8 @@
-"""Scoped monitor overlay with an HTTP-handler-only coordinator switch.
+"""Scoped monitor overlay preserving the production coordinator stop barrier.
 
 Run from a fetched exact GitHub checkout. Existing worker claims and publication
-facts are retained. The temporary unit override skips the whole-job stop barrier
-only after this service's HTTP handlers and outbound control requests drain.
-The normal barrier is restored before this command returns.
+facts are retained. Segmented uploads need permits between HTTP requests; idle handlers do not
+permit bypassing the existing admission and claim drain protection.
 """
 import argparse
 import datetime as dt
@@ -19,7 +18,6 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.deploy_pipeline_coordinator_guarded import handlers_drained
 
 UNIT = 'pipeline-coordinator.service'
 POINTER = Path('/opt/pipeline-dispatch/current')
@@ -114,58 +112,27 @@ def switch(folder, rollback=False):
     old_pid = run('systemctl', 'show', UNIT, '-p', 'MainPID', '--value')
     original_pids = pids()
     config_hash = sha(Path('/etc/pipeline-coordinator.json'))
-    marker = 'monitor-http-' + str(os.getpid())
-    rule = ['-p', 'tcp', '--dport', '18846', '-m', 'conntrack', '--ctstate', 'NEW',
-            '-m', 'comment', '--comment', marker, '-j', 'DROP']
-    watchdog = marker + '-release'
-    gated, stopped, changed = False, False, False
+    # An idle HTTP interval is not an idle segmented upload: its next segment
+    # still needs a fresh permit. Retain the existing service claim barrier.
+    assert 'pipeline_service_drain.py stop --unit=' + UNIT in run('systemctl', 'show', UNIT, '-p', 'ExecStop')
     began = time.monotonic()
-    observations = []
+    changed = False
+    record['state'] = 'draining'
+    save(folder, record)
     try:
-        run('systemd-run', '--quiet', '--unit=' + watchdog, '--on-active=60s', '--',
-            '/usr/sbin/iptables', '-D', 'INPUT', *rule)
-        run('iptables', '-I', 'INPUT', '1', *rule)
-        gated = True
-        deadline = time.monotonic() + 20
-        while True:
-            item = handlers_drained(old_pid)
-            observations.append(item)
-            if item == {'threads': 2, 'connected_sockets': 0, 'accept_queue': 0}:
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError('coordinator_handlers_still_active_old_service_preserved')
-            time.sleep(.25)
-        OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
-        OVERRIDE.write_text('[Service]\nExecStop=\nExecStartPost=\n')
-        run('systemctl', 'daemon-reload')
-        final = handlers_drained(old_pid)
-        observations.append(final)
-        assert final == {'threads': 2, 'connected_sockets': 0, 'accept_queue': 0}, 'control_request_resumed_old_service_preserved'
-        record['state'] = 'activating'
-        save(folder, record)
-        run('systemctl', 'stop', UNIT, timeout=30)
-        stopped = True
+        run('systemctl', 'stop', UNIT, timeout=86400)
         assert run('systemctl', 'show', UNIT, '-p', 'MainPID', '--value') == '0'
         pointer(target)
         changed = True
-        run('systemctl', 'start', UNIT, timeout=20)
-        stopped = False
+        run('systemctl', 'start', UNIT, timeout=90)
     except BaseException:
         if changed:
-            run('systemctl', 'stop', UNIT, timeout=30)
+            run('systemctl', 'stop', UNIT, timeout=86400)
             pointer(expected)
-            stopped = True
-        if stopped:
-            run('systemctl', 'start', UNIT, timeout=20)
+        run('systemctl', 'start', UNIT, timeout=90)
         raise
     finally:
-        if gated:
-            run('iptables', '-D', 'INPUT', *rule)
-        subprocess.run(['systemctl', 'stop', watchdog + '.timer'], capture_output=True, timeout=10)
-        OVERRIDE.unlink(missing_ok=True)
-        run('systemctl', 'daemon-reload')
-        record['http_drain'] = observations
-        record['control_switch_seconds'] = round(time.monotonic() - began, 3)
+        record['service_switch_seconds'] = round(time.monotonic() - began, 3)
         save(folder, record)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + 10
@@ -189,7 +156,7 @@ def switch(folder, rollback=False):
                   new_pid=run('systemctl', 'show', UNIT, '-p', 'MainPID', '--value'),
                   other_pids_unchanged=original_pids == pids(), finished_at=dt.datetime.now(dt.timezone.utc).isoformat())
     save(folder, record)
-    print(json.dumps({key: record[key] for key in ('state', 'sha', 'control_switch_seconds', 'other_pids_unchanged')}), flush=True)
+    print(json.dumps({key: record[key] for key in ('state', 'sha', 'service_switch_seconds', 'other_pids_unchanged')}), flush=True)
 
 
 if __name__ == '__main__':
