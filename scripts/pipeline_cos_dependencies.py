@@ -5,6 +5,7 @@ import hashlib
 from importlib import metadata
 import os
 import json
+import pwd
 from pathlib import Path
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ def provision(node):
     node=Path(node).resolve()
     if not (node/"features/pipeline_dispatch/cloud_node.py").is_file():
         raise ValueError("COS worker package required")
+    provision_sdk_home()
     dist=metadata.distribution("Pillow")
     # This is the same interpreter and installed distribution used by the
     # accepted media fixtures. Shared Python environments are never modified.
@@ -42,6 +44,21 @@ def provision(node):
                                    cwd=node,text=True).strip()
     if result!=dist.version:raise RuntimeError("worker dependency verification failed")
     print("COS private Pillow",result,flush=True)
+
+
+def provision_sdk_home():
+    account=pwd.getpwnam("pipeline-cos")
+    home=Path(account.pw_dir)
+    target=Path("/mnt/data-disk/pipeline-cos-runtime/sdk-home")
+    if home!=Path("/home/pipeline-cos") or not Path("/mnt/data-disk").is_mount():
+        raise RuntimeError("unexpected COS service identity or data volume")
+    target.mkdir(mode=0o700,exist_ok=True)
+    os.chown(target,account.pw_uid,account.pw_gid)
+    if not home.exists() and not home.is_symlink():
+        home.symlink_to(target,target_is_directory=True)
+    if home.resolve()!=target or target.stat().st_uid!=account.pw_uid:
+        raise RuntimeError("COS SDK home belongs to another installation")
+    subprocess.run(["runuser","-u","pipeline-cos","--","mkdir","-p",str(home/".cos_download_tmp_file")],check=True)
 
 
 def tools_for_worker(node, cfg):
