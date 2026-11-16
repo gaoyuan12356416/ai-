@@ -653,6 +653,7 @@ class XAutoPostService:
                         only_refresh_required=False,
                         preserve_transient_status=True,
                         require_publish_approved=True,
+                        schedule_preflight=True,
                     )
                 )
                 if str(account.get("id") or "") != str(account_id):

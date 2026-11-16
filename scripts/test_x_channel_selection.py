@@ -144,6 +144,53 @@ class ChannelSelectionTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "x_auto_account_not_found")
 
 
+class AutoPreflightBoundaryTests(unittest.TestCase):
+    def test_client_requests_scheduler_preflight(self):
+        from features.x_auto_posts.x_sidecar import XPostAutoBridgeClient
+        client = XPostAutoBridgeClient.__new__(XPostAutoBridgeClient)
+        client._post = mock.Mock(return_value={"item": {"id": 101}})
+        client.verify_account(101, require_publish_approved=True, schedule_preflight=True)
+        self.assertTrue(client._post.call_args.args[1]["schedule_preflight"])
+
+    def test_known_lock_is_skipped_before_any_x_verify(self):
+        from features.x_accounts import oauth_service as oauth
+        blocker = {"code": "x_post_account_locked", "message": "temporarily locked"}
+        store = mock.Mock()
+        store.schedule_account_blockers.return_value = {83: blocker}
+        with mock.patch.object(oauth, "_x_posts_api", return_value=(XPostError, lambda _: store, None)), \
+             mock.patch.object(oauth, "verify_account") as verify:
+            with self.assertRaises(oauth.ServiceError) as caught:
+                oauth.verify_auto_template_account_request(
+                    {"require_publish_approved": True, "schedule_preflight": True}, 83)
+        self.assertEqual(caught.exception.code, "x_post_account_locked")
+        verify.assert_not_called()
+        store.schedule_account_blockers.assert_called_once_with([83])
+
+    def test_explicit_refresh_does_not_inherit_scheduler_hold(self):
+        from features.x_accounts import oauth_service as oauth
+        account = auto_tests.FakeBridge().accounts_by_id["101"]
+        with mock.patch.object(oauth, "_x_posts_api") as store, \
+             mock.patch.object(oauth, "verify_account", return_value=account) as verify:
+            result = oauth.verify_auto_template_account_request(
+                {"only_refresh_required": True, "require_publish_approved": True}, 101)
+        self.assertTrue(result["item"]["publish_eligible"])
+        store.assert_not_called()
+        verify.assert_called_once()
+
+    def test_recoverable_profile_rejection_can_be_verified_again(self):
+        from features.x_accounts import oauth_service as oauth
+        store = mock.Mock()
+        store.schedule_account_blockers.return_value = {
+            101: {"code": oauth.ACCOUNT_VERIFY_REJECTED, "message": "recheck"}}
+        account = auto_tests.FakeBridge().accounts_by_id["101"]
+        with mock.patch.object(oauth, "_x_posts_api", return_value=(XPostError, lambda _: store, None)), \
+             mock.patch.object(oauth, "verify_account", return_value=account) as verify:
+            result = oauth.verify_auto_template_account_request(
+                {"require_publish_approved": True, "schedule_preflight": True}, 101)
+        self.assertTrue(result["item"]["publish_eligible"])
+        verify.assert_called_once()
+
+
 class PoolSelectionTests(unittest.TestCase):
     def test_runner_filters_current_restrictions_and_keeps_healthy_channels(self):
         from scripts import x_post_schedule_runner as runner

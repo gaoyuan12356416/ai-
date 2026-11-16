@@ -3426,11 +3426,19 @@ def verify_auto_template_account_request(payload, account_id):
         "only_refresh_required",
         "preserve_transient_status",
         "require_publish_approved",
+        "schedule_preflight",
     }
     if set(payload).difference(allowed) or any(
         not isinstance(payload.get(key), bool) for key in payload
     ):
         raise ServiceError("invalid_request", "账号校验请求无效", 400)
+    if payload.get("schedule_preflight") is True:
+        XPostError, XPostStore, _publish_canary = _x_posts_api()
+        blocker = XPostStore(POST_DB_PATH).schedule_account_blockers([int(account_id)]).get(int(account_id))
+        # Match pool preflight: a rejected profile check can recover on verify;
+        # a recorded platform lock or unresolved publication remains isolated.
+        if blocker and blocker["code"] != ACCOUNT_VERIFY_REJECTED:
+            raise ServiceError(blocker["code"], blocker["message"], 409)
     account = verify_account(
         account_id,
         AUTO_TEMPLATE_ACTOR,

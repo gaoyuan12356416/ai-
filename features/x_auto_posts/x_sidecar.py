@@ -263,6 +263,7 @@ class XPostAutoBridgeClient:
         only_refresh_required: bool = False,
         preserve_transient_status: bool = False,
         require_publish_approved: bool = False,
+        schedule_preflight: bool = False,
     ) -> Dict[str, Any]:
         account = int(account_id)
         if account <= 0:
@@ -273,12 +274,14 @@ class XPostAutoBridgeClient:
                 "only_refresh_required": bool(only_refresh_required),
                 "preserve_transient_status": bool(preserve_transient_status),
                 "require_publish_approved": bool(require_publish_approved),
+                **({"schedule_preflight": True} if schedule_preflight else {}),
             }
             if any(
                 (
                     only_refresh_required,
                     preserve_transient_status,
                     require_publish_approved,
+                    schedule_preflight,
                 )
             )
             else {},

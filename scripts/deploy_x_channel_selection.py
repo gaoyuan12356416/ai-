@@ -24,7 +24,7 @@ ROOT = Path('/mnt/data-disk/x-channel-selection-20261116')
 POINTERS = {'ordinary': Path('/opt/x-post-automation/current'),
             'tag': Path('/opt/x-tag-publisher/current')}
 BACKEND = ('features/x_auto_posts/service.py', 'features/x_posts/service.py',
-           'features/x_accounts/oauth_service.py')
+           'features/x_accounts/oauth_service.py', 'features/x_auto_posts/x_sidecar.py')
 ASSETS = ('static/x-auto-publish-template.js', 'static/x-auto-publish-template.html',
           'static/x-post-material-pool.html', 'static/x-post-drama-pool.html')
 OWNERS = ('x-tag-auto.service', 'x-tag-post.service',
@@ -75,8 +75,11 @@ def delta(relative, generated=False, public=False):
 
 
 def apply_delta(root, relative, generated=False, public=False):
+    patch = delta(relative, generated, public)
+    if not patch:
+        return
     run('git', 'apply', '--unsafe-paths', '--directory=' + str(root),
-        input=delta(relative, generated, public))
+        input=patch)
 
 
 def version_editor(root, prefix='x-auto-publish'):
@@ -129,7 +132,7 @@ def prepare():
     folder = ROOT / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + commit[:8])
     folder.mkdir(parents=True, mode=0o755)
     (folder / 'backups').mkdir(mode=0o700)
-    record = dict(commit=commit, source=str(SOURCE), status='preparing', roots={}, files={})
+    record = dict(commit=commit, base_commit=BASE, source=str(SOURCE), status='preparing', roots={}, files={})
     save(folder, record)
     for lane, pointer in POINTERS.items():
         live = pointer.resolve(strict=True)
@@ -156,7 +159,9 @@ def prepare():
         # Validate in a separate copy: acceptance fixtures are never installed.
         tests = folder / ('tests-' + lane)
         run('cp', '-a', '--reflink=auto', staged, tests)
-        for name in ('test_x_channel_selection.py', 'test_x_auto_post_service.py', 'test_x_auto_post_validation.py'):
+        for name in ('test_x_channel_selection.py', 'test_x_auto_post_service.py',
+                     'test_x_auto_post_validation.py', 'test_x_auto_post_publisher.py',
+                     'test_x_post_schedule_runner.py'):
             shutil.copy2(SOURCE / 'scripts' / name, tests / 'scripts' / name)
         result = subprocess.run([sys.executable, '-m', 'unittest', 'scripts.test_x_channel_selection',
                                  'scripts.test_x_auto_post_service', '-q'], cwd=tests,
@@ -165,8 +170,11 @@ def prepare():
         if result.returncode:
             raise RuntimeError('candidate_tests_failed:' + lane)
         run(sys.executable, '-m', 'py_compile', *(staged / p for p in BACKEND))
-        print(json.dumps(dict(prepared_lane=lane, tests='29 passed')), flush=True)
+        matched = re.search(rb'Ran (\d+) tests?', result.stderr)
+        print(json.dumps(dict(prepared_lane=lane, tests=(matched.group(1).decode() if matched else 'focused') + ' passed')), flush=True)
     for number, live in enumerate((Path('/usr/share/nginx/html'), Path('/root/drama_material_service/static'))):
+        if not any(delta(relative) for relative in ASSETS):
+            continue
         staged = folder / ('public-' + str(number))
         staged.mkdir()
         names = [Path(p).name for p in ASSETS]
@@ -289,7 +297,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('prepare', 'apply', 'rollback'))
     parser.add_argument('directory', nargs='?', type=Path)
+    parser.add_argument('--base', default=BASE)
     args = parser.parse_args()
+    BASE = args.base
     if args.action == 'prepare':
         prepare()
     else:
