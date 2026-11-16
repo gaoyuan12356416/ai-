@@ -75,6 +75,8 @@ ORDER BY item_index;
 
 数据库异常另记录 `database_failure`：reader 标明初始会话或读取阶段，writer 标明连接、开始事务、精确主键读取、插入、回执更新或提交阶段；保留数字错误码、固定的 greeting/authentication/query/tls 阶段及 timeout/reset/refused 等标签，不输出原始驱动消息、SQL、请求体或凭据。该诊断不改变分配、重试、持久化和通知规则。
 
+2026-11-16 的 TCP 头部跟踪确认：一条约 151 KB 诊断 JSON 对应的 SQL 传输发生大量重传，客户端五秒读超时后数据才传齐；传齐后数据库约五毫秒即返回。读写链路均启用 MySQL 协议压缩，以减少跨网络传输及重传压力。reader 继续使用原 FIFO Gate 的 mysql 客户端（`--compress`）；writer 使用当前已安装的 Oracle Connector/Python 9.4.0（`compress=True`），事务、精确主键/不可变 hash 核对、3/5/5 秒超时和后台退避保持原规则。压缩发生在传输协议层，数据库中的 JSON、原始 outbox、payload hash 和历史记录格式不变。服务依赖列在 `features/fb_page_assignment/requirements.txt`；新主机需先在该服务 Python 环境安装，部署器在切换前检查模块可导入。
+
 放宽画像、无可用 Page、已鉴权请求错误、依赖异常或日志待补写时，异步向郜远发送汇总提醒，含两个 ID、剧 ID、选中 Page、原因及北京时间。正常无画像选择不等于异常。未授权请求不发飞书。发送失败不改变分配结果，未知投递保留原 UUID 和回执状态。
 
 ## 部署与回滚

@@ -237,6 +237,8 @@ def deploy(args):
     need(re.fullmatch(r'[0-9a-f]{40}', commit) is not None, 'full_commit_required')
     need(run('git', '-C', str(source), 'rev-parse', 'HEAD') == commit, 'source_commit_mismatch')
     need(not run('git', '-C', str(source), 'status', '--porcelain'), 'source_worktree_not_clean')
+    # Validate the scoped writer dependency before touching live files.
+    run('/usr/bin/python3', '-c', 'import mysql.connector')
     origin = run('git', '-C', str(source), 'remote', 'get-url', 'origin')
     need(origin in {'git@github.com:gaoyuan12356416/ai-.git', 'https://github.com/gaoyuan12356416/ai-.git',
                     'git@github.com:gaoyuan12356416/ai-', 'https://github.com/gaoyuan12356416/ai-'},

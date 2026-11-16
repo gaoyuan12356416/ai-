@@ -306,12 +306,11 @@ class Writer:
         self.connection_factory = connection_factory
 
     def _connect(self):
-        connect = self.connection_factory
-        if connect is None:
-            import pymysql
-            connect = pymysql.connect
-        return connect(**self.config, charset="utf8mb4", autocommit=False,
-                       connect_timeout=3, read_timeout=5, write_timeout=5)
+        if self.connection_factory is not None:
+            return self.connection_factory(**self.config, charset="utf8mb4", autocommit=False,
+                                           connect_timeout=3, read_timeout=5, write_timeout=5)
+        from .mysql_transport import connect_writer
+        return connect_writer(self.config)
 
     @staticmethod
     def _record(request, row):

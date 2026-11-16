@@ -63,7 +63,7 @@ class Reader:
                 result = subprocess.run([
                     "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350", "-u",
                     self.env["ADMIN_MAPPING_MYSQL_USER"], "--connect-timeout=3", "--skip-reconnect",
-                    "--default-character-set=utf8mb4", "--unbuffered", "-N", "-B", "-r"],
+                    "--default-character-set=utf8mb4", "--compress", "--unbuffered", "-N", "-B", "-r"],
                     input=sql, env=env, text=True, encoding="utf-8", capture_output=True, timeout=42)
                 codes = re.findall(r"ERROR (\d+)", result.stderr)
                 if result.returncode:

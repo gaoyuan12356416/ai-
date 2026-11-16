@@ -271,6 +271,7 @@ class ReaderTests(unittest.TestCase):
             self.assertEqual(Reader(self.ENV).query(['SELECT 1']), [{'ok': 1}])
         args, kwargs = run.call_args
         self.assertEqual(args[0][0], '/usr/bin/mysql')
+        self.assertIn('--compress', args[0])
         self.assertNotIn('SQL_GATE_BYPASS', kwargs['env'])
         self.assertIn('START TRANSACTION READ ONLY', kwargs['input'])
         self.assertIn('MAX_EXECUTION_TIME=8000', kwargs['input'])
