@@ -58,3 +58,19 @@ The helper has an independent hash-verified backup/rollback action
 `catalog-admission` in the installer. Only unregistered startup processes proven
 to hold zero business claims may be replaced to finish this activation. Active
 business preparation and all publisher processes must continue normally.
+
+## First-round result
+
+See `results.json` for the dated counts, formulas and verification. With identical
+24-way120-second workloads, P4/CQ23 delivered13.5% more completed media seconds
+per wall second and21.6% fewer output bytes; bounded2.5M/3.5M delivered14.7%
+and46.7%, respectively. The estimate of roughly106/115 extra preparations per
+day assumes the prior day's GPU time share. It is not a measured publishing
+gain. Production retains P5/CQ21 and the existing capacity settings; only source
+caching and the catalog-admission correction are activated.
+
+Media-only A/B used host catalog verification for every variant. This now
+matches the deployed catalog fix. Source downloads, COS/Meta transfers and the
+independent catalog-admission improvement are excluded from the daily estimate.
+Main services and all16 publisher PIDs were preserved; GPU24 and CPU4 preparers
+registered after activation, with the existing CPU in-flight job retained.

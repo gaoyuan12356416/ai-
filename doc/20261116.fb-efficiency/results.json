@@ -1,0 +1,100 @@
+{
+  "date": "2026-11-16",
+  "scope": "FB auto random-overlay preparation; projections are conditional, not observed 24h publishing gains",
+  "encoding_and_concurrency_applied": false,
+  "cache_deployed_commit": "7a898b4b78d224f1036980dd68598fb7e5c67ff5",
+  "catalog_admission_deployed_commit": "33ce9744034e0ecf82f06fd6d58403cab7ed3cc4",
+  "baseline": {
+    "prepared_day": "2026-11-15",
+    "prepared": [
+      {
+        "prepared_profile": "fb-post-random-overlay-libx264-720x1280-v1",
+        "n": 165,
+        "avg_duration": 592.432525254545,
+        "avg_bytes": 164736964.33333334
+      },
+      {
+        "prepared_profile": "tt-post-random-overlay-h264-720x1280-v3",
+        "n": 784,
+        "avg_duration": 635.8041063392849,
+        "avg_bytes": 385416615.3992347
+      }
+    ],
+    "planned_template_states": [
+      {
+        "template_status": "disabled",
+        "n": 2562
+      }
+    ],
+    "cpu_code_verified": true,
+    "cpu_cache_module_verified": true
+  },
+  "encoding_summary": {
+    "p4_cq23": {
+      "label": "P4 / CQ23",
+      "vmaf_mean": 97.74350066666666,
+      "vmaf_min": 97.664683,
+      "ssim_mean": 0.9922893333333334,
+      "short_size_reduction": 0.2077376179941799,
+      "all_audio_identical": true,
+      "all_frames_and_duration_valid": true,
+      "throughput_factor": 1.1347154353372426,
+      "wall_seconds": 277.1900947773829,
+      "long_size_reduction": 0.215696207177277,
+      "projected_daily_extra": 105.61690130439821,
+      "projected_daily_total": 1054.6169013043982,
+      "exclusive_gpu_daily": 1411.9040851416505
+    },
+    "p4_cq23_3m": {
+      "label": "P4 / CQ23 / 2.5M，峰值3.5M",
+      "vmaf_mean": 96.060606,
+      "vmaf_min": 95.365339,
+      "ssim_mean": 0.9897773333333333,
+      "short_size_reduction": 0.48044207910285897,
+      "all_audio_identical": true,
+      "all_frames_and_duration_valid": true,
+      "throughput_factor": 1.1467593230620707,
+      "wall_seconds": 274.27889422047883,
+      "long_size_reduction": 0.4673753602854521,
+      "projected_daily_extra": 115.05930928066346,
+      "projected_daily_total": 1064.0593092806635,
+      "exclusive_gpu_daily": 1426.8900576155493
+    },
+    "p4_cq25": {
+      "label": "P4 / CQ25",
+      "vmaf_mean": 97.06252233333333,
+      "vmaf_min": 96.979337,
+      "ssim_mean": 0.990856,
+      "short_size_reduction": 0.3719722069571052,
+      "all_audio_identical": true,
+      "all_frames_and_duration_valid": true
+    }
+  },
+  "health": {
+    "verified_at_utc": "2026-11-16T07:25:12.014177Z",
+    "parent_service_pids_unchanged": true,
+    "capacity_configuration_unchanged": true,
+    "publisher_worker_pids_unchanged": true,
+    "publisher_workers": 16,
+    "prepare_workers": {
+      "cpu-main": 4,
+      "hk-gpu": 24
+    },
+    "retained_inflight_prepare_pids": [
+      2084277
+    ]
+  },
+  "qa": {
+    "cache_and_guard_linux": 13,
+    "catalog_integrity_linux": 14,
+    "platform_test_writes": 0
+  },
+  "benchmark_environment_note": "Media-only A/B uses CPU catalog verification, identical across variants and now matching the deployed catalog-admission fix; source download/COS upload/Meta publication are excluded.",
+  "cache_body_test": {
+    "body_bytes": 9962972,
+    "requests": 10,
+    "body_transfers": 1,
+    "origin_fingerprint_matched": true
+  },
+  "startup_issue": "Simultaneous cold replacement delayed GPU preparation-worker registration due to repeated sequential CUDA catalog hashing. Fixed host SHA256 retains all identity checks. Replaced only unregistered startup processes with zero business claims; retained active business work and all publisher PIDs."
+}
