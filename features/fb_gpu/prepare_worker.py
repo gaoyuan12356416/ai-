@@ -16,6 +16,7 @@ from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_comman
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file, validate_recipe
 from .render_process import RenderStalled, run_render
 from features.random_gpu.gpu_compute import file_digest
+from .source_cache import SourceCache, SourceDownloadError, observation as source_cache_observation
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
 CPU_PROFILE="fb-post-random-overlay-libx264-720x1280-v1"
@@ -91,12 +92,13 @@ def cleanup_stale_failed_jobs(config,*,now_fn=time.time,exclude_jobs=()):
     return removed
 
 def validate_request(value,config):
-    if not isinstance(value,Mapping) or set(value)!={"job_id","content_id","source_url","source_trim_tail_seconds","video_template","expected_profile"}: raise PrepareWorkerError("invalid_request","prepare fields invalid")
+    if not isinstance(value,Mapping) or set(value)-{"page_pool"}!={"job_id","content_id","source_url","source_trim_tail_seconds","video_template","expected_profile"} or ("page_pool" in value and value["page_pool"] is not True): raise PrepareWorkerError("invalid_request","prepare fields invalid")
     job=str(value.get("job_id") or ""); content=str(value.get("content_id") or ""); source=str(value.get("source_url") or "")
     parsed=urlsplit(source)
     if not JOB_RE.fullmatch(job) or not 1<=len(content)<=128 or value.get("video_template")!="random_overlay" or value.get("expected_profile")!=getattr(config,"profile",PROFILE) or value.get("source_trim_tail_seconds") not in (0,0.0): raise PrepareWorkerError("invalid_request","prepare identity/profile/trim invalid")
-    if parsed.scheme!="https" or not parsed.hostname or parsed.hostname.lower() not in config.allowed_source_hosts or parsed.username or parsed.password or parsed.fragment: raise PrepareWorkerError("invalid_request","source URL host invalid")
-    return {"job_id":job,"content_id":content,"source_url":source}
+    page_pool = value.get("page_pool") is True
+    if parsed.scheme not in (("http","https") if page_pool else ("https",)) or not parsed.hostname or (not page_pool and parsed.hostname.lower() not in config.allowed_source_hosts) or parsed.username or parsed.password or parsed.fragment: raise PrepareWorkerError("invalid_request","source URL host invalid")
+    return {"job_id":job,"content_id":content,"source_url":source, **({"page_pool":True} if page_pool else {})}
 
 def _probe(config,path):
     try: result=subprocess.run([config.ffprobe,"-v","error","-show_streams","-show_format","-of","json",str(path)],capture_output=True,text=True,timeout=120,check=True); payload=json.loads(result.stdout)
@@ -231,6 +233,17 @@ class PrepareProcessor:
             finally:
                 with self.lock: self.active_jobs.discard(job)
     def _download(self,url,path):
+        try:
+            receipt=SourceCache(self.config.work_root/"source-cache-v1").fetch(
+                url,path,session_factory=self.session_factory,max_source_bytes=self.config.max_source_bytes,
+                check=getattr(self,"execution_check",lambda:None))
+            SourceCache._write_json(Path(path).parent/"source-cache.json",receipt)
+            return receipt["sha256"]
+        except SourceDownloadError as exc:
+            status=413 if exc.code=="fb_gpu_source_too_large" else 502
+            raise PrepareWorkerError(exc.code,"source download failed",status) from None
+
+    def _download_uncached(self,url,path):
         session=self.session_factory(); session.trust_env=False
         try:
             response=session.get(url,stream=True,timeout=120,allow_redirects=False)
@@ -347,7 +360,7 @@ class PrepareProcessor:
                 stored=self.object_store.upload(output,job,output_sha,size)
                 result={"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":stored["url"],"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":stored["key"],"status":"ready","render_seconds":render_seconds}
                 renderer="cuda_native_v1" if native else self.config.compositor_backend
-                tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":renderer,"render_seconds":render_seconds},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
+                tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":renderer,"render_seconds":render_seconds,"source_cache":source_cache_observation(root)},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
             finally: output.unlink(missing_ok=True)
 
 class Server(ThreadingHTTPServer):
