@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from .runtime import log
 from .selector import assign
@@ -54,6 +55,7 @@ class Service:
 
     def finish(self, task_id, external, rows, code, results, reasons):
         response = dict(task_id=task_id, results=results)
+        started = time.monotonic()
         try:
             self.store.save(task_id, external, rows, code, response, sorted(set(reasons)))
         except Exception as exc:
@@ -69,9 +71,19 @@ class Service:
             except Exception as notify_exc:
                 log("emergency_alert_failed", task_id=task_id, error_type=type(notify_exc).__name__)
             return 503, dict(task_id=task_id, results=[])
-        # A failed write stays frozen in the outbox and creates a failure alert.
+        # Local FULL-synchronous persistence is the response boundary. MySQL
+        # synchronization and its lock/network waits belong to the outbox worker.
+        self.wake.set()
+        log("assignment_completed", task_id=task_id, external_task_id=external,
+            http_status=code, results=results, alert_reasons=sorted(set(reasons)),
+            persistence_ms=round((time.monotonic() - started) * 1000, 1))
+        return code, response
+
+    def _sync_task(self, task):
+        task_id = task["task_id"]
+        started = time.monotonic()
         try:
-            self.store.sync_task(task_id, self.writer)
+            synced = self.store.sync_task(task_id, self.writer)
         except Exception as exc:
             # Results are already frozen. Never rebuild this task with a
             # different error payload when synchronization coordination fails.
@@ -81,14 +93,14 @@ class Service:
             except Exception as defer_exc:
                 log("sync_deferral_failed", task_id=task_id, error_type=type(defer_exc).__name__)
                 try:
-                    self.notifier.send(dict(task_id=task_id, external_task_id=external, rows=rows,
-                                            alert_reasons=["log_sync_pending", "sync_deferral_failed"]))
+                    self.notifier.send(dict(task, alert_reasons=["log_sync_pending", "sync_deferral_failed"]))
                 except Exception as notify_exc:
                     log("emergency_alert_failed", task_id=task_id, error_type=type(notify_exc).__name__)
-        self.wake.set()
-        log("assignment_completed", task_id=task_id, external_task_id=external,
-            http_status=code, results=results, alert_reasons=sorted(set(reasons)))
-        return code, response
+            return
+        saved = self.store.get(task_id)
+        log("log_sync_completed" if synced else "log_sync_deferred", task_id=task_id,
+            elapsed_ms=round((time.monotonic() - started) * 1000, 1),
+            sync_attempts=saved["sync_attempts"], error_code=saved["last_sync_error"])
 
     def request_error(self, task_id, code, payload=None):
         external = payload.get("external_task_id") if isinstance(payload, dict) else None
@@ -106,6 +118,7 @@ class Service:
             external, ids = validate(payload)
         except InvalidRequest as exc:
             return self.request_error(task_id, str(exc), payload)
+        started = time.monotonic()
         try:
             data = self.sources.load(ids)
         except Exception as exc:
@@ -113,7 +126,9 @@ class Service:
             rows = [failure_row(error, "剧目或Page实时数据查询失败", cid) for cid in ids]
             return self.finish(task_id, external, rows, 503,
                                [dict(drama_id=cid, page_id=None) for cid in ids], [error])
+        loaded = time.monotonic()
         profiles, metadata, warnings = self.profile_loader([p["page_id"] for p in data["pages"]], self.profile_root)
+        profiled = time.monotonic()
         rows = assign(ids, data["dramas"], data["pages"], profiles)
         reasons = list(data.get("warnings", [])) + list(warnings)
         for row in rows:
@@ -124,12 +139,16 @@ class Service:
             if row.get("status") in {"failed", "degraded"}:
                 reasons.append(row.get("error_code") or row["status"])
         results = [dict(drama_id=row["drama_id"], page_id=row["page_id"]) for row in rows]
+        log("assignment_selected", task_id=task_id, external_task_id=external,
+            source_ms=round((loaded - started) * 1000, 1),
+            profile_ms=round((profiled - loaded) * 1000, 1),
+            selection_ms=round((time.monotonic() - profiled) * 1000, 1))
         return self.finish(task_id, external, rows, 200, results, reasons)
 
     def tick(self):
         self._deliver_alerts()
         for task in self.store.pending_sync(limit=5):
-            self.store.sync_task(task["task_id"], self.writer)
+            self._sync_task(task)
         self._deliver_alerts()
 
     def _deliver_alerts(self):

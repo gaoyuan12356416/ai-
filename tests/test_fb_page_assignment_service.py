@@ -82,9 +82,11 @@ class ServiceTests(ServiceFixture, unittest.TestCase):
         self.assertTrue(all(set(row) == {"drama_id", "page_id"} for row in response["results"]))
         self.assertTrue(all(isinstance(row["page_id"], str) for row in response["results"]))
         saved = self.store.get(response["task_id"])
-        self.assertEqual(saved["sync_status"], "synced")
+        self.assertEqual(saved["sync_status"], "pending")
+        self.assertEqual(self.writer.calls, [])
         self.assertEqual(saved["rows"][0]["diagnostics"]["profile_snapshot"], {"version": "fixture"})
         self.service.tick()
+        self.assertEqual(self.store.get(response["task_id"])["sync_status"], "synced")
         self.assertEqual(self.notifier.calls, [])
 
     def test_source_failure_preserves_each_id_and_alerts_once(self):
@@ -177,15 +179,16 @@ class ServiceTests(ServiceFixture, unittest.TestCase):
         self.assertEqual(self.store.get("bad_request")["rows"][0]["item_index"], 0)
 
     def test_sync_coordination_exception_keeps_original_success(self):
+        status, response = self.request()
         with patch.object(self.store, "sync_task", side_effect=RuntimeError("secret=SHOULD_NOT_LEAK")):
-            status, response = self.request()
+            self.service.tick()
         self.assertEqual(status, 200)
         self.assertIsNotNone(response["results"][0]["page_id"])
         saved = self.store.get("task_fixture")
         self.assertEqual(saved["response"], response)
         self.assertIn("log_sync_pending", saved["alert_reasons"])
-        self.assertEqual(saved["alert_status"], "pending")
-        self.assertEqual(self.notifier.calls, [])
+        self.assertEqual(saved["alert_status"], "sent")
+        self.assertEqual(len(self.notifier.calls), 1)
         self.assertNotIn("SHOULD_NOT_LEAK", self.logs.getvalue())
 
     def test_start_recovers_interrupted_send_without_replaying(self):
@@ -196,6 +199,26 @@ class ServiceTests(ServiceFixture, unittest.TestCase):
         self.service.close()
         self.assertEqual(self.store.get("task_fixture")["alert_status"], "unknown")
         self.assertEqual(self.notifier.calls, [])
+
+    def test_restart_syncs_frozen_response_without_rerunning_selection(self):
+        status, response = self.request()
+        self.assertEqual(status, 200)
+        written = threading.Event()
+        original = self.writer.write_task
+        def write(request):
+            original(request)
+            written.set()
+        self.writer.write_task = write
+        restarted = Service(Mock(), self.store, self.writer, self.notifier)
+        restarted.start()
+        try:
+            self.assertTrue(written.wait(3))
+        finally:
+            restarted.close()
+        self.assertEqual(self.store.get(response['task_id'])['response'], response)
+        self.assertEqual(self.store.get(response['task_id'])['sync_status'], 'synced')
+        restarted.sources.load.assert_not_called()
+        self.assertEqual(len(self.sources.calls), 1)
 
 
 class HttpTests(ServiceFixture, unittest.TestCase):
@@ -256,6 +279,34 @@ class HttpTests(ServiceFixture, unittest.TestCase):
         self.assertEqual([row["drama_id"] for row in saved["rows"]], ["d", "d2"])
         self.assertNotIn("SHOULD_NOT_LEAK", self.logs.getvalue())
         self.assertNotIn("SHOULD_NOT_LEAK", json.dumps(saved))
+
+    def test_http_responses_do_not_wait_for_slow_mysql_or_its_sync_lock(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.writer.write_task
+        def blocked_write(request):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError('fixture writer remained blocked')
+            original(request)
+        self.writer.write_task = blocked_write
+        self.service.start()
+        try:
+            status, first = self.http(body='{"external_task_id":"caller","drama_ids":["d"]}')
+            self.assertEqual(status, 200)
+            self.assertTrue(entered.wait(3))
+            self.assertFalse(release.is_set())
+            status, second = self.http(body='{"external_task_id":"caller2","drama_ids":["d2"]}')
+            self.assertEqual(status, 200)
+            self.assertNotEqual(first['task_id'], second['task_id'])
+            for response in (first, second):
+                saved = self.store.get(response['task_id'])
+                self.assertEqual(saved['response'], response)
+                self.assertEqual(saved['sync_status'], 'pending')
+        finally:
+            release.set()
+            self.service.close()
+        self.service.tick()
+        self.assertEqual(self.store.get(second['task_id'])['sync_status'], 'synced')
 
 
 if __name__ == "__main__":

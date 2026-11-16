@@ -13,9 +13,10 @@ import subprocess
 
 
 class SourceError(Exception):
-    def __init__(self, code):
+    def __init__(self, code, *, required_records=None):
         super().__init__(code)
         self.code = code
+        self.required_records = required_records
 
 
 def literal(value):
@@ -30,30 +31,57 @@ class Reader:
         if (env.get("ADMIN_MAPPING_MYSQL_HOST"), str(env.get("ADMIN_MAPPING_MYSQL_PORT"))) != ("101.32.56.53", "63350"):
             raise SourceError("invalid_reader_endpoint")
 
-    def query(self, statements):
+    def query(self, statements, *, optional_statements=()):
+        """Use one gated connection, retaining completed required reads if labels fail.
+
+        The checkpoint is emitted only after every required statement succeeds.
+        mysql stops on the first error, so an optional failure cannot disguise a
+        failed Page/metadata query as an empty or successful result.
+        """
         env = dict(os.environ)
         env.pop("SQL_GATE_BYPASS", None)
         env.update(MYSQL_PWD=self.env["ADMIN_MAPPING_MYSQL_PASSWORD"],
                    SQL_GATE_JOB_NAME="fb-page-assignment", SQL_GATE_WAIT_TIMEOUT_SECONDS="8",
                    SQL_GATE_EXEC_TIMEOUT_SECONDS="30", SQL_GATE_RETRY_DELAYS_SECONDS="")
+        boundary = "fb_page_assignment_required_complete"
+        queries = ";\n".join(statements)
+        if optional_statements:
+            queries += ";\nSELECT '" + boundary + "';\n" + ";\n".join(optional_statements)
         sql = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=8000; "
                "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ; "
                "START TRANSACTION READ ONLY; SELECT @@read_only;\n" +
-               ";\n".join(statements) + ";\nROLLBACK;")
+               queries + ";\nROLLBACK;")
         try:
             result = subprocess.run([
                 "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350", "-u",
                 self.env["ADMIN_MAPPING_MYSQL_USER"], "--connect-timeout=3", "--skip-reconnect",
-                "--default-character-set=utf8mb4", "-N", "-B", "-r"],
+                "--default-character-set=utf8mb4", "--unbuffered", "-N", "-B", "-r"],
                 input=sql, env=env, text=True, encoding="utf-8", capture_output=True, timeout=42)
-        except subprocess.TimeoutExpired:
-            raise SourceError("source_query_timeout") from None
+            stdout, stderr = result.stdout, result.stderr
+            error = "source_query_failed" if result.returncode else ""
+        except subprocess.TimeoutExpired as exc:
+            stdout, stderr, error = exc.stdout or "", exc.stderr or "", "source_query_timeout"
         except OSError:
             raise SourceError("source_connection_failed") from None
-        lines = result.stdout.splitlines()
-        if result.returncode or not lines or lines.pop(0) != "1":
-            codes = re.findall(r"ERROR (\d+)", result.stderr)
-            raise SourceError("source_query_failed" + ("_" + "_".join(codes) if codes else ""))
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        lines = stdout.splitlines()
+        if not lines or lines.pop(0) != "1":
+            raise SourceError(error or "source_query_failed")
+        checkpoint = lines.index(boundary) if optional_statements and boundary in lines else None
+        if error:
+            codes = re.findall(r"ERROR (\d+)", stderr)
+            error += "_" + "_".join(codes) if codes else ""
+            required = self._decode(lines[:checkpoint]) if checkpoint is not None else None
+            raise SourceError(error, required_records=required)
+        if optional_statements and checkpoint is None:
+            raise SourceError("source_invalid_response")
+        return self._decode([line for line in lines if line != boundary])
+
+    @staticmethod
+    def _decode(lines):
         try:
             return [json.loads(bytes.fromhex(line).decode("utf-8")) for line in lines if line.strip()]
         except (ValueError, TypeError):
@@ -75,7 +103,7 @@ class Sources:
 
     def load(self, ids):
         keys = ",".join(literal(cid) for cid in sorted(set(ids)))
-        records = self.reader.query([
+        required = [
             """SELECT HEX(JSON_OBJECT('kind','page','member_id',i.id,'page_id',TRIM(i.page_id),
                 'language',i.language,'source_id',p.id,'status',p.status,'forbidden_status',p.forbidden_status,
                 'is_permission',p.is_permission,'active_ad_count',p.active_ad_count,'fan_ccount',p.fan_ccount,
@@ -87,23 +115,28 @@ class Sources:
             "SELECT DISTINCT HEX(JSON_OBJECT('kind','info','content_id',content_id,'app_id',app_id,"
             "'language',language,'series_code',series_code,'resource_type',resource_type)) "
             "FROM kunlunads_dev.ads_drama_info WHERE app_id=1479 AND content_id IN (" + keys + ") LIMIT 20001"
-        ])
-        infos = [r for r in records if r.get("kind") == "info"]
-        page_rows = [r for r in records if r.get("kind") == "page"]
-        if len(infos) > 20000 or len(page_rows) > 10000:
-            raise SourceError("source_row_limit")
+        ]
+        optional = [
+            "SELECT DISTINCT HEX(JSON_OBJECT('kind','resource','content_id',content_id,'app_id',app_id,'language',language,"
+            "'series_code',series_code,'labels',labels)) FROM kunlunads_dev.ads_drama_resource "
+            "WHERE app_id=1479 AND content_id IN (" + keys + ") LIMIT 20001"
+        ]
         warnings = []
         try:
-            resources = self.reader.query([
-                "SELECT DISTINCT HEX(JSON_OBJECT('content_id',content_id,'app_id',app_id,'language',language,"
-                "'series_code',series_code,'labels',labels)) FROM kunlunads_dev.ads_drama_resource "
-                "WHERE app_id=1479 AND content_id IN (" + keys + ") LIMIT 20001"
-            ])
-            if len(resources) > 20000:
-                raise SourceError("source_label_row_limit")
+            records = self.reader.query(required, optional_statements=optional)
         except SourceError as exc:
-            resources = []
+            if exc.required_records is None:
+                raise
+            records = exc.required_records
             warnings.append("drama_labels_" + exc.code)
+        infos = [r for r in records if r.get("kind") == "info"]
+        page_rows = [r for r in records if r.get("kind") == "page"]
+        resources = [r for r in records if r.get("kind") == "resource"]
+        if len(infos) > 20000 or len(page_rows) > 10000:
+            raise SourceError("source_row_limit")
+        if len(resources) > 20000:
+            resources = []
+            warnings.append("drama_labels_source_label_row_limit")
         # SQL's default collation can match differently-cased IDs. Keep the
         # exact user-supplied content ID as the final identity boundary.
         wanted = set(ids)

@@ -21,7 +21,7 @@ def info(cid='Drama', lang='en'):
 
 
 def resource(cid='Drama', lang='en'):
-    return dict(content_id=cid, app_id=1479, language=lang, series_code='S', labels='female,sweet')
+    return dict(kind='resource', content_id=cid, app_id=1479, language=lang, series_code='S', labels='female,sweet')
 
 
 def page(pid='101', lang='en', source_id=1, updated='2026-11-11 10:00:00'):
@@ -43,11 +43,16 @@ class FakeReader:
         self.answers = list(answers)
         self.calls = []
 
-    def query(self, statements):
-        self.calls.append(list(statements))
+    def query(self, statements, *, optional_statements=()):
+        self.calls.append(list(statements) + list(optional_statements))
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
+        if optional_statements:
+            optional = self.answers.pop(0)
+            if isinstance(optional, SourceError):
+                raise SourceError(optional.code, required_records=answer)
+            answer += optional
         return answer
 
 
@@ -59,9 +64,8 @@ class SourcesTests(unittest.TestCase):
         reader = FakeReader([page(), info('A'), info('B')], [resource('A'), resource('B')])
         result = self.source(reader).load(['B', 'A', 'A'])
         self.assertEqual(set(result['dramas']), {'A', 'B'})
-        self.assertEqual(len(reader.calls), 2)
-        page_sql, info_sql = reader.calls[0]
-        label_sql = reader.calls[1][0]
+        self.assertEqual(len(reader.calls), 1)
+        page_sql, info_sql, label_sql = reader.calls[0]
         self.assertIn('g.id=62', page_sql)
         self.assertIn('g.app_id=1479', page_sql)
         self.assertIn('g.is_delete=0', page_sql)
@@ -279,6 +283,42 @@ class ReaderTests(unittest.TestCase):
         with patch('subprocess.run', side_effect=subprocess.TimeoutExpired('mysql', 42)):
             with self.assertRaisesRegex(SourceError, 'source_query_timeout'):
                 Reader(self.ENV).query(['SELECT 1'])
+
+    def test_required_and_optional_queries_share_one_gated_transaction(self):
+        required, optional = {'kind': 'page', 'page_id': '101'}, resource()
+        lines = ['1', json.dumps(required).encode().hex(), 'fb_page_assignment_required_complete',
+                 json.dumps(optional).encode().hex()]
+        result = SimpleNamespace(returncode=0, stdout='\n'.join(lines) + '\n', stderr='')
+        with patch('subprocess.run', return_value=result) as run:
+            records = Reader(self.ENV).query(['SELECT required'], optional_statements=['SELECT labels'])
+        self.assertEqual(records, [required, optional])
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("SELECT required;\nSELECT 'fb_page_assignment_required_complete';\nSELECT labels", run.call_args.kwargs['input'])
+        self.assertNotIn('--force', run.call_args.args[0])
+
+    def test_optional_failure_retains_only_verified_required_results(self):
+        required = {'kind': 'page', 'page_id': '101'}
+        stdout = '1\n' + json.dumps(required).encode().hex() + '\nfb_page_assignment_required_complete\n'
+        result = SimpleNamespace(returncode=1, stdout=stdout, stderr='ERROR 3024: timeout')
+        with patch('subprocess.run', return_value=result), self.assertRaises(SourceError) as caught:
+            Reader(self.ENV).query(['SELECT required'], optional_statements=['SELECT labels'])
+        self.assertEqual(caught.exception.code, 'source_query_failed_3024')
+        self.assertEqual(caught.exception.required_records, [required])
+
+    def test_required_failure_cannot_be_downgraded_to_optional_label_failure(self):
+        partial = json.dumps({'kind': 'page', 'page_id': '101'}).encode().hex()
+        result = SimpleNamespace(returncode=1, stdout='1\n' + partial + '\n', stderr='ERROR 3024: timeout')
+        with patch('subprocess.run', return_value=result), self.assertRaises(SourceError) as caught:
+            Reader(self.ENV).query(['SELECT pages', 'SELECT metadata'], optional_statements=['SELECT labels'])
+        self.assertIsNone(caught.exception.required_records)
+
+    def test_optional_timeout_preserves_completed_required_reads(self):
+        stdout = b'1\nfb_page_assignment_required_complete\n'
+        error = subprocess.TimeoutExpired('mysql', 42, output=stdout)
+        with patch('subprocess.run', side_effect=error), self.assertRaises(SourceError) as caught:
+            Reader(self.ENV).query(['SELECT required'], optional_statements=['SELECT labels'])
+        self.assertEqual(caught.exception.code, 'source_query_timeout')
+        self.assertEqual(caught.exception.required_records, [])
 
 
 if __name__ == '__main__':

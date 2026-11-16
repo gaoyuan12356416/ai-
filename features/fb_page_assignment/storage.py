@@ -200,8 +200,8 @@ class Store:
                  int(is_new), _utc_now(), task_id))
 
     def sync_task(self, task_id, writer):
-        # Both request-thread and background writes take this lock. The writer
-        # has a second process-wide lock for callers using multiple Store objects.
+        # The outbox worker owns writes. Keep serialization for any concurrent
+        # maintenance caller; the writer also has a process-wide lock.
         with self._sync_lock:
             request = self.get(task_id)
             if request is None:

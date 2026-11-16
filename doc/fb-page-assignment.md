@@ -31,7 +31,7 @@
 
 ## 选择规则
 
-每请求实时读取 `kunlunads_dev.ads_facebook_page_group_ins` 的 62 组未删除成员，以及 `ads_facebook_page_ins` 的可用状态、`active_ad_count` 和 `fan_ccount`。只选择 `status=0`、`forbidden_status=0`、`is_permission=1` 的 Page。自动化读取使用既有 FIFO SQL Gate 和 63350 只读端点，不调用 Meta 写接口。
+每请求实时读取 `kunlunads_dev.ads_facebook_page_group_ins` 的 62 组未删除成员，以及 `ads_facebook_page_ins` 的可用状态、`active_ad_count` 和 `fan_ccount`。只选择 `status=0`、`forbidden_status=0`、`is_permission=1` 的 Page。自动化读取使用既有 FIFO SQL Gate 和 63350 只读端点，不调用 Meta 写接口。Page、剧信息和剧标签在同一连接、同一只读事务中读取；必需数据完成后输出内部检查点，标签失败只降级标签，不重查或掩盖必需数据错误，不缓存实时 Page 状态。
 
 剧信息来自 Dramawave（`app_id=1479`）当前剧目数据。分类依赖线上共享 `features.x_tag_revenue` 的同版本标签与语言规则。Page 画像读取 `/mnt/data-disk/fb-page-portraits/current.json` 指向的完整本地快照，同批固定版本；请求链路不重算七天画像。无画像或最新快照读取失败时可继续选择，无画像来源故障会告警。
 
@@ -69,7 +69,9 @@ ORDER BY item_index;
 
 查询使用 63350 只读端点。运行日志使用 `journalctl -u fb-page-assignment.service`，两个关联 ID 可串联全部处理记录。
 
-先把冻结结果持久化到数据盘 SQLite 待补写队列，再尝试使用专用 writer 配置写 63353 的这一个日志表。MySQL 失败时继续返回结果、提醒郜远并后台退避补写；补写使用原主键和原内容，不重新分配。写入未知不能根据只读副本尚未查到就重建任务。若本地持久化也失败，返回 503 并告警。
+先把冻结结果通过 SQLite `synchronous=FULL` 持久化到数据盘待补写队列，随即返回 HTTP 结果并唤醒后台 worker。请求线程不等待 MySQL 写入、同步锁或飞书通知。后台使用专用 writer 配置写 63353 的这一个日志表；失败时提醒郜远并退避补写，使用原主键和原内容，不重新分配。正常异步待写不产生 `log_sync_pending` 提醒，实际写入失败才产生该提醒。重启继续同步原冻结结果；写入未知不能根据只读副本尚未查到就重建任务。若本地持久化也失败，返回 503 并告警。
+
+按 `task_id` 核对 `assignment_selected` 的数据/画像/选择耗时、`assignment_completed` 的本地持久化耗时、`http_response_sent` 的服务端总耗时，以及后台 `log_sync_completed` / `log_sync_deferred`。`http_response_disconnected` 单独记录连接断开；飞书播报和日志同步状态不能代替 HTTP 返回记录。服务重启先完成已接收请求，再关闭后台 worker；回滚代码保留现有 outbox。
 
 放宽画像、无可用 Page、已鉴权请求错误、依赖异常或日志待补写时，异步向郜远发送汇总提醒，含两个 ID、剧 ID、选中 Page、原因及北京时间。正常无画像选择不等于异常。未授权请求不发飞书。发送失败不改变分配结果，未知投递保留原 UUID 和回执状态。
 

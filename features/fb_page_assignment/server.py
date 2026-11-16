@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import signal
 import threading
+import time
 import uuid
 
 from .runtime import encoded, environment, log
@@ -26,15 +27,20 @@ def handler(service, token):
 
         def reply(self, status, body):
             data = encoded(body).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
+            event = "http_response_sent"
             try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
                 self.wfile.write(data)
+                self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                pass
+                event = "http_response_disconnected"
+            if hasattr(self, "request_started"):
+                log(event, task_id=body.get("task_id"), http_status=status,
+                    elapsed_ms=round((time.monotonic() - self.request_started) * 1000, 1))
 
         def do_GET(self):
             if self.path == "/healthz":
@@ -43,6 +49,7 @@ def handler(service, token):
                 self.reply(405 if self.path == ROUTE else 404, {"task_id": uuid.uuid4().hex, "results": []})
 
         def do_POST(self):
+            self.request_started = time.monotonic()
             task_id = uuid.uuid4().hex
             if self.path != ROUTE:
                 return self.reply(404, {"task_id": task_id, "results": []})
@@ -105,6 +112,8 @@ def main():
     service = Service(Sources(env), Store(root / "outbox.sqlite3"), Writer(env), Notifier(env))
     service.start()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(service, token))
+    # Finish accepted requests before closing the outbox during a scoped restart.
+    server.daemon_threads = False
     def stop(signum, frame):
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
