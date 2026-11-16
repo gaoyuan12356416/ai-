@@ -19,12 +19,13 @@ def main():
     p.add_argument('--jobs-root',type=Path,required=True)
     p.add_argument('--work-root',type=Path,required=True)
     p.add_argument('--max-body-mib',type=int,default=16)
+    p.add_argument('--min-body-mib',type=int,default=4)
     a=p.parse_args()
     a.work_root.mkdir(mode=0o700,parents=True,exist_ok=True)
-    choices=sorted(a.jobs_root.glob('*/source.mp4'),key=lambda x:x.stat().st_size)
+    choices=sorted(a.jobs_root.glob('*/source.mp4'),key=lambda x:x.stat().st_size,reverse=True)
     selected=None
     for path in choices:
-        if not 0<path.stat().st_size<=a.max_body_mib*1024**2:
+        if not a.min_body_mib*1024**2<=path.stat().st_size<=a.max_body_mib*1024**2:
             continue
         metadata=path.parent/'recipe.json'
         if metadata.is_file():
