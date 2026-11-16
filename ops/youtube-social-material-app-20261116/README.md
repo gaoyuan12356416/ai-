@@ -23,3 +23,13 @@ python3 RELEASE/ops/youtube-social-material-app-20261116/deploy.py COMMIT --roll
 ```
 
 回滚仅恢复本次 SQL，保留当前数据库、封面资产、短链、凭据及全部已发生的发布事实；若 SQL 已有后续修改则先核对差异。
+
+## 网页精确 ID 验收的查询修复
+
+线上验收另复现了 `search=8365481` 的 3024 超时：将 ID 转为文本后做 LOCATE，必须扫描全库找足 100 个子串匹配。数字 ID 现在使用 `pool.id=ID` 精确查询；文字名称搜索保持原查询。SQLite 实际执行及查询计划回归验证精确结果和主键查找，CPU 再用 MySQL 只读核验。
+
+此模块修复单独通过 `deploy_search.py COMMIT` 备份和安装，只激活主 API，YouTube worker 和协调器无需重启。切换使用当前主 API unit 已安装的 `pipeline_service_drain.py` ExecStop/ExecStartPost：仅等待实际依赖该 API 的 X 在途任务自然完成，其他渠道继续执行；保留其占用、代次和回执，不杀任务。主 API 的剧集合成已由独立 worker 执行。
+
+先对受影响的 `x`、`youtube` 调度器保存快照；安装模块后 `systemctl restart --no-block drama-material-api.service`。确认新 PID、HTTP 就绪、临时 drain 已解除，再按原快照恢复和验收调度器，保留原有停用状态。网页登录会话确认精确 ID 返回 8365481 及三项剧集资料。
+
+模块回滚使用 `deploy_search.py COMMIT --rollback SEARCH_BACKUP_DIRECTORY`，再按相同安全切换方式激活主 API；SQL 可独立按上文回滚。两种回滚均保留当前业务数据。

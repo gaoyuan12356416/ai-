@@ -62,7 +62,9 @@ class MaterialSource:
             if re.fullmatch(r'[1-9][0-9]{0,18}', material_id) is None:
                 raise WorkflowError('invalid_material_id','素材标识无效')
             condition += " AND pool.id='%s'" % material_id
-        if search:
+        if re.fullmatch(r'[1-9][0-9]{0,18}', search):
+            condition += " AND pool.id='%s'" % search
+        elif search:
             literal=str(search).encode('utf-8').hex()
             condition += " AND LOCATE(LOWER(CONVERT(0x%s USING utf8mb4)),LOWER(CONCAT(CAST(pool.id AS CHAR),' ',COALESCE(pool.name,''))))>0" % literal
         if uploader_id:

@@ -30,8 +30,8 @@ def units():
         text=True).strip().splitlines() for unit in UNITS}
 
 
-def atomic_install(value, metadata):
-    fd, name = tempfile.mkstemp(prefix='.material-source-', dir=str(TARGET.parent))
+def atomic_install(value, metadata, target=TARGET):
+    fd, name = tempfile.mkstemp(prefix='.material-source-', dir=str(target.parent))
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(value)
@@ -39,7 +39,7 @@ def atomic_install(value, metadata):
             os.fsync(stream.fileno())
         os.chmod(name, stat.S_IMODE(metadata.st_mode))
         os.chown(name, metadata.st_uid, metadata.st_gid)
-        os.replace(name, TARGET)
+        os.replace(name, target)
     finally:
         if os.path.exists(name):
             os.unlink(name)
