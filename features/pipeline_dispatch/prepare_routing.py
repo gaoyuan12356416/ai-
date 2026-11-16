@@ -3,7 +3,7 @@ import json
 
 CLOUD = "cos-cloud"
 CLOUD_KINDS = {"fb_prepare", "tt_prepare", "x_preflight", "x_random", "x_repair"}
-FAMILIES = {"fb": {"auto", "video"}, "x": {"queue"}, "tt": {"auto", "queue", "intake", "direct_test"}}
+FAMILIES = {"fb": {"auto", "video"}, "x": {"queue"}, "tt": {"auto", "intake", "direct_test"}}
 RANK = {"gpu": 0, "cpu": 1, "cos": 2}
 
 
@@ -72,8 +72,13 @@ def available_higher(conn, node, config, fresh, exclusions):
 
 def reserve_higher(higher, row, required):
     """Leave earlier compatible offers for actually idle higher-priority workers."""
+    if not any(peer["free"] for peer in higher):
+        return False
+    request = json.loads(row["payload_json"]).get("request") or {}
+    frozen = request.get("expected_profile") or request.get("profile")
     for peer in higher:
-        if peer["free"] and required <= peer["caps"] and "prepare:" + row["channel"] in peer["caps"]:
+        if (peer["free"] and required <= peer["caps"] and "prepare:" + row["channel"] in peer["caps"]
+                and (not frozen or "profile:" + frozen in peer["caps"])):
             peer["free"] -= 1
             return True
     return False

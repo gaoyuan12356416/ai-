@@ -896,7 +896,15 @@ class RemoteCanonicalDriver:
         self.control_only = bool(control_only)
 
     def call(self, action, payload):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
+        port = self.port
+        job = payload.get("job") or {}
+        if job.get("node_id") == "cos-cloud" and job.get("stage") == "prepare":
+            import os
+            ports = json.loads(os.environ.get("PIPELINE_COS_NATIVE_PORTS", "{}"))
+            if str(port) not in ports:
+                raise AdapterError("canonical_cloud_bridge_unavailable")
+            port = int(ports[str(port)])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=self.timeout)
         try:
             connection.request("POST", self.prefix + "/" + action, json.dumps(payload).encode(),
                                {"Authorization": "Bearer " + self._token, "Content-Type": "application/json"})

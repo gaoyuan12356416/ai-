@@ -299,7 +299,12 @@ class Coordinator:
             job["claim_token"] = payload["claim_token"]
             return self.reserve_job(job)
         if action == "jobs/heartbeat":
-            return self.store.heartbeat(payload, payload.get("phase"), payload.get("metrics"))
+            response = self.store.heartbeat(payload, payload.get("phase"), payload.get("metrics"))
+            if node_id == "cos-cloud":
+                job = self.store.get_job(payload["job_id"])
+                if job["channel"] == "fb" and job["payload"].get("kind") == "fb_prepare":
+                    self.registry._adapter(job).driver.call("renew", {"job":job, "claim":payload})
+            return response
         if action == "jobs/begin-operation":
             from .credentials import seal_credentials
             if hashlib.sha256(dumps(payload.get("details", {})).encode()).hexdigest() != payload.get("request_sha256"):
@@ -446,6 +451,11 @@ def handler_type(coordinator):
             self.reply(200, {"ok": True, "service": "pipeline-dispatch"}) if self.path == "/health" else self.reply(404, {"code": "not_found"})
 
         def do_PUT(self):
+            if self.path == "/api/pipeline-monitor/cos-capacity":
+                from .cloud_admin import save_capacity
+                status, response = save_capacity(self, coordinator.store)
+                self.reply(status, response)
+                return
             self.do_POST()
 
         def do_POST(self):
@@ -503,25 +513,28 @@ def build_registry(config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--standby-port", type=int, help="serve HTTP without starting a collector")
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
     store = DispatchStore(config["db_path"], capability_exclusions=config.get("node_capability_exclusions"))
     from .owners import OwnerResolver
     coordinator = Coordinator(store, build_registry(config), internal_token=os.environ.get("PIPELINE_DISPATCH_INTERNAL_TOKEN", ""), master_key=os.environ.get("PIPELINE_DISPATCH_MASTER_KEY", ""), owner_resolver=OwnerResolver(config.get("paths", {}).get("youtube")))
-    server = ThreadingHTTPServer(("127.0.0.1", int(config.get("port", 18846))), handler_type(coordinator))
-    server.daemon_threads = True
+    server = ThreadingHTTPServer(("127.0.0.1", int(args.standby_port or config.get("port", 18846))), handler_type(coordinator))
+    server.daemon_threads = False
     def stop(*_):
         coordinator.stopping.set()
         threading.Thread(target=server.shutdown, daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     thread = threading.Thread(target=coordinator.run_collector, daemon=True)
-    thread.start()
+    if not args.standby_port:
+        thread.start()
     try:
         server.serve_forever()
     finally:
         coordinator.stopping.set()
-        thread.join(timeout=20)
+        if thread.is_alive():
+            thread.join()
         server.server_close()
 
 

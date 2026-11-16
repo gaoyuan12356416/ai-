@@ -886,6 +886,8 @@ class DispatchStore:
             row = c.execute("SELECT * FROM pipeline_enrollment WHERE token_hash=?", (digest(enrollment_token),)).fetchone()
             if not row or row["consumed_at"] or row["expires_at"] <= self.now():
                 raise DispatchError("enrollment_invalid_or_expired", status=403)
+            if (node_id == prepare_routing.CLOUD) != (row["label"] == prepare_routing.CLOUD):
+                raise DispatchError("enrollment_scope_mismatch", status=403)
             if c.execute("SELECT 1 FROM pipeline_node_auth WHERE node_id=?", (node_id,)).fetchone():
                 raise DispatchError("node_already_enrolled")
             bearer = secrets.token_urlsafe(48)
@@ -1019,11 +1021,15 @@ class DispatchStore:
             rows = sorted(rows, key=lambda item: rank.get(item["channel"], 0))
         from .maintenance import active_holds, blocking_service
         maintenance_holds = active_holds()
+        cooldowns = {r[0] for r in c.execute("SELECT resource_key FROM pipeline_cooldown WHERE until_at>?", (now,))}
+        legacy = {r[0] for r in c.execute("SELECT DISTINCT resource_key FROM pipeline_legacy_resource")}
+        held_resources = {r["resource_key"]: r for r in c.execute("""SELECT r.resource_key,r.quarantined,r.legacy,
+                          j.stage,j.status,j.lease_expires_at FROM pipeline_resource r JOIN pipeline_job j ON j.id=r.job_id""")}
         for row in rows:
             if blocking_service(row, maintenance_holds):
                 blocked.append('service_draining')
                 continue
-            if c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", ("job:" + str(row["id"]), now)).fetchone():
+            if "job:" + str(row["id"]) in cooldowns:
                 blocked.append("account_busy")
                 continue
             if (row["channel"] not in config["enabled_channels"]
@@ -1031,7 +1037,7 @@ class DispatchStore:
                 blocked.append("channel_disabled")
                 continue
             required = set(json.loads(row["capabilities_json"]))
-            if not required.issubset(capabilities):
+            if capabilities is not None and not required.issubset(capabilities):
                 blocked.append("capability_unavailable")
                 continue
             resources = sorted(set(json.loads(row["resource_keys_json"])))
@@ -1043,21 +1049,21 @@ class DispatchStore:
             locks = [scoped] if scoped else (["prepare:" + r for r in resources] if independent else resources)
             busy = False
             for resource in locks:
-                if c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? LIMIT 1", (resource,)).fetchone():
+                if resource in legacy:
                     busy = True
                     break
-                held = c.execute("SELECT r.quarantined,r.legacy,j.stage,j.status,j.lease_expires_at FROM pipeline_resource r JOIN pipeline_job j ON j.id=r.job_id WHERE r.resource_key=?", (resource,)).fetchone()
+                held = held_resources.get(resource)
                 if held and not (independent and held["stage"] == "publish" and held["status"] == "running"
                                  and not held["quarantined"] and not held["legacy"] and held["lease_expires_at"] > now):
                     busy = True
                     break
-                if independent and c.execute("SELECT 1 FROM pipeline_resource WHERE resource_key=?", ("prepare:" + resource,)).fetchone():
+                if independent and ("prepare:" + resource) in held_resources:
                     busy = True
                     break
                 # Unknown preparation fences and legacy planners must also
                 # see the new lane. A normal publisher checks order below.
                 if not independent:
-                    prep = c.execute("SELECT quarantined FROM pipeline_resource WHERE resource_key=?", ("prepare:" + resource,)).fetchone()
+                    prep = held_resources.get("prepare:" + resource)
                     if prep and (stage != "publish" or prep["quarantined"]):
                         busy = True
                         break
@@ -1234,17 +1240,18 @@ class DispatchStore:
             if cloud or config.get("prepare_routing") == "priority":
                 higher = prepare_routing.available_higher(c, node, config, fresh, self.capability_exclusions)
             blocked = []
-            eligible = self._eligible(c, config, stage, now, capabilities, blocked)
+            eligible = self._eligible(c, config, stage, now, None if higher else capabilities, blocked)
             minimum = config["hosts"][node_id][stage].get("min_pending", 100) if cloud else 0
             count = 0
             choice = None
             for item in eligible:
                 row, locks, required = item
-                if cloud and not prepare_routing.cloud_candidate(row, capabilities):
+                reserved = choice is None and prepare_routing.reserve_higher(higher, row, required)
+                if not required <= capabilities or (cloud and not prepare_routing.cloud_candidate(row, capabilities)):
                     continue
                 count += 1
                 if choice is None:
-                    if prepare_routing.reserve_higher(higher, row, required):
+                    if reserved:
                         blocked.append("higher_priority_slot")
                     else:
                         choice = item

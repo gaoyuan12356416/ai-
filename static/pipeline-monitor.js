@@ -31,13 +31,13 @@
   }
   function abnormalDetails(row) {
     const labels = { failed: "失败", unknown: "待核对", held: "暂停或限制", blocked_by_unknown: "等待异常账号核对", worker_offline: "执行器失联", repeated_claim: "反复领取未推进", schedule_missing: "预约时间缺失", identity_missing: "账号身份缺失" };
-    return Object.entries(row.abnormal_reasons || {}).filter(([, count]) => count > 0).map(([reason, count]) => `<small>${e(row.reason_labels?.[reason] || labels[reason] || "其他异常")} ${number(count)}</small>`).join("");
+    return Object.entries(row.abnormal_reasons || {}).filter(([, count]) => count > 0).map(([reason, count]) => `<small>${e(labels[reason] || row.reason_labels?.[reason] || "其他异常")} ${number(count)}</small>`).join("");
   }
   // Keep headers and cells in the same asset so cached HTML cannot swap
   // successful completions with unresolved or failed work after an update.
   const CHANNEL_COLUMNS = [
     { key: "scheduled", label: "预约中", cell: row => number(row.scheduled) },
-    { key: "waiting", label: "待执行", cell: row => number(row.waiting) },
+    { key: "waiting", label: "待执行", title: "已到期、等待选材或调度执行的任务", cell: row => `${number(row.waiting)}${row.waiting_selection > 0 ? `<small>等待选材 ${number(row.waiting_selection)}</small>` : ""}` },
     { key: "executing", label: "执行中", cell: row => number(row.executing) },
     { key: "completed", label: "已完成", cell: row => `<strong>${number(row.completed)}</strong>` },
     { key: "abnormal", label: "范围内异常", title: "仅统计所选时间范围内仍未解决的异常，原因明细采用相同范围", cell: row => `${number(row.abnormal)}${abnormalDetails(row)}` },
@@ -163,7 +163,7 @@
       payload.min_pending = Number(fields.get("min_pending"));
     }
     capacityBusy = true; form.querySelectorAll("button,input").forEach(input => input.disabled = true); notice("pmCapacityError", "");
-    try { const result = await api("/api/pipeline-monitor/capacity", { method: "PUT", body: JSON.stringify(payload) }); if (result.capacity) renderCapacity(result.capacity, true); else capacity = null; document.activeElement?.blur(); await refresh(); }
+    try { const result = await api(form.dataset.host === "cos-cloud" ? "/api/pipeline-monitor/cos-capacity" : "/api/pipeline-monitor/capacity", { method: "PUT", body: JSON.stringify(payload) }); if (result.capacity) renderCapacity(result.capacity, true); else capacity = null; document.activeElement?.blur(); await refresh(); }
     catch (error) { notice("pmCapacityError", error.message); }
     finally { capacityBusy = false; form.querySelectorAll("button,input").forEach(input => input.disabled = false); if (!capacity) refresh(); }
   }

@@ -8,6 +8,14 @@ import json
 
 KEYS = ("waiting", "executing", "scheduled", "abnormal")
 LIMIT = 10000
+MONITOR_REASONS = {
+    "held": "任务暂停或受限",
+    "blocked_by_unknown": "等待相关账号的未知结果核对",
+    "worker_offline": "执行器失联，等待恢复",
+    "repeated_claim": "任务反复领取但未推进",
+    "schedule_missing": "任务预约时间缺失",
+    "identity_missing": "任务账号身份缺失",
+}
 
 
 def _object(raw):
@@ -51,11 +59,26 @@ def running_issue(conn, row, now):
     return ""
 
 
+def selection_wait(row):
+    # X Auto (including Tag) selects through its own control-only runner.
+    # This technical dispatch hold is normal before its native queue exists.
+    return (row["channel"] == "x" and row["family"] == "auto"
+            and row["stage"] == "prepare" and row["status"] in ("queued", "ready")
+            and row["source_status"] in ("pending", "retry_wait")
+            and not row["error_code"]
+            and row["hold_reason"] == "adapter_unavailable")
+
+
+def reason_label(code):
+    from features.post_daily_report.accounting import reason_label as outcome_label
+    return MONITOR_REASONS.get(code) or outcome_label(code)
+
+
 def classify(conn, row, now):
     if row["status"] in ("running", "legacy_running"):
         issue = running_issue(conn, row, now)
         return ("abnormal", issue) if issue else ("executing", "")
-    if row["hold_reason"]:
+    if row["hold_reason"] and not selection_wait(row):
         return "abnormal", "held"
     scheduled = _time(row["scheduled_at"])
     if scheduled is None:
@@ -80,11 +103,37 @@ def classify(conn, row, now):
     return "waiting", ""
 
 
+def annotate_selection_wait(conn, items, now):
+    """Use the same selection classification in the owner-scoped task list."""
+    if not items:
+        return
+    by_id = {item["id"]: item for item in items}
+    rows = conn.execute(
+        "SELECT id,channel,family,stage,status,source_status,error_code,hold_reason,scheduled_at,"
+        "resource_keys_json,node_id,worker_id,generation,lease_expires_at "
+        "FROM pipeline_job WHERE id IN (" + ",".join("?" for _ in by_id) + ")",
+        list(by_id)).fetchall()
+    for row in rows:
+        item = by_id[row["id"]]
+        if not selection_wait(row):
+            continue
+        if item.get("effective_state") not in (None, "waiting", "scheduled", "blocked"):
+            continue
+        if item.get("effective_state") == "blocked" and item.get("effective_code") != "adapter_unavailable":
+            continue
+        state, code = classify(conn, row, now)
+        item["effective_state"] = "blocked" if state == "abnormal" else state
+        item["effective_code"] = code
+        item["effective_reason"] = (reason_label(code) if code else
+            "等待预约时间，届时开始选材" if state == "scheduled" else
+            "等待选材，选材后进入统一调度制作")
+
+
 def add_summary(conn, scope, args, by, totals, common, now, start, end):
     # Collector updated_at is observation time, not an anomaly occurrence time.
     # Use the outcome timestamp, then the original task's execution/plan dates.
     anomaly_time = "COALESCE(NULLIF(j.finished_at,''),NULLIF(j.started_at,''),NULLIF(j.scheduled_at,''),NULLIF(j.source_created_at,''))"
-    rows = conn.execute("SELECT j.id,j.channel,j.stage,j.status,j.hold_reason,j.scheduled_at,"
+    rows = conn.execute("SELECT j.id,j.channel,j.family,j.stage,j.status,j.source_status,j.error_code,j.hold_reason,j.scheduled_at,"
                         "j.resource_keys_json,j.node_id,j.worker_id,j.generation,j.lease_expires_at,"
                         + anomaly_time + " anomaly_at "
                         "FROM pipeline_job j WHERE " + scope +
@@ -94,6 +143,7 @@ def add_summary(conn, scope, args, by, totals, common, now, start, end):
         known = item["queued"] is not None
         item.update({k: 0 if known else None for k in KEYS})
         item["abnormal_reasons"] = {}
+        item["waiting_selection"] = 0 if known else None
         item["oldest_pending_seconds"] = None
     # Keep receipt/closure semantics, including unresolved post-publication
     # comments, while scoping both counts and their reason details to the window.
@@ -102,7 +152,6 @@ def add_summary(conn, scope, args, by, totals, common, now, start, end):
         " AND (j.status='unknown' OR (j.source_status NOT IN ('skipped','cancelled','canceled','abandoned','duplicate','no_candidate')"
         " AND NOT EXISTS (SELECT 1 FROM pipeline_publication p WHERE p.source_key=j.source_key)))"
         " AND " + anomaly_time + ">=? AND " + anomaly_time + "<=?", args + [start, end]).fetchall()
-    from features.post_daily_report.accounting import reason_label
     from .failure_context import phases_for, display_code
     phases = phases_for(conn, outcomes)
     for outcome in outcomes:
@@ -114,6 +163,7 @@ def add_summary(conn, scope, args, by, totals, common, now, start, end):
         for item in by.values():
             item.update({key: None for key in KEYS})
             item["abnormal_reasons"] = {}
+            item["waiting_selection"] = None
         totals.update({key: None for key in KEYS})
         common["warnings"].append("任务状态分类超过读取上限，四类计数暂不可用；未以部分数据代替总数")
         return
@@ -129,6 +179,8 @@ def add_summary(conn, scope, args, by, totals, common, now, start, end):
         if reason:
             item["abnormal_reasons"][reason] = item["abnormal_reasons"].get(reason, 0) + 1
         if state == "waiting":
+            if selection_wait(row):
+                item["waiting_selection"] = (item["waiting_selection"] or 0) + 1
             age = max(0, (now - _time(row["scheduled_at"])).total_seconds())
             item["oldest_pending_seconds"] = max(item["oldest_pending_seconds"] or 0, age)
     for key in KEYS:

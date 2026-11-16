@@ -18,6 +18,10 @@ from .receipt_outbox import ReceiptOutbox
 from .worker import ExecutionContext, LeaseLost
 
 
+class CloudClient(CoordinatorClient):
+    ROUTES = CoordinatorClient.ROUTES | {"jobs/cos-intent", "jobs/cos-park", "jobs/cos-resume"}
+
+
 class CloudNode:
     def __init__(self, config):
         self.config = config
@@ -32,7 +36,7 @@ class CloudNode:
         credentials = json.loads(Path(config["node_config"]).read_text())
         if credentials["node_id"] != "cos-cloud":
             raise ValueError("COS enrollment required")
-        self.client = CoordinatorClient(config.get("coordinator_url", "http://127.0.0.1:18846"), credentials["node_token"], timeout=90)
+        self.client = CloudClient(config.get("coordinator_url", "http://127.0.0.1:18846"), credentials["node_token"], timeout=90)
         os.environ["PIPELINE_MEDIA_ALLOWED_HOSTS"] = ",".join(config["source_hosts"])
         self.stopping = threading.Event()
         self.backoff_until = 0
@@ -50,7 +54,13 @@ class CloudNode:
                 if row["receipt"]:
                     payload = json.loads(row["receipt"])
                     self.outbox.put(row["route"], payload, payload["receipt_id"])
-                    if self.outbox.flush(client, only=payload["receipt_id"]):
+                    try:
+                        acknowledged = self.outbox.flush(client, only=payload["receipt_id"])
+                    except CoordinatorError as exc:
+                        if exc.code in {"claim_expired", "claim_not_running"} and row.get("paid"):
+                            client.post("jobs/cos-resume", ctx.identity)
+                        raise
+                    if acknowledged:
                         self.ledger.forget(local_id)
                     else:
                         self.ledger.postpone(local_id, 15)
@@ -63,7 +73,7 @@ class CloudNode:
                     try:
                         resumed = client.post("jobs/cos-resume", ctx.identity)
                     except CoordinatorError as failed:
-                        if failed.code in {"cos_intent_missing", "claim_conflict"} and job.get("reservation_pending"):
+                        if failed.code in {"cos_intent_missing", "claim_conflict"} and not row.get("paid"):
                             self.ledger.forget(local_id)
                             return
                         raise

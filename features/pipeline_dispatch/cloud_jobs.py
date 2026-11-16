@@ -40,6 +40,8 @@ class CloudLedger:
                   identity TEXT PRIMARY KEY, job TEXT NOT NULL, next_poll REAL NOT NULL DEFAULT 0,
                   receipt TEXT NOT NULL DEFAULT '', route TEXT NOT NULL DEFAULT '');
             """)
+            if "paid" not in {r[1] for r in c.execute("PRAGMA table_info(work)")}:
+                c.execute("ALTER TABLE work ADD COLUMN paid INTEGER NOT NULL DEFAULT 0")
 
     @contextlib.contextmanager
     def connection(self):
@@ -48,14 +50,21 @@ class CloudLedger:
             with c:
                 yield c
 
-    def intent(self, identity, binding, target, tag):
+    def intent(self, identity, binding, target, tag, work_id=None):
         with self.connection() as c:
             result = c.execute("INSERT OR IGNORE INTO action(identity,digest,target,tag,created) VALUES(?,?,?,?,?)",
                                (identity, binding, target, tag, time.time()))
             row = dict(c.execute("SELECT * FROM action WHERE identity=?", (identity,)).fetchone())
             if (row["digest"], row["target"], row["tag"]) != (binding, target, tag):
                 raise ExecutionError("cos_frozen_action_conflict", unknown=True)
+            if work_id is not None:
+                c.execute("UPDATE work SET paid=1 WHERE identity=?", (work_id,))
             return row, result.rowcount == 1
+
+    def retry_rejected(self, identity):
+        with self.connection() as c:
+            return c.execute("UPDATE action SET state='intent',created=? WHERE identity=? AND state='rejected' AND provider_id=''",
+                             (time.time(),identity)).rowcount == 1
 
     def update(self, identity, provider_id, state):
         with self.connection() as c:
@@ -131,10 +140,21 @@ class CloudJobs:
         body = {"Tag": tag, "QueueId": self.queue, "Input": {"Object": source_key}, "Operation": operation, "CallBack": "no"}
         context.check()
         context.client.post("jobs/cos-intent", dict(context.identity, action_key=key))
-        row, new = self.ledger.intent(key, fingerprint(body), output, tag)
+        row, new = self.ledger.intent(key, fingerprint(body), output, tag,
+                      str(context.identity.get("job_id")) + ":" + str(context.identity.get("generation")))
+        if row["state"] == "rejected":
+            new = self.ledger.retry_rejected(key)
         try:
             if new:
-                response = self.client.ci_create_media_jobs(Bucket=self.bucket, Jobs=body, ContentType="application/xml")
+                try:
+                    response = self.client.ci_create_media_jobs(Bucket=self.bucket, Jobs=body, ContentType="application/xml")
+                except Exception as exc:
+                    code = getattr(exc, "get_error_code", lambda: "")()
+                    status_code = getattr(exc, "get_status_code", lambda: 0)()
+                    if str(status_code) in {"403","429","503"} and code in {
+                            "AccessDenied","SlowDown","RequestLimitExceeded","TooManyRequests","QueueFull","LimitExceeded"}:
+                        self.ledger.update(key, "", "rejected")
+                    raise
                 item = records(response.get("JobsDetail"))[0]
                 if not self._matches(item, row) or not item.get("JobId"):
                     raise PendingReadback()

@@ -234,12 +234,25 @@ class CloudExecutor(NodeExecutors):
         if not 1 <= duration or not 1 <= outro_duration <= 120:
             raise ExecutionError("cos_phone_duration_invalid")
         main = transcode(codec, duration - 0.9, tt_delivery=True)
+        if codec == "hevc":
+            prefix = temp / "phone-prefix.mp4"
+            run_media(self.config["ffmpeg"], ["-i",source,"-map","0:v:0","-map","0:a:0?","-c","copy","-t",
+                                "%.6f" % (duration - 0.9),"-movflags","+faststart","-y",prefix])
+            if not has_audio:
+                silent = temp / "phone-prefix-audio.mp4"
+                run_media(self.config["ffmpeg"], ["-i",prefix,"-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000",
+                         "-map","0:v:0","-map","1:a","-c:v","copy","-c:a","aac","-shortest","-y",silent])
+                prefix = silent
+            source_key = self.origin.content(prefix, "video/mp4")
+            main["Transcode"].pop("TimeInterval", None)
         if logo:
             main["Watermark"] = [watermark(self.origin.url(self.origin.content(logo, "image/png")), duration - 0.9,
                                                 width=132,height=132,dx=48,dy=72)]
         main_key = run("main", "Transcode", source_key, main)
         mixed, foreground = self.templates.phone_layers(source,outro,logo,duration,has_audio,context,temp)
         tail = transcode(codec, outro_duration, tt_delivery=True)
+        if codec == "hevc":
+            tail["Transcode"].pop("TimeInterval", None)
         tail["Watermark"] = [self.templates.outro_labels(font,str(request["content_id"]),outro_duration), foreground]
         tail_key = run("outro", "Transcode", mixed, tail)
         combined = {"ConcatTemplate": {"DirectConcat": "true", "Container":{"Format":"mp4"}, "Index":"0",

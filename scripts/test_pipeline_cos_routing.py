@@ -16,7 +16,7 @@ class CloudRoutingTests(unittest.TestCase):
         self.store = DispatchStore(Path(temp.name) / "dispatch.db", clock=lambda: self.now)
         for channel in ("fb", "x", "tt", "youtube"):
             self.store.channel_enabled(channel, True)
-        enrollment = self.store.create_enrollment("COS", {"is_admin": True})
+        enrollment = self.store.create_enrollment("cos-cloud", {"is_admin": True})
         self.store.consume_enrollment(enrollment["token"], "cos-cloud")
         self.caps = ["prepare:fb", "prepare:x", "prepare:tt", "fb_prepare", "x_preflight", "tt_prepare", "backend:cos"]
         self.health = {"queue_ready": True, "queue_limit": 10}
@@ -32,7 +32,7 @@ class CloudRoutingTests(unittest.TestCase):
     def offer(self, number, channel="fb", **extra):
         key = channel + ":" + str(number)
         return self.store.offer(dict(dict(source_key=key, source_id=str(number), channel=channel, stage="prepare",
-                    family="auto" if channel == "fb" else "queue", source_created_at=stamp(self.now),
+                    family="auto" if channel == "fb" else "intake" if channel == "tt" else "queue", source_created_at=stamp(self.now),
                     scheduled_at=stamp(self.now), capabilities=["prepare:" + channel],
                     resource_keys=["account:" + key], batch_key="batch"), **extra))
 
@@ -82,6 +82,21 @@ class CloudRoutingTests(unittest.TestCase):
         self.store.worker_heartbeat("cpu-main", "p", "prepare", draining=True)
         self.offer(1)
         self.assertIsNotNone(self.claim()["job"])
+
+    def test_gpu_only_offer_consumes_first_gpu_slot(self):
+        self.pool("cos-cloud", 1, min_pending=0)
+        self.store.register_node("hk-gpu", ["backend:gpu", "prepare:fb"])
+        self.pool("hk-gpu", 1)
+        self.store.worker_heartbeat("hk-gpu", "gpu", "prepare")
+        self.offer(1, capabilities=["backend:gpu", "prepare:fb"])
+        self.offer(2)
+        self.assertEqual(self.claim()["job"]["source_id"], "2")
+        self.assertEqual(self.claim("hk-gpu","gpu")["job"]["source_id"], "1")
+
+    def test_cloud_enrollment_is_scoped(self):
+        enrollment = self.store.create_enrollment("ordinary host", {"is_admin": True})
+        with self.assertRaisesRegex(DispatchError, "enrollment_scope_mismatch"):
+            self.store.consume_enrollment(enrollment["token"], "cos-cloud")
 
     def test_recovery_at_zero_and_fenced_unknown(self):
         self.pool("cos-cloud", 1, min_pending=0)

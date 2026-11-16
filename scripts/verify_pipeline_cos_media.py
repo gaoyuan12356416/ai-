@@ -32,6 +32,9 @@ def main():
              "tt-clean-hevc":("tt_prepare","tt-post-direct-clean-hevc-720x1280-v1"),
              "tt-outro":("tt_prepare","tt-post-direct-outro-h264-720x1280-v2"),
              "tt-branded":("tt_prepare","tt-post-h264-720x1280-v2"),
+             "tt-outro-hevc":("tt_prepare","tt-post-direct-outro-hevc-720x1280-v2"),
+             "tt-branded-hevc":("tt_prepare","tt-post-hevc-720x1280-v2"),
+             "tt-random-hevc":("tt_prepare","tt-post-random-overlay-hevc-720x1280-v3"),
              "fb-random":("fb_prepare", FB_PROFILE), "x-preflight":("x_preflight","source"),
              "x-repair":("x_repair",X_REPAIR), "x-random":("x_random",X_RANDOM),
              "tt-random":("tt_prepare","tt-post-random-overlay-h264-720x1280-v3")}
@@ -81,7 +84,7 @@ def main():
             artifact=result["artifact"]
             if kind=="tt_prepare" and name=="tt-source":
                 assert (artifact["sha256"], artifact["size"]) == (config.get("passthrough_sha", sha), config.get("passthrough_size", size))
-            if name=="tt-branded":
+            if name.startswith("tt-branded"):
                 assert result["preparation"]["direct_post_eligible"] is False
             receipt.write_text(encoded(result))
             print(name, "qualified", artifact["sha256"][:16], artifact["size"],flush=True)

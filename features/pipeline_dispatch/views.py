@@ -460,6 +460,9 @@ def query(store, view, actor, filters):
                 result['warnings'].append('跨日期核对暂不可用（' + type(exc).__name__ + '），数量不按零统计')
                 if view == 'summary':
                     result['backlog'] = {'available': False, 'unfinished': None, 'unqueued': None, 'channels': []}
+        if view == 'tasks':
+            from .queue_states import annotate_selection_wait
+            annotate_selection_wait(conn, result['items'], now)
     if view == 'summary':
         from .maintenance import active_holds
         if active_holds():

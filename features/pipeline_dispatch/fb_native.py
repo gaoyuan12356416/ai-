@@ -86,6 +86,24 @@ class FBNativeBridge:
             raise AdapterError("fb_dispatch_claim_mismatch")
         return dict(row), obj(row["task_json"]), obj(row["descriptor_json"])
 
+    def renew_cloud(self, job, claim):
+        record, task, _ = self._stored(job, claim)
+        if (job.get("node_id"), job["stage"]) != ("cos-cloud", "prepare") or record["receipt_json"]:
+            raise AdapterError("canonical_cloud_claim_invalid")
+        auto = job["family"] == "auto"
+        store = self.runtime.store if auto else self.runtime.manual_worker.store
+        table, key, owner, end = (("fb_auto_task", "id", "lease_owner", "lease_expires_at_utc") if auto
+                                  else ("fb_video_task", "task_id", "execution_lease", "execution_until"))
+        now = store.now_fn()
+        with store.connect() as conn:
+            # Only extend a still-valid native reservation for this exact owner.
+            # Any intervening owner/state change requires canonical reconciliation.
+            changed = conn.execute(f"UPDATE {table} SET {end}=? WHERE {key}=? AND {owner}=? AND status='preparing' AND {end}>?",
+                            (utc_iso(now + timedelta(seconds=1200)), task[key], task[owner], utc_iso(now))).rowcount
+        if not changed:
+            raise AdapterError("canonical_claim_stale")
+        return {"accepted": True}
+
     def _video_preflight(self, task):
         worker = self.runtime.manual_worker
         snap, prepared = obj(task["snapshot_json"]), obj(task["prepared_json"])
@@ -132,7 +150,12 @@ class FBNativeBridge:
             if validate_short_url(short) != build_short_url(task["id"]) or str(task.get("message_text") or "").count(short) != 1:
                 raise AdapterError("fb_auto_short_link_snapshot_invalid")
             validate_w2a_url(long)
-            self.runtime.executor.short_link_writer(self.runtime.executor.short_link_root, int(task["id"]), long)
+            try:
+                self.runtime.executor.short_link_writer(self.runtime.executor.short_link_root, int(task["id"]), long)
+            except Exception:
+                from features.story_copy.bridge import restore_fb_optional_link
+                if not restore_fb_optional_link(self.runtime.store,task):
+                    raise
         return {"page_id": task["page_id"], "media_url": task["media_url"], "message": task["message_text"], "title": ""}
 
     def _resume_preparation(self, job, previous):
