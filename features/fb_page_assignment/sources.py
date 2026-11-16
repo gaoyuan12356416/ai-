@@ -11,6 +11,8 @@ import re
 import sqlite3
 import subprocess
 
+from .runtime import log
+
 
 class SourceError(Exception):
     def __init__(self, code, *, required_records=None):
@@ -47,16 +49,29 @@ class Reader:
         queries = ";\n".join(statements)
         if optional_statements:
             queries += ";\nSELECT '" + boundary + "';\n" + ";\n".join(optional_statements)
-        sql = ("SET SESSION time_zone='+00:00'; SET SESSION MAX_EXECUTION_TIME=8000; "
-               "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ; "
+        # The mysql CLI normally dispatches every semicolon separately. A
+        # dedicated delimiter sends this fixed read-only batch in one packet,
+        # avoiding a network round trip for each SET/SELECT/checkpoint.
+        sql = ("delimiter //\n"
+               "SET SESSION time_zone='+00:00', MAX_EXECUTION_TIME=8000, tx_isolation='REPEATABLE-READ'; "
                "START TRANSACTION READ ONLY; SELECT @@read_only;\n" +
-               queries + ";\nROLLBACK;")
+               queries + ";\nROLLBACK//\n")
         try:
-            result = subprocess.run([
-                "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350", "-u",
-                self.env["ADMIN_MAPPING_MYSQL_USER"], "--connect-timeout=3", "--skip-reconnect",
-                "--default-character-set=utf8mb4", "--unbuffered", "-N", "-B", "-r"],
-                input=sql, env=env, text=True, encoding="utf-8", capture_output=True, timeout=42)
+            for attempt in range(2):
+                result = subprocess.run([
+                    "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350", "-u",
+                    self.env["ADMIN_MAPPING_MYSQL_USER"], "--connect-timeout=3", "--skip-reconnect",
+                    "--default-character-set=utf8mb4", "--unbuffered", "-N", "-B", "-r"],
+                    input=sql, env=env, text=True, encoding="utf-8", capture_output=True, timeout=42)
+                codes = re.findall(r"ERROR (\d+)", result.stderr)
+                # An observed upstream handshake failure produced no results.
+                # Retry once through the same FIFO gate, never SQL failures,
+                # partially read results, optional failures or execution timeouts.
+                if (attempt == 0 and result.returncode and not result.stdout.strip()
+                        and any(code in {"2003", "2013"} for code in codes)):
+                    log("source_connection_retry", error_code="_".join(codes))
+                    continue
+                break
             stdout, stderr = result.stdout, result.stderr
             error = "source_query_failed" if result.returncode else ""
         except subprocess.TimeoutExpired as exc:
@@ -67,13 +82,14 @@ class Reader:
             stdout = stdout.decode("utf-8", errors="replace")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", errors="replace")
+        codes = re.findall(r"ERROR (\d+)", stderr)
+        if error and codes:
+            error += "_" + "_".join(codes)
         lines = stdout.splitlines()
         if not lines or lines.pop(0) != "1":
             raise SourceError(error or "source_query_failed")
         checkpoint = lines.index(boundary) if optional_statements and boundary in lines else None
         if error:
-            codes = re.findall(r"ERROR (\d+)", stderr)
-            error += "_" + "_".join(codes) if codes else ""
             required = self._decode(lines[:checkpoint]) if checkpoint is not None else None
             raise SourceError(error, required_records=required)
         if optional_statements and checkpoint is None:

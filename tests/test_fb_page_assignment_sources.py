@@ -274,6 +274,9 @@ class ReaderTests(unittest.TestCase):
         self.assertNotIn('SQL_GATE_BYPASS', kwargs['env'])
         self.assertIn('START TRANSACTION READ ONLY', kwargs['input'])
         self.assertIn('MAX_EXECUTION_TIME=8000', kwargs['input'])
+        self.assertTrue(kwargs['input'].startswith('delimiter //\n'))
+        self.assertTrue(kwargs['input'].endswith('ROLLBACK//\n'))
+        self.assertEqual(kwargs['input'].count('SET SESSION'), 1)
         self.assertNotIn('test-password', str(args))
 
     def test_non_readonly_endpoint_response_and_timeout_are_errors(self):
@@ -319,6 +322,30 @@ class ReaderTests(unittest.TestCase):
             Reader(self.ENV).query(['SELECT required'], optional_statements=['SELECT labels'])
         self.assertEqual(caught.exception.code, 'source_query_timeout')
         self.assertEqual(caught.exception.required_records, [])
+
+    def test_empty_handshake_failure_retries_once_through_the_same_gate(self):
+        failed = SimpleNamespace(returncode=1, stdout='', stderr='ERROR 2013: initial handshake failed')
+        encoded = json.dumps({'ok': 1}).encode().hex()
+        success = SimpleNamespace(returncode=0, stdout='1\n' + encoded + '\n', stderr='')
+        with patch('subprocess.run', side_effect=[failed, success]) as run, patch('features.fb_page_assignment.sources.log'):
+            self.assertEqual(Reader(self.ENV).query(['SELECT 1']), [{'ok': 1}])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0], run.call_args_list[1])
+        self.assertEqual(run.call_args.args[0][0], '/usr/bin/mysql')
+
+    def test_second_handshake_failure_is_reported_with_no_more_retries(self):
+        failed = SimpleNamespace(returncode=1, stdout='', stderr='ERROR 2003: connection timed out')
+        with patch('subprocess.run', return_value=failed) as run, patch('features.fb_page_assignment.sources.log'):
+            with self.assertRaises(SourceError) as caught:
+                Reader(self.ENV).query(['SELECT 1'])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(caught.exception.code, 'source_query_failed_2003')
+
+    def test_partial_network_failure_is_not_retried(self):
+        failed = SimpleNamespace(returncode=1, stdout='1\n', stderr='ERROR 2013: read failed')
+        with patch('subprocess.run', return_value=failed) as run, self.assertRaises(SourceError):
+            Reader(self.ENV).query(['SELECT 1'])
+        self.assertEqual(run.call_count, 1)
 
 
 if __name__ == '__main__':

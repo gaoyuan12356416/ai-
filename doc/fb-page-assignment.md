@@ -31,7 +31,7 @@
 
 ## 选择规则
 
-每请求实时读取 `kunlunads_dev.ads_facebook_page_group_ins` 的 62 组未删除成员，以及 `ads_facebook_page_ins` 的可用状态、`active_ad_count` 和 `fan_ccount`。只选择 `status=0`、`forbidden_status=0`、`is_permission=1` 的 Page。自动化读取使用既有 FIFO SQL Gate 和 63350 只读端点，不调用 Meta 写接口。Page、剧信息和剧标签在同一连接、同一只读事务中读取；必需数据完成后输出内部检查点，标签失败只降级标签，不重查或掩盖必需数据错误，不缓存实时 Page 状态。
+每请求实时读取 `kunlunads_dev.ads_facebook_page_group_ins` 的 62 组未删除成员，以及 `ads_facebook_page_ins` 的可用状态、`active_ad_count` 和 `fan_ccount`。只选择 `status=0`、`forbidden_status=0`、`is_permission=1` 的 Page。自动化读取使用既有 FIFO SQL Gate 和 63350 只读端点，不调用 Meta 写接口。Page、剧信息和剧标签在同一连接、同一只读事务中读取；会话设置合并为一条 `SET`，固定 SQL 批次由 mysql 自定义分隔符一次下发，减少逐条语句的网络往返。必需数据完成后输出内部检查点，标签失败只降级标签，不重查或掩盖必需数据错误，不缓存实时 Page 状态。仅在未读取任何结果的连接建立阶段遇到 MySQL 2003/2013 时，通过原 FIFO Gate 再尝试一次；执行超时、SQL 错误、部分读取和标签失败不重试。日志 writer 继续原有后台退避规则。
 
 剧信息来自 Dramawave（`app_id=1479`）当前剧目数据。分类依赖线上共享 `features.x_tag_revenue` 的同版本标签与语言规则。Page 画像读取 `/mnt/data-disk/fb-page-portraits/current.json` 指向的完整本地快照，同批固定版本；请求链路不重算七天画像。无画像或最新快照读取失败时可继续选择，无画像来源故障会告警。
 
