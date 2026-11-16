@@ -4,6 +4,7 @@ import base64
 import hashlib
 from importlib import metadata
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -43,7 +44,42 @@ def provision(node):
     print("COS private Pillow",result,flush=True)
 
 
+def tools_for_worker(node, cfg):
+    bindir=Path(node)/"bin"
+    bindir.mkdir(exist_ok=True)
+    for name in ("ffmpeg","ffprobe"):
+        original=Path(cfg[name])
+        command=["runuser","-u","pipeline-cos","--"]
+        if subprocess.run(command+[str(original),"-version"],capture_output=True).returncode:
+            sha=hashlib.sha256(original.read_bytes()).hexdigest()
+            binary=bindir/(name+"-"+sha[:16])
+            if not binary.exists():
+                fd,temp=tempfile.mkstemp(dir=bindir);os.close(fd)
+                try:
+                    shutil.copyfile(original,temp)
+                    if hashlib.sha256(Path(temp).read_bytes()).hexdigest()!=sha:
+                        raise RuntimeError(name+" copy failed verification")
+                    os.chmod(temp,0o755);os.replace(temp,binary)
+                finally:
+                    if os.path.exists(temp):os.unlink(temp)
+            cfg[name]=str(binary)
+        subprocess.run(command+[cfg[name],"-version"],check=True,capture_output=True)
+    return cfg
+
+
 if __name__=="__main__":
     parser=argparse.ArgumentParser()
     parser.add_argument("node",type=Path)
-    provision(parser.parse_args().node)
+    parser.add_argument("--config",type=Path)
+    args=parser.parse_args()
+    provision(args.node)
+    if args.config:
+        stat=args.config.stat()
+        cfg=tools_for_worker(args.node,json.loads(args.config.read_text()))
+        fd,temp=tempfile.mkstemp(dir=args.config.parent)
+        try:
+            with os.fdopen(fd,"w") as out:json.dump(cfg,out)
+            os.chown(temp,stat.st_uid,stat.st_gid);os.chmod(temp,stat.st_mode & 0o777)
+            os.replace(temp,args.config)
+        finally:
+            if os.path.exists(temp):os.unlink(temp)

@@ -8,6 +8,7 @@ import os
 import signal
 import threading
 import time
+import traceback
 from pathlib import Path
 
 from .client import CoordinatorClient, CoordinatorError
@@ -107,6 +108,9 @@ class CloudNode:
                 # A platform negative result or invalid media is definitive; an
                 # interrupted transfer/read must retain its original paid action.
                 code = getattr(exc, "code", "")
+                frame = traceback.extract_tb(exc.__traceback__)[-1]
+                print("cos_prepare_error", local_id, ctx.phase_name, type(exc).__name__,
+                      Path(frame.filename).name, frame.lineno, flush=True)
                 if (getattr(exc, "unknown", False) or not code or getattr(exc, "retryable", False)
                         or code in {"cos_session_expired","youtube_source_download_failed"}):
                     self.backoff_until = max(self.backoff_until, time.monotonic() + 30)

@@ -79,11 +79,12 @@ def stage(release, manifest):
         run(["useradd","--system","--no-create-home","--shell","/sbin/nologin",USER])
         user=pwd.getpwnam(USER)
     gid=user.pw_gid
-    from pipeline_cos_dependencies import provision
+    from pipeline_cos_dependencies import provision, tools_for_worker
     provision(node)
     ETC.mkdir(exist_ok=True,mode=0o750);os.chown(ETC,0,gid);ETC.chmod(0o750)
     state=ROOT/"state";state.mkdir(exist_ok=True,mode=0o700);os.chown(state,user.pw_uid,gid)
     cfg=json.loads((release/"launch/worker-base.json").read_text())
+    tools_for_worker(node,cfg)
     for key in ("catalog","outro","font","logo"):
         asset=Path(cfg[key]); path=asset
         if subprocess.run(["runuser","-u",USER,"--","test","-r",str(asset)]).returncode:
