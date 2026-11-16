@@ -1980,8 +1980,9 @@ def _video_matches_delivery_contract(
     )
 
 
-def validate_prepared_output(config, payload, path, max_size, expected_duration):
-    video_contract = _delivery_video_contract(config)
+def validate_prepared_output(config, payload, path, max_size, expected_duration, *, video_contract=None):
+    if video_contract is None:
+        video_contract = _delivery_video_contract(config)
     videos = _stream_items(payload, "video")
     audios = _stream_items(payload, "audio")
     if len(videos) != 1 or len(audios) != 1:

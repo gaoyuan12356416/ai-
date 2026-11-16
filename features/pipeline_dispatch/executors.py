@@ -469,8 +469,18 @@ class NodeExecutors:
         finally:
             for owner, name, original in reversed(replaced): setattr(owner, name, original)
 
+    def _x_transform(self, kind, request, context):
+        processor = self._processor(kind)
+        if kind == "x_repair" and request.get("profile") != processor.config.profile:
+            raise ExecutionError("frozen_renderer_profile_mismatch")
+        return self._prepare_processor(kind, processor, request, context)
+
+    def _preflight_store(self):
+        from features.x_posts.media_repair import WorkerConfig, CosObjectStore
+        return CosObjectStore(WorkerConfig.from_env())
+
     def x_preflight(self, request, context):
-        from features.x_posts.media_repair import WorkerConfig, CosObjectStore, REPAIRABLE_TRIGGER_CODES
+        from features.x_posts.media_repair import REPAIRABLE_TRIGGER_CODES
         from features.x_posts import service as posts
         from features.drama_synthesis.youtube import YouTubeHTTPClient
         from PIL import Image
@@ -531,16 +541,13 @@ class NodeExecutors:
                     raise
                 repair_request = dict(request["repair_request"])
                 repair_request.update(source_url=request["source_url"], source_sha256=sha, source_size=size, trigger_code=exc.code)
-                processor = self._processor("x_repair")
-                if repair_request.get("profile") != processor.config.profile:
-                    raise ExecutionError("frozen_renderer_profile_mismatch")
-                repaired = self._prepare_processor("x_repair", processor, repair_request, context)
+                repaired = self._x_transform("x_repair", repair_request, context)
                 artifact = _artifact(repaired)
                 repaired_path = self._download(artifact, Path(temp) / "repaired.mp4", context)
                 probe = validate(repaired_path)
             if repaired is None:
-                config = WorkerConfig.from_env()
-                store = CosObjectStore(config)
+                store = self._preflight_store()
+                config = store.config
                 extension = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "video/mp4": "mp4"}[mime]
                 key = config.cos_prefix.rstrip("/") + "/source/" + sha[:2] + "/" + sha + "." + extension
                 context.phase("artifact_upload")
@@ -556,8 +563,7 @@ class NodeExecutors:
             if request.get("random_request"):
                 frozen = dict(request["random_request"])
                 frozen.update(source_url=artifact["url"], source_sha256=artifact["sha256"], source_size=artifact["size"], source_duration=artifact["duration_seconds"])
-                processor = self._processor("x_random")
-                prepared = self._prepare_processor("x_random", processor, frozen, context)
+                prepared = self._x_transform("x_random", frozen, context)
                 return {"status": "ready", "artifact": _artifact(prepared), "preparation": prepared}
             return {"status": "ready", **checkpoint, "probe": probe}
 

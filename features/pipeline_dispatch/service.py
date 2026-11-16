@@ -139,7 +139,8 @@ class Coordinator:
             with contextlib.closing(self.store.connect()) as c:
                 node = c.execute("SELECT capabilities_json FROM pipeline_node WHERE node_id=?", (job["node_id"],)).fetchone()
             capabilities = json.loads(node[0]) if node else []
-            job["executor_backend"] = "gpu" if "backend:gpu" in capabilities else "cpu"
+            from .prepare_routing import backend
+            job["executor_backend"] = backend(capabilities)
             job["executor_capabilities"] = capabilities
             descriptor = self.registry.reserve(job, job)
             # Freeze the actual descriptor so subsequent operations are
@@ -227,6 +228,15 @@ class Coordinator:
         node_id = payload.get("node_id")
         if not auth.get("internal") and auth.get("node_id") != node_id:
             raise DispatchError("node_identity_mismatch", status=403)
+        if node_id == "cos-cloud":
+            if action in {"jobs/begin-operation"} or (action in {"jobs/claim", "workers/drain", "workers/heartbeat"} and payload.get("stage") != "prepare"):
+                raise DispatchError("prepare_only_node", status=403)
+            if action == "jobs/cos-intent":
+                return self.store.cloud_intent(payload)
+            if action == "jobs/cos-park":
+                return self.store.resume_cloud(payload, park=True)
+            if action == "jobs/cos-resume":
+                return self.store.resume_cloud(payload)
         delivery_id = payload.get("checkpoint_id") if action == "jobs/checkpoint" else payload.get("receipt_id") if action in ("jobs/complete", "jobs/fail") else None
         if delivery_id:
             delivered = self.store.delivered(payload, delivery_id, payload)

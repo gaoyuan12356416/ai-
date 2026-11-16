@@ -114,6 +114,8 @@ def preparation_target(job, profile, *, automatic=False):
     # Older callers did not provide a host. Retain their prior inference;
     # current coordinator calls always provide the actual selected backend.
     backend = job.get("executor_backend") or ("cpu" if profile in cpu_variants.values() else "gpu")
+    if automatic and backend == "cos":
+        profile = profile.replace("-hevc-", "-h264-")
     if automatic and backend == "cpu":
         profile = cpu_variants.get(profile, profile)
     if profile not in supported_profiles(backend):

@@ -3,7 +3,7 @@
   const $ = id => document.getElementById(id);
   const CHANNELS = { x: "X", fb: "Facebook", tt: "TikTok", youtube: "YouTube" };
   const STAGES = { prepare: "制作", publish: "发布" };
-  const HOSTS = { "cpu-main": "CPU 服务器", "hk-gpu": "香港 GPU" };
+  const HOSTS = { "cpu-main": "CPU 服务器", "hk-gpu": "香港 GPU", "cos-cloud": "COS 云端" };
   const STATES = { queued: "排队中", pending: "排队中", running: "执行中", preparing: "制作中", publishing: "发布中", ready: "已就绪", completed: "制作完成", published: "发布成功", failed: "失败", unknown: "结果待核对", backlog_paused: "历史积压暂停", available: "正常", healthy: "正常", unavailable: "采集失败", offline: "离线", stale: "数据延迟", idle: "空闲", busy: "执行中", draining: "排空中", legacy_running: "原流程执行中" };
   const PHASES = { download: "下载素材", probe: "校验素材", render: "制作渲染", upload_artifact: "保存成片", prepare: "制作", upload: "上传平台", media_uploading: "上传平台", processing: "平台处理", post_creating: "创建帖子", publish: "发布", reconcile: "核对回执", complete: "完成" };
   Object.assign(STATES, { waiting: "待执行", executing: "执行中", scheduled: "预约中", blocked: "受阻", paused: "历史暂停", closed: "已取消/策略关闭" });
@@ -89,6 +89,13 @@
     const inferred = [busy, idle, alive].every(v => Number.isInteger(v) && v >= 0) && alive >= busy + idle ? alive - busy - idle : null;
     const draining = stage.draining_workers == null || stage.draining_workers === inferred ? inferred : null;
     const notes = [];
+    if (stage.min_pending != null) {
+      const reasons = {cos_below_min_pending:"低于接单阈值", higher_priority_slot:"GPU 或 CPU 有可用制作槽",
+        cos_queue_unavailable:"云端队列暂不可用", capacity_limit:"已达到并发上限", node_offline:"节点离线",
+        no_eligible_task:"暂无可领取任务", awaiting_assignment:"等待分配", account_busy:"任务资源占用"};
+      const reason = stage.max_workers === 0 ? "已停止接单" : reasons[stage.admission_reason] || stage.admission_reason || "可接单";
+      notes.push(`可领取 ${number(stage.eligible_pending)} 条，最低 ${number(stage.min_pending)} 条，执行中 ${number(stage.active_jobs)} 条。${reason}`);
+    }
     if (draining > 0) notes.push(`${number(draining)} 个排空进程已停止新领取，无在途任务，等待退出。`);
     if (stage.draining_busy_workers > 0) notes.push(`${number(stage.draining_busy_workers)} 个忙碌进程已停止新领取，当前任务完成后退出。`);
     if (Number.isFinite(busy) && Number.isFinite(stage.max_workers) && busy > stage.max_workers) notes.push(`自然排空：当前 ${number(busy)} 个任务继续完成，目标并发 ${number(stage.max_workers)}，暂不补充任务。`);
@@ -116,7 +123,7 @@
     capacity = value;
     $("pmCapacitySection").hidden = false;
     $("pmCapacityVersion").textContent = `配置版本 ${number(value.version)}`;
-    $("pmCapacityForms").innerHTML = `<div class="pm-capacity-grid">${(value.hosts || []).map((row, i) => `<form class="pm-capacity-row" data-host="${e(row.host_id)}" data-stage="${e(row.stage)}"><label for="pmCap${i}">${e(HOSTS[row.host_id] || row.host_id)} · ${e(STAGES[row.stage] || row.stage)}<small class="pm-muted"> ${row.scaling_mode === "manual" ? "手动" : "自动"} · 当前目标 ${number(row.max_workers)}，${row.scaling_mode === "manual" ? "保存后按此并发接单" : "并发上限"}</small></label><input id="pmCap${i}" name="max_workers" type="number" min="0" max="64" step="1" value="${e(row.ceiling)}" required aria-label="${e(HOSTS[row.host_id] || row.host_id)}${e(STAGES[row.stage])}并发上限"><button class="pm-button" type="submit">保存</button><button class="pm-button" type="submit" data-drain="true">停止接单</button></form>`).join("")}</div><form id="pmGlobalCapacity" class="pm-capacity-platforms"><label>发布总并发<input name="global_publish_limit" type="number" min="1" max="64" step="1" value="${e(value.global_publish_limit)}" required></label>${Object.keys(CHANNELS).map(c => `<label>${CHANNELS[c]} 发布上限<input name="channel_${c}" type="number" min="1" max="64" step="1" value="${e(value.channel_limits?.[c])}" required></label>`).join("")}<button class="pm-button primary" type="submit">保存发布限制</button></form>`;
+    $("pmCapacityForms").innerHTML = `<div class="pm-capacity-grid">${(value.hosts || []).map((row, i) => `<form class="pm-capacity-row" data-host="${e(row.host_id)}" data-stage="${e(row.stage)}"><label for="pmCap${i}">${e(HOSTS[row.host_id] || row.host_id)} · ${e(STAGES[row.stage] || row.stage)}<small class="pm-muted"> ${row.scaling_mode === "manual" ? "手动" : "自动"} · 当前目标 ${number(row.max_workers)}，${row.scaling_mode === "manual" ? "保存后按此并发接单" : "并发上限"}</small></label><input id="pmCap${i}" name="max_workers" type="number" min="0" max="64" step="1" value="${e(row.ceiling)}" required aria-label="${e(HOSTS[row.host_id] || row.host_id)}${e(STAGES[row.stage])}并发上限">${row.host_id === "cos-cloud" ? `<label>并发模式<select name="scaling_mode"><option value="manual" ${row.scaling_mode === "manual" ? "selected" : ""}>手动</option><option value="auto" ${row.scaling_mode === "auto" ? "selected" : ""}>自动</option></select></label><label>最低待制作数<input name="min_pending" type="number" min="0" step="1" value="${e(row.min_pending)}" required></label>` : ""}<button class="pm-button" type="submit">保存</button><button class="pm-button" type="submit" data-drain="true">停止接单</button></form>`).join("")}</div><form id="pmGlobalCapacity" class="pm-capacity-platforms"><label>发布总并发<input name="global_publish_limit" type="number" min="1" max="64" step="1" value="${e(value.global_publish_limit)}" required></label>${Object.keys(CHANNELS).map(c => `<label>${CHANNELS[c]} 发布上限<input name="channel_${c}" type="number" min="1" max="64" step="1" value="${e(value.channel_limits?.[c])}" required></label>`).join("")}<button class="pm-button primary" type="submit">保存发布限制</button></form>`;
   }
   function renderTasks(data) {
     nextCursor = data.next_cursor || "";
@@ -151,6 +158,10 @@
     const fields = new FormData(form), payload = { expected_version: capacity.version };
     if (form.dataset.host) Object.assign(payload, { host_id: form.dataset.host, stage: form.dataset.stage, max_workers: event.submitter?.dataset.drain ? 0 : Number(fields.get("max_workers")) });
     else Object.assign(payload, { global_publish_limit: Number(fields.get("global_publish_limit")), channel_limits: Object.fromEntries(Object.keys(CHANNELS).map(c => [c, Number(fields.get(`channel_${c}`))])) });
+    if (form.dataset.host === "cos-cloud") {
+      payload.scaling_mode = fields.get("scaling_mode");
+      payload.min_pending = Number(fields.get("min_pending"));
+    }
     capacityBusy = true; form.querySelectorAll("button,input").forEach(input => input.disabled = true); notice("pmCapacityError", "");
     try { const result = await api("/api/pipeline-monitor/capacity", { method: "PUT", body: JSON.stringify(payload) }); if (result.capacity) renderCapacity(result.capacity, true); else capacity = null; document.activeElement?.blur(); await refresh(); }
     catch (error) { notice("pmCapacityError", error.message); }

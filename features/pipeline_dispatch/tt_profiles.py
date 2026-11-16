@@ -28,7 +28,7 @@ def supported_profiles(backend):
     if backend == "cpu":
         return {name for name, (mode, codec) in PROFILE_SPECS.items()
                 if codec in {"source", "cpu"} or codec == "h264" and mode != "random_overlay"}
-    if backend == "gpu":
+    if backend in {"gpu", "cos"}:
         return {name for name, (_, codec) in PROFILE_SPECS.items() if codec != "cpu"}
     return set()
 
@@ -55,7 +55,7 @@ def asset_capabilities(config):
 
 def select_config(base, profile, backend):
     """Preserve the default renderer and build independent routed processors."""
-    if profile not in supported_profiles(backend):
+    if backend not in {"cpu", "gpu"} or profile not in supported_profiles(backend):
         raise TTProfileError("tt_renderer_profile_unsupported")
     mode, codec = PROFILE_SPECS[profile]
     encoder = "libx264" if backend == "cpu" else "hevc_nvenc" if codec in {"hevc", "source"} else "h264_nvenc"

@@ -260,12 +260,13 @@ class FBNativeBridge:
                         source = prepare_source_url(task["source_media_url"]) if policy else task["source_media_url"]
                     else:
                         source = obj(task["snapshot_json"])["material"]["media_url"]
-                    profile = CPU_PROFILE if job.get("executor_backend") == "cpu" else PROFILE
+                    backend = job.get("executor_backend") or "gpu"
+                    profile = {"cpu": CPU_PROFILE, "cos": "fb-random-overlay-ci-apng-h264-v1"}.get(backend, PROFILE)
                     descriptor = {"kind": "fb_prepare", "request": {"job_id": task["gpu_job_id"], "content_id": task["content_id"],
                                   "source_url": source, "source_trim_tail_seconds": 0, "video_template": task.get("video_template") or "random_overlay", "expected_profile": profile}}
                     if family == "video" and task.get("source_kind") == "pool":
                         descriptor["request"]["page_pool"] = True
-                    descriptor["required_capabilities"] = prepare_capabilities("fb", profile, "cpu" if profile == CPU_PROFILE else "gpu", job)
+                    descriptor["required_capabilities"] = prepare_capabilities("fb", profile, backend, job)
                 else:
                     request = self._auto_preflight(task) if family == "auto" else self._video_preflight(task)
                     descriptor = {"kind": "fb_publish", "request": request, "page_id": task["page_id"],

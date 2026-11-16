@@ -134,16 +134,24 @@ def valid_host_id(value):
 
 
 def capacity_payload(raw, actor):
-    allowed = {"expected_version", "host_id", "stage", "max_workers", "global_publish_limit", "channel_limits"}
+    allowed = {"expected_version", "host_id", "stage", "max_workers", "global_publish_limit", "channel_limits",
+               "scaling_mode", "min_pending", "prepare_routing"}
     if not isinstance(raw, dict) or set(raw) - allowed:
         raise MonitorError("invalid_request", "容量参数无效")
     if type(raw.get("expected_version")) is not int or raw["expected_version"] < 0:
         raise MonitorError("invalid_request", "请先刷新当前容量版本")
     result = dict(raw)
-    if any(k in raw for k in ("host_id", "stage", "max_workers")):
+    if "prepare_routing" in raw and raw["prepare_routing"] not in ("priority", "legacy"):
+        raise MonitorError("invalid_request", "制作分单策略无效")
+    if "scaling_mode" in raw and raw["scaling_mode"] not in ("manual", "auto"):
+        raise MonitorError("invalid_request", "并发模式无效")
+    if "min_pending" in raw and ((raw.get("host_id"), raw.get("stage")) != ("cos-cloud", "prepare")
+            or type(raw["min_pending"]) is not int or raw["min_pending"] < 0):
+        raise MonitorError("invalid_request", "COS 最低待制作数无效")
+    if any(k in raw for k in ("host_id", "stage", "max_workers", "min_pending", "scaling_mode")):
         if not valid_host_id(raw.get("host_id")) or raw.get("stage") not in STAGES:
             raise MonitorError("invalid_request", "服务器或执行阶段无效")
-        if type(raw.get("max_workers")) is not int or not 0 <= raw["max_workers"] <= 64:
+        if "max_workers" in raw and (type(raw["max_workers"]) is not int or not 0 <= raw["max_workers"] <= 64):
             raise MonitorError("invalid_request", "进程数无效")
     if "global_publish_limit" in raw:
         if type(raw["global_publish_limit"]) is not int or not 1 <= raw["global_publish_limit"] <= 64:

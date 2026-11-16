@@ -293,7 +293,7 @@ class XNativeBridge:
                                "source_size": queue.get("preflight_size", 0), "identity_mode": "source_to_fingerprint",
                                "max_media_bytes": min(self.r.POST_MAX_MEDIA_BYTES, video_byte_limit(pending_route or bool(source.get("long_video_publish_eligible")))),
                                "max_duration_seconds": 14400 if pending_route or source.get("long_video_publish_eligible") else duration_policy.standard_limit(queue)}
-                    repair_profile = "x-h264-libx264-720-duration-policy-v1" if job.get("executor_backend") == "cpu" else REPAIR_PROFILE
+                    repair_profile = {"cos": "x-h264-ci-720-duration-policy-v1", "cpu": "x-h264-libx264-720-duration-policy-v1"}.get(job.get("executor_backend"), REPAIR_PROFILE)
                     request["repair_request"] = {"job_key": hashlib.sha256(canonical({"queue": queue_identity(queue), "profile": repair_profile}).encode()).hexdigest(),
                         "material_id": str(queue["material_id"]) if str(queue["material_id"]).isdigit() else str(queue["id"]),
                         "pool_item_id": int(queue["pool_item_id"] or queue["id"]), "profile": repair_profile,
@@ -306,7 +306,7 @@ class XNativeBridge:
                             # when the coordinator lost its final receipt.
                             request["prepared_artifact"] = obj(saved[0])
                     if queue.get("random_template_enabled"):
-                        profile = "x-random-overlay-libx264-720x1280-v1" if job.get("executor_backend") == "cpu" else "x-random-overlay-h264-720x1280-v1"
+                        profile = {"cos": "x-random-overlay-ci-apng-h264-v1", "cpu": "x-random-overlay-libx264-720x1280-v1"}.get(job.get("executor_backend"), "x-random-overlay-h264-720x1280-v1")
                         request["random_request"] = frozen["request"] if frozen else {
                             "job_key": "x-random-v1-" + hashlib.sha256(canonical(queue_identity(queue)).encode()).hexdigest(),
                             "queue_id": queue["id"], "content_id": str(queue["content_id"]), "profile": profile,
@@ -317,7 +317,7 @@ class XNativeBridge:
                     if frozen:
                         request = frozen["request"]
                     else:
-                        profile = "x-random-overlay-libx264-720x1280-v1" if job.get("executor_backend") == "cpu" else "x-random-overlay-h264-720x1280-v1"
+                        profile = {"cos": "x-random-overlay-ci-apng-h264-v1", "cpu": "x-random-overlay-libx264-720x1280-v1"}.get(job.get("executor_backend"), "x-random-overlay-h264-720x1280-v1")
                         request = {"job_key": "x-random-v1-" + hashlib.sha256(canonical({"queue": queue_identity(queue), "sha256": queue["preflight_sha256"]}).encode()).hexdigest(),
                                    "queue_id": queue["id"], "content_id": str(queue["content_id"]), "source_url": queue["material_url"],
                                    "source_sha256": queue["preflight_sha256"], "source_size": queue["preflight_size"], "source_duration": float(queue["preflight_duration"]),
@@ -342,9 +342,9 @@ class XNativeBridge:
             descriptor["account_resource"] = "x:account:" + str(queue["account_id"])
             render_request = descriptor.get("request", {}).get("random_request", descriptor.get("request", {}))
             if str(render_request.get("profile", "")).startswith("x-random-overlay-"):
-                descriptor["required_capabilities"] = ["prepare:x", "backend:" + ("cpu" if "libx264" in render_request["profile"] else "gpu")]
+                descriptor["required_capabilities"] = ["prepare:x", "backend:" + ("cos" if "-ci-" in render_request["profile"] else "cpu" if "libx264" in render_request["profile"] else "gpu")]
             elif descriptor["kind"] == "x_preflight":
-                descriptor["required_capabilities"] = ["prepare:x", "backend:" + ("cpu" if "libx264" in repair_profile else "gpu")]
+                descriptor["required_capabilities"] = ["prepare:x", "backend:" + ("cos" if "-ci-" in repair_profile else "cpu" if "libx264" in repair_profile else "gpu")]
             descriptor["source_key"] = job["source_key"]
             with self.connect() as c:
                 c.execute("INSERT INTO pipeline_x_claim VALUES(?,?,?,?,?,?,?)", (*key, self.claim_hash(claim), queue["id"], log["id"], canonical(descriptor)))

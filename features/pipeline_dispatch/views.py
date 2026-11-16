@@ -129,9 +129,10 @@ def _common(conn, actor, channels, now):
 
 
 def capacity_dto(config):
-    return {"version": config["version"],
+    return {"version": config["version"], "prepare_routing": config.get("prepare_routing", "legacy"),
             "hosts": [{"host_id": host, "stage": stage, "max_workers": pool.get("target"),
-                       "ceiling": pool.get("ceiling"), "scaling_mode": pool.get("scaling_mode", "auto")} for host, pools in sorted(config["hosts"].items())
+                       "ceiling": pool.get("ceiling"), "scaling_mode": pool.get("scaling_mode", "auto"),
+                       **({"min_pending": pool["min_pending"]} if "min_pending" in pool else {})} for host, pools in sorted(config["hosts"].items())
                       for stage, pool in pools.items() if stage in STAGES],
             "global_publish_limit": config.get("global_publish_limit"),
             "channel_limits": {c: config.get("channel_limits", {}).get(c) for c in CHANNELS}}
@@ -368,12 +369,14 @@ def _workers(conn, store, actor, common, now):
     for host in sorted(set(nodes) | set(config["hosts"])):
         node = nodes.get(host, {})
         metrics = _json(node.get("metrics_json", "{}"))
-        item = {"host_id": host, "label": labels.get(host) or {"cpu-main": "CPU 服务器", "hk-gpu": "香港 GPU"}.get(host, host),
+        item = {"host_id": host, "label": labels.get(host) or {"cpu-main": "CPU 服务器", "hk-gpu": "香港 GPU", "cos-cloud": "COS 云端"}.get(host, host),
                 "last_seen_at": node.get("last_seen_at"), "stale": not node or node["last_seen_at"] < fresh}
         item.update({name: metrics.get(name) if isinstance(metrics.get(name), (float, int)) and not isinstance(metrics.get(name), bool) and math.isfinite(metrics[name]) else None for name in metric_names})
         item["stages"] = []
         for stage in STAGES:
             pool = config["hosts"].get(host, {}).get(stage, {})
+            if host == "cos-cloud" and stage != "prepare":
+                continue
             group = [p for p in processes if p["host_id"] == host and p["stage"] == stage]
             stat = stats.get((host, stage), {})
             item["stages"].append({"stage": stage, "max_workers": pool.get("target"), "ceiling": pool.get("ceiling"),
@@ -384,6 +387,19 @@ def _workers(conn, store, actor, common, now):
                                    "completed_today": stat.get("today", 0) if node else None,
                                    "throughput_per_hour": stat.get("hour", 0) if node else None,
                                    "avg_duration_seconds": stat.get("avg_seconds")})
+        if host == "cos-cloud":
+            from .prepare_routing import cloud_health
+            stage = item["stages"][0]
+            minimum = config["hosts"][host]["prepare"].get("min_pending", 100)
+            pending = store.cloud_pending(conn, config, stamp(now))
+            active_count = sum(j["node_id"] == host and j["stage"] == "prepare" for j in active)
+            health = cloud_health(node, "prepare") if node else "node_offline"
+            latest_reason = next((p["idle_reason"] for p in processes if p["host_id"] == host and p["status"] == "idle"), "")
+            stage.update(min_pending=minimum, eligible_pending=pending, active_jobs=active_count,
+                         queue_limit=metrics.get("queue_limit"),
+                         admission_reason=("node_offline" if item["stale"] else "capacity_limit" if not stage["max_workers"]
+                                           else health or ("cos_below_min_pending" if pending is not None and pending < minimum
+                                           else "capacity_limit" if active_count >= stage["max_workers"] else latest_reason)))
         items.append(item)
     return dict(common, items=items, processes=processes, capacity=capacity_dto(config))
 
