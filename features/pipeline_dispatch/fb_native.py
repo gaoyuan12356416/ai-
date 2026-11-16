@@ -88,18 +88,26 @@ class FBNativeBridge:
 
     def renew_cloud(self, job, claim):
         record, task, _ = self._stored(job, claim)
-        if (job.get("node_id"), job["stage"]) != ("cos-cloud", "prepare") or record["receipt_json"]:
+        if (job.get("node_id"), job["stage"]) != ("cos-cloud", "prepare"):
             raise AdapterError("canonical_cloud_claim_invalid")
+        if record["receipt_json"]:
+            return {"accepted": True}
         auto = job["family"] == "auto"
         store = self.runtime.store if auto else self.runtime.manual_worker.store
-        table, key, owner, end = (("fb_auto_task", "id", "lease_owner", "lease_expires_at_utc") if auto
-                                  else ("fb_video_task", "task_id", "execution_lease", "execution_until"))
         now = store.now_fn()
         with store.connect() as conn:
-            # Only extend a still-valid native reservation for this exact owner.
-            # Any intervening owner/state change requires canonical reconciliation.
-            changed = conn.execute(f"UPDATE {table} SET {end}=? WHERE {key}=? AND {owner}=? AND status='preparing' AND {end}>?",
-                            (utc_iso(now + timedelta(seconds=1200)), task[key], task[owner], utc_iso(now))).rowcount
+            # The original coordinator claim, same native owner and pending
+            # preparation must all still match, including after a restart.
+            until = utc_iso(now + timedelta(seconds=1200))
+            if auto:
+                changed = conn.execute("""UPDATE fb_auto_task SET lease_expires_at_utc=? WHERE id=?
+                        AND lease_owner=? AND status='preparing' AND graph_post_id=''""",
+                        (until, task["id"], task["lease_owner"])).rowcount
+            else:
+                from features.fb_video_publish.core import stamp
+                changed = conn.execute("""UPDATE fb_video_task SET prepare_until=? WHERE task_id=? AND prepare_lease=?
+                        AND status='queued' AND prepare_state='preparing' AND execution_lease=''""",
+                        (stamp(now + timedelta(seconds=1200)), task["task_id"], task["claim_token"])).rowcount
         if not changed:
             raise AdapterError("canonical_claim_stale")
         return {"accepted": True}

@@ -448,7 +448,7 @@ def handler_type(coordinator):
                 pass  # The durable callback can be delivered again with its ID.
 
         def do_GET(self):
-            self.reply(200, {"ok": True, "service": "pipeline-dispatch"}) if self.path == "/health" else self.reply(404, {"code": "not_found"})
+            self.reply(200, {"ok": True, "service": "pipeline-dispatch", "cos_prepare": True}) if self.path == "/health" else self.reply(404, {"code": "not_found"})
 
         def do_PUT(self):
             if self.path == "/api/pipeline-monitor/cos-capacity":
