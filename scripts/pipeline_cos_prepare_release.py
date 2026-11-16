@@ -100,7 +100,7 @@ def build(package, mirror, settings):
     scripts=node/"scripts"
     scripts.mkdir(exist_ok=True)
     for name in ["pipeline_cos_native.py","pipeline_cos_credentials.py","pipeline_cos_launch.py",
-                 "pipeline_cos_control.py","pipeline_cos_handoff.py","pipeline_cos_prepare_release.py"]:
+                 "pipeline_cos_control.py","pipeline_cos_handoff.py","pipeline_cos_prepare_release.py","pipeline_cos_dependencies.py"]:
         shutil.copy2(package/"scripts"/name,scripts/name)
     ports = {str(port):alternate for _,_,port,alternate,_,_ in NATIVE}
     configdir=release/"launch"
