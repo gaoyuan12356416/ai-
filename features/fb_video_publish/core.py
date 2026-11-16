@@ -425,6 +425,7 @@ class Store:
                         "repeat_history": repeats.get(pid + ":" + mid, [])}
             if not pool and not group_pool:
                 snapshot.update(title=title, manual_policy="operator-v2")
+                snapshot["story_copy_manual"] = bool(str(pair.get("caption_template") or "").strip())
             if pool:
                 snapshot["pool"] = pool
             if group_pool:
@@ -610,6 +611,12 @@ class Store:
                              (lease, until, now, row["task_id"]))
             else:
                 conn.execute("UPDATE fb_video_task SET link_state='writing',link_lease=?,link_until=?,updated_at_utc=? WHERE task_id=?", (lease, until, now, row["task_id"]))
+            try:
+                from features.story_copy.bridge import fb_final
+                if kind == 'execute':
+                    fb_final(conn,'fv',row)
+            except Exception as story_error:
+                __import__('logging').getLogger(__name__).warning('story_copy.fallback %s',type(story_error).__name__)
             conn.commit()
             result = dict(conn.execute("SELECT * FROM fb_video_task WHERE task_id=?", (row["task_id"],)).fetchone())
             result["claim_token"], result["worker_id"] = lease, worker_id

@@ -1,0 +1,18 @@
+[Unit]
+Description=Prepare multilingual story captions in batches
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk/story-copy
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/story-copy/current
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -B -m features.story_copy.worker
+Restart=on-failure
+RestartSec=5
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

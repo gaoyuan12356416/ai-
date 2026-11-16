@@ -16559,7 +16559,7 @@ class XPostStore:
         item["created"] = created
         return item
 
-    def prepare_log(self, log_id, long_url, short_url, post_text):
+    def prepare_log(self, log_id, long_url, short_url, post_text, *, story_product_url=None):
         log_id = _positive_int(log_id, "log_id")
         timestamp = utc_now()
         with contextlib.closing(_connect(self.db_path)) as conn:
@@ -16574,6 +16574,11 @@ class XPostStore:
                     conn.rollback()
                     raise XPostError("x_post_log_conflict", "发布日志已进入执行阶段", 409)
             else:
+                try:
+                    from features.story_copy.bridge import x_final
+                    post_text=x_final(conn,row,post_text,short_url,self.db_path,story_product_url)
+                except Exception as story_error:
+                    __import__('logging').getLogger(__name__).warning('story_copy.fallback %s',type(story_error).__name__)
                 conn.execute(
                     "UPDATE x_post_publish_log SET long_url=?,short_url=?,post_text=?,updated_at=? WHERE id=?",
                     (long_url, short_url, post_text, timestamp, log_id),
@@ -19601,6 +19606,7 @@ def publish_canary(
                     }, duration_policy_version=duration_policy.version(queue)
                 )
                 log = store.prepare_log(log["id"], long_url, short_url, post_text)
+                post_text = log["post_text"]
         if not prepare_link_after_probe:
             if callable(storage_guard):
                 storage_guard()
@@ -19755,6 +19761,7 @@ def publish_canary(
                 }, duration_policy_version=duration_policy.version(queue)
             )
             log = store.prepare_log(log["id"], long_url, short_url, post_text)
+            post_text = log["post_text"]
             if callable(storage_guard):
                 storage_guard()
             write_short_redirect(

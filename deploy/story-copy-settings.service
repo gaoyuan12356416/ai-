@@ -1,0 +1,16 @@
+[Unit]
+Description=Authenticated story caption preferences
+After=network.target
+RequiresMountsFor=/mnt/data-disk/story-copy
+
+[Service]
+WorkingDirectory=/opt/story-copy/current
+RuntimeDirectory=story-copy
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/python3 -B -m features.story_copy.settings
+Restart=on-failure
+RestartSec=3
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
