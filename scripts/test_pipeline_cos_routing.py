@@ -98,6 +98,33 @@ class CloudRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(DispatchError, "enrollment_scope_mismatch"):
             self.store.consume_enrollment(enrollment["token"], "cos-cloud")
 
+    def test_three_nodes_race_and_legacy_rollback(self):
+        self.pool("cos-cloud", 1, min_pending=0)
+        offers = [("cos-cloud","c1"),("cpu-main","cpu"),("hk-gpu","gpu")]
+        for host, worker in offers[1:]:
+            self.store.register_node(host, ["backend:"+worker,"prepare:fb"])
+            self.pool(host, 1)
+            self.store.worker_heartbeat(host,worker,"prepare")
+        self.offer(1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            replies=list(pool.map(lambda pair:self.claim(*pair),offers))
+        self.assertEqual([reply["job"]["node_id"] for reply in replies if reply["job"]], ["hk-gpu"])
+        original=replies[2]["job"]
+        self.store.set_capacity(dict(expected_version=self.store.config()["version"],prepare_routing="legacy"),
+                                {"is_admin": True})
+        self.pool("cos-cloud", 0)
+        self.offer(2)
+        self.assertEqual(self.claim("cpu-main","cpu")["job"]["source_id"], "2")
+        self.assertTrue(self.store.heartbeat(original)["accepted"])
+
+    def test_stale_capacity_version_does_not_change_threshold(self):
+        version = self.store.config()["version"]
+        self.pool("cos-cloud", 1, min_pending=100)
+        with self.assertRaisesRegex(DispatchError,"capacity_version_conflict"):
+            self.store.set_capacity(dict(expected_version=version,host_id="cos-cloud",stage="prepare",
+                                         min_pending=0,max_workers=8),{"is_admin": True})
+        self.assertEqual(self.store.config()["hosts"]["cos-cloud"]["prepare"]["min_pending"],100)
+
     def test_recovery_at_zero_and_fenced_unknown(self):
         self.pool("cos-cloud", 1, min_pending=0)
         self.offer(1)

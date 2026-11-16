@@ -14,6 +14,10 @@ class PendingReadback(Exception):
     """The provider may have accepted this exact action."""
 
 
+class QueueUnavailable(PendingReadback):
+    """The tenant queue or its credentials temporarily prevent further admission."""
+
+
 def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
@@ -114,7 +118,7 @@ class CloudJobs:
         target = operation.get("Output") or {}
         return (item.get("Tag") == row["tag"] and item.get("QueueId") == self.queue
                 and operation.get("UserData") == row["identity"] and target.get("Bucket") == self.bucket
-                and target.get("Object") == row["target"])
+                and target.get("Object") == row["target"] and target.get("Region", self.region) == self.region)
 
     def _find(self, row):
         window = dt.datetime.fromtimestamp(row["created"], dt.timezone.utc)
@@ -143,6 +147,8 @@ class CloudJobs:
         row, new = self.ledger.intent(key, fingerprint(body), output, tag,
                       str(context.identity.get("job_id")) + ":" + str(context.identity.get("generation")))
         if row["state"] == "rejected":
+            if not self.health()["queue_ready"]:
+                raise QueueUnavailable()
             new = self.ledger.retry_rejected(key)
         try:
             if new:
@@ -154,6 +160,7 @@ class CloudJobs:
                     if str(status_code) in {"403","429","503"} and code in {
                             "AccessDenied","SlowDown","RequestLimitExceeded","TooManyRequests","QueueFull","LimitExceeded"}:
                         self.ledger.update(key, "", "rejected")
+                        raise QueueUnavailable() from None
                     raise
                 item = records(response.get("JobsDetail"))[0]
                 if not self._matches(item, row) or not item.get("JobId"):

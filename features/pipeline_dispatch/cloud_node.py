@@ -12,7 +12,7 @@ import traceback
 from pathlib import Path
 
 from .client import CoordinatorClient, CoordinatorError
-from .cloud_jobs import CloudLedger, PendingReadback, fingerprint
+from .cloud_jobs import CloudLedger, PendingReadback, QueueUnavailable, fingerprint
 from .cloud_media import CloudExecutor
 from .executors import ExecutionError
 from .receipt_outbox import ReceiptOutbox
@@ -95,8 +95,9 @@ class CloudNode:
                 ctx.check()
                 result = self.executor.execute(job, ctx)
                 route, receipt = "jobs/complete", {"result":result}
-            except (PendingReadback, LeaseLost):
-                self.backoff_until = max(self.backoff_until, time.monotonic() + 30)
+            except (PendingReadback, LeaseLost) as exc:
+                if isinstance(exc, QueueUnavailable):
+                    self.backoff_until = max(self.backoff_until, time.monotonic() + 30)
                 with contextlib.suppress(CoordinatorError):
                     client.post("jobs/cos-park", ctx.identity)
                 self.ledger.postpone(local_id, 30)
@@ -113,7 +114,8 @@ class CloudNode:
                       Path(frame.filename).name, frame.lineno, flush=True)
                 if (getattr(exc, "unknown", False) or not code or getattr(exc, "retryable", False)
                         or code in {"cos_session_expired","youtube_source_download_failed"}):
-                    self.backoff_until = max(self.backoff_until, time.monotonic() + 30)
+                    if isinstance(exc, (ImportError, PermissionError)) or code == "cos_session_expired":
+                        self.backoff_until = max(self.backoff_until, time.monotonic() + 30)
                     with contextlib.suppress(CoordinatorError):
                         client.post("jobs/cos-park", ctx.identity)
                     self.ledger.postpone(local_id, 30)

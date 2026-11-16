@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from features.pipeline_dispatch.cloud_jobs import CloudJobs, CloudLedger, PendingReadback
+from features.pipeline_dispatch.cloud_jobs import CloudJobs, CloudLedger, PendingReadback, QueueUnavailable
 from features.pipeline_dispatch.executors import ExecutionError
 
 
@@ -66,6 +66,23 @@ class PaidRecoveryTests(unittest.TestCase):
         self.provider.jobs[0]["Operation"]["Output"]["Object"]="other.mp4"
         with self.assertRaises(PendingReadback):
             self.run_stage()
+        self.assertEqual(self.provider.submits, 1)
+
+    def test_queue_throttling_and_individual_uncertainty_are_distinct(self):
+        from unittest.mock import patch
+        class Throttled(Exception):
+            def get_status_code(self): return 429
+            def get_error_code(self): return "TooManyRequests"
+        with patch.object(self.provider, "ci_create_media_jobs", side_effect=Throttled()):
+            with self.assertRaises(QueueUnavailable): self.run_stage()
+        with patch.object(CloudJobs, "health", return_value={"queue_ready": False}):
+            with self.assertRaises(QueueUnavailable): self.run_stage()
+        with patch.object(CloudJobs, "health", return_value={"queue_ready": True}):
+            self.assertEqual(self.run_stage()[1]["job_id"], "provider-1")
+        self.provider.jobs[0]["Operation"]["Output"]["Region"] = "other-region"
+        with self.assertRaises(PendingReadback) as mismatch:
+            self.run_stage()
+        self.assertNotIsInstance(mismatch.exception, QueueUnavailable)
         self.assertEqual(self.provider.submits, 1)
 
 

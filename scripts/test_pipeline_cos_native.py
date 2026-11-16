@@ -1,6 +1,9 @@
 """Preparation receipts cross the real channel SQLite boundary in isolated fixtures."""
 import json
+import os
 import unittest
+from pathlib import Path
+from types import MethodType
 from unittest.mock import patch
 
 from features.pipeline_dispatch.cloud_admin import session_actor
@@ -8,6 +11,36 @@ from features.pipeline_dispatch.core import DispatchError
 
 
 class CosmosNativeTests(unittest.TestCase):
+    def test_fb_cloud_receipt_renews_original_lease_and_flows_to_publish(self):
+        from features.fb_video_publish.worker import Worker
+        from scripts.test_pipeline_fb_source_locks import FBSourceLockTests
+        fixture=FBSourceLockTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.runtime.manual_worker._moboreels_link=MethodType(Worker._moboreels_link,fixture.runtime.manual_worker)
+        native=fixture.video_job(9)
+        publish=dict(native,stage="publish",node_id="cpu-main",generation=2)
+        job=dict(native,stage="prepare",generation=1,executor_backend="cos",node_id="cos-cloud",
+                 executor_capabilities=["catalog:fb:"+"f"*64])
+        claim=dict(fixture.claim,node_id="cos-cloud")
+        sample=os.environ.get("PIPELINE_COS_FB_FIXTURE_RECEIPT")
+        receipt=json.loads(Path(sample).read_text()) if sample else {"preparation":{
+            "profile":"fb-random-overlay-ci-apng-h264-v1","job_id":"fixture-9","content_id":"content",
+            "output_url":"https://media.example.test/ci-fixture.mp4","output_sha256":"c"*64,"output_size":12900,
+            "probe":{"duration":8},"random_overlay_recipe":{"asset_set_sha256":"f"*64}}}
+        result=receipt["preparation"]
+        with fixture.video.connect() as conn:
+            conn.execute("""UPDATE fb_video_task SET processing_mode='random_overlay',prepare_state='planned',
+                        prepared_json='{}',gpu_job_id=?,content_id=? WHERE task_id=?""",
+                        (result["job_id"],result["content_id"],job["source_id"]))
+        descriptor=fixture.bridge.reserve(job,claim)
+        self.assertEqual(descriptor["request"]["expected_profile"],result["profile"])
+        self.assertTrue(fixture.bridge.renew_cloud(job,claim)["accepted"])
+        fixture.bridge.complete(job,receipt,claim)
+        self.assertTrue(fixture.bridge.complete(job,receipt,claim)["idempotent"])
+        next_stage=fixture.bridge.reserve(publish,dict(fixture.claim,node_id="cpu-main"))
+        self.assertEqual(next_stage["artifact"]["url"],result["output_url"])
+
     def test_x_cloud_preparation_enters_original_publisher(self):
         from scripts.test_pipeline_x_native import NativeTests
         fixture = NativeTests()
