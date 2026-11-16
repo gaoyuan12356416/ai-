@@ -4,7 +4,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,6 +82,34 @@ class TTCorrectionTests(unittest.TestCase):
         folder = self.state / 'corrections' / self.date / self.revision
         self.assertEqual((folder / 'card.json').read_text(encoding='utf-8'), json.dumps(sent_card, ensure_ascii=False, separators=(',', ':')))
         self.assertEqual(json.loads((folder / 'receipt.json').read_text())['message_id'], 'corrected-message')
+        self.assert_original_unchanged()
+
+    def test_layout_resend_uses_only_frozen_report_and_sends_once(self):
+        args = self.args + ['--layout-only']
+        with ExitStack() as stack:
+            collectors = [stack.enter_context(patch.object(correction, name))
+                          for name in ('collect_tt', 'collect_fb', 'collect_x')]
+            send = stack.enter_context(patch.object(correction, 'send_card',
+                                       return_value={'code': 0, 'message_id': 'table-message'}))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            self.assertEqual(correction.main(args + ['--preview']), 0)
+            send.assert_not_called()
+            self.assertEqual(correction.main(args + ['--send']), 0)
+            self.assertEqual(correction.main(args + ['--send']), 0)
+            self.assertEqual(send.call_count, 1)
+            for collector in collectors:
+                collector.assert_not_called()
+        folder = self.state / 'corrections' / self.date / self.revision
+        report = json.loads((folder / 'report.json').read_text(encoding='utf-8'))
+        audit = report.pop('correction')
+        self.assertEqual(report, self.base)
+        self.assertEqual(audit['original_message_id'], 'original-message')
+        self.assertEqual(audit['original_report_sha256'], hashlib.sha256(self.original_files['report.json']).hexdigest())
+        card = json.loads((folder / 'card.json').read_text(encoding='utf-8'))
+        self.assertIn('表格版补发', card['header']['title']['content'])
+        self.assertIn('column_set', [e['tag'] for e in card['elements']])
+        self.assertEqual(send.call_args.args[2], card)
+        self.assertNotEqual(send.call_args.args[3], self.original_uuid)
         self.assert_original_unchanged()
 
     def test_ambiguous_correction_blocks_retries_without_overwriting_artifacts(self):

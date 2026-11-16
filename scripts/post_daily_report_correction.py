@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit, deduplicated channel correction of an already sent daily report."""
+"""Explicit, deduplicated data or layout correction of an already sent daily report."""
 from __future__ import annotations
 
 import argparse
@@ -38,23 +38,23 @@ def corrected_report(state, chat_id, paths, window, revision, channel="TT"):
         raise RuntimeError("original_window_mismatch")
     if [c.get("channel") for c in report.get("channels", [])] != ["TT", "FB", "X"]:
         raise RuntimeError("original_channel_layout_mismatch")
-    collectors = {"TT": collect_tt, "FB": collect_fb, "X": collect_x}
-    replacement = collectors[channel](paths, window)
-    validate_channel(replacement)
-    if replacement.get("channel") != channel or replacement.get("error") or not replacement.get("rows"):
-        raise RuntimeError(channel.lower() + "_correction_unavailable")
-    if any(r.get("expected") is None or not r.get("data_available", True) for r in replacement["rows"]):
-        raise RuntimeError(channel.lower() + "_correction_incomplete")
-    result = copy.deepcopy(report)
-    result["channels"][["TT", "FB", "X"].index(channel)] = replacement
-    result["correction"] = {
+    report["correction"] = {
         "channel": channel, "revision": revision,
         "original_message_id": original["message_id"],
         "original_report_sha256": hashlib.sha256(raw).hexdigest(),
         "original_generated_at_utc": report.get("generated_at_utc"),
     }
-    result["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
-    return result
+    if channel != "layout":
+        collectors = {"TT": collect_tt, "FB": collect_fb, "X": collect_x}
+        replacement = collectors[channel](paths, window)
+        validate_channel(replacement)
+        if replacement.get("channel") != channel or replacement.get("error") or not replacement.get("rows"):
+            raise RuntimeError(channel.lower() + "_correction_unavailable")
+        if any(r.get("expected") is None or not r.get("data_available", True) for r in replacement["rows"]):
+            raise RuntimeError(channel.lower() + "_correction_incomplete")
+        report["channels"][["TT", "FB", "X"].index(channel)] = replacement
+        report["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    return report
 
 
 def correction_card(report, compact=False):
@@ -63,6 +63,10 @@ def correction_card(report, compact=False):
     if channel == "FB":
         visible["channels"] = [c for c in visible["channels"] if c["channel"] == "FB"]
     card = (build_compact_card if compact else build_card)(visible)
+    if channel == "layout":
+        card["header"]["title"]["content"] += "（表格版补发）"
+        card["elements"][0]["text"]["content"] += "\n本次补发沿用原播报的统计数字。"
+        return card
     if channel == "FB":
         card["header"]["title"]["content"] = "%s｜FB Post 发布日报" % report["date"]
     card["header"]["title"]["content"] += "（%s 修正版）" % channel
@@ -76,7 +80,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", required=True, help="Original Beijing report date, not the sending date")
     parser.add_argument("--revision", required=True, help="Stable correction ID; repeat calls are deduplicated")
-    parser.add_argument("--channel", choices=("TT", "FB", "X"), default="TT")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--channel", choices=("TT", "FB", "X"), default="TT")
+    scope.add_argument("--layout-only", action="store_true", help="Restore the table from the original archived data")
     parser.add_argument("--state-dir", default="/mnt/data-disk/post-daily-report")
     parser.add_argument("--paths-json", help="Optional publisher paths for offline fixtures")
     parser.add_argument("--feishu-config", default="/root/.codex/plugins/feishu/config.json")
@@ -85,6 +91,7 @@ def main(argv=None):
     mode.add_argument("--send", action="store_true")
     mode.add_argument("--preview", action="store_true")
     args = parser.parse_args(argv)
+    channel = "layout" if args.layout_only else args.channel
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", args.revision):
         parser.error("revision must be a safe 1-64 character identifier")
     window = Window.for_date(args.date)
@@ -106,7 +113,7 @@ def main(argv=None):
                 print(json.dumps({"status": "already_running"}))
                 return 0
         formal = state / "corrections" / window.date / args.revision
-        delivery_key = window.date + "/" + args.channel + "-correction/" + args.revision
+        delivery_key = window.date + "/" + channel + "-correction/" + args.revision
         if args.send:
             formal.mkdir(parents=True, exist_ok=True)
             store = DeliveryStore(formal / "delivery.sqlite3")
@@ -120,7 +127,7 @@ def main(argv=None):
         paths = dict(DEFAULT_PATHS)
         if args.paths_json:
             paths.update(json.loads(Path(args.paths_json).read_text(encoding="utf-8")))
-        report = corrected_report(state, args.chat_id, paths, window, args.revision, args.channel)
+        report = corrected_report(state, args.chat_id, paths, window, args.revision, channel)
         for compact in (False, True):
             card = correction_card(report, compact)
             card_json = json.dumps(card, ensure_ascii=False, separators=(",", ":"))
@@ -135,8 +142,10 @@ def main(argv=None):
         atomic_write(folder / "report.json", json.dumps(report, ensure_ascii=False, indent=2))
         atomic_write(folder / "card.json", card_json)
         atomic_write(folder / "preview.html", preview_html(report, card))
+        totals = {c["channel"].lower(): ({"error": c["error"]} if c.get("error") else total(c["rows"]))
+                  for c in report["channels"] if channel == "layout" or c["channel"] == channel}
         print(json.dumps({"status": "correction_ready", "date": window.date, "revision": args.revision,
-            args.channel.lower(): total(report["channels"][["TT", "FB", "X"].index(args.channel)]["rows"]), "card_bytes": payload_size,
+            **totals, "card_bytes": payload_size,
             "card_sha256": hashlib.sha256(card_json.encode()).hexdigest(), "path": str(folder)}, ensure_ascii=False))
         if not args.send:
             return 0

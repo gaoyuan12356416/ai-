@@ -83,10 +83,33 @@ def _cost_text(channel):
 
 
 def _columns(values, header=False):
-    return {"tag": "column_set", "flex_mode": "none", "background_style": "grey" if header else "default",
-            "columns": [{"tag": "column", "width": "weighted", "weight": 3 if i == 0 else 1,
-                         "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": str(v)}}]}
-                        for i, v in enumerate(values)]}
+    columns = []
+    for i, value in enumerate(values):
+        # Source labels are literal text. The other cells contain fixed headers or counts.
+        cell = ({"tag": "div", "text": {"tag": "plain_text", "content": str(value)}} if i == 0
+                else {"tag": "markdown", "content": str(value)})
+        columns.append({"tag": "column", "width": "weighted", "weight": 3 if i == 0 else 1, "elements": [cell]})
+    row = {"tag": "column_set", "flex_mode": "none", "columns": columns}
+    if header:
+        row["background_style"] = "grey"
+    return row
+
+
+def _source_table(headers, entries, compact):
+    if compact and entries:
+        keys = ["c%d" % i for i in range(len(headers))]
+        columns = [{"name": key, "display_name": label, "data_type": "text"} for key, label in zip(keys, headers)]
+        rows = [dict(zip(keys, map(str, values))) for values, _ in entries]
+        elements = [{"tag": "table", "page_size": min(len(rows), 10), "columns": columns, "rows": rows}]
+    else:
+        elements = [_columns(headers, header=True)]
+    for values, note in entries:
+        if not compact:
+            elements.append(_columns(values))
+        if note:
+            caption = "%s　%s" % (values[0], note) if compact else note
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": caption}]})
+    return elements
 
 
 def _backlog_elements(report):
@@ -122,19 +145,15 @@ def _fb_elements(channel, compact=False):
                     "受阻/待处理 %s · 结果待确认 %s · 策略跳过 %s。" %
                     (_n(sums["expected"]), _n(success), states["failed"], states["blocked"] + states["pending"],
                      states["unknown"], states["policy_skipped"]))]
-    if not compact:
-        elements.append(_columns(["发布来源", "实际应发", "成功", "失败", "受阻/待处理", "待确认"], True))
+    entries = []
     for row in rows[:12]:
         confirmed = row.get("published", 0) + row.get("late", 0)
         values = [row.get("label", row["source"]), _n(row.get("expected")), confirmed,
                   row.get("failed", 0), row.get("blocked", 0) + row.get("pending", 0), row.get("unknown", 0)]
-        if compact:
-            elements.append(_md("%s：实际应发 %s｜成功 %s｜失败 %s｜受阻/待处理 %s｜待确认 %s。" % tuple(values)))
-        else:
-            elements.append(_columns(values))
-        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
-            "当日确认成功 %s，次日补发 %s；策略跳过 %s。" %
-            (row.get("published", 0), row.get("late", 0), row.get("policy_skipped", 0))}]})
+        note = "当日确认成功 %s，次日补发 %s；策略跳过 %s。" % (
+            row.get("published", 0), row.get("late", 0), row.get("policy_skipped", 0))
+        entries.append((values, note))
+    elements.extend(_source_table(["发布来源", "实际应发", "成功", "失败", "受阻/待处理", "待确认"], entries, compact))
     elements.append(_md("**统计口径**\n实际应发按冻结的 Page 频次及所选时隙计算；已排除频次外 %s 个位置、执行前已失效的旧计划 %s 个时隙。\n"
                         "成功为当日确认成功 %s + 次日 10:00 前补发 %s；结果待确认不计成功或失败。\n"
                         "策略跳过包含于实际应发，单列且不计失败；受阻/待处理不等同于平台发布失败。" %
@@ -142,7 +161,29 @@ def _fb_elements(channel, compact=False):
     return elements
 
 
-def build_card(report):
+def _plan_table(rows, compact):
+    entries = []
+    for row in rows[:12]:
+        counts = total([row])
+        values = [row.get("label", row["source"]), _n(counts["expected"]), _n(counts["published"]),
+                  _n(counts["late"]), _n(counts["missing"])]
+        if compact:
+            entries.append((values, ""))
+            continue
+        forms = row.get("form_counts") or {}
+        form_text = "、".join("%s %s" % (k, v) for k, v in forms.items()) if forms else row.get("form", "")
+        states = []
+        for key, label in (("pending", "待处理"), ("blocked", "受阻"), ("unknown", "结果待确认"), ("failed", "失败"), ("policy_skipped", "已取消/策略关闭")):
+            if row.get(key):
+                if key == "failed" and row.get("unqueued") == row[key]:
+                    label = "未入队"
+                states.append("%s %s" % (label, row[key]))
+        note = "；".join(x for x in [form_text, "、".join(states)] if x)
+        entries.append((values, note[:200]))
+    return _source_table(["发布来源", "应发", "当日已发", "补发", "未完成"], entries, compact)
+
+
+def build_card(report, *, compact=False):
     incomplete = any(c.get("error") or any(r.get("expected") is None for r in c.get("rows", [])) for c in report["channels"])
     elements = [_md("**统计日：%s（北京时间）**\n昨日 00:00–24:00；补发截至次日 10:00。\n范围：AI 后台全部自动、手动 Post。" % report["date"])]
     if incomplete:
@@ -156,24 +197,11 @@ def build_card(report):
         sums = total(rows)
         actual_fb = channel.get("accounting") == "actual-fb-v2"
         if actual_fb:
-            elements.extend(_fb_elements(channel))
+            elements.extend(_fb_elements(channel, compact))
         else:
             elements.append(_md("**%s｜应发 %s · 当日计划已发 %s · 补发 %s · 未完成 %s**" %
                             (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]))))
-            elements.append(_columns(["发布来源", "应发", "当日已发", "补发", "未完成"], True))
-        for row in ([] if actual_fb else rows[:12]):
-            counts = total([row])
-            elements.append(_columns([row.get("label", row["source"]), _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]), _n(counts["missing"])]))
-            forms = row.get("form_counts") or {}
-            form_text = "、".join("%s %s" % (k, v) for k, v in forms.items()) if forms else row.get("form", "")
-            states = []
-            for key, label in (("pending", "待处理"), ("blocked", "受阻"), ("unknown", "结果待确认"), ("failed", "失败"), ("policy_skipped", "已取消/策略关闭")):
-                if row.get(key):
-                    if key == "failed" and row.get("unqueued") == row[key]:
-                        label = "未入队"
-                    states.append("%s %s" % (label, row[key]))
-            note = "；".join(x for x in [form_text, "、".join(states)] if x)
-            if note: elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note[:200]}]})
+            elements.extend(_plan_table(rows, compact))
         if len(rows) > 12: elements.append(_md("另有 %s 个来源，已计入渠道汇总；完整明细保存在日报归档。" % (len(rows) - 12)))
         elements.append(_md("往期计划昨日确认完成：**%s** 条（不计入上表昨日计划）。" % channel.get("prior_completed", 0)))
         if _cost_text(channel):
@@ -183,15 +211,33 @@ def build_card(report):
             for reason in row.get("reasons", []):
                 if not reason.get("count"): continue
                 qualifier = "（推测）" if reason.get("confidence") == "inferred" else "（待核实）" if reason.get("confidence") == "unknown" else ""
-                reasons.append("• **%s：%s 条** %s%s\n  建议：%s" % (row.get("label", row["source"])[:60], reason["count"], reason["reason"][:150], qualifier, reason.get("suggestion", "核对任务记录。")[:150]))
-        if reasons: elements.append(_md(("**失败、受阻与待确认原因**\n" if actual_fb else "**缺口原因与建议**\n") + "\n".join(reasons[:8]) + ("\n另有 %s 项原因，完整明细见日报归档。" % (len(reasons) - 8) if len(reasons) > 8 else "")))
+                text = "• **%s：%s 条** %s%s\n  建议：%s" % (row.get("label", row["source"])[:60], reason["count"], reason["reason"][:150], qualifier, reason.get("suggestion", "核对任务记录。")[:150])
+                reasons.append((reason["count"], text))
+        if reasons:
+            limit = 2 if compact else 8
+            if compact:
+                reasons.sort(key=lambda item: -item[0])
+            heading = "**失败、受阻与待确认原因**" if actual_fb else "**缺口原因与建议**"
+            lines = [heading] + [text for _, text in reasons[:limit]]
+            if len(reasons) > limit:
+                lines.append("另有 %s 项原因，完整明细见日报归档。" % (len(reasons) - limit))
+            elements.append(_md("\n".join(lines)))
         if actual_fb:
             policies = ["• %s：%s 条 %s" % (row.get("label", row["source"]), reason["count"], reason["reason"])
                         for row in rows for reason in row.get("policy_reasons", [])]
             if policies:
-                elements.append(_md("**正常策略跳过（不计失败）**\n" + "\n".join(policies)))
+                shown = policies[:2] if compact else policies
+                lines = ["**正常策略跳过（不计失败）**"] + shown
+                if len(policies) > len(shown):
+                    lines.append("另有 %s 项策略说明，详见日报归档。" % (len(policies) - len(shown)))
+                elements.append(_md("\n".join(lines)))
         warnings = list(dict.fromkeys(channel.get("warnings", []) + [w for r in rows for w in r.get("warnings", [])]))
-        if warnings: elements.append(_md("**口径说明**\n" + "\n".join("• " + w[:220] for w in warnings[:4]) + ("\n另有 %s 条说明，完整内容保存在日报归档。" % (len(warnings) - 4) if len(warnings) > 4 else "")))
+        if warnings:
+            limit = 1 if compact else 4
+            lines = ["**口径说明**"] + ["• " + w[:220] for w in warnings[:limit]]
+            if len(warnings) > limit:
+                lines.append("另有 %s 条说明，完整内容保存在日报归档。" % (len(warnings) - limit))
+            elements.append(_md("\n".join(lines)))
     elements.extend(_backlog_elements(report))
     elements.append({"tag": "hr"})
     elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": "已发以账本确认成功为准；无平台发布时间时使用系统确认时间。已提交/制作完成不等于已发布。仅播报与建议，不自动补发或调整发布任务。"}]})
@@ -201,41 +247,26 @@ def build_card(report):
 
 
 def build_compact_card(report):
-    elements = [_md("**北京时间 %s**｜补发截至次日 10:00。\n数据较多，本卡展示渠道汇总和主要原因；完整明细保存在服务器日报归档。" % report["date"])]
-    for channel in report["channels"]:
-        if channel.get("error"):
-            elements.append(_md("**%s：数据读取失败，数量未知。**" % channel["channel"]))
-            continue
-        rows = channel.get("rows", [])
-        sums = total(rows)
-        actual_fb = channel.get("accounting") == "actual-fb-v2"
-        if actual_fb:
-            elements.extend(_fb_elements(channel, compact=True))
-            elements.append(_md("往期计划当日确认完成 %s 条，单列不计入上述计划。" % channel.get("prior_completed", 0)))
-        else:
-            elements.append(_md("**%s** 应发 %s｜当日计划已发 %s｜补发 %s｜未完成 %s；往期昨日完成 %s。" % (channel["channel"], _n(sums["expected"]), _n(sums["published"]), _n(sums["late"]), _n(sums["missing"]), channel.get("prior_completed", 0))))
-        for row in ([] if actual_fb else rows[:10]):
-            counts = total([row])
-            elements.append(_md("%s：%s / %s / %s（应发 / 已发 / 补发）" % (row.get("label", row["source"])[:60], _n(counts["expected"]), _n(counts["published"]), _n(counts["late"]))))
-        if _cost_text(channel):
-            elements.append(_md(_cost_text(channel)))
-        reasons = [r for row in rows for r in row.get("reasons", []) if r.get("count")]
-        for r in sorted(reasons, key=lambda r: r["count"], reverse=True)[:2]:
-            elements.append(_md("%s 条：%s%s；建议：%s" % (r["count"], r["reason"][:100], "（推测/待核实）" if r.get("confidence") != "confirmed" else "", r.get("suggestion", "核查发布记录")[:120])))
-    elements.extend(_backlog_elements(report))
-    return {"config": {"wide_screen_mode": True}, "header": {"template": "orange", "title": {"tag": "plain_text", "content": "%s｜TT / FB / X Post 发布日报" % report["date"]}}, "elements": elements}
+    return build_card(report, compact=True)
 
 
 def preview_html(report, card):
     def render_text(value):
         escaped = html.escape(value).replace("\n", "<br>")
         return re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", escaped)
+    def render_row(values):
+        return ('<div class="row" style="grid-template-columns:3fr repeat(%s,1fr)">' % (len(values) - 1)
+                + "".join("<span>" + html.escape(v) + "</span>" for v in values) + "</div>")
     lines = []
     for element in card["elements"]:
         if element["tag"] == "hr": lines.append("<hr>")
         elif element["tag"] == "div": lines.append("<p>" + render_text(element["text"]["content"]) + "</p>")
         elif element["tag"] == "column_set":
-            values = [col["elements"][0]["text"]["content"] for col in element["columns"]]
-            lines.append('<div class="row" style="grid-template-columns:3fr repeat(%s,1fr)">' % (len(values)-1) + "".join("<span>" + html.escape(v) + "</span>" for v in values) + "</div>")
+            cells = [col["elements"][0] for col in element["columns"]]
+            lines.append(render_row([cell.get("text", cell)["content"] for cell in cells]))
+        elif element["tag"] == "table":
+            columns = element["columns"]
+            lines.append(render_row([col["display_name"] for col in columns]))
+            lines.extend(render_row([row[col["name"]] for col in columns]) for row in element["rows"])
         elif element["tag"] == "note": lines.append("<small>" + html.escape(element["elements"][0]["content"]) + "</small>")
     return '<!doctype html><html lang="zh"><meta charset="utf-8"><title>Post 发布日报预览</title><style>body{font:15px/1.65 system-ui;background:#f3f5f8;color:#182534;margin:30px auto;max-width:900px;padding:25px;background:white}h1{font-size:23px}.row{display:grid;grid-template-columns:3fr repeat(4,1fr);gap:12px;border-bottom:1px solid #eee;padding:8px}small{display:block;color:#687586}hr{border:0;border-top:1px solid #ccc;margin:24px 0}</style><h1>' + html.escape(card["header"]["title"]["content"]) + '</h1>' + "\n".join(lines) + '</html>'

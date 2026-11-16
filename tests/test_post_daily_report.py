@@ -1,13 +1,16 @@
 import json
+import io
 import sqlite3
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from features.post_daily_report.common import Window, read_db, in_window
 from features.post_daily_report.delivery import DeliveryStore, DeliveryUnknown, DefiniteFailure, send_card
 from features.post_daily_report.report import total, build_card, build_compact_card, collect_report, validate_channel
+from scripts import post_daily_report
 
 
 class ReportTests(unittest.TestCase):
@@ -46,9 +49,37 @@ class ReportTests(unittest.TestCase):
         full = json.dumps(build_card(report), ensure_ascii=False)
         self.assertIn('当日计划已发 未知', full)
         self.assertNotIn('当日计划已发 0', full)
-        compact = json.dumps(build_compact_card(report), ensure_ascii=False)
-        self.assertIn('已发 未知', compact)
-        self.assertIn('未知 / 未知 / 未知', compact)
+        compact = build_compact_card(report)
+        self.assertIn('当日计划已发 未知', json.dumps(compact, ensure_ascii=False))
+        table = next(e for e in compact['elements'] if e['tag'] == 'table')
+        self.assertEqual([c['display_name'] for c in table['columns']], ['发布来源', '应发', '当日已发', '补发', '未完成'])
+        self.assertEqual(list(table['rows'][0].values()), ['自动模板·数据不可用', '未知', '未知', '未知', '未知'])
+
+    def test_oversize_daily_entrypoint_keeps_source_tables_and_fb_outcomes(self):
+        channels = []
+        for name in ('TT', 'FB', 'X'):
+            rows = [{'source': '%s<%s>' % (name, index), 'expected': 8, 'published': 4,
+                     'late': 1, 'failed': 1, 'pending': 1, 'unknown': 1,
+                     'reasons': [{'count': 1, 'reason': '核对任务记录' * 24}]} for index in range(12)]
+            channel = {'channel': name, 'rows': rows}
+            if name == 'FB':
+                channel['accounting'] = 'actual-fb-v2'
+            channels.append(channel)
+        report = {'date': '2026-11-15', 'channels': channels}
+        with tempfile.TemporaryDirectory() as temp, patch.object(post_daily_report, 'collect_report', return_value=report):
+            with redirect_stdout(io.StringIO()) as log:
+                self.assertEqual(post_daily_report.main(['--preview', '--date', report['date'], '--state-dir', temp]), 0)
+            self.assertLessEqual(json.loads(log.getvalue())['card_bytes'], 29000)
+            folder = Path(temp) / 'previews' / report['date']
+            card = json.loads((folder / 'card.json').read_text(encoding='utf-8'))
+            preview = (folder / 'preview.html').read_text(encoding='utf-8')
+        tables = [e for e in card['elements'] if e['tag'] == 'table']
+        self.assertEqual([len(t['rows']) for t in tables], [12, 12, 12])
+        self.assertEqual(list(tables[0]['rows'][-1].values()), ['TT<11>', '8', '4', '1', '3'])
+        self.assertEqual(list(tables[1]['rows'][-1].values()), ['FB<11>', '8', '5', '1', '1', '1'])
+        self.assertEqual(tables[2]['columns'][-1]['display_name'], '未完成')
+        self.assertIn('X&lt;11&gt;', preview)
+        self.assertNotIn('X<11>', preview)
 
     def test_channel_failure_isolated_and_visible(self):
         with patch("features.post_daily_report.report.importlib.import_module", side_effect=RuntimeError("secret-must-not-leak")):
