@@ -1,0 +1,13 @@
+[Unit]
+Description=Codex account usage and reset-credit watch
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk
+ConditionPathExists=/mnt/data-disk/codex-accounts/state.json
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/codex-account-watch/current/scripts/codex_account_watch.py tick
+TimeoutStartSec=150
