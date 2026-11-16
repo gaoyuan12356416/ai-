@@ -29,6 +29,8 @@ ASSETS = ('static/x-auto-publish-template.js', 'static/x-auto-publish-template.h
           'static/x-post-material-pool.html', 'static/x-post-drama-pool.html')
 OWNERS = ('x-tag-auto.service', 'x-tag-post.service',
           'x-auto-post-service.service', 'x-post-automation.service')
+STOP_ORDER = ('x-tag-post.service', 'x-post-automation.service',
+              'x-tag-auto.service', 'x-auto-post-service.service')
 TAG_TRIGGERS = ('x-tag-auto-scheduler.timer', 'x-tag-auto-runner.timer',
                 'x-tag-auto-runner.path', 'x-tag-pool.timer', 'x-tag-manual.timer')
 TRIGGERS = TAG_TRIGGERS + ('x-post-schedule.timer', 'x-post-schedule-claim.timer',
@@ -263,7 +265,9 @@ def activate(folder, rollback=False):
                 run('systemctl', 'start', unit)
 
     try:
-        for unit in OWNERS:
+        # Publishers keep serving while their accepted distributed work drains.
+        # Keep the independent template HTTP API available during that wait.
+        for unit in STOP_ORDER:
             if baseline.get(unit) == 'active':
                 run('systemctl', 'stop', unit)
         install(rollback)
