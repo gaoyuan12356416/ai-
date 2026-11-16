@@ -610,10 +610,31 @@ class DispatchStore:
         held = c.execute("SELECT * FROM pipeline_resource WHERE job_id=?", (row["id"],)).fetchall()
         legacy = c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE job_id=?", (row["id"],)).fetchone()
         uncertain = row["status"] == "unknown"
+        cloud_owned = (row["node_id"] == prepare_routing.CLOUD and row["stage"] == "prepare"
+                       and row["generation"] > 0 and not row["grandfathered"] and not row["external_intent"])
+        # A parked CI delivery retains its exact generation's quarantined lock.
+        # It is not an unowned legacy publication. Keep earlier-version fences
+        # until the owning channel and the same generation have both receipted.
+        cloud_park = (cloud_owned and row["error_code"] == "cos_receipt_pending"
+                      and any(r["resource_key"] == resource and r["quarantined"]
+                              and r["generation"] == row["generation"] for r in held))
+        if legacy and cloud_owned and row["status"] == "completed" and self._has_cloud_intent(c, row):
+            try:
+                proof = json.loads(row["canonical_receipt"] or "{}")
+            except (ValueError, TypeError):
+                proof = None
+            delivered = c.execute("SELECT 1 FROM pipeline_receipt WHERE job_id=? AND generation=? LIMIT 1",
+                                  (row["id"], row["generation"])).fetchone()
+            if delivered and isinstance(proof, dict) and proof.get("source_key") == row["source_key"] and json.loads(row["artifact_json"]).get("sha256"):
+                released = c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=? AND resource_key=?",
+                                     (row["id"],resource)).rowcount
+                if released:
+                    self.event(c,row["id"],"cos_receipted_fence_released",{"generation":row["generation"]},self.now())
+                    legacy = None
         if held or row["status"] == "running":
             c.execute("INSERT OR IGNORE INTO pipeline_resource VALUES(?,?,?,?,?)",
                       (resource, row["id"], row["generation"], int(uncertain), int(held[0]["legacy"]) if held else 0))
-        if legacy or uncertain:
+        if legacy or (uncertain and not cloud_park):
             c.execute("INSERT OR IGNORE INTO pipeline_legacy_resource VALUES(?,?)", (resource, row["id"]))
         released = 0
         for table in ("pipeline_resource", "pipeline_legacy_resource"):
@@ -1649,6 +1670,8 @@ class DispatchStore:
             c.execute("UPDATE pipeline_job SET status=?,finished_at=CASE WHEN finished_at='' THEN ? ELSE finished_at END,updated_at=?,error_code='',error_message='',canonical_receipt=? WHERE id=?", (status, now, now, str(result.get("canonical_receipt", result.get("publish_id", ""))), row["id"]))
             c.execute("UPDATE pipeline_operation SET status='completed',updated_at=? WHERE job_id=? AND generation=?", (now, row["id"], row["generation"]))
             c.execute("DELETE FROM pipeline_resource WHERE job_id=? AND generation=?", (row["id"], row["generation"]))
+            if row["node_id"] == prepare_routing.CLOUD and row["stage"] == "prepare":
+                self._refresh_queue_isolation(c, c.execute("SELECT * FROM pipeline_job WHERE id=?", (row["id"],)).fetchone())
             for phase, metric in result.get("phase_metrics", {}).items():
                 seconds = metric.get("seconds") if isinstance(metric, dict) else metric
                 if isinstance(seconds, (float, int)) and not isinstance(seconds, bool) and math.isfinite(seconds) and seconds >= 0:

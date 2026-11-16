@@ -1,6 +1,7 @@
 import concurrent.futures
 import contextlib
 import datetime as dt
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -151,6 +152,28 @@ class CloudRoutingTests(unittest.TestCase):
             self.store.resume_cloud(dict(job, claim_token="wrong"))
         with self.assertRaises(DispatchError):
             self.store.worker_heartbeat("cos-cloud", "bad", "publish")
+
+    def test_canonical_completion_releases_only_this_cloud_projection(self):
+        self.pool("cos-cloud",1,min_pending=0)
+        self.offer(7,"x")
+        job=self.claim()["job"]
+        self.store.cloud_intent(dict(job,action_key="a"*64))
+        self.store.resume_cloud(job,park=True)
+        resource="task:"+job["source_key"]
+        with self.store.transaction() as conn:
+            row=conn.execute("SELECT * FROM pipeline_job WHERE id=?",(job["id"],)).fetchone()
+            self.store._refresh_queue_isolation(conn,row)
+            self.assertIsNotNone(conn.execute("SELECT 1 FROM pipeline_resource WHERE resource_key=? AND quarantined=1",(resource,)).fetchone())
+            self.assertIsNone(conn.execute("SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=?",(resource,)).fetchone())
+            # An earlier coordinator projected the same unknown into its legacy table.
+            conn.execute("INSERT INTO pipeline_legacy_resource VALUES(?,?)",(resource,job["id"]))
+            self.store._refresh_queue_isolation(conn,row)
+            self.assertIsNotNone(conn.execute("SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=?",(resource,)).fetchone())
+        self.store.resume_cloud(job)
+        self.store.complete(job,"receipt",{"artifact":{"url":"https://fixture.example/ci.mp4","sha256":"b"*64,"size":900},
+                                           "canonical_receipt":json.dumps({"source_key":job["source_key"]})},canonical_verified=True)
+        with self.store.transaction() as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=?",(resource,)).fetchone())
 
 
 if __name__ == "__main__":
