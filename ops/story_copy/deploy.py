@@ -26,6 +26,8 @@ MODULES = {
     "fb": {
         "features/fb_auto_posts/core.py": integrate.fb_auto,
         "features/fb_video_publish/core.py": integrate.fb_video,
+        "features/fb_auto_posts/publisher.py": integrate.fb_redirect,
+        "features/pipeline_dispatch/fb_native.py": integrate.fb_redirect,
     },
     "x": {
         "features/x_posts/service.py": integrate.x_service,

@@ -153,6 +153,13 @@ def fb_final(conn, family, row, *, extra_link_writer=None):
                 source, reason, body = "legacy", "short_link_unavailable", legacy
         if source == "ai":
             if family == "fa":
+                if optional_link:
+                    selection = obj(data["selection_json"])
+                    selection["story_copy"]["legacy_before_extra_link"] = legacy
+                    conn.execute(
+                        "UPDATE fb_auto_task SET selection_json=? WHERE id=?",
+                        (store.dump(selection), data["id"]),
+                    )
                 conn.execute(
                     "UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?",
                     (body, short, long, data["id"]),
@@ -176,3 +183,35 @@ def fb_final(conn, family, row, *, extra_link_writer=None):
         conn.execute("ROLLBACK TO story_copy_optional")
         conn.execute("RELEASE story_copy_optional")
         LOG.warning("story_copy.fb_fallback %s", type(exc).__name__)
+
+
+def restore_fb_optional_link(owner, task):
+    """An AI-only redirect can fail after the initial claim. Revert before any Graph write."""
+    extra = obj(task.get("selection_json")).get("story_copy", {})
+    if "legacy_before_extra_link" not in extra:
+        return False
+    fallback = extra["legacy_before_extra_link"]
+    with owner.connect() as conn:
+        changed = conn.execute(
+            """UPDATE fb_auto_task SET message_text=?,short_url='',long_url=''
+            WHERE id=? AND status='running' AND lease_owner=? AND message_text=? AND short_url=?
+            AND unknown_outcome=0 AND coalesce(graph_post_id,'')=''""",
+            (
+                fallback,
+                task["id"],
+                task["lease_owner"],
+                task["message_text"],
+                task["short_url"],
+            ),
+        ).rowcount
+        if not changed:
+            return False
+        conn.execute(
+            """UPDATE story_copy_receipt SET rowid=(SELECT max(rowid)+1 FROM story_copy_receipt),
+                        source='legacy',reason='short_link_unavailable',final_text=?,short_url=''
+                        WHERE task_key=? AND source='ai'""",
+            (fallback, "fb:auto:" + str(task["id"])),
+        )
+        conn.commit()
+    task.update(message_text=fallback, short_url="", long_url="")
+    return True

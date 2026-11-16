@@ -251,6 +251,44 @@ class CaptionTests(unittest.TestCase):
                 "https://example.org/one",
             )
 
+    def test_fb_added_link_failure_restores_legacy_before_graph(self):
+        with store.connection(self.fb) as c:
+            c.execute("DROP TABLE fb_auto_task")
+            c.execute(
+                "CREATE TABLE fb_auto_task(id INTEGER, status TEXT,lease_owner TEXT,message_text TEXT,short_url TEXT,long_url TEXT,unknown_outcome INTEGER,graph_post_id TEXT,selection_json TEXT)"
+            )
+            config = store.dump(
+                {"story_copy": {"legacy_before_extra_link": "original Page text"}}
+            )
+            c.execute(
+                "INSERT INTO fb_auto_task VALUES(2,'running','worker','AI text','https://example.org/fb','target',0,'',?)",
+                (config,),
+            )
+            c.execute(
+                "INSERT INTO story_copy_receipt VALUES('fb:auto:2','fb','ai','','AI text','https://example.org/fb',9,1)"
+            )
+            task = dict(c.execute("SELECT * FROM fb_auto_task").fetchone())
+
+        class Owner:
+            def connect(inner):
+                return store.connection(self.fb)
+
+        self.assertTrue(bridge.restore_fb_optional_link(Owner(), task))
+        self.assertEqual(task["message_text"], "original Page text")
+        self.assertEqual(task["short_url"], "")
+        with store.connection(self.fb) as c:
+            self.assertEqual(
+                tuple(
+                    c.execute(
+                        "SELECT source, reason FROM story_copy_receipt"
+                    ).fetchone()
+                ),
+                ("legacy", "short_link_unavailable"),
+            )
+        self.assertFalse(
+            bridge.restore_fb_optional_link(Owner(), dict(task, selection_json="{}"))
+        )
+
     def test_output_stream_and_alert_retry(self):
         rows = []
         stream = generator.Lines(rows.append)

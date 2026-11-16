@@ -26,6 +26,23 @@ def add(c, event, items):
     incident = (
         next(iter(reasons)) if len(reasons) == 1 and reasons <= SERVICE_REASONS else ""
     )
+    previous = c.execute(
+        "SELECT body,sent FROM alerts WHERE event=?", (event,)
+    ).fetchone()
+    if previous:
+        packed = c.execute(
+            "SELECT 1 FROM packed_alerts WHERE event=?", (event,)
+        ).fetchone()
+        if previous["sent"] or packed:
+            event += ":" + items[0]["key"]
+        else:
+            combined = {entry["key"]: entry for entry in json.loads(previous["body"])}
+            combined.update({entry["key"]: entry for entry in items})
+            c.execute(
+                "UPDATE alerts SET body=? WHERE event=?",
+                (store.dump(list(combined.values())), event),
+            )
+            return
     c.execute(
         "INSERT OR IGNORE INTO alerts(event,incident,body,created) VALUES(?,?,?,?)",
         (event, incident, store.dump(items), time.time()),
@@ -63,39 +80,55 @@ def deliver(c, send_func=send):
         (now,),
     ).fetchall()
     for r in rows:
-        if r["incident"]:
+        packet = c.execute(
+            "SELECT p.* FROM alert_packets p JOIN packed_alerts a ON p.id=a.packet WHERE a.event=?",
+            (r["event"],),
+        ).fetchone()
+        if packet:
+            if packet["delivered"]:
+                continue
+            if packet["id"] != r["event"]:
+                continue
+            keys = [(k,) for k in json.loads(packet["events"])]
+            message = packet["body"]
+        else:
+            keys = []
+        if not packet and r["incident"]:
             last = c.execute(
                 "SELECT max(sent) FROM alerts WHERE incident=?", (r["incident"],)
             ).fetchone()[0]
             if last and now - last < 900:
                 continue
-            siblings = [other for other in rows if other["incident"] == r["incident"]]
+            siblings = [
+                other
+                for other in rows
+                if other["incident"] == r["incident"]
+                and not c.execute(
+                    "SELECT 1 FROM packed_alerts WHERE event=?", (other["event"],)
+                ).fetchone()
+            ]
         else:
             siblings = [r]
         if c.execute("SELECT sent FROM alerts WHERE event=?", (r["event"],)).fetchone()[
             0
         ]:
             continue
-        items = [i for entry in siblings for i in json.loads(entry["body"])]
-        groups = {}
-        for i in items:
-            group = (
-                i["endpoint"],
-                i["title"],
-                i["language"],
-                i["reason"],
-                i["outcome"],
+        if not packet:
+            # Freeze membership and payload before the first send. A timeout reuses the same Feishu UUID.
+            siblings = siblings[: max(1, min(len(siblings), 8))]
+            keys = [(x["event"],) for x in siblings]
+            message = message_for(siblings)
+            c.execute(
+                "INSERT INTO alert_packets(id,incident,events,body) VALUES(?,?,?,?)",
+                (r["event"], r["incident"], store.dump([k[0] for k in keys]), message),
             )
-            groups.setdefault(group, []).append(i["key"])
-        lines = ["短剧 AI 文案异常", f"影响 {len(items)} 条。"]
-        for (end, title, lang, reason, outcome), ids in groups.items():
-            lines.append(
-                f"{end} · {title} · {lang} · {reason} · {outcome}\n任务 "
-                + ", ".join(ids)
+            c.executemany(
+                "INSERT INTO packed_alerts VALUES(?,?)",
+                [(key[0], r["event"]) for key in keys],
             )
-        keys = [(x["event"],) for x in siblings]
+            c.commit()
         try:
-            receipt = send_func(r["event"], "\n".join(lines))
+            receipt = send_func(r["event"], message)
         except Exception:
             c.executemany(
                 "UPDATE alerts SET attempts=attempts+1,next_try=strftime('%s','now')+min(900,30*(attempts+1)) WHERE event=?",
@@ -106,4 +139,27 @@ def deliver(c, send_func=send):
                 "UPDATE alerts SET sent=?,receipt=?,attempts=attempts+1 WHERE event=?",
                 [(now, receipt, k[0]) for k in keys],
             )
+            c.execute(
+                "UPDATE alert_packets SET delivered=? WHERE id=?", (now, r["event"])
+            )
         c.commit()
+
+
+def message_for(siblings):
+    items = [i for entry in siblings for i in json.loads(entry["body"])]
+    groups = {}
+    for i in items:
+        group = (
+            i["endpoint"],
+            i["title"],
+            i["language"],
+            i["reason"],
+            i["outcome"],
+        )
+        groups.setdefault(group, []).append(i["key"])
+    lines = ["短剧 AI 文案异常", f"影响 {len(items)} 条。"]
+    for (end, title, lang, reason, outcome), ids in groups.items():
+        lines.append(
+            f"{end} · {title} · {lang} · {reason} · {outcome}\n任务 " + ", ".join(ids)
+        )
+    return "\n".join(lines)

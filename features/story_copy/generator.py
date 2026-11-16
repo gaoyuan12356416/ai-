@@ -192,8 +192,16 @@ def run(rows, prior, emit, usage):
                 approvalPolicy="never",
                 sandbox="read-only",
                 ephemeral=True,
-                developerInstructions=INSTRUCTIONS,
-                config={"model_reasoning_effort": "low"},
+                baseInstructions=INSTRUCTIONS,
+                dynamicTools=[],
+                selectedCapabilityRoots=[],
+                config={
+                    "model_reasoning_effort": "low",
+                    "project_doc_max_bytes": 0,
+                    "features.apps": False,
+                    "features.plugins": False,
+                    "features.shell_tool": False,
+                },
             ),
         )
         thread = result["thread"]["id"]

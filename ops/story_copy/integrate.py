@@ -113,6 +113,34 @@ def x_native(text):
     return text
 
 
+def fb_redirect(text):
+    if "from features.story_copy.bridge import restore_fb_optional_link" in text:
+        return text
+    candidates = [
+        (
+            'self.short_link_writer(self.short_link_root, int(task["id"]), long_url)',
+            "self.store",
+        ),
+        (
+            'self.runtime.executor.short_link_writer(self.runtime.executor.short_link_root, int(task["id"]), long)',
+            "self.runtime.store",
+        ),
+    ]
+    for call, owner in candidates:
+        if call not in text:
+            continue
+        line = next(l for l in text.splitlines() if call in l)
+        prefix = line[: len(line) - len(line.lstrip())]
+        code = (
+            "try:\n    "
+            + call
+            + "\nexcept Exception:\n    from features.story_copy.bridge import restore_fb_optional_link\n"
+            "    if not restore_fb_optional_link(" + owner + ",task):\n        raise"
+        )
+        return replace(text, line, "\n".join(prefix + l for l in code.splitlines()))
+    raise ValueError("FB redirect writer not found")
+
+
 def html(text, endpoint):
     script = (
         '<script defer src="/story-copy-settings.js?v=1.1" data-endpoint="'

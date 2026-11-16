@@ -121,7 +121,12 @@ class FBNativeBridge:
             if validate_short_url(short) != build_short_url(task["id"]) or str(task.get("message_text") or "").count(short) != 1:
                 raise AdapterError("fb_auto_short_link_snapshot_invalid")
             validate_w2a_url(long)
-            self.runtime.executor.short_link_writer(self.runtime.executor.short_link_root, int(task["id"]), long)
+            try:
+                self.runtime.executor.short_link_writer(self.runtime.executor.short_link_root, int(task["id"]), long)
+            except Exception:
+                from features.story_copy.bridge import restore_fb_optional_link
+                if not restore_fb_optional_link(self.runtime.store,task):
+                    raise
         return {"page_id": task["page_id"], "media_url": task["media_url"], "message": task["message_text"], "title": ""}
 
     def _resume_preparation(self, job, previous):

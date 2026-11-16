@@ -158,7 +158,12 @@ class AutoPostExecutor:
                 validate_w2a_url(long_url)
                 if not secrets.compare_digest(normalized_short, expected_short) or str(task.get("message_text") or "").count(normalized_short) != 1:
                     raise FBPostLinkError("fb_auto_short_link_snapshot_invalid", "任务短链快照与发布文案不一致", 409)
-                self.short_link_writer(self.short_link_root, int(task["id"]), long_url)
+                try:
+                    self.short_link_writer(self.short_link_root, int(task["id"]), long_url)
+                except Exception:
+                    from features.story_copy.bridge import restore_fb_optional_link
+                    if not restore_fb_optional_link(self.store,task):
+                        raise
             except FBPostLinkError as exc:
                 return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": exc.code, "error_message": str(exc), "definite_attempts": 0})
             except Exception:

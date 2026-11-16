@@ -244,7 +244,15 @@ def sync_receipts(c):
                     if r["source"] == "legacy" and not oldreason:
                         alerts.add(
                             c,
-                            "receipt:" + key,
+                            "receipt-batch:"
+                            + str(
+                                r["batch"]
+                                or (
+                                    str(int(r["created"] // 60))
+                                    + "-"
+                                    + signature("|".join(group_key(task)))[:12]
+                                )
+                            ),
                             [alert_item(task, r["reason"], "已采用现行文案")],
                         )
                 c.execute(
