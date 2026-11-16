@@ -82,6 +82,14 @@ class CaptionTests(unittest.TestCase):
             tags=["ShortDrama", "Mystery"],
         )
 
+    def test_shared_synopsis_assigns_distinct_plot_beats(self):
+        tasks = [self.task(1), self.task(2, "fa")]
+        for t in tasks:
+            t["facts"] = {"series": "Ada hides the seal. Ben finds the ribbon."}
+        request = json.loads(generator.prompt(tasks, []))
+        self.assertEqual(len(request["fact_text"]), 1)
+        self.assertEqual([x["focus"]["sentence"] for x in request["tasks"]], [1, 2])
+
     def test_100_and_101_partial_failure(self):
         with store.connection() as c:
             for i in range(1, 102):

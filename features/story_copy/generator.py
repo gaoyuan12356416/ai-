@@ -3,6 +3,7 @@
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -17,6 +18,7 @@ Return the local refs keys such as ["series"] or ["episode"]. f1/f2 are lookup p
 Use the target language of each id for all public words. No URLs, icons, hashtags or line breaks in prose fields.
 CTA is short and natural. For episode jobs the renderer adds title and episode number. Never claim a click opens that episode.
 Write two concrete, short narrative beats. Vary perspective, choice, object or tension across the whole batch and all channels.
+Build each post around its assigned focus sentence. Leave other plot beats for the other posts. Never retell the whole sequence in each post, even with different words. A question can be the turn when the supplied material supports no second event.
 FB can establish more context. For X reserve space for a real link and tags; Chinese/Japanese opening+turn target 40-55 characters.
 Use only supplied facts. A clip name, audience preference or internal profile label is not a plot fact. Never expose internal tags or scores.
 If only series facts were supplied, use a series premise and do not describe any scene as taking place this episode. No invented dialogue, pricing or promises.
@@ -25,19 +27,31 @@ If evidence is insufficient return an object with the id and error "insufficient
 
 def prompt(tasks, prior):
     shared = {}
+    segments = {}
     items = []
     for i, t in enumerate(tasks):
         refs = {}
         for k, f in t["facts"].items():
             if f not in shared:
                 shared[f] = "f" + str(len(shared) + 1)
+                segments[shared[f]] = [
+                    s
+                    for s in re.split(r"(?<=[。！？；])\s*|(?<=[.!?;])\s+", f)
+                    if s.strip()
+                ]
             refs[k] = shared[f]
+        focus_ref = next(
+            (refs[k] for k in ("episode", "clip", "series") if k in refs), None
+        )
+        beats = segments.get(focus_ref, [])
+        focus_index = i % max(1, len(beats))
         items.append(
             dict(
                 id=t["key"],
                 endpoint=t["endpoint"],
                 language=t["language"],
                 refs=refs,
+                focus={"ref": focus_ref, "sentence": focus_index + 1},
                 episode=t.get("episode"),
                 clip=t.get("clip", ""),
                 audience=t.get("audience", []),
@@ -48,7 +62,7 @@ def prompt(tasks, prior):
         dict(
             title=tasks[0]["title"],
             product=group_key(tasks[0])[0],
-            fact_text={code: fact for fact, code in shared.items()},
+            fact_text=segments,
             recent=prior[-5:],
             tasks=items,
         )

@@ -359,11 +359,6 @@ def activate(folder, reverse):
                 raise RuntimeError("restage after concurrent " + lane + " release")
         schema_and_access()
         symlink(CENTRAL, folder / "central")
-        install_files(folder, rec, False)
-        run("systemctl", "daemon-reload")
-        run("systemctl", "enable", "--now", *AUX)
-        run("nginx", "-t")
-        run("systemctl", "reload", "nginx")
     try:
         for lane in ("tag", "x", "fb") if reverse else ("fb", "tag", "x"):
             print("switching", lane, flush=True)
@@ -376,6 +371,12 @@ def activate(folder, reverse):
     finally:
         for lane in ("fb", "x"):
             sched(folder, "restore", lane, reverse)
+    if not reverse:
+        install_files(folder, rec, False)
+        run("systemctl", "daemon-reload")
+        run("systemctl", "enable", "--now", *AUX)
+        run("nginx", "-t")
+        run("systemctl", "reload", "nginx")
     if reverse:
         run("systemctl", "disable", "--now", *AUX)
         install_files(folder, rec, True)
