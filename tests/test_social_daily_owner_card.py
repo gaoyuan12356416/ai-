@@ -88,6 +88,16 @@ class OwnerCardTests(unittest.TestCase):
                 routes.query_rows(app, "SELECT 1")
         self.assertNotIn("test-only-secret", str(raised.exception))
 
+    def test_gate_execution_timeout_keeps_specific_reason_without_stderr_secrets(self):
+        app = dict(ADMIN_MAPPING_MYSQL_HOST="101.32.56.53", ADMIN_MAPPING_MYSQL_PORT=63350,
+                   ADMIN_MAPPING_MYSQL_USER="reader", ADMIN_MAPPING_MYSQL_PASSWORD="test-only-secret")
+        failure = SimpleNamespace(returncode=124, stdout="1\n", stderr="SQL_GATE_EXECUTION_TIMEOUT test-only-secret")
+        with patch.object(routes.subprocess, "run", return_value=failure), self.assertLogs(routes.logger, level='WARNING') as logs:
+            with self.assertRaisesRegex(routes.ReportError, "SQL Gate") as raised:
+                routes.query_rows(app, "SELECT 1")
+        self.assertIn('EXECUTION_TIMEOUT', logs.output[0])
+        self.assertNotIn('test-only-secret', str(raised.exception) + str(logs.output))
+
     def test_read_retry_is_bounded_and_keeps_completed_source_cached(self):
         routes._cache.clear()
         app = {"SOCIAL_ANALYTICS_QUERY_ATTEMPTS": 2,

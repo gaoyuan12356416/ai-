@@ -8,6 +8,43 @@ from .adapters import source_key
 from .report import FIELDS, ReportError, add, campaign_index, empty, resolve
 
 SCOPE = "ai_backend_confirmed_publications_and_manual_shortlinks"
+DAILY_PAGE_BATCH = 64
+
+
+def _daily_facebook_rows(app, sql, coverage, pages):
+    """Keep each indexed read small; discard the entire source on any failure."""
+    from .routes import MAX_ROWS, query_source_rows
+    literal = lambda value: "0x" + str(value).encode("utf-8").hex()
+    batches = [pages[i:i + DAILY_PAGE_BATCH] for i in range(0, len(pages), DAILY_PAGE_BATCH)]
+
+    def read_batch(batch):
+        # The plain column uses adset_dt; the binary predicate makes batches
+        # disjoint even for collation-equivalent Page IDs. Exact triples are
+        # still checked below before any metric can enter the report.
+        values = [literal(page) for page in batch]
+        predicate = ("adset_id IN (" + ",".join("CONVERT(%s USING utf8mb4)" % v for v in values) +
+                     ") AND BINARY adset_id IN (" + ",".join(values) + ")")
+        statement = sql.replace("FORCE INDEX(sd)", "FORCE INDEX(adset_dt)")
+        statement = statement.replace("GROUP BY dt,BINARY campaign_id",
+                                      "AND " + predicate + " GROUP BY dt,BINARY campaign_id")
+        return query_source_rows(app, statement, MAX_ROWS)
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="social-daily-fb") as executor:
+        pending = [executor.submit(read_batch, batch) for batch in batches]
+        try:
+            for future in pending:
+                rows.extend(future.result())
+                if len(rows) > MAX_ROWS:
+                    raise ReportError("数据量超过在线查询上限，请缩小日期范围", 400)
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
+    # Read date coverage once, including days with no backend traffic. This
+    # index-only read carries no unrelated campaign or financial data.
+    rows.extend(query_source_rows(app, coverage, 93))
+    return rows
 
 
 def eligible(row, day):
@@ -77,7 +114,6 @@ def facebook_source(app, start, end, site, allowed_sources=None):
         pages = sorted({triple[1] for triple in allowed_sources})
         predicate = ("BINARY adset_id IN (" + ",".join(literal(page) for page in pages) + ")"
                      if pages else "1=0")
-        sql = sql.replace("GROUP BY dt,BINARY campaign_id", "AND " + predicate + " GROUP BY dt,BINARY campaign_id")
         # Source-day existence must survive even if no backend content had any
         # traffic. A zero-valued sentinel is removed by restrict, retaining only
         # coverage. It carries no other system's financial data.
@@ -87,8 +123,13 @@ def facebook_source(app, start, end, site, allowed_sources=None):
             'revenue_cents',0,'refund_cents',0,'updated_at','','_coverage_only',1))
             FROM kunlunads_dev.ads_facebook_page_insight FORCE INDEX(sd)
             WHERE site_id='%s' AND dt BETWEEN '%s' AND '%s' GROUP BY dt LIMIT 93""" % (site, site, start, end)
-        sql = "(" + sql + ") UNION ALL (" + coverage + ")"
-    rows = query_source_rows(app, sql, MAX_ROWS + (93 if allowed_sources is not None else 0))
+        if "SOCIAL_DAILY_FB_SOURCES" in app:
+            rows = _daily_facebook_rows(app, sql, coverage, pages)
+        else:
+            sql = sql.replace("GROUP BY dt,BINARY campaign_id", "AND " + predicate + " GROUP BY dt,BINARY campaign_id")
+            rows = query_source_rows(app, "(" + sql + ") UNION ALL (" + coverage + ")", MAX_ROWS + 93)
+    else:
+        rows = query_source_rows(app, sql, MAX_ROWS)
     if sum(not row.get("_coverage_only") for row in rows) > MAX_ROWS:
         raise ReportError("数据量超过在线查询上限，请缩小日期范围", 400)
     seen = set()

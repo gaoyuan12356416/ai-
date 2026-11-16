@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from datetime import datetime, timedelta, timezone
 
 SAFE_PAYLOAD_BYTES = 29000
 REPORT_URL = "https://ai.yingliangads.com/social-analytics.html"
@@ -76,6 +77,9 @@ def blocks(report):
     backend_only = report.get("scope") == "ai_backend_confirmed_publications_and_manual_shortlinks"
     scope_text = ("仅 AI 后台已成功发布的内容及手动短链\n按 campaign ID 关联用户 · 历史内容的当日效果"
                   if backend_only else "按 campaign ID 关联用户 · 全部历史内容的当日效果")
+    if report.get("prepared_at"):
+        collected = datetime.fromisoformat(report["prepared_at"]).astimezone(timezone(timedelta(hours=8)))
+        scope_text += "\n数据采集完成：北京时间 " + collected.strftime("%m-%d %H:%M:%S")
     result = [[md("**%s · UTC 自然日**\n%s" % (report["report_date"], scope_text))],
               [{"tag": "div", "fields": [
                   {"is_short": True, "text": {"tag": "lark_md", "content": label + "\n**" + value + "**"}}

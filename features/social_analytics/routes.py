@@ -66,6 +66,7 @@ def query_rows(app, statement, max_rows=1001):
     timeout = min(statement_seconds + 17, app.get("SOCIAL_ANALYTICS_QUERY_DEADLINE", float("inf")) - time.monotonic())
     if timeout < 1:
         raise ReportError("日报采集时间预算已用完", 503)
+    started = time.monotonic()
     try:
         result = subprocess.run([
             "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350",
@@ -78,8 +79,12 @@ def query_rows(app, statement, max_rows=1001):
                 logger.warning("social_effect_query_timeout query=%s mysql_code=3024", query_digest)
                 raise ReportError("效果查询超时（MySQL 3024）；本次不按零统计", 503)
             mysql_error = re.search(r"ERROR (\d+)", result.stderr)
-            logger.warning("social_effect_query_failed query=%s returncode=%s mysql_code=%s",
-                           query_digest, result.returncode, mysql_error.group(1) if mysql_error else "none")
+            gate_error = re.search(r"SQL_GATE_(EXECUTION_TIMEOUT|DAEMON_LOST|CHILD_CLEANUP_FAILED)", result.stderr)
+            logger.warning("social_effect_query_failed query=%s returncode=%s mysql_code=%s gate=%s elapsed=%.3f",
+                           query_digest, result.returncode, mysql_error.group(1) if mysql_error else "none",
+                           gate_error.group(1) if gate_error else "none", time.monotonic() - started)
+            if gate_error and gate_error.group(1) == "EXECUTION_TIMEOUT":
+                raise ReportError("效果查询执行超时（SQL Gate）；本次不按零统计", 503)
             if re.search(r"wait_timeout|queue_full|queue_timeout", result.stderr, re.I):
                 raise ReportError("效果查询排队超时，请稍后重试；本次不按零统计", 503)
             raise ValueError("readonly_query_failed")

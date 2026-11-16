@@ -158,12 +158,51 @@ class BackendScopeTests(unittest.TestCase):
         candidates = [metric(), metric(cid="outside", cents=90000),
                       metric(cid="", adset_id="", ad_id="", cents=0, _coverage_only=1)]
         settings = {"SOCIAL_DAILY_FB_SOURCES": {"2049": [("6", "page", "material")]}}
-        with patch.object(routes, "query_source_rows", return_value=candidates) as query:
+        def read(app, sql, limit):
+            return candidates[-1:] if "_coverage_only" in sql else candidates[:-1]
+        with patch.object(routes, "query_source_rows", side_effect=read) as query:
             rows, _ = facebook_source(settings, DAY, DAY, "2049")
-        self.assertIn("BINARY adset_id IN", query.call_args.args[1])
-        self.assertIn("UNION ALL", query.call_args.args[1])
+        statements = [call.args[1] for call in query.call_args_list]
+        self.assertTrue(any("FORCE INDEX(adset_dt)" in sql and "BINARY adset_id IN" in sql for sql in statements))
+        self.assertEqual(sum("_coverage_only" in sql for sql in statements), 1)
         self.assertEqual(len(rows), 2)
         self.assertEqual(sum(row["revenue_cents"] for row in rows), 100)
+
+    def test_daily_pages_are_batched_and_coverage_is_read_once(self):
+        from features.social_analytics import routes
+        allowed = [(str(i), "page-%03d" % i, "material") for i in range(130)]
+        def read(app, sql, limit):
+            if "_coverage_only" in sql:
+                return [metric(cid="", adset_id="", ad_id="", cents=0, _coverage_only=1)]
+            self.assertIn("FORCE INDEX(adset_dt)", sql)
+            self.assertIn("AND BINARY adset_id IN", sql)
+            included = [t for t in allowed if "CONVERT(0x" + t[1].encode().hex() + " USING utf8mb4)" in sql]
+            self.assertLessEqual(len(included), 64)
+            return [metric(cid=t[0], adset_id=t[1]) for t in included]
+        with patch.object(routes, "query_source_rows", side_effect=read) as query:
+            rows, _ = facebook_source({"SOCIAL_DAILY_FB_SOURCES": {"2049": allowed}}, DAY, DAY, "2049")
+        self.assertEqual(query.call_count, 4)
+        self.assertEqual(sum(row["revenue_cents"] for row in rows), 13000)
+        self.assertEqual(len(rows), 131)
+
+    def test_daily_failed_batch_never_returns_partial_source(self):
+        from features.social_analytics import routes
+        allowed = [(str(i), "page-%03d" % i, "material") for i in range(65)]
+        def read(app, sql, limit):
+            if allowed[-1][1].encode().hex() in sql:
+                raise ReportError("failed batch", 503)
+            return [metric()]
+        with patch.object(routes, "query_source_rows", side_effect=read):
+            with self.assertRaisesRegex(ReportError, "failed batch"):
+                facebook_source({"SOCIAL_DAILY_FB_SOURCES": {"2049": allowed}}, DAY, DAY, "2049")
+
+    def test_daily_empty_scope_still_requires_real_source_date_coverage(self):
+        from features.social_analytics import routes
+        coverage = metric(cid="", adset_id="", ad_id="", cents=0, _coverage_only=1)
+        with patch.object(routes, "query_source_rows", return_value=[coverage]) as query:
+            rows, _ = facebook_source({"SOCIAL_DAILY_FB_SOURCES": {"2049": []}}, DAY, DAY, "2049")
+        query.assert_called_once()
+        self.assertEqual(rows, [coverage])
 
     def test_candidate_overflow_fails_before_exact_tuple_filter(self):
         from features.social_analytics import routes

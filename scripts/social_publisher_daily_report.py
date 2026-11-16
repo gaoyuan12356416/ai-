@@ -17,6 +17,7 @@ from features.social_daily_report.collector import (
 )
 from features.social_daily_report.delivery import SocialDeliveryStore, deliver
 from features.social_daily_report.report import build_cards, payload_size, preview_html, require_complete
+from features.social_daily_report import prepared
 from scripts.post_daily_report import ensure_storage, atomic_write
 
 CHAT_ID = "oc_7c683c5770aef2e6c84a456e52cad389"
@@ -37,6 +38,7 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--send", action="store_true")
     mode.add_argument("--preview", action="store_true")
+    mode.add_argument("--prepare", action="store_true", help="Precompute complete data without claiming or sending")
     args = parser.parse_args(argv)
     now = datetime.now(BEIJING)
     day = date.fromisoformat(args.date or (now.date() - timedelta(days=1)).isoformat()).isoformat()
@@ -50,7 +52,9 @@ def main(argv=None):
     try:
         if os.name == "posix":
             import fcntl
-            handle = (state / "run.lock").open("a")
+            # Preparation must never hold up the 11:00 sender. Its last complete
+            # snapshot remains readable while another preparation is in flight.
+            handle = (state / ("prepare.lock" if args.prepare else "run.lock")).open("a")
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -71,9 +75,19 @@ def main(argv=None):
         if batch:
             report, cards = batch["report"], batch["cards"]
         else:
-            report = collect(day, args.db, args.env_file, args.x_db,
-                             args.fb_db, args.facebook_attribution_db, args.x_profile_db)
+            report = None
             if args.send:
+                try:
+                    report = prepared.load(state, day, CHAT_ID)
+                except (OSError, ValueError, KeyError, TypeError):
+                    print(json.dumps(dict(status="prepared_unavailable", date=day)), flush=True)
+                if report is not None:
+                    print(json.dumps(dict(status="using_prepared", date=day,
+                                          prepared_at=report.get("prepared_at"))), flush=True)
+            if report is None:
+                report = collect(day, args.db, args.env_file, args.x_db,
+                                 args.fb_db, args.facebook_attribution_db, args.x_profile_db)
+            if args.send or args.prepare:
                 try:
                     require_complete(report)
                 except ValueError as exc:
@@ -87,7 +101,14 @@ def main(argv=None):
                     print(json.dumps(dict(status="collection_failed", date=day, reason=str(exc),
                                           diagnostic_path=str(path)), ensure_ascii=False), flush=True)
                     raise
+            if args.prepare:
+                report["prepared_at"] = datetime.now(BEIJING).isoformat()
             cards = build_cards(report, CHAT_ID)
+            if args.prepare:
+                path = prepared.save(state, day, CHAT_ID, report)
+                print(json.dumps(dict(status="prepared", date=day, prepared_at=report["prepared_at"],
+                                      path=str(path)), ensure_ascii=False), flush=True)
+                return 0
             if store:
                 store.freeze(day, CHAT_ID, report, cards)
         folder = state / ("reports" if args.send else "previews") / day
