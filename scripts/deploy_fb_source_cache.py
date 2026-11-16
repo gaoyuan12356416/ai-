@@ -55,6 +55,11 @@ def patched(before, source):
     if result.count(anchor)!=1:
         raise ValueError('import_anchor_changed')
     result = result.replace(anchor,anchor+IMPORT,1)
+    anchor = '                if shutil.disk_usage(self.config.work_root).free<32*1024**3:'
+    if result.count(anchor)!=1:
+        raise ValueError('disk_reserve_anchor_changed')
+    result = result.replace(anchor,
+        '                SourceCache(self.config.work_root/"source-cache-v1").trim_if_low_disk(check=getattr(self,"execution_check",lambda:None))\n'+anchor,1)
     anchor = '"render_seconds":render_seconds},sort_keys=True'
     if result.count(anchor)!=1:
         raise ValueError('manifest_anchor_changed')

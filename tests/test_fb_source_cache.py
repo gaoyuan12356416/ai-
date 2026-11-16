@@ -18,7 +18,7 @@ class SourceCacheTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.body, self.etag = b'original-media' * 10000, '"version1"'
+        self.body, self.etag = b'original-media' * 500000, '"version1"'
         self.body_requests, self.validations = 0, 0
         owner = self
         class Handler(BaseHTTPRequestHandler):
@@ -118,6 +118,28 @@ class SourceCacheTests(unittest.TestCase):
         self.fetch('job2')
         self.assertTrue((self.root/'job1').is_file())
         self.assertEqual(2, len(list((self.root/'cache').glob('*/*.mp4'))))
+        (self.root/'job1').unlink()
+        self.cache._prune(exclude='',check=lambda:None)
+        self.assertEqual(1,len(list((self.root/'cache').glob('*/*.mp4'))))
+        self.assertTrue((self.root/'job2').is_file())
+
+    def test_preparer_download_preserves_hash_and_records_observation(self):
+        from types import SimpleNamespace
+        from features.fb_gpu.prepare_worker import PrepareProcessor
+        owner=object.__new__(PrepareProcessor)
+        owner.config=SimpleNamespace(work_root=self.root,max_source_bytes=10**7)
+        owner.session_factory=requests.Session
+        class CacheWithoutReserve(SourceCache):
+            def __init__(self,root):
+                super().__init__(root,reserve_bytes=0)
+        with patch('features.fb_gpu.prepare_worker.SourceCache',CacheWithoutReserve):
+            for name in ['one','two']:
+                folder=self.root/name
+                folder.mkdir()
+                self.assertEqual(hashlib.sha256(self.body).hexdigest(),owner._download(self.url,folder/'download.tmp'))
+        result=json.loads((self.root/'two'/'source-cache.json').read_text())
+        self.assertTrue(result['cache_hit'])
+        self.assertEqual(0,result['network_bytes'])
 
 
 if __name__ == '__main__':

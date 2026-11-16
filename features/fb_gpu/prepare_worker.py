@@ -223,6 +223,7 @@ class PrepareProcessor:
         # Same-job retries serialize; unrelated jobs share a strictly bounded pool.
         with self.slots,self.job_locks[int(hashlib.sha256(job.encode()).hexdigest(),16)%64]:
             with self.lock:
+                SourceCache(self.config.work_root/"source-cache-v1").trim_if_low_disk(check=getattr(self,"execution_check",lambda:None))
                 if shutil.disk_usage(self.config.work_root).free<32*1024**3:
                     raise PrepareWorkerError("fb_gpu_disk_reserve","GPU free disk below 32 GiB reserve",503)
                 if time.monotonic()-self.last_cleanup_at>=3600:

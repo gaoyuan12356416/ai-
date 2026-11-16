@@ -73,6 +73,13 @@ class SourceCache:
         self.max_bytes = max_bytes
         self.reserve_bytes = reserve_bytes
 
+    def trim_if_low_disk(self, *, check=lambda: None):
+        try:
+            if self.root.is_dir() and shutil.disk_usage(self.root).free < self.reserve_bytes:
+                self._prune(exclude='', check=check)
+        except OSError:
+            pass
+
     def fetch(self, url, destination, *, session_factory, max_source_bytes,
               check=lambda: None):
         started = time.monotonic()
