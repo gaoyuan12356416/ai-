@@ -125,6 +125,17 @@ class CloudRoutingTests(unittest.TestCase):
                                          min_pending=0,max_workers=8),{"is_admin": True})
         self.assertEqual(self.store.config()["hosts"]["cos-cloud"]["prepare"]["min_pending"],100)
 
+    def test_peer_slots_do_not_double_book_one_fb_material(self):
+        self.pool("cos-cloud",1,min_pending=0)
+        self.store.register_node("hk-gpu",["backend:gpu","prepare:fb"])
+        self.pool("hk-gpu",2)
+        for slot in ["one","two"]:self.store.worker_heartbeat("hk-gpu",slot,"prepare")
+        for i,material in enumerate(["same","same","second","third"]):
+            self.offer(i,resource_keys=["fb:material:"+material])
+        self.assertEqual(self.claim()["job"]["source_id"],"3")
+        self.assertEqual(self.claim("hk-gpu","one")["job"]["source_id"],"0")
+        self.assertEqual(self.claim("hk-gpu","two")["job"]["source_id"],"2")
+
     def test_recovery_at_zero_and_fenced_unknown(self):
         self.pool("cos-cloud", 1, min_pending=0)
         self.offer(1)

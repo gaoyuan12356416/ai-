@@ -111,7 +111,7 @@ def switch(release):
     run(["python3",HEALTH,"snapshot","--lane","coordinator","--output",snapshot])
     if (Path("/run/pipeline-service-drain")/(COORDINATOR+".json")).exists() or TEMP.exists():
         raise RuntimeError("other service handoff in progress")
-    if health(MAIN,True)[1].get("cos_prepare") or health(AUX)[1].get("cos_prepare") is not True:
+    if health(MAIN,True)[0]!=200 or health(AUX)[1].get("listener_port")!=AUX:
         raise RuntimeError("handoff endpoints changed")
     recorded = DROP.read_bytes() if DROP.exists() else None
     if recorded:write(release/"backup/original-cos-drop",recorded,0o600)
@@ -119,7 +119,7 @@ def switch(release):
     redirected=False
     try:
         redirect("-I",MAIN,AUX);redirected=True
-        if health(MAIN)[1].get("cos_prepare") is not True or health(MAIN,True)[1].get("cos_prepare"):
+        if health(MAIN)[1].get("listener_port")!=AUX or health(MAIN,True)[1].get("listener_port")==AUX:
             raise RuntimeError("new requests did not reach standby")
         # Main loop + single collector. Drain already accepted HTTP handlers
         # while new requests, heartbeats and publisher callbacks use standby.

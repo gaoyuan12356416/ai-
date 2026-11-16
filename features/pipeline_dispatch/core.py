@@ -1244,9 +1244,16 @@ class DispatchStore:
             minimum = config["hosts"][node_id][stage].get("min_pending", 100) if cloud else 0
             count = 0
             choice = None
+            reserved_locks = set()
             for item in eligible:
                 row, locks, required = item
-                reserved = choice is None and prepare_routing.reserve_higher(higher, row, required)
+                reserved = False
+                if choice is None:
+                    if not reserved_locks.isdisjoint(locks):
+                        reserved = True
+                    elif prepare_routing.reserve_higher(higher, row, required):
+                        reserved_locks.update(locks)
+                        reserved = True
                 if not required <= capabilities or (cloud and not prepare_routing.cloud_candidate(row, capabilities)):
                     continue
                 count += 1
