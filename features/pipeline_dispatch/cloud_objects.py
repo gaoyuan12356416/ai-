@@ -54,8 +54,23 @@ class ObjectStore:
         if head is not None and not matches(head):
             raise ExecutionError("cos_object_conflict", unknown=True)
         if head is None:
-            self.client.upload_file(Bucket=self.config.cos_bucket, Key=key, LocalFilePath=str(local_path),
-                    PartSize=8, MAXThread=2, ContentType=content_type, Metadata={"x-cos-meta-sha256": sha256_value})
+            target = {"Bucket": self.config.cos_bucket, "Key": key}
+            headers = {"ContentType": content_type, "Metadata": {"x-cos-meta-sha256": sha256_value}}
+            with Path(local_path).open("rb") as body:
+                if size < 64 * 1024**2:
+                    self.client.put_object(**target, **headers, Body=body, EnableMD5=True)
+                else:
+                    upload = self.client.create_multipart_upload(**target, **headers)["UploadId"]
+                    parts = []
+                    try:
+                        for index, chunk in enumerate(iter(lambda: body.read(16 * 1024**2), b""), 1):
+                            result = self.client.upload_part(**target, UploadId=upload, PartNumber=index, Body=chunk, EnableMD5=True)
+                            parts.append({"PartNumber": index, "ETag": result["ETag"]})
+                        self.client.complete_multipart_upload(**target, UploadId=upload, MultipartUpload={"Part": parts})
+                    except Exception:
+                        if not matches(self.head(key)):
+                            self.client.abort_multipart_upload(**target, UploadId=upload)
+                            raise
             if not matches(self.head(key)):
                 raise ExecutionError("cos_object_verify_failed")
         return self.url(key)

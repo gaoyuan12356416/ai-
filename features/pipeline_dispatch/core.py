@@ -1082,6 +1082,122 @@ class DispatchStore:
                    if prepare_routing.cloud_candidate(row, caps))
 
     def claim(self, node_id, worker_id, stage):
+        # Published-stage admission stays on the original path. Operators can
+        # select that same implementation for the physical preparation nodes.
+        if stage != "prepare" or (node_id != prepare_routing.CLOUD and self.config().get("prepare_routing") != "priority"):
+            if node_id == prepare_routing.CLOUD:
+                return {"job": None, "idle_reason": "prepare_only_node"}
+            return self._original_claim(node_id, worker_id, stage)
+        return self._priority_claim(node_id, worker_id, stage)
+
+    def _original_claim(self, node_id, worker_id, stage):
+        if stage not in STAGES:
+            raise DispatchError("stage_invalid", status=400)
+        now = self.now()
+        with self.transaction() as c:
+            self._expire(c)
+            node = c.execute("SELECT * FROM pipeline_node WHERE node_id=?", (node_id,)).fetchone()
+            worker = c.execute("SELECT * FROM pipeline_worker WHERE node_id=? AND worker_id=? AND stage=?", (node_id, worker_id, stage)).fetchone()
+            if not node or not worker or worker["draining"]:
+                return {"job": None, "idle_reason": "draining" if worker and worker["draining"] else "node_offline"}
+            fresh = stamp(self.clock() - dt.timedelta(seconds=45))
+            if node["last_seen_at"] < fresh or worker["last_seen_at"] < fresh:
+                return {"job": None, "idle_reason": "node_offline"}
+            config = self.config(c)
+            active = c.execute("SELECT count(*) FROM pipeline_job WHERE node_id=? AND stage=? AND status='running'", (node_id, stage)).fetchone()[0]
+            if active >= config["hosts"][node_id][stage]["target"]:
+                return {"job": None, "idle_reason": "capacity_limit"}
+            if c.execute("SELECT 1 FROM pipeline_job WHERE node_id=? AND worker_id=? AND status='running'", (node_id, worker_id)).fetchone():
+                return {"job": None, "idle_reason": "worker_busy"}
+            if stage == "publish" and c.execute("SELECT count(*) FROM pipeline_job WHERE stage='publish' AND status IN ('running','legacy_running')").fetchone()[0] >= config["global_publish_limit"]:
+                return {"job": None, "idle_reason": "global_publish_limit"}
+            # Apply immediately to cached registrations as well as future node
+            # heartbeats. An unavailable tool must not interrupt other node work.
+            capabilities = set(json.loads(node["capabilities_json"])) - self.capability_exclusions.get(node_id, set())
+            rows = c.execute("""SELECT j.* FROM pipeline_job j
+              LEFT JOIN pipeline_fairness fc ON fc.scope=? AND fc.item=j.channel
+              LEFT JOIN pipeline_fairness fb ON fb.scope=?||j.channel AND fb.item=j.batch_key
+              WHERE j.stage=? AND j.status IN ('queued','ready') AND j.hold_reason='' AND j.scheduled_at<=?
+              ORDER BY COALESCE(fc.last_seq,0),COALESCE(fb.last_seq,0),j.scheduled_at,j.id""",
+              (stage, stage + ":", stage, now)).fetchall()
+            # Priority applies only at admission. Existing claims, account locks,
+            # time gates and per-batch fairness remain authoritative. Unlisted
+            # channels keep their fair-order place in the highest band.
+            order = config.get("channel_priority", [])
+            if order:
+                rank = {channel: index for index, channel in enumerate(order)}
+                rows = sorted(rows, key=lambda item: rank.get(item["channel"], 0))
+            blocked = []
+            from .maintenance import active_holds, blocking_service
+            maintenance_holds = active_holds()
+            for row in rows:
+                if blocking_service(row, maintenance_holds):
+                    blocked.append('service_draining')
+                    continue
+                if c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", ("job:" + str(row["id"]), now)).fetchone():
+                    blocked.append("account_busy")
+                    continue
+                if (row["channel"] not in config["enabled_channels"]
+                        or (stage == "publish" and row["channel"] in config.get("preparation_only_channels", []))):
+                    blocked.append("channel_disabled")
+                    continue
+                if not set(json.loads(row["capabilities_json"])).issubset(capabilities):
+                    blocked.append("capability_unavailable")
+                    continue
+                resources = sorted(set(json.loads(row["resource_keys_json"])))
+                if not resources:
+                    blocked.append("account_identity_missing")
+                    continue  # All current channel work belongs to an account, Page, or YouTube channel.
+                scoped = isolated_queue_resource(row)
+                independent = independent_x_preparation(row) and not scoped
+                locks = [scoped] if scoped else (["prepare:" + r for r in resources] if independent else resources)
+                busy = False
+                for resource in locks:
+                    if c.execute("SELECT 1 FROM pipeline_legacy_resource WHERE resource_key=? LIMIT 1", (resource,)).fetchone():
+                        busy = True
+                        break
+                    held = c.execute("SELECT r.quarantined,r.legacy,j.stage,j.status,j.lease_expires_at FROM pipeline_resource r JOIN pipeline_job j ON j.id=r.job_id WHERE r.resource_key=?", (resource,)).fetchone()
+                    if held and not (independent and held["stage"] == "publish" and held["status"] == "running"
+                                     and not held["quarantined"] and not held["legacy"] and held["lease_expires_at"] > now):
+                        busy = True
+                        break
+                    if independent and c.execute("SELECT 1 FROM pipeline_resource WHERE resource_key=?", ("prepare:" + resource,)).fetchone():
+                        busy = True
+                        break
+                    # Unknown preparation fences and legacy planners must also
+                    # see the new lane. A normal publisher checks order below.
+                    if not independent:
+                        prep = c.execute("SELECT quarantined FROM pipeline_resource WHERE resource_key=?", ("prepare:" + resource,)).fetchone()
+                        if prep and (stage != "publish" or prep["quarantined"]):
+                            busy = True
+                            break
+                if busy:
+                    blocked.append("account_busy")
+                    continue
+                if stage == "publish":
+                    if any(c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", (key, now)).fetchone() for key in resources + ["channel:" + row["channel"]]):
+                        blocked.append("cooldown")
+                        continue
+                    if c.execute("SELECT count(*) FROM pipeline_job WHERE channel=? AND stage='publish' AND status IN ('running','legacy_running')", (row["channel"],)).fetchone()[0] >= config["channel_limits"][row["channel"]]:
+                        blocked.append("channel_limit")
+                        continue
+                # Eligible queues have no dependency on an earlier sibling.
+                token, generation = secrets.token_urlsafe(32), row["generation"] + 1
+                expires = stamp(self.clock() + dt.timedelta(seconds=LEASE_SECONDS))
+                c.execute("UPDATE pipeline_job SET status='running',node_id=?,worker_id=?,generation=?,claim_hash=?,lease_expires_at=?,started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,updated_at=?,error_code='',error_message='' WHERE id=?", (node_id, worker_id, generation, digest(token), expires, now, now, row["id"]))
+                c.execute("INSERT INTO pipeline_claim_history VALUES(?,?,?,?,?)", (row["id"], generation, node_id, worker_id, digest(token)))
+                for resource in locks:
+                    c.execute("INSERT INTO pipeline_resource VALUES(?,?,?,0,0)", (resource, row["id"], generation))
+                self.event(c, row["id"], "claimed", {"node_id": node_id, "worker_id": worker_id, "generation": generation}, now)
+                seq = c.execute("SELECT max(id) FROM pipeline_event").fetchone()[0]
+                for scope, item in ((stage, row["channel"]), (stage + ":" + row["channel"], row["batch_key"])):
+                    c.execute("INSERT INTO pipeline_fairness VALUES(?,?,?) ON CONFLICT(scope,item) DO UPDATE SET last_seq=excluded.last_seq", (scope, item, seq))
+                result = _job(c.execute("SELECT * FROM pipeline_job WHERE id=?", (row["id"],)).fetchone(), True)
+                result["claim_token"] = token
+                return {"job": result}
+            return {"job": None, "idle_reason": blocked[0] if blocked else "no_eligible_task", "idle_reasons": sorted(set(blocked))}
+
+    def _priority_claim(self, node_id, worker_id, stage):
         if stage not in STAGES:
             raise DispatchError("stage_invalid", status=400)
         now = self.now()
@@ -1115,7 +1231,7 @@ class DispatchStore:
                 if active >= prepare_routing.queue_limit(json.loads(node["metrics_json"])):
                     return {"job": None, "idle_reason": "cos_queue_limit"}
             higher = []
-            if stage == "prepare" and config.get("prepare_routing") == "priority":
+            if cloud or config.get("prepare_routing") == "priority":
                 higher = prepare_routing.available_higher(c, node, config, fresh, self.capability_exclusions)
             blocked = []
             eligible = self._eligible(c, config, stage, now, capabilities, blocked)

@@ -28,13 +28,15 @@ def probe(binary, path):
     return json.loads(raw.stdout)
 
 
-def transcode(codec, duration, canvas=(720, 1280), bit_rate=None):
+def transcode(codec, duration, canvas=(720, 1280), bit_rate=None, *, tt_delivery=False):
     hevc = codec == "hevc"
     video = {"Codec": "H.265" if hevc else "H.264", "Profile": "main" if hevc else "high", "Width": str(canvas[0]),
              "Height": str(canvas[1]), "Fps": "30", "Preset": "medium", "Gop": "60", "Pixfmt": "yuv420p"}
+    if tt_delivery:
+        bit_rate = 900 if hevc else 1500
     video.update({"Bitrate": str(bit_rate)} if bit_rate else {"Crf": "21"})
     return {"Transcode": {"Container": {"Format": "mp4"}, "Video": video, "Audio": {
-        "Codec": "aac", "Samplerate": "48000", "Bitrate": "192", "Channels": "2"},
+        "Codec": "aac", "Samplerate": "48000", "Bitrate": "128" if tt_delivery else "192", "Channels": "2"},
         "TimeInterval": {"Start": "0", "Duration": "%.3f" % duration}, "TransConfig": {"AdjDarMethod": "pad"}}}
 
 
@@ -142,10 +144,8 @@ class CloudExecutor(NodeExecutors):
             bit_rate = None
             if mode == "repair":
                 rate = repair.output_rate_control(cap, duration)
-                bit_rate = max(10, min(50000, int(rate["video_bitrate_kbps"]))) if "video_bitrate_kbps" in rate else min(4500, int(cap * 8 * 0.88 / duration / 1000) - 192)
-                if bit_rate < 10:
-                    raise ExecutionError("cos_x_size_budget")
-            params = transcode(codec, duration, canvas, bit_rate)
+                bit_rate = rate["video_bitrate_kbps"]
+            params = transcode(codec, duration, canvas, bit_rate, tt_delivery=channel == "tt")
             if mode == "random_overlay":
                 manifest = self.assets["manifest_sha256"]
                 if request.get("asset_manifest_sha256", manifest) != manifest:
@@ -161,13 +161,22 @@ class CloudExecutor(NodeExecutors):
             if mode == "source_direct":
                 output = source
             else:
+                ci_input = source
+                if codec == "hevc" and mode not in {"branded_preview", "direct_outro"} and duration < secs:
+                    # CI's HEVC interval can truncate a fractional second. Pass
+                    # the trimmed MP4 edit first, then encode its entire timeline.
+                    ci_input = temp / "trimmed.mp4"
+                    run_media(self.config["ffmpeg"], ["-i",source,"-map","0:v:0","-map","0:a:0?","-c","copy","-t",
+                              "%.6f" % duration,"-movflags","+faststart","-y",ci_input])
+                if codec == "hevc":
+                    params["Transcode"].pop("TimeInterval", None)
                 if not has_audio:
                     silent = temp / "with-audio.mp4"
-                    run_media(self.config["ffmpeg"], ["-i",source,"-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000",
+                    run_media(self.config["ffmpeg"], ["-i",ci_input,"-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000",
                             "-map","0:v:0","-map","1:a","-c:v","copy","-c:a","aac","-shortest","-y",silent])
                     ci_source = self.origin.content(silent, "video/mp4")
                 else:
-                    ci_source = self.origin.content(source, "video/mp4")
+                    ci_source = self.origin.content(ci_input, "video/mp4")
                 if mode in {"branded_preview","direct_outro"}:
                     duration, ci_output = self.phone_outro(request, mode, codec, has_audio, source, ci_source, duration, temp, context, run)
                     receipt["assets"] = {"outro_sha256": self.asset_hashes["outro"][0], "outro_size": self.asset_hashes["outro"][1],
@@ -224,13 +233,13 @@ class CloudExecutor(NodeExecutors):
         outro_duration = float(probe(self.config["ffprobe"], outro)["format"]["duration"])
         if not 1 <= duration or not 1 <= outro_duration <= 120:
             raise ExecutionError("cos_phone_duration_invalid")
-        main = transcode(codec, duration - 0.9)
+        main = transcode(codec, duration - 0.9, tt_delivery=True)
         if logo:
             main["Watermark"] = [watermark(self.origin.url(self.origin.content(logo, "image/png")), duration - 0.9,
                                                 width=132,height=132,dx=48,dy=72)]
         main_key = run("main", "Transcode", source_key, main)
         mixed, foreground = self.templates.phone_layers(source,outro,logo,duration,has_audio,context,temp)
-        tail = transcode(codec, outro_duration)
+        tail = transcode(codec, outro_duration, tt_delivery=True)
         tail["Watermark"] = [self.templates.outro_labels(font,str(request["content_id"]),outro_duration), foreground]
         tail_key = run("outro", "Transcode", mixed, tail)
         combined = {"ConcatTemplate": {"DirectConcat": "true", "Container":{"Format":"mp4"}, "Index":"0",
