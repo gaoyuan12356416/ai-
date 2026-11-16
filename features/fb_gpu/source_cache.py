@@ -225,7 +225,7 @@ class SourceCache:
                         blob = path.with_suffix('.mp4')
                         size = blob.stat().st_size
                         total += size
-                        entries.append((data.get('last_used', 0), path, blob, size))
+                        entries.append((float(data.get('last_used', 0)), path, blob, size))
                     except (OSError, ValueError, TypeError, AttributeError):
                         continue
                 for _, manifest, blob, size in sorted(entries):
