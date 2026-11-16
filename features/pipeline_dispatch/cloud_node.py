@@ -44,6 +44,9 @@ class CloudNode:
         self.target = 0
         self.futures = {}
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+        self.delivery_worker = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.pending_delivery = None
+        self.next_delivery = 0
         self.idle_reason = "awaiting_assignment"
 
     def work(self, row):
@@ -122,6 +125,9 @@ class CloudNode:
 
     def tick(self):
         now = time.monotonic()
+        if now >= self.next_delivery and (self.pending_delivery is None or self.pending_delivery.done()):
+            self.pending_delivery = self.delivery_worker.submit(self.outbox.flush, self.client)
+            self.next_delivery = now + 15
         for key, future in list(self.futures.items()):
             if future.done():
                 del self.futures[key]
@@ -170,6 +176,7 @@ class CloudNode:
                 self.stopping.wait(2)
         finally:
             self.workers.shutdown(wait=True)
+            self.delivery_worker.shutdown(wait=True)
             self.instance.close()
 
 

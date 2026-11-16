@@ -389,6 +389,7 @@ def _workers(conn, store, actor, common, now):
                                    "avg_duration_seconds": stat.get("avg_seconds")})
         if host == "cos-cloud":
             from .prepare_routing import cloud_health
+            item["label"] = "COS 云端"
             stage = item["stages"][0]
             minimum = config["hosts"][host]["prepare"].get("min_pending", 100)
             pending = store.cloud_pending(conn, config, stamp(now))

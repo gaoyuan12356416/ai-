@@ -2,7 +2,7 @@
 import argparse
 import contextlib
 import grp
-import http.client
+from http.client import HTTPConnection
 import json
 import os
 import pwd
@@ -29,7 +29,7 @@ def owner_env(unit=COORDINATOR):
 def http(port, method, path, data=None, bearer="", source=None):
     opts={"timeout":20}
     if source:opts["source_address"]=(source,0)
-    con=http.client.HTTPConnection("127.0.0.1",port,**opts)
+    con=HTTPConnection("127.0.0.1",port,**opts)
     try:
         body=json.dumps(data).encode() if data is not None else None
         headers={"Content-Type":"application/json","Connection":"close"}
