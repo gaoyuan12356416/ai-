@@ -3,6 +3,7 @@
 FB、TikTok、YouTube、X 的素材查询不再以 Dramawave 产品字段作为发布资格。
 素材产品通过 `ads_apps_setting.name → id` 查到对应剧库 app，剧名、简介、语言及投放时间都在该 app 下读取。
 原有空产品及社媒通用素材标签继续沿用原 Dramawave 映射。重复产品名使查询明确失败，不任意挑选 app。
+YouTube 的“Drama-社媒专用素材”产品 ID 3214 是素材库标识，剧集查询继续映射到 Dramawave 1479；其他已命名产品保留各自的 app ID。修复及无重启部署说明见 `ops/youtube-social-material-app-20261116/README.md`。
 X 素材选择支持全部产品、Moboreels、MoboShort，精确 ID 仍可跨产品查询。
 YouTube 的独立素材 SELECT 改为全部视频产品，素材 app 与频道授权 app 分开处理。
 
