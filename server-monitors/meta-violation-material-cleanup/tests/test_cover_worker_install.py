@@ -79,7 +79,12 @@ class NarrowPrepareTests(unittest.TestCase):
     def test_running_other_job_and_unrelated_api_methods_do_not_block(self):
         api_before = installer.digest(self.web / installer.STORE)
         shared_before = installer.digest(self.shared)
-        backup = installer.prepare(self.release)
+        with patch.object(installer, 'online_snapshot', wraps=installer.online_snapshot) as snapshot:
+            backup = installer.prepare(self.release)
+        self.assertEqual({call.args[0]: call.kwargs['max_read_seconds']
+                          for call in snapshot.call_args_list},
+                         {self.root / 'cover.sqlite3': None,
+                          self.root / 'cover-audit/runs.sqlite3': None, self.shared: 15})
         plan = json.loads((backup / 'plan.json').read_text())
         self.assertEqual(plan['scope'], 'cover-worker-only')
         self.assertEqual(plan['web_store_before'], api_before)
@@ -190,6 +195,14 @@ class SnapshotDeadlineTests(unittest.TestCase):
              patch.object(installer.time, 'monotonic', side_effect=[0., 1., 2.]):
             installer.online_snapshot(Path.cwd() / 'source.sqlite3', Path.cwd() / 'target.sqlite3')
         self.assertEqual(events[:3], ['BEGIN', 'SELECT name FROM sqlite_master LIMIT 1', 'backup'])
+        self.assertLess(events.index('source_rollback'), events.index('PRAGMA integrity_check'))
+
+    def test_idle_cover_backup_can_finish_beyond_shared_writer_deadline(self):
+        events, connections = self.connections()
+        with patch.object(installer.sqlite3, 'connect', side_effect=connections), \
+             patch.object(installer.time, 'monotonic', side_effect=[0., 60., 120.]):
+            installer.online_snapshot(Path.cwd() / 'source.sqlite3', Path.cwd() / 'target.sqlite3',
+                                      max_read_seconds=None)
         self.assertLess(events.index('source_rollback'), events.index('PRAGMA integrity_check'))
 
 

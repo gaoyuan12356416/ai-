@@ -67,15 +67,16 @@ def require_compatible_guards(reference, api):
     return sorted(expected)
 
 
-def online_snapshot(source, target):
+def online_snapshot(source, target, max_read_seconds=15):
     # A fixed read transaction prevents an active external writer from making
     # every incremental backup step restart. DELETE-journal writers may wait
-    # briefly; keep this read lock below their existing 30-second busy timeout.
+    # briefly. The shared ledger keeps a deadline below its writers' 30-second
+    # busy timeout. Cover-owned ledgers can finish while their services are idle.
     with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as src, \
          closing(sqlite3.connect(str(target))) as dst:
         started = time.monotonic()
         def progress(status, remaining, total):
-            if time.monotonic() - started >= 15:
+            if max_read_seconds is not None and time.monotonic() - started >= max_read_seconds:
                 raise TimeoutError('backup_snapshot_deadline_exceeded')
         try:
             src.execute('BEGIN')
@@ -125,7 +126,7 @@ def prepare(release):
                          (SHARED, 'shared-tasks.sqlite3')):
         if not source.is_file():
             raise RuntimeError('required_ledger_missing:' + str(source))
-        online_snapshot(source, backup / name)
+        online_snapshot(source, backup / name, max_read_seconds=15 if source == SHARED else None)
     final_state = unit_state()
     require_cover_idle(final_state)
     require_disabled_legacy(json.loads((ROOT / 'config.json').read_text(encoding='utf-8')), final_state)
