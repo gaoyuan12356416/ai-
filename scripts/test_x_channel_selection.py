@@ -58,6 +58,51 @@ class ChannelSelectionTests(unittest.TestCase):
         self.assertEqual(self.fixture.store.get_template(template["id"]).config["account_ids"],
                          ["101", "102"])
 
+    def test_mixed_scope_healthy_channel_reaches_confirmed_publish_once(self):
+        from features.x_auto_posts.publisher import AutoPostExecutor
+        from scripts import test_x_auto_post_publisher as publisher_fixtures
+
+        self.fixture.bridge.accounts_by_id["102"]["publish_eligible"] = False
+        template = self.create()
+        submitted = self.submit_run(template, "mixed-confirmed-publish-0001")
+        store = self.fixture.store
+        claim = store.claim_next_executable_task(
+            worker_id="channel-selector", lease_seconds=120, now=self.fixture.clock())
+        self.assertEqual(claim.task.account_id, "101")
+        token = claim.reveal_claim_token()
+        store.reserve_material(task_id=claim.task.id, material_id="123456",
+            content_id="DramaOne", selection={"material": {
+                "material_id": "123456", "video_duration": 120}}, claim_token=token)
+        store.confirm_material_reservation(claim.task.id, 9002, claim_token=token)
+        ready = store.transition_task(claim.task.id, "ready", expected_statuses={"reserved"},
+            claim_token=token, updates={"execution_run_id": 9001,
+                "execution_queue_id": 9002, "selected_duration_sec": 120,
+                "claim_phase": ""})
+        bridge = publisher_fixtures.FakeBridge(ready)
+
+        def publish(queue_id):
+            self.assertEqual(queue_id, 9002)
+            bridge.publish_calls += 1
+            bridge.queue_status = "published"
+            return {"status": "published"}
+
+        bridge.publish_queue = publish
+        executor = AutoPostExecutor(store, publisher_fixtures.DummySelector(), bridge,
+            lambda *_: {}, lambda *_: {}, gates=AutoLiveGates(True, True, True),
+            now_fn=self.fixture.clock, lease_seconds=120)
+        result = executor.execute_next("channel-publisher")
+        self.assertEqual(result["task"]["status"], "published")
+        self.assertEqual(result["task"]["publish_id"], "1900000000000000000")
+        self.assertEqual(bridge.publish_calls, 1)
+        self.assertEqual(store.get_run(submitted["run"]["id"]).status, "completed")
+        skipped = next(t for t in store.list_tasks(run_id=submitted["run"]["id"])
+                       if t.account_id == "102")
+        self.assertEqual(skipped.status, "skipped")
+        self.assertFalse(skipped.material_id)
+        self.assertIsNone(store.get_task_reservation(skipped.id))
+        self.assertFalse(executor.execute_next("channel-publisher-again")["claimed"])
+        self.assertEqual(bridge.publish_calls, 1)
+
     def test_all_restricted_finish_as_skipped_and_recovered_channel_rejoins(self):
         self.fixture.bridge.accounts_by_id["101"]["publish_eligible"] = False
         template = self.create(("101",))
