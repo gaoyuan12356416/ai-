@@ -95,7 +95,7 @@
 
               <section class="panel">
                 <div class="section-head">
-                  <div><h2>选择 X 账号</h2><p>支持多选；仅当前 active 且已批准发布的账号可进入正式任务，最终发布前会再次校验。</p></div>
+                  <div><h2>选择 X 账号</h2><p>支持多选；受限频道可正常选择和保存，发布时按当前状态自动跳过，其他频道继续发布。</p></div>
                   <span id="selectedAccountCount" class="badge">已选 0 个</span>
                 </div>
                 <div class="account-toolbar">
@@ -113,7 +113,7 @@
                 <div id="accountList" class="account-list" role="group" aria-label="选择 X 账号">
                   <div class="empty">正在加载账号…</div>
                 </div>
-                <p id="accountRefreshStatus" class="helper" aria-live="polite">Token 过期但已批准发布的账号可在此显式刷新；刷新成功后才会解锁选择。未批准账号不会被自动开放，前端显示也不替代服务端最终校验。</p>
+                <p id="accountRefreshStatus" class="helper" aria-live="polite">可刷新已批准发布的账号资格。受限状态不影响选择和保存；每次发布时重新校验，恢复可用后可自动参与后续发布。</p>
               </section>
 
               <section class="panel">

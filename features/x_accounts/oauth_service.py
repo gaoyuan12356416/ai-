@@ -3532,34 +3532,17 @@ def save_post_schedule_request(payload, source_type, navigation_item):
         finally:
             conn.close()
     accounts = [row_to_item(row) for row in rows]
-    eligible_ids = [
-        int(account["id"])
-        for account in accounts
-        if account.get("publish_eligible")
-    ]
+    known_ids = [int(account["id"]) for account in accounts]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
         store = XPostStore(POST_DB_PATH)
-        save_options = {}
-        if source_type == "material":
-            # Only trusted local account/ledger state may exclude an account.
-            # Saving settings never refreshes tokens or calls X.
-            blocked = {
-                account_id for account_id, hold in store.schedule_account_blockers(eligible_ids).items()
-                if hold.get("code") in {"x_post_account_locked", "x_account_not_publishable"}
-            }
-            # An active upload also has a needs-review fence while X responds.
-            # Keep that healthy selection; execution still honors its fence.
-            save_options["skippable_account_ids"] = [
-                int(account["id"]) for account in accounts
-                if not account.get("publish_eligible") or int(account["id"]) in blocked
-            ]
+        # Preserve selected restricted accounts; the runner filters current
+        # restrictions before taking material or creating a publishing queue.
         item = store.save_schedule_config(
             source_type,
             settings,
             actor,
-            eligible_account_ids=eligible_ids,
-            **save_options,
+            known_account_ids=known_ids,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)

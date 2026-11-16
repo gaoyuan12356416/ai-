@@ -151,7 +151,7 @@
     }
     .account-option:last-child { border-bottom: 0; }
     .account-option:hover { background: #f8faff; }
-    .account-option.disabled { cursor: not-allowed; opacity: .62; background: #fafbfc; }
+    .account-option.disabled { opacity: .62; background: #fafbfc; }
     .account-option input { width: 17px; height: 17px; accent-color: var(--blue); }
     .account-option strong, .account-option span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .account-option span { margin-top: 3px; color: var(--muted); font-size: 12px; }
@@ -1500,7 +1500,7 @@
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
           checkbox.checked = selected;
-          checkbox.disabled = !eligible && !selected;
+          checkbox.disabled = false;
           checkbox.dataset.accountId = id;
           const textWrap = document.createElement("span");
           const strong = document.createElement("strong");
@@ -1511,7 +1511,7 @@
           textWrap.append(strong, secondary);
           const status = document.createElement("span");
           status.className = "account-status";
-          setText(status, eligible ? "可发布" : (selected ? "异常，保存时自动跳过" : "不可发布"));
+          setText(status, eligible ? "可发布" : "当前受限，发布时自动跳过");
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
         });
@@ -1686,7 +1686,7 @@
           return;
         }
         if (enabled && !selectedIds.length) {
-          setScheduleMessage("启用自动发布前，请至少选择一个可发布账号。", true);
+          setScheduleMessage("启用自动发布前，请至少选择一个频道。", true);
           return;
         }
         if (enabled && scheduleMode === "fixed" && !state.schedule.publishTimes.length) {
@@ -1727,11 +1727,7 @@
             }),
           });
           applySchedule(result);
-          const skipped = scheduleItem(result).skipped_account_ids || [];
-          const skippedMessage = skipped.length
-            ? `已跳过 ${skipped.length} 个异常账号，不参与发布；恢复后可重新勾选。${state.schedule.accountIds.size ? "" : "当前无可发布账号，已保存并关闭自动发布。"}`
-            : "";
-          setScheduleMessage((scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。") + skippedMessage, false);
+          setScheduleMessage((scheduleMode === "random" ? "随机发布设置已保存；随机计划从下一个北京时间自然日生效。" : "发布设置已保存；账号变更从下一个未来发布时间开始生效。") + "受限频道保留选择，发布时按当前状态自动跳过。", false);
           showToast("素材池自动发布设置已保存。", false);
         } catch (error) {
           setScheduleMessage(`保存失败：${error.message}`, true);
@@ -2129,13 +2125,7 @@
         const checkbox = event.target.closest("input[data-account-id]");
         if (!checkbox) return;
         const id = String(checkbox.dataset.accountId || "");
-        const item = state.accountOptions.find(account => accountId(account) === id);
         if (checkbox.checked) {
-          if (!accountEligible(item)) {
-            checkbox.checked = false;
-            setScheduleMessage("该账号当前不可发布，请先完成授权或校验。", true);
-            return;
-          }
           state.schedule.accountIds.add(id);
         } else {
           state.schedule.accountIds.delete(id);

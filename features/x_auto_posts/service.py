@@ -464,15 +464,8 @@ class XAutoPostService:
                     "x_auto_account_not_found", "X account was not found", 404
                 )
             account = matches[0]
-            if str(account.get("id") or "") != str(account_id) or not bool(
-                account.get("publish_eligible")
-            ):
-                raise AutoPostServiceError(
-                    "x_auto_account_not_publishable",
-                    "X 账号 %s（ID %s）当前不可发布，请取消勾选或恢复授权后再保存。"
-                    % (str(account.get("username") or account_id)[:50], account_id),
-                    409,
-                )
+            # Saving keeps the operator's scope, including restricted accounts.
+            # Current publication eligibility is checked when the run is built.
             self._account_language(account)
 
     @staticmethod
@@ -688,6 +681,16 @@ class XAutoPostService:
                     account_snapshot_version=2,
                 )
             except Exception as exc:
+                restricted = not bool(getattr(exc, "unknown_outcome", False)) and int(getattr(exc, "status", 500) or 500) == 409 and str(
+                    getattr(exc, "code", "")
+                ) in {
+                    "x_auto_account_not_publishable", "x_account_not_publishable",
+                    "x_post_account_needs_review", "x_post_account_locked",
+                    "x_account_disabled", "x_account_publish_not_approved",
+                    "x_disconnect_pending", "x_token_revoked", "x_token_missing",
+                    "x_token_invalid", "x_account_suspended",
+                    "x_account_verification_rejected",
+                }
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,
@@ -700,19 +703,21 @@ class XAutoPostService:
                 )
                 task = self.store.transition_task(
                     task.id,
-                    "failed",
+                    "skipped" if restricted else "failed",
                     expected_statuses={"pending"},
                     updates={
                         "error_code": str(getattr(exc, "code", "x_auto_account_unavailable")),
                         "error_message": safe_public_message(exc),
                     },
-                    event_type="task_account_snapshot_failed",
+                    event_type="task_account_restricted" if restricted else "task_account_snapshot_failed",
                 )
             tasks.append(task)
-        if tasks and all(task.status == "failed" for task in tasks):
+        if tasks and all(task.status in {"failed", "skipped"} for task in tasks):
             current = self.store.get_run(run.id)
             if current.status == "queued":
-                self.store.set_run_status(run.id, "failed", expected_statuses={"queued"})
+                failed = sum(task.status == "failed" for task in tasks)
+                status = "failed" if failed == len(tasks) else "partial_failed" if failed else "completed"
+                self.store.set_run_status(run.id, status, expected_statuses={"queued"})
         return tasks
 
     def _create_run(

@@ -5667,6 +5667,7 @@ class XPostStore:
         eligible_account_ids=None,
         now=None,
         skippable_account_ids=None,
+        known_account_ids=None,
     ):
         source_type = _schedule_source_type(source_type)
         if not isinstance(payload, dict):
@@ -5685,13 +5686,8 @@ class XPostStore:
             payload.get("account_ids"),
             allow_empty=not enabled,
         )
-        skippable = set(_schedule_account_ids(
-            list(skippable_account_ids or []), allow_empty=True,
-        ))
-        skipped_account_ids = [value for value in account_ids if value in skippable]
-        account_ids = [value for value in account_ids if value not in skippable]
-        if skipped_account_ids and not account_ids:
-            enabled = False
+        # Legacy eligibility/skip arguments no longer trim the saved scope.
+        # Restrictions are transient execution state, not configuration errors.
         publish_times = _schedule_publish_times(
             payload.get("publish_times"),
             allow_empty=True,
@@ -5733,23 +5729,23 @@ class XPostStore:
                 "启用随机发布时必须设置每天1到24次",
                 400,
             )
-        if enabled and eligible_account_ids is not None:
-            eligible = set(
+        if known_account_ids is not None:
+            known = set(
                 _schedule_account_ids(
-                    list(eligible_account_ids),
+                    list(known_account_ids),
                     allow_empty=True,
                 )
             )
             missing = [
                 account_id
                 for account_id in account_ids
-                if account_id not in eligible
+                if account_id not in known
             ]
             if missing:
                 raise XPostError(
-                    "x_account_not_publishable",
-                    "所选X账号当前不可用于发布",
-                    409,
+                    "x_account_not_found",
+                    "所选X账号不存在，请刷新账号列表",
+                    404,
                 )
         expected_version = _positive_int(payload.get("version"), "version")
         actor = actor if isinstance(actor, dict) else {}
@@ -6014,8 +6010,6 @@ class XPostStore:
         item = self.get_schedule_config(source_type, now=current_time)
         if restarted_dramas:
             item["restarted_dramas"] = restarted_dramas
-        if skipped_account_ids:
-            item["skipped_account_ids"] = skipped_account_ids
         return item
 
     def due_schedule_slots(self, now=None, grace_seconds=90, limit=100):
