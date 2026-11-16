@@ -77,6 +77,73 @@ class QueueStatesTests(unittest.TestCase):
         self.assertNotIn('secret-bob-key', json.dumps(result))
         self.assertNotIn('shared-account', json.dumps(result))
 
+    def test_auto_selection_wait_is_waiting_in_summary_and_task_detail(self):
+        self.job('x:auto:9000000000011', family='auto', source_status='pending',
+                 hold_reason='adapter_unavailable', scheduled_at=stamp(self.now - dt.timedelta(minutes=10)))
+        self.job('other-user-selection', family='auto', source_status='pending',
+                 hold_reason='adapter_unavailable', owner_user_id='bob')
+        result = self.summary()
+        self.assertEqual(result['totals']['waiting'], 1)
+        self.assertEqual(result['totals']['abnormal'], 0)
+        row = result['channels'][0]
+        self.assertEqual(row['waiting_selection'], 1)
+        self.assertEqual(row['oldest_pending_seconds'], 600)
+        self.assertEqual(row['abnormal_reasons'], {})
+        detail = views.query(self.store, 'tasks', self.actor, {})
+        self.assertEqual(len(detail['items']), 1)
+        item = detail['items'][0]
+        self.assertEqual(item['effective_state'], 'waiting')
+        self.assertEqual(item['effective_code'], '')
+        self.assertIn('等待选材', item['effective_reason'])
+        self.assertIn('统一调度制作', item['effective_reason'])
+
+    def test_auto_selection_keeps_future_appointment_and_unknown_account_block(self):
+        blocker = self.job('private-unknown', 'unknown', owner_user_id='bob')
+        self.job('selection-blocked', family='auto', source_status='pending',
+                 hold_reason='adapter_unavailable', resource_keys_json='["shared-account"]')
+        self.job('selection-future', family='auto', source_status='pending',
+                 hold_reason='adapter_unavailable', scheduled_at=stamp(self.now + dt.timedelta(hours=1)))
+        with self.store.transaction() as c:
+            c.execute('INSERT INTO pipeline_resource(resource_key,job_id,generation,quarantined) VALUES (?,?,?,?)',
+                      ('shared-account', blocker, 0, 1))
+        result = self.summary()
+        self.assertEqual(result['totals']['waiting'], 0)
+        self.assertEqual(result['totals']['scheduled'], 1)
+        self.assertEqual(result['channels'][0]['waiting_selection'], 0)
+        self.assertEqual(result['channels'][0]['abnormal_reasons'], {'blocked_by_unknown': 1})
+        details = views.query(self.store, 'tasks', self.actor, {})
+        items = {item['source_key']: item for item in details['items']}
+        self.assertEqual(items['selection-blocked']['effective_state'], 'blocked')
+        self.assertEqual(items['selection-blocked']['effective_code'], 'blocked_by_unknown')
+        self.assertEqual(items['selection-future']['effective_state'], 'scheduled')
+        self.assertIn('等待预约时间', items['selection-future']['effective_reason'])
+        self.assertNotIn('private-unknown', json.dumps(details))
+
+    def test_selection_exception_keeps_real_holds_failures_and_other_families(self):
+        base = dict(family='auto', source_status='pending', hold_reason='adapter_unavailable')
+        self.job('selection', **base)
+        self.job('selection-retry', **dict(base, source_status='retry_wait'))
+        self.job('real-driver-missing', **dict(base, family='queue'))
+        self.job('real-pause', **dict(base, hold_reason='operator_paused'))
+        self.job('recorded-error', **dict(base, error_code='pipeline_lease_lost'))
+        self.job('publish-hold', **dict(base, stage='publish'))
+        self.job('failed-selection', 'failed', **dict(base, finished_at=stamp(self.now), error_code='select_failed'))
+        result = self.summary()
+        self.assertEqual(result['totals']['waiting'], 2)
+        self.assertEqual(result['totals']['abnormal'], 5)
+        self.assertEqual(result['channels'][0]['abnormal_reasons'], {'held': 3, 'select_failed': 1})
+        self.assertEqual(result['channels'][0]['reason_labels']['held'], '任务暂停或受限')
+
+    def test_selection_classification_and_detail_are_read_only(self):
+        self.job('selection', family='auto', source_status='pending', hold_reason='adapter_unavailable')
+        with contextlib.closing(self.store.connect()) as c:
+            before = list(c.iterdump())
+        with patch('socket.socket', side_effect=AssertionError('no platform network')):
+            self.summary()
+            views.query(self.store, 'tasks', self.actor, {})
+        with contextlib.closing(self.store.connect()) as c:
+            self.assertEqual(before, list(c.iterdump()))
+
     def test_normal_account_lock_is_pending_but_legacy_unknown_is_abnormal(self):
         blocker = self.job('other', 'running', owner_user_id='bob')
         self.job('due', resource_keys_json='["shared"]')
