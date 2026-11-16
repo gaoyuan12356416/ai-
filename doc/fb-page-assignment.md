@@ -73,6 +73,8 @@ ORDER BY item_index;
 
 按 `task_id` 核对 `assignment_selected` 的数据/画像/选择耗时、`assignment_completed` 的本地持久化耗时、`http_response_sent` 的服务端总耗时，以及后台 `log_sync_completed` / `log_sync_deferred`。`http_response_disconnected` 单独记录连接断开；飞书播报和日志同步状态不能代替 HTTP 返回记录。服务重启先完成已接收请求，再关闭后台 worker；回滚代码保留现有 outbox。
 
+数据库异常另记录 `database_failure`：reader 标明初始会话或读取阶段，writer 标明连接、开始事务、精确主键读取、插入、回执更新或提交阶段；保留数字错误码、固定的 greeting/authentication/query/tls 阶段及 timeout/reset/refused 等标签，不输出原始驱动消息、SQL、请求体或凭据。该诊断不改变分配、重试、持久化和通知规则。
+
 放宽画像、无可用 Page、已鉴权请求错误、依赖异常或日志待补写时，异步向郜远发送汇总提醒，含两个 ID、剧 ID、选中 Page、原因及北京时间。正常无画像选择不等于异常。未授权请求不发飞书。发送失败不改变分配结果，未知投递保留原 UUID 和回执状态。
 
 ## 部署与回滚

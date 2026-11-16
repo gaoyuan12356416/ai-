@@ -26,6 +26,8 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from .runtime import database_error, log
+
 
 TABLE = "`ads_ai`.`fb_drama_page_assignment_log`"
 ENV_PREFIX = "FB_PAGE_ASSIGNMENT_MYSQL_WRITE_"
@@ -336,12 +338,16 @@ class Writer:
     def write_task(self, request):
         records = [self._record(request, row) for row in request["rows"]]
         with _WRITER_LOCK:
-            connection = self._connect()
+            connection = None
+            phase, started = "connect", time.monotonic()
             try:
+                connection = self._connect()
+                phase = "begin"
                 connection.begin()
                 with connection.cursor() as cursor:
                     for record in records:
                         identity = (record["task_id"], record["item_index"])
+                        phase = "read_exact_key"
                         cursor.execute("SELECT payload_hash,revision FROM " + TABLE +
                                        " WHERE task_id=%s AND item_index=%s FOR UPDATE", identity)
                         existing = cursor.fetchone()
@@ -351,6 +357,7 @@ class Writer:
                             if previous_hash != record["payload_hash"]:
                                 raise PayloadConflictError("assignment log key conflicts with frozen facts")
                             if int(previous_revision) < record["revision"]:
+                                phase = "update_receipt"
                                 cursor.execute("UPDATE " + TABLE + """ SET revision=%s,
                                     alert_status=%s,alert_reasons_json=%s,feishu_message_id=%s,
                                     alert_error_code=%s,updated_at=%s
@@ -360,15 +367,22 @@ class Writer:
                                      *identity, record["revision"]))
                             continue
                         columns = tuple(record)
+                        phase = "insert"
                         cursor.execute("INSERT INTO " + TABLE + " (" + ",".join("`" + key + "`" for key in columns) +
                                        ") VALUES (" + ",".join("%s" for _ in columns) + ")",
                                        tuple(record[key] for key in columns))
+                phase = "commit"
                 connection.commit()
-            except Exception:
-                try:
-                    connection.rollback()
-                except Exception:
-                    pass
+            except Exception as exc:
+                log("database_failure", role="writer", port=63353, task_id=request["task_id"],
+                    phase=phase, elapsed_ms=round((time.monotonic() - started) * 1000, 1),
+                    error_type=type(exc).__name__, **database_error(exc))
+                if connection is not None:
+                    try:
+                        connection.rollback()
+                    except Exception:
+                        pass
                 raise
             finally:
-                connection.close()
+                if connection is not None:
+                    connection.close()

@@ -10,8 +10,9 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import time
 
-from .runtime import log
+from .runtime import database_error, log
 
 
 class SourceError(Exception):
@@ -58,12 +59,18 @@ class Reader:
                queries + ";\nROLLBACK//\n")
         try:
             for attempt in range(2):
+                started = time.monotonic()
                 result = subprocess.run([
                     "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350", "-u",
                     self.env["ADMIN_MAPPING_MYSQL_USER"], "--connect-timeout=3", "--skip-reconnect",
                     "--default-character-set=utf8mb4", "--unbuffered", "-N", "-B", "-r"],
                     input=sql, env=env, text=True, encoding="utf-8", capture_output=True, timeout=42)
                 codes = re.findall(r"ERROR (\d+)", result.stderr)
+                if result.returncode:
+                    log("database_failure", role="reader", port=63350, attempt=attempt + 1,
+                        phase="initial_session" if not result.stdout.strip() else "read",
+                        elapsed_ms=round((time.monotonic() - started) * 1000, 1),
+                        **database_error(result.stderr))
                 # An observed upstream handshake failure produced no results.
                 # Retry once through the same FIFO gate, never SQL failures,
                 # partially read results, optional failures or execution timeouts.
