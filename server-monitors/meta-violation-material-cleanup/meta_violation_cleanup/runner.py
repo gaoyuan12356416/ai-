@@ -18,6 +18,21 @@ def safe_error(exc):
     val=getattr(exc,'code',None)
     if isinstance(val,int) and not isinstance(val,bool):data['code']=val
     elif isinstance(val,str) and re.fullmatch(r'[a-z_][a-z0-9_]{0,79}',val):data['code']=val
+    if isinstance(exc,sqlite3.Error):
+        # Python 3.9 lacks sqlite_errorcode. Emit only recognized categories,
+        # including on that runtime, without serializing arbitrary error text.
+        detail = str(exc).lower()
+        for message,code in (
+                ('database is locked','sqlite_busy'),
+                ('database table is locked','sqlite_locked'),
+                ('database or disk is full','sqlite_full'),
+                ('disk i/o error','sqlite_io_error'),
+                ('database disk image is malformed','sqlite_corrupt'),
+                ('attempt to write a readonly database','sqlite_readonly'),
+                ('unable to open database file','sqlite_cannot_open')):
+            if detail == message or detail.startswith(message+':'):
+                data['code']=code
+                break
     return data
 
 

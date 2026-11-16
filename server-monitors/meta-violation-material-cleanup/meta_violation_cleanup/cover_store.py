@@ -3,7 +3,7 @@
 Only the caller holding the exclusive worker process lock may recover work.
 Every network-write intent is committed first. Unknown writes never replay.
 """
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -102,6 +102,12 @@ class CoverStore:
             raise CoverStoreError('durable_database_required')
         self.path = str(Path(path).resolve())
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        # Reporting holds a consistent read snapshot. WAL lets execution keep
+        # committing receipts while that snapshot scans the historical ledger.
+        # Journal mode must be changed outside the schema/write transaction.
+        with closing(sqlite3.connect(self.path, timeout=30)) as db:
+            if db.execute('PRAGMA journal_mode=WAL').fetchone()[0] != 'wal':
+                raise CoverStoreError('cover_wal_unavailable')
         with self._tx() as db:
             cover_index_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cover_creatives'").fetchone()
             for sql in _SCHEMA:

@@ -42,6 +42,15 @@ Definite failure is not automatically retried. Unknown writes are reconciled rea
 
 ## Concurrency and storage
 
+For the 2026-11-13 `OperationalError` pause and report/worker lock contention,
+read [database recovery](../../../../doc/20261116.meta-cover-sqlite-recovery.md).
+The cover queue uses WAL so consistent report snapshots can overlap worker
+commits. Preserve FULL synchronization and current receipts. Database copies
+use SQLite backup rather than copying only the main file while WAL is active.
+Composite `ads_source` discovery uses the covering `(source_type,source_id)`
+index in exhaustive bounded ranges, including tied source values and historical
+CSV/JSON/whitespace encodings. Preserve the existing statement limit and FIFO.
+
 For account usage collapsing global concurrency or scan SQL disconnects, read
 [account throttling and scan reuse](../../../../doc/20261103.meta-cover-throughput-scan/README.md).
 Cover execution scopes an exact-account BUC header to that account: usage at

@@ -62,6 +62,7 @@ class IndexedSourceTests(unittest.TestCase):
         self.assertEqual(expected,{str(n) for n in range(1,11)})
         self.assertTrue(expected<=found,expected-found)
         self.assertEqual(metrics['composite_ranges'],48)
+        self.assertEqual(metrics['complex_source_ranges'],24)
         self.assertFalse(any('FORCE INDEX(idx_product)' in q for q in source.queries))
         source.db.close()
 
@@ -87,6 +88,27 @@ class IndexedSourceTests(unittest.TestCase):
         records,metrics=material_rows(source,{'7'},{'1479':'1479'})
         self.assertEqual({r['id'] for r in records},{str(n) for n in range(1,len(values)+1)})
         self.assertEqual(metrics['complex_publication_rows'],len(values))
+
+    def test_sparse_composite_wrappers_use_covering_ranges_and_preserve_ties(self):
+        source=FixtureSource()
+        self.addCleanup(source.db.close)
+        values=['1,7','10,7','11,7','11,7','11,7','19,7','2,7',
+                '[7,8]',' 7 ','\t7\n','7','8']
+        for n,value in enumerate(values,1):
+            source.db.execute('INSERT INTO ads_source VALUES(?,?,?)',(100+n,3,value))
+            source.db.execute('INSERT INTO ads_facebook_auto_created_data VALUES('+','.join('?' for _ in range(11))+')',
+                (n,str(1000+n),'1479',str(100+n),None,str(2000+n),'100','1','1','',''))
+        query=source.query
+        def bounded_query(sql):
+            if 'FROM `main`.ads_source' in sql and 'LOCATE' in sql:
+                self.assertIn('FORCE INDEX(source_type)',sql)
+                self.assertIn('ORDER BY source_id,id',sql)
+                self.assertTrue('source_id>=' in sql or 'source_id<' in sql)
+            return query(sql)
+        source.query=bounded_query
+        records,metrics=material_rows(source,{'7'},{'1479':'1479'})
+        self.assertEqual({r['id'] for r in records},{str(n) for n in range(1,len(values))})
+        self.assertEqual(metrics['complex_source_ranges'],24)
 
 
 if __name__=='__main__':unittest.main()

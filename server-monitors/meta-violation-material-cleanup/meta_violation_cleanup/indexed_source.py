@@ -62,14 +62,27 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
         for rows in pages('ads_source FORCE INDEX(source_type)',fields,
                           'source_type=3 AND source_id IN '+_inside(part),'source_id'):
             aliases.update(row['id'] for row in rows)
-    # An ads_source wrapper can itself contain multiple canonical materials.
-    for rows in pages('ads_source FORCE INDEX(source_type_2)',fields,
-                      'source_type=3 AND '+complex_value('source_id')):
-        for row in rows:
-            metrics['complex_source_rows']+=1
-            try: matched=materials.intersection(parse_ids(row['source_id']))
-            except ValueError: continue
-            if matched: aliases.add(row['id'])
+    # Composite wrappers are sparse. The (source_type,id) index requires full
+    # row reads across the entire type before LIMIT can find any matches. Use
+    # the covering (source_type,source_id) index in exhaustive adjacent ranges.
+    bounds = (None,) + COMPOSITE_BOUNDS + (None,)
+    for lower_bound, upper_bound in zip(bounds, bounds[1:]):
+        predicates = ['source_type=3', complex_value('source_id')]
+        if lower_bound is not None:
+            predicates.append('source_id>=' + _quote(lower_bound))
+        if upper_bound is not None:
+            predicates.append('source_id<' + _quote(upper_bound))
+        for rows in pages('ads_source FORCE INDEX(source_type)', fields,
+                          ' AND '.join(predicates), 'source_id'):
+            for row in rows:
+                metrics['complex_source_rows'] += 1
+                try:
+                    matched = materials.intersection(parse_ids(row['source_id']))
+                except ValueError:
+                    continue
+                if matched:
+                    aliases.add(row['id'])
+        metrics['complex_source_ranges'] += 1
     metrics['source_aliases']=len(aliases)
     progress(stage='material_lookup',lookup_metrics=dict(metrics))
 
@@ -105,7 +118,6 @@ def material_rows(source, material_ids, scope, progress=lambda **kw: None, stop=
     # tens of millions of full records; these range scans reject ordinary
     # scalar values in the secondary index before fetching product/full rows.
     # EXPLAIN on the live reader confirms range + index_condition + no filesort.
-    bounds=(None,)+COMPOSITE_BOUNDS+(None,)
     for column,index in (('source_id','ads_facebook_auto_created_data_source_id'),
                          ('original_source_id','ads_facebook_auto_created_data_original_source_id')):
         for low,high in zip(bounds,bounds[1:]):

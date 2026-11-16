@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import sqlite3
 import sys
 import threading
 import unittest
@@ -89,6 +90,15 @@ def violation(identifier, status=0, date="2026-10-22 08:00:00.000000"):
 
 
 class SqlSourceTests(unittest.TestCase):
+    def test_sqlite_failures_expose_categories_without_exception_text(self):
+        from meta_violation_cleanup.runner import safe_error
+        self.assertEqual(safe_error(sqlite3.OperationalError('database is locked')),
+                         {'type': 'OperationalError', 'code': 'sqlite_busy'})
+        self.assertEqual(safe_error(sqlite3.OperationalError('database table is locked: private_table')),
+                         {'type': 'OperationalError', 'code': 'sqlite_locked'})
+        self.assertEqual(safe_error(sqlite3.OperationalError('SELECT access_token_synthetic_secret')),
+                         {'type': 'OperationalError'})
+
     def test_error_codes_only_expose_fixed_internal_literals(self):
         from meta_violation_cleanup.runner import safe_error
         for code in source.SqlSourceError._CODES:

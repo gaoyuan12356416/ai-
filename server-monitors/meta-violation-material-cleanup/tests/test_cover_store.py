@@ -43,6 +43,29 @@ class CoverStoreTests(unittest.TestCase):
         self.assertEqual(set(self.store.triggered_materials()),{'400'})
         self.assertEqual(self.store.triggered_materials()['400']['window_start'],'2026-10-25')
 
+    def test_reporting_snapshot_does_not_block_worker_commits(self):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with self.store._tx(False) as report:
+                self.assertEqual(report.execute('SELECT count(*) FROM batches').fetchone()[0], 1)
+                write = pool.submit(self.store.begin_batch, 'b2', {})
+                write.result(timeout=2)
+                # The report retains its original snapshot after the commit.
+                self.assertEqual(report.execute('SELECT count(*) FROM batches').fetchone()[0], 1)
+        self.assertEqual(self.store.batch_details('b2')['status'], 'scanning')
+
+    def test_existing_delete_journal_migrates_with_unknown_receipts_preserved(self):
+        task = self.task()
+        self.store.claim_task(task['id'])
+        self.store.mark_task_write(task['id'],intent={'new_creative_id':'301'})
+        self.store.finish_task(task['id'],'unknown',{'new_creative_id':'301'})
+        expected = self.store.get_task(task['id'])
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode=DELETE').fetchone()[0], 'delete')
+        reopened = CoverStore(self.store.path)
+        self.assertEqual(reopened.get_task(task['id']), expected)
+        with closing(sqlite3.connect(self.store.path)) as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+
     def test_cleanup_waits_for_same_creative_replacements_without_mutating_queue(self):
         self.succeeded()
         self.store.begin_batch('b2', {})
