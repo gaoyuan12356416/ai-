@@ -26,6 +26,19 @@ python3.9 ops/youtube-uploader-login-20261116/deploy.py COMMIT
 仅重启主 API，按 YouTube lane 快照恢复原有依赖调度状态；发布 worker、
 统一 writer 和原本暂停的旧 worker 保持原状。无需 GPU 切换或队列排空。
 
+主 API 的既有 ExecStop 会等待依赖它的 X 在途任务，期间旧 API 继续服务。
+通过有等待上限的 SSH 工具执行时，将输出保存到数据盘并后台启动，防止
+连接超时后子进程打印失败，留下未收尾的 manifest：
+
+```sh
+nohup python3.9 ops/youtube-uploader-login-20261116/deploy.py COMMIT > /mnt/data-disk/youtube-uploader-login-20261116/deploy.log 2>&1 < /dev/null &
+```
+
+持续核对服务 MainPID/HTTP、`schedulers-after.json` 和 manifest。
+SSH 超时或 manifest 尚未写入最终状态，不能单独证明服务仍在切换；先读取
+实际状态和已产生的回执，不重复发起重启。代码摘要、当前健康及调度验收
+全部核实后，可保留原 manifest 并补记实际完成状态，无需再次重启。
+
 从同一提交的 worktree 回滚：
 
 ```sh
@@ -34,3 +47,4 @@ python3.9 ops/youtube-uploader-login-20261116/deploy.py COMMIT --rollback BACKUP
 
 回滚仅恢复两份代码、重启主 API 并核对依赖，不还原数据库、回执或业务记录。
 存在后续代码更新时先核对差异，避免覆盖其他人的变更。
+远程回滚同样应重定向输出并后台启动，跟踪完成回执及服务状态。
