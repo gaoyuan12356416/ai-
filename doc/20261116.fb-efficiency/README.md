@@ -44,3 +44,17 @@ replacement. Never restart publisher workers or change scheduler/capacity settin
 as part of the cache rollout. Rollback restores the backed-up preparer entry file,
 retains compatible additive cache code and current business facts, and naturally
 replaces preparation children only.
+
+## Startup catalog admission
+
+Replacing the idle GPU preparers exposed repeated sequential CUDA SHA256 reads
+of the same full template catalog before worker registration. Catalog admission
+now explicitly uses standard host SHA256 and the existing per-process immutable
+file cache. All expected SHA, size, inode, mtime/ctime, replacement and symlink
+checks remain. Requested media/download/output GPU hashing retains its original
+route and failure behavior. No rendering, audio or recipe setting changes.
+
+The helper has an independent hash-verified backup/rollback action
+`catalog-admission` in the installer. Only unregistered startup processes proven
+to hold zero business claims may be replaced to finish this activation. Active
+business preparation and all publisher processes must continue normally.

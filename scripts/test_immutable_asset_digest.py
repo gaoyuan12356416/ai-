@@ -1,7 +1,7 @@
 """CPU-only regression for immutable-asset digest reuse and invalidation.
 
-The CUDA constructor is replaced with a counting SHA oracle. These tests
-verify routing/cache semantics, not device SHA correctness or performance.
+Control-plane catalog verification uses host SHA256. Media digest routing and
+all catalog identity/invalidation checks remain independently covered.
 """
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -32,6 +32,8 @@ class ImmutableAssetDigestTests(unittest.TestCase):
         self.env.start(); self.addCleanup(self.env.stop)
         cuda_patch = patch.object(compute, 'CudaSHA256', side_effect=lambda: hashlib.sha256())
         self.cuda = cuda_patch.start(); self.addCleanup(cuda_patch.stop)
+        asset_patch=patch.object(compute,'_asset_digest',side_effect=lambda:hashlib.sha256())
+        self.asset=asset_patch.start();self.addCleanup(asset_patch.stop)
 
     def digest(self):
         return compute.immutable_asset_sha256_file(self.file)
@@ -60,7 +62,8 @@ class ImmutableAssetDigestTests(unittest.TestCase):
                 mtime_ns=target.stat().st_mtime_ns)))
             self.assertEqual(asset_cache.cached_path(asset['path'], cache), target)
         fb.load_asset_set(self.root, fingerprint); tt.load_asset_set(self.root, fingerprint)
-        self.assertEqual(self.cuda.call_count, 1 + len(fb.ASSET_CATEGORIES))
+        self.assertEqual(self.asset.call_count, 1 + len(fb.ASSET_CATEGORIES))
+        self.assertEqual(self.cuda.call_count, 0)
         with self.assertRaises(fb.RandomOverlayError): fb.load_asset_set(self.root, '0' * 64)
         with self.assertRaises(tt.RandomOverlayError): tt.load_asset_set(self.root, '0' * 64)
 
@@ -79,44 +82,52 @@ class ImmutableAssetDigestTests(unittest.TestCase):
             self.file.write_bytes(b'modified asset'); os.utime(self.file, ns=(original.st_atime_ns, original.st_mtime_ns))
             generation[0] += 1
             self.assertEqual(self.digest(), (hashlib.sha256(b'modified asset').hexdigest(), original.st_size))
-        self.assertEqual(self.cuda.call_count, 2)
+        self.assertEqual(self.asset.call_count, 2)
 
     def test_atomic_replace_with_same_size_and_mtime_rehashes(self):
         self.digest(); before = self.file.stat()
         replacement = self.root / 'new.webm'; replacement.write_bytes(b'modified asset')
         os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns)); replacement.replace(self.file)
         self.assertEqual(self.digest()[0], hashlib.sha256(b'modified asset').hexdigest())
-        self.assertEqual(self.cuda.call_count, 2)
+        self.assertEqual(self.asset.call_count, 2)
 
-    def test_cpu_disabled_gpu_is_never_used_and_backend_does_not_share_cache(self):
+    def test_catalog_admission_is_cpu_for_both_render_backends(self):
         with patch.dict(os.environ, {'PIPELINE_RENDER_BACKEND': 'cpu'}), \
              patch.object(compute, 'CudaSHA256', side_effect=AssertionError('CPU entered CUDA')):
             self.assertEqual(self.digest(), self.digest())
         self.assertEqual(self.cuda.call_count, 0)
         self.digest(); self.digest()
-        self.assertEqual({key[1] for key in compute._IMMUTABLE_ASSET_DIGESTS}, {'cpu', 'cuda'})
-        self.assertEqual(self.cuda.call_count, 1)
+        self.assertEqual({key[1] for key in compute._IMMUTABLE_ASSET_DIGESTS}, {'cpu'})
+        self.assertEqual(self.cuda.call_count, 0)
+        self.assertEqual(self.asset.call_count, 1)
 
     def test_pid_change_does_not_use_parent_cache(self):
         self.digest(); pid = os.getpid()
         with patch.object(os, 'getpid', return_value=pid + 1): self.digest()
-        self.assertEqual(self.cuda.call_count, 2)
+        self.assertEqual(self.asset.call_count, 2)
 
-    def test_gpu_failure_is_not_cached_or_fallen_back(self):
-        self.cuda.side_effect = RuntimeError('CUDA failed')
+    def test_catalog_hash_failure_is_not_cached(self):
+        self.asset.side_effect = RuntimeError('asset hash failed')
         for _ in range(2):
-            with self.assertRaisesRegex(RuntimeError, 'CUDA failed'): self.digest()
+            with self.assertRaisesRegex(RuntimeError, 'asset hash failed'): self.digest()
         self.assertFalse(compute._IMMUTABLE_ASSET_DIGESTS)
+        self.assertEqual(self.asset.call_count, 2)
+        self.assertEqual(self.cuda.call_count, 0)
+
+    def test_requested_media_gpu_hash_still_has_no_cpu_fallback(self):
+        self.cuda.side_effect=RuntimeError('CUDA failed')
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError,'CUDA failed'):compute.file_digest()
         self.assertEqual(self.cuda.call_count, 2)
 
     def test_finalization_failure_does_not_cache_partial_result(self):
         class FailedDigest:
             def update(self, block): pass
             def hexdigest(self): raise RuntimeError('finalize failed')
-        self.cuda.side_effect = FailedDigest
+        self.asset.side_effect = FailedDigest
         with self.assertRaisesRegex(RuntimeError, 'finalize failed'): self.digest()
         self.assertFalse(compute._IMMUTABLE_ASSET_DIGESTS)
-        self.cuda.side_effect = hashlib.sha256
+        self.asset.side_effect = hashlib.sha256
         self.assertEqual(self.digest()[0], hashlib.sha256(self.file.read_bytes()).hexdigest())
 
     def test_change_during_read_is_rejected_and_not_cached(self):
@@ -126,10 +137,10 @@ class ImmutableAssetDigestTests(unittest.TestCase):
             def update(self, block):
                 self.value.update(block); path.write_bytes(b'new longer asset content')
             def hexdigest(self): return self.value.hexdigest()
-        self.cuda.side_effect = ChangingDigest
+        self.asset.side_effect = ChangingDigest
         with self.assertRaisesRegex(ValueError, 'immutable_asset_changed'): self.digest()
         self.assertFalse(compute._IMMUTABLE_ASSET_DIGESTS)
-        self.cuda.side_effect = hashlib.sha256
+        self.asset.side_effect = hashlib.sha256
         self.assertEqual(self.digest()[0], hashlib.sha256(self.file.read_bytes()).hexdigest())
 
     def test_replacement_between_lstat_and_open_rejects_cached_hit(self):
@@ -140,20 +151,21 @@ class ImmutableAssetDigestTests(unittest.TestCase):
             return real_open(path, flags, *args, **kwargs)
         with patch.object(os, 'open', side_effect=replace_before_open):
             with self.assertRaisesRegex(ValueError, 'immutable_asset_changed'): self.digest()
-        self.assertEqual(self.cuda.call_count, 1)
+        self.assertEqual(self.asset.call_count, 1)
         self.assertEqual(self.digest()[0], hashlib.sha256(b'modified asset').hexdigest())
 
     def test_public_source_and_output_hash_functions_are_not_cached(self):
         for loader in (fb, tt):
             for _ in range(2): self.assertEqual(loader.sha256_file(self.file)[0], hashlib.sha256(self.file.read_bytes()).hexdigest())
         self.assertEqual(self.cuda.call_count, 4)
+        self.assertEqual(self.asset.call_count, 0)
         self.assertFalse(compute._IMMUTABLE_ASSET_DIGESTS)
 
     def test_concurrent_callers_share_one_completed_digest(self):
         with ThreadPoolExecutor(max_workers=4) as executor:
             values = list(executor.map(lambda _: self.digest(), range(8)))
         self.assertEqual(len(set(values)), 1)
-        self.assertEqual(self.cuda.call_count, 1)
+        self.assertEqual(self.asset.call_count, 1)
 
     def test_cached_catalog_still_rejects_symlink_metadata(self):
         fingerprint = self.catalog(); assets = fb.load_asset_set(self.root, fingerprint)

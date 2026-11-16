@@ -127,7 +127,7 @@ def recycle(runtime, workers_file, unit):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('action',choices=['plan','apply','rollback','recycle'])
+    p.add_argument('action',choices=['plan','apply','rollback','recycle','catalog-admission'])
     p.add_argument('--source',type=Path)
     p.add_argument('--runtime',type=Path)
     p.add_argument('--backup',type=Path)
@@ -140,16 +140,36 @@ def main():
         return
     if a.action=='rollback':
         record = json.loads((a.backup/'manifest.json').read_text())
-        target = Path(record['runtime'])/ENTRY
+        target = Path(record['runtime'])/record.get('entry',ENTRY)
         current=sha(target.read_bytes())
         if current not in (record['after_sha256'],record['before_sha256']):
             raise ValueError('runtime_changed_after_cache_deployment')
-        before = (a.backup/'prepare_worker.py').read_bytes()
+        before = (a.backup/record.get('backup_file','prepare_worker.py')).read_bytes()
         if sha(before)!=record['before_sha256']:
             raise ValueError('backup_hash_mismatch')
         if current!=record['before_sha256']:
             atomic(target,before)
         record.update(status='rolled_back_for_new_preparers',rollback_utc=datetime.now(timezone.utc).isoformat())
+        (a.backup/'manifest.json').write_text(json.dumps(record,indent=2))
+        print(json.dumps(record))
+        return
+    if a.action=='catalog-admission':
+        commit=verified_source(a.source)
+        entry='features/random_gpu/gpu_compute.py'
+        target=a.runtime/entry
+        before=target.read_bytes();after=(a.source/entry).read_bytes()
+        if sha(before)!=a.expected_before:
+            raise ValueError('catalog_helper_changed')
+        compile(after,entry,'exec')
+        a.backup.mkdir(mode=0o700,parents=True,exist_ok=False)
+        (a.backup/'gpu_compute.py').write_bytes(before)
+        record=dict(commit=commit,runtime=str(a.runtime),source=str(a.source),
+            entry=entry,backup_file='gpu_compute.py',before_sha256=sha(before),
+            after_sha256=sha(after),created_at_utc=datetime.now(timezone.utc).isoformat(),
+            status='backed_up')
+        (a.backup/'manifest.json').write_text(json.dumps(record,indent=2))
+        atomic(target,after)
+        record['status']='installed_for_new_processes'
         (a.backup/'manifest.json').write_text(json.dumps(record,indent=2))
         print(json.dumps(record))
         return

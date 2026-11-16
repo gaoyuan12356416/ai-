@@ -201,6 +201,14 @@ def _asset_stat_identity(value):
             value.st_mtime_ns, value.st_ctime_ns)
 
 
+def _asset_digest():
+    # Catalog admission is control-plane verification, not video processing.
+    # Sequential GPU SHA launches across many fresh workers can occupy the
+    # device for minutes before any worker can register or accept a job.
+    import hashlib
+    return hashlib.sha256()
+
+
 def immutable_asset_sha256_file(path):
     """Reuse a verified immutable catalog file within this process only.
 
@@ -210,8 +218,7 @@ def immutable_asset_sha256_file(path):
     successful read of an unchanged regular file can populate the cache.
     """
     path = Path(path)
-    use_cuda = enabled()
-    backend = "cuda" if use_cuda else "cpu"
+    backend = "cpu"
     # Serialize admission of the same file so concurrent catalog consumers
     # do not duplicate a full digest. No CUDA object is retained in the cache.
     with _IMMUTABLE_ASSET_DIGEST_LOCK:
@@ -231,11 +238,7 @@ def immutable_asset_sha256_file(path):
             key = (os.getpid(), backend, str(resolved), identity, opened_identity)
             result = _IMMUTABLE_ASSET_DIGESTS.get(key)
             if result is None:
-                if use_cuda:
-                    digest = CudaSHA256()  # A GPU miss never falls back to CPU.
-                else:
-                    import hashlib
-                    digest = hashlib.sha256()
+                digest = _asset_digest()
                 size = 0
                 for block in iter(lambda: stream.read(1024 * 1024), b""):
                     size += len(block)
