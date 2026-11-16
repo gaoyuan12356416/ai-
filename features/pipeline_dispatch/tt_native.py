@@ -404,10 +404,7 @@ class TTNativeBridge:
             except Exception as exc:
                 if native_token:
                     from features.tt_auto_posts.selector import NoEligibleMaterial
-                    if self.automatic and (isinstance(exc, NoEligibleMaterial) or (
-                            job["stage"] == "prepare"
-                            and getattr(exc, "code", "") == "tt_auto_metric_window_not_ready"
-                            and native.claim_phase == "selection")):
+                    if self.automatic and isinstance(exc, NoEligibleMaterial):
                         current = self._native(job)
                         result = self.service.executor._retry_or_fail(current, "selection", exc, native_token)
                         self.service.executor._update_run(result.run_id)
@@ -449,6 +446,12 @@ class TTNativeBridge:
                     raise AdapterError("tt_reconcile_only")
                 if details != {"post_info": descriptor["request"]["post_info"], "video_url": descriptor["artifact"]["url"]}:
                     raise AdapterError("tt_operation_body_changed")
+                from features.moboreels_library.macro_client import contains_macro, assert_publishable
+                template_text = current.get("caption_template")
+                if self.automatic:
+                    template_text = self.store.get_template(current["template_id"], version=current["template_version"]).config.get("caption_template")
+                if contains_macro(template_text):
+                    assert_publishable(current.get("content_id"))
                 if job["family"] == "direct_test":
                     self.store.renew_direct_test_publish(int(job["source_id"]), stored["native_token"], lease_seconds=10800)
                 elif not self.automatic:

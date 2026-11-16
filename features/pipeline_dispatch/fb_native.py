@@ -22,6 +22,8 @@ from features.fb_auto_posts.gpu import PROFILE
 from features.fb_auto_posts.core import utc_iso
 from features.fb_auto_posts.links import validate_short_url, build_short_url, validate_w2a_url
 from features.fb_video_publish.links import short_url, validate_long_url
+from features.fb_video_publish import moboreels
+from features.fb_auto_posts.moboreels import ensure_link as ensure_moboreels_link
 
 CPU_PROFILE = "fb-post-random-overlay-libx264-720x1280-v1"
 _INITIALIZE_LOCK = threading.Lock()
@@ -94,7 +96,8 @@ class FBNativeBridge:
             worker.sources.get_pages(snap["actor"], [task["page_id"]], manual=manual)
             fresh = worker.sources.get_materials([task["material_id"]], need_desc=False,
                     enforce_blacklist=task.get("source_kind") not in {"manual", "pool"}, manual=manual,
-                    **({"page_pool": True} if task.get("source_kind") == "pool" or "pool" in snap else {}))[task["material_id"]]
+                    **({"page_pool": True} if task.get("source_kind") == "pool" or "pool" in snap else {}),
+                    **({"moboreels": True} if snap.get("moboreels") else {}))[task["material_id"]]
             if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                 raise AdapterError("material_identity_changed")
         media_url = str(prepared.get("media_url") or "")
@@ -103,9 +106,12 @@ class FBNativeBridge:
                 raise AdapterError("prepared_media_invalid")
         elif media_url != snap["material"]["media_url"]:
             raise AdapterError("original_media_invalid")
-        if short_url(task["ledger_id"]) != task["short_url"]:
-            raise AdapterError("short_link_identity_mismatch")
-        validate_long_url(task["long_url"], task["ledger_id"])
+        if snap.get("moboreels"):
+            worker._moboreels_link(task, kind="execute")
+        else:
+            if short_url(task["ledger_id"]) != task["short_url"]:
+                raise AdapterError("short_link_identity_mismatch")
+            validate_long_url(task["long_url"], task["ledger_id"])
         title = snap.get("title", "")
         if not isinstance(title, str):
             raise AdapterError("title_invalid")
@@ -117,7 +123,12 @@ class FBNativeBridge:
         short, long = str(task.get("short_url") or ""), str(task.get("long_url") or "")
         if bool(short) != bool(long):
             raise AdapterError("fb_auto_short_link_snapshot_invalid")
-        if short:
+        frozen_moboreels = obj(task.get("moboreels_json") or "{}")
+        if frozen_moboreels:
+            link = moboreels.validate(frozen_moboreels.get("link"), task["content_id"])
+            if short != link["short_url"] or long != link["target_url"]:
+                raise AdapterError("moboreels_link_snapshot_invalid")
+        elif short:
             if validate_short_url(short) != build_short_url(task["id"]) or str(task.get("message_text") or "").count(short) != 1:
                 raise AdapterError("fb_auto_short_link_snapshot_invalid")
             validate_w2a_url(long)
@@ -233,6 +244,12 @@ class FBNativeBridge:
                     raise AdapterError("canonical_account_busy")
                 raise AdapterError("canonical_task_not_claimable")
             try:
+                # Native preparation bypasses the legacy GPU/worker entrypoints.
+                # Freeze the creator-bound receipt before issuing any upload descriptor.
+                if family == "auto":
+                    task = ensure_moboreels_link(self.runtime.store, task)
+                else:
+                    task = self.runtime.manual_worker._moboreels_link(task, kind="prepare" if stage == "prepare" else "execute")
                 if frozen_descriptor:
                     descriptor = frozen_descriptor
                 elif stage == "prepare":
@@ -412,6 +429,9 @@ class FBNativeBridge:
             if existing:
                 # Credential responses are not replayable authorization to write.
                 raise AdapterError("operation_already_started")
+            intent = obj(task.get("moboreels_json") or "{}") if job["family"] == "auto" else obj(task.get("snapshot_json") or "{}").get("moboreels")
+            if intent:
+                moboreels.macro_client.assert_publishable(task.get("content_id"))
             credentials = self._credentials(job["family"], task)
             with self.runtime.store.connect() as conn:
                 used = {r[0] for r in conn.execute("SELECT credential_id FROM pipeline_fb_operation WHERE source_key=? AND stage=? AND generation=?", self._key(job))}
