@@ -36,6 +36,12 @@ def check_permit(path, work_root):
         raise ProductionNeedsResources('production_permit_unavailable') from None
     if not permit.get('allowed') or permit.get('expires_at', 0) < time.time():
         raise ProductionNeedsResources('production_permit_withdrawn')
+    memory=Path('/proc/meminfo')
+    if memory.exists():
+        available=next(int(s.split()[1])*1024 for s in memory.read_text().splitlines()
+                       if s.startswith('MemAvailable:'))
+        if available<4*1024**3:
+            raise ProductionNeedsResources('benchmark_ram_reserve')
     for proc in Path('/proc').iterdir():
         if not proc.name.isdigit():
             continue
@@ -81,9 +87,13 @@ def guarded_commands(commands, output_files, args, env):
             if time.monotonic()-started > args.case_timeout:
                 raise RuntimeError('benchmark_case_timeout')
             if len(samples) == 0 or time.monotonic()-samples[-1]['monotonic'] >= 2:
-                gpu = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,utilization.encoder,memory.used',
+                gpu = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,utilization.encoder,memory.used,memory.free',
                     '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=5)
                 samples.append(dict(monotonic=time.monotonic(), gpu=gpu.stdout.strip()))
+                if gpu.returncode==0:
+                    free=[float(line.split(',')[3]) for line in gpu.stdout.splitlines() if line.strip()]
+                    if free and min(free)<1024:
+                        raise ProductionNeedsResources('benchmark_gpu_memory_reserve')
             time.sleep(.2)
         codes = [p.returncode for p in processes]
         if any(codes):
