@@ -111,13 +111,13 @@ def states(units):
             for u in units}
 
 
-def scheduler(folder, action):
+def scheduler(folder, action, prefix=''):
     args = [sys.executable, HEALTH, action, '--lane', 'x', '--output',
-            str(folder / ('schedulers-' + action + '.json'))]
+            str(folder / (prefix + 'schedulers-' + action + '.json'))]
     if action == 'restore':
-        args += ['--baseline', str(folder / 'schedulers-snapshot.json'), '--wait-seconds', '25']
+        args += ['--baseline', str(folder / (prefix + 'schedulers-snapshot.json')), '--wait-seconds', '25']
     result = subprocess.run(args, capture_output=True)
-    (folder / ('schedulers-' + action + '.txt')).write_bytes(result.stdout + result.stderr)
+    (folder / (prefix + 'schedulers-' + action + '.txt')).write_bytes(result.stdout + result.stderr)
     return result.returncode
 
 
@@ -196,8 +196,12 @@ def prepare():
     print(json.dumps(dict(prepared=str(folder), commit=commit)), flush=True)
 
 
-def ready():
-    for port in (8810, 18833, 8821, 18843):
+def ready(baseline):
+    for unit, port in (('x-post-automation.service', 8810),
+                       ('x-auto-post-service.service', 18833),
+                       ('x-tag-post.service', 8821), ('x-tag-auto.service', 18843)):
+        if baseline.get(unit) != 'active':
+            continue
         deadline = time.monotonic() + 45
         while True:
             try:
@@ -227,7 +231,10 @@ def activate(folder, rollback=False):
             assert str(Path(item['pointer']).resolve()) == item['after'], 'later_runtime_release_present'
         for name, item in record['files'].items():
             assert sha(Path(name).read_bytes()) == item['after'], 'later_static_change_present:' + name
-    baseline = record['unit_baseline']
+        assert scheduler(folder, 'snapshot', 'rollback-') == 0, 'rollback_scheduler_baseline_unhealthy'
+        record['rollback_unit_baseline'] = states(TRIGGERS + OWNERS + ('x-tag-gateway.service',))
+        save(folder, record)
+    baseline = record['rollback_unit_baseline' if rollback else 'unit_baseline']
     active_triggers = [u for u in TRIGGERS if baseline.get(u) == 'active']
     # Stopping a trigger leaves its current oneshot and accepted HTTP requests
     # running. Owner stop uses the deployed graceful drain and infinite timeout.
@@ -253,7 +260,7 @@ def activate(folder, rollback=False):
                 run('systemctl', 'stop', unit)
         install(rollback)
         start_owners()
-        ready()
+        ready(baseline)
         switched = True
     except BaseException:
         # Restore only code if the scoped switch or new HTTP readiness fails.
@@ -262,12 +269,12 @@ def activate(folder, rollback=False):
                 run('systemctl', 'stop', unit)
         install(not rollback)
         start_owners()
-        ready()
+        ready(baseline)
         raise
     finally:
         for unit in active_triggers:
             run('systemctl', 'start', unit)
-        scheduler_result = scheduler(folder, 'restore')
+        scheduler_result = scheduler(folder, 'restore', 'rollback-' if rollback else '')
         record['scheduler_restore_result'] = scheduler_result
         record['unit_after'] = states(TRIGGERS + OWNERS + ('x-tag-gateway.service',))
         record['status'] = ('rolled_back' if rollback else 'active') if switched else 'switch_failed'
