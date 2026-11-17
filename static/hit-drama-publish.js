@@ -15,7 +15,7 @@
     const title=el('h2','爆款剧发布'); title.id='hitDramaTitle'; const head=el('div','','dialog-head');head.append(title);
     const body=el('div','','dialog-body');body.style.display='grid';body.style.gap='12px';
     const scope=el('p',isX?'每个 ID 仅向模板中语言、受众方向和题材画像均匹配的频道各发布一次；无有效画像或不匹配的频道会跳过。':'每个 ID 仅向模板中语言、受众方向和题材画像均匹配的 Page 各发布一次；无有效画像或不匹配的 Page 会跳过。');
-    const tip=el('p','沿用模板的素材、指标和冷却条件。未到可投放时间的剧先制作，预约在可投放前 30 分钟发布；该时点已过则尽快发布。本次操作不修改日常排期。');
+    const tip=el('p','本次不限制剧目上线天数，沿用模板的素材、指标和冷却条件。未到可投放时间的剧先制作，预约在可投放前 30 分钟发布；该时点已过则尽快发布。本次操作不修改日常排期。');
     const label=el('label','ID 类型');label.htmlFor='hitDramaType';const type=el('select');type.id='hitDramaType';
     for(const [value,text] of [['content_id','剧 ID（单语言版本）'],['resource_id','资源 ID（关联各语言版本）']]){const option=el('option',text);option.value=value;type.append(option);}
     const idLabel=el('label','剧 ID 或资源 ID（可输入多个）');idLabel.htmlFor='hitDramaInput';const input=el('textarea');input.id='hitDramaInput';input.rows=3;input.autocomplete='off';input.spellcheck=false;

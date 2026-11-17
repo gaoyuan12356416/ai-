@@ -81,6 +81,10 @@ class ProfileSelector(TwoStageSelector):
             get_run = getattr(self._run_store, 'get_run', None)
             frozen = get_run(request.run_id).blacklist_snapshot if callable(get_run) else {}
             hit = frozen.get('hit_material_publish') or frozen.get('hit_drama_publish') or {}
+            if frozen.get('hit_drama_publish'):
+                # Override only this request, before source SQL and hard gates.
+                request = replace(request, rules=replace(request.rules,
+                    drama=replace(request.rules.drama, launch_window_days=0)))
             with future_scope(hit.get('release_times', {})):
                 result = super()._select(request, reserve=reserve)
             context = getattr(self._profile_context, 'value', None)

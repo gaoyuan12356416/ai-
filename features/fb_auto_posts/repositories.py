@@ -511,7 +511,9 @@ class MaterialRepository:
         selection_end_epoch = int(self.now_fn().timestamp())
         if hit.get('timing_policy') == POLICY:
             selection_end_epoch = max([selection_end_epoch, *hit.get('release_times', {}).values()])
-        launch_days = int(config["drama_launch_window_days"])
+        # Explicit hit-drama runs may use old dramas; ordinary templates keep
+        # their saved launch window and every other material filter.
+        launch_days = 0 if hit else int(config["drama_launch_window_days"])
         deploy_after = 0 if not launch_days else int((self.now_fn() - timedelta(days=launch_days)).timestamp())
         drama_rule, material_rule = config["drama_rule"], config["material_rule"]
         allowed_types = [str(item) for item in drama_rule.get("resource_type_v2") or []]
