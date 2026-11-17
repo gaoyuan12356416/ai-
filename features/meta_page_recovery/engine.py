@@ -199,7 +199,9 @@ class Worker:
             origins=[p for p in pages if str(p['page_id'])==data['origin_page_id'] and p['group_id']==data['group_id']]
             if len(origins)!=1:
                 self.store.result(job['id'],'skipped','origin_pool_membership_changed',proof);return
-            from .domain import bad
+            from .domain import bad,page_health
+            if page_health(origins[0])=='unknown':
+                self.store.result(job['id'],'retry_wait','source_page_status_unknown',proof);return
             if not bad(origins[0]):
                 self.store.result(job['id'],'skipped','source_page_recovered',proof);return
             graph=self.proof_graph(data,proof)
@@ -320,6 +322,8 @@ class Worker:
             fresh=(self.sources.page_status([data['origin_page_id'],proof['new_page_id']])
                    if hasattr(self.sources,'page_status') else self.sources.pages())
             from .domain import available,bad
+            if any(p['group_id']==data['group_id'] and str(p['page_id'])==data['origin_page_id'] and page_health(p)=='unknown' for p in fresh):
+                self.store.result(job['id'],'retry_wait','source_page_status_unknown_before_update',proof);return
             if not any(p['group_id']==data['group_id'] and str(p['page_id'])==data['origin_page_id'] and bad(p) for p in fresh):
                 self.store.result(job['id'],'skipped','source_recovered_or_left_pool_during_prepare',proof);return
             if not any(p['group_id']==data['group_id'] and str(p['page_id'])==proof['new_page_id'] and available(p) for p in fresh):

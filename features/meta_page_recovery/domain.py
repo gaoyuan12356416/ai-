@@ -42,6 +42,12 @@ def bad(page):
     return page.get('status') == 1 or page.get('forbidden_status') == 1
 
 
+def page_health(page):
+    if bad(page):return 'abnormal'
+    if page.get('status')==0 and page.get('forbidden_status')==0:return 'normal'
+    return 'unknown'
+
+
 def available(page):
     return (page.get('status') == 0 and page.get('forbidden_status') == 0
             and page.get('is_permission') == 1)

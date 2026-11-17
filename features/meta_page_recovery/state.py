@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from .domain import encoded, utcnow, digest, bad, FINAL, RETRY, UNCERTAIN, POOLS
+from .domain import encoded, utcnow, digest, bad, page_health, FINAL, RETRY, UNCERTAIN, POOLS
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -61,20 +61,25 @@ class Store:
                 old = db.execute('SELECT * FROM pages WHERE page_id=?', (pid,)).fetchone()
                 page = rows[0]
                 current_bad = any(bad(r) for r in rows)
+                confirmed_normal=all(page_health(r)=='normal' for r in rows)
+                remembered_bad=1 if current_bad else 0 if confirmed_normal else old['bad'] if old else -1
                 generation = old['generation'] if old else 0
                 # A newly joined but already abnormal Page is a baseline unless
                 # its actual status transition is known to be after activation.
                 new_after_t0 = (page.get('status_at') or 0) >= __import__('datetime').datetime.fromisoformat(t0).timestamp()
-                trigger = bool(baseline and current_bad and ((old and not old['bad']) or (not old and new_after_t0)))
+                trigger = bool(baseline and current_bad and ((old and old['bad']==0) or ((not old or old['bad']==-1) and new_after_t0)))
                 if trigger:
                     generation += 1
                     incident = digest([pid, generation])[:32]
                     state = 'open' if len({r['group_id'] for r in rows}) == 1 else 'ambiguous_pool'
                     db.execute('INSERT INTO incidents(id,page_id,group_id,generation,run_id,state,payload) VALUES(?,?,?,?,?,?,?)',
                                (incident, pid, page['group_id'], generation, run, state, encoded(page)))
-                if not current_bad:
+                if current_bad and len({r['group_id'] for r in rows})==1:
+                    db.execute("UPDATE incidents SET state='open',group_id=?,payload=? WHERE page_id=? AND generation=? AND state='ambiguous_pool'",
+                               (page['group_id'],encoded(page),pid,generation))
+                if confirmed_normal:
                     db.execute("UPDATE incidents SET state='recovered_source' WHERE page_id=? AND state='open'", (pid,))
-                db.execute('INSERT OR REPLACE INTO pages VALUES(?,?,?,?)', (pid, int(current_bad), generation, encoded(page)))
+                db.execute('INSERT OR REPLACE INTO pages VALUES(?,?,?,?)', (pid, remembered_bad, generation, encoded(page)))
             if not baseline:
                 db.execute("INSERT INTO metadata VALUES('baseline_at',?)", (t0,))
                 db.execute("UPDATE runs SET kind='baseline' WHERE id=?", (run,))

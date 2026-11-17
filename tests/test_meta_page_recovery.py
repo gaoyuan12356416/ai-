@@ -160,6 +160,23 @@ class EngineTests(unittest.TestCase):
     def test_new_bad_once(self):
         self.queue();scan(self.store,self.sources)
         self.assertEqual(len(self.store.jobs({'queued'})),1)
+    def test_unknown_at_baseline_does_not_prove_a_new_ban(self):
+        self.sources.rows[0]['status']=None;scan(self.store,self.sources)
+        self.sources.rows[0]['status']=1;scan(self.store,self.sources)
+        self.assertEqual(self.store.jobs({'queued'}),[])
+    def test_temporary_unknown_does_not_create_false_recovery_generation(self):
+        self.queue();self.sources.rows[0]['status']=None;scan(self.store,self.sources)
+        self.worker.tick()
+        self.assertEqual((self.graph.creates,self.graph.updates),(0,0))
+        self.assertEqual(self.store.jobs({'retry_wait'})[0]['reason'],'source_page_status_unknown')
+        self.sources.rows[0]['status']=1;scan(self.store,self.sources)
+        with self.store.db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM incidents').fetchone()[0],1)
+    def test_resolved_pool_conflict_resumes_only_that_incident(self):
+        scan(self.store,self.sources)
+        self.sources.rows[0]['status']=1;self.sources.rows.append(page('10',group=25,status=1))
+        scan(self.store,self.sources);self.assertEqual(self.store.jobs({'queued'}),[])
+        self.sources.rows=self.sources.rows[1:];scan(self.store,self.sources)
+        jobs=self.store.jobs({'queued'});self.assertEqual(len(jobs),1);self.assertEqual(jobs[0]['payload']['group_id'],25)
     def test_forbidden_flag_transition(self):
         scan(self.store,self.sources);self.sources.rows[0]['forbidden_status']=1;scan(self.store,self.sources)
         self.assertEqual(len(self.store.jobs({'queued'})),1)
