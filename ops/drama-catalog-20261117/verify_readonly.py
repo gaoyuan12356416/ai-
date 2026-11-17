@@ -12,9 +12,13 @@ p.add_argument('--youtube-sql', type=Path)
 args=p.parse_args()
 sys.path.insert(0,args.root)
 if args.overlay:
-    paths=['features/publishing_products.py','features/x_posts/selector.py',
-           'features/fb_video_publish/sources.py','features/fb_video_publish/group_sources.py',
-           'features/youtube_auto_publish/source.py']
+    paths=['features/publishing_products.py']
+    if args.lane=='fb':
+        paths+=['features/fb_video_publish/sources.py','features/fb_video_publish/group_sources.py']
+    else:
+        paths+=['features/x_posts/selector.py']
+    if args.youtube_sql:
+        paths+=['features/youtube_auto_publish/source.py']
     for rel in paths:
         file=args.overlay/rel
         if not file.exists():continue
