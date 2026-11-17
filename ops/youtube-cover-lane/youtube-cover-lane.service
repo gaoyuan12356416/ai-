@@ -1,0 +1,26 @@
+[Unit]
+Description=Dedicated YouTube cover preparation lane
+After=network-online.target pipeline-coordinator.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=pipeline-worker
+Group=pipeline-worker
+WorkingDirectory=/mnt/data-disk/youtube-cover-lane-20261117/release
+EnvironmentFile=/mnt/data-disk/youtube-cover-lane-20261117/private/worker.env
+ExecStart=/mnt/data-disk/root-storage-20260915/rootfs/opt/pipeline-dispatch/venvs/179596a9699393cd377c0e06a0bec94e171f14cd/bin/python /mnt/data-disk/youtube-cover-lane-20261117/release/worker.py
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=infinity
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/mnt/data-disk/youtube-cover-lane-20261117/state
+
+[Install]
+WantedBy=multi-user.target
