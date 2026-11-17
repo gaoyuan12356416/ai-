@@ -241,12 +241,13 @@ def verify(folder):
         if unit.endswith('.timer') and info['extra_before'][unit] == 'active':
             future = (show(unit, 'NextElapseUSecRealtime') not in ('', 'n/a') or
                       show(unit, 'NextElapseUSecMonotonic') not in ('', '0', 'infinity'))
-            # OnUnitInactiveSec timers have no next timestamp while their
-            # current oneshot is still executing; systemd rearms on completion.
+            # Running timers may omit the next timestamp until their current
+            # oneshot finishes. Require a configured recurrence in that case.
             target = show(unit, 'Unit')
             rearming = (show(unit, 'SubState') == 'running' and show(target) in ('active', 'activating') and
                         show(target, 'MainPID') != '0' and
-                        re.search(r'^OnUnitInactiveSec=[1-9][^\n]*$', ops.run('systemctl', 'cat', unit), re.M))
+                        re.search(r'^(?:OnUnit(?:In)?ActiveSec=[1-9][^\n]*|OnCalendar=\*-\*-\* [^\n]+)$',
+                                  ops.run('systemctl', 'cat', unit), re.M))
             assert future or rearming, 'no_future_timer:' + unit
     oneshots = {u: ops.run('systemctl', 'show', u, '-p', 'Result,ExecMainStatus,ActiveState,SubState,ExecMainStartTimestamp,ActiveEnterTimestamp,InactiveEnterTimestamp')
                 for u in ('x-tag-auto-scheduler.service', 'x-tag-auto-runner.service')}
