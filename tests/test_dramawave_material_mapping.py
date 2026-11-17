@@ -3,7 +3,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from features.publishing_products import source_app_sql
+from features.publishing_products import source_app_sql, is_mobo_product, mobo_product_sql
 from features.x_video_publish.sources import SourceRepository
 
 
@@ -30,7 +30,7 @@ class DramaWaveMaterialMappingTests(unittest.TestCase):
         for product in ('Dramawave', ' Drama-comics ', 'Drama-B', 'Drama-C',
                         'Drama-novel', 'Drama-AI素材', 'Drama-社媒专用素材',
                         'DramawaveSource', 'DRAMAWAVE H5', 'dramawaveminis',
-                        '[w2a]DramaWave iOS', 'Dramawave-copy-test'):
+                        '[w2a]DramaWave iOS', 'Dramawave-copy-test', '[w2a]drama-double'):
             with self.subTest(product=product):
                 self.assertEqual(self.resolve_app(product, 9999), 1479)
 
@@ -40,6 +40,18 @@ class DramaWaveMaterialMappingTests(unittest.TestCase):
                                 ('Free-comics', 3210)):
             with self.subTest(product=product):
                 self.assertEqual(self.resolve_app(product, app_id), app_id)
+
+    def test_all_current_mobo_family_aliases_use_ai_library(self):
+        for app, label in ((2373, 'MoboShort'), (2430, '[w2a]MoboShort'),
+                           (2432, '[w2a]MoboShort iOS'), (2471, '[w2a]MoboShort-double'),
+                           (3360, 'moboreels'), (3442, '[w2a]MoboReels'), (3642, '社媒moboreel')):
+            with self.subTest(product=label):
+                self.assertEqual(self.resolve_app(label, app), app)
+                self.assertTrue(is_mobo_product(label, 9999))
+                self.assertTrue(is_mobo_product('', app))
+                sql = 'SELECT (' + mobo_product_sql('s') + ') FROM catalog.ads_custom_source s'
+                self.assertEqual(self.db.execute(sql).fetchone()[0], 1)
+        self.assertFalse(is_mobo_product('hotdrama', 3302))
 
     def test_comics_hydrates_1479_and_mobo_uses_ai_library(self):
         from types import SimpleNamespace
