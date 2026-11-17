@@ -123,6 +123,7 @@ class RecoveryAdmissionTests(unittest.TestCase):
         self.assertFalse(safe(c,task,record))
         c.execute("INSERT INTO pipeline_canonical_hold VALUES('fb:video:one','repair')")
         self.assertTrue(safe(c,task,record))
+        self.assertTrue(safe(c,dict(task,status='failed'),record))
         for field,value in [('status','published'),('graph_post_id','123'),('unknown_outcome',1),('execution_lease','active'),('batch_id','other')]:
             self.assertFalse(safe(c,dict(task,**{field:value}),record))
         c.execute("INSERT INTO fb_video_attempt VALUES('one')")

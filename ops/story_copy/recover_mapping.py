@@ -19,7 +19,7 @@ NATIVE = Path(store.SOURCES['fv'][1])
 def safe(c, task, record):
     key='fb:video:'+task['task_id']
     hold=c.execute('SELECT reason FROM pipeline_canonical_hold WHERE source_key=?',(key,)).fetchone()
-    return (task['batch_id']==record['batch'] and task['status']=='queued'
+    return (task['batch_id']==record['batch'] and task['status'] in ('queued','failed')
             and not any(task[k] for k in ('graph_post_id','unknown_outcome','execution_lease'))
             and hold is not None and hold['reason']==record['reason']
             and not c.execute('SELECT 1 FROM fb_video_attempt WHERE task_id=? LIMIT 1',(task['task_id'],)).fetchone()
