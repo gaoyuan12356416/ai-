@@ -25,6 +25,12 @@ media is reused; a known video reuse rejection allows one receipted copy of the
 exact readable Meta source through resumable upload. Unknown writes are never
 blindly repeated. Updating an Ad only sends its new `creative_id`, not status,
 budget or parent changes. The same `ad_id` and reporting history remain.
+Credential-scoped Page ADVERTISE/MANAGE tasks guide selection after account
+access is checked. Missing/incomplete enumeration still permits actual Meta
+validation. A rejected credential/Page pair does not exclude that Page from
+other authorized credentials. Only three known-denied probes run per Ad attempt;
+the next hourly scan continues. Receipted creative work retains its credential
+fingerprint (never the secret). Permissions are never bypassed or auto-granted.
 
 ## State and notifications
 
@@ -62,6 +68,10 @@ unchanged. Smaller 5k-source-row partitions, exact Page-set subdivision after
 silently dropping data. Pool membership is frozen per snapshot; additions enter
 the next refresh. Only the refresh unit's WorkingDirectory is overridden. The
 portrait reader, main API and publishing workers are not restarted.
+Completed historical SELECT partitions are cached with the exact scope, UTC
+window, SQL and collection start time so observed transport failures can resume.
+Failed reads are never cached. A fully published collection starts fresh on the
+next refresh; only the last two completed disposable caches are retained.
 
 ## GitHub-first deployment
 

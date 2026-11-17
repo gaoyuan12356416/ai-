@@ -86,14 +86,15 @@ def merge_paid(rows):
     return [dict(value, spend=str(value['spend']), revenue=str(value['revenue'])) for value in merged.values()]
 
 
-def paid(reader, scope, start, end):
+def paid(reader, scope, start, end, cache=None):
     result = []
     ids = ','.join(map(literal,scope))
     text_literal = lambda value: '_utf8mb4 ' + literal(value)
+    query=reader.query if cache is None else lambda statements,timeout=45:cache.query(reader,statements,timeout)
     for i in range(7):
         day = (date.fromisoformat(start)+timedelta(days=i)).isoformat()
         for app_id, product in PRODUCTS.items():
-            counts = reader.query(["SELECT HEX(JSON_OBJECT('series_code',series_code,'rows',COUNT(*))) "
+            counts = query(["SELECT HEX(JSON_OBJECT('series_code',series_code,'rows',COUNT(*))) "
                 "FROM kunlunads_dev.ads_custom_source_insight FORCE INDEX(pss) "
                 "WHERE product=%s AND dt=%s GROUP BY series_code ORDER BY series_code" % (text_literal(product),text_literal(day))],timeout=60)
             statements = []
@@ -114,7 +115,7 @@ def paid(reader, scope, start, end):
             # any Page or treating a timed-out range as empty.
             def read_partition(statement, ids_scope):
                 try:
-                    return reader.query([statement],timeout=45)
+                    return query([statement],timeout=45)
                 except Exception as exc:
                     if '3024' not in str(exc) or len(ids_scope)<=1:raise
                     middle=len(ids_scope)//2
@@ -126,7 +127,8 @@ def paid(reader, scope, start, end):
                         result.extend(read_partition(child,part))
                     return result
             rows=[]
-            for statement in statements:
+            for position,statement in enumerate(statements,1):
+                print(json.dumps(dict(event='paid_partition',day=day,product=product,position=position,total=len(statements))),flush=True)
                 rows.extend(read_partition(statement,scope))
             rows=merge_paid(rows)
             if len(rows)>100000: raise RuntimeError('paid_day_overflow')
@@ -145,7 +147,10 @@ def collect(env_path, config_path=CONFIG_DB, warehouse=WAREHOUSE):
     if not scope: raise RuntimeError('no_configured_pages')
     raw = dict(start=str(start), end=str(end), page_ids=scope)
     raw['social'], raw['social_version'] = social(set(scope),str(start),str(end),warehouse)
-    raw['paid'] = paid(reader,scope,str(start),str(end))
+    from .partition_cache import PartitionCache
+    cache=PartitionCache(scope,str(start),str(end))
+    raw['paid'] = paid(reader,scope,str(start),str(end),cache)
+    raw['collection']=cache.metadata()
     for table,index,columns,key in [('ads_drama_resource','content_id',['content_id','app_id','language','series_code','labels'],'resources'),
                               ('ads_drama_info','ac',['content_id','app_id','language','series_code','resource_type','name'],'infos')]:
         rows = []

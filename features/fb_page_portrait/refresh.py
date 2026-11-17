@@ -30,6 +30,11 @@ def main():
             proof=write(data,env,reader,create_table=args.create_table)
             atomic_json(root/(data['meta']['version']+'.receipt.json'),proof)
             publish(data,proof,root)
+            try:
+                from .partition_cache import complete
+                complete(raw)
+            except Exception as exc:
+                print(encoded(dict(event='partition_cache_maintenance_failed',error=type(exc).__name__)),flush=True)
             atomic_json(root/'status.json',dict(status='ok',**data['meta']))
             print(encoded(dict(event='published',**data['meta'])),flush=True)
         except Exception as exc:

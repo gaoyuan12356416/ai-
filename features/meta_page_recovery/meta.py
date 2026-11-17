@@ -117,3 +117,25 @@ class Graph:
 
     def insights(self,ad_id,dates):
         return self.pages(str(ad_id)+'/insights',fields='ad_id,actions,date_start,date_stop',time_range=dates,limit=100)
+
+    def account_pages(self):
+        """Positive, token-scoped ADVERTISE evidence; never a global Page ban."""
+        result=set();after=None;tasks_complete=True
+        try:
+            for _ in range(10):
+                params={'fields':'id,tasks','limit':100}
+                if after:params['after']=after
+                page=self.get('me/accounts',**params)
+                rows=page.get('data')
+                if not isinstance(rows,list):return result,False
+                tasks_complete=tasks_complete and all(isinstance(r.get('tasks'),list) for r in rows)
+                for row in rows:
+                    if set(row.get('tasks') or []) & {'ADVERTISE','MANAGE'}:result.add(str(row['id']))
+                paging=page.get('paging') or {}
+                if not paging.get('next'):return result,tasks_complete
+                cursor=(paging.get('cursors') or {}).get('after')
+                if not cursor or cursor==after:return result,False
+                after=cursor
+        except MetaError:
+            return result,False
+        return result,False

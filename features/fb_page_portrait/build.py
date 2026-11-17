@@ -69,4 +69,5 @@ def build(raw):
                 paid_metric='af_revenue0', social_scope='ai_backend_confirmed_publications',
                 paid_products=list(PRODUCTS.values()), product_identity='app_id_content_id_language',
                 taxonomy_version=TAXONOMY_VERSION, hierarchy_version=HIERARCHY_VERSION,
-                social_version=raw['social_version'], page_count=len(pages), audit=audit), pages=pages)
+                social_version=raw['social_version'], collection_started_at=raw.get('collection',{}).get('started_at'),
+                page_count=len(pages), audit=audit), pages=pages)

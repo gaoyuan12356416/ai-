@@ -65,7 +65,10 @@ class Reader:
             lines = result.stdout.splitlines()
             if result.returncode or not lines or lines.pop(0) != '1':
                 codes = re.findall(r'ERROR (\d+)', result.stderr)
-                raise SourceError('source_query_failed_'+'_'.join(codes))
+                from .domain import encoded
+                print(encoded(dict(event='source_read_failed',returncode=result.returncode,mysql_codes=codes,
+                    stdout_bytes=len(result.stdout),stderr_bytes=len(result.stderr))),flush=True)
+                raise SourceError('source_query_failed_'+('_'.join(codes) if codes else 'rc_'+str(result.returncode)))
             return [json.loads(bytes.fromhex(line).decode()) for line in lines if line.strip()]
         except subprocess.TimeoutExpired:
             raise SourceError('source_query_timeout') from None
@@ -117,13 +120,13 @@ class Sources:
         key = (str(job.get('user_id')), str(job['ad_account_id']))
         if key in self.token_cache:
             return self.token_cache[key]
-        ids = [str(job.get('user_id') or '0')]
-        ids.extend(x.strip() for x in self.env.get('META_PAGE_RECOVERY_TOKEN_USER_IDS','803,804').split(',') if x.strip().isdigit())
+        ids = [x.strip() for x in self.env.get('META_PAGE_RECOVERY_TOKEN_USER_IDS','803,804').split(',') if x.strip().isdigit()]
+        ids.append(str(job.get('user_id') or '0'));ids=list(dict.fromkeys(ids))
         if any(not x.isdigit() for x in ids):
             raise SourceError('invalid_token_user_identity')
         values = self.reader.query(["SELECT HEX(JSON_OBJECT('user_id',user_id,'token',accessToken)) "
              "FROM kunlunads_dev.ads_facebook_info WHERE user_id IN ("+','.join(ids)+") AND accessToken<>'' LIMIT 100"])
-        preferred = sorted(values, key=lambda r: str(r['user_id'])!=ids[0])
+        preferred = sorted(values, key=lambda r: ids.index(str(r['user_id'])))
         tokens = list(dict.fromkeys(str(r['token']) for r in preferred if r.get('token')))
         if self.env.get('META_PAGE_RECOVERY_ACCESS_TOKEN'):
             tokens.insert(0,self.env['META_PAGE_RECOVERY_ACCESS_TOKEN'])

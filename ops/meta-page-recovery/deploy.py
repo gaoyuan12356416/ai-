@@ -27,7 +27,7 @@ def build_release(source,release,profile):
     # regular package path, not Python's append-only namespace _NamespacePath.
     (release/'features/__init__.py').write_text('"""Scoped Meta recovery runtime packages."""\n',encoding='utf-8')
     for path in profile.glob('*.py'):
-        if path.name not in {'classification.py','collect.py'}:
+        if path.name not in {'classification.py','collect.py','build.py','refresh.py'}:
             shutil.copy2(path,release/'features/fb_page_portrait'/path.name)
 
 

@@ -6,6 +6,7 @@ from datetime import datetime,timezone,timedelta
 import json
 import time
 import threading
+import hashlib
 
 from .domain import (active_ad, account_dates, build_creative, creative_page, digest, encoded,
                      purchases, select_page, utcnow, UNCERTAIN)
@@ -74,6 +75,9 @@ class Worker:
         self.stop=stop or threading.Event()
         self.pool_snapshot=None
         self.profile_snapshot=None
+        self.auth_graphs={}
+        self.auth_pages={}
+        self.auth_locks={}
 
     def graph(self,data):
         key=str(data['ad_account_id'])
@@ -89,6 +93,14 @@ class Worker:
                 if exc.transient:raise
         raise MetaError('no_authorized_token')
 
+    def proof_graph(self,data,proof):
+        fingerprint=proof.get('credential_fingerprint')
+        if fingerprint:
+            for token in self.sources.tokens(data):
+                if hashlib.sha256(token.encode()).hexdigest()==fingerprint:
+                    return self.graph_factory(token)
+        return self.graph(data)
+
     def write(self,job,graph,stage,path,payload,files=None,record=None):
         attempt=self.store.intent(job['id'],stage,record if record is not None else payload)
         try:
@@ -101,6 +113,52 @@ class Worker:
             raise MetaError('transport_internal',uncertain=True) from None
         self.store.receipt(attempt,'accepted',receipt)
         return receipt
+
+    def authorized_selection(self,data,pages,profiles,target,excluded,current,proof=None):
+        if not hasattr(current,'account_pages'):
+            return current,select_page(pages,profiles,target,data['group_id'],self.allocations,excluded)
+        account=str(data['ad_account_id'])
+        tokens=self.sources.tokens(data)
+        account_key=(account,tuple(hashlib.sha256(token.encode()).hexdigest() for token in tokens))
+        if account_key not in self.auth_graphs:
+            graphs=[]
+            for token in tokens:
+                graph=self.graph_factory(token)
+                try:
+                    ad=graph.ad(data['ad_id'])
+                    if str(ad.get('account_id'))==account.removeprefix('act_'):graphs.append(graph)
+                except MetaError:continue
+            self.auth_graphs[account_key]=graphs
+        unknown=[];owners={}
+        for graph in self.auth_graphs[account_key]:
+            key=hashlib.sha256(graph.token.encode()).hexdigest()
+            lock=self.auth_locks.setdefault(key,threading.Lock())
+            with lock:
+                if key not in self.auth_pages:self.auth_pages[key]=graph.account_pages()
+                allowed,complete=self.auth_pages[key]
+            for pid in allowed:owners.setdefault(pid,[]).append(graph)
+            if not complete:unknown.append(graph)
+        if proof is not None:
+            signature=digest({pid:[hashlib.sha256(g.token.encode()).hexdigest() for g in graphs] for pid,graphs in owners.items()})
+            if proof.get('authorization_scope_signature')!=signature:
+                excluded=set(excluded)-set(proof.get('permission_rejected_pages',[]))
+                excluded.add(data['origin_page_id'])
+                proof['permission_rejected_pages']=[]
+                proof['permission_rejected_assignments']=[]
+                proof['authorization_scope_signature']=signature
+        rejected=set((proof or {}).get('permission_rejected_assignments',[]))
+        assignment=lambda graph,pid:hashlib.sha256(graph.token.encode()).hexdigest()+':'+pid
+        owners={pid:[graph for graph in graphs if assignment(graph,pid) not in rejected] for pid,graphs in owners.items()}
+        known=[p for p in pages if owners.get(str(p['page_id']))]
+        selected=select_page(known,profiles,target,data['group_id'],self.allocations,excluded)
+        if selected:return owners[selected['page_id']][0],selected
+        # Missing metadata permission or bounded/incomplete enumeration is not
+        # negative authorization evidence. Fall back to actual Meta validation.
+        for graph in unknown:
+            eligible=[p for p in pages if assignment(graph,str(p['page_id'])) not in rejected]
+            selected=select_page(eligible,profiles,target,data['group_id'],self.allocations,excluded)
+            if selected:return graph,selected
+        return current,None
 
     def reupload(self,job,graph,payload,proof):
         from .domain import video_ids,replace_video
@@ -144,7 +202,7 @@ class Worker:
             from .domain import bad
             if not bad(origins[0]):
                 self.store.result(job['id'],'skipped','source_page_recovered',proof);return
-            graph=self.graph(data)
+            graph=self.proof_graph(data,proof)
             current=graph.ad(data['ad_id'])
             if str(current.get('id'))!=str(data['ad_id']):raise ValueError('ad_identity_mismatch')
             if str(current.get('account_id'))!=str(data['ad_account_id']).removeprefix('act_'):
@@ -177,15 +235,23 @@ class Worker:
                 if self.profile_snapshot is None:self.profile_snapshot=self.profile_loader([str(p['page_id']) for p in pages])
                 profiles,metadata,warnings=self.profile_snapshot
                 excluded={data['origin_page_id']}
+                excluded.update(proof.get('permission_rejected_pages',[]))
                 # A Page can be unavailable for one account and usable for
                 # others. These exclusions never mutate the source Page pool.
+                probes=0
                 while True:
-                    selected=select_page(pages,profiles,target,data['group_id'],self.allocations,excluded)
+                    # A later positive Page grant clears an earlier local
+                    # rejection. An unrelated account/Page keeps progressing.
+                    graph,selected=self.authorized_selection(data,pages,profiles,target,excluded,graph,proof)
+                    excluded={data['origin_page_id']}|set(proof.get('permission_rejected_pages',[]))
                     if selected is None:
+                        proof['permission_rejected_pages']=[]
+                        proof['permission_rejected_assignments']=[]
                         self.store.result(job['id'],'waiting_no_candidate','no_authorized_same_pool_page',proof);return
                     selected_id=selected['page_id']
                     proof.update(new_page_id=selected_id,selection=selected,target=target,profile_version=metadata,
                                  profile_warnings=warnings)
+                    if hasattr(graph,'token'):proof['credential_fingerprint']=hashlib.sha256(graph.token.encode()).hexdigest()
                     self.store.save_proof(job['id'],proof)
                     try:
                         instagram=graph.new_instagram(selected_id)
@@ -206,8 +272,17 @@ class Worker:
                         break
                     except MetaError as exc:
                         if exc.uncertain:raise
-                        if exc.code in {'page_unpublished',200} or exc.subcode in {1487194,1443017,2490604}:
-                            excluded.add(selected_id);stage='prepare';continue
+                        if exc.code in {'page_unpublished',200} or exc.subcode in {1487194,1443017,2490604,3858749}:
+                            if hasattr(graph,'token'):
+                                proof.setdefault('permission_rejected_assignments',[]).append(hashlib.sha256(graph.token.encode()).hexdigest()+':'+selected_id)
+                            else:
+                                excluded.add(selected_id)
+                                proof.setdefault('permission_rejected_pages',[]).append(selected_id)
+                            self.store.save_proof(job['id'],proof)
+                            probes+=1
+                            if probes>=3:
+                                self.store.result(job['id'],'waiting_no_candidate','page_permission_probes_deferred',proof);return
+                            stage='prepare';continue
                         from .domain import video_ids
                         if exc.code==100 and video_ids(payload) and not proof.get('media_reupload_attempted'):
                             stage='media_upload'
@@ -248,6 +323,7 @@ class Worker:
             if not any(p['group_id']==data['group_id'] and str(p['page_id'])==data['origin_page_id'] and bad(p) for p in fresh):
                 self.store.result(job['id'],'skipped','source_recovered_or_left_pool_during_prepare',proof);return
             if not any(p['group_id']==data['group_id'] and str(p['page_id'])==proof['new_page_id'] and available(p) for p in fresh):
+                proof.setdefault('unused_creatives',[]).append(proof.pop('new_creative_id'))
                 self.store.result(job['id'],'retry_wait','selected_page_changed_before_update',proof);return
             latest=graph.ad(data['ad_id'])
             if not active_ad(latest):
@@ -296,7 +372,7 @@ class Worker:
         for job in self.store.jobs(UNCERTAIN|{'pending_review','changed'}):
             if datetime.fromisoformat(job['updated'])>datetime.now(timezone.utc)-timedelta(hours=1):continue
             try:
-                graph=self.graph(job['payload']);proof=self.resume_proof(job)
+                proof=self.resume_proof(job);graph=self.proof_graph(job['payload'],proof)
                 ad=graph.ad(job['payload']['ad_id'])
                 cid=str((ad.get('creative') or {}).get('id') or '')
                 if proof.get('new_creative_id')==cid:
