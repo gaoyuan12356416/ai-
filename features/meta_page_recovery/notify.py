@@ -1,4 +1,4 @@
-"""One frozen summary per completed hourly run, sent only to the agreed group."""
+"""One frozen daily summary, sent only to the agreed group."""
 from datetime import datetime,timedelta,timezone
 import json
 
@@ -10,29 +10,36 @@ def card(summary,acceptance=False):
     def stamp(value):return datetime.fromisoformat(value).astimezone(cst).strftime('%m-%d %H:%M:%S')
     started,finished=summary['started'],summary['finished']
     elapsed=round((datetime.fromisoformat(finished)-datetime.fromisoformat(started)).total_seconds())
-    lines=['批次：'+summary['run_id'], '北京时间：'+stamp(started)+' → '+stamp(finished)+'（'+str(elapsed)+'秒）']
+    daily=summary.get('kind')=='daily'
+    lines=(['统计区间（北京时间）：'+stamp(started)+' → '+stamp(finished),
+            '扫描每4小时一次｜统计批次 '+str(summary['scan_runs'])+'｜未完成 '+str(summary['unfinished_runs'])+'｜扫描失败 '+str(summary['failed_runs']),
+            'Ad按恢复任务去重，结果为生成时最新状态；已换页按本区间收到的修改回执统计。'] if daily else
+           ['批次：'+summary['run_id'], '北京时间：'+stamp(started)+' → '+stamp(finished)+'（'+str(elapsed)+'秒）'])
+    lines.append('PUR口径：广告账户时区今天＋昨天，purchase>0；无返回数据不等于零购买。')
     if acceptance:lines.append('这是上线验收播报；未执行真实广告换页。')
     if summary.get('kind')=='baseline':lines.append('首次建立基线，既有异常 Page 不补恢复。')
-    if summary.get('error'):lines.append('本轮存在扫描失败：'+str(summary['error'])[:500])
+    if summary.get('error'):lines.append('存在扫描失败：'+str(summary['error'])[:500])
     total_new=0;unresolved=0
     for gid,p in summary['pools'].items():
         total_new+=p['new_abnormal_pages']
         unresolved+=(p.get('unknown_pages') or 0)+(p.get('pool_conflicts') or 0)
         lines.extend(['', '**'+p['name']+'（池 '+gid+'）**',
             'Page总数 '+(str(p['scope_pages']) if p.get('scope_pages') is not None else '未知'),
-            '新增异常Page '+str(p['new_abnormal_pages'])+'｜扫描Ad '+str(p['scanned_ads'])+'｜PUR合格 '+str(p['pur_eligible']),
+            '新增异常Page '+str(p['new_abnormal_pages'])+'｜'+('处理Ad（去重） ' if daily else '扫描Ad ')+str(p['scanned_ads'])+'｜近两日PUR>0 '+str(p['pur_eligible']),
             '已替换待确认 '+str(p['changed'])+'｜审核中 '+str(p['pending_review'])+'｜可投放 '+str(p['deliverable']),
             '失败 '+str(p['failed'])+'｜未知 '+str(p['unknown'])+'｜待处理 '+str(p['waiting'])+'｜跳过 '+str(p['skipped'])])
+        if daily:
+            lines.append('本区间已换页 '+str(p['swapped'])+'｜近两日PUR=0跳过 '+str(p['pur_zero'])+'｜PUR无数据待查 '+str(p['pur_no_data']))
         if p.get('unknown_pages') or p.get('pool_conflicts'):
             lines.append('Page状态待核实 '+str(p.get('unknown_pages') or 0)+'｜跨池冲突 '+str(p.get('pool_conflicts') or 0))
-    if total_new==0 and not summary.get('error'):
+    if total_new==0 and not summary.get('error') and not daily:
         lines.insert(2,'本轮有 Page 状态待核实或跨池冲突，详见分池结果。' if unresolved else '本轮无新增异常 Page。')
     if summary.get('details'):
         lines.extend(['','**部分明细**'])
         for row in summary['details']:
             lines.append('Ad '+row['ad_id']+'：'+row['origin_page_id']+' → '+str(row.get('new_page_id') or '未选中')+'；'+row['status']+('；'+row['reason'] if row.get('reason') else ''))
     return dict(config={'wide_screen_mode':True},header={'template':'red' if summary.get('error') else 'blue',
-                'title':{'tag':'plain_text','content':'FB自动换Page｜'+('上线验收' if acceptance else '本轮结果')}},
+                'title':{'tag':'plain_text','content':'FB自动换Page｜'+('上线验收' if acceptance else '每日10点汇总' if daily else '本轮结果')}},
                 elements=[{'tag':'markdown','content':'\n'.join(lines)[:16000]}])
 
 
@@ -63,7 +70,7 @@ class Sender:
         for row in store.notifications():
             # Persist the intent before networking. A crash here is unknown,
             # not a license to send another group message on process restart.
-            store.notification_result(row['run_id'],'sending')
+            if not store.claim_notification(row['run_id']):continue
             try:
                 message_id=self.send(row,acceptance)
                 store.notification_result(row['run_id'],'sent',message_id=message_id)

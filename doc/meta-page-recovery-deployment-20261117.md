@@ -3,6 +3,10 @@
 CPU: `43.166.187.96`. Repository: `gaoyuan12356416/ai-`, branch
 `codex/meta-page-recovery-20261117`. Contract: [meta-page-recovery.md](meta-page-recovery.md).
 
+The hourly/batch-broadcast configuration below is historical. The later user
+change to four-hour execution and daily 10:00 reporting is recorded in
+[meta-page-recovery-schedule-20261117.md](meta-page-recovery-schedule-20261117.md).
+
 ## Current release and memory result
 
 - Installed pointer `/opt/meta-page-recovery/current`:

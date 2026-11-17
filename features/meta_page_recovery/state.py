@@ -1,4 +1,4 @@
-"""Durable incidents, per-Ad writes, hourly batches and notification outbox."""
+"""Durable incidents, per-Ad writes, batches and daily notification outbox."""
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -213,11 +213,83 @@ class Store:
                         details.append(dict(ad_id=row['ad_id'],origin_page_id=data['origin_page_id'],new_page_id=proof.get('new_page_id'),status=state,reason=row['reason']))
                 summary=dict(run_id=run['id'],kind=run['kind'],started=run['started'],finished=utcnow(),error=run['error'],pools=pools,details=details)
                 db.execute('UPDATE runs SET status=?,finished=?,summary=? WHERE id=?', ('failed' if run['error'] else 'complete',summary['finished'],encoded(summary),run['id']))
-                db.execute("INSERT OR IGNORE INTO notifications(run_id,status,uuid,body) VALUES(?,'pending',?,?)",(run['id'],'mpr-'+run['id'],encoded(summary)))
+                # Keep every frozen batch for audit, without broadcasting it.
+                db.execute("INSERT OR IGNORE INTO notifications(run_id,status,uuid,body) VALUES(?,'recorded',?,?)",(run['id'],'mpr-'+run['id'],encoded(summary)))
+
+    def archive_batch_notifications(self):
+        """Withdraw only unsent legacy batch messages; retain all send receipts."""
+        with self.db() as db:
+            return db.execute("UPDATE notifications SET status='recorded' WHERE status IN ('pending','failed') AND run_id NOT LIKE 'daily-%'").rowcount
+
+    def daily_summary(self, instant=None, db=None):
+        from datetime import datetime, timezone, timedelta
+        instant = instant or datetime.now(timezone.utc)
+        local = instant.astimezone(timezone(timedelta(hours=8)))
+        end = local.replace(hour=10, minute=0, second=0, microsecond=0)
+        if local < end:
+            end -= timedelta(days=1)
+        start = end - timedelta(days=1)
+        since, until = (t.astimezone(timezone.utc).isoformat() for t in (start, end))
+        if db is None:
+            with self.db() as db:
+                return self.daily_summary(instant, db)
+        runs = db.execute("SELECT * FROM runs WHERE kind='scan' AND started>=? AND started<? ORDER BY started", (since, until)).fetchall()
+        latest = db.execute("SELECT summary FROM runs WHERE started<? AND summary IS NOT NULL ORDER BY started DESC LIMIT 1", (until,)).fetchone()
+        latest = json.loads(latest['summary']) if latest else {}
+        scope = latest.get('pools', latest.get('page_scope', {}))
+        pools = {str(g):dict(name=v[1],new_abnormal_pages=0,scanned_ads=0,pur_eligible=0,changed=0,pending_review=0,deliverable=0,failed=0,unknown=0,waiting=0,skipped=0,pur_zero=0,pur_no_data=0,swapped=0) for g,v in POOLS.items()}
+        for group, pool in pools.items():
+            for field in ('scope_pages','unknown_pages','pool_conflicts'):
+                pool[field] = scope.get(group, {}).get(field)
+        for row in db.execute("SELECT i.group_id,COUNT(DISTINCT i.page_id) n FROM incidents i JOIN runs r ON r.id=i.run_id WHERE r.started>=? AND r.started<? GROUP BY i.group_id", (since, until)):
+            pools[str(row['group_id'])]['new_abnormal_pages'] = row['n']
+        # Retries in several batches count as one Ad recovery job. Also include
+        # older work that actually progressed during this reporting interval.
+        rows = db.execute("""SELECT * FROM jobs WHERE id IN (
+            SELECT rj.job_id FROM run_jobs rj JOIN runs r ON r.id=rj.run_id
+            WHERE r.kind='scan' AND r.started>=? AND r.started<?)
+            OR (updated>=? AND updated<?) ORDER BY rowid""", (since, until, since, until)).fetchall()
+        details = []
+        for row in rows:
+            data, proof = json.loads(row['payload']), json.loads(row['proof'])
+            pool = pools[str(data['group_id'])]
+            pool['scanned_ads'] += 1
+            pool['pur_eligible'] += int(DecimalSafe(proof.get('pur')) > 0)
+            pool['pur_zero'] += int(row['reason'] == 'pur_zero')
+            pool['pur_no_data'] += int(row['reason'] == 'pur_no_data')
+            state = row['status']
+            category = 'unknown' if state in UNCERTAIN else 'waiting' if state in RETRY or state in ('queued','running') else state
+            pool[category if category in ('changed','pending_review','deliverable','failed','unknown','waiting','skipped') else 'skipped'] += 1
+            if len(details) < 8 and (proof.get('new_page_id') or row['reason']):
+                details.append(dict(ad_id=row['ad_id'],origin_page_id=data['origin_page_id'],new_page_id=proof.get('new_page_id'),status=state,reason=row['reason']))
+        for row in db.execute("""SELECT DISTINCT j.id,j.payload FROM attempts a JOIN jobs j ON j.id=a.job_id
+            WHERE a.stage='ad_update' AND a.status='accepted' AND a.finished>=? AND a.finished<?""", (since, until)):
+            pools[str(json.loads(row['payload'])['group_id'])]['swapped'] += 1
+        errors = [r['id']+':'+r['error'] for r in runs if r['error']]
+        return dict(run_id='daily-'+end.date().isoformat(),kind='daily',started=since,finished=until,generated_at=utcnow(),
+                    error=';'.join(errors) or None,pools=pools,details=details,scan_runs=len(runs),
+                    unfinished_runs=sum(r['status'] in ('scanning','working','scan_failed') for r in runs),
+                    failed_runs=sum(bool(r['error']) for r in runs))
+
+    def queue_daily(self, instant=None):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            summary = self.daily_summary(instant, db)
+            # The date is the idempotency key, including after an uncertain send.
+            db.execute("INSERT OR IGNORE INTO notifications(run_id,status,uuid,body) VALUES(?,'pending',?,?)",
+                       (summary['run_id'],'mpr-'+summary['run_id'],encoded(summary)))
+            return summary['run_id']
 
     def notifications(self):
         with self.db() as db:
-            return [dict(r) for r in db.execute("SELECT * FROM notifications WHERE status IN ('pending','failed') AND (next_at IS NULL OR next_at<=?) ORDER BY rowid",(utcnow(),))]
+            return [dict(r) for r in db.execute("SELECT * FROM notifications WHERE run_id LIKE 'daily-%' AND status IN ('pending','failed') AND (next_at IS NULL OR next_at<=?) ORDER BY rowid",(utcnow(),))]
+
+    def claim_notification(self, run):
+        # Daily timer and recovery worker may both be ready to deliver. Only one
+        # can own the send intent; sending/unknown receipts cannot be reacquired.
+        with self.db() as db:
+            return bool(db.execute("""UPDATE notifications SET status='sending',attempts=attempts+1
+                WHERE run_id=? AND status IN ('pending','failed') AND (next_at IS NULL OR next_at<=?)""", (run,utcnow())).rowcount)
 
     def notification_result(self, run, status, message_id=None, error=None, next_at=None):
         with self.db() as db:

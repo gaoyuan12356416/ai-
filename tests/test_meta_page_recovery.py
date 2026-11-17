@@ -16,6 +16,11 @@ from features.meta_page_recovery.notify import card,Sender
 from features.meta_page_recovery.sources import Reader,SourceError
 
 
+def batch_messages(store):
+    with store.db() as db:
+        return [dict(r) for r in db.execute("SELECT * FROM notifications WHERE run_id NOT LIKE 'daily-%' ORDER BY rowid")]
+
+
 def page(pid='10',group=24,status=0,lang='en',**kw):
     return dict(page_id=pid,group_id=group,status=status,forbidden_status=0,is_permission=1,
         language=lang,active_ad_count=3,fan_ccount=100,status_at=0,**kw)
@@ -244,12 +249,12 @@ class EngineTests(unittest.TestCase):
     def test_source_failure_reports_failure_not_zero(self):
         self.sources.pages=lambda:(_ for _ in ()).throw(RuntimeError('database'))
         run=scan(self.store,self.sources)
-        row=self.store.notifications()[0];summary=json.loads(row['body'])
+        row=batch_messages(self.store)[0];summary=json.loads(row['body'])
         self.assertTrue(summary['error']);self.assertEqual(summary['run_id'],run)
     def test_finished_batch_waits_for_jobs(self):
         self.queue()
-        self.assertEqual(len(self.store.notifications()),1) # only initial baseline
-        self.worker.tick();self.assertEqual(len(self.store.notifications()),2)
+        self.assertEqual(len(batch_messages(self.store)),1) # only initial baseline
+        self.worker.tick();self.assertEqual(len(batch_messages(self.store)),2)
     def test_no_candidate_is_visible_and_retryable(self):
         self.queue();self.sources.rows.pop();self.worker.tick()
         self.assertEqual(len(self.store.jobs({'waiting_no_candidate'})),1)
@@ -277,17 +282,18 @@ class EngineTests(unittest.TestCase):
 class NotificationTests(unittest.TestCase):
     setUp=EngineTests.setUp
     def test_empty_run_card_and_fixed_recipient(self):
-        scan(self.store,self.sources);row=self.store.notifications()[0]
+        scan(self.store,self.sources);row=batch_messages(self.store)[0]
         body=card(json.loads(row['body']));self.assertIn('无新增异常',body['elements'][0]['content'])
         self.assertEqual(CHAT_ID,'oc_b633b6fba2c78f43ef1ebacd314d518c')
     def test_missing_page_status_is_visible_instead_of_a_zero_success(self):
         self.sources.rows[0]['status']=None;scan(self.store,self.sources)
-        summary=json.loads(self.store.notifications()[0]['body'])
+        summary=json.loads(batch_messages(self.store)[0]['body'])
         self.assertEqual(summary['pools']['24']['unknown_pages'],1)
         content=card(summary)['elements'][0]['content']
         self.assertIn('Page状态待核实 1',content);self.assertNotIn('本轮无新增异常 Page。',content)
     def test_delivery_receipt_deduplicates(self):
         scan(self.store,self.sources)
+        self.store.queue_daily(datetime.now(timezone.utc)+timedelta(days=1))
         with patch.object(Sender,'send',return_value='message-1') as send:
             sender=Sender({'FEISHU_APP_ID':'a','FEISHU_APP_SECRET':'s'})
             sender.deliver(self.store);sender.deliver(self.store)
@@ -295,10 +301,109 @@ class NotificationTests(unittest.TestCase):
     def test_uncertain_send_is_not_repeated(self):
         from features.fb_page_assignment.notify import DeliveryError
         scan(self.store,self.sources)
+        self.store.queue_daily(datetime.now(timezone.utc)+timedelta(days=1))
         with patch.object(Sender,'send',side_effect=DeliveryError('timeout',uncertain=True)) as send:
             sender=Sender({});sender.deliver(self.store);sender.deliver(self.store)
             self.assertEqual(send.call_count,1)
-            self.assertEqual(self.store.snapshot()['notifications'],{'unknown':1})
+            self.assertEqual(self.store.snapshot()['notifications'],{'recorded':1,'unknown':1})
+
+
+class DailyReportTests(unittest.TestCase):
+    setUp=EngineTests.setUp
+    queue=EngineTests.queue
+
+    def instant(self):
+        return datetime.now(timezone.utc)+timedelta(days=1)
+
+    def test_beijing_ten_oclock_window(self):
+        before=self.store.daily_summary(datetime(2026,11,17,1,59,tzinfo=timezone.utc))
+        exact=self.store.daily_summary(datetime(2026,11,17,2,tzinfo=timezone.utc))
+        self.assertEqual(before['run_id'],'daily-2026-11-16')
+        self.assertEqual(exact['run_id'],'daily-2026-11-17')
+        self.assertEqual(exact['started'],'2026-11-16T02:00:00+00:00')
+        self.assertEqual(exact['finished'],'2026-11-17T02:00:00+00:00')
+
+    def test_batch_is_recorded_without_delivery(self):
+        scan(self.store,self.sources)
+        with patch.object(Sender,'send') as send:
+            Sender({}).deliver(self.store)
+        send.assert_not_called()
+        self.assertEqual(batch_messages(self.store)[0]['status'],'recorded')
+
+    def test_repeated_retry_is_one_ad_and_no_data_is_not_zero(self):
+        self.graph.pur=None;self.queue();self.worker.tick()
+        for _ in range(2):scan(self.store,self.sources);self.worker.tick()
+        summary=self.store.daily_summary(self.instant());pool=summary['pools']['24']
+        self.assertEqual(summary['scan_runs'],3)
+        self.assertEqual((pool['scanned_ads'],pool['waiting'],pool['pur_no_data'],pool['pur_zero']),(1,1,1,0))
+        self.assertEqual(pool['new_abnormal_pages'],1)
+        text=card(summary)['elements'][0]['content']
+        self.assertIn('PUR无数据待查 1',text)
+        self.assertIn('无返回数据不等于零购买',text)
+
+    def test_inflight_batch_and_scan_failure_do_not_block_report(self):
+        self.queue()
+        self.sources.pages=lambda:(_ for _ in ()).throw(RuntimeError('database'))
+        scan(self.store,self.sources)
+        report=self.store.daily_summary(self.instant())
+        self.assertEqual(report['unfinished_runs'],1)
+        self.assertEqual(report['failed_runs'],1)
+        self.assertEqual(report['pools']['24']['waiting'],1)
+        self.assertTrue(report['error'])
+        self.store.queue_daily(self.instant())
+        self.assertEqual(len(self.store.notifications()),1)
+
+    def test_accepted_updates_are_deduplicated_and_report_body_is_frozen(self):
+        self.queue();self.worker.tick();job=self.store.jobs({'pending_review'})[0]
+        attempt=self.store.intent(job['id'],'ad_update',{})
+        self.store.receipt(attempt,'accepted',{'success':True})
+        report_id=self.store.queue_daily(self.instant());original=self.store.notifications()[0]
+        self.assertEqual(json.loads(original['body'])['pools']['24']['swapped'],1)
+        self.store.result(job['id'],'deliverable','review_accepted')
+        self.assertEqual(self.store.queue_daily(self.instant()),report_id)
+        self.assertEqual(self.store.notifications()[0]['body'],original['body'])
+        self.assertEqual(self.store.notifications()[0]['uuid'],original['uuid'])
+
+    def test_daily_timer_and_worker_cannot_send_the_same_report_twice(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        self.store.queue_daily(self.instant());pending=self.store.notifications()
+        barrier=threading.Barrier(2)
+        def same_snapshot():barrier.wait(timeout=5);return pending
+        with patch.object(self.store,'notifications',side_effect=same_snapshot), patch.object(Sender,'send',return_value='one-message') as send:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                tasks=[pool.submit(Sender({}).deliver,self.store) for _ in range(2)]
+                for task in tasks:task.result(timeout=10)
+        self.assertEqual(send.call_count,1)
+        self.assertEqual(self.store.snapshot()['notifications'],{'sent':1})
+
+    def test_legacy_archive_preserves_sent_unknown_and_daily_messages(self):
+        scan(self.store,self.sources)
+        with self.store.db() as db:
+            body=batch_messages(self.store)[0]['body']
+            for rid,status in [('legacy-pending','pending'),('legacy-failed','failed'),('legacy-sent','sent'),('legacy-unknown','unknown'),('daily-2026-11-17','pending')]:
+                db.execute('INSERT INTO notifications(run_id,status,uuid,body) VALUES(?,?,?,?)',(rid,status,rid,body))
+        self.assertEqual(self.store.archive_batch_notifications(),2)
+        with self.store.db() as db:states=dict(db.execute('SELECT run_id,status FROM notifications'))
+        self.assertEqual(states['legacy-sent'],'sent');self.assertEqual(states['legacy-unknown'],'unknown')
+        self.assertEqual(states['daily-2026-11-17'],'pending')
+        self.assertEqual(states['legacy-pending'],'recorded')
+        with self.store.db() as db:
+            db.execute("UPDATE notifications SET status='pending' WHERE run_id='legacy-pending'")
+        self.assertEqual([x['run_id'] for x in self.store.notifications()],['daily-2026-11-17'])
+
+    def test_previous_window_is_excluded(self):
+        self.queue();self.worker.tick()
+        summary=self.store.daily_summary(self.instant())
+        with self.store.db() as db:
+            db.execute("UPDATE runs SET started='2020-01-01T00:00:00+00:00'")
+            db.execute("UPDATE jobs SET updated='2020-01-01T00:00:00+00:00'")
+            db.execute("UPDATE attempts SET finished='2020-01-01T00:00:00+00:00'")
+        empty=self.store.daily_summary(self.instant())
+        self.assertEqual(empty['scan_runs'],0)
+        self.assertEqual(empty['pools']['24']['scanned_ads'],0)
+        self.assertEqual(empty['pools']['24']['swapped'],0)
+        self.assertEqual(summary['pools']['24']['scanned_ads'],1)
 
 
 if __name__=='__main__':unittest.main()

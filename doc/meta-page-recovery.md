@@ -1,6 +1,6 @@
 # Meta Page recovery, 2026-11-17
 
-The hourly scanner owns Page pools 24 (Dramawave), 25 (FreeReels) and 57
+The four-hour scanner owns Page pools 24 (Dramawave), 25 (FreeReels) and 57
 (HotDrama). The first successful scan creates a durable baseline and performs no
 ad recovery. Later `status=1` / `forbidden_status=1` transitions create incidents;
 a Page that recovered and becomes abnormal again has a new generation.
@@ -29,7 +29,7 @@ Credential-scoped Page ADVERTISE/MANAGE tasks guide selection after account
 access is checked. Missing/incomplete enumeration still permits actual Meta
 validation. A rejected credential/Page pair does not exclude that Page from
 other authorized credentials. Only three known-denied probes run per Ad attempt;
-the next hourly scan continues. Receipted creative work retains its credential
+the next scheduled scan continues. Receipted creative work retains its credential
 fingerprint (never the secret). Permissions are never bypassed or auto-granted.
 
 ## State and notifications
@@ -43,12 +43,21 @@ Creative receipt requires one exact operation name and payload match. A missing
 read result is not evidence that a write failed. Graceful worker stop drains the
 currently executing Ad in each account and leaves queued work intact.
 
-Each completed scan/execution batch freezes one summary, including empty and
-failed scans, for group `oc_b633b6fba2c78f43ef1ebacd314d518c`. A batch does not wait
-for Meta review. Changed, reviewing, deliverable, failed, unknown, waiting and
-skipped counts remain separate. Frozen UUID + outbox receipts prevent duplicate
-known sends; an uncertain send is retained for readback. Notification failure
-does not block recovery. No socket-bot configuration is changed.
+Each completed batch freezes a local summary, including empty and failed scans.
+Batch notifications are `recorded`, without sending them. Every Beijing day at
+10:00, an independent timer freezes one report for the previous 10:00-to-10:00
+interval, to group `oc_b633b6fba2c78f43ef1ebacd314d518c`. Recovery jobs retried in
+several batches count once. Their outcome is the latest status at report build;
+accepted Ad changes are separately counted by receipts within the interval.
+In-flight batches, scan failures, no-data waits and true zero-PUR skips are visible
+without waiting for all work or Meta review. Pool scope comes from the latest
+observed scan. The date-based UUID and frozen outbox body prevent duplicate known
+sends; uncertain sends remain protected. The independent report service delivers
+at 10:00 even while recovery is busy; the worker can retry known rejections.
+An atomic outbox claim prevents both owners sending the same card. Notification
+failure does not block recovery.
+Unsent legacy per-batch messages become `recorded` at worker startup, preserving
+sent/unknown messages and all business receipts. No socket-bot configuration changes.
 
 ## Managed Page import and portraits
 
@@ -105,12 +114,13 @@ fetch and checkout that exact commit on CPU. Install without activating:
 python3 CHECKOUT/ops/meta-page-recovery/deploy.py install --source CHECKOUT --commit SHA --deployment DEPLOYMENT
 ```
 
-Complete read-only preview and marked Feishu acceptance before activation.
+Complete read-only preview and local daily-card verification before activation.
 Profile refresh is independent: while it runs, use the last verified snapshot
 and the agreed unprofiled fallback; do not block unrelated accounts globally.
 `deploy.py activate --deployment DEPLOYMENT` establishes the
 baseline, then enables `meta-page-recovery-worker.service` and
-`meta-page-recovery-scan.timer` (hourly Beijing :05). Do not exercise actual swaps
+`meta-page-recovery-scan.timer` (Beijing 00/04/08/12/16/20:05), the worker and
+`meta-page-recovery-report.timer` (daily Beijing 10:00). Do not exercise actual swaps
 on historical banned Pages. `python3 -m features.meta_page_recovery status` gives
 batch, job and notification state. There is no new public HTTP API.
 
@@ -129,3 +139,9 @@ installs, roll back deployment manifests newest to oldest until the first
 manifest restores the original absent recovery units and portrait refresh
 override. The scanner and worker are disabled; the live business databases and
 already published portraits remain intact throughout.
+
+For an existing live installation, use `deploy.py switch --deployment DEPLOYMENT`
+after install. It retains the baseline, jobs and receipts, gracefully restarts only
+the affected recovery worker and activates both timers without running an extra
+scan. Its rollback restores the previous worker/timer activation states as well
+as code/unit files. See [the schedule-change record](meta-page-recovery-schedule-20261117.md).

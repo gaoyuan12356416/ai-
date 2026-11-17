@@ -14,7 +14,7 @@ from .state import Store
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('command',choices=['scan','work','status','preview','notify'])
+    p.add_argument('command',choices=['scan','work','status','preview','notify','report'])
     p.add_argument('--root',default='/mnt/data-disk/meta-page-recovery')
     p.add_argument('--env',default='/etc/meta-page-recovery.env')
     p.add_argument('--once',action='store_true');p.add_argument('--acceptance',action='store_true')
@@ -35,12 +35,21 @@ def main():
         if a.command=='scan':
             from .engine import scan
             scan(store,Sources(env));return
+        if a.command=='report':
+            report=store.queue_daily()
+            from .notify import Sender
+            # Independent of recovery work; the atomic outbox claim also lets
+            # the worker safely retry known delivery failures later.
+            Sender(env).deliver(store)
+            print(encoded(dict(daily_report_queued=report)));return
         from .notify import Sender
         sender=Sender(env)
         if a.command=='notify':sender.deliver(store,a.acceptance);return
         from features.fb_page_assignment.sources import load_profiles
         from .engine import Worker,log
         store.recover_process()
+        archived=store.archive_batch_notifications()
+        if archived:log('legacy_batch_messages_recorded',count=archived)
         stop=threading.Event()
         signal.signal(signal.SIGTERM,lambda *_:stop.set())
         signal.signal(signal.SIGINT,lambda *_:stop.set())
