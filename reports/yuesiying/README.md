@@ -21,6 +21,10 @@
 素材库存刷新使用 [共享目录工具](catalog/README.md) 的 `refresh-source` 入口，把原有只读SELECT分批写入 `ads_ai` 的已核验目录版本；不再为每次刷新导出完整 `library.json`。保持原查询过滤范围，完成校验后给工作目录绑定固定版本，再运行既有构建入口。旧版原始JSON先核验私有归档回执再清理，未知/未核验版本不作为报表输入。
 
 沿用既有 `ads_custom_source_insight` 查询的产品、应用、平台、日期、分组、HAVING 范围。
+手工刷新应保留已完成且对账通过的读取分片。实时库的 READ-COMMITTED 会使先后两次 SELECT
+读到不同的当日金额；每个待核验分片可在同一只读 REPEATABLE READ 一致性事务中读取
+明细及独立合计，分片内逐项对账后再合并。不把不同分片宣称为全库同一时刻快照，
+不在缺片、有效ID检查未完成或对账失败时覆盖线上。此流程不新增自动执行器。
 同一个分组查询同时输出 `SUM(af_installs) new_users, SUM(impressions) impressions, SUM(clicks) clicks`。
 素材点数组的前10项保持不变，末尾追加上述3项；空值保留null，不伪造0。
 
