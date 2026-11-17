@@ -48,9 +48,12 @@ def main():
             try:
                 worker=Worker(store,Sources(env),env,load_profiles,stop=stop)
                 worker.tick()
-                sender.deliver(store)
             except Exception as exc:
                 log('worker_iteration_failed',error_type=type(exc).__name__)
+            try:
+                sender.deliver(store)
+            except Exception as exc:
+                log('notification_iteration_failed',error_type=type(exc).__name__)
             if a.once:break
             stop.wait(15)
 

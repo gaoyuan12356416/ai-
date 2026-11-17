@@ -72,6 +72,8 @@ class Worker:
         self.allocations=Counter()
         self.graphs={}
         self.stop=stop or threading.Event()
+        self.pool_snapshot=None
+        self.profile_snapshot=None
 
     def graph(self,data):
         key=str(data['ad_account_id'])
@@ -135,7 +137,7 @@ class Worker:
     def process(self,job):
         data=job['payload'];proof=self.resume_proof(job);stage='prepare'
         try:
-            pages=self.sources.pages()
+            pages=self.pool_snapshot if self.pool_snapshot is not None else self.sources.pages()
             origins=[p for p in pages if str(p['page_id'])==data['origin_page_id'] and p['group_id']==data['group_id']]
             if len(origins)!=1:
                 self.store.result(job['id'],'skipped','origin_pool_membership_changed',proof);return
@@ -172,7 +174,8 @@ class Worker:
             if not proof.get('new_creative_id'):
                 target=(self.sources.target(data,origins[0]) if str(data.get('creative_id'))==current_cid
                         else dict(language=origins[0].get('language'),audience='__unknown__',themes=[],classification_status='cached_creative_stale'))
-                profiles,metadata,warnings=self.profile_loader([str(p['page_id']) for p in pages])
+                if self.profile_snapshot is None:self.profile_snapshot=self.profile_loader([str(p['page_id']) for p in pages])
+                profiles,metadata,warnings=self.profile_snapshot
                 excluded={data['origin_page_id']}
                 # A Page can be unavailable for one account and usable for
                 # others. These exclusions never mutate the source Page pool.
@@ -239,7 +242,8 @@ class Worker:
                 stage='validate'
                 graph.post(data['ad_id'],creative={'creative_id':proof['new_creative_id']},execution_options=['validate_only'])
             # Re-read both source membership and target status after preparation.
-            fresh=self.sources.pages()
+            fresh=(self.sources.page_status([data['origin_page_id'],proof['new_page_id']])
+                   if hasattr(self.sources,'page_status') else self.sources.pages())
             from .domain import available,bad
             if not any(p['group_id']==data['group_id'] and str(p['page_id'])==data['origin_page_id'] and bad(p) for p in fresh):
                 self.store.result(job['id'],'skipped','source_recovered_or_left_pool_during_prepare',proof);return
@@ -349,6 +353,7 @@ class Worker:
 
     def tick(self):
         accounts=list(dict.fromkeys(j['account_id'] for j in self.store.jobs({'queued'})))
+        if accounts:self.pool_snapshot=self.sources.pages()
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(self.account,accounts))
         self.reconcile()

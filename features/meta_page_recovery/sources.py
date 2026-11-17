@@ -72,9 +72,10 @@ class Sources:
         self.env, self.reader = env, reader or Reader(env)
         self.token_cache = {}
 
-    def pages(self):
+    def pages(self, ids=None):
         # The group and membership conditions are the authorization scope, not
         # dated account/product allowlists from unrelated old launchers.
+        predicate='' if ids is None else ' AND i.page_id IN ('+','.join(literal(p) for p in ids)+')'
         result = self.reader.query(["""SELECT HEX(JSON_OBJECT('group_id',g.id,'page_id',i.page_id,'language',i.language,
             'status',p.status,'forbidden_status',p.forbidden_status,'is_permission',p.is_permission,
             'status_at',p.status_at,'active_ad_count',p.active_ad_count,'fan_ccount',p.fan_ccount,
@@ -82,10 +83,12 @@ class Sources:
             FROM kunlunads_dev.ads_facebook_page_group g
             JOIN kunlunads_dev.ads_facebook_page_group_ins i ON i.group_id=g.id AND i.deleted_at=0
             LEFT JOIN kunlunads_dev.ads_facebook_page_ins p ON p.page_id=i.page_id
-            WHERE g.id IN (24,25,57) AND g.is_delete=0 AND TRIM(i.page_id)<>'' ORDER BY g.id,i.page_id LIMIT 20001"""])
+            WHERE g.id IN (24,25,57) AND g.is_delete=0 AND TRIM(i.page_id)<>''"""+predicate+" ORDER BY g.id,i.page_id LIMIT 20001"])
         if len(result)>20000:
             raise SourceError('page_scope_overflow')
         return result
+
+    def page_status(self,ids):return self.pages(ids)
 
     def ads(self, page_id, cursor='', size=500):
         rows = self.reader.query(["""SELECT HEX(JSON_OBJECT('ad_id',c.ad_id,'ad_account_id',c.ad_account_id,

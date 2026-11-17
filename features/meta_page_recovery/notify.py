@@ -65,4 +65,3 @@ class Sender:
             except DeliveryError as exc:
                 retry=(datetime.now(timezone.utc)+timedelta(seconds=min(3600,60*2**min(row['attempts'],6)))).isoformat()
                 store.notification_result(row['run_id'],'unknown' if exc.uncertain else 'failed',error=exc.code,next_at=retry)
-
