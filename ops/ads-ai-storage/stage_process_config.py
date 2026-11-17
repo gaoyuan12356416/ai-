@@ -25,8 +25,10 @@ def prepare(unit, backup, producer=False, apply=False):
     values={}
     for key,value in env.items():
         if producer and key.endswith('COS_BUCKET') and value in OLD_BUCKETS: values[key]=BUCKET
-        elif producer and key.endswith('COS_DOMAIN') and value.removeprefix('https://').rstrip('/') in OLD_HOSTS:
+        elif producer and key.endswith('COS_DOMAIN') and value.replace('https://','',1).rstrip('/')=='advertising-1306474899.cos.ap-hongkong.myqcloud.com':
             values[key]=('https://' if value.startswith('https://') else '')+HOST
+        elif producer and key.endswith('COS_PREFIX') and key.startswith(('TT_POST_GPU_','FB_PAGE_GPU_')):
+            values[key]=value if value.startswith('ads-ai/') else 'ads-ai/'+value.strip('/')
         elif key.endswith(('_ALLOWED_HOSTS','_SOURCE_HOSTS')):
             hosts=[h.strip() for h in value.split(',') if h.strip()]
             if HOST not in hosts:values[key]=','.join(hosts+[HOST])

@@ -2,6 +2,9 @@
 
 New AI outputs use a dedicated Hong Kong COS bucket carrying `team=ads_ai`.
 Shared advertising and SocialKit buckets keep their original ownership and data.
+TikTok retains its already verified delivery origin. Only the new `/ads-ai/` CDN
+path routes to the independent bucket; historical URLs keep their existing origin.
+TT/FB delivery prefixes and cloud delivery prefixes use this namespace.
 
 The production install uses narrow patches because independently deployed modules
 share the live runtime. `install_overlay.py` checks patch context, compiles staged
