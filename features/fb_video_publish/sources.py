@@ -18,7 +18,7 @@ from .templates import TemplateError
 
 MAX_MATERIALS = 200
 PAGE_SIZE = 100
-TEXT_SCAN_IDS = 10000
+TEXT_SCAN_IDS = 1000
 SOURCE_HOST = "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
 SOURCE_CDN_HOST = "socialkit-cdn.yingliang.tech"
 
@@ -338,6 +338,33 @@ class SourceRepository:
                 return "drama_name", ids, "idx_source_type_source_id"
         return "text", [], "PRIMARY"
 
+    def _text_search_rows(self, rows, search, *, manual=False):
+        # Match names after the bounded source read. A correlated drama/product
+        # predicate over even a small range can still exceed the SQL deadline.
+        needle = search.lower()
+        matched = {str(row["material_id"]) for row in rows
+                   if needle in (str(row["material_id"]) + " " + str(row.get("material_name") or "")).lower()}
+        remaining = [row for row in rows if str(row["material_id"]) not in matched]
+        ids = list(dict.fromkeys(str(row.get("content_id") or "") for row in remaining))
+        app_ids = sorted({int(row.get("source_app_id") or 1479) for row in remaining})
+        keys = set()
+        for offset in range(0, len(ids), 200):
+            chunk = ids[offset:offset + 200]
+            release = "" if manual else " AND ds.release_status=1 AND (ds.app_id<>1479 OR ds.deploy_time>0) AND ds.deploy_time>=0 AND ds.deploy_time<=%s"
+            release_params = [] if manual else [int(self.now_fn().timestamp())]
+            dramas = self.mysql.select(f"""
+                SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT ds.app_id,
+                       CAST(ds.content_id AS CHAR) content_id,COALESCE(ds.language,'') language
+                  FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
+                 WHERE ds.content_id IN ({','.join('%s' for _ in chunk)})
+                   AND ds.app_id IN ({','.join(str(value) for value in app_ids)}){release}
+                   AND LOCATE(BINARY LOWER(%s),BINARY LOWER(COALESCE(ds.name,'')))>0 LIMIT 20001
+            """, chunk + release_params + [search])
+            keys.update((int(row["app_id"]), str(row["content_id"]), page_language(row.get("language"))) for row in dramas)
+        return [row for row in rows if str(row["material_id"]) in matched or (
+            int(row.get("source_app_id") or 1479), str(row.get("content_id") or ""),
+            page_language(row.get("language"))) in keys]
+
     def search_materials(self, query: Mapping[str, Any], *, enforce_blacklist=True, manual=False) -> dict:
         if not isinstance(query, Mapping):
             raise SourceError("invalid_request", "素材筛选格式无效")
@@ -395,20 +422,13 @@ class SourceRepository:
             elif search_kind == "material_name":
                 extra.append("AND s.name=%s AND BINARY LOWER(s.name)=BINARY LOWER(%s)")
                 params.extend([search, search])
-            else:
-                if search_kind == "drama_name":
-                    extra.append("AND s.data_source_id IN (" + ",".join("%s" for _ in content_ids) + ")")
-                    params.extend(content_ids)
-                    match = "BINARY LOWER(ds.name)=BINARY LOWER(%s)"
-                    prefix, suffix = "AND ", ""
-                else:
-                    match = "LOCATE(BINARY LOWER(%s),BINARY LOWER(COALESCE(ds.name,'')))>0"
-                    prefix, suffix = "AND (LOCATE(BINARY LOWER(%s),BINARY LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0 OR ", ")"
-                    params.append(search)
-                extra.append(f"""{prefix}EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
+            elif search_kind == "drama_name":
+                extra.append("AND s.data_source_id IN (" + ",".join("%s" for _ in content_ids) + ")")
+                params.extend(content_ids)
+                extra.append(f"""AND EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
                     WHERE ds.content_id=s.data_source_id AND ds.app_id={source_app_sql("s", self.mysql.schema)}{released_search}
                       AND {_language_sql("ds.language")}={_language_sql("s.language")}
-                      AND {match}){suffix}""")
+                      AND BINARY LOWER(ds.name)=BINARY LOWER(%s))""")
                 params.extend(search_release_params + [search])
         if language:
             extra.append("AND " + _language_sql("s.language") + "=%s")
@@ -449,7 +469,9 @@ class SourceRepository:
             extra.append("AND EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1)")
             params.append(institution)
         index_option = {"source_index": source_index} if source_index != "PRIMARY" else {}
-        rows = self._select(" ".join(extra), params, limit + 1, enforce_blacklist=enforce_blacklist, manual=manual, **index_option, **({"moboreels": True} if moboreels else {}))
+        rows = self._select(" ".join(extra), params, TEXT_SCAN_IDS + 1 if search_kind == "text" else limit + 1, enforce_blacklist=enforce_blacklist, manual=manual, **index_option, **({"moboreels": True} if moboreels else {}))
+        if search_kind == "text":
+            rows = self._text_search_rows(rows, search, manual=manual)
         raw_ids = [str(row.get("material_id") or "") for row in rows]
         if (any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in raw_ids)
                 or len(raw_ids) != len(set(raw_ids)) or raw_ids != sorted(raw_ids, key=int, reverse=True)):

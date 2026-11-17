@@ -11,8 +11,9 @@ class Catalog:
     schema = 'kunlunads_dev'
     blacklist_schema = 'ads_setting'
 
-    def __init__(self, identity='', ids=(), rows=(), bound=50000):
+    def __init__(self, identity='', ids=(), rows=(), bound=50000, dramas=()):
         self.identity, self.ids, self.rows, self.bound = identity, ids, rows, bound
+        self.dramas = dramas
         self.calls = []
 
     def select(self, sql, params):
@@ -25,6 +26,8 @@ class Catalog:
             return [{'material_id': '1'}] if self.identity == ('content_id' if code else 'material_name') else []
         if 'DISTINCT CAST(ds.content_id' in sql:
             return [{'content_id': value} for value in self.ids] if self.identity == 'drama_name' else []
+        if 'DISTINCT ds.app_id' in sql:
+            return list(self.dramas)
         return list(self.rows)
 
 
@@ -84,16 +87,27 @@ class MaterialSearchTests(unittest.TestCase):
         self.assertIn('s.id>%s', sql)
 
     def test_full_text_page_resumes_at_last_returned_match(self):
-        cat = Catalog(rows=[{'material_id': str(value)} for value in (49990, 49980, 49970)])
+        cat = Catalog(rows=[{'material_id': str(value), 'material_name': 'partial title'} for value in (49990, 49980, 49970)])
         result = repository(cat).search_materials({'search': 'partial title', 'limit': 2}, manual=True)
         self.assertEqual(decode(result['next_cursor'])['before'], '49980')
         self.assertEqual([r['material_id'] for r in result['items']], ['49990', '49980'])
 
     def test_last_text_chunk_reports_complete(self):
-        cat = Catalog(bound=5000)
+        cat = Catalog(bound=TEXT_SCAN_IDS // 2)
         result = repository(cat).search_materials({'search': 'no match'}, manual=True)
         self.assertFalse(result['search_incomplete'])
         self.assertFalse(result['has_more'])
+
+    def test_partial_drama_match_requires_same_app_and_language(self):
+        rows = [dict(material_id=str(49999-i), content_id='a', source_app_id=app,
+                     language=lang, material_name='clip')
+                for i, (app, lang) in enumerate([(1479, 'en'), (3200, 'en'), (1479, 'ja')])]
+        cat = Catalog(rows=rows, dramas=[dict(app_id='1479', content_id='a', language='en')])
+        result = repository(cat).search_materials({'search': 'Dragon'}, manual=True, enforce_blacklist=False)
+        self.assertEqual([row['material_id'] for row in result['items']], ['49999'])
+        source_sql = next(sql for sql, _ in cat.calls if 'ORDER BY s.id DESC' in sql)
+        self.assertNotIn('LOCATE', source_sql)
+        self.assertNotIn('EXISTS', source_sql)
 
 
 if __name__ == '__main__':

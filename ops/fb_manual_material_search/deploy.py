@@ -48,8 +48,8 @@ def overlay(before, baseline, changed):
         before = ''.join(lines)
     node, _ = method(before, 'search_materials')
     lines = before.splitlines(keepends=True)
-    lines.insert(node.lineno - 1, method(changed, '_search_identity')[1] + '\n\n')
-    result = ''.join(lines).replace('PAGE_SIZE = 100\n', 'PAGE_SIZE = 100\nTEXT_SCAN_IDS = 10000\n', 1)
+    lines.insert(node.lineno - 1, method(changed, '_search_identity')[1] + '\n\n' + method(changed, '_text_search_rows')[1] + '\n\n')
+    result = ''.join(lines).replace('PAGE_SIZE = 100\n', 'PAGE_SIZE = 100\nTEXT_SCAN_IDS = 1000\n', 1)
     compile(result, MODULE, 'exec')
     return result.encode()
 
