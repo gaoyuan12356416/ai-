@@ -28,9 +28,22 @@ def normalize(payload):
         prompt, urls = item["prompt"], item["image_urls"]
         if not isinstance(prompt, str) or not prompt.strip():
             raise ApiError("invalid_request", "items[%d].prompt 必须是非空字符串" % i)
-        if not isinstance(urls, list) or not urls or any(not isinstance(u, str) or not u.strip() for u in urls):
-            raise ApiError("invalid_request", "items[%d].image_urls 必须是非空字符串数组" % i)
-        items.append({"prompt": prompt, "image_urls": [u.strip() for u in urls]})
+        if not isinstance(urls, list) or not urls:
+            raise ApiError("invalid_request", "items[%d].image_urls 必须是非空数组" % i)
+        images = []
+        for j, image in enumerate(urls):
+            if isinstance(image, str) and image.strip():
+                # Preserve the legacy canonical payload, including its idempotency hash.
+                images.append(image.strip())
+            elif isinstance(image, dict) and set(image) == {"image_url", "title"}:
+                if not isinstance(image["image_url"], str) or not image["image_url"].strip():
+                    raise ApiError("invalid_request", "items[%d].image_urls[%d].image_url 必须是非空字符串" % (i, j))
+                if not isinstance(image["title"], str) or not image["title"].strip():
+                    raise ApiError("invalid_request", "items[%d].image_urls[%d].title 必须是非空字符串" % (i, j))
+                images.append({"image_url": image["image_url"].strip(), "title": image["title"]})
+            else:
+                raise ApiError("invalid_request", "items[%d].image_urls[%d] 必须是 URL 字符串或包含 image_url 和 title 的对象" % (i, j))
+        items.append({"prompt": prompt, "image_urls": images})
     canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return request_id, items, hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -93,8 +106,13 @@ class Store:
             db.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?)", (task_id, principal, request_id, digest, now, now))
             ordinal = 0
             for i, item in enumerate(items):
-                for j, url in enumerate(item["image_urls"]):
-                    db.execute("INSERT INTO images(task_id,ordinal,item_index,image_index,image_url,prompt,updated_at) VALUES(?,?,?,?,?,?,?)", (task_id, ordinal, i, j, url, item["prompt"], now))
+                for j, image in enumerate(item["image_urls"]):
+                    if isinstance(image, dict):
+                        url = image["image_url"]
+                        prompt = "图片标题：%s\n\n生图提示词：%s" % (image["title"], item["prompt"])
+                    else:
+                        url, prompt = image, item["prompt"]
+                    db.execute("INSERT INTO images(task_id,ordinal,item_index,image_index,image_url,prompt,updated_at) VALUES(?,?,?,?,?,?,?)", (task_id, ordinal, i, j, url, prompt, now))
                     ordinal += 1
             db.execute("INSERT INTO events(task_id,event,created_at) VALUES(?,?,?)", (task_id, "accepted", now))
         return task_id, True

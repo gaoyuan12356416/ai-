@@ -1,4 +1,5 @@
 import concurrent.futures
+import hashlib
 import http.client
 import json
 import os
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from api import handler_class
 from common import CosUploader, checked_image, public_target, sha256
 from http.server import ThreadingHTTPServer
-from store import ApiError, Store
+from store import ApiError, Store, normalize
 
 
 PAYLOAD = {"request_id": "test-1", "items": [{"image_urls": ["https://example.com/1.png", "https://example.com/2.png"], "prompt": "中文提示词"}]}
@@ -94,6 +95,56 @@ class StoreTests(unittest.TestCase):
                 self.store.submit("owner", payload)
         self.assertEqual(self.store.next_image(), (None, False))
 
+    def test_per_image_titles_share_only_the_group_prompt(self):
+        payload = {"request_id": "titled-1", "items": [{"image_urls": [
+            {"image_url": " https://example.com/1.png ", "title": "重逢"},
+            {"image_url": "https://example.com/2.png", "title": "抉择"},
+            "https://example.com/3.png",
+        ], "prompt": "共用海报风格"}]}
+        task, _ = self.store.submit("owner", payload)
+        self.assertRegex(task, r"^ig_[0-9a-f]{32}$")
+        self.assertEqual(len(task), 35)
+        expected = [("https://example.com/1.png", "图片标题：重逢\n\n生图提示词：共用海报风格"),
+                    ("https://example.com/2.png", "图片标题：抉择\n\n生图提示词：共用海报风格"),
+                    ("https://example.com/3.png", "共用海报风格")]
+        for index, (url, prompt) in enumerate(expected):
+            row, _ = self.store.next_image()
+            self.assertEqual((row["item_index"], row["image_index"], row["image_url"], row["prompt"]), (0, index, url, prompt))
+            self.store.update(row, "succeeded", "succeeded", cos_url="https://cos/image.png")
+        self.assertTrue(self.store.query("owner", task)["done"])
+
+    def test_title_changes_conflict_with_the_original_request_id(self):
+        payload = {"request_id": "titled-1", "items": [{"image_urls": [
+            {"image_url": "https://example.com/1.png", "title": "原始标题"}], "prompt": "海报"}]}
+        task, _ = self.store.submit("owner", payload)
+        self.assertEqual(self.store.submit("owner", payload), (task, False))
+        payload["items"][0]["image_urls"][0]["title"] = "新标题"
+        with self.assertRaises(ApiError) as cm:
+            self.store.submit("owner", payload)
+        self.assertEqual(cm.exception.http_status, 409)
+        payload["request_id"] = "titled-2"
+        self.assertNotEqual(self.store.submit("owner", payload)[0], task)
+
+    def test_legacy_idempotency_hash_and_persisted_prompt_are_unchanged(self):
+        canonical = json.dumps(PAYLOAD["items"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(normalize(PAYLOAD)[2], hashlib.sha256(canonical.encode()).hexdigest())
+        task, _ = self.store.submit("owner", PAYLOAD)
+        reopened = Store(self.store.path)
+        reopened.initialize()
+        self.assertEqual(reopened.submit("owner", PAYLOAD), (task, False))
+        row, _ = reopened.next_image()
+        self.assertEqual(row["prompt"], "中文提示词")
+
+    def test_invalid_title_objects_are_not_enqueued(self):
+        for image in ({"image_url": "https://example.com/1.png"},
+                      {"image_url": "https://example.com/1.png", "title": " "},
+                      {"image_url": "https://example.com/1.png", "title": 3},
+                      {"image_url": " ", "title": "标题"},
+                      {"image_url": "https://example.com/1.png", "title": "标题", "extra": True}):
+            with self.subTest(image=image), self.assertRaises(ApiError):
+                self.store.submit("owner", {"items": [{"image_urls": [image], "prompt": "海报"}]})
+        self.assertEqual(self.store.next_image(), (None, False))
+
 
 class HttpTests(StoreTests):
     def setUp(self):
@@ -132,6 +183,16 @@ class HttpTests(StoreTests):
     def test_auth_and_not_found(self):
         self.assertEqual(self.request("GET", "/api/image-generation/tasks/ig_" + "1" * 32)[0], 401)
         self.assertEqual(self.request("GET", "/api/image-generation/tasks/ig_" + "1" * 32, headers={"X-API-Token": "test-token"})[0], 404)
+
+    def test_http_titled_payload(self):
+        payload = {"request_id": "http-titled-1", "items": [{"image_urls": [
+            {"image_url": "https://example.com/1.png", "title": "海报标题"}], "prompt": "电影风格"}]}
+        headers = {"Authorization": "Bearer test-token", "Content-Type": "application/json"}
+        code, submitted, _ = self.request("POST", "/api/image-generation/tasks", json.dumps(payload), headers)
+        self.assertEqual((code, submitted["total"], len(submitted["task_id"])), (202, 1, 35))
+        self.assertEqual(self.request("POST", "/api/image-generation/tasks", json.dumps(payload), headers)[0], 200)
+        row, _ = self.store.next_image()
+        self.assertEqual(row["prompt"], "图片标题：海报标题\n\n生图提示词：电影风格")
 
 
 class DownloadTests(unittest.TestCase):

@@ -2,6 +2,13 @@
 
 Two authenticated public endpoints under /api/image-generation/tasks. Each input URL
 is one independent image; groups share prompts, while the batch shares one task ID.
+Each `image_urls` entry may be an object with `image_url` and a non-empty `title`.
+The queue freezes that image's title together with its group's prompt as the actual
+generation request. Legacy URL strings keep their original prompt and canonical
+idempotency hash. Titles participate in new-request hashes, so changing a title
+requires a new `request_id`. No schema migration or historical task rewrite is needed.
+`task_id` is always 35 ASCII characters: `ig_` plus `uuid.uuid4().hex` (32 lowercase
+hexadecimal characters), matching `^ig_[0-9a-f]{32}$`.
 The API only writes/reads SQLite. A singleton worker orchestrates downloads,
 unprivileged Codex subprocess units, image validation and verified COS uploads.
 
