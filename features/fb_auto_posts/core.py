@@ -710,7 +710,7 @@ class FBAutoPostStore:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (template_id, slot_key)).fetchone()
             current = conn.execute("SELECT status,current_version FROM fb_auto_template WHERE id=?", (template_id,)).fetchone()
-            if current is None or (not target_slot and expected_template_version is not None and int(current["current_version"]) != int(expected_template_version)):
+            if current is None or current["status"] == "deleted" or (not target_slot and expected_template_version is not None and int(current["current_version"]) != int(expected_template_version)):
                 raise StoreError("fb_auto_due_slot_template_changed", "模板已停用或版本已变化，原计划时隙不再执行", 409)
             if current["status"] != "enabled" and (expected_template_version is not None or trigger_type == "auto"):
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"

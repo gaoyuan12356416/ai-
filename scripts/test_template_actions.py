@@ -129,6 +129,19 @@ class FBTests(unittest.TestCase):
                     method(original['id'], actor, version)
         self.assertEqual(self.store.list_templates(self.f.actor)['total'], 1)
 
+    def test_delete_during_selection_prevents_new_run(self):
+        from scripts.test_fb_auto_store import Pages, Materials
+        from features.fb_auto_posts.core import StoreError
+        pages = Pages()
+        original_list = pages.list_pages
+        def delete_before_returning_pages(*args, **kwargs):
+            self.store.delete_template(self.f.template['id'], self.f.actor, self.f.template['version'])
+            return original_list(*args, **kwargs)
+        pages.list_pages = delete_before_returning_pages
+        with self.assertRaises(StoreError):
+            self.store.create_run(self.f.template['id'], 'manual:racing-delete', 'manual', self.f.actor, pages, Materials())
+        self.assertEqual(self.store.list_runs(self.f.actor)['total'], 0)
+
     def test_http_copy_delete_require_auth_and_allowlisted_fields(self):
         from features.fb_auto_posts.service import Handler, Runtime, ServiceError, FB_AUTO_ADMIN_PREFIX
         from features.fb_auto_posts.client import route_allowed
