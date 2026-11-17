@@ -19,6 +19,18 @@ def run(*args):return subprocess.check_output(args,text=True).strip()
 def save(path,value):path.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
 
 
+def build_release(source,release,profile):
+    release.mkdir(parents=True,mode=0o755)
+    for package in ('meta_page_recovery','fb_page_portrait','fb_page_assignment'):
+        shutil.copytree(source/'features'/package,release/'features'/package,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+    # shared() prepends the current production dependency owner. It requires a
+    # regular package path, not Python's append-only namespace _NamespacePath.
+    (release/'features/__init__.py').write_text('"""Scoped Meta recovery runtime packages."""\n',encoding='utf-8')
+    for path in profile.glob('*.py'):
+        if path.name not in {'classification.py','collect.py'}:
+            shutil.copy2(path,release/'features/fb_page_portrait'/path.name)
+
+
 def install(source,commit,deployment):
     if run('findmnt','-no','UUID','/mnt/data-disk')!='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':raise RuntimeError('data_disk_unavailable')
     if run('git','-C',str(source),'rev-parse','HEAD')!=commit:raise RuntimeError('source_commit_mismatch')
@@ -45,15 +57,11 @@ def install(source,commit,deployment):
     save(deployment/'manifest.json',manifest)
     release=ROOT/'releases'/commit
     if release.exists():raise RuntimeError('release_exists')
-    release.mkdir(parents=True,mode=0o755)
-    for package in ('meta_page_recovery','fb_page_portrait','fb_page_assignment'):
-        shutil.copytree(source/'features'/package,release/'features'/package,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+    build_release(source,release,profile)
     # Preserve the complete deployed profile reader's unchanged helper files.
     # This is a refresh-only release; no main/FB publishing owner is replaced.
-    for path in profile.glob('*.py'):
-        if path.name not in {'classification.py','collect.py'}:
-            shutil.copy2(path,release/'features/fb_page_portrait'/path.name)
     subprocess.check_call(['/usr/bin/python3','-m','compileall','-q',str(release/'features')])
+    subprocess.check_call(['/usr/bin/python3','-c','import features.fb_page_portrait.collect; import features.meta_page_recovery.engine'],cwd=release)
     CURRENT.parent.mkdir(parents=True,exist_ok=True)
     temp=CURRENT.with_name('current.next');temp.symlink_to(release);temp.replace(CURRENT)
     common='[Unit]\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nWorkingDirectory=/opt/meta-page-recovery/current\nUMask=0077\n'
