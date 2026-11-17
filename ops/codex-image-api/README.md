@@ -22,8 +22,9 @@ unprivileged Codex subprocess units, image validation and verified COS uploads.
 
 Run `python build_docs.py OUTPUT_DIRECTORY` to produce a standalone Chinese HTML
 guide and OpenAPI 3.0 JSON. Documents contain placeholders, never credentials.
-HTTP access requires both source IP 101.32.30.18 and the existing screenshot API
-Token. Token rotation is read directly from the existing backend environment file.
+HTTP access requires the existing screenshot API Token and an allowlisted source
+IP (101.32.30.18 or 206.54.43.29). Token rotation is read directly from the
+existing backend environment file.
 
 ## Deployment
 
@@ -72,8 +73,8 @@ status. Submission is idempotent per label; keep previous failed acceptance reco
 It includes two different image prompts and one intentionally missing reference.
 Do not schedule this command or rerun with new labels without a verification need.
 The production allowlist can be tested from a disallowed source, including spoofed
-forwarding headers. Successful calls from 101.32.30.18 must be documented separately
-unless a test can actually originate there; loopback tests do not prove that path.
+forwarding headers. Document successful calls separately for each allowlisted
+source IP tested. Loopback tests cover the backend service.
 
 ## Rollback
 
