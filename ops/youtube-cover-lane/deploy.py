@@ -76,13 +76,17 @@ def main():
         request('/internal/pipeline-monitor/capacity', {'actor': actor, 'expected_version': version,
             'host_id': NODE, 'stage': stage, 'max_workers': count, 'scaling_mode': 'manual'}, internal)
     old_env = service_env('pipeline-node-cpu-main.service')
-    env = {key: old_env[key] for key in ['PATH', 'HOME', 'CODEX_HOME', 'YOUTUBE_AUTO_CODEX_BIN'] if key in old_env}
+    env = {key: value for key, value in old_env.items() if key in
+           ['PATH', 'HOME', 'CODEX_HOME', 'YOUTUBE_AUTO_CODEX_BIN', 'COS_BUCKET',
+            'COS_REGION', 'COS_DOMAIN', 'COS_SECRET_ID', 'COS_SECRET_KEY']
+           or key.startswith('X_POST_MEDIA_REPAIR_')}
     env.update(PIPELINE_NODE_ID=NODE, PIPELINE_NODE_STATE_ROOT=str(BASE / 'state'),
         PIPELINE_NODE_CONFIG=str(credential_path), PIPELINE_RENDER_BACKEND='cpu',
         PIPELINE_EXECUTORS='youtube_prepare', PIPELINE_RENDER_PROFILES='',
         PIPELINE_COORDINATOR_URL='http://127.0.0.1:18846',
         YOUTUBE_COVER_LANE_RUNTIME=str(runtime), PYTHONDONTWRITEBYTECODE='1',
         TMPDIR=str(BASE / 'state/tmp'))
+    env['X_POST_MEDIA_REPAIR_WORK_ROOT'] = str(BASE / 'state/artifacts')
     (BASE / 'state/tmp').mkdir(mode=0o700)
     os.chown(BASE / 'state/tmp', owner.pw_uid, owner.pw_gid)
     env_path = BASE / 'private/worker.env'

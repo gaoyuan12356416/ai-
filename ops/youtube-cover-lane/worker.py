@@ -28,6 +28,12 @@ def main():
     if config['node_id'] != 'cpu-youtube-cover' or os.environ.get('PIPELINE_EXECUTORS') != 'youtube_prepare':
         raise RuntimeError('cover-only identity required')
     assert_cover_only(NodeExecutors(config))
+    # Shared artifact storage must be configured before the first claim.
+    # Without this preflight, configuration failures would consume tasks.
+    from features.x_posts.media_repair import WorkerConfig, CosObjectStore
+    CosObjectStore(WorkerConfig.from_env())
+    if not (Path(os.environ['CODEX_HOME']) / 'auth.json').is_file():
+        raise RuntimeError('cover generator authentication unavailable')
     client = CoordinatorClient(config['coordinator_url'], config['node_token'])
     stopping = threading.Event()
 
