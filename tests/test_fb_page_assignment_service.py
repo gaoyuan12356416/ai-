@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from features.fb_page_assignment.notify import DeliveryError
+from features.fb_page_assignment.request_log import RequestBodyLog
 from features.fb_page_assignment.server import ROUTE, handler
 from features.fb_page_assignment.service import Service
 from features.fb_page_assignment.sources import SourceError
@@ -225,7 +226,8 @@ class HttpTests(ServiceFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.token = "independent_fixture_token_1234567890"
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.service, self.token))
+        self.request_logger = RequestBodyLog(Path(self.temporary.name) / "request-bodies", secrets=(self.token,))
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler(self.service, self.token, self.request_logger))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self.close_server)
@@ -254,13 +256,48 @@ class HttpTests(ServiceFixture, unittest.TestCase):
         self.assertEqual(self.sources.calls, [])
         self.assertEqual(self.notifier.calls, [])
         self.assertNotIn(self.token, self.logs.getvalue())
+        self.assertEqual(list(self.request_logger.root.glob("*/*.json")), [])
 
     def test_http_malformed_json_is_logged_and_notified(self):
         status, response = self.http(body="{not_json")
         self.assertEqual(status, 400)
         self.assertIn("invalid_json_or_body", self.store.get(response["task_id"])["alert_reasons"])
+        path, = self.request_logger.root.glob("*/" + response["task_id"] + ".json")
+        self.assertEqual(json.loads(path.read_text())["raw_body"], "{not_json")
         self.service.tick()
         self.assertEqual(len(self.notifier.calls), 1)
+
+    def test_http_records_original_invalid_parameters_before_validation(self):
+        raw = '{\n "data":{"external_task_id":"nested"}, "external_task_id":123, "drama_ids":["d"]\n}'
+        status, response = self.http(body=raw)
+        self.assertEqual(status, 400)
+        self.assertEqual(response["results"], [])
+        self.assertEqual(self.sources.calls, [])
+        path, = self.request_logger.root.glob("*/" + response["task_id"] + ".json")
+        self.assertEqual(json.loads(path.read_text())["raw_body"], raw)
+        self.assertIn("external_task_id_required_1_to_128_characters",
+                      self.store.get(response["task_id"])["alert_reasons"])
+        self.assertNotIn(raw, self.logs.getvalue())
+
+    def test_http_success_keeps_response_contract_and_hides_body_secrets(self):
+        raw = json.dumps(dict(external_task_id="caller", drama_ids=["d"],
+                              token="body-secret", note=self.token))
+        status, response = self.http(body=raw)
+        self.assertEqual(status, 200)
+        self.assertEqual(set(response), {"task_id", "results"})
+        path, = self.request_logger.root.glob("*/" + response["task_id"] + ".json")
+        saved = path.read_text()
+        self.assertNotIn("body-secret", saved)
+        self.assertNotIn(self.token, saved)
+        self.assertNotIn("body-secret", self.logs.getvalue())
+
+    def test_http_body_log_failure_does_not_change_business_response_or_leak_exception(self):
+        with patch.object(self.request_logger, "save", side_effect=OSError("secret=SHOULD_NOT_LEAK")):
+            status, response = self.http(body='{"external_task_id":"caller","drama_ids":["d"]}')
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(response["results"][0]["page_id"])
+        self.assertIn('"event":"request_body_log_failed"', self.logs.getvalue())
+        self.assertNotIn("SHOULD_NOT_LEAK", self.logs.getvalue())
 
     def test_http_does_not_offer_get_query_route(self):
         status, _ = self.http(method="GET")

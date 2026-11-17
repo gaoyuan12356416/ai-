@@ -17,7 +17,7 @@ ROUTE = "/api/integrations/v1/drama-page-assignments"
 MAX_BODY = 65536
 
 
-def handler(service, token):
+def handler(service, token, request_logger=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "PageAssignment/1"
 
@@ -65,6 +65,14 @@ def handler(service, token):
                     raise ValueError("invalid_body_length")
                 self.connection.settimeout(15)
                 raw = self.rfile.read(length)
+                if request_logger is not None:
+                    try:
+                        path = request_logger.save(task_id, raw,
+                            content_type=self.headers.get("Content-Type", ""),
+                            client_ip=self.headers.get("X-Real-IP", self.client_address[0]))
+                        log("request_body_logged", task_id=task_id, body_bytes=len(raw), path=str(path))
+                    except Exception as exc:
+                        log("request_body_log_failed", task_id=task_id, error_type=type(exc).__name__)
                 if len(raw) != length:
                     raise ValueError("incomplete_body")
                 payload = json.loads(raw.decode("utf-8"))
@@ -106,12 +114,14 @@ def main():
     from .sources import Sources
     from .storage import Store, Writer
     from .notify import Notifier
+    from .request_log import RequestBodyLog
     from .service import Service
     root = Path(args.data_root)
     root.mkdir(parents=True, exist_ok=True)
     service = Service(Sources(env), Store(root / "outbox.sqlite3"), Writer(env), Notifier(env))
     service.start()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(service, token))
+    request_logger = RequestBodyLog(root / "request-bodies", secrets=(token,))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(service, token, request_logger))
     # Finish accepted requests before closing the outbox during a scoped restart.
     server.daemon_threads = False
     def stop(signum, frame):

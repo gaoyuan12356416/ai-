@@ -69,6 +69,10 @@ ORDER BY item_index;
 
 查询使用 63350 只读端点。运行日志使用 `journalctl -u fb-page-assignment.service`，两个关联 ID 可串联全部处理记录。
 
+从 2026-11-17 起，已鉴权且在现有 64 KiB 限制内、已读到的请求体，在 JSON 解析和业务参数校验前，保存到 `/mnt/data-disk/fb-page-assignment/request-bodies/北京时间日期/task_id.json`。记录包含 `task_id`、UTC 接收时间、来源 IP、Content-Type、原始字节数和 `raw_body`；正常 UTF-8 请求保留原始空白、重复键、字段层级和类型，非法 UTF-8 使用替换字符并标记 `utf8_valid=false`。即使 JSON 无效或 `external_task_id` 校验失败也保留该记录；未授权、路径错误、超限或尚未读到请求体的请求不保存正文。
+
+日志目录权限 0700、单文件 0600。不记录 Authorization 请求头；请求体中的敏感字段（包括嵌套/重复的 Token、密码、Authorization）以及专用 API Token 的值会替换成 `[REDACTED]`，`redacted=true` 标记此变化。畸形敏感字段无法解析值时隐藏从该值起的剩余正文。原始正文仅留在本机私有目录，不进入 journal、MySQL 或飞书。journal 的 `request_body_logged` 只记录关联 ID、字节数和文件路径；`request_body_log_failed` 仅记录异常类型，不改变原有业务响应。日志只覆盖上线后的新请求，回滚代码保留已记录正文和现有 outbox。
+
 先把冻结结果通过 SQLite `synchronous=FULL` 持久化到数据盘待补写队列，随即返回 HTTP 结果并唤醒后台 worker。请求线程不等待 MySQL 写入、同步锁或飞书通知。后台使用专用 writer 配置写 63353 的这一个日志表；失败时提醒郜远并退避补写，使用原主键和原内容，不重新分配。正常异步待写不产生 `log_sync_pending` 提醒，实际写入失败才产生该提醒。重启继续同步原冻结结果；写入未知不能根据只读副本尚未查到就重建任务。若本地持久化也失败，返回 503 并告警。
 
 按 `task_id` 核对 `assignment_selected` 的数据/画像/选择耗时、`assignment_completed` 的本地持久化耗时、`http_response_sent` 的服务端总耗时，以及后台 `log_sync_completed` / `log_sync_deferred`。`http_response_disconnected` 单独记录连接断开；飞书播报和日志同步状态不能代替 HTTP 返回记录。服务重启先完成已接收请求，再关闭后台 worker；回滚代码保留现有 outbox。
