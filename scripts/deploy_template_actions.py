@@ -166,7 +166,11 @@ def restart_gateway(folder, action):
         ops.run('systemctl', 'restart', '--no-block', unit)
         deadline = time.monotonic() + 25
         while show(unit, 'MainPID') in ('0', pid) or show(unit) != 'active':
-            if time.monotonic() >= deadline: raise RuntimeError('gateway restart pending')
+            if time.monotonic() >= deadline:
+                # An existing publisher drain can delay this unit through
+                # After=. Keep the queued start and verify once it is active.
+                ops.save(folder / (action + '-gateway-start-pending.json'), dict(unit=unit, old_pid=pid))
+                return
             time.sleep(.5)
     finally:
         if gated: ops.run('iptables', '-D', 'INPUT', *rule)
@@ -240,7 +244,11 @@ def verify(folder):
         assert 'Result=success' in status and 'ExecMainStatus=0' in status, 'tag_scheduler_failed:' + unit
     after = ops.services()
     for unit in ('x-tag-post.service', 'pipeline-cos-native-fb.service', 'pipeline-cos-native-x-tag.service'):
-        assert after[unit] == info['services_at_switch'][unit], 'publisher_process_changed:' + unit
+        prior = info['services_at_switch'][unit]
+        if unit == 'x-tag-post.service' and 'ActiveState=deactivating' in prior:
+            assert 'ActiveState=active' in after[unit], 'preexisting_publisher_restart_pending'
+        else:
+            assert after[unit] == prior, 'publisher_process_changed:' + unit
     for name, row in info['files'].items():
         if is_static(name):
             assert ops.digest(name) in (row['before'], row['after']), 'preserve_later_static:' + name
