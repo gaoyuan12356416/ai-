@@ -149,7 +149,8 @@ def ready(baseline):
         deadline = time.monotonic() + 60
         while True:
             try:
-                with urllib.request.urlopen('http://127.0.0.1:%d/health' % port, timeout=3) as response:
+                path = '/api/ui/topbar' if port == 8787 else '/health'
+                with urllib.request.urlopen('http://127.0.0.1:%d%s' % (port, path), timeout=3) as response:
                     assert response.status == 200
                 break
             except OSError:
