@@ -40,6 +40,7 @@
       <form id="filters" class="rank-filters" aria-label="榜单筛选">
         <label class="rank-filter" for="dateFilter">榜单日期<select id="dateFilter"><option value="">最新榜单</option></select></label>
         <label class="rank-filter" for="languageFilter">语种<select id="languageFilter"><option value="en">英语 · en</option></select></label>
+        <label class="rank-filter" for="typeFilter">短剧类型<select id="typeFilter"><option value="">全部类型</option></select></label>
         <label class="rank-filter" for="resourceFilter">资源 ID<input id="resourceFilter" type="search" placeholder="输入资源 ID" maxlength="100"></label>
         <label class="rank-filter" for="contentFilter">剧 ID<input id="contentFilter" type="search" placeholder="输入剧 ID（区分大小写）" maxlength="100"></label>
         <label class="rank-filter" for="audienceFilter">受众（一级标签）<select id="audienceFilter"><option value="">全部受众</option></select></label>
@@ -52,7 +53,7 @@
       <div id="notice" class="rank-notice" role="status" hidden></div>
       <div class="rank-table-wrap" tabindex="0" role="region" aria-label="可横向滚动的榜单明细">
         <table class="rank-table">
-          <thead><tr><th scope="col">排名</th><th scope="col">短剧 / 剧 ID / 资源 ID</th><th scope="col">语种</th><th scope="col">resource_type_v2</th><th scope="col">受众（一级标签）</th><th scope="col">题材（二级标签）</th></tr></thead>
+          <thead><tr><th scope="col">排名</th><th scope="col">短剧 / 剧 ID / 资源 ID</th><th scope="col">语种</th><th scope="col" title="resource_type_v2">短剧类型</th><th scope="col">受众（一级标签）</th><th scope="col">题材（二级标签）</th></tr></thead>
           <tbody id="rows"><tr><td colspan="6" class="empty">正在读取榜单…</td></tr></tbody>
         </table>
       </div>
@@ -62,6 +63,6 @@
 </div>
 <script src="/quick-nav.js?v=20261113rank1"></script>
 <script src="/ui-topbar.js"></script>
-<script src="/drama-pay-rank.js?v=20261117a"></script>
+<script src="/drama-pay-rank.js?v=20261117b"></script>
 </body>
 </html>

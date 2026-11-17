@@ -2,9 +2,24 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const names={en:'英语',es:'西班牙语',pt:'葡萄牙语',ar:'阿拉伯语',bn:'孟加拉语',cs:'捷克语',de:'德语',el:'希腊语',fr:'法语',hi:'印地语',hu:'匈牙利语',id:'印度尼西亚语',it:'意大利语',ja:'日语',ko:'韩语',ms:'马来语',nb:'挪威语',nl:'荷兰语',pl:'波兰语',ro:'罗马尼亚语',ru:'俄语',sv:'瑞典语',ta:'泰米尔语',te:'泰卢固语',th:'泰语',tl:'菲律宾语',tr:'土耳其语',uk:'乌克兰语',vi:'越南语','zh-TW':'繁体中文'};
+  // Same source dictionary as the X/TT automatic-publishing template editors.
+  const resourceTypeNames = new Map([
+    ['0', '其他'], ['1', '翻译剧非首发'], ['2', '本土首发'], ['3', '本土对投'],
+    ['4', '本土二轮采买'], ['5', '本土自制'], ['6', '翻译剧首发'],
+    ['7', '首发本土动态漫'], ['8', '二轮本土动态漫'], ['9', '首发翻译动态漫'],
+    ['10', '二轮翻译动态漫'], ['11', '翻译剧自制'], ['12', '漫剧自制'],
+    ['13', 'AI本土真人剧自制'], ['14', 'AI本土真人剧首发'], ['15', '二轮本土AI真人剧'],
+    ['16', '翻译AI真人剧首发'], ['17', '二轮翻译AI真人剧'], ['18', 'AI本土解说剧自制'],
+    ['19', 'AI本土解说剧首发'], ['20', 'AI本土解说剧二轮'], ['21', 'AI翻译解说剧首发'],
+    ['22', 'AI翻译解说剧首发'], ['100', '小说'],
+    ['__missing', '待补充'], ['__conflict', '存在冲突']
+  ]);
+  const resourceTypeKey = row => String(row.resource_type_v2 ?? '').trim()
+    || (row.resource_type_status === 'conflict' ? '__conflict' : '__missing');
+  const resourceTypeName = value => resourceTypeNames.get(value) || `未知类型（${value}）`;
   let auth = {}, generation = 0, currentData = null;
   let loadedDay = '', loadedLanguage = '';
-  const searchIds = ['resourceFilter', 'contentFilter', 'audienceFilter', 'labelsFilter'];
+  const searchIds = ['resourceFilter', 'contentFilter', 'audienceFilter', 'labelsFilter', 'typeFilter'];
   function el(tag, text, className) {
     const node = document.createElement(tag);
     node.textContent = text;
@@ -24,12 +39,13 @@
   function renderRows() {
     if (!currentData) return;
     const data = currentData;
-    const [resource, content, audience, query] = searchIds.map(id => $(id).value.trim());
+    const [resource, content, audience, query, type] = searchIds.map(id => $(id).value.trim());
     const needle = query.toLocaleLowerCase();
     const filtered = data.list.filter(row =>
       (!resource || String(row.resource_id || '').includes(resource)) &&
       (!content || row.series_key.includes(content)) &&
       (!audience || (row.audience || '待补充') === audience) &&
+      (!type || resourceTypeKey(row) === type) &&
       (!needle || [...(row.labels || []), ...(row.label_names || []), ...(row.secondary_labels || [])].join(' ').toLocaleLowerCase().includes(needle))
     );
     $('countLabel').textContent = `显示 ${filtered.length} / ${data.list.length} 部短剧`;
@@ -44,9 +60,7 @@
         el('div', '资源 ID：' + (row.resource_id || (row.detail_status === 'conflict' ? '存在冲突' : '待补充')), 'drama-id'));
       const audienceCell = el('td', '');
       audienceCell.append(el('span', row.audience || '待补充', 'badge'));
-      const resourceType = row.resource_type_v2;
-      const typeCell = el('td', resourceType !== undefined && resourceType !== null && resourceType !== ''
-        ? String(resourceType) : row.resource_type_status === 'conflict' ? '存在冲突' : '待补充');
+      const typeCell = el('td', resourceTypeName(resourceTypeKey(row)));
       const themeCell = el('td', '');
       const themes = el('div', '', 'rank-themes');
       for (const label of row.secondary_labels?.length ? row.secondary_labels : ['待补充']) themes.append(el('span', label, 'badge'));
@@ -81,6 +95,10 @@
       options($('languageFilter'), Array.from(new Set(['en', ...data.languages])), lang, value => (names[value] || value) + ' · ' + value);
       const selectedAudience = $('audienceFilter').value;
       options($('audienceFilter'), Array.from(new Set(['', ...data.list.map(row => row.audience || '待补充'), selectedAudience])), selectedAudience, value => value || '全部受众');
+      const selectedType = $('typeFilter').value;
+      const types = Array.from(new Set([...data.list.map(resourceTypeKey), selectedType])).filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, 'en', {numeric: true}));
+      options($('typeFilter'), ['', ...types], selectedType, value => value ? resourceTypeName(value) : '全部类型');
       $('windowLabel').textContent = data.date ? `榜单 ${data.date} · 统计 ${data.window_start} 至 ${data.window_end}（UTC）` : '尚无榜单';
       $('updatedLabel').textContent = data.fetched_at ? '采集时间 ' + new Date(data.fetched_at).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false}) + '（北京）' : '';
       renderRows();
@@ -104,6 +122,9 @@
     else load();
   });
   $('resetSearch').addEventListener('click', () => { searchIds.forEach(id => { $(id).value = ''; }); renderRows(); });
+  $('typeFilter').addEventListener('change', () => {
+    if (currentData && $('dateFilter').value === loadedDay && $('languageFilter').value === loadedLanguage) renderRows();
+  });
   $('loginBtn').addEventListener('click', () => UiTopbar.handleAuthAction({auth}));
   async function init() {
     try {

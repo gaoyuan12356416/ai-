@@ -38,27 +38,28 @@ def pointer(destination):
     temporary.replace(CURRENT)
 
 
-def apply(folder):
+def apply(folder, base=BASE, static_only=False):
     assert run('findmnt', '-rn', '-o', 'UUID', '--mountpoint', '/mnt/data-disk') == '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
     commit = run('git', '-C', str(SOURCE), 'rev-parse', 'HEAD')
     assert not run('git', '-C', str(SOURCE), 'status', '--porcelain'), 'source_dirty'
     assert run('git', '-C', str(SOURCE), 'branch', '-r', '--contains', commit), 'source_not_fetched_from_remote'
     previous = CURRENT.resolve()
-    assert run('git', '-C', str(previous), 'rev-parse', 'HEAD') == BASE, 'catalog_release_changed'
+    assert run('git', '-C', str(previous), 'rev-parse', 'HEAD') == base, 'catalog_release_changed'
     assert not run('git', '-C', str(previous), 'status', '--porcelain'), 'catalog_source_dirty'
-    targets = {MAIN / name: name for name in FILES}
+    targets = {} if static_only else {MAIN / name: name for name in FILES}
     for root in (MAIN / 'static', WEB):
         targets.update({root / name: 'static/' + name for name in ASSETS})
     for target, name in targets.items():
-        expected = subprocess.check_output(['git', '-C', str(SOURCE), 'show', BASE + ':' + name])
+        expected = subprocess.check_output(['git', '-C', str(SOURCE), 'show', base + ':' + name])
         assert target.read_bytes() == expected, 'live_file_changed:' + str(target)
     folder.mkdir(parents=True, exist_ok=False)
     folder.chmod(0o700)
     manifest = dict(commit=commit, previous=str(previous), source=str(SOURCE), files={},
                     main_pid=run('systemctl', 'show', 'drama-material-api.service', '-p', 'MainPID', '--value'))
-    with sqlite3.connect('/mnt/data-disk/drama-pay-rank/rank.sqlite3') as source_db:
-        with sqlite3.connect(str(folder / 'rank-before.sqlite3')) as backup_db:
-            source_db.backup(backup_db)
+    if not static_only:
+        with sqlite3.connect('/mnt/data-disk/drama-pay-rank/rank.sqlite3') as source_db:
+            with sqlite3.connect(str(folder / 'rank-before.sqlite3')) as backup_db:
+                source_db.backup(backup_db)
     for i, (target, name) in enumerate(targets.items()):
         backup = folder / ('before-' + str(i))
         shutil.copy2(target, backup)
@@ -87,5 +88,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('apply', 'rollback'))
     parser.add_argument('--folder', type=Path, required=True)
+    parser.add_argument('--base', default=BASE)
+    parser.add_argument('--static-only', action='store_true')
     args = parser.parse_args()
-    (apply if args.action == 'apply' else rollback)(args.folder)
+    if args.action == 'apply':
+        apply(args.folder, args.base, args.static_only)
+    else:
+        rollback(args.folder)
