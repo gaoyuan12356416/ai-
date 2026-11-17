@@ -86,9 +86,11 @@ def suspend_downloads(jobs):
                                                        ('x:queue:'+str(job['source_id']),)).fetchone():
                     raise RuntimeError('native_write_already_started')
             return paused
-    except (OSError,ValueError,RuntimeError,sqlite3.Error):
+    except BaseException as exc:
         resume_downloads(paused)
-        return []
+        if isinstance(exc,(OSError,ValueError,RuntimeError,sqlite3.Error)):
+            return []
+        raise
 
 
 def main():
