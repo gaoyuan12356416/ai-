@@ -84,7 +84,10 @@ def main():
         record['state']='draining';save(folder,record)
         previous=None
         while True:
-            jobs=barrier['pending'](OWNER)
+            # Only publication calls the gateway's origin/attribution brokers.
+            # Existing preparation and Auto selection use the still-running
+            # native services and need not drain for a gateway-only switch.
+            jobs=[job for job in barrier['pending'](OWNER) if job['stage']=='publish']
             signature=[(j['id'],j['generation']) for j in jobs]
             if signature!=previous:print(json.dumps({'pending':jobs}),flush=True);previous=signature
             if not jobs:break
