@@ -8,6 +8,10 @@ import re
 from store import canonical, file_sha, iter_json_array, metadata, normalize, require, scoped_rows
 
 
+def canonical_lang(value):
+    return {'ph':'tl','ft':'zh-tw','tw':'zh-tw'}.get(value.lower(),value.lower())
+
+
 def norm(s):
     s=s.lower().strip();s=re.sub(r'^(?:en验证[_-])?ai(?:翻转|小语种|解说)-[a-z-]+-\d+-\d+:\d+-','',s);s=re.sub(r'^[a-z-]+-\d+-00:00-','',s)
     s=s.replace('en已验证_','').replace('en已验证','en').replace('纯净版','').replace('en验证','').replace('_翻转_','_')
@@ -38,7 +42,48 @@ def pack_matches(matches):
 
 
 def fuzzy_matches(mats, original_ids):
-    """Bounded, same-resource candidate retrieval; every result needs review.
+    """Compatibility entry; structured matching replaces fuzzy retrieval."""
+    index=collections.defaultdict(list)
+    for mid,row in mats.items():
+        key=structured_key(row['n'])
+        row['matchKey']=list(key) if key else None
+        if key and row['l'].lower()!='en':index[key].append(mid)
+    return {mid:[{'mid':target,'score':1.0,'reason':'主体作者尾号一致'}
+                 for target in sorted(index.get(structured_key(mats[mid]['n']),()),key=int)
+                 if target!=mid and canonical_lang(mats[target]['l'])!=canonical_lang(mats[mid]['l'])]
+            for mid in sorted(original_ids) if mid in mats}
+
+
+def structured_key(name):
+    """Resource, entire body (except language), author, explicit post-date version.
+
+    Dates and duration/promotion prefixes are ignored. Missing/ambiguous fields
+    fail closed; dates are never interpreted as versions. No fuzzy fallback.
+    """
+    import unicodedata
+    s=unicodedata.normalize('NFKC',name).lower().strip()
+    s=re.sub(r'(?:[._-](?:mp4|png|jpg|jpeg))+$','',s)
+    s=re.sub(r'^(?:en验证[_-])?ai(?:翻转|小语种|解说)-[a-z-]+-\d+-\d+:\d+-','',s)
+    s=re.sub(r'^[a-z-]+-\d+-\d+:\d+-','',s)
+    tail=re.search(r'[_\-]([a-z][a-z0-9]*)[_\-](\d{1,2}[._\-]\d{1,2}|\d{4})[_\-](\d+)\s*$',s)
+    if not tail:return None
+    author,date,version=tail.groups()
+    if len(date)==4 and date.isdigit():month,day=int(date[:2]),int(date[2:])
+    else:month,day=map(int,re.split(r'[._\-]',date))
+    if not (1<=month<=12 and 1<=day<=31):return None
+    head=s[:tail.start()].replace('en已验证','').replace('en验证','')
+    resource=re.search(r'(?<!\d)(\d{5,})(?!\d)',head)
+    if not resource:return None
+    body=head[resource.end():]
+    body=body.replace('zh-tw','tw')
+    languages=set('en tw ft ar de el es fr hi id it ja ko ms pl pt ru th tl ph tr vi'.split())
+    body='|'.join(t for t in re.findall(r'\d+|[a-z]+|[\u4e00-\u9fff]+',body) if t not in languages)
+    if not body or not re.search(r'\d',body):return None
+    return resource.group(1),body,author,str(int(version))
+
+
+def legacy_fuzzy_matches(mats, original_ids):
+    """Historical algorithm retained for regression comparisons only.
 
     Index distinct names, not every pair of material IDs. Match 3-gram Dice
     >= .55 with >= 6 common grams, or containment of >= 12 characters.
@@ -95,7 +140,7 @@ def select(catalog,originals,library):
         cid=str(row['data_source_id']);identity=catalog.get(cid,set())
         if len(identity)!=1:continue
         resource,lang=next(iter(identity))
-        if not lang or lang!=row['language'].lower() or resource not in originals:continue
+        if not lang or canonical_lang(lang)!=canonical_lang(row['language']) or resource not in originals:continue
         mid=str(row['id']);scoped[resource][mid]={'n':row['name'],'l':row['language'],'d':float(row['video_duration'] or 0),
             'k':norm(row['name']),'c':str(row['created_at']),'ids':[],'cid':cid,
             'v':next((v for v in ['AI翻转','AI解说','AI小语种'] if v in row['name']),'普通版本')}

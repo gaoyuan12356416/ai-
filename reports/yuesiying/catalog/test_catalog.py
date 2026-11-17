@@ -14,6 +14,27 @@ def row(i,name='EN-123-00:00-a',lang='en',cid='source',duration=0):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_structured_user_contract(self):
+        name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4'
+        key=consumer.structured_key(name)
+        self.assertIsNotNone(key)
+        for candidate in ['12M_EN已验证_30680_2_9_AR_二创_CHENHAN_11.8_1.mp4',
+                          'AI翻转-ko-30680-11:42-跑量迭代_12M_30680_2_9_EN_二创_chenhan_11_12_1',
+                          '19M-30680-2-9-ja-二创-chenhan-1108-1.mp4']:
+            self.assertEqual(key,consumer.structured_key(candidate))
+        for candidate in [name.replace('二创','精剪'),name.replace('2_9','29_1'),
+                          name.replace('chenhan','hupeixuan'),name.replace('30680','30681'),
+                          name.replace('11.6_1','11.6_2'),name.replace('11.6_1','11.6'),
+                          name.replace('11.6_1','13.6_1')]:
+            self.assertNotEqual(key,consumer.structured_key(candidate))
+        self.assertIsNone(consumer.structured_key(name.replace('11.6_1','11.6')))
+
+    def test_existing_ph_tl_inventory_alias_is_preserved(self):
+        name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4'
+        result=consumer.select({'en':{('30680','en')},'tl':{('30680','tl')}},
+            {'30680':{'1'}},[row(1,name=name,cid='en'),row(2,name=name,lang='ph',cid='tl')])
+        self.assertEqual([h['mid'] for h in result['matches']['30680']['1']],['2'])
+
     def test_compact_lists_are_lossless_and_shared(self):
         hits=[{'mid':'2','score':0.75,'reason':'核心名称部分相似'}]
         packed=consumer.pack_matches({'1':hits,'3':hits,'4':[]})
@@ -28,14 +49,13 @@ class CatalogTests(unittest.TestCase):
               '2':{'n':'18M_30702_39_10_吃醋_精剪_修改字幕_hupeixuan_11_8_4','l':'fr'},
               '3':{'n':korean,'l':'en'},'4':{'n':'completely unrelated content','l':'ja'}}
         hits=consumer.fuzzy_matches(mats,{'8166308'})['8166308']
-        self.assertEqual({r['mid'] for r in hits},{'8181355','2'})
+        self.assertEqual({r['mid'] for r in hits},{'8181355'})
         self.assertEqual(next(r['score'] for r in hits if r['mid']=='8181355'),1.0)
 
     def test_fuzzy_never_crosses_resources_or_same_language(self):
-        values=[row(1,name='abcdefg1234567-original',cid='en'),
-                row(2,name='abcdefg1234567-original-ko',lang='ko',cid='ko'),
-                row(3,name='abcdefg1234567-original-ko',lang='ko',cid='other'),
-                row(4,name='abcdefg1234567-original',cid='en')]
+        name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4'
+        values=[row(1,name=name,cid='en'),row(2,name=name,lang='ko',cid='ko'),
+                row(3,name=name,lang='ko',cid='other'),row(4,name=name,cid='en')]
         cat={'en':{('A','en')},'ko':{('A','ko')},'other':{('B','ko')}}
         result=consumer.select(cat,{'A':{'1'}},values)
         self.assertEqual([h['mid'] for h in result['matches']['A']['1']],['2'])
@@ -73,8 +93,9 @@ class CatalogTests(unittest.TestCase):
     def test_selection_identity_language_signatures_order_and_key_fields(self):
         catalog={'source':{('123','en')},'french':{('123','fr')},'ambiguous':{('123','fr'),('124','fr')}}
         originals={'123':{'3'}}
-        values=[row(7,name='fr-123-00:00-a',lang='fr',cid='french',duration=None),
-                row(3,name='en-123-00:00-a',duration='2.0'),
+        name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4'
+        values=[row(7,name=name,lang='fr',cid='french',duration=None),
+                row(3,name=name,duration='2.0'),
                 row(9,lang='fr',cid='ambiguous'),row(10,lang='ja',cid='french')]
         before=consumer.select(catalog,originals,values)
         after=consumer.select(catalog,originals,[store.normalize(value) for value in values])
@@ -118,7 +139,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in actual],[2])
 
     def test_legacy_validation_compares_raw_consumer_behavior(self):
-        values=[row('001')]
+        values=[row('001',name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4')]
         (self.root/'library.json').write_text(json.dumps(values))
         with patch.object(consumer,'inputs',return_value=({'source':{('123','en')}},{'123':{'001'}},{'source'})), \
                 patch.object(consumer,'scoped_rows',return_value=[store.normalize(values[0])]):

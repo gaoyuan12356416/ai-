@@ -37,7 +37,7 @@ for resource,mats in kept.items():
   if r['ids'] and r['l'].lower()!='en':groups[r['k']].append(mid)
  per={mid:performance[mid] for mids in groups.values() for mid in mids if mid in performance}
  f='localizations/'+hashlib.sha256(resource.encode()).hexdigest()[:20]+'.json';manifest[resource]=f
- (OUT/f).write_text(json.dumps({'materials':mats,'groups':groups,'performance':per,**pack_matches(selection['matches'][resource]),'matching':'loose-name-v1-manual-review','indexVersion':2},ensure_ascii=False,separators=(',',':')))
-meta={'today':base['today'],'start':base['start'],'effectsUpdated':max(str(r['updated']) for r in effects),'inventoryTime':(P/'inventory-time.txt').read_text(),'idTime':datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),'files':manifest,'validCandidateMaterials':valid_count,'matching':'loose-name-v1-manual-review','scope':'Dramawave五产品、Facebook＋TikTok、全部优化师；按小语种素材库ID累计。宽松名称相似候选（3字符片段Dice≥55%且共有≥6片段，或核心名包含且长度≥12）；不是内容同版证明，全部需逐条人工核对。'}
+ (OUT/f).write_text(json.dumps({'materials':mats,'groups':groups,'performance':per,**pack_matches(selection['matches'][resource]),'matching':'structured-body-author-version-v1','indexVersion':2},ensure_ascii=False,separators=(',',':')))
+meta={'today':base['today'],'start':base['start'],'effectsUpdated':max(str(r['updated']) for r in effects),'inventoryTime':(P/'inventory-time.txt').read_text(),'idTime':datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),'files':manifest,'validCandidateMaterials':valid_count,'matching':'structured-body-author-version-v1','scope':'Dramawave五产品、Facebook＋TikTok、全部优化师；按小语种素材库ID累计。同资源、主体片段（忽略语种）、作者及日期后版本尾号一致；日期和时长可不同；关键字段缺失则待核实；不是内容同版证明，全部需逐条人工核对。'}
 (OUT/'low-language-meta.json').write_text(json.dumps(meta,ensure_ascii=False,separators=(',',':')))
 print(json.dumps({'files':len(manifest),'valid':valid_count,'updated':meta['effectsUpdated']},ensure_ascii=False),flush=True)
