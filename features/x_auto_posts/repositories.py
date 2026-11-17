@@ -9,6 +9,8 @@ only activated daily generations from the local auto-post store.
 
 from __future__ import annotations
 
+from features.hit_publish import FUTURE_TIMES
+
 import hashlib
 import json
 import re
@@ -502,7 +504,7 @@ class ReadOnlyMySQLRepository:
         predicates = [
             "i.app_id=%s",
             "i.release_status=%s",
-            "i.drama_status=%s",
+            "i.drama_status IN (%s,%s)",
             "LOWER(TRIM(i.language)) IN (%s)" % ",".join("%s" for _ in languages),
             "i.deploy_time>%s",
             "i.deploy_time<=%s",
@@ -510,10 +512,11 @@ class ReadOnlyMySQLRepository:
         params: List[Any] = [
             self.app_id,
             1,
+            2,  # Pending launch is eligible; the release window still applies.
             3,
             *languages,
             0,
-            int(now_epoch),
+            max([int(now_epoch), *FUTURE_TIMES.get().values()]),
         ]
         if deploy_since_epoch is not None:
             predicates.append("i.deploy_time>=%s")
