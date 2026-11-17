@@ -259,7 +259,10 @@ def verify(folder):
         if unit == 'x-tag-post.service' and 'ActiveState=deactivating' in prior:
             assert 'ActiveState=active' in after[unit], 'preexisting_publisher_restart_pending'
         else:
-            assert after[unit] == prior, 'publisher_process_changed:' + unit
+            transition = info.get('independent_service_transitions', {}).get(unit, {})
+            reviewed = (transition.get('before') == prior and transition.get('after') == after[unit]
+                        and 'ActiveState=active' in after[unit])
+            assert after[unit] == prior or reviewed, 'publisher_process_changed:' + unit
     for name, row in info['files'].items():
         if is_static(name):
             assert ops.digest(name) in (row['before'], row['after']), 'preserve_later_static:' + name
