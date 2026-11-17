@@ -42,6 +42,13 @@ def specs():
             units += spec.get('restart_services', [])
             inactive += spec.get('must_be_inactive', [])
         result[group] = {'checks': checks, 'restart_services': sorted(set(units)), 'must_be_inactive': sorted(set(inactive))}
+    # COS preparation receipts are owned by the cloud coordinator, not this
+    # HTTP process. A parked receipt preserves its native source lease after
+    # execution has stopped. Keep all active coordinator/native publish checks;
+    # validate each excluded parked preparation separately in busy().
+    for check in result['fb']['checks']:
+        if check['name'] == 'fb_auto_task_busy':
+            check['sql'] = "SELECT COUNT(*) FROM fb_auto_task WHERE status='running' OR (status='preparing' AND lease_owner NOT LIKE 'pipeline:cos-cloud:%') OR (lease_owner<>'' AND lease_owner NOT LIKE 'pipeline:cos-cloud:%' AND julianday(lease_expires_at_utc)>julianday('now'))"
     return result
 
 
@@ -62,7 +69,7 @@ def stage(d, release, sha):
     directory = d.DATA / 'deployments' / ('drama-catalog-complete-' + datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ'))
     d.require(not directory.exists(), 'Deployment exists')
     for lane, row in plan['roots'].items():
-        # This follow-up changes only the exact-fenced shared helper and SQL.
+        # This follow-up changes only exact-fenced catalog files and SQL.
         # Snapshot the current composite runtime so concurrent unrelated fixes
         # are carried forward; tree and file fences protect the later switch.
         row['resolved'] = str(Path(row['logical']).resolve())
@@ -124,6 +131,50 @@ def pause(d, lanes, directory, state, group):
 
 def busy(d, directory, state, group):
     d.busy(state['specs'][group], directory, group)
+    if group == 'fb':
+        with closing(sqlite3.connect('file:/mnt/data-disk/fb-auto-post-publisher/fb-auto-post.sqlite3?mode=ro', uri=True, timeout=5)) as native:
+            parked = [str(r[0]) for r in native.execute("SELECT id FROM fb_auto_task WHERE status='preparing' AND lease_owner LIKE 'pipeline:cos-cloud:%'")]
+        with closing(sqlite3.connect('file:/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3?mode=ro', uri=True, timeout=5)) as conn:
+            for source_id in parked:
+                rows = conn.execute("SELECT id,status,error_code,node_id,external_intent,coalesce(julianday(lease_expires_at)>julianday('now'),0),generation FROM pipeline_job WHERE channel='fb' AND stage='prepare' AND source_id=?", (source_id,)).fetchall()
+                d.require(len(rows) == 1, 'Ambiguous cloud preparation owner')
+                job_id, status, error, node, external, leased, generation = rows[0]
+                d.require(node == 'cos-cloud' and not external and not leased, 'Cloud preparation still executing')
+                d.require((status,error) in (('unknown','cos_receipt_pending'),('queued','lease_expired')) or status == 'completed', 'Unreviewed cloud receipt state')
+                if status == 'unknown':
+                    d.require(conn.execute('SELECT 1 FROM pipeline_cloud_intent WHERE job_id=? AND generation=? LIMIT 1', (job_id,generation)).fetchone(), 'Cloud intent receipt missing')
+                elif status == 'completed':
+                    d.require(conn.execute('SELECT 1 FROM pipeline_receipt WHERE job_id=? AND generation=? LIMIT 1', (job_id,generation)).fetchone(), 'Completed cloud receipt missing')
+        d.save(directory / 'private' / 'preserved-cloud-preparations.json', {'source_ids': parked, 'action': 'preserve untouched; no execution or lease reset'})
+
+
+def adopt_drains(d, directory, state, previous):
+    """Transfer this task's existing admission receipts after its first activator exits."""
+    previous = previous.resolve()
+    d.require(previous == Path('/mnt/data-disk/moboreels-library/deployments/drama-catalog-20261117T090454Z'), 'Unexpected original deployment')
+    original = json.loads((previous / 'manifest.json').read_text())
+    d.require(original['commit'] == 'f4310f1315c08a499daf5dc69b5099bb98c2af12', 'Original commit differs')
+    running = subprocess.check_output(['systemctl','show','drama-catalog-main-20261117-090454.service','-p','MainPID','--value'], text=True).strip()
+    d.require(running == '0', 'Original activator must finish before receipt transfer')
+    cfg = config()
+    for group in ('x','fb','youtube'):
+        old = original['groups'][group]
+        d.require(group not in state['groups'] and not old.get('resumed') and not old.get('superseded_by'), 'Reconcile existing ownership receipt')
+        d.require(old['paused_by_us'] and group not in cfg['enabled_channels'], 'Original admission ownership changed')
+        receipt = json.loads((previous / 'private' / (group+'-pause.json')).read_text())
+        d.require(receipt['status']=='committed' and receipt['changed'] and not receipt['target_enabled'] and receipt['before']['enabled'], 'Invalid original pause')
+        current_fences(d, state, group)
+    for group in ('x','fb','youtube'):
+        old = original['groups'][group]
+        baseline = directory / 'private' / (group+'-scheduler-before.json')
+        shutil.copy2(old['baseline'], baseline)
+        shutil.copy2(previous / 'private' / (group+'-pause.json'), directory / 'private' / (group+'-pause.json'))
+        state['groups'][group] = dict(status='draining', before=old['before'], baseline=str(baseline),
+            paused_by_us=True, pause_version=old['pause_version'], inherited_from=str(previous))
+        old['superseded_by'] = str(directory)
+    d.save(directory / 'manifest.json', state)
+    d.save(previous / 'manifest.json', original)
+    print(json.dumps({'inherited_drains': ['x','fb','youtube'], 'config_version': cfg['version']}))
 
 
 def activate(d, directory, state, group):
@@ -217,8 +268,9 @@ def rollback(d, lanes, directory, state, group, reviewed_version=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('sha'); parser.add_argument('action', choices=('stage', 'pause', 'busy', 'activate', 'resume', 'rollback-pause', 'rollback'))
+    parser.add_argument('sha'); parser.add_argument('action', choices=('stage', 'pause', 'busy', 'activate', 'resume', 'rollback-pause', 'rollback', 'adopt-drains'))
     parser.add_argument('--deployment', type=Path); parser.add_argument('--group', choices=tuple(GROUPS))
+    parser.add_argument('--previous', type=Path)
     parser.add_argument('--reviewed-version', type=int)
     args = parser.parse_args(); release = Path(__file__).resolve().parents[2]
     d = module(release / 'ops/moboreels-attribution-20261113/deploy.py', 'original_deploy')
@@ -229,7 +281,8 @@ def main():
     state = json.loads((directory / 'manifest.json').read_text())
     d.require(state['commit'] == args.sha and state['release'] == str(release), 'Deployment release differs')
     lanes = module(release / OPS / 'lanes.py', 'scoped_lanes')
-    if args.action == 'pause': pause(d, lanes, directory, state, args.group)
+    if args.action == 'adopt-drains': adopt_drains(d, directory, state, args.previous)
+    elif args.action == 'pause': pause(d, lanes, directory, state, args.group)
     elif args.action == 'busy':
         busy(d, directory, state, args.group); print(json.dumps({'group': args.group, 'busy': False}))
     elif args.action == 'activate': activate(d, directory, state, args.group)

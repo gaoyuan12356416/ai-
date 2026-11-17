@@ -14,11 +14,11 @@
     },
     "tt": {
       "logical": "/opt/tt-post/current",
-      "resolved": "/mnt/data-disk/post-product-scope-releases/e5b1ee06c07def5262b2eb2888d6cf94f784b8b3/tt"
+      "resolved": "/mnt/data-disk/drama-catalog-releases/f4310f1315c08a499daf5dc69b5099bb98c2af12/tt"
     },
     "tt_auto": {
       "logical": "/opt/tt-auto-post/current",
-      "resolved": "/mnt/data-disk/post-product-scope-releases/e5b1ee06c07def5262b2eb2888d6cf94f784b8b3/tt_auto"
+      "resolved": "/mnt/data-disk/drama-catalog-releases/f4310f1315c08a499daf5dc69b5099bb98c2af12/tt_auto"
     }
   },
   "files": [
@@ -26,35 +26,56 @@
       "lane": "main",
       "relative": "features/publishing_products.py",
       "before": "232ef9ccb9778391f4e7af80813d9662028fb386b5e15e9d425049db4686b5f2",
-      "after": "51a123f1efbddee35b1e354136f140e99c4577eff07ba3ecfd266b332ec14149",
+      "after": "bb5507e6729971236a64f2f60beed792f171af053a3377f8f329e381e82fb797",
       "source": "ops/drama-catalog-complete-20261117/runtime/main/features/publishing_products.py"
     },
     {
       "lane": "x",
       "relative": "features/publishing_products.py",
-      "before": "232ef9ccb9778391f4e7af80813d9662028fb386b5e15e9d425049db4686b5f2",
-      "after": "51a123f1efbddee35b1e354136f140e99c4577eff07ba3ecfd266b332ec14149",
+      "before": "4b96a08e3ca55ef36ba0b491377026877bf1e3a6f67c2470cafb421beb086c4d",
+      "after": "bb5507e6729971236a64f2f60beed792f171af053a3377f8f329e381e82fb797",
       "source": "ops/drama-catalog-complete-20261117/runtime/x/features/publishing_products.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/x_posts/selector.py",
+      "before": "f15aca221cb4047803197fea8d4a19ccc91d16902764dc8061636771ac5a85e8",
+      "after": "65e143a0d6ad0f7f55b1a43c88eb9a587f59247be6da40e951a37e64594cb18e",
+      "source": "ops/drama-catalog-complete-20261117/runtime/x/features/x_posts/selector.py"
     },
     {
       "lane": "fb",
       "relative": "features/publishing_products.py",
-      "before": "232ef9ccb9778391f4e7af80813d9662028fb386b5e15e9d425049db4686b5f2",
-      "after": "51a123f1efbddee35b1e354136f140e99c4577eff07ba3ecfd266b332ec14149",
+      "before": "4b96a08e3ca55ef36ba0b491377026877bf1e3a6f67c2470cafb421beb086c4d",
+      "after": "bb5507e6729971236a64f2f60beed792f171af053a3377f8f329e381e82fb797",
       "source": "ops/drama-catalog-complete-20261117/runtime/fb/features/publishing_products.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/fb_video_publish/sources.py",
+      "before": "aa9c87067ee9901eeddbf1f2372fddaaf25587f39e7db5f2543e39dbfaa6f830",
+      "after": "05e78a32ef1958012fa89cdaaf7b6cf0a3ca612dcfce2089a175c4506cdb8715",
+      "source": "ops/drama-catalog-complete-20261117/runtime/fb/features/fb_video_publish/sources.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/fb_video_publish/group_sources.py",
+      "before": "ef562b8cdb762c53f34574e335351c300c4f53476ab9f0a954f1b916904e9e85",
+      "after": "5a2dd2852d5b3917292bd1140ff09b8a602806d4890f1c795177f4a5397ccb15",
+      "source": "ops/drama-catalog-complete-20261117/runtime/fb/features/fb_video_publish/group_sources.py"
     },
     {
       "lane": "tt",
       "relative": "features/publishing_products.py",
       "before": "232ef9ccb9778391f4e7af80813d9662028fb386b5e15e9d425049db4686b5f2",
-      "after": "51a123f1efbddee35b1e354136f140e99c4577eff07ba3ecfd266b332ec14149",
+      "after": "bb5507e6729971236a64f2f60beed792f171af053a3377f8f329e381e82fb797",
       "source": "ops/drama-catalog-complete-20261117/runtime/tt/features/publishing_products.py"
     },
     {
       "lane": "tt_auto",
       "relative": "features/publishing_products.py",
       "before": "232ef9ccb9778391f4e7af80813d9662028fb386b5e15e9d425049db4686b5f2",
-      "after": "51a123f1efbddee35b1e354136f140e99c4577eff07ba3ecfd266b332ec14149",
+      "after": "bb5507e6729971236a64f2f60beed792f171af053a3377f8f329e381e82fb797",
       "source": "ops/drama-catalog-complete-20261117/runtime/tt_auto/features/publishing_products.py"
     },
     {
