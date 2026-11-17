@@ -365,8 +365,8 @@ class Worker:
         if creative_page(created)!=proof.get('new_page_id'):raise ValueError('page_readback_mismatch')
         effective=ad.get('effective_status')
         proof.update(confirmed_at=utcnow(),effective_status=effective)
-        state='deliverable' if effective=='ACTIVE' else 'pending_review' if effective in {'PENDING_REVIEW','PREAPPROVED','IN_PROCESS','PENDING_BILLING_INFO'} else 'changed'
-        self.store.result(job['id'],state,'',proof)
+        state='deliverable' if effective=='ACTIVE' else 'pending_review' if effective=='PENDING_REVIEW' else 'changed'
+        self.store.result(job['id'],state,'meta_effective_status_'+str(effective) if state=='changed' else '',proof)
 
     def reconcile(self):
         for job in self.store.jobs(UNCERTAIN|{'pending_review','changed'}):

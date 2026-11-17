@@ -172,6 +172,19 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((self.graph.creates,self.graph.updates),(1,1))
         self.assertEqual(self.graph.current['id'],'100');self.assertEqual(creative_page(self.graph.creative('new')),'20')
         self.assertEqual(len(self.store.jobs({'pending_review'})),1)
+    def test_billing_and_processing_are_not_reported_as_review_or_delivery(self):
+        self.queue();job=self.store.claim('act_42')
+        payload=build_creative(creative(),'20',job['id'],'new_ig')
+        self.graph.creatives['new']=dict(payload,id='new')
+        current=ad();current['creative']={'id':'new'}
+        proof={'new_creative_id':'new','new_page_id':'20','creative_payload':payload}
+        for effective in ('PENDING_BILLING_INFO','PREAPPROVED','IN_PROCESS'):
+            current['effective_status']=effective
+            self.worker.confirm(job,self.graph,current,proof)
+            saved=self.store.jobs({'changed'})[0]
+            self.assertEqual(saved['reason'],'meta_effective_status_'+effective)
+        current['effective_status']='ACTIVE';self.worker.confirm(job,self.graph,current,proof)
+        self.assertEqual(len(self.store.jobs({'deliverable'})),1)
     def test_zero_pur_no_write(self):
         self.queue();self.graph.pur='0';self.worker.tick()
         self.assertEqual(self.graph.creates,0);self.assertEqual(len(self.store.jobs({'skipped'})),1)
