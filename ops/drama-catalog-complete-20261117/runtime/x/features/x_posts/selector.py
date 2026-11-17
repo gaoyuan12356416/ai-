@@ -464,7 +464,8 @@ class DramawaveCandidateSelector:
             query_stage="deploy_time",
         )
 
-    def _validate_drama_deploy_time(self, content_id, language, *, canonical_language=False):
+    def _validate_drama_deploy_time(self, content_id, language, *, canonical_language=False,
+                                   allow_future=False):
         rows = self._drama_deploy_rows(
             content_id, language, canonical_language=canonical_language
         )
@@ -507,7 +508,7 @@ class DramawaveCandidateSelector:
             deploy_times.append(deploy_time)
 
         effective_deploy_time = max(deploy_times)
-        if effective_deploy_time > int(self.now.timestamp()):
+        if not allow_future and effective_deploy_time > int(self.now.timestamp()):
             available_at = datetime.fromtimestamp(
                 effective_deploy_time, timezone.utc
             ).astimezone(SHANGHAI_TZ)

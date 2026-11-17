@@ -6,7 +6,7 @@
     },
     "x": {
       "logical": "/opt/x-post-automation/current",
-      "resolved": "/mnt/data-disk/story-copy-deploy/c26fe14ae4/candidate-x"
+      "resolved": "/mnt/data-disk/x-manual-release-time-20261117/20261117T091346Z-5f3ebbeb/candidate"
     },
     "fb": {
       "logical": "/opt/fb-auto-post/current",
@@ -39,8 +39,8 @@
     {
       "lane": "x",
       "relative": "features/x_posts/selector.py",
-      "before": "f15aca221cb4047803197fea8d4a19ccc91d16902764dc8061636771ac5a85e8",
-      "after": "65e143a0d6ad0f7f55b1a43c88eb9a587f59247be6da40e951a37e64594cb18e",
+      "before": "8e1ef24d15fe48d1c51511d3cce079d3e72719363b805fe73922c5719f9ee9e2",
+      "after": "b57c5e324060729ab315a1a71655f32716b73345f617fdcdd1b329c68215bfbb",
       "source": "ops/drama-catalog-complete-20261117/runtime/x/features/x_posts/selector.py"
     },
     {
