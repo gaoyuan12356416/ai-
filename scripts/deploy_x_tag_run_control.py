@@ -112,6 +112,8 @@ def main():
         record['finished_at']=datetime.now(timezone.utc).isoformat();save(folder,record)
         print(json.dumps({'state':record['state'],'revision':record['revision'],'services':record['services_after']}),flush=True)
     finally:
+        # A failed gateway start must keep new upload admissions held.
+        ready()
         barrier['release'](OWNER)
 
 
