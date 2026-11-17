@@ -6,6 +6,7 @@ from decimal import Decimal
 import time
 
 from features.youtube_daily_report.collector import BEIJING, DB_PATH, ENV_PATH, read_settings
+from features.social_analytics.report import effect_sites
 
 X_DB_PATH = "/var/lib/x-post-automation/accounts.sqlite3"
 X_PROFILE_DB_PATH = "/mnt/data-disk/x-tag-publisher/posts.sqlite3"
@@ -122,7 +123,7 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
         site: sorted({(str(row["key"][0]), row["effect_source"]["adset_id"],
                        row["effect_source"]["ad_id"])
                       for row in catalog_snapshot[0]
-                      if row["platform"] == "facebook" and row["site_id"] == site
+                      if row["platform"] == "facebook" and site in effect_sites(row)
                       and row.get("effect_source") and eligible(row, day)
                       and not row.get("excluded")})
         for site in ("2049", "2310")

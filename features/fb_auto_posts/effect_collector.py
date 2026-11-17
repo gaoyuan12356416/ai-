@@ -100,7 +100,7 @@ class GatedReader:
             raise FeedbackError('feedback_revenue_page_scope_invalid')
         dates = [datetime.fromisoformat(t['created_at_utc']).astimezone(BJ).date() for t in mature]
         start, end = min(dates).isoformat(), (max(dates)+timedelta(days=2)).isoformat()
-        sql = "SELECT /*+ MAX_EXECUTION_TIME(15000) */ JSON_OBJECT('dt',dt,'campaign_id',campaign_id,'campaign',campaign,'material_id',ad_id,'amount',SUM(dnu_revenue)) FROM ads_facebook_page_insight FORCE INDEX(adset_dt) WHERE adset_id IN ("+ids_sql(page_ids)+") AND dt BETWEEN '"+start+"' AND '"+end+"' AND site_id='2049' AND ad_id IN ("+ids_sql({t['material_id'] for t in mature})+") GROUP BY dt,campaign_id,campaign,ad_id LIMIT 20001"
+        sql = "SELECT /*+ MAX_EXECUTION_TIME(15000) */ JSON_OBJECT('dt',dt,'campaign_id',campaign_id,'campaign',campaign,'material_id',ad_id,'amount',SUM(dnu_revenue)) FROM ads_facebook_page_insight FORCE INDEX(adset_dt) WHERE adset_id IN ("+ids_sql(page_ids)+") AND dt BETWEEN '"+start+"' AND '"+end+"' AND site_id IN ('2049','2310') AND ad_id IN ("+ids_sql({t['material_id'] for t in mature})+") GROUP BY dt,campaign_id,campaign,ad_id LIMIT 20001"
         rows = self.query(sql)
         if len(rows)>20000:
             raise FeedbackError('feedback_revenue_scope_too_large')

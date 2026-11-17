@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from .adapters import PLATFORMS, read_catalogs, source_key
 from .backend_scope import eligible, restrict
-from .report import FIELDS, ReportError, add, empty
+from .report import FIELDS, ReportError, add, empty, effect_sites
 from .routes import metric_sql
 from .warehouse_reader import DEFAULT_ROOT
 from .warehouse_schema import (FACT_TABLES, CATALOG_TABLE, PUBLICATION_TABLE, RUN_TABLE,
@@ -103,7 +103,7 @@ def statements(catalog, platform, site, start, end):
         sql = sql.replace('GROUP BY dt,BINARY campaign_id',
                           'GROUP BY dt,BINARY campaign_id,BINARY adset_id,BINARY ad_id')
         pages = sorted({row['effect_source']['adset_id'] for row in catalog
-                        if row['platform'] == platform and row['site_id'] == site
+                        if row['platform'] == platform and site in effect_sites(row)
                         and row.get('effect_source') and eligible(row, end) and not row.get('excluded')})
         predicate = ('BINARY adset_id IN (' + ','.join('0x' + value.encode().hex() for value in pages) + ')'
                      if pages else '1=0')
@@ -145,7 +145,7 @@ def collect(env, reader, start=None, end=None):
         for source in spec['sources']:
             site = source['site_id']
             source_dates = [row['date'] for row in restricted if row['platform'] == platform
-                            and row['site_id'] == site and row.get('date')]
+                            and site in effect_sites(row) and row.get('date')]
             first = max(start, min(source_dates, default=start))
             # Coverage includes earlier dates: the source, not publication activity, proves a zero.
             windows = list(periods(start, end, days=1 if platform == 'facebook' else 4))

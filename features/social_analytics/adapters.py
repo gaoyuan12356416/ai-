@@ -20,8 +20,8 @@ PLATFORMS = {
     "x": {"label": "X", "site_id": "2116", "storage_alias_length": None,
           "sources": [{"site_id": "2116", "label": "X"}]},
     "facebook": {"label": "Facebook", "storage_alias_length": None,
-                 "sources": [{"site_id": "2049", "label": "旧自动发布"},
-                             {"site_id": "2310", "label": "手动发布"}]},
+                 "sources": [{"site_id": "2049", "label": "2049 历史落地页"},
+                             {"site_id": "2310", "label": "2310 落地页"}]},
 }
 MAX_CATALOG_ROWS = 100000
 

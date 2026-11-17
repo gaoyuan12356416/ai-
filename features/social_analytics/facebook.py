@@ -149,10 +149,11 @@ def parse_link(url, site, task_id):
     try:
         parsed = urlsplit(required(url))
         query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=30, strict_parsing=True)
-        path = "/ads/0/2049/view" if site == "2049" else "/ads/101/2310/view"
+        paths = (("/ads/0/2049/view", "/ads/101/2310/view") if site == "2049"
+                 else ("/ads/101/2310/view",))
         if (parsed.scheme != "https" or parsed.hostname != "www.dramawavew2a.com"
                 or parsed.port is not None or parsed.username or parsed.password or parsed.fragment
-                or parsed.path != path or set(query) != PARAMETERS
+                or parsed.path not in paths or set(query) != PARAMETERS
                 or any(len(value) != 1 or not value[0] for value in query.values())):
             raise ValueError()
         result = {key: value[0] for key, value in query.items()}

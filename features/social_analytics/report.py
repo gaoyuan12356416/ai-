@@ -101,17 +101,26 @@ def selected(row, actor, params):
         (str(row.get("drama_label") or "") + " " + row["drama"]).casefold())
 
 
+def effect_sites(row):
+    """Legacy FB ownership is unchanged when its short link moves to 2310."""
+    if (row["platform"] == "facebook" and row["site_id"] == "2049"
+            and row.get("link_type") == "auto_template"):
+        return ("2049", "2310")
+    return (row["site_id"],)
+
+
 def campaign_index(catalog):
     result = defaultdict(list)
     for row in catalog:
         campaign_id = row["key"][0]
         if not campaign_id:
             continue
-        key = (row["platform"], row["site_id"], campaign_id)
-        result[key].append(row)
         alias_length = PLATFORMS[row["platform"]]["storage_alias_length"]
-        if alias_length and len(campaign_id) > alias_length:
-            result[(key[0], key[1], campaign_id[:alias_length])].append(row)
+        for site in effect_sites(row):
+            key = (row["platform"], site, campaign_id)
+            result[key].append(row)
+            if alias_length and len(campaign_id) > alias_length:
+                result[(key[0], key[1], campaign_id[:alias_length])].append(row)
     return result
 
 
@@ -274,7 +283,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             if quality_visible:
                 add(quality["attributed"], metric)
             if is_selected(row):
-                emit(dict(row, date=day), metric)
+                emit(dict(row, date=day, site_id=site), metric)
                 if key[2] != row["key"][0]:
                     quality["corrected_keys"].add(key[2])
         elif quality_visible:

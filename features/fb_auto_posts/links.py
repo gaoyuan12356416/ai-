@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-FB_W2A_BASE_URL = "https://www.dramawavew2a.com/ads/0/2049/view"
+FB_W2A_BASE_URL = "https://www.dramawavew2a.com/ads/101/2310/view"
 FB_SHORT_BASE_URL = "https://gy.g2flow.com/s2l/fb"
 FB_W2A_QUERY_FIELDS = (
     "c",
@@ -159,7 +159,9 @@ def validate_w2a_url(value: Any) -> str:
         or parsed.port is not None
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.path != base.path
+        # Existing frozen tasks retain their original URL and attribution.
+        # The short-link HTTP response migrates their destination to 2310.
+        or parsed.path not in ("/ads/101/2310/view", "/ads/0/2049/view")
         or parsed.fragment
         or tuple(key for key, _value in pairs) != FB_W2A_QUERY_FIELDS
         or any(not item for _key, item in pairs)

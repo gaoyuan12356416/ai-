@@ -15,7 +15,7 @@ from urllib.parse import parse_qs
 from features.youtube_analytics.titles import enrich
 from .adapters import PLATFORMS, read_catalogs, source_key, source_site
 from .report import (ReportError, csv_export, options, parameters, summarize, validate_metrics,
-                     public_collector_metadata)
+                     public_collector_metadata, effect_sites)
 
 class ReportCache(OrderedDict):
     def clear(self):
@@ -158,7 +158,7 @@ def scoped_facebook_source(app, start, end, site, catalog=None):
     from .backend_scope import eligible, facebook_source
     allowed = None if catalog is None else sorted({
         (str(row["key"][0]), row["effect_source"]["adset_id"], row["effect_source"]["ad_id"])
-        for row in catalog if row["platform"] == "facebook" and row["site_id"] == site
+        for row in catalog if row["platform"] == "facebook" and site in effect_sites(row)
         and row.get("effect_source") and eligible(row, end) and not row.get("excluded")})
     fingerprint = hashlib.sha256(json.dumps(allowed, separators=(",", ":")).encode()).hexdigest()
     key = (start, end, "facebook_source_ids_v2", source_site("facebook", site), fingerprint)

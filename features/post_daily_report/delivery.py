@@ -16,7 +16,8 @@ class DeliveryUnknown(Exception):
 
 
 class DeliveryStore:
-    def __init__(self, path):
+    def __init__(self, path, namespace="post-daily-report"):
+        self.namespace = namespace
         self.db = sqlite3.connect(str(path), timeout=5)
         self.db.row_factory = sqlite3.Row
         self.db.execute("CREATE TABLE IF NOT EXISTS delivery (report_date TEXT NOT NULL, chat_id TEXT NOT NULL, request_uuid TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, message_id TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, PRIMARY KEY(report_date,chat_id))")
@@ -38,7 +39,7 @@ class DeliveryStore:
         if row and row["attempts"] >= 3:
             self.db.rollback()
             raise DefiniteFailure("delivery_retry_limit")
-        request_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, "post-daily-report/" + report_date + "/" + chat_id))
+        request_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, self.namespace + "/" + report_date + "/" + chat_id))
         self.db.execute("INSERT INTO delivery(report_date,chat_id,request_uuid,status,attempts,updated_at) VALUES(?,?,?,'sending',1,?) ON CONFLICT(report_date,chat_id) DO UPDATE SET status='sending',attempts=delivery.attempts+1,updated_at=excluded.updated_at", (report_date, chat_id, request_uuid, datetime.now(timezone.utc).isoformat()))
         self.db.commit()
         return request_uuid
@@ -70,7 +71,9 @@ def _post(url, payload, token=None, sending=False):
     return result
 
 
-def send_card(config_path, chat_id, card, request_uuid):
+def send_card(config_path, chat_id, card, request_uuid, receive_id_type="chat_id"):
+    if receive_id_type not in ("chat_id", "open_id"):
+        raise DefiniteFailure("feishu_recipient_type_invalid")
     try:
         with open(config_path, encoding="utf-8") as handle:
             config = json.load(handle)
@@ -82,7 +85,7 @@ def send_card(config_path, chat_id, card, request_uuid):
     token = auth.get("tenant_access_token")
     if not token:
         raise DefiniteFailure("feishu_auth_token_missing")
-    result = _post(base + "/im/v1/messages?receive_id_type=chat_id",
+    result = _post(base + "/im/v1/messages?receive_id_type=" + receive_id_type,
                    {"receive_id": chat_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False, separators=(",", ":")), "uuid": request_uuid}, token, sending=True)
     message_id = result.get("data", {}).get("message_id")
     if not message_id:
