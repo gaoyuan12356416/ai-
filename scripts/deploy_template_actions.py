@@ -33,6 +33,10 @@ def show(unit, field='ActiveState'):
     return ops.run('systemctl', 'show', unit, '-p', field, '--value')
 
 
+def is_static(name):
+    return '/static/' in name or name.startswith('/usr/share/nginx/html/')
+
+
 def overlay(folder, name, data):
     before = subprocess.check_output(['git', '-C', str(SOURCE), 'show', BASE + ':' + name])
     after = (SOURCE / name).read_bytes().replace(b'\r\n', b'\n')
@@ -176,7 +180,8 @@ def switch(folder, rollback=False):
         assert str(ops.LANES[lane][0].resolve()) == row['root'], 'preserve_later_runtime:' + lane
     for name, row in info['files'].items():
         assert ops.digest(name) in (row['before'], row['after']), 'preserve_later_file:' + name
-    assert show('drama-material-api.service') == 'active', 'existing_main_restart_must_finish_first'
+    main_state = show('drama-material-api.service')
+    assert main_state == 'active' or (main_state == 'deactivating' and show('drama-material-api.service', 'SubState') == 'stop'), 'main_api_not_serving_or_draining'
     assert 'pipeline_service_drain.py stop' in ops.run('systemctl', 'show', 'drama-material-api.service', '-p', 'ExecStop', '--value')
     action = 'rollback' if rollback else 'apply'
     if rollback:
@@ -185,11 +190,13 @@ def switch(folder, rollback=False):
                 table, where = ('x_auto_template', "deleted_at_utc<>''") if lane == 'x' else ('fb_auto_template', "status='deleted'")
                 assert not conn.execute('SELECT count(*) FROM ' + table + ' WHERE ' + where).fetchone()[0], 'deleted_templates_require_forward_compatible_rollback'
     info['services_at_switch'] = ops.services()
+    info['main_pid_before'] = show('drama-material-api.service', 'MainPID')
     info['extra_before'] = {u: show(u) for u in EXTRA_UNITS}
     for lane in FILES:
         ops.run(sys.executable, ops.HEALTH, 'snapshot', '--lane', lane,
                 '--output', folder / (action + '-schedulers-before-' + lane + '.json'))
     for name, row in info['files'].items():
+        if is_static(name): continue  # Publish buttons only after all APIs are active.
         source = Path(row['backup' if rollback else 'next'])
         assert ops.digest(source) == row['before' if rollback else 'after']
         atomic(Path(name), source.read_bytes(), row)
@@ -200,7 +207,12 @@ def switch(folder, rollback=False):
     restart_gateway(folder, action)
     # The installed main API stop/start hooks drain accepted handlers and restore
     # their own admission state. Never shorten their timeout or force a signal.
-    ops.run('systemctl', 'restart', '--no-block', 'drama-material-api.service')
+    sharing_drain = (show('drama-material-api.service') == 'deactivating' and
+                     show('drama-material-api.service', 'MainPID') == info['main_pid_before'])
+    if not sharing_drain:
+        ops.run('systemctl', 'restart', '--no-block', 'drama-material-api.service')
+    info['shared_existing_main_drain'] = sharing_drain
+    ops.save(folder / 'manifest.json', info)
     print(json.dumps(dict(status='switch_requested', action=action, commit=info['commit'])))
 
 
@@ -230,6 +242,9 @@ def verify(folder):
     for unit in ('x-tag-post.service', 'pipeline-cos-native-fb.service', 'pipeline-cos-native-x-tag.service'):
         assert after[unit] == info['services_at_switch'][unit], 'publisher_process_changed:' + unit
     for name, row in info['files'].items():
+        if is_static(name):
+            assert ops.digest(name) in (row['before'], row['after']), 'preserve_later_static:' + name
+            atomic(Path(name), Path(row['backup' if rollback else 'next']).read_bytes(), row)
         assert ops.digest(name) == row['before' if rollback else 'after'], 'installed_hash_mismatch:' + name
     info['status'] = 'rolled_back' if rollback else 'active'
     ops.save(folder / 'manifest.json', info)
