@@ -10,6 +10,7 @@
     templates: [],
     pollTimer: 0,
     detailRequest: 0,
+    terminating: new Set(),
   };
 
   const STATUS_LABELS = {
@@ -32,7 +33,7 @@
     failed: "失败",
     needs_review: "结果待确认",
     unknown: "结果待确认",
-    canceled: "已取消",
+    canceled: "已终止",
     skipped: "已跳过",
   };
 
@@ -63,7 +64,7 @@
 
   const TASK_COUNT_LABELS = {
     published: "已发布", no_candidate: "无符合条件素材", skipped: "已跳过",
-    failed: "失败", canceled: "已取消", unknown: "结果待确认",
+    failed: "失败", canceled: "已终止", unknown: "结果待确认",
     pending: "待处理", ready: "等待发布", retry_wait: "等待重试",
     waiting_result: "等待发布结果", active: "执行中",
   };
@@ -172,6 +173,16 @@
         type: "button",
         dataset: { runId: id },
       }));
+      if (["queued", "running"].includes(item.status)) {
+        const terminate = ui.element("button", {
+          className: "button small danger",
+          text: state.terminating.has(id) ? "终止中…" : "终止",
+          type: "button",
+          dataset: { terminateRunId: id },
+        });
+        terminate.disabled = state.terminating.has(id);
+        actionCell.appendChild(terminate);
+      }
       row.appendChild(actionCell);
       body.appendChild(row);
     });
@@ -437,6 +448,29 @@
     else dialog.removeAttribute("open");
   }
 
+  async function terminateRun(id) {
+    if (state.terminating.has(id)) return;
+    state.terminating.add(id);
+    try {
+      const confirmed = await ui.confirmAction({
+        title: "终止本次执行",
+        message: `确定终止 Run ${id} 吗？将停止剩余队列。已发布内容保留，已提交的发布请求继续核对结果；模板后续定时计划不受影响。`,
+        confirmText: "终止执行",
+        danger: true,
+      });
+      if (!confirmed) return;
+      renderRuns();
+      const result = await ui.api(`${ui.API_BASE}/runs/${id}/terminate`, { method: "POST", body: "{}" });
+      ui.showToast(result.message || "本次队列执行已终止");
+      await loadRuns({ quiet: true });
+    } catch (error) {
+      ui.showToast(error.message || "终止失败，请刷新后重试", true);
+    } finally {
+      state.terminating.delete(id);
+      renderRuns();
+    }
+  }
+
   function bindEvents() {
     ui.byId("runFilters").addEventListener("submit", event => {
       event.preventDefault();
@@ -454,6 +488,12 @@
     });
     ui.byId("reloadRuns").addEventListener("click", () => void loadRuns());
     ui.byId("runRows").addEventListener("click", event => {
+      const terminate = event.target.closest("button[data-terminate-run-id]");
+      if (terminate) {
+        const id = ui.positiveId(terminate.dataset.terminateRunId);
+        if (id) void terminateRun(id);
+        return;
+      }
       const button = event.target.closest("button[data-run-id]");
       const id = ui.positiveId(button && button.dataset.runId);
       if (id) void showRunDetail(id);
