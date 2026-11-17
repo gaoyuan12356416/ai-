@@ -16,7 +16,10 @@ class DeploymentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             release=Path(temporary)/'release'
             module.build_release(root,release,root/'features/fb_page_portrait')
-            result=subprocess.run([sys.executable,'-c','import features.fb_page_portrait.collect; import features.meta_page_recovery.engine'],
+            # The local shared fixture contains current owner overlays, while
+            # the checkout supplies their unchanged dependency packages.
+            code='import sys,features; features.__path__.append(sys.argv[1]); import features.fb_page_portrait.collect; import features.meta_page_recovery.engine'
+            result=subprocess.run([sys.executable,'-c',code,str(root/'features')],
                 cwd=release,env=dict(os.environ),capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
 
