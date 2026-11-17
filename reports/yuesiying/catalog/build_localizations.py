@@ -2,9 +2,9 @@ import json,re,collections,hashlib,datetime,argparse,os
 from pathlib import Path
 import pymysql
 from consumer import load_library, select, pack_matches
-parser=argparse.ArgumentParser();parser.add_argument('--workdir',type=Path,required=True);args=parser.parse_args()
+parser=argparse.ArgumentParser();parser.add_argument('--workdir',type=Path,required=True);parser.add_argument('--inventory-archive',type=Path);args=parser.parse_args()
 P=args.workdir.resolve();OUT=P/'site';base=json.loads((OUT/'data.json').read_text())
-cat=json.loads((P/'catalog.json').read_text());library=load_library(P,os.environ.get('REPORT_MATERIAL_CATALOG_CONFIG','/root/.codex/plugins/feishu/config.json'));effects=json.loads((P/'effects.json').read_text())
+cat=json.loads((P/'catalog.json').read_text());library=load_library(P,os.environ.get('REPORT_MATERIAL_CATALOG_CONFIG','/root/.codex/plugins/feishu/config.json'),args.inventory_archive);effects=json.loads((P/'effects.json').read_text())
 catalog=collections.defaultdict(set)
 for r in cat:catalog[str(r['content_id'])].add((str(r['series_code']),r['language'].lower()))
 def norm(s):
@@ -22,7 +22,11 @@ print('candidate materials',len(potential),'kept',sum(map(len,kept.values())),fl
 cfg=json.loads(Path('/root/.codex/plugins/feishu/config.json').read_text())['mysql'];db=pymysql.connect(host=cfg['host'],port=int(cfg['port']),user=cfg['user'],password=cfg['password'],database='kunlunads_dev',charset='utf8mb4',cursorclass=pymysql.cursors.DictCursor,read_timeout=120);ids=sorted(potential);mapping=collections.defaultdict(list)
 with db.cursor() as q:
  for offset in range(0,len(ids),2000):
-  batch=ids[offset:offset+2000];q.execute('SELECT id,source_id FROM ads_source WHERE source_type=3 AND status=0 AND is_invalid=0 AND source_id IN ('+','.join(['%s']*len(batch))+')',batch)
+  batch=ids[offset:offset+2000]
+  q.execute('SELECT id FROM ads_custom_source WHERE is_delete=0 AND id IN ('+','.join(['%s']*len(batch))+')',batch)
+  batch=[str(r['id']) for r in q.fetchall()]
+  if not batch:continue
+  q.execute('SELECT id,source_id FROM ads_source WHERE source_type=3 AND status=0 AND is_invalid=0 AND source_id IN ('+','.join(['%s']*len(batch))+')',batch)
   for r in q.fetchall():mapping[str(r['source_id'])].append(str(r['id']))
   if offset%40000==0:print('IDs',offset,'/',len(ids),flush=True)
 db.close();performance=collections.defaultdict(list)

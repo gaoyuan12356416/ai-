@@ -1,5 +1,19 @@
 # Shared material catalog
 
+## Explicit manual archive recovery
+
+When catalog transport repeatedly fails, the existing manual builder accepts
+`--inventory-archive /verified/private/source.json.gz`. This is not an automatic
+fallback or a new job: the operator must select the source using its private
+archive receipt. A fixed catalog-generation.json binding is required, its
+generated_at must match inventory-time.txt, and the uncompressed SHA256 must
+equal source_sha256 before any rows are consumed. The original source timestamp
+is retained. The gzip array is streamed; no full plaintext library.json is
+recreated. Candidate IDs are rechecked against current ads_source eligibility
+and current ads_custom_source.is_delete=0. Effect refresh, reconciliation,
+browser confirmation/copy tests, auth validation and deliberate deployment still
+must complete before publishing. This adds no cron, service or automation.
+
 The old manual report refresh exported a full `library.json` into every work
 directory. There is no scheduled producer in this report. The compatibility
 entry now reads that directory's fixed `catalog-generation.json` and queries

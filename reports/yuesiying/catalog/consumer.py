@@ -155,13 +155,24 @@ def select(catalog,originals,library):
             'order':[(resource,list(rows)) for resource,rows in kept.items()]}
 
 
-def load_library(workdir, config):
+def load_library(workdir, config, archive=None):
     root=Path(workdir);manifest=root/'catalog-generation.json'
+    require(archive is None or manifest.exists(),'archive_requires_bound_generation')
     if not manifest.exists():
         return iter_json_array(root/'library.json')
     binding=json.loads(manifest.read_text())
     require((root/'inventory-time.txt').read_text().strip()==binding['generated_at'],
             'catalog_binding_stale_use_refresh_source_and_bind')
+    if archive is not None:
+        # Explicit manual recovery of the exact immutable, privately archived
+        # source. Never relabel its date or silently fall back to another input.
+        import gzip
+        require(binding['source_kind']=='legacy-json','archive_source_kind_not_supported')
+        digest=hashlib.sha256()
+        with gzip.open(archive,'rb') as stream:
+            for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
+        require(digest.hexdigest()==binding['source_sha256'],'archive_source_checksum_mismatch')
+        return iter_json_array(archive)
     legacy=root/'library.json'
     if binding['source_kind']=='legacy-json' and legacy.exists():
         require(file_sha(legacy)==binding['source_sha256'],'legacy_library_changed_refresh_catalog_binding')

@@ -1,4 +1,6 @@
 import json
+import gzip
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -14,6 +16,19 @@ def row(i,name='EN-123-00:00-a',lang='en',cid='source',duration=0):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_explicit_archive_requires_exact_uncompressed_source_hash(self):
+        values=[row(1,name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4')]
+        raw=json.dumps(values,ensure_ascii=False).encode()
+        archive=self.root/'verified.json.gz'
+        with gzip.open(archive,'wb') as stream:stream.write(raw)
+        (self.root/'catalog-generation.json').write_text(json.dumps({'generated_at':'old',
+            'source_kind':'legacy-json','source_sha256':hashlib.sha256(raw).hexdigest()}))
+        (self.root/'inventory-time.txt').write_text('old')
+        self.assertEqual(list(consumer.load_library(self.root,'unused',archive)),values)
+        with gzip.open(archive,'wb') as stream:stream.write(raw+b' ')
+        with self.assertRaisesRegex(ValueError,'checksum_mismatch'):
+            consumer.load_library(self.root,'unused',archive)
+
     def test_structured_user_contract(self):
         name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4'
         key=consumer.structured_key(name)

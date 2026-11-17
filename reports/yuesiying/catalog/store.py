@@ -3,6 +3,7 @@ import contextlib
 import datetime as dt
 from decimal import Decimal
 import hashlib
+import gzip
 import json
 import os
 from pathlib import Path
@@ -46,7 +47,8 @@ def normalize(row):
 def iter_json_array(path, chunk_size=1024 * 1024):
     """Stream JSON with an offset cursor; do not recopy a megabyte per row."""
     decoder=json.JSONDecoder()
-    with Path(path).open('r',encoding='utf-8-sig') as stream:
+    opener=gzip.open if Path(path).suffix=='.gz' else open
+    with opener(path,'rt',encoding='utf-8-sig') as stream:
         buffer='';position=0;ended=False;mode='start'
         while True:
             while position<len(buffer) and buffer[position].isspace():position+=1
