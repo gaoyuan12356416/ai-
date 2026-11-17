@@ -13,6 +13,9 @@ class PortraitRecoveryTests(unittest.TestCase):
             def __init__(self):self.calls=0
             def query(self,statements):
                 self.calls+=1
+                if self.calls==1:
+                    self.sql=statements[0]
+                    if 'WHERE s.id=123 LIMIT 2' not in self.sql:raise AssertionError('source_numeric_identity_was_reinterpreted')
                 return [{'product':'Dramawave','content_id':'old','language':'fr','data_source':6}] if self.calls==1 else []
         with patch('features.fb_page_portrait.classification.classifications',return_value={}):
             value=Sources({},reader=Reader()).target({'source_id':'123','group_id':57},{'language':''})

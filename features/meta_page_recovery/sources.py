@@ -143,7 +143,7 @@ class Sources:
         materials=self.reader.query(["""SELECT HEX(JSON_OBJECT('product',c.product,'content_id',c.data_source_id,
             'language',c.language,'data_source',c.data_source)) FROM kunlunads_dev.ads_source s
             JOIN kunlunads_dev.ads_custom_source c ON s.source_type=3 AND c.id=s.source_id
-            WHERE s.id=%s LIMIT 2""" % literal(source)]) if source else []
+            WHERE s.id=%s LIMIT 2""" % str(int(source))]) if source.isdigit() else []
         if len(materials)!=1:return result
         material=materials[0]
         result['language']=language(material.get('language')) or result['language']
