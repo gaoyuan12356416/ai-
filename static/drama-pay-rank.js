@@ -44,6 +44,9 @@
         el('div', '资源 ID：' + (row.resource_id || (row.detail_status === 'conflict' ? '存在冲突' : '待补充')), 'drama-id'));
       const audienceCell = el('td', '');
       audienceCell.append(el('span', row.audience || '待补充', 'badge'));
+      const resourceType = row.resource_type_v2;
+      const typeCell = el('td', resourceType !== undefined && resourceType !== null && resourceType !== ''
+        ? String(resourceType) : row.resource_type_status === 'conflict' ? '存在冲突' : '待补充');
       const themeCell = el('td', '');
       const themes = el('div', '', 'rank-themes');
       for (const label of row.secondary_labels?.length ? row.secondary_labels : ['待补充']) themes.append(el('span', label, 'badge'));
@@ -54,14 +57,14 @@
         themeCell.append(details);
       }
       if (row.detail_status === 'conflict') themeCell.append(el('p', '剧目资源映射存在冲突，暂不展示题材', 'rank-detail-note'));
-      tr.append(rank, drama, el('td', names[row.language_code] || row.language_code), audienceCell, themeCell);
+      tr.append(rank, drama, el('td', names[row.language_code] || row.language_code), typeCell, audienceCell, themeCell);
       $('rows').append(tr);
     }
     if (!filtered.length) {
       const text = data.list.length ? '当前榜单没有符合搜索条件的短剧，请调整或清空搜索。' :
         data.availability === 'language_empty' ? '该语种当天没有榜单结果' : '该日期榜单尚未采集或尚未产出';
       const tr = el('tr', ''), td = el('td', text, 'empty');
-      td.colSpan = 5; tr.append(td); $('rows').append(tr);
+      td.colSpan = 6; tr.append(td); $('rows').append(tr);
     }
   }
   async function load() {

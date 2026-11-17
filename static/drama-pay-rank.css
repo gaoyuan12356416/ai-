@@ -16,13 +16,14 @@
 .rank-meta { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 14px 24px; border-block: 1px solid #e8edf3; background: #f8fafc; color: var(--muted); font-size: 12px; }
 .rank-notice { margin: 16px 24px; padding: 12px 15px; border: 1px solid #eadcb7; border-radius: 11px; background: #fffaf0; color: #947225; font-size: 12px; }
 .rank-table-wrap { overflow: auto; }
-.rank-table { width: 100%; min-width: 960px; border-collapse: collapse; text-align: left; }
+.rank-table { width: 100%; min-width: 1120px; border-collapse: collapse; text-align: left; }
 .rank-table th { padding: 13px 24px; background: #fbfcfe; color: #73839a; font-size: 12px; font-weight: 600; }
 .rank-table td { padding: 14px 24px; border-top: 1px solid #edf1f6; }
 .rank-table tbody tr:hover { background: #f8fbff; }
 .rank-table th:first-child { width: 90px; }
 .rank-table th:nth-child(3) { width: 110px; }
-.rank-table th:nth-child(4) { width: 165px; }
+.rank-table th:nth-child(4) { width: 160px; }
+.rank-table th:nth-child(5) { width: 165px; }
 .rank-table .rank { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: #f0f4f9; font-weight: 700; font-variant-numeric: tabular-nums; }
 .rank-table .rank.top { background: #edf2ff; color: #2457cf; }
 .rank-table .drama-name { margin-bottom: 4px; font-weight: 600; overflow-wrap: anywhere; }
@@ -47,7 +48,7 @@
 .rank-search-hint { width: 100%; color: var(--muted); font-size: 12px; }
 .rank-label-filter { flex: 1 1 260px; max-width: 340px; }
 .rank-label-filter input { width: 100%; }
-.rank-table th:nth-child(5) { width: 32%; }
+.rank-table th:nth-child(6) { width: 32%; }
 .rank-table .drama-id { line-height: 1.9; overflow-wrap: anywhere; }
 .rank-themes { display: flex; flex-wrap: wrap; gap: 5px; }
 .rank-themes .badge { background: #f2f5fb; color: #536b8b; font-weight: 400; }

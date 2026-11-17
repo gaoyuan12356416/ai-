@@ -31,7 +31,8 @@ def main():
                 try:
                     from .metadata import refresh as refresh_metadata
                     from features.social_analytics.warehouse_refresh import Reader, environment
-                    print(json.dumps(dict(event='rank_details',**refresh_metadata(Reader(environment('/root/drama_material_service/.env'))))),flush=True)
+                    print(json.dumps(dict(event='rank_details',**refresh_metadata(
+                        Reader(environment('/root/drama_material_service/.env')),refresh_day=result['date']))),flush=True)
                 except Exception as exc:
                     print(json.dumps(dict(event='rank_details_pending',error=type(exc).__name__)),flush=True)
                 return

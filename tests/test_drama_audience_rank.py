@@ -155,8 +155,41 @@ class RouteTests(unittest.TestCase):
 
 class RankMetadataTests(unittest.TestCase):
     def resource(self, **changes):
-        return dict(app_id=1479, content_id='AbC', language='pt', series_code='30702',
-                    labels='Sweet,Hidden Identity', **changes)
+        return dict(dict(app_id=1479, content_id='AbC', language='pt', series_code='30702',
+                         labels='Sweet,Hidden Identity', resource_type_v2=14), **changes)
+
+    def test_type_zero_conflict_and_exact_language(self):
+        from features.drama_pay_rank.metadata import index
+        row=self.resource(resource_type_v2=0)
+        result=index([row], [self.resource(language='en', resource_type_v2=99)])
+        self.assertEqual(result[('AbC','pt-br')]['resource_type_v2'],'0')
+        conflict=index([row], [self.resource(resource_type_v2=14)])[('AbC','pt-br')]
+        self.assertEqual((conflict['resource_type_v2'],conflict['resource_type_status']),('', 'conflict'))
+        self.assertEqual(conflict['resource_id'],'30702')
+
+    def test_legacy_cache_upgrade_and_explicit_day_refresh(self):
+        from features.drama_pay_rank import metadata
+        with tempfile.TemporaryDirectory() as root:
+            payload=dict(code=200,data=dict(date='2026-11-17',list=[
+                dict(date='2026-11-17',language_code='pt',series_key='AbC',rank=7)]))
+            core.update('s',root,fetcher=lambda _:payload,today='2026-11-17')
+            class Reader:
+                value=14
+                def query(inner,statements,timeout):
+                    self.assertIn("'resource_type_v2',resource_type_v2",statements[1])
+                    return [dict(self.resource(resource_type_v2=inner.value),kind='ads_drama_resource')]
+            reader=Reader()
+            metadata.refresh(reader,root,fetcher=lambda _: {})
+            with closing(core.database(root,True)) as db, db:
+                old=metadata.read(root)[('AbC','pt-br')]
+                del old['resource_type_v2']
+                db.execute('UPDATE rank_metadata SET payload=?',(json.dumps(old),))
+            self.assertEqual(metadata.refresh(reader,root,fetcher=lambda _: {})['requested'],1)
+            self.assertEqual(metadata.refresh(reader,root,fetcher=lambda _: {})['requested'],0)
+            reader.value=0
+            self.assertEqual(metadata.refresh(reader,root,fetcher=lambda _: {},refresh_day='2026-11-17')['requested'],1)
+            row=core.read(lang='pt',root=root)['list'][0]
+            self.assertEqual((row['rank'],row['resource_type_v2']),(7,'0'))
 
     def test_resource_id_and_same_portrait_themes(self):
         from features.drama_pay_rank.metadata import index
@@ -213,11 +246,12 @@ class RankMetadataTests(unittest.TestCase):
 
     def test_api_gap_fill_exact_identity(self):
         from features.drama_pay_rank.metadata import resolve_details
-        row=dict(app_id='com.dramawave.app',id='AbC',language=['pt'],resource_id=42,labels='Sweet')
+        row=dict(app_id='com.dramawave.app',id='AbC',language=['pt'],resource_id=42,labels='Sweet',resource_type_v2=14)
         data=dict(code=200,data=dict(list=[row,{**row,'app_id':'other','resource_id':99},{**row,'id':'abc','resource_id':10}]))
         result=resolve_details('AbC',data)
         self.assertEqual(list(result),[('AbC','pt-br')])
         self.assertEqual(result[('AbC','pt-br')]['resource_id'],'42')
+        self.assertEqual(result[('AbC','pt-br')]['resource_type_v2'],'14')
         with self.assertRaises(ValueError):resolve_details('AbC',dict(code=401))
 
     def test_api_failure_retry_then_cache_reuse(self):
