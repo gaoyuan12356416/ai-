@@ -2,11 +2,12 @@ import json
 import sqlite3
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from features.fb_video_publish.sources import SourceRepository
 from features.story_copy import alerts, sources, store, worker
 from tests import test_story_copy as fixtures
-from ops.story_copy.recover_mapping import safe
+from ops.story_copy.recover_mapping import safe, metadata
 
 
 class Catalog:
@@ -96,6 +97,23 @@ class PublishBatchAlertTests(unittest.TestCase):
 
 
 class RecoveryAdmissionTests(unittest.TestCase):
+    def test_operator_metadata_adapter_matches_repository_contract(self):
+        class Connection:
+            def cursor(self): return self
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def execute(self,sql,params=()): self.sql=sql
+            def fetchone(self): return {'ro':1}
+            def fetchall(self):
+                field='drama_name' if 'ads_drama_info' in self.sql else 'drama_description'
+                return [dict(app_id=1479,content_id='drama',language='en',**{field:'Verified facts'})]
+            def rollback(self): pass
+            def close(self): pass
+        with patch.dict('sys.modules',{'pymysql':SimpleNamespace(connect=lambda **kw:Connection(),cursors=SimpleNamespace(DictCursor=object))}), patch('pathlib.Path.read_text',return_value='FB_AUTO_MYSQL_USER=fixture\nFB_AUTO_MYSQL_PASSWORD=fixture\n'):
+            result=metadata([dict(material_id='1',source_app_id=3214,content_id='drama',language='en')])
+        self.assertEqual(result[0]['description_status'],'matched')
+        self.assertEqual(result[0]['source_app_id'],3214)
+
     def test_only_owned_hold_without_any_publish_evidence_can_recover(self):
         c=sqlite3.connect(':memory:');self.addCleanup(c.close);c.row_factory=sqlite3.Row
         c.executescript('CREATE TABLE pipeline_canonical_hold(source_key TEXT,reason TEXT);'

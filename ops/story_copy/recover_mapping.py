@@ -64,6 +64,7 @@ def metadata(rows):
                     q.execute(sql,params)
                     return q.fetchall()
         reader=Reader();reader.schema=schema
+        reader.blacklist_schema=env.get('FB_AUTO_BLACKLIST_MYSQL_DATABASE','ads_setting')
         repository=SourceRepository(None,SimpleNamespace(mysql=reader))
         return repository._enrich(rows,strict=True,need_desc=True,manual=True)
     finally:
