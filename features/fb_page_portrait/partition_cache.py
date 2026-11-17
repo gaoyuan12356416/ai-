@@ -37,7 +37,7 @@ class PartitionCache:
                 rows=reader.query(statements,timeout=timeout)
                 break
             except Exception as exc:
-                transient=any(value in str(exc) for value in ('2013','2003','2006','source_query_timeout','rc_124','rc_137','rc_143','rc_75'))
+                transient=any(value in str(exc) for value in ('2013','2002','2003','2006','source_query_timeout','rc_124','rc_137','rc_143','rc_75'))
                 if attempt or not transient:raise
                 print(encoded(dict(event='historical_partition_read_retry',query_hash=key)),flush=True)
         atomic_json(path,dict(read_at=datetime.now(timezone.utc).isoformat(),rows=rows))

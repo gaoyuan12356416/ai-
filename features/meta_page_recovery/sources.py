@@ -59,7 +59,7 @@ class Reader:
                                     input=sql,env=env,text=True,encoding='utf-8',capture_output=True,timeout=timeout+40)
                 codes = re.findall(r'ERROR (\d+)', result.stderr)
                 if (attempt==0 and result.returncode and not result.stdout.strip()
-                    and any(code in {'2003','2013'} for code in codes)):
+                    and any(code in {'2002','2003','2006','2013'} for code in codes)):
                     continue
                 break
             lines = result.stdout.splitlines()

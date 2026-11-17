@@ -84,6 +84,11 @@ class DomainTests(unittest.TestCase):
             self.assertEqual(run.call_count,2)
             self.assertEqual(run.call_args.args[0][0],'/usr/bin/mysql')
             self.assertNotIn('SQL_GATE_BYPASS',run.call_args.kwargs['env'])
+    def test_mysql_2002_connection_refusal_has_one_gated_retry(self):
+        env={'ADMIN_MAPPING_MYSQL_HOST':'101.32.56.53','ADMIN_MAPPING_MYSQL_PORT':'63350','ADMIN_MAPPING_MYSQL_USER':'test','ADMIN_MAPPING_MYSQL_PASSWORD':'fixture'}
+        responses=[SimpleNamespace(returncode=1,stdout='',stderr='ERROR 2002 connect'),SimpleNamespace(returncode=0,stdout='1\n7b7d\n',stderr='')]
+        with patch('features.meta_page_recovery.sources.subprocess.run',side_effect=responses) as run:
+            self.assertEqual(Reader(env).query(['SELECT 1']),[{}]);self.assertEqual(run.call_count,2)
     def test_partial_read_failure_is_not_retried_as_empty(self):
         env={'ADMIN_MAPPING_MYSQL_HOST':'101.32.56.53','ADMIN_MAPPING_MYSQL_PORT':'63350','ADMIN_MAPPING_MYSQL_USER':'test','ADMIN_MAPPING_MYSQL_PASSWORD':'fixture'}
         with patch('features.meta_page_recovery.sources.subprocess.run',return_value=SimpleNamespace(returncode=1,stdout='1\n',stderr='ERROR 2013 during query')) as run:
