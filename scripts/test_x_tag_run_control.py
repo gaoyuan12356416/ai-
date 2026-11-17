@@ -76,6 +76,9 @@ class RunControlTests(unittest.TestCase):
             self.assertEqual(c.execute('SELECT COUNT(*) FROM x_auto_event').fetchone()[0],events)
             with self.assertRaises(sqlite3.IntegrityError):
                 c.execute("UPDATE x_auto_task SET status='retry_wait' WHERE id=?",(self.task.id,))
+            c.execute("UPDATE x_auto_task SET error_code='' WHERE id=?",(self.task.id,))
+            with self.assertRaises(sqlite3.IntegrityError):
+                c.execute("UPDATE x_auto_task SET status='ready' WHERE id=?",(self.task.id,))
 
     def test_ready_queue_and_reserved_log_stopped(self):
         self.queue(log=('reserved',0,'',0))

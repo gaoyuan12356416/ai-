@@ -65,6 +65,12 @@ def terminate_run(auto_path, post_path, run_id, actor):
                 WHEN OLD.status='canceled' AND OLD.error_code='operator_terminated'
                   AND NEW.status NOT IN ('canceled','published','unknown','reconciling')
                 BEGIN SELECT RAISE(ABORT,'x_auto_run_terminated'); END""")
+            conn.execute("""CREATE TRIGGER IF NOT EXISTS x_tag_terminated_run_fence
+                BEFORE UPDATE OF status,claim_phase ON x_auto_task
+                WHEN (SELECT status FROM x_auto_run WHERE id=NEW.run_id)='canceled'
+                  AND (NEW.status IN ('pending','selecting','reserved','preparing','ready','publishing')
+                       OR (NEW.status='retry_wait' AND NEW.claim_phase<>'reconcile'))
+                BEGIN SELECT RAISE(ABORT,'x_auto_run_terminated'); END""")
             tasks = conn.execute('SELECT * FROM x_auto_task WHERE run_id=?', (run_id,)).fetchall()
             canceled = waiting = 0
             for task in tasks:
