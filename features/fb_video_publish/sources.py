@@ -18,6 +18,7 @@ from .templates import TemplateError
 
 MAX_MATERIALS = 200
 PAGE_SIZE = 100
+TEXT_SCAN_IDS = 10000
 SOURCE_HOST = "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
 SOURCE_CDN_HOST = "socialkit-cdn.yingliang.tech"
 
@@ -209,7 +210,9 @@ class SourceRepository:
             """
         return sql, params
 
-    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False):
+    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False, source_index="PRIMARY"):
+        if source_index not in {"PRIMARY", "name", "idx_source_type_source_id"}:
+            raise ValueError("invalid material index")
         condition, base_params = self._conditions(enforce_blacklist=enforce_blacklist, manual=manual,
                                                 page_pool=page_pool, moboreels=moboreels)
         sql = f"""
@@ -219,7 +222,7 @@ class SourceRepository:
                    COALESCE(s.url,'') media_url,COALESCE(s.cover,'') thumbnail_url,
                    COALESCE(s.language,'') language,s.video_duration,
                    COALESCE(CAST(s.user_id AS CHAR),'0') uploader_id
-              FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+              FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX({source_index})
              WHERE {condition} {extra}
              ORDER BY s.id DESC LIMIT %s
         """
@@ -301,6 +304,40 @@ class SourceRepository:
             result.append(item)
         return result
 
+    def _search_identity(self, search):
+        """Resolve complete identities before a bounded substring search.
+
+        Test existence independently of the current language/eligibility, so a
+        complete identity with no eligible rows never falls back to a full scan.
+        """
+        schema = self.mysql.schema
+        if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", search):
+            rows = self.mysql.select(f"""
+                SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id
+                  FROM `{schema}`.ads_custom_source s FORCE INDEX(idx_source_type_source_id)
+                 WHERE s.data_source=%s AND s.data_source_id=%s
+                   AND BINARY s.data_source_id=BINARY %s LIMIT 1
+            """, ["6", search, search])
+            if rows:
+                return "content_id", [], "idx_source_type_source_id"
+        rows = self.mysql.select(f"""
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id
+              FROM `{schema}`.ads_custom_source s FORCE INDEX(name)
+             WHERE s.name=%s AND BINARY LOWER(s.name)=BINARY LOWER(%s) LIMIT 1
+        """, [search, search])
+        if rows:
+            return "material_name", [], "name"
+        rows = self.mysql.select(f"""
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT CAST(ds.content_id AS CHAR) content_id
+              FROM `{schema}`.ads_drama_info ds FORCE INDEX(name)
+             WHERE ds.name=%s AND BINARY LOWER(ds.name)=BINARY LOWER(%s) LIMIT 1001
+        """, [search, search])
+        if 0 < len(rows) <= 1000:
+            ids = list(dict.fromkeys(str(row["content_id"]) for row in rows if row.get("content_id")))
+            if ids:
+                return "drama_name", ids, "idx_source_type_source_id"
+        return "text", [], "PRIMARY"
+
     def search_materials(self, query: Mapping[str, Any], *, enforce_blacklist=True, manual=False) -> dict:
         if not isinstance(query, Mapping):
             raise SourceError("invalid_request", "素材筛选格式无效")
@@ -328,6 +365,8 @@ class SourceRepository:
         fingerprint = hashlib.sha256(json.dumps(filters, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         extra, params, boundary = [], [], ""
         numeric_search = bool(re.fullmatch(r"[0-9]+", search))
+        multiple_ids = bool(re.fullmatch(r"[0-9]+(?:[\s,，;；]+[0-9]+)+", search))
+        search_kind, content_ids, source_index = "", [], "PRIMARY"
         if numeric_search:
             if len(search) > 19:
                 raise SourceError("invalid_request", "素材ID不能超过19位")
@@ -335,19 +374,42 @@ class SourceRepository:
             # requested row fails eligibility and a LIMIT cannot stop a scan).
             extra.append("AND s.id=%s")
             params.append(int(search))
+            search_kind = "material_id"
+        elif multiple_ids:
+            ids = list(dict.fromkeys(re.split(r"[\s,，;；]+", search)))
+            if any(len(value) > 19 for value in ids):
+                raise SourceError("invalid_request", "素材ID不能超过19位")
+            extra.append("AND s.id IN (" + ",".join("%s" for _ in ids) + ")")
+            params.extend(int(value) for value in ids)
+            search_kind = "material_ids"
         elif search and moboreels:
             extra.append("AND (LOCATE(LOWER(%s),LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0 OR EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND LOCATE(LOWER(%s),LOWER(d.story_name))>0))")
             params.extend([search, institution, search])
         elif search:
+            search_kind, content_ids, source_index = self._search_identity(search)
             released_search = "" if manual else " AND ds.release_status=1 AND (ds.app_id<>1479 OR ds.deploy_time>0) AND ds.deploy_time>=0 AND ds.deploy_time<=%s"
             search_release_params = [] if manual else [int(self.now_fn().timestamp())]
-            extra.append(f"""AND (
-                LOCATE(BINARY LOWER(%s),BINARY LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0
-                OR EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
+            if search_kind == "content_id":
+                extra.append("AND s.data_source_id=%s AND BINARY s.data_source_id=BINARY %s")
+                params.extend([search, search])
+            elif search_kind == "material_name":
+                extra.append("AND s.name=%s AND BINARY LOWER(s.name)=BINARY LOWER(%s)")
+                params.extend([search, search])
+            else:
+                if search_kind == "drama_name":
+                    extra.append("AND s.data_source_id IN (" + ",".join("%s" for _ in content_ids) + ")")
+                    params.extend(content_ids)
+                    match = "BINARY LOWER(ds.name)=BINARY LOWER(%s)"
+                    prefix, suffix = "AND ", ""
+                else:
+                    match = "LOCATE(BINARY LOWER(%s),BINARY LOWER(COALESCE(ds.name,'')))>0"
+                    prefix, suffix = "AND (LOCATE(BINARY LOWER(%s),BINARY LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0 OR ", ")"
+                    params.append(search)
+                extra.append(f"""{prefix}EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
                     WHERE ds.content_id=s.data_source_id AND ds.app_id={source_app_sql("s", self.mysql.schema)}{released_search}
                       AND {_language_sql("ds.language")}={_language_sql("s.language")}
-                      AND LOCATE(BINARY LOWER(%s),BINARY LOWER(COALESCE(ds.name,'')))>0))""")
-            params.extend([search] + search_release_params + [search])
+                      AND {match}){suffix}""")
+                params.extend(search_release_params + [search])
         if language:
             extra.append("AND " + _language_sql("s.language") + "=%s")
             params.append(language)
@@ -371,10 +433,23 @@ class SourceRepository:
                 params.extend([decoded["before"], boundary])
             except (ValueError, TypeError, KeyError, UnicodeError):
                 raise SourceError("invalid_cursor", "分页标识无效或筛选条件已改变，请从第一页重新加载") from None
+        scan_floor = None
+        if search_kind == "text":
+            if not boundary:
+                bound_rows = self.mysql.select(f"""
+                    SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(MAX(s.id) AS CHAR) scan_bound
+                      FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+                """, [])
+                boundary = str(bound_rows[0].get("scan_bound") or "0")
+            scan_upper = int(decoded["before"]) - 1 if cursor else int(boundary)
+            scan_floor = max(0, scan_upper - TEXT_SCAN_IDS)
+            extra.extend(["AND s.id>%s", "AND s.id<=%s"])
+            params.extend([scan_floor, scan_upper])
         if moboreels:
             extra.append("AND EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1)")
             params.append(institution)
-        rows = self._select(" ".join(extra), params, limit + 1, enforce_blacklist=enforce_blacklist, manual=manual, **({"moboreels": True} if moboreels else {}))
+        index_option = {"source_index": source_index} if source_index != "PRIMARY" else {}
+        rows = self._select(" ".join(extra), params, limit + 1, enforce_blacklist=enforce_blacklist, manual=manual, **index_option, **({"moboreels": True} if moboreels else {}))
         raw_ids = [str(row.get("material_id") or "") for row in rows]
         if (any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in raw_ids)
                 or len(raw_ids) != len(set(raw_ids)) or raw_ids != sorted(raw_ids, key=int, reverse=True)):
@@ -391,12 +466,17 @@ class SourceRepository:
             items = [enrich(item) for item in materials]
         else:
             items = self._enrich(materials, strict=False, need_desc=False, manual=manual)
-        has_more = len(rows) > limit
+        has_more = len(rows) > limit or (scan_floor is not None and scan_floor > 0)
         next_cursor = ""
-        if has_more and scanned:
-            value = {"v": 1, "before": str(scanned[-1]["material_id"]), "bound": boundary or raw_ids[0], "filter": fingerprint}
+        if has_more:
+            before = str(scanned[-1]["material_id"]) if len(rows) > limit else str(scan_floor + 1)
+            value = {"v": 1, "before": before, "bound": boundary or raw_ids[0], "filter": fingerprint}
             next_cursor = base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
         result = {"items": items, "next_cursor": next_cursor, "has_more": has_more, "limit": limit}
+        if search_kind:
+            result["search_kind"] = search_kind
+        if scan_floor is not None:
+            result["search_incomplete"] = has_more
         if numeric_search and not items and not cursor and not moboreels:
             result["empty_reason"] = self._exact_search_reason(int(search), language, uploader, enforce_blacklist=enforce_blacklist, manual=manual)
         return result
