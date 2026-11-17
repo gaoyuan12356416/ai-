@@ -20,8 +20,12 @@ for the configured old domains.
 For the cloud preparation node, capture outstanding `work.identity` values after
 graceful stop and set `legacy_work_ids` plus `legacy_storage` (old bucket, queue,
 prefix and delivery configuration). Only those identities use the old executor.
-New work uses the new bucket and queue. The renewable STS session grants the exact
-old/new prefixes while legacy work remains; no action ledger or receipt is reset.
+For this rollout, CI processing keeps the existing advertising bucket and its
+50-slot queue, while new final delivery objects use the independent AI bucket.
+The old CI bucket is separately tagged team=ads_ai under the ci resource type;
+the same COS bucket retains team=ads. The renewable STS session grants the exact
+processing/delivery prefixes while legacy work remains; no action ledger or
+receipt is reset.
 
 Update producer bucket/domain configuration and append the new exact host to
 existing consumer host lists. Retain the old hosts. Activate consumers before
@@ -44,7 +48,6 @@ Renew the scoped session and start the same affected services and their previous
 active scheduler dependencies. Never replace cloud configuration blindly while
 paid action identities remain bound to the new bucket.
 
-The default new Tencent CI queue has ten concurrent slots. Matching a previously
-raised quota requires a Tencent support request; do not claim that a queue name
-or routing update raises this quota. The verified TikTok CDN domain remains shared
-and retains its original billing attribution.
+The new bucket media queue is unused after verification. Existing CI processing
+retains 50 concurrent slots, so no quota support request is needed. The verified
+TikTok CDN domain remains shared and retains its original billing attribution.
