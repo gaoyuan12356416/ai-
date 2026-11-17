@@ -137,6 +137,26 @@ def paid(reader, scope, start, end, cache=None):
     return result
 
 
+def catalog(reader,table,index,columns,app_id,ids,cache=None):
+    fields=','.join("'%s',%s" % (c,c) for c in columns)
+    query=reader.query if cache is None else lambda statements,timeout=60:cache.query(reader,statements,timeout)
+    def read(part):
+        statement='SELECT DISTINCT HEX(JSON_OBJECT('+fields+')) FROM kunlunads_dev.'+table+' FORCE INDEX('+index+') WHERE app_id='+str(app_id)+' AND content_id IN ('+','.join(map(literal,part))+') LIMIT 20001'
+        try:
+            rows=query([statement],timeout=60)
+            if len(rows)>20000:raise RuntimeError('drama_metadata_overflow')
+            return rows
+        except Exception as exc:
+            if len(part)<=1 or not any(code in str(exc) for code in ('3024','drama_metadata_overflow')):raise
+            middle=len(part)//2
+            return read(part[:middle])+read(part[middle:])
+    result=[]
+    for offset in range(0,len(ids),25):
+        print(json.dumps(dict(event='catalog_partition',table=table,app_id=app_id,position=offset//25+1,total=(len(ids)+24)//25)),flush=True)
+        result.extend(read(ids[offset:offset+25]))
+    return list({json.dumps(row,sort_keys=True,ensure_ascii=False):row for row in result}.values())
+
+
 def collect(env_path, config_path=CONFIG_DB, warehouse=WAREHOUSE):
     env = environment(env_path)
     reader = Reader(env)
@@ -154,14 +174,9 @@ def collect(env_path, config_path=CONFIG_DB, warehouse=WAREHOUSE):
     for table,index,columns,key in [('ads_drama_resource','content_id',['content_id','app_id','language','series_code','labels'],'resources'),
                               ('ads_drama_info','ac',['content_id','app_id','language','series_code','resource_type','name'],'infos')]:
         rows = []
-        fields = ','.join("'%s',%s" % (c,c) for c in columns)
         for app_id in PRODUCTS:
             ids = sorted({str(r['content_id']) for kind in ('paid','social') for r in raw[kind] if r.get('content_id') and r.get('app_id',1479)==app_id})
-            for offset in range(0,len(ids),100):
-                statement = 'SELECT DISTINCT HEX(JSON_OBJECT('+fields+')) FROM kunlunads_dev.'+table+' FORCE INDEX('+index+') WHERE app_id='+str(app_id)+' AND content_id IN ('+','.join(map(literal,ids[offset:offset+100]))+') LIMIT 20001'
-                batch = reader.query([statement],timeout=60)
-                if len(batch)>20000: raise RuntimeError('drama_metadata_overflow')
-                rows.extend(batch)
+            rows.extend(catalog(reader,table,index,columns,app_id,ids,cache))
         raw[key] = rows
     # This snapshot has an explicit frozen scope. Mid-run pool additions enter
     # the next refresh instead of invalidating all already collected portraits.

@@ -1,4 +1,4 @@
-"""Resume only completed historical SELECT partitions after an observed failure."""
+"""Resume completed SELECT inputs of one frozen portrait collection."""
 from datetime import datetime,timezone
 import hashlib
 import json

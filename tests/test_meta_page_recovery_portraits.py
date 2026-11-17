@@ -3,11 +3,26 @@ import unittest
 from unittest.mock import patch
 
 from features.fb_page_portrait.classification import classifications
-from features.fb_page_portrait.collect import page_scope,series_ranges,paid
+from features.fb_page_portrait.collect import page_scope,series_ranges,paid,catalog
 from features.meta_page_recovery.sources import Sources
 
 
 class PortraitRecoveryTests(unittest.TestCase):
+    def test_catalog_timeout_splits_ids_without_losing_or_duplicating_records(self):
+        class Reader:
+            def __init__(self):self.sizes=[]
+            def query(self,statements,timeout=60):
+                import re
+                sql=statements[0]
+                values=re.search(r'content_id IN \(([^)]+)\)',sql).group(1).split(',')
+                self.sizes.append(len(values))
+                if len(values)>10:raise RuntimeError('source_query_failed_3024')
+                return [{'content_id':bytes.fromhex(value[2:]).decode(),'app_id':1479} for value in values]
+        reader=Reader();ids=[str(i) for i in range(32)]
+        rows=catalog(reader,'ads_drama_resource','content_id',['content_id','app_id'],1479,ids)
+        self.assertEqual({row['content_id'] for row in rows},set(ids));self.assertEqual(len(rows),32)
+        self.assertEqual(max(reader.sizes),25)
+
     def test_retired_catalog_keeps_verified_material_language(self):
         class Reader:
             def __init__(self):self.calls=0
