@@ -87,10 +87,11 @@ def write(data,env,reader,*,create_table=False):
     return dict(version=version,table=TABLE,verified_rows=len(check),payload_hashes=hashes,**data['meta']['audit'])
 
 
-def publish(data,proof,root=ROOT):
+def publish(data,proof,root=ROOT,*,page_items=None):
     root = Path(root);root.mkdir(parents=True,exist_ok=True)
     version = data['meta']['version']
-    assert proof['version']==version and proof['verified_rows']==len(data['pages'])
+    count=len(data['pages']) if page_items is None else data['meta']['page_count']
+    assert proof['version']==version and proof['verified_rows']==count
     final = root/(version+'.sqlite3')
     temp = root/(version+'.building')
     if final.exists() or temp.exists(): raise RuntimeError('projection_version_already_exists')
@@ -98,7 +99,9 @@ def publish(data,proof,root=ROOT):
         db.executescript('''CREATE TABLE profiles(page_id TEXT PRIMARY KEY,summary TEXT NOT NULL,tree TEXT NOT NULL);
         CREATE TABLE dramas(page_id TEXT,path TEXT,position INTEGER,payload TEXT,PRIMARY KEY(page_id,path,position));
         CREATE TABLE metadata(payload TEXT);''')
-        for pid,p in data['pages'].items():
+        seen=set()
+        for pid,p in (data['pages'].items() if page_items is None else page_items):
+            assert pid not in seen;seen.add(pid)
             assert hashlib.sha256(encoded(p).encode()).hexdigest()==proof['payload_hashes'][pid]
             summary,tree = projections(p)
             db.execute('INSERT INTO profiles VALUES(?,?,?)',(pid,encoded(summary),encoded(tree)))
@@ -106,6 +109,7 @@ def publish(data,proof,root=ROOT):
                 for t in a['children']:
                     path=a['key']+'/'+t['key']
                     db.executemany('INSERT INTO dramas VALUES(?,?,?,?)',[(pid,path,i,encoded(d)) for i,d in enumerate(t['dramas'])])
+        assert seen==set(proof['payload_hashes'])
         meta = {k:v for k,v in data['meta'].items() if k not in ('audit','page_count')}
         db.execute('INSERT INTO metadata VALUES(?)',(encoded(meta),))
         assert db.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
