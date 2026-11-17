@@ -48,10 +48,13 @@ def write(data,env,reader,*,create_table=False):
                 q.execute('SELECT DATABASE(),@@read_only')
                 assert q.fetchone() == ('ads_ai',0)
                 if create_table: q.execute(DDL)
-                for pid,p in pages.items():
-                    summary,_ = projections(p)
-                    q.execute('INSERT INTO '+TABLE+' (profile_version,page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,detail_json,meta_json,payload_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
-                              (version,pid,data['meta']['start'],data['meta']['end'],p['paid_cents'],p['social_cents'],p['spend_cents'],encoded(summary),encoded(p),encoded(data['meta']),hashes[pid]))
+                def records():
+                    for pid,p in pages.items():
+                        summary,_ = projections(p)
+                        yield (version,pid,data['meta']['start'],data['meta']['end'],p['paid_cents'],p['social_cents'],p['spend_cents'],encoded(summary),encoded(p),encoded(data['meta']),hashes[pid])
+                # The deployed PyMySQL driver consumes this iterator in bounded
+                # ~1 MiB SQL statements, without retaining all page strings.
+                q.executemany('INSERT INTO '+TABLE+' (profile_version,page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,detail_json,meta_json,payload_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',records())
             db.commit()
     verified = False
     for attempt in range(5):

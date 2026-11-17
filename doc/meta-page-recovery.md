@@ -80,6 +80,12 @@ also frozen per collection. A continuation reuses the same input, with its hash,
 coverage and original freshness proof; it does not relabel an old source as new.
 Every new collection still enforces the original 3-hour social freshness rule.
 Profile metadata exposes social validation/source times separately from build time.
+Profile writes encode one Page at a time; only small payload hashes are retained
+for the complete scope. PyMySQL consumes the record iterator in bounded SQL
+batches inside one transaction. This repairs the observed 3-GiB cgroup OOM from
+retaining every Page's JSON simultaneously. `refresh --resume-input VERSION.input.json`
+reuses the original version key/input and reconciles existing rows by their exact
+hashes. It refuses to replace an already published/superseding snapshot.
 The original 1 GiB / 30-minute portrait unit budget predates the expanded scope.
 `ops/meta-page-recovery/portrait_capacity.py` backs up and sets only that unit to
 3 GiB / 75 minutes, without restarting the active collector. Its temporary cgroup

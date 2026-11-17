@@ -14,7 +14,7 @@ from features.fb_page_portrait.resume import restore
 
 class MemoryWriteTests(unittest.TestCase):
     def test_writer_does_not_retain_all_encoded_page_payloads(self):
-        alive=weakref.WeakSet();peak=[0];original=storage.encoded;written={}
+        alive=weakref.WeakSet();peak=[0];original=storage.encoded;written={};batches=[0]
         class Tracked(str):pass
         def encode(value):
             result=original(value)
@@ -25,6 +25,10 @@ class MemoryWriteTests(unittest.TestCase):
             def __enter__(self):return self
             def __exit__(self,*args):pass
             def fetchone(self):return ('ads_ai',0)
+            def executemany(self,sql,values):
+                if isinstance(values,(list,tuple)):raise AssertionError('all_page_payloads_materialized')
+                batches[0]+=1
+                for item in values:self.execute(sql,item)
             def execute(self,sql,values=None):
                 if sql.startswith('INSERT'):
                     written[values[1]]=dict(page_id=values[1],hash=hashlib.sha256(values[8].encode()).hexdigest(),paid_cents=values[4],social_cents=values[5],spend_cents=values[6])
@@ -40,7 +44,7 @@ class MemoryWriteTests(unittest.TestCase):
             audit=dict(paid_cents=100,social_cents=200,spend_cents=300)))
         with patch.object(storage,'encoded',side_effect=encode),patch.dict('sys.modules',{'pymysql':SimpleNamespace(connect=lambda **kw:DB())}):
             proof=storage.write(data,{'ADMIN_MAPPING_MYSQL_USER':'fixture','ADMIN_MAPPING_MYSQL_PASSWORD':'fixture'},Reader())
-        self.assertEqual(proof['verified_rows'],100);self.assertLess(peak[0],10)
+        self.assertEqual(proof['verified_rows'],100);self.assertLess(peak[0],10);self.assertEqual(batches[0],1)
         self.assertEqual(proof['payload_hashes'],{pid:hashlib.sha256(original(p).encode()).hexdigest() for pid,p in pages.items()})
 
 
