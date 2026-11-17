@@ -15,6 +15,20 @@ from types import SimpleNamespace
 
 
 class CutoverTests(unittest.TestCase):
+    def test_fb_source_origins_keep_url_boundaries(self):
+        from urllib.parse import urlsplit, urlunsplit
+        for rel in ['features/fb_video_publish/sources.py','features/fb_auto_posts/manual_batch.py']:
+            tree=ast.parse((ROOT/rel).read_text(encoding='utf-8'))
+            nodes=[n for n in tree.body if (isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id.endswith('_HOST') for t in n.targets)) or (isinstance(n,ast.FunctionDef) and n.name=='prepare_source_url')]
+            class Invalid(Exception): pass
+            ns={'urlsplit':urlsplit,'urlunsplit':urlunsplit,'SourceError':Invalid,'BatchError':Invalid}
+            exec(compile(ast.Module(body=nodes,type_ignores=[]),rel,'exec'),ns)
+            fn=ns['prepare_source_url'];host='ads-ai-1306474899.cos.ap-hongkong.myqcloud.com'
+            self.assertEqual(fn('https://'+host+'/a.mp4'),'https://'+host+'/a.mp4')
+            self.assertTrue(fn('http://advertising-1306474899.cos.ap-hongkong.myqcloud.com/a.mp4').startswith('https://'))
+            for url in ['https://'+host+'.evil.example/a.mp4','https://user@'+host+'/a.mp4','http://'+host+'/a.mp4','https://'+host+'/a.mp4#part']:
+                with self.assertRaises(Invalid):fn(url)
+
     def test_new_upload_and_old_checkpoint_are_separate(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
             'COS_LEGACY_BUCKET_DOMAINS': json.dumps({'old-bucket': 'old.example.com'})

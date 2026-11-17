@@ -11,6 +11,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1]
 PATCHES = {
+    'features/fb_video_publish/sources.py': 'fb-sources.patch',
+    'features/fb_auto_posts/manual_batch.py': 'fb-manual.patch',
     'app.py': 'app.patch',
     'features/drama_synthesis/gpu_cache.py': 'gpu-cache.patch',
     'features/drama_synthesis/material_source.py': 'material-source.patch',
@@ -60,6 +62,6 @@ def install(root, backup, names, apply=False):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--backup',type=Path,required=True)
-    p.add_argument('--kind',choices=['drama','cloud'],required=True);p.add_argument('--apply',action='store_true');a=p.parse_args()
-    names=list(PATCHES)[:3] if a.kind=='drama' else list(PATCHES)[3:]
+    p.add_argument('--kind',choices=['drama','cloud','readers'],required=True);p.add_argument('--apply',action='store_true');a=p.parse_args()
+    names=list(PATCHES)[2:5] if a.kind=='drama' else (list(PATCHES)[5:] if a.kind=='cloud' else list(PATCHES)[:2])
     print(json.dumps(install(a.root,a.backup,names,a.apply),indent=2))

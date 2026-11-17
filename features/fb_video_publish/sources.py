@@ -20,6 +20,7 @@ MAX_MATERIALS = 200
 PAGE_SIZE = 100
 SOURCE_HOST = "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
 SOURCE_CDN_HOST = "socialkit-cdn.yingliang.tech"
+AI_SOURCE_HOST = "ads-ai-1306474899.cos.ap-hongkong.myqcloud.com"
 
 
 class SourceError(TemplateError):
@@ -45,7 +46,7 @@ def _language_sql(column: str) -> str:
 def _thumbnail(value) -> str:
     try:
         parsed = urlsplit(str(value or "").strip())
-        if (parsed.scheme not in ("https", "http") or parsed.hostname not in (SOURCE_HOST, SOURCE_CDN_HOST)
+        if (parsed.scheme not in ("https", "http") or parsed.hostname not in (SOURCE_HOST, SOURCE_CDN_HOST, AI_SOURCE_HOST)
                 or (parsed.scheme == "http" and parsed.hostname != SOURCE_HOST)
                 or parsed.port is not None or parsed.username or parsed.password or parsed.fragment):
             return ""
@@ -55,11 +56,11 @@ def _thumbnail(value) -> str:
 
 
 def prepare_source_url(value) -> str:
-    """Accept only the two already approved source origins; never follow redirects."""
+    """Accept only approved source origins; never follow redirects."""
     try:
         text = str(value or "").strip()
         parsed = urlsplit(text)
-        if (parsed.scheme not in ("https", "http") or parsed.hostname not in (SOURCE_HOST, SOURCE_CDN_HOST)
+        if (parsed.scheme not in ("https", "http") or parsed.hostname not in (SOURCE_HOST, SOURCE_CDN_HOST, AI_SOURCE_HOST)
                 or (parsed.scheme == "http" and parsed.hostname != SOURCE_HOST)
                 or parsed.port is not None or parsed.username or parsed.password or parsed.fragment
                 or not parsed.path.lower().endswith(".mp4") or len(text) > 4096
