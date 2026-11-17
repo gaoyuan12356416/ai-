@@ -198,6 +198,7 @@
       const actions = ui.element("div", { className: "row-actions" });
       actions.appendChild(actionButton("编辑", "edit", id));
       actions.appendChild(actionButton("复制", "copy", id));
+      actions.appendChild(actionButton("删除", "delete", id, "danger"));
       actions.appendChild(actionButton("预览", "preview", id));
       actions.appendChild(actionButton(enabled ? "关闭" : "开启", enabled ? "disable" : "enable", id, enabled ? "danger" : ""));
       actions.appendChild(actionButton("手动执行", "run", id, "primary"));
@@ -256,12 +257,14 @@
     const version = templateVersion(item);
     const names = {
       copy: "复制模板",
+      delete: "删除模板",
       enable: "开启模板",
       disable: "关闭模板",
       run: "手动执行模板",
     };
     const messages = {
       copy: `确认复制“${item.name || id}”吗？复制出的模板默认关闭。`,
+      delete: `确认删除“${item.name || id}”吗？删除后将从模板列表移除并停止新调度；已生成任务和历史发布记录保留。`,
       enable: `确认开启“${item.name || id}”吗？开启后系统会按模板计划自动创建真实发布任务。`,
       disable: `确认关闭“${item.name || id}”吗？关闭只停止后续自动触发，不会取消已经开始的任务。`,
       run: `确认立即执行“${item.name || id}”吗？系统会为模板内每个账号创建一次真实发布任务，视频准备完成后自动发布。`,
@@ -270,7 +273,7 @@
       title: names[action],
       message: messages[action],
       confirmText: action === "run" ? "确认真实执行" : "确认",
-      danger: action === "disable" || action === "run",
+      danger: action === "delete" || action === "disable" || action === "run",
     });
     if (!confirmed) return;
     state.busyIds.add(id);
@@ -300,6 +303,8 @@
           location.href = `/x-tag-auto-publish-template.html?id=${encodeURIComponent(copiedId)}`;
           return;
         }
+      } else if (action === "delete") {
+        ui.showToast("模板已删除，已生成任务和历史记录保留。", false);
       } else {
         ui.showToast(action === "enable" ? "模板已开启。" : "模板已关闭。", false);
       }
@@ -340,7 +345,7 @@
       await previewTemplate(item);
       return;
     }
-    if (["copy", "enable", "disable", "run"].includes(action)) await mutateTemplate(item, action);
+    if (["copy", "delete", "enable", "disable", "run"].includes(action)) await mutateTemplate(item, action);
   }
 
   function bindEvents() {

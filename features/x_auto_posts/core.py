@@ -830,6 +830,8 @@ def ensure_storage(db_path: Any) -> None:
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(x_auto_template)")
             }
+            if "deleted_at_utc" not in template_columns:
+                conn.execute("ALTER TABLE x_auto_template ADD COLUMN deleted_at_utc TEXT NOT NULL DEFAULT ''")
             if "enabled_at_utc" not in template_columns:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
@@ -1139,6 +1141,7 @@ class XAutoPostStore:
     @staticmethod
     def _template_row(conn: sqlite3.Connection, template_id: int, version: Optional[int] = None) -> Optional[sqlite3.Row]:
         version_expression = "t.current_version" if version is None else "?"
+        visible = " AND t.deleted_at_utc=''" if version is None else ""
         params: Tuple[Any, ...] = (template_id,) if version is None else (version, template_id)
         return conn.execute(
             """
@@ -1151,7 +1154,7 @@ class XAutoPostStore:
             JOIN x_auto_template_version v
               ON v.template_id=t.id AND v.version=%s
             WHERE t.id=?
-            """ % version_expression,
+            """ % version_expression + visible,
             params,
         ).fetchone()
 
@@ -1248,8 +1251,9 @@ class XAutoPostStore:
               ON v.template_id=t.id AND v.version=t.current_version
         """
         params: Tuple[Any, ...] = ()
+        sql += " WHERE t.deleted_at_utc=''"
         if enabled is not None:
-            sql += " WHERE t.enabled=?"
+            sql += " AND t.enabled=?"
             params = (int(bool(enabled)),)
         sql += " ORDER BY t.id"
         with self._reader() as conn:
@@ -1275,7 +1279,7 @@ class XAutoPostStore:
         actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
         with self._transaction() as conn:
-            current = conn.execute("SELECT * FROM x_auto_template WHERE id=?", (normalized_id,)).fetchone()
+            current = conn.execute("SELECT * FROM x_auto_template WHERE id=? AND deleted_at_utc=''", (normalized_id,)).fetchone()
             if current is None:
                 raise XAutoPostStoreError("x_auto_template_not_found", "template was not found", 404)
             if int(current["current_version"]) != expected:
@@ -1355,7 +1359,7 @@ class XAutoPostStore:
         now = self._now_iso()
         with self._transaction() as conn:
             current = conn.execute(
-                "SELECT current_version FROM x_auto_template WHERE id=?",
+                "SELECT current_version FROM x_auto_template WHERE id=? AND deleted_at_utc=''",
                 (normalized_id,),
             ).fetchone()
             if current is None:
@@ -1432,6 +1436,25 @@ class XAutoPostStore:
         assert result is not None
         return _template_from_row(result)
 
+    def delete_template(self, template_id: Any, *, expected_version: Any,
+                        actor: AuditActor = AuditActor()) -> Dict[str, Any]:
+        normalized_id = _positive_int(template_id, "template id")
+        expected = _positive_int(expected_version, "expected version")
+        actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
+        now = self._now_iso()
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM x_auto_template WHERE id=?", (normalized_id,)).fetchone()
+            if row is None:
+                raise XAutoPostStoreError("x_auto_template_not_found", "模板不存在", 404)
+            if int(row["current_version"]) != expected:
+                raise XAutoPostStoreError("x_auto_template_version_conflict", "模板版本已变化，请刷新后重试", 409)
+            if not row["deleted_at_utc"]:
+                conn.execute("UPDATE x_auto_template SET enabled=0,enabled_at_utc='',deleted_at_utc=?,updated_at=?,updated_by_user_id=?,updated_by_name=? WHERE id=?",
+                             (now, now, actor.user_id, actor.name, normalized_id))
+                self._event(conn, event_type="template_deleted", created_at=now,
+                            details={"template_id": normalized_id, "version": expected, "actor_user_id": actor.user_id})
+        return {"ok": True, "template_id": normalized_id, "deleted": True}
+
     def copy_template(
         self,
         template_id: Any,
@@ -1440,7 +1463,7 @@ class XAutoPostStore:
         actor: AuditActor = AuditActor(),
     ) -> TemplateSnapshot:
         source = self.get_template(template_id)
-        copy_name = name if name is not None else "%s copy" % source.name
+        copy_name = name if name is not None else source.name[:MAX_NAME_CHARS - 3] + " 副本"
         result = self.create_template(
             name=copy_name,
             description=source.description,
@@ -1622,6 +1645,8 @@ class XAutoPostStore:
                 if existing_facts != immutable:
                     raise XAutoPostStoreError("x_auto_run_idempotency_conflict", "run key belongs to different facts", 409)
                 return _run_from_row(existing)
+            if conn.execute("SELECT 1 FROM x_auto_template WHERE id=? AND deleted_at_utc<>''", (normalized_template_id,)).fetchone():
+                raise XAutoPostStoreError("x_auto_template_not_found", "template was deleted", 404)
             cursor = conn.execute(
                 """
                 INSERT INTO x_auto_run(

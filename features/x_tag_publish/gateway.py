@@ -247,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
             if set(body) != {'queue_id', 'log_id'}:
                 raise Error('invalid_request', '', 400)
             return 200, dict(context=resolve_attribution(body))
-        auto_match = re.fullmatch(re.escape(AUTO) + r'/(?:accounts(?:/[1-9][0-9]*/verify)?|templates(?:/[1-9][0-9]*(?:/(?:copy|enable|disable|preview|run-now))?)?|runs(?:/[1-9][0-9]*)?)', path)
+        auto_match = re.fullmatch(re.escape(AUTO) + r'/(?:accounts(?:/[1-9][0-9]*/verify)?|templates(?:/[1-9][0-9]*(?:/(?:copy|delete|enable|disable|preview|run-now))?)?|runs(?:/[1-9][0-9]*)?)', path)
         post_match = re.fullmatch(re.escape(POST) + r'/(?:logs|runs|profiles|material-pool(?:/(?:account-options|schedule|manual-publish|manual-runs/[1-9][0-9]*|[1-9][0-9]*))?)', path)
         if not auto_match and not post_match:
             raise Error('not_found', '', 404)

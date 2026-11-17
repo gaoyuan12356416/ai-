@@ -540,6 +540,14 @@ class XAutoPostService:
         public = self._template_item(item)
         return {"ok": True, "template": public, "item": public}
 
+    def delete_template(self, template_id: Any, raw: Mapping[str, Any]) -> Dict[str, Any]:
+        payload = dict(raw)
+        actor = _actor(payload)
+        if set(payload) != {"expected_version"}:
+            raise AutoPostServiceError("invalid_request", "delete request is invalid", 400)
+        return self.store.delete_template(template_id,
+            expected_version=expected_version(payload["expected_version"]), actor=actor)
+
     def set_enabled(self, template_id: Any, enabled: bool, raw: Mapping[str, Any]) -> Dict[str, Any]:
         payload = dict(raw)
         actor = _actor(payload)
@@ -1530,7 +1538,7 @@ class XAutoPostRequestHandler(BaseHTTPRequestHandler):
             return 200, service.create_template(self._body())
         match = re.fullmatch(
             re.escape(X_AUTO_ADMIN_PREFIX)
-            + r"/templates/([1-9][0-9]*)(?:/(copy|enable|disable|preview|run-now))?",
+            + r"/templates/([1-9][0-9]*)(?:/(copy|delete|enable|disable|preview|run-now))?",
             path,
         )
         if self.command == "POST" and match:
@@ -1540,6 +1548,8 @@ class XAutoPostRequestHandler(BaseHTTPRequestHandler):
                 return 200, service.update_template(template_id, body)
             if action == "copy":
                 return 200, service.copy_template(template_id, body)
+            if action == "delete":
+                return 200, service.delete_template(template_id, body)
             if action == "enable":
                 return 200, service.set_enabled(template_id, True, body)
             if action == "disable":

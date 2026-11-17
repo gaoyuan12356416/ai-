@@ -88,6 +88,8 @@
         "<td><strong>", ui.escapeHtml(schedule.frequency), "</strong><br><small>", ui.escapeHtml(schedule.details), "</small></td>",
         '<td><div class="table-actions">',
         '<a class="button small link-button" href="/fb-auto-publish-template.html?v=20260820-list-only-v2&id=', id, '">编辑</a>',
+        '<button class="button small" type="button" data-action="copy" data-template-id="', id, '"', busy, '>复制</button>',
+        '<button class="button small danger" type="button" data-action="delete" data-template-id="', id, '"', busy, '>删除</button>',
         '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",
         '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
         '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', runDisabled, runTitle, ">爆款素材发布</button>",
@@ -287,7 +289,11 @@
       openMaterialDialog(item);
       return;
     }
-    const accepted = action === "run"
+    const accepted = action === "copy"
+      ? await ui.confirmAction("复制模板", "将复制全部模板配置，新模板默认停用，复制后可继续编辑。")
+      : action === "delete"
+      ? await ui.confirmAction("删除模板", "确认删除“" + (item.name || id) + "”？删除后将从模板列表移除并停止新调度；已生成任务和历史发布记录保留。")
+      : action === "run"
       ? await ui.confirmAction("确认手动执行", "将创建可追踪的手动计划，由后台异步冻结 Page 和素材。确认继续？")
       : await ui.confirmAction(enabled ? "确认停用模板" : "确认启用模板", enabled
         ? "停用后不再生成新时隙；未提交 Meta 的手动执行会取消，自动预制任务保留并暂停。正在提交 Meta 时需等待本次结果后再停用。"
@@ -298,7 +304,19 @@
     let listFailed = false;
     try {
       const version = ui.templateVersion(item);
-      if (action === "run") {
+      if (action === "copy" || action === "delete") {
+        const result = await ui.api(ui.API_BASE + "/templates/" + id + "/" + action, {
+          method: "POST", body: JSON.stringify({ expected_version: version }),
+        });
+        if (action === "copy") {
+          const copiedId = ui.positiveId(result.template && result.template.id);
+          if (!copiedId) throw new Error("复制响应缺少模板 ID，请刷新列表核对。");
+          ui.showToast("模板已复制，新模板默认停用。");
+          window.location.href = "/fb-auto-publish-template.html?id=" + copiedId;
+          return;
+        }
+        ui.showToast("模板已删除，已生成任务和历史记录保留。");
+      } else if (action === "run") {
         await ui.api(ui.API_BASE + "/templates/" + id + "/run-now", {
           method: "POST",
           body: JSON.stringify({

@@ -293,11 +293,18 @@ class Handler(BaseHTTPRequestHandler):
             source = self.runtime.resolve_source(payload, actor)
             result = {"ok": True, "template": self.runtime.store.create_template(payload, actor, source)}
         else:
-            match = re.fullmatch(re.escape(FB_AUTO_ADMIN_PREFIX) + r"/templates/([1-9][0-9]*)(?:/(enable|disable|run-now))?", parsed.path)
+            match = re.fullmatch(re.escape(FB_AUTO_ADMIN_PREFIX) + r"/templates/([1-9][0-9]*)(?:/(copy|delete|enable|disable|run-now))?", parsed.path)
             if not match: raise ServiceError("not_found", "接口不存在", 404)
             template_id, action = int(match.group(1)), match.group(2)
             if not action:
                 version = payload.pop("expected_version", None); source = self.runtime.resolve_source(payload, actor); result = {"ok": True, "template": self.runtime.store.update_template(template_id, payload, actor, version, source)}
+            elif action in {"copy", "delete"}:
+                if set(payload) != {"expected_version"}:
+                    raise ServiceError("invalid_request", "请求字段无效", 400)
+                if action == "copy":
+                    result = {"ok": True, "template": self.runtime.store.copy_template(template_id, actor, payload["expected_version"])}
+                else:
+                    result = self.runtime.store.delete_template(template_id, actor, payload["expected_version"])
             elif action in {"enable", "disable"}:
                 allowed = {"expected_version", "preserve_unsubmitted_before_utc"} if action == "disable" else {"expected_version"}
                 if "expected_version" not in payload or set(payload) - allowed: raise ServiceError("invalid_request", "请求字段无效", 400)

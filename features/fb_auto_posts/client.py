@@ -57,7 +57,7 @@ GET_ROUTES = {
 def route_allowed(method: str, path: str) -> bool:
     if method == "GET":
         return path in GET_ROUTES or bool(re.fullmatch(re.escape(FB_AUTO_ADMIN_PREFIX) + r"/(?:templates|runs)/[1-9][0-9]*", path))
-    return method == "POST" and bool(re.fullmatch(re.escape(FB_AUTO_ADMIN_PREFIX) + r"/templates(?:/[1-9][0-9]*(?:/(?:enable|disable|run-now))?)?", path))
+    return method == "POST" and bool(re.fullmatch(re.escape(FB_AUTO_ADMIN_PREFIX) + r"/templates(?:/[1-9][0-9]*(?:/(?:copy|delete|enable|disable|run-now))?)?", path))
 
 
 def parse_admin_query(path: str, raw_query: Any) -> Dict[str, str]:

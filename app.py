@@ -98054,7 +98054,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
         fb_auto_template_match = re.fullmatch(
             re.escape(FB_AUTO_ADMIN_PREFIX)
-            + r"/templates(?:/[1-9][0-9]*(?:/(?:enable|disable|run-now))?)?",
+            + r"/templates(?:/[1-9][0-9]*(?:/(?:copy|delete|enable|disable|run-now))?)?",
             parsed.path,
         )
         if fb_auto_template_match:
@@ -98067,6 +98067,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             session = self._session() or {}
             action_suffix = parsed.path.rsplit("/", 1)[-1]
             action = {
+                "copy": "copy_fb_auto_publish_template",
+                "delete": "delete_fb_auto_publish_template",
                 "enable": "enable_fb_auto_publish_template",
                 "disable": "disable_fb_auto_publish_template",
                 "run-now": "run_fb_auto_publish_template",

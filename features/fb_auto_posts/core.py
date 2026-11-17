@@ -258,7 +258,7 @@ class FBAutoPostStore:
 
     def _template_row(self, conn: sqlite3.Connection, template_id: int, actor: ActorScope) -> sqlite3.Row:
         clause, params = self._scope_clause(actor)
-        row = conn.execute(f"SELECT t.*,v.config_json,v.config_sha256 FROM fb_auto_template t JOIN fb_auto_template_version v ON v.template_id=t.id AND v.version=t.current_version WHERE t.id=?{clause}", (template_id,) + params).fetchone()
+        row = conn.execute(f"SELECT t.*,v.config_json,v.config_sha256 FROM fb_auto_template t JOIN fb_auto_template_version v ON v.template_id=t.id AND v.version=t.current_version WHERE t.id=? AND t.status<>'deleted'{clause}", (template_id,) + params).fetchone()
         if row is None:
             raise StoreError("fb_auto_template_not_found", "自动发布模板不存在", 404)
         return row
@@ -280,6 +280,40 @@ class FBAutoPostStore:
             conn.execute("INSERT INTO fb_auto_template_version VALUES(?,?,?,?,?,?)", (template_id, 1, encoded, config_hash(config), actor.user_id, now))
             conn.commit()
             return self._template_dto(self._template_row(conn, template_id, actor))
+
+    def copy_template(self, template_id: int, actor: ActorScope, version: Any) -> Dict[str, Any]:
+        expected, now = expected_version(version), utc_iso(self.now_fn())
+        with self._lock, self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            source = self._template_row(conn, template_id, actor)
+            if int(source["current_version"]) != expected:
+                raise StoreError("fb_auto_template_version_conflict", "模板版本已变化，请刷新后重试", 409)
+            config = _loads(source["config_json"], {})
+            config["name"] = str(source["name"])[:117] + " 副本"
+            encoded = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            cur = conn.execute("INSERT INTO fb_auto_template(name,status,current_version,owner_user_id,scope_is_admin,created_by,created_name,created_at_utc,updated_at_utc) VALUES(?,'disabled',1,?,?,?,?,?,?)",
+                               (config["name"], actor.owner_user_id, int(actor.is_admin), actor.user_id, actor.name, now, now))
+            copied_id = int(cur.lastrowid)
+            conn.execute("INSERT INTO fb_auto_template_version VALUES(?,?,?,?,?,?)",
+                         (copied_id, 1, encoded, config_hash(config), actor.user_id, now))
+            conn.commit()
+            return self._template_dto(self._template_row(conn, copied_id, actor))
+
+    def delete_template(self, template_id: int, actor: ActorScope, version: Any) -> Dict[str, Any]:
+        expected, now = expected_version(version), utc_iso(self.now_fn())
+        clause, params = self._scope_clause(actor)
+        with self._lock, self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(f"SELECT t.* FROM fb_auto_template t WHERE t.id=?{clause}",
+                               (template_id,) + params).fetchone()
+            if row is None:
+                raise StoreError("fb_auto_template_not_found", "模板不存在", 404)
+            if int(row["current_version"]) != expected:
+                raise StoreError("fb_auto_template_version_conflict", "模板版本已变化，请刷新后重试", 409)
+            if row["status"] != "deleted":
+                conn.execute("UPDATE fb_auto_template SET status='deleted',updated_at_utc=? WHERE id=?", (now, template_id))
+            conn.commit()
+        return {"ok": True, "template_id": template_id, "deleted": True}
 
     def update_template(self, template_id: int, raw: Any, actor: ActorScope, version: Any, resolved_source: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
         config, expected, now = normalize_template_payload(raw), expected_version(version), utc_iso(self.now_fn())
@@ -409,7 +443,7 @@ class FBAutoPostStore:
 
     def list_templates(self, actor: ActorScope, *, status: str = "", query: str = "", limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         clause, params = self._scope_clause(actor)
-        filters, values = ["1=1" + clause], list(params)
+        filters, values = ["t.status<>'deleted'" + clause], list(params)
         if status:
             if status not in {"enabled", "disabled"}:
                 raise StoreError("invalid_request", "模板状态筛选无效", 400)
