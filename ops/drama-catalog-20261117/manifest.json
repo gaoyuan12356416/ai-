@@ -1,0 +1,132 @@
+{
+  "roots": {
+    "main": {
+      "logical": "/root/drama_material_service",
+      "resolved": "/mnt/data-disk/root-storage-20260915/rootfs/root/drama_material_service"
+    },
+    "x": {
+      "logical": "/opt/x-post-automation/current",
+      "resolved": "/mnt/data-disk/story-copy-deploy/c26fe14ae4/candidate-x"
+    },
+    "fb": {
+      "logical": "/opt/fb-auto-post/current",
+      "resolved": "/mnt/data-disk/story-mapping-deploy-20261117/fb"
+    },
+    "tt": {
+      "logical": "/opt/tt-post/current",
+      "resolved": "/mnt/data-disk/post-product-scope-releases/e5b1ee06c07def5262b2eb2888d6cf94f784b8b3/tt"
+    },
+    "tt_auto": {
+      "logical": "/opt/tt-auto-post/current",
+      "resolved": "/mnt/data-disk/post-product-scope-releases/e5b1ee06c07def5262b2eb2888d6cf94f784b8b3/tt_auto"
+    }
+  },
+  "files": [
+    {
+      "lane": "main",
+      "relative": "features/publishing_products.py",
+      "before": "4b96a08e3ca55ef36ba0b491377026877bf1e3a6f67c2470cafb421beb086c4d",
+      "after": "4e70422b758cba9e96f3331f438f3df7598abe3ee70b65456ba57bf4e3add2a3",
+      "source": "ops/drama-catalog-20261117/runtime/main/features/publishing_products.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/x_posts/selector.py",
+      "before": "227c41c9dc7c07a2aa4cbb6cbb60217fada759181a46ddc5396e922a070d8be0",
+      "after": "250e42a97e8a7545ef63c322f584469167f46565ce26bf7c0869eee78b23277c",
+      "source": "ops/drama-catalog-20261117/runtime/main/features/x_posts/selector.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/fb_video_publish/sources.py",
+      "before": "3761acb1430c43c6de92ec42a029964cd82db8372d80470018dc485b2179e7fb",
+      "after": "635825ffd3e9c643ccbfadd69730111b1118628933ab81ef75a98600db6ca2a6",
+      "source": "ops/drama-catalog-20261117/runtime/main/features/fb_video_publish/sources.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/fb_video_publish/group_sources.py",
+      "before": "708f858cc4bb52e113f8ab436a02d5f8a4aa5c49a1c142621e63168ea7d758ee",
+      "after": "d6eff60ebdc46ea4c8269b697dbd12d70cec4bed481d9e725d31a71c737c64b8",
+      "source": "ops/drama-catalog-20261117/runtime/main/features/fb_video_publish/group_sources.py"
+    },
+    {
+      "lane": "main",
+      "relative": "features/youtube_auto_publish/source.py",
+      "before": "83c403b82f879948d30f45014a55d1ded5bd13e309fac7f2a9ce9984965737b3",
+      "after": "bcf43e5a6087087591f8c969218b31c195477a4119afff971c90b01c1a579dcc",
+      "source": "ops/drama-catalog-20261117/runtime/main/features/youtube_auto_publish/source.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/publishing_products.py",
+      "before": "4b96a08e3ca55ef36ba0b491377026877bf1e3a6f67c2470cafb421beb086c4d",
+      "after": "4e70422b758cba9e96f3331f438f3df7598abe3ee70b65456ba57bf4e3add2a3",
+      "source": "ops/drama-catalog-20261117/runtime/x/features/publishing_products.py"
+    },
+    {
+      "lane": "x",
+      "relative": "features/x_posts/selector.py",
+      "before": "f15aca221cb4047803197fea8d4a19ccc91d16902764dc8061636771ac5a85e8",
+      "after": "65e143a0d6ad0f7f55b1a43c88eb9a587f59247be6da40e951a37e64594cb18e",
+      "source": "ops/drama-catalog-20261117/runtime/x/features/x_posts/selector.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/publishing_products.py",
+      "before": "4b96a08e3ca55ef36ba0b491377026877bf1e3a6f67c2470cafb421beb086c4d",
+      "after": "4e70422b758cba9e96f3331f438f3df7598abe3ee70b65456ba57bf4e3add2a3",
+      "source": "ops/drama-catalog-20261117/runtime/fb/features/publishing_products.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/fb_video_publish/sources.py",
+      "before": "d46faa18fa7e9e41ae762d0edd1562da781465b270d95258b3fa1b53aea75aff",
+      "after": "f366faefddaac7e82c7b6692a5426a0511283b2673cac1c3e1b9c1a9e322160b",
+      "source": "ops/drama-catalog-20261117/runtime/fb/features/fb_video_publish/sources.py"
+    },
+    {
+      "lane": "fb",
+      "relative": "features/fb_video_publish/group_sources.py",
+      "before": "ef562b8cdb762c53f34574e335351c300c4f53476ab9f0a954f1b916904e9e85",
+      "after": "5a2dd2852d5b3917292bd1140ff09b8a602806d4890f1c795177f4a5397ccb15",
+      "source": "ops/drama-catalog-20261117/runtime/fb/features/fb_video_publish/group_sources.py"
+    },
+    {
+      "lane": "tt",
+      "relative": "features/publishing_products.py",
+      "before": "4b96a08e3ca55ef36ba0b491377026877bf1e3a6f67c2470cafb421beb086c4d",
+      "after": "4e70422b758cba9e96f3331f438f3df7598abe3ee70b65456ba57bf4e3add2a3",
+      "source": "ops/drama-catalog-20261117/runtime/tt/features/publishing_products.py"
+    },
+    {
+      "lane": "tt",
+      "relative": "features/x_posts/selector.py",
+      "before": "ac652e861ae482023df674c23c621173b2bd781b8015c8e5b3cbd548efce2bf2",
+      "after": "bb14e39b591bc8fde85e02236998f11a57710a584fbab4c5a8c4d8e7c4e21b5f",
+      "source": "ops/drama-catalog-20261117/runtime/tt/features/x_posts/selector.py"
+    },
+    {
+      "lane": "tt_auto",
+      "relative": "features/publishing_products.py",
+      "before": "4b96a08e3ca55ef36ba0b491377026877bf1e3a6f67c2470cafb421beb086c4d",
+      "after": "4e70422b758cba9e96f3331f438f3df7598abe3ee70b65456ba57bf4e3add2a3",
+      "source": "ops/drama-catalog-20261117/runtime/tt_auto/features/publishing_products.py"
+    },
+    {
+      "lane": "tt_auto",
+      "relative": "features/x_posts/selector.py",
+      "before": "ac652e861ae482023df674c23c621173b2bd781b8015c8e5b3cbd548efce2bf2",
+      "after": "bb14e39b591bc8fde85e02236998f11a57710a584fbab4c5a8c4d8e7c4e21b5f",
+      "source": "ops/drama-catalog-20261117/runtime/tt_auto/features/x_posts/selector.py"
+    },
+    {
+      "lane": "main",
+      "relative": "youtube-material-source.sql",
+      "target": "/etc/youtube-auto-publish/material-source.sql",
+      "before": "5442929c753521fa1bbdb8ed1d72286d4d630d7f2310b11982d573bbc156e54a",
+      "after": "edb26cc13b25ad9391ab0ec6995b3a8cb572a0cbe99c3cc8d2a75ca1a59ae2b7",
+      "source": "ops/drama-catalog-20261117/youtube-material-source.sql"
+    }
+  ]
+}

@@ -6,7 +6,7 @@ It still uses the existing FIFO SQL adapter and current Page authorization.
 """
 from __future__ import annotations
 
-from features.publishing_products import current_app_id, source_app_scope, source_app_sql
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql, is_mobo_product, mobo_product_sql
 import logging
 import re
 from collections import defaultdict
@@ -268,7 +268,7 @@ class GroupPoolSource:
         return self._select(f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,
                    s.type material_type,COALESCE(s.data_source_id,'') content_id,
-                   {source_app_sql("s", self.mysql.schema)} source_app_id,
+                   {source_app_sql("s", self.mysql.schema)} source_app_id,COALESCE(s.product,'') source_product,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
                    COALESCE(s.url,'') media_url,COALESCE(s.cover,'') thumbnail_url,
                    s.video_duration,COALESCE(CAST(s.user_id AS CHAR),'0') uploader_id
@@ -289,6 +289,7 @@ class GroupPoolSource:
         return {
             "material_id": str(row["material_id"]),
             "source_app_id": int(row.get("source_app_id") or 1479),
+            "source_product": str(row.get("source_product") or ""),
             "content_id": _clean_text(row.get("content_id"), maximum=256),
             "material_name": _clean_text(row.get("material_name"), maximum=512),
             "material_tag": _clean_text(row.get("material_tag"), maximum=512, required=False, campaign=True),
@@ -391,12 +392,13 @@ class GroupPoolSource:
                     errors[mid] = {"material_id": mid, "code": "material_not_found", "message": "素材ID不存在"}
             if not materials:
                 continue
-            content_ids = sorted({item["content_id"] for item in materials})
-            resources, releases = ({}, {}) if moboreels else self._metadata(content_ids, [m.get("source_app_id", 1479) for m in materials])
+            regular = [m for m in materials if not moboreels and not is_mobo_product(m.get("source_product"), m.get("source_app_id"))]
+            content_ids = sorted({item["content_id"] for item in regular})
+            resources, releases = self._metadata(content_ids, [m.get("source_app_id", 1479) for m in regular]) if regular else ({}, {})
             for material in materials:
                 mid, content_id = material["material_id"], material["content_id"]
                 try:
-                    if moboreels:
+                    if moboreels or is_mobo_product(material.get("source_product"), material.get("source_app_id")):
                         from .moboreels import enrich, MoboreelsFBError
                         try:
                             found[mid] = {**enrich(material), "policy_version": POLICY_VERSION}

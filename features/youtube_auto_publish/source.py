@@ -1,5 +1,6 @@
 """Replaceable, server-owned SELECT contract. Unconfigured means no material."""
 import json
+from features.publishing_products import is_mobo_product
 import re
 import threading
 import time
@@ -29,10 +30,11 @@ def validate_sql(sql):
 
 
 class MaterialSource:
-    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS, drama_resolver=None, async_cache=False):
+    def __init__(self, sql_file, query_runner, *, allowed_hosts=DEFAULT_HOSTS, drama_resolver=None, async_cache=False, uploader_ids_provider=None):
         self.sql_file, self.query_runner = str(sql_file or ''), query_runner
         self.allowed_hosts = tuple(allowed_hosts)
         self.drama_resolver = drama_resolver
+        self.uploader_ids_provider = uploader_ids_provider
         self.lock = threading.Lock()
         self.cache = None
         self.read_cache = ReadCache() if async_cache else None
@@ -62,7 +64,9 @@ class MaterialSource:
             if re.fullmatch(r'[1-9][0-9]{0,18}', material_id) is None:
                 raise WorkflowError('invalid_material_id','素材标识无效')
             condition += " AND pool.id='%s'" % material_id
-        if search:
+        if re.fullmatch(r'[1-9][0-9]{0,18}', search):
+            condition += " AND pool.id='%s'" % search
+        elif search:
             literal=str(search).encode('utf-8').hex()
             condition += " AND LOCATE(LOWER(CONVERT(0x%s USING utf8mb4)),LOWER(CONCAT(CAST(pool.id AS CHAR),' ',COALESCE(pool.name,''))))>0" % literal
         if uploader_id:
@@ -85,10 +89,11 @@ class MaterialSource:
             ids=[item['id'] for item in items]
             if len(ids)!=len(set(ids)):
                 raise WorkflowError('material_source_ambiguous','素材查询存在重复 ID，请管理员调整 SQL',503)
-            if moboreels:
+            mobo_items = [item for item in items if moboreels or is_mobo_product("", item.get("app_id"))]
+            if mobo_items:
                 from features.moboreels_library.macro_client import lookup_story, MoboreelsLinkError
                 from .reference import normalize_reference_url
-                for item in items:
+                for item in mobo_items:
                     try:
                         drama = lookup_story(item['content_id'])
                     except MoboreelsLinkError as exc:
@@ -99,8 +104,9 @@ class MaterialSource:
                                 drama_cover_url=normalize_reference_url(drama.get('img_src')))
                     item['drama_cover_status'] = 'available' if item['drama_cover_url'] else 'missing'
                     item['drama_cover_message'] = '' if item['drama_cover_url'] else 'Moboreels 原剧封面暂不可用，请选择本地上传'
-            elif self.drama_resolver:
-                items = self.drama_resolver(items)
+            regular = [item for item in items if not moboreels and not is_mobo_product("", item.get("app_id"))]
+            if regular and self.drama_resolver:
+                self.drama_resolver(regular)
             for item in items:
                 item['long_url'] = long_url(item)
                 item['link_ready'] = has_link_source(item)
@@ -131,6 +137,9 @@ class MaterialSource:
                 if re.fullmatch(r'0|[1-9][0-9]{0,18}', value):
                     name = str(item.get('name') or '').strip() or ('未知上传人' if value == '0' else '用户 ' + value)
                     options.append({'id': value, 'name': name})
+            if self.uploader_ids_provider is not None:
+                allowed = self.uploader_ids_provider()
+                options = [item for item in options if item['id'] in allowed]
             return options
         except Exception:
             raise WorkflowError('material_query_failed','上传人查询失败，请稍后刷新',503) from None

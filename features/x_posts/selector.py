@@ -8,7 +8,7 @@ are intentionally outside the X publishing eligibility contract.
 
 from __future__ import annotations
 
-from features.publishing_products import current_app_id, source_app_scope, source_app_sql
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql, is_mobo_product
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -530,9 +530,6 @@ class DramawaveCandidateSelector:
     ):
         from .moboreels import source_enabled, story_metadata
         moboreels = source_enabled()
-        if moboreels:
-            require_dramawave_product = False
-            use_drama_language = True
         material_rows = self._pool_material_rows(
             material_id,
             allow_long_duration=allow_long_duration,
@@ -549,6 +546,10 @@ class DramawaveCandidateSelector:
                 "素材 %s 存在重复源数据" % material_id,
             )
         row = material_rows[0]
+        moboreels = moboreels or is_mobo_product(row.get("product"), row.get("source_app_id"))
+        if moboreels:
+            require_dramawave_product = False
+            use_drama_language = True
         try:
             candidate_id = _text(row.get("material_id"), "material_id", limit=64)
             key = material_key(candidate_id)

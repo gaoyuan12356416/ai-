@@ -1,7 +1,7 @@
 """Bounded, read-only Page and video catalog adapters for manual publishing."""
 from __future__ import annotations
 
-from features.publishing_products import current_app_id, source_app_scope, source_app_sql
+from features.publishing_products import current_app_id, source_app_scope, source_app_sql, is_mobo_product, mobo_product_sql
 import base64
 import hashlib
 import json
@@ -18,6 +18,7 @@ from .templates import TemplateError
 
 MAX_MATERIALS = 200
 PAGE_SIZE = 100
+TEXT_SCAN_IDS = 1000
 SOURCE_HOST = "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
 SOURCE_CDN_HOST = "socialkit-cdn.yingliang.tech"
 
@@ -193,9 +194,9 @@ class SourceRepository:
             sql += " AND TRIM(COALESCE(s.language,''))<>''"
         if not (manual or page_pool or moboreels):
             sql += f"""
-            AND EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
+            AND ({mobo_product_sql("s")} OR EXISTS (SELECT 1 FROM `{schema}`.ads_drama_info d FORCE INDEX(ac)
                 WHERE d.content_id=s.data_source_id AND d.app_id={source_app_sql("s", schema)} AND d.release_status=1
-                AND (d.app_id<>1479 OR d.deploy_time>0) AND d.deploy_time>=0 AND d.deploy_time<=%s AND {drama_language}={source_language})
+                AND (d.app_id<>1479 OR d.deploy_time>0) AND d.deploy_time>=0 AND d.deploy_time<=%s AND {drama_language}={source_language}))
         """
             params.append(int(self.now_fn().timestamp()))
         if enforce_blacklist and not moboreels:
@@ -209,17 +210,19 @@ class SourceRepository:
             """
         return sql, params
 
-    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False):
+    def _select(self, extra="", params=(), limit=101, *, enforce_blacklist=True, manual=False, page_pool=False, moboreels=False, source_index="PRIMARY"):
+        if source_index not in {"PRIMARY", "name", "idx_source_type_source_id"}:
+            raise ValueError("invalid material index")
         condition, base_params = self._conditions(enforce_blacklist=enforce_blacklist, manual=manual,
                                                 page_pool=page_pool, moboreels=moboreels)
         sql = f"""
             SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                    COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
-                   {source_app_sql("s", self.mysql.schema)} source_app_id,
+                   {source_app_sql("s", self.mysql.schema)} source_app_id,COALESCE(s.product,'') source_product,
                    COALESCE(s.url,'') media_url,COALESCE(s.cover,'') thumbnail_url,
                    COALESCE(s.language,'') language,s.video_duration,
                    COALESCE(CAST(s.user_id AS CHAR),'0') uploader_id
-              FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+              FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX({source_index})
              WHERE {condition} {extra}
              ORDER BY s.id DESC LIMIT %s
         """
@@ -242,6 +245,7 @@ class SourceRepository:
             raise SourceError("material_unavailable", "素材缺少有效视频、时长、剧集或语言信息", 409) from None
         return {
             "source_app_id": int(row.get("source_app_id") or 1479),
+            "source_product": str(row.get("source_product") or ""),
             "material_id": material_id, "material_name": str(row["material_name"]).strip(),
             "content_id": content_id, "language": language, "media_url": url,
             "duration_seconds": float(duration), "material_tag": str(row.get("material_tag") or "").strip(),
@@ -252,12 +256,33 @@ class SourceRepository:
     def _enrich(self, materials: list[dict], *, strict: bool, need_desc: bool, manual=False, page_pool=False):
         if not materials:
             return []
+        mobo = [m for m in materials if is_mobo_product(m.get("source_product"), m.get("source_app_id"))]
+        if mobo:
+            from .moboreels import enrich, MoboreelsFBError
+            resolved = {}
+            for item in mobo:
+                try:
+                    item.update(enrich(item))
+                    resolved[item["material_id"]] = item
+                except MoboreelsFBError as exc:
+                    if strict:
+                        raise SourceError(exc.code, str(exc), 409) from None
+            regular = [m for m in materials if not is_mobo_product(m.get("source_product"), m.get("source_app_id"))]
+            for item in self._enrich(regular, strict=strict, need_desc=need_desc, manual=manual, page_pool=page_pool):
+                resolved[item["material_id"]] = item
+            return [resolved[m["material_id"]] for m in materials if m["material_id"] in resolved]
         ids = sorted({item["content_id"] for item in materials})
         placeholders = ",".join("%s" for _ in ids)
         languages = sorted({item["language"] for item in materials})
         language_slots = ",".join("%s" for _ in languages)
         schema = self.mysql.schema
-        app_ids = ",".join(str(int(item.get("source_app_id") or 1479)) for item in materials)
+        # 3214 is the Drama social-material bucket, not a separate drama catalog.
+        # Keep the material's frozen product identity; resolve only its metadata.
+        def metadata_app(item):
+            app_id = int(item.get("source_app_id") or 1479)
+            return 1479 if app_id == 3214 else app_id
+
+        app_ids = ",".join(str(app_id) for app_id in sorted({metadata_app(item) for item in materials}))
         optional_metadata = manual or page_pool
         released = "" if optional_metadata else " AND d.release_status=1 AND (d.app_id<>1479 OR d.deploy_time>0) AND d.deploy_time>=0 AND d.deploy_time<=%s"
         release_params = [] if optional_metadata else [int(self.now_fn().timestamp())]
@@ -289,7 +314,7 @@ class SourceRepository:
                     target.setdefault(key, set()).add(text)
         result = []
         for item in materials:
-            key = (int(item.get("source_app_id") or 1479), item["content_id"], item["language"])
+            key = (metadata_app(item), item["content_id"], item["language"])
             named, described = names.get(key, set()), descs.get(key, set())
             if not optional_metadata and (len(named) != 1 or (need_desc and len(described) != 1)):
                 if strict:
@@ -300,6 +325,69 @@ class SourceRepository:
             item["description_status"] = "matched" if len(described) == 1 else "ambiguous" if described else "missing"
             result.append(item)
         return result
+
+    def _search_identity(self, search):
+        """Resolve complete identities before a bounded substring search.
+
+        Test existence independently of the current language/eligibility, so a
+        complete identity with no eligible rows never falls back to a full scan.
+        """
+        schema = self.mysql.schema
+        if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", search):
+            rows = self.mysql.select(f"""
+                SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id
+                  FROM `{schema}`.ads_custom_source s FORCE INDEX(idx_source_type_source_id)
+                 WHERE s.data_source=%s AND s.data_source_id=%s
+                   AND BINARY s.data_source_id=BINARY %s LIMIT 1
+            """, ["6", search, search])
+            if rows:
+                return "content_id", [], "idx_source_type_source_id"
+        rows = self.mysql.select(f"""
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(s.id AS CHAR) material_id
+              FROM `{schema}`.ads_custom_source s FORCE INDEX(name)
+             WHERE s.name=%s AND BINARY LOWER(s.name)=BINARY LOWER(%s) LIMIT 1
+        """, [search, search])
+        if rows:
+            return "material_name", [], "name"
+        rows = self.mysql.select(f"""
+            SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT CAST(ds.content_id AS CHAR) content_id
+              FROM `{schema}`.ads_drama_info ds FORCE INDEX(name)
+             WHERE ds.name=%s AND BINARY LOWER(ds.name)=BINARY LOWER(%s) LIMIT 1001
+        """, [search, search])
+        if 0 < len(rows) <= 1000:
+            ids = list(dict.fromkeys(str(row["content_id"]) for row in rows if row.get("content_id")))
+            if ids:
+                return "drama_name", ids, "idx_source_type_source_id"
+        return "text", [], "PRIMARY"
+
+
+    def _text_search_rows(self, rows, search, *, manual=False):
+        # Match names after the bounded source read. A correlated drama/product
+        # predicate over even a small range can still exceed the SQL deadline.
+        needle = search.lower()
+        matched = {str(row["material_id"]) for row in rows
+                   if needle in (str(row["material_id"]) + " " + str(row.get("material_name") or "")).lower()}
+        remaining = [row for row in rows if str(row["material_id"]) not in matched]
+        ids = list(dict.fromkeys(str(row.get("content_id") or "") for row in remaining))
+        app_ids = sorted({int(row.get("source_app_id") or 1479) for row in remaining})
+        keys = set()
+        for offset in range(0, len(ids), 200):
+            chunk = ids[offset:offset + 200]
+            release = "" if manual else " AND ds.release_status=1 AND (ds.app_id<>1479 OR ds.deploy_time>0) AND ds.deploy_time>=0 AND ds.deploy_time<=%s"
+            release_params = [] if manual else [int(self.now_fn().timestamp())]
+            dramas = self.mysql.select(f"""
+                SELECT /*+ MAX_EXECUTION_TIME(8000) */ DISTINCT ds.app_id,
+                       CAST(ds.content_id AS CHAR) content_id,COALESCE(ds.language,'') language
+                  FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
+                 WHERE ds.content_id IN ({','.join('%s' for _ in chunk)})
+                   AND ds.app_id IN ({','.join(str(value) for value in app_ids)}){release}
+                   AND LOCATE(BINARY LOWER(%s),BINARY LOWER(COALESCE(ds.name,'')))>0 LIMIT 20001
+            """, chunk + release_params + [search])
+            keys.update((int(row["app_id"]), str(row["content_id"]), page_language(row.get("language"))) for row in dramas)
+        return [row for row in rows if str(row["material_id"]) in matched or (
+            int(row.get("source_app_id") or 1479), str(row.get("content_id") or ""),
+            page_language(row.get("language"))) in keys]
+
 
     def search_materials(self, query: Mapping[str, Any], *, enforce_blacklist=True, manual=False) -> dict:
         if not isinstance(query, Mapping):
@@ -328,6 +416,8 @@ class SourceRepository:
         fingerprint = hashlib.sha256(json.dumps(filters, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         extra, params, boundary = [], [], ""
         numeric_search = bool(re.fullmatch(r"[0-9]+", search))
+        multiple_ids = bool(re.fullmatch(r"[0-9]+(?:[\s,，;；]+[0-9]+)+", search))
+        search_kind, content_ids, source_index = "", [], "PRIMARY"
         if numeric_search:
             if len(search) > 19:
                 raise SourceError("invalid_request", "素材ID不能超过19位")
@@ -335,19 +425,35 @@ class SourceRepository:
             # requested row fails eligibility and a LIMIT cannot stop a scan).
             extra.append("AND s.id=%s")
             params.append(int(search))
+            search_kind = "material_id"
+        elif multiple_ids:
+            ids = list(dict.fromkeys(re.split(r"[\s,，;；]+", search)))
+            if any(len(value) > 19 for value in ids):
+                raise SourceError("invalid_request", "素材ID不能超过19位")
+            extra.append("AND s.id IN (" + ",".join("%s" for _ in ids) + ")")
+            params.extend(int(value) for value in ids)
+            search_kind = "material_ids"
         elif search and moboreels:
             extra.append("AND (LOCATE(LOWER(%s),LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0 OR EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND LOCATE(LOWER(%s),LOWER(d.story_name))>0))")
             params.extend([search, institution, search])
         elif search:
+            search_kind, content_ids, source_index = self._search_identity(search)
             released_search = "" if manual else " AND ds.release_status=1 AND (ds.app_id<>1479 OR ds.deploy_time>0) AND ds.deploy_time>=0 AND ds.deploy_time<=%s"
             search_release_params = [] if manual else [int(self.now_fn().timestamp())]
-            extra.append(f"""AND (
-                LOCATE(BINARY LOWER(%s),BINARY LOWER(CONCAT(CAST(s.id AS CHAR),' ',COALESCE(s.name,''))))>0
-                OR EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
+            if search_kind == "content_id":
+                extra.append("AND s.data_source_id=%s AND BINARY s.data_source_id=BINARY %s")
+                params.extend([search, search])
+            elif search_kind == "material_name":
+                extra.append("AND s.name=%s AND BINARY LOWER(s.name)=BINARY LOWER(%s)")
+                params.extend([search, search])
+            elif search_kind == "drama_name":
+                extra.append("AND s.data_source_id IN (" + ",".join("%s" for _ in content_ids) + ")")
+                params.extend(content_ids)
+                extra.append(f"""AND EXISTS (SELECT 1 FROM `{self.mysql.schema}`.ads_drama_info ds FORCE INDEX(ac)
                     WHERE ds.content_id=s.data_source_id AND ds.app_id={source_app_sql("s", self.mysql.schema)}{released_search}
                       AND {_language_sql("ds.language")}={_language_sql("s.language")}
-                      AND LOCATE(BINARY LOWER(%s),BINARY LOWER(COALESCE(ds.name,'')))>0))""")
-            params.extend([search] + search_release_params + [search])
+                      AND BINARY LOWER(ds.name)=BINARY LOWER(%s))""")
+                params.extend(search_release_params + [search])
         if language:
             extra.append("AND " + _language_sql("s.language") + "=%s")
             params.append(language)
@@ -371,10 +477,25 @@ class SourceRepository:
                 params.extend([decoded["before"], boundary])
             except (ValueError, TypeError, KeyError, UnicodeError):
                 raise SourceError("invalid_cursor", "分页标识无效或筛选条件已改变，请从第一页重新加载") from None
+        scan_floor = None
+        if search_kind == "text":
+            if not boundary:
+                bound_rows = self.mysql.select(f"""
+                    SELECT /*+ MAX_EXECUTION_TIME(8000) */ CAST(MAX(s.id) AS CHAR) scan_bound
+                      FROM `{self.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+                """, [])
+                boundary = str(bound_rows[0].get("scan_bound") or "0")
+            scan_upper = int(decoded["before"]) - 1 if cursor else int(boundary)
+            scan_floor = max(0, scan_upper - TEXT_SCAN_IDS)
+            extra.extend(["AND s.id>%s", "AND s.id<=%s"])
+            params.extend([scan_floor, scan_upper])
         if moboreels:
             extra.append("AND EXISTS (SELECT 1 FROM `ads_ai`.cdreader_koc_drama d WHERE d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1)")
             params.append(institution)
-        rows = self._select(" ".join(extra), params, limit + 1, enforce_blacklist=enforce_blacklist, manual=manual, **({"moboreels": True} if moboreels else {}))
+        index_option = {"source_index": source_index} if source_index != "PRIMARY" else {}
+        rows = self._select(" ".join(extra), params, TEXT_SCAN_IDS + 1 if search_kind == "text" else limit + 1, enforce_blacklist=enforce_blacklist, manual=manual, **index_option, **({"moboreels": True} if moboreels else {}))
+        if search_kind == "text":
+            rows = self._text_search_rows(rows, search, manual=manual)
         raw_ids = [str(row.get("material_id") or "") for row in rows]
         if (any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in raw_ids)
                 or len(raw_ids) != len(set(raw_ids)) or raw_ids != sorted(raw_ids, key=int, reverse=True)):
@@ -391,12 +512,17 @@ class SourceRepository:
             items = [enrich(item) for item in materials]
         else:
             items = self._enrich(materials, strict=False, need_desc=False, manual=manual)
-        has_more = len(rows) > limit
+        has_more = len(rows) > limit or (scan_floor is not None and scan_floor > 0)
         next_cursor = ""
-        if has_more and scanned:
-            value = {"v": 1, "before": str(scanned[-1]["material_id"]), "bound": boundary or raw_ids[0], "filter": fingerprint}
+        if has_more:
+            before = str(scanned[-1]["material_id"]) if len(rows) > limit else str(scan_floor + 1)
+            value = {"v": 1, "before": before, "bound": boundary or raw_ids[0], "filter": fingerprint}
             next_cursor = base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
         result = {"items": items, "next_cursor": next_cursor, "has_more": has_more, "limit": limit}
+        if search_kind:
+            result["search_kind"] = search_kind
+        if scan_floor is not None:
+            result["search_incomplete"] = has_more
         if numeric_search and not items and not cursor and not moboreels:
             result["empty_reason"] = self._exact_search_reason(int(search), language, uploader, enforce_blacklist=enforce_blacklist, manual=manual)
         return result

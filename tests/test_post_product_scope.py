@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 import features.fb_auto_posts
@@ -38,20 +39,29 @@ def deploy(app):
 
 
 class ProductScopeTests(unittest.TestCase):
-    def test_same_content_id_resolves_with_its_actual_product(self):
+    def setUp(self):
+        mock = patch('features.moboreels_library.macro_client.lookup_story', return_value={
+            'story_id':'shared-id','is_show':1,'lang_id':3,
+            'story_name':'Mobo AI Library','introduce':'Library Description'})
+        self.lookup = mock.start()
+        self.addCleanup(mock.stop)
+
+    def test_same_content_id_resolves_with_its_authoritative_catalog(self):
         repo=SourceRepository(SimpleNamespace(schema='kunlunads_dev'))
         apps=[1479,3360,2373]
         rows=[material(i+1,app) for i,app in enumerate(apps)]
         result=repo._resolve_rows(['1','2','3'],rows,mappings=([drama(a) for a in apps],[deploy(a) for a in apps]))
         self.assertEqual(result['errors'],{})
-        self.assertEqual([result['items'][str(i+1)]['drama_name'] for i in range(3)],['Title-'+str(a) for a in apps])
+        self.assertEqual([result['items'][str(i+1)]['drama_name'] for i in range(3)],['Title-1479','Mobo AI Library','Mobo AI Library'])
         self.assertEqual(current_app_id(),1479)
 
     def test_missing_own_mapping_does_not_borrow_another_product(self):
+        from features.moboreels_library.macro_client import MoboreelsEligibilityError
+        self.lookup.side_effect = MoboreelsEligibilityError('Not available in AI library')
         repo=SourceRepository(SimpleNamespace(schema='kunlunads_dev'))
         result=repo._resolve_rows(['1'],[material(1,3360)],mappings=([drama(1479)],[deploy(1479)]))
         self.assertEqual(result['items'],{})
-        self.assertEqual(result['errors']['1']['code'],'drama_mapping_missing')
+        self.assertEqual(result['errors']['1']['code'],'moboreels_story_invalid')
 
     def test_context_resets_after_failure(self):
         with self.assertRaises(RuntimeError):
@@ -70,9 +80,9 @@ class ProductScopeTests(unittest.TestCase):
                 self.assert_sql=sql
                 return [drama(a) for a in (1479,3360,2373)]
         repo=FBSource(None,SimpleNamespace(mysql=SQL()))
-        values=[dict(content_id='shared-id',language='en',source_app_id=a) for a in (1479,3360,2373)]
+        values=[dict(material_id=str(a),content_id='shared-id',language='en',source_app_id=a) for a in (1479,3360,2373)]
         result=repo._enrich(values,strict=True,need_desc=True,manual=True)
-        self.assertEqual([r['drama_name'] for r in result],['Title-1479','Title-3360','Title-2373'])
+        self.assertEqual([r['drama_name'] for r in result],['Title-1479','Mobo AI Library','Mobo AI Library'])
         condition,params=repo._conditions(enforce_blacklist=False,manual=True)
         self.assertNotIn('s.product=%s',condition)
 
