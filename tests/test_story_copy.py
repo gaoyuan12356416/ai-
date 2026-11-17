@@ -25,6 +25,7 @@ class CaptionTests(unittest.TestCase):
         for patcher in [
             patch.object(store, "ROOT", self.root),
             patch.object(store, "DB", self.root / "copy.db"),
+            patch.object(store, "TAG_POSTS", str(db)),
             patch.object(
                 store,
                 "SOURCES",
@@ -123,20 +124,198 @@ class CaptionTests(unittest.TestCase):
                 97,
             )
             self.assertEqual(
-                c.execute("SELECT count(*) FROM jobs WHERE state='failed'").fetchone()[
+                c.execute("SELECT count(*) FROM jobs WHERE state='retry_wait'").fetchone()[
                     0
                 ],
                 3,
             )
             sent = []
             alerts.deliver(c, lambda event, body: sent.append(body) or "receipt")
+            self.assertEqual(sent, [])
+            retry_batch, retry_rows = store.claim(c)
+            self.assertEqual(len(retry_rows), 4)
+            self.assertEqual({t["key"] for t in retry_rows}, {self.task(i)["key"] for i in range(98, 102)})
+
+            def second_failure(part, emit, usage):
+                emit(self.item(self.task(101)))
+                raise RuntimeError("generation_timeout")
+
+            worker.generate_batch(c, retry_batch, retry_rows, second_failure)
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='ready'").fetchone()[0], 98)
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='failed'").fetchone()[0], 3)
+            alerts.deliver(c, lambda event, body: sent.append(body) or "receipt")
             self.assertEqual(len(sent), 1)
             self.assertIn("影响 3 条", sent[0])
-            self.assertEqual(len(store.claim(c)[1]), 1)
+            self.assertIn("重试一次仍失败", sent[0])
+            self.assertFalse(store.claim(c)[1])
             for t in rows[97:]:
                 self.assertEqual(
                     bridge.select(t, "原正文", "https://example.org/task")[2], "原正文"
                 )
+
+    @staticmethod
+    def provider_down(rows, emit, usage):
+        raise RuntimeError("codex_generation_failed")
+
+    def test_retry_joins_next_queue_and_keeps_prompt_groups_separate(self):
+        with store.connection() as c:
+            old = [self.task(i, f) for i, f in enumerate(("fa", "xm", "xd", "ta"), 1)]
+            for t in old:
+                store.enqueue(c, t)
+            c.commit()
+            first, rows = store.claim(c)
+            worker.generate_batch(c, first, rows, self.provider_down)
+            fresh = dict(self.task(5), content="other", title="The Seal", product="hotdrama")
+            fresh["facts"] = {"series": "A queen hides a seal."}
+            store.enqueue(c, fresh)
+            c.commit()
+            second, rows = store.claim(c)
+            self.assertEqual(len(rows), 5)
+            seen = []
+
+            def success(chunk, emit, usage):
+                self.assertEqual(len({model.group_key(t) for t in chunk}), 1)
+                request = json.loads(generator.prompt(chunk))
+                seen.append((request["title"], request["product"], len(chunk)))
+                for t in chunk:
+                    emit(self.item(t))
+
+            worker.generate_batch(c, second, rows, success)
+            self.assertEqual(seen, [("The Rivals", "dramawave", 4), ("The Seal", "hotdrama", 1)])
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='ready' AND reason=''").fetchone()[0], 5)
+            retries = c.execute("SELECT * FROM retries").fetchall()
+            self.assertEqual(len(retries), 4)
+            for r in retries:
+                self.assertEqual((r["first_batch"], r["retry_batch"], r["state"]), (first, second, "succeeded"))
+                self.assertEqual(r["first_reason"], "codex_generation_failed")
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+            self.assertEqual(bridge.select(old[0], "legacy", "https://example.org/t")[0], "ai")
+
+    def test_retry_survives_restart_and_runs_without_new_work_after_window(self):
+        with store.connection() as c:
+            store.enqueue(c, self.task(1))
+            c.commit()
+            first, rows = store.claim(c)
+            worker.generate_batch(c, first, rows, self.provider_down)
+            due = c.execute("SELECT retry_after FROM retries").fetchone()[0]
+        store.initialize()
+        with store.connection() as c:
+            worker.restore(c)
+            with patch.object(store.time, "time", return_value=due - 1):
+                self.assertFalse(store.claim(c)[1])
+            with patch.object(store.time, "time", return_value=due):
+                second, rows = store.claim(c)
+            self.assertEqual(len(rows), 1)
+            worker.generate_batch(c, second, rows, lambda *args: None)
+            r = c.execute("SELECT * FROM retries").fetchone()
+            self.assertEqual(r["state"], "failed")
+            self.assertEqual(r["reason"], "missing_model_row")
+            self.assertEqual(r["first_reason"], "codex_generation_failed")
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 1)
+            with patch.object(store.time, "time", return_value=due + 86400):
+                self.assertFalse(store.claim(c)[1])
+
+    def test_invalid_generated_copy_also_gets_one_retry(self):
+        with store.connection() as c:
+            task = self.task(1)
+            store.enqueue(c, task)
+            c.commit()
+            first, rows = store.claim(c)
+            worker.generate_batch(c, first, rows, lambda rows, emit, usage: emit(dict(self.item(task), language="fr")))
+            self.assertEqual(c.execute("SELECT state FROM jobs").fetchone()[0], "retry_wait")
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+            c.execute("UPDATE retries SET retry_after=0")
+            c.commit()
+            second, rows = store.claim(c)
+            worker.generate_batch(c, second, rows, lambda rows, emit, usage: emit(self.item(task)))
+            self.assertEqual(c.execute("SELECT state FROM jobs").fetchone()[0], "ready")
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+
+    def test_interrupted_attempts_keep_successes_and_never_retry_twice(self):
+        with store.connection() as c:
+            for i in (1, 2):
+                store.enqueue(c, self.task(i))
+            c.commit()
+            first, rows = store.claim(c)
+            store.accept(c, first, rows[0], self.item(rows[0]))
+            worker.restore(c)
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='ready'").fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='retry_wait'").fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+            c.execute("UPDATE retries SET retry_after=0")
+            c.commit()
+            second, rows = store.claim(c)
+            self.assertEqual(len(rows), 1)
+            worker.restore(c)
+            worker.restore(c)
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT state,reason FROM retries").fetchone()[:], ("failed", "worker_interrupted"))
+            self.assertFalse(store.claim(c)[1])
+
+    def test_native_receipt_cancels_waiting_or_inflight_retry_without_alert(self):
+        for i, inflight in enumerate((False, True), 1):
+            with self.subTest(inflight=inflight), store.connection() as c:
+                task = self.task(i)
+                store.enqueue(c, task)
+                c.commit()
+                first, rows = store.claim(c)
+                worker.generate_batch(c, first, rows, self.provider_down)
+                if inflight:
+                    c.execute("UPDATE retries SET retry_after=0")
+                    c.commit()
+                    second, rows = store.claim(c)
+                with store.connection(self.fb) as native:
+                    bridge.receipt(native, task, "legacy", "codex_generation_failed", "frozen text", "https://example.org/t", first)
+                worker.sync_receipts(c)
+                if inflight:
+                    worker.generate_batch(c, second, rows, lambda rows, emit, usage: emit(self.item(task)))
+                job = c.execute("SELECT * FROM jobs WHERE key=?", (task["key"],)).fetchone()
+                self.assertEqual((job["state"], job["final"], job["draft"]), ("legacy", "frozen text", None))
+                self.assertEqual(c.execute("SELECT state FROM retries WHERE key=?", (task["key"],)).fetchone()[0], "finalized")
+                self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+                self.assertFalse(store.claim(c)[1])
+
+    def test_retry_schema_preserves_historical_failures(self):
+        with store.connection() as c:
+            store.enqueue(c, self.task(1))
+            c.execute("UPDATE jobs SET state='failed',reason='codex_generation_failed'")
+            c.execute("DROP TABLE retries")
+        store.initialize()
+        with store.connection() as c:
+            self.assertFalse(store.claim(c)[1])
+            self.assertEqual(c.execute("SELECT count(*) FROM retries").fetchone()[0], 0)
+
+    def test_retry_prompts_keep_languages_and_facts_separate(self):
+        english = self.task(1)
+        french = dict(self.task(2), language="fr", title="Le Sceau", facts={"series": "La reine cache un sceau."})
+        groups = list(generator.splits([english, french, self.task(3)]))
+        self.assertEqual([len(g) for g in groups], [2, 1])
+        requests = [json.loads(generator.prompt(g)) for g in groups]
+        self.assertEqual([r["title"] for r in requests], ["The Rivals", "Le Sceau"])
+        self.assertEqual({t["language"] for t in requests[0]["tasks"]}, {"en"})
+        self.assertEqual({t["language"] for t in requests[1]["tasks"]}, {"fr"})
+        self.assertNotIn("Two heirs", json.dumps(requests[1]))
+
+    def test_publish_batch_alert_waits_for_remaining_retry(self):
+        with store.connection() as c:
+            task = dict(self.task(1), publish_batch="native-batch")
+            store.enqueue(c, task)
+            c.commit()
+            first, rows = store.claim(c)
+            worker.generate_batch(c, first, rows, self.provider_down)
+            other = dict(self.task(2), publish_batch="native-batch")
+            alerts.add(c, "other-final-failure", [worker.alert_item(other, "codex_generation_failed")])
+            c.commit()
+            sent = []
+            alerts.deliver(c, lambda event, body: sent.append(body) or "receipt")
+            self.assertEqual(sent, [])
+            c.execute("UPDATE retries SET retry_after=0")
+            c.commit()
+            second, rows = store.claim(c)
+            worker.generate_batch(c, second, rows, self.provider_down)
+            alerts.deliver(c, lambda event, body: sent.append(body) or "receipt")
+            self.assertEqual(len(sent), 1)
+            self.assertIn("影响 2 条", sent[0])
 
     def test_generation_ignores_unavailable_history_and_uses_repeated_copy(self):
         with store.connection() as c:

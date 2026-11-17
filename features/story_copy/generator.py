@@ -86,7 +86,13 @@ def splits(tasks):
         else:
             yield rows
 
-    return fit(tasks)
+    # A queue may now carry retries from another drama or language. Each prompt
+    # still has exactly one title/product/language and its own supplied facts.
+    groups = {}
+    for task in tasks:
+        groups.setdefault(group_key(task), []).append(task)
+    for rows in groups.values():
+        yield from fit(rows)
 
 
 class Lines:

@@ -106,7 +106,7 @@ def deliver(c, send_func=send):
         if not packet and r["incident"]:
             publication = r["incident"].startswith("publish-batch:")
             if publication and c.execute(
-                "SELECT 1 FROM jobs WHERE state IN ('pending','generating') "
+                "SELECT 1 FROM jobs WHERE state IN ('pending','generating','retry_wait') "
                 "AND json_extract(payload,'$.publish_batch')=? LIMIT 1",
                 (r["incident"].removeprefix("publish-batch:"),),
             ).fetchone():

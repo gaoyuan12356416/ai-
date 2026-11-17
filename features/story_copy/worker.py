@@ -79,12 +79,8 @@ def generate_batch(c, batch, tasks, runner=generator.run):
     failed = []
     for t in tasks:
         reason = errors.get(t["key"], "missing_model_row")
-        changed = c.execute(
-            "UPDATE jobs SET state='failed',reason=? WHERE key=? AND batch=? AND state='generating'",
-            (reason, t["key"], batch),
-        ).rowcount
-        if changed:
-            failed.append(alert_item(t, reason))
+        if store.fail(c, batch, t["key"], reason) == "failed":
+            failed.append(alert_item(t, reason, "重试一次仍失败，到点使用现行文案"))
     accepted = c.execute(
         "SELECT count(*) FROM jobs WHERE batch=? AND draft IS NOT NULL", (batch,)
     ).fetchone()[0]
@@ -147,6 +143,9 @@ def sync_receipts(c):
                         task = None
                 if task:
                     oldreason = job["reason"] if job else ""
+                    retry = c.execute(
+                        "SELECT 1 FROM retries WHERE key=?", (key,)
+                    ).fetchone()
                     c.execute(
                         "UPDATE jobs SET state=?,reason=?,final=?,short=? WHERE key=?",
                         (
@@ -157,7 +156,13 @@ def sync_receipts(c):
                             key,
                         ),
                     )
-                    if r["source"] == "legacy" and not oldreason:
+                    # A native receipt freezes the copy. Cancel pending retries,
+                    # preserving the first failure and never replaying publication.
+                    c.execute(
+                        "UPDATE retries SET state='finalized',reason=?,finished=? WHERE key=? AND state IN ('pending','generating')",
+                        (r["reason"], time.time(), key),
+                    )
+                    if r["source"] == "legacy" and not oldreason and not retry:
                         alerts.add(
                             c,
                             "receipt-batch:"
@@ -194,10 +199,11 @@ def restore(c):
         rows = c.execute(
             "SELECT payload FROM jobs WHERE batch=? AND state='generating'", (batch,)
         ).fetchall()
-        c.execute(
-            "UPDATE jobs SET state='failed',reason='worker_interrupted' WHERE batch=? AND state='generating'",
-            (batch,),
-        )
+        failed = []
+        for row in rows:
+            task = sources.obj(row[0])
+            if store.fail(c, batch, task["key"], "worker_interrupted") == "failed":
+                failed.append(alert_item(task, "worker_interrupted", "重试一次仍失败，到点使用现行文案"))
         c.execute(
             "UPDATE batches SET finished=?,accepted=(SELECT count(*) FROM jobs WHERE batch=? AND draft IS NOT NULL),reason='worker_interrupted' WHERE id=?",
             (time.time(), batch, batch),
@@ -205,7 +211,7 @@ def restore(c):
         alerts.add(
             c,
             "batch:" + str(batch),
-            [alert_item(sources.obj(r[0]), "worker_interrupted") for r in rows],
+            failed,
         )
     c.commit()
 

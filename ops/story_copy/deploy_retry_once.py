@@ -1,0 +1,46 @@
+"""Release persistent one-time caption retries without restarting publishers."""
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(SRC))
+from features.story_copy import store
+from ops.story_copy import deploy as d
+from ops.story_copy import deploy_no_history as release
+
+release.FILES = tuple("features/story_copy/" + name for name in
+                      ("worker.py", "generator.py", "store.py", "alerts.py"))
+
+
+def prepare(folder):
+    release.prepare(folder)
+    backup = folder / "captions-before.sqlite3"
+    with store.connection(readonly=True) as source:
+        with sqlite3.connect(backup) as target:
+            source.backup(target)
+    backup.chmod(0o600)
+    rec = json.loads((folder / "record.json").read_text())
+    rec["database_backup"] = str(backup)
+    d.save(folder, rec)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("prepare", "apply", "rollback"))
+    parser.add_argument("folder", type=Path)
+    args = parser.parse_args()
+    folder = args.folder.resolve()
+    if (folder.parent != Path("/mnt/data-disk/story-copy-deploy")
+            or not os.path.ismount("/mnt/data-disk")
+            or d.read("findmnt", "-n", "-o", "UUID", "--mountpoint", "/mnt/data-disk")
+            != "3e8ac4e8-7770-456d-9e89-2ec5dd405fa8"):
+        raise SystemExit("unexpected deployment path or data disk")
+    if args.action == "prepare":
+        prepare(folder)
+    else:
+        release.switch(folder, args.action == "rollback")

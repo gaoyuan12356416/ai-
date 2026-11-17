@@ -39,6 +39,7 @@ SOURCES = {
 }
 TAG_POSTS = "/mnt/data-disk/x-tag-publisher/posts.sqlite3"
 SOURCES["tm"] = ("x_material", TAG_POSTS, "x_post_queue")
+RETRY_DELAY_SECONDS = 60
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS switches(id INTEGER PRIMARY KEY,endpoint TEXT,enabled INTEGER,marks TEXT,actor TEXT,at REAL);
 CREATE INDEX IF NOT EXISTS switch_endpoint ON switches(endpoint,id DESC);
@@ -51,6 +52,8 @@ CREATE TABLE IF NOT EXISTS history(product TEXT,content TEXT,lang TEXT,hash TEXT
  PRIMARY KEY(product,content,lang,hash));
 CREATE TABLE IF NOT EXISTS batches(id INTEGER PRIMARY KEY,created REAL,finished REAL,requested INTEGER,
  accepted INTEGER DEFAULT 0,input_tokens INTEGER,output_tokens INTEGER,calls INTEGER DEFAULT 0,reason TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS retries(key TEXT PRIMARY KEY,first_batch INTEGER NOT NULL,first_reason TEXT NOT NULL,
+ created REAL NOT NULL,retry_after REAL NOT NULL,retry_batch INTEGER,finished REAL,state TEXT NOT NULL,reason TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS alerts(event TEXT PRIMARY KEY,incident TEXT,body TEXT,created REAL,sent REAL,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,receipt TEXT);
 CREATE TABLE IF NOT EXISTS alert_packets(id TEXT PRIMARY KEY,incident TEXT,events TEXT,body TEXT,delivered REAL);
 CREATE TABLE IF NOT EXISTS packed_alerts(event TEXT PRIMARY KEY,packet TEXT);
@@ -176,28 +179,66 @@ def enqueue(c, task):
 
 def claim(c):
     c.execute("BEGIN IMMEDIATE")
+    now = time.time()
     row = c.execute(
         """SELECT product,content,lang FROM jobs WHERE state='pending' GROUP BY product,content,lang
         HAVING count(*)>=100 OR min(created)<=? OR max(coalesce(json_extract(payload,'$.urgent'),0))=1
         ORDER BY min(created) LIMIT 1""",
-        (time.time() - 60,),
+        (now - 60,),
     ).fetchone()
-    if not row:
+    # Carry failures into the next ready queue, even if its drama/language differs.
+    # With no new work, retry after one normal collection window instead of waiting forever.
+    rows = c.execute(
+        """SELECT j.key,j.payload FROM jobs j JOIN retries r ON r.key=j.key
+        WHERE j.state='retry_wait' AND r.state='pending' AND (r.retry_after<=? OR ?)
+        ORDER BY r.created,j.key LIMIT 100""",
+        (now, row is not None),
+    ).fetchall()
+    if row and len(rows) < 100:
+        rows += c.execute(
+            "SELECT key,payload FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=? ORDER BY created,key LIMIT ?",
+            (*row, 100 - len(rows)),
+        ).fetchall()
+    if not rows:
         c.commit()
         return None, []
-    rows = c.execute(
-        "SELECT key,payload FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=? ORDER BY created,key LIMIT 100",
-        tuple(row),
-    ).fetchall()
     batch = c.execute(
-        "INSERT INTO batches(created,requested) VALUES(?,?)", (time.time(), len(rows))
+        "INSERT INTO batches(created,requested) VALUES(?,?)", (now, len(rows))
     ).lastrowid
     c.executemany(
         "UPDATE jobs SET state='generating',batch=? WHERE key=?",
         [(batch, r["key"]) for r in rows],
     )
+    c.executemany(
+        "UPDATE retries SET state='generating',retry_batch=? WHERE key=? AND state='pending'",
+        [(batch, r["key"]) for r in rows],
+    )
     c.commit()
     return batch, [json.loads(r["payload"]) for r in rows]
+
+
+def fail(c, batch, key, reason):
+    """Persist the first failure, or settle the single retry. Caller commits with its alert."""
+    retry = c.execute("SELECT 1 FROM retries WHERE key=?", (key,)).fetchone()
+    state = "failed" if retry else "retry_wait"
+    changed = c.execute(
+        "UPDATE jobs SET state=?,reason=? WHERE key=? AND batch=? AND state='generating'",
+        (state, reason, key, batch),
+    ).rowcount
+    if not changed:
+        return None  # A valid draft or native final receipt already settled this job.
+    now = time.time()
+    if retry:
+        c.execute(
+            "UPDATE retries SET state='failed',reason=?,finished=? WHERE key=? AND retry_batch=?",
+            (reason, now, key, batch),
+        )
+    else:
+        c.execute(
+            "INSERT INTO retries(key,first_batch,first_reason,created,retry_after,state) VALUES(?,?,?,?,?,'pending')",
+            (key, batch, reason, now, now + RETRY_DELAY_SECONDS),
+        )
+    return state
 
 
 def accept(c, batch, task, item):
@@ -209,9 +250,14 @@ def accept(c, batch, task, item):
     try:
         clean.update(options[0])
         changed = c.execute(
-            "UPDATE jobs SET state='ready',draft=?,plot=?,hash=? WHERE key=? AND batch=? AND state='generating'",
+            "UPDATE jobs SET state='ready',draft=?,plot=?,hash=?,reason='' WHERE key=? AND batch=? AND state='generating'",
             (dump(clean), plot, digest, task["key"], batch),
         ).rowcount
+        if changed:
+            c.execute(
+                "UPDATE retries SET state='succeeded',reason='',finished=? WHERE key=? AND retry_batch=?",
+                (time.time(), task["key"], batch),
+            )
         c.commit()
         return bool(changed)
     except Exception:
