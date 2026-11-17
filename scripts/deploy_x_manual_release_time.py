@@ -167,8 +167,21 @@ def activate(folder, reverse=False):
         for relative, digest in record['runtime_before'].items():
             assert sha(POINTER / relative) == digest, 'concurrent_runtime_file_change:' + relative
     prefix = 'rollback-' if reverse else ''
-    scheduler(folder, 'snapshot', prefix)
-    baseline = states(OWNERS + TRIGGERS + DEPENDENTS)
+    current = states(OWNERS + TRIGGERS + DEPENDENTS)
+    # A stopped deployment controller may leave the normal ExecStop barrier
+    # running. Resume only after that barrier and any concurrent owner switch
+    # have finished; never replace or terminate either service's drain helper.
+    assert not any(current[u] in {'activating', 'deactivating'} for u in OWNERS), 'owner_switch_in_progress'
+    resuming = not reverse and record['status'] == 'draining'
+    if resuming:
+        baseline = dict(record['units_before'])
+        assert all(current[u] == 'active' for u in OWNERS if baseline.get(u) == 'deactivating'), 'concurrent_owner_not_ready'
+        for unit, state in current.items():
+            if state == 'active' or baseline.get(unit) == 'deactivating':
+                baseline[unit] = state
+    else:
+        scheduler(folder, 'snapshot', prefix)
+        baseline = current
     record[prefix + 'units_before'] = baseline
     record['status'] = prefix + 'draining'
     save(folder, record)
@@ -177,11 +190,16 @@ def activate(folder, reverse=False):
         run('systemctl', 'stop', *triggers)
     print(json.dumps(dict(status=record['status'], folder=str(folder))), flush=True)
     switched = False
+    install_started = False
     try:
         # Existing ExecStop drain remains authoritative, including segmented uploads.
         for unit in OWNERS:
             if baseline[unit] == 'active':
                 run('systemctl', 'stop', unit)
+        assert str(POINTER.resolve()) == record['after' if reverse else 'before'], 'concurrent_runtime_switch'
+        for target, info in record['files'].items():
+            assert sha(Path(target)) == info['after' if reverse else 'before'], 'concurrent_file_change:' + target
+        install_started = True
         install(record, reverse)
         for unit in reversed(OWNERS):
             if baseline[unit] == 'active':
@@ -192,7 +210,8 @@ def activate(folder, reverse=False):
         for unit in OWNERS:
             if baseline[unit] == 'active':
                 run('systemctl', 'stop', unit)
-        install(record, not reverse)
+        if install_started:
+            install(record, not reverse)
         for unit in reversed(OWNERS):
             if baseline[unit] == 'active':
                 run('systemctl', 'start', unit)
