@@ -6,7 +6,7 @@ import json
 import sqlite3
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -159,7 +159,7 @@ def refresh(part, audit, last_pass):
     print(
         lang,
         len(part),
-        {s: list(outcomes.values()).count(s) for s in set(outcomes)},
+        dict(Counter(outcomes.values())),
         flush=True,
     )
 
