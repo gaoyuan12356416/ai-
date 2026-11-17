@@ -47,7 +47,7 @@ def fuzzy_matches(mats, original_ids):
     for mid,row in mats.items():
         key=structured_key(row['n'])
         row['matchKey']=list(key) if key else None
-        if key and row['l'].lower()!='en':index[key].append(mid)
+        if key and row['l'].lower()!='en' and not row.get('originOnly'):index[key].append(mid)
     return {mid:[{'mid':target,'score':1.0,'reason':'主体作者尾号一致'}
                  for target in sorted(index.get(structured_key(mats[mid]['n']),()),key=int)
                  if target!=mid and canonical_lang(mats[target]['l'])!=canonical_lang(mats[mid]['l'])]
@@ -63,12 +63,16 @@ def structured_key(name):
     import unicodedata
     s=unicodedata.normalize('NFKC',name).lower().strip()
     s=re.sub(r'(?:[._-](?:mp4|png|jpg|jpeg))+$','',s)
+    ratio=re.search(r'\(\s*(\d+)\s*:\s*(\d+)\s*\)\s*$',s)
+    dimensions='|ratio:'+ratio.group(1)+':'+ratio.group(2) if ratio else ''
+    if ratio:s=s[:ratio.start()].strip()
     s=re.sub(r'^(?:en验证[_-])?ai(?:翻转|小语种|解说)-[a-z-]+-\d+-\d+:\d+-','',s)
     s=re.sub(r'^[a-z-]+-\d+-\d+:\d+-','',s)
-    tail=re.search(r'[_\-]([a-z][a-z0-9]*)[_\-](\d{1,2}[._\-]\d{1,2}|\d{4})[_\-](\d+)\s*$',s)
+    tail=re.search(r'[_\-]([a-z][a-z0-9]*)[_\-](\d{1,2}[._\-]\d{1,2}|\d{6}|\d{4})[_\-](\d+)\s*$',s)
     if not tail:return None
     author,date,version=tail.groups()
-    if len(date)==4 and date.isdigit():month,day=int(date[:2]),int(date[2:])
+    if len(date)==6 and date.isdigit():month,day=int(date[2:4]),int(date[4:])
+    elif len(date)==4 and date.isdigit():month,day=int(date[:2]),int(date[2:])
     else:month,day=map(int,re.split(r'[._\-]',date))
     if not (1<=month<=12 and 1<=day<=31):return None
     head=s[:tail.start()].replace('en已验证','').replace('en验证','')
@@ -78,8 +82,8 @@ def structured_key(name):
     body=body.replace('zh-tw','tw')
     languages=set('en tw ft ar de el es fr hi id it ja ko ms pl pt ru th tl ph tr vi'.split())
     body='|'.join(t for t in re.findall(r'\d+|[a-z]+|[\u4e00-\u9fff]+',body) if t not in languages)
-    if not body or not re.search(r'\d',body):return None
-    return resource.group(1),body,author,str(int(version))
+    if not body or not (re.search(r'\d',body) or '图片' in body):return None
+    return resource.group(1),body+dimensions,author,str(int(version))
 
 
 def legacy_fuzzy_matches(mats, original_ids):
@@ -134,7 +138,7 @@ def inputs(workdir):
     return catalog,originals,contents
 
 
-def select(catalog,originals,library):
+def select(catalog,originals,library,original_metadata=None):
     scoped=collections.defaultdict(dict)
     for row in library:
         cid=str(row['data_source_id']);identity=catalog.get(cid,set())
@@ -144,12 +148,18 @@ def select(catalog,originals,library):
         mid=str(row['id']);scoped[resource][mid]={'n':row['name'],'l':row['language'],'d':float(row['video_duration'] or 0),
             'k':norm(row['name']),'c':str(row['created_at']),'ids':[],'cid':cid,
             'v':next((v for v in ['AI翻转','AI解说','AI小语种'] if v in row['name']),'普通版本')}
+    for resource,rows in (original_metadata or {}).items():
+        for mid,row in rows.items():
+            if mid not in scoped[resource]:scoped[resource][mid]={**row,'originOnly':True}
     kept={};potential=set();matches={}
     for resource,mats in scoped.items():
         matches[resource]=fuzzy_matches(mats,originals[resource])
         candidates={hit['mid'] for hits in matches[resource].values() for hit in hits}
+        source_keys={structured_key(r['n']) for r in (original_metadata or {}).get(resource,{}).values()}
+        source_keys.discard(None)
+        candidates.update(mid for mid,row in mats.items() if not row.get('originOnly') and row['l'].lower()!='en' and structured_key(row['n']) in source_keys)
         kept[resource]={mid:row for mid,row in mats.items() if mid in originals[resource] or mid in candidates}
-        potential.update(mid for mid,row in kept[resource].items() if row['l'].lower()!='en')
+        potential.update(mid for mid,row in kept[resource].items() if row['l'].lower()!='en' and not row.get('originOnly'))
     return {'kept':kept,'potential':sorted(potential),
             'matches':matches,
             'order':[(resource,list(rows)) for resource,rows in kept.items()]}
@@ -178,6 +188,23 @@ def load_library(workdir, config, archive=None):
         require(file_sha(legacy)==binding['source_sha256'],'legacy_library_changed_refresh_catalog_binding')
     _,_,contents=inputs(root)
     return scoped_rows(config,binding['generation_id'],contents)
+
+
+def load_current_parts(directory, receipt):
+    """Explicit, complete manual scoped read; never an automatic fallback."""
+    directory=Path(directory);info=json.loads(Path(receipt).read_text())
+    require(info.get('complete') is True,'current_inventory_incomplete')
+    require(info.get('source')=='kunlunads_dev.ads_custom_source/data_source=6/is_delete=0',
+            'current_inventory_source_not_verified')
+    expected={f'{i:06}.json' for i in range(0,len(info['content_ids']),info['batch_size'])}
+    require(set(info['files'])==expected,'current_inventory_parts_missing')
+    for filename in sorted(expected):
+        path=directory/filename
+        require(file_sha(path)==info['files'][filename],'current_inventory_part_checksum_mismatch')
+        offset=int(filename.split('.')[0]);scope=set(info['content_ids'][offset:offset+info['batch_size']])
+        for row in iter_json_array(path):
+            require(str(row['data_source_id']) in scope,'current_inventory_part_out_of_scope')
+            yield row
 
 
 def bind(workdir,config,generation):

@@ -1,4 +1,20 @@
 (()=>{'use strict';
+function structuredKey(name){
+ let s=String(name||'').normalize('NFKC').toLowerCase().trim().replace(/(?:[._-](?:mp4|png|jpg|jpeg))+$/g,'');
+ const ratio=s.match(/\(\s*(\d+)\s*:\s*(\d+)\s*\)\s*$/),dimensions=ratio?'|ratio:'+ratio[1]+':'+ratio[2]:'';
+ if(ratio)s=s.slice(0,ratio.index).trim();
+ s=s.replace(/^(?:en验证[_-])?ai(?:翻转|小语种|解说)-[a-z-]+-\d+-\d+:\d+-/,'').replace(/^[a-z-]+-\d+-\d+:\d+-/,'');
+ const tail=s.match(/[_-]([a-z][a-z0-9]*)[_-](\d{1,2}[._-]\d{1,2}|\d{6}|\d{4})[_-](\d+)\s*$/);if(!tail)return null;
+ const date=tail[2],parts=/^\d{6}$/.test(date)?[date.slice(2,4),date.slice(4)]:/^\d{4}$/.test(date)?[date.slice(0,2),date.slice(2)]:date.split(/[._-]/);
+ if(+parts[0]<1||+parts[0]>12||+parts[1]<1||+parts[1]>31)return null;
+ const head=s.slice(0,tail.index).replaceAll('en已验证','').replaceAll('en验证',''),resource=head.match(/(?<!\d)(\d{5,})(?!\d)/);if(!resource)return null;
+ const langs=new Set('en tw ft ar de el es fr hi id it ja ko ms pl pt ru th tl ph tr vi'.split(' '));
+ const body=(head.slice(resource.index+resource[0].length).replaceAll('zh-tw','tw').match(/\d+|[a-z]+|[\u4e00-\u9fff]+/g)||[]).filter(x=>!langs.has(x)).join('|');
+ if(!body||!(/\d/.test(body)||body.includes('图片')))return null;
+ return [resource[1],body+dimensions,tail[1],String(Number(tail[3]))];
+}
+window.ReportStructuredKey=structuredKey;
+const canonicalLang=s=>({ph:'tl',ft:'zh-tw',tw:'zh-tw'}[String(s||'').toLowerCase()]||String(s||'').toLowerCase());
 const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const F=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:2});let activeProduct=null,confirmed=null,metaPromise,cache=new Map();
 const productOf=el=>el?.closest('[data-product-scope]')||null;
 document.addEventListener('click',e=>{const b=e.target.closest('[data-summary-category],[data-action="materials"],[data-action="sourceids"]');if(b)activeProduct=productOf(b)},true);
@@ -15,11 +31,11 @@ async function open(product,status){
  const source=confirmed,selectedIDs=new Set(source.rows.map(x=>String(x.id)));if(status)status.textContent='正在查找已确认素材对应的小语种版本…';
  try{const meta=await getMeta(),resources=[...new Set(source.rows.map(r=>DATA.meta[r.cid]?.resource).filter(Boolean))];let loaded=new Map();await Promise.all(resources.map(async resource=>{if(!meta.files[resource])throw Error('资源'+resource+'缺少库存核对数据');loaded.set(resource,await readFile(meta.files[resource]))}));if(confirmed!==source||!source.scope.valid())throw Error('素材确认范围已变化，请重新确认');
  const results=new Map(),coverage=[];let missing=0;
- for(const base of source.rows){const resource=DATA.meta[base.cid]?.resource,file=loaded.get(resource),mother=file?.materials[String(base.id)];const entry={base,known:!!mother,languages:[],inventory:0,eligible:[]};coverage.push(entry);if(!mother){missing++;continue}
- if(file.matching!=='structured-body-author-version-v1'||file.indexVersion!==2||!file.matchRefs||!file.matchSets)throw Error('结构化匹配索引未就绪，请刷新后重试');
- if(!mother.matchKey){entry.known=false;missing++;continue}
- const hits=(file.matchSets[file.matchRefs[String(base.id)]]||[]).map(([mid,score,kind])=>({mid,score,reason:'同剧号、主体、作者、版本尾号'})).filter(h=>file.materials[h.mid]);const versions=hits.map(h=>[h.mid,file.materials[h.mid]]).filter(([mid,r])=>mid!==String(base.id)&&r.l.toLowerCase()!=='en'&&r.l.toLowerCase()!==mother.l.toLowerCase());entry.inventory=versions.length;entry.languages=[...new Set(versions.map(([,r])=>r.l))].sort();entry.valid=versions.filter(([,r])=>r.ids.length).length;
- for(const hit of hits){const mid=hit.mid;if(selectedIDs.has(mid))continue;const r=file.materials[mid];if(r.l.toLowerCase()==='en'||r.l.toLowerCase()===mother.l.toLowerCase()||!r.ids.length)continue;entry.eligible.push(mid);const durationReview=r.d<=0||mother.d<=0||Math.abs(r.d-mother.d)>2;if(!results.has(mid))results.set(mid,{mid,resource,...r,review:true,bases:[],points:file.performance[mid]||[]});const candidate=results.get(mid);candidate.bases.push({name:base.name,lang:mother.l,d:mother.d,score:hit.score,reason:hit.reason,durationReview})}}
+ for(const base of source.rows){const resource=DATA.meta[base.cid]?.resource,file=loaded.get(resource),stored=file?.materials[String(base.id)],mother={l:stored&&!stored.originOnly?stored.l:base.language,d:stored?.d||0},key=structuredKey(base.name);const entry={base,known:!!key&&key[0]===String(resource),languages:[],inventory:0,eligible:[]};coverage.push(entry);
+ if(file.matching!=='structured-body-author-version-v2'||file.indexVersion!==3||!file.keyGroups)throw Error('结构化匹配索引未就绪，请刷新后重试');
+ if(!entry.known){missing++;continue}
+ const hits=(file.keyGroups[JSON.stringify(key)]||[]).map(mid=>({mid,score:1,reason:'同剧号、主体、作者、版本尾号'})).filter(h=>file.materials[h.mid]);const versions=hits.map(h=>[h.mid,file.materials[h.mid]]).filter(([mid,r])=>mid!==String(base.id)&&canonicalLang(r.l)!=='en'&&canonicalLang(r.l)!==canonicalLang(mother.l));entry.inventory=versions.length;entry.languages=[...new Set(versions.map(([,r])=>r.l))].sort();entry.valid=versions.filter(([,r])=>r.ids.length).length;
+ for(const hit of hits){const mid=hit.mid;if(selectedIDs.has(mid))continue;const r=file.materials[mid];if(canonicalLang(r.l)==='en'||canonicalLang(r.l)===canonicalLang(mother.l)||!r.ids.length)continue;entry.eligible.push(mid);const durationReview=r.d<=0||mother.d<=0||Math.abs(r.d-mother.d)>2;if(!results.has(mid))results.set(mid,{mid,resource,...r,review:true,bases:[],points:file.performance[mid]||[]});const candidate=results.get(mid);candidate.bases.push({name:base.name,lang:mother.l,d:mother.d,score:hit.score,reason:hit.reason,durationReview})}}
  if(status)status.textContent=`已核对${source.rows.length}条素材，找到${results.size}个其他小语种版本。`;
  show([...results.values()],source,meta,missing,coverage);
  }catch(e){if(status)status.textContent='小语种核对未完成：'+e.message+'；未提供不完整批次复制。'}

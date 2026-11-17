@@ -16,6 +16,30 @@ def row(i,name='EN-123-00:00-a',lang='en',cid='source',duration=0):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_missing_original_uses_confirmed_name_not_old_inventory_presence(self):
+        name='22M_31150_1_9_标记_EN_精剪_Chensijing_11.11_2.mp4'
+        seed={'n':name,'l':'en','d':0,'k':'seed','c':'now','ids':[],'cid':'en','v':'来源名称'}
+        result=consumer.select({'ko':{('31150','ko')}},{'31150':{'1'}},
+            [row(2,name='AI小语种-ko-31150-24:33-'+name,lang='ko',cid='ko')],{'31150':{'1':seed}})
+        self.assertEqual([h['mid'] for h in result['matches']['31150']['1']],['2'])
+        self.assertTrue(result['kept']['31150']['1']['originOnly'])
+
+    def test_image_compact_date_ratio_and_explicit_suffix(self):
+        original='31150_EN_图片_huangjingyi_261111-1（9：16）.png'
+        same='AI翻转-ko-31150-00:00-31150_KO_图片_HUANGJINGYI_261115_1(9:16).png'
+        key=consumer.structured_key(original)
+        self.assertEqual(key,('31150','图片|ratio:9:16','huangjingyi','1'))
+        self.assertEqual(key,consumer.structured_key(same))
+        self.assertNotEqual(key,consumer.structured_key(same.replace('_1(','_2(')))
+        self.assertNotEqual(key,consumer.structured_key(same.replace('(9:16)','(16:9)')))
+
+    def test_current_parts_require_complete_receipt_and_exact_checksums(self):
+        file=self.root/'000000.json';values=[row(1)];file.write_text(json.dumps(values))
+        receipt=self.root/'receipt.json';info={'complete':True,'source':'kunlunads_dev.ads_custom_source/data_source=6/is_delete=0','content_ids':['source'],'batch_size':100,'files':{file.name:store.file_sha(file)}}
+        receipt.write_text(json.dumps(info));self.assertEqual(list(consumer.load_current_parts(self.root,receipt)),values)
+        info['complete']=False;receipt.write_text(json.dumps(info))
+        with self.assertRaisesRegex(ValueError,'incomplete'):list(consumer.load_current_parts(self.root,receipt))
+
     def test_explicit_archive_requires_exact_uncompressed_source_hash(self):
         values=[row(1,name='12M_30680_2_9_EN_二创_chenhan_11.6_1.mp4')]
         raw=json.dumps(values,ensure_ascii=False).encode()
