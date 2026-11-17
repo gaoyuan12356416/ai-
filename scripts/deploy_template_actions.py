@@ -5,6 +5,7 @@ import difflib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -37,6 +38,14 @@ def overlay(folder, name, data):
     after = (SOURCE / name).read_bytes().replace(b'\r\n', b'\n')
     if data.replace(b'\r\n', b'\n') == before:
         return after
+    if name in STATIC and name.endswith('.html'):
+        asset = Path(name).stem + '.js'
+        pattern = rb'(?<=src="/)' + re.escape(asset.encode()) + rb'\?v=[^"\s]+'
+        replacement = re.findall(pattern, after)
+        assert len(replacement) == 1 and len(re.findall(pattern, data)) == 1, 'ambiguous_list_script:' + name
+        # Other deployments update this cache key independently. Only replace
+        # the single known list script URL, preserving the rest of the page.
+        return re.sub(pattern, lambda _: replacement[0], data)
     scratch = folder / 'overlay-scratch'
     scratch.write_bytes(data)
     delta = ''.join(difflib.unified_diff(before.decode().splitlines(True), after.decode().splitlines(True),
@@ -111,6 +120,17 @@ print('migration twice passed; template, version, run and task counts preserved'
             path = root / (Path(name).name if root.name == 'html' else name)
             if path.exists():
                 remember(folder, info, path, overlay(folder, name, path.read_bytes()))
+    ui = folder / 'ui-test'
+    (ui / 'scripts').mkdir(parents=True)
+    (ui / 'static').mkdir()
+    shutil.copy2(SOURCE / 'scripts/test_template_actions_ui.js', ui / 'scripts/test_template_actions_ui.js')
+    for name in STATIC:
+        if name.endswith('.js'):
+            record = info['files']['/usr/share/nginx/html/' + Path(name).name]
+            shutil.copy2(record['next'], ui / name)
+    result = subprocess.run(['node', 'scripts/test_template_actions_ui.js'], cwd=ui, capture_output=True, text=True, timeout=20)
+    (folder / 'tests-ui.txt').write_text(result.stdout + result.stderr)
+    assert not result.returncode, 'live_ui_tests_failed:' + result.stderr
     info['status'] = 'prepared'
     ops.save(folder / 'manifest.json', info)
     print(json.dumps(dict(status='prepared', commit=commit, files=len(info['files']), tests='fb+x passed')))
