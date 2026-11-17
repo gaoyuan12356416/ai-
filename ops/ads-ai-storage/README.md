@@ -32,7 +32,19 @@ Verification: storage compatibility unit tests, live credential upload/readback,
 one-second CI transcode in the new bucket, effective process configuration,
 historical URL reads, new object evidence, and scheduler restoration.
 
-Rollback: use the deployment manifest to restore only the changed source/config
-files and added systemd overrides; gracefully restart the same affected services.
-Keep the new bucket, its objects and all ledgers. Preserve both bucket domains in
-read allowlists while either bucket contains completed or in-flight outputs.
+Rollback future writes only, after the same graceful drain. Keep compatibility
+code, both allowed bucket domains, new objects and all ledgers. Restore original
+producer destinations from the saved environment files or remove their storage
+only overrides, while retaining reader host extensions. Extend
+COS_LEGACY_BUCKET_DOMAINS to include both buckets, so either checkpoint can resume.
+For the cloud node, preserve the current new-bucket work IDs as legacy IDs with
+the new storage/queue configuration, and make the original shared storage the
+primary configuration; remaining pre-cutover work then uses that original target.
+Renew the scoped session and start the same affected services and their previously
+active scheduler dependencies. Never replace cloud configuration blindly while
+paid action identities remain bound to the new bucket.
+
+The default new Tencent CI queue has ten concurrent slots. Matching a previously
+raised quota requires a Tencent support request; do not claim that a queue name
+or routing update raises this quota. The verified TikTok CDN domain remains shared
+and retains its original billing attribution.

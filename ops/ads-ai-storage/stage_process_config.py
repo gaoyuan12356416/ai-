@@ -35,7 +35,7 @@ def prepare(unit, backup, producer=False, apply=False):
     if producer and any(k.endswith('COS_BUCKET') for k in values):
         values['COS_LEGACY_BUCKET_DOMAINS']=json.dumps({'advertising-1306474899':'advertising-1306474899.cos.ap-hongkong.myqcloud.com'},separators=(',',':'))
     override=Path('/etc/ads-ai-storage')/(unit+'.env')
-    dropin=Path('/etc/systemd/system')/(unit+'.d')/'zzzz-ads-ai-storage.conf'
+    dropin=Path('/etc/systemd/system')/(unit+'.d')/'zzzzz-ads-ai-storage.conf'
     row={'unit':unit,'before':props,'producer':producer,'values':values,'override':str(override),'dropin':str(dropin)}
     if apply and values:
         backup.mkdir(parents=True,exist_ok=True)
