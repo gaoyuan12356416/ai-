@@ -85,8 +85,11 @@ def main(argv=None):
                     print(json.dumps(dict(status="using_prepared", date=day,
                                           prepared_at=report.get("prepared_at"))), flush=True)
             if report is None:
+                # Preparation runs well before delivery and may finish slow,
+                # bounded batches without sharing the sender's 120-second budget.
+                options = {"query_budget_seconds": 480} if args.prepare else {}
                 report = collect(day, args.db, args.env_file, args.x_db,
-                                 args.fb_db, args.facebook_attribution_db, args.x_profile_db)
+                                 args.fb_db, args.facebook_attribution_db, args.x_profile_db, **options)
             if args.send or args.prepare:
                 try:
                     require_complete(report)

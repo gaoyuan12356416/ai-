@@ -53,6 +53,17 @@ class PreparationTests(unittest.TestCase):
         self.assertFalse((self.root / 'delivery.sqlite3').exists())
         self.assertTrue(prepared.load(self.root, self.day, cli.CHAT_ID))
 
+    def test_only_preparation_uses_the_longer_collection_budget(self):
+        with patch.object(cli, 'collect', return_value=self.report) as collect:
+            self.assertEqual(self.run_cli('--prepare'), 0)
+            self.assertEqual(collect.call_args.kwargs, {'query_budget_seconds': 480})
+        # Exercise fallback collection; no prepared snapshot is available here.
+        (self.root / 'prepared' / self.day / 'report.json').unlink()
+        with patch.object(cli, 'collect', return_value=self.report) as collect, \
+                patch.object(cli, 'send_card', return_value={'message_id': 'fallback'}):
+            self.assertEqual(self.run_cli('--send'), 0)
+            self.assertEqual(collect.call_args.kwargs, {})
+
     def test_eleven_sender_uses_complete_preparation_without_database_reads(self):
         self.prepare()
         with patch.object(cli, 'collect', side_effect=AssertionError('no database reads at eleven')), \

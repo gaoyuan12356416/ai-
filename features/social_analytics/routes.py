@@ -68,8 +68,11 @@ def query_rows(app, statement, max_rows=1001):
         raise ReportError("日报采集时间预算已用完", 503)
     started = time.monotonic()
     try:
-        result = subprocess.run([
-            "/usr/bin/mysql", "-h", "101.32.56.53", "-P", "63350",
+        command = ["/usr/bin/mysql"]
+        if app.get("SOCIAL_ANALYTICS_MYSQL_COMPRESS"):
+            command.append("--compress")
+        result = subprocess.run(command + [
+            "-h", "101.32.56.53", "-P", "63350",
             "-u", str(app["ADMIN_MAPPING_MYSQL_USER"]), "--connect-timeout=3",
             "--default-character-set=utf8mb4", "--skip-reconnect", "-N", "-B", "-r"],
             input=statement, env=env, text=True, encoding="utf-8", capture_output=True, timeout=timeout)

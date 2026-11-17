@@ -88,6 +88,23 @@ class OwnerCardTests(unittest.TestCase):
                 routes.query_rows(app, "SELECT 1")
         self.assertNotIn("test-only-secret", str(raised.exception))
 
+    def test_mysql_compression_is_scoped_and_keeps_readonly_gate_limits(self):
+        app = dict(ADMIN_MAPPING_MYSQL_HOST="101.32.56.53", ADMIN_MAPPING_MYSQL_PORT=63350,
+                   ADMIN_MAPPING_MYSQL_USER="reader", ADMIN_MAPPING_MYSQL_PASSWORD="test-only-secret",
+                   SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000)
+        success = SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+        for compress in (False, True):
+            with self.subTest(compress=compress), \
+                    patch.object(routes.subprocess, "run", return_value=success) as run, \
+                    patch.dict(routes.os.environ, {"SQL_GATE_BYPASS": "1"}):
+                routes.query_rows(dict(app, SOCIAL_ANALYTICS_MYSQL_COMPRESS=compress), "SELECT 1")
+            self.assertEqual("--compress" in run.call_args.args[0], compress)
+            self.assertEqual(run.call_args.args[0][0], "/usr/bin/mysql")
+            self.assertIn("START TRANSACTION READ ONLY", run.call_args.kwargs["input"])
+            self.assertIn("MAX_EXECUTION_TIME=20000", run.call_args.kwargs["input"])
+            self.assertEqual(run.call_args.kwargs["env"]["SQL_GATE_EXEC_TIMEOUT_SECONDS"], "24")
+            self.assertNotIn("SQL_GATE_BYPASS", run.call_args.kwargs["env"])
+
     def test_gate_execution_timeout_keeps_specific_reason_without_stderr_secrets(self):
         app = dict(ADMIN_MAPPING_MYSQL_HOST="101.32.56.53", ADMIN_MAPPING_MYSQL_PORT=63350,
                    ADMIN_MAPPING_MYSQL_USER="reader", ADMIN_MAPPING_MYSQL_PASSWORD="test-only-secret")

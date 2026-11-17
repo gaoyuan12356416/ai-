@@ -189,6 +189,7 @@ class DailyBillingTests(unittest.TestCase):
         self.assertEqual(read.call_args.args[0]['SOCIAL_ANALYTICS_X_PROFILE_DB_PATH'],
                          '/mnt/data-disk/x-tag-publisher/posts.sqlite3')
         self.assertIs(build.call_args.kwargs["catalog_snapshot"], snapshot)
+        self.assertTrue(build.call_args.args[0]['SOCIAL_ANALYTICS_MYSQL_COMPRESS'])
         self.assertEqual(result["totals"]["revenue_cents"], 215988)
 
 

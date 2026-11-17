@@ -99,7 +99,7 @@ def present(shared, report_date):
 
 def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH,
             fb_db_path=FB_DB_PATH, facebook_attribution_db_path=FACEBOOK_ATTRIBUTION_DB_PATH,
-            x_profile_db_path=X_PROFILE_DB_PATH):
+            x_profile_db_path=X_PROFILE_DB_PATH, *, query_budget_seconds=120):
     from features.social_analytics.adapters import read_catalogs
     from features.social_analytics.routes import build_report
     from features.social_daily_report.billing import collect_financials
@@ -111,8 +111,9 @@ def collect(report_date, db_path=DB_PATH, env_path=ENV_PATH, x_db_path=X_DB_PATH
                SOCIAL_ANALYTICS_FB_DB_PATH=fb_db_path,
                SOCIAL_ANALYTICS_FACEBOOK_ATTRIBUTION_DB=facebook_attribution_db_path,
                SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2,
+               SOCIAL_ANALYTICS_MYSQL_COMPRESS=True,
                SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
-               SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + 120)
+               SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + query_budget_seconds)
     catalog_snapshot = read_catalogs(app, ["youtube", "x", "facebook"])
     # Freeze candidates globally, before source SQL. Exact triple membership and
     # publication-date/owner verification remain in the shared source boundary.
