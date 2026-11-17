@@ -395,9 +395,8 @@
     if (macros.filter(macro => macro === "url").length > 1) throw new Error("X Post 正文模板中的 {{url}} 最多出现一次。");
     const metricWindowDays = integerValue("metricWindowDays", 7);
     if (!Number.isInteger(metricWindowDays) || metricWindowDays < 1 || metricWindowDays > 30) throw new Error("指标统计窗口必须为 1–30 天。");
-    const launchWindow = integerValue("dramaLaunchWindowDays", 0);
+    const launchWindow = window.normalizeDramaLaunchWindow(ui.byId("dramaLaunchWindowDays").value);
     const cooldown = integerValue("cooldownDays", 0);
-    if (!Number.isInteger(launchWindow) || launchWindow < 0) throw new Error("剧上线窗口必须为大于等于 0 的整数。");
     if (!Number.isInteger(cooldown) || cooldown < 0) throw new Error("同剧冷却窗口必须为大于等于 0 的整数。");
 
     validateRange("dramaRoasMin", "dramaRoasMax", "剧 D0 ROAS");

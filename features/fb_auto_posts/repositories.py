@@ -72,6 +72,7 @@ class MaterialCandidate:
     resource_type_v2: str
     drama_description: str = ""
     material_tag: str = ""
+    deploy_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -511,8 +512,14 @@ class MaterialRepository:
         selection_end_epoch = int(self.now_fn().timestamp())
         if hit.get('timing_policy') == POLICY:
             selection_end_epoch = max([selection_end_epoch, *hit.get('release_times', {}).values()])
-        launch_days = int(config["drama_launch_window_days"])
-        deploy_after = 0 if not launch_days else int((self.now_fn() - timedelta(days=launch_days)).timestamp())
+        from features.drama_launch_window import bounds, is_range
+        window = config["drama_launch_window_days"]
+        lower, upper = bounds(window, int(self.now_fn().timestamp()))
+        explicit_range = is_range(window)
+        if explicit_range:
+            selection_end_epoch = upper
+        # The SQL uses >; ranges have inclusive endpoints. Keep legacy N-day behavior.
+        deploy_after = lower - 1 if explicit_range or not window else lower
         drama_rule, material_rule = config["drama_rule"], config["material_rule"]
         allowed_types = [str(item) for item in drama_rule.get("resource_type_v2") or []]
         type_sql = "" if not allowed_types else " AND CAST(d.resource_type_v2 AS CHAR) IN (" + ",".join("%s" for _ in allowed_types) + ")"
@@ -582,7 +589,7 @@ class MaterialRepository:
                 metadata_sql = f"""
                     SELECT TRIM(d.content_id) content_id,COALESCE(d.name,'') drama_name,
                            LOWER(TRIM(d.language)) language,
-                           CAST(d.resource_type_v2 AS CHAR) resource_type_v2,COALESCE(d.series_code,'') series_code
+                           CAST(d.resource_type_v2 AS CHAR) resource_type_v2,COALESCE(d.series_code,'') series_code,d.deploy_time
                       FROM `{self.mysql.schema}`.ads_drama_info d
                       JOIN (SELECT d0.content_id,MAX(d0.id) id
                               FROM `{self.mysql.schema}`.ads_drama_info d0 FORCE INDEX(ac)
@@ -627,6 +634,9 @@ class MaterialRepository:
                 d_spend = drama_totals.spend if drama_totals else Decimal("0")
                 d_roas = drama_totals.roas if drama_totals else None
                 detail = metadata.get(content_id, row)
+                deploy_time = int(detail.get("deploy_time") or 0)
+                if explicit_range and not lower <= deploy_time <= upper:
+                    continue
                 if inherit_language and self._material_language(product, row.get("language"),
                         metadata.get(content_id, {}).get("language")) != language:
                     continue
@@ -643,7 +653,7 @@ class MaterialRepository:
                 if not self._in_range(d_spend, drama_rule["spend_min"], drama_rule["spend_max"]) or not self._in_range(d_roas, drama_rule["roas_min"], drama_rule["roas_max"]):
                     continue
                 seen_material_ids.add(raw_id)
-                candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255]))
+                candidates.append(MaterialCandidate(raw_id, content_id, url, str(row.get("material_name") or "")[:500], str(detail.get("drama_name") or "")[:500], language, duration, m_spend, m_roas, d_spend, d_roas, resource_type, description, str(row.get("material_tag") or "").strip()[:255], deploy_time))
             candidates.sort(key=cmp_to_key(compare))
             if profile_mode and not profile_error:
                 # Rank-equivalent buckets retain the same bounded old-metric

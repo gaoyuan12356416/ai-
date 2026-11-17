@@ -760,6 +760,10 @@ class FBAutoPostStore:
                             pre_reason = "fb_auto_no_video_after_drama_cooldown"
                         elif all(item.material_id in excluded for item in candidates):
                             pre_reason = "fb_auto_no_video_after_material_cooldown"
+                if material is not None and not hit_drama and material.deploy_time > int(now_dt.timestamp()):
+                    from features.drama_launch_window import release_timing
+                    selection["hit_publish_timing"] = release_timing(material.deploy_time, now_dt)
+                    task_publish_at = selection["hit_publish_timing"]["publish_at_utc"]
                 if material is not None and hit_drama and hit_drama.get('timing_policy'):
                     from features.hit_publish import timing, POLICY
                     if hit_drama['timing_policy'] == POLICY:

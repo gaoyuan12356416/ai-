@@ -2704,7 +2704,8 @@ class XAutoPostStore:
             hit_timing = _json_object(selection_json).get('hit_publish_timing')
             if hit_timing:
                 from features.hit_publish import POLICY
-                if hit_timing.get('policy') != POLICY:
+                from features.drama_launch_window import POLICY as RELEASE_POLICY
+                if hit_timing.get('policy') not in (POLICY, RELEASE_POLICY):
                     raise XAutoPostStoreError('x_auto_hit_timing_invalid', 'invalid hit timing', 409)
                 conn.execute('UPDATE x_auto_task SET scheduled_at_utc=? WHERE id=?',
                              (_utc_iso(hit_timing['publish_at_utc']), normalized_task_id))

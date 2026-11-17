@@ -28,6 +28,14 @@ def valid_internal_bearer(value: Any) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9._~-]{32,512}", str(value or "")))
 
 
+def _launch_window(value):
+    from features.drama_launch_window import normalize
+    try:
+        return normalize(value)
+    except ValueError as exc:
+        raise ValidationError("invalid_request", str(exc)) from None
+
+
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValidationError("invalid_request", f"{label}必须是对象")
@@ -165,7 +173,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "group_ids": group_ids,
         "message_template": message,
         "metric_window_days": _int(value.get("metric_window_days", 7), "指标窗口", 1, 30),
-        "drama_launch_window_days": _int(value.get("drama_launch_window_days", 0), "上线窗口", 0, 3650),
+        "drama_launch_window_days": _launch_window(value.get("drama_launch_window_days", 0)),
         "cooldown_days": _int(value.get("cooldown_days", 30), "Page素材冷却窗口", 0, 3650),
         "material_data_source": _int(value.get("material_data_source", 6), "素材来源", 1, 1000),
         "app_id": str(value.get("app_id") or ""),

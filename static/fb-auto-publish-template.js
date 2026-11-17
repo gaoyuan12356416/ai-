@@ -41,7 +41,7 @@
       material_data_source: Number(ui.byId("dataSource").value),
       material_product: ui.byId("materialProduct").value.trim(),
       metric_window_days: Number(ui.byId("metricDays").value),
-      drama_launch_window_days: Number(ui.byId("launchDays").value),
+      drama_launch_window_days: window.normalizeDramaLaunchWindow(ui.byId("launchDays").value),
       cooldown_days: Number(ui.byId("cooldown").value),
       drama_cooldown_hours: Number(ui.byId("dramaCooldown").value),
       stagger_minutes: schedule.mode === "fixed" ? Number(ui.byId("staggerMinutes").value) : 0,
@@ -109,7 +109,7 @@
     ui.byId("dataSource").value = Number(config.material_data_source || 6);
     ui.byId("materialProduct").value = config.material_product || config.product || "Dramawave";
     ui.byId("metricDays").value = Number(config.metric_window_days || 7);
-    ui.byId("launchDays").value = Number(config.drama_launch_window_days || 0);
+    ui.byId("launchDays").value = config.drama_launch_window_days ?? 0;
     ui.byId("cooldown").value = Number(config.cooldown_days || 0);
     ui.byId("dramaCooldown").value = Number(config.drama_cooldown_hours || 0);
     ui.byId("staggerMinutes").value = Number(config.stagger_minutes || 0);

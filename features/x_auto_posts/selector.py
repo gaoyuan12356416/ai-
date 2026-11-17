@@ -8,7 +8,8 @@ constraint are all evaluated before the selected identity leaves this layer.
 
 from __future__ import annotations
 
-from features.hit_publish import future_allowed
+from features.hit_publish import future_allowed, future_scope, FUTURE_TIMES, target_language
+from features.drama_launch_window import normalize as launch_window, bounds as launch_bounds, is_range, release_timing
 
 import re
 import urllib.parse
@@ -220,7 +221,7 @@ class DramaFilterRule:
     d0_roas: DecimalRange = field(default_factory=DecimalRange)
     sort: SortRule = field(default_factory=SortRule)
     resource_types: Tuple[str, ...] = ()
-    launch_window_days: int = 0
+    launch_window_days: Any = 0
     cooldown_days: int = 0
 
     def __post_init__(self) -> None:
@@ -229,11 +230,7 @@ class DramaFilterRule:
             "resource_types",
             tuple(dict.fromkeys(str(value).strip() for value in self.resource_types if str(value).strip())),
         )
-        _nonnegative_int(
-            self.launch_window_days,
-            "launch_window_days",
-            MAX_DRAMA_WINDOW_DAYS,
-        )
+        object.__setattr__(self, "launch_window_days", launch_window(self.launch_window_days))
         _nonnegative_int(
             self.cooldown_days,
             "cooldown_days",
@@ -263,11 +260,7 @@ class DramaFilterRule:
             d0_roas=DecimalRange.from_mapping(raw.get("d0_roas"), "drama D0 ROAS"),
             sort=SortRule.from_mapping(raw.get("sort")),
             resource_types=tuple(str(value).strip() for value in resource_types),
-            launch_window_days=_nonnegative_int(
-                raw.get("launch_window_days", 0),
-                "launch_window_days",
-                MAX_DRAMA_WINDOW_DAYS,
-            ),
+            launch_window_days=launch_window(raw.get("launch_window_days", 0)),
             cooldown_days=_nonnegative_int(
                 raw.get("cooldown_days", 0),
                 "cooldown_days",
@@ -357,7 +350,7 @@ class SelectionRules:
                     "direction": self.drama.sort.direction,
                 },
                 "resource_types": list(self.drama.resource_types),
-                "launch_window_days": int(self.drama.launch_window_days),
+                "launch_window_days": self.drama.launch_window_days,
                 "cooldown_days": int(self.drama.cooldown_days),
             },
             "material": {
@@ -717,8 +710,9 @@ class TwoStageSelector:
         language = canonical_language(request.language)
         now_utc = _current_utc(request.now)
         now_epoch = int(now_utc.timestamp())
-        launch_days = int(request.rules.drama.launch_window_days)
-        earliest = now_epoch - launch_days * 86400 if launch_days else None
+        window = request.rules.drama.launch_window_days
+        earliest, latest = launch_bounds(window, now_epoch)
+        explicit_range = is_range(window)
         allowed_types = set(request.rules.drama.resource_types)
         grouped: Dict[str, List[DramaSourceRow]] = {}
         for row in rows:
@@ -727,8 +721,8 @@ class TwoStageSelector:
                 or row.release_status != 1
                 or row.language != language
                 or row.deploy_time <= 0
-                or (row.deploy_time > now_epoch and not future_allowed(row.content_id, row.language, row.deploy_time))
-                or (earliest is not None and row.deploy_time < earliest)
+                or (row.deploy_time > latest and (explicit_range or not future_allowed(row.content_id, row.language, row.deploy_time)))
+                or row.deploy_time < earliest
                 or (allowed_types and row.resource_type_v2 not in allowed_types)
             ):
                 self._reject(rejection_counts, "drama_hard_gate")
@@ -934,12 +928,13 @@ class TwoStageSelector:
             now_utc,
             int(request.rules.metric_window_days),
         )
-        launch_days = int(request.rules.drama.launch_window_days)
-        deploy_since = now_epoch - launch_days * 86400 if launch_days else None
+        window = request.rules.drama.launch_window_days
+        earliest, latest = launch_bounds(window, now_epoch)
+        deploy_since = earliest if window else None
         initial_blacklist = self.source.blacklist_snapshot()
         drama_rows = self.source.list_drama_rows(
             language=language,
-            now_epoch=now_epoch,
+            now_epoch=latest,
             deploy_since_epoch=deploy_since,
             resource_types=request.rules.drama.resource_types,
         )
@@ -981,7 +976,11 @@ class TwoStageSelector:
             )
             for material in materials:
                 try:
-                    validated = self._validate_material(request, drama, material)
+                    future_times = dict(FUTURE_TIMES.get())
+                    if is_range(window) and drama.deploy_time > now_epoch:
+                        future_times[drama.content_id + ":" + target_language(drama.language)] = drama.deploy_time
+                    with future_scope(future_times):
+                        validated = self._validate_material(request, drama, material)
                 except CandidateRejected:
                     self._reject(rejection_counts, "material_strict_rejected")
                     continue
@@ -1016,6 +1015,8 @@ class TwoStageSelector:
                         "final_loaded_at_utc": final_blacklist.loaded_at_utc,
                     },
                 }
+                if is_range(window) and drama.deploy_time > now_epoch:
+                    snapshot["hit_publish_timing"] = release_timing(drama.deploy_time, now_utc)
                 if not reserve:
                     return ReservedSelection(
                         reservation={},

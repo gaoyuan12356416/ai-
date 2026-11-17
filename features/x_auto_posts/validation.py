@@ -53,6 +53,14 @@ class ValidationError(ValueError):
         super().__init__(str(message or "请求参数无效"))
 
 
+def _launch_window(value):
+    from features.drama_launch_window import normalize
+    try:
+        return normalize(value)
+    except ValueError as exc:
+        raise ValidationError("invalid_request", str(exc)) from None
+
+
 def is_placeholder_secret(value: Any) -> bool:
     """Reject documented/example credentials before they can authenticate."""
 
@@ -358,9 +366,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "metric_window_days": _integer(
             value.get("metric_window_days", 7), "指标统计窗口", 1, 30
         ),
-        "drama_launch_window_days": _integer(
-            value.get("drama_launch_window_days", 0), "剧上线窗口", 0, 3650
-        ),
+        "drama_launch_window_days": _launch_window(value.get("drama_launch_window_days", 0)),
         "cooldown_days": _integer(
             value.get("cooldown_days", 0), "剧冷却窗口", 0, 3650
         ),

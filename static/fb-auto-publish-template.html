@@ -121,7 +121,8 @@
             </div>
             <div class="field">
               <label for="launchDays">短剧上线窗口（0 不限）</label>
-              <input id="launchDays" type="number" min="0" max="3650" value="0" />
+              <input id="launchDays" type="text" value="0" placeholder="例如 -1~0" />
+              <div class="hint">0 不限；7 为近 7 天；-1~0 为未来 24 小时内可投放的剧，按可投放时间排期。负数为尚需等待的天数。</div>
             </div>
             <div class="field">
               <label>短剧消耗范围</label>
@@ -194,6 +195,7 @@
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=ac11d7b304fb"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-template.js?v=compact-plan-20261111-v1"></script>
+  <script src="/drama-launch-window.js?v=20261117-range1"></script>
+  <script src="/fb-auto-publish-template.js?v=20261117-range1"></script>
 </body>
 </html>
