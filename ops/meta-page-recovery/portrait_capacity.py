@@ -10,7 +10,7 @@ import time
 UNIT='fb-page-portrait-refresh.service'
 DROP=Path('/etc/systemd/system/fb-page-portrait-refresh.service.d/meta-page-recovery-capacity.conf')
 RUNTIME=Path('/run/systemd/system.control/fb-page-portrait-refresh.service.d/50-MemoryMax.conf')
-BODY='[Service]\nMemoryMax=3G\nTimeoutStartSec=75min\n'
+BODY='[Service]\nMemoryMax=3G\nTimeoutStartSec=2h\n'
 
 
 def run(*args):return subprocess.check_output(args,text=True).strip()

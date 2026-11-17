@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 import time
@@ -36,7 +37,12 @@ def verify(data):
         def cursor(self,*args,**kw):return DryCursor(self)
         def commit(self):pass
     class Reader:
-        def query(self,*args,**kw):return list(seen.values())
+        def query(self,statements,**kw):
+            sql=statements[0]
+            if "'rows',COUNT(*)" in sql:return [{'rows':len(seen)}]
+            match=re.search(r'page_id IN \(([^)]+)\)',sql)
+            ids={bytes.fromhex(value[2:]).decode() for value in match.group(1).split(',')} if match else None
+            return [row for pid,row in seen.items() if ids is None or pid in ids]
     # Only the transport is replaced. The installed PyMySQL encoder and its
     # bounded executemany implementation run against the full original input.
     with patch.object(pymysql,'connect',return_value=DryConnection()):

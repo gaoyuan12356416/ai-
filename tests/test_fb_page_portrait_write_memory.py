@@ -45,7 +45,9 @@ class MemoryWriteTests(unittest.TestCase):
             def cursor(self):return Cursor()
             def commit(self):pass
         class Reader:
-            def query(self,sql,timeout=30):return list(written.values())
+            def query(self,sql,timeout=30):
+                if "'rows',COUNT(*)" in sql[0]:return [{'rows':len(written)}]
+                return list(written.values())
         pages={str(i):dict(page_id=str(i),paid_cents=1,social_cents=2,spend_cents=3,audiences=[],padding='x'*10000) for i in range(100)}
         data=dict(pages=pages,meta=dict(version='20261117T061854638718Z',start='2026-11-10',end='2026-11-16',
             audit=dict(paid_cents=100,social_cents=200,spend_cents=300)))
@@ -53,6 +55,17 @@ class MemoryWriteTests(unittest.TestCase):
             proof=storage.write(data,{'ADMIN_MAPPING_MYSQL_USER':'fixture','ADMIN_MAPPING_MYSQL_PASSWORD':'fixture'},Reader())
         self.assertEqual(proof['verified_rows'],100);self.assertLess(peak[0],10);self.assertEqual(batches[0],1)
         self.assertEqual(proof['payload_hashes'],{pid:hashlib.sha256(original(p).encode()).hexdigest() for pid,p in pages.items()})
+    def test_hash_readback_splits_timeout_without_omitting_pages(self):
+        class Reader:
+            def query(self,statements,timeout=30):
+                import re
+                sql=statements[0]
+                if "'rows',COUNT(*)" in sql:return [{'rows':5}]
+                ids=[bytes.fromhex(value[2:]).decode() for value in re.search(r'page_id IN \(([^)]+)\)',sql).group(1).split(',')]
+                if len(ids)>2:raise RuntimeError('source_query_failed_3024')
+                return [{'page_id':pid,'hash':pid} for pid in ids]
+        rows=storage.readback(Reader(),'20261117T061854638718Z',['1','2','3','4','5'])
+        self.assertEqual({row['page_id'] for row in rows},{'1','2','3','4','5'});self.assertEqual(len(rows),5)
 
 
 class ResumeTests(unittest.TestCase):

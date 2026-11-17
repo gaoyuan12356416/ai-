@@ -29,6 +29,25 @@ def projections(profile):
     return summary,tree
 
 
+def readback(reader,version,ids):
+    base=f' FROM {TABLE} WHERE profile_version={literal(version)}'
+    count=reader.query(["SELECT HEX(JSON_OBJECT('rows',COUNT(*)))"+base],timeout=30)
+    if len(count)!=1 or count[0]['rows']!=len(ids):return []
+    def read(part):
+        sql="SELECT HEX(JSON_OBJECT('page_id',page_id,'hash',SHA2(detail_json,256),'paid_cents',paid_cents,'social_cents',social_cents,'spend_cents',spend_cents))"+base
+        sql+=' AND page_id IN ('+','.join(map(literal,part))+')'
+        try:return reader.query([sql],timeout=30)
+        except Exception as exc:
+            if '3024' not in str(exc) or len(part)<=1:raise
+            middle=len(part)//2
+            return read(part[:middle])+read(part[middle:])
+    result=[]
+    for offset in range(0,len(ids),100):
+        result.extend(read(ids[offset:offset+100]))
+        print(encoded(dict(event='profile_readback',verified=len(result),total=len(ids))),flush=True)
+    return result
+
+
 def write(data,env,reader,*,create_table=False):
     import pymysql
     version = data['meta']['version']
@@ -58,7 +77,7 @@ def write(data,env,reader,*,create_table=False):
             db.commit()
     verified = False
     for attempt in range(5):
-        check = reader.query([f"SELECT HEX(JSON_OBJECT('page_id',page_id,'hash',SHA2(detail_json,256),'paid_cents',paid_cents,'social_cents',social_cents,'spend_cents',spend_cents)) FROM {TABLE} WHERE profile_version={literal(version)}"],timeout=30)
+        check = readback(reader,version,list(pages))
         if {r['page_id']:r['hash'] for r in check} == hashes:
             verified = True; break
         time.sleep(2)

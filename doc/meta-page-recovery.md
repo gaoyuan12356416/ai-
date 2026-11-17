@@ -88,9 +88,13 @@ reuses the original version key/input and reconciles existing rows by their exac
 hashes. It refuses to replace an already published/superseding snapshot.
 The original 1 GiB / 30-minute portrait unit budget predates the expanded scope.
 `ops/meta-page-recovery/portrait_capacity.py` backs up and sets only that unit to
-3 GiB / 75 minutes, without restarting the active collector. Its temporary cgroup
+3 GiB / 2 hours, without restarting the active collector. Its temporary cgroup
 overlay is restored after the current collection. Capacity rollback drains only
 this affected oneshot and never kills work or restores old business snapshots.
+The expanded cold collection and cross-region write were observed to exceed the
+old 75-minute combined budget. Final hash verification reads 100 Page IDs at a
+time and subdivides on 3024; every actual detail hash and global row count/cents
+still must match. The database's existing per-query timeout is unchanged.
 
 ## GitHub-first deployment
 
