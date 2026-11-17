@@ -4,8 +4,10 @@ from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import runpy
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -26,14 +28,67 @@ def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest() if path.ex
 def state(unit):return dict(line.split('=',1) for line in run('systemctl','show',unit,'-p','MainPID','-p','ActiveState').splitlines())
 def save(folder,record):
     tmp=folder/'record.tmp';tmp.write_text(json.dumps(record,indent=2)+'\n');tmp.replace(folder/'record.json')
-def ready():
-    for _ in range(60):
+def ready(seconds=30):
+    until=time.monotonic()+seconds
+    while time.monotonic()<until:
         try:
             with urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8898/healthz',timeout=2) as response:
                 if response.status==200:return
         except OSError:pass
         time.sleep(.5)
     raise RuntimeError('gateway_not_ready')
+
+
+def resume_downloads(paused):
+    for pid,start in paused:
+        try:
+            if Path('/proc/%d/stat'%pid).read_text().split()[21]==start:
+                os.kill(pid,signal.SIGCONT)
+        except ProcessLookupError:pass
+        except FileNotFoundError:pass
+
+
+def suspend_downloads(jobs):
+    """Pause only local isolated GET workers; preserve TCP, memory and leases.
+
+    Native intents are checked again after the process is stopped, closing the
+    race between its last heartbeat and an upload. Any upload keeps draining.
+    """
+    paused=[]
+    try:
+        with closing(sqlite3.connect('file:/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3?mode=ro',uri=True)) as c, \
+             closing(sqlite3.connect('file:/mnt/data-disk/x-tag-publisher/posts.sqlite3?mode=ro',uri=True)) as p:
+            c.row_factory=sqlite3.Row
+            for job in jobs:
+                row=c.execute('SELECT j.*,w.pid,w.observation_json FROM pipeline_job j JOIN pipeline_worker w '
+                              'ON w.node_id=j.node_id AND w.worker_id=j.worker_id WHERE j.id=?',(job['id'],)).fetchone()
+                if (not row or row['node_id']!='cpu-main' or row['external_intent']
+                    or json.loads(row['observation_json']).get('phase')!='download'
+                    or (datetime.fromisoformat(row['lease_expires_at'].replace('Z','+00:00'))-datetime.now(timezone.utc)).total_seconds()<35):
+                    raise RuntimeError('not_an_unstarted_local_download')
+                pid=int(row['pid']);proc=Path('/proc/%d'%pid)
+                command=(proc/'cmdline').read_bytes()
+                if pid<=1 or b'multiprocessing.spawn' not in command or b'--multiprocessing-fork' not in command:
+                    raise RuntimeError('not_an_isolated_worker')
+                if c.execute('SELECT count(*) FROM pipeline_worker WHERE pid=?',(pid,)).fetchone()[0]!=1:
+                    raise RuntimeError('worker_not_isolated')
+                if not any(str(fd.resolve()).endswith('/source.download.tmp') for fd in (proc/'fd').iterdir()):
+                    raise RuntimeError('download_file_not_open')
+                start=(proc/'stat').read_text().split()[21]
+                os.kill(pid,signal.SIGSTOP);paused.append((pid,start))
+                for _ in range(50):
+                    if (proc/'stat').read_text().split()[2]=='T':break
+                    time.sleep(.01)
+                else:raise RuntimeError('worker_not_suspended')
+                log=p.execute('SELECT status,attempt_count,unknown_outcome,x_post_id FROM x_post_publish_log WHERE queue_id=?',
+                              (job['source_id'],)).fetchone()
+                if log!=('reserved',0,0,'') or p.execute('SELECT 1 FROM pipeline_x_operation WHERE source_key=? LIMIT 1',
+                                                       ('x:queue:'+str(job['source_id']),)).fetchone():
+                    raise RuntimeError('native_write_already_started')
+            return paused
+    except (OSError,ValueError,RuntimeError,sqlite3.Error):
+        resume_downloads(paused)
+        return []
 
 
 def main():
@@ -80,6 +135,8 @@ def main():
     hold=barrier['DIRECTORY']/(OWNER+'.json')
     if hold.exists():raise RuntimeError('another_deployment_owns_tag_hold')
     barrier['write_hold'](OWNER)
+    paused=[]
+    signal.signal(signal.SIGTERM,lambda *_: (_ for _ in ()).throw(SystemExit('deployment_stopped')))
     try:
         record['state']='draining';save(folder,record)
         previous=None
@@ -91,13 +148,21 @@ def main():
             signature=[(j['id'],j['generation']) for j in jobs]
             if signature!=previous:print(json.dumps({'pending':jobs}),flush=True);previous=signature
             if not jobs:break
+            paused=suspend_downloads(jobs)
+            if paused:
+                record['paused_download_pids']=[pid for pid,_ in paused];save(folder,record)
+                print(json.dumps({'temporarily_paused_download_pids':record['paused_download_pids']}),flush=True)
+                break
             time.sleep(2)
         if POINTER.resolve()!=live:raise RuntimeError('runtime_changed_during_drain')
         for entry in record['files']:
             if digest(Path(entry['path']))!=entry['after' if rollback else 'before']:
                 raise RuntimeError('concurrent_file_change:'+entry['path'])
         # Drain existing gateway RPCs too. Native uploads are already finished.
-        while run('bash','-c',"ss -Htn state established '( sport = :8898 )' | wc -l")!='0':time.sleep(.5)
+        connection_deadline=time.monotonic()+5
+        while run('bash','-c',"ss -Htn state established '( sport = :8898 )' | wc -l")!='0':
+            if paused and time.monotonic()>connection_deadline:raise RuntimeError('gateway_requests_still_active')
+            time.sleep(.2)
         for entry in record['files']:
             dest=Path(entry['path']);dest.parent.mkdir(parents=True,exist_ok=True)
             source=Path(entry['backup']) if rollback else ROOT/entry['source']
@@ -106,7 +171,8 @@ def main():
             else:
                 temp=dest.with_name(dest.name+'.terminate-new');shutil.copy2(source,temp);temp.chmod(0o644);temp.replace(dest)
         run('systemctl','restart',GATEWAY)
-        ready()
+        ready(10 if paused else 30)
+        resume_downloads(paused);paused=[]
         record['state']='rolled_back' if rollback else 'active'
         record['services_after']={u:state(u) for u in record['services_before']}
         for unit in (OWNER,'x-tag-auto.service','pipeline-coordinator.service'):
@@ -115,6 +181,7 @@ def main():
         record['finished_at']=datetime.now(timezone.utc).isoformat();save(folder,record)
         print(json.dumps({'state':record['state'],'revision':record['revision'],'services':record['services_after']}),flush=True)
     finally:
+        resume_downloads(paused)
         # A failed gateway start must keep new upload admissions held.
         ready()
         barrier['release'](OWNER)
