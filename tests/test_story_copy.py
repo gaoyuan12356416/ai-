@@ -2,6 +2,7 @@
 
 import json
 import random
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -458,6 +459,55 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(after["previous_cta"], "See more")
             self.assertEqual(after["cta"], "👆 Tap the link to find the ring")
             self.assertEqual(after["opening"], "A ring.")
+
+    def test_busy_publisher_only_defers_that_hook_and_reuses_generation(self):
+        tasks = [self.task(1, "fa"), self.task(2, "fa")]
+        old = store.dump(
+            dict(
+                cta="Watch",
+                opening="A ring.",
+                turn="Who hid it?",
+                icon="◇",
+                tags=["Drama", "Ring"],
+            )
+        )
+        with store.connection() as c:
+            for t in tasks:
+                store.enqueue(c, t)
+            c.execute("UPDATE jobs SET state='ready',draft=?", (old,))
+        audit = self.root / "hooks.sqlite3"
+        refresh_click_hooks.prepare_audit(audit)
+        apply = refresh_click_hooks.upgrade
+
+        def busy_once(c, t, raw, opts, reason=None):
+            if t["key"] == tasks[0]["key"]:
+                raise sqlite3.OperationalError("database is locked")
+            return apply(c, t, raw, opts, reason)
+
+        def provider(instructions, request, emit, usage):
+            for t in tasks:
+                emit(dict(id=t["key"], hooks=["to find the ring", "to see who hid it"]))
+            usage.update(inputTokens=90, outputTokens=33)
+
+        with patch.object(generator, "run_request", side_effect=provider) as gen:
+            with patch.object(refresh_click_hooks, "upgrade", side_effect=busy_once):
+                self.assertEqual(
+                    refresh_click_hooks.refresh(
+                        [(t, old) for t in tasks], audit, False
+                    ),
+                    {tasks[0]["key"]},
+                )
+            self.assertFalse(
+                refresh_click_hooks.refresh([(tasks[0], old)], audit, True)
+            )
+            self.assertEqual(gen.call_count, 1)
+        with store.connection() as c:
+            self.assertEqual(
+                c.execute(
+                    "select count(distinct json_extract(draft,'$.hook_key')) from jobs"
+                ).fetchone()[0],
+                2,
+            )
 
     def test_reviewed_episode_and_switch_watermark(self):
         with store.connection() as c:

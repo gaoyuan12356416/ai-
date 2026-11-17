@@ -30,7 +30,7 @@ def upgrade(c, task, original, options, reason=None):
     native = (
         store.TAG_POSTS if task["family"] == "ta" else store.SOURCES[task["family"]][1]
     )
-    with store.connection(native, readonly=True) as src:
+    with store.connection(native, readonly=True, timeout=0.4) as src:
         if src.execute(
             "SELECT 1 FROM story_copy_receipt WHERE task_key=?", (task["key"],)
         ).fetchone():
@@ -58,13 +58,15 @@ def upgrade(c, task, original, options, reason=None):
         raise
 
 
-def batches(size):
+def batches(size, only=None):
     by_lang = defaultdict(list)
     with store.connection(readonly=True) as c:
         for r in c.execute(
             "SELECT payload,draft FROM jobs WHERE " + V1 + " ORDER BY created,key"
         ):
             task = json.loads(r["payload"])
+            if only is not None and task["key"] not in only:
+                continue
             by_lang[task["language"]].append((task, r["draft"]))
     chunks = [
         list(rows[i : i + size] for i in range(0, len(rows), size))
@@ -77,25 +79,36 @@ def batches(size):
 
 
 def refresh(part, audit, last_pass):
-    usage, errors, outcomes = {}, {}, {}
+    usage, errors, outcomes, edits = {}, {}, {}, {}
     rows = {t["key"]: (t, raw) for t, raw in part}
     lang = part[0][0]["language"]
     started = time.time()
-    with store.connection(timeout=10) as c:
+    with store.connection(timeout=10) as c, store.connection(audit, timeout=15) as log:
 
         def emit(item):
             k = item.get("id")
-            if k not in rows or k in outcomes or k in errors:
+            if k not in rows or k in edits or k in errors:
                 return
             t, raw = rows[k]
             try:
-                opts = model.click_options(t, item.get("hooks"))
-                outcomes[k] = "updated" if upgrade(c, t, raw, opts) else "frozen"
+                edits[k] = model.click_options(t, item.get("hooks"))
+                log.execute(
+                    "INSERT OR REPLACE INTO candidates VALUES(?,?,?)",
+                    (k, model.signature(raw), store.dump(edits[k])),
+                )
+                log.commit()
             except ValueError as exc:
                 errors[k] = str(exc)
 
         prompt_rows, prior = [], {}
         for t, raw in part:
+            cached = log.execute(
+                "SELECT options FROM candidates WHERE key=? AND original_hash=?",
+                (t["key"], model.signature(raw)),
+            ).fetchone()
+            if cached:
+                edits[t["key"]] = json.loads(cached[0])
+                continue
             d = json.loads(raw)
             drama = store.dump([t["product"], t["content"]])
             if drama not in prior:
@@ -118,24 +131,40 @@ def refresh(part, audit, last_pass):
                 used=prior,
                 rows=prompt_rows,
             )
-            generator.run_request(REQUEST, store.dump(request), emit, usage)
+            if prompt_rows:
+                generator.run_request(REQUEST, store.dump(request), emit, usage)
         except (ValueError, RuntimeError, OSError) as exc:
             missed = (
                 str(exc)[:100] if not isinstance(exc, OSError) else "codex_unavailable"
             )
         failed = []
         for k, (t, raw) in rows.items():
-            if k in outcomes:
-                continue
             reason = errors.get(k, missed)
-            if last_pass:
-                if upgrade(c, t, raw, [], reason):
-                    failed.append(worker.alert_item(t, reason))
-                    outcomes[k] = "fallback"
+            try:
+                if k in edits:
+                    try:
+                        outcomes[k] = (
+                            "updated" if upgrade(c, t, raw, edits[k]) else "frozen"
+                        )
+                        continue
+                    except ValueError as exc:
+                        reason = str(exc)
+                        log.execute("DELETE FROM candidates WHERE key=?", (k,))
+                        log.commit()
+                if last_pass:
+                    if upgrade(c, t, raw, [], reason):
+                        failed.append(worker.alert_item(t, reason))
+                        outcomes[k] = "fallback"
+                    else:
+                        outcomes[k] = "frozen"
                 else:
-                    outcomes[k] = "frozen"
-            else:
-                outcomes[k] = "retry"
+                    outcomes[k] = "retry"
+            except sqlite3.OperationalError as exc:
+                if not any(s in str(exc).lower() for s in ("locked", "busy")):
+                    raise
+                # A busy native owner keeps its claim. Reuse the saved hook
+                # on the next pass; do not stop other rows or call the model again.
+                outcomes[k] = "deferred"
         if failed:
             alerts.add(
                 c,
@@ -143,14 +172,13 @@ def refresh(part, audit, last_pass):
                 failed,
             )
             c.commit()
-    with sqlite3.connect(audit, timeout=15) as log:
         log.execute(
             "INSERT INTO calls VALUES(?,?,?,?,?,?,?)",
             (
                 started,
                 time.time(),
                 lang,
-                len(part),
+                len(prompt_rows),
                 usage.get("inputTokens"),
                 usage.get("outputTokens"),
                 store.dump(outcomes),
@@ -162,6 +190,18 @@ def refresh(part, audit, last_pass):
         dict(Counter(outcomes.values())),
         flush=True,
     )
+    return {k for k, v in outcomes.items() if v == "deferred"}
+
+
+def prepare_audit(path):
+    with store.connection(path) as log:
+        log.execute("PRAGMA journal_mode=WAL")
+        log.execute(
+            "CREATE TABLE IF NOT EXISTS candidates(key TEXT PRIMARY KEY,original_hash TEXT,options TEXT)"
+        )
+        log.execute(
+            "CREATE TABLE IF NOT EXISTS calls(started REAL,finished REAL,lang TEXT,requested INTEGER,input_tokens INTEGER,output_tokens INTEGER,outcomes TEXT)"
+        )
 
 
 def main():
@@ -172,12 +212,10 @@ def main():
     )
     p.add_argument("--workers", type=int, choices=(1, 2), default=2)
     args = p.parse_args()
-    with sqlite3.connect(args.audit) as log:
-        log.execute(
-            "CREATE TABLE IF NOT EXISTS calls(started REAL,finished REAL,lang TEXT,requested INTEGER,input_tokens INTEGER,output_tokens INTEGER,outcomes TEXT)"
-        )
-    for last_pass in (False, True):
-        parts = batches(args.size)
+    prepare_audit(args.audit)
+    last_pass, only = False, None
+    while True:
+        parts = batches(args.size, only)
         print(
             "upgrading",
             sum(map(len, parts)),
@@ -187,7 +225,15 @@ def main():
             flush=True,
         )
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            list(pool.map(lambda part: refresh(part, args.audit, last_pass), parts))
+            deferred = set().union(
+                *pool.map(lambda part: refresh(part, args.audit, last_pass), parts)
+            )
+        if last_pass:
+            if not deferred:
+                break
+            only = deferred
+            time.sleep(3)
+        last_pass = True
 
 
 if __name__ == "__main__":
