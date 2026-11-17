@@ -39,6 +39,7 @@ def install(source,commit,deployment):
     if not remote.startswith(commit+'\t'):raise RuntimeError('github_commit_not_verified')
     if deployment.exists():raise RuntimeError('deployment_already_exists')
     deployment.mkdir(parents=True,mode=0o700)
+    shutil.copy2(__file__,deployment/'deploy.py')
     previous={}
     for name in NAMES:
         path=UNITS/name
@@ -94,7 +95,7 @@ def rollback(deployment):
     manifest=json.loads((deployment/'manifest.json').read_text())
     if CURRENT.resolve()!=ROOT/'releases'/manifest['commit']:raise RuntimeError('newer_release_present')
     subprocess.check_call(['systemctl','disable','--now',NAMES[1]])
-    subprocess.check_call(['systemctl','stop',NAMES[2]])
+    subprocess.check_call(['systemctl','disable','--now',NAMES[2]])
     for name,body in manifest['previous_files'].items():
         path=Path(name)
         if body is None:

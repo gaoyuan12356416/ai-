@@ -98,3 +98,9 @@ drain, restores prior code/unit pointers, and keeps current configuration,
 portraits, tokens, ledger, receipts and already confirmed Ad changes. Never
 restore an old SQLite over newer business facts or automatically return Ads to a
 blocked Page. Later release drift requires reconciliation before rollback.
+Every installation freezes its own `DEPLOYMENT/deploy.py`. Use that copy for
+rollback. For full feature withdrawal after several inactive pre-activation
+installs, roll back deployment manifests newest to oldest until the first
+manifest restores the original absent recovery units and portrait refresh
+override. The scanner and worker are disabled; the live business databases and
+already published portraits remain intact throughout.

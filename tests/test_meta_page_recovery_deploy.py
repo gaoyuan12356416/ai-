@@ -6,9 +6,26 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import json
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_rollback_disables_worker_boot_restart_and_preserves_business_state(self):
+        root=Path(__file__).resolve().parents[1]
+        spec=importlib.util.spec_from_file_location('recovery_deploy_rollback',root/'ops/meta-page-recovery/deploy.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary);release=folder/'releases'/'verified';release.mkdir(parents=True)
+            pointer=folder/'current';pointer.mkdir()
+            (folder/'manifest.json').write_text(json.dumps(dict(commit='verified',previous_files={},previous_current=str(release))))
+            # Avoid requiring Windows symlink privileges in this pure operation test.
+            with patch.object(module,'CURRENT') as current,patch.object(module,'ROOT',folder),patch.object(module.subprocess,'check_call') as call:
+                current.resolve.return_value=release
+                module.rollback(folder)
+                self.assertIn((['systemctl','disable','--now','meta-page-recovery-worker.service'],),[c.args for c in call.call_args_list])
+            self.assertTrue((folder/'manifest.json').exists())
+
     def test_cold_import_in_packaged_release(self):
         root=Path(__file__).resolve().parents[1]
         spec=importlib.util.spec_from_file_location('recovery_deploy',root/'ops/meta-page-recovery/deploy.py')
