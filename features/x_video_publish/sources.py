@@ -42,10 +42,15 @@ def safe_url(value):
         return ''
 
 class CachedSelector(DramawaveCandidateSelector):
-    def __init__(self, raw, dramas, deploy, *, probe_deadline=None):
+    def __init__(self, raw, dramas, deploy, *, probe_deadline=None, allow_future_deploy=False):
         super().__init__(None)
         self.raw, self.dramas, self.deploy = raw, dramas, deploy
         self.probe_deadline = probe_deadline
+        self.allow_future_deploy = allow_future_deploy is True
+
+    def _validate_drama_deploy_time(self, content_id, language, **kwargs):
+        return super()._validate_drama_deploy_time(
+            content_id, language, allow_future=self.allow_future_deploy, **kwargs)
 
     def _pool_material_rows(self, material_id, **kwargs):
         row = self.raw.get(material_id)
@@ -95,7 +100,7 @@ class SourceRepository:
             s.is_delete material_is_deleted,s.url material_url,s.name material_name,s.language material_language,
             TRIM(s.data_source_id) content_id,s.tag_name source_tag_name,s.video_duration,s.cover thumbnail_url'''
 
-    def resolve(self, material_ids, *, moboreels=False):
+    def resolve(self, material_ids, *, moboreels=False, allow_future_deploy=False):
         if moboreels:
             return self._resolve_moboreels(material_ids)
         deadline = time.monotonic() + (8 if self.allow_pending_episode_duration else 65)
@@ -106,7 +111,8 @@ class SourceRepository:
         if originals:
             marks = ','.join('%s' for _ in originals)
             rows, mappings = self._read_exact_bundle(f's.id IN ({marks})', originals)
-            result = self._resolve_rows(originals, rows, recover_duration=True, mappings=mappings)
+            result = self._resolve_rows(originals, rows, recover_duration=True, mappings=mappings,
+                                        allow_future_deploy=allow_future_deploy)
         if episodes:
             from .episode_sources import EpisodeRepository
             resolved = EpisodeRepository(self.mysql, self.schema,
@@ -180,7 +186,8 @@ class SourceRepository:
             raise PublishingError('source_result_invalid','素材数据格式无效，请稍后重试',503) from None
         return buckets['material'], (buckets['drama'], buckets['deploy'])
 
-    def _resolve_rows(self, material_ids, rows, *, recover_duration=False, mappings=None):
+    def _resolve_rows(self, material_ids, rows, *, recover_duration=False, mappings=None,
+                      allow_future_deploy=False):
         # Exact-ID reads supply both mapping sets from one SQL snapshot. Ordinary
         # browsing reuses its source rows and fetches the same bounded mappings.
         raw = {str(r['material_id']):r for r in rows}
@@ -205,6 +212,7 @@ class SourceRepository:
         for r in deployment_rows:
             deploy[(int(r.get('app_id') or 1479), str(r['content_id']))].append(r)
         selector = CachedSelector(raw,dramas,deploy,
+                                  allow_future_deploy=allow_future_deploy,
                                   probe_deadline=time.monotonic()+8 if recover_duration else None)
         result, errors = {}, {}
         for start in range(0,len(material_ids),50):
@@ -329,9 +337,11 @@ class SourceRepository:
 class SourceClient:
     def __init__(self, token):
         self.token = token
-    def resolve(self, material_ids, *, moboreels=None):
+    def resolve(self, material_ids, *, moboreels=None, allow_future_deploy=False):
         from features.x_posts.moboreels import source_enabled
         payload = {'action':'resolve','material_ids':ids(material_ids)}
+        if allow_future_deploy:
+            payload['action'] = 'resolve_manual_schedule'
         if moboreels is True or (moboreels is None and source_enabled()):
             payload['moboreels'] = True
         return broker('source',payload,self.token)

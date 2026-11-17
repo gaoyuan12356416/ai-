@@ -111,6 +111,17 @@ def validate_episode_snapshot(material_id, material, frozen=None):
             raise XPostError("x_video_material_changed", "免费集归属、集数或视频地址已变更，请重新核对", 409)
 
 
+def _manual_schedule(value, material, now):
+    """Use the verified drama release as the earliest manual publish time."""
+    requested = _timing(value, now, check_future=False)
+    deployed_at = int(material.get("drama_deploy_time") or 0)
+    if deployed_at > now.timestamp():
+        release = _stamp(datetime.fromtimestamp(deployed_at, timezone.utc))
+        if not requested or release > requested:
+            return release
+    return _timing(requested, now)
+
+
 def _timing(value, now, check_future=True):
     if value in (None, ""):
         return ""
@@ -483,7 +494,10 @@ class PersonalStore:
                     if not same_drama_language(language, material_language):
                         raise XPostError("x_post_account_language_mismatch", "素材语言与账号剧语言不匹配", 409)
                     validate_account_duration(account, material)
-                    schedule = _timing(raw.get("scheduled_at", raw.get("publish_time", "")), current)
+                    requested = raw.get("scheduled_at", raw.get("publish_time", ""))
+                    schedule = (_manual_schedule(requested, material, current) if source == "manual"
+                                else _timing(requested, current))
+                    row["schedule_adjusted"] = schedule != _timing(requested, current, check_future=False)
                     if source == "manual" and material_id in material_times and material_times[material_id] != schedule:
                         raise XPostError("x_video_material_time_mismatch", "同一素材的目标账号必须共用发布时间", 400)
                     processing = raw.get("processing", raw.get("processing_mode", "original")) or "original"
@@ -494,7 +508,7 @@ class PersonalStore:
                     use_default = supplied_copy in (None, "")
                     caption = normalize_caption(config["default_copy"] if use_default else supplied_copy)
                     rendered = render_caption(caption, material.get("drama_name", material.get("name")), material.get("drama_description", material.get("description", material.get("desc"))), "https://preview.invalid/0.html")
-                    row.update(caption=caption, rendered_caption=rendered, caption_source="default" if use_default else "edited", config_version=int(config["version"]), drama_language=language, scheduled_at=schedule, processing=processing, source_snapshot={k: material[k] for k in ("material_id", "id", "drama_name", "drama_description", "description", "language", "duration_seconds", "duration_status", "material_name", "content_id", "series_code", "url", "material_url", "source_kind", "resource_id", "episode_number") if k in material}, account_snapshot={k: account[k] for k in ("id", "username", "display_name", "x_user_id", "drama_language") if k in account})
+                    row.update(caption=caption, rendered_caption=rendered, caption_source="default" if use_default else "edited", config_version=int(config["version"]), drama_language=language, scheduled_at=schedule, processing=processing, source_snapshot={k: material[k] for k in ("material_id", "id", "drama_name", "drama_description", "description", "language", "duration_seconds", "duration_status", "drama_deploy_time", "material_name", "content_id", "series_code", "url", "material_url", "source_kind", "resource_id", "episode_number") if k in material}, account_snapshot={k: account[k] for k in ("id", "username", "display_name", "x_user_id", "drama_language") if k in account})
                     try:
                         self._occupancy(conn, account_id, material_id, bool(raw.get("allow_repeat_success") is True))
                     except XPostError as exc:
@@ -565,6 +579,8 @@ class PersonalStore:
                         raise XPostError("x_video_material_changed", "素材数据已变更，请重新核对", 409)
                     validate_episode_snapshot(mid, material, row["source_snapshot"])
                     validate_account_duration(accounts.get(str(aid), accounts.get(aid)), material)
+                    if frozen["source"] == "manual" and _manual_schedule(row["scheduled_at"], material, current) != row["scheduled_at"]:
+                        raise XPostError("x_video_release_time_changed", "剧目可投放时间已推迟，请重新核对实际预约时间", 409)
                     rendered = render_caption(row["caption"], material.get("drama_name", material.get("name")), material.get("drama_description", material.get("description", material.get("desc"))), "https://preview.invalid/0.html")
                     if rendered != row["rendered_caption"]:
                         raise XPostError("x_video_material_changed", "素材文案数据已变更，请重新核对", 409)

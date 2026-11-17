@@ -99,7 +99,7 @@ class PublishingService:
             lambda actor,mids:call('source',self.source.resolve,mids),
             lambda tenant,user:call('identity',self.identity,tenant,user),enabled=self.enabled)
 
-    def _resolve_rows(self, actor, rows):
+    def _resolve_rows(self, actor, rows, *, allow_future_deploy=False):
         from features.x_posts.moboreels import contains_macro
         groups = {False: [], True: []}
         for row in rows:
@@ -119,7 +119,10 @@ class PublishingService:
         for enabled, mids in groups.items():
             if not mids:
                 continue
-            resolved = self.source.resolve(mids, moboreels=True) if enabled else self.source.resolve(mids)
+            options = {'allow_future_deploy': True} if allow_future_deploy else {}
+            if enabled:
+                options['moboreels'] = True
+            resolved = self.source.resolve(mids, **options)
             for key in result:
                 result[key].update(resolved.get(key, {}))
         return result
@@ -170,7 +173,7 @@ class PublishingService:
                 raise PublishingError('unassigned_material','存在未分配目标账号的素材',400)
         mids=list(dict.fromkeys(r['material_id'] for r in rows if isinstance(r['material_id'],str)
             and (re.fullmatch(r'[1-9][0-9]{0,30}',r['material_id']) or (excel and is_episode_id(r['material_id'])))))
-        resolved=self._resolve_rows(actor, rows)
+        resolved=self._resolve_rows(actor, rows, allow_future_deploy=not excel)
         result=self.store.preview(actor,{'source':'excel' if excel else 'manual','rows':rows},accounts,resolved['items'])
         return self.preview_dto(result,resolved.get('errors',{}))
 
@@ -193,6 +196,7 @@ class PublishingService:
                 'account_name':account.get('display_name') or account.get('username') or row['account_id'],
                 'caption':row['rendered_caption'],'caption_template':row['caption'],
                 'planned_at_utc':row['scheduled_at'] or None,'schedule_kind':'scheduled' if row['scheduled_at'] else 'immediate',
+                'schedule_adjusted':bool(row.get('schedule_adjusted')),
                 'processing_mode':client_processing(row['processing']),'repeat_required':bool(row.get('repeat_required'))})
         return {'preview_id':result['preview_token'],'expires_at_utc':result['expires_at'],'items':items,'skipped':skipped,
                 'repeat_required':any(i['repeat_required'] for i in items)}
@@ -238,7 +242,7 @@ class PublishingService:
                 if frozen['source']=='manual' and len(rows)!=len(frozen['rows']):
                     raise PublishingError('manual_preflight_failed','请修正所有手动发布配对后重新核对',409)
                 mids=list(dict.fromkeys(r['material_id'] for r in rows))
-                resolved=self._resolve_rows(actor, rows)
+                resolved=self._resolve_rows(actor, rows, allow_future_deploy=frozen['source']=='manual')
                 batch=self.store.commit(actor,token,key,self.accounts(actor),resolved['items'],allow_repeat_success=payload.get('allow_repeat') is True)
             value=batch_dto(batch)
             return {'batch_id':value['batch_id'],'batch':value}
