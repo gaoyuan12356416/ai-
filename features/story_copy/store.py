@@ -200,38 +200,6 @@ def claim(c):
     return batch, [json.loads(r["payload"]) for r in rows]
 
 
-def history(c, key, batch=None):
-    query = """SELECT plot FROM (
-      SELECT plot,created at FROM jobs WHERE product=? AND content=? AND lang=? AND hash IS NOT NULL
-      UNION ALL SELECT plot,at FROM history WHERE product=? AND content=? AND lang=?)
-      ORDER BY at DESC LIMIT 30"""
-    values = [r[0] for r in c.execute(query, (*key, *key))]
-    if batch:
-        values.extend(
-            r[0]
-            for r in c.execute(
-                "SELECT plot FROM jobs WHERE batch=? AND hash IS NOT NULL", (batch,)
-            )
-        )
-    return values
-
-
-def choose_hook(c, task, options):
-    # Prefer variety when available; repetition must never reject usable copy.
-    used = {
-        r[0]
-        for r in c.execute(
-            """SELECT json_extract(draft,'$.hook_key') FROM jobs
-        WHERE product=? AND content=? AND lang=? AND draft IS NOT NULL""",
-            group_key(task),
-        )
-    }
-    for option in options:
-        if option["hook_key"] not in used:
-            return option
-    return options[0]
-
-
 def accept(c, batch, task, item):
     options = click_options(task, item.get("hooks"))
     clean = validate(task, item, options)
@@ -239,7 +207,7 @@ def accept(c, batch, task, item):
     digest = signature(plot)
     c.execute("BEGIN IMMEDIATE")
     try:
-        clean.update(choose_hook(c, task, options))
+        clean.update(options[0])
         changed = c.execute(
             "UPDATE jobs SET state='ready',draft=?,plot=?,hash=? WHERE key=? AND batch=? AND state='generating'",
             (dump(clean), plot, digest, task["key"], batch),

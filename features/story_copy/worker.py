@@ -6,86 +6,9 @@ import threading
 import time
 
 from . import alerts, generator, sources, store
-from .model import (
-    canonical_lang,
-    click_prefix,
-    group_key,
-    history_plot,
-    product,
-    signature,
-)
+from .model import click_prefix, group_key, signature
 
 LOG = logging.getLogger(__name__)
-
-
-def data_for(key, row):
-    if key == "fv":
-        task = sources.fb_task("fv", row)
-    elif key == "fa":
-        task = sources.fb_task("fa", row)
-        cfg = sources.obj(row.get("config_json"))
-        task["product"] = task["product"] or product(cfg.get("product"))
-        task["language"] = task["language"] or canonical_lang(cfg.get("language"))
-    else:
-        task = {
-            "product": "moboreels"
-            if "{{m_url}}" in str(row.get("body_template") or "")
-            else "dramawave",
-            "content": row["content_id"],
-            "language": row["material_language"],
-            "title": row["drama_name"],
-        }
-    return task
-
-
-def seed_history(c, task):
-    key = group_key(task)
-    queries = [
-        (
-            "xm",
-            store.SOURCES["xm"][1],
-            "SELECT q.content_id,q.material_language,q.drama_name,q.body_template,l.post_text text,l.updated_at stamp FROM x_post_queue q JOIN x_post_publish_log l ON l.queue_id=q.id WHERE q.content_id=? AND l.status='published'",
-        ),
-        (
-            "ta",
-            store.TAG_POSTS,
-            "SELECT q.content_id,q.material_language,q.drama_name,q.body_template,l.post_text text,l.updated_at stamp FROM x_post_queue q JOIN x_post_publish_log l ON l.queue_id=q.id WHERE q.content_id=? AND l.status='published'",
-        ),
-        (
-            "fv",
-            store.SOURCES["fv"][1],
-            "SELECT t.rowid _ord,t.*,t.caption text,t.updated_at_utc stamp FROM fb_video_task t WHERE t.content_id=? AND t.status='published'",
-        ),
-        (
-            "fa",
-            store.SOURCES["fa"][1],
-            "SELECT t.*,r.config_json,t.message_text text,t.completed_at_utc stamp FROM fb_auto_task t JOIN fb_auto_run r ON r.id=t.run_id WHERE t.content_id=? AND t.status='published'",
-        ),
-    ]
-    from datetime import datetime
-
-    for family, path, sql in queries:
-        with store.connection(path, readonly=True, timeout=0.3) as src:
-            rows = src.execute(sql, (task["content"],))
-            for raw in rows:
-                row = dict(raw)
-                meta = data_for(family, row)
-                if group_key(meta) != key:
-                    continue
-                plot = history_plot(row["text"], meta["title"])
-                if not plot:
-                    continue
-                try:
-                    at = datetime.fromisoformat(
-                        str(row["stamp"]).replace("Z", "+00:00")
-                    ).timestamp()
-                except (TypeError, ValueError):
-                    at = 0
-                c.execute(
-                    "INSERT OR IGNORE INTO history VALUES(?,?,?,?,?,?)",
-                    (*key, signature(plot), plot, at),
-                )
-        c.commit()
 
 
 def alert_item(task, reason, outcome="到点使用现行文案"):
@@ -100,32 +23,8 @@ def alert_item(task, reason, outcome="到点使用现行文案"):
     )
 
 
-def generate_batch(c, batch, tasks, runner=generator.run, seed=True):
+def generate_batch(c, batch, tasks, runner=generator.run):
     errors = {}
-    prior = []
-    if seed:
-        try:
-            seed_history(c, tasks[0])
-        except Exception as exc:
-            LOG.warning(
-                "history unavailable for batch %s: %s", batch, type(exc).__name__
-            )
-            for t in tasks:
-                errors[t["key"]] = "caption_history_unavailable"
-    key = group_key(tasks[0])
-    for r in c.execute(
-        "SELECT draft FROM jobs WHERE product=? AND content=? AND lang=? AND draft IS NOT NULL ORDER BY created DESC LIMIT 5",
-        key,
-    ):
-        d = sources.obj(r[0])
-        prior.append(
-            dict(
-                plot=(d.get("opening", "") + " " + d.get("turn", ""))[:260],
-                hook=d.get("click_hook", ""),
-            )
-        )
-    if len(prior) < 5:
-        prior.extend(p[:220] for p in store.history(c, key)[: 5 - len(prior)])
     ready = []
     for t in tasks:
         try:
@@ -144,7 +43,7 @@ def generate_batch(c, batch, tasks, runner=generator.run, seed=True):
             ready.append(t)
     tokens = [None, None]
     calls = 0
-    for chunk in generator.splits(ready, prior) if ready else ():
+    for chunk in generator.splits(ready) if ready else ():
         by_key = {t["key"]: t for t in chunk}
         submitted = set()
 
@@ -163,7 +62,7 @@ def generate_batch(c, batch, tasks, runner=generator.run, seed=True):
         usage = {}
         calls += 1
         try:
-            runner(chunk, prior, emit, usage)
+            runner(chunk, emit, usage)
             missed = "missing_model_row"
         except Exception as exc:
             LOG.warning("caption batch %s provider %s", batch, type(exc).__name__)

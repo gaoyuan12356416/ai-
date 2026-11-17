@@ -211,33 +211,6 @@ def click_options(task, values):
     return options
 
 
-def near(a, b):
-    if a == b:
-        return True
-    if min(len(a), len(b)) < 3:
-        return False
-    x = {a[i : i + 3] for i in range(len(a) - 2)}
-    y = {b[i : i + 3] for i in range(len(b) - 2)}
-    return 2 * len(x & y) >= 0.85 * (len(x) + len(y))
-
-
-def history_plot(text, title=""):
-    lines = [
-        re.sub(r"https?://\S+", "", x).strip() for x in str(text or "").splitlines()
-    ]
-    lines = [re.sub(r"#[^\s#]+", "", x).strip() for x in lines]
-    lines = [
-        x
-        for x in lines
-        if x
-        and x.strip("《》🎬 ") != title
-        and not re.match(r"^(?:Episode|Ep\.?)\s*\d+$", x, re.I)
-    ]
-    if len(lines) >= 3:
-        lines = lines[-2:]
-    return normalized(" ".join(lines))
-
-
 def weight(text):
     return sum(
         1

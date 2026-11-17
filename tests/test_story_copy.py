@@ -87,13 +87,16 @@ class CaptionTests(unittest.TestCase):
             tags=["ShortDrama", "Mystery"],
         )
 
-    def test_shared_synopsis_assigns_distinct_plot_beats(self):
+    def test_prompt_uses_current_facts_without_history_or_variation(self):
         tasks = [self.task(1), self.task(2, "fa")]
         for t in tasks:
             t["facts"] = {"series": "Ada hides the seal. Ben finds the ribbon."}
-        request = json.loads(generator.prompt(tasks, []))
+        request = json.loads(generator.prompt(tasks))
         self.assertEqual(len(request["fact_text"]), 1)
-        self.assertEqual([x["focus"]["sentence"] for x in request["tasks"]], [1, 2])
+        self.assertNotIn("recent", request)
+        for item in request["tasks"]:
+            self.assertNotIn("focus", item)
+            self.assertNotIn("suggested_angle", item)
 
     def test_100_and_101_partial_failure(self):
         with store.connection() as c:
@@ -104,14 +107,14 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(100, len(rows))
             calls = []
 
-            def partial(part, prior, emit, usage):
+            def partial(part, emit, usage):
                 calls.append(len(part))
                 usage.update(inputTokens=1500, outputTokens=19000)
                 for t in part[:97]:
                     emit(self.item(t))
                 raise RuntimeError("generation_timeout")
 
-            worker.generate_batch(c, batch, rows, partial, seed=False)
+            worker.generate_batch(c, batch, rows, partial)
             self.assertEqual(calls, [100])
             self.assertEqual(
                 c.execute("SELECT count(*) FROM jobs WHERE state='ready'").fetchone()[
@@ -135,6 +138,35 @@ class CaptionTests(unittest.TestCase):
                     bridge.select(t, "原正文", "https://example.org/task")[2], "原正文"
                 )
 
+    def test_generation_ignores_unavailable_history_and_uses_repeated_copy(self):
+        with store.connection() as c:
+            tasks = [self.task(i, f) for i, f in enumerate(("fa", "xm", "xd", "ta"), 1)]
+            for task in tasks:
+                store.enqueue(c, task)
+            c.commit()
+            batch, rows = store.claim(c)
+            repeated = self.item(rows[0])
+            repeated["hooks"] = ["to find the seal"]
+            # Missing history tables/native databases must not affect generation.
+            c.execute("DROP TABLE history")
+            c.commit()
+            queries = []
+            c.set_trace_callback(queries.append)
+
+            def provider(part, emit, usage):
+                for task in part:
+                    emit(dict(repeated, id=task["key"]))
+
+            with patch.object(store, "connection", side_effect=sqlite3.OperationalError("database is locked")):
+                worker.generate_batch(c, batch, rows, provider)
+            c.set_trace_callback(None)
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='ready'").fetchone()[0], 4)
+            self.assertEqual(c.execute("SELECT count(DISTINCT hash) FROM jobs").fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+            self.assertFalse(any("SELECT draft" in q or "json_extract(draft" in q for q in queries))
+        for task in tasks:
+            self.assertEqual(bridge.select(task, "legacy", "https://example.org/post")[0], "ai")
+
     def test_short_batch_window_and_request_budget(self):
         with store.connection() as c:
             t = self.task(1)
@@ -146,7 +178,7 @@ class CaptionTests(unittest.TestCase):
             c.commit()
             self.assertEqual(len(store.claim(c)[1]), 1)
         with patch.dict("os.environ", {"STORY_COPY_OUTPUT_BUDGET": "2600"}):
-            pieces = list(generator.splits([self.task(i) for i in range(100)], []))
+            pieces = list(generator.splits([self.task(i) for i in range(100)]))
             self.assertEqual(sum(map(len, pieces)), 100)
             self.assertLessEqual(max(map(len, pieces)), 10)
 
@@ -250,7 +282,7 @@ class CaptionTests(unittest.TestCase):
                 repeated = dict(item, id=task["key"])
                 if i == 3:
                     repeated["turn"] += "s"
-                worker.generate_batch(c, batch, [task], lambda rows, prior, emit, usage: emit(repeated), seed=False)
+                worker.generate_batch(c, batch, [task], lambda rows, emit, usage: emit(repeated))
                 self.assertEqual(bridge.select(task, "legacy", "https://example.org/post")[0], "ai")
             self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='ready'").fetchone()[0], 3)
             self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
@@ -364,7 +396,7 @@ class CaptionTests(unittest.TestCase):
                 1,
             )
 
-    def test_ten_languages_and_dedup_calibration(self):
+    def test_ten_languages_rendering(self):
         samples = json.loads(
             (ROOT / "tests/fixtures/story-copy-reviewed.json").read_text(
                 encoding="utf-8"
@@ -403,8 +435,6 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(text.splitlines()[-1], s["tags"])
             self.assertLessEqual(model.weight(text), 280)
             plot = model.normalized(s["opening"] + s["turn"])
-            self.assertTrue(model.near(plot, plot[:-1] + "a"))
-            self.assertFalse(any(model.near(plot, old) for old in plots))
             plots.append(plot)
         self.assertEqual(10, len(plots))
 
@@ -425,7 +455,7 @@ class CaptionTests(unittest.TestCase):
                 self.assertEqual(lines[1].count("👆"), 1)
                 self.assertEqual("Episode 3" in lines[1], f == "xd")
             self.assertEqual(
-                4,
+                1,
                 c.execute(
                     "SELECT count(DISTINCT json_extract(draft,'$.hook_key')) FROM jobs"
                 ).fetchone()[0],
@@ -438,7 +468,7 @@ class CaptionTests(unittest.TestCase):
                 self.item(t), hooks=["to find the seal!", "TO FIND THE SEAL"]
             )
             worker.generate_batch(
-                c, b, [t], lambda chunk, prior, emit, usage: emit(repeated), seed=False
+                c, b, [t], lambda chunk, emit, usage: emit(repeated)
             )
             selected = bridge.select(t, "original", link)
             self.assertEqual(selected[:2], ("ai", ""))
@@ -538,7 +568,7 @@ class CaptionTests(unittest.TestCase):
                 c.execute(
                     "select count(distinct json_extract(draft,'$.hook_key')) from jobs"
                 ).fetchone()[0],
-                2,
+                1,
             )
 
     def test_reviewed_episode_and_switch_watermark(self):
