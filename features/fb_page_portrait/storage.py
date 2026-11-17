@@ -34,8 +34,7 @@ def write(data,env,reader,*,create_table=False):
     version = data['meta']['version']
     assert re.fullmatch(VERSION_RE,version)
     pages = data['pages']
-    payloads = {pid:encoded(p) for pid,p in pages.items()}
-    hashes = {pid:hashlib.sha256(body.encode()).hexdigest() for pid,body in payloads.items()}
+    hashes = {pid:hashlib.sha256(encoded(p).encode()).hexdigest() for pid,p in pages.items()}
     existing = []
     if not create_table:
         existing = reader.query([f'SELECT HEX(JSON_OBJECT(\'page_id\',page_id,\'hash\',payload_sha256)) FROM {TABLE} WHERE profile_version={literal(version)}'],timeout=30)
@@ -52,7 +51,7 @@ def write(data,env,reader,*,create_table=False):
                 for pid,p in pages.items():
                     summary,_ = projections(p)
                     q.execute('INSERT INTO '+TABLE+' (profile_version,page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,detail_json,meta_json,payload_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
-                              (version,pid,data['meta']['start'],data['meta']['end'],p['paid_cents'],p['social_cents'],p['spend_cents'],encoded(summary),payloads[pid],encoded(data['meta']),hashes[pid]))
+                              (version,pid,data['meta']['start'],data['meta']['end'],p['paid_cents'],p['social_cents'],p['spend_cents'],encoded(summary),encoded(p),encoded(data['meta']),hashes[pid]))
             db.commit()
     verified = False
     for attempt in range(5):

@@ -27,7 +27,7 @@ def build_release(source,release,profile):
     # regular package path, not Python's append-only namespace _NamespacePath.
     (release/'features/__init__.py').write_text('"""Scoped Meta recovery runtime packages."""\n',encoding='utf-8')
     for path in profile.glob('*.py'):
-        if path.name not in {'classification.py','collect.py','build.py','refresh.py'}:
+        if path.name not in {'classification.py','collect.py','build.py','refresh.py','storage.py'}:
             shutil.copy2(path,release/'features/fb_page_portrait'/path.name)
 
 
@@ -49,7 +49,8 @@ def install(source,commit,deployment):
                   previous_current=str(CURRENT.resolve()) if CURRENT.exists() else None,
                   profile_baseline={},activated=False)
     profile=Path('/opt/fb-page-portraits/current/features/fb_page_portrait')
-    expected={'classification.py':'f7a41e254b8c8295b3cb5655f5976a96a68c4c15','collect.py':'45ddb9902a208a384b8047ca4c71b36a921058c6'}
+    expected={'classification.py':'f7a41e254b8c8295b3cb5655f5976a96a68c4c15','collect.py':'45ddb9902a208a384b8047ca4c71b36a921058c6',
+              'storage.py':'b449ab307c7c00d549ea2c9d42b818336868dca1'}
     for name,blob in expected.items():
         if run('git','hash-object',str(profile/name))!=blob:raise RuntimeError('profile_baseline_changed_'+name)
     for name in ('classification.py','collect.py','refresh.py','storage.py'):
