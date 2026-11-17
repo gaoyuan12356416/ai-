@@ -9,6 +9,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.drama_launch_window import normalize, bounds, release_timing, frozen_release_times, POLICY
@@ -100,9 +101,28 @@ class XTests(unittest.TestCase):
             conn.execute('INSERT INTO x_post_manual_run VALUES(1,?,?)', ('auto_template', 'x-auto-task-' + str(task.id)))
         post = SimpleNamespace(db_path=postdb, get_queue=lambda _: dict(manual_run_id=1, account_id=task.account_id, material_id='101'))
         with self.assertRaises(XPostError):
-            assert_due(str(fixture.db_path), post, 1, fixture.clock())
-        assert_due(str(fixture.db_path), post, 1, datetime.fromtimestamp(release, timezone.utc))
+            assert_due(fixture.db_path.as_uri(), post, 1, fixture.clock())
+        assert_due(fixture.db_path.as_uri(), post, 1, datetime.fromtimestamp(release, timezone.utc))
         self.assertEqual(fixture.store.get_task(task.id).selection, snapshot)
+
+    def test_current_profile_selector_keeps_exact_timing(self):
+        from features.x_tag_publish.selection import ProfileSelector
+        f = self.f
+        release = self.epoch + 3600
+        source = f.FakeSource([f.drama('C1', deploy_time=release)], {'C1': [f.material('101', 'C1')]})
+        store = f.FakeStore()
+        store.get_run = lambda _: SimpleNamespace(blacklist_snapshot={})
+        selector = ProfileSelector(source, f.MetricWindowRepository(f.FakeMetricStore()),
+                                   f.FakePublishedHistory(), store, material_validator=f.FakeValidator())
+        decision = SimpleNamespace(audit=lambda *a, **k: {'selection_mode': 'fixture'})
+        with patch.dict('os.environ', X_POST_AUTOMATION_INTERNAL_URL='http://fixture', X_POST_AUTO_INTERNAL_TOKEN='fixture'), \
+             patch('features.x_tag_publish.selection.XPostAutoBridgeClient'), \
+             patch('features.x_tag_publish.selection.Decision', return_value=decision), \
+             patch('features.x_tag_publish.selection.ranked_dramas', side_effect=lambda _, rows, __: rows):
+            selector.select_and_reserve(f.request(f.rules(drama={'launch_window_days': '-1~0'})))
+        snapshot = store.reserve_calls[0]['selection_snapshot']
+        self.assertEqual(snapshot['hit_publish_timing']['advance_seconds'], 0)
+        self.assertEqual(snapshot['tag_profile']['selection_mode'], 'fixture')
 
 
 class FBTests(unittest.TestCase):
