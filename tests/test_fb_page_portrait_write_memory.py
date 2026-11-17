@@ -7,12 +7,19 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import weakref
+import subprocess
+import sys
 
 from features.fb_page_portrait import storage
 from features.fb_page_portrait.resume import restore
 
 
 class MemoryWriteTests(unittest.TestCase):
+    def test_memory_canary_direct_cli_has_no_driver_requirement_for_help(self):
+        path=Path(__file__).resolve().parents[1]/'ops/meta-page-recovery/profile_memory_canary.py'
+        with tempfile.TemporaryDirectory() as folder:
+            result=subprocess.run([sys.executable,str(path),'--help'],cwd=folder,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
     def test_writer_does_not_retain_all_encoded_page_payloads(self):
         alive=weakref.WeakSet();peak=[0];original=storage.encoded;written={};batches=[0]
         class Tracked(str):pass
