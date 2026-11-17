@@ -197,7 +197,7 @@ class CaptionTests(unittest.TestCase):
             self.assertFalse(store.eligible(c, "tm", 1000))
             self.assertTrue(store.eligible(c, "ta", 1000))
 
-    def test_same_drama_across_channels_and_story_only_episode(self):
+    def test_identical_copy_across_channels_and_story_only_episode(self):
         with store.connection() as c:
             ts = [self.task(i + 1, f) for i, f in enumerate(["fa", "xm", "xd", "ta"])]
             for t in ts:
@@ -207,14 +207,15 @@ class CaptionTests(unittest.TestCase):
             sample = self.item(ts[0])
             self.assertTrue(store.accept(c, batch, ts[0], sample))
             for t in ts[1:]:
-                with self.assertRaisesRegex(ValueError, "duplicate"):
+                self.assertTrue(
                     store.accept(
                         c, batch, t, dict(sample, id=t["key"], tags=["Other", "Tags"])
                     )
+                )
             t = ts[2]
             with self.assertRaisesRegex(ValueError, "episode_evidence_missing"):
                 model.validate(t, dict(self.item(t), scope="episode"))
-            self.assertTrue(store.accept(c, batch, t, self.item(t)))
+            self.assertFalse(store.accept(c, batch, t, self.item(t)))
             selected = bridge.select(t, "fallback", "https://example.org/unique")
             self.assertEqual(selected[0], "ai")
             lines = selected[2].splitlines()
@@ -224,6 +225,38 @@ class CaptionTests(unittest.TestCase):
             self.assertIn("Episode 3", lines[1])
             self.assertTrue(lines[1].startswith("👆 Tap the link "))
             self.assertEqual(len(lines), 7)
+
+    def test_existing_unique_index_migrates_and_history_allows_reuse(self):
+        with store.connection() as c:
+            c.execute("DROP INDEX jobs_exact")
+            c.execute("CREATE UNIQUE INDEX jobs_exact ON jobs(product,content,lang,hash) WHERE hash IS NOT NULL")
+            first = self.task(1)
+            store.enqueue(c, first)
+            c.commit()
+            batch, _ = store.claim(c)
+            item = self.item(first)
+            store.accept(c, batch, first, item)
+            old = dict(c.execute("SELECT * FROM jobs WHERE key=?", (first["key"],)).fetchone())
+            c.execute("INSERT INTO history VALUES(?,?,?,?,?,?)", (*model.group_key(first), old["hash"], old["plot"], 1))
+        store.initialize()
+        store.initialize()
+        with store.connection() as c:
+            self.assertEqual(old, dict(c.execute("SELECT * FROM jobs WHERE key=?", (first["key"],)).fetchone()))
+            for i in (2, 3):
+                task = self.task(i)
+                store.enqueue(c, task)
+                c.commit()
+                batch, _ = store.claim(c)
+                repeated = dict(item, id=task["key"])
+                if i == 3:
+                    repeated["turn"] += "s"
+                worker.generate_batch(c, batch, [task], lambda rows, prior, emit, usage: emit(repeated), seed=False)
+                self.assertEqual(bridge.select(task, "legacy", "https://example.org/post")[0], "ai")
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='ready'").fetchone()[0], 3)
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE hash=?", (old["hash"],)).fetchone()[0], 2)
+            store.enqueue(c, first)
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs").fetchone()[0], 3)
 
     def test_manual_frozen_and_correct_product_link(self):
         snap = {
@@ -407,10 +440,9 @@ class CaptionTests(unittest.TestCase):
             worker.generate_batch(
                 c, b, [t], lambda chunk, prior, emit, usage: emit(repeated), seed=False
             )
-            self.assertEqual(
-                bridge.select(t, "original", link)[:3],
-                ("legacy", "duplicate_click_hook", "original"),
-            )
+            selected = bridge.select(t, "original", link)
+            self.assertEqual(selected[:2], ("ai", ""))
+            self.assertIn("Tap the link to find the seal!", selected[2])
         t = dict(self.task(20), language="zh-Hant-TW")
         candidates = ["👆 點連結看他反擊", "看後續", "看她反擊"]
         self.assertEqual(

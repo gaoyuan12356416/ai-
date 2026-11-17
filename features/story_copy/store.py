@@ -11,7 +11,6 @@ from .model import (
     ENDPOINTS,
     click_options,
     group_key,
-    near,
     normalized,
     signature,
     validate,
@@ -46,7 +45,7 @@ CREATE INDEX IF NOT EXISTS switch_endpoint ON switches(endpoint,id DESC);
 CREATE TABLE IF NOT EXISTS jobs(key TEXT PRIMARY KEY,endpoint TEXT,product TEXT,content TEXT,lang TEXT,payload TEXT,
  state TEXT,batch INTEGER,draft TEXT,plot TEXT,hash TEXT,reason TEXT DEFAULT '',created REAL,final TEXT,short TEXT);
 CREATE INDEX IF NOT EXISTS jobs_pending ON jobs(state,product,content,lang,created);
-CREATE UNIQUE INDEX IF NOT EXISTS jobs_exact ON jobs(product,content,lang,hash) WHERE hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS jobs_exact ON jobs(product,content,lang,hash) WHERE hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS jobs_history ON jobs(product,content,lang,created DESC);
 CREATE TABLE IF NOT EXISTS history(product TEXT,content TEXT,lang TEXT,hash TEXT,plot TEXT,at REAL,
  PRIMARY KEY(product,content,lang,hash));
@@ -87,6 +86,12 @@ def initialize():
     with connection() as c:
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        # Keep fingerprints for audit, but allow identical copy on different tasks.
+        # Retain the index name so older code can start without recreating uniqueness.
+        c.execute("BEGIN IMMEDIATE")
+        if any(r["name"] == "jobs_exact" and r["unique"] for r in c.execute("PRAGMA index_list(jobs)")):
+            c.execute("DROP INDEX jobs_exact")
+            c.execute("CREATE INDEX jobs_exact ON jobs(product,content,lang,hash) WHERE hash IS NOT NULL")
 
 
 def setting(endpoint):
@@ -212,8 +217,7 @@ def history(c, key, batch=None):
 
 
 def choose_hook(c, task, options):
-    # Writers call this inside BEGIN IMMEDIATE so simultaneous batches and the
-    # ready-draft upgrade cannot reserve the same hook for two different posts.
+    # Prefer variety when available; repetition must never reject usable copy.
     used = {
         r[0]
         for r in c.execute(
@@ -225,22 +229,16 @@ def choose_hook(c, task, options):
     for option in options:
         if option["hook_key"] not in used:
             return option
-    raise ValueError("duplicate_click_hook")
+    return options[0]
 
 
 def accept(c, batch, task, item):
     options = click_options(task, item.get("hooks"))
     clean = validate(task, item, options)
-    key = group_key(task)
     plot = normalized(clean["opening"] + clean["turn"])
     digest = signature(plot)
     c.execute("BEGIN IMMEDIATE")
     try:
-        if c.execute(
-            "SELECT 1 FROM history WHERE product=? AND content=? AND lang=? AND hash=?",
-            (*key, digest),
-        ).fetchone() or any(near(plot, p) for p in history(c, key, batch)):
-            raise ValueError("duplicate_plot")
         clean.update(choose_hook(c, task, options))
         changed = c.execute(
             "UPDATE jobs SET state='ready',draft=?,plot=?,hash=? WHERE key=? AND batch=? AND state='generating'",
@@ -248,9 +246,6 @@ def accept(c, batch, task, item):
         ).rowcount
         c.commit()
         return bool(changed)
-    except sqlite3.IntegrityError:
-        c.rollback()
-        raise ValueError("duplicate_plot") from None
     except Exception:
         c.rollback()
         raise
