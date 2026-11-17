@@ -53,9 +53,15 @@ class Reader:
         sql = ("delimiter //\nSET SESSION time_zone='+00:00',MAX_EXECUTION_TIME=8000,tx_isolation='REPEATABLE-READ'; "
                "START TRANSACTION READ ONLY; SELECT @@read_only;\n"+';\n'.join(statements)+';\nROLLBACK//\n')
         try:
-            result = subprocess.run(['/usr/bin/mysql','-h','101.32.56.53','-P','63350','-u',self.env['ADMIN_MAPPING_MYSQL_USER'],
+            for attempt in range(2):
+                result = subprocess.run(['/usr/bin/mysql','-h','101.32.56.53','-P','63350','-u',self.env['ADMIN_MAPPING_MYSQL_USER'],
                                      '--connect-timeout=3','--skip-reconnect','--default-character-set=utf8mb4','--compress','-N','-B','-r'],
                                     input=sql,env=env,text=True,encoding='utf-8',capture_output=True,timeout=timeout+40)
+                codes = re.findall(r'ERROR (\d+)', result.stderr)
+                if (attempt==0 and result.returncode and not result.stdout.strip()
+                    and any(code in {'2003','2013'} for code in codes)):
+                    continue
+                break
             lines = result.stdout.splitlines()
             if result.returncode or not lines or lines.pop(0) != '1':
                 codes = re.findall(r'ERROR (\d+)', result.stderr)
@@ -135,8 +141,10 @@ class Sources:
             'language',c.language,'data_source',c.data_source)) FROM kunlunads_dev.ads_source s
             JOIN kunlunads_dev.ads_custom_source c ON s.source_type=3 AND c.id=s.source_id
             WHERE s.id=%s LIMIT 2""" % literal(source)]) if source else []
-        if len(materials)!=1 or materials[0].get('data_source')!=6:return result
+        if len(materials)!=1:return result
         material=materials[0]
+        result['language']=language(material.get('language')) or result['language']
+        if material.get('data_source')!=6:return result
         source_app={'dramawave':1479,'freereels':979,'hotdrama':3302}.get(str(material.get('product','')).lower())
         if not source_app:return result
         cid=str(material['content_id']);lang=language(material.get('language'))
@@ -144,12 +152,8 @@ class Sources:
             "'labels',labels,'series_code',series_code)) FROM kunlunads_dev.ads_drama_resource "
             "WHERE app_id=%d AND content_id=%s LIMIT 100" % (source_app,literal(cid))])
         rows=[row for row in rows if str(row['content_id'])==cid and language(row.get('language'))==lang]
-        identities = {(int(r['app_id']),str(r['content_id']),language(r.get('language'))) for r in rows}
-        if len(identities)!=1:
-            return result
-        source_app,cid,lang = next(iter(identities))
-        if source_app not in {1479,979,3302}:
-            return result
+        # Missing/retired catalog tags must not discard an explicitly verified
+        # material language or prevent an info-only audience classification.
         # An explicit source-resource link can legitimately be a DramaWave
         # material used in a HotDrama ad. It is not an ID-only cross-product match.
         infos = self.reader.query(["SELECT DISTINCT HEX(JSON_OBJECT('app_id',app_id,'content_id',content_id,'language',language,"

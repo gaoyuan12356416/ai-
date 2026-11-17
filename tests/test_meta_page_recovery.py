@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from features.meta_page_recovery.domain import (account_dates,purchases,active_ad,select_page,profile_match,
@@ -12,6 +13,7 @@ from features.meta_page_recovery.state import Store
 from features.meta_page_recovery.engine import scan,Worker,verify_creative
 from features.meta_page_recovery.meta import MetaError
 from features.meta_page_recovery.notify import card,Sender
+from features.meta_page_recovery.sources import Reader,SourceError
 
 
 def page(pid='10',group=24,status=0,lang='en',**kw):
@@ -74,6 +76,19 @@ class Graph:
 
 
 class DomainTests(unittest.TestCase):
+    def test_initial_handshake_retry_stays_on_sql_gate(self):
+        env={'ADMIN_MAPPING_MYSQL_HOST':'101.32.56.53','ADMIN_MAPPING_MYSQL_PORT':'63350','ADMIN_MAPPING_MYSQL_USER':'test','ADMIN_MAPPING_MYSQL_PASSWORD':'fixture'}
+        responses=[SimpleNamespace(returncode=1,stdout='',stderr='ERROR 2013 greeting'),SimpleNamespace(returncode=0,stdout='1\n7b7d\n',stderr='')]
+        with patch('features.meta_page_recovery.sources.subprocess.run',side_effect=responses) as run:
+            self.assertEqual(Reader(env).query(['SELECT 1']),[{}])
+            self.assertEqual(run.call_count,2)
+            self.assertEqual(run.call_args.args[0][0],'/usr/bin/mysql')
+            self.assertNotIn('SQL_GATE_BYPASS',run.call_args.kwargs['env'])
+    def test_partial_read_failure_is_not_retried_as_empty(self):
+        env={'ADMIN_MAPPING_MYSQL_HOST':'101.32.56.53','ADMIN_MAPPING_MYSQL_PORT':'63350','ADMIN_MAPPING_MYSQL_USER':'test','ADMIN_MAPPING_MYSQL_PASSWORD':'fixture'}
+        with patch('features.meta_page_recovery.sources.subprocess.run',return_value=SimpleNamespace(returncode=1,stdout='1\n',stderr='ERROR 2013 during query')) as run:
+            with self.assertRaises(SourceError):Reader(env).query(['SELECT 1'])
+            self.assertEqual(run.call_count,1)
     def test_timezone_today_yesterday(self):
         now=datetime(2026,11,17,1,0,tzinfo=timezone.utc)
         self.assertEqual(account_dates({'timezone_name':'America/Los_Angeles'},now),{'since':'2026-11-15','until':'2026-11-16'})

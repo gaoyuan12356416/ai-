@@ -4,9 +4,19 @@ from unittest.mock import patch
 
 from features.fb_page_portrait.classification import classifications
 from features.fb_page_portrait.collect import page_scope,series_ranges,paid
+from features.meta_page_recovery.sources import Sources
 
 
 class PortraitRecoveryTests(unittest.TestCase):
+    def test_retired_catalog_keeps_verified_material_language(self):
+        class Reader:
+            def __init__(self):self.calls=0
+            def query(self,statements):
+                self.calls+=1
+                return [{'product':'Dramawave','content_id':'old','language':'fr','data_source':6}] if self.calls==1 else []
+        with patch('features.fb_page_portrait.classification.classifications',return_value={}):
+            value=Sources({},reader=Reader()).target({'source_id':'123','group_id':57},{'language':''})
+        self.assertEqual(value['language'],'fr');self.assertEqual(value['source_app_id'],1479)
     def test_three_products_do_not_share_content_identity(self):
         rows=[dict(app_id=app,content_id='same',language='en',series_code=str(app),labels=[label])
               for app,label in [(1479,'ceo'),(979,'revenge'),(3302,'sweet_love')]]
