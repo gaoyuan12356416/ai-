@@ -1,0 +1,20 @@
+diff --git a/app.py b/app.py
+index 980f4efd..6ddad824 100644
+--- a/app.py
++++ b/app.py
+@@ -22683,11 +22683,14 @@ def upload_file_to_cos(path, *, return_receipt=False, checkpoint_job_id=None):
+             WORK_ROOT, ".runtime", "uploads", upload_job_id,
+             hashlib.sha256(object_key.encode("utf-8")).hexdigest() + ".json",
+         )
++        from features.drama_synthesis.storage_targets import checkpoint_target
++        upload_bucket, upload_domain = checkpoint_target(checkpoint_path, COS_BUCKET, COS_DOMAIN)
++        object_url = "https://" + upload_domain.strip().strip("/") + "/" + object_key.lstrip("/")
+         receipt = resume_upload(
+             # The SDK otherwise retries POST internally, outside the durable
+             # create/complete fences. Retry only via the verified checkpoint.
+             get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT), retry=0),
+-            bucket=COS_BUCKET, key=object_key, path=path,
++            bucket=upload_bucket, key=object_key, path=path,
+             checkpoint_path=checkpoint_path, progress_callback=media_upload_progress,
+             content_type=guess_content_type(path), acl="public-read",
+         )

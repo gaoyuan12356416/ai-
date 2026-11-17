@@ -167,10 +167,9 @@ def verify_artifacts(result, outputs, *, client, bucket, url_for_key):
     # artifact cannot hide behind a partial cache read.
     for field in sorted(selected):
         item = artifacts[field]
-        if item["bucket"] != bucket:
-            raise cache_error()
         try:
-            if url_for_key(item["key"]) != item["url"]:
+            from .storage_targets import artifact_url
+            if artifact_url(item["bucket"], item["key"], bucket, url_for_key) != item["url"]:
                 raise cache_error()
             headers = _headers(client.head_object(Bucket=item["bucket"], Key=item["key"]))
             if (_positive_number(headers.get("content-length")) != item["size_bytes"]

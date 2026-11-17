@@ -1,0 +1,13 @@
+--- a/features/drama_synthesis/material_source.py
++++ b/features/drama_synthesis/material_source.py
+@@ -66,7 +66,9 @@
+         domain = str(getattr(self.app, 'COS_DOMAIN', '') or '').strip().strip('/')
+         domain = urlsplit(domain if '://' in domain else 'https://' + domain).netloc
+         public = urlsplit(str(getattr(self.app, 'PUBLIC_BASE_URL', '') or ''))
+-        allowed = bool(domain and parsed.netloc == domain) or (
++        from features.drama_synthesis.storage_targets import legacy_domains
++        domains = {domain, *legacy_domains().values()}
++        allowed = bool(parsed.netloc and parsed.netloc in domains) or (
+             bool(public.netloc) and parsed.netloc == public.netloc and
+             parsed.path.startswith(public.path.rstrip('/') + '/'))
+         require(parsed.scheme == 'https' and not parsed.username and not parsed.password and

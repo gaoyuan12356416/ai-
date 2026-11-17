@@ -1,0 +1,24 @@
+diff --git a/features/pipeline_dispatch/cloud_node.py b/features/pipeline_dispatch/cloud_node.py
+index 7f86db3d..b4f57e6e 100644
+--- a/features/pipeline_dispatch/cloud_node.py
++++ b/features/pipeline_dispatch/cloud_node.py
+@@ -33,6 +33,9 @@ class CloudNode:
+         self.ledger = CloudLedger(state / "actions.sqlite3")
+         self.outbox = ReceiptOutbox(state / "receipts.sqlite3")
+         self.executor = CloudExecutor(config, self.ledger)
++        self.legacy_work_ids = frozenset(config.get("legacy_work_ids", []))
++        self.legacy_executor = (CloudExecutor(dict(config, **config["legacy_storage"]), self.ledger)
++                                if self.legacy_work_ids else None)
+         self.caps = self.executor.capabilities()
+         credentials = json.loads(Path(config["node_config"]).read_text())
+         if credentials["node_id"] != "cos-cloud":
+@@ -93,7 +96,8 @@ class CloudNode:
+                     job = ctx.job = reserved["job"]
+                     self.ledger.remember(job)
+                 ctx.check()
+-                result = self.executor.execute(job, ctx)
++                executor = self.legacy_executor if local_id in self.legacy_work_ids else self.executor
++                result = executor.execute(job, ctx)
+                 route, receipt = "jobs/complete", {"result":result}
+             except (PendingReadback, LeaseLost) as exc:
+                 if isinstance(exc, QueueUnavailable):
