@@ -9,7 +9,7 @@ Deploy `python3 ops/youtube-cover-lane/deploy.py` once, after pushing this commi
 It enrolls an audited `cpu-youtube-cover` identity with existing authority APIs,
 preserves capacity-before evidence and fingerprints a separate copy of the
 existing node runtime. Only current youtube_auto_publish modules are overlaid
-to retain current reference/provenance validation. Secrets remain private 0600
+plus their Moboreels/product-mapping dependencies to retain current reference/provenance validation. Secrets remain private 0600
 files, outside Git. A single existing process_worker runs preparation only;
 publication capacity is explicitly zero. Original cpu-main, GPU, coordinator,
 canonical API and upload processes are neither replaced nor restarted.
@@ -34,3 +34,15 @@ remove its unit only after stopped, then systemctl daemon-reload.
 The independently failing youtube-cover-material-sync unit reports
 unexpected_cos_destination. That material-library sync does not own these queued
 preparation claims; its recovery is outside this admission fix.
+
+Initial deployment validation exposed omitted shared COS configuration and
+current-generation imports. The new worker was stopped, these dependencies were
+completed, imports/config/auth/scope preflight added, and definitive pre-generation
+failures were retried via the original owner/admin API. Initial reference fetch
+timeouts were also rechecked successfully using the same validated downloader.
+No model output was discarded and no unknown result was retried.
+
+`python3 ops/youtube-cover-lane/verify_admission.py` additionally exercises the
+actual deployed DispatchStore in an isolated data-disk SQLite database: an older
+FB offer cannot enter this lane, a second concurrent cover claim is refused,
+and publication capacity is zero. No live job is used as a test fixture.
