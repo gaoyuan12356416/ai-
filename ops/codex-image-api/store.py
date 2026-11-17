@@ -35,12 +35,19 @@ def normalize(payload):
             if isinstance(image, str) and image.strip():
                 # Preserve the legacy canonical payload, including its idempotency hash.
                 images.append(image.strip())
-            elif isinstance(image, dict) and set(image) == {"image_url", "title"}:
+            elif isinstance(image, dict) and {"image_url", "title"} <= image.keys() <= {"image_url", "title", "image_id"}:
                 if not isinstance(image["image_url"], str) or not image["image_url"].strip():
                     raise ApiError("invalid_request", "items[%d].image_urls[%d].image_url 必须是非空字符串" % (i, j))
                 if not isinstance(image["title"], str) or not image["title"].strip():
                     raise ApiError("invalid_request", "items[%d].image_urls[%d].title 必须是非空字符串" % (i, j))
-                images.append({"image_url": image["image_url"].strip(), "title": image["title"]})
+                reference = {"image_url": image["image_url"].strip(), "title": image["title"]}
+                if "image_id" in image:
+                    image_id = image["image_id"]
+                    if not (type(image_id) is int or isinstance(image_id, str) and image_id.strip()):
+                        raise ApiError("invalid_request", "items[%d].image_urls[%d].image_id 必须是非空字符串或整数" % (i, j))
+                    reference["image_id"] = image_id
+                # Omit the field from the canonical payload when it was not supplied.
+                images.append(reference)
             else:
                 raise ApiError("invalid_request", "items[%d].image_urls[%d] 必须是 URL 字符串或包含 image_url 和 title 的对象" % (i, j))
         items.append({"prompt": prompt, "image_urls": images})
@@ -82,6 +89,7 @@ class Store:
                     image_url TEXT NOT NULL, prompt TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'queued', stage TEXT NOT NULL DEFAULT 'queued',
                     attempt_id TEXT, cos_url TEXT, error_json TEXT, updated_at REAL NOT NULL,
+                    image_id_json TEXT,
                     PRIMARY KEY(task_id,ordinal)
                 );
                 CREATE INDEX IF NOT EXISTS images_queue ON images(state,task_id,ordinal);
@@ -90,6 +98,10 @@ class Store:
                     event TEXT NOT NULL, detail TEXT, created_at REAL NOT NULL
                 );
             """)
+            # Serialize the additive migration if API and worker start together.
+            db.execute("BEGIN IMMEDIATE")
+            if not any(column["name"] == "image_id_json" for column in db.execute("PRAGMA table_info(images)")):
+                db.execute("ALTER TABLE images ADD COLUMN image_id_json TEXT")
 
     def submit(self, principal, payload):
         request_id, items, digest = normalize(payload)
@@ -107,12 +119,19 @@ class Store:
             ordinal = 0
             for i, item in enumerate(items):
                 for j, image in enumerate(item["image_urls"]):
+                    image_id_json = None
                     if isinstance(image, dict):
                         url = image["image_url"]
                         prompt = "图片标题：%s\n\n生图提示词：%s" % (image["title"], item["prompt"])
+                        if "image_id" in image:
+                            # TEXT with JSON encoding preserves leading zeros and integer precision.
+                            image_id_json = json.dumps(image["image_id"], ensure_ascii=False)
                     else:
                         url, prompt = image, item["prompt"]
-                    db.execute("INSERT INTO images(task_id,ordinal,item_index,image_index,image_url,prompt,updated_at) VALUES(?,?,?,?,?,?,?)", (task_id, ordinal, i, j, url, prompt, now))
+                    db.execute(
+                        "INSERT INTO images(task_id,ordinal,item_index,image_index,image_url,prompt,updated_at,image_id_json) VALUES(?,?,?,?,?,?,?,?)",
+                        (task_id, ordinal, i, j, url, prompt, now, image_id_json),
+                    )
                     ordinal += 1
             db.execute("INSERT INTO events(task_id,event,created_at) VALUES(?,?,?)", (task_id, "accepted", now))
         return task_id, True
@@ -135,7 +154,14 @@ class Store:
             status = "queued" if all(i["state"] == "queued" for i in images) else "running"
         results = None
         if done:
-            results = [{"item_index": i["item_index"], "image_index": i["image_index"], "status": i["state"], "cos_url": i["cos_url"], "error": json.loads(i["error_json"]) if i["error_json"] else None} for i in images]
+            results = [{
+                "item_index": image["item_index"],
+                "image_index": image["image_index"],
+                "image_id": json.loads(image["image_id_json"]) if image["image_id_json"] is not None else None,
+                "status": image["state"],
+                "cos_url": image["cos_url"],
+                "error": json.loads(image["error_json"]) if image["error_json"] else None,
+            } for image in images]
         return dict(task_id=task_id, status=status, done=done, total=total, completed=completed, succeeded=succeeded, failed=failed, results=results)
 
     def next_image(self):

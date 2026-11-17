@@ -6,7 +6,13 @@ Each `image_urls` entry may be an object with `image_url` and a non-empty `title
 The queue freezes that image's title together with its group's prompt as the actual
 generation request. Legacy URL strings keep their original prompt and canonical
 idempotency hash. Titles participate in new-request hashes, so changing a title
-requires a new `request_id`. No schema migration or historical task rewrite is needed.
+requires a new `request_id`. No historical task rewrite is needed.
+`image_id` is optional for each titled reference object. The caller supplies a
+non-blank string (recommended for IDs with leading zeros or long numbers) or an
+integer. Any ID is stored with the image and returned unchanged, with the same
+JSON type, in its terminal result whether successful or failed. Results for omitted
+IDs have `image_id: null`. The ID is correlation data, independent of generation,
+and participates in the request hash only when supplied. Result ordering is unchanged.
 `task_id` is always 35 ASCII characters: `ig_` plus `uuid.uuid4().hex` (32 lowercase
 hexadecimal characters), matching `^ig_[0-9a-f]{32}$`.
 The API only writes/reads SQLite. A singleton worker orchestrates downloads,
@@ -43,6 +49,10 @@ Codex runs with approvals bypassed only inside this external OS isolation.
 SQLite: /mnt/data-disk/codex-image-api/state.sqlite3. Generated files, receipts and
 upload checkpoints: jobs/TASK/ORDINAL. Code rollback never restores an old ledger.
 The worker has one filesystem lock and transactionally claims one image at a time.
+A schema update adds the nullable `images.image_id_json` column on API startup;
+existing rows and omission-based idempotency keys stay unchanged. The previous
+worker can read and finish rows in the updated database and need not restart for
+this API-only change. A code rollback preserves the column and existing IDs.
 A generation attempt is committed before its unit is launched. On restart, the
 worker inspects that unit rather than spawning again. Each child runs outside the
 worker service cgroup and survives a worker restart. A dead process without a

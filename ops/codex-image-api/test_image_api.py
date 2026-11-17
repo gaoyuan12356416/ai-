@@ -45,6 +45,7 @@ class StoreTests(unittest.TestCase):
         final = self.store.query("owner", task)
         self.assertEqual((final["status"], final["done"], final["completed"], final["failed"]), ("partial_failed", True, 2, 1))
         self.assertEqual([r["image_index"] for r in final["results"]], [0, 1])
+        self.assertEqual([r["image_id"] for r in final["results"]], [None, None])
         self.assertIsNone(final["results"][1]["cos_url"])
 
     def test_idempotency_under_parallel_submission(self):
@@ -145,6 +146,14 @@ class StoreTests(unittest.TestCase):
                 self.store.submit("owner", {"items": [{"image_urls": [image], "prompt": "海报"}]})
         self.assertEqual(self.store.next_image(), (None, False))
 
+    def test_invalid_image_ids_are_not_enqueued(self):
+        for image_id in ("", " ", False, None, 1.5, [], {}):
+            item = {"image_url": "https://example.com/1.png", "title": "标题", "image_id": image_id}
+            with self.subTest(image_id=image_id), self.assertRaises(ApiError) as cm:
+                self.store.submit("owner", {"items": [{"image_urls": [item], "prompt": "海报"}]})
+            self.assertEqual(cm.exception.http_status, 400)
+        self.assertEqual(self.store.next_image(), (None, False))
+
 
 class HttpTests(StoreTests):
     def setUp(self):
@@ -193,6 +202,43 @@ class HttpTests(StoreTests):
         self.assertEqual(self.request("POST", "/api/image-generation/tasks", json.dumps(payload), headers)[0], 200)
         row, _ = self.store.next_image()
         self.assertEqual(row["prompt"], "图片标题：海报标题\n\n生图提示词：电影风格")
+
+    def test_http_returns_the_exact_image_id_for_each_terminal_result(self):
+        url = "https://example.com/1.png"
+        refs = [
+            {"image_url": url, "title": "海报甲", "image_id": "000042"},
+            {"image_url": url, "title": "海报乙", "image_id": 10**24},
+        ]
+        payload = {"request_id": "material-id-1", "items": [
+            {"image_urls": refs, "prompt": "电影风格"},
+            {"image_urls": [{"image_url": url, "title": "历史格式"}], "prompt": "电影风格"},
+        ]}
+        headers = {"Authorization": "Bearer test-token", "Content-Type": "application/json"}
+        path = "/api/image-generation/tasks"
+        body = json.dumps(payload)
+        code, submitted, _ = self.request("POST", path, body, headers)
+        self.assertEqual((code, submitted["total"]), (202, 3))
+        state_path = path + "/" + submitted["task_id"]
+        self.assertIsNone(self.request("GET", state_path, headers=headers)[1]["results"])
+        self.assertEqual(self.request("POST", path, body, headers)[:2], (200, submitted))
+        refs[0]["image_id"] = "000043"
+        self.assertEqual(self.request("POST", path, json.dumps(payload), headers)[0], 409)
+
+        reopened = Store(self.store.path)
+        reopened.initialize()
+        first, _ = reopened.next_image()
+        self.assertNotIn("000042", first["prompt"])
+        reopened.update(first, "succeeded", "succeeded", cos_url="https://cos/1.png")
+        second, _ = reopened.next_image()
+        reopened.update(second, "failed", "failed", error={"code": "download_failed", "message": "bad"})
+        third, _ = reopened.next_image()
+        reopened.update(third, "succeeded", "succeeded", cos_url="https://cos/3.png")
+        code, state, _ = self.request("GET", state_path, headers=headers)
+        self.assertEqual((code, state["done"], state["status"]), (200, True, "partial_failed"))
+        self.assertEqual(
+            [(r["item_index"], r["image_index"], r["image_id"], r["status"]) for r in state["results"]],
+            [(0, 0, "000042", "succeeded"), (0, 1, 10**24, "failed"), (1, 0, None, "succeeded")],
+        )
 
 
 class DownloadTests(unittest.TestCase):

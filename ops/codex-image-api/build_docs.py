@@ -7,16 +7,23 @@ from pathlib import Path
 BASE = "https://ai.yingliangads.com"
 PATH = "/api/image-generation/tasks"
 REQUEST = {"request_id": "business-request-001", "items": [
-    {"image_urls": [{"image_url": "https://example.com/reference-1.jpg", "title": "命运的重逢"}, {"image_url": "https://example.com/reference-2.jpg", "title": "最后的抉择"}], "prompt": "保留人物主体，制作电影风格的横版海报，使用该图的 title 作为海报标题"},
-    {"image_urls": [{"image_url": "https://example.com/reference-3.jpg", "title": "破晓时分"}], "prompt": "根据参考图制作适合社交媒体的广告图片，结合该图的 title 设计文案与构图"}
+    {"image_urls": [
+        {"image_url": "https://example.com/reference-1.jpg", "title": "命运的重逢", "image_id": "material-001"},
+        {"image_url": "https://example.com/reference-2.jpg", "title": "最后的抉择", "image_id": "material-002"},
+    ], "prompt": "保留人物主体，制作电影风格的横版海报，使用该图的 title 作为海报标题"},
+    {"image_urls": [
+        {"image_url": "https://example.com/reference-3.jpg", "title": "破晓时分", "image_id": "material-003"},
+    ], "prompt": "根据参考图制作适合社交媒体的广告图片，结合该图的 title 设计文案与构图"}
 ]}
 TASK = "ig_0123456789abcdef0123456789abcdef"
 RUNNING = {"task_id": TASK, "status": "running", "done": False, "total": 3, "completed": 1, "succeeded": 1, "failed": 0, "results": None}
 FINAL = {"task_id": TASK, "status": "partial_failed", "done": True, "total": 3, "completed": 3, "succeeded": 2, "failed": 1, "results": [
-    {"item_index": 0, "image_index": 0, "status": "succeeded", "cos_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/drama-materials/image-generation/" + TASK + "/0000-0000.png", "error": None},
-    {"item_index": 0, "image_index": 1, "status": "succeeded", "cos_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/drama-materials/image-generation/" + TASK + "/0000-0001.png", "error": None},
-    {"item_index": 1, "image_index": 0, "status": "failed", "cos_url": None, "error": {"code": "download_failed", "message": "图片下载 HTTP 404"}}
+    {"item_index": 0, "image_index": 0, "image_id": "material-001", "status": "succeeded", "cos_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/drama-materials/image-generation/" + TASK + "/0000-0000.png", "error": None},
+    {"item_index": 0, "image_index": 1, "image_id": "material-002", "status": "succeeded", "cos_url": "https://advertising-1306474899.cos.ap-hongkong.myqcloud.com/drama-materials/image-generation/" + TASK + "/0000-0001.png", "error": None},
+    {"item_index": 1, "image_index": 0, "image_id": "material-003", "status": "failed", "cos_url": None, "error": {"code": "download_failed", "message": "图片下载 HTTP 404"}}
 ]}
+IMAGE_ID_INPUT = "调用方提供的素材 ID，可选。支持非空字符串或整数；超长数字、有前导零的 ID 建议传字符串。仅用于关联结果，不参与生图。"
+IMAGE_ID_RESULT = "成功和失败项均原样返回各自提交的 image_id，保留值和类型；未传时返回 null。"
 
 
 def ref(name):
@@ -30,10 +37,17 @@ def response(schema, description, example=None):
     return {"description": description, "content": {"application/json": content}}
 
 
+def image_id_schema(description, nullable=False):
+    string = {"type": "string", "minLength": 1, "pattern": r"\S"}
+    if nullable:
+        string["nullable"] = True
+    return {"oneOf": [string, {"type": "integer"}], "description": description}
+
+
 def contract():
     schemas = {
         "SubmitRequest": {"type": "object", "additionalProperties": False, "required": ["items"], "properties": {
-            "request_id": {"type": "string", "minLength": 1, "maxLength": 200, "description": "可选业务幂等键。原样复用以安全重试；相同键但不同内容返回 409。"},
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 200, "description": "可选业务幂等键。相同键与内容可安全重试；修改 title 或 image_id 等内容后沿用该键返回 409。"},
             "items": {"type": "array", "minItems": 1, "items": ref("InputGroup")}
         }},
         "InputGroup": {"type": "object", "additionalProperties": False, "required": ["image_urls", "prompt"], "properties": {
@@ -42,7 +56,8 @@ def contract():
         }},
         "TitledImage": {"type": "object", "additionalProperties": False, "required": ["image_url", "title"], "properties": {
             "image_url": {"type": "string", "minLength": 1, "description": "该张参考图的公开 HTTP/HTTPS URL。"},
-            "title": {"type": "string", "minLength": 1, "description": "该张图的非空标题，与组 prompt 一起送入生图模型；不能仅含空白。"}
+            "title": {"type": "string", "minLength": 1, "description": "该张图的非空标题，与组 prompt 一起送入生图模型；不能仅含空白。"},
+            "image_id": image_id_schema(IMAGE_ID_INPUT),
         }},
         "TaskStatus": {"type": "string", "enum": ["queued", "running", "succeeded", "partial_failed", "failed"]},
         "TaskId": {"type": "string", "minLength": 35, "maxLength": 35, "pattern": "^ig_[0-9a-f]{32}$", "description": "固定 35 个 ASCII 字符：ig_ 前缀加 UUID v4 的 32 位小写十六进制字符。标识整个批次，须原样保存和传入查询 URL。"},
@@ -53,9 +68,10 @@ def contract():
             "succeeded": {"type": "integer", "minimum": 0}, "failed": {"type": "integer", "minimum": 0},
             "results": {"type": "array", "nullable": True, "items": ref("ImageResult"), "description": "处理中为 null；终态按原提交顺序返回所有成功及失败项。"}
         }},
-        "ImageResult": {"type": "object", "required": ["item_index", "image_index", "status", "cos_url", "error"], "properties": {
+        "ImageResult": {"type": "object", "required": ["item_index", "image_index", "image_id", "status", "cos_url", "error"], "properties": {
             "item_index": {"type": "integer", "minimum": 0, "description": "items 下标，从 0 开始"},
             "image_index": {"type": "integer", "minimum": 0, "description": "该组 image_urls 下标，从 0 开始"},
+            "image_id": image_id_schema(IMAGE_ID_RESULT, nullable=True),
             "status": {"type": "string", "enum": ["succeeded", "failed"]},
             "cos_url": {"type": "string", "format": "uri", "nullable": True, "description": "成功图片的公开 HTTPS COS 地址；失败时为 null。"},
             "error": {"type": "object", "nullable": True, "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}
@@ -64,7 +80,7 @@ def contract():
     }
     errors = {str(code): response("ErrorResponse", desc) for code, desc in [(400, "请求结构或 JSON 无效"), (401, "Token 缺失或无效"), (403, "来源 IP 不在白名单"), (404, "任务或接口不存在"), (409, "幂等键与已有请求内容冲突"), (413, "请求体超过 1 MiB"), (503, "服务暂不可用") ]}
     return {
-        "openapi": "3.0.3", "info": {"title": "异步批量生图 API", "version": "1.1.0", "description": "仅允许来源 IP 101.32.30.18；复用现有截图 API Token。每张参考图的 title 与组 prompt 共同参与生图；兼容旧 URL 字符串数组。整批共用一个固定 35 字符的任务 ID。"},
+        "openapi": "3.0.3", "info": {"title": "异步批量生图 API", "version": "1.2.0", "description": "仅允许来源 IP 101.32.30.18；复用现有截图 API Token。每张参考图的 title 与组 prompt 共同参与生图；查询结果可按逐图 image_id 关联。兼容旧 URL 字符串数组，整批共用一个固定 35 字符的任务 ID。"},
         "servers": [{"url": BASE}], "security": [{"ScreenshotBearer": []}, {"ScreenshotApiToken": []}],
         "paths": {
             PATH: {"post": {"operationId": "submitImageGeneration", "summary": "异步提交生图批次", "requestBody": {"required": True, "content": {"application/json": {"schema": ref("SubmitRequest"), "example": REQUEST}}}, "responses": dict(errors, **{"202": response("SubmitResponse", "任务已持久化，等待后台处理", {"task_id": TASK, "status": "queued", "total": 3}), "200": response("SubmitResponse", "相同 request_id 的已有任务")})}},
@@ -85,7 +101,8 @@ payload = {
     "items": [{
         "image_urls": [{
             "image_url": "https://example.com/reference-1.jpg",
-            "title": "命运的重逢"
+            "title": "命运的重逢",
+            "image_id": "material-001"
         }],
         "prompt": "保留人物主体，制作电影风格的横版海报，使用该图的 title 作为海报标题"
     }]
@@ -115,9 +132,9 @@ while True:
     if state["done"]:
         for item in state["results"]:
             if item["status"] == "succeeded":
-                print(item["item_index"], item["image_index"], item["cos_url"])
+                print(item["image_id"], item["cos_url"])
             else:
-                print(item["item_index"], item["image_index"], item["error"])
+                print(item["image_id"], item["error"])
         break
     time.sleep(5)
 '''
@@ -143,14 +160,27 @@ curl --fail-with-body \\
   -H "Authorization: Bearer $SCREENSHOT_API_TOKEN"'''
     sections = [
         "<section id='access'><h2>接入信息</h2><table><tr><th>服务地址</th><td>https://ai.yingliangads.com</td></tr><tr><th>来源 IP 白名单</th><td><strong>101.32.30.18</strong>，按实际连接来源校验，伪造转发头无效</td></tr><tr><th>鉴权</th><td>Authorization: Bearer &lt;现有截图 API Token&gt;<br>也支持 X-API-Token；两个方式任选其一</td></tr><tr><th>数据格式</th><td>application/json；UTF-8；请求体最大 1 MiB</td></tr><tr><th>参考图片</th><td>公开可下载的 HTTP/HTTPS 链接；单帧 PNG、JPEG、WebP；每张不超过 32 MiB；不支持视频、内网地址或需要登录的链接</td></tr></table><p>在调用方服务器上请求接口。Token 不应放入前端代码、URL 或公开文档。此处所有示例图片和任务 ID 均为占位示例。</p></section>",
-        "<section id='submit'><h2>1. 提交生图批次</h2><p class='endpoint'><b>POST</b> /api/image-generation/tasks</p><p>每组包含多张参考图和一段共用 prompt；image_urls 中每项填写 image_url 与该图自己的 title，后端将逐图标题与组提示词一起送入生图模型。组内<strong>每张图各生成一张结果</strong>，不同图片不串用标题。以下请求共生成三张图片。</p>" + code(REQUEST) + "<table><tr><th>字段</th><th>说明</th></tr><tr><td>request_id</td><td>可选，1–200 字符。建议提供稳定业务幂等键；同一键、同一内容返回原任务，不重复入队；内容不同返回 409。title 也参与内容校验；修改标题重新生图应使用新 request_id。不传时每次提交均创建新任务。</td></tr><tr><td>items</td><td>必填非空数组，每组包含非空 image_urls 数组和非空 prompt 字符串。</td></tr><tr><td>image_urls[]</td><td>推荐使用含 image_url（非空参考图 URL）和 title（该图的非空标题）的对象；标题与该图一一对应，组内共用 prompt。兼容旧版 URL 字符串，该项仍仅按原 prompt 生图。</td></tr><tr><td>task_id</td><td>响应字段，由服务端生成，标识整个批次。固定 35 个 ASCII 字符：ig_（3 字符）加 UUID v4 去掉连字符后的 32 位小写十六进制字符；格式 ^ig_[0-9a-f]{32}$。存储字段至少 35 字符，须原样保存和查询，不要与 request_id 混淆。</td></tr></table><p>首次接收返回 <strong>HTTP 202</strong>；幂等重试命中已有任务返回 <strong>HTTP 200</strong>。响应不等待下载、生图和上传。</p>" + code({"task_id": TASK, "status": "queued", "total": 3}) + "<p>若提交响应丢失，请使用原 request_id 和原内容重试。想重新生成失败图片，应另建 request_id，仅提交需要重做的参考图及其标题。</p></section>",
-        "<section id='query'><h2>2. 查询状态和结果</h2><p class='endpoint'><b>GET</b> /api/image-generation/tasks/{task_id}</p><p>路径参数使用提交响应返回的完整 35 字符 task_id（含 ig_）。建议每五秒轮询。HTTP 200 表示查询成功；图片是否生成成功请检查 status 和 results。</p>" + code(RUNNING) + "<table><tr><th>status</th><th>含义</th><th>done</th></tr><tr><td>queued</td><td>等待处理</td><td>false</td></tr><tr><td>running</td><td>正在处理，可能已有部分完成</td><td>false</td></tr><tr><td>succeeded</td><td>全部成功</td><td>true</td></tr><tr><td>partial_failed</td><td>部分成功、部分失败</td><td>true</td></tr><tr><td>failed</td><td>全部失败</td><td>true</td></tr></table><p>completed = succeeded + failed。done=true 后停止轮询；此前 results=null，整批结束后一次返回所有结果。item_index 和 image_index 均从 0 开始，结果保持原提交顺序。</p>" + code(FINAL) + "<p>成功项的 cos_url 为公开 HTTPS 图片链接；失败项保留错误原因。单张失败不会阻断其他图片。默认逐张生成，单次 Codex 生图执行上限 900 秒；排队、下载和上传耗时另计。完成结果不会因后续查询而重新生成。</p></section>",
+        "<section id='submit'><h2>1. 提交生图批次</h2><p class='endpoint'><b>POST</b> /api/image-generation/tasks</p><p>每组包含多张参考图和一段共用 prompt。每张图可提交其自己的 image_id 用于关联结果；后端将逐图标题与组提示词一起送入生图模型。以下请求共生成三张图片。</p>"
+        + code(REQUEST) + "<table><tr><th>字段</th><th>说明</th></tr>"
+        "<tr><td>request_id</td><td>可选，1–200 字符。建议提供稳定业务幂等键；同一键、同一内容返回原任务，不重复入队；内容不同返回 409。title 和 image_id 都属于请求内容。不传时每次提交均创建新任务。</td></tr>"
+        "<tr><td>items</td><td>必填非空数组，每组包含非空 image_urls 数组和非空 prompt 字符串。</td></tr>"
+        "<tr><td>image_urls[]</td><td>推荐使用含 image_url（非空参考图 URL）、title（该图的非空标题）以及可选 image_id 的对象。兼容旧版 URL 字符串，该项仍仅按原 prompt 生图。</td></tr>"
+        "<tr><td>image_urls[].image_id</td><td>" + IMAGE_ID_INPUT + "</td></tr>"
+        "<tr><td>task_id</td><td>响应字段，由服务端生成，标识整个批次。固定 35 个 ASCII 字符：ig_（3 字符）加 UUID v4 去掉连字符后的 32 位小写十六进制字符；格式 ^ig_[0-9a-f]{32}$。须原样保存和查询。</td></tr></table>"
+        "<p>首次接收返回 <strong>HTTP 202</strong>；幂等重试命中已有任务返回 <strong>HTTP 200</strong>。响应不等待下载、生图和上传。</p>"
+        + code({"task_id": TASK, "status": "queued", "total": 3})
+        + "<p>若提交响应丢失，请使用原 request_id 和原内容重试。重新生成失败图片时，使用新的 request_id，并保留原素材的 image_id 以便关联。</p></section>",
+        "<section id='query'><h2>2. 查询状态和结果</h2><p class='endpoint'><b>GET</b> /api/image-generation/tasks/{task_id}</p><p>路径参数使用提交响应返回的完整 35 字符 task_id（含 ig_）。建议每五秒轮询。HTTP 200 表示查询成功；图片是否生成成功请检查 status 和 results。</p>"
+        + code(RUNNING) + "<table><tr><th>status</th><th>含义</th><th>done</th></tr><tr><td>queued</td><td>等待处理</td><td>false</td></tr><tr><td>running</td><td>正在处理，可能已有部分完成</td><td>false</td></tr><tr><td>succeeded</td><td>全部成功</td><td>true</td></tr><tr><td>partial_failed</td><td>部分成功、部分失败</td><td>true</td></tr><tr><td>failed</td><td>全部失败</td><td>true</td></tr></table>"
+        "<p>completed = succeeded + failed。done=true 后停止轮询；此前 results=null，整批结束后一次返回所有结果。item_index 和 image_index 均从 0 开始，结果保持原提交顺序。"
+        + IMAGE_ID_RESULT + "</p>" + code(FINAL)
+        + "<p>成功项的 cos_url 为公开 HTTPS 图片链接；失败项保留错误原因。单张失败不会阻断其他图片。默认逐张生成，单次 Codex 生图执行上限 900 秒；排队、下载和上传耗时另计。完成结果不会因后续查询而重新生成。</p></section>",
         "<section id='errors'><h2>错误处理</h2><table><tr><th>HTTP</th><th>处理方式</th></tr><tr><td>400</td><td>修正 JSON、必填字段、请求体或 Content-Type。</td></tr><tr><td>401</td><td>检查现有截图 API Token。</td></tr><tr><td>403</td><td>确认实际出口 IP 为 101.32.30.18。</td></tr><tr><td>404</td><td>检查接口地址与 task_id。</td></tr><tr><td>409</td><td>request_id 已对应其他内容；新业务使用新 ID。</td></tr><tr><td>413</td><td>请求体超过 1 MiB，请拆分批次。</td></tr><tr><td>503</td><td>服务暂不可用；稍后重试，提交仍沿用原 request_id。</td></tr></table>" + code({"error": {"code": "unauthorized", "message": "Token 缺失或无效"}}) + "<p>任务内错误常见为 invalid_image_url / unsafe_image_url / image_too_large / download_failed / invalid_image、generation_launch_failed / generation_failed / generation_timeout / generation_no_image / execution_interrupted / invalid_output / processing_failed，以及 cos_not_configured / cos_object_conflict / cos_upload_failed。这些错误通过查询结果返回，不改变查询请求的 HTTP 200。</p><p>下载和 COS 上传最多尝试三次；生成图片及上传记录持久保存。已确认成功的图片不会因 worker 重启重新生成；生图中断且没有可核对产物时，记录失败，避免盲目重复执行。</p></section>",
-        "<section id='examples'><h2>调用示例</h2><h3>cURL</h3>" + code(curl) + "<h3>Python：提交与轮询</h3><p>安装 requests，并设置环境变量 SCREENSHOT_API_TOKEN。替换示例参考图链接后运行。</p>" + code(PYTHON_EXAMPLE) + "</section>"
+        "<section id='examples'><h2>调用示例</h2><h3>cURL</h3>" + code(curl) + "<h3>Python：提交与轮询</h3><p>安装 requests，并设置环境变量 SCREENSHOT_API_TOKEN。替换示例参考图链接、标题和素材 ID 后运行。</p>" + code(PYTHON_EXAMPLE) + "</section>"
     ]
     return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>异步批量生图 API · 接口文档</title><style>
     :root{color-scheme:light;--ink:#16283d;--muted:#53677a;--line:#dce5ee;--accent:#106b75}*{box-sizing:border-box}body{margin:0;background:#f2f6fa;color:var(--ink);font:16px/1.75 system-ui,'Microsoft YaHei',sans-serif}main{max-width:1080px;margin:auto;padding:40px 24px 70px}header{background:#123949;color:white;border-radius:18px;padding:30px 34px;margin-bottom:24px}header p{color:#d5e6eb}h1{font-size:30px;line-height:1.35;margin:8px 0 15px}h2{font-size:23px;margin:0 0 18px}h3{font-size:18px}section{background:white;border:1px solid var(--line);border-radius:14px;padding:28px 32px;margin:20px 0;scroll-margin-top:20px}nav{display:flex;gap:10px;flex-wrap:wrap}a{color:var(--accent)}nav a{background:white;padding:7px 14px;border:1px solid var(--line);border-radius:8px;text-decoration:none}.badge{font-size:13px;letter-spacing:.06em;color:#a9dce2}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border-bottom:1px solid var(--line);padding:12px;text-align:left;vertical-align:top}th{background:#f4f8fb;font-weight:650}td:first-child{overflow-wrap:anywhere}pre{background:#0f2535;color:#e0eef7;padding:20px;border-radius:10px;overflow:auto;font:13px/1.65 Consolas,monospace;tab-size:2}p{overflow-wrap:anywhere}.endpoint{padding:12px 16px;background:#e7f5f3;border-radius:8px;font-family:Consolas,monospace}.endpoint b{color:#087569;margin-right:12px}footer{color:var(--muted);font-size:13px}@media(max-width:650px){main{padding:18px 12px}header,section{padding:22px 16px}h1{font-size:25px}th,td{padding:9px}pre{font-size:12px}}@media print{body{background:white}main{max-width:none;padding:0}nav{display:none}section{break-inside:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}}
-    </style></head><body><main><header><div class="badge">API REFERENCE · 2026-11-17 · v1.1</div><h1>异步批量生图 API</h1><p>提交参考图、逐图标题与组提示词 → 获取一个任务 ID → 轮询状态 → 整批完成后获取 COS 链接</p></header><nav><a href="#access">接入信息</a><a href="#submit">提交接口</a><a href="#query">查询接口</a><a href="#errors">错误处理</a><a href="#examples">调用示例</a><a href="openapi.json" download>下载 OpenAPI JSON</a></nav>""" + "".join(sections) + "<footer>本文档不包含真实 Token。OpenAPI JSON 可导入兼容的接口调试工具。</footer></main></body></html>"
+    </style></head><body><main><header><div class="badge">API REFERENCE · 2026-11-17 · v1.2</div><h1>异步批量生图 API</h1><p>提交参考图、逐图标题与素材 ID → 获取批次任务 ID → 轮询状态 → 整批完成后按素材 ID 关联结果</p></header><nav><a href="#access">接入信息</a><a href="#submit">提交接口</a><a href="#query">查询接口</a><a href="#errors">错误处理</a><a href="#examples">调用示例</a><a href="openapi.json" download>下载 OpenAPI JSON</a></nav>""" + "".join(sections) + "<footer>本文档不包含真实 Token。OpenAPI JSON 可导入兼容的接口调试工具。</footer></main></body></html>"
 
 
 def main():
