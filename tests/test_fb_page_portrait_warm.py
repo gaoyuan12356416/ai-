@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import subprocess
+import sys
 
 
 class WarmTests(unittest.TestCase):
@@ -19,6 +21,10 @@ class WarmTests(unittest.TestCase):
         reader=Reader()
         self.assertEqual(self.cache.query(reader,['SELECT bounded']),[{'value':1}])
         self.assertEqual(self.cache.query(reader,['SELECT bounded']),[{'value':1}]);self.assertEqual(reader.calls,1)
+    def test_direct_cli_imports_its_own_checkout(self):
+        path=Path(__file__).resolve().parents[1]/'ops/meta-page-recovery/warm_catalog.py'
+        result=subprocess.run([sys.executable,str(path),'--help'],cwd=self.temp.name,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
     def test_active_collectors_result_wins_a_concurrent_finish(self):
         cache=self.cache;module=self.module
         class Reader:

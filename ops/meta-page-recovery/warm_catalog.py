@@ -6,7 +6,10 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import uuid
+
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 
 from features.fb_page_portrait.collect import catalog,PRODUCTS
 from features.fb_page_portrait.runtime import atomic_json,encoded
@@ -40,7 +43,7 @@ def run(folder):
     social=json.loads((folder/'social-input.json').read_text())
     ids={app:set() for app in PRODUCTS}
     for path in folder.glob('*.json'):
-        if not re.fullmatch('[0-9a-f]{64}\.json',path.name):continue
+        if not re.fullmatch(r'[0-9a-f]{64}\.json',path.name):continue
         for row in json.loads(path.read_text()).get('rows',[]):
             if row.get('app_id') in ids and row.get('content_id') and 'spend' in row and 'revenue' in row:
                 ids[row['app_id']].add(str(row['content_id']))
