@@ -5,6 +5,9 @@ account DTOs are resolved by the authenticated Sidecar before entering here.
 """
 from __future__ import annotations
 
+from features.x_posts.duration_policy import standard_limit
+
+
 import contextlib
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -14,15 +17,28 @@ import re
 import secrets
 import sqlite3
 
-from features.x_accounts.language import canonical_drama_language
-from features.x_posts.service import XPostError, XPostStore, _connect, utc_now
+from features.x_accounts.language import canonical_drama_language, same_drama_language
+from features.x_posts.service import XPostError, XPostStore, _connect, redact_text, utc_now
 from .templates import DEFAULT_COPY, normalize_caption, render_caption
+from .material_identity import is_episode_id, normalize_material_id
 
 PersonalPublishError = XPostError
 BEIJING_TZ = timezone(timedelta(hours=8))
 PREVIEW_TTL_SECONDS = 600
 MAX_ROWS = 200
 _TERMINAL = {"failed_preflight", "completed", "completed_with_errors", "stopped", "needs_review"}
+
+
+def validate_account_duration(account, material):
+    """Reject known long-video/member mismatches before reserving any task."""
+    # Missing duration remains the source hydration/final media guard's concern.
+    duration = float(material.get("duration_seconds") or 0)
+    if duration > standard_limit() and account.get("subscription_type") not in {
+        "basic", "premium", "premium_plus",
+    }:
+        status = "无会员资格" if account.get("subscription_type") == "none" else "会员资格未知"
+        raise XPostError("x_long_video_requires_premium",
+            "素材时长 %.3f 秒，超过 1200 秒；当前账号%s，请选择有 X Basic、Premium 或 Premium+ 会员资格的账号。" % (duration, status), 409)
 
 
 def actor_subject(actor):
@@ -65,6 +81,36 @@ def _account_id(value):
     return result
 
 
+def _material_id(value, *, allow_episode=False):
+    if not allow_episode or not is_episode_id(value):
+        return _id(value, "素材 ID")
+    return normalize_material_id(value)
+
+
+def _material_lookup(materials, material_id):
+    # Do not eagerly convert a hexadecimal resource ID to an integer.
+    material = materials.get(material_id)
+    if material is None and not is_episode_id(material_id):
+        material = materials.get(int(material_id))
+    return material
+
+
+def validate_episode_snapshot(material_id, material, frozen=None):
+    """Pin the exact free resource across preview, commit and queue creation."""
+    if not is_episode_id(material_id):
+        return
+    if (not isinstance(material, dict) or material.get("source_kind") != "free_episode"
+            or material.get("resource_id") != material_id
+            or type(material.get("episode_number")) is not int or material["episode_number"] <= 0):
+        raise XPostError("x_video_material_changed", "免费集来源身份无效，请重新核对", 409)
+    if frozen is not None:
+        fields = ("source_kind", "resource_id", "episode_number", "content_id", "series_code")
+        current_url = material.get("original_material_url") or material.get("material_url")
+        if (any(material.get(key) != frozen.get(key) for key in fields)
+                or current_url != frozen.get("material_url")):
+            raise XPostError("x_video_material_changed", "免费集归属、集数或视频地址已变更，请重新核对", 409)
+
+
 def _timing(value, now, check_future=True):
     if value in (None, ""):
         return ""
@@ -94,7 +140,7 @@ def _account(account, account_id, owner, language=None, *, platform_access=False
         current_language = canonical_drama_language(account.get("drama_language"))
     except ValueError:
         raise XPostError("x_post_account_language_mismatch", "账号剧语言无效", 409) from None
-    if language and current_language != language:
+    if language and not same_drama_language(current_language, language):
         raise XPostError("x_post_account_language_mismatch", "素材与账号剧语言不一致，或账号语言已变更", 409)
     return current_language
 
@@ -167,13 +213,14 @@ def ensure_core_schema(conn):
           AND r.body_template=NEW.caption AND r.scheduled_at=NEW.scheduled_at
           AND r.random_template_enabled=(NEW.processing='random'))
         BEGIN SELECT RAISE(ABORT, 'personal child identity mismatch'); END""")
-    # Override only the ownership comparison, preserving the global reservation fence.
-    for action, columns in (("insert", ""), ("update", " OF material_key,manual_run_id")):
+    # Preserve the global reservation fence across both free-episode entry paths.
+    for action, columns in (("insert", ""), ("update", " OF material_key,material_id,source_type,manual_run_id")):
         name = "trg_x_post_queue_manual_reservation_" + action
         conn.execute("DROP TRIGGER IF EXISTS " + name)
         conn.execute("""CREATE TRIGGER %s BEFORE %s%s ON x_post_queue
           WHEN EXISTS (SELECT 1 FROM x_post_manual_material_reservation r
-            WHERE r.material_key=NEW.material_key AND r.state='active'
+            WHERE (r.material_key=NEW.material_key OR (NEW.source_type='drama'
+                AND length(NEW.material_id)=32 AND r.material_key=lower(NEW.material_id))) AND r.state='active'
               AND (NEW.manual_run_id IS NULL OR r.manual_run_id<>NEW.manual_run_id)
               AND NOT EXISTS (
                 SELECT 1 FROM x_video_publish_task anchor JOIN x_video_publish_task sibling
@@ -370,11 +417,18 @@ class PersonalStore:
     @staticmethod
     def _occupancy(conn, account_id, material_id, allow_success=False, own_batch=None):
         # Unknown results fence this account/material pair only.
+        # Drama-pool queues store a resource ID with an empty material_key.
+        # The same free episode cannot bypass its existing receipt via Excel.
+        identity_sql = "q.material_key=?"
+        identity_args = (material_id,)
+        if is_episode_id(material_id):
+            identity_sql = "(q.material_key=? OR q.material_id=? COLLATE NOCASE)"
+            identity_args += (material_id,)
         hold = conn.execute("""SELECT 1 FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
           LEFT JOIN x_post_repost_ledger r ON r.queue_id=q.id
-          WHERE (q.account_id=? OR q.relay_account_id=? OR r.relay_account_id=?) AND q.material_key=?
+          WHERE (q.account_id=? OR q.relay_account_id=? OR r.relay_account_id=?) AND """ + identity_sql + """
           AND (COALESCE(l.unknown_outcome,0)=1 OR l.status IN ('post_creating','repost_creating')
-          OR COALESCE(r.unknown_outcome,0)=1 OR r.status IN ('source_publishing','reposting','needs_review')) LIMIT 1""", (account_id, account_id, account_id, material_id)).fetchone()
+          OR COALESCE(r.unknown_outcome,0)=1 OR r.status IN ('source_publishing','reposting','needs_review')) LIMIT 1""", (account_id, account_id, account_id) + identity_args).fetchone()
         if hold:
             raise XPostError("x_post_unknown_outcome", "该账号与素材已有结果待核对任务，禁止重复提交", 409, True)
         personal_hold = conn.execute("""SELECT 1 FROM x_video_publish_task t
@@ -383,8 +437,8 @@ class PersonalStore:
         if personal_hold:
             raise XPostError("x_post_unknown_outcome", "该账号与素材已有结果待核对任务，禁止重复提交", 409, True)
         active = conn.execute("""SELECT 1 FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
-          WHERE q.account_id=? AND q.material_key=? AND (q.status IN ('queued','reserved','publishing')
-          OR l.status IN ('reserved','media_uploading','post_creating','repost_creating')) LIMIT 1""", (account_id, material_id)).fetchone()
+          WHERE q.account_id=? AND """ + identity_sql + """ AND (q.status IN ('queued','reserved','publishing','waiting_relay')
+          OR l.status IN ('reserved','media_uploading','post_creating','repost_creating')) LIMIT 1""", (account_id,) + identity_args).fetchone()
         if active:
             raise XPostError("x_video_pair_active", "此账号与素材已有进行中任务", 409)
         pending = conn.execute("""SELECT 1 FROM x_video_publish_task t JOIN x_post_manual_run r ON r.id=t.manual_run_id
@@ -392,7 +446,7 @@ class PersonalStore:
           AND (? IS NULL OR t.batch_id<>?) LIMIT 1""", (account_id, material_id, own_batch, own_batch)).fetchone()
         if pending:
             raise XPostError("x_video_pair_active", "此账号与素材已有等待或待核对任务", 409)
-        success = conn.execute("SELECT 1 FROM x_post_queue WHERE account_id=? AND material_key=? AND status='published' LIMIT 1", (account_id, material_id)).fetchone()
+        success = conn.execute("SELECT 1 FROM x_post_queue q WHERE q.account_id=? AND " + identity_sql + " AND q.status='published' LIMIT 1", (account_id,) + identity_args).fetchone()
         if success and not allow_success:
             raise XPostError("x_video_repeat_required", "此账号已成功发布过该素材；默认跳过，可明确选择再次发布", 409)
 
@@ -413,19 +467,22 @@ class PersonalStore:
                     if not isinstance(raw, dict):
                         raise XPostError("invalid_request", "发布行必须是对象", 400)
                     row["row_number"] = int(raw.get("row_number") or index)
-                    account_id, material_id = _account_id(raw.get("account_id")), _id(raw.get("material_id"), "素材 ID")
+                    account_id = _account_id(raw.get("account_id"))
+                    material_id = _material_id(raw.get("material_id"), allow_episode=source == "excel")
                     row.update(account_id=str(account_id), material_id=material_id)
                     pair = (account_id, material_id)
                     if pair in seen:
                         raise XPostError("x_video_duplicate_row", "同账号与素材重复，已保留首条有效行", 409)
                     account = accounts.get(str(account_id), accounts.get(account_id))
-                    material = materials.get(material_id, materials.get(int(material_id)))
+                    material = _material_lookup(materials, material_id)
                     language = _account(account, account_id, owner, platform_access=actor.get("x_platform_access") is True)
                     if not isinstance(material, dict) or str(material.get("material_id", material.get("id", ""))) != material_id:
                         raise XPostError("x_video_material_not_found", "素材不存在或未通过来源校验", 404)
+                    validate_episode_snapshot(material_id, material)
                     material_language = canonical_drama_language(material.get("language", material.get("drama_language")))
-                    if language != material_language:
+                    if not same_drama_language(language, material_language):
                         raise XPostError("x_post_account_language_mismatch", "素材语言与账号剧语言不匹配", 409)
+                    validate_account_duration(account, material)
                     schedule = _timing(raw.get("scheduled_at", raw.get("publish_time", "")), current)
                     if source == "manual" and material_id in material_times and material_times[material_id] != schedule:
                         raise XPostError("x_video_material_time_mismatch", "同一素材的目标账号必须共用发布时间", 400)
@@ -437,7 +494,7 @@ class PersonalStore:
                     use_default = supplied_copy in (None, "")
                     caption = normalize_caption(config["default_copy"] if use_default else supplied_copy)
                     rendered = render_caption(caption, material.get("drama_name", material.get("name")), material.get("drama_description", material.get("description", material.get("desc"))), "https://preview.invalid/0.html")
-                    row.update(caption=caption, rendered_caption=rendered, caption_source="default" if use_default else "edited", config_version=int(config["version"]), drama_language=language, scheduled_at=schedule, processing=processing, source_snapshot={k: material[k] for k in ("material_id", "id", "drama_name", "drama_description", "description", "language", "duration_seconds", "material_name", "content_id", "series_code", "url", "material_url") if k in material}, account_snapshot={k: account[k] for k in ("id", "username", "display_name", "x_user_id", "drama_language") if k in account})
+                    row.update(caption=caption, rendered_caption=rendered, caption_source="default" if use_default else "edited", config_version=int(config["version"]), drama_language=language, scheduled_at=schedule, processing=processing, source_snapshot={k: material[k] for k in ("material_id", "id", "drama_name", "drama_description", "description", "language", "duration_seconds", "duration_status", "material_name", "content_id", "series_code", "url", "material_url", "source_kind", "resource_id", "episode_number") if k in material}, account_snapshot={k: account[k] for k in ("id", "username", "display_name", "x_user_id", "drama_language") if k in account})
                     try:
                         self._occupancy(conn, account_id, material_id, bool(raw.get("allow_repeat_success") is True))
                     except XPostError as exc:
@@ -503,9 +560,11 @@ class PersonalStore:
                 if accounts is not None:
                     _account(accounts.get(str(aid), accounts.get(aid)), aid, owner, row["drama_language"], platform_access=actor.get("x_platform_access") is True)
                 if materials is not None:
-                    material = materials.get(mid, materials.get(int(mid)))
-                    if not isinstance(material, dict) or canonical_drama_language(material.get("language", material.get("drama_language"))) != row["drama_language"]:
+                    material = _material_lookup(materials, mid)
+                    if not isinstance(material, dict) or not same_drama_language(material.get("language", material.get("drama_language")), row["drama_language"]):
                         raise XPostError("x_video_material_changed", "素材数据已变更，请重新核对", 409)
+                    validate_episode_snapshot(mid, material, row["source_snapshot"])
+                    validate_account_duration(accounts.get(str(aid), accounts.get(aid)), material)
                     rendered = render_caption(row["caption"], material.get("drama_name", material.get("name")), material.get("drama_description", material.get("description", material.get("desc"))), "https://preview.invalid/0.html")
                     if rendered != row["rendered_caption"]:
                         raise XPostError("x_video_material_changed", "素材文案数据已变更，请重新核对", 409)
@@ -549,13 +608,22 @@ class PersonalStore:
         result = {k: row[k] for k in ("id", "source", "created_at", "idempotency_key")}
         tasks = conn.execute("""SELECT t.*,r.status AS run_status,r.error_code,r.error_message,
           q.id AS queue_id,q.status AS queue_status,l.id AS log_id,l.status AS log_status,
-          l.unknown_outcome,l.x_post_id,l.x_post_url,l.post_text
+          l.unknown_outcome,l.x_post_id,l.x_post_url,l.post_text,
+          l.error_code AS log_error_code,l.error_message AS log_error_message
           FROM x_video_publish_task t JOIN x_post_manual_run r ON r.id=t.manual_run_id
           LEFT JOIN x_post_queue q ON q.manual_run_id=r.id
           LEFT JOIN x_post_publish_log l ON l.queue_id=q.id WHERE t.batch_id=? ORDER BY t.id""", (int(batch_id),)).fetchall()
         result["tasks"] = []
         for task in tasks:
             item = dict(task)
+            log_code = item.pop("log_error_code")
+            log_message = item.pop("log_error_message")
+            if log_code or log_message:
+                # The publisher records queue-specific failures on the log;
+                # the parent run may only carry its aggregate terminal status.
+                item["error_code"] = log_code or ""
+                item["error_message"] = log_message or ""
+            item["error_message"] = redact_text(item["error_message"], 500)
             item["source_snapshot"] = json.loads(item.pop("source_snapshot_json"))
             item["account_snapshot"] = json.loads(item.pop("account_snapshot_json"))
             if item["unknown_outcome"] or item["run_status"] == "needs_review" or item["log_status"] in {"post_creating", "repost_creating"}:

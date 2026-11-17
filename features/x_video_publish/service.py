@@ -6,6 +6,7 @@ from .core import PersonalStore
 from .errors import PublishingError
 from .sources import LANGUAGES, SourceClient, safe_url
 from .transport import broker
+from .material_identity import is_episode_id, normalize_material_id
 
 def processing(value):
     if value in (None,'','original'):
@@ -16,6 +17,13 @@ def processing(value):
 
 def client_processing(value):
     return 'random_overlay' if value=='random' else 'original'
+
+def task_error_message(task):
+    message = task.get('error_message') or ''
+    if (task.get('status') == 'failed' and task.get('error_code') == 'x_upstream_error'
+            and 'your account is temporarily locked.' in message.lower()):
+        return 'X 账号暂时锁定，请登录该账号按提示解锁后再恢复发布。原始错误：' + message
+    return message
 
 def batch_dto(batch, *, include_items=True):
     status_map={'waiting':'queued','processing':'processing','success':'published','needs_review':'unknown',
@@ -35,7 +43,7 @@ def batch_dto(batch, *, include_items=True):
             'caption':t.get('post_text') or t.get('caption') or '',
             'planned_at_utc':t.get('scheduled_at') or None,'processing_mode':client_processing(t.get('processing')),
             'schedule_kind':'scheduled' if t.get('scheduled_at') else 'immediate',
-            'status':status_map.get(t['status'],t['status']),'error_message':t.get('error_message') or '',
+            'status':status_map.get(t['status'],t['status']),'error_message':task_error_message(t),
             'post_url':safe_url(t.get('x_post_url')),'row_number':t.get('row_number'),
             'queue_id':str(t.get('queue_id') or ''),'manual_run_id':str(t.get('manual_run_id') or '')})
     result['items'] = items
@@ -65,6 +73,7 @@ class PublishingService:
                 'username':account.get('username') or '', 'profile_image_url':safe_url(account.get('profile_image_url')),
                 'language':account.get('drama_language') or '', 'status':account.get('status') or 'unknown',
                 'publish_approved':account.get('publish_approved') is True,'eligible':eligible,
+                'subscription_type':account.get('subscription_type') or 'unknown',
                 'blocked_reason':'' if eligible else '账号授权不可用或未允许发布',
                 'caption_template':config['default_copy'],'config_version':config['version'],
                 'daily_auto_publish_configured':account.get('daily_auto_publish_configured') is True,
@@ -90,6 +99,31 @@ class PublishingService:
             lambda actor,mids:call('source',self.source.resolve,mids),
             lambda tenant,user:call('identity',self.identity,tenant,user),enabled=self.enabled)
 
+    def _resolve_rows(self, actor, rows):
+        from features.x_posts.moboreels import contains_macro
+        groups = {False: [], True: []}
+        for row in rows:
+            mid = row.get('material_id')
+            if not isinstance(mid, str) or not (re.fullmatch(r'[1-9][0-9]{0,30}', mid) or is_episode_id(mid)):
+                continue
+            caption = row.get('caption') or row.get('caption_template')
+            if not caption and row.get('account_id'):
+                caption = self.store.get_settings(actor, row['account_id']).get('default_copy')
+            group = groups[contains_macro(caption)]
+            if mid not in group:
+                group.append(mid)
+        overlap = set(groups[False]) & set(groups[True])
+        if overlap:
+            raise PublishingError('material_provider_conflict','同一素材不能在同次批次混用旧剧目宏与 {{m_url}}',409)
+        result = {'items': {}, 'errors': {}}
+        for enabled, mids in groups.items():
+            if not mids:
+                continue
+            resolved = self.source.resolve(mids, moboreels=True) if enabled else self.source.resolve(mids)
+            for key in result:
+                result[key].update(resolved.get(key, {}))
+        return result
+
     def preview(self,actor,payload,*,excel=False):
         accounts=self.accounts(actor)
         rows=[]
@@ -109,8 +143,11 @@ class PublishingService:
                     # Preserve a row-local invalid mode for core validation;
                     # one bad Excel row must not discard other valid rows.
                     mode='invalid'
+                material_id=row.get('material_id')
+                if is_episode_id(material_id):
+                    material_id=normalize_material_id(material_id)
                 rows.append({'row_number':row.get('row_number'),'account_id':str(account['id']) if account else '',
-                    'material_id':row.get('material_id'),'caption':row.get('caption_template') or '',
+                    'material_id':material_id,'caption':row.get('caption_template') or '',
                     'scheduled_at':row.get('scheduled_at_utc') or '',
                     'processing':mode})
         else:
@@ -131,8 +168,9 @@ class PublishingService:
                     'processing':processing(payload.get('processing_mode'))})
             if set(mids)!=assigned:
                 raise PublishingError('unassigned_material','存在未分配目标账号的素材',400)
-        mids=list(dict.fromkeys(r['material_id'] for r in rows if isinstance(r['material_id'],str) and re.fullmatch(r'[1-9][0-9]{0,30}',r['material_id'])))
-        resolved=self.source.resolve(mids) if mids else {'items':{},'errors':{}}
+        mids=list(dict.fromkeys(r['material_id'] for r in rows if isinstance(r['material_id'],str)
+            and (re.fullmatch(r'[1-9][0-9]{0,30}',r['material_id']) or (excel and is_episode_id(r['material_id'])))))
+        resolved=self._resolve_rows(actor, rows)
         result=self.store.preview(actor,{'source':'excel' if excel else 'manual','rows':rows},accounts,resolved['items'])
         return self.preview_dto(result,resolved.get('errors',{}))
 
@@ -149,6 +187,8 @@ class PublishingService:
             material=row['source_snapshot'];account=row['account_snapshot']
             items.append({'row_number':row['row_number'],'material_id':row['material_id'],
                 'material_name':material.get('material_name') or material.get('drama_name') or row['material_id'],
+                **({'duration_status':material.get('duration_status'),
+                    'duration_seconds':material.get('duration_seconds')} if is_episode_id(row['material_id']) else {}),
                 'account_id':row['account_id'],'x_user_id':account.get('x_user_id',''),
                 'account_name':account.get('display_name') or account.get('username') or row['account_id'],
                 'caption':row['rendered_caption'],'caption_template':row['caption'],
@@ -198,7 +238,7 @@ class PublishingService:
                 if frozen['source']=='manual' and len(rows)!=len(frozen['rows']):
                     raise PublishingError('manual_preflight_failed','请修正所有手动发布配对后重新核对',409)
                 mids=list(dict.fromkeys(r['material_id'] for r in rows))
-                resolved=self.source.resolve(mids) if mids else {'items':{}}
+                resolved=self._resolve_rows(actor, rows)
                 batch=self.store.commit(actor,token,key,self.accounts(actor),resolved['items'],allow_repeat_success=payload.get('allow_repeat') is True)
             value=batch_dto(batch)
             return {'batch_id':value['batch_id'],'batch':value}
