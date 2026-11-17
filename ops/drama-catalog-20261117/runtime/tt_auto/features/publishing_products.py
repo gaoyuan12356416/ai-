@@ -27,14 +27,20 @@ def mobo_product_sql(alias):
     return "LOCATE('mobo',%s)=1 OR LOCATE('[w2a]mobo',%s)=1" % (value, value)
 
 
-def source_app_sql(alias, schema):
-    if not all(re.fullmatch(r'[A-Za-z0-9_]+', value) for value in (alias, schema)):
+def dramawave_product_sql(alias):
+    if not re.fullmatch(r'[A-Za-z0-9_]+', alias):
         raise ValueError('invalid catalog identifier')
     product = "LOWER(TRIM(%s.product))" % alias
     variants = ','.join("'%s'" % name for name in DRAMAWAVE_MATERIAL_PRODUCTS)
-    family = ("LOCATE('dramawave',{product})=1 OR "
-              "LOCATE('[w2a]dramawave',{product})=1 OR "
-              "{product} IN ({variants})").format(product=product, variants=variants)
+    return ("LOCATE('dramawave',{product})=1 OR "
+            "LOCATE('[w2a]dramawave',{product})=1 OR "
+            "{product} IN ({variants})").format(product=product, variants=variants)
+
+
+def source_app_sql(alias, schema):
+    if not all(re.fullmatch(r'[A-Za-z0-9_]+', value) for value in (alias, schema)):
+        raise ValueError('invalid catalog identifier')
+    family = dramawave_product_sql(alias)
     # Resolve family variants before the app-name lookup, so a material product
     # ID such as Drama-comics never replaces the authoritative drama app ID.
     # Other named products keep the exact prior scalar lookup and blank fallback.
