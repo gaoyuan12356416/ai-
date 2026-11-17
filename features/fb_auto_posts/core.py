@@ -807,6 +807,12 @@ class FBAutoPostStore:
                         selection['hit_drama_publish']['allowed_content_ids'] = hit_drama['page_content_ids'].get(page.page_id, [])
                     else:
                         selection['hit_drama_publish'] = dict(hit_drama)
+                try:
+                    from features.story_copy.bridge import fb_plan
+                    if status == 'planned' and material is not None:
+                        fb_plan(selection,self,config,page,material,int(task_cursor.lastrowid),link_timestamp)
+                except Exception as story_error:
+                    __import__('logging').getLogger(__name__).warning('story_copy.fallback %s',type(story_error).__name__)
                 conn.execute("UPDATE fb_auto_task SET selection_json=? WHERE id=?", (json.dumps(selection, sort_keys=True), int(task_cursor.lastrowid)))
                 if status == "planned": queued += 1
                 else: skipped += 1
@@ -1034,6 +1040,11 @@ class FBAutoPostStore:
             if updated != 1:
                 conn.rollback(); return None
             conn.execute("UPDATE fb_auto_run SET status='running' WHERE id=?", (int(row["run_id"]),))
+            try:
+                from features.story_copy.bridge import fb_final, fb_redirect
+                fb_final(conn,'fa',row,extra_link_writer=fb_redirect)
+            except Exception as story_error:
+                __import__('logging').getLogger(__name__).warning('story_copy.fallback %s',type(story_error).__name__)
             conn.commit()
             claimed = conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (int(row["id"]),)).fetchone()
             return dict(claimed)

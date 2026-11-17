@@ -25,7 +25,6 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 from features.x_accounts.language import canonical_drama_language
 from features.x_posts import duration_policy
 from features.pipeline_dispatch.backlog_contract import SCHEMA as BACKLOG_SCHEMA, disposition_record
-from features import social_random_schedule as target_random
 
 
 UTC = timezone.utc
@@ -206,13 +205,11 @@ class RunRecord:
     finished_at_utc: str
 
     duration_policy_version: int = 2
-    schedule_policy: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "duration_policy_version": self.duration_policy_version,
-            "schedule_policy": self.schedule_policy,
             "run_key": self.run_key,
             "template_id": self.template_id,
             "template_version": self.template_version,
@@ -267,13 +264,11 @@ class TaskRecord:
     updated_at: str
     reserved_at_utc: str
     published_at_utc: str
-    schedule_policy: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "run_id": self.run_id,
-            "schedule_policy": self.schedule_policy,
             "template_id": self.template_id,
             "template_version": self.template_version,
             "account_id": self.account_id,
@@ -932,10 +927,6 @@ def ensure_storage(db_path: Any) -> None:
                 """
             )
             duration_policy.migrate(conn, ("x_auto_run",))
-            target_random.ensure_schema(conn)
-            for table in ("x_auto_run", "x_auto_task"):
-                if "schedule_policy" not in {r[1] for r in conn.execute("PRAGMA table_info(" + table + ")")}:
-                    conn.execute("ALTER TABLE " + table + " ADD COLUMN schedule_policy TEXT NOT NULL DEFAULT ''")
             conn.commit()
         except Exception:
             if conn.in_transaction:
@@ -963,7 +954,6 @@ def _template_from_row(row: sqlite3.Row) -> TemplateSnapshot:
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
     raw_generation = row["metric_generation_id"]
     return RunRecord(
-        schedule_policy=str(row["schedule_policy"] or ""),
         duration_policy_version=int(row["duration_policy_version"]),
         id=int(row["id"]),
         run_key=str(row["run_key"]),
@@ -987,7 +977,6 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
 
 def _task_from_row(row: sqlite3.Row) -> TaskRecord:
     return TaskRecord(
-        schedule_policy=str(row["schedule_policy"] or ""),
         id=int(row["id"]),
         run_id=int(row["run_id"]),
         template_id=int(row["template_id"]),
@@ -1544,7 +1533,6 @@ class XAutoPostStore:
         metric_generation_id: Optional[Any] = None,
         blacklist_snapshot: Optional[Mapping[str, Any]] = None,
         actor: AuditActor = AuditActor(),
-        schedule_policy: str = "",
     ) -> RunRecord:
         clean_key = _bounded_text(run_key, "run key", 255)
         normalized_template_id = _positive_int(template_id, "template id")
@@ -1573,8 +1561,6 @@ class XAutoPostStore:
             if not bool(version_row["confirmed"]):
                 raise XAutoPostStoreError("x_auto_template_version_unconfirmed", "template version must be confirmed before execution", 409)
             if clean_trigger == "auto":
-                frozen_day = target_random.get_day_plan(conn, "x:auto:" + str(normalized_template_id), normalized_date) if schedule_policy == target_random.POLICY else None
-                frozen_target_day = bool(frozen_day and int(frozen_day["config_version"]) == normalized_version)
                 current_template = conn.execute(
                     """
                     SELECT enabled,current_version,enabled_at_utc
@@ -1591,10 +1577,11 @@ class XAutoPostStore:
                 if (
                     current_template is None
                     or not bool(current_template["enabled"])
-                    or (int(current_template["current_version"]) != normalized_version and not frozen_target_day)
+                    or int(current_template["current_version"])
+                    != normalized_version
                     or not enabled_at
-                    or (not frozen_target_day and _utc_datetime(scheduled)
-                    < _utc_datetime(enabled_at, "template enabled time"))
+                    or _utc_datetime(scheduled)
+                    < _utc_datetime(enabled_at, "template enabled time")
                 ):
                     raise XAutoPostStoreError(
                         "x_auto_template_not_enabled_for_slot",
@@ -1642,9 +1629,9 @@ class XAutoPostStore:
                     trigger_type,scheduled_at_utc,shanghai_date,publish_time,
                     metric_generation_id,blacklist_snapshot_json,status,
                     created_by_user_id,created_by_name,created_at,updated_at,
-                    duration_policy_version,schedule_policy
+                    duration_policy_version
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,2,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,2)
                 """,
                 (
                     clean_key,
@@ -1661,7 +1648,6 @@ class XAutoPostStore:
                     actor.name,
                     now,
                     now,
-                    schedule_policy,
                 ),
             )
             run_id = int(cursor.lastrowid)
@@ -1930,8 +1916,8 @@ class XAutoPostStore:
                     trigger_priority,scheduled_at_utc,status,language,
                     account_snapshot_version,account_snapshot_json,
                     body_template,body_sha256,body_utf16_units,
-                    created_at,updated_at,schedule_policy
-                ) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?,?,?)
+                    created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?,?)
                 """,
                 (
                     normalized_run_id,
@@ -1950,7 +1936,6 @@ class XAutoPostStore:
                     body_units,
                     now,
                     now,
-                    str(run["schedule_policy"] or ""),
                 ),
             )
             task_id = int(cursor.lastrowid)
@@ -2227,7 +2212,7 @@ class XAutoPostStore:
                 SELECT t.*
                 FROM x_auto_task t
                 WHERE t.status='pending'
-                  AND (t.scheduled_at_utc<=? OR t.schedule_policy='target_midnight_v1')
+                  AND t.scheduled_at_utc<=?
                   AND NOT EXISTS (SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='x:auto:'||t.id)
                 ORDER BY
                     t.trigger_priority ASC,
@@ -2348,7 +2333,7 @@ class XAutoPostStore:
                     """
                 SELECT * FROM x_auto_task
                 WHERE
-                    (status='pending' AND (scheduled_at_utc<=? OR schedule_policy='target_midnight_v1'))
+                    (status='pending' AND scheduled_at_utc<=?)
                     OR (status='selecting' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
                         status='reserved'
@@ -2360,7 +2345,7 @@ class XAutoPostStore:
                         AND (next_attempt_at_utc='' OR next_attempt_at_utc<=?)
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
                     )
-                    OR (status='ready' AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
+                    OR (status='ready' AND scheduled_at_utc<=? AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?))
                     OR (
                         status IN ('publishing','reconciling','unknown')
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
@@ -2377,7 +2362,7 @@ class XAutoPostStore:
                     template_id ASC,
                     id ASC
                 """,
-                    (current, current, current, current, current, current, current, current),
+                    (current, current, current, current, current, current, current, current, current),
                 )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
@@ -2393,10 +2378,6 @@ class XAutoPostStore:
                     continue
                 candidate_id = int(candidate["id"])
                 candidate_status = str(candidate["status"])
-                if (str(candidate["schedule_policy"]) == target_random.POLICY
-                    and str(candidate["scheduled_at_utc"]) > current
-                    and (candidate_status == "ready" or (candidate_status == "retry_wait" and candidate["claim_phase"] == "publish"))):
-                    continue
                 # Each template task owns its lease and receipt independently.
                 selected = candidate
                 break
@@ -2659,16 +2640,18 @@ class XAutoPostStore:
                 cooldown_start = _utc_iso(cooldown_since_utc, "cooldown start")
                 cooldown_hit = conn.execute(
                     """
-                    SELECT 1 FROM x_auto_material_ledger
-                    WHERE template_id=? AND content_id=? AND reserved_at_utc>=?
+                    SELECT 1 FROM x_auto_material_ledger AS ledger
+                    JOIN x_auto_task AS prior_task ON prior_task.id=ledger.task_id
+                    WHERE ledger.template_id=? AND prior_task.account_id=?
+                      AND ledger.content_id=? AND ledger.reserved_at_utc>=?
                     LIMIT 1
                     """,
-                    (int(task["template_id"]), clean_content_id, cooldown_start),
+                    (int(task["template_id"]), str(task["account_id"]), clean_content_id, cooldown_start),
                 ).fetchone()
                 if cooldown_hit is not None:
                     raise XAutoPostStoreError(
                         "x_auto_drama_in_cooldown",
-                        "drama is still in this template's cooldown window",
+                        "drama is still in this template's cooldown window for the target account",
                         409,
                     )
             existing_ledger = conn.execute(
@@ -2718,6 +2701,13 @@ class XAutoPostStore:
                     normalized_task_id,
                 ),
             )
+            hit_timing = _json_object(selection_json).get('hit_publish_timing')
+            if hit_timing:
+                from features.hit_publish import POLICY
+                if hit_timing.get('policy') != POLICY:
+                    raise XAutoPostStoreError('x_auto_hit_timing_invalid', 'invalid hit timing', 409)
+                conn.execute('UPDATE x_auto_task SET scheduled_at_utc=? WHERE id=?',
+                             (_utc_iso(hit_timing['publish_at_utc']), normalized_task_id))
             self._event(
                 conn,
                 run_id=int(task["run_id"]),
@@ -3015,19 +3005,23 @@ class XAutoPostStore:
             return None
         return _reservation_from_row(row)
 
-    def last_template_drama_reserved_at(self, template_id: Any, content_id: Any) -> Optional[str]:
+    def last_template_drama_reserved_at(
+        self, template_id: Any, content_id: Any, *, account_id: Any
+    ) -> Optional[str]:
         normalized_template_id = _positive_int(template_id, "template id")
         clean_content_id = _bounded_text(content_id, "content id", MAX_IDENTITY_CHARS)
+        clean_account_id = _bounded_text(account_id, "account id", MAX_ACCOUNT_ID_CHARS)
         with self._reader() as conn:
             row = conn.execute(
                 """
-                SELECT reserved_at_utc
-                FROM x_auto_material_ledger
-                WHERE template_id=? AND content_id=?
-                ORDER BY reserved_at_utc DESC
+                SELECT ledger.reserved_at_utc
+                FROM x_auto_material_ledger AS ledger
+                JOIN x_auto_task AS task ON task.id=ledger.task_id
+                WHERE ledger.template_id=? AND task.account_id=? AND ledger.content_id=?
+                ORDER BY ledger.reserved_at_utc DESC
                 LIMIT 1
                 """,
-                (normalized_template_id, clean_content_id),
+                (normalized_template_id, clean_account_id, clean_content_id),
             ).fetchone()
         return None if row is None else str(row["reserved_at_utc"])
 
@@ -3037,12 +3031,13 @@ class XAutoPostStore:
         content_id: Any,
         cooldown_days: Any,
         *,
+        account_id: Any,
         now: Optional[Any] = None,
     ) -> bool:
         days = _nonnegative_int(cooldown_days, "cooldown days")
         if days == 0:
             return False
-        last = self.last_template_drama_reserved_at(template_id, content_id)
+        last = self.last_template_drama_reserved_at(template_id, content_id, account_id=account_id)
         if not last:
             return False
         current = self._now() if now is None else _utc_datetime(now)
@@ -3053,10 +3048,13 @@ class XAutoPostStore:
         template_id: Any,
         content_ids: Sequence[Any],
         since_utc: Any,
+        *,
+        account_id: Any,
     ) -> Set[str]:
-        """Return dramas reserved by this template at or after ``since_utc``."""
+        """Return this template/account's dramas reserved at or after ``since_utc``."""
 
         normalized_template_id = _positive_int(template_id, "template id")
+        clean_account_id = _bounded_text(account_id, "account id", MAX_ACCOUNT_ID_CHARS)
         since = _utc_iso(since_utc, "cooldown start")
         if isinstance(content_ids, (str, bytes)) or not isinstance(content_ids, Sequence):
             raise XAutoPostStoreError("x_auto_content_ids_invalid", "content ids must be a list", 400)
@@ -3075,12 +3073,13 @@ class XAutoPostStore:
                 placeholders = ",".join("?" for _ in batch)
                 rows = conn.execute(
                     """
-                    SELECT DISTINCT content_id
-                    FROM x_auto_material_ledger
-                    WHERE template_id=? AND reserved_at_utc>=?
-                      AND content_id IN (%s)
+                    SELECT DISTINCT ledger.content_id
+                    FROM x_auto_material_ledger AS ledger
+                    JOIN x_auto_task AS task ON task.id=ledger.task_id
+                    WHERE ledger.template_id=? AND task.account_id=? AND ledger.reserved_at_utc>=?
+                      AND ledger.content_id IN (%s)
                     """ % placeholders,
-                    (normalized_template_id, since, *batch),
+                    (normalized_template_id, clean_account_id, since, *batch),
                 ).fetchall()
                 result.update(str(row["content_id"]) for row in rows)
         return result

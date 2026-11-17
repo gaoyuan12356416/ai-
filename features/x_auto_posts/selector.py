@@ -2,11 +2,13 @@
 
 The public operation is :meth:`TwoStageSelector.select_and_reserve`.  It never
 returns an unreserved winner: permanent exclusion, a final blacklist refresh,
-published-history recheck, template cooldown and the global material uniqueness
+published-history recheck, template/account cooldown and global material uniqueness
 constraint are all evaluated before the selected identity leaves this layer.
 """
 
 from __future__ import annotations
+
+from features.hit_publish import future_allowed
 
 import re
 import urllib.parse
@@ -75,6 +77,8 @@ class NoEligibleMaterial(SelectionError):
     def __init__(self, rejection_counts: Mapping[str, int]):
         self.rejection_counts = dict(rejection_counts)
         labels = {
+            "drama_cooldown": "目标频道的剧目冷却中",
+            "drama_cooldown_race": "目标频道的剧目已被其他任务预占",
             "drama_hard_gate": "剧上线时间或基础条件不符",
             "drama_d0_roas": "剧ROAS不达标", "drama_spend": "剧消耗不达标",
             "material_hard_gate": "素材地址、时长或基础条件不符",
@@ -482,6 +486,7 @@ class SelectionStore(Protocol):
         self,
         *,
         template_id: int,
+        account_id: str,
         content_ids: Sequence[str],
         since_utc: str,
     ) -> Iterable[str]:
@@ -722,7 +727,7 @@ class TwoStageSelector:
                 or row.release_status != 1
                 or row.language != language
                 or row.deploy_time <= 0
-                or row.deploy_time > now_epoch
+                or (row.deploy_time > now_epoch and not future_allowed(row.content_id, row.language, row.deploy_time))
                 or (earliest is not None and row.deploy_time < earliest)
                 or (allowed_types and row.resource_type_v2 not in allowed_types)
             ):
@@ -771,6 +776,7 @@ class TwoStageSelector:
                 str(value)
                 for value in self.store.cooldown_content_ids(
                     template_id=int(request.template_id),
+                    account_id=str(request.account_id),
                     content_ids=[item.content_id for item in candidates],
                     since_utc=since,
                 )
