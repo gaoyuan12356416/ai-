@@ -2,7 +2,6 @@
 import argparse
 from contextlib import closing
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,6 +10,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import time
 
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
@@ -42,8 +42,8 @@ def save(path, value):
 
 def config_hash(db, lane):
     with closing(sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)) as conn:
-        table = 'fb_auto_template' if lane == 'fb' else 'x_auto_template_version'
-        columns = 'id,config_json,current_version' if lane == 'fb' else 'template_id,version,config_json'
+        table = 'fb_auto_template_version' if lane == 'fb' else 'x_auto_template_version'
+        columns = 'template_id,version,config_json'
         rows = conn.execute('SELECT ' + columns + ' FROM ' + table + ' ORDER BY 1,2').fetchall()
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
 
@@ -52,6 +52,49 @@ def services():
     units = [row[3] for row in LANES.values()] + ['drama-material-api.service', 'x-tag-post.service',
         'x-tag-gateway.service', 'pipeline-cos-native-fb.service', 'pipeline-cos-native-x-tag.service']
     return {unit: run('systemctl', 'show', unit, '--property=MainPID,ActiveState,SubState') for unit in units}
+
+
+def restart_fb(folder, action):
+    # The FB HTTP owner has no native SIGTERM drain. Reuse its verified socket
+    # and stack check, while gating only new connections to this owner. GPU and
+    # native publishing workers keep their tasks, leases and processes.
+    from scripts.deploy_fb_skipped_recheck import drained
+    unit = LANES['fb'][3]
+    pid = run('systemctl', 'show', unit, '-p', 'MainPID', '--value')
+    marker = 'hit-drama-age-' + str(os.getpid())
+    rule = ['-p', 'tcp', '--dport', '18835', '-m', 'conntrack', '--ctstate', 'NEW',
+            '-m', 'comment', '--comment', marker, '-j', 'REJECT', '--reject-with', 'tcp-reset']
+    watchdog = marker + '-gate'
+    run('systemd-run', '--quiet', '--unit=' + watchdog, '--on-active=120s', '--',
+        '/usr/sbin/iptables', '-D', 'INPUT', *rule)
+    gated = False
+    try:
+        run('iptables', '-I', 'INPUT', '1', *rule)
+        gated = True
+        deadline = time.monotonic() + 90
+        while True:
+            proof = drained(pid)
+            if not proof['sockets'] and not proof['accept_queue'] and proof['threads'] - proof['idle_readbacks'] <= 1:
+                time.sleep(.3)
+                if drained(pid) == proof:
+                    break
+            if time.monotonic() >= deadline:
+                raise RuntimeError('FB accepted requests preserved; retry switch after they finish')
+            time.sleep(.5)
+        save(folder / (action + '-fb-drain.json'), dict(pid=pid, proof=proof))
+        run('systemctl', 'restart', '--no-block', unit)
+        deadline = time.monotonic() + 25
+        while True:
+            new_pid = run('systemctl', 'show', unit, '-p', 'MainPID', '--value')
+            if new_pid not in ('0', pid) and run('systemctl', 'show', unit, '-p', 'ActiveState', '--value') == 'active':
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError('FB owner switch still pending; inspect without killing tasks')
+            time.sleep(.5)
+    finally:
+        if gated:
+            run('iptables', '-D', 'INPUT', *rule)
+        subprocess.run(['systemctl', 'stop', watchdog + '.timer'], capture_output=True, timeout=10)
 
 
 def prepare(folder):
@@ -111,10 +154,9 @@ def switch(folder, rollback=False):
         run(sys.executable, HEALTH, 'snapshot', '--lane', lane, '--output', folder / (action + '-schedulers-before-' + lane + '.json'))
     for name, entry in info['files'].items():
         static_release.atomic(Path(name), Path(entry['backup' if rollback else 'next']).read_bytes(), entry)
-    # The two control owners drain their own accepted HTTP work normally.
-    # Native upload/render/publish services and the main API are untouched.
-    for _, _, _, unit, _ in LANES.values():
-        run('systemctl', 'restart', '--no-block', unit)
+    restart_fb(folder, action)
+    # X's owner already has a normal SIGTERM drain. Do not restart its publisher.
+    run('systemctl', 'restart', '--no-block', LANES['x'][3])
     info['requested_action'] = action
     save(folder / 'manifest.json', info)
     print(json.dumps(dict(status='switch_requested', action=action, commit=info['commit'],
