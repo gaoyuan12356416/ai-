@@ -73,3 +73,39 @@ daily-report release. Pending/failed daily cards are retained as `recorded` befo
 returning to an old hourly sender; sent/unknown receipts are unchanged. Current
 jobs, Page state, credentials, all attempts, accepted Ad changes and profile
 snapshots remain intact. Never replace the live SQLite with `state-before.sqlite3`.
+
+## Confirmed deployment and acceptance
+
+- Runtime commit: `453e712cf6a55ef2ab614392b61cdd2d954720ff`. GitHub push and CPU
+  fetch/check-out verified; recovery worker switched at 2026-11-17 18:42:42 CST.
+  Source checkout: `/mnt/data-disk/meta-page-recovery/source-73bbb1db`.
+- Deployment/backup: `/mnt/data-disk/meta-page-recovery/deployments/20261117-schedule-453e712c`.
+  Its manifest retains previous files, pointer and activation states; the online
+  SQLite copy is `state-before.sqlite3`. The frozen `deploy.py` is executable
+  with Python and provides the rollback below.
+- CPU focused tests: **59 passed**, log
+  `/mnt/data-disk/meta-page-recovery/verification/tests-schedule-453e712c.log`.
+  Related local tests and targeted final concurrency/rollback tests passed.
+  Both real systemd calendar parsers and all five unit files validated.
+- Worker and both timers are enabled/active. Read-back next scan:
+  **2026-11-17 20:05 CST**; next report: **2026-11-18 10:00 CST**. Neither an extra
+  scan nor an immediate group message was triggered by this switch.
+- All eight business-table fingerprints matched before/after: original baseline,
+  3375 observed Pages, 2 incidents, **328 jobs**, **8 attempts**, 6 runs, 873
+  run-job links and all **6 existing notification rows/receipts**. No baseline,
+  skipped job or already completed Ad change was replayed.
+- Portrait and Page-assignment Python files match the previous release exactly.
+  No portrait collector, main API or organic publishing worker was restarted.
+- A private online state copy generated the next daily report preview, with
+  outgoing HTTP forbidden. Queuing twice and two deliveries produced exactly
+  one simulated receipt on the private copy; live state was unchanged. Preview
+  is partial until tomorrow's cutoff, not an actual daily delivery.
+- Acceptance: `verification/schedule-453e712c-acceptance.json`; preview:
+  `verification/daily-preview-20261118.json`, under the recovery data root.
+  The first real 10:00 receipt remains a future scheduled event.
+
+Rollback this exact update, retaining all live business facts:
+
+```
+python3 /mnt/data-disk/meta-page-recovery/deployments/20261117-schedule-453e712c/deploy.py rollback --deployment /mnt/data-disk/meta-page-recovery/deployments/20261117-schedule-453e712c
+```
