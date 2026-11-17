@@ -97,8 +97,8 @@ def prepare(folder):
                     # Apply only the reviewed UI delta to older runtime copies.
                     scratch = folder / ('static-' + str(len(info['files'])))
                     scratch.write_bytes(live)
-                    delta = ''.join(difflib.unified_diff(old.decode().splitlines(True), data.decode().splitlines(True), fromfile='before', tofile='after'))
-                    result = subprocess.run(['patch', '--batch', '--forward', '--fuzz=0', str(scratch)],
+                    delta = ''.join(difflib.unified_diff(old.decode().splitlines(True), data.decode().splitlines(True), fromfile='a/' + scratch.name, tofile='b/' + scratch.name))
+                    result = subprocess.run(['git', 'apply', '--whitespace=nowarn', '-'], cwd=folder,
                                             input=delta, text=True, capture_output=True)
                     assert not result.returncode, 'static_variant_requires_review:' + str(path)
                     data = scratch.read_bytes()
