@@ -19,6 +19,8 @@ DB = Path('/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3')
 HEALTH = '/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
 TRIGGERS = ['x-tag-auto-runner.timer', 'x-tag-auto-scheduler.timer', 'x-tag-auto-runner.path']
 PUBLISHERS = ['x-tag-post.service', 'pipeline-cos-native-x-tag.service', 'pipeline-coordinator.service']
+BACKUP_NAME = 'repositories'
+TESTS = [('test_x_pending_launch.py', []), ('test_drama_launch_range.py', ['--platform', 'x'])]
 
 
 def run(*args, timeout=60):
@@ -41,13 +43,13 @@ def prepare(folder):
     assert run('git', '-C', SOURCE, 'branch', '-r', '--contains', commit)
     assert digest(ROOT / FILE) == BEFORE, 'live_source_changed'
     folder.mkdir(parents=True, mode=0o700, exist_ok=False)
-    shutil.copy2(ROOT / FILE, folder / 'repositories.before.py')
-    shutil.copy2(SOURCE / FILE, folder / 'repositories.next.py')
+    shutil.copy2(ROOT / FILE, folder / (BACKUP_NAME + '.before.py'))
+    shutil.copy2(SOURCE / FILE, folder / (BACKUP_NAME + '.next.py'))
     candidate = folder / 'candidate'
     shutil.copytree(ROOT.resolve(), candidate, symlinks=True,
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.git'))
     shutil.copy2(SOURCE / FILE, candidate / FILE)
-    for name, args in [('test_x_pending_launch.py', []), ('test_drama_launch_range.py', ['--platform', 'x'])]:
+    for name, args in TESTS:
         shutil.copy2(SOURCE / 'scripts' / name, candidate / 'scripts' / name)
         result = subprocess.run([sys.executable, '-B', 'scripts/' + name, *args], cwd=candidate,
                                 text=True, capture_output=True, timeout=90)
@@ -61,7 +63,7 @@ def prepare(folder):
     save(folder / 'manifest.json', dict(commit=commit, status='prepared', root=str(ROOT.resolve()),
         before=BEFORE, after=digest(SOURCE / FILE), mode=meta.st_mode & 0o777,
         uid=meta.st_uid, gid=meta.st_gid))
-    print(json.dumps(dict(status='prepared', commit=commit, tests='8 passed')))
+    print(json.dumps(dict(status='prepared', commit=commit, tests=[name for name, _ in TESTS])))
 
 
 def switch(folder, rollback=False):
@@ -70,7 +72,7 @@ def switch(folder, rollback=False):
     expected = info['after'] if rollback else info['before']
     target = info['before'] if rollback else info['after']
     assert digest(ROOT / FILE) == expected, 'preserve_later_source'
-    source = folder / ('repositories.before.py' if rollback else 'repositories.next.py')
+    source = folder / (BACKUP_NAME + ('.before.py' if rollback else '.next.py'))
     assert digest(source) == target
     action = 'rollback' if rollback else 'apply'
     run(sys.executable, HEALTH, 'snapshot', '--lane', 'x', '--output', folder / (action + '-schedulers-before.json'))

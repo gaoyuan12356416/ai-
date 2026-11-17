@@ -2296,8 +2296,9 @@ class XAutoPostStore:
 
         An expired ``publishing`` task is converted to ``unknown`` and claimed
         only for reconciliation.  It can therefore never be initialized again.
-        Active work for one account remains serialized inside the same
-        ``BEGIN IMMEDIATE`` transaction.
+        Claims remain serialized inside ``BEGIN IMMEDIATE``. When native
+        workers own publication, alternate new work with receipt observation
+        so repeated observations cannot exhaust every bounded runner cycle.
         """
 
         worker = _bounded_text(worker_id, "worker id", 128)
@@ -2354,6 +2355,31 @@ class XAutoPostStore:
                     (current, current, current, current, current, current),
                 )
             else:
+                fairness_order = ""
+                if publish_delegated:
+                    # Persist the turn through existing audit events, inside the
+                    # claim transaction. Concurrent callers and service restarts
+                    # therefore share one turn without new scheduler state.
+                    last_claim = conn.execute(
+                        "SELECT event_type FROM x_auto_event WHERE event_type IN "
+                        "('task_claimed_selection','task_claimed_prepare',"
+                        "'task_claimed_publish','task_claimed_reconcile') "
+                        "ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                    observe_first = not last_claim or last_claim[0] != "task_claimed_reconcile"
+                    observation = (
+                        "(status IN ('publishing','reconciling','unknown','ready') "
+                        "OR (status='retry_wait' AND claim_phase='reconcile'))"
+                    )
+                    # A just-observed old run must go behind other due receipts;
+                    # original run time alone would repeatedly select that run.
+                    fairness_order = (
+                        "CASE WHEN %s THEN %d ELSE %d END, "
+                        "CASE WHEN %s THEN COALESCE(NULLIF(next_attempt_at_utc,''),"
+                        "NULLIF(lease_expires_at_utc,''),scheduled_at_utc) ELSE '' END, "
+                        % (observation, 0 if observe_first else 1,
+                           1 if observe_first else 0, observation)
+                    )
                 candidates = conn.execute(
                     """
                 SELECT * FROM x_auto_task
@@ -2376,6 +2402,7 @@ class XAutoPostStore:
                         AND (lease_expires_at_utc='' OR lease_expires_at_utc<=?)
                     )
                 ORDER BY
+                    {fairness_order}
                     CASE
                         WHEN status IN ('publishing','reconciling','unknown') THEN 0
                         WHEN status='ready' THEN 1
@@ -2386,7 +2413,7 @@ class XAutoPostStore:
                     scheduled_at_utc ASC,
                     template_id ASC,
                     id ASC
-                """,
+                """.format(fairness_order=fairness_order),
                     (current, current, current, current, current, current, current, current, current),
                 )
             selected: Optional[sqlite3.Row] = None
