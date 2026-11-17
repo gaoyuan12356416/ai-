@@ -32,6 +32,8 @@ def main():
     # Without this preflight, configuration failures would consume tasks.
     from features.x_posts.media_repair import WorkerConfig, CosObjectStore
     CosObjectStore(WorkerConfig.from_env())
+    from features.youtube_auto_publish.runtime import generate_cover_factory
+    from features.youtube_auto_publish.images import decode_cover
     if not (Path(os.environ['CODEX_HOME']) / 'auth.json').is_file():
         raise RuntimeError('cover generator authentication unavailable')
     client = CoordinatorClient(config['coordinator_url'], config['node_token'])
