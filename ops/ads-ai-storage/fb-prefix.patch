@@ -1,0 +1,7 @@
+--- a/features/fb_gpu/prepare_worker.py
++++ b/features/fb_gpu/prepare_worker.py
+@@ -59,3 +59,3 @@
+         domain=_origin(source.get("FB_PAGE_GPU_COS_DOMAIN")); prefix=str(source.get("FB_PAGE_GPU_COS_PREFIX","fb-page-random-overlay-h264-v3")).strip("/")
+-        if not secret_id or not secret_key or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}",bucket) or not re.fullmatch(r"[a-z0-9-]{3,64}",region) or prefix!="fb-page-random-overlay-h264-v3": raise PrepareWorkerError("invalid_configuration","COS configuration invalid",500)
++        if not secret_id or not secret_key or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}",bucket) or not re.fullmatch(r"[a-z0-9-]{3,64}",region) or prefix not in ("fb-page-random-overlay-h264-v3", "ads-ai/fb-page-random-overlay-h264-v3"): raise PrepareWorkerError("invalid_configuration","COS configuration invalid",500)
+         retention=int(source.get("FB_PAGE_GPU_FAILED_JOB_RETENTION_SECONDS","172800")); cleanup_max=int(source.get("FB_PAGE_GPU_CLEANUP_MAX_JOBS","100")); cos_timeout=int(source.get("FB_PAGE_GPU_COS_TIMEOUT","120"))

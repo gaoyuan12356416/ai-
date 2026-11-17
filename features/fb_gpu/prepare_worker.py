@@ -57,7 +57,7 @@ class WorkerConfig:
         if not SHA_RE.fullmatch(manifest): raise PrepareWorkerError("invalid_configuration","asset manifest fingerprint invalid",500)
         secret_id,secret_key,bucket,region=str(source.get("FB_PAGE_GPU_COS_SECRET_ID", "")),str(source.get("FB_PAGE_GPU_COS_SECRET_KEY", "")),str(source.get("FB_PAGE_GPU_COS_BUCKET", "")),str(source.get("FB_PAGE_GPU_COS_REGION", ""))
         domain=_origin(source.get("FB_PAGE_GPU_COS_DOMAIN")); prefix=str(source.get("FB_PAGE_GPU_COS_PREFIX","fb-page-random-overlay-h264-v3")).strip("/")
-        if not secret_id or not secret_key or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}",bucket) or not re.fullmatch(r"[a-z0-9-]{3,64}",region) or prefix!="fb-page-random-overlay-h264-v3": raise PrepareWorkerError("invalid_configuration","COS configuration invalid",500)
+        if not secret_id or not secret_key or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}",bucket) or not re.fullmatch(r"[a-z0-9-]{3,64}",region) or prefix not in ("fb-page-random-overlay-h264-v3", "ads-ai/fb-page-random-overlay-h264-v3"): raise PrepareWorkerError("invalid_configuration","COS configuration invalid",500)
         retention=int(source.get("FB_PAGE_GPU_FAILED_JOB_RETENTION_SECONDS","172800")); cleanup_max=int(source.get("FB_PAGE_GPU_CLEANUP_MAX_JOBS","100")); cos_timeout=int(source.get("FB_PAGE_GPU_COS_TIMEOUT","120"))
         if not 86400<=retention<=604800 or not 1<=cleanup_max<=1000 or not 30<=cos_timeout<=600: raise PrepareWorkerError("invalid_configuration","cleanup or COS timeout policy invalid",500)
         max_jobs=int(source.get("FB_PAGE_GPU_MAX_JOBS","1"))
