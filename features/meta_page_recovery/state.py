@@ -53,8 +53,17 @@ class Store:
         by_id = {}
         for page in pages:
             by_id.setdefault(str(page['page_id']), []).append(page)
+        scope={str(g):dict(scope_pages=0,unknown_pages=0,pool_conflicts=0) for g in POOLS}
+        for rows in by_id.values():
+            groups={r['group_id'] for r in rows}
+            for group in groups:
+                values=[r for r in rows if r['group_id']==group];item=scope[str(group)]
+                item['scope_pages']+=1
+                item['unknown_pages']+=int(not any(bad(r) for r in values) and not all(page_health(r)=='normal' for r in values))
+                item['pool_conflicts']+=int(len(groups)>1)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            db.execute('UPDATE runs SET summary=? WHERE id=?',(encoded(dict(page_scope=scope)),run))
             baseline = db.execute("SELECT value FROM metadata WHERE key='baseline_at'").fetchone()
             t0 = baseline['value'] if baseline else utcnow()
             for pid, rows in by_id.items():
@@ -186,6 +195,8 @@ class Store:
                 if any(r['outcome'] == 'pending' for r in outcomes):
                     continue
                 pools = {str(g):dict(name=v[1],new_abnormal_pages=0,scanned_ads=0,pur_eligible=0,changed=0,pending_review=0,deliverable=0,failed=0,unknown=0,waiting=0,skipped=0) for g,v in POOLS.items()}
+                scope=(json.loads(run['summary']) if run['summary'] else {}).get('page_scope',{})
+                for group,pool in pools.items():pool.update(scope.get(group,dict(scope_pages=None,unknown_pages=None,pool_conflicts=None)))
                 for i in db.execute('SELECT group_id,state FROM incidents WHERE run_id=?', (run['id'],)):
                     pools[str(i['group_id'])]['new_abnormal_pages'] += 1
                 details = []

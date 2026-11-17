@@ -280,6 +280,12 @@ class NotificationTests(unittest.TestCase):
         scan(self.store,self.sources);row=self.store.notifications()[0]
         body=card(json.loads(row['body']));self.assertIn('无新增异常',body['elements'][0]['content'])
         self.assertEqual(CHAT_ID,'oc_b633b6fba2c78f43ef1ebacd314d518c')
+    def test_missing_page_status_is_visible_instead_of_a_zero_success(self):
+        self.sources.rows[0]['status']=None;scan(self.store,self.sources)
+        summary=json.loads(self.store.notifications()[0]['body'])
+        self.assertEqual(summary['pools']['24']['unknown_pages'],1)
+        content=card(summary)['elements'][0]['content']
+        self.assertIn('Page状态待核实 1',content);self.assertNotIn('本轮无新增异常 Page。',content)
     def test_delivery_receipt_deduplicates(self):
         scan(self.store,self.sources)
         with patch.object(Sender,'send',return_value='message-1') as send:

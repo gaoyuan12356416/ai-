@@ -14,14 +14,19 @@ def card(summary,acceptance=False):
     if acceptance:lines.append('这是上线验收播报；未执行真实广告换页。')
     if summary.get('kind')=='baseline':lines.append('首次建立基线，既有异常 Page 不补恢复。')
     if summary.get('error'):lines.append('本轮存在扫描失败：'+str(summary['error'])[:500])
-    total_new=0
+    total_new=0;unresolved=0
     for gid,p in summary['pools'].items():
         total_new+=p['new_abnormal_pages']
+        unresolved+=(p.get('unknown_pages') or 0)+(p.get('pool_conflicts') or 0)
         lines.extend(['', '**'+p['name']+'（池 '+gid+'）**',
+            'Page总数 '+(str(p['scope_pages']) if p.get('scope_pages') is not None else '未知'),
             '新增异常Page '+str(p['new_abnormal_pages'])+'｜扫描Ad '+str(p['scanned_ads'])+'｜PUR合格 '+str(p['pur_eligible']),
             '已替换待确认 '+str(p['changed'])+'｜审核中 '+str(p['pending_review'])+'｜可投放 '+str(p['deliverable']),
             '失败 '+str(p['failed'])+'｜未知 '+str(p['unknown'])+'｜待处理 '+str(p['waiting'])+'｜跳过 '+str(p['skipped'])])
-    if total_new==0 and not summary.get('error'):lines.insert(2,'本轮无新增异常 Page。')
+        if p.get('unknown_pages') or p.get('pool_conflicts'):
+            lines.append('Page状态待核实 '+str(p.get('unknown_pages') or 0)+'｜跨池冲突 '+str(p.get('pool_conflicts') or 0))
+    if total_new==0 and not summary.get('error'):
+        lines.insert(2,'本轮有 Page 状态待核实或跨池冲突，详见分池结果。' if unresolved else '本轮无新增异常 Page。')
     if summary.get('details'):
         lines.extend(['','**部分明细**'])
         for row in summary['details']:
