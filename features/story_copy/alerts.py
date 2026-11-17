@@ -22,10 +22,20 @@ SERVICE_REASONS = {
 def add(c, event, items):
     if not items:
         return
+    groups = {}
+    for item in items:
+        groups.setdefault(item.get("publish_batch", ""), []).append(item)
+    if len(groups) > 1:
+        for batch, members in groups.items():
+            add(c, event + ":" + uuid.uuid5(uuid.NAMESPACE_URL, batch).hex, members)
+        return
     reasons = {x["reason"] for x in items}
     incident = (
         next(iter(reasons)) if len(reasons) == 1 and reasons <= SERVICE_REASONS else ""
     )
+    publish_batches = {x.get("publish_batch", "") for x in items}
+    if len(publish_batches) == 1 and "" not in publish_batches:
+        incident = "publish-batch:" + next(iter(publish_batches))
     previous = c.execute(
         "SELECT body,sent FROM alerts WHERE event=?", (event,)
     ).fetchone()
@@ -94,14 +104,27 @@ def deliver(c, send_func=send):
         else:
             keys = []
         if not packet and r["incident"]:
+            publication = r["incident"].startswith("publish-batch:")
+            if publication and c.execute(
+                "SELECT 1 FROM jobs WHERE state IN ('pending','generating') "
+                "AND json_extract(payload,'$.publish_batch')=? LIMIT 1",
+                (r["incident"].removeprefix("publish-batch:"),),
+            ).fetchone():
+                # A native submission may span several drama/language model calls.
+                # Freeze its notification only when all discovered jobs have settled.
+                continue
             last = c.execute(
                 "SELECT max(sent) FROM alerts WHERE incident=?", (r["incident"],)
             ).fetchone()[0]
-            if last and now - last < 900:
+            if not publication and last and now - last < 900:
                 continue
+            candidates = c.execute(
+                "SELECT * FROM alerts WHERE incident=? AND sent IS NULL AND next_try<=? ORDER BY created,event",
+                (r["incident"], now),
+            ).fetchall() if publication else rows
             siblings = [
                 other
-                for other in rows
+                for other in candidates
                 if other["incident"] == r["incident"]
                 and not c.execute(
                     "SELECT 1 FROM packed_alerts WHERE event=?", (other["event"],)
@@ -115,7 +138,8 @@ def deliver(c, send_func=send):
             continue
         if not packet:
             # Freeze membership and payload before the first send. A timeout reuses the same Feishu UUID.
-            siblings = siblings[: max(1, min(len(siblings), 8))]
+            if not r["incident"].startswith("publish-batch:"):
+                siblings = siblings[:8]
             keys = [(x["event"],) for x in siblings]
             message = message_for(siblings)
             c.execute(
@@ -158,8 +182,13 @@ def message_for(siblings):
         )
         groups.setdefault(group, []).append(i["key"])
     lines = ["短剧 AI 文案异常", f"影响 {len(items)} 条。"]
+    shown = 0
     for (end, title, lang, reason, outcome), ids in groups.items():
-        lines.append(
-            f"{end} · {title} · {lang} · {reason} · {outcome}\n任务 " + ", ".join(ids)
-        )
+        detail = f"{end} · {title} · {lang} · {reason} · {outcome}\n任务 " + ", ".join(ids)
+        if len(("\n".join(lines) + "\n" + detail).encode("utf-8")) > 16000:
+            break
+        lines.append(detail)
+        shown += len(ids)
+    if shown < len(items):
+        lines.append(f"另有 {len(items) - shown} 条，完整明细已保存在文案告警记录中。")
     return "\n".join(lines)

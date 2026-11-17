@@ -96,6 +96,7 @@ def alert_item(task, reason, outcome="到点使用现行文案"):
         language=task["language"],
         reason=reason,
         outcome=outcome,
+        publish_batch=task.get("publish_batch", ""),
     )
 
 

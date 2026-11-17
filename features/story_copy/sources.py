@@ -60,6 +60,7 @@ def fb_task(family, row):
             extra_link=info.get("link", []),
             manual=False,
             urgent=False,
+            publish_batch="fb:auto:" + str(row["run_id"]) if row.get("run_id") else "",
         )
     snap = obj(row.get("snapshot_json"))
     mat = snap.get("material") or {}
@@ -82,6 +83,7 @@ def fb_task(family, row):
         clip=mat.get("material_name", ""),
         manual=bool(snap.get("story_copy_manual", False)),
         urgent=row.get("source_kind") == "manual",
+        publish_batch="fb:video:" + str(row["batch_id"]) if row.get("batch_id") else "",
     )
 
 

@@ -260,7 +260,13 @@ class SourceRepository:
         languages = sorted({item["language"] for item in materials})
         language_slots = ",".join("%s" for _ in languages)
         schema = self.mysql.schema
-        app_ids = ",".join(str(int(item.get("source_app_id") or 1479)) for item in materials)
+        # 3214 is the Drama social-material bucket, not a separate drama catalog.
+        # Keep the material's frozen product identity; resolve only its metadata.
+        def metadata_app(item):
+            app_id = int(item.get("source_app_id") or 1479)
+            return 1479 if app_id == 3214 else app_id
+
+        app_ids = ",".join(str(app_id) for app_id in sorted({metadata_app(item) for item in materials}))
         optional_metadata = manual or page_pool
         released = "" if optional_metadata else " AND d.release_status=1 AND (d.app_id<>1479 OR d.deploy_time>0) AND d.deploy_time>=0 AND d.deploy_time<=%s"
         release_params = [] if optional_metadata else [int(self.now_fn().timestamp())]
@@ -292,7 +298,7 @@ class SourceRepository:
                     target.setdefault(key, set()).add(text)
         result = []
         for item in materials:
-            key = (int(item.get("source_app_id") or 1479), item["content_id"], item["language"])
+            key = (metadata_app(item), item["content_id"], item["language"])
             named, described = names.get(key, set()), descs.get(key, set())
             if not optional_metadata and (len(named) != 1 or (need_desc and len(described) != 1)):
                 if strict:
