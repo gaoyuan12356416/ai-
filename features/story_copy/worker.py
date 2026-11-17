@@ -6,7 +6,14 @@ import threading
 import time
 
 from . import alerts, generator, sources, store
-from .model import canonical_lang, group_key, history_plot, product, signature
+from .model import (
+    canonical_lang,
+    click_prefix,
+    group_key,
+    history_plot,
+    product,
+    signature,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -110,11 +117,20 @@ def generate_batch(c, batch, tasks, runner=generator.run, seed=True):
         key,
     ):
         d = sources.obj(r[0])
-        prior.append((d.get("opening", "") + " " + d.get("turn", ""))[:260])
+        prior.append(
+            dict(
+                plot=(d.get("opening", "") + " " + d.get("turn", ""))[:260],
+                hook=d.get("click_hook", ""),
+            )
+        )
     if len(prior) < 5:
         prior.extend(p[:220] for p in store.history(c, key)[: 5 - len(prior)])
     ready = []
     for t in tasks:
+        try:
+            click_prefix(t["language"])
+        except ValueError as exc:
+            errors[t["key"]] = str(exc)
         if t.get("evidence_error"):
             errors[t["key"]] = t["evidence_error"]
         if (

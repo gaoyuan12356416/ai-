@@ -7,7 +7,15 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .model import ENDPOINTS, group_key, near, normalized, signature, validate
+from .model import (
+    ENDPOINTS,
+    click_options,
+    group_key,
+    near,
+    normalized,
+    signature,
+    validate,
+)
 
 ROOT = Path(os.environ.get("STORY_COPY_ROOT", "/mnt/data-disk/story-copy"))
 DB = ROOT / "captions.sqlite3"
@@ -203,8 +211,26 @@ def history(c, key, batch=None):
     return values
 
 
+def choose_hook(c, task, options):
+    # Writers call this inside BEGIN IMMEDIATE so simultaneous batches and the
+    # ready-draft upgrade cannot reserve the same hook for two different posts.
+    used = {
+        r[0]
+        for r in c.execute(
+            """SELECT json_extract(draft,'$.hook_key') FROM jobs
+        WHERE product=? AND content=? AND lang=? AND draft IS NOT NULL""",
+            group_key(task),
+        )
+    }
+    for option in options:
+        if option["hook_key"] not in used:
+            return option
+    raise ValueError("duplicate_click_hook")
+
+
 def accept(c, batch, task, item):
-    clean = validate(task, item)
+    options = click_options(task, item.get("hooks"))
+    clean = validate(task, item, options)
     key = group_key(task)
     plot = normalized(clean["opening"] + clean["turn"])
     digest = signature(plot)
@@ -215,6 +241,7 @@ def accept(c, batch, task, item):
             (*key, digest),
         ).fetchone() or any(near(plot, p) for p in history(c, key, batch)):
             raise ValueError("duplicate_plot")
+        clean.update(choose_hook(c, task, options))
         changed = c.execute(
             "UPDATE jobs SET state='ready',draft=?,plot=?,hash=? WHERE key=? AND batch=? AND state='generating'",
             (dump(clean), plot, digest, task["key"], batch),

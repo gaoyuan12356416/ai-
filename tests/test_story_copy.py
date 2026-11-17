@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from features.story_copy import alerts, bridge, generator, model, sources, store, worker
 from features.story_copy import evidence, settings
+from ops.story_copy import refresh_click_hooks
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,7 +77,10 @@ class CaptionTests(unittest.TestCase):
             scope="series",
             angle="identity",
             motif="intrigue",
-            cta="Watch now",
+            hooks=[
+                "to find " + sentence().split()[0],
+                "to see " + sentence().split()[0],
+            ],
             opening=sentence(),
             turn=sentence(),
             tags=["ShortDrama", "Mystery"],
@@ -217,6 +221,7 @@ class CaptionTests(unittest.TestCase):
                 [lines[0], lines[2], lines[5]], ["https://example.org/unique", "", ""]
             )
             self.assertIn("Episode 3", lines[1])
+            self.assertTrue(lines[1].startswith("👆 Tap the link "))
             self.assertEqual(len(lines), 7)
 
     def test_manual_frozen_and_correct_product_link(self):
@@ -332,18 +337,35 @@ class CaptionTests(unittest.TestCase):
             )
         )
         plots = []
+        hooks = [
+            "看誰敢動他的學生",
+            "to see why Selene walks",
+            "para ver a quién elige",
+            "para ver a magia de Selena",
+            "und entdecke Miras Pakt",
+            "帰還の条件を探ろう",
+            "기사의 정체를 확인해 봐",
+            ", by poznać wybór smoka",
+            " a odhal Bjornův původ",
+            "untuk melihat kartu Gabe",
+        ]
         for i, s in enumerate(samples):
             t = dict(self.task(i + 1), language=s["lang"])
             item = dict(
                 self.item(t),
                 opening=s["opening"],
                 turn=s["turn"],
-                cta=s["cta"],
+                hooks=[hooks[i]],
                 tags=s["tags"].split(),
             )
             draft = model.validate(t, item)
             text = model.render(t, draft, s["url"])
             self.assertEqual(text.splitlines()[0], s["url"])
+            self.assertTrue(
+                text.splitlines()[1].startswith(
+                    "👆 " + model.click_prefix(s["lang"]).rstrip()
+                )
+            )
             self.assertEqual(text.splitlines()[-1], s["tags"])
             self.assertLessEqual(model.weight(text), 280)
             plot = model.normalized(s["opening"] + s["turn"])
@@ -351,6 +373,91 @@ class CaptionTests(unittest.TestCase):
             self.assertFalse(any(model.near(plot, old) for old in plots))
             plots.append(plot)
         self.assertEqual(10, len(plots))
+
+    def test_hooks_across_all_endpoints_and_batches(self):
+        link = "https://example.org/abc"
+        with store.connection() as c:
+            for i, f in enumerate(("fa", "xm", "xd", "ta"), 1):
+                t = self.task(i, f)
+                store.enqueue(c, t)
+                c.commit()
+                b, _ = store.claim(c)
+                item = self.item(t)
+                item["hooks"] = ["to find the seal", "to learn who hid it " + str(i)]
+                store.accept(c, b, t, item)
+                lines = bridge.select(t, "legacy", link)[2].splitlines()
+                self.assertEqual(lines[0], link)
+                self.assertTrue(lines[1].startswith("👆 Tap the link to "))
+                self.assertEqual(lines[1].count("👆"), 1)
+                self.assertEqual("Episode 3" in lines[1], f == "xd")
+            self.assertEqual(
+                4,
+                c.execute(
+                    "SELECT count(DISTINCT json_extract(draft,'$.hook_key')) FROM jobs"
+                ).fetchone()[0],
+            )
+            t = self.task(5, "fa")
+            store.enqueue(c, t)
+            c.commit()
+            b, _ = store.claim(c)
+            repeated = dict(
+                self.item(t), hooks=["to find the seal!", "TO FIND THE SEAL"]
+            )
+            worker.generate_batch(
+                c, b, [t], lambda chunk, prior, emit, usage: emit(repeated), seed=False
+            )
+            self.assertEqual(
+                bridge.select(t, "original", link)[:3],
+                ("legacy", "duplicate_click_hook", "original"),
+            )
+        t = dict(self.task(20), language="zh-Hant-TW")
+        candidates = ["👆 點連結看他反擊", "看後續", "看她反擊"]
+        self.assertEqual(
+            [x["cta"] for x in model.click_options(t, candidates)],
+            ["👆 點連結看她反擊"],
+        )
+        self.assertEqual(model.click_prefix("zh-SG"), "点链接")
+        self.assertEqual(model.click_prefix("en-US"), "Tap the link ")
+
+    def test_upgrade_only_unfrozen_draft(self):
+        t = self.task(1, "fa")
+        with store.connection() as c:
+            store.enqueue(c, t)
+            old = store.dump(
+                dict(
+                    cta="See more",
+                    opening="A ring.",
+                    turn="Who hid it?",
+                    icon="◇",
+                    tags=["Ring", "Drama"],
+                )
+            )
+            c.execute("UPDATE jobs SET draft=?,state='ready'", (old,))
+            c.commit()
+            opts = model.click_options(t, ["to find the ring"])
+            with store.connection(self.fb) as src:
+                src.execute(
+                    "INSERT INTO story_copy_receipt VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        t["key"],
+                        "fb",
+                        "ai",
+                        "",
+                        "frozen",
+                        "https://example.org/old",
+                        1,
+                        1,
+                    ),
+                )
+            self.assertFalse(refresh_click_hooks.upgrade(c, t, old, opts))
+            with store.connection(self.fb) as src:
+                src.execute("DELETE FROM story_copy_receipt")
+            self.assertTrue(refresh_click_hooks.upgrade(c, t, old, opts))
+            self.assertFalse(refresh_click_hooks.upgrade(c, t, old, opts))
+            after = json.loads(c.execute("SELECT draft FROM jobs").fetchone()[0])
+            self.assertEqual(after["previous_cta"], "See more")
+            self.assertEqual(after["cta"], "👆 Tap the link to find the ring")
+            self.assertEqual(after["opening"], "A ring.")
 
     def test_reviewed_episode_and_switch_watermark(self):
         with store.connection() as c:

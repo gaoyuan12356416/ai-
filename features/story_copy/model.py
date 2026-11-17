@@ -44,6 +44,57 @@ EPISODES = {
     "it": "Episodio {n}",
     "ms": "Episod {n}",
     "hi": "एपिसोड {n}",
+    "el": "Επεισόδιο {n}",
+    "ro": "Episodul {n}",
+    "tl": "Episode {n}",
+    "fil": "Episode {n}",
+}
+
+# Only the tail is model-written. Keep the delimiter in the prefix so CJK
+# and Thai do not acquire a space between the prompt and its continuation.
+CLICK_PREFIX = {
+    "zh": "点链接",
+    "zh-tw": "點連結",
+    "ja": "リンクをタップして",
+    "ko": "링크를 눌러 ",
+    "th": "แตะลิงก์",
+    "en": "Tap the link ",
+    "es": "Toca el enlace ",
+    "pt": "Toque no link ",
+    "pt-pt": "Toca na ligação ",
+    "fr": "Cliquez sur le lien ",
+    "de": "Tippe auf den Link ",
+    "it": "Tocca il link ",
+    "pl": "Kliknij link",
+    "cs": "Klikni na odkaz",
+    "id": "Ketuk tautan ",
+    "ms": "Tekan pautan ",
+    "vi": "Nhấn vào liên kết ",
+    "ar": "اضغط على الرابط ",
+    "tr": "Bağlantıya dokun",
+    "ru": "Нажми на ссылку",
+    "hi": "लिंक पर टैप करें",
+    "tl": "Pindutin ang link ",
+    "fil": "Pindutin ang link ",
+    "el": "Πάτησε τον σύνδεσμο ",
+    "ro": "Apasă pe link ",
+    "uk": "Натисни на посилання",
+    "nl": "Tik op de link ",
+    "sv": "Tryck på länken ",
+    "hu": "Kattints a linkre",
+    "bn": "লিঙ্কে ট্যাপ করুন",
+}
+SCRIPTS = {
+    "zh": r"[\u3400-\u9fff]",
+    "ja": r"[\u3040-\u30ff]",
+    "ko": r"[\uac00-\ud7af]",
+    "th": r"[\u0e00-\u0e7f]",
+    "ar": r"[\u0600-\u06ff]",
+    "ru": r"[\u0400-\u04ff]",
+    "uk": r"[\u0400-\u04ff]",
+    "hi": r"[\u0900-\u097f]",
+    "el": r"[\u0370-\u03ff]",
+    "bn": r"[\u0980-\u09ff]",
 }
 
 
@@ -78,6 +129,86 @@ def normalized(value):
 
 def signature(value):
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def click_prefix(language):
+    lang = canonical_lang(language)
+    parts = lang.split("-")
+    if parts[0] == "zh":
+        lang = "zh-tw" if set(parts) & {"tw", "hk", "mo", "hant"} else "zh"
+    prefix = CLICK_PREFIX.get(lang, CLICK_PREFIX.get(parts[0]))
+    if not prefix:
+        raise ValueError("unsupported_click_language")
+    return prefix
+
+
+GENERIC_HOOKS = frozenset(
+    normalized(s)
+    for s in (
+        "看後續",
+        "看后续",
+        "看下去",
+        "看精彩後續",
+        "看精彩后续",
+        "看她的故事",
+        "看他的故事",
+        "to watch now",
+        "to keep watching",
+        "to see more",
+        "to see what happens",
+        "to follow their story",
+        "para ver más",
+        "para ver qué pasa",
+        "para ver mais",
+        "pour voir la suite",
+        "für mehr",
+        "続きを見よう",
+        "続きを見る",
+        "확인해 보세요",
+        "untuk menonton",
+        "para mapanood",
+    )
+)
+
+
+def click_options(task, values):
+    prefix = click_prefix(task["language"])
+    lang = canonical_lang(task["language"]).split("-")[0]
+    script = SCRIPTS.get(lang)
+    options = []
+    for value in values if isinstance(values, list) else []:
+        try:
+            hook = one_line(value, {"zh": 16, "ja": 24}.get(lang, 66))
+        except ValueError:
+            continue
+        key = normalized(hook)
+        if (
+            len(key) < 2
+            or key in GENERIC_HOOKS
+            or len(hook.split()) > 12
+            or (script and not re.search(script, hook))
+            or normalized(prefix) in key
+            or re.search(r"[↑⬆☝👉👆]", hook)
+            or (
+                task.get("episode")
+                and re.search(
+                    r"直[達达看]|直行|direct(?:ly)? to|directo al episodio|direto ao epis[oó]dio",
+                    hook,
+                    re.I,
+                )
+            )
+        ):
+            continue
+        # Slavic and Turkish subordinate clauses often start with a comma.
+        separator = "" if lang in {"zh", "ja", "th"} or hook[0] in ",،，.!?:—–" else " "
+        cta = "👆 " + prefix.rstrip() + separator + hook
+        if key not in {o["hook_key"] for o in options}:
+            options.append(dict(click_hook=hook, hook_key=key, cta=cta))
+    if not options:
+        raise ValueError("invalid_click_hook")
+    if task.get("endpoint", "").startswith("x_"):
+        options.sort(key=lambda item: weight(item["cta"]))
+    return options
 
 
 def near(a, b):
@@ -135,7 +266,7 @@ def one_line(value, maximum):
     return value.strip()
 
 
-def validate(task, item):
+def validate(task, item, options=None):
     if item.get("id") != task["key"] or canonical_lang(
         item.get("language")
     ) != canonical_lang(task["language"]):
@@ -167,27 +298,14 @@ def validate(task, item):
         raise ValueError("invalid_tags")
     output = {
         k: one_line(item.get(k), limit)
-        for k, limit in (("cta", 120), ("opening", 640), ("turn", 440), ("angle", 90))
+        for k, limit in (("opening", 640), ("turn", 440), ("angle", 90))
     }
     if not normalized(output["opening"]) or not normalized(output["turn"]):
         raise ValueError("empty_plot")
-    scripts = {
-        "zh": r"[\u3400-\u9fff]",
-        "ja": r"[\u3040-\u30ff]",
-        "ko": r"[\uac00-\ud7af]",
-        "th": r"[\u0e00-\u0e7f]",
-        "ar": r"[\u0600-\u06ff]",
-        "ru": r"[\u0400-\u04ff]",
-    }
-    script = scripts.get(canonical_lang(task["language"]).split("-")[0])
+    script = SCRIPTS.get(canonical_lang(task["language"]).split("-")[0])
     if script and not re.search(script, output["opening"] + output["turn"]):
         raise ValueError("task_language_mismatch")
-    if task.get("episode") and re.search(
-        r"直[達达看]|直行|direct(?:ly)? to|directo al episodio|direto ao epis[oó]dio",
-        output["cta"],
-        re.I,
-    ):
-        raise ValueError("episode_link_target_unverified")
+    output.update((options or click_options(task, item.get("hooks")))[0])
     if task.get("episode") and "episode" not in facts:
         if re.search(
             r"\b(?:in this episode|in episode \d+)\b|本[集话話]|這一集|这一集|今回の|이번\s*화",
@@ -214,11 +332,11 @@ def render(task, draft, url):
         lang = canonical_lang(task["language"]).split("-")[0]
         label = EPISODES.get(lang, "№ {n}").format(n=int(task["episode"]))
         title = one_line(task["title"], 500)
-        cta = (
-            f"《{title}》{label}｜{cta}"
-            if lang in ("zh", "ja")
-            else f"{title} · {label} · {cta}"
+        episode = (
+            f"《{title}》{label}" if lang in ("zh", "ja") else f"{title} · {label}"
         )
+        sep = "｜" if lang in ("zh", "ja") else " · "
+        cta = sep.join((cta, episode) if draft.get("click_hook") else (episode, cta))
     text = "\n".join(
         (
             url,
