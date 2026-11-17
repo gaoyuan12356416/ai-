@@ -14,6 +14,23 @@ from tests.test_socialkit_gap_alert import NOW, report, event
 
 
 class DigestTests(unittest.TestCase):
+    def test_summary_and_html_show_only_yesterday(self):
+        data = report()
+        card = summary_card(data, 'https://example.com/report.html')
+        html = render_html(data)
+        for content in (card['elements'][0]['text']['content'], html):
+            self.assertIn('昨日 2026-11-02 UTC（完整一天）', content)
+            self.assertNotIn('最近 7', content)
+            self.assertNotIn('2026-10-27', content)
+
+    def test_archived_explicit_period_keeps_its_original_label(self):
+        data = report()
+        data['period'] = dict(start='2026-10-27', end='2026-11-02', days=7, timezone='UTC')
+        for content in (summary_card(data, 'https://example.com/report.html')['elements'][0]['text']['content'], render_html(data)):
+            self.assertIn('2026-10-27 至 2026-11-02 UTC', content)
+            self.assertIn('共 7 个完整日', content)
+            self.assertNotIn('昨日', content)
+
     def test_cli_preview_passes_actual_argument_names(self):
         from features.socialkit_gap_alert.digest import main
         with tempfile.TemporaryDirectory() as root:

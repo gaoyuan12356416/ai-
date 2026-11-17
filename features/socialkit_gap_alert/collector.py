@@ -13,7 +13,7 @@ APP_ID = 1479
 CHANNELS = ("facebook", "youtube", "x")
 FRESH_SECONDS = 7200
 HISTORY_FRESH_SECONDS = 26 * 3600  # Historical snapshot dates are reconciled daily.
-RULE_VERSION = "seven-complete-utc-days-v1"
+RULE_VERSION = "previous-complete-utc-day-v1"
 MIN_SOCIALKIT_CENTS = 1000
 SITES = {"facebook": {"2049", "2310"}, "youtube": {"2284"}, "x": {"2116"}}
 ERROR_CODES = frozenset({"socialkit_date_unavailable", "socialkit_snapshot_stale",
@@ -49,8 +49,8 @@ def date_range(start, end):
 
 def comparison_period(report_date):
     day = date.fromisoformat(report_date)
-    return dict(start=(day - timedelta(days=7)).isoformat(),
-                end=(day - timedelta(days=1)).isoformat(), days=7, timezone="UTC")
+    yesterday = (day - timedelta(days=1)).isoformat()
+    return dict(start=yesterday, end=yesterday, days=1, timezone="UTC")
 
 
 def socialkit_candidates(root, version, day, now, *, end=None, enforce_fresh=True):
@@ -157,7 +157,7 @@ def unconfirmed_income_drama(catalog, raw_sources, day):
 def own_channel(app, day, platform, now, *, end=None, enforce_fresh=True):
     end = end or day
     settings = dict(app)
-    # Seven daily reads share one bounded budget. Keep each SQL capped at 20s.
+    # Daily reads share one bounded budget. Keep each SQL capped at 20s.
     settings.update(SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + (300 if end != day else 150),
                     SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                     SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2)

@@ -75,10 +75,25 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["reasons"], reasons)
 
-    def test_seven_complete_days_excludes_today_and_handles_year_boundary(self):
-        self.assertEqual(collector.comparison_period(DAY),
-                         dict(start="2026-10-27", end="2026-11-02", days=7, timezone="UTC"))
-        self.assertEqual(collector.comparison_period("2027-01-01")["start"], "2026-12-25")
+    def test_yesterday_excludes_today_and_handles_calendar_boundaries(self):
+        for day, yesterday in ((DAY, "2026-11-02"), ("2026-11-17", "2026-11-16"),
+                               ("2027-01-01", "2026-12-31"), ("2026-11-01", "2026-10-31"),
+                               ("2024-03-01", "2024-02-29")):
+            with self.subTest(day=day):
+                self.assertEqual(collector.comparison_period(day),
+                                 dict(start=yesterday, end=yesterday, days=1, timezone="UTC"))
+
+    def test_collect_reads_yesterday_on_both_sides_and_keeps_all_history(self):
+        with patch.object(collector, "socialkit_candidates", return_value=([candidate(platform="x", income=1000)], {"version": "v1"})) as sk, \
+             patch.object(collector, "own_channel", return_value=own({"drama-1": 100}, {"drama-1": {"count": 2, "last_date": "2020-01-01"}})) as ours:
+            result = collector.collect({}, "unused", now=NOW)
+        sk.assert_called_once_with("unused", None, "2026-11-02", NOW, end="2026-11-02", enforce_fresh=True)
+        ours.assert_called_once_with({}, "2026-11-02", "x", NOW, end="2026-11-02", enforce_fresh=True)
+        self.assertEqual(result["period"], dict(start="2026-11-02", end="2026-11-02", days=1, timezone="UTC"))
+        self.assertEqual(result["rule_version"], "previous-complete-utc-day-v1")
+        self.assertEqual(result["events"][0]["period"], result["period"])
+        self.assertEqual(result["events"][0]["reasons"], ["large_revenue_gap"])
+        self.assertEqual(result["events"][0]["history_success_count"], 2)
 
     def test_own_range_sums_days_and_fails_if_any_day_is_missing(self):
         days = collector.date_range("2026-10-27", "2026-11-02")
@@ -256,6 +271,9 @@ class ComparisonTests(unittest.TestCase):
             rows, meta = collector.socialkit_candidates(root, "v1", days[0], NOW, end=days[-1])
             self.assertEqual(rows[0]["revenue_cents"], 700)
             self.assertEqual(set(meta["date_manifest"]), set(days))
+            rows, meta = collector.socialkit_candidates(root, "v1", "2026-11-02", NOW, end="2026-11-02")
+            self.assertEqual(rows[0]["revenue_cents"], 100)
+            self.assertEqual(set(meta["date_manifest"]), {"2026-11-02"})
             with self.assertRaisesRegex(collector.ComparisonUnavailable, "stale"):
                 collector.socialkit_candidates(root, "v1", days[0], NOW + timedelta(hours=27), end=days[-1])
             del details[days[3]]
@@ -343,7 +361,7 @@ class DeliveryTests(unittest.TestCase):
         result = deliver(self.store, report([changed]), CHAT_ID, self.sender)
         self.assertEqual(result["sent_cards"], 1)
         self.assertEqual([r["status"] for r in result["receipts"]].count("cancelled"), 1)
-        self.assertIn("近 7 个完整日收入差距较大", json.dumps(self.sent[0][0], ensure_ascii=False))
+        self.assertIn("收入差距较大", json.dumps(self.sent[0][0], ensure_ascii=False))
 
     def test_new_rules_preserve_existing_same_day_receipts(self):
         deliver(self.store, report(), CHAT_ID, self.sender)
@@ -362,8 +380,8 @@ class DeliveryTests(unittest.TestCase):
                    state="large_revenue_gap", reasons=["large_revenue_gap"])
         card = split_cards(report([row]), [row], CHAT_ID)[0][1]
         content = json.dumps(card, ensure_ascii=False)
-        for expected in ("2026-10-27 至 2026-11-02", "不含当天", "$100.00", "$20.00", "$80.00", "20.00%",
-                         "近 7 个完整日收入差距较大", "全部历史"):
+        for expected in ("昨日 2026-11-02 UTC", "完整一天", "$100.00", "$20.00", "$80.00", "20.00%",
+                         "收入差距较大", "全部历史"):
             self.assertIn(expected, content)
         self.assertNotIn("今日未出收入", content)
 

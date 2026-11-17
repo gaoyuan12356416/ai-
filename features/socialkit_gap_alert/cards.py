@@ -28,10 +28,17 @@ def beijing_time(value):
         return "待核实"
 
 
+def period_text(period):
+    if period["start"] == period["end"]:
+        return "昨日 %s UTC（完整一天）" % period["start"]
+    return "%s 至 %s UTC（共 %d 个完整日，不含当天）" % (
+        period["start"], period["end"], period["days"])
+
+
 def make_card(report, events):
     period = report.get("period") or comparison_period(report["date"])
     text = ["Dramawave · 我方未发布或收入差距较大",
-            "收入区间：%s 至 %s UTC（最近 7 个完整日，不含当天）" % (period["start"], period["end"]),
+            "收入范围：" + period_text(period),
             "播报日期：%s UTC（北京时间 08:00 切日）" % report["date"],
             "条件一：SocialKit 区间收入 > $0，且我方该平台全部历史未查到成功发布。",
             "条件二：SocialKit 区间收入 ≥ $10，且我方区间收入 < SocialKit 的 50%。满足任一条件播报。",
@@ -42,11 +49,11 @@ def make_card(report, events):
     for event in events:
         reasons = event.get("reasons") or [event["state"]]
         label = "；".join({"no_confirmed_publication": "该平台全部历史未查到成功发布",
-                           "large_revenue_gap": "近 7 个完整日收入差距较大"}.get(reason, reason)
+                           "large_revenue_gap": "收入差距较大"}.get(reason, reason)
                           for reason in reasons)
         socialkit, own = event["socialkit_revenue_cents"], event["own_revenue_cents"]
         ratio = format(Decimal(own) * 100 / Decimal(socialkit), ".2f") + "%"
-        content = ("%s · %s\n剧目 ID：%s\n近 7 日收入：SocialKit %s ／ 我方 %s\n命中原因：%s"
+        content = ("%s · %s\n剧目 ID：%s\n区间收入：SocialKit %s ／ 我方 %s\n命中原因：%s"
                    "\n收入差额（SocialKit－我方）：%s；我方占比：%s"
                    "\n历史成功发布：%d；最近发布日期（UTC）：%s") % (
                        LABELS[event["platform"]], event["drama_name"], event["drama"],

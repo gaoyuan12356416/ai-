@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from features.post_daily_report.delivery import DeliveryStore, DefiniteFailure, send_card
 from features.socialkit_analytics.refresh import ensure_data_mount
 from features.socialkit_analytics.storage import atomic_json
-from .cards import LABELS, beijing_time, dollars, payload_size, MAX_BYTES
+from .cards import LABELS, beijing_time, dollars, payload_size, period_text, MAX_BYTES
 from .collector import collect, comparison_period, safe_error
 from .runner import CHAT_ID, DEFAULT_ROOT, DEFAULT_SOCIALKIT_ROOT, DEFAULT_FEISHU_CONFIG, run_lock, settings
 
@@ -40,7 +40,7 @@ def summary_card(report, url):
     events = report["events"]
     sums = totals(events)
     period = report.get("period") or comparison_period(report["date"])
-    lines = ["Dramawave · %s 至 %s UTC" % (period["start"], period["end"]),
+    lines = ["Dramawave · " + period_text(period),
              "共 %d 项（平台×剧目），涉及 %d 部剧；待核实 %d 项。" %
              (sums["count"], sums["dramas"], len(report["pending"])),
              "历史未查到成功发布 %d 项；收入差距较大 %d 项（两类可重叠）。" % (sums["unpublished"], sums["gap"])]
@@ -90,7 +90,7 @@ def render_html(report):
     return '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SocialKit 收入差异日报</title><style>
 :root{color-scheme:light;--ink:#182b44;--muted:#66768a;--line:#dde5ee;--orange:#be610b}*{box-sizing:border-box}body{margin:0;background:#f3f6fa;color:var(--ink);font:15px/1.65 system-ui,"Microsoft YaHei",sans-serif}main{max-width:1440px;margin:auto;padding:40px 28px}header{border-top:4px solid #e8a04c;padding-top:20px}.eyebrow{font-size:12px;letter-spacing:2px;color:var(--orange);font-weight:700}h1{font-size:32px;line-height:1.3;margin:10px 0}h2{font-size:20px;margin:0 0 14px}.muted{color:var(--muted)}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:26px 0}.metric,section{background:white;border:1px solid var(--line);border-radius:14px;padding:22px}.metric strong{display:block;font-size:29px;letter-spacing:-1px;margin:5px 0}.metric span{font-size:13px;color:var(--muted)}section{margin:20px 0}.scroll{overflow:auto}table{width:100%%;border-collapse:collapse;font-size:13px}th{text-align:left;color:var(--muted);background:#f6f8fb;white-space:nowrap}th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}tbody tr:hover{background:#fffaf3}.number{white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right}#details td:nth-child(2){min-width:230px;max-width:350px;overflow-wrap:anywhere}#details td:nth-child(3){font-family:ui-monospace,monospace}#details td:nth-child(4){min-width:160px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}input,select{border:1px solid var(--line);border-radius:8px;background:white;color:var(--ink);padding:10px;font:inherit}input{flex:1;min-width:220px}.note{border-left:3px solid #e8a04c;padding-left:14px}.small{font-size:13px}details summary{cursor:pointer;font-weight:650}footer{font-size:12px;color:var(--muted);overflow-wrap:anywhere}tr[hidden]{display:none}@media(max-width:750px){main{padding:22px 14px}.metrics{grid-template-columns:repeat(2,1fr);gap:10px}.metric,section{padding:16px}.metric strong{font-size:24px}h1{font-size:26px}}@media print{.toolbar{display:none}main{padding:0}.scroll{overflow:visible}section{break-inside:avoid}#details{font-size:9px}}
-</style></head><body><main><header><div class="eyebrow">DRAMAWAVE · DAILY REVIEW</div><h1>SocialKit 收入差异日报</h1><div class="muted">收入区间 %s — %s UTC · 最近 7 个完整日，不含播报当天</div><div class="muted small">播报统计日 %s UTC · 采集时间 %s（北京时间）</div></header>
+</style></head><body><main><header><div class="eyebrow">DRAMAWAVE · DAILY REVIEW</div><h1>SocialKit 收入差异日报</h1><div class="muted">收入范围：%s</div><div class="muted small">播报统计日 %s UTC · 采集时间 %s（北京时间）</div></header>
 <div class="metrics"><div class="metric">命中项目<strong>%d</strong><span>平台 × 剧目；涉及 %d 部不同剧目</span></div><div class="metric">历史未查到成功发布<strong>%d</strong><span>该平台该剧全部历史</span></div><div class="metric">收入差距较大<strong>%d</strong><span>与未发布条件可能重叠</span></div><div class="metric">待核实项目<strong>%d</strong><span>单独列出，未视为零收入</span></div></div>
 <section><h2>平台汇总</h2><p class="muted small">仅汇总下方命中项目。金额为 USD 原始收入，不扣退款；不代表平台全部收入。</p><div class="scroll"><table><thead><tr><th>平台</th><th>项目数</th><th>SocialKit 收入</th><th>我方收入</th><th>收入差额</th></tr></thead><tbody>%s<tr><td><b>合计</b></td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr></tbody></table></div></section>
 <section><h2>完整明细</h2><div class="toolbar"><input id="query" aria-label="搜索剧名或 ID" placeholder="搜索剧名或 ID"><select id="platform" aria-label="平台"><option value="">全部平台</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option><option value="x">X</option></select><select id="reason" aria-label="命中原因"><option value="">全部原因</option><option value="no_confirmed_publication">历史未查到成功发布</option><option value="large_revenue_gap">收入差距较大</option></select><select id="sort" aria-label="排序"><option value="gap">按收入差额降序</option><option value="sk">按 SocialKit 收入降序</option></select></div><p id="count" class="muted small" aria-live="polite">共 %d 项</p><div class="scroll"><table id="details"><thead><tr><th>平台</th><th>剧名</th><th>剧目 ID</th><th>命中原因</th><th>SocialKit 收入</th><th>我方收入</th><th>收入差额</th><th>我方占比</th><th>历史成功发布</th><th>最近发布 UTC</th></tr></thead><tbody>%s</tbody></table></div></section>
@@ -100,7 +100,7 @@ def render_html(report):
 const body=document.querySelector('#details tbody'), rows=Array.from(body.rows);
 function update(){const q=document.querySelector('#query').value.trim().toLocaleLowerCase(),p=document.querySelector('#platform').value,r=document.querySelector('#reason').value,s=document.querySelector('#sort').value;rows.sort((a,b)=>Number(b.dataset[s])-Number(a.dataset[s]));let shown=0;for(const row of rows){row.hidden=!!((p&&row.dataset.platform!==p)||(r&&!row.dataset.reasons.split(' ').includes(r))||(q&&!row.textContent.toLocaleLowerCase().includes(q)));if(!row.hidden)shown++;body.appendChild(row)}document.querySelector('#count').textContent=`显示 ${shown} / ${rows.length} 项`}
 document.querySelectorAll('input,select').forEach(el=>el.addEventListener('input',update));update();
-</script></body></html>''' % (esc(period["start"]), esc(period["end"]), esc(report["date"]), esc(beijing_time(report["collected_at"])),
+</script></body></html>''' % (esc(period_text(period)), esc(report["date"]), esc(beijing_time(report["collected_at"])),
         sums["count"], sums["dramas"], sums["unpublished"], sums["gap"], len(report["pending"]), "".join(platform_rows),
         sums["count"], dollars(sums["socialkit"]), dollars(sums["own"]), dollars(sums["socialkit"]-sums["own"]),
         sums["count"], "".join(rows), len(report["pending"]), pending or '<tr><td colspan="3">无</td></tr>',
