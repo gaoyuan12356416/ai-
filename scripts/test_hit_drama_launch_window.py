@@ -158,6 +158,14 @@ class XTests(unittest.TestCase):
             with self.assertRaises(NoEligibleMaterial):
                 self.selector.preview(self.request)
 
+    def test_account_drama_cooldown_still_applies(self):
+        from features.x_auto_posts.selector import NoEligibleMaterial
+        self.store.cooldown_content_ids = lambda **_: {'C1'}
+        rules = replace(self.request.rules,
+                        drama=replace(self.request.rules.drama, cooldown_days=1))
+        with self.assertRaises(NoEligibleMaterial):
+            self.selector.preview(replace(self.request, rules=rules))
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
