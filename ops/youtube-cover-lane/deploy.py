@@ -42,6 +42,8 @@ def main():
     shutil.copytree('/root/drama_material_service/features/moboreels_library',
                     runtime / 'features/moboreels_library', dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.copy2('/root/drama_material_service/features/publishing_products.py',
+                 runtime / 'features/publishing_products.py')
     shutil.copy2(source / 'worker.py', release / 'worker.py')
     fingerprint = {str(p.relative_to(runtime)): hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in runtime.rglob('*.py')}
