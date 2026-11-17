@@ -3,6 +3,7 @@ from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -32,18 +33,23 @@ def page_scope(reader, path=CONFIG_DB):
     return sorted(set(configured(path)) | {str(r['page_id']) for r in rows})
 
 
-def social(scope, start, end, root=WAREHOUSE):
-    root = Path(root)
-    meta = json.loads((root/'current.json').read_text())
-    path = (root/meta['database']).resolve()
-    if not path.is_relative_to(root.resolve()): raise ValueError('invalid_warehouse_path')
+def check_social(meta,start,end,instant):
     if meta.get('catalog_errors'): raise RuntimeError('social_catalog_incomplete')
-    if (datetime.now(timezone.utc)-datetime.fromisoformat(meta['generated_at'])).total_seconds() > 10800:
+    age=(instant-datetime.fromisoformat(meta['generated_at'])).total_seconds()
+    if age<0 or age>10800:
         raise RuntimeError('social_snapshot_stale')
     days = {(date.fromisoformat(start)+timedelta(days=i)).isoformat() for i in range(7)}
     for site in ('2049','2310'):
         if not days.issubset(set(meta['coverage'].get('facebook:'+site, []))):
             raise RuntimeError('social_days_incomplete_'+site)
+
+
+def social(scope, start, end, root=WAREHOUSE, *, snapshot=None, as_of=None):
+    root = Path(root)
+    meta = snapshot or json.loads((root/'current.json').read_text())
+    path = (root/meta['database']).resolve()
+    if not path.is_relative_to(root.resolve()): raise ValueError('invalid_warehouse_path')
+    check_social(meta,start,end,as_of or datetime.now(timezone.utc))
     with closing(sqlite3.connect('file:'+str(path)+'?mode=ro&immutable=1', uri=True)) as db:
         catalog = [json.loads(r[0]) for r in db.execute("SELECT payload FROM catalog")]
         catalog = [r for r in catalog if r['platform']=='facebook']
@@ -62,6 +68,29 @@ def social(scope, start, end, root=WAREHOUSE):
             result.append(dict(page_id=pid, date=r['date'], app_id=1479, content_id=row['drama'], language=row['language'],
                           revenue_cents=r['revenue_cents'], posts=sorted({p['id'] for c in candidates for p in c.get('publications',[]) if p['date']<=r['date']})))
     return result, meta['version']
+
+
+def social_input(cache,scope,start,end,warehouse=WAREHOUSE):
+    """Resume the SAME successfully validated immutable social input, not a new read."""
+    from .runtime import encoded,atomic_json
+    path=cache.folder/'social-input.json'
+    identity=hashlib.sha256(encoded([scope,start,end,str(Path(warehouse).resolve())]).encode()).hexdigest()
+    if path.exists():
+        saved=json.loads(path.read_text())
+        if saved.get('identity')!=identity or saved.get('rows_hash')!=hashlib.sha256(encoded(saved['rows']).encode()).hexdigest():
+            raise RuntimeError('frozen_social_input_changed')
+        instant=datetime.fromisoformat(saved['validated_at'])
+        if instant>datetime.now(timezone.utc):raise RuntimeError('frozen_social_validation_in_future')
+        check_social(saved['source'],start,end,instant)
+        return saved
+    snapshot=json.loads((Path(warehouse)/'current.json').read_text())
+    instant=datetime.now(timezone.utc)
+    check_social(snapshot,start,end,instant)
+    rows,version=social(set(scope),start,end,warehouse,snapshot=snapshot,as_of=instant)
+    saved=dict(identity=identity,rows=rows,version=version,source=snapshot,validated_at=instant.isoformat(),
+               rows_hash=hashlib.sha256(encoded(rows).encode()).hexdigest())
+    atomic_json(path,saved)
+    return saved
 
 
 def series_ranges(rows, target=5000):
@@ -166,9 +195,11 @@ def collect(env_path, config_path=CONFIG_DB, warehouse=WAREHOUSE):
     scope = page_scope(reader,config_path)
     if not scope: raise RuntimeError('no_configured_pages')
     raw = dict(start=str(start), end=str(end), page_ids=scope)
-    raw['social'], raw['social_version'] = social(set(scope),str(start),str(end),warehouse)
     from .partition_cache import PartitionCache
     cache=PartitionCache(scope,str(start),str(end))
+    frozen=social_input(cache,scope,str(start),str(end),warehouse)
+    raw.update(social=frozen['rows'],social_version=frozen['version'],social_validated_at=frozen['validated_at'],
+               social_source_generated_at=frozen['source']['generated_at'])
     raw['paid'] = paid(reader,scope,str(start),str(end),cache)
     raw['collection']=cache.metadata()
     for table,index,columns,key in [('ads_drama_resource','content_id',['content_id','app_id','language','series_code','labels'],'resources'),

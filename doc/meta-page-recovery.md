@@ -75,6 +75,11 @@ next refresh; only the last two completed disposable caches are retained.
 Catalog batches use 25 content IDs and subdivide further on 3024/overflow; the
 observed 100-ID resource read exceeded the source's existing 8-second limit.
 Live Page state and recovery permissions are never served from this input cache.
+The verified immutable social input and its original validation timestamp are
+also frozen per collection. A continuation reuses the same input, with its hash,
+coverage and original freshness proof; it does not relabel an old source as new.
+Every new collection still enforces the original 3-hour social freshness rule.
+Profile metadata exposes social validation/source times separately from build time.
 The original 1 GiB / 30-minute portrait unit budget predates the expanded scope.
 `ops/meta-page-recovery/portrait_capacity.py` backs up and sets only that unit to
 3 GiB / 75 minutes, without restarting the active collector. Its temporary cgroup

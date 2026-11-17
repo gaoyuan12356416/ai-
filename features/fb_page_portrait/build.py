@@ -70,4 +70,5 @@ def build(raw):
                 paid_products=list(PRODUCTS.values()), product_identity='app_id_content_id_language',
                 taxonomy_version=TAXONOMY_VERSION, hierarchy_version=HIERARCHY_VERSION,
                 social_version=raw['social_version'], collection_started_at=raw.get('collection',{}).get('started_at'),
+                social_validated_at=raw.get('social_validated_at'),social_source_generated_at=raw.get('social_source_generated_at'),
                 page_count=len(pages), audit=audit), pages=pages)
