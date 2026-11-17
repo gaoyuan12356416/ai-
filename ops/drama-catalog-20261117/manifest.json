@@ -54,7 +54,7 @@
       "lane": "main",
       "relative": "features/youtube_auto_publish/source.py",
       "before": "83c403b82f879948d30f45014a55d1ded5bd13e309fac7f2a9ce9984965737b3",
-      "after": "bcf43e5a6087087591f8c969218b31c195477a4119afff971c90b01c1a579dcc",
+      "after": "658f86696ae12ac528a581a0a364d5c7e81527afce628e7e52f10be5deb72827",
       "source": "ops/drama-catalog-20261117/runtime/main/features/youtube_auto_publish/source.py"
     },
     {

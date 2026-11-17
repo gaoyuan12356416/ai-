@@ -106,7 +106,8 @@ class MaterialSource:
                     item['drama_cover_message'] = '' if item['drama_cover_url'] else 'Moboreels 原剧封面暂不可用，请选择本地上传'
             regular = [item for item in items if not moboreels and not is_mobo_product("", item.get("app_id"))]
             if regular and self.drama_resolver:
-                self.drama_resolver(regular)
+                resolved = {item["id"]: item for item in self.drama_resolver(regular)}
+                items = [resolved.get(item["id"], item) for item in items]
             for item in items:
                 item['long_url'] = long_url(item)
                 item['link_ready'] = has_link_source(item)
