@@ -72,6 +72,11 @@ Completed historical SELECT partitions are cached with the exact scope, UTC
 window, SQL and collection start time so observed transport failures can resume.
 Failed reads are never cached. A fully published collection starts fresh on the
 next refresh; only the last two completed disposable caches are retained.
+The original 1 GiB / 30-minute portrait unit budget predates the expanded scope.
+`ops/meta-page-recovery/portrait_capacity.py` backs up and sets only that unit to
+3 GiB / 75 minutes, without restarting the active collector. Its temporary cgroup
+overlay is restored after the current collection. Capacity rollback drains only
+this affected oneshot and never kills work or restores old business snapshots.
 
 ## GitHub-first deployment
 
@@ -82,8 +87,10 @@ fetch and checkout that exact commit on CPU. Install without activating:
 python3 CHECKOUT/ops/meta-page-recovery/deploy.py install --source CHECKOUT --commit SHA --deployment DEPLOYMENT
 ```
 
-Complete import, a fresh verified profile, read-only preview and marked Feishu
-acceptance first. `deploy.py activate --deployment DEPLOYMENT` establishes the
+Complete read-only preview and marked Feishu acceptance before activation.
+Profile refresh is independent: while it runs, use the last verified snapshot
+and the agreed unprofiled fallback; do not block unrelated accounts globally.
+`deploy.py activate --deployment DEPLOYMENT` establishes the
 baseline, then enables `meta-page-recovery-worker.service` and
 `meta-page-recovery-scan.timer` (hourly Beijing :05). Do not exercise actual swaps
 on historical banned Pages. `python3 -m features.meta_page_recovery status` gives
