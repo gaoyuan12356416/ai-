@@ -222,6 +222,8 @@ def switch(folder, rollback=False):
 
 def verify(folder):
     info = json.loads((folder / 'manifest.json').read_text())
+    for lane, row in info['lanes'].items():
+        assert str(ops.LANES[lane][0].resolve()) == row['root'], 'preserve_later_runtime:' + lane
     rollback = info['requested_action'] == 'rollback'
     action = 'rollback' if rollback else 'apply'
     for unit in ('fb-auto-post-service.service', 'x-tag-auto.service', 'x-tag-gateway.service', 'drama-material-api.service'):
@@ -237,8 +239,16 @@ def verify(folder):
         assert show(unit) == status, 'dependent_state_changed:' + unit
     for unit in TAG_TRIGGERS:
         if unit.endswith('.timer') and info['extra_before'][unit] == 'active':
-            assert show(unit, 'NextElapseUSecRealtime') not in ('', 'n/a') or show(unit, 'NextElapseUSecMonotonic') not in ('', '0', 'infinity'), 'no_future_timer:' + unit
-    oneshots = {u: ops.run('systemctl', 'show', u, '-p', 'Result,ExecMainStatus,ActiveEnterTimestamp,InactiveEnterTimestamp')
+            future = (show(unit, 'NextElapseUSecRealtime') not in ('', 'n/a') or
+                      show(unit, 'NextElapseUSecMonotonic') not in ('', '0', 'infinity'))
+            # OnUnitInactiveSec timers have no next timestamp while their
+            # current oneshot is still executing; systemd rearms on completion.
+            target = show(unit, 'Unit')
+            rearming = (show(unit, 'SubState') == 'running' and show(target) in ('active', 'activating') and
+                        show(target, 'MainPID') != '0' and
+                        re.search(r'^OnUnitInactiveSec=[1-9][^\n]*$', ops.run('systemctl', 'cat', unit), re.M))
+            assert future or rearming, 'no_future_timer:' + unit
+    oneshots = {u: ops.run('systemctl', 'show', u, '-p', 'Result,ExecMainStatus,ActiveState,SubState,ExecMainStartTimestamp,ActiveEnterTimestamp,InactiveEnterTimestamp')
                 for u in ('x-tag-auto-scheduler.service', 'x-tag-auto-runner.service')}
     for unit, status in oneshots.items():
         assert 'Result=success' in status and 'ExecMainStatus=0' in status, 'tag_scheduler_failed:' + unit
