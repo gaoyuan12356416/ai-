@@ -12,6 +12,8 @@ Nginx 只在 `/s2l/fb/` 的 HTML 响应中，把旧落地页完整前缀替换�
 
 浏览器全程核验发现旧短链 CSP 中浏览器不识别的 `navigate-to` 指令，已从本次短链配置删除；其它有效 CSP 限制保留。公开跳转和原始参数不受这项清理影响。
 
+验收边界：2310 页面自身有 Meta Pixel 的 currency 格式警告，在原有手动短链 `/s2l/facebook/3100.html` 对照中也可复现；本次保留页面 SDK/Pixel 配置。跳转检查不等同于真实安装、购买或未来收入到账验证。
+
 部署目录 `/mnt/data-disk/fb-auto-2310-20261117/deployment`。在已推送的干净 GitHub checkout 中执行：
 
 ```sh
