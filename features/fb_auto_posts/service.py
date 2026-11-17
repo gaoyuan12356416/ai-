@@ -57,22 +57,17 @@ class Runtime:
         items = [{**as_public(group), "group_label": "Post" if group.group_type == 0 else "AD", "missing_token_pages": group.total_pages - group.publishable_pages} for group in groups]
         return {"ok": True, "items": items, "summary": {"total_groups": len(items), "total_pages": sum(item["total_pages"] for item in items), "publishable_pages": sum(item["publishable_pages"] for item in items), "missing_token_pages": sum(item["total_pages"] - item["publishable_pages"] for item in items)}}
 
-    def resolve_source(self, payload: Mapping[str, Any], actor: ActorScope) -> Dict[str, str]:
+    def resolve_source(self, payload: Mapping[str, Any], actor: ActorScope) -> Dict[str, Any]:
         group_ids = payload.get("group_ids")
-        if not isinstance(group_ids, list):
+        if not isinstance(group_ids, list) or not group_ids:
             raise ServiceError("invalid_request", "Page池ID无效", 400)
         wanted = {str(item) for item in group_ids}
         groups = [group for group in self.pages.list_groups(is_admin=actor.is_admin, owner_user_id=actor.owner_user_id) if group.group_id in wanted]
         if len(groups) != len(wanted):
             raise ServiceError("fb_auto_page_group_not_found", "Page池不存在或不属于当前负责人", 404)
-        sources = {(group.app_id, group.product) for group in groups}
-        if len(sources) != 1:
-            raise ServiceError("fb_auto_mixed_product_groups", "首版模板只能选择同一产品的Page池", 409)
-        app_id, product = next(iter(sources))
-        if not app_id or not product:
-            raise ServiceError("fb_auto_group_product_missing", "Page池缺少产品映射", 409)
-        if app_id != "1479" or product != "Dramawave":
-            raise ServiceError("fb_auto_product_mapping_unsupported", "首发仅支持Dramawave Page池，未知产品禁止启用", 409)
+        # Pool product labels describe the Page inventory, not the content source.
+        # Keep the existing source defaults; material_product and the Moboreels
+        # macro continue to select their respective content/link paths.
         return {"app_id": "1479", "product": "Dramawave", "material_data_source": 6, "metric_product": "Dramawave", "metric_platform": 0}
 
     def validate_activation(self, template: Mapping[str, Any]) -> Dict[str, Any]:

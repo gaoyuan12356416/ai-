@@ -23,7 +23,6 @@ from urllib.parse import parse_qs, urlsplit
 from features.x_posts.selector import connect_read_only
 from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import canonical_drama_language
-from features import social_random_schedule as target_random
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
 from .core import AuditActor, XAutoPostStore
@@ -44,7 +43,7 @@ from .x_sidecar import (
 
 UTC = timezone.utc
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 18833
+DEFAULT_PORT = 18843
 MAX_BODY_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 RUN_EVENT_LIMIT = 200
@@ -119,6 +118,9 @@ def _blacklist_dict(snapshot: Any) -> Dict[str, Any]:
 
 
 def _public_selection(value: Any) -> Any:
+    if isinstance(value, Mapping) and "policy_version" in value and "candidate_labels" in value:
+        from features.x_tag_revenue.tags import localize_audit
+        value = localize_audit(dict(value))
     if isinstance(value, Mapping):
         return {
             str(key): _public_selection(item)
@@ -197,7 +199,7 @@ class XAutoPostService:
         executor: AutoPostExecutor,
         *,
         now_fn=lambda: datetime.now(UTC),
-        runner_kick_path: Any = "/run/x-auto-post/manual-kick",
+        runner_kick_path: Any = "/run/x-tag-auto/manual-kick",
         schedule_grace_seconds: int = 600,
     ):
         self.store = store
@@ -222,10 +224,6 @@ class XAutoPostService:
 
     def _template_item(self, snapshot: Any) -> Dict[str, Any]:
         item = self._template_snapshot_item(snapshot)
-        with self.store._transaction() as conn:
-            plans = [target_random.get_day_plan(conn, "x:auto:" + str(snapshot.id), (self._now().astimezone(BEIJING_TZ).date() + timedelta(days=i)).isoformat()) for i in range(2)]
-        item["target_daily_plans"] = [plan for plan in plans if plan]
-        item["preparation_schedule"] = "每天北京时间 00:00 开始备料"
         last_run = self.store.get_latest_run_for_template(snapshot.id)
         next_run_at = ""
         if snapshot.enabled:
@@ -245,8 +243,9 @@ class XAutoPostService:
                 if schedule.get("mode") == "fixed":
                     publish_times = list(schedule.get("times") or [])
                 else:
-                    target_plan = next((p for p in item["target_daily_plans"] if p["local_date"] == day), None)
-                    publish_times = sorted({time for target in target_plan["targets"] for time in target["times"]}) if target_plan else self.store.get_random_plan(snapshot.id, snapshot.version, day) or []
+                    publish_times = self.store.get_random_plan(
+                        snapshot.id, snapshot.version, day
+                    ) or []
                 for publish_time in publish_times:
                     hour, minute = (int(value) for value in publish_time.split(":"))
                     slot = datetime(
@@ -464,15 +463,8 @@ class XAutoPostService:
                     "x_auto_account_not_found", "X account was not found", 404
                 )
             account = matches[0]
-            if str(account.get("id") or "") != str(account_id) or not bool(
-                account.get("publish_eligible")
-            ):
-                raise AutoPostServiceError(
-                    "x_auto_account_not_publishable",
-                    "X 账号 %s（ID %s）当前不可发布，请取消勾选或恢复授权后再保存。"
-                    % (str(account.get("username") or account_id)[:50], account_id),
-                    409,
-                )
+            # Saving keeps the operator's scope, including restricted accounts.
+            # Current publication eligibility is checked when the run is built.
             self._account_language(account)
 
     @staticmethod
@@ -660,6 +652,7 @@ class XAutoPostService:
                         only_refresh_required=False,
                         preserve_transient_status=True,
                         require_publish_approved=True,
+                        schedule_preflight=True,
                     )
                 )
                 if str(account.get("id") or "") != str(account_id):
@@ -688,6 +681,16 @@ class XAutoPostService:
                     account_snapshot_version=2,
                 )
             except Exception as exc:
+                restricted = not bool(getattr(exc, "unknown_outcome", False)) and int(getattr(exc, "status", 500) or 500) == 409 and str(
+                    getattr(exc, "code", "")
+                ) in {
+                    "x_auto_account_not_publishable", "x_account_not_publishable",
+                    "x_post_account_needs_review", "x_post_account_locked",
+                    "x_account_disabled", "x_account_publish_not_approved",
+                    "x_disconnect_pending", "x_token_revoked", "x_token_missing",
+                    "x_token_invalid", "x_account_suspended",
+                    "x_account_verification_rejected",
+                }
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,
@@ -700,19 +703,21 @@ class XAutoPostService:
                 )
                 task = self.store.transition_task(
                     task.id,
-                    "failed",
+                    "skipped" if restricted else "failed",
                     expected_statuses={"pending"},
                     updates={
                         "error_code": str(getattr(exc, "code", "x_auto_account_unavailable")),
                         "error_message": safe_public_message(exc),
                     },
-                    event_type="task_account_snapshot_failed",
+                    event_type="task_account_restricted" if restricted else "task_account_snapshot_failed",
                 )
             tasks.append(task)
-        if tasks and all(task.status == "failed" for task in tasks):
+        if tasks and all(task.status in {"failed", "skipped"} for task in tasks):
             current = self.store.get_run(run.id)
             if current.status == "queued":
-                self.store.set_run_status(run.id, "failed", expected_statuses={"queued"})
+                failed = sum(task.status == "failed" for task in tasks)
+                status = "failed" if failed == len(tasks) else "partial_failed" if failed else "completed"
+                self.store.set_run_status(run.id, status, expected_statuses={"queued"})
         return tasks
 
     def _create_run(
@@ -724,8 +729,6 @@ class XAutoPostService:
         publish_time: str,
         run_key: str,
         actor: AuditActor = AuditActor(),
-        account_ids: Optional[Sequence[str]] = None,
-        schedule_policy: str = "",
     ) -> Tuple[Any, bool]:
         with self._run_create_lock:
             existing = self.store.get_run_by_key(run_key)
@@ -744,7 +747,7 @@ class XAutoPostService:
                         "run idempotency key belongs to different frozen facts",
                         409,
                     )
-                self._run_tasks(existing, dict(frozen.config, account_ids=list(account_ids)) if account_ids is not None else frozen.config)
+                self._run_tasks(existing, frozen.config)
                 return self.store.get_run(existing.id), False
             blacklist = self.selector.source.blacklist_snapshot()
             shanghai_date = scheduled_at.astimezone(BEIJING_TZ).date().isoformat()
@@ -758,9 +761,8 @@ class XAutoPostService:
                 publish_time=publish_time,
                 blacklist_snapshot=_blacklist_dict(blacklist),
                 actor=actor,
-                schedule_policy=schedule_policy,
             )
-            self._run_tasks(run, dict(template.config, account_ids=list(account_ids)) if account_ids is not None else template.config)
+            self._run_tasks(run, template.config)
             return self.store.get_run(run.id), True
 
     def _kick(self) -> bool:
@@ -820,7 +822,7 @@ class XAutoPostService:
         }
 
     @staticmethod
-    def _random_times(template: Any, shanghai_date: str, count: int, account_id: str = "") -> List[str]:
+    def _random_times(template: Any, shanghai_date: str, count: int) -> List[str]:
         digest = hashlib.sha256(
             (
                 str(template.id)
@@ -830,7 +832,6 @@ class XAutoPostService:
                 + template.config_sha256
                 + "|"
                 + shanghai_date
-                + ("|" + str(account_id) if account_id else "")
             ).encode("utf-8")
         ).digest()
         generator = random.Random(int.from_bytes(digest[:16], "big"))
@@ -848,21 +849,6 @@ class XAutoPostService:
         times = self._random_times(template, shanghai_date, int(schedule.get("daily_count") or 0))
         return self.store.put_random_plan(template.id, template.version, shanghai_date, times)
 
-    def _target_random_plan(self, template: Any, day: str):
-        source = "x:auto:" + str(template.id)
-        with self.store._transaction() as conn:
-            if not target_random.is_active(conn, day):
-                return None
-            saved = target_random.get_day_plan(conn, source, day)
-            if saved:
-                return saved
-            enabled_day = datetime.fromisoformat(template.enabled_at_utc.replace("Z", "+00:00")).astimezone(BEIJING_TZ).date().isoformat()
-            if enabled_day >= day:
-                return {"targets": [], "config_version": template.version}
-            return target_random.ensure_day_plan(
-                conn, source, day, template.version, dict(template.config), template.config.get("account_ids") or [],
-                lambda account: self._random_times(template, day, int(template.config["schedule"]["daily_count"]), account), now=self._now())
-
     def tick(self) -> Dict[str, Any]:
         if not self.executor.gates.is_open:
             return {
@@ -879,32 +865,6 @@ class XAutoPostService:
             day = shanghai.date().isoformat()
             created = []
             for template in self.store.list_templates(enabled=True):
-                with self.store._transaction() as conn:
-                    frozen_today = target_random.get_day_plan(conn, "x:auto:" + str(template.id), day)
-                if frozen_today or template.config.get("schedule", {}).get("mode") == "random":
-                    target_plan = self._target_random_plan(template, day)
-                    if target_plan is not None:
-                        frozen = self.store.get_template(template.id, version=int(target_plan["config_version"]))
-                        for target in target_plan["targets"]:
-                            for target_slot in target["slots"]:
-                                try:
-                                    run, was_created = self._create_run(
-                                        frozen, trigger_type="auto", scheduled_at=datetime.fromisoformat(target_slot["scheduled_at"].replace("Z", "+00:00")),
-                                        publish_time=target_slot["publish_time"],
-                                        run_key=f"x-auto:auto:{target_random.POLICY}:{template.id}:{day}:{target['target_id']}:{target_slot['ordinal']}",
-                                        account_ids=[target["target_id"]], schedule_policy=target_random.POLICY)
-                                except Exception as exc:
-                                    if str(getattr(exc, "code", "")) in {
-                                        "x_auto_template_not_enabled_for_slot",
-                                        "x_auto_template_version_conflict",
-                                    }:
-                                        continue
-                                    raise
-                                with self.store._transaction() as conn:
-                                    target_random.bind_slot(conn, "x:auto:" + str(template.id), day, target["target_id"], target_slot["ordinal"], "x_auto_run", run.id)
-                                if was_created:
-                                    created.append(run.id)
-                        continue
                 for publish_time in self._schedule_times(template, day):
                     hour, minute = (int(value) for value in publish_time.split(":"))
                     slot = shanghai.replace(
@@ -1085,13 +1045,13 @@ def _env_int(
 
 def _isolated_db_path(source: Mapping[str, str]) -> str:
     root = Path(
-        str(source.get("X_AUTO_POST_STATE_ROOT", "/mnt/data-disk/x-auto-post-publisher"))
+        str(source.get("X_AUTO_POST_STATE_ROOT", "/mnt/data-disk/x-tag-publisher/auto"))
     ).expanduser()
     path = Path(
         str(
             source.get(
                 "X_AUTO_POST_DB_PATH",
-                "/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3",
+                "/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3",
             )
         )
     ).expanduser()
@@ -1099,7 +1059,7 @@ def _isolated_db_path(source: Mapping[str, str]) -> str:
         str(
             source.get(
                 "X_POST_DB_PATH",
-                "/mnt/data-disk/x-post-automation/x-posts.sqlite3",
+                "/mnt/data-disk/x-tag-publisher/x-posts.sqlite3",
             )
         )
     ).expanduser()
@@ -1233,6 +1193,9 @@ def build_service_from_env(
         )
 
     store = XAutoPostStore(db_path)
+    from features.x_tag_publish.policy import initialize_ids, lane_paths
+    lane_paths()
+    initialize_ids(db_path)
     repository = ReadOnlyMySQLRepository(
         source_connection,
         schema=material_schema,
@@ -1268,6 +1231,8 @@ def build_service_from_env(
                 )
             item = dict(candidates[0])
             return {
+                "source_duration": item.get("source_duration"),
+                "drama_deploy_time": item.get("drama_deploy_time"),
                 "material_id": str(item.get("material_id") or ""),
                 "content_id": str(item.get("content_id") or ""),
                 "material_language": str(item.get("material_language") or ""),
@@ -1308,7 +1273,7 @@ def build_service_from_env(
         media_timeout=_env_int(source, "X_AUTO_POST_MEDIA_TIMEOUT", 30, 5, 120),
         work_dir=str(
             source.get(
-                "X_AUTO_POST_WORK_DIR", "/mnt/data-disk/x-post-automation/daily-work"
+                "X_AUTO_POST_WORK_DIR", "/mnt/data-disk/x-tag-publisher/daily-work"
             )
         ),
         repair_profile=str(
@@ -1412,13 +1377,14 @@ def build_service_from_env(
         dispatch_enabled=dispatch_enabled(source),
         dispatch_cutoff=dispatch_cutoff(source),
     )
-    return XAutoPostService(
+    from features.x_tag_publish.hit_drama import TagAutoPostService
+    return TagAutoPostService(
         store,
         bridge,
         selector,
         executor,
         runner_kick_path=str(
-            source.get("X_AUTO_POST_RUNNER_KICK_PATH", "/run/x-auto-post/manual-kick")
+            source.get("X_AUTO_POST_RUNNER_KICK_PATH", "/run/x-tag-auto/manual-kick")
         ),
         schedule_grace_seconds=_env_int(
             source, "X_AUTO_POST_SCHEDULE_GRACE_SECONDS", 600, 60, 3600
@@ -1440,7 +1406,7 @@ class XAutoPostHTTPServer(ThreadingHTTPServer):
         host, port = server_address
         if host != DEFAULT_HOST or int(port) != DEFAULT_PORT:
             raise AutoPostServiceError(
-                "x_auto_listen_invalid", "service may listen only on 127.0.0.1:18833", 500
+                "x_auto_listen_invalid", "service may listen only on 127.0.0.1:18843", 500
             )
         if not valid_internal_bearer(internal_token):
             raise AutoPostServiceError(
@@ -1652,3 +1618,6 @@ __all__ = [
     "build_service_from_env",
     "serve",
 ]
+
+# This import is installed only in the independent tag runtime.
+from features.x_tag_publish.selection import ProfileSelector as TwoStageSelector
