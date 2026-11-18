@@ -59,7 +59,10 @@ def collect(dispatch, native, locks, directory=DIRECTORY):
                 if row['source_key'].startswith('x:auto:') and row['source_id'].isdigit():
                     task = a.execute('SELECT * FROM x_auto_task WHERE id=?', (int(row['source_id']),)).fetchone()
                     if task:
-                        phase, progress, heartbeat = task['claim_phase'] or task['status'], task['updated_at'], task['updated_at']
+                        phase, heartbeat = task['claim_phase'] or task['status'], task['updated_at']
+                        event = a.execute('SELECT created_at FROM x_auto_event WHERE task_id=? ORDER BY id DESC LIMIT 1',
+                                          (task['id'],)).fetchone()
+                        progress = event['created_at'] if event else task['created_at']
                         if task['status'] == 'selecting':
                             reason = ('execution_still_active' if not execution_available(locks, task['id'])
                                       else 'selection_recovery_check_pending' if pure_selection(task)
