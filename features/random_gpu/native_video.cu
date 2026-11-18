@@ -118,20 +118,25 @@ __device__ float4 over(float4 bottom, float4 top) {
                        limit(top.y*a+bottom.y*(1-a)),
                        limit(top.z*a+bottom.z*(1-a)),1.0f);
 }
+extern "C" __global__ void compose_rotation(float angle,float* rotation) {
+    rotation[0]=cosf(angle);
+    rotation[1]=sinf(angle);
+}
+
 extern "C" __global__ void compose_rgba(
     const uchar4* source, const uchar4* main,
     const uchar4* border, int bw, int bh,
     const uchar4* opacity, int ow, int oh,
     const uchar4* corners, int cw, int ch,
     const uchar4* tint, int tw, int th,
-    uchar4* out, int mw, int mh, float angle, float tint_alpha,
+    uchar4* out, int mw, int mh, const float* rotation, float tint_alpha,
     float source_alpha, float source_scale) {
     int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y*blockDim.y+threadIdx.y;
     if (x>=720 || y>=1280) return;
     float u=(x+0.5f)/720.0f, v=(y+0.5f)/1280.0f;
     float4 value=linear_rgba(source,720,1280,u,v,1); value.w=1.0f;
     float cx=u*720.0f-360.0f, cy=v*1280.0f-640.0f;
-    float cosine=cosf(angle), sine=sinf(angle);
+    float cosine=rotation[0], sine=rotation[1];
     float sx=mw*0.5f+cx*cosine+cy*sine;
     float sy=mh*0.5f-cx*sine+cy*cosine;
     float4 foreground=(sx<0 || sy<0 || sx>=mw || sy>=mh)
