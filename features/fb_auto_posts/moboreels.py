@@ -70,13 +70,19 @@ def candidate_snapshot(repo, config):
     validate_rules(config)
     institution = moboreels.institution_id()
     rule=config["material_rule"]
-    product=str(config.get("material_product") or config["product"])
+    from features.material_products import selected
+    products=selected(config)
+    # Frozen legacy m_url runs retain their previous catalog scope.
+    filter_products="material_products" in config
+    product_sql=(" AND s.product IN ("+",".join("%s" for _ in products)+")") if filter_products else ""
+    product_params=products if filter_products else ()
     language=str(config["language"])
     language_ids={"zh-tw":2,"en":3,"es":4,"pt":5,"fr":6,"ru":7,"it":8,"ja":9,"ar":10,"id":11,"th":12,"vi":13,"ko":14,"tl":15,"de":16,"hi":17,"bn":18,"ms":21,"tr":22}
     source_language_sql="LOWER(TRIM(s.language))=%s"
     language_params=[language]
-    if product.casefold()=="dramawavesource":
-        source_language_sql="("+source_language_sql+" OR (TRIM(COALESCE(s.language,''))='' AND d.lang_id=%s))"
+    if any(p.casefold()=="dramawavesource" for p in products):
+        source_product_sql="LOWER(s.product)='dramawavesource' AND " if filter_products else ""
+        source_language_sql="("+source_language_sql+" OR ("+source_product_sql+"TRIM(COALESCE(s.language,''))='' AND d.lang_id=%s))"
         language_params.append(language_ids.get(language,-1))
     page_size,cursor,page_count=1000,0,0
     limit=max(1,min(int(config.get("_candidate_limit",getattr(repo,"candidate_limit",5000))),getattr(repo,"candidate_limit",5000)))
@@ -91,11 +97,11 @@ def candidate_snapshot(repo, config):
                  LOWER(TRIM(s.language)) language,s.video_duration,d.story_name drama_name,d.introduce drama_description
             FROM `{repo.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
             JOIN `ads_ai`.cdreader_koc_drama d ON d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1
-           WHERE s.data_source=%s AND s.type=2 AND s.is_delete=0
+           WHERE s.data_source=%s{product_sql} AND s.type=2 AND s.is_delete=0
              AND {source_language_sql} AND s.video_duration>=%s AND s.video_duration<=%s
              AND s.id>%s
            ORDER BY s.id LIMIT %s
-        """,(institution,int(config["material_data_source"]),*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
+        """,(institution,int(config["material_data_source"]),*product_params,*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
         page_count+=1
         for row in rows:
             mid=str(row.get("material_id") or "")

@@ -136,8 +136,13 @@ def _schedule(raw: Any) -> Dict[str, Any]:
 
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
+    from features.material_products import selected
+    try:
+        products = list(selected(value))
+    except ValueError as exc:
+        raise ValidationError("invalid_request", str(exc)) from None
     required = {"name", "group_ids", "message_template", "drama_rule", "material_rule", "schedule", "video_template"}
-    optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "material_product", "app_id", "product", "metric_product", "metric_platform", "drama_cooldown_hours", "page_daily_limits", "default_daily_count", "stagger_minutes", "feedback_selection"}
+    optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "material_product", "material_products", "app_id", "product", "metric_product", "metric_platform", "drama_cooldown_hours", "page_daily_limits", "default_daily_count", "stagger_minutes", "feedback_selection"}
     if "video_template" not in value or value.get("video_template") != "random_overlay":
         raise ValidationError(
             "fb_auto_video_template_required",
@@ -170,6 +175,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         group_ids.append(text)
     result = {
         "name": name,
+        "material_products": products,
         "group_ids": group_ids,
         "message_template": message,
         "metric_window_days": _int(value.get("metric_window_days", 7), "指标窗口", 1, 30),

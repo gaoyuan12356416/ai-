@@ -578,7 +578,10 @@ class ReadOnlyMySQLRepository:
         *,
         content_id: str,
         language: str,
+        products: Sequence[str] = (DEFAULT_PRODUCT,),
     ) -> List[MaterialSourceRow]:
+        from features.material_products import normalize
+        products = normalize(products)
         normalized_content_id = _text(content_id, "content_id", limit=128)
         normalized_language = canonical_language(language)
         languages = _catalog_languages(normalized_language)
@@ -594,18 +597,19 @@ class ReadOnlyMySQLRepository:
                    FORCE INDEX (idx_source_type_source_id)
              WHERE s.data_source=%s
                AND s.data_source_id=%s
-               AND s.product=%s
+               AND s.product IN ({product_params})
                AND s.type=%s
                AND s.is_delete=%s
                AND LOWER(TRIM(s.language)) IN ({language_params})
                AND s.video_duration>%s
                AND s.video_duration<=%s
              ORDER BY s.id
-        """.format(schema=self.schema, language_params=",".join("%s" for _ in languages))
+        """.format(schema=self.schema, language_params=",".join("%s" for _ in languages),
+                   product_params=",".join("%s" for _ in products))
         params = (
             self.material_data_source,
             normalized_content_id,
-            self.product,
+            *products,
             2,
             0,
             *languages,

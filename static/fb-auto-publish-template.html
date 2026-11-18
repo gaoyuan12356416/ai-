@@ -77,13 +77,9 @@
             </div>
 
             <div class="field">
-              <label class="required" for="materialProduct">素材产品</label>
-              <input id="materialProduct" list="materialProducts" value="Dramawave" required maxlength="128" autocomplete="off" />
-              <datalist id="materialProducts">
-                <option value="DramawaveSource">dramawavesource 素材</option>
-                <option value="Dramawave">Dramawave 素材</option>
-              </datalist>
-              <span class="helper">可选择 DramawaveSource，或输入其他素材产品名称。使用 {{m_url}} 时读取 Moboreels 剧目并归属模板创建者，旧消耗和 ROAS 筛选需留空；素材产品范围不变。</span>
+              <label class="required" id="materialProductsLabel">素材产品（可多选）</label>
+              <div id="materialProducts" role="group" aria-labelledby="materialProductsLabel" data-source-option="true"></div>
+              <span class="helper">默认 DramaWave，可同时选择多个素材产品。使用 {{m_url}} 时沿用 Moboreels 剧目及链接规则。</span>
             </div>
             <div class="field">
               <label for="dataSource">素材来源</label>
@@ -196,6 +192,7 @@
   <script src="/quick-nav.js?v=ac11d7b304fb"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
-  <script src="/fb-auto-publish-template.js?v=20261117-range1"></script>
+  <script src="/material-product-picker.js?v=20261118products1"></script>
+  <script src="/fb-auto-publish-template.js?v=20261118products1"></script>
 </body>
 </html>

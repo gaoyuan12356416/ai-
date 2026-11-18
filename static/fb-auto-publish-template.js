@@ -39,7 +39,7 @@
       message_template: ui.byId("message").value,
       video_template: ui.byId("videoTemplate").value,
       material_data_source: Number(ui.byId("dataSource").value),
-      material_product: ui.byId("materialProduct").value.trim(),
+      material_products: window.MaterialProductPicker.read(),
       metric_window_days: Number(ui.byId("metricDays").value),
       drama_launch_window_days: window.normalizeDramaLaunchWindow(ui.byId("launchDays").value),
       cooldown_days: Number(ui.byId("cooldown").value),
@@ -107,7 +107,7 @@
     ui.byId("message").value = config.message_template || "";
     ui.byId("videoTemplate").value = config.video_template;
     ui.byId("dataSource").value = Number(config.material_data_source || 6);
-    ui.byId("materialProduct").value = config.material_product || config.product || "Dramawave";
+    window.MaterialProductPicker.render(config);
     ui.byId("metricDays").value = Number(config.metric_window_days || 7);
     ui.byId("launchDays").value = config.drama_launch_window_days ?? 0;
     ui.byId("cooldown").value = Number(config.cooldown_days || 0);
@@ -238,6 +238,7 @@
 
   void ui.boot({
     onReady: async () => {
+      window.MaterialProductPicker.render();
       bindEvents();
       try {
         await loadGroups();

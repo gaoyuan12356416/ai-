@@ -267,6 +267,7 @@
   function hydrateTemplate(item) {
     state.template = ui.objectValue(item);
     const config = ui.objectValue(state.template.config);
+    window.MaterialProductPicker.render(config);
     const configValue = (key, fallback) => state.template[key] !== undefined ? state.template[key] : config[key] !== undefined ? config[key] : fallback;
     state.version = Math.max(0, ui.numberValue(state.template.version || state.template.current_version, 0));
     setValue("templateName", state.template.name);
@@ -426,6 +427,7 @@
     const payload = {
       name,
       account_ids: Array.from(state.selectedAccountIds),
+      material_products: window.MaterialProductPicker.read(),
       body_template: bodyTemplate,
       random_template_enabled: document.getElementById("randomTemplateEnabled").checked,
       metric_window_days: metricWindowDays,
@@ -652,6 +654,7 @@
   void ui.initShell({
     activeKey: "xAutoPublishTemplates",
     onReady: async () => {
+      window.MaterialProductPicker.render();
       bindEvents();
       setTimeRows(["11:00"]);
       setResourceTypes([]);

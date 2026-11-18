@@ -153,8 +153,10 @@ def selector_rules(
                 raise NoEligibleMaterial({"account_duration_limit": 1})
             if configured_max is None or configured_max > account_limit:
                 duration_max = account_limit
+    from features.material_products import selected
     return SelectionRules.from_mapping(
         {
+            "material_products": selected(config),
             "metric_window_days": config.get("metric_window_days", 7),
             "platform": config.get("platform", 0),
             "drama": {

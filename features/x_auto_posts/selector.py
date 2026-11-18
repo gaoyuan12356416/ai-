@@ -301,8 +301,11 @@ class SelectionRules:
     platform: int = DEFAULT_PLATFORM
     drama: DramaFilterRule = field(default_factory=DramaFilterRule)
     material: MaterialFilterRule = field(default_factory=MaterialFilterRule)
+    material_products: Tuple[str, ...] = (DEFAULT_PRODUCT,)
 
     def __post_init__(self) -> None:
+        from features.material_products import normalize
+        object.__setattr__(self, "material_products", normalize(self.material_products))
         if isinstance(self.metric_window_days, bool):
             raise ValueError("metric_window_days is invalid")
         if int(self.metric_window_days) < 1 or int(self.metric_window_days) > 30:
@@ -314,7 +317,7 @@ class SelectionRules:
     def from_mapping(cls, raw: Any) -> "SelectionRules":
         if not isinstance(raw, Mapping):
             raise ValueError("selection rules must be an object")
-        allowed = {"metric_window_days", "platform", "drama", "material"}
+        allowed = {"metric_window_days", "platform", "drama", "material", "material_products"}
         if set(raw).difference(allowed):
             raise ValueError("selection rules have unknown fields")
         raw_days = raw.get("metric_window_days")
@@ -333,6 +336,7 @@ class SelectionRules:
         )
         return cls(
             metric_window_days=days,
+            material_products=raw.get("material_products", (DEFAULT_PRODUCT,)),
             platform=platform,
             drama=DramaFilterRule.from_mapping(raw.get("drama")),
             material=MaterialFilterRule.from_mapping(raw.get("material")),
@@ -341,6 +345,7 @@ class SelectionRules:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "metric_window_days": int(self.metric_window_days),
+            "material_products": list(self.material_products),
             "platform": int(self.platform),
             "drama": {
                 "spend": self.drama.spend.as_dict(),
@@ -825,7 +830,7 @@ class TwoStageSelector:
             if (
                 row.content_id != drama.content_id
                 or row.language != language
-                or row.product != self.product
+                or row.product.casefold() not in {p.casefold() for p in request.rules.material_products}
                 or row.material_type != 2
                 or row.is_delete != 0
                 or row.data_source != self.material_data_source
@@ -962,9 +967,12 @@ class TwoStageSelector:
         )
 
         for drama in dramas:
+            product_filter = ({} if request.rules.material_products == (DEFAULT_PRODUCT,)
+                              else {"products": request.rules.material_products})
             material_rows = self.source.list_material_rows(
                 content_id=drama.content_id,
                 language=language,
+                **product_filter,
             )
             materials = self._eligible_materials(
                 request,

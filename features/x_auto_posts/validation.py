@@ -317,6 +317,11 @@ def _body_template(value: Any) -> str:
 
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
+    from features.material_products import selected
+    try:
+        products = list(selected(value))
+    except ValueError as exc:
+        raise ValidationError("invalid_request", str(exc)) from None
     required = {
         "name",
         "account_ids",
@@ -328,6 +333,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     optional = {
         "language",  # Accepted for older editors; account settings are authoritative.
         "language_source",
+        "material_products",
         "random_template_enabled",
         "metric_window_days",
         "drama_launch_window_days",
@@ -361,6 +367,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "name": _text(value.get("name"), "模板名称", minimum=1, maximum=120),
         "account_ids": account_ids,
         "language_source": "account",
+        "material_products": products,
         "random_template_enabled": value.get("random_template_enabled", False),
         "body_template": _body_template(value.get("body_template")),
         "metric_window_days": _integer(
