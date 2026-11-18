@@ -13,7 +13,9 @@ def main(args):
     c.execute("attach database ? as native",(Path(args.native).resolve().as_uri()+"?mode=ro",))
     ledger=sqlite3.connect(Path(args.snapshot).resolve().as_uri()+"?mode=ro",uri=True)
     try:
-        c.execute("begin immediate" if args.apply else "begin")
+        # Keep the native database read-only. Only the main database needs
+        # to acquire a write lock when the verified queue row is updated.
+        c.execute("begin")
         for jid in args.ids:
             j=c.execute("select * from pipeline_job where id=?",(jid,)).fetchone()
             event="cos_handoff_historical_failure_confirmed"
