@@ -90,7 +90,7 @@ def fetch_day(day):
         upper_bound = "" if high is None else f" AND id < {high}"
         statements.append(f"""
             SELECT /*+ MAX_EXECUTION_TIME(30000) */
-                HEX(WEIGHT_STRING(TRIM(data_source_id))),HEX(MIN(BINARY TRIM(data_source_id))),
+                HEX(WEIGHT_STRING(MIN(TRIM(data_source_id)))),HEX(MIN(BINARY TRIM(data_source_id))),
                 TRIM(resource_id), SUM(COALESCE(spend,0)),SUM(COALESCE(af_revenue0,0))
             FROM {SOURCE} FORCE INDEX (stats_date)
             WHERE dt='{day}' AND id >= {low}{upper_bound}
