@@ -154,6 +154,65 @@ class FacebookAttributionTests(unittest.TestCase):
         self.run_collect()
         self.assertEqual(self.saved("2310")["status"], "unresolved")
 
+    def test_material_title_refresh_preserves_frozen_attribution_and_receipt(self):
+        self.manual_drama_label("", "none")
+        self.run_collect()
+        before = self.saved("2310")
+        with database(self.source) as conn:
+            saved = json.loads(conn.execute("SELECT snapshot_json FROM fb_video_task").fetchone()[0])
+        saved["material"]["drama_name"] = "Now resolved title"
+        self.change("UPDATE fb_video_task SET snapshot_json=?", (json.dumps(saved),))
+        self.assertEqual(self.run_collect(LATER)["status"], "complete")
+        after = self.saved("2310")
+        for field in ("identity_json", "evidence_json", "evidence_hash", "publications_json", "frozen_at"):
+            self.assertEqual(before[field], after[field])
+        self.assertNotEqual(before["observed_hash"], after["observed_hash"])
+        row = next(r for r in self.read(LATER)[0] if r["site_id"] == "2310")
+        self.assertEqual(row["owner"], "creator")
+        self.assertEqual(row["effect_source"], dict(adset_id="999", ad_id="55"))
+        self.assertEqual(self.run_collect(LATER)["sources"]["2310"]["changed"], 0)
+
+    def test_prior_title_only_conflict_recovers_but_other_evidence_does_not(self):
+        self.run_collect()
+        changed = copy.deepcopy(self.snapshot)
+        changed["material"]["drama_name"] = "Refreshed label"
+        self.change("UPDATE fb_video_task SET snapshot_json=?", (json.dumps(changed),))
+        # Reproduce the previously deployed whole-evidence comparison.
+        with patch.object(fb, "_display_title_refresh", return_value=False):
+            self.run_collect(LATER)
+        before = self.saved("2310")
+        self.assertEqual(before["error_code"], "frozen_evidence_changed")
+        self.assertEqual(self.run_collect(LATER)["status"], "complete")
+        self.assertEqual(before["identity_json"], self.saved("2310")["identity_json"])
+        changed["actor"]["user_id"] = "editor"
+        self.change("UPDATE fb_video_task SET snapshot_json=?", (json.dumps(changed),))
+        self.run_collect(LATER)
+        self.assertEqual(self.saved("2310")["status"], "conflict")
+
+    def test_title_refresh_cannot_clear_confirmed_post_change(self):
+        self.run_collect()
+        changed = copy.deepcopy(self.snapshot)
+        changed["material"]["drama_name"] = "Refreshed label"
+        self.change("UPDATE fb_video_task SET snapshot_json=?,graph_post_id='999_999'", (json.dumps(changed),))
+        self.run_collect(LATER)
+        self.assertEqual(self.saved("2310")["error_code"], "confirmed_publication_changed")
+        self.change("UPDATE fb_video_task SET graph_post_id='999_101'")
+        self.run_collect(LATER)
+        self.assertEqual(self.saved("2310")["status"], "conflict")
+
+    def test_title_refresh_cannot_change_frozen_campaign_title_or_ids(self):
+        self.run_collect()
+        for section, field, value in (("attribution", "drama_name", "New campaign title"),
+                                       ("material", "material_id", "another-material"),
+                                       ("page", "page_id", "another-page")):
+            with self.subTest(section=section, field=field):
+                changed = copy.deepcopy(self.snapshot)
+                changed["material"]["drama_name"] = "Refreshed label"
+                changed[section][field] = value
+                self.change("UPDATE fb_video_task SET snapshot_json=?", (json.dumps(changed),))
+                self.run_collect(LATER)
+                self.assertEqual(self.saved("2310")["status"], "conflict")
+
     def test_missing_manual_label_recovers_without_source_edits(self):
         self.manual_drama_label("", "none")
         with patch.object(fb, "identity_new", side_effect=fb.AttributionError("identity_field_invalid")):

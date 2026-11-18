@@ -2,7 +2,8 @@
 Description=Prepare complete social daily data before the 11:00 delivery
 
 [Timer]
-OnCalendar=*-*-* 10:40,50,55,58:00 Asia/Shanghai
+OnCalendar=*-*-* 09:40,50:00 Asia/Shanghai
+OnCalendar=*-*-* 10:00,10,20,30,40,50,55,58:00 Asia/Shanghai
 AccuracySec=1s
 RandomizedDelaySec=0
 Persistent=false

@@ -581,6 +581,31 @@ def _pending(site, record):
         return {}
 
 
+def _display_title_refresh(site, previous, evidence):
+    """A refreshed material label cannot invalidate an already frozen URL.
+
+    Compare every other evidence field exactly. In particular the attribution
+    title, creator, Page/material IDs and links remain immutable. This also
+    repairs only conflicts produced by the old whole-snapshot comparison.
+    """
+    if (site != "2310" or not previous or not previous["frozen_at"]
+            or previous["status"] not in {"frozen", "conflict"}
+            or (previous["status"] == "conflict" and
+                previous["error_code"] != "frozen_evidence_changed")):
+        return False
+    frozen = obj(previous["evidence_json"])
+    current = json.loads(canonical(evidence))
+    try:
+        old_material = frozen["snapshot"]["material"]
+        new_material = current["snapshot"]["material"]
+        if old_material.get("drama_name") == new_material.get("drama_name"):
+            return False
+        new_material["drama_name"] = old_material["drama_name"]
+    except (KeyError, TypeError):
+        return False
+    return current == frozen
+
+
 def _upsert_record(conn, site, record, users, now):
     record_id = record["record_id"]
     previous = conn.execute("SELECT * FROM social_facebook_identity WHERE site_id=? AND record_id=?",
@@ -598,7 +623,11 @@ def _upsert_record(conn, site, record, users, now):
         identity = obj(previous["identity_json"])
         frozen_at = previous["frozen_at"]
         frozen_evidence, frozen_hash = previous["evidence_json"], previous["evidence_hash"]
-        if previous["status"] == "conflict" or evidence_hash != frozen_hash:
+        if _display_title_refresh(site, previous, record["evidence"]):
+            # Keep the original validated identity/evidence, while publications()
+            # below independently rechecks current publication facts.
+            status, error = "frozen", ""
+        elif previous["status"] == "conflict" or evidence_hash != frozen_hash:
             status, error = "conflict", "frozen_evidence_changed"
     else:
         try:

@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 import tempfile
+import runpy
+import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -81,6 +83,35 @@ class PreparationTests(unittest.TestCase):
             self.run_cli('--prepare')
         self.assertEqual((self.root / 'prepared' / self.day / 'report.json').read_bytes(), before)
         self.assertFalse((self.root / 'delivery.sqlite3').exists())
+
+    def test_source_exception_before_quality_check_retries_real_entrypoint(self):
+        error = cli.ReportError('AI 后台记录的 campaign ID 用户归属冲突', 503)
+        entry = Path(cli.__file__).with_name('youtube_publisher_daily_report.py')
+        argv = [str(entry), '--date', self.day, '--state-dir', str(self.root), '--send']
+        with patch.object(cli, 'collect', side_effect=error), patch.object(cli, 'send_card') as send, \
+                patch.object(sys, 'argv', argv), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as caught:
+            runpy.run_path(str(entry), run_name='__main__')
+        self.assertEqual(caught.exception.code, 75)
+        send.assert_not_called()
+        failure = json.loads(next((self.root / 'failures' / self.day).glob('*.json')).read_text(encoding='utf-8'))
+        self.assertTrue(failure['retryable'])
+        self.assertEqual(failure['reason'], str(error))
+        store = SocialDeliveryStore(self.root / 'delivery.sqlite3')
+        self.assertIsNone(store.get(self.day, cli.CHAT_ID))
+        self.assertIsNone(store.batch(self.day, cli.CHAT_ID))
+        store.close()
+
+    def test_collection_exception_keeps_prepared_snapshot_and_hides_unknown_text(self):
+        self.prepare()
+        before = (self.root / 'prepared' / self.day / 'report.json').read_bytes()
+        with patch.object(cli, 'collect', side_effect=RuntimeError('private database string')), \
+                self.assertRaises(RuntimeError):
+            self.run_cli('--prepare')
+        self.assertEqual((self.root / 'prepared' / self.day / 'report.json').read_bytes(), before)
+        failure = next((self.root / 'failures' / self.day).glob('*.json')).read_text(encoding='utf-8')
+        self.assertNotIn('private database string', failure)
+        self.assertFalse(json.loads(failure)['retryable'])
 
     def test_wrong_group_or_date_cannot_be_used(self):
         self.prepare()

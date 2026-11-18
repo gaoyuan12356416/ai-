@@ -18,9 +18,21 @@ from features.social_daily_report.collector import (
 from features.social_daily_report.delivery import SocialDeliveryStore, deliver
 from features.social_daily_report.report import build_cards, payload_size, preview_html, require_complete
 from features.social_daily_report import prepared
+from features.social_analytics.report import ReportError
 from scripts.post_daily_report import ensure_storage, atomic_write
 
 CHAT_ID = "oc_7c683c5770aef2e6c84a456e52cad389"
+
+
+def collection_failure(state, day, reason, **details):
+    failure = dict(status="collection_failed", date=day, reason=reason,
+                   checked_at=datetime.now(BEIJING).isoformat(), **details)
+    folder = state / "failures" / day
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (datetime.now(BEIJING).strftime("%H%M%S-%f") + ".json")
+    atomic_write(path, json.dumps(failure, ensure_ascii=False, indent=2))
+    print(json.dumps(dict(status="collection_failed", date=day, reason=reason,
+                          diagnostic_path=str(path)), ensure_ascii=False), flush=True)
 
 
 def main(argv=None):
@@ -88,21 +100,32 @@ def main(argv=None):
                 # Preparation runs well before delivery and may finish slow,
                 # bounded batches without sharing the sender's 120-second budget.
                 options = {"query_budget_seconds": 480} if args.prepare else {}
-                report = collect(day, args.db, args.env_file, args.x_db,
-                                 args.fb_db, args.facebook_attribution_db, args.x_profile_db, **options)
+                try:
+                    report = collect(day, args.db, args.env_file, args.x_db,
+                                     args.fb_db, args.facebook_attribution_db, args.x_profile_db, **options)
+                except Exception as exc:
+                    # Collection has not claimed delivery. A source-level 503
+                    # must reach the same bounded retry path as partial quality.
+                    # Never expose arbitrary driver/config exception text.
+                    safe_reasons = {
+                        "AI 后台记录的 campaign ID 用户归属冲突",
+                        "AI 后台发布记录缺少冻结来源 ID",
+                        "AI 后台统计范围金额不守恒",
+                        "日报采集时间预算已用完",
+                    }
+                    reason = str(exc) if isinstance(exc, ReportError) and str(exc) in safe_reasons else type(exc).__name__
+                    retryable = isinstance(exc, ReportError) and exc.status == 503
+                    collection_failure(state, day, reason, retryable=retryable,
+                                       error_type=type(exc).__name__)
+                    if retryable:
+                        raise ValueError("daily_report_sources_incomplete") from exc
+                    raise
             if args.send or args.prepare:
                 try:
                     require_complete(report)
                 except ValueError as exc:
                     # Preserve safe source diagnostics before any batch is frozen.
-                    failure = dict(status="collection_failed", date=day, reason=str(exc),
-                                   quality=report["quality"], checked_at=datetime.now(BEIJING).isoformat())
-                    failed = state / "failures" / day
-                    failed.mkdir(parents=True, exist_ok=True)
-                    path = failed / (datetime.now(BEIJING).strftime("%H%M%S-%f") + ".json")
-                    atomic_write(path, json.dumps(failure, ensure_ascii=False, indent=2))
-                    print(json.dumps(dict(status="collection_failed", date=day, reason=str(exc),
-                                          diagnostic_path=str(path)), ensure_ascii=False), flush=True)
+                    collection_failure(state, day, str(exc), quality=report["quality"], retryable=True)
                     raise
             if args.prepare:
                 report["prepared_at"] = datetime.now(BEIJING).isoformat()
