@@ -153,7 +153,8 @@ def inspect_image(url, expected_sha="", expected_category="", session=None):
     from PIL import Image
     import requests
     parts = urlparse(url)
-    allowed = ("ai.yingliangads.com", "advertising-1306474899.cos.ap-hongkong.myqcloud.com")
+    allowed = ("ai.yingliangads.com", "advertising-1306474899.cos.ap-hongkong.myqcloud.com",
+               "ads-ai-1306474899.cos.ap-hongkong.myqcloud.com")
     if parts.scheme != "https" or parts.hostname not in allowed or not parts.path or parts.username:
         raise ValueError("untrusted_image_url")
     client = session or requests

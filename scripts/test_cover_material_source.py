@@ -832,10 +832,13 @@ class ImageTests(OfflineTest):
     def test_untrusted_url_hash_change_ratio_mismatch_and_http_fail(self):
         session = self.session(self.png())
         for url in ("http://ai.yingliangads.com/a.png", "https://evil.invalid/a.png",
+                    "https://another-bucket.cos.ap-hongkong.myqcloud.com/a.png",
                     "https://user:password@ai.yingliangads.com/a.png"):
             with self.subTest(url=url):
                 with self.assertRaisesRegex(ValueError, "untrusted_image_url"):
                     material.inspect_image(url, session=session)
+        url = "https://ads-ai-1306474899.cos.ap-hongkong.myqcloud.com/drama-screenshot-materials/a.jpg"
+        self.assertEqual(material.inspect_image(url, expected_category="1:1", session=session)["width"], 100)
         url = "https://ai.yingliangads.com/a.png"
         with self.assertRaisesRegex(ValueError, "image_sha_changed"):
             material.inspect_image(url, "b" * 64, session=session)
