@@ -55,14 +55,27 @@ def nav_json(path):
 
 
 def nav_script(path,commit):
-    patch=run('git','diff','--unified=1','d7dc3c6052d9490c2102956fb75e3343808f8211',commit,'--','static/quick-nav.js')
-    if b'key: "videoEditingAi"' in path.read_bytes():return path.read_bytes()
+    base='d7dc3c6052d9490c2102956fb75e3343808f8211'
+    before=run('git','show',base+':static/quick-nav.js').decode()
+    after=run('git','show',commit+':static/quick-nav.js').decode()
+    live=path.read_text(encoding='utf-8')
+    if 'key: "videoEditingAi"' in live:return path.read_bytes()
+    def block(text,start,end):
+        left=text.index(start)
+        return text[left:text.index(end,left)+len(end)]
+    signature='      items: [{ key: "videoEditing",'
+    old_normal=block(before,'    if (!normalized.some(group => group && Array.isArray(group.items) &&\n        group.items.some(item => item && item.key === "videoEditing"',
+                     '} else normalized.push(JSON.parse(JSON.stringify(editorDefault)));\n    }')
+    new_normal=block(after,'    const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");',
+                     '      editorGroup.items.push(...missingEditorItems.map(item => ({...item})));\n    }')
+    href='    videoEditing: "/video-editing.html",'
+    for old,new in [(block(before,signature,'enabled: true }],'),block(after,signature,'enabled: true }],')),
+                    (href,block(after,href,'    videoEditingAi: "/video-editing-ai.html",')),(old_normal,new_normal)]:
+        if live.count(old)!=1:raise ValueError('cannot isolate menu change in '+str(path))
+        live=live.replace(old,new,1)
     with tempfile.TemporaryDirectory() as temp:
-        target=Path(temp)/'static/quick-nav.js'
-        target.parent.mkdir()
-        target.write_bytes(path.read_bytes())
-        subprocess.run(['git','apply','--unidiff-zero','--whitespace=nowarn','-'],
-                       cwd=temp,input=patch,check=True)
+        target=Path(temp)/'nav.js'
+        target.write_bytes(live.encode())
         run('node','--check',str(target))
         return target.read_bytes()
 
