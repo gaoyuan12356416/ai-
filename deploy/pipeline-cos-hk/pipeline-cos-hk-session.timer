@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the COS worker's short-lived credentials
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

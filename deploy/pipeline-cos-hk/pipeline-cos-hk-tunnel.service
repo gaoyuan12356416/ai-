@@ -1,0 +1,13 @@
+[Unit]
+Description=Private Unix socket for COS session refresh
+After=network-online.target
+
+[Service]
+RuntimeDirectory=pipeline-cos-hk
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/ssh -NT -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/x-post-media-repair-tunnel/known_hosts -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -i /etc/x-post-media-repair-tunnel/id_ed25519_cpu_tunnel -L /run/pipeline-cos-hk/session.sock:/run/pipeline-cos-issuer.sock root@43.166.187.96
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

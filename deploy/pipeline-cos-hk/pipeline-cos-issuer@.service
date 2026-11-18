@@ -1,0 +1,8 @@
+[Unit]
+Description=Read current scoped COS session
+
+[Service]
+ExecStart=/usr/bin/cat /etc/pipeline-cos-cloud/ci-session.json
+StandardInput=socket
+StandardOutput=socket
+NoNewPrivileges=yes

@@ -1,0 +1,10 @@
+[Unit]
+Description=Serve the current scoped COS session over a root-only Unix socket
+
+[Socket]
+ListenStream=/run/pipeline-cos-issuer.sock
+SocketMode=0600
+Accept=yes
+
+[Install]
+WantedBy=sockets.target

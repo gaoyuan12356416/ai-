@@ -1,0 +1,20 @@
+[Unit]
+Description=Hong Kong COS preparation worker
+Wants=network-online.target pipeline-node-hk-gpu-tunnel.service pipeline-cos-hk-session.timer
+After=network-online.target pipeline-node-hk-gpu-tunnel.service
+
+[Service]
+User=pipeline-cos
+WorkingDirectory=/data/pipeline-cos-hk/current
+ExecStart=/opt/pipeline-dispatch/venvs/68407465a58d99f9dd2c9a14da000f167115f804/bin/python -m features.pipeline_dispatch.cloud_node --config /etc/pipeline-cos-cloud/worker.json
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=infinity
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

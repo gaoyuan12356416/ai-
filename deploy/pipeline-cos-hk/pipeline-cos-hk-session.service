@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the HK COS worker's scoped session
+Wants=pipeline-cos-hk-tunnel.service
+After=pipeline-cos-hk-tunnel.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /data/pipeline-cos-hk/current/deploy/pipeline-cos-hk/session.py
+UMask=0077
