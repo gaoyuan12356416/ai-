@@ -64,6 +64,11 @@
                     <label class="required" for="templateName">模板名称</label>
                     <input id="templateName" maxlength="100" autocomplete="off" placeholder="例如：英语剧 ROAS 优先" required />
                   </div>
+                  <div class="field span-2">
+                    <label id="materialProductsLabel">素材产品（可多选）</label>
+                    <div id="materialProducts" role="group" aria-labelledby="materialProductsLabel"></div>
+                    <span class="helper">默认 DramaWave，按所选产品范围筛选素材。</span>
+                  </div>
                   <div class="field">
                     <label>剧语言</label>
                     <span>读取 X 账户设置</span>
@@ -123,11 +128,6 @@
                 <div class="notice warning">
                   <div class="notice-mark">!</div>
                   <div><strong>X 发布不限制剧黑名单。</strong>筛选和最终冻结均忽略剧黑名单；仍会排除资源黑名单命中的素材，以及本画像流程已保留或发布过的素材（防重独立于原流程）。历史素材永久防重继续生效。</div>
-                </div>
-                <div class="field" style="margin-bottom:15px">
-                  <label id="materialProductsLabel">素材产品（可多选）</label>
-                  <div id="materialProducts" role="group" aria-labelledby="materialProductsLabel"></div>
-                  <span class="helper">默认 DramaWave，按所选产品范围筛选素材。</span>
                 </div>
                 <div class="compact-grid" style="margin-bottom: 15px;">
                   <div class="field">
