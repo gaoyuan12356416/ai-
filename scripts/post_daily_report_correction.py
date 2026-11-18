@@ -65,7 +65,7 @@ def correction_card(report, compact=False):
     card = (build_compact_card if compact else build_card)(visible)
     if channel == "layout":
         card["header"]["title"]["content"] += "（表格版补发）"
-        card["elements"][0]["text"]["content"] += "\n本次补发沿用原播报的统计数字。"
+        card["elements"].insert(0, {"tag": "div", "text": {"tag": "lark_md", "content": "本次补发沿用原播报的统计数字。"}})
         return card
     if channel == "FB":
         card["header"]["title"]["content"] = "%s｜FB Post 发布日报" % report["date"]

@@ -46,19 +46,18 @@ class ReportTests(unittest.TestCase):
         for key in ('expected', 'published', 'late', 'missing'):
             self.assertIsNone(sums[key])
         report = {"date": "2026-09-17", "channels": [{"channel": "TT", "rows": rows}]}
-        full = json.dumps(build_card(report), ensure_ascii=False)
-        self.assertIn('当日计划已发 未知', full)
-        self.assertNotIn('当日计划已发 0', full)
-        compact = build_compact_card(report)
-        self.assertIn('当日计划已发 未知', json.dumps(compact, ensure_ascii=False))
-        table = next(e for e in compact['elements'] if e['tag'] == 'table')
-        self.assertEqual([c['display_name'] for c in table['columns']], ['发布来源', '应发', '当日已发', '补发', '未完成'])
-        self.assertEqual(list(table['rows'][0].values()), ['自动模板·数据不可用', '未知', '未知', '未知', '未知'])
+        for card in (build_card(report), build_compact_card(report)):
+            metric = card['elements'][0]['columns'][1]['elements'][0]['content']
+            self.assertIn('**未知**', metric)
+            source = next(e for e in card['elements'] if e['tag'] == 'collapsible_panel')
+            text = json.dumps(source, ensure_ascii=False)
+            self.assertIn('自动模板·数据不可用：成功 **未知** / 应发 未知', text)
+            self.assertIn('其他来源：成功 **1** / 应发 1', text)
 
     def test_oversize_daily_entrypoint_keeps_source_tables_and_fb_outcomes(self):
         channels = []
         for name in ('TT', 'FB', 'X'):
-            rows = [{'source': '%s<%s>' % (name, index), 'expected': 8, 'published': 4,
+            rows = [{'source': '%s<%s>' % (name, index), 'label': '来源<%s>' % index, 'expected': 8, 'published': 4,
                      'late': 1, 'failed': 1, 'pending': 1, 'unknown': 1,
                      'reasons': [{'count': 1, 'reason': '核对任务记录' * 24}]} for index in range(12)]
             channel = {'channel': name, 'rows': rows}
@@ -73,13 +72,13 @@ class ReportTests(unittest.TestCase):
             folder = Path(temp) / 'previews' / report['date']
             card = json.loads((folder / 'card.json').read_text(encoding='utf-8'))
             preview = (folder / 'preview.html').read_text(encoding='utf-8')
-        tables = [e for e in card['elements'] if e['tag'] == 'table']
-        self.assertEqual([len(t['rows']) for t in tables], [12, 12, 12])
-        self.assertEqual(list(tables[0]['rows'][-1].values()), ['TT<11>', '8', '4', '1', '3'])
-        self.assertEqual(list(tables[1]['rows'][-1].values()), ['FB<11>', '8', '5', '1', '1', '1'])
-        self.assertEqual(tables[2]['columns'][-1]['display_name'], '未完成')
-        self.assertIn('X&lt;11&gt;', preview)
-        self.assertNotIn('X<11>', preview)
+        sources = next(e for e in card['elements'] if e['tag'] == 'collapsible_panel')
+        self.assertEqual(len(sources['elements']), 3)
+        for channel in sources['elements']:
+            self.assertEqual(channel['content'].count('成功 **5** / 应发 8 · 未完成 3'), 12)
+            self.assertIn('来源&lt;11&gt;', channel['content'])
+        self.assertIn('<details>', preview)
+        self.assertNotIn('来源<11>', preview)
 
     def test_channel_failure_isolated_and_visible(self):
         with patch("features.post_daily_report.report.importlib.import_module", side_effect=RuntimeError("secret-must-not-leak")):

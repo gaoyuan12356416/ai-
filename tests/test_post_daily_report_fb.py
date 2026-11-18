@@ -182,8 +182,8 @@ class FBReportTests(unittest.TestCase):
         for card in (build_card(report),build_compact_card(report)):
             text = json.dumps(card,ensure_ascii=False)
             self.assertIn("确认成功 7",text)
-            self.assertIn("明确失败 0",text)
-            self.assertNotIn("未完成",text)
+            self.assertIn("失败 0 · 受阻 4",text)
+            self.assertIn("未完成 4",text)
 
     def test_missing_frozen_frequency_scope_stays_unknown(self):
         self.frequency_schema()
