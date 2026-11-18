@@ -89,7 +89,7 @@ def dto(record):
 def submit(runtime, actor, body):
     require(isinstance(body, dict) and set(body) == {'source_ids'}, 'smart_sources_invalid', '请提交素材编号列表')
     snapshots = source_snapshots(runtime, actor, body['source_ids'])
-    fingerprint = hashlib.sha256(encode(['smart-v1', model_config(), [(s['source_id'], s['_stamp'], s['series_code'])
+    fingerprint = hashlib.sha256(encode(['smart-v2-emotion', model_config(), [(s['source_id'], s['_stamp'], s['series_code'])
                                                                      for s in snapshots]]).encode()).hexdigest()
     now = int(time.time())
     who = owner(actor)

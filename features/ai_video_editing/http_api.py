@@ -71,7 +71,7 @@ class Handler(platform.DramaMaterialHandler):
         check(isinstance(value,dict),'invalid_json','请求应为 JSON 对象')
         return value
 
-    def stream(self,path,name,digest='',download=False):
+    def stream(self,path,name,digest='',download=False,mime='video/mp4'):
         path=Path(path)
         check(path.is_file(),'media_missing','文件暂不可读取',404)
         size=path.stat().st_size
@@ -80,7 +80,7 @@ class Handler(platform.DramaMaterialHandler):
             self.send_response(416);self.send_header('Content-Range',f'bytes */{size}');self.end_headers();return
         partial=bool(self.headers.get('Range'))
         self.send_response(206 if partial else 200)
-        self.send_header('Content-Type','video/mp4')
+        self.send_header('Content-Type',mime)
         self.send_header('Cache-Control','private, no-store')
         self.send_header('Accept-Ranges','bytes')
         self.send_header('Content-Length',str(end-start+1))
@@ -106,6 +106,14 @@ class Handler(platform.DramaMaterialHandler):
         if path=='/internal/claim' and self.command=='POST':
             self.payload()
             return self.reply(200,{'item':self.runtime.claim()})
+        sound=re.fullmatch(r'/internal/tasks/(at_[0-9a-f]{32})/audio/(ag_[0-9a-f]{32})',path)
+        if sound and self.command=='GET':
+            from .composition import audio
+            with self.runtime.db() as db:
+                job=self.runtime.leased(db,sound[1],self.headers.get('X-Edit-Lease',''))
+                check(json.loads(job['unit_data']).get('composition',{}).get('speech_id')==sound[2], 'not_found','音轨不属于此任务',404)
+            file,digest=audio(self.runtime,sound[2],job['owner'])
+            return self.stream(file,'voice.wav',digest,mime='audio/wav')
         m=re.fullmatch(r'/internal/tasks/(at_[0-9a-f]{32})/(sources/(aa_[0-9a-f]{32})|heartbeat|complete|fail|receipt)',path)
         check(m,'not_found','接口不存在',404)
         tid,action,sid=m.groups()
@@ -156,6 +164,12 @@ class Handler(platform.DramaMaterialHandler):
         if verb in ('POST','PATCH'):
             if not self._require_same_origin_json():return
             body=self.payload()
+        if path.startswith('/studio/'):
+            from .studio import dispatch
+            response=dispatch(rt,actor,verb,path[len('/studio'):],body,params)
+            if 'file' in response:
+                return self.stream(response['file'],response['name'],download=True,mime='application/zip')
+            return self.reply(200,response)
         if path=='/assets' and verb=='GET':
             return self.reply(200,rt.assets(actor,q('q'),max(1,min(int(q('limit','50')),200)),max(0,int(q('offset','0'))),q('series')))
         if path=='/series' and verb=='GET':return self.reply(200,rt.series(actor))
@@ -224,6 +238,8 @@ class Handler(platform.DramaMaterialHandler):
 
 def main():
     rt=Runtime(os.getenv('AI_VIDEO_EDITING_ROOT','/mnt/data-disk/ai-video-editing'))
+    from .studio import start
+    start(rt)
     with ThreadingHTTPServer(('127.0.0.1',18983),Handler) as http:
         http.runtime=rt
         http.worker_token=Path('/etc/ai-video-editing/worker.token').read_text().strip()

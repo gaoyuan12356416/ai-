@@ -170,8 +170,14 @@ class Runtime:
                 clean.append({'id':str(c.get('id') or 'clip_'+str(j))[:128],'source_id':sid,'start_ms':start,'end_ms':end,
                               'fit':c.get('fit','contain'),'mirror':c.get('mirror',False),'mute':c.get('mute',False),'transition':'cut',
                               'zoom_percent':zoom})
-            result.append({'id':uid,'title':str(u.get('title') or '作品 '+str(i+1))[:200],
-                           'series_code':str(u.get('series_code',''))[:180],'clips':clean})
+            item={'id':uid,'title':str(u.get('title') or '作品 '+str(i+1))[:200],
+                  'series_code':str(u.get('series_code',''))[:180],'clips':clean}
+            if u.get('composition') is not None:
+                from .composition import normalize, audio
+                item['composition']=normalize(u['composition'],sum(c['end_ms']-c['start_ms'] for c in clean))
+                if item['composition']['speech_id']:
+                    audio(self,item['composition']['speech_id'],owner(actor))
+            result.append(item)
         return result
 
     def receipt(self,actor,kind,payload,fn):
