@@ -76,10 +76,9 @@ def prepare(folder):
    (folder/('tests-'+lane+'-'+str(i)+'.txt')).write_text(result.stdout+result.stderr)
    if result.returncode:print(result.stdout+result.stderr);raise RuntimeError('candidate_tests_failed:'+lane)
   print(lane+' candidate tests passed',flush=True)
+ # The main API proxies these editors to the independent owners. Its retired
+ # source modules are not executing this path; preserve them and their imports.
  main=Path('/root/drama_material_service')
- for name in [SHARED,*FILES['x'],*FILES['fb']]:
-  path=main/name;data=overlay(folder,name,path.read_bytes() if path.exists() else b'')
-  compile(data,name,'exec');remember(folder,info,path,data)
  for root in [main,Path('/usr/share/nginx/html'),ops.LANES['x'][0],ops.LANES['fb'][0]]:
   for name in STATIC:
    path=root/(Path(name).name if root.name=='html' else name)
@@ -96,6 +95,9 @@ def switch(folder,rollback=False):
   current=ops.digest(name) if Path(name).exists() else ''
   assert current in (row['before'],row['after']),'preserve_later_file:'+name
  action='rollback' if rollback else 'apply'
+ if rollback:
+  for lane,h in info['config_before'].items():
+   assert ops.config_hash(ops.LANES[lane][4],lane)==h,'templates_changed_requires_forward_fix:'+lane
  for lane in FILES:
   ops.run(sys.executable,ops.HEALTH,'snapshot','--lane',lane,'--output',folder/(action+'-schedulers-before-'+lane+'.json'))
  for name,row in info['files'].items():
