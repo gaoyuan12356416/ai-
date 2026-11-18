@@ -151,7 +151,9 @@ def capacity_payload(raw, actor):
     if any(k in raw for k in ("host_id", "stage", "max_workers", "min_pending", "scaling_mode")):
         if not valid_host_id(raw.get("host_id")) or raw.get("stage") not in STAGES:
             raise MonitorError("invalid_request", "服务器或执行阶段无效")
-        if "max_workers" in raw and (type(raw["max_workers"]) is not int or not 0 <= raw["max_workers"] <= 64):
+        cloud_prepare = (raw.get("host_id"), raw.get("stage")) == ("cos-cloud", "prepare")
+        if "max_workers" in raw and (type(raw["max_workers"]) is not int or raw["max_workers"] < 0
+                                     or (not cloud_prepare and raw["max_workers"] > 64)):
             raise MonitorError("invalid_request", "进程数无效")
     if "global_publish_limit" in raw:
         if type(raw["global_publish_limit"]) is not int or raw["global_publish_limit"] < 1:

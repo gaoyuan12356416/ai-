@@ -19,7 +19,7 @@ def cloud_capability(cap):
 
 def queue_limit(metrics):
     limit = metrics.get("queue_limit")
-    return min(64, limit) if metrics.get("queue_ready") is True and type(limit) is int and limit > 0 else 0
+    return limit if metrics.get("queue_ready") is True and type(limit) is int and limit > 0 else 0
 
 
 def cloud_health(node, stage):

@@ -99,6 +99,22 @@ class CloudRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(DispatchError, "enrollment_scope_mismatch"):
             self.store.consume_enrollment(enrollment["token"], "cos-cloud")
 
+    def test_actual_cloud_quota_above_64_controls_admission(self):
+        self.store.register_node("cos-cloud", self.caps, {"queue_ready": True, "queue_limit": 65})
+        self.pool("cos-cloud", 500, min_pending=0)
+        for index in range(66):
+            self.offer(index)
+            self.store.worker_heartbeat("cos-cloud", "quota-" + str(index), "prepare")
+        for index in range(65):
+            self.assertIsNotNone(self.claim(worker="quota-" + str(index))["job"])
+        self.assertEqual(self.claim(worker="quota-65")["idle_reason"], "cos_queue_limit")
+        self.store.set_capacity(dict(expected_version=self.store.config()["version"], host_id="cos-cloud",
+                                     stage="prepare", scaling_mode="auto"), {"is_admin": True})
+        self.store.register_node("cos-cloud", self.caps, {"queue_ready": True, "queue_limit": 100})
+        self.store.adapt_capacity()
+        pool = self.store.config()["hosts"]["cos-cloud"]["prepare"]
+        self.assertEqual((pool["ceiling"], pool["target"]), (500, 100))
+
     def test_three_nodes_race_and_legacy_rollback(self):
         self.pool("cos-cloud", 1, min_pending=0)
         offers = [("cos-cloud","c1"),("cpu-main","cpu"),("hk-gpu","gpu")]

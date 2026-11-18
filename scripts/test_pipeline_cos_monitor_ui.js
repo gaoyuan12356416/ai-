@@ -46,10 +46,10 @@ async function main() {
     const form=page.locator('form[data-host="cos-cloud"][data-stage="prepare"]');
     await form.locator('[name="min_pending"]').fill("120");
     await form.locator('[name="scaling_mode"]').selectOption("auto");
-    await form.locator('[name="max_workers"]').fill("3");
+    await form.locator('[name="max_workers"]').fill("100");
     await form.getByText("保存",{exact:true}).click();
     await page.waitForFunction(()=>document.querySelector("#pmCapacityVersion").textContent.includes("8"));
-    assert.deepEqual(writes[0],{expected_version:7,host_id:"cos-cloud",stage:"prepare",max_workers:3,scaling_mode:"auto",min_pending:120});
+    assert.deepEqual(writes[0],{expected_version:7,host_id:"cos-cloud",stage:"prepare",max_workers:100,scaling_mode:"auto",min_pending:120});
     await form.getByText("停止接单",{exact:true}).click();
     await page.waitForFunction(()=>document.querySelector("#pmCapacityVersion").textContent.includes("9"));
     assert.equal(writes[1].max_workers,0);
