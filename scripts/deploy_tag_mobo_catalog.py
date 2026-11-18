@@ -31,7 +31,7 @@ def prepare(folder):
  folder.mkdir(parents=True,exist_ok=False,mode=0o700)
  info=dict(commit=commit,root=str(root),files={},status='preparing',
            pids={u:ops.run('systemctl','show',u,'-p','MainPID','--value') for u in UNITS},
-           triggers={u:ops.run('systemctl','is-active',u) for u in TRIGGERS})
+           triggers={u:ops.run('systemctl','show',u,'-p','ActiveState','--value') for u in TRIGGERS})
  ops.save(folder/'manifest.json',info)
  candidate=folder/'candidate'
  shutil.copytree(root,candidate,symlinks=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc','.git'))
@@ -44,7 +44,13 @@ def prepare(folder):
    assert before==expected,'live_file_changed:'+name
   else:assert not before or before==after,'module_collision:'+name
   p=candidate/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(after)
-  compile(after,name,'exec');remember(folder,info,dest,after)
+  compile(after,name,'exec')
+  if dest.parent.exists():remember(folder,info,dest,after)
+  else:
+   next_file=folder/(str(len(info['files']))+'.next');next_file.write_bytes(after)
+   metadata=(root/'features').stat()
+   info['files'][str(dest)]=dict(before='',after=ops.digest(next_file),backup='',next=str(next_file),
+                               existed=False,mode=0o644,uid=metadata.st_uid,gid=metadata.st_gid)
  for name in ['test_tag_mobo_catalog','test_auto_material_products','test_x_auto_post_selector','test_x_auto_post_validation']:
   shutil.copy2(SOURCE/'scripts'/(name+'.py'),candidate/'scripts'/(name+'.py'))
  for cmd in [[sys.executable,'-B','-m','unittest','scripts.test_tag_mobo_catalog','scripts.test_x_auto_post_selector','scripts.test_x_auto_post_validation'],
@@ -80,11 +86,11 @@ def apply(folder,rollback=False):
 def verify(folder):
  info=json.loads((folder/'manifest.json').read_text())
  for unit in UNITS:
-  assert ops.run('systemctl','is-active',unit)=='active'
+  assert ops.run('systemctl','show',unit,'-p','ActiveState','--value')=='active'
   assert ops.run('systemctl','show',unit,'-p','MainPID','--value')!=info['pids'][unit],unit+':old_pid'
  for unit,before in info['triggers'].items():
-  if before=='active' and ops.run('systemctl','is-active',unit)!='active':ops.run('systemctl','start',unit)
-  assert ops.run('systemctl','is-active',unit)==before,unit
+  if before=='active' and ops.run('systemctl','show',unit,'-p','ActiveState','--value')!='active':ops.run('systemctl','start',unit)
+  assert ops.run('systemctl','show',unit,'-p','ActiveState','--value')==before,unit
  for port in ('18843','8812','8898'):
   # Native/gateway port health is checked from the unit listener separately.
   if port=='18843':ops.run('curl','--max-time','5','-fsS','http://127.0.0.1:'+port+'/health')
