@@ -12,6 +12,7 @@ from features.x_auto_posts.selection_recovery import (
     ClaimLifetime, execution_available, file_lock, recover_proven_selection)
 from scripts.x_auto_selection_watchdog import external_proof
 from features.pipeline_dispatch.drain_diagnostics import read_snapshot
+from features.pipeline_dispatch.drain_gateway import authenticate
 
 
 class RecoveryTests(unittest.TestCase):
@@ -128,6 +129,23 @@ class ExternalProofTests(unittest.TestCase):
             path = Path(folder) / 'snapshot.json'
             path.write_text(json.dumps({'checked_at': '2020-01-01T00:00:00+00:00', 'holds': []}))
             self.assertTrue(read_snapshot(path)['stale'])
+
+
+class DiagnosticAuthTests(unittest.TestCase):
+    def test_missing_cookie_does_not_read_snapshot_or_call_auth(self):
+        with patch('http.client.HTTPConnection') as connection:
+            self.assertEqual(authenticate(''), 401)
+            connection.assert_not_called()
+
+    def test_only_existing_authenticated_admin_is_allowed(self):
+        for auth, expected in [({}, 401),
+                ({'authenticated': True, 'user': {'user_id': 'u', 'is_admin': False}}, 403),
+                ({'authenticated': True, 'user': {'user_id': 'u', 'is_admin': True}}, 200)]:
+            with self.subTest(expected=expected), patch('http.client.HTTPConnection') as connection:
+                response = connection.return_value.getresponse.return_value
+                response.status = 200
+                response.read.return_value = json.dumps(auth).encode()
+                self.assertEqual(authenticate('existing-cookie'), expected)
 
 
 if __name__ == '__main__':

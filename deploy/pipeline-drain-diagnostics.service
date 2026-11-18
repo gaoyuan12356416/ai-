@@ -1,0 +1,20 @@
+[Unit]
+Description=Read-only authenticated pipeline drain diagnostics
+After=network.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+User=nobody
+WorkingDirectory=/opt/x-selection-recovery/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m features.pipeline_dispatch.drain_gateway
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

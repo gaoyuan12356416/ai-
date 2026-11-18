@@ -2,11 +2,10 @@
 """Scoped install after the tag control API has stopped gracefully.
 
 Source must be a fetched GitHub release. No queue rows or receipt files change.
-The capacity gateway GET method and HTML script hook are patched in place so
-concurrent capacity-setting changes are retained. Rollback preserves all ledgers.
+The independent diagnostics gateway does not share the capacity release.
+Only an HTML script hook is added. Rollback preserves all ledgers.
 """
 import argparse
-import ast
 import hashlib
 import json
 import os
@@ -20,12 +19,6 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def method(source, cls, name):
-    tree = ast.parse(source)
-    return next(f for c in tree.body if isinstance(c, ast.ClassDef) and c.name == cls
-                for f in c.body if isinstance(f, ast.FunctionDef) and f.name == name)
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', type=Path, required=True)
@@ -36,13 +29,12 @@ def main():
     assert subprocess.check_output(['systemctl', 'show', 'x-tag-auto.service', '-p', 'MainPID', '--value'], text=True).strip() == '0'
     assert subprocess.check_output(['systemctl', 'show', 'x-tag-auto-runner.service', '-p', 'MainPID', '--value'], text=True).strip() == '0'
     tag = Path('/opt/x-tag-publisher/current').resolve()
-    gateway = Path('/opt/pipeline-capacity-gateway/current').resolve()
     expected = {'core.py': '684c8556426e4bbed443ca51e2466597871ce91e27e14bb67116d6706ab328a5',
                 'publisher.py': 'e835da1a464c14f78f71ed6b034c136599a076fe7c143de7b3c9cd716a254c39'}
     for name, sha in expected.items():
         assert digest(tag / 'features/x_auto_posts' / name) == sha, 'tag_runtime_changed:' + name
     backup.mkdir(parents=True, exist_ok=False)
-    manifest = {'source': str(source), 'tag': str(tag), 'gateway': str(gateway), 'files': []}
+    manifest = {'source': str(source), 'tag': str(tag), 'files': []}
 
     def install(path, data, mode=0o644):
         path = Path(path)
@@ -66,23 +58,9 @@ def main():
     for name in ('selection_recovery.py', 'core.py', 'publisher.py'):
         relative = Path('features/x_auto_posts') / name
         install(tag / relative, (source / relative).read_bytes())
-    for name in ('drain_diagnostics.py', 'maintenance.py'):
-        relative = Path('features/pipeline_dispatch') / name
-        if name == 'maintenance.py' and (gateway / relative).exists():
-            continue
-        install(gateway / relative, (source / relative).read_bytes())
-    relative = Path('features/pipeline_dispatch/capacity_gateway.py')
-    current = (gateway / relative).read_text()
-    replacement = (source / relative).read_text()
-    old, new = method(current, 'Handler', 'do_GET'), method(replacement, 'Handler', 'do_GET')
-    old_lines, new_lines = current.splitlines(True), replacement.splitlines(True)
-    assert 'drain-diagnostics' not in ''.join(old_lines[old.lineno - 1:old.end_lineno])
-    assert 'self.path == "/health"' in ''.join(old_lines[old.lineno - 1:old.end_lineno])
-    old_lines[old.lineno - 1:old.end_lineno] = new_lines[new.lineno - 1:new.end_lineno]
-    install(gateway / relative, ''.join(old_lines).encode())
     # Existing admin Cookie authentication is reused by this exact route.
     install('/etc/nginx/default.d/pipeline-drain-diagnostics.conf', b'''location = /api/pipeline-monitor/drain-diagnostics {
-    proxy_pass http://127.0.0.1:18960;
+    proxy_pass http://127.0.0.1:18961;
     proxy_set_header Host $host;
     proxy_connect_timeout 5s;
     proxy_read_timeout 10s;
@@ -98,7 +76,7 @@ def main():
         assert 'pipeline-drain-diagnostics.js' not in text
         assert '</body>' in text
         install(html, text.replace('</body>', hook + '\n</body>').encode())
-    for unit in ('x-tag-selection-watchdog.service', 'x-tag-selection-watchdog.timer'):
+    for unit in ('x-tag-selection-watchdog.service', 'x-tag-selection-watchdog.timer', 'pipeline-drain-diagnostics.service'):
         install(Path('/etc/systemd/system') / unit, (source / 'deploy' / unit).read_bytes())
     install('/etc/systemd/system/x-tag-auto.service.d/70-selection-recovery.conf', b'''[Service]
 Environment=X_AUTO_EXECUTION_LOCK_DIR=/mnt/data-disk/x-tag-publisher/auto/execution-locks
