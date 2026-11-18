@@ -45,7 +45,7 @@ def mysql(statement):
                SQL_GATE_JOB_NAME="x-tag-selection-metrics", SQL_GATE_RETRY_DELAYS_SECONDS="",
                SQL_GATE_EXEC_TIMEOUT_SECONDS="240")
     env.pop("SQL_GATE_BYPASS", None)
-    client = ["/usr/bin/mysql", "--no-defaults", "--protocol=TCP", "--host=101.32.56.53",
+    client = ["/usr/bin/mysql", "--protocol=TCP", "--host=101.32.56.53",
               "--port=63350", "--user=" + env["X_AUTO_POST_MYSQL_USER"], "--compress",
               "--batch", "--raw", "--quick", "--skip-column-names", "--skip-reconnect",
               "--connect-timeout=5", "--default-character-set=utf8mb4"]
