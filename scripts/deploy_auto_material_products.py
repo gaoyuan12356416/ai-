@@ -36,6 +36,13 @@ def overlay(folder,name,live):
  before=original(name);live=live.replace(b'\r\n',b'\n')
  if live==before:return after
  if name.endswith('.html'):
+  if name=='static/fb-auto-publish-template.html':
+   # The older runtime copy differs only in the helper text for this replaced
+   # field. Replace the reviewed field block, preserving all surrounding HTML.
+   field=rb'<label class="required" for="materialProduct">.*?</span>'
+   block=re.search(field,before,re.S)
+   assert block and len(re.findall(field,live,re.S))==1,'material_field_ambiguous'
+   live=re.sub(field,lambda _:block.group(0),live,flags=re.S)
   asset=Path(name).stem+'.js'
   pattern=rb'(/'+re.escape(asset.encode())+rb'\?v=)[^"\s]+'
   old_version=re.search(pattern,before)
