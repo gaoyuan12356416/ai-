@@ -59,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = int(os.environ.get("PIPELINE_CAPACITY_GATEWAY_PORT", "18847"))
+    port = int(os.environ.get("PIPELINE_CAPACITY_GATEWAY_PORT", "18960"))
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
 
