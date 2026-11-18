@@ -47,11 +47,22 @@ class CloudNode:
         self.next_register = 0
         self.target = 0
         self.futures = {}
-        self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+        self.worker_limit = 1
+        self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=self.worker_limit)
+        self.previous_workers = []
         self.delivery_worker = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.pending_delivery = None
         self.next_delivery = 0
         self.idle_reason = "awaiting_assignment"
+
+    def ensure_worker_capacity(self, limit):
+        if type(limit) is not int or limit <= self.worker_limit:
+            return
+        previous = self.workers
+        self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=limit)
+        self.worker_limit = limit
+        previous.shutdown(wait=False)
+        self.previous_workers.append(previous)
 
     def work(self, row):
         local_id, job = row["identity"], json.loads(row["job"])
@@ -145,6 +156,7 @@ class CloudNode:
                     self.ledger.postpone(key, 15)
         if now >= self.next_register:
             metrics = self.executor.jobs.health()
+            self.ensure_worker_capacity(metrics.get("queue_limit"))
             if now < self.backoff_until:
                 metrics["queue_ready"] = False
             admitted = self.client.post("nodes/register", {"node_id":"cos-cloud","capabilities":self.caps,"metrics":metrics})
@@ -152,7 +164,7 @@ class CloudNode:
             self.next_register = now + 10
         for row in self.ledger.due():
             key = row["identity"]
-            if key not in self.futures and len(self.futures) < 64:
+            if key not in self.futures and len(self.futures) < self.worker_limit:
                 self.futures[key] = self.workers.submit(self.work, row)
         if len(self.futures) >= self.target or now < self.backoff_until:
             return
@@ -186,6 +198,8 @@ class CloudNode:
                 self.stopping.wait(2)
         finally:
             self.workers.shutdown(wait=True)
+            for previous in self.previous_workers:
+                previous.shutdown(wait=True)
             self.delivery_worker.shutdown(wait=True)
             self.instance.close()
 
