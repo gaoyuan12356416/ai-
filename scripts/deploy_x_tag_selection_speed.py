@@ -80,8 +80,10 @@ def main():
             assert Path('/opt/x-tag-publisher/current').resolve() == base
             assert all(sha(base / f) == h for f,h in manifest['base_hashes'].items()), 'base_changed'
             settings = {
-                API: '[Service]\nEnvironment=X_AUTO_POST_WORKER_COUNT=4\nEnvironment=X_TAG_SELECTION_BASE=' + str(base) + '\nExecStart=\nExecStart=/usr/bin/python3 ' + str(source / 'scripts/x_tag_selection_service.py') + '\n',
-                RUNNER: '[Service]\nEnvironment=X_AUTO_POST_WORKER_COUNT=4\n'}
+                # EnvironmentFile overrides Environment, so append the scoped
+                # non-secret file after the original publisher environment.
+                API: '[Service]\nEnvironmentFile=' + str(source / 'deploy/x-tag-selection-speed.env') + '\nEnvironment=X_TAG_SELECTION_BASE=' + str(base) + '\nExecStart=\nExecStart=/usr/bin/python3 ' + str(source / 'scripts/x_tag_selection_service.py') + '\n',
+                RUNNER: '[Service]\nEnvironmentFile=' + str(source / 'deploy/x-tag-selection-speed.env') + '\n'}
             for unit, data in settings.items():
                 target = DROPINS[unit]; target.parent.mkdir(parents=True, exist_ok=True)
                 tmp = target.with_suffix('.new'); tmp.write_text(data); tmp.chmod(0o644); tmp.replace(target)
