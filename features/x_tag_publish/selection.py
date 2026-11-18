@@ -76,6 +76,10 @@ class ProfileSelector(TwoStageSelector):
         return super()._eligible_materials(request, drama, rows, blacklist, metrics, rejection_counts)
 
     def _select(self, request, *, reserve):
+        from .material_catalog import for_request
+        selector = for_request(self, request)
+        if selector is not self:
+            return selector._select(request, reserve=reserve)
         try:
             from features.hit_publish import future_scope
             get_run = getattr(self._run_store, 'get_run', None)

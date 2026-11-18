@@ -216,6 +216,7 @@ class DramaSourceRow:
     release_status: int
     name: str = ""
     app: str = ""
+    catalog: str = "dramawave"
 
 
 @dataclass(frozen=True)

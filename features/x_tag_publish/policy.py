@@ -146,7 +146,7 @@ class Decision:
 
 def catalog_labels(source, dramas):
     """Exact-version classifications shared with income portraits."""
-    ids = [d.content_id for d in dramas]
+    ids = [d.content_id for d in dramas if getattr(d, "catalog", "dramawave") == "dramawave"]
     if not ids:
         return {}
     factory = getattr(source, 'connection_factory', None)

@@ -60,6 +60,7 @@ _VALIDATED_PUBLIC_TEXT_LIMITS = {
     "description": 4096,
     "drama_name": 500,
     "material_tag": 255,
+    "source_provider": 32,
 }
 
 
@@ -411,6 +412,7 @@ class DramaCandidate:
     deploy_time: int
     name: str
     metrics: MetricTotals
+    catalog: str = "dramawave"
 
 
 @dataclass(frozen=True)
@@ -637,6 +639,7 @@ def _object_mapping(value: Any) -> Optional[Dict[str, Any]]:
 def _drama_snapshot(item: DramaCandidate) -> Dict[str, Any]:
     return {
         "content_id": item.content_id,
+        "catalog": item.catalog,
         "series_code": item.series_code,
         "language": item.language,
         "resource_type_v2": item.resource_type_v2,
@@ -721,13 +724,16 @@ class TwoStageSelector:
         allowed_types = set(request.rules.drama.resource_types)
         grouped: Dict[str, List[DramaSourceRow]] = {}
         for row in rows:
+            mobo = row.catalog == "moboreels"
             if (
-                row.app_id != self.app_id
+                (not mobo and row.app_id != self.app_id)
+                or (mobo and (row.app_id != 0 or window or allowed_types))
+                or row.catalog not in {"dramawave", "moboreels"}
                 or row.release_status != 1
                 or row.language != language
-                or row.deploy_time <= 0
+                or (not mobo and row.deploy_time <= 0)
                 or (row.deploy_time > latest and (explicit_range or not future_allowed(row.content_id, row.language, row.deploy_time)))
-                or row.deploy_time < earliest
+                or (not mobo and row.deploy_time < earliest)
                 or (allowed_types and row.resource_type_v2 not in allowed_types)
             ):
                 self._reject(rejection_counts, "drama_hard_gate")
@@ -738,6 +744,7 @@ class TwoStageSelector:
         for content_id, group in grouped.items():
             identities = {
                 (
+                    item.catalog,
                     item.series_code,
                     item.language,
                     item.resource_type_v2,
@@ -748,8 +755,8 @@ class TwoStageSelector:
             if len(identities) != 1:
                 self._reject(rejection_counts, "drama_identity_ambiguous")
                 continue
-            series_code, row_language, resource_type, name = next(iter(identities))
-            totals = metrics.drama(content_id)
+            catalog, series_code, row_language, resource_type, name = next(iter(identities))
+            totals = MetricTotals() if catalog == "moboreels" else metrics.drama(content_id)
             if not request.rules.drama.spend.contains(totals.spend):
                 self._reject(rejection_counts, "drama_spend")
                 continue
@@ -765,6 +772,7 @@ class TwoStageSelector:
                     deploy_time=max(item.deploy_time for item in group),
                     name=name,
                     metrics=totals,
+                    catalog=catalog,
                 )
             )
 
@@ -802,7 +810,7 @@ class TwoStageSelector:
         metrics: MetricWindowSnapshot,
         rejection_counts: Dict[str, int],
     ) -> List[MaterialCandidate]:
-        if drama.content_id in blacklist.material_data_source_ids:
+        if drama.catalog != "moboreels" and drama.content_id in blacklist.material_data_source_ids:
             self._reject(rejection_counts, "material_blacklist")
             return []
         language = canonical_language(request.language)
@@ -841,7 +849,11 @@ class TwoStageSelector:
             ):
                 self._reject(rejection_counts, "material_hard_gate")
                 continue
-            totals = metrics.material(drama.content_id, material_id)
+            from features.x_tag_publish.material_catalog import MOBO_PRODUCTS
+            if (row.product.casefold() in MOBO_PRODUCTS) != (drama.catalog == "moboreels"):
+                self._reject(rejection_counts, "material_catalog_mismatch")
+                continue
+            totals = MetricTotals() if drama.catalog == "moboreels" else metrics.material(drama.content_id, material_id)
             if not rule.spend.contains(totals.spend):
                 self._reject(rejection_counts, "material_spend")
                 continue
@@ -999,7 +1011,7 @@ class TwoStageSelector:
                 # deliberately not introduced; this is a fresh exclusion
                 # check only.
                 final_blacklist = self.source.blacklist_snapshot()
-                if drama.content_id in final_blacklist.material_data_source_ids:
+                if drama.catalog != "moboreels" and drama.content_id in final_blacklist.material_data_source_ids:
                     self._reject(rejection_counts, "material_blacklist_final")
                     break
                 if material.source.material_id in {

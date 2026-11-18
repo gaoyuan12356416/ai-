@@ -1247,6 +1247,7 @@ def build_service_from_env(
                 "description": str(item.get("description") or ""),
                 "drama_name": str(item.get("drama_name") or ""),
                 "material_tag": str(item.get("tag") or ""),
+                "source_provider": str(item.get("source_provider") or "dramawave"),
             }
 
     resolver = XStrictMaterialResolver()

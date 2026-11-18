@@ -57,10 +57,11 @@ class XTests(unittest.TestCase):
             def list_material_rows(self, *, content_id, language, products=('Dramawave',)):
                 self.products=products
                 return self.materials[content_id]  # Deliberately return unselected products too.
-        source=Source([drama('C0')],{'C0':[material('1','C0'),material('2','C0',product='MoboShort'),material('3','C0',product='Moboreels')]})
-        result=selector(source,FakeMetricStore()).preview(request(rules(material_products=['Moboreels','Moboshort'])))
+        source=Source([replace(drama('C0'),catalog='moboreels',app_id=0,deploy_time=0)],{'C0':[material('1','C0'),material('2','C0',product='MoboShort'),material('3','C0',product='Moboreels')]})
+        result=selector(source,FakeMetricStore()).preview(request(rules(material_products=['Moboreels','Moboshort'],drama={'resource_types':[]})))
         self.assertEqual(source.products,('Moboreels','Moboshort'))
         self.assertEqual(result.material.source.material_id,'2')
+        source.dramas=[drama('C0')]
         self.assertEqual(selector(source,FakeMetricStore()).preview(request()).material.source.material_id,'1')
 
 class FBTests(unittest.TestCase):

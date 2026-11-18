@@ -722,7 +722,7 @@ DEFAULT_DRAMA_POST_TEMPLATE = (
 )
 POST_TEMPLATE_MACRO_RE = re.compile(r"\{\{([a-z_]+)\}\}")
 POST_TEMPLATE_ALLOWED_MACROS = frozenset(
-    {"drama_name", "episode_number", "desc", "url"}
+    {"drama_name", "episode_number", "desc", "url", "m_url"}
 )
 
 
@@ -739,6 +739,8 @@ def _normalize_post_template(value, source_type):
     source_type = _schedule_source_type(source_type)
     if value in (None, ""):
         value = _default_post_template(source_type)
+    if "{{m_url}}" in str(value or "") and (source_type == "drama" or "{{url}}" in str(value or "")):
+        raise XPostError("invalid_post_template", "Moboreels 链接宏仅用于素材，不能与 url 同时使用", 400)
     template = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
     if not template or len(template) > 2000:
         raise XPostError(
@@ -810,6 +812,7 @@ def _render_post_text(
     description,
     episode_number=None,
     body_template=None,
+    m_url=None,
 ):
     """Render a validated frozen template while truncating only ``desc``."""
     parsed = urllib.parse.urlsplit(str(short_url or ""))
@@ -829,6 +832,7 @@ def _render_post_text(
     substitutions = {
         "drama_name": normalized_name,
         "url": str(short_url),
+        "m_url": m_url or "https://ai.yingliangads.com/m/preview",
     }
     if episode_number is not None:
         substitutions["episode_number"] = str(_positive_int(
@@ -869,7 +873,7 @@ def _render_post_text(
     return before_description + rendered_description + after_description
 
 
-def build_post_text(short_url, drama_name, description, body_template=None, *, copy_contract_version=1):
+def build_post_text(short_url, drama_name, description, body_template=None, *, copy_contract_version=1, m_url=None):
     if copy_contract_version == 2:
         from features.x_video_publish.templates import render_caption
         return render_caption(body_template, drama_name, description, short_url)
@@ -880,6 +884,7 @@ def build_post_text(short_url, drama_name, description, body_template=None, *, c
         drama_name,
         description,
         body_template=body_template,
+        m_url=m_url,
     )
 
 
@@ -19394,6 +19399,11 @@ def publish_canary(
     confirmed_post_url = ""
     confirmed_media_id = ""
     try:
+        from .moboreels import assert_queue_publishable
+        try:
+            assert_queue_publishable(queue)
+        except Exception as exc:
+            raise XPostError("moboreels_drama_not_publishable", str(exc), 409) from None
         attribution_context = None
         if os.environ.get("X_POST_ATTRIBUTION_V2_ENABLED", "0") == "1":
             from features.x_posts.attribution import AttributionError, load_frozen, freeze, resolve_via_loopback, build_url
@@ -19412,6 +19422,13 @@ def publish_canary(
         prepare_link_after_probe = not bool(log["long_url"]) and (
             deferred_media_validation or expected_duration <= 0
         )
+        from .moboreels import contains_macro, resolve_x_url
+        m_url = None
+        if contains_macro(queue.get("body_template")):
+            try:
+                m_url = resolve_x_url(store.db_path, queue, log)
+            except Exception as exc:
+                raise XPostError("moboreels_link_unavailable", str(exc), 409) from None
         if log["long_url"]:
             long_url = log["long_url"]
             short_url = log["short_url"]
@@ -19433,6 +19450,7 @@ def publish_canary(
                     queue["description"],
                     queue.get("body_template"),
                     copy_contract_version=int(queue.get("copy_contract_version", 1)),
+                    m_url=m_url,
                 )
             if not prepare_link_after_probe:
                 long_url = build_url(attribution_context, log) if attribution_context else build_w2a_url(
@@ -19452,7 +19470,7 @@ def publish_canary(
                         "video_duration_seconds": expected_duration,
                     }, duration_policy_version=duration_policy.version(queue)
                 )
-                log = store.prepare_log(log["id"], long_url, short_url, post_text)
+                log = store.prepare_log(log["id"], long_url, short_url, post_text, story_product_url=m_url)
                 post_text = log["post_text"]
         if not prepare_link_after_probe:
             if callable(storage_guard):
@@ -19607,7 +19625,7 @@ def publish_canary(
                     "video_duration_seconds": published_duration,
                 }, duration_policy_version=duration_policy.version(queue)
             )
-            log = store.prepare_log(log["id"], long_url, short_url, post_text)
+            log = store.prepare_log(log["id"], long_url, short_url, post_text, story_product_url=m_url)
             post_text = log["post_text"]
             if callable(storage_guard):
                 storage_guard()
@@ -19635,6 +19653,10 @@ def publish_canary(
         if callable(storage_guard):
             storage_guard()
         store.mark_media_uploaded(log["id"], uploaded["media_id"])
+        try:
+            assert_queue_publishable(queue)
+        except Exception as exc:
+            raise XPostError("moboreels_drama_not_publishable", str(exc), 409) from None
         created = x_client.create_post(access_token, post_text, uploaded["media_id"])
         post_url = "https://x.com/%s/status/%s" % (username, created["post_id"])
         confirmed_post = created["post_id"]

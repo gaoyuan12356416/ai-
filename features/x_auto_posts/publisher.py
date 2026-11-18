@@ -477,6 +477,8 @@ class AutoPostExecutor:
         return normalized
 
     def _create_run(self, task: TaskRecord, body_template: str, random_template_enabled: bool = False) -> Dict[str, Any]:
+        if self._selection_material(task).get("source_provider") == "moboreels":
+            body_template = body_template.replace("{{url}}", "{{m_url}}")
         payload = {
             "duration_policy_version": self.store.get_run(task.run_id).duration_policy_version,
             "external_task_key": execution_key(self.store, task),
