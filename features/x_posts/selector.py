@@ -505,7 +505,8 @@ class DramawaveCandidateSelector:
             deploy_times.append(deploy_time)
 
         effective_deploy_time = max(deploy_times)
-        if effective_deploy_time > int(self.now.timestamp()):
+        from features.hit_publish import future_allowed
+        if effective_deploy_time > int(self.now.timestamp()) and not future_allowed(content_id, language, effective_deploy_time):
             available_at = datetime.fromtimestamp(
                 effective_deploy_time, timezone.utc
             ).astimezone(SHANGHAI_TZ)
@@ -778,6 +779,7 @@ class DramawaveCandidateSelector:
             "drama_name": drama["drama_name"],
             "drama_deploy_time": drama_deploy_time,
             "tag": drama["labels"][0],
+            "drama_labels": list(drama["labels"]),
             "description": drama["description"],
             "spend": 0.0,
             "facebook_violation_count": normalized_counts["facebook_count"],
@@ -883,6 +885,7 @@ class DramawaveCandidateSelector:
             "material_language": material_language,
             "drama_name": drama_name,
             "tag": labels[0],
+            "drama_labels": list(labels),
             "description": description,
             "spend": _float(row.get("spend"), "spend"),
             "facebook_violation_count": normalized_counts["facebook_count"],
