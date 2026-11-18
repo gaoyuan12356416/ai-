@@ -21,8 +21,8 @@ import urllib.request
 INSTANCE = 'ins-lyr5109j'
 REGION = 'na-ashburn'
 PUBLIC_IP = '43.166.187.96'
-BEFORE_MBPS = 20
-AFTER_MBPS = 100
+BEFORE_MBPS = 100
+AFTER_MBPS = 200
 BILLING = 'TRAFFIC_POSTPAID_BY_HOUR'
 DATA = Path('/mnt/data-disk/cpu-db-network')
 UUID = '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'
@@ -122,7 +122,7 @@ def plan(cloud, *, rollback=False):
     old_quote, new_quote = cloud.quote(expected), cloud.quote(target)
     old_price = old_quote['Price']['BandwidthPrice']
     new_price = new_quote['Price']['BandwidthPrice']
-    need(old_price.get('ChargeUnit') == 'GB' and new_price == old_price,
+    need(old_price.get('ChargeUnit') == 'GB' and new_price == old_price and new_quote['Price'] == old_quote['Price'],
          'traffic_tariff_changed_review_required')
     return dict(before=current, target_mbps=target, billing=BILLING,
                 before_quote=old_quote, after_quote=new_quote,

@@ -11,7 +11,7 @@ egress = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(egress)
 
 
-def cloud(cap=20, billing=egress.BILLING):
+def cloud(cap=100, billing=egress.BILLING):
     client = Mock()
     client.describe.return_value = dict(cap_mbps=cap, billing=billing, state='RUNNING', operation_state='SUCCESS')
     client.quote.return_value = {'Price': {'BandwidthPrice': {'UnitPrice': .1, 'ChargeUnit': 'GB'}}, 'RequestId': 'fixture'}
@@ -21,9 +21,9 @@ def cloud(cap=20, billing=egress.BILLING):
 class EgressTests(unittest.TestCase):
     def test_plan_preserves_per_gb_billing_and_one_instance(self):
         planned = egress.plan(cloud())
-        self.assertEqual(planned['target_mbps'], 100)
+        self.assertEqual(planned['target_mbps'], 200)
         self.assertTrue(planned['traffic_tariff_unchanged'])
-        self.assertEqual(egress.bandwidth(100), {'InstanceIds': ['ins-lyr5109j'], 'InternetAccessible': {'InternetMaxBandwidthOut': 100}})
+        self.assertEqual(egress.bandwidth(200), {'InstanceIds': ['ins-lyr5109j'], 'InternetAccessible': {'InternetMaxBandwidthOut': 200}})
 
     def test_changed_tariff_billing_or_another_operators_cap_is_preserved(self):
         for client in [cloud(cap=50), cloud(billing='BANDWIDTH_PREPAID')]:
@@ -37,8 +37,8 @@ class EgressTests(unittest.TestCase):
 
     def test_uncertain_write_is_read_back_once_without_write_retry(self):
         client = cloud()
-        client.describe.side_effect = [dict(cap_mbps=20, billing=egress.BILLING, state='RUNNING', operation_state='SUCCESS'),
-                                       dict(cap_mbps=100, billing=egress.BILLING, state='RUNNING', operation_state='SUCCESS')]
+        client.describe.side_effect = [dict(cap_mbps=100, billing=egress.BILLING, state='RUNNING', operation_state='SUCCESS'),
+                                       dict(cap_mbps=200, billing=egress.BILLING, state='RUNNING', operation_state='SUCCESS')]
         client.api.side_effect = RuntimeError('cloud_transport_TimeoutError')
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary) / 'deployment'
@@ -47,7 +47,7 @@ class EgressTests(unittest.TestCase):
             client.api.assert_called_once()
             client.api.reset_mock()
             client.describe.side_effect = None
-            client.describe.return_value = dict(cap_mbps=100, operation_state='SUCCESS')
+            client.describe.return_value = dict(cap_mbps=200, operation_state='SUCCESS')
             egress.change(client, folder, 'fixture')
             client.api.assert_not_called()
 
