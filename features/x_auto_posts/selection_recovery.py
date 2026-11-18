@@ -27,6 +27,12 @@ def file_lock(directory, name, *, shared=False, blocking=True):
     path = Path(directory)
     path.mkdir(parents=True, exist_ok=True)
     with (path / name).open("a+") as handle:
+        # Root recovery/diagnostics share the service-owned lock directory.
+        # A root-created inode must remain writable by that service afterward.
+        owner = path.stat()
+        if os.geteuid() == 0 and owner.st_uid != 0 and os.fstat(handle.fileno()).st_uid == 0:
+            os.fchown(handle.fileno(), owner.st_uid, owner.st_gid)
+            os.fchmod(handle.fileno(), 0o660)
         try:
             fcntl.flock(handle, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
                         | (0 if blocking else fcntl.LOCK_NB))
@@ -40,8 +46,22 @@ def file_lock(directory, name, *, shared=False, blocking=True):
 
 
 def execution_available(directory, task_id):
-    with file_lock(directory, str(int(task_id)) + ".lock", blocking=False) as handle:
-        return bool(handle)
+    if not directory:
+        return True
+    import fcntl
+    # A read-only probe must not create a root-owned task lock. Missing means
+    # no executor owns it; admission + the actual request lock fence claims.
+    try:
+        handle = (Path(directory) / (str(int(task_id)) + ".lock")).open("r")
+    except FileNotFoundError:
+        return True
+    with handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        return True
 
 
 class ClaimLifetime:
