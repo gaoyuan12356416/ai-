@@ -91,11 +91,11 @@ def candidate_snapshot(repo, config):
                  LOWER(TRIM(s.language)) language,s.video_duration,d.story_name drama_name,d.introduce drama_description
             FROM `{repo.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
             JOIN `ads_ai`.cdreader_koc_drama d ON d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1
-           WHERE s.data_source=%s AND s.product=%s AND s.type=2 AND s.is_delete=0
+           WHERE s.data_source=%s AND s.type=2 AND s.is_delete=0
              AND {source_language_sql} AND s.video_duration>=%s AND s.video_duration<=%s
              AND s.id>%s
            ORDER BY s.id LIMIT %s
-        """,(institution,int(config["material_data_source"]),product,*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
+        """,(institution,int(config["material_data_source"]),*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
         page_count+=1
         for row in rows:
             mid=str(row.get("material_id") or "")
