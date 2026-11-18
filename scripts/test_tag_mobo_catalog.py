@@ -107,6 +107,7 @@ class MoboTests(unittest.TestCase):
         with patch.dict(os.environ,{'X_POST_ATTRIBUTION_V2_ENABLED':'0'}), \
              patch('features.x_posts.moboreels.assert_queue_publishable'), \
              patch('features.x_posts.moboreels.resolve_x_url',return_value=url), \
+             patch('features.x_posts.service._build_short_url',return_value='https://example.test/x/1.html'), \
              patch('features.x_posts.service.build_w2a_url',return_value='https://example.test/drama'), \
              patch('features.x_posts.service.write_short_redirect'):
             result=bridge._links(queue,{'id':1})
