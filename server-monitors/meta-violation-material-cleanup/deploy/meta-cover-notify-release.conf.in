@@ -1,0 +1,8 @@
+# Pin only the reporter to a verified GitHub release without restarting workers.
+[Unit]
+Description=Report Meta cover work from the preceding four-hour interval
+
+[Service]
+WorkingDirectory=@RELEASE@/server-monitors/meta-violation-material-cleanup
+ExecStart=
+ExecStart=/usr/bin/env python3 @RELEASE@/server-monitors/meta-violation-material-cleanup/cover.py --config /mnt/data-disk/meta-violation-material-cleanup/config.json notify

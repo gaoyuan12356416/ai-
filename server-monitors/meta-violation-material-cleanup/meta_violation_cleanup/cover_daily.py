@@ -55,7 +55,7 @@ def worker_state():
         return {'ActiveState': 'unavailable'}
 
 
-def collect(path, start, end):
+def collect(path, start, end, *, workload_only=False):
     """Outcome events use [start,end); current backlog is labelled separately.
 
     Historical records do not measure individual GETs or preflight. Timings
@@ -68,19 +68,37 @@ def collect(path, start, end):
         db.execute('BEGIN')
         # Read one consistent snapshot; never sum mutable batch totals.
         outcomes, intents, successes = {}, {}, {}
-        for row in db.execute('''SELECT object_key,action,created_at FROM events
-            WHERE created_at<? ORDER BY id''', (bounds[1],)):
+        query = 'SELECT object_key,action,created_at FROM events WHERE created_at<?'
+        params = (bounds[1],)
+        if workload_only:
+            query += ' AND created_at>=?'
+            params += (bounds[0],)
+        work_states = ('waiting_review', 'pending', 'waiting_references', 'reference_scan_incomplete')
+        for row in db.execute(query + ' ORDER BY id', params):
             if row['action'] == 'write_intent':
                 intents.setdefault(row['object_key'], row['created_at'])
             if row['created_at'] < bounds[0]:
                 continue
             if row['action'] == 'succeeded':
                 successes[row['object_key']] = row['created_at']
-            if row['action'] in ('succeeded', 'failed', 'unknown', 'obsolete', 'blocked',
-                                 'deleted_verified', 'previous_deleted', 'delete_failed', 'delete_unknown'):
+            if row['action'] in (('succeeded', 'failed', 'unknown', 'obsolete', 'blocked',
+                                  'deleted_verified', 'previous_deleted', 'delete_failed', 'delete_unknown')
+                                 + (work_states if workload_only else ())):
                 outcomes[row['object_key']] = row['action']
         tasks = Counter(v for k, v in outcomes.items() if k.startswith('task:'))
         deletions = Counter(v for k, v in outcomes.items() if k.startswith('creative:'))
+        if workload_only:
+            # The four-hour workload contains only activity inside this window.
+            # Do not scan cumulative queues or include historical wait latency.
+            batches = dict(db.execute('''SELECT status,count(*) FROM batches
+                WHERE sealed_at>=? AND sealed_at<? AND id NOT LIKE 'cover-error-%'
+                GROUP BY status''', bounds))
+            return {'workload_only': True, 'window_start': start.isoformat(),
+                    'window_end': end.isoformat(), 'tasks': dict(tasks), 'deletions': dict(deletions),
+                    'new_ads': db.execute('SELECT count(*) FROM tasks WHERE created_at>=? AND created_at<?', bounds).fetchone()[0],
+                    'scan_completed': batches.get('sealed', 0),
+                    'scan_failed': db.execute("SELECT count(*) FROM batches WHERE status='failed' AND id NOT LIKE 'cover-error-%' AND created_at>=? AND created_at<?", bounds).fetchone()[0],
+                    'worker_errors': db.execute("SELECT count(*) FROM batches WHERE status='failed' AND id LIKE 'cover-error-%' AND created_at>=? AND created_at<?", bounds).fetchone()[0]}
         current_tasks = dict(db.execute('SELECT status,count(*) FROM tasks GROUP BY status').fetchall())
         current_deletions = dict(db.execute('SELECT status,count(*) FROM deletions GROUP BY status').fetchall())
         batches = list(db.execute('''SELECT status,meta,created_at,sealed_at FROM batches
@@ -227,7 +245,45 @@ def duration(seconds):
     return '%.2f 秒' % seconds
 
 
+def workload_body(data):
+    t, d = data['tasks'], data['deletions']
+    start, end = (datetime.fromisoformat(data[k]).strftime('%m-%d %H:%M')
+                  for k in ('window_start', 'window_end'))
+    return '\n'.join([
+        'Meta 违规封面替换｜本4小时工作量',
+        '%s → %s（北京时间）' % (start, end),
+        '广告处理 %d 条：替换成功 %d，待审核 %d，暂缓 %d，失败 %d，未知 %d，跳过 %d' % (
+            sum(t.values()), t.get('succeeded', 0), t.get('waiting_review', 0), t.get('pending', 0),
+            t.get('failed', 0), t.get('unknown', 0), t.get('obsolete', 0) + t.get('blocked', 0)),
+        '旧 Creative 检查 %d 个：确认清理 %d，核实已删 %d，暂缓 %d，失败 %d，未知 %d' % (
+            sum(d.values()), d.get('deleted_verified', 0), d.get('previous_deleted', 0),
+            d.get('pending', 0) + d.get('waiting_references', 0) + d.get('reference_scan_incomplete', 0),
+            d.get('failed', 0) + d.get('delete_failed', 0), d.get('unknown', 0) + d.get('delete_unknown', 0)),
+        '新增入队 %d 条；完成扫描 %d 批；扫描异常 %d 批；执行异常 %d 批' % (
+            data['new_ads'], data['scan_completed'], data['scan_failed'], data['worker_errors']),
+        '按本时段内每个广告任务 / Creative 的最后一次处理结果去重；窗口外结果不计入。',
+    ])
+
+
+def workload_card(data):
+    t, d = data['tasks'], data['deletions']
+    lines = workload_body(data).splitlines()
+    return {'config': {'wide_screen_mode': True},
+            'header': {'template': 'blue', 'title': {'tag': 'plain_text', 'content': lines[0]}},
+            'elements': [
+                {'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': lines[1] + '\nDramaWave / HotDrama · 每4小时播报'}]},
+                {'tag': 'div', 'fields': [
+                    {'is_short': True, 'text': {'tag': 'lark_md', 'content': label + '\n**{:,} {}**'.format(count, unit)}}
+                    for label, count, unit in [('替换成功', t.get('succeeded', 0), '条'),
+                                                ('旧 Creative 清理', d.get('deleted_verified', 0), '个')]]},
+                {'tag': 'markdown', 'content': '\n\n'.join(lines[2:5])},
+                {'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': lines[5]}]},
+            ]}
+
+
 def report_body(data):
+    if data.get('workload_only'):
+        return workload_body(data)
     t, d = data['tasks'], data['deletions']
     ct, cd = data['current_tasks'], data['current_deletions']
     start, end = (datetime.fromisoformat(data[k]).strftime('%m-%d %H:%M')
@@ -295,6 +351,8 @@ def report_body(data):
 
 def report_card(data):
     """Compact default view; retain the complete frozen report in one panel."""
+    if data.get('workload_only'):
+        return workload_card(data)
     t, d = data['tasks'], data['deletions']
     ct, cd = data['current_tasks'], data['current_deletions']
     hours = data.get('report_hours', 24)
@@ -396,11 +454,13 @@ def notify_daily(config, audit, at=None, dry_run=False):
         except ValueError:
             if existing:
                 raise  # Never silently replace an already attempted body.
-            data = collect(root / 'cover.sqlite3', start, end)
+            workload_only = hours == 4 and lookback_hours == 4
+            data = collect(root / 'cover.sqlite3', start, end, workload_only=workload_only)
             data['worker_state'] = worker_state()
             data['report_hours'] = hours
             data['report_lookback_hours'] = lookback_hours
-            data['performance'] = collect_performance(root, start, end)
+            if not workload_only:
+                data['performance'] = collect_performance(root, start, end)
             frozen = {'data': data, 'body': report_body(data), 'card': report_card(data),
                       'recipient': destination}
             if not dry_run:

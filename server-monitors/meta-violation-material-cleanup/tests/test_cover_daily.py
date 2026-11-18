@@ -66,6 +66,55 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(daily.summary([])['mean_seconds'], None)
         self.assertEqual(daily.summary(range(1, 101))['p95_seconds'], 95)
 
+    def test_four_hour_workload_excludes_history_and_deduplicates_review_and_cleanup(self):
+        start, end = daily.window(self.at, 4, 4)
+        self.event('task:1', 'unknown', (start - timedelta(seconds=1)).astimezone(timezone.utc).isoformat(timespec='microseconds'))
+        self.event('task:1', 'succeeded', start.astimezone(timezone.utc).isoformat(timespec='microseconds'))
+        for _ in range(2):
+            self.event('task:2', 'waiting_review', (start + timedelta(minutes=1)).astimezone(timezone.utc).isoformat(timespec='microseconds'))
+            self.event('creative:3', 'waiting_references', (end - timedelta(seconds=1)).astimezone(timezone.utc).isoformat(timespec='microseconds'))
+        self.event('task:4', 'failed', end.astimezone(timezone.utc).isoformat(timespec='microseconds'))
+        data = daily.collect(self.store.path, start, end, workload_only=True)
+        self.assertEqual(data['tasks'], {'succeeded': 1, 'waiting_review': 1})
+        self.assertEqual(data['deletions'], {'waiting_references': 1})
+        self.assertNotIn('current_tasks', data)
+        self.assertNotIn('timings', data)
+        body = daily.report_body(data)
+        self.assertIn('广告处理 2 条', body)
+        self.assertIn('旧 Creative 检查 1 个', body)
+        card = json.dumps(daily.report_card(data), ensure_ascii=False)
+        for forbidden in ('积压', '未决未知', '平均', 'P95', '近24小时'):
+            self.assertNotIn(forbidden, card)
+
+    def test_four_hour_notify_uses_only_previous_interval_without_performance_or_send(self):
+        config = dict(self.periodic_config(), cover_report_lookback_hours=4)
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), \
+             patch.object(daily, 'worker_state', lambda: {}), \
+             patch.object(daily, 'collect_performance') as performance, \
+             patch.object(daily, 'Notifier') as sender:
+            result = daily.notify_daily(config, self.audit, self.at.replace(hour=1), dry_run=True)
+        self.assertEqual(result['data']['window_start'], '2026-10-28T21:30:00+08:00')
+        self.assertEqual(result['data']['window_end'], '2026-10-29T01:30:00+08:00')
+        self.assertTrue(result['data']['workload_only'])
+        performance.assert_not_called()
+        sender.assert_not_called()
+
+    def test_lookback_change_preserves_already_sent_window_without_resending(self):
+        config = self.periodic_config()
+        run_id = 'cover-periodic-4h-20261029T0930'
+        self.audit.begin(run_id, 'run', {})
+        self.audit.artifact(run_id, 'daily-summary.json', {
+            'body': 'old 24-hour report', 'data': {}, 'recipient': config['cover_report_recipient']})
+        self.audit.claim_notice(run_id, 'end', 'old 24-hour report')
+        self.audit.start_notice(run_id, 'end')
+        self.audit.finish_notice(run_id, 'end', 'sent', {'message_id': 'old-message'})
+        config['cover_report_lookback_hours'] = 4
+        with patch.object(daily, 'process_lock', lambda *_: nullcontext()), patch.object(daily, 'Notifier') as sender:
+            result = daily.notify_daily(config, self.audit, self.at)
+        self.assertEqual(result['delivery'], 'sent')
+        sender.assert_not_called()
+        self.assertEqual(self.audit.load_artifact(run_id, 'daily-summary.json')['body'], 'old 24-hour report')
+
     def test_worker_error_batches_are_not_scans(self):
         with self.store._tx() as db:
             for key, status in (('cover-scan-ok', 'sealed'), ('cover-scan-fail', 'failed'),

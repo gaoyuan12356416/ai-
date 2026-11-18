@@ -5,6 +5,14 @@ description: Maintain the hourly Meta violation-material cover replacement and o
 
 # Meta violation-material cover replacement
 
+As of 2026-11-18, the operator requires each four-hour report to contain only
+the preceding completed four-hour workload. Set both report hours and lookback
+hours to 4. Omit cumulative backlog/history and historical queue latency; count
+review/reference waits processed within the interval by last outcome per object.
+This supersedes the rolling-24-hour reporting rules below. Preserve past frozen
+reports and receipts. See [report deployment](../../../../doc/20261118.meta-cover-four-hour-workload.md)
+for the reporter-only release override that preserves active worker/scanner PIDs.
+
 ## Current contract (2026-10-28)
 
 The approved cover replacement plan supersedes the old five-plus-paused deletion contract. Preserve old code, task history, credentials, receipts and unknown fences, but keep meta-violation-material-cleanup.timer disabled. Do not run the old live run.py deletion entry point for this workflow.
