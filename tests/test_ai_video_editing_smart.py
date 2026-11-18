@@ -94,6 +94,13 @@ class SmartEditingTests(unittest.TestCase):
                 status, plan = smart_api.dispatch(self.runtime, ACTOR, 'POST', '/api/ai-video-editing/plans', payload)
                 self.assertEqual((status, len(plan['outputs'])), (200, 30))
                 self.assertEqual([len(d['units']) for d in plan['drafts']], [20, 10])
+                all_units = [unit for draft in plan['drafts'] for unit in draft['units']]
+                for i in range(0, 30, 5):
+                    group = plan['outputs'][i:i + 5]
+                    self.assertEqual([entry['zoom_percent'] for entry in group], [100, 104, 108, 113, 118])
+                    self.assertTrue(all(entry['segments'] == group[0]['segments'] for entry in group))
+                    for entry, unit in zip(group, all_units[i:i + 5]):
+                        self.assertTrue(all(c['zoom_percent'] == entry['zoom_percent'] for c in unit['clips']))
                 for output in plan['outputs']:
                     self.assertEqual(sum(seg['end_ms'] - seg['start_ms'] for seg in output['segments']), output['duration_ms'])
                     self.assertTrue(all(0 <= seg['start_ms'] < seg['end_ms'] <= 12000 for seg in output['segments']))

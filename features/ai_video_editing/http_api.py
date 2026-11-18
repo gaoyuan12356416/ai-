@@ -168,6 +168,9 @@ class Handler(platform.DramaMaterialHandler):
             from .smart_api import dispatch
             status,answer=dispatch(rt,actor,verb,path,body)
             return self.reply(status,answer)
+        if path=='/questions' and verb=='POST':
+            from .questions import answer
+            return self.reply(200,answer(rt,actor,body))
         if path in ('/projects','/tasks') and verb=='GET':return self.reply(200,rt.list_records(path[1:],actor))
         if path=='/projects' and verb=='POST':return self.reply(200,rt.save(actor,body))
         m=re.fullmatch('/projects/(ap_[0-9a-f]{32})(/render)?',path)

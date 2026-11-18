@@ -1,3 +1,4 @@
+import hashlib
 import math
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +15,33 @@ from features.ai_video_editing.runtime import Runtime
 
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'needs ffmpeg and ffprobe')
 class IndependentRenderTests(unittest.TestCase):
+    def test_variants_enlarge_center_and_keep_identical_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'pattern.mp4'
+            subprocess.run(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i',
+                'color=black:s=180x320:r=25:d=2,drawbox=x=57:y=80:w=66:h=160:c=white:t=fill',
+                '-f', 'lavfi', '-i', 'sine=f=400:d=2', '-c:v', 'mpeg4', '-c:a', 'aac', str(source)], check=True)
+            results = []
+            for z in (100,104):
+                target = root / ('out%d.mp4' % z)
+                clip = {'source_id':'pattern', 'start_ms':115, 'end_ms':1730}
+                if z != 100:
+                    clip['zoom_percent'] = z
+                receipt = worker.render({'clips':[clip]}, {'pattern':source}, target, root / ('r%d' % z), encoder='libx264')
+                def data(options):
+                    return subprocess.check_output(['ffmpeg', '-loglevel', 'error', '-i', str(target), *options, '-'])
+                bitstream = data(['-map','0:a:0','-c:a','copy','-f','adts'])
+                pcm = data(['-map','0:a:0','-f','s16le'])
+                frame = data(['-map','0:v:0','-frames:v','1','-pix_fmt','gray','-f','rawvideo'])
+                width = sum(value > 128 for value in frame[640 * 720:641 * 720])
+                results.append((receipt['frames'], hashlib.sha256(bitstream).digest(), hashlib.sha256(pcm).digest(),
+                                hashlib.sha256(frame).digest(), width))
+            base, zoomed = results
+            self.assertEqual(base[:3], zoomed[:3])
+            self.assertNotEqual(base[3], zoomed[3])
+            self.assertAlmostEqual(zoomed[4] / base[4], 1.04, delta=.012)
+
     def test_real_http_render_silent_vfr_fractional_cuts_and_lost_completion(self):
         from features.ai_video_editing.http_api import Handler
         actor = {'user_id': 'operator', 'tenant_key': 'one'}

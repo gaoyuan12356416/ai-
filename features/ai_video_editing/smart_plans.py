@@ -7,6 +7,7 @@ from .smart_common import require
 
 METHODS = {'hook_first': '热点前置', 'highlight_montage': '高燃混剪',
            'golden_three': '黄金三段', 'cliffhanger': '爆点引流'}
+VARIANT_ZOOM = (100, 104, 108, 113, 118)
 PREFER = {
     '开场钩子': ('hook', 'conflict', 'turn', 'emotion'), '交代起因': ('context', 'emotion'),
     '转折收束': ('turn', 'resolution', 'cliffhanger'), '高燃片段': ('conflict', 'turn', 'emotion', 'hook'),
@@ -102,11 +103,9 @@ def exclusive_bounds(selected):
     return bounds
 
 
-def allocations(capacities, target, roles, variant):
+def allocations(capacities, target, roles):
     # Allocate remaining time after a short source hits its range boundary.
     weights = [1.4 if role == '交代起因' else .8 if role == '开场钩子' else 1. for role in roles]
-    if len(roles) > 1 and variant > 1:
-        weights[(variant - 2) % len(weights)] *= 1.14 + .04 * variant
     target = min(target, sum(capacities))
     budgets = [0] * len(capacities)
     active = list(range(len(capacities)))
@@ -120,7 +119,7 @@ def allocations(capacities, target, roles, variant):
     return budgets
 
 
-def segments_for(sources, method, selected, target, variant):
+def segments_for(sources, method, selected, target):
     bounds = exclusive_bounds(selected)
     capacities = []
     for event, role in selected:
@@ -128,18 +127,17 @@ def segments_for(sources, method, selected, target, variant):
         left, right = bounds[key]
         if role == '悬念切点':
             # Cut close to the visual event, without adding its later outcome.
-            right = min(right, max(left + 1, event['end_ms'] + (variant - 1) * 90))
+            right = min(right, max(left + 1, event['end_ms']))
             bounds[key] = left, right
         capacities.append(right - left)
     if method == 'hook_first':
         e = selected[0][0]
-        target = min(e['source_duration'], max(500, e['end_ms'] - e['start_ms'] + 1800 + (variant - 1) * 410))
-    budgets = allocations(capacities, target, [role for _, role in selected], variant)
+        target = min(e['source_duration'], max(500, e['end_ms'] - e['start_ms'] + 1800))
+    budgets = allocations(capacities, target, [role for _, role in selected])
     result = []
     for (event, role), size in zip(selected, budgets):
         left, right = bounds[(event['source_id'], event['id'])]
-        bias = (.48, .38, .58, .32, .64)[variant - 1]
-        start = right - size if role == '悬念切点' else max(left, min(right - size, event['anchor'] - int(size * bias)))
+        start = right - size if role == '悬念切点' else max(left, min(right - size, event['anchor'] - int(size * .48)))
         end = start + size
         if end <= start or (end - start) < 34:
             continue
@@ -175,27 +173,28 @@ def build_plans(sources, payload):
         seen = set()
         for s in range(1, scripts + 1):
             selected = roles_for(events, method, s, goal)
-            for v in range(1, variants + 1):
-                segs = segments_for(group, method, selected, goal, v)
-                require(segs, 'smart_timeline_empty', '选段没有满一帧的可用画面', 409)
-                signature = tuple((seg['source_id'], seg['start_ms'], seg['end_ms']) for seg in segs)
-                if signature in seen:
-                    warnings.append('素材较短或可用证据有限，部分脚本或版本的选段相同。')
-                seen.add(signature)
-                duration = sum(y - x for _, x, y in signature)
-                if target and duration < target - 40:
-                    warnings.append('部分方案的可用源区间短于目标，已保留实际可用时长。')
+            segs = segments_for(group, method, selected, goal)
+            require(segs, 'smart_timeline_empty', '选段没有满一帧的可用画面', 409)
+            signature = tuple((seg['source_id'], seg['start_ms'], seg['end_ms']) for seg in segs)
+            if signature in seen:
+                warnings.append('素材较短或可用证据有限，部分脚本的选段相同。')
+            seen.add(signature)
+            duration = sum(y - x for _, x, y in signature)
+            if target and duration < target - 40:
+                warnings.append('部分方案的可用源区间短于目标，已保留实际可用时长。')
+            for i, seg in enumerate(segs, 1):
+                seg['clip_id'] = 'clip_%03d' % i
+            for v, zoom in enumerate(VARIANT_ZOOM[:variants], 1):
                 uid = 'smart_g%d_s%d_v%d' % (group_index, s, v)
                 title = '%s · %s · 脚本%d版本%d' % (group[0]['title'][:85], METHODS[method], s, v)
                 clips = []
-                for i, seg in enumerate(segs, 1):
-                    cid = 'clip_%03d' % i
-                    seg['clip_id'] = cid
-                    clips.append({'id': cid, 'source_id': seg['source_id'], 'start_ms': seg['start_ms'],
-                                  'end_ms': seg['end_ms'], 'fit': 'contain', 'mute': False, 'mirror': False, 'transition': 'cut'})
+                for seg in segs:
+                    clips.append({'id': seg['clip_id'], 'source_id': seg['source_id'], 'start_ms': seg['start_ms'],
+                                  'end_ms': seg['end_ms'], 'fit': 'contain', 'mute': False, 'mirror': False,
+                                  'transition': 'cut', 'zoom_percent': zoom})
                 units.append({'id': uid, 'title': title, 'series_code': group[0]['series_code'], 'clips': clips})
                 outputs.append({'unit_id': uid, 'title': title, 'script_index': s, 'variant_index': v,
-                                'duration_ms': duration, 'segments': segs})
+                                'duration_ms': duration, 'zoom_percent': zoom, 'segments': [dict(seg) for seg in segs]})
     drafts = [{'schema_version': 2, 'name': '智能剪辑 · ' + METHODS[method],
                                'units': units[i:i + 20]} for i in range(0, len(units), 20)]
     return {'drafts': drafts, 'outputs': outputs, 'warnings': list(dict.fromkeys(warnings))}

@@ -165,8 +165,11 @@ class Runtime:
                       and (end*30+500)//1000>(start*30+500)//1000,'clip_range','片段超出素材范围或短于一帧')
                 check(c.get('fit','contain') in ('contain','cover') and c.get('transition','cut')=='cut' and
                       all(type(c.get(k,False)) is bool for k in ('mirror','mute')),'clip_style','不支持的片段样式')
+                zoom=c.get('zoom_percent',100)
+                check(type(zoom) is int and 100<=zoom<=130,'clip_zoom','缩放须在 100% 到 130% 之间')
                 clean.append({'id':str(c.get('id') or 'clip_'+str(j))[:128],'source_id':sid,'start_ms':start,'end_ms':end,
-                              'fit':c.get('fit','contain'),'mirror':c.get('mirror',False),'mute':c.get('mute',False),'transition':'cut'})
+                              'fit':c.get('fit','contain'),'mirror':c.get('mirror',False),'mute':c.get('mute',False),'transition':'cut',
+                              'zoom_percent':zoom})
             result.append({'id':uid,'title':str(u.get('title') or '作品 '+str(i+1))[:200],
                            'series_code':str(u.get('series_code',''))[:180],'clips':clean})
         return result

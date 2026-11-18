@@ -10,6 +10,14 @@
   const terminal = status => ['completed','failed','cancelled','unknown','recovery_required'].includes(status);
   const nameOf = src => src.name || src.title || src.source_id;
   const sourceId = src => src.source_id || src.id;
+  const focusTypes = [
+    {key:'all',label:'全部候选',hint:'点击时间线或下方的预览，可查看原片对应区间。'},
+    {key:'opening',label:'黄金开场',tags:['hook'],hint:'标有开场钩子的选段，可从原片任意位置前置。'},
+    {key:'highlights',label:'亮点',tags:['conflict','turn'],hint:'标有冲突或转折的选段，按原片位置排列。'},
+    {key:'story',label:'剧情',tags:['context','conflict','turn','resolution'],hint:'呈现有画面依据的背景、冲突、转折和收束。'},
+    {key:'ending',label:'结尾悬念',tags:['cliffhanger'],hint:'标有悬念的选段，可用作剪辑结尾。'},
+    {key:'emotion',label:'情绪',tags:['emotion'],hint:'上轨显示模型明确识别的情绪片段。下轨柱高表示声画变化的测量强度。'}
+  ];
   const durationOf = src => Number(src?.metadata?.duration_ms || src?.duration_ms || 0);
   const secs = ms => String(Math.round(ms) / 1000);
   const time = ms => {
@@ -19,6 +27,7 @@
   const model = {selected:[], settings:null, editingProject:null, analysisId:'', plan:null, active:0, edited:false, pendingDrafts:[], projects:[], jobs:[], projectName:'AI 智能剪辑'};
   let auth, storageKey, rows = [], total = 0, seq = 0, uploading = false, latestUploads = [], uploadFilesPending = [];
   let analysis = null, timer, jobTimer, mediaSeq = 0, stopAt = null, busy = false, pollFailures = 0;
+  let focusKey='all', focusedSource='', questionRun=null, questionError='', questionContext='';
   const liveJobs = new Map();
   function persist() {
     if (!storageKey) return;
@@ -182,21 +191,84 @@
       await Promise.allSettled([search(),readSeries()]);
     }
   }
+  function validRange(row,duration) {
+    return Number.isInteger(row.start_ms)&&Number.isInteger(row.end_ms)&&row.start_ms>=0&&row.end_ms>row.start_ms&&row.end_ms<=duration;
+  }
+  function timelineTrack(label,rows,si,duration,strength=false) {
+    const marks=rows.map(({c,ci})=>{
+      const left=c.start_ms/duration*100,width=(c.end_ms-c.start_ms)/duration*100;
+      const height=strength?Math.round(Math.max(0,Math.min(1,c.score))*90)+10:100;
+      const title=[c.category,time(c.start_ms)+' – '+time(c.end_ms),strength?'强度 '+Math.round(c.score*100)+'/100':''].filter(Boolean).join(' · ');
+      return '<button type="button" class="ai-marker" data-mark="'+si+':'+ci+'" style="left:'+left+'%;width:'+width+'%;height:'+height+'%" title="'+escape(title)+'" aria-label="'+escape('预览 '+title)+'"></button>';
+    }).join('');
+    return '<div class="ai-track-label">'+escape(label)+'</div><div class="ai-track'+(strength?' ai-strength':'')+'">'+(marks||'<span>'+(strength?'无独立强度采样':'未识别')+'</span>')+'</div>';
+  }
+  function renderFocus() {
+    const sources=analysis?.sources||[];
+    let si=sources.findIndex(s=>s.source_id===focusedSource);
+    if(si<0)si=0;
+    const s=sources[si];if(!s)return;
+    focusedSource=s.source_id;
+    $('timelineSource').innerHTML=sources.map((src,i)=>'<option value="'+i+'">'+escape(src.title||selectedSource(src.source_id)?.name||src.source_id)+'</option>').join('');
+    $('timelineSource').value=String(si);
+    const focus=focusTypes.find(f=>f.key===focusKey)||focusTypes[0];
+    $('focusTypes').innerHTML=focusTypes.map(f=>'<button type="button" data-focus="'+f.key+'" aria-pressed="'+(f.key===focus.key)+'">'+f.label+'</button>').join('');
+    $('focusHint').textContent=focus.hint;
+    const duration=durationOf(s);
+    const all=(s.candidates||[]).map((c,ci)=>({c,ci})).filter(({c})=>validRange(c,duration)).sort((a,b)=>a.c.start_ms-b.c.start_ms||a.c.end_ms-b.c.end_ms);
+    const matches=!focus.tags?all:all.filter(({c})=>c.engine==='multimodal'&&focus.tags.includes(c.tag));
+    let tracks=timelineTrack(focus.key==='emotion'?'模型识别的情绪':focus.label,matches,si,duration);
+    if(focus.key==='emotion')tracks+=timelineTrack('声画信号强度',all.filter(({c})=>c.engine==='signal'&&Number.isFinite(c.score)),si,duration,true);
+    $('timeline').innerHTML=tracks+'<div class="ai-scale"><span>0:00</span><span>'+time(duration)+'</span></div>';
+    $('candidates').innerHTML=matches.map(({c,ci})=>{
+      const detail=[c.reason,c.evidence,c.transcript].filter(x=>typeof x==='string'&&x).filter((v,n,a)=>a.indexOf(v)===n).join(' · ');
+      const evidenceType=c.engine==='multimodal'?'画面语义':c.engine==='signal'?'视听信号':'';
+      const score=Number.isFinite(c.score)?'评分 '+Math.round(c.score*100)+'/100':'';
+      return '<div class="ai-row"><div class="ai-maintext"><strong class="ai-time">'+time(c.start_ms)+' – '+time(c.end_ms)+'</strong><small>'+escape([c.category,evidenceType,score,detail].filter(Boolean).join(' · '))+'</small></div><div class="ai-tools">'+btn('预览','candidate',si+':'+ci)+(model.plan?btn('加入当前版本','insert',si+':'+ci):'')+'</div></div>';
+    }).join('')||empty('本条原片未识别到'+focus.label+'选段。');
+  }
+  function renderQuestion() {
+    const pending=!!questionRun&&questionRun.id===model.analysisId;
+    $('askQuestion').disabled=pending;
+    $('askQuestion').textContent=pending?'回答中…':'提问';
+    const response=model.lastQuestion?.id===model.analysisId?model.lastQuestion:null;
+    if(questionError||pending||!response){
+      $('questionReply').textContent=questionError||(pending?'正在核对素材证据…':'');
+      return;
+    }
+    const evidence=response.evidence.map((e,i)=>{
+      const source=analysis?.sources?.find(s=>s.source_id===e.source_id);
+      if(!source||!validRange(e,durationOf(source)))return '';
+      const label=(source.title||selectedSource(e.source_id)?.name||e.source_id)+' · '+time(e.start_ms)+' – '+time(e.end_ms);
+      return btn(label,'citation',i);
+    }).filter(Boolean);
+    $('questionReply').innerHTML='<strong>'+escape(response.question)+'</strong><p>'+escape(response.answer)+'</p><div class="ai-citations">'+(evidence.join('')||'<span>没有可定位的原片依据。</span>')+'</div>';
+  }
+  async function askQuestion() {
+    const id=model.analysisId,question=$('questionInput').value.trim();
+    if(!question||question.length>500||analysis?.status!=='succeeded'||questionRun?.id===id)return;
+    const run={id};questionRun=run;questionError='';renderQuestion();
+    try {
+      const data=await api('/questions',{method:'POST',body:{analysis_id:id,question}});
+      if(model.analysisId!==id||questionRun!==run)return;
+      if(typeof data.answer!=='string'||!data.answer.trim()||!Array.isArray(data.evidence))throw new Error('未取得有效回答，请重试。');
+      model.lastQuestion={id,question,answer:data.answer,evidence:data.evidence.filter(e=>e&&typeof e.source_id==='string')};
+      persist();
+    } catch(e){if(model.analysisId===id&&questionRun===run)questionError=e.message;}
+    finally{if(questionRun===run){questionRun=null;renderQuestion();}}
+  }
   function renderAnalysis() {
+    if(questionContext!==model.analysisId){
+      questionContext=model.analysisId;questionRun=null;questionError='';focusKey='all';focusedSource='';
+      $('questionInput').value=model.lastQuestion?.id===model.analysisId?model.lastQuestion.question:'';
+      $('questionPanel').open=false;
+    }
     $('analysisState').textContent=analysis ? labels[analysis.status]||analysis.status : model.analysisId?'等待读取分析':model.editingProject?'正在编辑已保存草稿':'尚未分析';
     const note=analysis?.error||analysis?.error_message||(analysis?.sources||[]).flatMap(s=>s.warnings||[]).filter((w,i,arr)=>arr.indexOf(w)===i).join('；');
     $('analysisNote').textContent=note;
     $('analysisNote').classList.toggle('error',analysis?.status==='failed');
-    $('candidates').innerHTML=(analysis?.sources||[]).map((s,si)=>{
-      const candidates=s.candidates||[];
-      const engine=s.engine==='multimodal'?'画面语义分析':s.engine==='signal'?'画面与声音信号':'';
-      return '<div class="ai-note"><strong>'+escape(s.title||selectedSource(s.source_id)?.name||s.source_id)+'</strong> · '+escape(engine||'分析中')+' · '+candidates.length+' 个候选</div>'+candidates.map((c,ci)=>{
-        const detail=[c.reason,c.evidence,c.transcript].filter(x=>typeof x==='string'&&x).filter((v,n,a)=>a.indexOf(v)===n).join(' · ');
-        const evidenceType=c.engine==='multimodal'?'画面语义':c.engine==='signal'?'视听信号':'';
-        const score=Number.isFinite(c.score)?'评分 '+Math.round(c.score*100)+'/100':'';
-        return '<div class="ai-row"><div class="ai-maintext"><strong class="ai-time">'+time(c.start_ms)+' – '+time(c.end_ms)+'</strong><small>'+escape([c.category,evidenceType,score,detail].filter(Boolean).join(' · '))+'</small></div><div class="ai-tools">'+btn('预览','candidate',si+':'+ci)+(model.plan?btn('加入当前版本','insert',si+':'+ci):'')+'</div></div>';
-      }).join('');
-    }).join('');
+    $('analysisTools').hidden=analysis?.status!=='succeeded'||!analysis.sources?.length;
+    if(!$('analysisTools').hidden){renderFocus();renderQuestion();}
     buttons();
   }
   function queuePoll() {
@@ -250,7 +322,8 @@
     $('unitSelect').innerHTML=units.map((u,i)=>'<option value="'+i+'">'+escape(u.title||'剪辑版本 '+(i+1))+'</option>').join('');
     $('unitSelect').value=String(model.active);
     const totalTime=unit.clips.reduce((v,c)=>v+c.end_ms-c.start_ms,0);
-    $('planCount').textContent='共 '+units.length+' 个版本 · 当前 '+time(totalTime)+(model.plan.warnings?.length?' · '+model.plan.warnings.join('；'):'');
+    const zoom=detail?.zoom_percent??unit.clips[0]?.zoom_percent??100;
+    $('planCount').textContent='共 '+units.length+' 个版本 · 当前 '+time(totalTime)+' · 画面缩放 '+zoom+'%'+(model.plan.warnings?.length?' · '+model.plan.warnings.join('；'):'');
     $('clipRows').innerHTML=unit.clips.map((c,i)=>{
       const seg=detail?.segments?.find(x=>x.clip_id===c.id);
       const title=selectedSource(c.source_id)?.name||c.source_id;
@@ -466,6 +539,30 @@
     });
     $('analyze').onclick=()=>action(analyze); $('makePlan').onclick=()=>action(generate);
     $('refreshAnalysis').onclick=()=>refreshAnalysis(true);
+    $('timelineSource').onchange=()=>{focusedSource=analysis.sources[Number($('timelineSource').value)].source_id;renderFocus();};
+    $('focusTypes').onclick=e=>{
+      const el=e.target.closest('[data-focus]');if(!el)return;
+      focusKey=el.dataset.focus;renderFocus();
+      $('focusTypes').querySelector('[data-focus="'+focusKey+'"]').focus({preventScroll:true});
+    };
+    $('timeline').onclick=e=>{
+      const el=e.target.closest('[data-mark]');if(!el)return;
+      const [si,ci]=el.dataset.mark.split(':').map(Number),s=analysis.sources[si],c=s.candidates[ci];
+      previewSource(s.source_id,c.start_ms,c.end_ms,s.title);
+    };
+    $('questionForm').onsubmit=e=>{e.preventDefault();askQuestion();};
+    $('questionTemplate').onchange=e=>{
+      const topic=e.target.value;
+      if(!topic)return;
+      $('questionInput').value=/^[A-Za-z]+$/.test(topic)?'根据本次素材写一段适合 '+topic+' 的短视频文案，只采用能在原片核实的内容，并引用对应片段。':topic;
+      e.target.value='';$('questionInput').focus();
+    };
+    $('questionReply').onclick=e=>{
+      const el=e.target.closest('[data-citation]');if(!el||model.lastQuestion?.id!==model.analysisId)return;
+      const ref=model.lastQuestion.evidence[Number(el.dataset.citation)];
+      const source=analysis.sources.find(s=>s.source_id===ref.source_id);
+      if(source&&validRange(ref,durationOf(source)))previewSource(ref.source_id,ref.start_ms,ref.end_ms,source.title);
+    };
     $('unitSelect').onchange=()=>{model.active=Number($('unitSelect').value);persist();renderPlan();};
     $('projectName').oninput=()=>{model.projectName=$('projectName').value;if(model.plan){model.edited=true;model.plan.saved=false;buttons();}persist();};
     $('candidates').onclick=e=>{

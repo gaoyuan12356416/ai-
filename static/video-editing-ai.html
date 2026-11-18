@@ -7,13 +7,13 @@
   <title>AI 智能剪辑 · AI 后台</title>
   <link rel="stylesheet" href="/ui-topbar.css">
 
-  <link rel="stylesheet" href="/video-editing-ai.css?v=20261118-1">
-  <script defer src="/quick-nav.js?v=20261118-1"></script>
+  <link rel="stylesheet" href="/video-editing-ai.css?v=20261118-2">
+  <script defer src="/quick-nav.js?v=20261118-2"></script>
   <script defer src="/ui-topbar.js"></script>
-  <link rel="stylesheet" href="/video-editing-ai-language.css?v=20261118-1">
-  <script defer src="/video-editing-ai-subtitles.js?v=20261118-1"></script>
-  <script defer src="/video-editing-ai-language.js?v=20261118-1"></script>
-  <script defer src="/video-editing-ai.js?v=20261118-1"></script>
+  <link rel="stylesheet" href="/video-editing-ai-language.css?v=20261118-2">
+  <script defer src="/video-editing-ai-subtitles.js?v=20261118-2"></script>
+  <script defer src="/video-editing-ai-language.js?v=20261118-2"></script>
+  <script defer src="/video-editing-ai.js?v=20261118-2"></script>
 </head>
 <body>
   <div class="app">
@@ -76,7 +76,22 @@
         <section id="review" class="ai-card ai-section">
           <header class="ai-heading"><h2>候选与方案</h2><span id="analysisState" class="ai-muted" role="status">尚未分析</span></header>
           <div id="analysisNote" class="ai-feedback" role="status"></div>
-          <div id="candidates" class="ai-candidates"></div>
+          <div id="analysisTools" hidden>
+            <div class="ai-focushead"><label>原片时间线 <select id="timelineSource"></select></label></div>
+            <div class="ai-filters" id="focusTypes" role="group" aria-label="专项解析"></div>
+            <p id="focusHint" class="ai-muted"></p>
+            <div id="timeline" class="ai-timeline"></div>
+            <div id="candidates" class="ai-candidates" aria-label="当前时间线的选段"></div>
+            <details class="ai-questions" id="questionPanel">
+              <summary>素材问答</summary>
+              <form id="questionForm">
+                <label for="questionInput">根据本次分析的素材提问</label>
+                <select id="questionTemplate" aria-label="常用提问"><option value="">选择常用提问</option><option value="根据可核实的片段，概括剧情进展并标出重要转折。">剧情总结</option><option value="哪一段最适合用作短视频开场？请说明理由并引用对应片段。">短视频开场</option><option value="TikTok">TikTok 文案</option><option value="Facebook">Facebook 文案</option><option value="YouTube">YouTube 文案</option><option value="Instagram">Instagram 文案</option></select>
+                <div class="ai-questionline"><input id="questionInput" type="text" maxlength="500" required placeholder="例如：哪一段最适合用来交代角色冲突？"><button type="submit" class="button small" id="askQuestion">提问</button></div>
+              </form>
+              <div id="questionReply" aria-live="polite"></div>
+            </details>
+          </div>
           <div class="ai-actionrow"><button type="button" class="button" id="refreshAnalysis" hidden>刷新分析</button><button type="button" class="button primary" id="makePlan" disabled>生成剪辑方案</button></div>
           <div id="planBlock" hidden>
             <div class="ai-planhead"><label>剪辑版本<select id="unitSelect"></select></label><span id="planCount" class="ai-muted"></span></div>

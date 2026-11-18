@@ -79,4 +79,28 @@ input:focus,select:focus { outline:2px solid #aac3f5; outline-offset:1px; }
 .ai-upload-queue:empty {display:none;}
 .ai-search select {max-width:42%;min-width:0;}
 .ai-upload-fields input {min-width:0;width:100%;}
+.ai-focushead label {display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:14px;font-weight:650;}
+.ai-focushead select {max-width:100%;}
+.ai-filters,.ai-citations,.ai-questionline {display:flex;flex-wrap:wrap;gap:6px;}
+.ai-filters {margin:12px 0 6px;}
+.ai-filters button {border:1px solid #cbd9e8;border-radius:16px;padding:4px 11px;background:#fff;color:#334d6c;font-size:13px;}
+.ai-filters button[aria-pressed=true] {color:#fff;background:#275ca7;border-color:#275ca7;}
+.ai-timeline {background:#f5f8fc;border-radius:9px;padding:9px 12px;margin:7px 0;}
+.ai-track-label,.ai-scale,.ai-track span {color:#465c76;font-size:12px;}
+.ai-track {height:17px;position:relative;background:#e1e9f2;border-radius:3px;margin:4px 0 5px;}
+.ai-track span {position:absolute;inset:0;text-align:center;line-height:17px;}
+.ai-marker {position:absolute;bottom:0;border:1px solid #f5f8fc;background:#527ebb;min-width:2px;padding:0;border-radius:3px;}
+.ai-marker:focus-visible,.ai-marker:hover {z-index:1;background:#1c4e92;}
+.ai-strength {height:28px;}
+.ai-strength span {line-height:28px;}
+.ai-strength .ai-marker {background:#58857c;}
+.ai-scale {display:flex;justify-content:space-between;font-variant-numeric:tabular-nums;}
+.ai-questions {border-block:1px solid #dde5ee;padding:12px 0;margin:12px 0 0;}
+.ai-questions summary {width:fit-content;cursor:pointer;font-size:14px;font-weight:650;}
+.ai-questions form {margin-top:10px;}
+.ai-questions label {font-size:13px;color:#465c76;display:block;margin-bottom:5px;}
+#questionTemplate {max-width:100%;margin-bottom:6px;}
+.ai-questionline input {flex:1;min-width:120px;}
+#questionReply:not(:empty) {border-radius:8px;background:#f3f6fb;padding:10px;margin-top:9px;font-size:13px;overflow-wrap:anywhere;}
+#questionReply p {white-space:pre-wrap;line-height:1.55;margin:6px 0;}
 @media(max-width:480px) { .ai-upload-fields{grid-template-columns:1fr;} .ai-search{flex-wrap:wrap;} .ai-search select{max-width:100%;} }

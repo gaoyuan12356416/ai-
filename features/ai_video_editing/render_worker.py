@@ -129,8 +129,9 @@ def render(unit, sources, output, workdir, *, encoder='h264_nvenc', ffmpeg='ffmp
         require(type(start) is int and type(end) is int and 0 <= start < end <= duration
                 and frame(start) < frame(end), '片段时间码超出原片')
         fit, muted, mirror = clip.get('fit', 'contain'), clip.get('mute', False), clip.get('mirror', False)
+        zoom = clip.get('zoom_percent', 100)
         require(fit in ('contain', 'cover') and type(muted) is bool and type(mirror) is bool
-                and clip.get('transition', 'cut') == 'cut', '片段样式无效')
+                and clip.get('transition', 'cut') == 'cut' and type(zoom) is int and 100 <= zoom <= 130, '片段样式无效')
         first, last = frame(start), frame(end)
         count = last - first
         # Seek to an integral second before the cut. All relative video and
@@ -145,10 +146,19 @@ def render(unit, sources, output, workdir, *, encoder='h264_nvenc', ffmpeg='ffmp
         geometry = ('scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,'
                     'pad=720:1280:(ow-iw)/2:(oh-ih)/2' if fit == 'contain' else
                     'scale=720:1280:force_original_aspect_ratio=increase:force_divisible_by=2,crop=720:1280')
+        view = [geometry]
+        if mirror:
+            view.append('hflip')
+        if zoom > 100:
+            # Scale the completed canvas around its center; nearest even
+            # dimensions preserve chroma alignment for the final 4:2:0 crop.
+            width = 2 * ((720 * zoom + 100) // 200)
+            height = 2 * ((1280 * zoom + 100) // 200)
+            view.extend(['scale=%d:%d' % (width, height), 'crop=720:1280:(iw-ow)/2:(ih-oh)/2'])
         video = ('[0:%s]fps=30:start_time=0,tpad=stop_mode=clone:stop_duration=1,'
                  'trim=start_frame=%d:end_frame=%d,setpts=PTS-STARTPTS,'
-                 'scale=trunc(iw*sar/2)*2:ih,setsar=1,%s,%ssetsar=1,format=yuv420p[v]'
-                 % (v['index'], left, right, geometry, 'hflip,' if mirror else ''))
+                 'scale=trunc(iw*sar/2)*2:ih,setsar=1,%s,setsar=1,format=yuv420p[v]'
+                 % (v['index'], left, right, ','.join(view)))
         sample_count = count * 1600
         if audio and not muted:
             sound = ('[0:%s]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,'
@@ -302,6 +312,7 @@ def run_job(api, job, root, encoder, ffmpeg, ffprobe):
                 path.unlink()
         upload_saved(api, folder)
         keep = False
+        LOG.info('render completed task=%s frames=%d sha256=%s', tid, meta['frames'], meta['sha256'])
     except LeaseLost:
         keep = False
     except (TransferError, OSError) as exc:
