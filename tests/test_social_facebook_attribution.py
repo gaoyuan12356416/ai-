@@ -149,8 +149,18 @@ class FacebookAttributionTests(unittest.TestCase):
                 self.assertEqual(owner["owner"], "creator")
                 self.assertEqual(owner["drama"], "dramA")
 
-    def test_arbitrary_manual_label_mismatch_still_rejected(self):
+    def test_title_enrichment_before_first_collection_uses_frozen_url(self):
         self.manual_drama_label("Original title", "Unrelated title")
+        self.run_collect()
+        self.assertEqual(self.saved("2310")["status"], "frozen")
+        row = next(r for r in self.read()[0] if r["site_id"] == "2310")
+        self.assertEqual(row["drama_label"], "Unrelated title")
+        self.assertEqual(row["owner"], "creator")
+
+    def test_attribution_title_must_still_match_exact_url(self):
+        changed = copy.deepcopy(self.snapshot)
+        changed["attribution"]["drama_name"] = "Does not match frozen campaign"
+        self.change("UPDATE fb_video_task SET snapshot_json=?", (json.dumps(changed),))
         self.run_collect()
         self.assertEqual(self.saved("2310")["status"], "unresolved")
 

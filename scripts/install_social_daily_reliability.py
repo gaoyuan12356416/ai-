@@ -19,8 +19,8 @@ FB = 'features/social_analytics/facebook.py'
 CLI = 'scripts/social_publisher_daily_report.py'
 UNIT = 'social-daily-prepare.timer'
 BASELINE = {
-    FB: 'd3771f4761a53e797845d592ebd1e842e11c81d35f4e7313eec87ccdfe45994e',
-    CLI: 'b3cce45ac3a488603901a593f7fcd7b9140c61c4c8753be5967539b939e40bd8',
+    FB: '0250c944527abc53467671e882543a4677fc4442ed17cd7e25ee00432eb928aa',
+    CLI: '77afc1dfc09f2b18e8e71cfaf7dc1022e8ee57aa4f9d8e14b363f03804d004e4',
 }
 
 
@@ -51,13 +51,12 @@ def stage(args):
     shutil.copy2(ROOT / CLI, release / CLI)
     old, committed = (CURRENT / FB).read_text(), (ROOT / FB).read_text()
     patched = replace_function(old, committed, '_upsert_record')
-    helper = next(n for n in ast.parse(committed).body
-                  if isinstance(n, ast.FunctionDef) and n.name == '_display_title_refresh')
-    patched += '\n\n' + '\n'.join(committed.splitlines()[helper.lineno - 1:helper.end_lineno]) + '\n'
+    patched = replace_function(patched, committed, '_display_title_refresh')
+    patched = replace_function(patched, committed, 'identity_new')
     before, after = ast.parse(old), ast.parse(patched)
     for tree in (before, after):
         tree.body = [n for n in tree.body if not (isinstance(n, ast.FunctionDef)
-                     and n.name in {'_upsert_record', '_display_title_refresh'})]
+                     and n.name in {'_upsert_record', '_display_title_refresh', 'identity_new'})]
     if ast.dump(before) != ast.dump(after):
         raise RuntimeError('unrelated_facebook_code_changed')
     (release / FB).write_text(patched)
