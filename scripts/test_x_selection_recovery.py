@@ -82,6 +82,15 @@ class RecoveryTests(unittest.TestCase):
                                account_snapshot_version=1, account_snapshot={})
         self.assertEqual(self.claim().task.id, claim.task.id)
 
+    def test_normal_runner_cannot_bypass_independent_recovery_proof(self):
+        self.claim()
+        self.clock.value += dt.timedelta(seconds=181)
+        self.assertIsNone(self.store.claim_next_executable_task(
+            worker_id='test', lease_seconds=10800, defer_selection_recovery=True))
+        self.assertTrue(self.recover())
+        self.assertEqual(self.store.claim_next_executable_task(
+            worker_id='test', lease_seconds=10800, defer_selection_recovery=True).task.id, self.task.id)
+
     @unittest.skipIf(os.name == 'nt', 'Linux production flock contract')
     def test_active_request_cannot_be_reclaimed_despite_expired_heartbeat(self):
         claim = self.claim()

@@ -2292,6 +2292,7 @@ class XAutoPostStore:
         publish_delegated: bool = False,
         planning_cutoff: Optional[Any] = None,
         candidate_guard: Optional[Callable[[int], bool]] = None,
+        defer_selection_recovery: bool = False,
     ) -> Optional[TaskClaim]:
         """Claim the next safe phase, including expired-crash recovery.
 
@@ -2420,6 +2421,10 @@ class XAutoPostStore:
                 )
             selected: Optional[sqlite3.Row] = None
             for candidate in candidates:
+                # When the independent recovery owner is enabled, only its
+                # cross-ledger proof may turn an ended selection into retry_wait.
+                if defer_selection_recovery and candidate["status"] == "selecting":
+                    continue
                 if candidate_guard is not None and not candidate_guard(int(candidate["id"])):
                     continue
                 if conn.execute("SELECT 1 FROM pipeline_canonical_hold WHERE source_key=?", ("x:auto:" + str(candidate["id"]),)).fetchone():

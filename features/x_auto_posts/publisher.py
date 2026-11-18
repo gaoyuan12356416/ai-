@@ -1132,6 +1132,7 @@ class AutoPostExecutor:
                     reconcile_only=reconcile_only,
                     publish_delegated=self.dispatch_enabled,
                     candidate_guard=lambda task_id: execution_available(lock_dir, task_id),
+                    defer_selection_recovery=bool(lock_dir),
                     planning_cutoff=self.dispatch_cutoff if self.dispatch_enabled else None,
                 )
                 if claim is not None:
