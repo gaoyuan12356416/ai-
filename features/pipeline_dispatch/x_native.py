@@ -6,6 +6,7 @@ script. Every operation reuses that sidecar's account verification and tokens.
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -14,15 +15,60 @@ import sqlite3
 import threading
 import time
 import weakref
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit, parse_qs
 
 from .adapters import AdapterError, obj
+from .diagnostics import failure_fields
 from features.x_posts import service as posts
 from features.x_posts import duration_policy
 from features.x_posts.media_limits import video_byte_limit
 from features.x_posts.media_repair import REPAIR_PROFILE
 from features.x_posts.random_template import queue_identity, validate_receipt
 from features.x_posts.random_template_store import PreparationStore, canonical
+
+
+def _resolve_attribution(queue_id, log):
+    """Retry only the read-only resolver, before any link freeze or X intent."""
+    from features.x_posts.attribution import AttributionError, validate_context
+    token = (os.environ.get("X_INTERNAL_TOKEN") or os.environ.get("X_POST_AUTOMATION_INTERNAL_TOKEN") or "").strip()
+    if len(token) < 32:
+        raise AttributionError("x_attribution_internal_auth_missing", 503)
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/internal/x-posts/attribution/resolve",
+        data=json.dumps({"queue_id": queue_id, "log_id": log["id"]}).encode(),
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
+    # Leave room for account verification inside the bridge's 90-second call.
+    deadline = time.monotonic() + 55
+    for attempt in range(3):
+        status = 0
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError()
+            with urllib.request.urlopen(request, timeout=min(20, remaining)) as response:
+                status, raw = response.status, response.read(65537)
+            if status != 200 or len(raw) > 65536:
+                raise AttributionError("x_attribution_response_invalid", 503)
+            context = json.loads(raw)["context"]
+            return validate_context(context, log)
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            retryable = 500 <= status < 600
+            exc.close()
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            retryable = isinstance(reason, (TimeoutError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError, BrokenPipeError))
+        except (ValueError, KeyError, TypeError):
+            raise AttributionError("x_attribution_response_invalid", 503) from None
+        if not retryable or attempt == 2 or time.monotonic() >= deadline:
+            # Never log the response body, request URL, token or exception text.
+            logging.getLogger(__name__).warning(
+                "x_attribution_resolve_failed queue_id=%s log_id=%s http=%s attempts=%s",
+                queue_id, log["id"], status, attempt + 1)
+            raise AttributionError("x_attribution_resolution_unavailable", 503) from None
+        time.sleep(min((0.5, 1.0)[attempt], max(0, deadline - time.monotonic())))
 
 
 class XNativeBridge:
@@ -99,6 +145,14 @@ class XNativeBridge:
         with self.connect() as c:
             row = c.execute("SELECT * FROM pipeline_x_claim WHERE source_key=? AND stage=? AND generation=?", self.key(job)).fetchone()
             latest = c.execute("SELECT MAX(generation) FROM pipeline_x_claim WHERE source_key=? AND stage=?", self.key(job)[:2]).fetchone()[0]
+            # An audited recovery revokes the old execution before its next
+            # claim exists; a delayed old failure must not undo admission.
+            from .x_prepost_recovery import TABLE
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone():
+                superseded = c.execute("SELECT 1 FROM " + TABLE + " WHERE source_key=? AND ((stage=? AND to_generation>?) OR (stage='publish' AND ?='prepare')) LIMIT 1",
+                                       (job['source_key'], job['stage'], job['generation'], job['stage'])).fetchone()
+                if superseded:
+                    raise AdapterError('x_dispatch_claim_conflict')
         if not row or latest != job["generation"] or not secrets.compare_digest(row["claim_hash"], self.claim_hash(claim)):
             raise AdapterError("x_dispatch_claim_conflict")
         return dict(row), obj(row["descriptor_json"])
@@ -163,18 +217,18 @@ class XNativeBridge:
         else:
             body = posts.build_post_text(short, queue.get("drama_name"), queue["description"], queue.get("body_template"), copy_contract_version=int(queue.get("copy_contract_version", 1)))
         if os.environ.get("X_POST_ATTRIBUTION_V2_ENABLED", "0") == "1":
-            from features.x_posts.attribution import load_frozen, freeze, resolve_via_loopback, build_url
+            from features.x_posts.attribution import load_frozen, freeze, build_url
             attribution = load_frozen(self.r.POST_DB_PATH, log["id"])
             if attribution is None:
-                attribution = freeze(self.r.POST_DB_PATH, log, resolve_via_loopback(queue["id"], log["id"]))
+                attribution = freeze(self.r.POST_DB_PATH, log, _resolve_attribution(queue["id"], log))
             long_url = build_url(attribution, log)
         else:
             macros = {key: queue[key] for key in ("material_language", "drama_name", "tag", "page_name", "page_id", "material_name", "material_id", "content_id")}
             macros.update(username=queue["account_username"], timestamp=int(time.time()), log_id=log["id"], queue_id=queue["id"], video_duration_seconds=duration)
             long_url = posts.build_w2a_url(macros, duration_policy_version=duration_policy.version(queue))
-        log = self.store.prepare_log(log["id"], long_url, short, body)
         self.r.preflight_post_storage_request()
         posts.write_short_redirect(self.r.POST_PUBLIC_ROOT, log["id"], long_url, durable_storage={"mount_root": self.r.POST_STORAGE_MOUNT_ROOT, "storage_root": self.r.POST_STORAGE_ROOT})
+        log = self.store.prepare_log(log["id"], long_url, short, body)
         return log
 
     def artifact(self, queue, record):
@@ -202,15 +256,14 @@ class XNativeBridge:
             if previous:
                 return self.stored(job, claim)[1]
             queue = self.store.get_queue(int(job["source_id"]))
-            if job["stage"] == "publish":
-                # Check before a native claim or any media-upload intent. A
-                # later episode waits locally for the confirmed episode cursor.
-                self.store.assert_scheduled_publishable(queue["id"])
             # Deferred/routed inputs are admitted only once the existing route
             # planner has frozen the original media and account identity.
             pending_route = queue.get("delivery_mode") == "duration_pending"
             log = {"id": 0, "status": "reserved", "attempt_count": 0, "unknown_outcome": 0} if pending_route and job["stage"] == "prepare" else self.store.reserve_log(queue["id"])
-            if log["status"] != "reserved" or log["attempt_count"] or log["unknown_outcome"]:
+            from .x_prepost_recovery import authorization, digest
+            with self.connect() as c:
+                recovered = authorization(c, queue, log, job) if log["id"] else None
+            if log["status"] != "reserved" or (log["attempt_count"] and not recovered) or log["unknown_outcome"]:
                 raise AdapterError("x_existing_attempt_requires_reconciliation")
             self._parent(queue, log)
             source_id, _, source = self.account(queue, target=pending_route, verify_now=True)
@@ -267,6 +320,8 @@ class XNativeBridge:
                     descriptor = {"kind": "x_random", "request": request}
             else:
                 artifact = self.artifact(queue, frozen)
+                if recovered and digest(artifact) != recovered["artifact_sha256"]:
+                    raise AdapterError("x_recovery_artifact_changed")
                 media_limit = posts.DEFAULT_MAX_GIF_BYTES if artifact["mime"] == "image/gif" else posts.DEFAULT_MAX_IMAGE_BYTES if artifact["mime"].startswith("image/") else video_byte_limit(bool(source.get("long_video_publish_eligible")))
                 if type(artifact.get("size")) is not int or not 0 < artifact["size"] <= min(media_limit, self.r.POST_MAX_MEDIA_BYTES):
                     raise AdapterError("x_artifact_exceeds_account_limit")
@@ -321,14 +376,19 @@ class XNativeBridge:
             if path == "/2/media/upload/initialize":
                 with self.connect() as c:
                     initialized = c.execute("SELECT 1 FROM pipeline_x_checkpoint WHERE source_key=? AND generation=? AND phase='x_media_initialized'", (job["source_key"], job["generation"])).fetchone()
-                retryable = retry_of is not None and log["status"] == "media_uploading" and log["attempt_count"] == 1 and not initialized
+                retryable = retry_of is not None and log["status"] == "media_uploading" and log["attempt_count"] >= 1 and not initialized
                 untouched = retry_of is None and log["status"] == "reserved" and not log["attempt_count"]
-                if method != "POST" or not (retryable or untouched) or log["unknown_outcome"]:
+                from .x_prepost_recovery import authorization, mark_retry_uploading
+                with self.connect() as c:
+                    recovered = authorization(c, queue, log, job) if retry_of is None else None
+                if method != "POST" or not (retryable or untouched or recovered) or log["unknown_outcome"]:
                     raise AdapterError("x_upload_already_started")
                 expected = json.dumps({"media_type": descriptor["artifact"]["mime"], "total_bytes": descriptor["artifact"]["size"], "media_category": descriptor["request"]["media_category"]}, separators=(",", ":")).encode()
                 if details.get("body_sha256") != hashlib.sha256(expected).hexdigest():
                     raise AdapterError("x_upload_identity_changed")
-                if not retryable:
+                if recovered:
+                    mark_retry_uploading(self, job, log["id"])
+                elif not retryable:
                     self.store.mark_publishing(log["id"])
             elif path == "/2/tweets":
                 if method != "POST" or log["status"] != "post_creating" or log["unknown_outcome"] or not log["x_media_id"]:
@@ -520,17 +580,20 @@ class XNativeBridge:
         if log["status"] == "published":
             return {"status": "published", "canonical_terminal": True}
         code = str(receipt.get("error_code", "pipeline_execution_failed"))[:120]
+        # The scheduler derives account locks from this canonical receipt.
+        # Preserve bounded, redacted diagnostics across the native boundary.
+        message = failure_fields(receipt.get("error_message")).get("error_message") or code
         unknown = bool(receipt.get("unknown_outcome")) or log["status"] in ("post_creating", "repost_creating")
         if unknown and log["status"] in ("post_creating", "repost_creating"):
             # Preserve the state required to accept this exact attempt's late
             # receipt. It remains quarantined and cannot receive new permits.
             with self.connect() as c:
-                c.execute("UPDATE x_post_publish_log SET unknown_outcome=1,error_code=?,error_message=?,updated_at=? WHERE id=?", (code, code, posts.utc_now(), log["id"]))
+                c.execute("UPDATE x_post_publish_log SET unknown_outcome=1,error_code=?,error_message=?,updated_at=? WHERE id=?", (code, message, posts.utc_now(), log["id"]))
             return {"canonical_no_write": False}
         if log["status"] == "reserved":
-            self.store.mark_failed_if_reserved(log["id"], code, code)
+            self.store.mark_failed_if_reserved(log["id"], code, message)
         else:
-            self.store.mark_failed(log["id"], code, code, unknown)
+            self.store.mark_failed(log["id"], code, message, unknown)
         return {"canonical_no_write": not unknown}
 
     def reconcile(self, job):
