@@ -46,7 +46,7 @@ class ObjectStore:
                 return None
             raise
 
-    def upload(self, key, local_path, sha256_value, size, content_type="video/mp4"):
+    def upload(self, key, local_path, sha256_value, size, content_type="video/mp4", copy_from=None):
         head = self.head(key)
         def matches(info):
             return (info is not None and int(info.get("content-length", -1)) == size
@@ -56,6 +56,19 @@ class ObjectStore:
         if head is None:
             target = {"Bucket": self.config.cos_bucket, "Key": key}
             headers = {"ContentType": content_type, "Metadata": {"x-cos-meta-sha256": sha256_value}}
+            if copy_from:
+                source, etag = copy_from
+                try:
+                    self.client.copy_object(**target, **headers, CopySource=source,
+                                            CopyStatus="Replaced", CopySourceIfMatch=etag)
+                except Exception as exc:
+                    print("cos_delivery_copy_fallback", type(exc).__name__, flush=True)
+                copied = self.head(key)
+                if matches(copied):
+                    print("cos_delivery_copy_verified", size, flush=True)
+                    return self.url(key)
+                if copied is not None:
+                    raise ExecutionError("cos_object_conflict", unknown=True)
             with Path(local_path).open("rb") as body:
                 if size < 64 * 1024**2:
                     self.client.put_object(**target, **headers, Body=body, EnableMD5=True)

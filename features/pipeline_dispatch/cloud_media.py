@@ -100,32 +100,39 @@ class CloudExecutor(NodeExecutors):
         with tempfile.TemporaryDirectory(dir=self.work_root) as folder:
             temp = Path(folder)
             source = temp / "source.mp4"
-            context.phase("download")
-            YouTubeHTTPClient().download(request["source_url"], source, allowed_hosts=self.config["source_hosts"],
-                    max_bytes=16 * 1024**3 if channel == "x" else 2 * 1024**3, heartbeat=context.check)
-            sha, size = sha256_file(source)
-            if ((request.get("source_sha256") and request["source_sha256"] != sha)
-                    or (request.get("source_size") and int(request["source_size"]) != size)):
-                raise ExecutionError("cos_source_fingerprint_changed")
-            raw = probe(self.config["ffprobe"], source)
-            streams = raw["streams"]
-            has_audio = any(s["codec_type"] == "audio" for s in streams)
-            secs = float(raw["format"]["duration"])
-            trim = float(request.get("source_trim_tail_seconds", 0))
-            duration = secs - trim
-            if not math.isfinite(duration) or duration <= 0 or trim < 0 or (mode in {"source_direct","random_overlay"} and trim):
-                raise ExecutionError("cos_source_duration_invalid")
-            info = {}
-            if mode == "repair":
-                repair.validate_request(request, profile=profile)
-                info = repair.inspect_source(raw, request["trigger_code"], request["duration_policy"])
-                duration = info["output_duration"]
-            elif channel == "tt":
-                tt.inspect_input(raw, self.config.get("max_tt_duration", 3600))
-            elif channel == "fb" and (duration > 3600 or request.get("video_template", "random_overlay") != "random_overlay"):
-                raise ExecutionError("cos_fb_video_contract")
-            elif channel == "x" and (abs(float(request["source_duration"]) - secs) > 0.05 or secs > request["max_duration_seconds"]):
-                raise ExecutionError("cos_x_duration_policy")
+            from .cloud_fb_input import cloud_input
+            remote = cloud_input(self, request, identity) if kind == "fb_prepare" else None
+            if remote:
+                ci_source, duration = remote
+                secs, has_audio, info = duration, True, {}
+                print("cos_fb_input_remote", native_id, flush=True)
+            else:
+                context.phase("download")
+                YouTubeHTTPClient().download(request["source_url"], source, allowed_hosts=self.config["source_hosts"],
+                        max_bytes=16 * 1024**3 if channel == "x" else 2 * 1024**3, heartbeat=context.check)
+                sha, size = sha256_file(source)
+                if ((request.get("source_sha256") and request["source_sha256"] != sha)
+                        or (request.get("source_size") and int(request["source_size"]) != size)):
+                    raise ExecutionError("cos_source_fingerprint_changed")
+                raw = probe(self.config["ffprobe"], source)
+                streams = raw["streams"]
+                has_audio = any(s["codec_type"] == "audio" for s in streams)
+                secs = float(raw["format"]["duration"])
+                trim = float(request.get("source_trim_tail_seconds", 0))
+                duration = secs - trim
+                if not math.isfinite(duration) or duration <= 0 or trim < 0 or (mode in {"source_direct","random_overlay"} and trim):
+                    raise ExecutionError("cos_source_duration_invalid")
+                info = {}
+                if mode == "repair":
+                    repair.validate_request(request, profile=profile)
+                    info = repair.inspect_source(raw, request["trigger_code"], request["duration_policy"])
+                    duration = info["output_duration"]
+                elif channel == "tt":
+                    tt.inspect_input(raw, self.config.get("max_tt_duration", 3600))
+                elif channel == "fb" and (duration > 3600 or request.get("video_template", "random_overlay") != "random_overlay"):
+                    raise ExecutionError("cos_fb_video_contract")
+                elif channel == "x" and (abs(float(request["source_duration"]) - secs) > 0.05 or secs > request["max_duration_seconds"]):
+                    raise ExecutionError("cos_x_duration_policy")
 
             context.phase("prepare")
             receipt = {"status": "ready", "profile": profile, "backend": "cos", "storage_backend": "cos"}
@@ -158,25 +165,27 @@ class CloudExecutor(NodeExecutors):
                                assets={"asset_set_sha256": manifest, "selected": recipe["assets"]})
                 if channel == "x":
                     receipt.update(queue_id=request["queue_id"], source_sha256=sha, source_size=size, asset_manifest_sha256=manifest)
+            copy_from = None
             if mode == "source_direct":
                 output = source
             else:
-                ci_input = source
-                if codec == "hevc" and mode not in {"branded_preview", "direct_outro"} and duration < secs:
-                    # CI's HEVC interval can truncate a fractional second. Pass
-                    # the trimmed MP4 edit first, then encode its entire timeline.
-                    ci_input = temp / "trimmed.mp4"
-                    run_media(self.config["ffmpeg"], ["-i",source,"-map","0:v:0","-map","0:a:0?","-c","copy","-t",
-                              "%.6f" % duration,"-movflags","+faststart","-y",ci_input])
-                if codec == "hevc":
-                    params["Transcode"].pop("TimeInterval", None)
-                if not has_audio:
-                    silent = temp / "with-audio.mp4"
-                    run_media(self.config["ffmpeg"], ["-i",ci_input,"-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000",
-                            "-map","0:v:0","-map","1:a","-c:v","copy","-c:a","aac","-shortest","-y",silent])
-                    ci_source = self.origin.content(silent, "video/mp4")
-                else:
-                    ci_source = self.origin.content(ci_input, "video/mp4")
+                if not remote:
+                    ci_input = source
+                    if codec == "hevc" and mode not in {"branded_preview", "direct_outro"} and duration < secs:
+                        # CI's HEVC interval can truncate a fractional second. Pass
+                        # the trimmed MP4 edit first, then encode its entire timeline.
+                        ci_input = temp / "trimmed.mp4"
+                        run_media(self.config["ffmpeg"], ["-i",source,"-map","0:v:0","-map","0:a:0?","-c","copy","-t",
+                                  "%.6f" % duration,"-movflags","+faststart","-y",ci_input])
+                    if codec == "hevc":
+                        params["Transcode"].pop("TimeInterval", None)
+                    if not has_audio:
+                        silent = temp / "with-audio.mp4"
+                        run_media(self.config["ffmpeg"], ["-i",ci_input,"-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000",
+                                "-map","0:v:0","-map","1:a","-c:v","copy","-c:a","aac","-shortest","-y",silent])
+                        ci_source = self.origin.content(silent, "video/mp4")
+                    else:
+                        ci_source = self.origin.content(ci_input, "video/mp4")
                 if mode in {"branded_preview","direct_outro"}:
                     duration, ci_output = self.phone_outro(request, mode, codec, has_audio, source, ci_source, duration, temp, context, run)
                     receipt["assets"] = {"outro_sha256": self.asset_hashes["outro"][0], "outro_size": self.asset_hashes["outro"][1],
@@ -185,6 +194,14 @@ class CloudExecutor(NodeExecutors):
                     ci_output = run("render", "Transcode", ci_source, params)
                 context.phase("output_verify")
                 output = temp / "output.mp4"
+                if self.config.get("delivery_cloud_copy"):
+                    try:
+                        info_head = self.origin.head(ci_output)
+                        if info_head and info_head.get("etag"):
+                            copy_from = ({"Bucket": self.jobs.bucket, "Region": self.jobs.region, "Key": ci_output},
+                                         info_head["etag"])
+                    except Exception as exc:
+                        print("cos_delivery_head_fallback", type(exc).__name__, flush=True)
                 self.jobs.client.download_file(Bucket=self.jobs.bucket, Key=ci_output, DestFilePath=str(output), PartSize=8, MAXThread=2)
                 if codec == "hevc":
                     raw_out = probe(self.config["ffprobe"], output)
@@ -193,6 +210,7 @@ class CloudExecutor(NodeExecutors):
                         tagged = temp / "tagged.mp4"
                         run_media(self.config["ffmpeg"], ["-i",output,"-map","0","-c","copy","-tag:v","hvc1","-movflags","+faststart","-y",tagged])
                         output = tagged
+                        copy_from = None
             final = probe(self.config["ffprobe"], output)
             digest, byte_count = sha256_file(output)
             if not 0 < byte_count <= cap:
@@ -221,7 +239,10 @@ class CloudExecutor(NodeExecutors):
             if kind == "x_random":
                 validate_receipt(request, receipt)
             context.phase("artifact_upload")
-            self.delivery.upload(dest, output, digest, byte_count)
+            if copy_from:
+                self.delivery.upload(dest, output, digest, byte_count, copy_from=copy_from)
+            else:
+                self.delivery.upload(dest, output, digest, byte_count)
             return receipt
 
     def phone_outro(self, request, mode, codec, has_audio, source, source_key, duration, temp, context, run):

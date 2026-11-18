@@ -43,6 +43,8 @@ class CloudLedger:
                 CREATE TABLE IF NOT EXISTS work (
                   identity TEXT PRIMARY KEY, job TEXT NOT NULL, next_poll REAL NOT NULL DEFAULT 0,
                   receipt TEXT NOT NULL DEFAULT '', route TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS fb_input (
+                  action TEXT PRIMARY KEY, object_key TEXT NOT NULL, seconds REAL NOT NULL);
             """)
             if "paid" not in {r[1] for r in c.execute("PRAGMA table_info(work)")}:
                 c.execute("ALTER TABLE work ADD COLUMN paid INTEGER NOT NULL DEFAULT 0")

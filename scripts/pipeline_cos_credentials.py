@@ -48,15 +48,23 @@ def issue(config, issuer, destination):
     owner = str(user.get("AccountId") or user["PrincipalId"]).split(":")[0]
     if not owner.isdigit():
         raise RuntimeError("Tencent STS owner identity unavailable")
-    object_resources = [resource("cos", target, prefix.strip("/") + "/*") for target, prefix in (
-        (bucket, config["prefix"]), (config["delivery_bucket"], config["delivery_prefix"]))]
+    stores = [config]
+    if config.get("legacy_work_ids"):
+        stores.append(dict(config, **config["legacy_storage"]))
+    object_resources = sorted({resource("cos", target, prefix.strip("/") + "/*")
+        for store in stores for target, prefix in (
+            (store["bucket"], store["prefix"]), (store["delivery_bucket"], store["delivery_prefix"]))})
+    ci_resources = sorted({resource("ci", store["bucket"], "*") for store in stores})
     policy = {"version": "2.0", "statement": [
         {"effect": "allow", "action": ["ci:CreateMediaJobs", "ci:DescribeMediaJob", "ci:DescribeMediaJobs",
-            "ci:DescribeMediaQueues"], "resource": [resource("ci", bucket, "*")]},
+            "ci:DescribeMediaQueues"], "resource": ci_resources},
         {"effect": "allow", "action": ["cos:GetObject", "cos:HeadObject", "cos:PutObject",
             "cos:InitiateMultipartUpload", "cos:UploadPart", "cos:ListParts", "cos:CompleteMultipartUpload",
             "cos:AbortMultipartUpload"], "resource": object_resources},
         {"effect": "allow", "action": ["cam:PassRole"], "resource": ["qcs::cam::uin/" + owner + ":roleName/CI_QCSRole"]}]}
+    if config.get("fb_cloud_input"):
+        policy["statement"].append({"effect": "allow", "action": ["cos:GetObject", "cos:HeadObject"],
+            "resource": [resource("cos", bucket, "custom/source/*")]})
     response = sts("GetFederationToken", {"Name": "pipeline-cos-prepare", "DurationSeconds": 7200,
                    "Policy": json.dumps(policy, separators=(",", ":"))}, *credentials)
     destination = Path(destination)
