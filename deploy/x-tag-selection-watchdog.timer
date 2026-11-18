@@ -1,0 +1,11 @@
+[Unit]
+Description=Check X selection recovery even while publishers are draining
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=30
+AccuracySec=2
+Unit=x-tag-selection-watchdog.service
+
+[Install]
+WantedBy=timers.target

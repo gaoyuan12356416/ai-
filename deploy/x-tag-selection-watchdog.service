@@ -1,0 +1,14 @@
+[Unit]
+Description=X selection recovery and service drain diagnostics
+After=network.target
+RequiresMountsFor=/mnt/data-disk/x-tag-publisher/auto
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=root
+Group=x-post-daily
+UMask=0007
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -I /opt/x-selection-recovery/current/scripts/x_auto_selection_watchdog.py --apply
+TimeoutStartSec=180

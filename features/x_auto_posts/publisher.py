@@ -1110,6 +1110,11 @@ class AutoPostExecutor:
             self.store.set_run_status(run_id, target, expected_statuses={run.status})
 
     def execute_next(self, worker_id: Any) -> Dict[str, Any]:
+        import contextlib
+        import os
+        from .selection_recovery import ClaimLifetime, execution_available, file_lock
+        lock_dir = os.environ.get("X_AUTO_EXECUTION_LOCK_DIR", "")
+        lifetime = contextlib.ExitStack()
         reconcile_only = not self.gates.is_open
         worker = str(worker_id or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9._:@-]{1,128}", worker):
@@ -1119,14 +1124,22 @@ class AutoPostExecutor:
         if not self._execute_slots.acquire(blocking=False):
             return {"ok": True, "claimed": False, "busy": True}
         try:
-            claim = self.store.claim_next_executable_task(
-                worker_id=worker,
-                lease_seconds=self.lease_seconds,
-                now=self._now(),
-                reconcile_only=reconcile_only,
-                publish_delegated=self.dispatch_enabled,
-                planning_cutoff=self.dispatch_cutoff if self.dispatch_enabled else None,
-            )
+            with file_lock(lock_dir, "admission.lock", shared=True):
+                claim = self.store.claim_next_executable_task(
+                    worker_id=worker,
+                    lease_seconds=self.lease_seconds,
+                    now=self._now(),
+                    reconcile_only=reconcile_only,
+                    publish_delegated=self.dispatch_enabled,
+                    candidate_guard=lambda task_id: execution_available(lock_dir, task_id),
+                    planning_cutoff=self.dispatch_cutoff if self.dispatch_enabled else None,
+                )
+                if claim is not None:
+                    handle = lifetime.enter_context(file_lock(lock_dir, str(claim.task.id) + ".lock", blocking=False))
+                    if not handle:
+                        raise RuntimeError("x_auto_execution_lock_conflict")
+                    lifetime.enter_context(ClaimLifetime(
+                        self.store, claim, handle, lease_seconds=self.lease_seconds, now_fn=self._now))
             if claim is None:
                 result = {
                     "ok": True,
@@ -1152,6 +1165,8 @@ class AutoPostExecutor:
                 prepared_now = False
                 if phase == "selection":
                     task = self._select(task, claim_token)
+                    self.store.renew_task_claim(task.id, claim_token,
+                                               lease_seconds=min(self.lease_seconds, 900), now=self._now())
                     phase = "prepare"
                 if phase == "prepare" or task.status in {"reserved", "preparing"}:
                     task = self._prepare(task, claim_token)
@@ -1178,6 +1193,7 @@ class AutoPostExecutor:
                 "gates": self.gates.as_dict(),
             }
         finally:
+            lifetime.close()
             self._execute_slots.release()
 
 
