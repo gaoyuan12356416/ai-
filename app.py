@@ -43474,6 +43474,9 @@ def list_products(force=False):
 
 
 
+    from features.moboreels_library.synthesis import include_product
+    items = include_product(items)
+
     with PRODUCT_CACHE_LOCK:
 
 
@@ -63319,6 +63322,9 @@ def pick_drama_variant(content_id, app_id=None):
 
 
 def fetch_drama_episodes(content_id, app_id=None):
+    if str(app_id or "").strip() == "3360":
+        from features.moboreels_library.synthesis import fetch_episodes
+        return fetch_episodes(content_id)
 
 
 
