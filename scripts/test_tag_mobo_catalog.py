@@ -90,4 +90,28 @@ class MoboTests(unittest.TestCase):
         with self.assertRaises(XPostError):
             build_post_text('https://example.test/1.html','Story','Synopsis','{{drama_name}} {{desc}} {{url}} {{m_url}}')
 
+    def test_distributed_bridge_freezes_actual_product_link(self):
+        from features.pipeline_dispatch.x_native import XNativeBridge
+        from unittest.mock import Mock
+        bridge=XNativeBridge.__new__(XNativeBridge)
+        bridge.r=SimpleNamespace(POST_DB_PATH='fixture.sqlite3',POST_SHORT_BASE_URL='https://example.test/x',
+            POST_PUBLIC_ROOT='/fixture',POST_STORAGE_MOUNT_ROOT='/fixture',POST_STORAGE_ROOT='/fixture',
+            preflight_post_storage_request=lambda:None)
+        bridge.store=Mock()
+        bridge.store.prepare_log.side_effect=lambda log_id,long_url,short,body,**kw:dict(post_text=body)
+        queue=dict(id=1,source_type='material',preflight_duration=218,drama_name='Story',description='Synopsis',
+                   body_template='{{drama_name}} {{desc}} {{m_url}}',material_language='en',tag='Moboreels',
+                   page_name='Page',page_id='293',material_name='Video',material_id='20',content_id='147905322',
+                   account_username='test')
+        url='https://ai.yingliangads.com/m/frozen-test'
+        with patch.dict(os.environ,{'X_POST_ATTRIBUTION_V2_ENABLED':'0'}), \
+             patch('features.x_posts.moboreels.assert_queue_publishable'), \
+             patch('features.x_posts.moboreels.resolve_x_url',return_value=url), \
+             patch('features.x_posts.service.build_w2a_url',return_value='https://example.test/drama'), \
+             patch('features.x_posts.service.write_short_redirect'):
+            result=bridge._links(queue,{'id':1})
+        self.assertIn(url,result['post_text'])
+        self.assertNotIn('/m/preview',result['post_text'])
+        self.assertEqual(bridge.store.prepare_log.call_args.kwargs['story_product_url'],url)
+
 if __name__=='__main__':unittest.main()
