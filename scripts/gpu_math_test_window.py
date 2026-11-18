@@ -46,16 +46,22 @@ def save(path, record):
 
 
 def restore(record):
-    current=snapshot();pool=current['config']['hosts']['hk-gpu']['prepare']
-    if pool==record['before_pool']:
-        return 'already_restored'
-    if pool!=record['paused_pool']:
-        return 'pool_changed_externally_preserved'
-    change(current['version'],record['before_pool'])
-    after=snapshot()
-    if after['config']['hosts']['hk-gpu']['prepare']!=record['before_pool']:
-        raise RuntimeError('restore_readback_mismatch')
-    return 'restored'
+    for attempt in range(5):
+        current=snapshot();pool=current['config']['hosts']['hk-gpu']['prepare']
+        if pool==record['before_pool']:
+            return 'already_restored'
+        if pool!=record['paused_pool']:
+            return 'pool_changed_externally_preserved'
+        try:
+            change(current['version'],record['before_pool'])
+            after=snapshot()
+            if after['config']['hosts']['hk-gpu']['prepare']==record['before_pool']:
+                return 'restored'
+        except Exception:
+            # Unknown HTTP outcome: inspect current state/version before retry.
+            pass
+        time.sleep(2)
+    raise RuntimeError('restore_readback_mismatch')
 
 
 def main():

@@ -23,8 +23,10 @@ def idle_window(args):
     deadline=time.monotonic()+args.wait_timeout
     consecutive=0
     while time.monotonic()<deadline:
+        if time.time()>=args.deadline_epoch:
+            raise TimeoutError('exclusive_window_ended')
         # A locally observed idle window is the only permit this runner grants.
-        atomic_json(args.permit,dict(allowed=True,expires_at=time.time()+1800,
+        atomic_json(args.permit,dict(allowed=True,expires_at=min(time.time()+1800,args.deadline_epoch),
             basis='idle_gpu_observation',production_signals=0))
         try:
             check_permit(args.permit,args.work_root)
@@ -66,6 +68,7 @@ def main():
     p.add_argument('--phase',choices=['kernels','quality','throughput','all'],default='all')
     p.add_argument('--wait-timeout',type=float,default=1800)
     p.add_argument('--idle-samples',type=int,default=10)
+    p.add_argument('--deadline-epoch',type=float,default=float('inf'))
     p.add_argument('--duration',type=float,default=120)
     p.add_argument('--concurrency',type=int,default=16)
     p.add_argument('--order',default='baseline,candidate,candidate,baseline')
