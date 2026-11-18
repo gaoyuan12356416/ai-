@@ -1,0 +1,1 @@
+"""Independent AI editing application."""

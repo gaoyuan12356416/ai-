@@ -4,7 +4,10 @@
       key: "video_editing", label: "视频剪辑", order: 15, module: "video_editing",
       items: [{ key: "videoEditing", label: "视频剪辑工作台", order: 10,
         description: "共享视频素材、逐剧剪辑与制作任务", kind: "page",
-        href: "/video-editing.html", module: "video_editing", enabled: true }],
+        href: "/video-editing.html", module: "video_editing", enabled: true },
+        { key: "videoEditingAi", label: "AI 智能剪辑", order: 20,
+          description: "分析原片、调整剪辑方案并制作成片", kind: "page",
+          href: "/video-editing-ai.html", module: "video_editing", enabled: true }],
     },
     {
       key: "ad_control",
@@ -533,6 +536,7 @@
 
   const INTERNAL_VIEW_HREFS = {
     videoEditing: "/video-editing.html",
+    videoEditingAi: "/video-editing-ai.html",
     tasks: "/drama-synthesis.html",
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
@@ -575,14 +579,17 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
-    if (!normalized.some(group => group && Array.isArray(group.items) &&
-        group.items.some(item => item && item.key === "videoEditing"))) {
-      const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
-      const editorGroup = normalized.find(group => group && group.key === "video_editing");
-      if (editorGroup) {
-        if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
-        editorGroup.items.push(JSON.parse(JSON.stringify(editorDefault.items[0])));
-      } else normalized.push(JSON.parse(JSON.stringify(editorDefault)));
+    const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
+    const missingEditorItems = editorDefault.items.filter(entry => !normalized.some(group =>
+      Array.isArray(group?.items) && group.items.some(item => item?.key === entry.key)));
+    if (missingEditorItems.length) {
+      let editorGroup = normalized.find(group => group?.key === editorDefault.key);
+      if (!editorGroup) {
+        editorGroup = {...editorDefault, items: []};
+        normalized.push(editorGroup);
+      }
+      if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
+      editorGroup.items.push(...missingEditorItems.map(item => ({...item})));
     }
     let tiktokPlatform = normalized.find(group => group && group.key === "tiktok_platform");
     if (!tiktokPlatform) {

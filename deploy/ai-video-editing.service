@@ -1,0 +1,23 @@
+[Unit]
+Description=Independent AI video editing application
+After=network.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai-video-editing/current
+EnvironmentFile=/root/drama_material_service/.env
+Environment=AI_VIDEO_EDITING_ROOT=/mnt/data-disk/ai-video-editing
+Environment=AI_VIDEO_EDITING_CODEX_BIN=/usr/bin/codex
+Environment=AI_VIDEO_EDITING_CODEX_HOME=/root/.codex
+Environment=AI_VIDEO_EDITING_VISION_MODEL=gpt-6.1-sol
+EnvironmentFile=-/etc/ai-video-editing/runtime.env
+ExecStart=/usr/bin/python3 -m ai_video_editing.http_api
+Restart=on-failure
+RestartSec=4
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,34 @@
+[Unit]
+Description=Independent AI video editor GPU rendering worker
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/data/ai-video-editing
+
+[Service]
+Type=simple
+WorkingDirectory=/data/ai-video-editing/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONNOUSERSITE=1
+Environment=AI_VIDEO_EDITING_RENDER_ROOT=/data/ai-video-editing/work
+Environment=AI_VIDEO_EDITING_FFMPEG=/usr/bin/ffmpeg
+Environment=AI_VIDEO_EDITING_FFPROBE=/usr/bin/ffprobe
+Environment=AI_VIDEO_EDITING_ENCODER=h264_nvenc
+EnvironmentFile=-/etc/ai-video-editing/render.env
+ExecStart=/usr/bin/python3.9 -m features.ai_video_editing.render_worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+KillMode=control-group
+Nice=12
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=200%
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/data/ai-video-editing/work
+
+[Install]
+WantedBy=multi-user.target

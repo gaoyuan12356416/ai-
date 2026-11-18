@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>AI 智能剪辑 · AI 后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css">
+
+  <link rel="stylesheet" href="/video-editing-ai.css?v=20261118-1">
+  <script defer src="/quick-nav.js?v=20261118-1"></script>
+  <script defer src="/ui-topbar.js"></script>
+  <link rel="stylesheet" href="/video-editing-ai-language.css?v=20261118-1">
+  <script defer src="/video-editing-ai-subtitles.js?v=20261118-1"></script>
+  <script defer src="/video-editing-ai-language.js?v=20261118-1"></script>
+  <script defer src="/video-editing-ai.js?v=20261118-1"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">AI</div><div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div></div>
+      <nav id="quickNav" class="nav" aria-label="后台导航"></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="title"><h1>AI 智能剪辑</h1><p>从剧集和素材中选段，核对时间码后制作成片。</p></div>
+        <div class="top-actions"><div id="userCard" class="user-card"></div><button class="button" id="authButton" type="button">登录</button></div>
+      </header>
+      <div id="gate" class="ai-notice" role="status">正在加载工作台…</div>
+      <div id="workspace" hidden>
+        <nav class="ai-worknav" aria-label="工作区域">
+          <a href="#sources">素材与配置</a><a href="#review">候选与方案</a><a href="#works">草稿与成片</a>
+          <button type="button" id="subtitleTool">字幕工具</button>
+        </nav>
+        <div class="ai-grid" id="sources">
+          <section class="ai-card">
+            <header class="ai-heading"><h2>我的素材库</h2><button id="showUpload" class="ai-link" type="button">上传视频</button></header>
+            <form id="uploadForm" class="ai-upload" hidden>
+              <label>本地视频<input id="uploadFile" type="file" accept=".mp4,.mov,video/mp4,video/quicktime" multiple required></label>
+              <p class="ai-muted">支持多选 MP4、MOV，每个文件最大 1 GiB。上传的素材仅本人可见。</p>
+              <div class="ai-upload-fields">
+                <label>剧名（选填）<input id="uploadSeries" list="seriesNames" maxlength="80" placeholder="相同剧名的素材会归为一组"></label>
+                <label>起始集号（选填）<input id="uploadEpisode" type="number" min="1" max="100000" step="1" placeholder="按文件列表顺序递增"></label>
+              </div>
+              <ol id="uploadQueue" class="ai-upload-queue"></ol>
+              <div class="ai-tools"><button id="submitUpload" type="submit" class="button small">开始上传</button></div>
+              <progress id="uploadProgress" max="100" value="0" hidden></progress>
+              <p id="uploadState" class="ai-muted" role="status"></p>
+              <button id="pickUploaded" class="button small" type="button" hidden>选用本次就绪素材</button>
+            </form>
+            <form class="ai-search" id="searchForm">
+              <select id="seriesFilter" aria-label="按剧名筛选"><option value="">全部剧名</option></select>
+              <datalist id="seriesNames"></datalist>
+              <input id="sourceQuery" aria-label="查找素材" placeholder="搜索已就绪素材名称" type="search" maxlength="100">
+              <button class="button small" type="submit">查询</button>
+            </form>
+
+            <p id="searchState" class="ai-muted" role="status"></p>
+            <div id="sourceList" class="ai-source-list" aria-label="可选素材"></div>
+            <button type="button" id="moreSources" class="ai-link" hidden>加载更多素材</button>
+          </section>
+          <section class="ai-card">
+            <header class="ai-heading"><h2>剪辑配置</h2><span id="selectedCount" class="ai-muted">已选 0 段</span></header>
+            <div id="selection" class="ai-selection"></div>
+            <div class="ai-formgrid">
+              <label>处理方式<select id="grouping"><option value="merge">合并素材</option><option value="independent">逐条处理</option></select></label>
+              <label>剪辑手法<select id="method"><option value="hook_first">热点前置</option><option value="highlight_montage">高燃混剪</option><option value="golden_three">黄金三段</option><option value="cliffhanger">爆点引流</option></select></label>
+              <label id="durationField">目标时长（秒）<input type="number" id="duration" min="1" step="1" placeholder="自动"></label>
+              <label>脚本数量<select id="scriptCount"><option>1</option><option>2</option><option>3</option></select></label>
+              <label>每份脚本版本数<select id="variantCount"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+            </div>
+
+            <div class="ai-submitbar"><span id="estimated" class="ai-muted"></span><button id="analyze" class="button primary" type="button" disabled>分析所选素材</button></div>
+          </section>
+        </div>
+        <section id="review" class="ai-card ai-section">
+          <header class="ai-heading"><h2>候选与方案</h2><span id="analysisState" class="ai-muted" role="status">尚未分析</span></header>
+          <div id="analysisNote" class="ai-feedback" role="status"></div>
+          <div id="candidates" class="ai-candidates"></div>
+          <div class="ai-actionrow"><button type="button" class="button" id="refreshAnalysis" hidden>刷新分析</button><button type="button" class="button primary" id="makePlan" disabled>生成剪辑方案</button></div>
+          <div id="planBlock" hidden>
+            <div class="ai-planhead"><label>剪辑版本<select id="unitSelect"></select></label><span id="planCount" class="ai-muted"></span></div>
+            <div id="clipRows" class="ai-clips"></div>
+            <div class="ai-submitbar"><label>项目名称<input id="projectName" type="text" maxlength="80" value="AI 智能剪辑"></label><div class="ai-tools"><button type="button" id="saveCopy" class="button small" hidden>另存为新草稿</button><button type="button" class="button primary" id="saveDraft">创建剪辑草稿</button></div></div>
+          </div>
+        </section>
+        <section id="works" class="ai-card ai-section">
+          <header class="ai-heading"><h2>草稿与成片</h2><div class="ai-tools"><button type="button" class="ai-link" id="refreshWorks">刷新进度</button></div></header>
+          <div id="projects"></div><div id="jobs"></div>
+        </section>
+        <div id="notice" class="ai-notice" role="status" aria-live="polite" hidden></div>
+      </div>
+    </main>
+  </div>
+  <dialog id="preview" class="ai-modal" aria-labelledby="previewHeading">
+    <div class="ai-heading"><h2 id="previewHeading">视频预览</h2><button type="button" id="closePreview" class="button small">关闭</button></div>
+    <video id="player" controls playsinline preload="metadata"></video><p id="previewInfo" class="ai-muted" role="status"></p>
+  </dialog>
+</body>
+</html>
