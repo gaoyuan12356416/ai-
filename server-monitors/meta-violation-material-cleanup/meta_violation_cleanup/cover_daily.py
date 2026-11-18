@@ -73,7 +73,7 @@ def collect(path, start, end, *, workload_only=False):
         if workload_only:
             query += ' AND created_at>=?'
             params += (bounds[0],)
-        work_states = ('waiting_review', 'pending', 'waiting_references', 'reference_scan_incomplete')
+        work_states = ('waiting_review', 'pending')
         for row in db.execute(query + ' ORDER BY id', params):
             if row['action'] == 'write_intent':
                 intents.setdefault(row['object_key'], row['created_at'])
@@ -255,9 +255,8 @@ def workload_body(data):
         '广告处理 %d 条：替换成功 %d，待审核 %d，暂缓 %d，失败 %d，未知 %d，跳过 %d' % (
             sum(t.values()), t.get('succeeded', 0), t.get('waiting_review', 0), t.get('pending', 0),
             t.get('failed', 0), t.get('unknown', 0), t.get('obsolete', 0) + t.get('blocked', 0)),
-        '旧 Creative 检查 %d 个：确认清理 %d，核实已删 %d，暂缓 %d，失败 %d，未知 %d' % (
+        '旧 Creative 清理结果 %d 个：确认清理 %d，核实已删 %d，失败 %d，未知 %d' % (
             sum(d.values()), d.get('deleted_verified', 0), d.get('previous_deleted', 0),
-            d.get('pending', 0) + d.get('waiting_references', 0) + d.get('reference_scan_incomplete', 0),
             d.get('failed', 0) + d.get('delete_failed', 0), d.get('unknown', 0) + d.get('delete_unknown', 0)),
         '新增入队 %d 条；完成扫描 %d 批；扫描异常 %d 批；执行异常 %d 批' % (
             data['new_ads'], data['scan_completed'], data['scan_failed'], data['worker_errors']),

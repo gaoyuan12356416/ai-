@@ -8,7 +8,8 @@ description: Maintain the hourly Meta violation-material cover replacement and o
 As of 2026-11-18, the operator requires each four-hour report to contain only
 the preceding completed four-hour workload. Set both report hours and lookback
 hours to 4. Omit cumulative backlog/history and historical queue latency; count
-review/reference waits processed within the interval by last outcome per object.
+Ad review waits processed within the interval by last outcome per object. For
+Creative cleanup, count actual deletion/verification outcome events only.
 This supersedes the rolling-24-hour reporting rules below. Preserve past frozen
 reports and receipts. See [report deployment](../../../../doc/20261118.meta-cover-four-hour-workload.md)
 for the reporter-only release override that preserves active worker/scanner PIDs.
