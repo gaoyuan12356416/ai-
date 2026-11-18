@@ -154,7 +154,7 @@ def capacity_payload(raw, actor):
         if "max_workers" in raw and (type(raw["max_workers"]) is not int or not 0 <= raw["max_workers"] <= 64):
             raise MonitorError("invalid_request", "进程数无效")
     if "global_publish_limit" in raw:
-        if type(raw["global_publish_limit"]) is not int or not 1 <= raw["global_publish_limit"] <= 64:
+        if type(raw["global_publish_limit"]) is not int or raw["global_publish_limit"] < 1:
             raise MonitorError("invalid_request", "发布总并发无效")
     if "channel_limits" in raw:
         limits = raw["channel_limits"]
