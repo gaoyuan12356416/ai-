@@ -127,7 +127,7 @@ def rollback(commit):
     backup=OPS/'backups'/commit
     manifest=json.loads((backup/'manifest.json').read_text())
     current=APP/'current'
-    if current.exists() and current.resolve()!=APP/'releases'/commit:raise ValueError('different release active')
+    if current.exists() and current.resolve()!=(APP/'releases'/commit).resolve():raise ValueError('different release active')
     for r in manifest['files']:
         p=Path(r['path'])
         if (sha(p.read_bytes()) if p.exists() else None) not in (r['after'],r['before']):raise ValueError('concurrent change: '+str(p))
