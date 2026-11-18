@@ -8,12 +8,44 @@ from unittest.mock import patch
 import test_cover_worker as fixtures
 from test_cover_worker import Graph, ad, creative
 from meta_violation_cleanup.throttle import Governor
+from meta_violation_cleanup.sql_source import SqlSourceError
 
 
 class SchedulerTests(unittest.TestCase):
     setUp = fixtures.WorkerTests.setUp
     enqueue = fixtures.WorkerTests.enqueue
     worker = fixtures.WorkerTests.worker
+
+    def test_source_timeout_drains_sent_task_and_next_cycle_does_not_replay_it(self):
+        self.config.update(execution_workers=1, execution_batch_size=1)
+        ads = [ad('10', '20', '100'), ad('11', '21', '200')]
+        self.enqueue(ads)
+        graph = Graph(ads, [creative('20', '100'), creative('21', '200')])
+        worker = self.worker(graph)
+        prepare = self.source.prepare_candidates
+        started, failed = threading.Event(), threading.Event()
+        execute = worker._execute
+        def executing(task, context):
+            started.set()
+            self.assertTrue(failed.wait(2))
+            return execute(task, context)
+        def preparing(tasks):
+            if self.source.calls:
+                self.assertTrue(started.wait(2))
+                failed.set()
+                raise SqlSourceError('sql_query_timeout')
+            return prepare(tasks)
+        with patch.object(self.source, 'prepare_candidates', preparing), \
+             patch.object(worker, '_execute', executing):
+            with self.assertRaises(SqlSourceError):
+                worker.run_once(max_ads=2, process_deletes=False)
+        self.assertEqual(self.store.get_task(1)['status'], 'succeeded')
+        self.assertEqual(self.store.get_task(2)['status'], 'pending')
+        before = list(graph.calls)
+        worker.run_once(max_ads=2, process_deletes=False)
+        self.assertEqual(self.store.get_task(2)['status'], 'succeeded')
+        self.assertFalse(any(call[0] == 'get_ad' and call[1] == '10'
+                             for call in graph.calls[len(before):]))
 
     def test_cooling_account_is_skipped_before_sql_and_other_account_progresses(self):
         ads=[ad('10','20','100'),ad('11','21','200')]

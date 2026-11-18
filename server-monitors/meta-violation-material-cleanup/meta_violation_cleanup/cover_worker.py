@@ -539,8 +539,14 @@ class CoverWorker:
                     tasks.extendleft(reversed(deferred))
                 if batch:
                     at = self.clock()
-                    with self.timings.measure('source_prepare'):
-                        contexts = self.source.prepare_candidates(batch)
+                    try:
+                        with self.timings.measure('source_prepare'):
+                            contexts = self.source.prepare_candidates(batch)
+                    except Exception:
+                        # Persist every submitted task's receipt and surface a
+                        # concurrent execution failure before retrying reads.
+                        completed(list(futures))
+                        raise
                     batch_sizes[len(batch)] += 1
                     for task in batch:
                         preparations[task['id']] += 1

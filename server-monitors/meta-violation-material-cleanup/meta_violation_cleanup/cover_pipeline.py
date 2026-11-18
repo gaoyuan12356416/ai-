@@ -17,11 +17,14 @@ def run_lanes(cycle, stop, *, once=False, refresh_seconds=3600, clock=time.monot
     failures = []
     deadline = clock() + refresh_seconds
 
+    def recoverable(exc):
+        return isinstance(exc, InterruptedError) or getattr(exc, 'retryable_source_read', False)
+
     def fail(exc):
         with mutex:
             if not failures:
                 failures.append(exc)
-            elif isinstance(failures[0], InterruptedError) and not isinstance(exc, InterruptedError):
+            elif recoverable(failures[0]) and not recoverable(exc):
                 # A cooperative handoff must never hide a concurrent write or
                 # ledger failure reported while the sibling lane drains.
                 failures[0] = exc

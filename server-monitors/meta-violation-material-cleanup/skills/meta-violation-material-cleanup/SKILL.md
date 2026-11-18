@@ -42,6 +42,13 @@ Definite failure is not automatically retried. Unknown writes are reconciled rea
 
 ## Concurrency and storage
 
+For a transient read-only SQL timeout/disconnect, see
+[source retry recovery](../../../../doc/20261118.meta-cover-source-retry.md).
+The affected lane retries a fresh snapshot with 30-to-300-second backoff;
+submitted tasks drain and retain receipts. Permanent source-integrity failures
+and concurrent write/ledger halts still create a durable pause. Do not clear
+unknown fences, reset terminal tasks, or replay writes to recover a source outage.
+
 For the 2026-11-13 `OperationalError` pause and report/worker lock contention,
 read [database recovery](../../../../doc/20261116.meta-cover-sqlite-recovery.md).
 The cover queue uses WAL so consistent report snapshots can overlap worker

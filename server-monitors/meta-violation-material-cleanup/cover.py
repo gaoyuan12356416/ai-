@@ -36,6 +36,28 @@ class CoverWritePaused(RuntimeError):
     exit_status = 78
 
 
+class RetryableSourceRead(RuntimeError):
+    """A discarded read-only snapshot; never permission to replay a write."""
+    retryable_source_read = True
+
+    def __init__(self, error, diagnostic):
+        self.failure = safe_error(error)
+        self.diagnostic_id = diagnostic.get('id')
+        super().__init__(error.code)
+
+
+def source_read_failure(error, source):
+    diagnostic = source.last_diagnostic or {}
+    codes = {item['errno'] for item in diagnostic.get('mysql_errors', [])}
+    transient = isinstance(error, SqlSourceError) and (
+        error.code in ('sql_query_timeout', 'sql_stream_incomplete', 'sql_query_failed')
+        and (codes <= {1040, 1203, 2002, 2003, 2006, 2013, 2055, 3024} if codes
+             else error.code in ('sql_query_timeout', 'sql_stream_incomplete')))
+    if transient:
+        raise RetryableSourceRead(error, diagnostic) from error
+    raise error
+
+
 def batch_id(prefix='cover'):
     return prefix + '-' + datetime.now(CST).strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
 
@@ -228,6 +250,15 @@ def work(config, store, audit, stop, once, max_ads):
     governor = Governor(maximum=32, per_account=2, rps=24, initial_limit=32, ramp_up=True,
                         account_scoped_usage=True)
     recovered = False
+    source_failures = Counter()
+
+    def retry_delay(lane, error):
+        source_failures[lane] = min(source_failures[lane] + 1, 5)
+        delay = min(300, 30 * 2 ** (source_failures[lane] - 1))
+        print(json.dumps({'at': now(), 'lane': lane, 'source_read_retry': error.failure,
+                          'sql_diagnostic_id': error.diagnostic_id,
+                          'retry_seconds': delay}), flush=True)
+        return delay
 
     def make_worker(lane, stopped):
         # SQL snapshots and Graph clients belong to the calling lane. The two
@@ -244,11 +275,13 @@ def work(config, store, audit, stop, once, max_ads):
             worker = CoverWorker(lane_config, store, source, factory, shared,
                                  stop=stopped, governor=governor)
             return source, worker
-        except BaseException:
+        except BaseException as exc:
             source.close()
+            if isinstance(exc, SqlSourceError):
+                source_read_failure(exc, source)
             raise
 
-    def cycle(lane, stopped):
+    def run_cycle(lane, stopped):
         # Do not open SQL/credential sessions for empty polling cycles.
         ready = store.ready_tasks(limit=1) if lane == 'ads' else store.pending_deletions(limit=1)
         if not ready:
@@ -283,9 +316,25 @@ def work(config, store, audit, stop, once, max_ads):
             if lane == 'cleanup':
                 return 0 if store.pending_deletions(limit=1) else 1
             return idle_delay(result, bool(store.ready_tasks(limit=1)))
+        except SqlSourceError as exc:
+            # run_once drains submitted Graph work before propagating a source
+            # error. A concurrent write/ledger halt must take precedence.
+            if worker.halted.is_set():
+                raise CliError(worker.halt_reason or 'cover_worker_halted') from exc
+            source_read_failure(exc, source)
         finally:
             worker.close()
             source.close()
+
+    def cycle(lane, stopped):
+        try:
+            delay = run_cycle(lane, stopped)
+            source_failures[lane] = 0
+            return delay
+        except RetryableSourceRead as exc:
+            if once:
+                raise
+            return retry_delay(lane, exc)
 
     while not stop():
         try:
@@ -317,6 +366,7 @@ def work(config, store, audit, stop, once, max_ads):
                 finally:
                     worker.close()
                     source.close()
+                source_failures['reconcile'] = 0
                 run_lanes(cycle, guarded_stop, once=once)
                 # run_lanes drains BOTH lanes before this shared lease exits,
                 # including the 09:55-10:05 priority handoff and shutdown.
@@ -331,6 +381,13 @@ def work(config, store, audit, stop, once, max_ads):
             if not stop():
                 raise
             break
+        except RetryableSourceRead as exc:
+            if once:
+                raise
+            until = time.monotonic() + retry_delay('reconcile', exc)
+            while not stop() and time.monotonic() < until:
+                time.sleep(min(.25, max(0, until - time.monotonic())))
+            continue
         except Exception as exc:
             bid = batch_id('cover-error')
             failure = safe_error(exc)
