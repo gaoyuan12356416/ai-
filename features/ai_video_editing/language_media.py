@@ -38,7 +38,7 @@ def probe(path):
     return seconds, info.get("streams", [])
 
 
-def _parse_srt(content):
+def _parse_srt(content, duration_ms):
     out = []
     for block in re.split(r"\n\s*\n", content.lstrip("\ufeff").replace("\r", "").strip()):
         lines = block.splitlines()
@@ -49,6 +49,7 @@ def _parse_srt(content):
         if len(matches) != 2:
             continue
         times = [((int(h)*60+int(m))*60+int(s))*1000+int(ms) for h,m,s,ms in matches]
+        times[1] = min(times[1], duration_ms)
         text = re.sub(r"</?(?:b|i|u|font)(?:\s[^>]*)?>", "", "\n".join(lines[row+1:]), flags=re.I).strip()
         if text and times[1] > times[0]:
             out.append({"start": times[0], "end": times[1], "text": text})
@@ -120,7 +121,7 @@ def transcribe(path, source_language="auto"):
         argv=[os.environ.get("AI_VIDEO_EDITING_FFMPEG","ffmpeg"), "-v", "error", *local_input(path),
               "-map","0:"+str(visible[0]["index"]),"-c:s","srt","-f","srt","pipe:1"]
         p = _process(argv,timeout=30)
-        cues=_parse_srt(p.stdout.decode("utf-8","replace")) if p.returncode==0 else []
+        cues=_parse_srt(p.stdout.decode("utf-8","replace"),round(seconds*1000)) if p.returncode==0 else []
         if cues: return {"cues":cues,"source":"embedded","note":"已读取视频内嵌字幕轨。"}
     exe=shutil.which(os.environ.get("AI_VIDEO_EDITING_WHISPER_BIN","whisper-cli"))
     model=os.environ.get("AI_VIDEO_EDITING_WHISPER_MODEL","")
@@ -129,9 +130,9 @@ def transcribe(path, source_language="auto"):
         if exe and model and Path(model).is_file() and any(s["codec_type"]=="audio" for s in streams):
             audio=root/"audio.wav"
             command([*local_input(path),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le","-y",str(audio)],timeout=45)
-            p=_process([exe,"-m",model,"-f",str(audio),"-l",source_language,"-osrt","-of",str(root/"audio"),"-t","2"],timeout=130)
+            p=_process([exe,"-m",model,"-f",str(audio),"-l",source_language,"-osrt","-of",str(root/"audio"),"-t","4"],timeout=min(240,max(75,round(seconds*.65)+30)))
             result=root/"audio.srt"
             if p.returncode==0 and result.exists():
-                cues=_parse_srt(result.read_text(encoding="utf-8",errors="replace"))
+                cues=_parse_srt(result.read_text(encoding="utf-8",errors="replace"),round(seconds*1000))
                 if cues:return {"cues":cues,"source":"asr","note":"已根据原声音轨生成字幕草稿，请校对对白。"}
         return _hard_captions(path,seconds,source_language,root)
