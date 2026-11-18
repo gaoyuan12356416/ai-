@@ -206,16 +206,20 @@ class XNativeBridge:
                 self.store.assert_auto_template_publishable(queue["id"], log["id"])
 
     def _links(self, queue, log):
+        from features.x_posts.moboreels import assert_queue_publishable
+        assert_queue_publishable(queue)
         if log.get("post_text") and log.get("long_url") and log.get("short_url"):
             return log
         duration = float(queue.get("preflight_duration") or 0)
         if duration < 0 or (duration == 0 and queue.get("media_validation_mode") != "preflight"):
             raise AdapterError("x_media_preflight_not_ready")
         short = posts._build_short_url(self.r.POST_SHORT_BASE_URL, log["id"])
+        from features.x_posts.moboreels import contains_macro, resolve_x_url
+        m_url = resolve_x_url(self.r.POST_DB_PATH, queue, log) if contains_macro(queue.get("body_template")) else None
         if queue.get("source_type") == "drama":
             body = posts.build_drama_episode_post_text(short, queue.get("episode_number"), queue.get("drama_name"), queue["description"], queue.get("body_template"))
         else:
-            body = posts.build_post_text(short, queue.get("drama_name"), queue["description"], queue.get("body_template"), copy_contract_version=int(queue.get("copy_contract_version", 1)))
+            body = posts.build_post_text(short, queue.get("drama_name"), queue["description"], queue.get("body_template"), copy_contract_version=int(queue.get("copy_contract_version", 1)), m_url=m_url)
         if os.environ.get("X_POST_ATTRIBUTION_V2_ENABLED", "0") == "1":
             from features.x_posts.attribution import load_frozen, freeze, build_url
             attribution = load_frozen(self.r.POST_DB_PATH, log["id"])
@@ -228,7 +232,7 @@ class XNativeBridge:
             long_url = posts.build_w2a_url(macros, duration_policy_version=duration_policy.version(queue))
         self.r.preflight_post_storage_request()
         posts.write_short_redirect(self.r.POST_PUBLIC_ROOT, log["id"], long_url, durable_storage={"mount_root": self.r.POST_STORAGE_MOUNT_ROOT, "storage_root": self.r.POST_STORAGE_ROOT})
-        log = self.store.prepare_log(log["id"], long_url, short, body)
+        log = self.store.prepare_log(log["id"], long_url, short, body, story_product_url=m_url)
         return log
 
     def artifact(self, queue, record):
@@ -374,6 +378,8 @@ class XNativeBridge:
                 raise AdapterError("x_operation_account_changed")
             self._parent(queue, log)
             if path == "/2/media/upload/initialize":
+                from features.x_posts.moboreels import assert_queue_publishable
+                assert_queue_publishable(queue)
                 with self.connect() as c:
                     initialized = c.execute("SELECT 1 FROM pipeline_x_checkpoint WHERE source_key=? AND generation=? AND phase='x_media_initialized'", (job["source_key"], job["generation"])).fetchone()
                 retryable = retry_of is not None and log["status"] == "media_uploading" and log["attempt_count"] >= 1 and not initialized
