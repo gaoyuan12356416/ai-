@@ -41,7 +41,10 @@ def reconcile(args):
             require(not any(j[k] for k in ("external_intent","grandfathered","hold_reason")) and
                     not any(t[k] for k in ("graph_post_id","unknown_outcome","lease_owner","lease_expires_at_utc",
                         "prepared_sha256","prepared_media_url")),"already owned or delivered")
-            require(t["planned_publish_at_utc"]>now, "scheduled time passed")
+            # The native target-midnight policy keeps due tasks eligible for
+            # normal scheduling even when their preparation finishes late.
+            require(t["schedule_policy"]=="target_midnight_v1" or t["planned_publish_at_utc"]>now,
+                    "original late-publication policy requires separate review")
             tpl=central.execute("select status,current_version from native.fb_auto_template where id=?",(t["template_id"],)).fetchone()
             require(tuple(tpl)==("enabled",t["template_version"]), "template changed")
             original=ledger.execute("select paid,job from work where identity=?",(str(jobid)+":"+str(gen),)).fetchone()
