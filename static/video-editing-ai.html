@@ -1,16 +1,246 @@
 <!doctype html>
-<html lang="zh-CN"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin">
-<title>AI 智能剪辑 · AI 后台</title>
-<link rel="stylesheet" href="/video-editing-ai.css?v=20261118-studio1">
-<script defer src="/ui-topbar.js"></script><script defer src="/video-editing-ai-studio.js?v=20261118-studio1"></script>
-</head><body>
-<header class="studio-header"><a class="back" href="/video-editing.html">‹ <span>返回后台</span></a><div class="studio-brand"><span class="brand-icon">AI</span><div><strong>智能剪辑工作台</strong><small>AI 自动后台</small></div></div><span class="header-divider"></span><span id="sessionTitle" class="session-title">新建创作</span><div class="header-actions"><button data-action="history" class="quiet" data-icon="history">创作历史</button><button data-action="works" class="quiet" data-icon="works">我的作品</button><div id="userCard"></div><button id="authButton" class="quiet">登录</button></div></header>
-<div id="gate" role="status">正在打开工作台…</div>
-<main id="workspace" class="studio" hidden>
-<nav class="tool-rail" aria-label="创作工具"><button data-action="assets" data-icon="media"><span>媒资库</span></button><button data-action="analysis" data-icon="timeline"><span>智影解析</span></button><button data-action="clip" data-icon="scissors"><span>智能剪辑</span></button><button data-action="narration" data-icon="mic"><span>影视解说</span></button><button data-action="translation" data-icon="translate"><span>视频翻译</span></button><div class="rail-space"></div><button data-action="works" data-icon="works"><span>我的作品</span></button></nav>
-<section class="conversation" aria-label="创作对话"><header class="panel-heading"><div class="assistant-heading"><span class="assistant-avatar">AI</span><div><strong>创作助手</strong><small id="sessionState">和 AI 一起完成你的下一条视频</small></div></div><button class="icon-button" data-action="new" aria-label="开启新任务" title="开启新任务">＋</button></header><div id="messages" class="messages" role="log" aria-live="polite"></div><div class="composer-wrap"><div class="quick-tools"><button data-action="clip">智能剪辑</button><button data-action="narration">影视解说</button><button data-action="translation">视频翻译</button><button data-action="prompts">常用提示词</button></div><form id="composer" class="composer"><div id="configChips" class="config-chips"></div><label class="sr-only" for="prompt">描述你想创作的视频</label><textarea id="prompt" rows="3" maxlength="500" placeholder="描述你想创作的视频，或向 AI 提问…"></textarea><div class="composer-footer"><button type="button" class="icon-button" data-action="history" title="会话历史" aria-label="会话历史" data-icon="history"></button><span id="submitHint">先选择素材，开始创作</span><button id="send" type="submit" class="send" aria-label="发送" title="发送" data-icon="send"></button></div></form><span class="composer-note">生成内容可在预览后调整与导出</span></div></section>
-<section class="stage" aria-label="视频工作区"><header class="stage-heading"><div class="segmented"><button id="sourceView" data-action="source-view" class="active">原始素材</button><button id="resultView" data-action="result-view">已完成作品 <span id="resultCount">0</span></button></div><div class="stage-actions"><span id="mediaTitle"></span><button id="exportButton" class="quiet" data-action="export" data-icon="download" hidden>导出</button></div></header><div class="player-area" id="playerArea"><video id="player" controls playsinline preload="metadata" hidden></video><div id="captionPreview" class="caption-preview" hidden></div><div class="stage-empty" id="stageEmpty"><div class="empty-art" aria-hidden="true"><span>▶</span><i>✦</i></div><h1>让好故事，更快被看见</h1><p>选择视频素材，让 AI 帮你找到亮点、整理剧情、制作成片</p><button class="primary" data-action="assets" data-icon="plus">选择视频素材</button><small>本地上传 · 多集组合 · 智能创作</small></div><div id="renderOverlay" class="render-overlay" hidden></div></div><div class="filmstrip-wrap"><span id="stripLabel">待处理<br>视频</span><div id="filmstrip" class="filmstrip"></div><button class="add-source" data-action="assets" aria-label="添加素材">＋</button></div><section id="timelinePanel" class="timeline-panel" hidden><header><strong>智影解析</strong><span>点击片段定位画面</span><button class="quiet" data-action="hide-timeline">收起</button></header><div id="timeline" class="timeline"></div></section><div id="stageSuggestions" class="stage-suggestions"><span>从一个想法开始</span><button data-action="clip" data-icon="scissors"><strong>智能剪辑</strong><small>四种剪法，找到故事的吸引力</small><b>↗</b></button><button data-action="narration" data-icon="mic"><strong>影视解说</strong><small>从画面到脚本，再到配音成片</small><b>↗</b></button><button data-action="translation" data-icon="translate"><strong>视频翻译</strong><small>译文、双语字幕与配音</small><b>↗</b></button></div></section>
-<aside id="copyPanel" class="copy-panel" aria-label="平台文案" hidden><header class="panel-heading"><strong>发布文案</strong><button class="icon-button" data-action="close-copy" aria-label="收起文案">×</button></header><div id="platformTabs" class="platform-tabs"></div><label id="copyLabel" for="copyText">视频描述</label><textarea id="copyText" placeholder="根据当前作品生成推广文案，也可以直接填写。"></textarea><div class="copy-actions"><button class="quiet" data-action="generate-copy">AI 生成</button><button class="primary" data-action="copy-text">复制文案</button></div><p id="copyState" class="muted">文案与当前作品一起保存</p><div class="copy-details" id="workInfo"></div></aside>
-</main><dialog id="modal"><div class="modal-heading"><div><h2 id="modalTitle"></h2><p id="modalSubtitle"></p></div><button id="closeModal" class="icon-button" aria-label="关闭">×</button></div><div id="modalBody"></div><footer id="modalFooter"></footer></dialog><div id="toast" class="toast" role="status" hidden></div>
-</body></html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="referrer" content="same-origin" />
+    <title>AI 智能剪辑 · AI 后台</title>
+    <link rel="stylesheet" href="/ui-topbar.css" />
+    <link rel="stylesheet" href="/video-editing-ai.css?v=20261118-studio2" />
+    <script defer src="/quick-nav.js"></script>
+    <script defer src="/ui-topbar.js"></script>
+    <script defer src="/video-editing-ai-studio.js?v=20261118-studio2"></script>
+  </head>
+  <body>
+    <header class="studio-header topbar">
+      <button
+        id="openNavigation"
+        class="quiet"
+        aria-haspopup="dialog"
+        aria-controls="navigationPanel"
+        aria-expanded="false"
+      >
+        ☰ <span>后台导航</span></button
+      ><a class="back" href="/video-editing.html" title="返回视频剪辑"
+        ><span>返回后台</span></a
+      >
+      <div class="studio-brand">
+        <span class="brand-icon">AI</span>
+        <div><strong>智能剪辑工作台</strong><small>AI 自动后台</small></div>
+      </div>
+      <span class="header-divider"></span
+      ><span id="sessionTitle" class="session-title">新建创作</span>
+      <div class="header-actions top-actions">
+        <button data-action="history" class="quiet" data-icon="history">
+          创作历史</button
+        ><button data-action="works" class="quiet" data-icon="works">
+          我的作品
+        </button>
+        <div id="userCard" class="user-card"></div>
+        <button id="refreshButton" class="quiet">刷新</button
+        ><button id="authButton" class="quiet">登录</button>
+      </div>
+    </header>
+    <dialog
+      id="navigationPanel"
+      class="navigation-panel"
+      aria-labelledby="navigationTitle"
+    >
+      <header>
+        <strong id="navigationTitle">AI 自动后台</strong
+        ><button
+          id="closeNavigation"
+          class="icon-button"
+          aria-label="关闭后台导航"
+        >
+          ×
+        </button>
+      </header>
+      <nav id="quickNav" aria-label="后台模块导航"></nav>
+    </dialog>
+    <div id="gate" role="status">正在打开工作台…</div>
+    <main id="workspace" class="studio" hidden>
+      <nav class="tool-rail" aria-label="创作工具">
+        <button data-action="assets" data-icon="media">
+          <span>媒资库</span></button
+        ><button data-action="analysis" data-icon="timeline">
+          <span>智影解析</span></button
+        ><button data-action="clip" data-icon="scissors">
+          <span>智能剪辑</span></button
+        ><button data-action="narration" data-icon="mic">
+          <span>影视解说</span></button
+        ><button data-action="translation" data-icon="translate">
+          <span>视频翻译</span>
+        </button>
+        <div class="rail-space"></div>
+        <button data-action="works" data-icon="works">
+          <span>我的作品</span>
+        </button>
+      </nav>
+      <section class="conversation" aria-label="创作对话">
+        <header class="panel-heading">
+          <div class="assistant-heading">
+            <span class="assistant-avatar">AI</span>
+            <div>
+              <strong>创作助手</strong
+              ><small id="sessionState">和 AI 一起完成你的下一条视频</small>
+            </div>
+          </div>
+          <button
+            class="icon-button"
+            data-action="new"
+            aria-label="开启新任务"
+            title="开启新任务"
+          >
+            ＋
+          </button>
+        </header>
+        <div id="messages" class="messages" role="log" aria-live="polite"></div>
+        <div class="composer-wrap">
+          <div class="quick-tools">
+            <button data-action="clip">智能剪辑</button
+            ><button data-action="narration">影视解说</button
+            ><button data-action="translation">视频翻译</button
+            ><button data-action="prompts">常用提示词</button>
+          </div>
+          <form id="composer" class="composer">
+            <div id="configChips" class="config-chips"></div>
+            <label class="sr-only" for="prompt">描述你想创作的视频</label
+            ><textarea
+              id="prompt"
+              rows="3"
+              maxlength="500"
+              placeholder="描述你想创作的视频，或向 AI 提问…"
+            ></textarea>
+            <div class="composer-footer">
+              <button
+                type="button"
+                class="icon-button"
+                data-action="history"
+                title="会话历史"
+                aria-label="会话历史"
+                data-icon="history"
+              ></button
+              ><span id="submitHint">先选择素材，开始创作</span
+              ><button
+                id="send"
+                type="submit"
+                class="send"
+                aria-label="发送"
+                title="发送"
+                data-icon="send"
+              ></button>
+            </div>
+          </form>
+          <span class="composer-note">生成内容可在预览后调整与导出</span>
+        </div>
+      </section>
+      <section class="stage" aria-label="视频工作区">
+        <header class="stage-heading">
+          <div class="segmented">
+            <button id="sourceView" data-action="source-view" class="active">
+              原始素材</button
+            ><button id="resultView" data-action="result-view">
+              已完成作品 <span id="resultCount">0</span>
+            </button>
+          </div>
+          <div class="stage-actions">
+            <span id="mediaTitle"></span
+            ><button
+              id="exportButton"
+              class="quiet"
+              data-action="export"
+              data-icon="download"
+              hidden
+            >
+              导出
+            </button>
+          </div>
+        </header>
+        <div class="player-area" id="playerArea">
+          <video
+            id="player"
+            controls
+            playsinline
+            preload="metadata"
+            hidden
+          ></video>
+          <div id="captionPreview" class="caption-preview" hidden></div>
+          <div class="stage-empty" id="stageEmpty">
+            <div class="empty-art" aria-hidden="true">
+              <span>▶</span><i>✦</i>
+            </div>
+            <h1>让好故事，更快被看见</h1>
+            <p>选择视频素材，让 AI 帮你找到亮点、整理剧情、制作成片</p>
+            <button class="primary" data-action="assets" data-icon="plus">
+              选择视频素材</button
+            ><small>本地上传 · 多集组合 · 智能创作</small>
+          </div>
+          <div id="renderOverlay" class="render-overlay" hidden></div>
+        </div>
+        <div class="filmstrip-wrap">
+          <span id="stripLabel">待处理<br />视频</span>
+          <div id="filmstrip" class="filmstrip"></div>
+          <button class="add-source" data-action="assets" aria-label="添加素材">
+            ＋
+          </button>
+        </div>
+        <section id="timelinePanel" class="timeline-panel" hidden>
+          <header>
+            <strong>智影解析</strong><span>点击片段定位画面</span
+            ><button class="quiet" data-action="hide-timeline">收起</button>
+          </header>
+          <div id="timeline" class="timeline"></div>
+        </section>
+        <div id="stageSuggestions" class="stage-suggestions">
+          <span>从一个想法开始</span
+          ><button data-action="clip" data-icon="scissors">
+            <strong>智能剪辑</strong><small>四种剪法，找到故事的吸引力</small
+            ><b>↗</b></button
+          ><button data-action="narration" data-icon="mic">
+            <strong>影视解说</strong><small>从画面到脚本，再到配音成片</small
+            ><b>↗</b></button
+          ><button data-action="translation" data-icon="translate">
+            <strong>视频翻译</strong><small>译文、双语字幕与配音</small><b>↗</b>
+          </button>
+        </div>
+      </section>
+      <aside id="copyPanel" class="copy-panel" aria-label="平台文案" hidden>
+        <header class="panel-heading">
+          <strong>发布文案</strong
+          ><button
+            class="icon-button"
+            data-action="close-copy"
+            aria-label="收起文案"
+          >
+            ×
+          </button>
+        </header>
+        <div id="platformTabs" class="platform-tabs"></div>
+        <label id="copyLabel" for="copyText">视频描述</label
+        ><textarea
+          id="copyText"
+          placeholder="根据当前作品生成推广文案，也可以直接填写。"
+        ></textarea>
+        <div class="copy-actions">
+          <button class="quiet" data-action="generate-copy">AI 生成</button
+          ><button class="primary" data-action="copy-text">复制文案</button>
+        </div>
+        <p id="copyState" class="muted">文案与当前作品一起保存</p>
+        <div class="copy-details" id="workInfo"></div>
+      </aside>
+    </main>
+    <dialog id="modal">
+      <div class="modal-heading">
+        <div>
+          <h2 id="modalTitle"></h2>
+          <p id="modalSubtitle"></p>
+        </div>
+        <button id="closeModal" class="icon-button" aria-label="关闭">×</button>
+      </div>
+      <div id="modalBody"></div>
+      <footer id="modalFooter"></footer>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>
