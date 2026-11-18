@@ -21,6 +21,8 @@ class Provider:
         return {"JobsDetail": receipt}
 
     def ci_list_media_jobs(self, **args):
+        if not all(args[field].endswith("+0000") for field in ("StartCreationTime", "EndCreationTime")):
+            raise ValueError("CI rejects timestamps without a numeric offset")
         if self.lose_list:
             raise ConnectionError("test")
         return {"JobsDetail":self.jobs}

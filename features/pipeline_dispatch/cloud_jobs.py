@@ -124,7 +124,8 @@ class CloudJobs:
 
     def _find(self, row):
         window = dt.datetime.fromtimestamp(row["created"], dt.timezone.utc)
-        fmt = lambda moment: moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # CI requires an explicit numeric offset when listing a creation window.
+        fmt = lambda moment: moment.strftime("%Y-%m-%dT%H:%M:%S%z")
         token, seen = "", set()
         while True:
             result = self.client.ci_list_media_jobs(Bucket=self.bucket, QueueId=self.queue, Tag=row["tag"],

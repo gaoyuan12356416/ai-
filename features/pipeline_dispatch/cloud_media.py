@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .cloud_jobs import CloudJobs, fingerprint
+from .cloud_fb_input import cloud_input
 from .cloud_objects import ObjectStore, SessionClient
 from .cloud_templates import Templates, run_media, watermark
 from .executors import NodeExecutors, ExecutionError, _artifact
@@ -100,8 +101,10 @@ class CloudExecutor(NodeExecutors):
         with tempfile.TemporaryDirectory(dir=self.work_root) as folder:
             temp = Path(folder)
             source = temp / "source.mp4"
-            from .cloud_fb_input import cloud_input
-            remote = cloud_input(self, request, identity) if kind == "fb_prepare" else None
+            remote = None
+            if kind == "fb_prepare":
+                context.phase("source_check")
+                remote = cloud_input(self, request, identity)
             if remote:
                 ci_source, duration = remote
                 secs, has_audio, info = duration, True, {}
