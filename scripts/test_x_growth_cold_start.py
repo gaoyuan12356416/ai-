@@ -1,11 +1,17 @@
 """Regression cases for cold-start evidence, source isolation and coverage denominators."""
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
+import os
+import sqlite3
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.x_growth_profile.collector import profile_coverage
+from features.x_growth_profile import collector, store
 from features.x_growth_profile.model import build_profiles
 
 NOW = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
@@ -60,6 +66,9 @@ class ColdStartTest(unittest.TestCase):
                 self.assertEqual(groups(build(rows, channels), 3), {})
         p = build([sample(1, 'a'), sample(2, 'b')], channels, {1:'A', 2:'B', 3:'A'})
         self.assertEqual(groups(p, 3), {})
+        conflict = sample(2, 'b')
+        conflict['metadata']['catalog'] = 'moboreels'
+        self.assertEqual(groups(build([sample(1, 'a'), conflict], channels), 3), {})
 
     def test_visible_population_controls_donors_and_recipients(self):
         p = build([sample(1, 'a'), sample(2, 'b'), sample(3, 'c')], {1:'en', 2:'en', 4:'en'})
@@ -120,6 +129,35 @@ class ColdStartTest(unittest.TestCase):
         self.assertEqual(coverage['followers_unknown']['channels'], 1)
         self.assertEqual(coverage['followers_under_100']['channels'], 3)
         self.assertEqual(coverage['visible'], 6)
+
+    def test_late_product_receipt_repairs_recorded_catalog_and_preserves_measured_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            account_db = Path(tmp) / 'accounts.sqlite3'
+            account_db.touch()
+            post_db = Path(tmp) / 'posts.sqlite3'
+            with sqlite3.connect(post_db) as db:
+                db.execute('CREATE TABLE x_post_queue(id,account_id,content_id,material_language,preflight_duration,tag)')
+                db.execute("INSERT INTO x_post_queue VALUES(1,1,'story','en',600,'')")
+                db.execute('CREATE TABLE x_post_publish_log(x_post_id,published_at,x_media_id,queue_id,status,unknown_outcome)')
+                db.execute("INSERT INTO x_post_publish_log VALUES('p',?,'m',1,'published',0)", (NOW.isoformat(),))
+            db.close()
+            growth = Path(tmp) / 'growth.db'
+            store.initialize(growth)
+            receipt = {'1': {'drama': {'catalog': 'moboreels'}, 'tag_profile': {
+                'classification': {'themes':['family'], 'catalog':'moboreels'}}}}
+            responses = [{'items': {}}, {'items': receipt}, {'items': {}}]
+            with patch.object(collector, 'ACCOUNT_DB', str(account_db)), patch.dict(
+                    os.environ, {'X_INTERNAL_TOKEN':'test', 'X_POST_DB_PATH':str(post_db)}), patch.object(
+                    collector, 'request', side_effect=responses), store.connect(growth, write=True) as db:
+                accounts = {1:{'x_user_id':'123'}}
+                collector.discover(db, accounts, NOW)
+                self.assertEqual(db.execute('SELECT catalog FROM growth_post').fetchone()[0], 'dramawave')
+                db.execute("INSERT INTO post_snapshot VALUES('p','6h',?,'{}')", (NOW.isoformat(),))
+                collector.discover(db, accounts, NOW)
+                collector.discover(db, accounts, NOW)
+                product, labels = db.execute('SELECT catalog,metadata_json FROM growth_post').fetchone()
+                self.assertEqual((product, json.loads(labels)['themes']), ('moboreels', ['family']))
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM post_snapshot').fetchone()[0], 1)
 
 
 if __name__ == '__main__':

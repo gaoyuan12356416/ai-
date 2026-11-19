@@ -110,6 +110,8 @@ class ColdStartEvidence:
         language = canonical_language(post.get('language'))
         catalog = post.get('catalog')
         drama = post.get('content_id')
+        if meta.get('catalog') and meta['catalog'] != catalog:
+            return
         if (not themes or not language or not drama or catalog not in ('dramawave', 'moboreels')
                 or type(impressions) is not int or impressions < 0):
             return

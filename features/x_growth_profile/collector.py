@@ -89,8 +89,17 @@ def discover(db,accounts,now):
                 # Do not infer reliable taxonomy from source tags in other languages.
                 if not metadata:
                     metadata={'themes':[],'audience':'__unknown__','label_status':'missing_frozen_classification'}
-                catalog=(selection.get('drama') or {}).get('catalog','dramawave')
-                db.execute('INSERT OR IGNORE INTO growth_post VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                catalog=(selection.get('drama') or {}).get('catalog') or metadata.get('catalog') or 'dramawave'
+                if metadata.get('catalog') and metadata['catalog'] != catalog:
+                    metadata={'themes':[],'audience':'__unknown__','label_status':'missing_frozen_classification'}
+                # A publisher receipt may be discovered before the auto ledger
+                # exposes its frozen product. Repair the legacy DramaWave
+                # default only when the same receipt later identifies Mobo.
+                db.execute('''INSERT INTO growth_post VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET
+                              catalog=excluded.catalog, metadata_json=excluded.metadata_json
+                              WHERE growth_post.catalog='dramawave' AND excluded.catalog='moboreels'
+                                AND growth_post.account_id=excluded.account_id AND growth_post.x_user_id=excluded.x_user_id
+                                AND growth_post.content_id=excluded.content_id AND growth_post.source=excluded.source''',
                            (row['x_post_id'],row['account_id'],str(account['x_user_id']),row['content_id'],
                             row['material_language'],catalog,row['published_at'],row['preflight_duration'],
                             store.dumps(metadata),row['x_media_id'],source))
