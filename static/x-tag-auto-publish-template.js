@@ -4,6 +4,7 @@
   const ui = window.XAutoPublish;
   const templateId = ui.pageIdFromQuery("id");
   document.title = `${templateId ? "编辑" : "创建"} X 标签画像自动发布模板 - AI自动后台`;
+  ui.setText(ui.byId("pageTitle"), `${templateId ? "编辑" : "创建"} X 标签画像自动发布模板`, "");
   const RESOURCE_TYPE_V2_OPTIONS = Object.freeze([
     { value: "0", label: "其他" },
     { value: "1", label: "翻译剧非首发" },
@@ -34,6 +35,10 @@
   const state = {
     accounts: [],
     accountMetrics: new Map(),
+    accountsLoaded: false,
+    accountsLoading: false,
+    accountLoadError: "",
+    templateReady: false,
     selectedAccountIds: new Set(),
     selectedResourceTypes: new Set(),
     template: null,
@@ -167,6 +172,17 @@
   function renderAccounts() {
     const list = ui.byId("accountList");
     ui.clear(list);
+    if (!state.accountsLoaded) {
+      list.appendChild(ui.element("div", { className: "empty", text: state.accountLoadError || "正在加载账号…" }));
+      if (state.accountLoadError) {
+        const retry = ui.element("button", { className: "button small", text: "重新加载账号", type: "button" });
+        retry.addEventListener("click", () => void loadAccountOptions());
+        list.appendChild(retry);
+      }
+      ui.setText(ui.byId("accountResultCount"), `共已选 ${state.selectedAccountIds.size} 个账号，账号列表${state.accountLoadError ? "暂不可用" : "正在加载"}。`, "");
+      updateSummary();
+      return;
+    }
     const query = ui.byId("accountSearch").value.trim().toLowerCase();
     const membershipFilter = ui.byId("accountMembershipFilter").value;
     const revenueRange = metricRange("accountRevenue");
@@ -400,7 +416,7 @@
     const languages = Array.from(new Set(state.accounts
       .filter(item => state.selectedAccountIds.has(accountId(item)))
       .map(accountLanguage))).sort();
-    ui.setText(ui.byId("summaryLanguage"), languages.length
+    ui.setText(ui.byId("summaryLanguage"), !state.accountsLoaded ? "正在读取所选账号语言" : languages.length
       ? `账户设置：${languages.join("、")}` : "读取 X 账户设置", "");
     ui.setText(ui.byId("summaryAccounts"), `${count} 个`, "");
     ui.setText(ui.byId("summaryMetric"), `platform=${ui.byId("platform").value || "0"} / ${ui.byId("metricWindowDays").value || "7"} 天`, "");
@@ -525,6 +541,23 @@
   async function loadAccounts() {
     const payload = await ui.api(`${ui.API_BASE}/accounts`);
     state.accounts = ui.readItems(payload, ["accounts", "items"]);
+    state.accountsLoaded = true;
+  }
+
+  async function loadAccountOptions() {
+    if (state.accountsLoading) return;
+    state.accountsLoading = true;
+    state.accountLoadError = "";
+    renderAccounts();
+    try {
+      await loadAccounts();
+    } catch (error) {
+      state.accountLoadError = error.message || "账号读取失败，已保存的选择仍保留。";
+    } finally {
+      state.accountsLoading = false;
+      renderAccounts();
+      ui.byId("saveTemplate").disabled = !state.templateReady || !state.accountsLoaded || state.busy;
+    }
   }
 
   async function refreshAccountEligibility() {
@@ -592,7 +625,7 @@
 
   async function saveTemplate(event) {
     event.preventDefault();
-    if (state.busy || state.accountRefreshBusy) return;
+    if (!state.templateReady || !state.accountsLoaded || state.busy || state.accountRefreshBusy) return;
     let payload;
     try {
       payload = buildPayload();
@@ -731,10 +764,12 @@
       bindEvents();
       setTimeRows(["11:00"]);
       setResourceTypes([]);
-      void loadAccountMetrics();
+      ui.byId("retryEditorLoad").addEventListener("click", () => location.reload());
+      // Fetch the small configuration immediately; account options are independent.
+      const templateRequest = loadTemplate();
+      void loadAccountOptions();
       try {
-        const [accountsResult, templateResult] = await Promise.all([loadAccounts(), loadTemplate()]);
-        void accountsResult;
+        const templateResult = await templateRequest;
         if (templateId) {
           if (!templateResult || !templateResult.id && !templateResult.template_id) throw new Error("模板不存在或不可访问。");
           hydrateTemplate(templateResult);
@@ -744,7 +779,15 @@
           updateSummary();
           state.dirty = false;
         }
+        state.templateReady = true;
+        ui.hide(ui.byId("editorLoading"));
+        ui.show(ui.byId("editorContent"));
+        ui.byId("saveTemplate").disabled = !state.accountsLoaded;
+        // The larger revenue snapshot must not compete with initial configuration.
+        void loadAccountMetrics();
       } catch (error) {
+        ui.setText(ui.byId("editorLoadingMessage"), error.message || "模板配置读取失败，请重试。", "");
+        ui.show(ui.byId("retryEditorLoad"));
         ui.setText(ui.byId("formStatus"), error.message || "页面数据加载失败。", "");
         ui.byId("formStatus").className = "status-line error";
         ui.byId("saveTemplate").disabled = true;

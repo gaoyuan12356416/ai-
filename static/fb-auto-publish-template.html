@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
-  <title>创建 FB Page 自动发布模板 - AI自动后台</title>
+  <title>FB Page 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <link rel="stylesheet" href="/fb-auto-publish.css?v=compact-plan-20261111-v1" />
 </head>
@@ -22,7 +22,7 @@
     <main class="main">
       <header class="topbar">
         <div class="title">
-          <h1 id="pageTitle">创建 FB Page 自动发布模板</h1>
+          <h1 id="pageTitle">正在加载FB Page 自动发布模板…</h1>
           <p>选择同一目标产品的 Page 池，并配置选材、视频制作和北京时间发布规则。</p>
         </div>
         <div class="top-actions">
@@ -43,6 +43,11 @@
       </section>
 
       <div id="pageRoot" class="hidden">
+        <section id="editorLoading" class="panel gate" role="status" aria-live="polite">
+          <strong id="editorLoadingMessage">正在读取已保存的模板配置…</strong>
+          <button id="retryEditorLoad" class="button hidden" type="button">重新加载</button>
+        </section>
+        <div id="editorContent" class="hidden">
         <section class="notice">
           <div class="notice-mark">i</div>
           <div>
@@ -175,13 +180,14 @@
             <div class="field wide form-actions">
               <div id="capacityEstimate" class="helper">请选择 Page 池后查看每日预计 GPU 任务和 Graph 发布量。</div>
               <div class="actions">
-                <button id="saveTemplate" class="button primary" type="submit">保存模板</button>
+                <button id="saveTemplate" disabled class="button primary" type="submit">保存模板</button>
                 <a class="button link-button" href="/fb-auto-publish-templates.html?v=20260820-list-only-v2">取消并返回</a>
                 <span id="formMessage" class="status-line" role="status" aria-live="polite"></span>
               </div>
             </div>
           </form>
         </section>
+        </div>
       </div>
     </main>
   </div>
@@ -190,9 +196,9 @@
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=ac11d7b304fb"></script>
-  <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
+  <script src="/fb-auto-publish-common.js?v=20261119-fast1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/fb-auto-publish-template.js?v=20261118products1"></script>
+  <script src="/fb-auto-publish-template.js?v=20261119-fast1"></script>
 </body>
 </html>

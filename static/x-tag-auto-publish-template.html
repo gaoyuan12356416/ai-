@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
-  <title>编辑 X 标签画像自动发布模板 - AI自动后台</title>
+  <title>X 标签画像自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <link rel="stylesheet" href="/x-tag-auto-publish.css?v=20261105membership1" />
 <link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" />  <link rel="stylesheet" href="/x-tag-template-layout.css?v=20261119-2" />
@@ -23,7 +23,7 @@
     <main class="main">
       <header class="topbar">
         <div class="title">
-          <h1 id="pageTitle">创建 X 标签画像自动发布模板</h1>
+          <h1 id="pageTitle">正在加载X 标签画像自动发布模板…</h1>
           <p>按账号剧语言和模板条件筛选，再按受众、题材两级收入画像选剧；同组合内按模板排序选择素材。</p>
         </div>
         <div class="top-actions">
@@ -44,6 +44,11 @@
       </section>
 
       <div id="pageRoot" class="hidden">
+        <section id="editorLoading" class="panel gate" role="status" aria-live="polite">
+          <strong id="editorLoadingMessage">正在读取已保存的模板配置…</strong>
+          <button id="retryEditorLoad" class="button hidden" type="button">重新加载</button>
+        </section>
+        <div id="editorContent" class="hidden">
         <form id="templateForm" novalidate>
           <div class="form-layout">
             <div class="form-main">
@@ -274,7 +279,7 @@
                   <div class="summary-item"><span>发布时间</span><strong id="summarySchedule">每天 11:00</strong></div>
                 </div>
                 <div class="sticky-actions">
-                  <button id="saveTemplate" class="button primary" type="submit">保存模板</button>
+                  <button id="saveTemplate" disabled class="button primary" type="submit">保存模板</button>
                   <a class="button link-button" href="/x-tag-auto-publish-templates.html">取消并返回</a>
                 </div>
                 <p id="formStatus" class="status-line" role="status" aria-live="polite">请填写模板配置。</p>
@@ -282,6 +287,7 @@
             </aside>
           </div>
         </form>
+        </div>
       </div>
     </main>
   </div>
@@ -299,9 +305,9 @@
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=203bf1a08903"></script>
-  <script src="/x-tag-auto-publish-common.js?v=20260814language1"></script>
+  <script src="/x-tag-auto-publish-common.js?v=20261119-fast1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/x-tag-auto-publish-template.js?v=20261119-1"></script>
+  <script src="/x-tag-auto-publish-template.js?v=20261119-fast1"></script>
 </body>
 </html>

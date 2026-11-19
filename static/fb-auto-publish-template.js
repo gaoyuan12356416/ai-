@@ -3,11 +3,16 @@
 
   const ui = window.FBAutoPublishUI;
   const templateId = ui.positiveId(new URLSearchParams(window.location.search).get("id"));
+  ui.byId("pageTitle").textContent = `${templateId ? "编辑" : "创建"} FB Page 自动发布模板`;
+  document.title = ui.byId("pageTitle").textContent + " - AI自动后台";
   const state = {
     groups: [],
     template: null,
     busy: false,
     fixedStaggerMinutes: 0,
+    groupsLoaded: false,
+    groupsLoading: false,
+    templateReady: false,
   };
 
   function range(prefix) {
@@ -59,6 +64,7 @@
   }
 
   function renderGroups() {
+    if (!state.groupsLoaded) return;
     const selected = new Set(((state.template && state.template.config || {}).group_ids || []).map(String));
     ui.byId("poolList").innerHTML = state.groups.map(group => [
       '<label class="pool">',
@@ -73,12 +79,34 @@
   async function loadGroups() {
     const data = await ui.api(ui.API_BASE + "/groups");
     state.groups = Array.isArray(data.items) ? data.items : [];
+    state.groupsLoaded = true;
     const summary = data.summary || {};
     ui.byId("groupCount").textContent = summary.total_groups ?? 0;
     ui.byId("pageCount").textContent = summary.total_pages ?? 0;
     ui.byId("publishableCount").textContent = summary.publishable_pages ?? 0;
     ui.byId("missingCount").textContent = summary.missing_token_pages ?? 0;
     renderGroups();
+    estimate();
+  }
+
+  async function loadGroupOptions() {
+    if (state.groupsLoading) return;
+    state.groupsLoading = true;
+    ui.byId("poolList").textContent = "正在加载 Page 池…";
+    try {
+      await loadGroups();
+    } catch (error) {
+      ui.byId("poolList").textContent = error.message || "Page 池读取失败，已保存的选择仍保留。";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "button small";
+      retry.textContent = "重新加载 Page 池";
+      retry.addEventListener("click", () => void loadGroupOptions());
+      ui.byId("poolList").appendChild(retry);
+    } finally {
+      state.groupsLoading = false;
+      ui.byId("saveTemplate").disabled = !state.templateReady || !state.groupsLoaded || state.busy;
+    }
   }
 
   async function loadTemplate() {
@@ -132,6 +160,11 @@
   }
 
   function estimate() {
+    if (!state.groupsLoaded) {
+      const count = state.template?.config?.group_ids?.length || 0;
+      ui.byId("capacityEstimate").textContent = `已选 ${count} 个 Page 池，正在读取池内账号与发布容量…`;
+      return;
+    }
     const selected = Array.from(document.querySelectorAll('input[name="group"]:checked'))
       .map(input => state.groups.find(group => String(group.group_id) === input.value))
       .filter(Boolean);
@@ -202,7 +235,7 @@
 
   async function saveTemplate(event) {
     event.preventDefault();
-    if (state.busy) return;
+    if (!state.templateReady || !state.groupsLoaded || state.busy) return;
     state.busy = true;
     ui.byId("saveTemplate").disabled = true;
     ui.byId("formMessage").textContent = "正在保存…";
@@ -240,17 +273,25 @@
     onReady: async () => {
       window.MaterialProductPicker.render();
       bindEvents();
+      ui.byId("retryEditorLoad").addEventListener("click", () => window.location.reload());
+      const templateRequest = loadTemplate();
+      void loadGroupOptions();
       try {
-        await loadGroups();
         if (templateId) {
-          const item = await loadTemplate();
+          const item = await templateRequest;
           if (!ui.positiveId(item && (item.id || item.template_id))) throw new Error("模板不存在或不可访问。");
           hydrateTemplate(item);
           renderTargetDayPlans(item.target_daily_plans);
         } else {
           toggleSchedule();
         }
+        state.templateReady = true;
+        ui.byId("editorLoading").classList.add("hidden");
+        ui.byId("editorContent").classList.remove("hidden");
+        ui.byId("saveTemplate").disabled = !state.groupsLoaded;
       } catch (error) {
+        ui.byId("editorLoadingMessage").textContent = error.message || "模板配置读取失败，请重试。";
+        ui.byId("retryEditorLoad").classList.remove("hidden");
         ui.byId("saveTemplate").disabled = true;
         ui.byId("formMessage").textContent = error.message || "页面数据加载失败";
         ui.byId("formMessage").className = "status-line error";

@@ -89,11 +89,11 @@
     } catch (_error) {
       auth = { authenticated: false };
     }
-    await QuickNav.render({
+    void QuickNav.render({
       container: "#quickNav",
       auth,
       activeKey: "fbAutoPublishTemplates",
-    });
+    }).catch(() => {});
     UiTopbar.render({
       auth,
       userCard: "#userCard",

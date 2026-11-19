@@ -242,11 +242,11 @@
     } catch (_) {
       auth = { authenticated: false, login_url: "/api/auth/feishu/login" };
     }
-    await window.QuickNav.render({
+    void window.QuickNav.render({
       container: "#quickNav",
       auth,
       activeKey: config.activeKey || "xAutoPublishTemplates",
-    });
+    }).catch(() => {});
     window.UiTopbar.render({
       auth,
       userCard: "#userCard",

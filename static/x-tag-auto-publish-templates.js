@@ -8,6 +8,8 @@
     total: 0,
     templates: [],
     busyIds: new Set(),
+    summary: {},
+    operatorName: "",
   };
 
   function templateId(item) {
@@ -136,10 +138,11 @@
     const summary = ui.objectValue(payload && (payload.summary || payload.counts));
     const enabled = ui.numberValue(summary.enabled, state.templates.filter(isEnabled).length);
     const disabled = ui.numberValue(summary.disabled, Math.max(0, state.total - enabled));
-    const running = ui.numberValue(summary.running || summary.active_runs, state.templates.filter(item => {
+    const running = ui.numberValue(summary.running ?? summary.active_runs, state.templates.filter(item => {
       const status = String(item.last_run_status || (item.last_run && item.last_run.status) || "").toLowerCase();
       return ["queued", "running", "preparing", "publishing"].includes(status);
     }).length);
+    state.summary = { enabled, disabled, running };
     ui.setText(ui.byId("totalCount"), state.total, "0");
     ui.setText(ui.byId("enabledCount"), enabled, "0");
     ui.setText(ui.byId("disabledCount"), disabled, "0");
@@ -154,78 +157,140 @@
       return;
     }
 
-    state.templates.forEach(item => {
-      const config = ui.objectValue(item && item.config);
-      const id = templateId(item);
-      const enabled = isEnabled(item);
-      const version = templateVersion(item);
-      const row = ui.element("tr");
+    state.templates.forEach(item => body.appendChild(templateRow(item)));
+  }
 
-      const nameCell = ui.element("td");
-      const primary = ui.element("div", { className: "primary-cell" });
-      primary.appendChild(ui.element("strong", { text: item.name || `模板 ${id}` }));
-      primary.appendChild(ui.element("span", { className: "secondary mono", text: `ID ${id || "—"} · v${version}` }));
-      nameCell.appendChild(primary);
-      row.appendChild(nameCell);
+  function templateRow(item) {
+    const config = ui.objectValue(item && item.config);
+    const id = templateId(item);
+    const enabled = isEnabled(item);
+    const version = templateVersion(item);
+    const row = ui.element("tr", { dataset: { templateId: id } });
 
-      const statusCell = ui.element("td");
-      const statusControl = ui.element("div", { className: "template-status-control" });
-      statusControl.appendChild(ui.statusBadge(statusLabel(item.status, enabled), enabled ? "success" : "warning"));
-      const toggle = ui.element("button", {
-        type: "button",
-        className: "template-status-switch",
-        title: enabled ? "点击关闭自动发布" : "点击开启自动发布",
-        attributes: { role: "switch", "aria-checked": String(enabled), "aria-label": `${item.name || id} 自动发布`, "aria-busy": String(state.busyIds.has(id)) },
-        dataset: { action: enabled ? "disable" : "enable", templateId: id },
-      });
-      toggle.disabled = state.busyIds.has(id);
-      statusControl.appendChild(toggle);
-      statusCell.appendChild(statusControl);
-      row.appendChild(statusCell);
+    const nameCell = ui.element("td");
+    const primary = ui.element("div", { className: "primary-cell" });
+    primary.appendChild(ui.element("strong", { text: item.name || `模板 ${id}` }));
+    primary.appendChild(ui.element("span", { className: "secondary mono", text: `ID ${id || "—"} · v${version}` }));
+    nameCell.appendChild(primary);
+    row.appendChild(nameCell);
 
-      const accountsCell = ui.element("td");
-      accountsCell.appendChild(ui.element("strong", { text: `${accountCount(item)} 个账号` }));
-      accountsCell.appendChild(ui.element("div", { className: "secondary", text: "剧语言读取账户设置" }));
-      row.appendChild(accountsCell);
-
-      ui.appendTextCell(row, scheduleSummary(item));
-
-      const sortCell = ui.element("td");
-      sortCell.appendChild(ui.element("div", { text: `剧：${sortLabel(item.drama_rule || config.drama_rule)}` }));
-      sortCell.appendChild(ui.element("div", { className: "secondary", text: `素材：${sortLabel(item.material_rule || config.material_rule)}` }));
-      row.appendChild(sortCell);
-
-      ui.appendTextCell(row, ui.formatTime(item.next_run_at || item.next_scheduled_at));
-
-      const lastRun = ui.objectValue(item.last_run);
-      const lastStatus = item.last_run_status || lastRun.status;
-      const lastCell = ui.element("td");
-      lastCell.appendChild(ui.statusBadge(runStatusLabel(lastStatus), ui.statusKind(lastStatus)));
-      const lastTime = item.last_run_at || lastRun.created_at || lastRun.triggered_at;
-      if (lastTime) lastCell.appendChild(ui.element("div", { className: "secondary", text: ui.formatTime(lastTime) }));
-      row.appendChild(lastCell);
-
-      ui.appendTextCell(row, item.operator_name || "—");
-
-      const actionsCell = ui.element("td");
-      const actions = ui.element("div", { className: "template-actions" });
-      actions.appendChild(actionButton("编辑", "edit", id));
-      actions.appendChild(actionButton("记录", "runs", id));
-      actions.appendChild(actionButton("手动执行", "run", id, "primary"));
-      const more = ui.element("details");
-      more.appendChild(ui.element("summary", { className: "button small", text: "更多操作", attributes: { "aria-label": `${item.name || id} 更多操作` } }));
-      const options = ui.element("div", { className: "template-action-options" });
-      options.appendChild(actionButton("复制", "copy", id));
-      options.appendChild(actionButton("爆款素材发布", "material", id));
-      options.appendChild(actionButton("爆款剧发布", "drama", id));
-      options.appendChild(actionButton("删除", "delete", id, "danger"));
-      more.appendChild(options);
-      actions.appendChild(more);
-      if (state.busyIds.has(id)) actions.querySelectorAll("button").forEach(button => { button.disabled = true; });
-      actionsCell.appendChild(actions);
-      row.appendChild(actionsCell);
-      body.appendChild(row);
+    const statusCell = ui.element("td");
+    const statusControl = ui.element("div", { className: "template-status-control" });
+    statusControl.appendChild(ui.statusBadge(statusLabel(item.status, enabled), enabled ? "success" : "warning"));
+    const toggle = ui.element("button", {
+      type: "button",
+      className: "template-status-switch",
+      title: enabled ? "点击关闭自动发布" : "点击开启自动发布",
+      attributes: { role: "switch", "aria-checked": String(enabled), "aria-label": `${item.name || id} 自动发布`, "aria-busy": String(state.busyIds.has(id)) },
+      dataset: { action: enabled ? "disable" : "enable", templateId: id },
     });
+    toggle.disabled = state.busyIds.has(id);
+    statusControl.appendChild(toggle);
+    statusCell.appendChild(statusControl);
+    row.appendChild(statusCell);
+
+    const accountsCell = ui.element("td");
+    accountsCell.appendChild(ui.element("strong", { text: `${accountCount(item)} 个账号` }));
+    accountsCell.appendChild(ui.element("div", { className: "secondary", text: "剧语言读取账户设置" }));
+    row.appendChild(accountsCell);
+
+    ui.appendTextCell(row, scheduleSummary(item));
+
+    const sortCell = ui.element("td");
+    sortCell.appendChild(ui.element("div", { text: `剧：${sortLabel(item.drama_rule || config.drama_rule)}` }));
+    sortCell.appendChild(ui.element("div", { className: "secondary", text: `素材：${sortLabel(item.material_rule || config.material_rule)}` }));
+    row.appendChild(sortCell);
+
+    ui.appendTextCell(row, ui.formatTime(item.next_run_at || item.next_scheduled_at));
+
+    const lastRun = ui.objectValue(item.last_run);
+    const lastStatus = item.last_run_status || lastRun.status;
+    const lastCell = ui.element("td");
+    lastCell.appendChild(ui.statusBadge(runStatusLabel(lastStatus), ui.statusKind(lastStatus)));
+    const lastTime = item.last_run_at || lastRun.created_at || lastRun.triggered_at;
+    if (lastTime) lastCell.appendChild(ui.element("div", { className: "secondary", text: ui.formatTime(lastTime) }));
+    row.appendChild(lastCell);
+
+    ui.appendTextCell(row, item.operator_name || "—");
+
+    const actionsCell = ui.element("td");
+    const actions = ui.element("div", { className: "template-actions" });
+    actions.appendChild(actionButton("编辑", "edit", id));
+    actions.appendChild(actionButton("记录", "runs", id));
+    actions.appendChild(actionButton("手动执行", "run", id, "primary"));
+    const more = ui.element("details");
+    more.appendChild(ui.element("summary", { className: "button small", text: "更多操作", attributes: { "aria-label": `${item.name || id} 更多操作` } }));
+    const options = ui.element("div", { className: "template-action-options" });
+    options.appendChild(actionButton("复制", "copy", id));
+    options.appendChild(actionButton("爆款素材发布", "material", id));
+    options.appendChild(actionButton("爆款剧发布", "drama", id));
+    options.appendChild(actionButton("删除", "delete", id, "danger"));
+    more.appendChild(options);
+    actions.appendChild(more);
+    if (state.busyIds.has(id)) actions.querySelectorAll("button").forEach(button => { button.disabled = true; });
+    actionsCell.appendChild(actions);
+    row.appendChild(actionsCell);
+    return row;
+  }
+
+  function setRowBusy(id, busy) {
+    const row = ui.byId("templateRows").querySelector(`tr[data-template-id="${id}"]`);
+    if (!row) return;
+    row.querySelectorAll("button").forEach(button => { button.disabled = busy; });
+    row.querySelector('[role="switch"]')?.setAttribute("aria-busy", String(busy));
+  }
+
+  function applyTemplateUpdate(next, operatorName) {
+    const id = templateId(next);
+    const index = state.templates.findIndex(item => templateId(item) === id);
+    if (index < 0) return;
+    const previous = state.templates[index];
+    const current = { ...previous, ...next };
+    current.next_run_at = next.next_run_at || next.next_scheduled_at || "";
+    current.next_scheduled_at = "";
+    if (operatorName) current.operator_name = operatorName;
+    state.templates[index] = current;
+    const delta = Number(isEnabled(current)) - Number(isEnabled(previous));
+    renderStats({ summary: { ...state.summary, enabled: state.summary.enabled + delta, disabled: state.summary.disabled - delta } });
+    const row = ui.byId("templateRows").querySelector(`tr[data-template-id="${id}"]`);
+    if (row) {
+      const expanded = !!row.querySelector("details[open]");
+      const hadFocus = row.contains(document.activeElement);
+      const replacement = templateRow(current);
+      if (expanded) replacement.querySelector("details").open = true;
+      row.replaceWith(replacement);
+      if (hadFocus) replacement.querySelector('[role="switch"]')?.focus({ preventScroll: true });
+    }
+  }
+
+  async function toggleTemplate(item, action) {
+    const id = templateId(item);
+    state.busyIds.add(id);
+    setRowBusy(id, true);
+    try {
+      const payload = await ui.api(`${ui.API_BASE}/templates/${id}/${action}`, {
+        method: "POST", body: JSON.stringify({ expected_version: templateVersion(item) }),
+      });
+      const updated = ui.readItem(payload, ["template", "item"]);
+      if (templateId(updated) !== id) throw new Error("模板状态返回不完整，正在核对。");
+      state.busyIds.delete(id);
+      applyTemplateUpdate(updated, updated.operator_name || state.operatorName);
+      ui.showToast(isEnabled(updated) ? "模板已开启。" : "模板已关闭。", false);
+    } catch (error) {
+      try {
+        const payload = await ui.api(`${ui.API_BASE}/templates/${id}`);
+        const updated = ui.readItem(payload, ["template", "item"]);
+        if (templateId(updated) !== id) throw new Error("状态读取失败");
+        state.busyIds.delete(id);
+        applyTemplateUpdate(updated);
+      } catch (_) {
+        // Keep the last confirmed row; never clear unrelated rows or retry a write.
+      }
+      ui.showToast(error.message || "状态更新失败，请核对后重试。", true);
+    } finally {
+      state.busyIds.delete(id);
+      setRowBusy(id, false);
+    }
   }
 
   function renderPager() {
@@ -268,12 +333,10 @@
   async function mutateTemplate(item, action) {
     const id = templateId(item);
     const version = templateVersion(item);
-    const isToggle = action === "enable" || action === "disable";
+    if (action === "enable" || action === "disable") return toggleTemplate(item, action);
     const names = {
       copy: "复制模板",
       delete: "删除模板",
-      enable: "开启模板",
-      disable: "关闭模板",
       run: "手动执行模板",
     };
     const messages = {
@@ -281,15 +344,13 @@
       delete: `确认删除“${item.name || id}”吗？删除后将从模板列表移除并停止新调度；已生成任务和历史发布记录保留。`,
       run: `确认立即执行“${item.name || id}”吗？系统会为模板内每个账号创建一次真实发布任务，视频准备完成后自动发布。`,
     };
-    if (!isToggle) {
-      const confirmed = await ui.confirmAction({
-        title: names[action],
-        message: messages[action],
-        confirmText: action === "run" ? "确认真实执行" : "确认",
-        danger: action === "delete" || action === "run",
-      });
-      if (!confirmed) return;
-    }
+    const confirmed = await ui.confirmAction({
+      title: names[action],
+      message: messages[action],
+      confirmText: action === "run" ? "确认真实执行" : "确认",
+      danger: action === "delete" || action === "run",
+    });
+    if (!confirmed) return;
     state.busyIds.add(id);
     renderTemplates();
     try {
@@ -331,8 +392,6 @@
       ) {
         forgetManualRunKey(id, version);
       }
-      // Read back after conflicts or uncertain responses; never retry a toggle blindly.
-      if (isToggle) await loadTemplates();
       ui.showToast(error.message || `${names[action]}失败`, true);
     } finally {
       state.busyIds.delete(id);
@@ -388,7 +447,8 @@
 
   void ui.initShell({
     activeKey: "xAutoPublishTemplates",
-    onReady: async () => {
+    onReady: async auth => {
+      state.operatorName = String(auth?.user?.name || "");
       bindEvents();
       await loadTemplates();
     },
