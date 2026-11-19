@@ -86,7 +86,10 @@ def normalize(value, duration):
     )
     mix = value.get("original_volume", 1)
     check(type(mix) in (float, int) and 0 <= mix <= 1, "audio_invalid", "原声比例无效")
+    from .subtitle_protection import settings as protection_settings
+
     return {
+        "subtitle_protection": protection_settings(value.get("subtitle_protection")),
         "watermark": watermark,
         "effects": list(dict.fromkeys(effects)),
         "cues": clean,

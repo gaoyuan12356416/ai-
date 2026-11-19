@@ -121,7 +121,7 @@ def capabilities(seconds=0):
         "methods": METHODS,
         "effects": sorted(EFFECTS),
         "durations": durations,
-        "voices": [{"id": "default", "name": "标准配音"}],
+        "voices": [{"id": "default", "name": "自然配音"}],
         "multi_character": False,
         "erase_original_subtitles": False,
     }
@@ -159,6 +159,7 @@ def configuration(value):
             {
                 "watermark": clip.get("watermark", ""),
                 "effects": clip.get("effects", []),
+                "subtitle_protection": clip.get("subtitle_protection"),
             },
             1,
         )
@@ -169,6 +170,7 @@ def configuration(value):
             "variant_count": variants,
             "watermark": comp["watermark"],
             "effects": comp["effects"],
+            "subtitle_protection": comp["subtitle_protection"],
         }
     for kind in ("narration", "translation"):
         row = value.get(kind)
@@ -304,27 +306,32 @@ def checkpoint(rt, row, status, state, error=""):
             )
 
 
-def script(rt, actor, sources, analysis, settings):
-    from .language_tools import generate
+def script(rt, actor, sources, analysis, settings, clip=None, merge=True):
+    from .narration import write
 
-    context = "\n".join(
-        c.get("reason", "") + " " + c.get("transcript", "")
-        for s in analysis["sources"]
-        for c in s["candidates"]
-        if c.get("engine") == "multimodal"
-    )
-    check(
-        context.strip(),
-        "script_evidence",
-        "当前没有足够的画面语义，请先重新解析或手动填写解说稿",
-    )
-    payload = {
-        "mode": "narrate",
-        "language": settings.get("language", "zh"),
-        "seconds": settings.get("seconds", 30),
-        "text": context[:12000],
+    opts = {
+        "analysis_id": analysis["analysis_id"],
+        "method": clip["method"] if clip else "cliffhanger",
+        "merge": merge,
+        "script_count": 1,
+        "variant_count": 1,
     }
-    return generate(payload)["text"]
+    seconds = clip["seconds"] if clip else settings["seconds"]
+    if seconds is not None:
+        opts["target_duration_ms"] = seconds * 1000
+    planned = build_plans(analysis["sources"], opts)
+    unit = planned["drafts"][0]["units"][0]
+    for attempt in range(2):
+        try:
+            return " ".join(
+                c["text"]
+                for c in write(
+                    analysis["sources"], unit["clips"], settings, shorter=attempt > 0
+                )
+            )
+        except Exception as exc:
+            if attempt or getattr(exc, "code", "") != "speech_too_long":
+                raise
 
 
 def prepare(rt, actor, analysis, config):
@@ -335,7 +342,7 @@ def prepare(rt, actor, analysis, config):
     clip = config.get("clip")
     planning = clip or (
         {
-            "method": "golden_three",
+            "method": "cliffhanger",
             "script_count": 1,
             "variant_count": 1,
             "seconds": config["narration"]["seconds"],
@@ -356,6 +363,10 @@ def prepare(rt, actor, analysis, config):
         plan = build_plans(sources, opts)
         units = [u for draft in plan["drafts"] for u in draft["units"]]
         warnings = plan["warnings"]
+        if not clip and config.get("narration"):
+            for unit in units:
+                unit["title"] = sources[0]["title"] + " · 影视解说"
+
     else:
         groups = [sources] if config["merge"] else [[s] for s in sources]
         units = [
@@ -392,47 +403,50 @@ def prepare(rt, actor, analysis, config):
             "effects": clip.get("effects", []) if clip else [],
             "cues": [],
         }
+        if "mirror" in comp["effects"] or any(c.get("mirror") for c in unit["clips"]):
+            from .subtitle_protection import resolve
+
+            comp["subtitle_protection"] = resolve(
+                rt,
+                actor,
+                unit["clips"],
+                clip.get("subtitle_protection") if clip else None,
+            )
         narration = config.get("narration")
         translation = config.get("translation")
         cues = []
         if narration:
-            relevant = {
-                **analysis,
-                "sources": [
-                    {
-                        **s,
-                        "candidates": [
-                            c
-                            for c in s["candidates"]
-                            if any(
-                                cut["source_id"] == s["source_id"]
-                                and c["start_ms"] < cut["end_ms"]
-                                and c["end_ms"] > cut["start_ms"]
-                                for cut in unit["clips"]
-                            )
-                        ],
-                    }
-                    for s in sources
-                ],
-            }
-            text = narration["text"] or script(rt, actor, sources, relevant, narration)
-            paragraphs = [
-                s.strip()
-                for s in re.split(r"(?<=[。！？.!?])\s*|\n+", text)
-                if s.strip()
-            ]
-            total = max(1, sum(len(s) for s in paragraphs))
-            elapsed = 0
+            from .narration import write as write_narration, plain_captions
+
+            narration_voice = None
             span = min(duration, narration["seconds"] * 1000)
-            for i, words in enumerate(paragraphs):
-                end = (
-                    span
-                    if i == len(paragraphs) - 1
-                    else min(span, elapsed + round(span * len(words) / total))
-                )
-                if end > elapsed:
-                    cues.append({"start": elapsed, "end": end, "text": words})
-                elapsed = end
+            if narration["text"]:
+                # Read edited text as one continuous performance; do not revoice every subtitle.
+                cues = [{"start": 0, "end": span, "text": narration["text"]}]
+            else:
+                for attempt in range(2):
+                    try:
+                        cues = write_narration(
+                            sources, unit["clips"], narration, shorter=attempt > 0
+                        )
+                        if narration["speech"] and not (
+                            translation and translation["speech"]
+                        ):
+                            narration_voice = synthesize(
+                                {"language": narration["language"], "cues": cues}
+                            )
+                        break
+                    except Exception as exc:
+                        if attempt or getattr(exc, "code", "") != "speech_too_long":
+                            raise
+            if narration["speech"] and not (translation and translation["speech"]):
+                if narration_voice is None:
+                    narration_voice = synthesize(
+                        {"language": narration["language"], "cues": cues}
+                    )
+                cues = narration_voice.get("cues", cues)
+            elif narration["text"]:
+                cues = plain_captions(narration["text"], span)
             comp["style"] = narration["style"]
         elif translation:
             offset = 0
@@ -492,11 +506,15 @@ def prepare(rt, actor, analysis, config):
         if speaking is narration:
             spoken = cues
         if speaking and spoken:
-            voice = synthesize(
-                {"language": speaking["language"], "speed": 165, "cues": spoken}
+            voice = (
+                narration_voice
+                if speaking is narration and narration_voice
+                else synthesize(
+                    {"language": speaking["language"], "speed": 165, "cues": spoken}
+                )
             )
             comp["speech_id"] = store_audio(rt, actor, voice["audio_base64"])
-            comp["original_volume"] = 0 if translation else 0.15
+            comp["original_volume"] = 0
         unit["composition"] = normalize(comp, duration)
         prepared[key] = unit["composition"]
     return units, warnings
@@ -792,10 +810,23 @@ def dispatch(rt, actor, verb, path, body, query):
                     "analysis_not_ready",
                     "请先完成素材解析",
                 )
-                settings = configuration({"narration": {**body, "speech": False}})[
-                    "narration"
-                ]
-                text = script(rt, actor, current["assets"], analysis, settings)
+                cfg = configuration(
+                    {
+                        "narration": {**body, "speech": False},
+                        "clip": body.get("clip"),
+                        "merge": body.get("merge", True),
+                    }
+                )
+                settings = cfg["narration"]
+                text = script(
+                    rt,
+                    actor,
+                    current["assets"],
+                    analysis,
+                    settings,
+                    cfg.get("clip"),
+                    cfg["merge"],
+                )
                 with rt.db(True) as db:
                     message(
                         db,

@@ -142,6 +142,10 @@
     $("modalFooter").innerHTML = footer;
     modalKind = kind;
     $("modal").classList.toggle("assets", kind === "assets");
+    $("modal").classList.toggle(
+      "settings-modal",
+      kind === "narration" || kind === "translation",
+    );
     iconify($("modal"));
     if (!$("modal").open) $("modal").showModal();
   }
@@ -150,6 +154,8 @@
       toast("文件正在上传，请稍候");
       return;
     }
+    $("stylePreviewVideo")?.pause();
+    settingsObserver?.disconnect();
     $("modal").close();
     $("captionPreview").hidden = true;
     modalKind = "";
@@ -797,6 +803,92 @@
     `<input id="${id}" value="${esc(value)}" ${attrs}>`;
   const select = (id, options, value) =>
     `<select id="${id}">${options.map(([v, n]) => `<option value="${esc(v)}" ${String(v) === String(value) ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>`;
+  let settingsObserver;
+  function settingsPreviewMarkup() {
+    const source = assets[Math.min(index, assets.length - 1)] || assets[0];
+    return `<aside class="settings-preview"><h3>字幕位置预览</h3><p class="muted">拖动高度滑块，字幕即时移动</p>
+      <div id="stylePreviewFrame" class="settings-preview-frame"><video id="stylePreviewVideo" muted playsinline preload="metadata" src="${esc(source.preview_url)}"></video><div id="heightGuide" class="height-guide"></div><div id="stylePreviewCaption" class="settings-preview-caption"></div></div>
+      <div class="preview-playback"><button type="button" id="toggleStylePlayback">播放预览</button><span id="stylePreviewTime">0:00</span></div>
+      <input id="stylePreviewSeek" aria-label="预览画面时间" type="range" min="0" max="${source.duration_ms / 1000}" step="0.1" value="0">
+      <output id="stylePositionValue" class="preview-position" aria-live="polite"></output><p class="muted">预览使用所选原片和示例字幕，比例与 720 × 1280 成片一致。</p></aside>`;
+  }
+  function connectSettingsPreview(kind) {
+    const video = $("stylePreviewVideo"),
+      frame = $("stylePreviewFrame"),
+      caption = $("stylePreviewCaption");
+    $("player").pause();
+    const samples = {
+      zh: "门外的脚步声越来越近。",
+      en: "The footsteps outside are getting closer.",
+      ja: "ドアの外から足音が近づいてくる。",
+      ko: "문밖의 발소리가 점점 가까워진다.",
+      es: "Los pasos se acercan a la puerta.",
+      fr: "Les pas se rapprochent de la porte.",
+    };
+    const preview = () => {
+      const s = readStyle(),
+        scale = frame.clientWidth / 720;
+      const example = samples[$("language").value] || "Let the story continue.";
+      caption.textContent =
+        kind === "narration" && $("scriptText").value.trim()
+          ? $("scriptText").value.trim().slice(0, 85)
+          : example;
+      if (kind === "translation" && $("subtitleMode").value === "bilingual")
+        caption.textContent = "Someone is coming to the door.\n" + example;
+      caption.style.bottom = 100 - s.height + "%";
+      caption.style.fontSize = s.size * scale + "px";
+      caption.style.color = s.color;
+      caption.style.textAlign = s.align;
+      caption.style.webkitTextStroke = s.outline * scale + "px #111";
+      caption.style.paintOrder = "stroke fill";
+      caption.style.textShadow = `0 ${scale}px 0 #111`;
+      $("heightGuide").style.bottom = 100 - s.height + "%";
+      $("stylePositionValue").textContent =
+        `距顶部 ${s.height}% · 距底部 ${100 - s.height}%`;
+      $("heightValue").textContent = s.height + "%";
+    };
+    [
+      "styleSize",
+      "styleHeight",
+      "styleColor",
+      "styleAlign",
+      "styleOutline",
+      "language",
+      "subtitleMode",
+      "scriptText",
+    ].forEach((k) => {
+      if ($(k)) $(k).addEventListener("input", preview);
+    });
+    document.querySelectorAll("[data-caption-height]").forEach(
+      (b) =>
+        (b.onclick = () => {
+          $("styleHeight").value = b.dataset.captionHeight;
+          preview();
+        }),
+    );
+    $("toggleStylePlayback").onclick = () => {
+      if (video.paused)
+        video.play().catch(() => toast("预览视频暂不可播放", true));
+      else video.pause();
+    };
+    video.onplay = () => ($("toggleStylePlayback").textContent = "暂停预览");
+    video.onpause = () => ($("toggleStylePlayback").textContent = "播放预览");
+    video.ontimeupdate = () => {
+      $("stylePreviewSeek").value = video.currentTime;
+      $("stylePreviewTime").textContent = time(video.currentTime * 1000);
+    };
+    $("stylePreviewSeek").oninput = () =>
+      (video.currentTime = Number($("stylePreviewSeek").value));
+    video.onloadedmetadata = () => {
+      video.currentTime = Math.min(1, Math.max(0, video.duration - 0.1));
+      preview();
+    };
+    settingsObserver?.disconnect();
+    settingsObserver = new ResizeObserver(preview);
+    settingsObserver.observe(frame);
+    preview();
+  }
+
   function styleFields(style = {}) {
     return (
       field(
@@ -806,12 +898,13 @@
       ) +
       field(
         "height",
-        "字幕高度（%）",
+        `字幕高度 <output id="heightValue">${style.height || 84}%</output>`,
         input(
           "styleHeight",
           style.height || 84,
-          'type="range" min="10" max="95"',
-        ),
+          'type="range" min="10" max="95" aria-label="字幕高度"',
+        ) +
+          '<span class="caption-presets"><button type="button" data-caption-height="68">68%</button><button type="button" data-caption-height="78">78%</button><button type="button" data-caption-height="88">88%</button></span>',
       ) +
       field(
         "color",
@@ -922,7 +1015,18 @@
           )
           .join(
             "",
-          )}</div><p class="settings-note">脚本决定不同剪辑方案，裂变在相同方案上生成画面版本。热点前置会将精彩片段提前，再接回原片。</p>`;
+          )}</div><div id="subtitleProtectionOptions" class="protection-settings"><label class="checks"><input id="protectSubtitles" type="checkbox" ${c.subtitle_protection?.enabled !== false ? "checked" : ""}>字幕保护</label><p class="muted">水平翻转时保留原字幕区域的方向，新增字幕始终保持正常方向。</p><div class="form-grid">${field(
+          "protectionMode",
+          "保护区域",
+          select(
+            "protectionMode",
+            [
+              ["auto", "自动识别字幕区域"],
+              ["manual", "手动调整区域"],
+            ],
+            c.subtitle_protection?.mode || "auto",
+          ),
+        )}${field("protectionTop", "上边界（距顶部 %）", input("protectionTop", c.subtitle_protection?.top ?? 55, 'type="number" min="0" max="99"'))}${field("protectionBottom", "下边界（距顶部 %）", input("protectionBottom", c.subtitle_protection?.bottom ?? 92, 'type="number" min="1" max="100"'))}</div><p class="muted">保护区域内的画面保持原方向；自动识别不足时保留 55%–92% 区域，可手动扩大。</p></div><p class="settings-note">脚本决定不同剪辑方案，裂变在相同方案上生成画面版本。热点前置会将精彩片段提前，再接回原片。</p>`;
     } else if (kind === "narration") {
       body =
         '<div class="form-grid">' +
@@ -942,7 +1046,7 @@
           `<textarea id="scriptText" maxlength="1600" rows="5" placeholder="可直接填写，也可以根据素材生成解说稿">${esc(c.text || "")}</textarea>`,
           "wide",
         ) +
-        `<div class="modal-tools wide"><button id="generateScript">AI 生成脚本</button><button id="scriptHistory" class="quiet">脚本历史</button><span id="scriptStatus" class="muted"></span></div><label class="checks wide"><input id="speech" type="checkbox" ${c.speech !== false ? "checked" : ""} ${!caps.speech ? "disabled" : ""}>生成标准配音</label><p class="settings-note wide">解说稿会按成片时长生成字幕与配音。可先校对脚本，再添加配置。</p>` +
+        `<div class="modal-tools wide"><button id="generateScript">AI 生成脚本</button><button id="scriptHistory" class="quiet">脚本历史</button><span id="scriptStatus" class="muted"></span></div><label class="checks wide"><input id="speech" type="checkbox" ${c.speech !== false ? "checked" : ""} ${!caps.speech ? "disabled" : ""}>生成自然配音</label><p class="settings-note wide">按实际镜头顺序写解说，用自然语音配音，并按语音时间点对齐字幕；脚本过长时提示调整。</p>` +
         styleFields(c.style) +
         "</div>";
     } else {
@@ -974,10 +1078,12 @@
             c.mode || "bilingual",
           ),
         ) +
-        `<label class="checks"><input id="speech" type="checkbox" ${c.speech ? "checked" : ""} ${!caps.speech ? "disabled" : ""}>生成标准配音</label>` +
+        `<label class="checks"><input id="speech" type="checkbox" ${c.speech ? "checked" : ""} ${!caps.speech ? "disabled" : ""}>生成自然配音</label>` +
         styleFields(c.style) +
-        `</div><p class="settings-note">开启配音将替换原声。画面内已有的硬字幕会保留；当前可生成新增字幕及标准配音，多角色配音暂未开放。</p>`;
+        `</div><p class="settings-note">开启配音将替换原声。画面内已有的硬字幕会保留；当前可生成新增字幕及自然配音，多角色配音暂未开放。</p>`;
     }
+    if (kind !== "clip")
+      body = `<div class="settings-layout"><div class="settings-fields">${body}</div>${settingsPreviewMarkup()}</div>`;
     openModal(
       { clip: "智能剪辑", narration: "影视解说", translation: "视频翻译" }[
         kind
@@ -992,6 +1098,22 @@
       const durationVisibility = () =>
         ($("duration").closest("label").hidden = c.method === "hook_first");
       durationVisibility();
+      const protectionVisibility = () => {
+        $("subtitleProtectionOptions").hidden = !document.querySelector(
+          'input[name="effect"][value="mirror"]',
+        ).checked;
+        ["protectionTop", "protectionBottom"].forEach(
+          (k) =>
+            ($(k).disabled =
+              $("protectionMode").value === "auto" ||
+              !$("protectSubtitles").checked),
+        );
+      };
+      document.querySelector('input[name="effect"][value="mirror"]').onchange =
+        protectionVisibility;
+      $("protectionMode").onchange = protectionVisibility;
+      $("protectSubtitles").onchange = protectionVisibility;
+      protectionVisibility();
       $("modalBody")
         .querySelectorAll("[data-method]")
         .forEach(
@@ -1005,25 +1127,7 @@
             }),
         );
     } else {
-      const preview = () => {
-        const s = readStyle();
-        $("captionPreview").textContent =
-          kind === "translation"
-            ? "让精彩故事跨越语言\nLet great stories travel."
-            : "这是一段解说字幕预览";
-        $("captionPreview").hidden = false;
-        $("captionPreview").style.bottom = 100 - s.height + "%";
-        $("captionPreview").style.fontSize = Math.max(12, s.size * 0.65) + "px";
-        $("captionPreview").style.color = s.color;
-        $("captionPreview").style.textAlign = s.align;
-      };
-      [
-        "styleSize",
-        "styleHeight",
-        "styleColor",
-        "styleAlign",
-        "styleOutline",
-      ].forEach((k) => ($(k).oninput = preview));
+      connectSettingsPreview(kind);
       if (kind === "narration") {
         $("generateScript").onclick = () =>
           action(async () => {
@@ -1033,8 +1137,11 @@
             const d = await api("/studio/sessions/" + session.id + "/scripts", {
               language: $("language").value,
               seconds: Number($("seconds").value),
+              clip: config().clip,
+              merge: config().merge !== false,
             });
             $("scriptText").value = d.text;
+            $("scriptText").dispatchEvent(new Event("input"));
             $("scriptStatus").textContent = "已保存到脚本历史";
             await refresh();
           });
@@ -1057,6 +1164,7 @@
               $("scriptText").value = list.find(
                 (m) => m.id === b.dataset.useScript,
               ).data.text;
+              $("scriptText").dispatchEvent(new Event("input"));
               area.remove();
             }
           };
@@ -1076,6 +1184,12 @@
             script_count: Number($("scriptCount").value),
             variant_count: Number($("variantCount").value),
             watermark: $("watermark").value,
+            subtitle_protection: {
+              enabled: $("protectSubtitles").checked,
+              mode: $("protectionMode").value,
+              top: Number($("protectionTop").value),
+              bottom: Number($("protectionBottom").value),
+            },
             effects: [
               ...document.querySelectorAll("input[name=effect]:checked"),
             ].map((e) => e.value),
@@ -1455,6 +1569,8 @@
   });
   $("modal").addEventListener("close", () => {
     $("captionPreview").hidden = true;
+    $("stylePreviewVideo")?.pause();
+    settingsObserver?.disconnect();
     modalKind = "";
     clearTimeout(importTimer);
   });
