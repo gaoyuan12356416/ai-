@@ -17,7 +17,7 @@ class ProviderClient:
         self._rate_lock = threading.Lock()
         self._next_request = 0.0
 
-    def _post(self, path, payload, request_id=None):
+    def _post(self, path, payload, request_id=None, *, read_timeout=60):
         if not self.settings.institution_user_id or not self.settings.token:
             raise ProviderError("供应方接口凭证未配置")
         with self._rate_lock:
@@ -34,7 +34,7 @@ class ProviderClient:
             "sign": hashlib.sha256(source.encode("utf-8")).hexdigest(),
         }
         return self.http.post(self.settings.api_base + path, headers=headers, json=payload,
-                              timeout=(10, 60), allow_redirects=False)
+                              timeout=(10, read_timeout), allow_redirects=False)
 
     def get_page(self, page_index, page_size=100):
         for attempt in range(3):
@@ -59,7 +59,7 @@ class ProviderClient:
 
     def create_promotion(self, payload, request_id):
         # The caller durably saves intent before this one network request.
-        response = self._post("/api/story/getcodeinfo", payload, request_id)
+        response = self._post("/api/story/getcodeinfo", payload, request_id, read_timeout=120)
         try:
             body = response.json()
         except ValueError:

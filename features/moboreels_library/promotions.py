@@ -186,6 +186,16 @@ class PromotionManager:
             "creating": "正在生成推广链接，请稍候", "unknown": "请求结果待核对，请联系管理员，暂不重复创建",
             "rejected": "供应方未接受本次请求，可稍后重试", "succeeded": "推广链接已生成",
         }.get(record.get("status"), "")
+        if record.get("status") == "unknown":
+            result["request_id"] = record.get("request_id")
+            receipt = record.get("response_json")
+            if isinstance(receipt, str):
+                try:
+                    receipt = json.loads(receipt)
+                except ValueError:
+                    receipt = None
+            if isinstance(receipt, dict) and receipt.get("transport_error") == "ReadTimeout":
+                result["message"] = "等候 Moboreels 返回推广链接时超时，创建结果待核对。"
         return result
 
     def get(self, actor, story):

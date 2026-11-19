@@ -108,7 +108,11 @@
     if (!promotion) return attribution + `<div class="notice">${Number(row.is_show) === 1 ? "尚未生成推广链接。" : "该剧已下架，暂不能生成新链接；当前用户没有已保存的历史链接。"}</div>`;
     if (GOOD_PROMOTION.has(promotion.status)) return attribution + linkCard("推广口令",promotion.koc_code,"koc_code",true) + linkCard("剧目推广链接",promotion.deep_link,"deep_link",false) + linkCard("主页链接",promotion.home_link,"home_link",false) + `<p class="promotion-result-note">生成时间（北京时间）：${escapeHtml(formatUTC(promotion.created_at))}${Number(row.is_show) !== 1 ? "<br>该剧目前已下架，以上为历史生成结果。" : ""}</p>`;
     if (ACTIVE_PROMOTION.has(promotion.status)) return attribution + '<div class="notice">推广链接正在生成，页面会自动更新结果，请勿重复提交。</div>';
-    if (promotion.status === "unknown") return attribution + '<div class="notice">该请求的创建结果待核对。请联系管理员核对原口令和链接，核对完成前不会再次创建。</div><p class="muted">其他剧目仍可正常生成推广链接。</p>';
+    if (promotion.status === "unknown") {
+      const reason = escapeHtml(promotion.message || "本次建链结果待核对。");
+      const reference = promotion.request_id ? linkCard("供应方请求号", promotion.request_id, "request_id", true) : "";
+      return attribution + `<div class="notice">${reason}</div>` + reference + '<p class="muted">请管理员向 Moboreels 核对这笔请求。已生成的链接可以补回，确认未创建后可以重试。</p>';
+    }
     if (promotion.status === "rejected") return attribution + `<div class="notice error">${escapeHtml(promotion.message || promotion.error_message || "本次请求未成功，可稍后重试。")}</div>${Number(row.is_show) === 1 ? '<button class="btn btn-primary" type="button" data-action="retry-promotion">重试生成</button>' : ""}`;
     return attribution + '<div class="notice">推广结果暂不可用，请刷新查看或联系管理员核对。</div>';
   }

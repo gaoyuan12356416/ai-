@@ -126,14 +126,37 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual(len(self.provider.calls), 1)
 
     def test_timeout_is_unknown_and_never_replayed(self):
-        self.provider.error = TimeoutError("upstream timeout")
+        self.provider.error = requests.ReadTimeout("private error details")
         first = self.manager.create(ACTOR, "story-a")
-        self.assertEqual(first["promotion"]["status"], "unknown")
+        promotion = first["promotion"]
+        self.assertEqual(promotion["status"], "unknown")
+        self.assertEqual(promotion["request_id"], self.provider.calls[0][1])
+        self.assertIn("超时", promotion["message"])
+        self.assertIn("待核对", promotion["message"])
+        self.assertNotIn("private error details", promotion["message"])
+        self.assertNotIn("response_json", promotion)
+        self.assertIsNone(self.manager.get(dict(ACTOR, user_id="user-b"), "story-a"))
         self.provider.error = None
         again = self.manager.create(ACTOR, "story-a")
         self.assertTrue(again["reused"])
-        self.assertEqual(again["promotion"]["status"], "unknown")
+        self.assertEqual(again["promotion"], promotion)
         self.assertEqual(len(self.provider.calls), 1)
+
+    def test_legacy_unknown_receipt_returns_only_confirmed_timeout_reason(self):
+        star = identity("institution-a", ACTOR)[0]
+        for story, receipt, read_timeout in (
+            ("old-timeout", '{"transport_error":"ReadTimeout"}', True),
+            ("old-error", '{"response":{"message":"ReadTimeout"}}', False),
+            ("old-malformed", 'private unreadable receipt', False),
+        ):
+            with self.subTest(story=story):
+                self.db.records[(star, story)] = dict(story_id=story, status="unknown",
+                    request_id="original-id", response_json=receipt)
+                result = self.manager.get(ACTOR, story)
+                self.assertEqual(result["request_id"], "original-id")
+                self.assertEqual("超时" in result["message"], read_timeout)
+                self.assertNotIn("response_json", result)
+        self.assertFalse(self.provider.calls)
 
     def test_all_non_success_business_responses_stay_unknown_without_retry(self):
         for index, code in enumerate([None, 0, 400, 401, 429, 500, 503, "200", "invalid", [], {}]):
@@ -295,6 +318,7 @@ class ProviderTests(unittest.TestCase):
             client.create_promotion({"story_id": "story-a"}, "request-guid")
         args, kwargs = http.post.call_args
         self.assertEqual(args[0], "https://kocapi-cn.cdreader.com/api/story/getcodeinfo")
+        self.assertEqual(kwargs["timeout"], (10, 120))
         self.assertFalse(kwargs["allow_redirects"])
         self.assertEqual(kwargs["headers"]["timestamp"], "1700000000123")
         expected = hashlib.sha256("request-guid_1700000000123_institution_mixed_faketoken".encode()).hexdigest()
@@ -303,9 +327,9 @@ class ProviderTests(unittest.TestCase):
 
     def test_creation_transport_failure_has_one_attempt(self):
         http = mock.Mock()
-        http.post.side_effect = requests.Timeout()
+        http.post.side_effect = requests.ReadTimeout()
         client = ProviderClient(self.settings, http)
-        with self.assertRaises(requests.Timeout):
+        with self.assertRaises(requests.ReadTimeout):
             client.create_promotion({"story_id": "story-a"}, "request-guid")
         self.assertEqual(http.post.call_count, 1)
 
@@ -317,6 +341,7 @@ class ProviderTests(unittest.TestCase):
             result = client.get_page(3)
         self.assertEqual(result["total"], 1)
         calls = http.post.call_args_list
+        self.assertTrue(all(call.kwargs["timeout"] == (10, 60) for call in calls))
         self.assertEqual(len({call.kwargs["headers"]["reqid"] for call in calls}), 3)
         self.assertTrue(all(call.kwargs["json"] == {"project_type": 2, "status": 0, "page_index": 3, "page_size": 100} for call in calls))
 
