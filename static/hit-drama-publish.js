@@ -20,7 +20,7 @@
     for(const [value,text] of [['content_id','剧 ID（单语言版本）'],['resource_id','资源 ID（关联各语言版本）']]){const option=el('option',text);option.value=value;type.append(option);}
     const idLabel=el('label','剧 ID 或资源 ID（可输入多个）');idLabel.htmlFor='hitDramaInput';const input=el('textarea');input.id='hitDramaInput';input.rows=3;input.autocomplete='off';input.spellcheck=false;
     const inputHint=el('p','多个 ID 可用逗号、空格或换行分隔，重复 ID 会自动去重。','helper');inputHint.id='hitDramaInputHint';input.setAttribute('aria-describedby',inputHint.id);
-    function updateInput(){input.placeholder=type.value==='resource_id'?'例如：30911, 30912 30913':'例如：kOfK3rsZLN, mfX8RIwfwt BXbuiaD7tl';}
+    function updateInput(){input.placeholder=type.value==='resource_id'?'例如：XEY468, XEY463 或 30911':'例如：kOfK3rsZLN, mfX8RIwfwt BXbuiaD7tl';}
     type.addEventListener('change',updateInput);updateInput();
     const status=el('p','正在读取模板…');status.setAttribute('role','status');status.style.whiteSpace='pre-wrap';const resultBox=el('div');
     const typeField=el('div','','field'),idField=el('div','','field');typeField.append(label,type);idField.append(idLabel,input,inputHint);
@@ -84,6 +84,9 @@
       const item=data.template||data.item||data;version=Number(item.version||item.current_version);
       if(!Number.isInteger(version)||version<=0)throw Error('模板版本读取失败，请刷新后重试');
       title.textContent='爆款剧发布 · '+(item.name||`模板 ${templateId}`);
+      const config=item.config||{};
+      const mobo=isX?(config.material_products||[]).some(p=>['moboreels','moboshort'].includes(String(p).toLowerCase())):String(config.message_template||'').includes('{{m_url}}');
+      if(mobo)tip.textContent='Mobo 按当前上架剧目选材，制作完成后尽快发布。沿用模板的素材、指标和冷却条件，本次不限制上线天数，也不修改日常排期。';
       key=['hit-drama-v1',platform,auth.user.tenant_key,auth.user.user_id,templateId].join(':');
       const saved=sessionStorage.getItem(key);
       if(saved){
@@ -97,10 +100,10 @@
     submit.onclick=async()=>{
       if(busy||done)return;
       if(!batch){
-        const ids=[...new Set(input.value.split(/[\s,，]+/).filter(Boolean))],pattern=type.value==='resource_id'?/^[1-9][0-9]{0,30}$/:/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+        const ids=[...new Set(input.value.split(/[\s,，]+/).filter(Boolean))],pattern=type.value==='resource_id'?/^(?:[1-9][0-9]{0,30}|[A-Za-z][A-Za-z0-9_-]{0,63})$/:/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
         if(!ids.length){status.textContent='请输入至少一个剧 ID 或资源 ID。';input.focus();return;}
         const invalid=ids.filter(id=>!pattern.test(id));
-        if(invalid.length){status.textContent=`ID 格式不正确：${invalid.join('、')}。`+(type.value==='resource_id'?'资源 ID 请输入正整数。':'剧 ID 支持字母、数字、下划线和短横线。');input.focus();return;}
+        if(invalid.length){status.textContent=`ID 格式不正确：${invalid.join('、')}。`+(type.value==='resource_id'?'资源 ID 支持数字或 XEY468 这样的字母编号。':'剧 ID 支持字母、数字、下划线和短横线。');input.focus();return;}
         batch={items:ids.map(id=>{
           const operation=crypto.randomUUID().replaceAll('-','');
           return {request:{expected_version:version,drama_id:id,id_type:type.value,...(isX?{idempotency_key:operation,confirmed:true}:{operation_id:operation})}};

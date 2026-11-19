@@ -25,8 +25,29 @@ def normalize(payload):
     return dict(payload, drama_id=value, expected_version=int(payload['expected_version']))
 
 
-def resolve(source, request):
+def resolve(source, request, config=None):
     try:
+        from features.material_products import selected
+        from features.moboreels_hit import MOBO_PRODUCTS, resolve as resolve_mobo
+        products = selected(config or {})
+        mobo = any(p.casefold() in MOBO_PRODUCTS for p in products)
+        ordinary = any(p.casefold() not in MOBO_PRODUCTS for p in products)
+        if mobo:
+            targets = []
+            if ordinary:
+                try:
+                    targets.append(resolve_target(source._stream_select, source.schema, source.app_id, request))
+                except ValueError as exc:
+                    if str(exc) not in ('资源 ID 未关联到目标产品下的剧目', '目标产品下未找到该剧 ID'):
+                        raise
+            try:
+                targets.append(resolve_mobo(source._stream_select, source.schema, request))
+            except ValueError as exc:
+                if not targets or str(exc) not in ('资源 ID 未关联到目标产品下的剧目', '目标产品下未找到该剧 ID'):
+                    raise
+            if len(targets) != 1:
+                raise ValueError('该 ID 同时匹配多个产品，请在模板中选择单一素材产品后重试')
+            return targets[0]
         return resolve_target(source._stream_select, source.schema, source.app_id, request)
     except ValueError as exc:
         raise AutoPostServiceError('hit_drama_not_found', str(exc), 409) from None
@@ -77,8 +98,13 @@ class TagAutoPostService(XAutoPostService):
                 template = self.store.get_template(template_id)
                 if template.version != request['expected_version']:
                     raise AutoPostServiceError('x_auto_template_version_conflict', '模板版本已变化，请刷新后重试', 409)
-                target = resolve(self.selector.source, request)
-                catalog = catalog_labels(self.selector.source, [SimpleNamespace(content_id=cid) for cid in content_ids(target)])
+                target = resolve(self.selector.source, request, template.config)
+                is_mobo = target.get('catalog') == 'moboreels'
+                if is_mobo:
+                    from features.moboreels_hit import classifications
+                    catalog = classifications(self.selector.source._stream_select, content_ids(target))
+                else:
+                    catalog = catalog_labels(self.selector.source, [SimpleNamespace(content_id=cid) for cid in content_ids(target)])
                 accounts, skipped = [], []
                 for account_id in template.config.get('account_ids', []):
                     try:
@@ -106,13 +132,15 @@ class TagAutoPostService(XAutoPostService):
                 if not matched:
                     raise AutoPostServiceError('hit_drama_no_matching_channel', '没有语言、受众和题材画像均匹配的可发布频道，未创建任务', 409)
                 from features.hit_publish import release_times, POLICY
-                times = release_times(self.selector.source._stream_select, self.selector.source.schema, self.selector.source.app_id, content_ids(target))
-                frozen = dict(release_times=times, timing_policy=POLICY, request=request, target=target, account_ids=matched, account_content_ids=account_targets, skipped=skipped, profiles=audits)
+                times = {} if is_mobo else release_times(self.selector.source._stream_select, self.selector.source.schema, self.selector.source.app_id, content_ids(target))
+                frozen = dict(release_times=times, timing_policy='' if is_mobo else POLICY, request=request, target=target, account_ids=matched, account_content_ids=account_targets, skipped=skipped, profiles=audits)
+                from .material_catalog import CatalogSource
+                blacklist_source = CatalogSource(self.selector.source, ['Moboreels']) if is_mobo else self.selector.source
                 now = self._now()
                 run = self.store.create_run(run_key=key, template_id=template.id, template_version=template.version,
                     trigger_type='manual', scheduled_at_utc=now, shanghai_date=now.astimezone(BEIJING_TZ).date().isoformat(),
                     publish_time=now.astimezone(BEIJING_TZ).strftime('%H:%M'), actor=actor,
-                    blacklist_snapshot={**_blacklist_dict(self.selector.source.blacklist_snapshot()), MARKER: frozen})
+                    blacklist_snapshot={**_blacklist_dict(blacklist_source.blacklist_snapshot()), MARKER: frozen})
                 self._run_tasks(run, dict(template.config, account_ids=matched))
                 created = True
         self._kick()
