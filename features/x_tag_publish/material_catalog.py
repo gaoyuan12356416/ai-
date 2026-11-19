@@ -40,7 +40,8 @@ class CatalogSource:
         from features.moboreels_library.settings import read_env_file
         from features.moboreels_library.macro_client import MoboreelsLinkError
         language = kwargs['language']
-        lang_ids = [key for key, value in LANGUAGES.items() if value.casefold() == language.casefold()]
+        from features.hit_drama_target import target_language
+        lang_ids = [key for key, value in LANGUAGES.items() if target_language(value) == target_language(language)]
         if not lang_ids:
             return rows
         config = read_env_file(os.environ.get('MOBOREELS_MACRO_ENV_FILE', '/etc/moboreels-macro.env'))

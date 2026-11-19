@@ -3,7 +3,8 @@
     "features/hit_drama_target.py": "8bc1eb11a9d4ea38992dbe25b763eec1f784cdf96e3307572532f07c344e511f",
     "features/moboreels_hit.py": "",
     "features/x_tag_publish/hit_drama.py": "6b3eeeab53966bd191958d8f139b3cc43f6ea361f567209d4e34555eb0c3f346",
-    "features/x_tag_publish/selection.py": "00ebe2946c03a495c355b31290eb1751db450d1ebfa1d2abd51d560cf7af1825"
+    "features/x_tag_publish/selection.py": "00ebe2946c03a495c355b31290eb1751db450d1ebfa1d2abd51d560cf7af1825",
+    "features/x_tag_publish/material_catalog.py": "b08049b482bc07a6c4be7f2ef3ac2d8776e3cf49ba98926d8862fdc27a628c25"
   },
   "fb": {
     "features/hit_drama_target.py": "41e9c014603dae9003de1fff2afaba69d5e2a7ecb3c48c12401cbf14cfd7ccca",

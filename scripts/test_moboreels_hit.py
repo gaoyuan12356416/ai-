@@ -81,6 +81,15 @@ class FacebookTests(unittest.TestCase):
 
 
 class XTests(unittest.TestCase):
+    def test_mobo_portuguese_catalog_accepts_normalized_selection_language(self):
+        from features.x_tag_publish.material_catalog import CatalogSource
+        calls=[]
+        source=SimpleNamespace(schema='ads',material_data_source=6,_stream_select=lambda sql,args:(calls.append((sql,args)) or [dict(story_id='123',story_name='Target')]))
+        with patch.dict(os.environ,MOBOREELS_INSTITUTION_USER_ID='scope'):
+            rows=CatalogSource(source,['Moboreels']).list_drama_rows(language='pt')
+        self.assertEqual(len(rows),1);self.assertEqual(calls[0][1][1],5)
+        self.assertEqual(rows[0].language,'pt')
+
     def test_mobo_execution_keeps_exact_catalog_and_material(self):
         from dataclasses import replace
         from scripts import test_x_auto_post_selector as f
