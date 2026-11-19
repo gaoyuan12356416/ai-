@@ -160,6 +160,29 @@ def readonly(path):
     return db
 
 
+def enrich_template_operators(result):
+    """Read the stored human operator for only the returned template rows."""
+    items = result.get('templates', result.get('items', []))
+    if not items:
+        return result
+    ids = list(dict.fromkeys(int(item['id']) for item in items))
+    try:
+        with closing(readonly(lane_paths()['X_AUTO_POST_DB_PATH'])) as db:
+            rows = db.execute(
+                'SELECT id,created_by_name,created_by_user_id,updated_by_name,updated_by_user_id '
+                'FROM x_auto_template WHERE id IN (' + ','.join('?' for _ in ids) + ')', ids)
+            operators = {row['id']: dict(row) for row in rows}
+        for key in ('templates', 'items'):
+            for item in result.get(key, []):
+                row = operators.get(int(item['id']), {})
+                item['operator_name'] = (row.get('updated_by_name') or row.get('updated_by_user_id')
+                                         or row.get('created_by_name') or row.get('created_by_user_id') or '')
+    except (OSError, sqlite3.Error):
+        # Auxiliary metadata must not hide templates or suggest an invented operator.
+        result['operator_metadata_unavailable'] = True
+    return result
+
+
 def enrich_logs(result):
     paths = lane_paths()
     with closing(readonly(paths['X_POST_DB_PATH'])) as db, closing(readonly(paths['X_AUTO_POST_DB_PATH'])) as auto:
@@ -183,7 +206,7 @@ def read_hit_origin(task_id):
     code = ("import sqlite3,json,sys; "
             "c=sqlite3.connect(sys.argv[1]+'?mode=ro',uri=True,timeout=5); "
             "c.row_factory=sqlite3.Row; "
-            "r=c.execute('SELECT account_id,material_id,selection_json,scheduled_at_utc FROM x_auto_task WHERE id=?',(int(sys.argv[2]),)).fetchone(); "
+            "r=c.execute('SELECT t.account_id,t.material_id,t.selection_json,t.scheduled_at_utc,r.status AS run_status FROM x_auto_task t JOIN x_auto_run r ON r.id=t.run_id WHERE t.id=?',(int(sys.argv[2]),)).fetchone(); "
             "print(json.dumps(dict(r) if r else None)); c.close()")
     try:
         result = subprocess.run(['/usr/sbin/runuser','-u','x-post-daily','--','/usr/bin/python3','-c',code,
@@ -192,7 +215,10 @@ def read_hit_origin(task_id):
                                 env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
         if len(result.stdout)>2*1024*1024:
             raise ValueError()
-        return json.loads(result.stdout)
+        origin = json.loads(result.stdout)
+        if origin and origin.pop('run_status', '') == 'canceled':
+            raise Error('x_auto_run_terminated', '本次运行已手动终止', 409)
+        return origin
     except (OSError,ValueError,subprocess.SubprocessError):
         raise Error('x_auto_hit_origin_unavailable','预约来源暂不可用',503) from None
 
@@ -247,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
             if set(body) != {'queue_id', 'log_id'}:
                 raise Error('invalid_request', '', 400)
             return 200, dict(context=resolve_attribution(body))
-        auto_match = re.fullmatch(re.escape(AUTO) + r'/(?:accounts(?:/[1-9][0-9]*/verify)?|templates(?:/[1-9][0-9]*(?:/(?:copy|delete|enable|disable|preview|run-now))?)?|runs(?:/[1-9][0-9]*)?)', path)
+        auto_match = re.fullmatch(re.escape(AUTO) + r'/(?:accounts(?:/[1-9][0-9]*/verify)?|templates(?:/[1-9][0-9]*(?:/(?:copy|delete|enable|disable|preview|run-now))?)?|runs(?:/[1-9][0-9]*(?:/terminate)?)?)', path)
         post_match = re.fullmatch(re.escape(POST) + r'/(?:logs|runs|profiles|material-pool(?:/(?:account-options|schedule|manual-publish|manual-runs/[1-9][0-9]*|[1-9][0-9]*))?)', path)
         if not auto_match and not post_match:
             raise Error('not_found', '', 404)
@@ -268,11 +294,26 @@ class Handler(BaseHTTPRequestHandler):
         if auto_match:
             if self.command not in ('GET', 'POST'):
                 raise Error('method_not_allowed', '', 405)
+            terminate = re.fullmatch(re.escape(AUTO) + r'/runs/([1-9][0-9]*)/terminate', path)
+            if terminate:
+                if self.command != 'POST':
+                    raise Error('method_not_allowed', '', 405)
+                if body:
+                    raise Error('invalid_request', '终止请求无需额外参数', 400)
+                from .run_control import terminate_run, RunControlError
+                paths = lane_paths()
+                try:
+                    return 200, terminate_run(paths['X_AUTO_POST_DB_PATH'], paths['X_POST_DB_PATH'],
+                                              int(terminate.group(1)), actor)
+                except RunControlError as exc:
+                    raise Error(exc.code, str(exc), exc.status) from None
             if self.command == 'POST' and '/templates' in path:
                 body['_actor'] = {k: actor[k] for k in ('user_id', 'name', 'tenant_key')}
             target = path.replace(AUTO, OLD_AUTO, 1) + ('?' + parsed.query if parsed.query else '')
             result = rpc('http://127.0.0.1:18843', target, os.environ['X_AUTO_POST_INTERNAL_TOKEN'],
                          method=self.command, payload=body if self.command == 'POST' else None, timeout=120)
+            if self.command == 'GET' and path == AUTO + '/templates':
+                result = enrich_template_operators(result)
             return (202 if path.endswith('/run-now') else 200), result
         query = parse_qs(parsed.query, keep_blank_values=True)
         if any(len(v) != 1 for v in query.values()):

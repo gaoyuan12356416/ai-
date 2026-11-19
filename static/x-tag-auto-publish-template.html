@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
-  <title>编辑 X 标签画像自动发布模板 - AI自动后台</title>
+  <title>X 标签画像自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <link rel="stylesheet" href="/x-tag-auto-publish.css?v=20261105membership1" />
-<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>
+<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" />  <link rel="stylesheet" href="/x-tag-template-layout.css?v=20261119-2" />
+</head>
 <body>
   <div class="app">
     <aside class="sidebar">
@@ -22,7 +23,7 @@
     <main class="main">
       <header class="topbar">
         <div class="title">
-          <h1 id="pageTitle">创建 X 标签画像自动发布模板</h1>
+          <h1 id="pageTitle">正在加载X 标签画像自动发布模板…</h1>
           <p>按账号剧语言和模板条件筛选，再按受众、题材两级收入画像选剧；同组合内按模板排序选择素材。</p>
         </div>
         <div class="top-actions">
@@ -43,14 +44,11 @@
       </section>
 
       <div id="pageRoot" class="hidden">
-        <section class="notice">
-          <div class="notice-mark">i</div>
-          <div>
-            <strong>模板不会改变现有 X 账号、素材池、短剧池或人工发布配置。</strong>
-            新建模板保存后默认停用；只有单独启用并到达计划时刻后，才会进入独立的自动发布流程。
-          </div>
+        <section id="editorLoading" class="panel gate" role="status" aria-live="polite">
+          <strong id="editorLoadingMessage">正在读取已保存的模板配置…</strong>
+          <button id="retryEditorLoad" class="button hidden" type="button">重新加载</button>
         </section>
-
+        <div id="editorContent" class="hidden">
         <form id="templateForm" novalidate>
           <div class="form-layout">
             <div class="form-main">
@@ -115,6 +113,20 @@
                   <button id="selectVisibleAccounts" class="button small" type="button">选择当前结果</button>
                   <button id="clearAccounts" class="button small" type="button">清空</button>
                 </div>
+                <div class="account-metric-filters">
+                  <div class="field">
+                    <label for="accountRevenueMin">累计收入（美元）</label>
+                    <div class="account-range"><input id="accountRevenueMin" type="number" step="0.01" placeholder="最低" aria-label="最低累计收入（美元）" /><span>至</span><input id="accountRevenueMax" type="number" step="0.01" placeholder="最高" aria-label="最高累计收入（美元）" /></div>
+                  </div>
+                  <div class="field">
+                    <label for="accountFollowersMin">粉丝量</label>
+                    <div class="account-range"><input id="accountFollowersMin" type="number" min="0" step="1" placeholder="最少" aria-label="最少粉丝量" /><span>至</span><input id="accountFollowersMax" type="number" min="0" step="1" placeholder="最多" aria-label="最多粉丝量" /></div>
+                  </div>
+                  <div class="field"><label for="accountMetricSort">账号排序</label><select id="accountMetricSort"><option value="default">默认排序</option><option value="revenue_desc">收入从高到低</option><option value="revenue_asc">收入从低到高</option><option value="followers_desc">粉丝从多到少</option><option value="followers_asc">粉丝从少到多</option></select></div>
+                  <button id="resetAccountFilters" class="button small" type="button">重置筛选</button>
+                </div>
+                <p id="accountMetricsStatus" class="helper" role="status">正在读取账号收入和粉丝数据…</p>
+                <p id="accountResultCount" class="helper" aria-live="polite"></p>
                 <div id="accountList" class="account-list" role="group" aria-label="选择 X 账号">
                   <div class="empty">正在加载账号…</div>
                 </div>
@@ -267,7 +279,7 @@
                   <div class="summary-item"><span>发布时间</span><strong id="summarySchedule">每天 11:00</strong></div>
                 </div>
                 <div class="sticky-actions">
-                  <button id="saveTemplate" class="button primary" type="submit">保存模板</button>
+                  <button id="saveTemplate" disabled class="button primary" type="submit">保存模板</button>
                   <a class="button link-button" href="/x-tag-auto-publish-templates.html">取消并返回</a>
                 </div>
                 <p id="formStatus" class="status-line" role="status" aria-live="polite">请填写模板配置。</p>
@@ -275,6 +287,7 @@
             </aside>
           </div>
         </form>
+        </div>
       </div>
     </main>
   </div>
@@ -292,10 +305,9 @@
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=203bf1a08903"></script>
-  <script src="/x-tag-publish-ui.js?v=cc668f1d6ea3"></script>
-  <script src="/x-tag-auto-publish-common.js?v=20260814language1"></script>
+  <script src="/x-tag-auto-publish-common.js?v=20261119-fast1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/x-tag-auto-publish-template.js?v=20261118products1"></script>
+  <script src="/x-tag-auto-publish-template.js?v=20261119-fast1"></script>
 </body>
 </html>
