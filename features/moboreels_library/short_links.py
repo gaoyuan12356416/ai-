@@ -62,13 +62,24 @@ class ShortLinks:
         conn.execute('INSERT INTO links(short_link_id,short_code,record_json,mirror_pending) VALUES(?,?,?,1) ON CONFLICT(short_link_id) DO UPDATE SET record_json=excluded.record_json,mirror_pending=1',
                      (record['short_link_id'], record['short_code'], json.dumps(record, ensure_ascii=False, sort_keys=True)))
 
-    def resolve(self, body):
+    def manual(self, actor, story, platform, destination):
+        targets = {'story': 'deep_link', 'home': 'home_link'}
+        if destination not in targets:
+            raise ValueError('推广链接类型无效')
+        return self.resolve({
+            'actor': actor, 'story_id': story, 'platform': platform,
+            'task_id': 'library:' + story, 'purpose': 'manual_' + destination,
+        }, saved_target=targets[destination])
+
+    def resolve(self, body, *, saved_target=None):
         actor = body.get('actor') or {}
         star, tenant, user, name = identity(self.settings.institution_user_id, actor)
         values = {}
         for field, limit in [('story_id',64), ('platform',20), ('account_id',128), ('task_id',255), ('material_id',128), ('purpose',32)]:
             value = str(body.get(field) or '').strip()
-            if not value or len(value) > limit or any(ord(c) < 32 for c in value):
+            # The library knows the operator, story and platform, but no posting account or material.
+            optional = saved_target is not None and field in ('account_id', 'material_id')
+            if (not value and not optional) or len(value) > limit or any(ord(c) < 32 for c in value):
                 raise ValueError('推广关联字段无效: '+field)
             values[field] = value
         if values['platform'] not in ('x','fb','tt','youtube'):
@@ -84,6 +95,12 @@ class ShortLinks:
         drama = self.db.get_drama(values['story_id'])
         if not drama or int(drama.get('is_show') or 0) != 1:
             raise PromotionError('短剧不存在或已下架，不能创建新的推广短链；已生成短链仍可查看', 'drama_unavailable', 409)
+        if saved_target:
+            _, promotion = self.promotions._read_record(actor, values['story_id'])
+            if not promotion or promotion['status'] != 'succeeded':
+                raise PromotionError('请先为这部剧生成自己的推广链接', 'promotion_unavailable', 409)
+            if not safe_target(promotion.get(saved_target)):
+                raise PromotionError('供应方未提供有效的目标链接', 'invalid_promotion_target', 409)
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             record = self._get(c, key)
@@ -98,7 +115,14 @@ class ShortLinks:
                     promotion_request_id=None, koc_code=None, tenant_key=tenant, user_id=user, star_user_id=star,
                     short_code=code, short_url='https://ai.yingliangads.com/m/'+code, target_url=None,
                     status='preparing', created_at=now(), updated_at=now())
+                if not saved_target:
+                    self._save(c, record)
+            if saved_target:
+                record.update(promotion_request_id=promotion['request_id'], koc_code=promotion.get('koc_code'),
+                              target_url=promotion[saved_target], status='succeeded', updated_at=now())
                 self._save(c, record)
+                c.commit()
+                return self.public(record)
             c.commit()
         # PromotionManager preserves intent, successful receipts and unknown-result fences.
         self.promotions.create(actor, values['story_id'])

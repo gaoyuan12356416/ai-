@@ -25,6 +25,11 @@ DATA = Path('/mnt/data-disk/moboreels-library/data')
 UNIT = 'moboreels-library.service'
 CODE = ['features/moboreels_library/'+name+'.py' for name in ('service','short_links','clicks')]
 STATIC = ['static/moboreels-report.'+ext for ext in ('js','css','html')]
+PROFILES = {
+    'clicks': CODE + STATIC,
+    'library': ['features/moboreels_library/service.py', 'features/moboreels_library/short_links.py']
+               + ['static/moboreels-library.' + ext for ext in ('js', 'css', 'html')],
+}
 
 
 def run(*args, **kw):
@@ -50,7 +55,7 @@ def install(path, source):
     tmp.replace(path)
 
 
-def stage(folder):
+def stage(folder, profile='clicks'):
     previous = CURRENT.resolve()
     candidate = folder/'candidate'
     if run('git','-C',SOURCE,'status','--porcelain','--untracked-files=no'):
@@ -59,15 +64,15 @@ def stage(folder):
     folder.mkdir(parents=True, exist_ok=False)
     (folder/'backups').mkdir()
     run('cp','-a','--reflink=auto',previous,candidate)
-    manifest = {'commit':commit, 'previous':str(previous), 'files':{}, 'overlays':{}}
-    for name in CODE + STATIC:
+    manifest = {'commit':commit, 'previous':str(previous), 'profile':profile, 'files':{}, 'overlays':{}}
+    for name in PROFILES[profile]:
         result = subprocess.run(['git','-C',SOURCE,'show','HEAD^:'+name], capture_output=True)
         expected = hashlib.sha256(result.stdout).hexdigest() if not result.returncode else None
         if digest(previous/name) != expected:
             raise RuntimeError('active source differs from Git baseline: '+name)
         install(candidate/name, SOURCE/name)
         manifest['overlays'][name] = {'old':expected, 'new':digest(candidate/name)}
-        targets = [MAIN/name] + ([PUBLIC/Path(name).name] if name in STATIC else [])
+        targets = [MAIN/name] + ([PUBLIC/Path(name).name] if name.startswith('static/') else [])
         for path in targets:
             if digest(path) != expected:
                 raise RuntimeError('runtime mirror differs from Git baseline: '+str(path))
@@ -144,17 +149,17 @@ def switch(folder, rollback):
         # Keep unrelated edits made since activation, without modifying the original backup.
         target = Path(tempfile.mkdtemp(prefix='restored-', dir=folder))
         run('cp','-a','--reflink=auto',str(expected)+'/.',target)
-        for name in CODE+STATIC:
+        for name in manifest['overlays']:
             install(target/name, old/name if (old/name).exists() else None)
     else:
         # Include concurrent, unrelated edits made to the prior tree since staging.
-        run('rsync','-a','--exclude=__pycache__',*['--exclude=/'+n for n in CODE+STATIC],
+        run('rsync','-a','--exclude=__pycache__',*['--exclude=/'+n for n in manifest['overlays']],
             str(old)+'/',str(new)+'/')
     with drained():
         if CURRENT.resolve() != expected:
             raise RuntimeError('active release changed during staging')
         prefix = folder/'nginx-prefix.json'
-        if not rollback and not prefix.exists():
+        if not rollback and manifest.get('profile', 'clicks') == 'clicks' and not prefix.exists():
             with prefix.open('x') as out:
                 json.dump(capture(Path('/var/log/nginx')), out)
         link = CURRENT.with_name('current.click-'+str(os.getpid()))
@@ -188,13 +193,14 @@ if __name__ == '__main__':
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument('action', choices=('stage','apply','rollback'))
     args.add_argument('folder', type=Path)
+    args.add_argument('--profile', choices=PROFILES, default='clicks')
     opts = args.parse_args()
     folder = opts.folder.resolve()
     if (not folder.is_relative_to('/mnt/data-disk') or
             run('findmnt','-n','-o','UUID','--mountpoint','/mnt/data-disk') != '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'):
         raise SystemExit('Moboreels data disk unavailable')
     if opts.action == 'stage':
-        stage(folder)
+        stage(folder, opts.profile)
     else:
         with (folder/'switch.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

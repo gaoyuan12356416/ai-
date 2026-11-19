@@ -121,12 +121,16 @@ class Application:
         if method == "GET" and re.fullmatch(r"/sync-runs/[0-9a-f]{32}", path):
             run = self.sync.get(path.rsplit("/", 1)[1])
             return (200, {"run": public_run(run)}) if run else (404, {"error": "not_found", "message": "未找到同步任务"})
-        match = re.fullmatch(r"/dramas/([^/]{1,192})(/promotion)?", path)
+        match = re.fullmatch(r"/dramas/([^/]{1,192})(/promotion(?:/short-link)?)?", path)
         if match:
             story = unquote(match.group(1))
             if not story or len(story) > 64 or any(ord(c) < 32 for c in story):
                 raise ValueError("剧目ID无效")
-            if match.group(2):
+            if match.group(2) == '/promotion/short-link':
+                if method == 'POST':
+                    link = self.short_links.manual(actor, story, query.get('platform'), query.get('destination', 'story'))
+                    return 200, {'short_url': link['short_url']}
+            elif match.group(2) == '/promotion':
                 if method == "GET":
                     return 200, {"promotion": self.promotions.get(actor, story)}
                 if method == "POST":

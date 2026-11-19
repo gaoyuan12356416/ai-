@@ -5,3 +5,11 @@
 @media(max-width:680px){.app{display:block}.sidebar{padding:14px;gap:12px}.brand{padding:0}.nav{max-height:230px;overflow:auto}.main{padding:18px 12px}.topbar{gap:14px;margin-bottom:18px}h1{font-size:23px}.top-actions{width:100%;margin:0;justify-content:space-between}.user-card{flex:1}.sync-panel{padding:17px}.sync-heading{align-items:flex-start}.sync-heading .btn{white-space:nowrap}.sync-line{gap:9px}.panel-head,.filters{padding:16px}.pagination{padding:13px;flex-wrap:wrap}.pagination>div{flex:1;justify-content:space-between}.pagination-buttons{min-width:250px}.page-size-label{white-space:nowrap}.dialog-head,.dialog-body{padding:18px}.detail-grid{gap:8px}.detail-field{padding:9px}.sync-counts{gap:12px}.panel{border-radius:13px}}
 
 .cover-wrap{position:relative}.cover-state{position:absolute;inset:0;display:grid;place-items:center;font-size:10px;text-align:center}.cover-wrap img{opacity:0}.cover-wrap.is-loaded img{opacity:1}.cover-wrap.is-loaded .cover-state{display:none}
+.channel-link-form h3 { margin: 0 0 4px; font-size: 16px; }
+.channel-link-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0; }
+.channel-link-controls label { flex: 1 1 100px; font-size: 13px; }
+.channel-link-controls select { display: block; margin-top: 4px; }
+.channel-link-result { display: flex; align-items: center; gap: 8px; }
+.channel-link-result[hidden] { display: none; }
+.channel-link-result input { flex: 1; min-width: 0; }
+.channel-link-form + .link-card + details summary { cursor: pointer; color: var(--muted); font-size: 13px; }

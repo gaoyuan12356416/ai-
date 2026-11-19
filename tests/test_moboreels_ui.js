@@ -221,9 +221,12 @@ async function main() {
   assert.ok(!promotion.includes("<script>"));
   assert.ok(!promotion.includes("javascript:"));
   assert.ok(promotion.includes("&lt;b&gt;me&lt;/b&gt;"));
+  assert.ok(promotion.includes('data-channel-link') && promotion.includes('value="youtube"'));
+  assert.ok(promotion.includes('value="home"') && !promotion.includes('value="story"'));
   const pending = ui.promotionHtml({status:"unknown", message:"供应方响应超时", request_id:"<trace>"}, row, "me");
   assert.ok(pending.includes("供应方响应超时") && pending.includes("&lt;trace&gt;"));
   assert.ok(pending.includes('data-copy="request_id"') && !pending.includes("retry-promotion"));
+  assert.ok(!pending.includes('data-channel-link'));
   assert.equal(ui.promotionButton({is_show:0}), "查看历史链接");
   assert.equal(ui.promotionButton({is_show:1,promotion_status:"succeeded"}), "查看推广链接");
   assert.equal(ui.promotionButton({is_show:1,promotion_status:"creating"}), "查看生成进度");

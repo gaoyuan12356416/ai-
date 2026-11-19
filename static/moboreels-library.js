@@ -103,10 +103,33 @@
     const safe = isCode ? String(value || "") : safeUrl(value);
     return `<div class="link-card"><div class="link-card-head"><span>${label}</span>${safe ? `<button class="btn mini" data-copy="${key}" type="button">复制</button>` : ""}</div>${isCode ? `<span class="link-value code-value">${escapeHtml(text(safe))}</span>` : safe ? `<a class="link-value" href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer">${escapeHtml(safe)}</a>` : `<span class="link-value">未提供有效链接</span>`}</div>`;
   }
+  function channelLinkForm(promotion) {
+    const choices = [[promotion.deep_link, "story", "剧目"], [promotion.home_link, "home", "主页"]]
+      .filter(([url]) => safeUrl(url))
+      .map(([, value, label]) => `<option value="${value}">${label}</option>`).join("");
+    if (!choices) return "";
+    return `<form class="link-card channel-link-form" data-channel-link>
+      <h3>渠道统计短链</h3>
+      <p class="muted">把生成的短链放入视频说明或评论，点击会归到所选渠道和当前发布人。</p>
+      <div class="channel-link-controls">
+        <label>发布渠道<select name="platform" required><option value="">请选择</option><option value="youtube">YouTube</option><option value="x">X</option><option value="fb">Facebook</option><option value="tt">TikTok</option></select></label>
+        <label>跳转到<select name="destination">${choices}</select></label>
+        <button class="btn btn-primary" type="submit">生成统计短链</button>
+      </div>
+      <p class="muted" role="status" data-link-status></p>
+      <div class="channel-link-result" hidden><input id="channelShortValue" aria-label="渠道统计短链" readonly>
+        <button class="btn mini" type="button" data-copy="channel_link">复制短链</button></div>
+    </form>`;
+  }
   function promotionHtml(promotion, row, currentName) {
     const attribution = `<p class="promotion-intro">推广归属：${escapeHtml(text((promotion && promotion.star_name) || currentName))}<br>同一用户对同一部短剧复用已有推广链接。</p>`;
     if (!promotion) return attribution + `<div class="notice">${Number(row.is_show) === 1 ? "尚未生成推广链接。" : "该剧已下架，暂不能生成新链接；当前用户没有已保存的历史链接。"}</div>`;
-    if (GOOD_PROMOTION.has(promotion.status)) return attribution + linkCard("推广口令",promotion.koc_code,"koc_code",true) + linkCard("剧目推广链接",promotion.deep_link,"deep_link",false) + linkCard("主页链接",promotion.home_link,"home_link",false) + `<p class="promotion-result-note">生成时间（北京时间）：${escapeHtml(formatUTC(promotion.created_at))}${Number(row.is_show) !== 1 ? "<br>该剧目前已下架，以上为历史生成结果。" : ""}</p>`;
+    if (GOOD_PROMOTION.has(promotion.status)) return attribution + channelLinkForm(promotion)
+      + linkCard("推广口令", promotion.koc_code, "koc_code", true)
+      + '<details><summary>供应商原链（直接访问不计入后台点击）</summary>'
+      + linkCard("剧目推广链接", promotion.deep_link, "deep_link", false)
+      + linkCard("主页链接", promotion.home_link, "home_link", false) + '</details>'
+      + `<p class="promotion-result-note">生成时间（北京时间）：${escapeHtml(formatUTC(promotion.created_at))}${Number(row.is_show) !== 1 ? "<br>该剧目前已下架，以上为历史生成结果。" : ""}</p>`;
     if (ACTIVE_PROMOTION.has(promotion.status)) return attribution + '<div class="notice">推广链接正在生成，页面会自动更新结果，请勿重复提交。</div>';
     if (promotion.status === "unknown") {
       const reason = escapeHtml(promotion.message || "本次建链结果待核对。");
@@ -242,7 +265,63 @@
     async function pollPromotion(row,sequence){if(sequence!==state.promotionSequence||!el.promotionDialog.open||!state.allowed||doc.visibilityState==="hidden")return;try{const data=await api(`${API}/dramas/${encodeURIComponent(String(row.story_id))}/promotion`);showPromotion(data.promotion||null,row,sequence);}catch(error){if(sequence===state.promotionSequence&&el.promotionDialog.open){el.promotionBody.innerHTML='<div class="notice">暂时无法读取生成结果，请关闭后重新查看；不会自动重复创建。</div>';}}}
     async function openPromotion(row,retry){if(!state.allowed)return;clearTimeout(state.promotionTimer);const sequence=++state.promotionSequence;state.promotionRow=row;state.promotion=null;el.promotionTitle.textContent=text(row.story_name);el.promotionBody.innerHTML='<p class="muted">正在读取当前用户的推广信息…</p>';if(!el.promotionDialog.open)el.promotionDialog.showModal();try{const data=await loadPromotion(row,!!retry);showPromotion(data.promotion||null,row,sequence);}catch(error){if(sequence!==state.promotionSequence||!el.promotionDialog.open)return;if(error.data&&error.data.promotion){showPromotion(error.data.promotion,row,sequence);return;}el.promotionBody.innerHTML=`<div class="notice error">${escapeHtml(error.message)}</div><p class="muted">可关闭后重新查看结果。页面不会自动重复提交创建请求。</p>`;if(state.pageActive&&doc.visibilityState!=="hidden"&&(error.network||error.status>=500))state.promotionTimer=setTimeout(()=>pollPromotion(row,sequence),2000);}}
     async function openDetail(row){const sequence=++state.detailSequence;el.detailTitle.textContent=text(row.story_name);el.detailBody.innerHTML='<p class="muted">正在读取详情…</p>';el.detailDialog.showModal();try{const data=await api(`${API}/dramas/${encodeURIComponent(String(row.story_id))}`);if(sequence!==state.detailSequence||!el.detailDialog.open)return;state.detail=data.drama||row;state.detail.promotion_status=data.promotion?data.promotion.status:row.promotion_status;el.detailTitle.textContent=text(state.detail.story_name);el.detailBody.innerHTML=detailHtml(state.detail);}catch(error){if(sequence===state.detailSequence)el.detailBody.innerHTML=`<div class="notice error">${escapeHtml(error.message)}</div>`;}}
-    async function copy(key){let value;if(key==="netdisk")value=state.detail&&(state.detail.baidu_link||state.detail.baiduLink);else value=state.promotion&&state.promotion[key];if(key==="deep_link"||key==="home_link")value=safeUrl(value);if(!value){toast("暂无可复制的内容。",true);return;}try{if(root.navigator.clipboard&&root.isSecureContext)await root.navigator.clipboard.writeText(String(value));else{const box=doc.createElement("textarea");box.value=String(value);box.style.position="fixed";box.style.opacity="0";(doc.querySelector("dialog[open]")||doc.body).appendChild(box);box.select();const done=doc.execCommand("copy");box.remove();if(!done)throw new Error("copy");}toast("已复制。");}catch(_){toast("复制失败，请选中内容后手动复制。",true);}}
+    let channelLinkRevision = 0;
+    el.promotionBody.addEventListener("change", event => {
+      const form = event.target.closest("[data-channel-link]");
+      if (!form) return;
+      channelLinkRevision++;
+      form.querySelector(".channel-link-result").hidden = true;
+      form.querySelector("input").value = "";
+      form.querySelector("[data-link-status]").textContent = "";
+      form.querySelector('[type="submit"]').disabled = false;
+    });
+    el.promotionBody.addEventListener("submit", async event => {
+      const form = event.target;
+      if (!form.matches("[data-channel-link]")) return;
+      event.preventDefault();
+      const platform = form.elements.platform.value;
+      if (!platform || !state.allowed || !state.promotionRow) return;
+      const revision = ++channelLinkRevision;
+      const status = form.querySelector("[data-link-status]");
+      const submit = form.querySelector('[type="submit"]');
+      const result = form.querySelector(".channel-link-result");
+      const query = new URLSearchParams({platform, destination: form.elements.destination.value});
+      const story = encodeURIComponent(state.promotionRow.story_id);
+      submit.disabled = true;
+      result.hidden = true;
+      status.textContent = "正在读取统计短链…";
+      try {
+        const response = await api(`${API}/dramas/${story}/promotion/short-link?${query}`, {method:"POST", body:"{}"});
+        if (revision !== channelLinkRevision || !form.isConnected) return;
+        if (!/^https:\/\/ai\.yingliangads\.com\/m\/[A-Za-z0-9_-]{16}$/.test(response.short_url || "")) {
+          throw new Error("暂未取得有效短链，请重试。");
+        }
+        form.querySelector("input").value = response.short_url;
+        status.textContent = "";
+        result.hidden = false;
+      } catch (error) {
+        if (revision === channelLinkRevision) status.textContent = error.message;
+      } finally {
+        if (revision === channelLinkRevision) submit.disabled = false;
+      }
+    });
+    async function copy(key) {
+      let value;
+      if (key === "channel_link") value = byId("channelShortValue").value;
+      else if (key === "netdisk") value = state.detail && (state.detail.baidu_link || state.detail.baiduLink);
+      else value = state.promotion && state.promotion[key];
+      if (key === "deep_link" || key === "home_link") value = safeUrl(value);
+      if (!value) { toast("暂无可复制的内容。",true); return; }
+      try {
+        if (root.navigator.clipboard && root.isSecureContext) await root.navigator.clipboard.writeText(String(value));
+        else {
+          const box=doc.createElement("textarea");box.value=String(value);box.style.position="fixed";box.style.opacity="0";
+          (doc.querySelector("dialog[open]")||doc.body).appendChild(box);box.select();
+          const done=doc.execCommand("copy");box.remove();if(!done)throw new Error("copy");
+        }
+        toast("已复制。");
+      } catch (_) { toast("复制失败，请选中内容后手动复制。",true); }
+    }
     doc.addEventListener("click",event=>{const close=event.target.closest("[data-close]");if(close){byId(close.dataset.close).close();return;}const copyButton=event.target.closest("[data-copy]");if(copyButton){copy(copyButton.dataset.copy);return;}const action=event.target.closest("[data-action]");if(!action)return;event.preventDefault();if(action.dataset.action==="retry-promotion"){if(state.promotionRow)openPromotion(state.promotionRow,true);return;}const id=action.dataset.storyId;const row=state.rows.find(item=>String(item.story_id)===id)||(state.detail&&String(state.detail.story_id)===id?state.detail:null);if(!row)return;if(action.dataset.action==="detail")openDetail(row);else if(action.dataset.action==="promotion"){if(el.detailDialog.open)el.detailDialog.close();openPromotion(row);}});
     el.promotionDialog.addEventListener("close",()=>{state.promotionSequence++;clearTimeout(state.promotionTimer);});el.detailDialog.addEventListener("close",()=>state.detailSequence++);
     [el.detailDialog,el.promotionDialog].forEach(dialog=>dialog.addEventListener("click",event=>{if(event.target===dialog){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)dialog.close();}}));

@@ -6,6 +6,7 @@ import threading
 import unittest
 
 from features.moboreels_library.short_links import ShortLinks, safe_target
+from features.moboreels_library.clicks import ClickStats
 from features.moboreels_library.macro_client import contains_macro
 from features.moboreels_library.promotions import PromotionError, PromotionManager
 from features.moboreels_library.settings import Settings
@@ -28,6 +29,37 @@ class LinksTest(unittest.TestCase):
         self.assertEqual(len(self.provider.calls), 1)
         self.assertEqual(self.links.target(first['short_url'].rsplit('/',1)[1]), first['target_url'])
         self.assertEqual(first['promotion_request_id'], self.provider.calls[0][1])
+
+    def test_library_links_keep_original_destinations_and_attribute_real_redirects(self):
+        self.manager.create(ACTOR, '42')
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: self.links.manual(ACTOR, '42', 'youtube', 'story'), range(6)))
+        first = results[0]
+        self.assertTrue(all(result == first for result in results))
+        home = self.links.manual(ACTOR, '42', 'youtube', 'home')
+        fb = self.links.manual(ACTOR, '42', 'fb', 'story')
+        self.assertEqual(len({link['short_url'] for link in (first, home, fb)}), 3)
+        self.assertEqual(len(self.provider.calls), 1)
+        saved = self.manager.get(ACTOR, '42')
+        for link, target in ((first, 'deep_link'), (home, 'home_link')):
+            self.assertEqual(self.links.target(link['short_url'].rsplit('/', 1)[1]), saved[target])
+        clicks = ClickStats(self.settings)
+        record = self.links.redirect_record(first['short_url'].rsplit('/', 1)[1])
+        clicks.record_redirect(record, {'Referer': 'https://www.youtube.com/', 'User-Agent': 'Mozilla/5.0'})
+        result = clicks.query({'group_by': 'platform_publisher', 'platform': 'youtube'}, ACTOR)
+        self.assertEqual([(r['platform'], r['publisher_name'], r['clicks']) for r in result['list']],
+                         [('youtube', ACTOR['name'], 1)])
+        other = dict(ACTOR, user_id='other')
+        with self.assertRaises(PromotionError):
+            self.links.manual(other, '42', 'youtube', 'story')
+        self.assertEqual(len(self.provider.calls), 1)
+        self.assertEqual(clicks.query({}, other)['summary']['clicks'], 0)
+        self.manager.create(other, '42')
+        self.assertNotEqual(self.links.manual(other, '42', 'youtube', 'story')['short_url'], first['short_url'])
+        self.db.drama['is_show'] = 0
+        self.assertEqual(self.links.manual(ACTOR, '42', 'youtube', 'story'), first)
+        with self.assertRaises(PromotionError):
+            self.links.manual(ACTOR, '42', 'tt', 'story')
 
     def test_different_material_task_and_owner_attribution(self):
         first = self.links.resolve(self.body)
