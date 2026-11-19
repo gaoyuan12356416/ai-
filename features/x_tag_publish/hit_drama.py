@@ -68,6 +68,11 @@ def match_reason(decision, metadata):
 
 
 class TagAutoPostService(XAutoPostService):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from features.x_growth_profile.store import SnapshotStore
+        self.store = SnapshotStore(self.store)
+
     def run_now(self, template_id, raw):
         if 'material_ids' in raw or 'material_id' in raw:
             from .hit_material import publish_material
