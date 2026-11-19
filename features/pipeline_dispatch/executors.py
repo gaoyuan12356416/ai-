@@ -943,10 +943,21 @@ class NodeExecutors:
             # A successful PUT alone is not publication proof. Confirm the same
             # owned video; an unknown PUT never triggers a second visibility write.
             context.phase("visibility_verify")
-            with context.operation("youtube_video_state", {"video_id": video_id, "channel_id": request["channel_id"]}, write=False) as credential:
-                confirmed = api.read_reviewed_video_state(credential["access_token"], video_id, expected_channel_id=request["channel_id"])
             expected_visibility = "private" if publish_at else "public"
-            if confirmed.get("visibility") != expected_visibility or (publish_at and confirmed.get("preserved_status", {}).get("publishAt") != publish_at):
+            confirmed = {}
+            for attempt in range(5):
+                context.check()
+                with context.operation("youtube_video_state", {"video_id": video_id, "channel_id": request["channel_id"]}, write=False) as credential:
+                    confirmed = api.read_reviewed_video_state(credential["access_token"], video_id, expected_channel_id=request["channel_id"])
+                if confirmed.get("state") == "succeeded" and confirmed.get("visibility") == expected_visibility and (not publish_at or confirmed.get("preserved_status", {}).get("publishAt") == publish_at):
+                    break
+                if attempt < 4:
+                    time.sleep(2 ** attempt)
+            else:
+                # Keep a safe diagnostic receipt; reconciliation owns future GETs.
+                context.checkpoint("youtube_visibility_observation", {"video_id": video_id,
+                    "visibility": confirmed.get("visibility", ""),
+                    "publish_at": confirmed.get("preserved_status", {}).get("publishAt", "")})
                 raise ExecutionError("youtube_visibility_unconfirmed", unknown=True)
             context.checkpoint("youtube_visibility", {"video_id": video_id, "publish_at": publish_at, "status": "scheduled" if publish_at else "public", "confirmed": confirmed})
             comment_id = str(request.get("comment_id") or "")

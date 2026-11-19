@@ -293,12 +293,9 @@ class NativeRenderer:
         self.stream = self.cp.cuda.get_current_stream()
         source = Path(__file__).with_suffix('.cu').read_text(encoding='utf-8')
         self.module = self.cp.RawModule(code=source, options=('--std=c++11',),
-                                      name_expressions=('fit_nv12', 'compose_rgba','compose_rotation','fit_components'))
+                                      name_expressions=('fit_nv12', 'compose_rgba','fit_components'))
         self.fit = self.module.get_function('fit_nv12')
         self.compose = self.module.get_function('compose_rgba')
-        self.rotation = self.cp.empty(2, dtype=self.cp.float32)
-        self.module.get_function('compose_rotation')((1,), (1,),
-            (self.cp.float32(self.recipe['rotation_millidegrees']*math.pi/180000), self.rotation))
         self.components = self.module.get_function('fit_components')
         self.back = self.cp.empty((HEIGHT, WIDTH, 4), dtype=self.cp.uint8)
         self.main = self.cp.empty_like(self.back)
@@ -374,7 +371,7 @@ class NativeRenderer:
         scale = self.recipe['scale_bp'] / 10000
         self.compose(grid, block, (self.back, main, *layers, self.output,
             cp.int32(math.floor(WIDTH*scale/2)*2), cp.int32(math.floor(HEIGHT*scale/2)*2),
-            self.rotation,
+            cp.float32(self.recipe['rotation_millidegrees']*math.pi/180000),
             cp.float32(self.recipe['tint_opacity_bp']/10000),
             cp.float32(self.overlay['opacity_bp']/10000 if self.overlay else 0),
             cp.float32(self.overlay['scale_bp']/10000 if self.overlay else 1)))

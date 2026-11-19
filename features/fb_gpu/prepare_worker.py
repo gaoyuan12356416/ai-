@@ -15,8 +15,8 @@ import requests
 from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file, validate_recipe
 from .render_process import RenderStalled, run_render
-from features.random_gpu.gpu_compute import file_digest
 from .source_cache import SourceCache, SourceDownloadError, observation as source_cache_observation
+from features.random_gpu.gpu_compute import file_digest
 
 PROFILE="tt-post-random-overlay-h264-720x1280-v3"
 CPU_PROFILE="fb-post-random-overlay-libx264-720x1280-v1"
@@ -59,7 +59,7 @@ class WorkerConfig:
         if not SHA_RE.fullmatch(manifest): raise PrepareWorkerError("invalid_configuration","asset manifest fingerprint invalid",500)
         secret_id,secret_key,bucket,region=str(source.get("FB_PAGE_GPU_COS_SECRET_ID", "")),str(source.get("FB_PAGE_GPU_COS_SECRET_KEY", "")),str(source.get("FB_PAGE_GPU_COS_BUCKET", "")),str(source.get("FB_PAGE_GPU_COS_REGION", ""))
         domain=_origin(source.get("FB_PAGE_GPU_COS_DOMAIN")); prefix=str(source.get("FB_PAGE_GPU_COS_PREFIX","fb-page-random-overlay-h264-v3")).strip("/")
-        if not secret_id or not secret_key or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}",bucket) or not re.fullmatch(r"[a-z0-9-]{3,64}",region) or prefix!="fb-page-random-overlay-h264-v3": raise PrepareWorkerError("invalid_configuration","COS configuration invalid",500)
+        if not secret_id or not secret_key or not re.fullmatch(r"[A-Za-z0-9._-]{3,128}",bucket) or not re.fullmatch(r"[a-z0-9-]{3,64}",region) or prefix not in ("fb-page-random-overlay-h264-v3", "ads-ai/fb-page-random-overlay-h264-v3"): raise PrepareWorkerError("invalid_configuration","COS configuration invalid",500)
         retention=int(source.get("FB_PAGE_GPU_FAILED_JOB_RETENTION_SECONDS","172800")); cleanup_max=int(source.get("FB_PAGE_GPU_CLEANUP_MAX_JOBS","100")); cos_timeout=int(source.get("FB_PAGE_GPU_COS_TIMEOUT","120"))
         if not 86400<=retention<=604800 or not 1<=cleanup_max<=1000 or not 30<=cos_timeout<=600: raise PrepareWorkerError("invalid_configuration","cleanup or COS timeout policy invalid",500)
         max_jobs=int(source.get("FB_PAGE_GPU_MAX_JOBS","1"))
@@ -243,22 +243,6 @@ class PrepareProcessor:
         except SourceDownloadError as exc:
             status=413 if exc.code=="fb_gpu_source_too_large" else 502
             raise PrepareWorkerError(exc.code,"source download failed",status) from None
-
-    def _download_uncached(self,url,path):
-        session=self.session_factory(); session.trust_env=False
-        try:
-            response=session.get(url,stream=True,timeout=120,allow_redirects=False)
-            if response.status_code!=200: raise PrepareWorkerError("fb_gpu_source_download_failed","source download failed",502)
-            size=0; digest=file_digest()
-            with path.open("xb") as handle:
-                for chunk in response.iter_content(1024*1024):
-                    execution_check=getattr(self,"execution_check",None)
-                    if execution_check: execution_check()
-                    size+=len(chunk)
-                    if size>self.config.max_source_bytes: raise PrepareWorkerError("fb_gpu_source_too_large","source too large",413)
-                    digest.update(chunk); handle.write(chunk)
-            return digest.hexdigest()
-        finally: session.close()
     def _recipe_for_job(self,root,request,source_sha):
         path=root/"recipe.json"
         if path.is_symlink(): raise PrepareWorkerError("fb_gpu_recipe_invalid","frozen recipe path invalid",409)
