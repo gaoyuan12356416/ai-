@@ -29,9 +29,9 @@
     const end=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate())-86400000);
     return {date_from:new Date(end.getTime()-30*86400000).toISOString().slice(0,10),date_to:end.toISOString().slice(0,10)};
   }
-  function validateRange(from,to,now=new Date()) {
+  function validateRange(from,to,now=new Date(),clicks=false) {
     function parse(value) {
-      if(!/^\d{4}-\d{2}-\d{2}$/.test(value))throw new Error("请选择完整的来源起止日期。");
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(value))throw new Error("请选择完整的起止日期。");
       const parsed=new Date(value+"T00:00:00Z");
       if(!Number.isFinite(parsed.getTime())||parsed.toISOString().slice(0,10)!==value)throw new Error("来源日期无效。");
       return parsed.getTime();
@@ -39,7 +39,7 @@
     const start=parse(from),end=parse(to);
     if(start>end)throw new Error("起始日期不能晚于结束日期。");
     if((end-start)/86400000>=31)throw new Error("单次最多查询 31 个日历日期，请缩小日期范围。");
-    if(to>now.toISOString().slice(0,10))throw new Error("结束日期不能晚于今天。广告收益为 T+1，建议查询到昨日。");
+    if(to>now.toISOString().slice(0,10))throw new Error(clicks?"结束日期不能晚于北京时间今天。":"结束日期不能晚于今天。广告收益为 T+1，建议查询到昨日。");
     return {date_from:from,date_to:to};
   }
   function reportUrl(query) {
@@ -110,6 +110,104 @@
   const settled=promise=>promise.then(data=>({data}),error=>({error}));
   function outcome(result){if(result.error)throw result.error;return result.data;}
 
+  const CLICK_GROUPS = {platform_publisher:"发布渠道 × 发布人", platform:"发布渠道", publisher:"发布人",
+    referrer:"访问来源", day:"点击日期", account:"发布账号", story:"剧目 ID", material:"素材 ID"};
+  const SOURCES = {x:"X", fb:"Facebook", tt:"TikTok", youtube:"YouTube", instagram:"Instagram",
+    search:"搜索引擎", other:"其他网站", unknown:"直接 / 未知"};
+  const beijingClock = () => new Date(Date.now() + 8 * 3600000);
+  function clickRow(row,group) {
+    const platform = SOURCES[row.platform] || row.platform || "未知渠道";
+    const owner = row.publisher_name || row.user_id || "未知发布人";
+    const labels = {platform_publisher:platform+" · "+owner, platform, publisher:owner,
+      referrer:SOURCES[row.referrer] || "直接 / 未知", day:row.day, account:platform+" · "+(row.account_id || "未知账号"),
+      story:row.story_id, material:row.material_id};
+    return `<tr><td><strong class="dimension">${escapeHtml(labels[group])}</strong></td>`+
+      [row.clicks,row.links_clicked,row.automated].map(value=>`<td class="number">${formatCount(value)}</td>`).join("")+"</tr>";
+  }
+
+  function clickPanel(doc,api) {
+    const el = {};
+    for(const key of ["Form","Fields","From","To","Group","Platform","Today","Scope","Error","Count","Links",
+                      "Automated","Coverage","Dimension","Rows","Page","Prev","Next"]) {
+      el[key]=doc.getElementById("click"+key);
+    }
+    const reads=readLoader(api);
+    let allowed=false, sequence=0, page=1, pages=1, busy=false;
+    function dates(days) {
+      const end=beijingClock();
+      el.From.value=new Date(end.getTime()-(days-1)*86400000).toISOString().slice(0,10);
+      el.To.value=end.toISOString().slice(0,10);
+      el.From.max=el.To.max=el.To.value;
+    }
+    function buttons() {
+      el.Prev.disabled=!allowed||busy||page<=1;
+      el.Next.disabled=!allowed||busy||page>=pages;
+    }
+    function clear(message) {
+      pages=1;
+      el.Count.textContent=el.Links.textContent=el.Automated.textContent="—";
+      el.Rows.innerHTML=`<tr><td class="empty" colspan="4">${escapeHtml(message)}</td></tr>`;
+      el.Coverage.textContent="";el.Page.textContent="";el.Scope.textContent="范围待确认";
+      buttons();
+    }
+    async function refresh(reset=false) {
+      if(!allowed)return;
+      if(reset)page=1;
+      const current=++sequence;
+      const group=el.Group.value||"platform_publisher";
+      el.From.max=el.To.max=beijingClock().toISOString().slice(0,10);
+      el.Dimension.textContent=CLICK_GROUPS[group];
+      el.Error.classList.add("hidden");busy=true;clear("正在读取点击数据…");
+      try {
+        const range=validateRange(el.From.value,el.To.value,beijingClock(),true);
+        const params=new URLSearchParams({...range,view:"clicks",group_by:group,page_size:"50",page_index:String(page)});
+        if(el.Platform.value)params.set("platform",el.Platform.value);
+        const data=await reads.load(`${API}/reports?${params}`);
+        if(current!==sequence||!allowed)return;
+        if(data.view!=="clicks"||!data.summary||!Array.isArray(data.list)||!data.coverage_from)
+          throw new Error("点击报表返回格式异常，请重新查询。");
+        pages=Math.max(1,Math.ceil(data.total/50));
+        if(page>pages){page=pages;return refresh();}
+        const covered=range.date_to>=data.coverage_from;
+        if(covered) {
+          el.Count.textContent=formatCount(data.summary.clicks);
+          el.Links.textContent=formatCount(data.summary.links_clicked);
+          el.Automated.textContent=formatCount(data.summary.automated);
+        }
+        el.Scope.textContent=data.scope.label;
+        el.Coverage.textContent=`统计自 ${data.coverage_from}（北京时间）。点击量按跳转次数累计，已识别的预览和自动请求单列。访问来源按来路网站或 App 标记识别。`;
+        const empty=covered?"所选日期和渠道暂无访问。":"所选日期早于统计开始日期。";
+        el.Rows.innerHTML=data.list.length?data.list.map(row=>clickRow(row,group)).join("")
+          :`<tr><td class="empty" colspan="4">${empty}</td></tr>`;
+        el.Page.textContent=`共 ${formatCount(data.total)} 组 · 第 ${page} / ${pages} 页`;
+      } catch(error) {
+        if(current!==sequence||!allowed||error.name==="AbortError")return;
+        reads.cancel();clear("本次查询未完成。");el.Error.textContent=error.message;el.Error.classList.remove("hidden");
+      } finally {
+        if(current===sequence){busy=false;buttons();}
+      }
+    }
+    el.Form.addEventListener("submit",ev=>{ev.preventDefault();refresh(true);});
+    el.Group.addEventListener("change",()=>refresh(true));
+    el.Platform.addEventListener("change",()=>refresh(true));
+    el.Today.addEventListener("click",()=>{dates(1);refresh(true);});
+    el.Prev.addEventListener("click",()=>{if(!busy&&page>1){page--;refresh();}});
+    el.Next.addEventListener("click",()=>{if(!busy&&page<pages){page++;refresh();}});
+    dates(7);
+    return {
+      authorize(value) {
+        const wasAllowed=allowed;
+        allowed=value;el.Fields.disabled=!allowed;
+        if(!allowed){
+          sequence++;reads.cancel();busy=false;el.Error.classList.add("hidden");
+          clear("登录并获得报表权限后查看点击数据。");
+        }else if(!wasAllowed)refresh(true);
+      },
+      cancel(){sequence++;reads.cancel();busy=false;buttons();},
+      refresh
+    };
+  }
+
   async function boot() {
     const doc=root.document,el={};
     ["quickNav","userCard","loginBtn","accessNotice","filterForm","filterFields","dateFrom","dateTo","groupBy","searchInput","resetBtn","scopeLabel","queryPeriod","filterError","adCoverage","undatedNote","summaryCards","resultCount","refreshBtn","reportError","dimensionHeading","reportRows","pageSummary","pageNumber","prevPage","nextPage","syncBtn","syncStatus","lastSuccess","syncRange","progressWrap","syncProgress","progressText","syncError","syncDetails","syncParts","toast"].forEach(id=>{el[id]=doc.getElementById(id);});
@@ -123,6 +221,7 @@
     function renderAuth() {
       const user=state.auth.user;
       state.allowed=!state.blocked&&!!(state.auth.authenticated&&user&&(user.is_admin||user.role==="admin"||(user.permissions&&user.permissions.moboreels_report)));
+      clicks.authorize(state.allowed);
       if(root.UiTopbar)root.UiTopbar.render({auth:state.auth,userCard:el.userCard,authButton:el.loginBtn});
       else{el.userCard.textContent=user?user.name||"已登录":"未登录";el.loginBtn.textContent=state.auth.authenticated?"退出登录":"登录";}
       el.filterFields.disabled=!state.allowed;el.refreshBtn.disabled=!state.allowed||state.busy;el.syncBtn.disabled=!state.allowed||state.starting||ACTIVE.has((state.run||{}).status);
@@ -143,7 +242,7 @@
       if(!response.ok){const error=new Error(data.message||({permission_denied:"当前账号没有收益报表权限。",moboreels_unavailable:"报表服务暂不可用，请稍后重试。"}[data.error])||`请求未完成（${response.status}），请稍后重试。`);error.status=response.status;throw error;}
       return data;
     }
-    const reports=readLoader(api),syncReads=readLoader(api);
+    const reports=readLoader(api),syncReads=readLoader(api),clicks=clickPanel(doc,api);
     function filters() {
       const range=validateRange(el.dateFrom.value,el.dateTo.value);
       const q=el.searchInput.value.trim();if(q.length>200)throw new Error("搜索内容不能超过 200 个字符。");
@@ -209,8 +308,8 @@
     el.nextPage.addEventListener("click",()=>{if(!state.busy&&state.page<Math.ceil(state.total/50)){state.page++;fetchReport();}});
     el.refreshBtn.addEventListener("click",()=>{fetchReport();pollSync();});el.syncBtn.addEventListener("click",startSync);
     el.loginBtn.addEventListener("click",async()=>{if(root.UiTopbar)await root.UiTopbar.handleAuthAction({auth:state.auth,api,afterLogout:()=>root.location.reload()});else if(state.auth.authenticated){await api("/api/auth/logout",{method:"POST",body:"{}"}).catch(()=>{});root.location.reload();}else root.location.assign(`/api/auth/feishu/login?next=${encodeURIComponent(root.location.pathname)}`);});
-    root.addEventListener("pagehide",()=>{state.pageActive=false;clearTimeout(state.timer);reports.cancel();syncReads.cancel();});
-    root.addEventListener("pageshow",()=>{state.pageActive=true;if(state.allowed)pollSync();});
+    root.addEventListener("pagehide",()=>{state.pageActive=false;clearTimeout(state.timer);reports.cancel();syncReads.cancel();clicks.cancel();});
+    root.addEventListener("pageshow",event=>{state.pageActive=true;if(state.allowed){pollSync();if(event.persisted)clicks.refresh();}});
     doc.addEventListener("visibilitychange",()=>{if(doc.visibilityState==="hidden"){clearTimeout(state.timer);syncReads.cancel();}else if(state.allowed)pollSync();});
     resetDates();el.summaryCards.innerHTML=summaryHtml(null);
     const authRead=settled(api("/api/ui/topbar")),firstReport=settled(reports.load(reportUrl(filters()))),firstSync=settled(syncReads.load(`${API}/report-sync-runs/latest`));

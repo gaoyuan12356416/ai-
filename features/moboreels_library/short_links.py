@@ -126,14 +126,18 @@ class ShortLinks:
     def public(record):
         return {k: record.get(k) for k in ('short_link_id','short_url','promotion_key','promotion_request_id','koc_code','story_id','target_url','status')}
 
-    def target(self, code):
+    def redirect_record(self, code):
         if not re.fullmatch(r'[A-Za-z0-9_-]{16}', code):
             return None
         with self.connect() as c:
             row = c.execute('SELECT record_json FROM links WHERE short_code=?',(code,)).fetchone()
         record = json.loads(row[0]) if row else {}
         target = record.get('target_url')
-        return target if record.get('status')=='succeeded' and safe_target(target) else None
+        return record if record.get('status')=='succeeded' and safe_target(target) else None
+
+    def target(self, code):
+        record = self.redirect_record(code)
+        return record['target_url'] if record else None
 
     def flush_outbox(self):
         if not self.mirror_lock.acquire(blocking=False):

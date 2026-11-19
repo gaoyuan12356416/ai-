@@ -35,11 +35,32 @@ async function interactions(){
   assert.ok(!page.element("reportRows").innerHTML.includes("CODE"));
   assert.ok(!page.element("summaryCards").innerHTML.includes("12,345"));
   page.request("/ui/topbar").reply(auth);await flush();
-  assert.equal(page.requests.length,3,"startup consumes earlier reads without requesting twice");
+  assert.equal(page.requests.length,4,"the independent click report starts once the user is authorized");
   assert.ok(page.element("reportRows").innerHTML.includes("CODE"));
   assert.ok(page.element("summaryCards").innerHTML.includes("$12,300.0089"));
   assert.equal(page.element("scopeLabel").textContent,"范围：仅本人推广");
   assert.equal(page.element("filterFields").disabled,false);
+
+  const clicks=page.request("view=clicks");
+  assert.equal(new URL(clicks.url,"https://test.invalid").searchParams.get("group_by"),"platform_publisher");
+  const clicked={view:"clicks",coverage_from:"2026-01-01",scope:{label:"本人推广"},total:1,
+    summary:{clicks:17,automated:4,links_clicked:2},list:[{platform:"x",publisher_name:"<作者>",clicks:17,automated:4,links_clicked:2}]};
+  clicks.reply(clicked);await flush();
+  assert.equal(page.element("clickCount").textContent,"17");assert.equal(page.element("clickAutomated").textContent,"4");
+  assert.match(page.element("clickRows").innerHTML,/X · &lt;作者&gt;/);
+  page.element("clickGroup").value="publisher";page.element("clickGroup").emit("change");
+  const staleClick=page.requests.at(-1);
+  page.element("clickGroup").value="referrer";page.element("clickGroup").emit("change");
+  assert.equal(staleClick.aborted,true);
+  const currentClick=page.requests.at(-1);
+  assert.equal(new URL(currentClick.url,"https://test.invalid").searchParams.get("group_by"),"referrer");
+  currentClick.reply({...clicked,total:1,list:[{referrer:"unknown",clicks:17,automated:4,links_clicked:2}]});await flush();
+  assert.match(page.element("clickRows").innerHTML,/直接 \/ 未知/);
+  page.element("clickToday").emit("click");
+  assert.equal(page.element("clickFrom").value,page.element("clickTo").value);
+  page.requests.at(-1).fail(new Error("offline"));await flush();
+  assert.equal(page.element("clickCount").textContent,"—");
+  assert.ok(page.element("reportRows").innerHTML.includes("CODE"),"click read failures leave the revenue view available");
 
   page.element("groupBy").value="day";page.element("groupBy").emit("change");
   const outdated=page.requests.at(-1);
@@ -95,6 +116,8 @@ async function interactions(){
   }
   const onlyLibrary=harness();onlyLibrary.request("/reports?").reply(report());onlyLibrary.request("/report-sync-runs/latest").reply({run:null});onlyLibrary.request("/ui/topbar").reply({authenticated:true,user:{permissions:{moboreels_library:true}}});await flush();
   assert.equal(onlyLibrary.element("filterFields").disabled,true,"library permission does not grant financial report access");
+  assert.equal(onlyLibrary.element("clickFields").disabled,true);
+  assert.ok(!onlyLibrary.request("view=clicks"));
   assert.ok(!onlyLibrary.element("reportRows").innerHTML.includes("CODE"));
   const admin=harness();admin.request("/ui/topbar").reply({authenticated:true,user:{role:"admin"}});admin.request("/reports?").reply(report({scope:{kind:"institution",label:"全机构"}}));admin.request("/report-sync-runs/latest").reply({run:null});await flush();
   assert.equal(admin.element("scopeLabel").textContent,"范围：全机构");admin.window.emit("pagehide");

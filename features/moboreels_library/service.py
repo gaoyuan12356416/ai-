@@ -11,6 +11,7 @@ import threading
 from urllib.parse import unquote
 
 from .catalog import Catalog
+from .clicks import ClickStats
 from .db import Database, DatabaseError
 from .promotions import PromotionError, PromotionManager, identity
 from .provider import ProviderClient
@@ -49,6 +50,7 @@ class Application:
         self.promotions.recover()
         self.sync = sync or SyncManager(settings, self.db, self.provider)
         self.short_links = short_links if short_links is not None else ShortLinks(settings, self.db, self.promotions)
+        self.clicks = ClickStats(settings)
         self.reports = reports if reports is not None else Reports(settings, db=self.db, provider=self.provider)
         self.content = ContentTools(settings, self.catalog, self.provider)
         self._media = None
@@ -87,6 +89,8 @@ class Application:
                 raise ValueError('剧目 ID 无效')
             return 200, self.content.episodes(story, refresh=query.get('refresh') == '1')
         if method == 'GET' and path == '/reports':
+            if query.get('view') == 'clicks':
+                return 200, self.clicks.query(query, actor)
             return 200, self.reports.query(query, actor, all_users=actor.get('is_admin') is True)
         if method == 'POST' and path == '/report-sync-runs':
             previous = self.reports.latest()
@@ -158,15 +162,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.respond(200, {"ok": True, "service": "moboreels-library"})
         elif self.path.startswith('/m/'):
-            target = self.server.app.short_links.target(self.path.split('?', 1)[0][3:])
-            if not target:
+            record = self.server.app.short_links.redirect_record(self.path.split('?', 1)[0][3:])
+            if not record:
                 return self.respond(404, {'error': 'not_found'})
             self.send_response(302)
-            self.send_header('Location', target)
+            self.send_header('Location', record['target_url'])
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('Content-Length', '0')
             self.end_headers()
+            self.server.app.clicks.record_redirect(record, self.headers)
         else:
             self.respond(404, {"error": "not_found"})
 
