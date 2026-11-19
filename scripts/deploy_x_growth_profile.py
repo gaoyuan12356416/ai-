@@ -85,7 +85,7 @@ def prepare(folder):
         with closing(sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True)) as src,closing(sqlite3.connect(folder/(name+'-before.sqlite3'))) as dst:src.backup(dst)
     tests=['scripts/test_x_growth_profile.py','scripts/test_hit_drama_launch_window.py','scripts/test_auto_material_products.py']
     for name in tests:shutil.copy2(SOURCE/name,candidate/name)
-    for i,cmd in enumerate([[sys.executable,'-B','scripts/test_x_growth_profile.py'],[sys.executable,'-B','scripts/test_hit_drama_launch_window.py'],[sys.executable,'-B','scripts/test_auto_material_products.py','--platform','x']]):
+    for i,cmd in enumerate([[sys.executable,'-B','scripts/test_x_growth_profile.py'],[sys.executable,'-B','scripts/test_hit_drama_launch_window.py','--platform','x'],[sys.executable,'-B','scripts/test_auto_material_products.py','--platform','x']]):
         result=subprocess.run(cmd,cwd=candidate,env=dict(os.environ,X_GROWTH_DB_PATH=str(folder/'absent-offline-db.sqlite3')),capture_output=True,text=True,timeout=120)
         (folder/('test-'+str(i)+'.log')).write_text(result.stdout+result.stderr)
         if result.returncode:print(result.stdout+result.stderr);raise RuntimeError('candidate_test_failed:'+str(i))
