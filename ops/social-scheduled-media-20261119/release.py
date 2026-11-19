@@ -124,11 +124,26 @@ def stage(group):
     service_args = list(argv)
     dest = folder / "candidate"
     if link:
-        if not Path(link).is_symlink() or Path(link).resolve() != old:
+        prior = Path(link).resolve()
+        if not Path(link).is_symlink():
             raise RuntimeError("active source moved: " + group)
-        prior = old
+        if prior != old:
+            # An earlier scheduler-only release can advance X Tag's code
+            # pointer while its long-lived HTTP service retains the old cwd.
+            manifest_path = prior.parent / "manifest.json"
+            receipt = (
+                read(manifest_path)
+                if group == "tag" and manifest_path.is_file()
+                else {}
+            )
+            if (
+                receipt.get("status"),
+                receipt.get("previous"),
+                receipt.get("candidate"),
+            ) != ("active", str(old), str(prior)):
+                raise RuntimeError("active source moved: " + group)
         for i, v in enumerate(service_args):
-            for prefix in (str(old), link):
+            for prefix in (str(old), str(prior), link):
                 if v.startswith(prefix + "/"):
                     service_args[i] = str(dest) + v[len(prefix) :]
                     break
@@ -214,11 +229,11 @@ def warm_start(group, direction):
     ):
         env.pop(key, None)
     revert = direction == "rollback"
-    cwd = Path(m["old"] if revert or not m["link"] else m["candidate"])
+    cwd = Path((m["previous"] if revert else m["candidate"]) if m["link"] else m["old"])
     argv = list(m["argv"])
     if revert and m["link"]:
         argv = [
-            str(m["old"]) + a[len(m["candidate"]) :]
+            str(m["previous"]) + a[len(m["candidate"]) :]
             if a.startswith(m["candidate"] + "/")
             else a
             for a in argv
@@ -341,7 +356,8 @@ def switch(group, revert=False):
     target = m["previous"] if revert else m["candidate"]
     link = Path(m["link"])
     if m["link"]:
-        if link.resolve() != Path(origin) or (p / "cwd").resolve() != Path(origin):
+        expected_runtime = Path(m["candidate"] if revert else m["old"])
+        if link.resolve() != Path(origin) or (p / "cwd").resolve() != expected_runtime:
             raise RuntimeError("owner or code pointer changed: " + group)
     elif not revert and drop.exists():
         raise RuntimeError("cloud unit override already exists")
@@ -400,7 +416,7 @@ def switch(group, revert=False):
             180,
             "existing HTTP requests still active",
         )
-        if p != proc(unit):
+        if p != proc(unit) or (m["link"] and link.resolve() != Path(origin)):
             raise RuntimeError("unit changed while draining")
         if prop(unit, "ExecStop"):
             # Every canonical RPC and heartbeat is being served by the warm
