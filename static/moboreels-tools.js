@@ -6,13 +6,22 @@
   function parseIDs(value){return [...new Set(String(value).split(/[\s,，;；]+/).filter(Boolean))];}
   function https(value){try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password?u.href:'';}catch(_){return '';}}
   function csvCell(value){const s=String(value==null?'':value);return '"'+(/^[=+@\-\t\r]/.test(s)?"'"+s:s).replace(/"/g,'""')+'"';}
+  async function copyResourceIDs(ids){
+    const value=ids.join('\n');
+    try{await navigator.clipboard.writeText(value);return;}catch(_){}
+    const input=root.document.createElement('textarea'),previous=root.document.activeElement;
+    input.value=value;input.readOnly=true;input.style.cssText='position:fixed;left:-9999px;top:0';
+    root.document.body.appendChild(input);input.select();
+    try{if(!root.document.execCommand('copy'))throw new Error('复制失败，请允许浏览器访问剪贴板后重试。');}
+    finally{input.remove();if(previous)previous.focus({preventScroll:true});}
+  }
   async function request(path,options={}){
     const response=await fetch(path,{credentials:'same-origin',cache:'no-store',...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
     const data=await response.json();
     if(!response.ok){const error=new Error(data.message||'请求失败，请稍后重试');error.status=response.status;throw error;}
     return data;
   }
-  function recommendationRow(r,business){return `<tr><td><strong>${escape(r.story_name)}</strong><span class="cell-sub">${escape(r.story_id)}</span></td><td>${escape(r.language_name)}</td><td><span class="badge">${escape(r.recommend_grade||'未分级')}</span></td><td>${escape(r.recommend_reason||'—')}<span class="cell-sub">${escape(r.recommend_remark||'')}</span></td><td>${escape(Array.isArray(r.tags)?r.tags.join('、'):r.tags||'—')}</td><td>${escape(r.recommend_time)}</td><td>${Number(business)===2?`<a class="btn mini" href="/moboreels-library.html?story_id=${encodeURIComponent(r.story_id)}">查看短剧</a>`:'—'}</td></tr>`;}
+  function recommendationRow(r,business){return `<tr><td><strong>${escape(r.story_name)}</strong><span class="cell-sub">${escape(r.story_id)}</span></td><td>${escape(r.language_name)}</td><td><span class="badge">${escape(r.recommend_grade||'未分级')}</span></td><td>${escape(r.recommend_reason||'—')}<span class="cell-sub">${escape(r.recommend_remark||'')}</span></td><td>${escape(Array.isArray(r.tags)?r.tags.join('、'):r.tags||'—')}</td><td>${escape(r.recommend_time)}</td><td><div class="row-actions"><button type="button" class="btn mini" data-copy-resource-id="${escape(r.story_id)}">复制资源 ID</button>${Number(business)===2?`<a class="btn mini" href="/moboreels-library.html?story_id=${encodeURIComponent(r.story_id)}">查看短剧</a>`:''}</div></td></tr>`;}
   function accountRow(r,admin){return `<tr><td>${escape(r.platform_name)}</td><td>${escape(r.account_id)}</td><td>${escape(r.nickname)}<span class="cell-sub">归属：${escape(r.star_name)}</span></td><td>${https(r.platform_link)?`<a href="${escape(https(r.platform_link))}" target="_blank" rel="noopener noreferrer">查看主页</a>`:'—'}</td><td><span class="badge ${r.status==='succeeded'?'success':r.status==='unknown'?'warning':r.status==='failed'?'error':'running'}">${escape(STATUS[r.status]||r.status)}</span><span class="cell-sub">${escape(r.message)}</span></td><td>${escape(r.provider_id||'—')}</td><td>${escape(time(r.updated_at))}${admin&&['unknown','failed'].includes(r.status)?`<br><button class="btn mini" data-resolve="${escape(r.id)}">核实结果</button>`:''}</td></tr>`;}
   const exported={parseIDs,https,csvCell,recommendationRow,accountRow};
   if(typeof module==='object'&&module.exports)module.exports=exported;
@@ -47,15 +56,15 @@
   async function boot(){
     const mode=doc.body.dataset.moboreelsPage;if(!mode)return;
     const recommendations=mode==='recommendations', activeKey=recommendations?'moboreelsRecommendations':'moboreelsMediaAccounts';
-    let auth={},allowed=false,page=1,total=0,rows=[],preview=[],timer=null,sequence=0,controller=null,busy=false,exportDate='';
+    let auth={},allowed=false,page=1,total=0,rows=[],preview=[],timer=null,sequence=0,controller=null,busy=false,exportDate='',loadedQuery=null,copying=false;
     const notice=$('notice'),table=$('rows'),filter=$('filters');
-    function showError(e){notice.textContent=e.message||String(e);notice.classList.remove('hidden');if(e.status===401||e.status===403){allowed=false;table.innerHTML='';rows=[];clearTimeout(timer);$('controls').disabled=true;doc.querySelectorAll('dialog[open]').forEach(d=>d.close());}}
+    function showError(e){notice.textContent=e.message||String(e);notice.classList.remove('hidden');if(e.status===401||e.status===403){allowed=false;table.innerHTML='';rows=[];clearTimeout(timer);$('controls').disabled=true;if($('copyIDsBtn'))$('copyIDsBtn').disabled=true;doc.querySelectorAll('dialog[open]').forEach(d=>d.close());}}
     function query(){const q=new URLSearchParams(new FormData(filter));q.set('page_index',page);return q;}
     function nav(){if(root.UiTopbar)root.UiTopbar.render({auth,userCard:$('userCard'),authButton:$('loginBtn')});if(root.QuickNav)root.QuickNav.render({container:$('quickNav'),activeKey,auth,onNavigate:item=>{if(item.href)location.assign(item.href);}}).catch(()=>{});}
     function choices(select,values){const previous=select.value;select.innerHTML='<option value="">全部</option>'+values.map(([value,label])=>`<option value="${escape(value)}">${escape(label)}</option>`).join('');select.value=previous;}
     async function load(refresh=false){
       if(!allowed)return;clearTimeout(timer);if(controller)controller.abort();controller=new AbortController();const seq=++sequence;
-      const params=query();if(refresh&&recommendations)params.set('refresh','1');$('refreshBtn').disabled=true;table.setAttribute('aria-busy','true');if(recommendations)$('exportBtn').disabled=true;
+      const params=query();if(refresh&&recommendations)params.set('refresh','1');$('refreshBtn').disabled=true;table.setAttribute('aria-busy','true');if(recommendations){$('exportBtn').disabled=true;$('copyIDsBtn').disabled=true;$('copyFeedback').textContent='';loadedQuery=null;copying=false;}
       try{
         const data=await request(`${API}/${recommendations?'recommendations':'media-accounts'}?${params}`,{signal:controller.signal});
         if(seq!==sequence||!allowed)return;rows=data.list;total=data.total;notice.classList.add('hidden');
@@ -64,6 +73,7 @@
         $('prevPage').disabled=page<=1;$('nextPage').disabled=page*50>=total;
         if(recommendations){
           exportDate=data.query_date||$('queryDate').value;$('exportBtn').disabled=false;
+          loadedQuery=new URLSearchParams(params);loadedQuery.delete('refresh');$('copyIDsBtn').disabled=!total;
           $('snapshotTime').textContent=`数据获取：${time(data.fetched_at)}（北京时间）；统计基于所选日期完整推荐列表，共 ${data.source_total} 条。`;
           $('summary').innerHTML=Object.entries(data.summary.grades).map(([k,v])=>`<span class="stat-chip">${escape(k)} <strong>${v}</strong></span>`).join('')+'<span class="muted">'+Object.entries(data.summary.languages).map(([k,v])=>`${escape(k)} ${v}`).join(' · ')+'</span>';
           choices($('languageFilter'),data.languages);choices($('gradeFilter'),Object.keys(data.summary.grades).filter(v=>v!=='未分级').map(v=>[v,v]));
@@ -76,6 +86,36 @@
     doc.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(!doc.hidden&&allowed&&!recommendations)load();});root.addEventListener('pagehide',()=>{clearTimeout(timer);if(controller)controller.abort();});
     doc.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
     if(recommendations){
+      const copyButton=$('copyIDsBtn'),copyFeedback=$('copyFeedback');
+      async function copyRecommendations(singleID){
+        if(!allowed||!loadedQuery||copying||!total)return;
+        copying=true;copyButton.disabled=true;const seq=sequence,expectedTotal=total;
+        copyFeedback.textContent='正在复制资源 ID…';
+        try{
+          let ids;
+          if(singleID!==undefined){ids=[singleID];}
+          else if(rows.length===total){ids=rows.map(r=>String(r.story_id));}
+          else{
+            const params=new URLSearchParams(loadedQuery),all=[];params.set('page_size','100');
+            let snapshot=null;
+            for(let index=1;all.length<expectedTotal;index++){
+              params.set('page_index',index);
+              const data=await request(`${API}/recommendations?${params}`,{signal:controller.signal});
+              if(seq!==sequence||!allowed)return;
+              if(data.total!==expectedTotal||data.list.length!==Math.min(100,expectedTotal-all.length)||(snapshot!==null&&data.fetched_at!==snapshot))throw new Error('推荐列表已更新，请重新查询后复制。');
+              snapshot=data.fetched_at;all.push(...data.list.map(r=>String(r.story_id)));
+            }
+            ids=all;
+          }
+          ids=[...new Set(ids)];
+          if(seq!==sequence||!allowed)return;
+          await copyResourceIDs(ids);
+          if(seq===sequence&&allowed)copyFeedback.textContent=singleID!==undefined?`已复制资源 ID：${singleID}`:`已复制 ${ids.length} 个资源 ID（当前筛选全部结果，每行一个）。`;
+        }catch(e){if(e.name!=='AbortError'&&seq===sequence){copyFeedback.textContent=e.message||'复制失败，请重试。';if(e.status===401||e.status===403)showError(e);}}
+        finally{if(seq===sequence){copying=false;copyButton.disabled=!allowed||!loadedQuery||!total;}}
+      }
+      copyButton.onclick=()=>copyRecommendations();
+      table.addEventListener('click',event=>{const button=event.target.closest('[data-copy-resource-id]');if(button)copyRecommendations(button.dataset.copyResourceId);});
       $('queryDate').value=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());$('queryDate').max=$('queryDate').value;
       $('exportBtn').onclick=()=>{const data=[['剧目ID','名称','语言','推荐等级','推荐理由','推荐备注','标签','推荐日期'],...rows.map(r=>[r.story_id,r.story_name,r.language_name,r.recommend_grade,r.recommend_reason,r.recommend_remark,Array.isArray(r.tags)?r.tags.join(','):r.tags,r.recommend_time])];const blob=new Blob(['\ufeff'+data.map(r=>r.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=doc.createElement('a');a.href=url;a.download=`Moboreels推荐-${exportDate}-第${page}页.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
     }else{
