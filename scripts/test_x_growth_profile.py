@@ -184,7 +184,9 @@ class GrowthTests(unittest.TestCase):
         db.execute('CREATE TABLE x_auto_task(execution_queue_id,selection_json,published_at_utc)')
         selection={'drama':{'catalog':'dramawave'},'tag_profile':{'classification':{'themes':['revenge'],'audience':'general'}}}
         db.execute('INSERT INTO x_auto_task VALUES(1,?,?)',(json.dumps(selection),published));db.commit();db.close()
-        with store.connect(write=True) as db:db.execute('INSERT INTO collector_state VALUES(?,?)',('started_at',json.dumps((now-timedelta(days=7)).isoformat())))
+        # Simulate an existing collector launched three hours ago. This post
+        # predates its former 24h discovery window but is a live 73h sample now.
+        with store.connect(write=True) as db:db.execute('INSERT INTO collector_state VALUES(?,?)',('started_at',json.dumps((now-timedelta(hours=3)).isoformat())))
         store.set_mode(1,'growth',0,'actor')
         def fake(url,token,payload=None):
             if '/growth-origins' in url:

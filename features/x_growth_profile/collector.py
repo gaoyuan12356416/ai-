@@ -17,6 +17,8 @@ from .model import build_profiles, instant
 
 ACCOUNT_DB='/var/lib/x-post-automation/accounts.sqlite3'
 STAGES=((6,'6h'),(24,'24h'),(72,'72h'),(168,'7d'))
+STARTUP_LOOKBACK = timedelta(hours=78)
+LATEST_SAMPLE_AGE = {stage: timedelta(hours=hours + 6) for hours,stage in STAGES}
 
 @contextmanager
 def readonly(path):
@@ -55,12 +57,12 @@ def access_token(account,now):
 
 def discover(db,accounts,now):
     row=db.execute("SELECT value_json FROM collector_state WHERE key='started_at'").fetchone()
-    if row:
-        start=instant(json.loads(row[0]))-timedelta(hours=24)
-    else:
-        start=now-timedelta(hours=24)
+    first_started = instant(json.loads(row[0])) if row else now
+    if not row:
         db.execute('INSERT INTO collector_state VALUES(?,?)',('started_at',store.dumps(now.isoformat())))
-    start=max(start,now-timedelta(days=29)).isoformat().replace('+00:00','Z')
+    # Use the original launch timestamp for both new and existing collectors.
+    # A previously undiscovered post can still supply a genuine 72–78h sample.
+    start=max(first_started - STARTUP_LOOKBACK,now-timedelta(days=29)).isoformat().replace('+00:00','Z')
     frozen=request('http://127.0.0.1:8898/internal/x-tag/growth-origins',os.environ['X_INTERNAL_TOKEN'],{'since':start})['items']
     paths=list(dict.fromkeys([os.getenv('X_POST_DB_PATH','/mnt/data-disk/x-tag-publisher/posts.sqlite3'),ACCOUNT_DB]))
     for source in paths:
@@ -176,17 +178,18 @@ def collect(limit_accounts=None):
                 params={'ids':','.join(p['post_id'] for p,_ in batch),'tweet.fields':'author_id,attachments,public_metrics,non_public_metrics,organic_metrics',
                         'expansions':'attachments.media_keys','media.fields':'type,duration_ms,public_metrics,non_public_metrics,organic_metrics'}
                 result=request('https://api.x.com/2/tweets?'+urllib.parse.urlencode(params),token)
+                observed_at = datetime.now(timezone.utc)
                 values={str(p['id']):p for p in result.get('data',[])}
                 with store.connect(write=True) as db:
                     for post,stage in batch:
                         value=values.get(post['post_id'])
-                        if not value:
+                        if not value or observed_at - instant(post['published_at']) > LATEST_SAMPLE_AGE[stage]:
                             continue
                         if str(value.get('author_id'))!=str(account['x_user_id']):
                             raise ValueError('post_author_mismatch')
                         metrics=extract(value,result.get('includes',{}).get('media',[]))
                         db.execute('INSERT OR IGNORE INTO post_snapshot VALUES(?,?,?,?)',
-                                   (post['post_id'],stage,store.stamp(),store.dumps(metrics)))
+                                   (post['post_id'],stage,observed_at.isoformat(),store.dumps(metrics)))
                         report['post_samples']+=1
             with store.connect(write=True) as db:
                 db.execute('DELETE FROM collector_state WHERE key=?',('retry:'+str(aid),))
