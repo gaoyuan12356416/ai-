@@ -258,6 +258,15 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == '/healthz' and self.command == 'GET':
             return 200, dict(ok=True, service='x-tag-publish-gateway')
+        if path == '/internal/x-tag/growth-origins' and self.command == 'POST':
+            token = os.environ.get('X_INTERNAL_TOKEN', '')
+            if len(token) < 32 or not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
+                raise Error('permission_denied', '', 403)
+            body = self.body()
+            if set(body) != {'since'}:
+                raise Error('invalid_request', '', 400)
+            from features.x_growth_profile.origins import read_origins
+            return 200, dict(items=read_origins(body['since']))
         if path == '/internal/x-tag/hit-origin' and self.command == 'POST':
             token = os.environ.get('X_INTERNAL_TOKEN', '')
             if len(token) < 32 or not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):

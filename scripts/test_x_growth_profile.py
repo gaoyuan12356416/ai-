@@ -192,14 +192,17 @@ class GrowthTests(unittest.TestCase):
         with store.connect(write=True) as db:db.execute('INSERT INTO collector_state VALUES(?,?)',('started_at',json.dumps((now-timedelta(days=7)).isoformat())))
         store.set_mode(1,'growth',0,'actor')
         def fake(url,token,payload=None):
+            if '/growth-origins' in url:
+                from features.x_growth_profile.origins import query
+                return {'items':query(auto,payload['since'])}
             self.assertIsNone(payload)
             if '/users/me' in url:return {'data':{'id':'123','public_metrics':{'followers_count':100}}}
             return {'data':[{'id':'999','author_id':'123','public_metrics':{'impression_count':1000,'bookmark_count':3},'organic_metrics':{'impression_count':1000,'user_profile_clicks':10,'retweet_count':2}}]}
-        with patch.object(collector,'ACCOUNT_DB',str(accounts)),patch.object(collector,'access_token',return_value='fake-test-token'),patch.object(collector,'request',side_effect=fake) as req,patch.dict(os.environ,{'X_POST_DB_PATH':str(posts),'X_AUTO_POST_DB_PATH':str(auto)}):
+        with patch.object(collector,'ACCOUNT_DB',str(accounts)),patch.object(collector,'access_token',return_value='fake-test-token'),patch.object(collector,'request',side_effect=fake) as req,patch.dict(os.environ,{'X_INTERNAL_TOKEN':'test-only','X_POST_DB_PATH':str(posts),'X_AUTO_POST_DB_PATH':str(auto)}):
             result=collector.collect()
             self.assertEqual(result['post_samples'],1);self.assertEqual(result['follower_samples'],1)
-            self.assertEqual(req.call_count,2)
-            collector.collect();self.assertEqual(req.call_count,2)
+            self.assertEqual(req.call_count,3)
+            collector.collect();self.assertEqual(req.call_count,4)
         with store.connect() as db:
             self.assertEqual(db.execute('SELECT stage FROM post_snapshot').fetchone()[0],'72h')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM mode_audit').fetchone()[0],1)

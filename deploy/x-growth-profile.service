@@ -15,9 +15,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Existing publishing ledgers belong to two isolated service users. Permit
-# cross-owner reads inside this read-only sandbox without changing their modes.
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=
 ReadWritePaths=/mnt/data-disk/x-tag-publisher/growth
-ReadOnlyPaths=/var/lib/x-post-automation /mnt/data-disk/x-tag-publisher/posts /mnt/data-disk/x-tag-publisher/auto
+ReadOnlyPaths=/var/lib/x-post-automation /mnt/data-disk/x-tag-publisher/posts

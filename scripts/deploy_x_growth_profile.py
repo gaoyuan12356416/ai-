@@ -19,7 +19,7 @@ ROOT=Path('/opt/x-tag-publisher/current')
 BASE='6ea43e27'
 HEALTH='/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
 CHANGED=['features/x_tag_publish/'+n+'.py' for n in ('policy','selection','pool','gateway','hit_drama')]
-NEW=['features/x_growth_profile/'+n+'.py' for n in ('__init__','store','model','metrics','selection','api','collector')]
+NEW=['features/x_growth_profile/'+n+'.py' for n in ('__init__','store','model','metrics','selection','api','collector','origins')]
 STATIC=['static/'+n for n in ('x-growth-profile.js','x-tag-publish-ui.js','x-tag-auto-publish-template.js','x-tag-auto-publish-template.html')]
 UNITS=['x-growth-profile.service','x-growth-profile.timer']
 

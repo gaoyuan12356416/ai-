@@ -35,7 +35,7 @@ def request(url, token, payload=None):
     raw=None if payload is None else json.dumps(payload).encode()
     req=urllib.request.Request(url,data=raw,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
     with urllib.request.build_opener(NoRedirect()).open(req,timeout=25) as response:
-        return json.loads(response.read(4*1024*1024))
+        return json.loads(response.read(8*1024*1024))
 
 def access_token(account,now):
     expires=account.get('access_expires_at')
@@ -61,12 +61,7 @@ def discover(db,accounts,now):
         start=now-timedelta(hours=24)
         db.execute('INSERT INTO collector_state VALUES(?,?)',('started_at',store.dumps(now.isoformat())))
     start=max(start,now-timedelta(days=29)).isoformat().replace('+00:00','Z')
-    auto_path=os.getenv('X_AUTO_POST_DB_PATH','/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3')
-    frozen={}
-    with readonly(auto_path) as auto:
-        for row in auto.execute("SELECT execution_queue_id,selection_json FROM x_auto_task WHERE published_at_utc>=? AND execution_queue_id<>''",(start,)):
-            value=json.loads(row['selection_json'] or '{}')
-            frozen[str(row['execution_queue_id'])]=value
+    frozen=request('http://127.0.0.1:8898/internal/x-tag/growth-origins',os.environ['X_INTERNAL_TOKEN'],{'since':start})['items']
     paths=list(dict.fromkeys([os.getenv('X_POST_DB_PATH','/mnt/data-disk/x-tag-publisher/posts.sqlite3'),ACCOUNT_DB]))
     for source in paths:
         with readonly(source) as posts:
