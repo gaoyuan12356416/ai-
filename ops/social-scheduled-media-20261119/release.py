@@ -250,12 +250,12 @@ def warm_start(group, direction):
         argv[argv.index("--config") + 1] = str(
             ROOT / group / ("warm-rollback.json" if revert else "warm-native.json")
         )
-    elif m.get("warm_x"):
-        module = (
-            "features.x_tag_publish.runtime"
-            if group == "tag"
-            else "features.x_accounts.oauth_service"
-        )
+    elif m.get("warm_x") or group == "tt_auto":
+        module = {
+            "x": "features.x_accounts.oauth_service",
+            "tag": "features.x_tag_publish.runtime",
+            "tt_auto": "scripts.tt_auto_post_service",
+        }[group]
         script = (
             "import http.server as h,runpy\noriginal=h.ThreadingHTTPServer.__init__\n"
             "def bind(server,addr,*a,**kw):\n"
@@ -534,6 +534,45 @@ def switch(group, revert=False):
     print(group, direction, "verified", flush=True)
 
 
+def supply_original(previous):
+    """Add the lazy file-verification dependency to already switched HTTP owners."""
+    previous = Path(previous).resolve()
+    if previous.parent != ROOT.parent or not previous.name.startswith("release-"):
+        raise ValueError("unexpected release directory")
+    manifest = read(HERE / "manifest.json")
+    rel = "features/pipeline_dispatch/original_media.py"
+    for group in ("fb", "x", "tag", "tt"):
+        meta = read(previous / group / "release.json")
+        dest = Path(meta["candidate"])
+        applied = read(previous / group / "activate-receipt.json")
+        if (
+            applied["switch"] != str(dest)
+            or Path(meta["link"]).resolve() != dest
+            or (proc(meta["unit"]) / "cwd").resolve() != dest
+        ):
+            raise RuntimeError("native release changed: " + group)
+        source = manifest[group][rel]
+        data = (PKG / source["file"]).read_bytes()
+        actual = dest / rel
+        if blob(data) != source["after"] or source["before"] is not None:
+            raise RuntimeError("unexpected dependency preimage")
+        if not actual.is_file():
+            # Link without replacing a concurrent deployment's file.
+            tmp = actual.with_name(".original-media-" + str(os.getpid()))
+            atomic(tmp, data)
+            try:
+                os.link(tmp, actual)
+            finally:
+                tmp.unlink(missing_ok=True)
+        if blob(actual.read_bytes()) != source["after"]:
+            raise RuntimeError("conflicting original-media dependency")
+        dump(
+            previous / group / "dependency-receipt.json",
+            {"file": rel, "blob": source["after"], "release": str(ROOT)},
+        )
+        print(group, "dependency verified", flush=True)
+
+
 def backup():
     cfg = read(CFG)
     out = ROOT / "ledger-backup"
@@ -683,6 +722,8 @@ if __name__ == "__main__":
         backup()
     elif action == "mirror":
         mirror()
+    elif action == "supply-original":
+        supply_original(sys.argv[2])
     elif action == "warm":
         warm_start(*sys.argv[2:4])
     elif action == "activate":
