@@ -52,8 +52,8 @@ def publish_drama(runtime, template_id, actor, payload):
         if existing:
             return existing
     _gates(runtime)
-    if template['current_version'] != request['expected_version'] or template['status'] != 'enabled':
-        raise StoreError('fb_auto_version_conflict', '模板已停用或版本已变化，请刷新后重试', 409)
+    if template['current_version'] != request['expected_version']:
+        raise StoreError('fb_auto_version_conflict', '模板版本已变化，请刷新后重试', 409)
     config = json.loads(template['config_json'])
     mysql = runtime.materials.mysql
     from features.fb_video_publish.moboreels import contains
