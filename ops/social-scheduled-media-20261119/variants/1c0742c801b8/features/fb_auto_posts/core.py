@@ -20,6 +20,7 @@ from .strategy import daily_capacity, in_slot, planned_time, cooldown_content_id
 from features import social_random_schedule as target_daily
 from . import target_schedule
 from . import page_caption
+from . import explicit_publish
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
 from .languages import page_language
 from .profile_selection import Decision, load_profiles
@@ -214,10 +215,10 @@ class FBAutoPostStore:
                 "source_media_url": "TEXT NOT NULL DEFAULT ''",
                 "prepared_media_url": "TEXT NOT NULL DEFAULT ''",
                 "prepared_sha256": "TEXT NOT NULL DEFAULT ''",
+                "media_selection_kind": "TEXT NOT NULL DEFAULT ''",
                 "prepared_size_bytes": "INTEGER NOT NULL DEFAULT 0",
                 "prepared_duration_seconds": "TEXT NOT NULL DEFAULT ''",
                 "prepared_profile": "TEXT NOT NULL DEFAULT ''",
-                "media_selection_kind": "TEXT NOT NULL DEFAULT ''",
                 "prepared_at_utc": "TEXT NOT NULL DEFAULT ''",
                 "selection_json": "TEXT NOT NULL DEFAULT '{}'",
                 "recovery_until_utc": "TEXT NOT NULL DEFAULT ''",
@@ -406,7 +407,7 @@ class FBAutoPostStore:
                 manual_runs = [
                     int(item[0])
                     for item in conn.execute(
-                        "SELECT DISTINCT x.run_id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id WHERE x.template_id=? AND r.trigger_type='manual' AND x.status IN ('planned','preparing','ready')",
+                        f"SELECT DISTINCT x.run_id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id WHERE x.template_id=? AND r.trigger_type='manual' AND NOT {explicit_publish.independent_run_sql()} AND x.status IN ('planned','preparing','ready')",
                         (template_id,),
                     )
                 ]
@@ -415,7 +416,7 @@ class FBAutoPostStore:
                     (now, template_id),
                 )
                 conn.execute(
-                    "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_manual_template_disabled',error_code='fb_auto_manual_template_disabled',error_message='模板已停用，手动执行任务已取消',lease_owner='',lease_expires_at_utc='',next_prepare_at_utc='',completed_at_utc=? WHERE id IN (SELECT x.id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id WHERE x.template_id=? AND r.trigger_type='manual' AND x.status IN ('planned','preparing','ready'))",
+                    f"UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_manual_template_disabled',error_code='fb_auto_manual_template_disabled',error_message='模板已停用，手动执行任务已取消',lease_owner='',lease_expires_at_utc='',next_prepare_at_utc='',completed_at_utc=? WHERE id IN (SELECT x.id FROM fb_auto_task x JOIN fb_auto_run r ON r.id=x.run_id WHERE x.template_id=? AND r.trigger_type='manual' AND NOT {explicit_publish.independent_run_sql()} AND x.status IN ('planned','preparing','ready'))",
                     (now, template_id),
                 )
                 for run_id in manual_runs:
@@ -592,7 +593,7 @@ class FBAutoPostStore:
                 template.update(current_version=int(expected_template_version), config_json=frozen[0])
             if expected_template_version is not None and int(template["current_version"]) != int(expected_template_version):
                 raise StoreError("fb_auto_due_slot_template_changed", "模板版本已变化，原计划时隙不再执行", 409)
-            if expected_template_version is not None and template["status"] != "enabled":
+            if expected_template_version is not None and template["status"] != "enabled" and not hit_drama:
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
             if expected_template_version is not None and not hit_drama:
@@ -613,6 +614,7 @@ class FBAutoPostStore:
             config = _loads(template["config_json"], {})
             if hit_drama:
                 config['hit_drama_publish'] = dict(hit_drama)
+                config[explicit_publish.MARKER] = True
                 template['config_json'] = json.dumps(config, ensure_ascii=False)
             scope_admin, scope_owner = bool(template["scope_is_admin"]), str(template["owner_user_id"])
             existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (template_id, slot_key)).fetchone()
@@ -640,7 +642,7 @@ class FBAutoPostStore:
         # Templates may share a group or individual Pages. Each template's slot
         # has its own capacity; actual Page writes retain the execution mutex.
         enabled_others = self.enabled_template_sources(template_id)
-        enabled_fingerprint = {(template_id, int(template["current_version"]))}
+        enabled_fingerprint = {(template_id, int(template["current_version"]))} if template['status'] == 'enabled' else set()
         for other in enabled_others:
             enabled_fingerprint.add((int(other["template_id"]), int(other["template_version"])))
         total, publishable = len(page_rows), sum(1 for page in page_rows if page.eligible_token_count > 0)
@@ -684,7 +686,7 @@ class FBAutoPostStore:
         if any(page_language(page.language) and (page.page_id not in candidate_snapshots or
                 page_language(page.language)!=caption_languages.get(page.page_id)) for page in page_rows):
             raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
-        enabled_fingerprint = {(template_id, int(template["current_version"]))}
+        enabled_fingerprint = {(template_id, int(template["current_version"]))} if template['status'] == 'enabled' else set()
         for other in self.enabled_template_sources(template_id):
             enabled_fingerprint.add((int(other["template_id"]), int(other["template_version"])))
         total, publishable = len(page_rows), sum(page.eligible_token_count > 0 for page in page_rows)
@@ -713,7 +715,7 @@ class FBAutoPostStore:
             current = conn.execute("SELECT status,current_version FROM fb_auto_template WHERE id=?", (template_id,)).fetchone()
             if current is None or current["status"] == "deleted" or (not target_slot and expected_template_version is not None and int(current["current_version"]) != int(expected_template_version)):
                 raise StoreError("fb_auto_due_slot_template_changed", "模板已停用或版本已变化，原计划时隙不再执行", 409)
-            if current["status"] != "enabled" and (expected_template_version is not None or trigger_type == "auto"):
+            if current["status"] != "enabled" and (trigger_type == "auto" or (expected_template_version is not None and not hit_drama)):
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
             if expected_template_version is not None and not hit_drama:
@@ -902,7 +904,7 @@ class FBAutoPostStore:
             if task_id is None:
                 self._expire_late_auto_work(conn, now, cutoff)
             row = conn.execute(
-                "SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND (t.current_version=x.template_version OR x.schedule_policy='target_midnight_v1') JOIN fb_auto_run r ON r.id=x.run_id WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND (((x.status='planned' AND (x.next_prepare_at_utc='' OR x.next_prepare_at_utc<=?)) OR (x.status='preparing' AND x.lease_expires_at_utc<?))) AND (x.schedule_policy='target_midnight_v1' OR r.trigger_type='manual' OR x.planned_publish_at_utc>=? OR x.recovery_until_utc>?) AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1",
+                f"SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND {explicit_publish.task_status_sql(task='x')} AND (t.current_version=x.template_version OR x.schedule_policy='target_midnight_v1') JOIN fb_auto_run r ON r.id=x.run_id WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND (((x.status='planned' AND (x.next_prepare_at_utc='' OR x.next_prepare_at_utc<=?)) OR (x.status='preparing' AND x.lease_expires_at_utc<?))) AND (x.schedule_policy='target_midnight_v1' OR r.trigger_type='manual' OR x.planned_publish_at_utc>=? OR x.recovery_until_utc>?) AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1",
                 (now, now, cutoff, now, task_id, task_id),
             ).fetchone()
             if row is None:
@@ -928,7 +930,7 @@ class FBAutoPostStore:
                 raise StoreError("fb_auto_prepare_not_claimed", "视频制作任务未被领取", 409)
             template = conn.execute("SELECT status,current_version FROM fb_auto_template WHERE id=?", (int(row["template_id"]),)).fetchone()
             version_changed = template is None or (row["schedule_policy"] != target_daily.POLICY and int(template["current_version"]) != int(row["template_version"]))
-            manual_disabled = row["trigger_type"] == "manual" and (template is None or template["status"] != "enabled")
+            manual_disabled = row["trigger_type"] == "manual" and not explicit_publish.allows_task(conn, template, row)
             too_late = row["schedule_policy"] != target_daily.POLICY and row["trigger_type"] == "auto" and str(row["planned_publish_at_utc"]) < cutoff and str(row["recovery_until_utc"]) <= now
             if manual_disabled or version_changed or too_late:
                 reason = "fb_auto_manual_template_disabled" if manual_disabled else ("fb_auto_template_version_changed" if version_changed else "fb_auto_task_too_late")
@@ -972,7 +974,7 @@ class FBAutoPostStore:
                 return {"ok": True, "task_id": task_id, "status": "skipped", "skip_reason": "fb_auto_manual_template_disabled"}
             if row is None or row["status"] != "preparing": raise StoreError("fb_auto_prepare_not_claimed", "视频制作任务未被领取", 409)
             template = conn.execute("SELECT status,current_version FROM fb_auto_template WHERE id=?", (int(row["template_id"]),)).fetchone()
-            manual_disabled = row["trigger_type"] == "manual" and (template is None or template["status"] != "enabled")
+            manual_disabled = row["trigger_type"] == "manual" and not explicit_publish.allows_task(conn, template, row)
             if manual_disabled or template is None or (row["schedule_policy"] != target_daily.POLICY and int(template["current_version"]) != int(row["template_version"])):
                 now = utc_iso(self.now_fn())
                 reason = "fb_auto_manual_template_disabled" if manual_disabled else "fb_auto_template_version_changed"
@@ -1059,7 +1061,7 @@ class FBAutoPostStore:
                 if recent:
                     conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_drama_cooldown_at_publish',error_code='fb_auto_drama_cooldown_at_publish',completed_at_utc=? WHERE id=? AND status='ready'", (now,candidate['id']))
                     self._refresh_run(conn, int(candidate['run_id']), now)
-            rows = conn.execute("SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND t.status='enabled' AND (t.current_version=x.template_version OR x.schedule_policy='target_midnight_v1') WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND (x.schedule_policy='target_midnight_v1' OR x.recovery_until_utc='' OR x.recovery_until_utc>?) AND x.unknown_outcome=0 AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND (x.prepared_media_url<>x.source_media_url OR x.media_selection_kind='deadline_original') AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status='running') AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now, now, task_id, task_id)).fetchall()
+            rows = conn.execute(f"SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND {explicit_publish.task_status_sql(task='x')} AND (t.current_version=x.template_version OR x.schedule_policy='target_midnight_v1') WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND (x.schedule_policy='target_midnight_v1' OR x.recovery_until_utc='' OR x.recovery_until_utc>?) AND x.unknown_outcome=0 AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND (x.prepared_media_url<>x.source_media_url OR x.media_selection_kind='deadline_original') AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status='running') AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now, now, task_id, task_id)).fetchall()
             row = None
             for candidate in rows:
                 if (manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True)
@@ -1075,7 +1077,7 @@ class FBAutoPostStore:
                 break
             if row is None:
                 conn.commit(); return None
-            updated = conn.execute("UPDATE fb_auto_task SET status='running',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=? AND status='ready' AND unknown_outcome=0 AND TRIM(prepared_at_utc)<>'' AND TRIM(prepared_media_url)<>'' AND media_url=prepared_media_url AND (prepared_media_url<>source_media_url OR media_selection_kind='deadline_original') AND planned_publish_at_utc<=? AND EXISTS (SELECT 1 FROM fb_auto_template t WHERE t.id=fb_auto_task.template_id AND t.status='enabled' AND (t.current_version=fb_auto_task.template_version OR fb_auto_task.schedule_policy='target_midnight_v1')) AND NOT EXISTS (SELECT 1 FROM fb_auto_task x WHERE x.page_id=fb_auto_task.page_id AND x.id<>fb_auto_task.id AND x.status='running')", (worker_id, lease, now, int(row["id"]), now)).rowcount
+            updated = conn.execute(f"UPDATE fb_auto_task SET status='running',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=? AND status='ready' AND unknown_outcome=0 AND TRIM(prepared_at_utc)<>'' AND TRIM(prepared_media_url)<>'' AND media_url=prepared_media_url AND (prepared_media_url<>source_media_url OR media_selection_kind='deadline_original') AND planned_publish_at_utc<=? AND EXISTS (SELECT 1 FROM fb_auto_template t WHERE t.id=fb_auto_task.template_id AND {explicit_publish.task_status_sql(task='fb_auto_task')} AND (t.current_version=fb_auto_task.template_version OR fb_auto_task.schedule_policy='target_midnight_v1')) AND NOT EXISTS (SELECT 1 FROM fb_auto_task x WHERE x.page_id=fb_auto_task.page_id AND x.id<>fb_auto_task.id AND x.status='running')", (worker_id, lease, now, int(row["id"]), now)).rowcount
             if updated != 1:
                 conn.rollback(); return None
             conn.execute("UPDATE fb_auto_run SET status='running' WHERE id=?", (int(row["run_id"]),))

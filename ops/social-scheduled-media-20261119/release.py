@@ -599,6 +599,61 @@ def mirror():
     run("systemctl", "enable", "--now", fname + ".socket")
 
 
+def rollback(group):
+    cfg = read(CFG)
+    if group == "coordinator":
+        marker = Path("/run/pipeline-social-media-rollback")
+        with marker.open("x") as out:
+            out.write(str(os.getpid()))
+        try:
+
+            def pending_finished():
+                with sqlite3.connect(
+                    Path(cfg["db_path"]).as_uri() + "?mode=ro", uri=True
+                ) as c:
+                    return (
+                        c.execute(
+                            "SELECT count(*) FROM pipeline_media_gate WHERE phase='pending'"
+                        ).fetchone()[0]
+                        == 0
+                    )
+
+            wait(
+                pending_finished, 600, "media owners still acknowledging issued tickets"
+            )
+            switch(group, True)
+        finally:
+            marker.unlink(missing_ok=True)
+        return
+    if group in {"fb", "tt_auto", "x", "tag"}:
+        key = "x" if group == "tag" else group
+        paths = cfg["x_tag"]["paths"] if group == "tag" else cfg["paths"]
+        tables = {
+            "fb": [
+                ("fb:auto:", "fb_auto_task", "id"),
+                ("fb:video:", "fb_video_task", "task_id"),
+            ],
+            "tt_auto": [("tt:auto:", "tt_auto_task", "id")],
+            "x": [("x:queue:", "x_post_queue", "id")],
+        }[key]
+        with sqlite3.connect(Path(paths[key]).as_uri() + "?mode=ro", uri=True) as c:
+            if c.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='pipeline_native_media_decision'"
+            ).fetchone():
+                for prefix, table, id_col in tables:
+                    count = c.execute(
+                        f"""SELECT count(*) FROM {table} t JOIN pipeline_native_media_decision d
+                        ON d.source_key=?||t.{id_col} WHERE d.status='applied'
+                        AND t.status NOT IN ('published','synced','completed','failed','failed_without_retry','cancelled','canceled','skipped')""",
+                        (prefix,),
+                    ).fetchone()[0]
+                    if count:
+                        raise RuntimeError(
+                            f"{count} issued {group} decisions still need this owner; roll back coordinator first and retain this compatible reader"
+                        )
+    switch(group, True)
+
+
 if __name__ == "__main__":
     action = sys.argv[1]
     if action == "stage":
@@ -610,7 +665,9 @@ if __name__ == "__main__":
         mirror()
     elif action == "warm":
         warm_start(*sys.argv[2:4])
-    elif action in ("activate", "rollback"):
-        switch(sys.argv[2], action == "rollback")
+    elif action == "activate":
+        switch(sys.argv[2])
+    elif action == "rollback":
+        rollback(sys.argv[2])
     else:
         raise SystemExit("unsupported operation")

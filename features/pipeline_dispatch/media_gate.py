@@ -3,11 +3,13 @@
 import datetime as dt
 import json
 import uuid
+from pathlib import Path
 
 from . import media_decision
 
 PREPARERS = {("fb", "auto"), ("fb", "video"), ("x", "queue"), ("tt", "auto")}
 HOLD = "media_decision_pending"
+ROLLBACK_DRAIN = Path("/run/pipeline-social-media-rollback")
 
 
 def schema(c):
@@ -124,6 +126,8 @@ def allowed(c, row):
 def consider(c, row, now, *, due_only=False):
     """Called in the same BEGIN IMMEDIATE as claim/retirement."""
     if not allowed(c, row):
+        return False
+    if ROLLBACK_DRAIN.exists():
         return False
     key = row["source_key"]
     gate = c.execute(
