@@ -51,14 +51,20 @@ class FacebookTests(unittest.TestCase):
         from features.fb_auto_posts.repositories import RepositoryError
         config=dict(message_template='{{m_url}}',material_products=['Moboreels'],material_data_source=2,
             language='en',material_rule=dict(duration_min_seconds=1,duration_max_seconds=100),
-            drama_launch_window_days=7,hit_drama_publish=dict(catalog='moboreels',content_ids=['123','456'],by_language={'en':['123'],'id':['456']}))
+            drama_launch_window_days=7,hit_drama_publish=dict(catalog='moboreels',content_ids=['123','456','789'],by_language={'en':['123','789'],'id':['456']}))
         calls=[];repo=SimpleNamespace(mysql=SimpleNamespace(schema='ads',select=lambda sql,args:(calls.append((sql,args)) or [])),
             monotonic_fn=lambda:0,catalog_deadline_seconds=10,catalog_max_pages=5,candidate_limit=1)
         with patch('features.fb_video_publish.moboreels.institution_id',return_value='scope'):
             self.assertEqual(candidate_snapshot(repo,config).candidates,())
+            self.assertEqual(candidate_snapshot(repo,dict(config,language='ja')).candidates,())
+            self.assertEqual(len(calls),1)
+            candidate_snapshot(repo,dict(config,hit_drama_publish={},drama_launch_window_days=0))
         sql,args=calls[0]
-        self.assertLess(sql.index('d.story_id IN (%s)'),sql.index('LIMIT'))
-        self.assertIn('123',args);self.assertNotIn('456',args)
+        self.assertIn('s FORCE INDEX(idx_source_type_source_id)',sql)
+        self.assertIn('s.data_source_id IN (%s,%s) AND d.story_id IN (%s,%s)',sql)
+        self.assertEqual(args,('scope',2,'Moboreels','123','789','123','789','en',1,100,0,1000))
+        self.assertIn('s FORCE INDEX(PRIMARY)',calls[1][0])
+        self.assertNotIn('s.data_source_id IN',calls[1][0])
         for change in (dict(drama_rule={'spend_min':1}),dict(feedback_selection={'enabled':True}),dict(drama_rule={'resource_type_v2':['x']})):
             with self.assertRaises(RepositoryError):validate_rules(dict(config,**change))
 

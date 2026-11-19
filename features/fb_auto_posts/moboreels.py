@@ -80,13 +80,18 @@ def candidate_snapshot(repo, config):
     product_params=products if filter_products else ()
     language=str(config["language"])
     hit = config.get('hit_drama_publish') or {}
+    source_index = 'PRIMARY'
     target_sql, target_params = '', ()
     if hit:
         from features.hit_drama_target import content_ids
-        target_params = tuple(content_ids(hit, language))
-        if not target_params:
+        target_ids = tuple(content_ids(hit, language))
+        if not target_ids:
             return CandidateSnapshot((), (), ())
-        target_sql = ' AND d.story_id IN ('+','.join('%s' for _ in target_params)+')'
+        # Give the source index an explicit ID range as well as scoping the provider catalog.
+        source_index = 'idx_source_type_source_id'
+        slots = ','.join('%s' for _ in target_ids)
+        target_sql = f' AND s.data_source_id IN ({slots}) AND d.story_id IN ({slots})'
+        target_params = target_ids + target_ids
     language_ids={"zh-tw":2,"en":3,"es":4,"pt":5,"fr":6,"ru":7,"it":8,"ja":9,"ar":10,"id":11,"th":12,"vi":13,"ko":14,"tl":15,"de":16,"hi":17,"bn":18,"ms":21,"tr":22}
     source_language_sql="LOWER(TRIM(s.language))=%s"
     language_params=[language]
@@ -105,7 +110,7 @@ def candidate_snapshot(repo, config):
           SELECT CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                  s.url media_url,COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
                  LOWER(TRIM(s.language)) language,s.video_duration,d.story_name drama_name,d.introduce drama_description
-            FROM `{repo.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
+            FROM `{repo.mysql.schema}`.ads_custom_source s FORCE INDEX({source_index})
             JOIN `ads_ai`.cdreader_koc_drama d ON d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1
            WHERE s.data_source=%s{product_sql}{target_sql} AND s.type=2 AND s.is_delete=0
              AND {source_language_sql} AND s.video_duration>=%s AND s.video_duration<=%s
