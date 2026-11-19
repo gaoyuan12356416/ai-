@@ -45,8 +45,11 @@ class Templates:
                 sha, size = sha256_file(target)
                 return self.origin.upload(remote, target, sha, size, "image/png")
 
-    def random(self, recipe, assets, duration):
+    def random(self, recipe, assets, duration, *, canvas_size=(720, 1280)):
         from PIL import Image
+        width, height = canvas_size
+        sd = canvas_size != (720, 1280)
+        scale = f"scale={width}:{height}:flags=lanczos," if sd else ""
         paths = selected_asset_paths(recipe, assets)
         selected = recipe["assets"]
         apng = ["-map", "0:v:0", "-an", "-r", "30", "-pix_fmt", "rgba", "-c:v", "apng", "-threads", "2",
@@ -54,20 +57,23 @@ class Templates:
         def border(target):
             run_media(self.ffmpeg, ["-loop", "1", "-framerate", "30", "-i", paths["border"], "-c:v", "libvpx-vp9",
                 "-i", paths["opacity_video"], "-filter_complex",
-                "[0:v]format=rgba[b];[1:v]format=rgba[o];[b][o]overlay=shortest=1:format=auto,format=rgba[out]",
+                f"[0:v]{scale}format=rgba[b];[1:v]{scale}format=rgba[o];[b][o]overlay=shortest=1:format=auto,format=rgba[out]",
                 "-map", "[out]", "-an", "-r", "30", "-c:v", "apng", "-threads", "2", "-compression_level", "3",
                 "-plays", "0", "-f", "apng", "-y", target])
         def corners(target):
-            run_media(self.ffmpeg, ["-c:v", "libvpx-vp9", "-i", paths["corners"], *apng, target])
+            run_media(self.ffmpeg, ["-c:v", "libvpx-vp9", "-i", paths["corners"], *(["-vf", scale.rstrip(",")] if sd else []), *apng, target])
         def tint(target):
             with Image.open(paths["tint"]) as source:
                 layer = source.convert("RGBA")
+                if sd:
+                    layer = layer.resize(canvas_size, Image.Resampling.LANCZOS)
                 layer.putalpha(layer.getchannel("A").point(lambda v: round(v * recipe["tint_opacity_bp"] / 10000)))
                 layer.save(target)
-        urls = [self.cached("border-opacity", [selected[x]["sha256"] for x in ("border", "opacity_video")], "apng", border),
-                self.cached("corners", selected["corners"]["sha256"], "apng", corners),
-                self.cached("tint", [selected["tint"]["sha256"], recipe["tint_opacity_bp"]], "png", tint)]
-        return [watermark(url, duration) for url in urls]
+        suffix = f"-{width}x{height}" if sd else ""
+        urls = [self.cached("border-opacity" + suffix, [selected[x]["sha256"] for x in ("border", "opacity_video")], "apng", border),
+                self.cached("corners" + suffix, selected["corners"]["sha256"], "apng", corners),
+                self.cached("tint" + suffix, [selected["tint"]["sha256"], recipe["tint_opacity_bp"]], "png", tint)]
+        return [watermark(url, duration, width=width, height=height) for url in urls]
 
     def outro_labels(self, font, content_id, duration):
         from PIL import Image, ImageDraw, ImageFont

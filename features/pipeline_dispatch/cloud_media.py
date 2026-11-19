@@ -18,6 +18,9 @@ from .tt_profiles import PROFILE_SPECS, supported_profiles
 from features.fb_gpu.random_overlay import derive_recipe, load_asset_set, sha256_file
 
 
+from features.random_gpu.profiles import SD_PROFILES, base_profile, canvas as profile_canvas
+
+
 FB_PROFILE = "fb-random-overlay-ci-apng-h264-v1"
 X_RANDOM = "x-random-overlay-ci-apng-h264-v1"
 X_REPAIR = "x-h264-ci-720-duration-policy-v1"
@@ -54,7 +57,7 @@ class CloudExecutor(NodeExecutors):
         self.asset_hashes = {name: sha256_file(Path(config[name])) for name in ("font", "outro", "logo")}
         if any(value[0] != config[name + "_sha256"] for name, value in self.asset_hashes.items()):
             raise ExecutionError("cos_frozen_asset_changed")
-        self.formats = supported_profiles("cos") | {FB_PROFILE, X_RANDOM, X_REPAIR}
+        self.formats = supported_profiles("cos") | {FB_PROFILE, X_RANDOM, X_REPAIR, SD_PROFILES[FB_PROFILE], SD_PROFILES[X_RANDOM]}
 
     def capabilities(self, stage=None):
         if stage == "publish":
@@ -90,7 +93,7 @@ class CloudExecutor(NodeExecutors):
         from features.x_posts.random_template import validate_receipt
         channel = kind.split("_")[0]
         profile = request.get("expected_profile") or request.get("profile")
-        if profile not in self.formats or profile not in ({FB_PROFILE} if kind == "fb_prepare" else
+        if profile not in self.formats or base_profile(profile) not in ({FB_PROFILE} if kind == "fb_prepare" else
                  {X_RANDOM} if kind == "x_random" else {X_REPAIR} if kind == "x_repair" else supported_profiles("cos")):
             raise ExecutionError("cos_profile_mismatch")
         mode, codec = PROFILE_SPECS.get(profile, ("repair" if kind == "x_repair" else "random_overlay", "h264"))
@@ -150,7 +153,7 @@ class CloudExecutor(NodeExecutors):
                 actions.append(evidence)
                 return key
 
-            canvas = info.get("canvas", (720, 1280))
+            canvas = profile_canvas(profile) if mode == "random_overlay" else info.get("canvas", (720, 1280))
             bit_rate = None
             if mode == "repair":
                 rate = repair.output_rate_control(cap, duration)
@@ -162,10 +165,12 @@ class CloudExecutor(NodeExecutors):
                     raise ExecutionError("cos_frozen_catalog_changed")
                 recipe = derive_recipe(job_id=native_id, content_id=str(request["content_id"]), profile=profile,
                         source_url_sha256=hashlib.sha256(request["source_url"].encode()).hexdigest(), asset_set=self.assets)
-                params["Watermark"] = self.templates.random(recipe, self.assets, duration)
+                params["Watermark"] = self.templates.random(recipe, self.assets, duration, canvas_size=canvas)
                 receipt.update(random_overlay_recipe=recipe, recipe=recipe, execution_profile="ci-apng-watermark-v1",
                                applied_layers=["border", "opacity_video", "corners", "tint"],
                                assets={"asset_set_sha256": manifest, "selected": recipe["assets"]})
+                if not remote:
+                    receipt.update(source_sha256=sha, source_size=size)
                 if channel == "x":
                     receipt.update(queue_id=request["queue_id"], source_sha256=sha, source_size=size, asset_manifest_sha256=manifest)
             copy_from = None
@@ -225,7 +230,7 @@ class CloudExecutor(NodeExecutors):
             if channel == "tt":
                 contract = {"codec": codec, "profile": "main" if codec == "hevc" else "high",
                             "codec_tag": "hvc1" if codec == "hevc" else "avc1"}
-                checked = tt.validate_prepared_output(SimpleNamespace(media_mode=mode), final, output, cap, duration, video_contract=contract)
+                checked = tt.validate_prepared_output(SimpleNamespace(media_mode=mode, profile=profile), final, output, cap, duration, video_contract=contract)
                 receipt.update(media_mode=mode, transition="phone-match-0.9s" if mode in {"branded_preview","direct_outro"} else "none",
                          direct_post_eligible=mode != "branded_preview", brand_overlay_review_required=mode == "branded_preview",
                          source_trim_tail_seconds=trim, reused=False)
@@ -233,9 +238,9 @@ class CloudExecutor(NodeExecutors):
                 checked = repair.validate_output(final, output, canvas, cap, expected_duration=duration,
                            trim_applied=info["trim_applied"], max_duration_seconds=info["max_duration"])
             else:
-                if (video.get("codec_name"), video.get("profile"), video.get("pix_fmt"), video.get("width"), video.get("height")) != ("h264","High","yuv420p",720,1280):
+                if (video.get("codec_name"), video.get("profile"), video.get("pix_fmt"), video.get("width"), video.get("height")) != ("h264","High","yuv420p",*canvas):
                     raise ExecutionError("cos_output_video_invalid")
-                checked = {"duration": measured, "width": 720, "height": 1280}
+                checked = {"duration": measured, "width": canvas[0], "height": canvas[1], "codec": "h264"}
             dest = self.delivery.config.cos_prefix + "/" + channel + "/" + digest[:2] + "/" + digest + ".mp4"
             receipt.update(output_url=self.delivery.url(dest), output_size=byte_count, output_sha256=digest, probe=checked,
                         storage_key=dest, ci_actions=actions)

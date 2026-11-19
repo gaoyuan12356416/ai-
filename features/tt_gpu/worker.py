@@ -58,6 +58,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .credentials import CredentialEnvelopeError, decode_seal_key, open_access_token
+from features.random_gpu.profiles import base_profile, canvas
+
+
 from features.random_gpu.compositor import (
     BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay,
 )
@@ -2033,7 +2036,7 @@ def validate_prepared_output(config, payload, path, max_size, expected_duration,
     if (
         not video_contract_matches
         or str(video.get("pix_fmt") or "").lower() != "yuv420p"
-        or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+        or (width, height) != canvas(getattr(config, "profile", None))
         or abs(rate - 30.0) > 0.01
         or str(audio.get("codec_name") or "").lower() != "aac"
         or audio_profile != "lc"
@@ -2118,7 +2121,7 @@ def _delivery_video_contract(config):
         config.video_encoder,
         config.media_mode,
     )
-    if config.profile != expected_profile:
+    if base_profile(config.profile) != expected_profile:
         raise TTGPUError(
             "invalid_configuration",
             "video encoder and media mode require their exact media profile",
@@ -4117,7 +4120,7 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         or duration > float(config.max_duration_seconds)
         or not math.isfinite(frame_rate)
         or abs(frame_rate - 30.0) > 0.01
-        or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+        or (width, height) != canvas(getattr(config, "profile", None))
         or not video_contract_matches
         or str(probe.get("pixel_format") or "").lower() != "yuv420p"
         or str(probe.get("audio_codec") or "").lower() != "aac"

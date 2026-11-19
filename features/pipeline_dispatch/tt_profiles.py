@@ -6,6 +6,9 @@ from pathlib import Path
 
 # H264 profiles already distinguish the non-random media contract. CPU uses
 # libx264 explicitly; GPU uses the corresponding NVENC encoder.
+from features.random_gpu.profiles import SD_PROFILES
+
+
 PROFILE_SPECS = {
     "tt-post-hevc-720x1280-v2": ("branded_preview", "hevc"),
     "tt-post-h264-720x1280-v2": ("branded_preview", "h264"),
@@ -18,6 +21,8 @@ PROFILE_SPECS = {
     "tt-post-random-overlay-h264-720x1280-v3": ("random_overlay", "h264"),
     "tt-post-random-overlay-libx264-720x1280-v1": ("random_overlay", "cpu"),
 }
+
+PROFILE_SPECS.update({SD_PROFILES[old]: value for old, value in PROFILE_SPECS.items() if old in SD_PROFILES})
 
 
 class TTProfileError(ValueError):
