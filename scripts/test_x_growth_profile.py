@@ -174,10 +174,10 @@ class GrowthTests(unittest.TestCase):
         accounts=Path(self.tmp.name)/'accounts.sqlite3';posts=Path(self.tmp.name)/'posts.sqlite3';auto=Path(self.tmp.name)/'auto.sqlite3'
         db=sqlite3.connect(accounts)
         db.execute('CREATE TABLE x_authorized_account(id,x_user_id,status,publish_approved,deleted_at,drama_language,access_expires_at,owner_user_id,owner_tenant_key)')
-        db.execute("INSERT INTO x_authorized_account VALUES(1,'123','active',1,NULL,'en',?,'u','t')",((now+timedelta(hours=1)).isoformat(),));db.commit();db.close()
+        db.execute("INSERT INTO x_authorized_account VALUES(1,'123','active',1,NULL,'pt-br',?,'u','t')",((now+timedelta(hours=1)).isoformat(),));db.commit();db.close()
         db=sqlite3.connect(posts)
         db.execute('CREATE TABLE x_post_queue(id,account_id,content_id,material_language,preflight_duration,tag)')
-        db.execute("INSERT INTO x_post_queue VALUES(1,1,'drama','en',600,'')")
+        db.execute("INSERT INTO x_post_queue VALUES(1,1,'drama','pt',600,'')")
         db.execute('CREATE TABLE x_post_publish_log(x_post_id,published_at,x_media_id,queue_id,status,unknown_outcome)')
         db.execute("INSERT INTO x_post_publish_log VALUES('999',?,'media',1,'published',0)",(published,));db.commit();db.close()
         db=sqlite3.connect(auto)
@@ -202,6 +202,9 @@ class GrowthTests(unittest.TestCase):
             collector.collect();self.assertEqual(req.call_count,4)
         with store.connect() as db:
             self.assertEqual(db.execute('SELECT stage FROM post_snapshot').fetchone()[0],'72h')
+            profile=json.loads(db.execute('SELECT data_json FROM growth_profile WHERE account_id=1').fetchone()[0])
+            self.assertEqual(profile['themes'][0]['language'],'pt-br')
+            self.assertEqual(profile['mature_posts'],1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM mode_audit').fetchone()[0],1)
         self.assertEqual(store.selection_context({'id':1})['mode'],'growth')
 

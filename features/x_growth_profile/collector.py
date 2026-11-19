@@ -14,6 +14,7 @@ import urllib.request
 from . import store
 from .metrics import extract
 from .model import build_profiles, instant
+from features.x_tag_revenue.core import language as canonical_language
 
 ACCOUNT_DB='/var/lib/x-post-automation/accounts.sqlite3'
 STAGES=((6,'6h'),(24,'24h'),(72,'72h'),(168,'7d'))
@@ -116,14 +117,14 @@ def fill_metadata(accounts):
                 classification=drama.get('classification') or {}
                 if classification.get('themes'):
                     catalog[(classification.get('catalog') or drama.get('catalog') or 'dramawave',
-                             str(drama['content_id']),str(drama['language']))]=classification
+                             str(drama['content_id']),canonical_language(drama['language']))]=classification
             visit(node.get('children',[]))
     for profile in data.get('accounts',{}).values():
         visit(profile.get('audiences',[]))
     updated=0
     with store.connect(write=True) as db:
         for row in missing:
-            value=catalog.get((row['catalog'],row['content_id'],row['language']))
+            value=catalog.get((row['catalog'],row['content_id'],canonical_language(row['language'])))
             if value:
                 db.execute('UPDATE growth_post SET metadata_json=? WHERE post_id=?',(store.dumps(value),row['post_id']))
                 updated+=1
@@ -205,8 +206,12 @@ def collect(limit_accounts=None):
         posts=[]
         for row in db.execute("SELECT p.*,s.stage,s.observed_at,s.metrics_json FROM growth_post p JOIN post_snapshot s USING(post_id) WHERE s.stage='72h' AND p.published_at>=?",((now-timedelta(days=28)).isoformat(),)):
             p=dict(row)
-            if p['account_id'] in accounts and p['language']!=accounts[p['account_id']].get('drama_language','en'):
-                continue
+            if p['account_id'] in accounts:
+                account_language = accounts[p['account_id']].get('drama_language') or 'en'
+                if canonical_language(p['language']) != canonical_language(account_language):
+                    continue
+                # Persist the channel's spelling so its selector can consume the node.
+                p['language'] = account_language
             p['metrics']=json.loads(p.pop('metrics_json'));p['metadata']=json.loads(p.pop('metadata_json'));posts.append(p)
         followers=defaultdict(list)
         for row in db.execute('SELECT * FROM follower_snapshot WHERE observed_at>=?',((now-timedelta(days=15)).isoformat(),)):

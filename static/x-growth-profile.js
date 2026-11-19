@@ -35,11 +35,22 @@
     if (!profile) {
       body.append(node('p', '等待本账号的首批成长数据。新发布的帖子和粉丝快照将用于建立画像。'));
     } else {
+      const observed = profile.observations || {};
+      const stages = observed.stages || {};
       const metrics = node('div', null, 'xtr-stats');
-      metrics.append(node('span', '有效 72 小时样本 ' + number(profile.mature_posts) + ' 条'),
+      metrics.append(node('span', '近 28 天跟踪 ' + number(observed.tracked_posts || 0) + ' 条帖子'),
                      node('span', '近 7 天净增粉 ' + number(profile.followers?.net_7d)),
                      node('span', '前 7 天净增粉 ' + number(profile.followers?.previous_net_7d)));
       body.append(metrics);
+      const stageLabels = [['6h', '6 小时'], ['24h', '24 小时'], ['72h', '72 小时'], ['7d', '7 天']];
+      body.append(node('p', '已采集的帖子　' + stageLabels
+        .map(([key, label]) => label + ' ' + number(stages[key] || 0) + ' 条').join(' · ')));
+      body.append(node('p', '已满 72 小时 ' + number(observed.at_least_72h_posts || 0) + ' 条 · '
+        + (profile.mature_posts == null ? '等待首次评分' : '纳入评分 ' + number(profile.mature_posts) + ' 条')));
+      if (observed.measured_posts_24h > 0) {
+        body.append(node('p', '24 小时自然曝光 ' + number(observed.organic_impressions_24h)
+          + '（' + number(observed.measured_posts_24h) + ' 条有数据）'));
+      }
       if (profile.themes?.length) {
         const scroll = node('div', null, 'xtr-table-scroll');
         const table = node('table', null, 'xtr-table');
@@ -101,7 +112,10 @@
       const top = profile?.themes?.find(theme => theme.mature);
       button.append(node('span', top ? themeName(top.theme) : profile ? '题材样本积累中' : '等待首次采集', 'xtr-context'));
       if (profile) {
-        button.append(node('span', '有效样本 ' + number(profile.mature_posts) + ' · 周净增粉 ' + number(profile.followers?.net_7d), 'xtr-note'));
+        button.append(node('span', '跟踪 ' + number(profile.observations?.tracked_posts || 0)
+          + ' 条 · 72 小时采集 ' + number(profile.observations?.stages?.['72h'] || 0) + ' 条', 'xtr-note'));
+        button.append(node('span', '纳入评分 ' + number(profile.mature_posts)
+          + ' · 周净增粉 ' + number(profile.followers?.net_7d), 'xtr-note'));
       }
       button.append(node('span', '查看成长画像 ↗', 'xtr-more'));
       button.addEventListener('click', () => showProfile(id));
