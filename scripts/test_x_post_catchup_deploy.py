@@ -25,24 +25,15 @@ CATCHUP_ENV_EXAMPLE = (
 
 
 class XPostCatchupDeployTest(unittest.TestCase):
-    def test_auto_publish_status_follows_preserved_operating_metrics(self):
-        header = (
-            "<th>X账号</th><th>运营统计</th>"
-            '<th class="auto-publish-col">自动发布 Post</th>'
-        )
-        self.assertIn(header, ACCOUNT_LIST)
-        account_cell = '<td><div class="account">'
-        status_cell = '<td class="auto-publish-col"><span class="status '
-        self.assertLess(ACCOUNT_LIST.index(account_cell), ACCOUNT_LIST.index(status_cell))
+    def test_publishing_ports_follow_operating_metrics(self):
+        status_cell = '<td class="publishing-ports-col"'
+        self.assertIn('<th class="publishing-ports-col">活跃发布端口</th>', ACCOUNT_LIST)
         self.assertLess(ACCOUNT_LIST.index("<td>${operatingMetricsHtml(item)}</td>"), ACCOUNT_LIST.index(status_cell))
         self.assertLess(
             ACCOUNT_LIST.index(status_cell),
             ACCOUNT_LIST.index("<td>${metricsHtml(item)}</td>"),
         )
-        self.assertIn(
-            ".auto-publish-col { min-width:120px; white-space:nowrap; }",
-            ACCOUNT_LIST,
-        )
+        self.assertNotIn("data-pool-status-id", ACCOUNT_LIST)
 
     def test_navigation_uses_versioned_account_list_url(self):
         account_item = next(

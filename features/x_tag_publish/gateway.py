@@ -10,6 +10,7 @@ import re
 import sqlite3
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from .account_ports import account_publishing_ports, readonly
 from .policy import ROOT, lane_paths, portrait_snapshot, Decision
 from .transport import Error, rpc
 from features.x_tag_revenue.tags import localize_audit
@@ -154,12 +155,6 @@ def resolve_attribution(body):
     return resolver.resolve(body['queue_id'], body['log_id'])
 
 
-def readonly(path):
-    db = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=10)
-    db.row_factory = sqlite3.Row
-    return db
-
-
 def enrich_template_operators(result):
     """Read the stored human operator for only the returned template rows."""
     items = result.get('templates', result.get('items', []))
@@ -258,7 +253,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == '/healthz' and self.command == 'GET':
             return 200, dict(ok=True, service='x-tag-publish-gateway')
-        if path == POST + '/profiles/growth':
+        if path in (POST + '/profiles/growth', POST + '/account-publishing-ports'):
             if self.command != 'GET':
                 raise Error('method_not_allowed', '', 405)
             cookie = self.headers.get('Cookie', '')
@@ -266,6 +261,10 @@ class Handler(BaseHTTPRequestHandler):
             # Use the canonical account list so scope and deleted-account rules
             # stay identical to the page, even if those rules change.
             accounts = rpc('http://127.0.0.1:8787', '/api/admin/x-accounts', cookie=cookie)
+            if path == POST + '/account-publishing-ports':
+                paths = lane_paths()
+                return 200, account_publishing_ports(accounts['items'], paths['X_AUTO_POST_DB_PATH'],
+                                                     paths['X_POST_DB_PATH'])
             from features.x_growth_profile.listing import account_profiles
             return 200, dict(items=account_profiles(accounts['items']))
         if path == '/internal/x-tag/growth-origins' and self.command == 'POST':
