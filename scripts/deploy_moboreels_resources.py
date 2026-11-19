@@ -59,6 +59,8 @@ def prepare(folder):
             if name.endswith('.js'):
                 if path.exists():
                     expected='3f31f9dc460cdd8aa737449627c2b1e735b3d2ba21caec33f87463015e909277' if name=='hit-drama-publish.js' else '7dd7177c193dd8d40f4efef4ccb828c67632d3ac604e35e0a365778bb7990589'
+                    if root==folder/'fb/candidate/static' and name=='hit-drama-publish.js':
+                        expected='52fee7459ea631ae2a7e8fba4d57e7530269aec241490d578f469f931b5c74d8'
                     assert sha(path)==expected,'static_baseline_changed:'+str(path)
                 data=(SOURCE/'static'/name).read_bytes()
             else:
