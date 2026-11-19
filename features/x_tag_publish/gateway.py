@@ -160,6 +160,29 @@ def readonly(path):
     return db
 
 
+def enrich_template_operators(result):
+    """Read the stored human operator for only the returned template rows."""
+    items = result.get('templates', result.get('items', []))
+    if not items:
+        return result
+    ids = list(dict.fromkeys(int(item['id']) for item in items))
+    try:
+        with closing(readonly(lane_paths()['X_AUTO_POST_DB_PATH'])) as db:
+            rows = db.execute(
+                'SELECT id,created_by_name,created_by_user_id,updated_by_name,updated_by_user_id '
+                'FROM x_auto_template WHERE id IN (' + ','.join('?' for _ in ids) + ')', ids)
+            operators = {row['id']: dict(row) for row in rows}
+        for key in ('templates', 'items'):
+            for item in result.get(key, []):
+                row = operators.get(int(item['id']), {})
+                item['operator_name'] = (row.get('updated_by_name') or row.get('updated_by_user_id')
+                                         or row.get('created_by_name') or row.get('created_by_user_id') or '')
+    except (OSError, sqlite3.Error):
+        # Auxiliary metadata must not hide templates or suggest an invented operator.
+        result['operator_metadata_unavailable'] = True
+    return result
+
+
 def enrich_logs(result):
     paths = lane_paths()
     with closing(readonly(paths['X_POST_DB_PATH'])) as db, closing(readonly(paths['X_AUTO_POST_DB_PATH'])) as auto:
@@ -289,6 +312,8 @@ class Handler(BaseHTTPRequestHandler):
             target = path.replace(AUTO, OLD_AUTO, 1) + ('?' + parsed.query if parsed.query else '')
             result = rpc('http://127.0.0.1:18843', target, os.environ['X_AUTO_POST_INTERNAL_TOKEN'],
                          method=self.command, payload=body if self.command == 'POST' else None, timeout=120)
+            if self.command == 'GET' and path == AUTO + '/templates':
+                result = enrich_template_operators(result)
             return (202 if path.endswith('/run-now') else 200), result
         query = parse_qs(parsed.query, keep_blank_values=True)
         if any(len(v) != 1 for v in query.values()):

@@ -8,8 +8,9 @@
   <title>X 标签画像自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <link rel="stylesheet" href="/x-tag-auto-publish.css?v=20260814language1" />
-<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>
-<body>
+<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" />  <link rel="stylesheet" href="/x-tag-template-layout.css?v=20261119-1" />
+</head>
+<body class="template-list-page">
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
@@ -23,7 +24,7 @@
       <header class="topbar">
         <div class="title">
           <h1>X 标签画像自动发布模板</h1>
-          <p>为不同账号组合维护独立的选剧、选素材和发布时间规则。新模板默认停用，启用或手动执行前均需明确确认。</p>
+          <p>管理账号组合、选材规则和发布时间。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -43,14 +44,6 @@
       </section>
 
       <div id="pageRoot" class="hidden">
-        <section class="notice warning">
-          <div class="notice-mark">!</div>
-          <div>
-            <strong>这里创建的是隔离的 X 标签画像自动发布任务，不会改动现有素材池、短剧池或人工发布流程。</strong>
-            手动执行会为模板内每个账号立即创建一次真实发布任务；任务进入异步准备后不会因关闭模板而取消。
-          </div>
-        </section>
-
         <section class="stats" aria-label="模板统计">
           <article class="stat"><span>模板总数</span><strong id="totalCount">—</strong></article>
           <article class="stat"><span>已启用</span><strong id="enabledCount">—</strong></article>
@@ -104,11 +97,12 @@
                   <th>两层排序</th>
                   <th>下次执行</th>
                   <th>最近运行</th>
+                  <th title="最近编辑或启停模板的人员">操作人</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody id="templateRows">
-                <tr><td colspan="8" class="empty">正在加载模板…</td></tr>
+                <tr><td colspan="9" class="empty">正在加载模板…</td></tr>
               </tbody>
             </table>
           </div>
@@ -138,9 +132,8 @@
 
   <script src="/ui-topbar.js"></script>
   <script src="/quick-nav.js?v=97b22a40182f"></script>
-  <script src="/x-tag-publish-ui.js?v=12be9cf4bbeb"></script>
   <script src="/x-tag-auto-publish-common.js?v=20260814language1"></script>
-  <script src="/x-tag-auto-publish-templates.js?v=20261117-actions1"></script>
+  <script src="/x-tag-auto-publish-templates.js?v=20261119-1"></script>
   <script src="/hit-drama-publish.js?v=3f31f9dc460c"></script>
   <script src="/hit-material-publish.js?v=b69eebce6f0c"></script>
 <script defer src="/story-copy-settings.js?v=1.1" data-endpoint="x_tag_auto"></script>

@@ -1,0 +1,32 @@
+/* Scoped to the template list/editor; shared publishing pages keep their layout. */
+.template-list-page .title p { max-width: 680px; }
+.template-list-page .topbar { flex-wrap: wrap; }
+.template-list-page #story-copy-option { gap: 8px 14px !important; font-size: 13px !important; }
+.template-list-page #story-copy-option label { flex: 0 0 auto; white-space: nowrap; }
+.template-list-page #story-copy-option input[type="checkbox"] {
+  width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0; flex: 0 0 16px;
+}
+.template-list-page .filters { grid-template-columns: minmax(200px, 1fr) minmax(140px, 220px) auto auto; }
+.template-list-page table { min-width: 1210px; }
+.template-list-page th:last-child { width: 250px; }
+.template-list-page .template-actions { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; min-width: 230px; }
+.template-actions .button { white-space: nowrap; }
+.template-actions details { flex-basis: 100%; }
+.template-actions summary { display: inline-flex; align-items: center; gap: 5px; list-style: none; }
+.template-actions summary::-webkit-details-marker { display: none; }
+.template-actions summary::after { content: "⌄"; }
+.template-actions details[open] summary::after { content: "⌃"; }
+.template-action-options { display: grid; grid-template-columns: repeat(2, max-content); gap: 6px; margin-top: 8px; padding: 10px 0 2px; border-top: 1px solid var(--x-auto-line); }
+.account-metric-filters { display: grid; grid-template-columns: repeat(2, minmax(170px, 1fr)) minmax(130px, .7fr) auto; gap: 10px; align-items: end; margin: 12px 0; }
+.account-range { display: flex; align-items: center; gap: 7px; }
+.account-range input { min-width: 0; }
+.account-metric-values { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 5px; font-size: 12px; color: var(--x-auto-muted); font-variant-numeric: tabular-nums; }
+.account-metric-values span { display: inline; }
+#accountMetricsStatus, #accountResultCount { margin: 8px 0; }
+@media (max-width: 1400px) {
+  .account-metric-filters { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
+}
+@media (max-width: 620px) {
+  .template-list-page .filters, .account-metric-filters { grid-template-columns: 1fr; }
+  .template-list-page #story-copy-option { align-items: flex-start !important; }
+}

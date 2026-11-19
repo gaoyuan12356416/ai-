@@ -33,6 +33,7 @@
   const RESOURCE_TYPE_V2_VALUES = new Set(RESOURCE_TYPE_V2_OPTIONS.map(item => item.value));
   const state = {
     accounts: [],
+    accountMetrics: new Map(),
     selectedAccountIds: new Set(),
     selectedResourceTypes: new Set(),
     template: null,
@@ -121,12 +122,59 @@
     return ui.boolValue(item.enabled) || item.status === "enabled" ? "已启用" : "已停用";
   }
 
+  function optionalNumber(value) {
+    if (value == null || String(value).trim() === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function accountMetric(item, metric) {
+    const snapshot = state.accountMetrics.get(accountId(item));
+    if (metric === "revenue") return optionalNumber(snapshot?.operating_stats?.revenue_total_usd);
+    return optionalNumber(snapshot?.followers_count ?? snapshot?.public_metrics?.followers_count
+      ?? item.followers_count ?? item.public_metrics?.followers_count);
+  }
+
+  function metricRange(prefix) {
+    return ["Min", "Max"].map(suffix => optionalNumber(ui.byId(prefix + suffix).value));
+  }
+
+  function withinRange(value, range) {
+    const [min, max] = range;
+    if (min === null && max === null) return true;
+    return value !== null && (min === null || value >= min) && (max === null || value <= max);
+  }
+
+  async function loadAccountMetrics() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const payload = await ui.api("/api/admin/x-accounts", { signal: controller.signal });
+      state.accountMetrics = new Map(ui.readItems(payload, ["items", "accounts"]).map(item => [accountId(item), item]));
+      const meta = ui.objectValue(payload.operating_stats_meta);
+      const stamp = meta.generated_at_utc ? ` · 更新于 ${ui.formatTime(meta.generated_at_utc)}` : "";
+      const availability = meta.status === "stale" ? " · 收入缓存已过期，当前按上次数据筛选" : meta.status === "missing" ? " · 收入数据待刷新" : "";
+      ui.setText(ui.byId("accountMetricsStatus"), `沿用 X 账号列表的累计收入（美元）及粉丝量${stamp}${availability}。范围含边界，留空不限；无数据账号不参与对应区间筛选。`, "");
+    } catch (_) {
+      state.accountMetrics.clear();
+      ui.setText(ui.byId("accountMetricsStatus"), "收入和粉丝数据暂不可用，可继续选择账号；刷新页面后重试。无数据不按 0 处理。", "");
+    } finally {
+      clearTimeout(timeout);
+      renderAccounts();
+    }
+  }
+
   function renderAccounts() {
     const list = ui.byId("accountList");
     ui.clear(list);
     const query = ui.byId("accountSearch").value.trim().toLowerCase();
     const membershipFilter = ui.byId("accountMembershipFilter").value;
+    const revenueRange = metricRange("accountRevenue");
+    const followersRange = metricRange("accountFollowers");
+    const invalidRange = [revenueRange, followersRange].some(([min, max]) => min !== null && max !== null && min > max);
     const visible = state.accounts.filter(item => {
+      if (invalidRange || !withinRange(accountMetric(item, "revenue"), revenueRange)
+        || !withinRange(accountMetric(item, "followers"), followersRange)) return false;
       const subscription = accountSubscription(item);
       const membership = ["basic", "premium", "premium_plus"].includes(subscription)
         ? "member" : (subscription === "none" ? "non_member" : "unknown");
@@ -134,8 +182,18 @@
       if (!query) return true;
       return `${accountId(item)} ${item && item.x_user_id || ""} ${item && item.username ? "@" + item.username : ""} ${accountName(item)} ${accountSubscription(item)} ${accountLanguage(item)} ${item && item.status || ""}`.toLowerCase().includes(query);
     });
+    const [sortMetric, sortDirection] = ui.byId("accountMetricSort").value.split("_");
+    if (["revenue", "followers"].includes(sortMetric)) visible.sort((a, b) => {
+      const left = accountMetric(a, sortMetric), right = accountMetric(b, sortMetric);
+      if (left === null) return right === null ? 0 : 1;
+      if (right === null) return -1;
+      return (left - right) * (sortDirection === "asc" ? 1 : -1);
+    });
+    const visibleSelected = visible.filter(item => state.selectedAccountIds.has(accountId(item))).length;
+    ui.setText(ui.byId("accountResultCount"), invalidRange ? "最低值不能大于最高值，请调整筛选范围。"
+      : `显示 ${visible.length} / ${state.accounts.length} 个账号，当前结果已选 ${visibleSelected} 个；共已选 ${state.selectedAccountIds.size} 个（含筛选外账号）。`, "");
     if (!visible.length) {
-      list.appendChild(ui.element("div", { className: "empty", text: "没有匹配的账号。" }));
+      list.appendChild(ui.element("div", { className: "empty", text: invalidRange ? "请调整筛选范围。" : "没有匹配的账号。" }));
       updateSummary();
       updateAccountRefreshButton();
       return;
@@ -158,6 +216,11 @@
       const details = ui.element("div");
       details.appendChild(ui.element("strong", { text: accountName(item) }));
       details.appendChild(ui.element("span", { className: "secondary mono", text: id }));
+      const metrics = ui.element("div", { className: "account-metric-values" });
+      const revenue = accountMetric(item, "revenue"), followers = accountMetric(item, "followers");
+      metrics.appendChild(ui.element("span", { text: `累计收入 ${revenue === null ? "—" : "$" + revenue.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` }));
+      metrics.appendChild(ui.element("span", { text: `粉丝 ${followers === null ? "—" : followers.toLocaleString("zh-CN")}` }));
+      details.appendChild(metrics);
       const meta = ui.element("div");
       meta.appendChild(ui.element("span", {
         className: `language-chip${eligible ? "" : " badge warning"}`,
@@ -597,6 +660,16 @@
     });
     ui.byId("accountSearch").addEventListener("input", renderAccounts);
     ui.byId("accountMembershipFilter").addEventListener("change", renderAccounts);
+    ["accountRevenueMin", "accountRevenueMax", "accountFollowersMin", "accountFollowersMax"].forEach(id => {
+      ui.byId(id).addEventListener("input", renderAccounts);
+    });
+    ui.byId("accountMetricSort").addEventListener("change", renderAccounts);
+    ui.byId("resetAccountFilters").addEventListener("click", () => {
+      ["accountSearch", "accountRevenueMin", "accountRevenueMax", "accountFollowersMin", "accountFollowersMax"].forEach(id => { ui.byId(id).value = ""; });
+      ui.byId("accountMembershipFilter").value = "all";
+      ui.byId("accountMetricSort").value = "default";
+      renderAccounts();
+    });
     ui.byId("refreshAccountEligibility").addEventListener("click", () => void refreshAccountEligibility());
     ui.byId("accountList").addEventListener("change", event => {
       const checkbox = event.target.closest("input[data-account-id]");
@@ -604,7 +677,7 @@
       if (checkbox.checked) state.selectedAccountIds.add(checkbox.dataset.accountId);
       else state.selectedAccountIds.delete(checkbox.dataset.accountId);
       state.dirty = true;
-      updateSummary();
+      renderAccounts();
     });
     ui.byId("selectVisibleAccounts").addEventListener("click", () => {
       ui.byId("accountList").querySelectorAll("input[data-account-id]").forEach(checkbox => {
@@ -612,7 +685,7 @@
         state.selectedAccountIds.add(checkbox.dataset.accountId);
       });
       state.dirty = true;
-      updateSummary();
+      renderAccounts();
     });
     ui.byId("clearAccounts").addEventListener("click", () => {
       state.selectedAccountIds.clear();
@@ -635,12 +708,12 @@
     ui.byId("scheduleModeFixed").addEventListener("change", renderScheduleMode);
     ui.byId("scheduleModeRandom").addEventListener("change", renderScheduleMode);
     ui.byId("templateForm").addEventListener("input", event => {
-      if (event.target.matches("#accountSearch, #accountMembershipFilter")) return;
+      if (event.target.closest(".account-metric-filters") || event.target.matches("#accountSearch, #accountMembershipFilter")) return;
       state.dirty = true;
       updateSummary();
     });
     ui.byId("templateForm").addEventListener("change", event => {
-      if (event.target.matches("#accountSearch, #accountMembershipFilter")) return;
+      if (event.target.closest(".account-metric-filters") || event.target.matches("#accountSearch, #accountMembershipFilter")) return;
       state.dirty = true;
       updateSummary();
     });
@@ -658,6 +731,7 @@
       bindEvents();
       setTimeRows(["11:00"]);
       setResourceTypes([]);
+      void loadAccountMetrics();
       try {
         const [accountsResult, templateResult] = await Promise.all([loadAccounts(), loadTemplate()]);
         void accountsResult;

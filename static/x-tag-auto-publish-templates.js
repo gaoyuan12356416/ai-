@@ -127,7 +127,7 @@
     const body = ui.byId("templateRows");
     ui.clear(body);
     const row = ui.element("tr");
-    const cell = ui.element("td", { className: "empty", text: message, attributes: { colspan: "8" } });
+    const cell = ui.element("td", { className: "empty", text: message, attributes: { colspan: "9" } });
     row.appendChild(cell);
     body.appendChild(row);
   }
@@ -194,17 +194,23 @@
       if (lastTime) lastCell.appendChild(ui.element("div", { className: "secondary", text: ui.formatTime(lastTime) }));
       row.appendChild(lastCell);
 
+      ui.appendTextCell(row, item.operator_name || "—");
+
       const actionsCell = ui.element("td");
-      const actions = ui.element("div", { className: "row-actions" });
+      const actions = ui.element("div", { className: "template-actions" });
       actions.appendChild(actionButton("编辑", "edit", id));
-      actions.appendChild(actionButton("复制", "copy", id));
-      actions.appendChild(actionButton("删除", "delete", id, "danger"));
-      actions.appendChild(actionButton("预览", "preview", id));
-      actions.appendChild(actionButton(enabled ? "关闭" : "开启", enabled ? "disable" : "enable", id, enabled ? "danger" : ""));
-      actions.appendChild(actionButton("手动执行", "run", id, "primary"));
-      actions.appendChild(actionButton("爆款素材发布", "material", id, "primary"));
-      actions.appendChild(actionButton("爆款剧发布", "drama", id, "primary"));
       actions.appendChild(actionButton("记录", "runs", id));
+      actions.appendChild(actionButton("手动执行", "run", id, "primary"));
+      const more = ui.element("details");
+      more.appendChild(ui.element("summary", { className: "button small", text: "更多操作", attributes: { "aria-label": `${item.name || id} 更多操作` } }));
+      const options = ui.element("div", { className: "template-action-options" });
+      options.appendChild(actionButton(enabled ? "关闭" : "开启", enabled ? "disable" : "enable", id));
+      options.appendChild(actionButton("复制", "copy", id));
+      options.appendChild(actionButton("爆款素材发布", "material", id));
+      options.appendChild(actionButton("爆款剧发布", "drama", id));
+      options.appendChild(actionButton("删除", "delete", id, "danger"));
+      more.appendChild(options);
+      actions.appendChild(more);
       if (state.busyIds.has(id)) actions.querySelectorAll("button").forEach(button => { button.disabled = true; });
       actionsCell.appendChild(actions);
       row.appendChild(actionsCell);
@@ -233,6 +239,7 @@
       state.total = Math.max(0, ui.numberValue(payload.total || (payload.pagination && payload.pagination.total), state.templates.length));
       renderTemplates();
       renderStats(payload);
+      if (payload.operator_metadata_unavailable) ui.showToast("操作人信息暂不可用，请稍后刷新。", true);
       renderPager();
     } catch (error) {
       state.templates = [];
@@ -246,10 +253,6 @@
 
   function findTemplate(id) {
     return state.templates.find(item => templateId(item) === id) || null;
-  }
-
-  async function previewTemplate(item) {
-    await window.TagPublishUI.previewTemplate(item, ui);
   }
 
   async function mutateTemplate(item, action) {
@@ -339,10 +342,6 @@
     }
     if (action === "runs") {
       location.href = `/x-tag-auto-publish-runs.html?template_id=${encodeURIComponent(id)}`;
-      return;
-    }
-    if (action === "preview") {
-      await previewTemplate(item);
       return;
     }
     if (["copy", "delete", "enable", "disable", "run"].includes(action)) await mutateTemplate(item, action);

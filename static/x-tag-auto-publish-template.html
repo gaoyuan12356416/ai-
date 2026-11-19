@@ -8,7 +8,8 @@
   <title>编辑 X 标签画像自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <link rel="stylesheet" href="/x-tag-auto-publish.css?v=20261105membership1" />
-<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" /></head>
+<link rel="stylesheet" href="/x-tag-publish-ui.css?v=1" />  <link rel="stylesheet" href="/x-tag-template-layout.css?v=20261119-1" />
+</head>
 <body>
   <div class="app">
     <aside class="sidebar">
@@ -115,6 +116,20 @@
                   <button id="selectVisibleAccounts" class="button small" type="button">选择当前结果</button>
                   <button id="clearAccounts" class="button small" type="button">清空</button>
                 </div>
+                <div class="account-metric-filters">
+                  <div class="field">
+                    <label for="accountRevenueMin">累计收入（美元）</label>
+                    <div class="account-range"><input id="accountRevenueMin" type="number" step="0.01" placeholder="最低" aria-label="最低累计收入（美元）" /><span>至</span><input id="accountRevenueMax" type="number" step="0.01" placeholder="最高" aria-label="最高累计收入（美元）" /></div>
+                  </div>
+                  <div class="field">
+                    <label for="accountFollowersMin">粉丝量</label>
+                    <div class="account-range"><input id="accountFollowersMin" type="number" min="0" step="1" placeholder="最少" aria-label="最少粉丝量" /><span>至</span><input id="accountFollowersMax" type="number" min="0" step="1" placeholder="最多" aria-label="最多粉丝量" /></div>
+                  </div>
+                  <div class="field"><label for="accountMetricSort">账号排序</label><select id="accountMetricSort"><option value="default">默认排序</option><option value="revenue_desc">收入从高到低</option><option value="revenue_asc">收入从低到高</option><option value="followers_desc">粉丝从多到少</option><option value="followers_asc">粉丝从少到多</option></select></div>
+                  <button id="resetAccountFilters" class="button small" type="button">重置筛选</button>
+                </div>
+                <p id="accountMetricsStatus" class="helper" role="status">正在读取账号收入和粉丝数据…</p>
+                <p id="accountResultCount" class="helper" aria-live="polite"></p>
                 <div id="accountList" class="account-list" role="group" aria-label="选择 X 账号">
                   <div class="empty">正在加载账号…</div>
                 </div>
@@ -296,6 +311,6 @@
   <script src="/x-tag-auto-publish-common.js?v=20260814language1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/x-tag-auto-publish-template.js?v=20261118products1"></script>
+  <script src="/x-tag-auto-publish-template.js?v=20261119-1"></script>
 </body>
 </html>
