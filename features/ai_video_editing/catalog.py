@@ -399,6 +399,8 @@ class Catalog:
                     allow_redirects=False,
                 )
                 data = response.json()
+                if response.status_code == 200 and data.get("code") != 200 and "video cannot be empty" in str(data.get("msg", data.get("message", ""))).lower():
+                    raise Fault("catalog_no_episodes", "供应方暂无该剧分集视频，请选择其他剧目", 404)
                 check(
                     response.status_code == 200
                     and data.get("code") == 200
