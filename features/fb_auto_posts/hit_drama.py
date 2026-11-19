@@ -56,8 +56,14 @@ def publish_drama(runtime, template_id, actor, payload):
         raise StoreError('fb_auto_version_conflict', '模板已停用或版本已变化，请刷新后重试', 409)
     config = json.loads(template['config_json'])
     mysql = runtime.materials.mysql
+    from features.fb_video_publish.moboreels import contains
+    is_mobo = contains(config.get('message_template'))
     try:
-        target = resolve_target(mysql.select, mysql.schema, config['app_id'], request)
+        if is_mobo:
+            from features.moboreels_hit import resolve
+            target = resolve(mysql.select, mysql.schema, request)
+        else:
+            target = resolve_target(mysql.select, mysql.schema, config['app_id'], request)
     except ValueError as exc:
         raise StoreError('hit_drama_not_found', str(exc), 409) from None
     page_rows = runtime.pages.list_pages(config['group_ids'], is_admin=bool(template['scope_is_admin']),
@@ -69,8 +75,8 @@ def publish_drama(runtime, template_id, actor, payload):
         error.conflicts = target['skipped_pages']
         raise error
     from features.hit_publish import release_times, POLICY
-    target['release_times'] = release_times(mysql.select, mysql.schema, config['app_id'], content_ids(target))
-    target['timing_policy'] = POLICY
+    target['release_times'] = {} if is_mobo else release_times(mysql.select, mysql.schema, config['app_id'], content_ids(target))
+    target['timing_policy'] = '' if is_mobo else POLICY
     result = runtime.store.create_run(template_id, slot, 'manual', actor, runtime.pages, runtime.materials,
         expected_template_version=request['expected_version'], hit_drama=dict(target, request=request),
         max_publishable_pages=runtime.max_publishable_pages, max_jobs_per_slot=runtime.max_jobs_per_slot, max_daily_jobs=runtime.max_daily_jobs)
