@@ -130,6 +130,6 @@ def dispatch(handler, parsed, authorize, root=DEFAULT_ROOT):
         status, payload = response(data, meta, accounts, account_id, tag, path)
         return send(status, payload)
     except SnapshotExpired:
-        return send(409, {'message': '该画像版本已更新，请重新打开详情'})
+        return send(409, {'message': '该收入批次已更新，请点击“刷新列表”后重新查看画像'})
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
         return send(503, {'message': '标签收入画像暂不可用，请稍后重试；频道其他功能可正常使用'})

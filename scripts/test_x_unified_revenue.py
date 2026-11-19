@@ -136,6 +136,18 @@ class UnifiedRevenueTests(unittest.TestCase):
         self.assertEqual(VERSION, sent[0][1]['meta']['version'])
         self.assertEqual(303, sent[0][1]['items']['7']['revenue_cents'])
 
+    def test_expired_version_requests_list_refresh_not_reopen_loop(self):
+        sent = []
+        class Handler:
+            headers = {'Cookie': 'fixture'}
+            def send_json(self, status, payload):
+                sent.append((status, payload))
+        with patch.object(routes, 'read_snapshot', side_effect=routes.SnapshotExpired()):
+            routes.dispatch(Handler(), urlsplit('/api/x-channel-tag-revenue?version=' + VERSION),
+                            lambda cookie: (200, [{'id': 7, 'x_user_id': '123'}]), self.root)
+        self.assertEqual(409, sent[0][0])
+        self.assertIn('刷新列表', sent[0][1]['message'])
+
 
 if __name__ == '__main__':
     unittest.main()
