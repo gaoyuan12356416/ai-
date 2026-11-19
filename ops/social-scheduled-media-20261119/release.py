@@ -110,7 +110,7 @@ def clone(old, new):
         run("cp", "-al", str(old) + "/.", new, timeout=240)
 
 
-def stage(group, predecessor=None):
+def stage(group, predecessor=None, inverse_of=None):
     folder = ROOT / group
     folder.mkdir(exist_ok=True)
     unit, link, port_env = GROUPS[group]
@@ -170,6 +170,22 @@ def stage(group, predecessor=None):
     clone(prior, dest)
     checks = read(HERE / "manifest.json")[group]
     previous_checks = {}
+    original = None
+    if inverse_of:
+        prior_release = Path(inverse_of).resolve()
+        older = read(prior_release / group / "release.json")
+        inherited = read(prior.parent / "release.json")
+        if (
+            group != "fb"
+            or prior_release.parent != ROOT.parent
+            or inherited.get("candidate") != str(prior)
+            or inherited.get("previous") != older["candidate"]
+        ):
+            raise RuntimeError(
+                "active FB successor is not based on the selected release"
+            )
+        original = Path(older["previous"])
+        opts["inverse_of"] = str(prior_release)
     if predecessor:
         predecessor = Path(predecessor).resolve()
         if (
@@ -185,6 +201,19 @@ def stage(group, predecessor=None):
         rel = Path(name) if link else Path(name).name
         live = prior / rel
         actual = blob(live.read_bytes()) if live.is_file() else None
+        if original:
+            before = original / rel
+            if (
+                actual != entry["after"]
+                or (blob(before.read_bytes()) if before.is_file() else None)
+                != entry["before"]
+            ):
+                raise RuntimeError("overlapping successor change: " + name)
+            if before.is_file():
+                atomic(dest / rel, before.read_bytes())
+            else:
+                (dest / rel).unlink(missing_ok=True)
+            continue
         if actual != previous_checks.get(name, {}).get("after", entry["before"]):
             raise RuntimeError("current source drift: " + group + " " + name)
         content = (PKG / entry["file"]).read_bytes()
@@ -221,6 +250,14 @@ def stage(group, predecessor=None):
         + "\n",
         0o700,
     )
+    if original:
+        atomic(
+            folder / "revert-scheduled-media.sh",
+            "#!/bin/sh\nset -eu\nexec /usr/bin/python3 "
+            + shlex.quote(str(__file__))
+            + " apply-inverse fb\n",
+            0o700,
+        )
     return meta
 
 
@@ -719,8 +756,12 @@ def mirror():
     run("systemctl", "enable", "--now", fname + ".socket")
 
 
-def rollback(group):
+def rollback(group, inverse=False):
     cfg = read(CFG)
+    if inverse and (
+        group != "fb" or not read(ROOT / group / "release.json").get("inverse_of")
+    ):
+        raise RuntimeError("no staged FB inverse")
     if group == "coordinator":
         marker = Path("/run/pipeline-social-media-rollback")
         with marker.open("x") as out:
@@ -771,7 +812,7 @@ def rollback(group):
                         raise RuntimeError(
                             f"{count} issued {group} decisions still need this owner; roll back coordinator first and retain this compatible reader"
                         )
-    switch(group, True)
+    switch(group, not inverse)
 
 
 if __name__ == "__main__":
@@ -781,6 +822,10 @@ if __name__ == "__main__":
             stage(group)
     elif action == "stage-next":
         stage(sys.argv[2], sys.argv[3])
+    elif action == "stage-inverse":
+        stage(sys.argv[2], inverse_of=sys.argv[3])
+    elif action == "apply-inverse":
+        rollback(sys.argv[2], inverse=True)
     elif action == "refresh-timing":
         refresh_timing()
     elif action == "backup":
