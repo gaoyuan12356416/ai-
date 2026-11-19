@@ -6,7 +6,7 @@
   function parseIDs(value){return [...new Set(String(value).split(/[\s,，;；]+/).filter(Boolean))];}
   function https(value){try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password?u.href:'';}catch(_){return '';}}
   function csvCell(value){const s=String(value==null?'':value);return '"'+(/^[=+@\-\t\r]/.test(s)?"'"+s:s).replace(/"/g,'""')+'"';}
-  async function copyResourceIDs(ids){
+  async function copyIDs(ids){
     const value=ids.join('\n');
     try{await navigator.clipboard.writeText(value);return;}catch(_){}
     const input=root.document.createElement('textarea'),previous=root.document.activeElement;
@@ -58,13 +58,19 @@
     const recommendations=mode==='recommendations', activeKey=recommendations?'moboreelsRecommendations':'moboreelsMediaAccounts';
     let auth={},allowed=false,page=1,total=0,rows=[],preview=[],timer=null,sequence=0,controller=null,busy=false,exportDate='',loadedQuery=null,copying=false,resourceError='';
     const notice=$('notice'),table=$('rows'),filter=$('filters');
-    function showError(e){notice.textContent=e.message||String(e);notice.classList.remove('hidden');if(e.status===401||e.status===403){allowed=false;table.innerHTML='';rows=[];clearTimeout(timer);$('controls').disabled=true;if($('copyIDsBtn'))$('copyIDsBtn').disabled=true;doc.querySelectorAll('dialog[open]').forEach(d=>d.close());}}
+    const copyResourceButton=$('copyIDsBtn'),copyStoryButton=$('copyStoryIDsBtn');
+    function updateCopyButtons(){
+      const disabled=!allowed||!loadedQuery||!total||copying;
+      if(copyResourceButton)copyResourceButton.disabled=disabled||!!resourceError;
+      if(copyStoryButton)copyStoryButton.disabled=disabled;
+    }
+    function showError(e){notice.textContent=e.message||String(e);notice.classList.remove('hidden');if(e.status===401||e.status===403){allowed=false;table.innerHTML='';rows=[];clearTimeout(timer);$('controls').disabled=true;updateCopyButtons();doc.querySelectorAll('dialog[open]').forEach(d=>d.close());}}
     function query(){const q=new URLSearchParams(new FormData(filter));q.set('page_index',page);return q;}
     function nav(){if(root.UiTopbar)root.UiTopbar.render({auth,userCard:$('userCard'),authButton:$('loginBtn')});if(root.QuickNav)root.QuickNav.render({container:$('quickNav'),activeKey,auth,onNavigate:item=>{if(item.href)location.assign(item.href);}}).catch(()=>{});}
     function choices(select,values){const previous=select.value;select.innerHTML='<option value="">全部</option>'+values.map(([value,label])=>`<option value="${escape(value)}">${escape(label)}</option>`).join('');select.value=previous;}
     async function load(refresh=false){
       if(!allowed)return;clearTimeout(timer);if(controller)controller.abort();controller=new AbortController();const seq=++sequence;
-      const params=query();if(refresh&&recommendations)params.set('refresh','1');$('refreshBtn').disabled=true;table.setAttribute('aria-busy','true');if(recommendations){$('exportBtn').disabled=true;$('copyIDsBtn').disabled=true;$('copyFeedback').textContent='';loadedQuery=null;copying=false;}
+      const params=query();if(refresh&&recommendations)params.set('refresh','1');$('refreshBtn').disabled=true;table.setAttribute('aria-busy','true');if(recommendations){$('exportBtn').disabled=true;$('copyFeedback').textContent='';loadedQuery=null;copying=false;updateCopyButtons();}
       try{
         const data=await request(`${API}/${recommendations?'recommendations':'media-accounts'}?${params}`,{signal:controller.signal});
         if(seq!==sequence||!allowed)return;rows=data.list;total=data.total;notice.classList.add('hidden');
@@ -73,7 +79,7 @@
         $('prevPage').disabled=page<=1;$('nextPage').disabled=page*50>=total;
         if(recommendations){
           exportDate=data.query_date||$('queryDate').value;$('exportBtn').disabled=false;
-          loadedQuery=new URLSearchParams(params);loadedQuery.delete('refresh');resourceError=data.resource_mapping_error||'';$('copyIDsBtn').disabled=!total||!!resourceError;$('copyFeedback').textContent=resourceError;
+          loadedQuery=new URLSearchParams(params);loadedQuery.delete('refresh');resourceError=data.resource_mapping_error||'';updateCopyButtons();$('copyFeedback').textContent=resourceError;
           $('snapshotTime').textContent=`数据获取：${time(data.fetched_at)}（北京时间）；统计基于所选日期完整推荐列表，共 ${data.source_total} 条。`;
           $('summary').innerHTML=Object.entries(data.summary.grades).map(([k,v])=>`<span class="stat-chip">${escape(k)} <strong>${v}</strong></span>`).join('')+'<span class="muted">'+Object.entries(data.summary.languages).map(([k,v])=>`${escape(k)} ${v}`).join(' · ')+'</span>';
           choices($('languageFilter'),data.languages);choices($('gradeFilter'),Object.keys(data.summary.grades).filter(v=>v!=='未分级').map(v=>[v,v]));
@@ -86,38 +92,50 @@
     doc.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(!doc.hidden&&allowed&&!recommendations)load();});root.addEventListener('pagehide',()=>{clearTimeout(timer);if(controller)controller.abort();});
     doc.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
     if(recommendations){
-      const copyButton=$('copyIDsBtn'),copyFeedback=$('copyFeedback');
-      async function copyRecommendations(singleID){
-        if(!allowed||!loadedQuery||copying||!total||resourceError)return;
-        copying=true;copyButton.disabled=true;const seq=sequence,expectedTotal=total;
-        copyFeedback.textContent='正在复制资源 ID…';
+      const copyFeedback=$('copyFeedback');
+      async function copyRecommendations(field,singleID){
+        const isResource=field==='resource_id';
+        const button=isResource?copyResourceButton:copyStoryButton;
+        if(button.disabled)return;
+        const label=isResource?'资源 ID':'剧 ID';
+        const missingReason=isResource?'未匹配资源 ID':'缺少剧 ID';
+        const seq=sequence,expectedTotal=total;
+        copying=true;
+        updateCopyButtons();
+        copyFeedback.textContent=`正在复制${label}…`;
         try{
-          let ids,missing=0;
-          if(singleID!==undefined){ids=[singleID];}
-          else if(rows.length===total){ids=rows.map(r=>r.resource_id||'');}
+          let values;
+          if(singleID!==undefined){values=[singleID];}
+          else if(rows.length===expectedTotal){values=rows.map(row=>row[field]);}
           else{
-            const params=new URLSearchParams(loadedQuery),all=[];params.set('page_size','100');
+            const params=new URLSearchParams(loadedQuery);
+            params.set('page_size','100');
+            values=[];
             let snapshot=null;
-            for(let index=1;all.length<expectedTotal;index++){
+            for(let index=1;values.length<expectedTotal;index++){
               params.set('page_index',index);
               const data=await request(`${API}/recommendations?${params}`,{signal:controller.signal});
               if(seq!==sequence||!allowed)return;
-              if(data.resource_mapping_error)throw new Error(data.resource_mapping_error);
-              if(data.total!==expectedTotal||data.list.length!==Math.min(100,expectedTotal-all.length)||(snapshot!==null&&data.fetched_at!==snapshot))throw new Error('推荐列表已更新，请重新查询后复制。');
-              snapshot=data.fetched_at;all.push(...data.list.map(r=>r.resource_id||''));
+              if(isResource&&data.resource_mapping_error)throw new Error(data.resource_mapping_error);
+              if(data.total!==expectedTotal||data.list.length!==Math.min(100,expectedTotal-values.length)||(snapshot!==null&&data.fetched_at!==snapshot))throw new Error('推荐列表已更新，请重新查询后复制。');
+              snapshot=data.fetched_at;
+              values.push(...data.list.map(row=>row[field]));
             }
-            ids=all;
           }
-          missing=ids.filter(id=>!id).length;ids=[...new Set(ids.filter(Boolean))];
-          if(!ids.length)throw new Error('当前推荐未匹配到资源 ID，无法复制。');
+          const present=values.filter(Boolean),ids=[...new Set(present)];
+          const missing=values.length-present.length;
+          if(!ids.length)throw new Error(`当前推荐${missingReason}，无法复制。`);
           if(seq!==sequence||!allowed)return;
-          await copyResourceIDs(ids);
-          if(seq===sequence&&allowed)copyFeedback.textContent=singleID!==undefined?`已复制资源 ID：${singleID}`:`已复制 ${ids.length} 个资源 ID（当前筛选全部结果，去重后每行一个）。${missing?`另有 ${missing} 条推荐未匹配资源 ID，已跳过。`:''}`;
+          await copyIDs(ids);
+          if(seq!==sequence||!allowed)return;
+          copyFeedback.textContent=singleID!==undefined?`已复制${label}：${singleID}`:`已复制 ${ids.length} 个${label}（当前筛选全部结果，去重后每行一个）。`;
+          if(missing)copyFeedback.textContent+=`另有 ${missing} 条推荐${missingReason}，已跳过。`;
         }catch(e){if(e.name!=='AbortError'&&seq===sequence){copyFeedback.textContent=e.message||'复制失败，请重试。';if(e.status===401||e.status===403)showError(e);}}
-        finally{if(seq===sequence){copying=false;copyButton.disabled=!allowed||!loadedQuery||!total||!!resourceError;}}
+        finally{if(seq===sequence){copying=false;updateCopyButtons();}}
       }
-      copyButton.onclick=()=>copyRecommendations();
-      table.addEventListener('click',event=>{const button=event.target.closest('[data-copy-resource-id]');if(button)copyRecommendations(button.dataset.copyResourceId);});
+      copyResourceButton.onclick=()=>copyRecommendations('resource_id');
+      if(copyStoryButton)copyStoryButton.onclick=()=>copyRecommendations('story_id');
+      table.addEventListener('click',event=>{const button=event.target.closest('[data-copy-resource-id]');if(button)copyRecommendations('resource_id',button.dataset.copyResourceId);});
       $('queryDate').value=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());$('queryDate').max=$('queryDate').value;
       $('exportBtn').onclick=()=>{const data=[['剧目ID','资源ID','名称','语言','推荐等级','推荐理由','推荐备注','标签','推荐日期'],...rows.map(r=>[r.story_id,r.resource_id,r.story_name,r.language_name,r.recommend_grade,r.recommend_reason,r.recommend_remark,Array.isArray(r.tags)?r.tags.join(','):r.tags,r.recommend_time])];const blob=new Blob(['\ufeff'+data.map(r=>r.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=doc.createElement('a');a.href=url;a.download=`Moboreels推荐-${exportDate}-第${page}页.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
     }else{
