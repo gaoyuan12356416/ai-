@@ -134,6 +134,57 @@ class DecisionTests(unittest.TestCase):
             )
         )
 
+    def test_fb_release_timing_preserves_preparation_on_the_previous_day(self):
+        adapter = LedgerAdapter(LedgerSpec("fb", "auto", "", ""), driver=object())
+        start, retry, release = (
+            "2026-11-18T16:56:02Z",
+            "2026-11-19T01:00:00Z",
+            "2026-11-19T16:00:00Z",
+        )
+        row = dict(
+            id=1,
+            status="planned",
+            page_id="1",
+            account_id="2",
+            created_at=start,
+            scheduled_at=release,
+            _media_publish_at=release,
+            schedule_policy="target_midnight_v1",
+            selection_json={
+                "hit_publish_timing": {
+                    "prepare_at_utc": start,
+                    "publish_at_utc": release,
+                }
+            },
+        )
+        offer = adapter.project(row, self.now)
+        self.assertEqual(offer["scheduled_at"], start)
+        self.assertEqual(offer["media_publish_at"], "2026-11-19T16:00:00.000+00:00")
+        self.assertEqual(
+            adapter.project(dict(row, next_prepare_at_utc=retry), self.now)[
+                "scheduled_at"
+            ],
+            retry,
+        )
+        row["selection_json"]["hit_publish_timing"]["publish_at_utc"] = retry
+        self.assertEqual(adapter.project(row, self.now)["scheduled_at"], release)
+
+    def test_x_preparation_open_time_is_independent_of_parent_appointment(self):
+        adapter = LedgerAdapter(LedgerSpec("x", "queue", "", ""), driver=object())
+        row = dict(
+            id=7,
+            status="queued",
+            account_id=3,
+            random_template_enabled=1,
+            material_url="https://example.org/m.mp4",
+            scheduled_at="2026-11-18T16:00:00Z",
+            _media_publish_at="2026-11-19T08:00:00Z",
+        )
+        offer = adapter.project(row, self.now)
+        self.assertEqual(offer["stage"], "prepare")
+        self.assertEqual(offer["scheduled_at"], row["scheduled_at"])
+        self.assertEqual(offer["media_publish_at"], "2026-11-19T08:00:00.000+00:00")
+
     def test_committed_decision_lost_ack_reuses_ticket_before_creating_publish(self):
         job = self.store.offer(self.base)
         media_gate.sweep(self.store)

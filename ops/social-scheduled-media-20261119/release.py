@@ -110,7 +110,7 @@ def clone(old, new):
         run("cp", "-al", str(old) + "/.", new, timeout=240)
 
 
-def stage(group):
+def stage(group, predecessor=None):
     folder = ROOT / group
     folder.mkdir(exist_ok=True)
     unit, link, port_env = GROUPS[group]
@@ -169,11 +169,23 @@ def stage(group):
         }
     clone(prior, dest)
     checks = read(HERE / "manifest.json")[group]
+    previous_checks = {}
+    if predecessor:
+        predecessor = Path(predecessor).resolve()
+        if (
+            predecessor.parent != ROOT.parent
+            or not link
+            or Path(read(predecessor / group / "release.json")["candidate"]) != prior
+        ):
+            raise RuntimeError("predecessor is not the active release")
+        previous_checks = read(
+            predecessor / "package" / HERE.relative_to(PKG) / "manifest.json"
+        )[group]
     for name, entry in checks.items():
         rel = Path(name) if link else Path(name).name
         live = prior / rel
         actual = blob(live.read_bytes()) if live.is_file() else None
-        if actual != entry["before"]:
+        if actual != previous_checks.get(name, {}).get("after", entry["before"]):
             raise RuntimeError("current source drift: " + group + " " + name)
         content = (PKG / entry["file"]).read_bytes()
         if blob(content) != entry["after"]:
@@ -573,6 +585,55 @@ def supply_original(previous):
         print(group, "dependency verified", flush=True)
 
 
+def refresh_timing():
+    """Reproject existing unclaimed FB release-timed offers from their native rows."""
+    m = read(ROOT / "coordinator/release.json")
+    p = proc(m["unit"])
+    if (p / "cwd").resolve() != Path(m["candidate"]):
+        raise RuntimeError("coordinator release changed")
+    sys.path.insert(0, m["candidate"])
+    from contextlib import closing
+    from features.pipeline_dispatch.core import DispatchStore, stamp
+    from features.pipeline_dispatch.owners import OwnerResolver
+    from features.pipeline_dispatch.service import build_registry
+
+    cfg = read(CFG)
+    env = dict(
+        v.split("=", 1)
+        for v in (p / "environ").read_bytes().decode().split(chr(0))
+        if "=" in v
+    )
+    for driver in cfg["drivers"]:
+        key = driver["token_env"]
+        os.environ[key] = env[key]
+    adapter = build_registry(cfg).adapters[("fb", "auto")]
+    owners = OwnerResolver(cfg["paths"].get("youtube"))
+    store = DispatchStore(
+        cfg["db_path"], capability_exclusions=cfg.get("node_capability_exclusions")
+    )
+    with closing(store.connect()) as c:
+        rows = c.execute("""SELECT source_id,scheduled_at FROM pipeline_job WHERE channel='fb' AND family='auto'
+            AND stage='prepare' AND status IN ('queued','ready') AND generation=0 AND hold_reason=''
+            AND external_intent=0 AND claim_hash='' AND canonical_receipt=''""").fetchall()
+    refreshed = 0
+    for row in rows:
+        native = adapter.read(row["source_id"])
+        if not native:
+            continue
+        offer = adapter.project(native)
+        if (
+            offer["stage"] == "prepare"
+            and offer["status"] in ("queued", "ready")
+            and stamp(offer["scheduled_at"]) < row["scheduled_at"]
+        ):
+            for resolved in owners.resolve([offer]):
+                store.offer(resolved)
+                refreshed += 1
+    result = {"observed": len(rows), "refreshed": refreshed}
+    dump(ROOT / "timing-refresh.json", result)
+    print(result, flush=True)
+
+
 def backup():
     cfg = read(CFG)
     out = ROOT / "ledger-backup"
@@ -718,6 +779,10 @@ if __name__ == "__main__":
     if action == "stage":
         for group in sys.argv[2:] or GROUPS:
             stage(group)
+    elif action == "stage-next":
+        stage(sys.argv[2], sys.argv[3])
+    elif action == "refresh-timing":
+        refresh_timing()
     elif action == "backup":
         backup()
     elif action == "mirror":

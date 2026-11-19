@@ -565,13 +565,23 @@ class LedgerAdapter:
                 source_revision = str(version) + ":" + str(body.get("generation_retry_id") or "")
         actual_publish = row.get("_media_publish_at") or row.get("scheduled_at")
         publish_at = stamp(actual_publish) if actual_publish else ""
-        eligible_at = publish_at
+        eligible_at = stamp(row["scheduled_at"]) if stage == "prepare" and row.get("scheduled_at") else publish_at
         if stage == "prepare" and not terminal and not review_hold:
             created_at = row.get("origin_created_at") or row.get("created_at_utc") or row.get("created_at")
             created_at = stamp(created_at) if created_at else publish_at
             if row.get("schedule_policy") == TARGET_RANDOM_POLICY and publish_at:
                 day = local_day(datetime.fromisoformat(publish_at.replace("Z", "+00:00")))
                 eligible_at = max(created_at, utc_at(day))
+                if (spec.channel, spec.family) == ("fb", "auto"):
+                    # A release-timed hit freezes its own preparation window,
+                    # which can open before midnight of the publication day.
+                    timing = obj(obj(row.get("selection_json")).get("hit_publish_timing"))
+                    if timing.get("prepare_at_utc") and timing.get("publish_at_utc"):
+                        try:
+                            if stamp(timing["publish_at_utc"]) == publish_at:
+                                eligible_at = max(created_at, stamp(timing["prepare_at_utc"]))
+                        except (TypeError, ValueError, AdapterError):
+                            pass
                 for field in ("next_prepare_at_utc", "prepare_retry_at", "next_attempt_at_utc"):
                     if row.get(field):
                         eligible_at = max(eligible_at, stamp(row[field]))
