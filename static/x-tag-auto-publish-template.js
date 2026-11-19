@@ -237,7 +237,6 @@
       metrics.appendChild(ui.element("span", { text: `累计收入 ${revenue === null ? "—" : "$" + revenue.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` }));
       metrics.appendChild(ui.element("span", { text: `粉丝 ${followers === null ? "—" : followers.toLocaleString("zh-CN")}` }));
       details.appendChild(metrics);
-      if (window.XGrowthProfile) details.appendChild(window.XGrowthProfile.controls(item));
       const meta = ui.element("div");
       meta.appendChild(ui.element("span", {
         className: `language-chip${eligible ? "" : " badge warning"}`,
@@ -352,6 +351,7 @@
     state.version = Math.max(0, ui.numberValue(state.template.version || state.template.current_version, 0));
     setValue("templateName", state.template.name);
     setValue("platform", configValue("platform", 0), "0");
+    setValue("profileModel", configValue("profile_model", "revenue"), "revenue");
     setValue("metricWindowDays", configValue("metric_window_days", 7), "7");
     setValue("bodyTemplate", configValue("body_template", ""));
     document.getElementById("randomTemplateEnabled").checked = configValue("random_template_enabled", false) === true;
@@ -411,6 +411,7 @@
   }
 
   function updateSummary() {
+    ui.setText(ui.byId("summaryProfileModel"), ui.byId("profileModel").selectedOptions[0]?.textContent || "收入画像");
     const count = state.selectedAccountIds.size;
     ui.setText(ui.byId("selectedAccountCount"), `已选 ${count} 个`, "");
     ui.setText(ui.byId("summaryVersion"), state.version ? `v${state.version}` : "新模板", "");
@@ -509,6 +510,7 @@
       account_ids: Array.from(state.selectedAccountIds),
       material_products: window.MaterialProductPicker.read(),
       body_template: bodyTemplate,
+      profile_model: ui.byId("profileModel").value,
       random_template_enabled: document.getElementById("randomTemplateEnabled").checked,
       metric_window_days: metricWindowDays,
       drama_launch_window_days: launchWindow,

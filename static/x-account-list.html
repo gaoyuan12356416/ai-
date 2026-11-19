@@ -132,7 +132,7 @@
 
         <section class="operating-summary" aria-label="X API 余额与统计更新时间">
           <article class="stat"><div class="stat-actions"><span>X API 实时可用余额（USD）</span><button id="refreshCredits" class="button small" type="button">刷新余额</button></div><strong id="apiCreditsBalance">—</strong><div id="apiCreditsDetail" class="stat-note" aria-live="polite">正在查询当前 API 余额…</div></article>
-          <article class="stat"><span>发布与收入统计更新时间</span><strong id="statsCacheStatus">尚未读取</strong><div id="statsCacheDetail" class="cache-state"></div><div class="stat-note">运营统计与画像每小时同步更新；收入按 UTC 日期统计至前一个完整日，Post / Repost 昨日计数按北京时间。刷新列表读取同一批完整结果。</div></article>
+          <article class="stat"><span>发布与收入统计更新时间</span><strong id="statsCacheStatus">尚未读取</strong><div id="statsCacheDetail" class="cache-state"></div><div class="stat-note">运营统计与收入画像每小时同步更新；收入按 UTC 日期统计至前一个完整日，Post / Repost 昨日计数按北京时间。刷新列表读取同一批完整结果。</div></article>
         </section>
 
         <section class="panel">
@@ -164,8 +164,8 @@
           <div id="publishingNotice" class="subtle" role="status" hidden></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>运营统计</th><th class="xtr-col">受众方向<small>占频道收入</small></th><th class="xtr-col xtr-col-theme">题材<small>主要受众内</small></th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>后台状态</th><th class="pool-status-col">素材池状态</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="11" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th>运营统计</th><th class="xtr-col">收入画像<small>受众方向 · 占频道收入</small></th><th class="xtr-col xtr-col-theme">收入画像<small>题材 · 主要受众内</small></th><th class="xtr-col">成长画像<small>题材表现 · 净增粉</small></th><th class="auto-publish-col">自动发布 Post</th><th class="drama-language-col">剧语言</th><th class="publish-approval-col">允许发布</th><th>公众数据</th><th>后台状态</th><th class="pool-status-col">素材池状态</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="12" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -175,6 +175,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
+  <script src="/x-growth-profile.js?v=20261119-account-models"></script>
   <script src="/x-video-account-settings.js?v=20261104pool-status"></script>
   <script src="/quick-nav.js?v=203bf1a08903"></script>
   <script>
@@ -527,7 +528,7 @@
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="11" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="12" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -552,6 +553,7 @@
             <td>${operatingMetricsHtml(item)}</td>
             <td class="xtr-col" data-x-tag-id="${escapeHtml(item.id)}" data-x-tag-level="audience">${window.XTagRevenue ? window.XTagRevenue.cell(item.id, "audience") : "读取中…"}</td>
             <td class="xtr-col xtr-col-theme" data-x-tag-id="${escapeHtml(item.id)}" data-x-tag-level="theme">${window.XTagRevenue ? window.XTagRevenue.cell(item.id, "theme") : "读取中…"}</td>
+            <td class="xtr-col" data-growth-account="${escapeHtml(item.id)}"></td>
             <td class="auto-publish-col"><span class="status ${autoPublishConfigured ? "active" : "disabled"}">${autoPublishConfigured ? "已配置" : "未配置"}</span></td>
             <td class="drama-language-col"><select class="drama-language-select" data-drama-language-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(username)} 剧语言">${dramaLanguageOptions(item.drama_language)}</select><div class="subtle">仅影响新生成任务</div></td>
             <td class="publish-approval-col"><label class="publish-toggle"><input type="checkbox" data-publish-approval-id="${escapeHtml(item.id)}" ${publishApproved ? "checked" : ""} /><span>${publishApproved ? "已允许" : "未允许"}</span></label><div class="subtle">${publishApproved && credentialPublishEligible ? (item.access_token_status === "expired_refreshable" || item.access_token_status === "missing_refreshable" ? "发布池可选；执行时自动续期" : "发布池可选") : (publishApproved ? "授权不可用，发布池不可选" : "发布池不可选")}</div></td>
@@ -561,6 +563,7 @@
             <td><div class="xp-row-actions">${verifyButton}<button class="button small" data-x-settings="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(reason)}">发布设置</button><button class="button small" data-x-pool="${escapeHtml(item.id)}" ${enabled ? "" : "disabled"} title="${escapeHtml(reason)}">素材池</button>${state.auth?.user?.role === "admin" ? `<button class="button small danger" type="button" data-delete-id="${escapeHtml(item.id)}">删除</button>` : ""}</div><div class="xp-row-reason" data-publishing-reason-id="${escapeHtml(item.id)}" ${reason ? "" : "hidden"}>${escapeHtml(reason)}</div></td>
           </tr>`;
         }).join("");
+        window.XGrowthProfile?.paint(body);
         body.querySelectorAll("[data-pool-status-id]").forEach(cell => {
           if (poolObserver) poolObserver.observe(cell);
           else requestPoolStatus(cell);
@@ -588,7 +591,7 @@
         state.poolStates = new Map();
         poolRequests.length = 0;
         poolObserver?.disconnect();
-        el("accountRows").innerHTML = `<tr><td colspan="11" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="12" class="empty">正在加载…</td></tr>`;
         el("resultCount").textContent = "正在读取账号…";
         try {
           // Start the primary list first. Optional settings never hold its rows.
@@ -601,10 +604,11 @@
           renderStats(); renderOperatingSummary(); renderLanguageFilter(); renderRows();
           performance.mark("x-account-list-ready");
           window.XTagRevenue?.refresh(state.statsMeta?.version || "");
+          void window.XGrowthProfile?.refresh(state.accounts);
           void refreshCredits();
         } catch (error) {
           if (loadVersion !== state.loadVersion) return;
-          el("accountRows").innerHTML = `<tr><td colspan="11" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="12" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         } finally {

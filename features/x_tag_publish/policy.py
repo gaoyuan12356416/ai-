@@ -154,6 +154,15 @@ def Decision(account, identity, snapshot=None):
 
 def catalog_labels(source, dramas):
     """Exact-version classifications shared with income portraits."""
+    metadata = dramawave_labels(source, dramas)
+    story_ids = [d.content_id for d in dramas if getattr(d, 'catalog', None) == 'moboreels']
+    if story_ids:
+        from features.moboreels_hit import classifications
+        metadata.update(classifications(source._stream_select, story_ids))
+    return metadata
+
+
+def dramawave_labels(source, dramas):
     ids = [d.content_id for d in dramas if getattr(d, "catalog", "dramawave") == "dramawave"]
     if not ids:
         return {}

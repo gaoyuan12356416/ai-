@@ -315,6 +315,15 @@ def _body_template(value: Any) -> str:
     return template
 
 
+def profile_model(config, override=None):
+    """Resolve an operator's publish model against this immutable template version."""
+    source = override if override is not None and "profile_model" in override else config
+    value = source.get("profile_model", "revenue")
+    if value not in ("revenue", "growth"):
+        raise ValidationError("invalid_request", "画像模型必须为收入画像或成长画像")
+    return value
+
+
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:
     value = _mapping(raw, "模板")
     from features.material_products import selected
@@ -334,6 +343,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "language",  # Accepted for older editors; account settings are authoritative.
         "language_source",
         "material_products",
+        "profile_model",
         "random_template_enabled",
         "metric_window_days",
         "drama_launch_window_days",
@@ -368,6 +378,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "account_ids": account_ids,
         "language_source": "account",
         "material_products": products,
+        "profile_model": profile_model(value),
         "random_template_enabled": value.get("random_template_enabled", False),
         "body_template": _body_template(value.get("body_template")),
         "metric_window_days": _integer(

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from features.x_auto_posts.service import XAutoPostService, AutoPostServiceError, _actor, _blacklist_dict
 from features.x_auto_posts.repositories import BEIJING_TZ
+from features.x_auto_posts.validation import profile_model
+from features.x_growth_profile.store import publish_profile_context
 from .policy import Decision, catalog_labels, language, portrait_snapshot
 from features.hit_drama_target import identifier, resolve_target, content_ids
 
@@ -68,11 +70,6 @@ def match_reason(decision, metadata):
 
 
 class TagAutoPostService(XAutoPostService):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        from features.x_growth_profile.store import SnapshotStore
-        self.store = SnapshotStore(self.store)
-
     def run_now(self, template_id, raw):
         if 'material_ids' in raw or 'material_id' in raw:
             from .hit_material import publish_material
@@ -81,6 +78,7 @@ class TagAutoPostService(XAutoPostService):
             return super().run_now(template_id, raw)
         payload = dict(raw)
         actor = _actor(payload)
+        override = {"profile_model": payload.pop("profile_model")} if "profile_model" in payload else {}
         request = normalize(payload)
         key = 'x-tag:hit-drama:v1:' + hashlib.sha256(request['idempotency_key'].encode()).hexdigest()[:32]
         with self._run_create_lock:
@@ -90,6 +88,8 @@ class TagAutoPostService(XAutoPostService):
                 if existing.template_id != int(template_id) or frozen.get('request') != request:
                     raise AutoPostServiceError('hit_drama_operation_conflict', '同一操作标识已用于不同剧目或模板', 409)
                 template = self.store.get_template(template_id, version=existing.template_version)
+                if profile_model(template.config, override) != profile_model(existing.blacklist_snapshot):
+                    raise AutoPostServiceError('hit_drama_operation_conflict', '该操作已使用其他画像模型', 409)
                 self._run_tasks(existing, dict(template.config, account_ids=frozen['account_ids']))
                 run, created = existing, False
             else:
@@ -98,6 +98,7 @@ class TagAutoPostService(XAutoPostService):
                 template = self.store.get_template(template_id)
                 if template.version != request['expected_version']:
                     raise AutoPostServiceError('x_auto_template_version_conflict', '模板版本已变化，请刷新后重试', 409)
+                model = profile_model(template.config, override)
                 target = resolve(self.selector.source, request, template.config)
                 is_mobo = target.get('catalog') == 'moboreels'
                 if is_mobo:
@@ -114,11 +115,12 @@ class TagAutoPostService(XAutoPostService):
                         accounts.append(account)
                     except Exception:
                         skipped.append(dict(account_id=account_id, reason='account_not_publishable'))
-                snapshot = portrait_snapshot([a.get('x_user_id') for a in accounts])
+                snapshot = portrait_snapshot([a.get('x_user_id') for a in accounts]) if model == 'revenue' else None
                 matched, audits, account_targets = [], {}, {}
                 for account in accounts:
                     account_id = str(account['id'])
                     lang = self._account_language(account)
+                    account = dict(account, selection_profile=publish_profile_context(account_id, model))
                     decision = Decision(account, ['hit-drama', key], snapshot)
                     ids = content_ids(target, lang)
                     eligible = [cid for cid in ids if not match_reason(decision, catalog.get((cid, language(lang))))]
@@ -140,10 +142,10 @@ class TagAutoPostService(XAutoPostService):
                 run = self.store.create_run(run_key=key, template_id=template.id, template_version=template.version,
                     trigger_type='manual', scheduled_at_utc=now, shanghai_date=now.astimezone(BEIJING_TZ).date().isoformat(),
                     publish_time=now.astimezone(BEIJING_TZ).strftime('%H:%M'), actor=actor,
-                    blacklist_snapshot={**_blacklist_dict(blacklist_source.blacklist_snapshot()), MARKER: frozen})
+                    blacklist_snapshot={**_blacklist_dict(blacklist_source.blacklist_snapshot()), MARKER: frozen, "profile_model": model})
                 self._run_tasks(run, dict(template.config, account_ids=matched))
                 created = True
         self._kick()
-        return dict(ok=True, run_id=run.id, created=created, idempotent=not created,
+        return dict(ok=True, run_id=run.id, profile_model=profile_model(run.blacklist_snapshot), created=created, idempotent=not created,
                     matched_channels=len(frozen['account_ids']), skipped_channels=frozen['skipped'], content_id=frozen['target'].get('content_id',''),
                     content_ids=content_ids(frozen['target']), languages=frozen['target'].get('languages',[]))

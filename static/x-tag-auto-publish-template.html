@@ -24,7 +24,7 @@
       <header class="topbar">
         <div class="title">
           <h1 id="pageTitle">正在加载X 标签画像自动发布模板…</h1>
-          <p>按账号剧语言和模板条件筛选，再使用该频道手动选择的收入画像或成长画像选材。画像设置独立保存，作用于新任务。</p>
+          <p>按模板条件选材，每个账号使用自己的对应画像。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -82,6 +82,14 @@
                     <label for="metricWindowDays">指标统计窗口</label>
                     <input id="metricWindowDays" type="number" min="1" max="30" step="1" value="7" />
                     <span class="helper">未填写时按最近 7 个完整北京时间自然日。</span>
+                  </div>
+                  <div class="field">
+                    <label for="profileModel">选材画像模型</label>
+                    <select id="profileModel">
+                      <option value="revenue">收入画像</option>
+                      <option value="growth">成长画像</option>
+                    </select>
+                    <span class="helper">定时发布使用此模型，手动执行时可为本次发布另选。</span>
                   </div>
                   <div class="field span-2">
                     <label style="display:flex;align-items:center;gap:8px"><input id="randomTemplateEnabled" type="checkbox" style="width:auto" />是否启用随机模板</label>
@@ -271,6 +279,7 @@
                 <div class="section-head"><div><h2>保存摘要</h2><p>保存只更新模板配置，不会立即执行。</p></div></div>
                 <div class="summary-list">
                   <div class="summary-item"><span>模板版本</span><strong id="summaryVersion">新模板</strong></div>
+                  <div class="summary-item"><span>选材画像模型</span><strong id="summaryProfileModel">收入画像</strong></div>
                   <div class="summary-item"><span>剧语言</span><strong id="summaryLanguage">读取 X 账户设置</strong></div>
                   <div class="summary-item"><span>已选账号</span><strong id="summaryAccounts">0 个</strong></div>
                   <div class="summary-item"><span>指标口径</span><strong id="summaryMetric">platform=0 / 7 天</strong></div>
@@ -308,7 +317,6 @@
   <script src="/x-tag-auto-publish-common.js?v=20261119-fast1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/x-growth-profile.js?v=20261119growth2"></script>
-  <script src="/x-tag-auto-publish-template.js?v=20261119growth1"></script>
+  <script src="/x-tag-auto-publish-template.js?v=20261119model3"></script>
 </body>
 </html>

@@ -133,6 +133,7 @@
       const primary = ui.element("div", { className: "primary-cell" });
       primary.appendChild(ui.element("strong", { text: item.template_name || `模板 ${item.template_id || "—"}` }));
       primary.appendChild(ui.element("span", { className: "secondary mono", text: `Run ${id || "—"} · v${item.template_version || item.version || "—"}` }));
+      if (item.profile_model) primary.appendChild(ui.element("span", { className: "secondary", text: item.profile_model === "growth" ? "成长画像" : "收入画像" }));
       templateCell.appendChild(primary);
       row.appendChild(templateCell);
 
@@ -411,6 +412,7 @@
       ui.setText(ui.byId("runDetailSubtitle"), `${run.template_name || `模板 ${run.template_id || "—"}`} · v${run.template_version || "—"}`, "");
       const facts = ui.byId("runDetailFacts");
       facts.append(
+        detailFact("本次选材画像", run.profile_model === "growth" ? "成长画像" : run.profile_model === "revenue" ? "收入画像" : "历史记录"),
         detailFact("触发方式", triggerLabel(run.trigger_type)),
         detailFact("运行状态", statusLabel(run.display_status || run.status)),
         detailFact("计划 / 触发时间", ui.formatTime(run.scheduled_at || run.scheduled_at_utc || run.triggered_at || run.created_at)),

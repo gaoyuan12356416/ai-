@@ -99,7 +99,7 @@ def fill_metadata(accounts):
     dramas, so manual/pool posts can learn without a second SQL collector.
     """
     with store.connect() as db:
-        missing=[dict(r) for r in db.execute("SELECT post_id,account_id,content_id,language FROM growth_post WHERE metadata_json LIKE '%missing_frozen_classification%'")]
+        missing=[dict(r) for r in db.execute("SELECT post_id,account_id,content_id,language,catalog FROM growth_post WHERE metadata_json LIKE '%missing_frozen_classification%'")]
     ids={r['account_id'] for r in missing}
     if not ids:
         return 0
@@ -113,14 +113,15 @@ def fill_metadata(accounts):
             for drama in node.get('dramas',[]):
                 classification=drama.get('classification') or {}
                 if classification.get('themes'):
-                    catalog[(str(drama['content_id']),str(drama['language']))]=classification
+                    catalog[(classification.get('catalog') or drama.get('catalog') or 'dramawave',
+                             str(drama['content_id']),str(drama['language']))]=classification
             visit(node.get('children',[]))
     for profile in data.get('accounts',{}).values():
         visit(profile.get('audiences',[]))
     updated=0
     with store.connect(write=True) as db:
         for row in missing:
-            value=catalog.get((row['content_id'],row['language']))
+            value=catalog.get((row['catalog'],row['content_id'],row['language']))
             if value:
                 db.execute('UPDATE growth_post SET metadata_json=? WHERE post_id=?',(store.dumps(value),row['post_id']))
                 updated+=1
@@ -130,7 +131,7 @@ def collect(limit_accounts=None):
     now=datetime.now(timezone.utc)
     store.initialize()
     with readonly(ACCOUNT_DB) as source:
-        accounts={row['id']:dict(row) for row in source.execute("SELECT * FROM x_authorized_account WHERE status='active' AND publish_approved=1 AND COALESCE(deleted_at,'')=''")}
+        accounts={row['id']:dict(row) for row in source.execute("SELECT * FROM x_authorized_account WHERE status='active' AND COALESCE(deleted_at,'')=''")}
     report=dict(started_at=now.isoformat(),post_samples=0,follower_samples=0,accounts_ok=0,failures=[])
     with store.connect(write=True) as db:
         discover(db,accounts,now)
@@ -142,14 +143,14 @@ def collect(limit_accounts=None):
         retry={r[0].split(':')[1]:json.loads(r[1]) for r in db.execute("SELECT key,value_json FROM collector_state WHERE key LIKE 'retry:%'")}
         posts=[dict(r) for r in db.execute('SELECT * FROM growth_post WHERE published_at>=?',((now-timedelta(days=8)).isoformat(),))]
     due=defaultdict(list)
-    active_ids={p['account_id'] for p in posts}
     for post in posts:
         age=(now-instant(post['published_at'])).total_seconds()/3600
         for hours,stage in STAGES:
             if hours<=age<=hours+6 and (post['post_id'],stage) not in snapshots:
                 due[post['account_id']].append((post,stage))
     bucket=now.strftime('%Y-%m-%dT')+str(now.hour//6*6).zfill(2)
-    selected=sorted(active_ids & set(accounts))
+    # New channels need a follower baseline even before their first publication.
+    selected=sorted(accounts)
     if limit_accounts is not None:
         selected=selected[:limit_accounts]
     for aid in selected:

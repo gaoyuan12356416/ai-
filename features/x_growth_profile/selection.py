@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 
 from features.x_tag_revenue.taxonomy import THEMES, AUDIENCES, UNKNOWN
-from .store import dumps, selection_context
+from .store import dumps
 from .model import VERSION
 
 def recent_choices(account_id):
@@ -53,8 +53,10 @@ class GrowthDecision:
         for node in self.nodes:
             if node['mature']:
                 a=node['audience'];t=node['theme']
-                self.weights[a]=self.weights.get(a,0)+node['score']
-                self.node_weights.setdefault((a,),{})[t]=node['score']
+                # Exact-material assignment shares the integer-based revenue scorer.
+                weight = round(node['score'] * 100)
+                self.weights[a] = self.weights.get(a, 0) + weight
+                self.node_weights.setdefault((a,), {})[t] = weight
         self.audience_order=list(self.weights)
         self.orders[()]=self.audience_order
         for key,weights in self.node_weights.items():
@@ -108,21 +110,22 @@ class GrowthDecision:
 
     def audit(self,metadata,*,fallback=''):
         metadata=metadata or {}
-        choices=[t for t in self.order if t in metadata.get('themes',[])]
-        theme=choices[0] if choices else ''
+        # Exact-drama/material matching uses the mature audience-theme weights
+        # directly and never runs the ordinary exploration ranking.
+        ranking = self.order or self.orders.get((metadata.get('audience'),), [])
+        theme = next((t for t in ranking if t in metadata.get('themes', [])), '')
+        role = 'strict_match' if theme and not self.order else (self.role if self.order and theme == self.order[0] else 'explore')
         return dict(policy_version=VERSION,profile_mode='growth',mode_version=self.context.get('mode_version',0),
                     profile_version=self.profile.get('version',''),profile_generated_at=self.profile.get('computed_at',''),
                     account_id=self.account_id,x_user_id=self.x_user_id,language=self.language,
                     classification=metadata,selected_tag_key=theme,selected_tag=THEMES.get(theme,''),
                     selected_path_names=[THEMES[theme]] if theme in THEMES else [],
-                    growth_role=self.role if self.order and theme==self.order[0] else 'explore',
+                    growth_role=role,
                     preferred_tag=THEMES.get(self.order[0],'') if self.order else '',
                     fallback=bool(fallback or not theme),fallback_reason=fallback or ('' if theme else 'growth_labels_unavailable'),
                     growth_mature_posts=self.profile.get('mature_posts',0),growth_policy=self.profile.get('policy',{}),
                     followers=self.profile.get('followers',{}),weights=[],
-                    explanation='成长画像：成熟题材优先' if self.role=='exploit' else '成长画像：探索或补足题材样本')
+                    explanation={'exploit':'成长画像：成熟题材优先','strict_match':'成长画像：指定素材与成熟题材匹配','explore':'成长画像：探索或补足题材样本'}[role])
 
 def choose_context(account):
-    # Historic frozen tasks explicitly carry revenue below, so changing a setting
-    # cannot reinterpret already created tasks.
-    return account.get('selection_profile') or selection_context(account)
+    return account.get('selection_profile') or {'mode': 'revenue', 'profile': {}}

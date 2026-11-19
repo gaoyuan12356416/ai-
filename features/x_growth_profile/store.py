@@ -107,16 +107,14 @@ def set_mode(account_id, mode, expected_version, actor, db_path=None):
                    (account_id, old, mode, version+1, actor, now))
     return channel_details(account_id, db_path)
 
-class SnapshotStore:
-    """Freeze the explicitly selected mode/profile with newly created tasks."""
-    def __init__(self, original):
-        self.original = original
-
-    def __getattr__(self, name):
-        return getattr(self.original, name)
-
-    def create_task(self, **kwargs):
-        account = dict(kwargs.get('account_snapshot') or {})
-        if account.get('id') and 'selection_profile' not in account:
-            account['selection_profile'] = selection_context(account)
-        return self.original.create_task(**dict(kwargs, account_snapshot=account))
+def publish_profile_context(account_id, model):
+    """Load this account's data for the model selected for a publication."""
+    if model not in ('revenue', 'growth'):
+        raise ValueError('invalid_profile_model')
+    context = {'mode': model, 'profile': {}}
+    if model == 'growth' and path().is_file():
+        with connect() as db:
+            row = db.execute('SELECT data_json FROM growth_profile WHERE account_id=?', (int(account_id),)).fetchone()
+        if row:
+            context['profile'] = json.loads(row[0])
+    return context

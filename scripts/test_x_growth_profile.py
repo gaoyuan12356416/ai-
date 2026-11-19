@@ -47,21 +47,16 @@ class GrowthTests(unittest.TestCase):
         for mode,version in [('auto',0),('growth',True),('growth',-1)]:
             with self.assertRaises(ValueError):store.set_mode(1,mode,version,'actor')
 
-    def test_frozen_task_preserves_choice_after_switch(self):
-        class Original:
-            def create_task(self,**kwargs):return kwargs
-        store.set_mode(1,'growth',0,'actor')
-        task=store.SnapshotStore(Original()).create_task(account_snapshot={'id':1})
-        store.set_mode(1,'revenue',1,'actor')
-        self.assertEqual(task['account_snapshot']['selection_profile']['mode'],'growth')
-        self.assertEqual(store.selection_context({'id':1})['mode'],'revenue')
+    def test_legacy_channel_setting_cannot_select_a_new_model(self):
+        from features.x_growth_profile.selection import choose_context
+        store.set_mode(1, 'growth', 0, 'old-operator')
+        self.assertEqual(choose_context({'id': 1})['mode'], 'revenue')
+        self.assertEqual(store.publish_profile_context(1, 'growth')['mode'], 'growth')
 
     def test_existing_snapshot_not_rewritten(self):
-        class Original:
-            def create_task(self,**kwargs):return kwargs
-        snapshot={'id':1,'selection_profile':{'mode':'growth','mode_version':9,'profile':{'version':'old'}}}
-        result=store.SnapshotStore(Original()).create_task(account_snapshot=snapshot)
-        self.assertEqual(snapshot,result['account_snapshot'])
+        from features.x_growth_profile.selection import choose_context
+        snapshot = {'mode': 'growth', 'mode_version': 9, 'profile': {'version': 'old'}}
+        self.assertEqual(choose_context({'id': 1, 'selection_profile': snapshot}), snapshot)
 
     def test_owner_and_admin_authorization(self):
         accounts=Path(self.tmp.name)/'accounts.db'
@@ -207,5 +202,27 @@ class GrowthTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT stage FROM post_snapshot').fetchone()[0],'72h')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM mode_audit').fetchone()[0],1)
         self.assertEqual(store.selection_context({'id':1})['mode'],'growth')
+
+    def test_first_follower_baseline_for_active_account_without_posts(self):
+        from features.x_growth_profile import collector
+        accounts = Path(self.tmp.name) / 'account-without-posts.sqlite3'
+        with sqlite3.connect(accounts) as db:
+            db.execute('CREATE TABLE x_authorized_account(id, x_user_id, status, publish_approved, deleted_at)')
+            db.executemany('INSERT INTO x_authorized_account VALUES(?,?,?,?,?)', [
+                (10, '120', 'active', 0, ''), (11, '121', 'error', 1, ''), (12, '122', 'active', 1, 'deleted')])
+        db.close()
+        with patch.object(collector, 'ACCOUNT_DB', str(accounts)), patch.object(collector, 'discover'), \
+             patch.object(collector, 'access_token', return_value='test'), \
+             patch.object(collector, 'request', return_value={'data': {'id':'120','public_metrics':{'followers_count':0}}}) as get:
+            result = collector.collect()
+            self.assertEqual(result['follower_samples'], 1)
+            self.assertEqual(result['post_samples'], 0)
+            self.assertEqual(result['profiles'], 1)
+            self.assertEqual(get.call_count, 1)
+        with store.connect() as db:
+            profile = json.loads(db.execute('SELECT data_json FROM growth_profile WHERE account_id=10').fetchone()[0])
+            self.assertEqual(profile['followers']['followers'], 0)
+            self.assertIsNone(profile['followers']['net_7d'])
+            self.assertEqual(profile['policy']['exploration'], 1)
 
 if __name__=='__main__':unittest.main()

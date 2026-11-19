@@ -8,6 +8,8 @@ from features.hit_drama_target import target_language
 from features.x_auto_posts.service import AutoPostServiceError, _actor, _blacklist_dict
 from features.x_auto_posts.publisher import account_duration_limit_seconds
 from features.x_auto_posts.repositories import BEIJING_TZ
+from features.x_auto_posts.validation import profile_model
+from features.x_growth_profile.store import publish_profile_context
 from .policy import Decision, catalog_labels, language, portrait_snapshot
 from .hit_drama import match_reason
 
@@ -33,7 +35,9 @@ def normalize(raw):
 
 
 def publish_material(service, template_id, raw):
-    actor, request = normalize(raw)
+    payload = dict(raw)
+    override = {"profile_model": payload.pop("profile_model")} if "profile_model" in payload else {}
+    actor, request = normalize(payload)
     key = 'x-tag:hit-material:v1:'+hashlib.sha256(request['idempotency_key'].encode()).hexdigest()[:32]
     with service._run_create_lock:
         existing = service.store.get_run_by_key(key)
@@ -42,6 +46,8 @@ def publish_material(service, template_id, raw):
             if existing.template_id != int(template_id) or frozen.get('request') != request:
                 raise AutoPostServiceError('hit_material_operation_conflict', '操作标识已用于其他素材或模板', 409)
             template = service.store.get_template(template_id, version=existing.template_version)
+            if profile_model(template.config, override) != profile_model(existing.blacklist_snapshot):
+                raise AutoPostServiceError('hit_material_operation_conflict', '该操作已使用其他画像模型', 409)
             service._run_tasks(existing, dict(template.config, account_ids=frozen['account_ids']))
             run, created = existing, False
         else:
@@ -50,6 +56,7 @@ def publish_material(service, template_id, raw):
             template = service.store.get_template(template_id)
             if template.version != request['expected_version']:
                 raise AutoPostServiceError('x_auto_template_version_conflict', '模板版本已变化，请刷新重试', 409)
+            model = profile_model(template.config, override)
             source, ids = service.selector.source, request['material_ids']
             rows = list(source._stream_select(f'SELECT CAST(id AS CHAR) material_id,TRIM(data_source_id) content_id '
                 f'FROM `{source.schema}`.ads_custom_source WHERE id IN ({",".join("%s" for _ in ids)})', tuple(ids)))
@@ -79,10 +86,11 @@ def publish_material(service, template_id, raw):
                 except Exception:
                     skipped.append(dict(account_id=aid, reason='account_not_publishable'))
             catalog = catalog_labels(source, [SimpleNamespace(content_id=i['content_id']) for i in candidates.values()])
-            snapshot = portrait_snapshot([a.get('x_user_id') for a in accounts])
+            snapshot = portrait_snapshot([a.get('x_user_id') for a in accounts]) if model == 'revenue' else None
             scores, audits, reasons = {}, {}, {}
             for account in accounts:
                 aid, lang = str(account['id']), service._account_language(account)
+                account = dict(account, selection_profile=publish_profile_context(aid, model))
                 decision = Decision(account, ['hit-material',key], snapshot)
                 for mid,item in candidates.items():
                     metadata = catalog.get((item['content_id'], language(lang)))
@@ -126,10 +134,10 @@ def publish_material(service, template_id, raw):
             run = service.store.create_run(run_key=key,template_id=template.id,template_version=template.version,
                 trigger_type='manual',scheduled_at_utc=now,shanghai_date=now.astimezone(BEIJING_TZ).date().isoformat(),
                 publish_time=now.astimezone(BEIJING_TZ).strftime('%H:%M'),actor=actor,
-                blacklist_snapshot={**_blacklist_dict(source.blacklist_snapshot()),MARKER:frozen})
+                blacklist_snapshot={**_blacklist_dict(source.blacklist_snapshot()),MARKER:frozen, "profile_model":model})
             service._run_tasks(run,dict(template.config,account_ids=frozen['account_ids']))
             created = True
     service._kick()
-    return dict(ok=True,run_id=run.id,created=created,idempotent=not created,matched_channels=len(frozen['account_ids']),
+    return dict(ok=True,run_id=run.id,profile_model=profile_model(run.blacklist_snapshot),created=created,idempotent=not created,matched_channels=len(frozen['account_ids']),
                 skipped_channels=frozen['skipped'],skipped_materials=frozen['skipped_materials'],
                 assignments=[dict(account_id=aid,**entry) for aid,entry in frozen['assignments'].items()])

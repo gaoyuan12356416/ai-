@@ -51,9 +51,9 @@
     const host=document.querySelector('main,.main') || document.body;
     const banner=node('section', '', 'tag-lane-banner');
     banner.append(node('strong','X 标签画像发布'));
-    banner.append(node('p','各频道可手动选择收入画像或成长画像。收入画像沿用受众和题材收入偏好；成长画像根据成熟内容表现探索和调整。系统不会自动切换画像类型，已生成任务保持原选择。'));
+    banner.append(node('p','在 X 账号列表查看每个频道的收入画像和成长画像。自动发布按本次选择的模型为各频道选材。'));
     const nav=node('nav');
-    for(const [href,label] of [['/x-tag-auto-publish-templates.html','自动发布模板'],['/x-tag-material-pool.html','画像素材池'],['/x-tag-auto-publish-runs.html','模板运行记录'],['/x-tag-post-logs.html','画像发布日志'],['/x-account-list.html','频道收入画像']]){const a=node('a',label);a.href=href;nav.append(a);}
+    for(const [href,label] of [['/x-tag-auto-publish-templates.html','自动发布模板'],['/x-tag-material-pool.html','画像素材池'],['/x-tag-auto-publish-runs.html','模板运行记录'],['/x-tag-post-logs.html','画像发布日志'],['/x-account-list.html','频道画像']]){const a=node('a',label);a.href=href;nav.append(a);}
     banner.append(nav);
     const details=node('details');details.append(node('summary','查看频道画像和本流程发布量'));
     const list=node('div','','tag-profile-list');details.append(list);banner.append(details);host.prepend(banner);

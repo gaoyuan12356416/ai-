@@ -258,6 +258,16 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == '/healthz' and self.command == 'GET':
             return 200, dict(ok=True, service='x-tag-publish-gateway')
+        if path == POST + '/profiles/growth':
+            if self.command != 'GET':
+                raise Error('method_not_allowed', '', 405)
+            cookie = self.headers.get('Cookie', '')
+            authorize(cookie, 'xAccountList')
+            # Use the canonical account list so scope and deleted-account rules
+            # stay identical to the page, even if those rules change.
+            accounts = rpc('http://127.0.0.1:8787', '/api/admin/x-accounts', cookie=cookie)
+            from features.x_growth_profile.listing import account_profiles
+            return 200, dict(items=account_profiles(accounts['items']))
         if path == '/internal/x-tag/growth-origins' and self.command == 'POST':
             token = os.environ.get('X_INTERNAL_TOKEN', '')
             if len(token) < 32 or not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
@@ -283,11 +293,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise Error('invalid_request', '', 400)
             return 200, dict(context=resolve_attribution(body))
         auto_match = re.fullmatch(re.escape(AUTO) + r'/(?:accounts(?:/[1-9][0-9]*/verify)?|templates(?:/[1-9][0-9]*(?:/(?:copy|delete|enable|disable|preview|run-now))?)?|runs(?:/[1-9][0-9]*(?:/terminate)?)?)', path)
-        post_match = re.fullmatch(re.escape(POST) + r'/(?:logs|runs|profiles(?:/[1-9][0-9]*)?|material-pool(?:/(?:account-options|schedule|manual-publish|manual-runs/[1-9][0-9]*|[1-9][0-9]*))?)', path)
+        post_match = re.fullmatch(re.escape(POST) + r'/(?:logs|runs|profiles|material-pool(?:/(?:account-options|schedule|manual-publish|manual-runs/[1-9][0-9]*|[1-9][0-9]*))?)', path)
         if not auto_match and not post_match:
             raise Error('not_found', '', 404)
         navigation_keys = PROFILE_TEMPLATE_NAV if auto_match else PROFILE_POOL_NAV
-        if path == POST + '/profiles' or path.startswith(POST + '/profiles/'):
+        if path == POST + '/profiles':
             navigation_keys = (PROFILE_POOL_NAV, PROFILE_TEMPLATE_NAV)
         elif path in (POST + '/logs', POST + '/runs'):
             navigation_keys = None
@@ -300,12 +310,6 @@ class Handler(BaseHTTPRequestHandler):
                 if (origin.scheme, origin.netloc) != ('https', 'ai.yingliangads.com'):
                     raise Error('same_origin_required', '', 403)
             body = self.body()
-        mode_match = re.fullmatch(re.escape(POST) + r'/profiles/([1-9][0-9]*)', path)
-        if mode_match:
-            if self.command != 'POST':
-                raise Error('method_not_allowed', '', 405)
-            from features.x_growth_profile.api import update
-            return 200, update(int(mode_match.group(1)), body, actor)
         if auto_match:
             if self.command not in ('GET', 'POST'):
                 raise Error('method_not_allowed', '', 405)
@@ -327,11 +331,6 @@ class Handler(BaseHTTPRequestHandler):
             target = path.replace(AUTO, OLD_AUTO, 1) + ('?' + parsed.query if parsed.query else '')
             result = rpc('http://127.0.0.1:18843', target, os.environ['X_AUTO_POST_INTERNAL_TOKEN'],
                          method=self.command, payload=body if self.command == 'POST' else None, timeout=120)
-            if self.command == 'GET' and path == AUTO + '/accounts':
-                from features.x_growth_profile.api import details
-                for account in result.get('items', result.get('accounts', [])):
-                    account['selection_profile'] = details(account['id'], actor)
-                result['accounts'] = result.get('items', result.get('accounts', []))
             if self.command == 'GET' and path == AUTO + '/templates':
                 result = enrich_template_operators(result)
             return (202 if path.endswith('/run-now') else 200), result
@@ -350,9 +349,7 @@ class Handler(BaseHTTPRequestHandler):
                 with closing(readonly(lane_paths()['X_POST_DB_PATH'])) as db:
                     counts = {str(r[0]): r[1] for r in db.execute(
                         "SELECT account_id,COUNT(*) FROM x_post_queue WHERE status='published' GROUP BY account_id")}
-                from features.x_growth_profile.api import details
                 return 200, dict(meta=snapshot[1], items=[dict(account_id=a['id'], username=a.get('username'),
-                    selection_profile=details(a['id'], actor),
                     published_count=counts.get(str(a['id']), 0),
                     profile=Decision(a, ['preview'], snapshot).audit(None)) for a in accounts])
             routes = {'logs': 'logs/query', 'runs': 'runs/query', 'material-pool': 'material-pool/query',

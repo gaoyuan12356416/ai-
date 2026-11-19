@@ -62,6 +62,9 @@ class ProfileSelector(TwoStageSelector):
         if callable(get_task):
             task = get_task(request.task_id)
             account['selection_profile'] = task.account_snapshot.get('selection_profile') or {'mode': 'revenue', 'mode_version': 0, 'profile': {}}
+        else:
+            from features.x_growth_profile.store import publish_profile_context
+            account['selection_profile'] = publish_profile_context(request.account_id, getattr(self, 'preview_profile_model', 'revenue'))
         decision = Decision(account, ['auto', request.template_id, request.template_version, request.run_id, request.task_id])
         context = dict(decision=decision, catalog={}, language=language(request.language), fallback='', hit=target, now=request.now)
         self._profile_context.value = context
