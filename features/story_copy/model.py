@@ -50,39 +50,38 @@ EPISODES = {
     "fil": "Episode {n}",
 }
 
-# Only the tail is model-written. Keep the delimiter in the prefix so CJK
-# and Thai do not acquire a space between the prompt and its continuation.
+# Fixed localized CTA. Models supply only the story, never a CTA continuation.
 CLICK_PREFIX = {
-    "zh": "点链接",
-    "zh-tw": "點連結",
-    "ja": "リンクをタップして",
-    "ko": "링크를 눌러 ",
-    "th": "แตะลิงก์",
-    "en": "Tap the link ",
-    "es": "Toca el enlace ",
-    "pt": "Toque no link ",
-    "pt-pt": "Toca na ligação ",
-    "fr": "Cliquez sur le lien ",
-    "de": "Tippe auf den Link ",
-    "it": "Tocca il link ",
-    "pl": "Kliknij link",
-    "cs": "Klikni na odkaz",
-    "id": "Ketuk tautan ",
-    "ms": "Tekan pautan ",
-    "vi": "Nhấn vào liên kết ",
-    "ar": "اضغط على الرابط ",
-    "tr": "Bağlantıya dokun",
-    "ru": "Нажми на ссылку",
-    "hi": "लिंक पर टैप करें",
-    "tl": "Pindutin ang link ",
-    "fil": "Pindutin ang link ",
-    "el": "Πάτησε τον σύνδεσμο ",
-    "ro": "Apasă pe link ",
-    "uk": "Натисни на посилання",
-    "nl": "Tik op de link ",
-    "sv": "Tryck på länken ",
-    "hu": "Kattints a linkre",
-    "bn": "লিঙ্কে ট্যাপ করুন",
+    "zh": "立即观看完整版",
+    "zh-tw": "立即觀看完整版",
+    "ja": "今すぐ全編を視聴",
+    "ko": "지금 전체 영상 보기",
+    "th": "ดูเรื่องเต็มได้เลย",
+    "en": "watch full now",
+    "es": "Mira la versión completa ahora",
+    "pt": "Assista à versão completa agora",
+    "pt-pt": "Vê a versão completa agora",
+    "fr": "Regardez en entier maintenant",
+    "de": "Jetzt in voller Länge ansehen",
+    "it": "Guarda subito la versione completa",
+    "pl": "Obejrzyj całość teraz",
+    "cs": "Sleduj celé hned",
+    "id": "Tonton versi lengkapnya sekarang",
+    "ms": "Tonton versi penuh sekarang",
+    "vi": "Xem bản đầy đủ ngay",
+    "ar": "شاهد النسخة الكاملة الآن",
+    "tr": "Şimdi tamamını izle",
+    "ru": "Смотри полную версию прямо сейчас",
+    "hi": "अभी पूरा देखें",
+    "tl": "Panoorin nang buo ngayon",
+    "fil": "Panoorin nang buo ngayon",
+    "el": "Δες το ολόκληρο τώρα",
+    "ro": "Urmărește acum versiunea completă",
+    "uk": "Дивись повну версію зараз",
+    "nl": "Bekijk nu de volledige versie",
+    "sv": "Se hela nu",
+    "hu": "Nézd meg most a teljes történetet",
+    "bn": "এখনই সম্পূর্ণ দেখুন",
 }
 SCRIPTS = {
     "zh": r"[\u3400-\u9fff]",
@@ -142,73 +141,12 @@ def click_prefix(language):
     return prefix
 
 
-GENERIC_HOOKS = frozenset(
-    normalized(s)
-    for s in (
-        "看後續",
-        "看后续",
-        "看下去",
-        "看精彩後續",
-        "看精彩后续",
-        "看她的故事",
-        "看他的故事",
-        "to watch now",
-        "to keep watching",
-        "to see more",
-        "to see what happens",
-        "to follow their story",
-        "para ver más",
-        "para ver qué pasa",
-        "para ver mais",
-        "pour voir la suite",
-        "für mehr",
-        "続きを見よう",
-        "続きを見る",
-        "확인해 보세요",
-        "untuk menonton",
-        "para mapanood",
-    )
-)
-
-
 def click_options(task, values):
-    prefix = click_prefix(task["language"])
-    lang = canonical_lang(task["language"]).split("-")[0]
-    script = SCRIPTS.get(lang)
-    options = []
-    for value in values if isinstance(values, list) else []:
-        try:
-            hook = one_line(value, {"zh": 16, "ja": 24}.get(lang, 66))
-        except ValueError:
-            continue
-        key = normalized(hook)
-        if (
-            len(key) < 2
-            or key in GENERIC_HOOKS
-            or len(hook.split()) > 12
-            or (script and not re.search(script, hook))
-            or normalized(prefix) in key
-            or re.search(r"[↑⬆☝👉👆]", hook)
-            or (
-                task.get("episode")
-                and re.search(
-                    r"直[達达看]|直行|direct(?:ly)? to|directo al episodio|direto ao epis[oó]dio",
-                    hook,
-                    re.I,
-                )
-            )
-        ):
-            continue
-        # Slavic and Turkish subordinate clauses often start with a comma.
-        separator = "" if lang in {"zh", "ja", "th"} or hook[0] in ",،，.!?:—–" else " "
-        cta = "👆 " + prefix.rstrip() + separator + hook
-        if key not in {o["hook_key"] for o in options}:
-            options.append(dict(click_hook=hook, hook_key=key, cta=cta))
-    if not options:
-        raise ValueError("invalid_click_hook")
-    if task.get("endpoint", "").startswith("x_"):
-        options.sort(key=lambda item: weight(item["cta"]))
-    return options
+    # Keep the draft fields understood by all already-running native renderers.
+    # The legacy hooks argument is intentionally ignored, even if malformed.
+    text = click_prefix(task["language"])
+    return [dict(click_hook=text, hook_key=normalized(text), cta="👆 " + text,
+                 cta_style="watch_full_now")]
 
 
 def weight(text):

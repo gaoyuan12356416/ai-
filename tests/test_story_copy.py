@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from features.story_copy import alerts, bridge, generator, model, sources, store, worker
 from features.story_copy import evidence, settings
-from ops.story_copy import refresh_click_hooks
+from ops.story_copy import refresh_click_hooks, repair_drafts
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -93,11 +93,42 @@ class CaptionTests(unittest.TestCase):
         for t in tasks:
             t["facts"] = {"series": "Ada hides the seal. Ben finds the ribbon."}
         request = json.loads(generator.prompt(tasks))
+        self.assertEqual(request["cta"], "👆 watch full now")
         self.assertEqual(len(request["fact_text"]), 1)
         self.assertNotIn("recent", request)
         for item in request["tasks"]:
             self.assertNotIn("focus", item)
             self.assertNotIn("suggested_angle", item)
+
+    def test_manual_repair_preserves_native_receipts_and_auto_retry_history(self):
+        task = self.task(1)
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            first, _ = store.claim(c)
+            store.fail(c, first, task["key"], "codex_generation_failed")
+            c.execute("UPDATE retries SET retry_after=0")
+            c.commit()
+            second, _ = store.claim(c)
+            store.fail(c, second, task["key"], "codex_generation_failed")
+            c.commit()
+            before = dict(c.execute("SELECT * FROM jobs").fetchone())
+            original_retry = dict(c.execute("SELECT * FROM retries").fetchone())
+            draft = model.validate(task, self.item(task))
+            with store.connection(self.fb) as src:
+                src.execute("INSERT INTO story_copy_receipt VALUES(?,?,?,?,?,?,?,?)",
+                            (task["key"], "x_material", "legacy", "", "frozen text", "https://example.org/x", second, 1))
+            self.assertFalse(repair_drafts.save_candidate(c, before, draft, 99))
+            with store.connection(self.fb) as src:
+                src.execute("DELETE FROM story_copy_receipt")
+            self.assertTrue(repair_drafts.save_candidate(c, before, draft, 99))
+            self.assertFalse(repair_drafts.save_candidate(c, before, draft, 100))
+            repaired = dict(c.execute("SELECT * FROM jobs").fetchone())
+            self.assertEqual((repaired["state"], repaired["reason"], repaired["batch"]), ("ready", "", 99))
+            self.assertEqual(dict(c.execute("SELECT * FROM retries").fetchone()), original_retry)
+            revised = dict(draft, cta="different pending CTA")
+            self.assertTrue(repair_drafts.save_candidate(c, repaired, revised))
+            self.assertFalse(repair_drafts.save_candidate(c, repaired, revised))
 
     def test_100_and_101_partial_failure(self):
         with store.connection() as c:
@@ -434,7 +465,7 @@ class CaptionTests(unittest.TestCase):
                 [lines[0], lines[2], lines[5]], ["https://example.org/unique", "", ""]
             )
             self.assertIn("Episode 3", lines[1])
-            self.assertTrue(lines[1].startswith("👆 Tap the link "))
+            self.assertTrue(lines[1].startswith("👆 watch full now"))
             self.assertEqual(len(lines), 7)
 
     def test_existing_unique_index_migrates_and_history_allows_reuse(self):
@@ -630,7 +661,7 @@ class CaptionTests(unittest.TestCase):
                 store.accept(c, b, t, item)
                 lines = bridge.select(t, "legacy", link)[2].splitlines()
                 self.assertEqual(lines[0], link)
-                self.assertTrue(lines[1].startswith("👆 Tap the link to "))
+                self.assertTrue(lines[1].startswith("👆 watch full now"))
                 self.assertEqual(lines[1].count("👆"), 1)
                 self.assertEqual("Episode 3" in lines[1], f == "xd")
             self.assertEqual(
@@ -651,15 +682,20 @@ class CaptionTests(unittest.TestCase):
             )
             selected = bridge.select(t, "original", link)
             self.assertEqual(selected[:2], ("ai", ""))
-            self.assertIn("Tap the link to find the seal!", selected[2])
+            self.assertIn("👆 watch full now", selected[2])
+            self.assertNotIn("to find the seal", selected[2])
         t = dict(self.task(20), language="zh-Hant-TW")
         candidates = ["👆 點連結看他反擊", "看後續", "看她反擊"]
         self.assertEqual(
             [x["cta"] for x in model.click_options(t, candidates)],
-            ["👆 點連結看她反擊"],
+            ["👆 立即觀看完整版"],
         )
-        self.assertEqual(model.click_prefix("zh-SG"), "点链接")
-        self.assertEqual(model.click_prefix("en-US"), "Tap the link ")
+        self.assertEqual(model.click_prefix("zh-SG"), "立即观看完整版")
+        self.assertEqual(model.click_prefix("en-US"), "watch full now")
+        self.assertEqual(model.click_prefix("jp"), "今すぐ全編を視聴")
+        for hooks in (None, [], ["wrong language"], "not an array"):
+            item = dict(self.item(self.task(30)), hooks=hooks)
+            self.assertEqual(model.validate(self.task(30), item)["cta"], "👆 watch full now")
 
     def test_upgrade_only_unfrozen_draft(self):
         t = self.task(1, "fa")
@@ -698,7 +734,7 @@ class CaptionTests(unittest.TestCase):
             self.assertFalse(refresh_click_hooks.upgrade(c, t, old, opts))
             after = json.loads(c.execute("SELECT draft FROM jobs").fetchone()[0])
             self.assertEqual(after["previous_cta"], "See more")
-            self.assertEqual(after["cta"], "👆 Tap the link to find the ring")
+            self.assertEqual(after["cta"], "👆 watch full now")
             self.assertEqual(after["opening"], "A ring.")
 
     def test_busy_publisher_only_defers_that_hook_and_reuses_generation(self):
