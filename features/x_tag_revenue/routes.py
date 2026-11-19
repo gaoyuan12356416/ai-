@@ -78,7 +78,7 @@ def dispatch(handler, parsed, authorize, root=DEFAULT_ROOT):
     send = handler.send_json
     match = re.fullmatch(r'/api/x-channel-tag-revenue(?:/([0-9]+))?', parsed.path)
     query = parse_qs(parsed.query, keep_blank_values=True)
-    if not match or set(query) - {'tag','path','page','version'} or any(len(v) != 1 for v in query.values()) or (query and not match.group(1)) or ('tag' in query and 'path' in query):
+    if not match or set(query) - {'tag','path','page','version'} or any(len(v) != 1 for v in query.values()) or (set(query) - {'version'} and not match.group(1)) or ('tag' in query and 'path' in query):
         return send(400, {'message': '查询参数无效'})
     version = query.get('version', [None])[0]
     page = query.get('page', ['1'])[0]

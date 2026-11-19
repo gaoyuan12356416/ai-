@@ -71,6 +71,7 @@ def build(catalog, metrics, resources, end, drama_info=None):
     from .hierarchy import build_tree
     classifications = classification_index(resources, drama_info or [])
     channels = {}
+    daily_revenue = defaultdict(int)
     unresolved = 0
     unresolved_rows = 0
 
@@ -119,6 +120,8 @@ def build(catalog, metrics, resources, end, drama_info=None):
             continue
         drama_key = (str(row.get('drama') or ''), language(row.get('language')))
         bucket(row['channel'])['dramas'][drama_key]['revenue_cents'] += cents
+        if metric['date'] == end:
+            daily_revenue[row['channel']] += cents
 
     output = {}
     for channel_id, channel in channels.items():
@@ -161,6 +164,7 @@ def build(catalog, metrics, resources, end, drama_info=None):
         tag_rows.sort(key=lambda r: (-r['revenue_cents'], r['key']))
         output[channel_id.removeprefix('x:')] = dict(
             revenue_cents=channel_total, unknown_revenue_cents=unknown,
+            revenue_yesterday_cents=daily_revenue[channel_id],
             known_share_bp=round(Fraction(channel_total - unknown, channel_total) * 10000) if meaningful_share else None,
             published_count=len(channel['posts']), drama_count=len(channel['dramas']),
             status='partial' if channel['incomplete'] else 'complete', tags=tag_rows)

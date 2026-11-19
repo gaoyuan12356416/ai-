@@ -1,6 +1,7 @@
 """Indexed disk projections of verified ads_ai portraits; no resident catalog cache."""
 from contextlib import closing
 import json
+from decimal import Decimal
 import os
 from pathlib import Path
 import re
@@ -29,6 +30,20 @@ def publish(root, data, proof):
     temporary = directory / (version + '.pending.sqlite3')
     temporary.unlink(missing_ok=True)
     counts, checksums = {'profiles': 0, 'dramas': 0}, {'profiles': 0, 'dramas': 0}
+    statistics = data.get('operating_stats')
+    if statistics is not None:
+        if statistics['version'] != version:
+            raise ValueError('statistics_version_mismatch')
+        for key in ('generated_at_utc', 'source_version', 'start', 'end'):
+            source_key = 'generated_at' if key == 'generated_at_utc' else key
+            if statistics[key] != data['meta'][source_key]:
+                raise ValueError('statistics_period_mismatch')
+        for item in statistics['accounts'].values():
+            profile = data['accounts'].get(item['x_user_id'], {})
+            if (Decimal(item['revenue_total_usd']) * 100 != profile.get('revenue_cents', 0)
+                    or Decimal(item['revenue_yesterday_usd']) * 100 != profile.get('revenue_yesterday_cents', 0)):
+                raise ValueError('statistics_portrait_revenue_mismatch')
+        counts['account_stats'] = checksums['account_stats'] = 0
     meta = dict(data['meta'], storage='ads_ai.x_channel_revenue_profile', audit=data.get('audit', {}))
     try:
         with closing(sqlite3.connect(temporary)) as db:
@@ -39,6 +54,14 @@ def publish(root, data, proof):
                     payload TEXT NOT NULL, PRIMARY KEY(x_user_id,path,position)) WITHOUT ROWID;
             ''')
             db.execute('INSERT INTO metadata VALUES(1,?)', (encoded(meta),))
+            if statistics is not None:
+                db.execute('CREATE TABLE account_stats (account_id TEXT PRIMARY KEY, payload TEXT NOT NULL) WITHOUT ROWID')
+                db.execute('INSERT INTO metadata VALUES(2,?)', (encoded({k: v for k, v in statistics.items() if k != 'accounts'}),))
+                for account_id, item in sorted(statistics['accounts'].items()):
+                    row = (str(account_id), encoded(item))
+                    db.execute('INSERT INTO account_stats VALUES(?,?)', row)
+                    counts['account_stats'] += 1
+                    checksums['account_stats'] ^= fingerprint(row)
             def insert_details(uid, node_path, values):
                 for index, item in enumerate(values):
                     row = (uid, node_path, index, encoded(item))
@@ -73,6 +96,8 @@ def publish(root, data, proof):
             with closing(connect(path)) as db:
                 if db.execute('SELECT payload FROM metadata WHERE id=1').fetchone()[0] != encoded(meta):
                     raise ValueError('profile_disk_version_conflict')
+                if statistics is not None and db.execute('SELECT payload FROM metadata WHERE id=2').fetchone()[0] != encoded({k: v for k, v in statistics.items() if k != 'accounts'}):
+                    raise ValueError('statistics_disk_version_conflict')
                 for table in counts:
                     count = checksum = 0
                     for row in db.execute('SELECT * FROM ' + table):
@@ -86,7 +111,8 @@ def publish(root, data, proof):
         pointer = directory / 'current.json'
         old = json.loads(pointer.read_text()) if pointer.exists() else {}
         manifest = dict(version=version, file=path.name, previous=old.get('file'),
-                        source_proof=proof, counts=counts, checksums=checksums)
+                        source_proof=proof, counts=counts, checksums=checksums,
+                        statistics=statistics is not None)
         if old.get('version') == version:
             manifest['previous'] = old.get('previous')
         atomic_json(pointer, manifest)

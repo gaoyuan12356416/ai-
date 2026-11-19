@@ -1,0 +1,9 @@
+{
+  "features/x_account_stats/service.py": "b59570f041442fd2b112b1a85de8ac3a9cb0738b434142bc7d446453095e324f",
+  "features/x_tag_revenue/core.py": "34456b887060e23dc0016407308f965a79e840a020805d2f7873071440ed7980",
+  "features/x_tag_revenue/refresh.py": "65b313a81091ff87faa2a0d49a3100351b6fa90dab4c413a82b4ddd78620f316",
+  "features/x_tag_revenue/serving.py": "1ec9f4247cdaad905647b9c82c16daafa86cb23bbf89a1dade5fe46fdada1af3",
+  "features/x_tag_revenue/routes.py": "7f7e8a5f05beb81b550517b6d33384229aec48a76b789478c8ca37daee90c7b0",
+  "static/x-tag-revenue.js": "4ad9b4acd30c4a5b043cf04dae069095fd3c544a2286fdfdb4b707a6308eaae3",
+  "scripts/refresh_x_account_operating_stats.py": "1dca22e57b72338028b56c3b6675b52ffc282a113e782907822aa934c1401555"
+}
