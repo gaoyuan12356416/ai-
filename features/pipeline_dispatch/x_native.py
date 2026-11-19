@@ -236,6 +236,11 @@ class XNativeBridge:
         return log
 
     def artifact(self, queue, record):
+        from .native_media import existing
+        with self.connect() as c:
+            selected = existing(c, "x:queue:" + str(queue["id"]))
+        if selected.get("status") == "applied":
+            return obj(selected["artifact_json"])
         if queue.get("random_template_enabled"):
             if not record or record["status"] != "ready":
                 raise AdapterError("x_random_preparation_required")
@@ -306,7 +311,7 @@ class XNativeBridge:
                             # when the coordinator lost its final receipt.
                             request["prepared_artifact"] = obj(saved[0])
                     if queue.get("random_template_enabled"):
-                        profile = {"cos": "x-random-overlay-ci-apng-h264-v1", "cpu": "x-random-overlay-libx264-720x1280-v1"}.get(job.get("executor_backend"), "x-random-overlay-h264-720x1280-v1")
+                        profile = {"cos": "x-random-overlay-ci-apng-h264-480x854-v2", "cpu": "x-random-overlay-libx264-480x854-v1"}.get(job.get("executor_backend"), "x-random-overlay-h264-480x854-v1")
                         request["random_request"] = frozen["request"] if frozen else {
                             "job_key": "x-random-v1-" + hashlib.sha256(canonical(queue_identity(queue)).encode()).hexdigest(),
                             "queue_id": queue["id"], "content_id": str(queue["content_id"]), "profile": profile,
@@ -317,7 +322,7 @@ class XNativeBridge:
                     if frozen:
                         request = frozen["request"]
                     else:
-                        profile = {"cos": "x-random-overlay-ci-apng-h264-v1", "cpu": "x-random-overlay-libx264-720x1280-v1"}.get(job.get("executor_backend"), "x-random-overlay-h264-720x1280-v1")
+                        profile = {"cos": "x-random-overlay-ci-apng-h264-480x854-v2", "cpu": "x-random-overlay-libx264-480x854-v1"}.get(job.get("executor_backend"), "x-random-overlay-h264-480x854-v1")
                         request = {"job_key": "x-random-v1-" + hashlib.sha256(canonical({"queue": queue_identity(queue), "sha256": queue["preflight_sha256"]}).encode()).hexdigest(),
                                    "queue_id": queue["id"], "content_id": str(queue["content_id"]), "source_url": queue["material_url"],
                                    "source_sha256": queue["preflight_sha256"], "source_size": queue["preflight_size"], "source_duration": float(queue["preflight_duration"]),
@@ -643,6 +648,9 @@ class XNativeBridge:
         return {"held": True, "paused": True, "source_key": job["source_key"], "cutoff": cutoff}
 
     def dispatch(self, action, payload):
+        if action in {"media-context", "media-decision"}:
+            from .native_media import handle
+            return handle(self, action, payload)
         job, claim = payload.get("job", {}), payload.get("claim", {})
         if action == "reserve": return self.reserve(job, claim)
         if action == "begin-operation": return self.begin_operation(job, claim, payload.get("operation", {}))

@@ -60,7 +60,7 @@ class TTBackendBindingTests(unittest.TestCase):
                 fixture = fixtures.RoutedTTBridgeTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
                 fixture.executor.test_routes[(fixture.task.template_id, fixture.task.template_version)] = replace(fixture.route, media_profile_version=profile, source_trim_tail_seconds=0)
                 descriptor = fixture.bridge.reserve(fixture.job, fixture.claim)
-                self.assertEqual(descriptor['request']['expected_profile'], 'tt-post-random-overlay-libx264-720x1280-v1')
+                self.assertEqual(descriptor['request']['expected_profile'], 'tt-post-random-overlay-libx264-480x854-v1')
                 self.assertEqual(descriptor['native_route']['profile'], profile)
                 self.assertIn('backend:cpu', descriptor['required_capabilities'])
                 self.assertEqual(fixture.bridge.reserve(dict(fixture.job, generation=2, executor_backend='gpu'), fixture.claim), descriptor)
@@ -78,6 +78,16 @@ class TTBackendBindingTests(unittest.TestCase):
                     self.assertEqual(descriptor['request']['expected_profile'], 'tt-post-source-direct-v1')
                     self.assertIn('backend:' + backend, descriptor['required_capabilities'])
                     self.assertEqual(fixture.fixture.gpu.prepare_jobs, [])
+
+    def test_new_pool_random_claim_freezes_sd_size_before_receipt(self):
+        for family in ("intake","direct_test"):
+            with self.subTest(family=family):
+                fixture,job=self.pool_case("tt-post-random-overlay-h264-720x1280-v3",family,"gpu")
+                job["executor_capabilities"].append("catalog:tt:"+"a"*64)
+                descriptor=fixture.bridge.reserve(job,fixture.claim)
+                selected="tt-post-random-overlay-h264-480x854-v3"
+                self.assertEqual(descriptor["request"]["expected_profile"],selected)
+                self.assertEqual(fixture.bridge._native_dict(job)["preparation_profile"],selected)
 
     def test_frozen_hevc_rejects_cpu_before_any_native_claim(self):
         for family in ('intake', 'direct_test'):

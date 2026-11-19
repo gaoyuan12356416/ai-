@@ -19,6 +19,9 @@ PROFILE_SPECS = {
     "tt-post-random-overlay-libx264-720x1280-v1": ("random_overlay", "cpu"),
 }
 
+PROFILE_SPECS.update({name.replace("720x1280", "480x854"): spec for name,spec in PROFILE_SPECS.items()
+                      if spec[0]=="random_overlay"})
+
 
 class TTProfileError(ValueError):
     pass
@@ -28,7 +31,7 @@ def supported_profiles(backend):
     if backend == "cpu":
         return {name for name, (mode, codec) in PROFILE_SPECS.items()
                 if codec in {"source", "cpu"} or codec == "h264" and mode != "random_overlay"}
-    if backend in {"gpu", "cos"}:
+    if backend == "gpu":
         return {name for name, (_, codec) in PROFILE_SPECS.items() if codec != "cpu"}
     return set()
 
@@ -55,7 +58,7 @@ def asset_capabilities(config):
 
 def select_config(base, profile, backend):
     """Preserve the default renderer and build independent routed processors."""
-    if backend not in {"cpu", "gpu"} or profile not in supported_profiles(backend):
+    if profile not in supported_profiles(backend):
         raise TTProfileError("tt_renderer_profile_unsupported")
     mode, codec = PROFILE_SPECS[profile]
     encoder = "libx264" if backend == "cpu" else "hevc_nvenc" if codec in {"hevc", "source"} else "h264_nvenc"

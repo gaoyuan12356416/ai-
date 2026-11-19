@@ -146,7 +146,7 @@ class AutoPostExecutor:
         task = self.store.claim_next(worker_id, lease_seconds)
         if task is None:
             return {"ok": True, "status": "no_pending", "claimed": False}
-        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or task.get("prepared_media_url") == task.get("source_media_url"):
+        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or (task.get("prepared_media_url") == task.get("source_media_url") and task.get("media_selection_kind") != "deadline_original"):
             return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_prepared_media_required", "error_message": "任务缺少独立GPU成片，已禁止发布", "definite_attempts": 0})
         short_url, long_url = str(task.get("short_url") or ""), str(task.get("long_url") or "")
         if bool(short_url) != bool(long_url):

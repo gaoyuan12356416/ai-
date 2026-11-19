@@ -20,6 +20,9 @@ from features.fb_gpu.prepare_worker import build_command, software_command
 from features.fb_gpu.render_process import RenderStalled, run_render
 from features.random_gpu.compositor import BACKEND
 
+from features.random_gpu.profiles import base_profile, canvas
+
+
 PROFILE = "x-random-overlay-h264-720x1280-v1"
 CPU_PROFILE = "x-random-overlay-libx264-720x1280-v1"
 PREPARE_PATH = "/internal/x-post-random-template"
@@ -32,7 +35,7 @@ JOB = re.compile(r"x-random-v1-[a-f0-9]{64}\Z")
 def validate_request(raw, config):
     if not isinstance(raw, dict) or set(raw) not in (FIELDS, FIELDS | {"duration_policy_version"}):
         raise repair.MediaRepairError("x_random_request_invalid", "random video request fields invalid", 400)
-    expected_profile = CPU_PROFILE if config.profile == CPU_PROFILE else PROFILE
+    expected_profile = config.profile if base_profile(config.profile) in (PROFILE, CPU_PROFILE) else PROFILE
     if (type(raw["queue_id"]) is not int or not 0 < raw["queue_id"] < 2**63
             or not JOB.fullmatch(str(raw["job_key"])) or raw["profile"] != expected_profile
             or not SHA.fullmatch(str(raw["source_sha256"]))
@@ -59,8 +62,8 @@ def validate_request(raw, config):
 
 
 def random_command(config, source, output, info, recipe, assets):
-    cpu = config.profile == CPU_PROFILE
-    adapter = SimpleNamespace(ffmpeg=config.ffmpeg_bin, compositor_backend="cpu_legacy" if cpu else BACKEND,
+    cpu = base_profile(config.profile) == CPU_PROFILE
+    adapter = SimpleNamespace(profile=config.profile, ffmpeg=config.ffmpeg_bin, compositor_backend="cpu_legacy" if cpu else BACKEND,
                               video_encoder="libx264" if cpu else "h264_nvenc")
     command = build_command(adapter, source, output, info, recipe, assets)
     rate = repair.output_rate_control(config.max_output_bytes, info["duration"])
@@ -71,10 +74,13 @@ def random_command(config, source, output, info, recipe, assets):
 
 
 class RandomTemplateProcessor:
-    def __init__(self, processor, *, asset_root, manifest_sha256, runner=run_render, assets=None, backend="gpu"):
+    def __init__(self, processor, *, asset_root, manifest_sha256, runner=run_render, assets=None, backend="gpu", profile=None):
         self.repair = processor
         if backend not in {"gpu", "cpu"}: raise ValueError("invalid renderer backend")
-        self.config = replace(processor.config, profile=CPU_PROFILE if backend=="cpu" else PROFILE,
+        original = CPU_PROFILE if backend == "cpu" else PROFILE
+        if profile is not None and base_profile(profile) != original:
+            raise ValueError("x_random_profile_backend_mismatch")
+        self.config = replace(processor.config, profile=profile or original,
                               cos_prefix=processor.config.cos_prefix.rstrip("/") + "/random-template")
         self.runner = runner
         self.assets = assets or load_asset_set(Path(asset_root), manifest_sha256)
@@ -119,7 +125,7 @@ class RandomTemplateProcessor:
                    "scale=%s:%s:eval=frame,setsar=%s,fps=30" % (video["width"], video["height"], sar.replace(":", "/")),
                    "-c:v", "h264_nvenc", "-preset", "p5", "-cq", "18", "-b:v", "0", "-pix_fmt", "yuv420p",
                    "-c:a", "aac", "-af", "aresample=48000:async=1:first_pts=0", "-t", str(info["duration"]), str(normalized)]
-            if self.config.profile == CPU_PROFILE: cmd = software_command(cmd)
+            if base_profile(self.config.profile) == CPU_PROFILE: cmd = software_command(cmd)
             self.runner(cmd, capture_output=True, text=True, timeout=remaining(), check=True)
             normalized_info = self._info(normalized)
             if abs(normalized_info["duration"] - info["duration"]) > 0.05:
@@ -168,13 +174,13 @@ class RandomTemplateProcessor:
                         raise repair.MediaRepairError("x_random_source_changed", "random source duration changed", 409)
                     self._render(source, output, info, recipe, selected_asset_paths(recipe, self.assets))
                     probe = repair.validate_output(
-                        repair._probe_payload(self.config, output, self.repair.runner), output, (720, 1280),
+                        repair._probe_payload(self.config, output, self.repair.runner), output, canvas(self.config.profile),
                         self.config.max_output_bytes, expected_duration=request["source_duration"],
                         max_duration_seconds=request["max_duration_seconds"] if request["max_duration_seconds"] in (140, 1200) else 14400)
                     if (abs(probe["duration"] - request["source_duration"]) > 0.05
                             or (probe["duration"] > duration_policy.standard_limit(request)) != (request["source_duration"] > duration_policy.standard_limit(request))
                             or probe["duration"] > request["max_duration_seconds"]
-                            or (probe["width"], probe["height"]) != (720, 1280)):
+                            or (probe["width"], probe["height"]) != canvas(self.config.profile)):
                         raise repair.MediaRepairError("x_random_output_invalid", "random video duration or dimensions changed", 422)
                     digest, size = repair._file_sha256(output)
                     key = self.config.cos_prefix + "/" + job + "/" + digest + ".mp4"

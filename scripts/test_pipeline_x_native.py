@@ -191,10 +191,12 @@ class NativeTests(unittest.TestCase):
         queue = self.queue(random=True)
         job, descriptor, artifact = self.preflight(queue)
         request = PreparationStore(self.runtime.POST_DB_PATH).get(queue["id"])["request"]
-        config = SimpleNamespace(profile=CPU_PROFILE, max_source_bytes=16 * 1024**3, allowed_hosts=("media.example.test",))
+        from features.random_gpu.profiles import SD_PROFILES
+        frozen_profile = SD_PROFILES[CPU_PROFILE]
+        config = SimpleNamespace(profile=frozen_profile, max_source_bytes=16 * 1024**3, allowed_hosts=("media.example.test",))
         validate_request(request, config)
         retry = self.job(queue, "prepare", generation=2, backend="gpu")
-        self.assertEqual(self.bridge.reserve(retry, retry)["request"]["profile"], CPU_PROFILE)
+        self.assertEqual(self.bridge.reserve(retry, retry)["request"]["profile"], frozen_profile)
         with self.assertRaises(AdapterError): self.bridge.complete(job, {"artifact": artifact}, job)
 
     def test_random_complete_binds_full_portable_artifact(self):

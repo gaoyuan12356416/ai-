@@ -7215,6 +7215,13 @@ class TTPostStore:
             "TT material preparation profile",
             128,
         )
+        compatible_profiles = [normalized_required_profile] if normalized_required_profile else []
+        if "random-overlay" in normalized_required_profile:
+            for old, new in (("720x1280", "480x854"), ("480x854", "720x1280")):
+                if old in normalized_required_profile:
+                    compatible_profiles.append(normalized_required_profile.replace(old,new))
+        profile_sql = (" AND preparation_profile IN ("+",".join("?" for _ in compatible_profiles)+")"
+                       if compatible_profiles else "")
         normalized_excluded_pool_item_id = (
             _positive_int(
                 excluded_pool_item_id,
@@ -7336,14 +7343,7 @@ class TTPostStore:
                 exclusion_sql = (
                     " AND id<>?" if normalized_excluded_pool_item_id else ""
                 )
-                profile_sql = (
-                    " AND preparation_profile=?"
-                    if normalized_required_profile
-                    else ""
-                )
-                claim_params: List[Any] = [target_language]
-                if normalized_required_profile:
-                    claim_params.append(normalized_required_profile)
+                claim_params: List[Any] = [target_language,*compatible_profiles]
                 if normalized_excluded_pool_item_id:
                     claim_params.append(normalized_excluded_pool_item_id)
                 pool = conn.execute(
@@ -7357,14 +7357,7 @@ class TTPostStore:
                     claim_params,
                 ).fetchone()
             else:
-                profile_sql = (
-                    " AND preparation_profile=?"
-                    if normalized_required_profile
-                    else ""
-                )
-                claim_params = [normalized_account_id]
-                if normalized_required_profile:
-                    claim_params.append(normalized_required_profile)
+                claim_params = [normalized_account_id,*compatible_profiles]
                 pool = conn.execute(
                     """
                     SELECT * FROM tt_post_recurring_pool

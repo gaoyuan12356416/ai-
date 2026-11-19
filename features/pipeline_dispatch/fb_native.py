@@ -25,7 +25,7 @@ from features.fb_video_publish.links import short_url, validate_long_url
 from features.fb_video_publish import moboreels
 from features.fb_auto_posts.moboreels import ensure_link as ensure_moboreels_link
 
-CPU_PROFILE = "fb-post-random-overlay-libx264-720x1280-v1"
+CPU_PROFILE = "fb-post-random-overlay-libx264-480x854-v1"
 _INITIALIZE_LOCK = threading.Lock()
 
 class FBNativeBridge:
@@ -127,8 +127,14 @@ class FBNativeBridge:
             if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                 raise AdapterError("material_identity_changed")
         media_url = str(prepared.get("media_url") or "")
-        if task["processing_mode"] == "random_overlay":
+        if prepared.get("media_selection_kind")=="deadline_original":
+            if not media_url or media_url!=snap["material"]["media_url"]:
+                raise AdapterError("original_media_invalid")
+        elif task["processing_mode"] == "random_overlay" and prepared.get("media_selection_kind") not in {"cross_platform_reuse", "deadline_reuse"}:
             if not media_url or media_url == snap["material"]["media_url"] or not all(prepared.get(k) for k in ("sha256", "profile", "random_overlay_recipe")):
+                raise AdapterError("prepared_media_invalid")
+        elif prepared.get("media_selection_kind") in {"cross_platform_reuse", "deadline_reuse"}:
+            if not media_url or not prepared.get("sha256") or media_url==snap["material"]["media_url"]:
                 raise AdapterError("prepared_media_invalid")
         elif media_url != snap["material"]["media_url"]:
             raise AdapterError("original_media_invalid")
@@ -144,7 +150,7 @@ class FBNativeBridge:
         return {"page_id": task["page_id"], "media_url": media_url, "message": task["caption"], "title": title}
 
     def _auto_preflight(self, task):
-        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or task.get("prepared_media_url") == task.get("source_media_url"):
+        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or (task.get("prepared_media_url") == task.get("source_media_url") and task.get("media_selection_kind") != "deadline_original"):
             raise AdapterError("fb_auto_prepared_media_required")
         short, long = str(task.get("short_url") or ""), str(task.get("long_url") or "")
         if bool(short) != bool(long):
@@ -292,7 +298,7 @@ class FBNativeBridge:
                     else:
                         source = obj(task["snapshot_json"])["material"]["media_url"]
                     backend = job.get("executor_backend") or "gpu"
-                    profile = {"cpu": CPU_PROFILE, "cos": "fb-random-overlay-ci-apng-h264-v1"}.get(backend, PROFILE)
+                    profile = {"cpu": CPU_PROFILE, "cos": "fb-random-overlay-ci-apng-h264-480x854-v2"}.get(backend, PROFILE.replace("720x1280", "480x854"))
                     descriptor = {"kind": "fb_prepare", "request": {"job_id": task["gpu_job_id"], "content_id": task["content_id"],
                                   "source_url": source, "source_trim_tail_seconds": 0, "video_template": task.get("video_template") or "random_overlay", "expected_profile": profile}}
                     if family == "video" and task.get("source_kind") == "pool":
@@ -303,7 +309,8 @@ class FBNativeBridge:
                     descriptor = {"kind": "fb_publish", "request": request, "page_id": task["page_id"],
                                   "body": request["message"], "artifact": artifact_from(task)}
                     descriptor["artifact"]["url"] = request["media_url"]
-                    if family == "video" and task["processing_mode"] == "original":
+                    if (task.get("media_selection_kind")=="deadline_original" or obj(task.get("prepared_json")).get("media_selection_kind")=="deadline_original"
+                            or (family=="video" and task["processing_mode"]=="original")):
                         descriptor["processing_mode"] = "original"
                         descriptor["artifact"]["identity_mode"] = "remote_url"
             except Exception as exc:
@@ -688,6 +695,9 @@ class FBNativeBridge:
             return result
 
     def dispatch(self, action, payload):
+        if action in {"media-context", "media-decision"}:
+            from .native_media import handle
+            return handle(self, action, payload)
         if not isinstance(payload, dict) or set(payload) - {"job", "claim", "operation", "receipt", "phase", "cutoff"}:
             raise AdapterError("canonical_bridge_payload_invalid")
         job = payload.get("job") or {}

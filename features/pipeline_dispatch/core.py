@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 from .backlog_release import offer_disposition
 from .backlog_contract import SCHEMA as BACKLOG_SCHEMA
-from . import prepare_routing
+from . import prepare_routing, media_gate
 
 CHANNELS = ("x", "fb", "tt", "youtube")
 STAGES = ("prepare", "publish")
@@ -265,6 +265,7 @@ class DispatchStore:
             c.execute("INSERT OR IGNORE INTO pipeline_config VALUES(1,1,?,?)", (dumps(DEFAULT_CAPACITY), self.now()))
             from .snapshots import install
             install(c)
+            media_gate.schema(c)
 
     @staticmethod
     def event(c, job_id, event_type, details, now):
@@ -676,6 +677,7 @@ class DispatchStore:
             if backlog_action == 'archive':
                 archived = c.execute("SELECT * FROM pipeline_job WHERE source_key=? AND stage=?", (offer['source_key'], stage)).fetchone()
                 return _job(archived, True) if archived else None
+            media_gate.observe(c, offer, now)
             self._close_terminal_preparation_observation(c, offer)
             if stage == "publish" and status not in ("published", "failed") and (not offer.get("legacy_inflight") or int(offer.get("source_attempt_count") or 0) > 0):
                 c.execute("UPDATE pipeline_job SET status='completed',finished_at=?,updated_at=? WHERE source_key=? AND stage='prepare' AND status='legacy_running' AND generation=0", (now, now, offer["source_key"]))
@@ -1202,12 +1204,18 @@ class DispatchStore:
                     blocked.append("account_busy")
                     continue
                 if stage == "publish":
+                    if c.execute("SELECT 1 FROM pipeline_media_gate WHERE source_key=? AND phase='pending'", (row["source_key"],)).fetchone():
+                        blocked.append("media_decision_pending")
+                        continue
                     if any(c.execute("SELECT 1 FROM pipeline_cooldown WHERE resource_key=? AND until_at>?", (key, now)).fetchone() for key in resources + ["channel:" + row["channel"]]):
                         blocked.append("cooldown")
                         continue
                     if c.execute("SELECT count(*) FROM pipeline_job WHERE channel=? AND stage='publish' AND status IN ('running','legacy_running')", (row["channel"],)).fetchone()[0] >= config["channel_limits"][row["channel"]]:
                         blocked.append("channel_limit")
                         continue
+                if stage == "prepare" and media_gate.consider(c, row, now):
+                    blocked.append("media_decision_pending")
+                    continue
                 # Eligible queues have no dependency on an earlier sibling.
                 token, generation = secrets.token_urlsafe(32), row["generation"] + 1
                 expires = stamp(self.clock() + dt.timedelta(seconds=LEASE_SECONDS))
@@ -1289,6 +1297,8 @@ class DispatchStore:
                 return {"job": None, "idle_reason": "cos_below_min_pending", "eligible_pending": count}
             if choice is not None:
                 row, locks, _ = choice
+                if media_gate.consider(c, row, now):
+                    return {"job": None, "idle_reason": "media_decision_pending"}
                 # Eligible queues have no dependency on an earlier sibling.
                 token, generation = secrets.token_urlsafe(32), row["generation"] + 1
                 expires = stamp(self.clock() + dt.timedelta(seconds=LEASE_SECONDS))
@@ -1665,6 +1675,7 @@ class DispatchStore:
                 if not isinstance(artifact, dict) or not artifact.get("sha256") or not artifact.get("size") or not (artifact.get("url") or artifact.get("object_key")):
                     raise DispatchError("portable_artifact_required")
                 c.execute("UPDATE pipeline_job SET artifact_json=? WHERE id=?", (dumps(artifact), row["id"]))
+                media_gate.media_decision.record_artifact(c, row["source_key"], row["channel"], artifact, self.now())
             now = self.now()
             c.execute("INSERT INTO pipeline_receipt VALUES(?,?,?,?,?)", (receipt_id, row["id"], row["generation"], body_hash, now))
             c.execute("UPDATE pipeline_job SET status=?,finished_at=CASE WHEN finished_at='' THEN ? ELSE finished_at END,updated_at=?,error_code='',error_message='',canonical_receipt=? WHERE id=?", (status, now, now, str(result.get("canonical_receipt", result.get("publish_id", ""))), row["id"]))

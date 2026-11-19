@@ -11,11 +11,13 @@ import secrets
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .core import DispatchStore, DispatchError, dumps
 from .diagnostics import failure_fields
+from . import media_gate
 
 
 class Coordinator:
@@ -131,6 +133,72 @@ class Coordinator:
                 # Never expose source URLs, tokens, or raw driver exception text.
                 print("pipeline_collection_failed", flush=True)
             self.stopping.wait(15)
+
+    def deliver_media(self, job, ticket, decision):
+        adapter = self.registry._adapter(job)
+        try:
+            row = adapter.read(job["source_id"])
+            offer = adapter.project(row) if row else None
+            kind = decision["kind"]
+            applied_here = False
+            if kind == "refresh":
+                result = {"refreshed":True} if offer else {"skipped":True,"reason":"canonical_task_missing"}
+            else:
+                if not adapter.driver or getattr(adapter.driver,"control_only",False):
+                    raise RuntimeError("canonical_execution_not_connected")
+                # The canonical owner checks its current schedule, lease and any
+                # existing ticket atomically. Retry exactly the same ticket after
+                # a transport failure, even if a subsequent scan advanced status.
+                native = {k:job[k] for k in ("id","channel","family","source_key","source_id","stage","generation")}
+                native["publish_at"] = decision.get("publish_at","")
+                native["observed_publish_at"] = (offer or {}).get("media_publish_at","")
+                native["media_target"] = {k:str(row[k]) for k in ("material_id","content_id","template_version","account_id","page_id") if row and row.get(k)}
+                if kind == "select_source":
+                    selection = adapter.driver.call("media-context",{"job":native,"deadline":decision["deadline"],"decision_id":ticket})
+                    if any(selection.get(k) for k in ("retry","skipped","already_started","schedule_changed")):
+                        result = selection
+                    else:
+                        result = {"selected":True}
+                else:
+                    result = adapter.driver.call("media-decision",{"job":native,"decision":decision,"decision_id":ticket})
+                    applied_here = bool(result.get("applied"))
+                row = adapter.read(job["source_id"])
+                offer = adapter.project(row) if row else None
+                if kind == "select_source" and result.get("selected") and offer:
+                    context = selection.get("context") or selection.get("media_context")
+                    if context and context.get("source_identity"):
+                        offer["media_context"] = context
+                if applied_here:
+                    artifact = (offer or {}).get("artifact") or {}
+                    expected = result.get("artifact") or decision.get("artifact") or {}
+                    matches = all(artifact.get(k) == expected[k] for k in ("sha256","url") if expected.get(k))
+                    if not (offer and offer["source_key"] == job["source_key"] and offer["stage"] == "publish" and matches):
+                        result = {"retry": True, "reason":"canonical_media_readback_pending"}
+            if offer:
+                self.store.offer(offer)
+            media_gate.close(self.store, job, ticket, decision, result)
+        except Exception as exc:
+            media_gate.close(self.store, job, ticket, decision, {"retry": True, "reason":getattr(exc,"code","canonical_media_unavailable")})
+
+    def run_media_dispatch(self):
+        """Media waiting for its deadline must progress even when all renderers are busy."""
+        inflight = {}
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="pipeline-media") as executor:
+            while not self.stopping.is_set():
+                try:
+                    for ticket, future in list(inflight.items()):
+                        if future.done():
+                            del inflight[ticket]
+                            future.result()
+                    media_gate.sweep(self.store)
+                    for job,ticket,decision in media_gate.pending(self.store,16):
+                        if len(inflight)>=8:
+                            break
+                        if ticket not in inflight:
+                            inflight[ticket]=executor.submit(self.deliver_media,job,ticket,decision)
+                except Exception:
+                    print("pipeline_media_dispatch_failed", flush=True)
+                self.stopping.wait(1)
 
     def reserve_job(self, job):
         try:
@@ -528,14 +596,18 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     thread = threading.Thread(target=coordinator.run_collector, daemon=True)
+    media_thread = threading.Thread(target=coordinator.run_media_dispatch, daemon=True)
     if not args.standby_port:
         thread.start()
+        media_thread.start()
     try:
         server.serve_forever()
     finally:
         coordinator.stopping.set()
         if thread.is_alive():
             thread.join()
+        if media_thread.is_alive():
+            media_thread.join()
         server.server_close()
 
 

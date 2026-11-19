@@ -113,6 +113,10 @@ def preparation_target(job, profile, *, automatic=False):
     }
     # Older callers did not provide a host. Retain their prior inference;
     # current coordinator calls always provide the actual selected backend.
+    if "random-overlay" in profile:
+        profile = profile.replace("720x1280", "480x854")
+        cpu_variants.update({p.replace("720x1280", "480x854"): v.replace("720x1280", "480x854")
+                             for p, v in tuple(cpu_variants.items()) if "random-overlay" in p})
     backend = job.get("executor_backend") or ("cpu" if profile in cpu_variants.values() else "gpu")
     if automatic and backend == "cos":
         profile = profile.replace("-hevc-", "-h264-")
@@ -207,6 +211,23 @@ class TTNativeBridge:
         if port.route_identity is not None:
             descriptor["native_route"] = port.route_identity
         return descriptor
+
+    def _freeze_pool_canvas(self, job, task, token, profile):
+        previous = task["preparation_profile"]
+        if previous == profile or not profile:
+            return previous
+        if not ("random-overlay" in previous and profile == previous.replace("720x1280", "480x854")):
+            raise AdapterError("tt_frozen_video_route_changed")
+        if max(int(task.get(k) or 0) for k in ("attempt_count","preparation_attempt_count","prepare_attempt_count")) > 1:
+            return previous
+        table = {"intake":"tt_post_material_intake","direct_test":"tt_post_direct_test"}[job["family"]]
+        with self.connect() as conn:
+            changed = conn.execute(f"""UPDATE {table} SET preparation_profile=?
+                WHERE id=? AND status='preparing' AND claim_token=? AND preparation_profile=?
+                AND COALESCE(prepared_media_url,'')=''""",(profile,task["id"],token,previous)).rowcount
+        if changed != 1:
+            raise AdapterError("tt_frozen_video_route_changed")
+        return profile
 
     def _queue_preflight(self, queue, token):
         from features.tt_posts.core import TTPostPolicy
@@ -357,12 +378,14 @@ class TTNativeBridge:
                         if not claims:
                             raise AdapterError("canonical_task_not_claimable")
                         native_token, task = claims[0].reveal_claim_token(), claims[0].item
+                        if not frozen_descriptor:
+                            selected_profile=self._freeze_pool_canvas(job,task,native_token,selected_profile)
                         self._direct_prepare_preflight(task)
                         clone = copy.copy(self.service)
                         clone.source_trim_tail_seconds = float(task["source_trim_tail_seconds"])
                         descriptor = frozen_descriptor or self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
                             "material_id": task["material_id"], "content_id": task["content_id"],
-                            "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=task["preparation_profile"])
+                            "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=selected_profile)
                     else:
                         native = self.store.claim_direct_test_publish(identity, worker, lease_seconds=10800)
                         native_token, task = native.reveal_claim_token(), native.item
@@ -383,11 +406,13 @@ class TTNativeBridge:
                     if native is None:
                         raise AdapterError("canonical_task_not_claimable")
                     task, native_token = native.item, native.reveal_claim_token()
+                    if not frozen_descriptor:
+                        selected_profile=self._freeze_pool_canvas(job,task,native_token,selected_profile)
                     clone = copy.copy(self.service)
                     clone.source_trim_tail_seconds = float(task["source_trim_tail_seconds"])
                     descriptor = frozen_descriptor or self._prepare_descriptor(clone, lambda svc: svc._prepare_resolved({
                         "material_id": str(task["material_id"]), "content_id": str(task["content_id"]),
-                        "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=task["preparation_profile"])
+                        "source_media_url": task["source_media_url"]}, gpu_job_id=task["gpu_job_id"]), profile=selected_profile)
                     account_id = task["account_id"]
                 else:
                     if job["stage"] != "publish":
@@ -639,6 +664,9 @@ class TTNativeBridge:
             return result
 
     def dispatch(self, action, payload):
+        if action in {"media-context", "media-decision"}:
+            from .native_media import handle
+            return handle(self, action, payload)
         if not isinstance(payload, dict) or set(payload) - {"job", "claim", "operation", "receipt", "phase", "cutoff"}:
             raise AdapterError("canonical_bridge_payload_invalid")
         job, claim = payload.get("job") or {}, payload.get("claim") or {}

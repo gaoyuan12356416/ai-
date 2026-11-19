@@ -155,6 +155,9 @@ def default_specs(paths):
     return result
 
 
+from .media_decision import fb_video_appointment
+
+
 class LedgerAdapter:
     def __init__(self, spec: LedgerSpec, driver=None, *, cross_paths=None, preparation_policy=None):
         self.spec, self.driver = spec, driver
@@ -279,6 +282,17 @@ class LedgerAdapter:
                 row["scheduled_at"] = parent.get("planned_publish_at_utc") or parent.get("scheduled_at")
                 if not row["scheduled_at"]:
                     raise AdapterError("random_publish_time_missing")
+            if row.get("manual_run_id") and parent.get("publish_mode") == "scheduled":
+                row["_media_publish_at"] = parent.get("scheduled_at")
+            if row.get("schedule_run_id"):
+                appointment = parent.get("planned_publish_at_utc") or parent.get("scheduled_at")
+                if not appointment and parent.get("run_date") and parent.get("publish_time"):
+                    try:
+                        appointment = stamp(datetime.fromisoformat(parent["run_date"] + "T" + parent["publish_time"])
+                                            .replace(tzinfo=timezone(timedelta(hours=8))))
+                    except (TypeError, ValueError):
+                        appointment = ""
+                row["_media_publish_at"] = appointment
             if self.cross_paths.get("x_auto") and not row.get("ancestor_source_keys"):
                 match = re.fullmatch(r"x-auto-task-([1-9][0-9]*)", str(parent.get("external_task_key") or ""))
                 origin = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE id=?", (int(match[1]),)).fetchone() if match else None
@@ -304,11 +318,29 @@ class LedgerAdapter:
                 pool_owner = self._parent(conn, "x_post_material_pool", "id", row["pool_item_id"])
                 if pool_owner.get("created_by_user_id"):
                     parent = pool_owner
+            if row.get("ancestor_source_keys") and self.cross_paths.get("x_auto"):
+                auto_task = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE id=?",
+                                         (row["ancestor_source_keys"][0].split(":")[-1],)).fetchone()
+                if auto_task and dict(auto_task).get("run_id") and conn.execute(
+                        "SELECT 1 FROM pipeline_x_auto.sqlite_master WHERE type='table' AND name='x_auto_run'").fetchone():
+                    run = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_run WHERE id=?", (auto_task["run_id"],)).fetchone()
+                    if run and dict(run).get("trigger_type"):
+                        row["_media_publish_at"] = auto_task["scheduled_at_utc"] if run["trigger_type"] != "manual" else ""
+            if self._exists(conn, "pipeline_native_media_decision"):
+                final = conn.execute("SELECT artifact_json FROM pipeline_native_media_decision WHERE source_key=?",
+                                     ("x:queue:"+str(row["id"]),)).fetchone()
+                art = obj(final[0]) if final else {}
+                if art.get("url"):
+                    row.update(_dispatch_artifact=art,random_prepared=True,prepared_media_url=art["url"],
+                               prepared_sha256=art.get("sha256",""),prepared_profile=art.get("profile",""),
+                               prepared_size_bytes=art.get("size",0))
         elif key in {("x", "auto"), ("tt", "auto"), ("fb", "auto")}:
             prefix = self.spec.channel + "_auto"
             parent = self._parent(conn, prefix + "_run", "id", row.get("run_id"))
             template = self._parent(conn, prefix + "_template", "id", row.get("template_id"))
             parent = {**template, **parent}
+            if parent.get("trigger_type") and parent["trigger_type"] != "manual":
+                row["_media_publish_at"] = row.get("planned_publish_at_utc") or row.get("scheduled_at_utc") or parent.get("scheduled_at_utc")
             row["schedule_policy"] = row.get("schedule_policy") or parent.get("schedule_policy") or obj(row.get("account_settings_json")).get("schedule_policy", "")
             if template.get("owner_user_id") or template.get("created_by_user_id"):
                 parent["owner_user_id"] = template.get("owner_user_id") or template["created_by_user_id"]
@@ -341,6 +373,8 @@ class LedgerAdapter:
             row["origin_created_at"] = parent.get("created_at")
         elif key == ("fb", "video"):
             parent = obj(row.get("snapshot_json")).get("actor", {})
+            batch = self._parent(conn,"fb_video_batch","batch_id",row.get("batch_id"))
+            row["_media_publish_at"] = fb_video_appointment(row,batch)
             row["schedule_policy"] = row.get("schedule_policy") or obj(obj(row.get("snapshot_json")).get("group_pool")).get("schedule_policy", "")
             if self._exists(conn, "fb_video_attempt"):
                 from .fb_isolation import platform_attempt_count
@@ -529,7 +563,8 @@ class LedgerAdapter:
             version = row.get("version") or body.get("current_version")
             if isinstance(version, int) and not isinstance(version, bool) and version > 0:
                 source_revision = str(version) + ":" + str(body.get("generation_retry_id") or "")
-        publish_at = stamp(row.get("scheduled_at")) if row.get("scheduled_at") else ""
+        actual_publish = row.get("_media_publish_at") or row.get("scheduled_at")
+        publish_at = stamp(actual_publish) if actual_publish else ""
         eligible_at = publish_at
         if stage == "prepare" and not terminal and not review_hold:
             created_at = row.get("origin_created_at") or row.get("created_at_utc") or row.get("created_at")
@@ -562,7 +597,12 @@ class LedgerAdapter:
                          "fb_material_id": str(row.get("material_id") or ""),
                          "fb_pool_task_id": source_id if spec.family == "video" and row.get("source_kind") == "pool" else "",
                          "fb_page_write_active": page_write_active(row, spec.family, now)}
-        return {**fb_fields, "source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
+        from . import media_decision
+        from .core import stamp as dispatch_stamp
+        appointment = row.get("_media_publish_at")
+        return {**fb_fields, "media_context":media_decision.context_from_row(spec.channel,spec.family,row),
+                "media_publish_at":dispatch_stamp(appointment) if appointment else "",
+                "source_key": source_key, "channel": spec.channel, "family": spec.family, "source_id": source_id,
                 "backlog_authorization": row.get("_backlog_authorization"),
                 "backlog_ancestor_authorization": row.get("_backlog_ancestor_authorization"),
                 "source_revision": source_revision,

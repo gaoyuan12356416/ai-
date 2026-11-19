@@ -1,0 +1,199 @@
+{
+  "coordinator": {
+    "features/pipeline_dispatch/adapters.py": {
+      "after": "9a70506c2a1cefb0b21ab676cb54353102d50f25",
+      "before": "e6097afb2650216b1a158cd86af37f369568a80c",
+      "file": "features/pipeline_dispatch/adapters.py"
+    },
+    "features/pipeline_dispatch/core.py": {
+      "after": "ea25edf39575a997a71750421cfde9b4f5885cf4",
+      "before": "154c296792d3113daec4e4cab651cc1d6f73b4c8",
+      "file": "features/pipeline_dispatch/core.py"
+    },
+    "features/pipeline_dispatch/media_decision.py": {
+      "after": "e342b0fed14a10b7b65e8967d88573bcebec52e1",
+      "before": null,
+      "file": "features/pipeline_dispatch/media_decision.py"
+    },
+    "features/pipeline_dispatch/media_gate.py": {
+      "after": "e6c9016077ebfbff1f616dba3a699f4450706b74",
+      "before": null,
+      "file": "features/pipeline_dispatch/media_gate.py"
+    },
+    "features/pipeline_dispatch/service.py": {
+      "after": "d3ced65a37b69539bc29402f94ab3872358e8c1d",
+      "before": "71aa36b625765f3b13cd60f552ee8829c84ec2e8",
+      "file": "features/pipeline_dispatch/service.py"
+    },
+    "scripts/backfill_pipeline_media_index.py": {
+      "after": "aa814f1969cd9b0ca7a270240d5570b4ca714223",
+      "before": null,
+      "file": "scripts/backfill_pipeline_media_index.py"
+    }
+  },
+  "cos_fb": {
+    "features/pipeline_dispatch/fb_native.py": {
+      "after": "e6b78e1f96720d1e2eabb66fc3e66c0025f6a8e1",
+      "before": "7c0ed2e58c7014bee1806dc76a881c35b202cb73",
+      "file": "ops/social-scheduled-media-20261119/variants/e6b78e1f9672/features/pipeline_dispatch/fb_native.py"
+    }
+  },
+  "cos_tag": {
+    "features/pipeline_dispatch/x_native.py": {
+      "after": "73b7e16d964ed401a89145cbe2c6a3e20b216f4c",
+      "before": "67c502e525ded7b8120e647377e595201b440c0c",
+      "file": "ops/social-scheduled-media-20261119/variants/73b7e16d964e/features/pipeline_dispatch/x_native.py"
+    }
+  },
+  "cos_tt": {
+    "features/pipeline_dispatch/tt_native.py": {
+      "after": "f721717a701a9c701df85a0b4bc317dc4ce26de0",
+      "before": "cb538b7c2a080ebab7eb6414e6d2b0af24bc28de",
+      "file": "ops/social-scheduled-media-20261119/variants/f721717a701a/features/pipeline_dispatch/tt_native.py"
+    },
+    "features/pipeline_dispatch/tt_profiles.py": {
+      "after": "fef4fac1b19ea6059418451a8653855caee297f0",
+      "before": "78e3459885eb5d90055cbf666cfa3784b93a7d09",
+      "file": "features/pipeline_dispatch/tt_profiles.py"
+    }
+  },
+  "cos_tt_auto": {
+    "features/pipeline_dispatch/tt_native.py": {
+      "after": "c522cf53933c207b165761d2a228eeccc2cd0fd7",
+      "before": "2edb8a40952e7e932c5d348ee9060b58249850fe",
+      "file": "ops/social-scheduled-media-20261119/variants/c522cf53933c/features/pipeline_dispatch/tt_native.py"
+    },
+    "features/pipeline_dispatch/tt_profiles.py": {
+      "after": "fef4fac1b19ea6059418451a8653855caee297f0",
+      "before": "78e3459885eb5d90055cbf666cfa3784b93a7d09",
+      "file": "features/pipeline_dispatch/tt_profiles.py"
+    }
+  },
+  "cos_x": {
+    "features/pipeline_dispatch/x_native.py": {
+      "after": "22c95c1c75a45d4821eba99e6df476b6ce73ac01",
+      "before": "5d9dcdeaef45f26a7520e7973fb51067f5f8a678",
+      "file": "ops/social-scheduled-media-20261119/variants/22c95c1c75a4/features/pipeline_dispatch/x_native.py"
+    }
+  },
+  "fb": {
+    "features/fb_auto_posts/core.py": {
+      "after": "fb02162532c3ed2b0092d825a420e77ad5cd823f",
+      "before": "4545f383aa67ad36a6ba6bec04f08322486e8886",
+      "file": "ops/social-scheduled-media-20261119/variants/fb02162532c3/features/fb_auto_posts/core.py"
+    },
+    "features/fb_auto_posts/publisher.py": {
+      "after": "8757a5f5ccb0f1a8df21593cd23e9f160e811a22",
+      "before": "d516f782d6465f3b137046c635a5ef7c03b19c1e",
+      "file": "ops/social-scheduled-media-20261119/variants/8757a5f5ccb0/features/fb_auto_posts/publisher.py"
+    },
+    "features/fb_video_publish/worker.py": {
+      "after": "e7a60a93d7b012f5ac521ba42c4efc972e1f9610",
+      "before": "aa5b83cdfbae435e5ede10b8f8e0786f6dfd90cd",
+      "file": "ops/social-scheduled-media-20261119/variants/e7a60a93d7b0/features/fb_video_publish/worker.py"
+    },
+    "features/pipeline_dispatch/fb_native.py": {
+      "after": "8bdae4aae7a6bc412cf3fea8541609182909710e",
+      "before": "c3d1c8bf355a67b3cdff4d3ebb5f6113aaa728f3",
+      "file": "ops/social-scheduled-media-20261119/variants/8bdae4aae7a6/features/pipeline_dispatch/fb_native.py"
+    },
+    "features/pipeline_dispatch/media_decision.py": {
+      "after": "e342b0fed14a10b7b65e8967d88573bcebec52e1",
+      "before": null,
+      "file": "features/pipeline_dispatch/media_decision.py"
+    },
+    "features/pipeline_dispatch/native_media.py": {
+      "after": "40842775783697b2de2d839516ca7c6df4fe4c8b",
+      "before": null,
+      "file": "features/pipeline_dispatch/native_media.py"
+    }
+  },
+  "tag": {
+    "features/pipeline_dispatch/media_decision.py": {
+      "after": "e342b0fed14a10b7b65e8967d88573bcebec52e1",
+      "before": null,
+      "file": "features/pipeline_dispatch/media_decision.py"
+    },
+    "features/pipeline_dispatch/native_media.py": {
+      "after": "40842775783697b2de2d839516ca7c6df4fe4c8b",
+      "before": null,
+      "file": "features/pipeline_dispatch/native_media.py"
+    },
+    "features/pipeline_dispatch/x_native.py": {
+      "after": "7a8b1f7f94e920c70dcdae800fdc4afcc451ca6e",
+      "before": "a6420484ba7ca9458833d91e57671857849c8d23",
+      "file": "ops/social-scheduled-media-20261119/variants/7a8b1f7f94e9/features/pipeline_dispatch/x_native.py"
+    }
+  },
+  "tt": {
+    "features/pipeline_dispatch/media_decision.py": {
+      "after": "e342b0fed14a10b7b65e8967d88573bcebec52e1",
+      "before": null,
+      "file": "features/pipeline_dispatch/media_decision.py"
+    },
+    "features/pipeline_dispatch/native_media.py": {
+      "after": "40842775783697b2de2d839516ca7c6df4fe4c8b",
+      "before": null,
+      "file": "features/pipeline_dispatch/native_media.py"
+    },
+    "features/pipeline_dispatch/tt_native.py": {
+      "after": "53da16aeec63beba2ae8292c207a5d011fe12538",
+      "before": "f110af67e4b1549b11b65233b0674aafa1284f56",
+      "file": "ops/social-scheduled-media-20261119/variants/53da16aeec63/features/pipeline_dispatch/tt_native.py"
+    },
+    "features/pipeline_dispatch/tt_profiles.py": {
+      "after": "fef4fac1b19ea6059418451a8653855caee297f0",
+      "before": "f59e1699d7b17b0dbb7b834e59e347083ee43c2f",
+      "file": "features/pipeline_dispatch/tt_profiles.py"
+    },
+    "features/tt_posts/core.py": {
+      "after": "879bb55db5dcde7a5e3ac3dbed3eb510fe9bfce5",
+      "before": "a4a3f3a41a028725deaa3f11cd2ed2e24a8761b9",
+      "file": "ops/social-scheduled-media-20261119/variants/879bb55db5dc/features/tt_posts/core.py"
+    }
+  },
+  "tt_auto": {
+    "features/pipeline_dispatch/media_decision.py": {
+      "after": "e342b0fed14a10b7b65e8967d88573bcebec52e1",
+      "before": null,
+      "file": "features/pipeline_dispatch/media_decision.py"
+    },
+    "features/pipeline_dispatch/native_media.py": {
+      "after": "40842775783697b2de2d839516ca7c6df4fe4c8b",
+      "before": null,
+      "file": "features/pipeline_dispatch/native_media.py"
+    },
+    "features/pipeline_dispatch/original_media.py": {
+      "after": "7928c01422af7a08b05910322d221d2f5677c1e2",
+      "before": null,
+      "file": "features/pipeline_dispatch/original_media.py"
+    },
+    "features/pipeline_dispatch/tt_native.py": {
+      "after": "e3370f77cd54eb5f0756e63e9ccc47bf09e53cd2",
+      "before": "c2ce9790cefe7dcc29b20ac7869e2ab71f73fb03",
+      "file": "ops/social-scheduled-media-20261119/variants/e3370f77cd54/features/pipeline_dispatch/tt_native.py"
+    },
+    "features/pipeline_dispatch/tt_profiles.py": {
+      "after": "fef4fac1b19ea6059418451a8653855caee297f0",
+      "before": "f59e1699d7b17b0dbb7b834e59e347083ee43c2f",
+      "file": "features/pipeline_dispatch/tt_profiles.py"
+    }
+  },
+  "x": {
+    "features/pipeline_dispatch/media_decision.py": {
+      "after": "e342b0fed14a10b7b65e8967d88573bcebec52e1",
+      "before": null,
+      "file": "features/pipeline_dispatch/media_decision.py"
+    },
+    "features/pipeline_dispatch/native_media.py": {
+      "after": "40842775783697b2de2d839516ca7c6df4fe4c8b",
+      "before": null,
+      "file": "features/pipeline_dispatch/native_media.py"
+    },
+    "features/pipeline_dispatch/x_native.py": {
+      "after": "270b74e47a37812e5c0e68e2a61d4f792d3cf1e7",
+      "before": "f895f87bcb8e0b1a94f35f6f03a18a4fb355afa3",
+      "file": "ops/social-scheduled-media-20261119/variants/270b74e47a37/features/pipeline_dispatch/x_native.py"
+    }
+  }
+}

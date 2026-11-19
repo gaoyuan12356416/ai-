@@ -171,9 +171,12 @@ class Worker:
                 if any(str(fresh[k]) != str(snap["material"][k]) for k in ("material_id", "content_id", "language", "media_url")):
                     raise DomainError("material_identity_changed", "素材来源身份已变化，未向平台发布", 409)
             media_url = str(prepared.get("media_url") or "")
-            if task["processing_mode"] == "random_overlay":
+            if prepared.get("media_selection_kind")=="deadline_original":
+                if not media_url or media_url!=snap["material"]["media_url"]:
+                    raise DomainError("original_media_invalid", "原片身份与冻结来源不一致", 409)
+            elif task["processing_mode"] == "random_overlay" or prepared.get("media_selection_kind") in {"cross_platform_reuse","deadline_reuse"}:
                 if (not media_url or media_url == snap["material"]["media_url"] or not prepared.get("sha256")
-                        or not prepared.get("profile") or not prepared.get("random_overlay_recipe")):
+                        or not prepared.get("profile") or (not prepared.get("random_overlay_recipe") and prepared.get("media_selection_kind") not in {"cross_platform_reuse","deadline_reuse"})):
                     raise DomainError("prepared_media_invalid", "任务缺少独立加工成片", 409)
             elif media_url != snap["material"]["media_url"]:
                 raise DomainError("original_media_invalid", "原片身份与冻结来源不一致", 409)
