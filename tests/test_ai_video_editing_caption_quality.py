@@ -63,6 +63,11 @@ class CaptionQualityTest(unittest.TestCase):
         white=(frame[:,:,0]==255)
         self.assertTrue(np.array_equal(result[white],frame[white]))
         self.assertTrue(np.array_equal(result[900],frame[900,::-1]))
+        short=np.full((1280,720,3),80,np.uint8)
+        cv2.putText(short,'No!',(310,850),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,0),6)
+        cv2.putText(short,'No!',(310,850),cv2.FONT_HERSHEY_SIMPLEX,1.2,(255,255,255),2)
+        fixed=mirror_frame(short,55,92); glyphs=short[:,:,0]==255
+        self.assertTrue(np.array_equal(fixed[glyphs],short[glyphs]))
 
 
 if __name__ == "__main__":

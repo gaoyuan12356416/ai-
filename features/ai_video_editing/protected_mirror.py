@@ -34,11 +34,11 @@ def mirror_frame(frame, top, bottom):
             group.append(letter)
     mask = np.zeros(gray.shape, np.uint8)
     for group in groups:
-        if len(group) < 4:
+        if len(group) < 2:
             continue
         left = max(0, min(g[1] for g in group)-round(20*scale))
         right = min(width, max(g[1]+g[3] for g in group)+round(20*scale))
-        if right-left < 50*scale:
+        if right-left < 18*scale:
             continue
         a = max(0, min(g[2] for g in group)-round(3*scale))
         b = min(len(roi), max(g[2]+g[4] for g in group)+round(3*scale))
