@@ -130,11 +130,15 @@ def fill_metadata(accounts):
                 updated+=1
     return updated
 
+def visible_accounts():
+    with readonly(ACCOUNT_DB) as source:
+        return {row['id']:dict(row) for row in source.execute("SELECT * FROM x_authorized_account WHERE COALESCE(deleted_at,'')=''")}
+
 def collect(limit_accounts=None):
     now=datetime.now(timezone.utc)
     store.initialize()
-    with readonly(ACCOUNT_DB) as source:
-        accounts={row['id']:dict(row) for row in source.execute("SELECT * FROM x_authorized_account WHERE status='active' AND COALESCE(deleted_at,'')=''")}
+    visible = visible_accounts()
+    accounts = {aid: row for aid, row in visible.items() if row['status'] == 'active'}
     report=dict(started_at=now.isoformat(),post_samples=0,follower_samples=0,accounts_ok=0,failures=[])
     with store.connect(write=True) as db:
         discover(db,accounts,now)
@@ -202,31 +206,76 @@ def collect(limit_accounts=None):
                 db.execute('INSERT OR REPLACE INTO collector_state VALUES(?,?)',('retry:'+str(aid),store.dumps(dict(
                     attempts=attempts,until=(now+timedelta(minutes=min(60,5*2**min(attempts,4)))).isoformat(),code=code))))
             report['failures'].append(dict(account_id=aid,code=code))
+    report.update(rebuild_profiles(visible))
+    report['finished_at'] = store.stamp()
+    with store.connect(write=True) as db:
+        db.execute('INSERT OR REPLACE INTO collector_state VALUES(?,?)',('last_run',store.dumps(report)))
+    return report
+
+def profile_coverage(profiles, accounts):
+    sources = defaultdict(int)
+    under_100 = {'channels': 0, 'with_directions': 0}
+    new_channels = {'channels': 0, 'with_directions': 0}
+    unknown = {'channels': 0, 'with_directions': 0}
+    for profile in profiles.values():
+        groups = profile['cold_start']['by_catalog'].values()
+        evidence = {group['source'] for group in groups if group['recommendations']}
+        mature = any(node['mature'] for node in profile['themes'])
+        if mature:
+            evidence.add('mature')
+        source = next((s for s in ('mature', 'own', 'language_peers', 'catalog_peers') if s in evidence), 'none')
+        sources[source] += 1
+        followers = profile['followers']['followers']
+        if followers is None:
+            followers = accounts[profile['account_id']].get('followers_count')
+        if followers is not None and followers < 1000 and not mature:
+            new_channels['channels'] += 1
+            new_channels['with_directions'] += int(source != 'none')
+        cohort = unknown if followers is None else under_100 if followers < 100 else None
+        if cohort is not None:
+            cohort['channels'] += 1
+            cohort['with_directions'] += int(source != 'none')
+    return dict(visible=len(profiles), with_directions=len(profiles)-sources.get('none', 0),
+                by_primary_source=dict(sources), under_1000_without_mature_themes=new_channels,
+                followers_under_100=under_100, followers_unknown=unknown)
+
+def rebuild_profiles(accounts=None):
+    """Recompute all visible channels using only the local account and snapshot databases."""
+    accounts = visible_accounts() if accounts is None else accounts
+    languages = {aid: row.get('drama_language') or 'en' for aid, row in accounts.items()}
+    tenants = {aid: ('tenant', row['owner_tenant_key']) if row.get('owner_tenant_key') else ('account', aid)
+               for aid, row in accounts.items()}
+    now = datetime.now(timezone.utc)
     with store.connect() as db:
+        db.execute('BEGIN')
         posts=[]
-        for row in db.execute("SELECT p.*,s.stage,s.observed_at,s.metrics_json FROM growth_post p JOIN post_snapshot s USING(post_id) WHERE s.stage='72h' AND p.published_at>=?",((now-timedelta(days=28)).isoformat(),)):
+        for row in db.execute("SELECT p.*,s.stage,s.observed_at,s.metrics_json FROM growth_post p JOIN post_snapshot s USING(post_id) WHERE s.stage IN ('72h','24h','6h') AND p.published_at>=?",((now-timedelta(days=28)).isoformat(),)):
             p=dict(row)
-            if p['account_id'] in accounts:
-                account_language = accounts[p['account_id']].get('drama_language') or 'en'
-                if canonical_language(p['language']) != canonical_language(account_language):
-                    continue
-                # Persist the channel's spelling so its selector can consume the node.
-                p['language'] = account_language
-            p['metrics']=json.loads(p.pop('metrics_json'));p['metadata']=json.loads(p.pop('metadata_json'));posts.append(p)
+            account_language = languages.get(p['account_id'])
+            if not account_language or canonical_language(p['language']) != canonical_language(account_language):
+                continue
+            # Existing mature policy matches the current account's raw language setting.
+            p['language'] = account_language
+            p['metrics'] = json.loads(p.pop('metrics_json'))
+            p['metadata'] = json.loads(p.pop('metadata_json'))
+            posts.append(p)
         followers=defaultdict(list)
         for row in db.execute('SELECT * FROM follower_snapshot WHERE observed_at>=?',((now-timedelta(days=15)).isoformat(),)):
             followers[row['account_id']].append(dict(row))
         previous={r[0]:json.loads(r[1]) for r in db.execute('SELECT account_id,data_json FROM growth_profile')}
-    profiles=build_profiles(posts,followers,previous,now)
-    report.update(finished_at=store.stamp(),profiles=len(profiles))
+    profiles=build_profiles(posts,followers,previous,now,account_languages=languages,account_tenants=tenants)
+    result = dict(profiles=len(profiles), profile_coverage=profile_coverage(profiles, accounts))
     with store.connect(write=True) as db:
         for aid,profile in profiles.items():
-            db.execute('INSERT OR REPLACE INTO growth_profile VALUES(?,?,?,?)',(aid,profile['version'],profile['computed_at'],store.dumps(profile)))
-        db.execute('INSERT OR REPLACE INTO collector_state VALUES(?,?)',('last_run',store.dumps(report)))
-    return report
+            db.execute('''INSERT INTO growth_profile VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+                          version=excluded.version, computed_at=excluded.computed_at, data_json=excluded.data_json
+                          WHERE excluded.computed_at>=growth_profile.computed_at''',
+                       (aid,profile['version'],profile['computed_at'],store.dumps(profile)))
+    return result
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--limit-accounts',type=int)
+    parser.add_argument('--profiles-only',action='store_true')
     args=parser.parse_args()
-    print(store.dumps(collect(args.limit_accounts)))
+    print(store.dumps(rebuild_profiles() if args.profiles_only else collect(args.limit_accounts)))

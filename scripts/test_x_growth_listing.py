@@ -11,6 +11,35 @@ from features.x_growth_profile import listing, store
 
 
 class GrowthListingTest(unittest.TestCase):
+    def test_cold_reference_does_not_become_personal_history_or_expose_peer_ids(self):
+        now = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
+        rec = dict(theme='family', score=58, weight=0.7, posts=9, dramas=4, accounts=3,
+                   post_ids=['private-post'])
+        group = dict(source='catalog_peers', language='cs', languages=['en', 'ja'], stage='24h',
+                     posts=9, dramas=4, accounts=3, account_ids=[2, 7, 8], recommendations=[rec])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'growth.db'
+            store.initialize(path)
+            with store.connect(path, write=True) as db:
+                data = dict(cold_start={'by_catalog': {'dramawave': group},
+                                        'own_observations': {'6h': {'posts': 1, 'dramas': 1}}})
+                for account_id in [1, 2]:
+                    db.execute('INSERT INTO growth_profile VALUES(?,?,?,?)',
+                               (account_id, 'v', now.isoformat(), json.dumps(data)))
+            result = listing.account_profiles([{'id': 1}], path, now)
+        self.assertEqual(set(result), {'1'})
+        self.assertEqual(result['1']['mature_posts'], 0)
+        self.assertEqual(result['1']['themes'], [])
+        self.assertNotIn('observations', result['1'])
+        cold = result['1']['cold_start']
+        self.assertEqual(cold['own_observations'], {'6h': {'posts': 1, 'dramas': 1}})
+        visible = cold['by_catalog']['dramawave']
+        self.assertEqual(visible, {
+            'source': 'catalog_peers', 'language': 'cs', 'languages': ['en', 'ja'], 'stage': '24h',
+            'posts': 9, 'dramas': 4, 'accounts': 3,
+            'recommendations': [{'theme': 'family', 'score': 58, 'posts': 9, 'dramas': 4, 'accounts': 3}],
+        })
+
     def test_post_counts_metrics_and_score_have_distinct_scopes(self):
         now = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as folder:

@@ -32,6 +32,25 @@ def account_profiles(accounts, db_path=None, now=None):
                     for node in profile.get('themes', [])
                 ],
             }
+            cold = profile.get('cold_start', {})
+            by_catalog = {}
+            for catalog, group in cold.get('by_catalog', {}).items():
+                # Keep aggregate evidence visible without exposing peer identities or post IDs.
+                by_catalog[catalog] = {
+                    key: group[key] for key in ('source', 'stage', 'language', 'languages',
+                                                'posts', 'accounts', 'dramas') if key in group
+                }
+                by_catalog[catalog]['recommendations'] = [
+                    {key: item[key] for key in ('theme', 'score', 'posts', 'accounts', 'dramas') if key in item}
+                    for item in group.get('recommendations', [])
+                ]
+            own = {
+                stage: {key: counts[key] for key in ('posts', 'dramas') if key in counts}
+                for stage, counts in cold.get('own_observations', {}).items()
+                if stage in ('6h', '24h', '72h')
+            }
+            if by_catalog or own:
+                result[str(account_id)]['cold_start'] = {'by_catalog': by_catalog, 'own_observations': own}
         # The same post may have several stages, but only one row per stage.
         # A null metric must not turn a missing observation into zero exposure.
         rows = db.execute("""

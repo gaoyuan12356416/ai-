@@ -222,9 +222,11 @@ class GrowthTests(unittest.TestCase):
             result = collector.collect()
             self.assertEqual(result['follower_samples'], 1)
             self.assertEqual(result['post_samples'], 0)
-            self.assertEqual(result['profiles'], 1)
+            self.assertEqual(result['profiles'], 2)
             self.assertEqual(get.call_count, 1)
         with store.connect() as db:
+            self.assertEqual({r[0] for r in db.execute('SELECT account_id FROM growth_profile')}, {10, 11})
+            self.assertEqual({r[0] for r in db.execute('SELECT account_id FROM follower_snapshot')}, {10})
             profile = json.loads(db.execute('SELECT data_json FROM growth_profile WHERE account_id=10').fetchone()[0])
             self.assertEqual(profile['followers']['followers'], 0)
             self.assertIsNone(profile['followers']['net_7d'])

@@ -5,6 +5,10 @@
   const number = value => value == null ? '待积累' : Number(value).toLocaleString('zh-CN');
   const percent = value => (value * 100).toFixed(0) + '%';
   const themeName = key => themeNames[key] || key;
+  const products = {dramawave:'DramaWave', mobo:'Mobo', moboreels:'MoboReels'};
+  const productName = key => products[key] || key;
+  const sources = {own:'本号初步观察', language_peers:'同语种频道参考', catalog_peers:'跨语种频道参考'};
+  const windows = {'6h':'6 小时', '24h':'24 小时', '72h':'72 小时', '7d':'7 天'};
   const cellSelector = '[data-growth-account]';
   let accounts = new Map(), profiles = {}, status = 'loading', sequence = 0;
   let refreshController;
@@ -14,6 +18,36 @@
     if (text != null) element.textContent = text;
     if (className) element.className = className;
     return element;
+  }
+
+  function startingGroups(profile) {
+    return Object.entries(profile?.cold_start?.by_catalog || {})
+      .filter(([, group]) => sources[group.source] && group.recommendations?.length);
+  }
+
+  function showStartingGroups(body, groups) {
+    body.append(node('h3', '冷启动选材参考'));
+    for (const [catalog, group] of groups) {
+      body.append(node('h4', productName(catalog) + ' · ' + sources[group.source]));
+      const languages = (group.languages || []).join('、');
+      const stats = [windows[group.stage], number(group.posts) + ' 条帖子', number(group.dramas) + ' 部剧'];
+      if (group.source !== 'own') stats.push(number(group.accounts) + ' 个参考频道');
+      body.append(node('p', stats.filter(Boolean).join(' · ')));
+      if (group.source === 'catalog_peers') {
+        body.append(node('p', '账号语言 ' + (group.language || '未设置') + ' · 样本语言 '
+          + (languages || '未标注') + '。这些题材仍需在本号验证。', 'xtr-note'));
+      } else {
+        body.append(node('p', (group.language ? '语言 ' + group.language + '。' : '')
+          + (group.source === 'own' ? '本号样本尚少，以下是可优先尝试的题材。' : '题材来自同语种频道的实测表现，仍需在本号验证。'), 'xtr-note'));
+      }
+      const list = node('ul');
+      for (const item of group.recommendations) {
+        list.append(node('li', themeName(item.theme) + ' · 参考分 ' + number(item.score) + ' · '
+          + number(item.posts) + ' 条帖子 / ' + number(item.dramas) + ' 部剧'));
+      }
+      body.append(list);
+    }
+    body.append(node('p', '参考分越高，题材在对应样本中的相对表现越好。常规选材会参考所选产品的推荐题材，并保留一部分机会探索其他题材。', 'xtr-note'));
   }
 
   function showProfile(id) {
@@ -35,6 +69,9 @@
     if (!profile) {
       body.append(node('p', '等待本账号的首批成长数据。新发布的帖子和粉丝快照将用于建立画像。'));
     } else {
+      const groups = startingGroups(profile);
+      if (groups.length) showStartingGroups(body, groups);
+      body.append(node('h3', '本号观测'));
       const observed = profile.observations || {};
       const stages = observed.stages || {};
       const metrics = node('div', null, 'xtr-stats');
@@ -42,9 +79,12 @@
                      node('span', '近 7 天净增粉 ' + number(profile.followers?.net_7d)),
                      node('span', '前 7 天净增粉 ' + number(profile.followers?.previous_net_7d)));
       body.append(metrics);
-      const stageLabels = [['6h', '6 小时'], ['24h', '24 小时'], ['72h', '72 小时'], ['7d', '7 天']];
-      body.append(node('p', '已采集的帖子　' + stageLabels
+      body.append(node('p', '已采集的帖子　' + Object.entries(windows)
         .map(([key, label]) => label + ' ' + number(stages[key] || 0) + ' 条').join(' · ')));
+      const ownSamples = Object.entries(windows)
+        .filter(([key]) => profile.cold_start?.own_observations?.[key]?.posts > 0)
+        .map(([key, label]) => label + ' ' + number(profile.cold_start.own_observations[key].posts) + ' 条');
+      if (ownSamples.length) body.append(node('p', '可供冷启动分析的本号样本　' + ownSamples.join(' · ')));
       body.append(node('p', '已满 72 小时 ' + number(observed.at_least_72h_posts || 0) + ' 条 · '
         + (profile.mature_posts == null ? '等待首次评分' : '纳入评分 ' + number(profile.mature_posts) + ' 条')));
       if (observed.measured_posts_24h > 0) {
@@ -63,7 +103,7 @@
         const rows = table.createTBody();
         for (const theme of profile.themes) {
           const row = rows.insertRow();
-          const product = ({dramawave:'DramaWave', mobo:'Mobo', moboreels:'MoboReels'})[theme.catalog] || theme.catalog;
+          const product = productName(theme.catalog);
           for (const value of [themeName(theme.theme), audienceNames[theme.audience] || theme.audience,
             [product, theme.language].filter(Boolean).join(' / '),
             number(theme.effective_posts) + ' / ' + number(theme.dramas), number(theme.score),
@@ -74,13 +114,15 @@
         scroll.append(table);
         body.append(scroll);
       } else {
-        body.append(node('p', '尚无可评分的题材。系统在发布约 72 小时后，用帖子自然曝光、主页点击和转发收藏评估题材。'));
+        body.append(node('p', '本号暂缺可评分的 72 小时题材样本。'));
       }
-      const policy = profile.policy || {};
-      const shares = Object.entries(policy.weights || {}).filter(([, weight]) => weight > 0)
-        .map(([key, weight]) => themeName(key) + ' ' + percent(weight));
-      shares.push('探索 ' + percent(policy.exploration ?? 1));
-      body.append(node('p', '当前选材比例　' + shares.join(' · ')));
+      if (!groups.length || profile.themes?.some(theme => theme.mature)) {
+        const policy = profile.policy || {};
+        const shares = Object.entries(policy.weights || {}).filter(([, weight]) => weight > 0)
+          .map(([key, weight]) => themeName(key) + ' ' + percent(weight));
+        shares.push('探索 ' + percent(policy.exploration ?? 1));
+        body.append(node('p', '本号题材选材比例　' + shares.join(' · ')));
+      }
       if (profile.computed_at) {
         const date = new Date(profile.computed_at).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai', hour12:false});
         body.append(node('p', '更新于 ' + date + '（北京时间）', 'xtr-note'));
@@ -110,9 +152,20 @@
       }
       const profile = profiles[id];
       const top = profile?.themes?.find(theme => theme.mature);
-      button.append(node('span', top ? themeName(top.theme) : profile ? '题材样本积累中' : '等待首次采集', 'xtr-context'));
+      const groups = startingGroups(profile);
+      if (top) {
+        button.append(node('span', '本号成熟题材 · ' + themeName(top.theme), 'xtr-context'));
+        button.append(node('span', [productName(top.catalog), top.language].filter(Boolean).join(' / '), 'xtr-note'));
+      }
+      for (const [catalog, group] of groups) {
+        button.append(node('span', productName(catalog) + ' · ' + themeName(group.recommendations[0].theme), 'xtr-context'));
+        button.append(node('span', sources[group.source] + ' · ' + number(group.posts) + ' 条样本', 'xtr-note'));
+      }
+      if (!top && !groups.length) {
+        button.append(node('span', profile ? '题材样本积累中' : '等待首次采集', 'xtr-context'));
+      }
       if (profile) {
-        button.append(node('span', '跟踪 ' + number(profile.observations?.tracked_posts || 0)
+        button.append(node('span', '本号跟踪 ' + number(profile.observations?.tracked_posts || 0)
           + ' 条 · 72 小时采集 ' + number(profile.observations?.stages?.['72h'] || 0) + ' 条', 'xtr-note'));
         button.append(node('span', '纳入评分 ' + number(profile.mature_posts)
           + ' · 周净增粉 ' + number(profile.followers?.net_7d), 'xtr-note'));

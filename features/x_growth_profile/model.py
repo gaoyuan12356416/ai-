@@ -5,6 +5,7 @@ import hashlib
 import math
 import statistics
 
+from .cold_start import ColdStartEvidence
 from .store import dumps
 
 VERSION = 'x-growth-v1'
@@ -36,22 +37,33 @@ def follower_summary(rows, now):
     return dict(followers=current['followers'] if current else None, net_7d=net, previous_net_7d=prior,
                 basis='account_net_change_not_post_attribution', two_weeks_nonpositive=net is not None and prior is not None and net <= 0 and prior <= 0)
 
-def build_profiles(posts, followers, previous=None, now=None):
+def build_profiles(posts, followers, previous=None, now=None, account_languages=None, account_tenants=None):
     now = now or datetime.now(timezone.utc)
     previous = previous or {}
     rows = []
-    accounts = set(followers) | set(previous)
+    accounts = set(account_languages) if account_languages is not None else set(followers) | set(previous)
+    languages = dict(account_languages or {})
+    cold = defaultdict(ColdStartEvidence)
+    tenants = account_tenants or {}
+    cutoff = now - timedelta(days=28)
     for post in posts:
-        accounts.add(int(post['account_id']))
-        age = (instant(post['observed_at'])-instant(post['published_at'])).total_seconds()/3600
-        if post.get('stage') != '72h' or not 72 <= age <= 78 or instant(post['published_at']) < now-timedelta(days=28):
+        aid = int(post['account_id'])
+        if account_languages is not None and aid not in accounts:
             continue
+        accounts.add(aid)
+        languages.setdefault(aid, post['language'])
+        published = instant(post['published_at'])
+        observed = instant(post['observed_at'])
+        if published < cutoff or observed > now:
+            continue
+        age = (observed - published).total_seconds() / 3600
         m = post['metrics']
         impressions = m.get('organic_impressions')
         # A public total cannot safely replace organic data for a promoted post.
         if impressions is None and m.get('promoted_impressions', 0) == 0:
             impressions = m.get('impressions')
-        if impressions is None or impressions < 100:
+        cold[tenants.get(aid)].add(post, age, impressions)
+        if post.get('stage') != '72h' or not 72 <= age <= 78 or impressions is None or impressions < 100:
             continue
         clicks = m.get('profile_clicks')
         interactions = m.get('organic_reposts')
@@ -134,6 +146,8 @@ def build_profiles(posts, followers, previous=None, now=None):
         profile=dict(account_id=account_id,policy_version=VERSION,computed_at=now.isoformat(),
                      policy_updated_at=now.isoformat() if due else old['policy_updated_at'],
                      themes=nodes,policy=policy,followers=growth,
+                     cold_start=cold[tenants.get(account_id)].profile(
+                         account_id, languages.get(account_id) or 'en', {n['catalog'] for n in mature}),
                      mature_posts=len([r for r in rows if int(r['account_id'])==account_id]),
                      score_basis='72h_organic_post_impressions_profile_clicks_reposts_bookmarks',
                      note='媒体播放及观看时长仅辅助展示；涨粉是账号净变化，不归因到单条帖子。')
