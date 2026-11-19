@@ -6,17 +6,20 @@
     <meta name="referrer" content="same-origin" />
     <title>AI 智能剪辑 · AI 后台</title>
     <link rel="stylesheet" href="/ui-topbar.css" />
-    <link rel="stylesheet" href="/video-editing-ai.css?v=20261118-studio2" />
+    <link rel="stylesheet" href="/video-editing-ai.css?v=20261119-library1" />
     <script defer src="/quick-nav.js"></script>
     <script defer src="/ui-topbar.js"></script>
-    <script defer src="/video-editing-ai-studio.js?v=20261118-studio2"></script>
+    <script
+      defer
+      src="/video-editing-ai-studio.js?v=20261119-library1"
+    ></script>
   </head>
   <body>
     <header class="studio-header topbar">
       <button
         id="openNavigation"
         class="quiet"
-        aria-haspopup="dialog"
+        aria-label="展开后台导航"
         aria-controls="navigationPanel"
         aria-expanded="false"
       >
@@ -41,13 +44,18 @@
         ><button id="authButton" class="quiet">登录</button>
       </div>
     </header>
-    <dialog
+    <aside
       id="navigationPanel"
       class="navigation-panel"
       aria-labelledby="navigationTitle"
     >
       <header>
-        <strong id="navigationTitle">AI 自动后台</strong
+        <a class="backend-brand" href="/"
+          ><span class="brand-icon">AI</span
+          ><span
+            ><strong id="navigationTitle">AI 自动后台</strong
+            ><small>ai.yingliangads.com</small></span
+          ></a
         ><button
           id="closeNavigation"
           class="icon-button"
@@ -57,7 +65,7 @@
         </button>
       </header>
       <nav id="quickNav" aria-label="后台模块导航"></nav>
-    </dialog>
+    </aside>
     <div id="gate" role="status">正在打开工作台…</div>
     <main id="workspace" class="studio" hidden>
       <nav class="tool-rail" aria-label="创作工具">
@@ -174,7 +182,7 @@
             <p>选择视频素材，让 AI 帮你找到亮点、整理剧情、制作成片</p>
             <button class="primary" data-action="assets" data-icon="plus">
               选择视频素材</button
-            ><small>本地上传 · 多集组合 · 智能创作</small>
+            ><small>DramaWave · MoboReels · 本地上传</small>
           </div>
           <div id="renderOverlay" class="render-overlay" hidden></div>
         </div>

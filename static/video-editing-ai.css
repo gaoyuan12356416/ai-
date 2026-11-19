@@ -1499,7 +1499,7 @@ dialog::backdrop {
   }
 }
 
-/* Shared backend chrome stays outside the full viewport editing workspace. */
+/* Shared backend chrome. */
 .studio-header.topbar {
   align-items: center;
   flex-wrap: nowrap;
@@ -1567,5 +1567,339 @@ dialog::backdrop {
   }
   .studio-header .header-actions button[data-action="history"] {
     display: none;
+  }
+}
+
+/* Persistent backend navigation; horizontal creation tools reserve room for video. */
+body {
+  padding-left: 230px;
+}
+.navigation-panel {
+  width: 230px;
+  border: 0;
+  z-index: 20;
+}
+.backend-brand {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: white;
+  text-decoration: none;
+}
+.backend-brand small {
+  display: block;
+  font-size: 11px;
+  color: #a5b9d9;
+  margin-top: 4px;
+}
+.navigation-panel > header {
+  padding: 4px 4px 22px;
+}
+#openNavigation,
+#closeNavigation,
+.studio-header .back,
+.header-divider {
+  display: none;
+}
+.studio-header.topbar {
+  height: 74px;
+  padding: 0 20px;
+}
+.studio-brand small {
+  letter-spacing: 0;
+}
+.studio {
+  height: calc(100dvh - 74px);
+  padding: 12px 20px 18px;
+  gap: 12px;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  grid-template-rows: 48px minmax(0, 1fr);
+}
+.studio:has(.copy-panel:not([hidden])) {
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr) 310px;
+}
+.tool-rail {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  padding: 0;
+  gap: 6px;
+  align-items: stretch;
+}
+.tool-rail button {
+  flex-direction: row;
+  width: auto;
+  padding: 10px 16px;
+  font-size: 13px;
+  gap: 8px;
+  border-radius: 9px;
+}
+.tool-rail button:first-child {
+  color: var(--blue);
+  background: #e8efff;
+}
+.tool-rail button svg {
+  width: 19px;
+  height: 19px;
+}
+.studio .copy-panel {
+  position: static;
+  width: auto;
+  box-shadow: none;
+}
+.studio .conversation,
+.studio .stage {
+  min-height: 0;
+}
+.studio-header .user-card {
+  min-width: 200px;
+}
+.studio-header .session-title {
+  max-width: 160px;
+}
+.library-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+  margin-bottom: 18px;
+}
+.library-tabs button.active {
+  background: #e8efff;
+  color: var(--blue);
+  border-color: #aabff1;
+}
+.catalog-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0;
+}
+.catalog-summary .muted {
+  margin-left: auto;
+}
+.catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+.drama-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  gap: 0;
+}
+.drama-card img {
+  width: 100%;
+  height: 160px;
+  object-fit: cover;
+  background: #e8edf6;
+}
+.drama-card .card-body {
+  display: block;
+  width: 100%;
+}
+.drama-card strong {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.drama-card small {
+  display: block;
+  font-size: 11px;
+  color: #7285a0;
+  margin-top: 5px;
+}
+.episode-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px;
+  margin: 18px 0;
+}
+.episode-grid label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  padding: 10px 4px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.episode-grid label:has(input:checked) {
+  background: #eaf0ff;
+  border-color: #7298ed;
+  color: var(--blue);
+}
+.import-list {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.import-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid #edf1f7;
+}
+.import-row > div {
+  flex: 1;
+  min-width: 0;
+}
+.import-row strong {
+  display: block;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-row small {
+  display: block;
+  color: #7285a0;
+  font-size: 11px;
+  margin-top: 4px;
+}
+.import-row progress {
+  width: 110px;
+}
+.import-row button {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+.library-selection-title {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  color: #607792;
+}
+#modal.assets {
+  width: min(1080px, calc(100vw - 48px));
+}
+@media (max-width: 1700px) and (min-width: 761px) {
+  body {
+    padding-left: 210px;
+  }
+  .navigation-panel {
+    width: 210px;
+    padding: 18px 10px;
+  }
+  .studio,
+  .studio:has(.copy-panel:not([hidden])) {
+    grid-template-columns: 290px minmax(0, 1fr);
+    padding: 12px 16px 16px;
+  }
+  .studio .copy-panel {
+    position: fixed;
+    right: 20px;
+    top: 140px;
+    bottom: 26px;
+    width: 320px;
+    z-index: 6;
+    box-shadow: 0 10px 60px #16345840;
+  }
+  .studio-header .session-title,
+  .studio-header .studio-brand small {
+    display: none;
+  }
+  .studio-header.topbar {
+    padding: 0 16px;
+    gap: 10px;
+  }
+  .studio-header .user-card {
+    min-width: 180px;
+  }
+  .studio-header .user-card small {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+@media (max-width: 1200px) and (min-width: 761px) {
+  body {
+    padding-left: 190px;
+  }
+  .navigation-panel {
+    width: 190px;
+  }
+  .studio,
+  .studio:has(.copy-panel:not([hidden])) {
+    grid-template-columns: 270px minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px;
+  }
+  .tool-rail button {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .studio-header .user-card {
+    display: none;
+  }
+  .studio-header .header-actions {
+    gap: 2px;
+  }
+}
+@media (max-width: 760px) {
+  body {
+    padding-left: 0;
+  }
+  .navigation-panel {
+    display: none;
+    width: 260px;
+    box-shadow: 10px 0 50px #10284655;
+  }
+  .navigation-panel.is-open {
+    display: block;
+  }
+  #openNavigation,
+  #closeNavigation {
+    display: inline-flex;
+  }
+  .studio-header.topbar {
+    height: 64px;
+    padding: 0 10px;
+  }
+  .studio,
+  .studio:has(.copy-panel:not([hidden])) {
+    height: auto;
+    padding: 10px;
+    display: flex;
+  }
+  .tool-rail {
+    overflow: auto;
+    justify-content: flex-start;
+  }
+  .tool-rail button {
+    flex: none;
+    padding: 10px;
+    font-size: 11px;
+  }
+  .tool-rail .rail-space,
+  .tool-rail button:last-child {
+    display: none;
+  }
+  .studio .copy-panel {
+    position: fixed;
+    top: 76px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    bottom: 20px;
+  }
+  .catalog-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .episode-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .library-tabs {
+    gap: 5px;
+  }
+  .library-tabs button {
+    font-size: 12px;
+    padding: 9px;
   }
 }

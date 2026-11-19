@@ -164,6 +164,9 @@ class Handler(platform.DramaMaterialHandler):
         if verb in ('POST','PATCH'):
             if not self._require_same_origin_json():return
             body=self.payload()
+        if path.startswith('/catalog/'):
+            from .catalog_imports import dispatch
+            return self.reply(200, dispatch(rt, self.server.catalog, actor, verb, path, params, body))
         if path.startswith('/studio/'):
             from .studio import dispatch
             response=dispatch(rt,actor,verb,path[len('/studio'):],body,params)
@@ -240,8 +243,13 @@ def main():
     rt=Runtime(os.getenv('AI_VIDEO_EDITING_ROOT','/mnt/data-disk/ai-video-editing'))
     from .studio import start
     start(rt)
+    from .catalog import Catalog
+    from .catalog_imports import start as start_imports
+    catalog = Catalog(platform)
+    start_imports(rt, catalog)
     with ThreadingHTTPServer(('127.0.0.1',18983),Handler) as http:
         http.runtime=rt
+        http.catalog=catalog
         http.worker_token=Path('/etc/ai-video-editing/worker.token').read_text().strip()
         http.serve_forever()
 

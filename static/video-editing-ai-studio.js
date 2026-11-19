@@ -120,7 +120,10 @@
     toastTimer = setTimeout(() => ($("toast").hidden = true), 6500);
   }
   async function action(fn) {
-    if (busy) return;
+    if (busy) {
+      toast("正在处理，请稍候…");
+      return;
+    }
     busy = true;
     $("send").disabled = true;
     try {
@@ -138,6 +141,7 @@
     $("modalBody").innerHTML = body;
     $("modalFooter").innerHTML = footer;
     modalKind = kind;
+    $("modal").classList.toggle("assets", kind === "assets");
     iconify($("modal"));
     if (!$("modal").open) $("modal").showModal();
   }
@@ -442,12 +446,240 @@
       await refresh();
     } else openConfig("clip");
   }
+  let librarySource = "local",
+    catalogPage = 1,
+    catalogItems = [],
+    catalogDrama = null,
+    catalogEpisodes = [],
+    importTimer,
+    importPolling = false;
+  const pendingImports = new Set();
+  function libraryMarkup() {
+    return `<div class="library-tabs" role="tablist" aria-label="媒体来源">
+      <button data-library-source="local" role="tab" aria-selected="true" class="active">我的素材</button>
+      <button data-library-source="dramawave" role="tab" aria-selected="false">DramaWave 短剧</button>
+      <button data-library-source="moboreels" role="tab" aria-selected="false">MoboReels 短剧</button>
+    </div><section id="catalogPanel" hidden>
+      <div class="modal-tools"><input id="catalogQuery" type="search" aria-label="搜索短剧" placeholder="输入剧名或剧目 ID"><button id="searchCatalog">搜索剧目</button></div>
+      <div id="catalogContent"></div></section>`;
+  }
+  function connectLibrary() {
+    librarySource = "local";
+    catalogDrama = null;
+    $("modalBody")
+      .querySelectorAll("[data-library-source]")
+      .forEach(
+        (b) =>
+          (b.onclick = () =>
+            action(async () => {
+              librarySource = b.dataset.librarySource;
+              $("modalBody")
+                .querySelectorAll("[data-library-source]")
+                .forEach((tab) => {
+                  tab.classList.toggle("active", tab === b);
+                  tab.setAttribute("aria-selected", String(tab === b));
+                });
+              $("localLibrary").hidden = librarySource !== "local";
+              $("catalogPanel").hidden = librarySource === "local";
+              if (librarySource !== "local") {
+                catalogPage = 1;
+                catalogDrama = null;
+                $("catalogQuery").value = "";
+                await readCatalog();
+              } else await readAssets();
+            })),
+      );
+    $("searchCatalog").onclick = () =>
+      action(async () => {
+        catalogPage = 1;
+        await readCatalog();
+      });
+    $("catalogQuery").onkeydown = (e) => {
+      if (e.key === "Enter") $("searchCatalog").click();
+    };
+    pollImports();
+  }
+  async function readCatalog() {
+    catalogDrama = null;
+    $("catalogContent").innerHTML =
+      '<div class="modal-empty">正在读取短剧资源…</div>';
+    try {
+      const data = await api(
+        "/catalog/dramas?" +
+          new URLSearchParams({
+            product: librarySource,
+            q: $("catalogQuery").value,
+            page: catalogPage,
+          }),
+      );
+      if (modalKind !== "assets") return;
+      catalogItems = data.items;
+      $("catalogContent").innerHTML =
+        `<div class="catalog-summary"><strong>选择剧目</strong><span class="muted">第 ${catalogPage} 页 · ${data.items.length} 部 · 按语言区分版本</span></div>
+        <div class="catalog-grid">${data.items.map((d, i) => `<button class="drama-card" data-drama-index="${i}"><img loading="lazy" referrerpolicy="no-referrer" src="${esc(d.cover || "")}" alt=""><span class="card-body"><strong>${esc(d.name)}</strong><small>${esc(d.language || "未知语言")} · ID ${esc(d.id)}</small>${d.subtitle ? `<small>${esc(d.subtitle)}</small>` : ""}${d.episodes ? `<small>共 ${d.episodes} 集</small>` : ""}</span></button>`).join("") || '<p class="modal-empty">没有匹配剧目，请尝试完整 ID 或剧名前缀</p>'}</div>
+        <div class="catalog-summary"><button id="catalogPrev" ${catalogPage === 1 ? "disabled" : ""}>上一页</button><button id="catalogNext" ${!data.has_more ? "disabled" : ""}>下一页</button></div>`;
+      $("catalogContent")
+        .querySelectorAll("[data-drama-index]")
+        .forEach(
+          (b) =>
+            (b.onclick = () =>
+              action(() =>
+                openDrama(catalogItems[Number(b.dataset.dramaIndex)]),
+              )),
+        );
+      $("catalogPrev").onclick = () =>
+        action(async () => {
+          catalogPage--;
+          await readCatalog();
+        });
+      $("catalogNext").onclick = () =>
+        action(async () => {
+          catalogPage++;
+          await readCatalog();
+        });
+    } catch (e) {
+      $("catalogContent").innerHTML =
+        `<p class="modal-empty">${esc(e.message)}</p>`;
+      throw e;
+    }
+  }
+  async function openDrama(drama) {
+    catalogDrama = drama;
+    $("catalogContent").innerHTML =
+      '<div class="modal-empty">正在读取分集…</div>';
+    try {
+      const data = await api(
+        "/catalog/episodes?" +
+          new URLSearchParams({ product: librarySource, key: drama.key }),
+      );
+      if (modalKind !== "assets") return;
+      catalogEpisodes = data.items;
+      $("catalogContent").innerHTML =
+        `<div class="catalog-summary"><button id="backCatalog">‹ 返回剧目</button><strong>${esc(drama.name)}</strong><span class="muted">${esc(drama.language)} · ${data.items.length} 集</span></div>
+        <p class="muted">选择需要创作的分集，导入后自动加入下方已选素材。每次最多 20 集，单集不超过 1 GiB。</p>
+        <div class="catalog-summary"><button id="selectFirstEpisodes">选择前 3 集</button><button id="clearEpisodes">清空选择</button><span id="episodeCount" class="muted">已选 0 集</span></div>
+        <div class="episode-grid">${data.items.map((e) => `<label><input type="checkbox" name="catalogEpisode" value="${e.number}">第 ${e.number} 集</label>`).join("")}</div><button id="importEpisodes" class="primary">导入所选分集</button>`;
+      const checkboxes = () => [
+        ...$("catalogContent").querySelectorAll('[name="catalogEpisode"]'),
+      ];
+      const update = () => {
+        const selected = checkboxes().filter((c) => c.checked);
+        $("episodeCount").textContent = `已选 ${selected.length} 集`;
+        $("importEpisodes").disabled =
+          selected.length === 0 || selected.length > 20;
+      };
+      checkboxes().forEach((c) => (c.onchange = update));
+      $("backCatalog").onclick = () => action(readCatalog);
+      $("selectFirstEpisodes").onclick = () => {
+        checkboxes().forEach((c, i) => (c.checked = i < 3));
+        update();
+      };
+      $("clearEpisodes").onclick = () => {
+        checkboxes().forEach((c) => (c.checked = false));
+        update();
+      };
+      $("importEpisodes").onclick = () =>
+        action(async () => {
+          const episodes = checkboxes()
+            .filter((c) => c.checked)
+            .map((c) => Number(c.value));
+          if (new Set([...sourceSelection]).size + episodes.length > 20)
+            throw new Error("一次创作最多选择 20 个素材，请先移除多余素材");
+          const data = await api("/catalog/imports", {
+            product: librarySource,
+            key: drama.key,
+            episodes,
+          });
+          data.items.forEach((j) => pendingImports.add(j.id));
+          toast("已加入导入队列，关闭窗口后仍会继续");
+          await pollImports();
+        });
+      update();
+    } catch (e) {
+      $("catalogContent").innerHTML =
+        `<p>${esc(e.message)}</p><button id="backCatalog">返回剧目</button>`;
+      $("backCatalog").onclick = () => action(readCatalog);
+      throw e;
+    }
+  }
+  async function pollImports() {
+    clearTimeout(importTimer);
+    if (modalKind !== "assets" || importPolling) return;
+    importPolling = true;
+    try {
+      const data = await api("/catalog/imports");
+      if (modalKind !== "assets") return;
+      let added = false;
+      for (const j of data.items)
+        if (pendingImports.has(j.id) && j.status === "ready") {
+          pendingImports.delete(j.id);
+          if (
+            !sourceSelection.includes(j.asset_id) &&
+            sourceSelection.length < 20
+          ) {
+            sourceSelection.push(j.asset_id);
+            added = true;
+          }
+        }
+      if (added) await readAssets();
+      if (modalKind !== "assets") return;
+      $("importList").hidden = !data.items.length;
+      $("importList").innerHTML = `<strong>剧集导入记录</strong>${data.items
+        .slice(0, 20)
+        .map((j) => {
+          const status = {
+            queued: "等待导入",
+            downloading: "正在导入",
+            ready: "已就绪",
+            failed: "导入失败",
+          }[j.status];
+          return `<div class="import-row"><div><strong>${esc(j.title || `${j.product === "dramawave" ? "DramaWave" : "MoboReels"} · 第 ${j.episode} 集`)}</strong><small>${status}${j.error ? " · " + esc(j.error) : ""}${j.bytes ? " · " + (j.bytes / 1048576).toFixed(1) + " MB" : ""}</small></div>${j.status === "downloading" ? `<progress ${j.total ? `max="${j.total}" value="${j.bytes}"` : ""}></progress>` : ""}${j.status === "ready" ? `<button data-use-import="${j.asset_id}" ${sourceSelection.includes(j.asset_id) ? "disabled" : ""}>${sourceSelection.includes(j.asset_id) ? "已选择" : "选用素材"}</button>` : j.status === "failed" ? `<button data-retry-import="${j.id}">重试导入</button>` : ""}</div>`;
+        })
+        .join("")}`;
+      $("importList")
+        .querySelectorAll("[data-use-import]")
+        .forEach(
+          (b) =>
+            (b.onclick = () =>
+              action(async () => {
+                if (sourceSelection.length >= 20)
+                  throw new Error("一次创作最多选择 20 个素材");
+                if (!sourceSelection.includes(b.dataset.useImport))
+                  sourceSelection.push(b.dataset.useImport);
+                await readAssets();
+                await pollImports();
+              })),
+        );
+      $("importList")
+        .querySelectorAll("[data-retry-import]")
+        .forEach(
+          (b) =>
+            (b.onclick = () =>
+              action(async () => {
+                await api(
+                  "/catalog/imports/" + b.dataset.retryImport + "/retry",
+                  {},
+                );
+                pendingImports.add(b.dataset.retryImport);
+                await pollImports();
+              })),
+        );
+    } catch (e) {
+      if (modalKind === "assets")
+        $("importList").innerHTML =
+          `<p class="muted">导入记录读取失败：${esc(e.message)}</p>`;
+    } finally {
+      importPolling = false;
+      if (modalKind === "assets") importTimer = setTimeout(pollImports, 3500);
+    }
+  }
+
   async function openAssets() {
     sourceSelection = assets.map((a) => a.id);
     openModal(
       "媒资库",
       "选择一个或多个视频，按选入顺序组合创作",
-      `<div class="modal-tools"><input id="assetQuery" type="search" placeholder="搜索素材或剧名"><button id="searchAssets">查询</button><button id="toggleUpload" class="primary" data-icon="plus">上传视频</button></div><div id="uploadZone" class="upload-zone" hidden><input id="uploadFile" type="file" accept=".mp4,.mov" multiple><div class="form-grid" style="margin-top:12px"><label class="field">剧名（选填）<input id="uploadSeries" maxlength="80" placeholder="同名剧目归为一组"></label><label class="field">起始集号（选填）<input id="uploadEpisode" type="number" min="1" max="100000"></label></div><p>支持 MP4、MOV，每个文件最多 1 GiB。上传后可在自己的媒资库中重复使用。</p><progress id="uploadProgress" max="100" value="0" hidden></progress><p id="uploadStatus"></p><button id="uploadStart">开始上传</button></div><div id="assetGrid" class="asset-grid"></div><div id="selectionTray" class="selection-tray"></div>`,
+      `${libraryMarkup()}<section id="localLibrary"><div class="modal-tools"><input id="assetQuery" type="search" placeholder="搜索素材或剧名"><button id="searchAssets">查询</button><button id="toggleUpload" class="primary" data-icon="plus">上传视频</button></div><div id="uploadZone" class="upload-zone" hidden><input id="uploadFile" type="file" accept=".mp4,.mov" multiple><div class="form-grid" style="margin-top:12px"><label class="field">剧名（选填）<input id="uploadSeries" maxlength="80" placeholder="同名剧目归为一组"></label><label class="field">起始集号（选填）<input id="uploadEpisode" type="number" min="1" max="100000"></label></div><p>支持 MP4、MOV，每个文件最多 1 GiB。上传后可在自己的媒资库中重复使用。</p><progress id="uploadProgress" max="100" value="0" hidden></progress><p id="uploadStatus"></p><button id="uploadStart">开始上传</button></div><div id="assetGrid" class="asset-grid"></div></section><p class="library-selection-title">已选素材 · 按下方顺序创作</p><div id="selectionTray" class="selection-tray"></div><div id="importList" class="import-list" hidden></div>`,
       `<label class="checks"><input type="checkbox" id="mergeSources" ${config().merge !== false ? "checked" : ""}> 合并所选素材</label><span id="assetCount">已选 ${sourceSelection.length} 个</span><button id="confirmAssets" class="primary">确认选择</button>`,
       "assets",
     );
@@ -475,12 +707,14 @@
         else render();
       });
     await readAssets();
+    connectLibrary();
   }
   async function readAssets() {
     const data = await api(
       "/assets?" +
         new URLSearchParams({ q: $("assetQuery").value, limit: 200 }),
     );
+    if (modalKind !== "assets") return;
     library = data.items;
     drawAssets();
   }
@@ -1222,6 +1456,7 @@
   $("modal").addEventListener("close", () => {
     $("captionPreview").hidden = true;
     modalKind = "";
+    clearTimeout(importTimer);
   });
   $("composer").onsubmit = (e) => {
     e.preventDefault();
@@ -1261,13 +1496,13 @@
     if (!document.hidden && session) refresh();
   });
   $("openNavigation").onclick = () => {
-    $("navigationPanel").showModal();
+    $("navigationPanel").classList.add("is-open");
     $("openNavigation").setAttribute("aria-expanded", "true");
   };
-  $("closeNavigation").onclick = () => $("navigationPanel").close();
-  $("navigationPanel").addEventListener("close", () =>
-    $("openNavigation").setAttribute("aria-expanded", "false"),
-  );
+  $("closeNavigation").onclick = () => {
+    $("navigationPanel").classList.remove("is-open");
+    $("openNavigation").setAttribute("aria-expanded", "false");
+  };
   async function init() {
     iconify(document);
     auth = await api("/api/ui/topbar");
