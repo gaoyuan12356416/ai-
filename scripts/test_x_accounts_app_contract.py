@@ -114,19 +114,15 @@ class XAccountsAppContractTest(unittest.TestCase):
             X_ACCOUNTS_SIDECAR_SOURCE,
         )
 
-    def test_x_account_list_displays_drama_language_publish_approval_and_daily_status(self):
-        self.assertIn(
-            '<th>X账号</th><th>运营统计</th><th class="auto-publish-col">自动发布 Post</th>'
-            '<th class="drama-language-col">剧语言</th>'
-            '<th class="publish-approval-col">允许发布</th>',
-            X_ACCOUNT_LIST_SOURCE,
-        )
-        self.assertRegex(
-            X_ACCOUNT_LIST_SOURCE,
-            r'\$\{booleanChips\(item\)\}</div></div></td>\s*'
-            r'<td>\$\{operatingMetricsHtml\(item\)\}</td>\s*'
-            r'<td class="auto-publish-col">',
-        )
+    def test_account_list_displays_active_ports_and_keeps_account_controls(self):
+        header = X_ACCOUNT_LIST_SOURCE.split("<thead>", 1)[1].split("</thead>", 1)[0]
+        self.assertIn("活跃发布端口", header)
+        for name in ("素材池状态", "允许发布", "自动发布 Post"):
+            self.assertNotIn(name, header)
+        self.assertEqual(header.count("<th"), 10)
+        self.assertIn("/api/admin/x-tag-posts/account-publishing-ports", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn("escapeHtml(port.label)", X_ACCOUNT_LIST_SOURCE)
+        self.assertIn("<summary>发布权限</summary>", X_ACCOUNT_LIST_SOURCE)
         self.assertIn("item.publish_approved === true", X_ACCOUNT_LIST_SOURCE)
         self.assertIn(
             'data-publish-approval-id="${escapeHtml(item.id)}"',
@@ -136,14 +132,6 @@ class XAccountsAppContractTest(unittest.TestCase):
             "/api/admin/x-accounts/${encodeURIComponent(id)}/publish-approval",
             X_ACCOUNT_LIST_SOURCE,
         )
-        self.assertIn("发布池可选", X_ACCOUNT_LIST_SOURCE)
-        self.assertIn("发布池不可选", X_ACCOUNT_LIST_SOURCE)
-        self.assertIn(
-            "item.daily_auto_publish_configured === true",
-            X_ACCOUNT_LIST_SOURCE,
-        )
-        self.assertIn("已配置", X_ACCOUNT_LIST_SOURCE)
-        self.assertIn("未配置", X_ACCOUNT_LIST_SOURCE)
         self.assertIn(
             'data-drama-language-id="${escapeHtml(item.id)}"',
             X_ACCOUNT_LIST_SOURCE,
@@ -152,11 +140,10 @@ class XAccountsAppContractTest(unittest.TestCase):
             "/api/admin/x-accounts/${encodeURIComponent(id)}/drama-language",
             X_ACCOUNT_LIST_SOURCE,
         )
-        self.assertGreaterEqual(
-            X_ACCOUNT_LIST_SOURCE.count('colspan="15"'),
-            4,
-        )
+        self.assertEqual(X_ACCOUNT_LIST_SOURCE.count('colspan="10"'), 4)
         self.assertNotIn('colspan="12"', X_ACCOUNT_LIST_SOURCE)
+
+    def test_post_logs_display_batch_and_source(self):
         self.assertNotIn("expected_count || 3", X_POST_LOGS_SOURCE)
         self.assertNotIn('id="latestPublished">0 / 3', X_POST_LOGS_SOURCE)
         self.assertIn('item.batch_kind === "catchup"', X_POST_LOGS_SOURCE)
