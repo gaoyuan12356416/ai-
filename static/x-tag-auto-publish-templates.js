@@ -169,7 +169,18 @@
       row.appendChild(nameCell);
 
       const statusCell = ui.element("td");
-      statusCell.appendChild(ui.statusBadge(statusLabel(item.status, enabled), enabled ? "success" : "warning"));
+      const statusControl = ui.element("div", { className: "template-status-control" });
+      statusControl.appendChild(ui.statusBadge(statusLabel(item.status, enabled), enabled ? "success" : "warning"));
+      const toggle = ui.element("button", {
+        type: "button",
+        className: "template-status-switch",
+        title: enabled ? "点击关闭自动发布" : "点击开启自动发布",
+        attributes: { role: "switch", "aria-checked": String(enabled), "aria-label": `${item.name || id} 自动发布`, "aria-busy": String(state.busyIds.has(id)) },
+        dataset: { action: enabled ? "disable" : "enable", templateId: id },
+      });
+      toggle.disabled = state.busyIds.has(id);
+      statusControl.appendChild(toggle);
+      statusCell.appendChild(statusControl);
       row.appendChild(statusCell);
 
       const accountsCell = ui.element("td");
@@ -204,7 +215,6 @@
       const more = ui.element("details");
       more.appendChild(ui.element("summary", { className: "button small", text: "更多操作", attributes: { "aria-label": `${item.name || id} 更多操作` } }));
       const options = ui.element("div", { className: "template-action-options" });
-      options.appendChild(actionButton(enabled ? "关闭" : "开启", enabled ? "disable" : "enable", id));
       options.appendChild(actionButton("复制", "copy", id));
       options.appendChild(actionButton("爆款素材发布", "material", id));
       options.appendChild(actionButton("爆款剧发布", "drama", id));
@@ -258,6 +268,7 @@
   async function mutateTemplate(item, action) {
     const id = templateId(item);
     const version = templateVersion(item);
+    const isToggle = action === "enable" || action === "disable";
     const names = {
       copy: "复制模板",
       delete: "删除模板",
@@ -268,17 +279,17 @@
     const messages = {
       copy: `确认复制“${item.name || id}”吗？复制出的模板默认关闭。`,
       delete: `确认删除“${item.name || id}”吗？删除后将从模板列表移除并停止新调度；已生成任务和历史发布记录保留。`,
-      enable: `确认开启“${item.name || id}”吗？开启后系统会按模板计划自动创建真实发布任务。`,
-      disable: `确认关闭“${item.name || id}”吗？关闭只停止后续自动触发，不会取消已经开始的任务。`,
       run: `确认立即执行“${item.name || id}”吗？系统会为模板内每个账号创建一次真实发布任务，视频准备完成后自动发布。`,
     };
-    const confirmed = await ui.confirmAction({
-      title: names[action],
-      message: messages[action],
-      confirmText: action === "run" ? "确认真实执行" : "确认",
-      danger: action === "delete" || action === "disable" || action === "run",
-    });
-    if (!confirmed) return;
+    if (!isToggle) {
+      const confirmed = await ui.confirmAction({
+        title: names[action],
+        message: messages[action],
+        confirmText: action === "run" ? "确认真实执行" : "确认",
+        danger: action === "delete" || action === "run",
+      });
+      if (!confirmed) return;
+    }
     state.busyIds.add(id);
     renderTemplates();
     try {
@@ -320,6 +331,8 @@
       ) {
         forgetManualRunKey(id, version);
       }
+      // Read back after conflicts or uncertain responses; never retry a toggle blindly.
+      if (isToggle) await loadTemplates();
       ui.showToast(error.message || `${names[action]}失败`, true);
     } finally {
       state.busyIds.delete(id);
