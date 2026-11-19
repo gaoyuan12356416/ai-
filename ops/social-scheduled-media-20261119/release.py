@@ -551,6 +551,10 @@ def backup():
             ) as src,
             sqlite3.connect(tmp) as cp,
         ):
+            # An explicit WAL snapshot lets the online backup keep moving
+            # while active workers continue to update the source database.
+            src.execute("BEGIN")
+            src.execute("SELECT rootpage FROM sqlite_master LIMIT 1").fetchone()
             src.backup(cp, pages=6000, sleep=0.03)
         tmp.chmod(0o600)
         os.replace(tmp, dst)
