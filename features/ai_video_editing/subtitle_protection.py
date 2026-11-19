@@ -26,19 +26,6 @@ def settings(value=None):
     return {"enabled": enabled, "mode": mode, "top": top, "bottom": bottom}
 
 
-def mirror_graph(input_label, output_label, protection, prefix):
-    """Pixels inside the band are unchanged; new ASS subtitles are drawn later."""
-    p = settings(protection)
-    if not p["enabled"]:
-        return f"[{input_label}]hflip[{output_label}]"
-    top, bottom = p["top"], p["bottom"]
-    return (
-        f"[{input_label}]split[{prefix}original][{prefix}reverse];"
-        f"[{prefix}reverse]hflip[{prefix}flipped];"
-        f"[{prefix}flipped][{prefix}original]blend=all_expr='if(between(Y,H*{top}/100,H*{bottom}/100),B,A)'[{output_label}]"
-    )
-
-
 def resolve(rt, actor, clips, value):
     result = settings(value)
     if not result["enabled"] or result["mode"] == "manual":

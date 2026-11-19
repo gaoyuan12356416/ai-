@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from features.ai_video_editing import narration, speech
 from features.ai_video_editing.smart_common import SmartError
-from features.ai_video_editing.subtitle_protection import mirror_graph, resolve
+from features.ai_video_editing.subtitle_protection import resolve
 
 
 class CaptionQualityTest(unittest.TestCase):
@@ -48,21 +48,21 @@ class CaptionQualityTest(unittest.TestCase):
         self.assertTrue(result["enabled"])
         self.assertEqual((result["top"], result["bottom"]), (55, 92))
 
-    @unittest.skipUnless(shutil.which("ffmpeg"), "requires FFmpeg")
-    def test_protected_mirror_preserves_luma_and_chroma_pixels(self):
-        # Test every pixel in Y, U and V planes. Chroma has half-height coordinates.
-        width, height = 64, 96
-        planes = [(width, height), (width // 2, height // 2), (width // 2, height // 2)]
-        raw = bytes((x * 3 + y * 5 + n * 31) % 256 for n, (w, h) in enumerate(planes) for y in range(h) for x in range(w))
-        graph = mirror_graph("0:v", "out", {"mode": "manual", "top": 50, "bottom": 75}, "test")
-        result = subprocess.run(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "64x96", "-i", "pipe:0", "-filter_complex", graph, "-map", "[out]", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"], input=raw, capture_output=True, check=True).stdout
-        offset = 0
-        for w, h in planes:
-            for y in range(h):
-                row = raw[offset+y*w:offset+(y+1)*w]
-                expected = row if h*.5 <= y <= h*.75 else row[::-1]
-                self.assertEqual(result[offset+y*w:offset+(y+1)*w], expected)
-            offset += w*h
+    def test_subtitle_glyphs_stay_readable_without_preserving_background_band(self):
+        import cv2
+        import numpy as np
+        from features.ai_video_editing.protected_mirror import mirror_frame
+        frame=np.zeros((1280,720,3),np.uint8)
+        frame[:,:360]=[60,80,100]
+        frame[:,360:]=[80,100,130]
+        # Without subtitles every background pixel must flip, including the protected band.
+        self.assertTrue(np.array_equal(mirror_frame(frame,55,92),cv2.flip(frame,1)))
+        cv2.putText(frame,'Noah? Where are you?',(80,850),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,0),6)
+        cv2.putText(frame,'Noah? Where are you?',(80,850),cv2.FONT_HERSHEY_SIMPLEX,1.2,(255,255,255),2)
+        result=mirror_frame(frame,55,92)
+        white=(frame[:,:,0]==255)
+        self.assertTrue(np.array_equal(result[white],frame[white]))
+        self.assertTrue(np.array_equal(result[900],frame[900,::-1]))
 
 
 if __name__ == "__main__":

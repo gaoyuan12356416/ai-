@@ -1015,7 +1015,7 @@
           )
           .join(
             "",
-          )}</div><div id="subtitleProtectionOptions" class="protection-settings"><label class="checks"><input id="protectSubtitles" type="checkbox" ${c.subtitle_protection?.enabled !== false ? "checked" : ""}>字幕保护</label><p class="muted">水平翻转时保留原字幕区域的方向，新增字幕始终保持正常方向。</p><div class="form-grid">${field(
+          )}</div><div id="subtitleProtectionOptions" class="protection-settings"><label class="checks"><input id="protectSubtitles" type="checkbox" ${c.subtitle_protection?.enabled !== false ? "checked" : ""}>字幕保护</label><p class="muted">水平翻转时恢复浅色内嵌字幕的正常方向，新增字幕始终保持正常方向。</p><div class="form-grid">${field(
           "protectionMode",
           "保护区域",
           select(
@@ -1026,7 +1026,7 @@
             ],
             c.subtitle_protection?.mode || "auto",
           ),
-        )}${field("protectionTop", "上边界（距顶部 %）", input("protectionTop", c.subtitle_protection?.top ?? 55, 'type="number" min="0" max="99"'))}${field("protectionBottom", "下边界（距顶部 %）", input("protectionBottom", c.subtitle_protection?.bottom ?? 92, 'type="number" min="1" max="100"'))}</div><p class="muted">保护区域内的画面保持原方向；自动识别不足时保留 55%–92% 区域，可手动扩大。</p></div><p class="settings-note">脚本决定不同剪辑方案，裂变在相同方案上生成画面版本。热点前置会将精彩片段提前，再接回原片。</p>`;
+        )}${field("protectionTop", "上边界（距顶部 %）", input("protectionTop", c.subtitle_protection?.top ?? 55, 'type="number" min="0" max="99"'))}${field("protectionBottom", "下边界（距顶部 %）", input("protectionBottom", c.subtitle_protection?.bottom ?? 92, 'type="number" min="1" max="100"'))}</div><p class="muted">在指定区域识别字幕字形并修复翻转后的原字位置。默认识别 55%–92% 区域，可手动调整；彩色或花字字幕请检查成片。</p></div><p class="settings-note">脚本决定不同剪辑方案，裂变在相同方案上生成画面版本。热点前置会将精彩片段提前，再接回原片。</p>`;
     } else if (kind === "narration") {
       body =
         '<div class="form-grid">' +
