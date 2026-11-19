@@ -99,10 +99,14 @@ def freeze_match(pages, target, mysql, identity, app_id="1479"):
         return frozen
     page_ids = [str(_field(page, "page_id", "")) for page in pages]
     catalog, catalog_error = {}, ""
-    if str(app_id) == "1479":
+    if str(app_id) == "1479" or target.get('catalog') == 'moboreels':
         snapshot = load_profiles(page_ids)
         try:
-            catalog = load_classifications(mysql, content_ids(target))
+            if target.get('catalog') == 'moboreels':
+                from features.moboreels_hit import classifications
+                catalog = classifications(mysql.select, content_ids(target))
+            else:
+                catalog = load_classifications(mysql, content_ids(target))
         except Exception:
             catalog_error = "candidate_metadata_unavailable"
     else:

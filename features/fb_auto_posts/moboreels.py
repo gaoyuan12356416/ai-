@@ -55,9 +55,11 @@ def validate_rules(config):
             low, high=rule.get(metric+"_min"),rule.get(metric+"_max")
             if (low is not None and Decimal(str(low))>0) or high is not None:
                 raise RepositoryError("moboreels_metrics_unsupported", "Moboreels暂不支持Dramawave消耗或ROAS筛选，请清空这些筛选", 409)
-    if config.get("drama_rule", {}).get("resource_type_v2") or config.get("drama_launch_window_days"):
+    hit = config.get('hit_drama_publish') or {}
+    mobo_hit = hit.get('catalog') == 'moboreels' and bool(hit.get('content_ids'))
+    if config.get("drama_rule", {}).get("resource_type_v2") or (config.get("drama_launch_window_days") and not mobo_hit):
         raise RepositoryError("moboreels_rules_unsupported", "Moboreels分类及未注明时区的上架日期不能用于旧剧目类型或上线天数筛选，请清空这些筛选", 409)
-    if config.get("hit_drama_publish") or config.get("feedback_selection", {}).get("enabled"):
+    if (hit and not mobo_hit) or config.get("feedback_selection", {}).get("enabled"):
         raise RepositoryError("moboreels_rules_unsupported", "Moboreels暂不支持旧Post效果或爆剧规则，请关闭该选材规则", 409)
     if "{{url}}" in str(config.get("message_template") or ""):
         raise RepositoryError("moboreels_mixed_url", "Moboreels文案不可混用{{url}}，请仅使用{{m_url}}", 409)
@@ -77,6 +79,14 @@ def candidate_snapshot(repo, config):
     product_sql=(" AND s.product IN ("+",".join("%s" for _ in products)+")") if filter_products else ""
     product_params=products if filter_products else ()
     language=str(config["language"])
+    hit = config.get('hit_drama_publish') or {}
+    target_sql, target_params = '', ()
+    if hit:
+        from features.hit_drama_target import content_ids
+        target_params = tuple(content_ids(hit, language))
+        if not target_params:
+            return CandidateSnapshot((), (), ())
+        target_sql = ' AND d.story_id IN ('+','.join('%s' for _ in target_params)+')'
     language_ids={"zh-tw":2,"en":3,"es":4,"pt":5,"fr":6,"ru":7,"it":8,"ja":9,"ar":10,"id":11,"th":12,"vi":13,"ko":14,"tl":15,"de":16,"hi":17,"bn":18,"ms":21,"tr":22}
     source_language_sql="LOWER(TRIM(s.language))=%s"
     language_params=[language]
@@ -97,11 +107,11 @@ def candidate_snapshot(repo, config):
                  LOWER(TRIM(s.language)) language,s.video_duration,d.story_name drama_name,d.introduce drama_description
             FROM `{repo.mysql.schema}`.ads_custom_source s FORCE INDEX(PRIMARY)
             JOIN `ads_ai`.cdreader_koc_drama d ON d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1
-           WHERE s.data_source=%s{product_sql} AND s.type=2 AND s.is_delete=0
+           WHERE s.data_source=%s{product_sql}{target_sql} AND s.type=2 AND s.is_delete=0
              AND {source_language_sql} AND s.video_duration>=%s AND s.video_duration<=%s
              AND s.id>%s
            ORDER BY s.id LIMIT %s
-        """,(institution,int(config["material_data_source"]),*product_params,*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
+        """,(institution,int(config["material_data_source"]),*product_params,*target_params,*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
         page_count+=1
         for row in rows:
             mid=str(row.get("material_id") or "")

@@ -22,7 +22,8 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(target['content_ids'],['kOfK3rsZLN']);self.assertIn('BINARY content_id',calls[0])
 
     def test_invalid_missing_and_incomplete_targets_never_become_unrestricted(self):
-        for value in ('30911 OR 1=1',True,'-1','abc'):
+        self.assertEqual(identifier('resource_id', 'XEY468'), 'XEY468')
+        for value in ('30911 OR 1=1',True,'-1','abc;DROP'):
             with self.assertRaises(ValueError):identifier('resource_id',value)
         for rows in ([],[{'content_id':'abc','language':''}],[{'content_id':'abc','language':'en'}]*1001):
             with self.assertRaises(ValueError):resolve_target(lambda *a:rows,'ads',1479,dict(id_type='resource_id',drama_id='30911'))
@@ -31,10 +32,17 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(content_ids({'content_id':'old'}),['old'])
         self.assertEqual(content_ids({'content_id':'old','languages':['en']},'id'),[])
 
-    def test_portuguese_profile_alias_keeps_portugal_distinct(self):
-        target={'by_language':{'pt':['br'],'pt-pt':['pt']},'content_ids':['br','pt']}
-        self.assertEqual(content_ids(target,'pt-br'),['br'])
-        self.assertEqual(content_ids(target,'pt-pt'),['pt'])
+    def test_portuguese_aliases_share_scope_without_other_regions(self):
+        target=resolve_target(lambda *a:[{'content_id':'a','language':'pt'},
+            {'content_id':'a','language':'pt-BR'},{'content_id':'b','language':'pt-PT'}],
+            'ads',1479,dict(id_type='resource_id',drama_id='123'))
+        self.assertEqual(target['by_language'],{'pt-br':['a'],'pt-pt':['b']})
+        for language in ('pt','pt-BR','pt_br'):
+            self.assertEqual(content_ids(target,language),['a'])
+            self.assertEqual(content_ids({'by_language':{'pt':['a']}},language),['a'])
+            self.assertEqual(content_ids({'content_id':'a','languages':['pt']},language),['a'])
+        self.assertEqual(content_ids(target,'es'),[])
+        self.assertEqual(content_ids(target,'pt-PT'),['b'])
 
 
 if __name__=='__main__':unittest.main()

@@ -51,7 +51,8 @@ class ProfileSelector(TwoStageSelector):
             allowed = set(content_ids(target['target'], request.language))
             if 'account_content_ids' in target:
                 allowed.intersection_update(target['account_content_ids'].get(str(request.account_id), []))
-            rows = [row for row in rows if row.content_id in allowed]
+            catalog = target['target'].get('catalog', 'dramawave')
+            rows = [row for row in rows if row.content_id in allowed and getattr(row, 'catalog', 'dramawave') == catalog]
         candidates = super()._eligible_dramas(request, rows, metrics, rejection_counts)
         bridge = XPostAutoBridgeClient(os.environ['X_POST_AUTOMATION_INTERNAL_URL'],
                                       os.environ['X_POST_AUTO_INTERNAL_TOKEN'])
@@ -61,7 +62,11 @@ class ProfileSelector(TwoStageSelector):
         self._profile_context.value = context
         if target:
             from .policy import catalog_labels
-            context['catalog'] = catalog_labels(self.source, candidates)
+            if target['target'].get('catalog') == 'moboreels':
+                from features.moboreels_hit import classifications
+                context['catalog'] = classifications(self.source._stream_select, [row.content_id for row in candidates])
+            else:
+                context['catalog'] = catalog_labels(self.source, candidates)
             # Exact-drama requests never use ordinary no-profile/rank fallback.
             return [drama for drama in candidates if not match_reason(decision,
                 context['catalog'].get((drama.content_id, language(drama.language))))]
