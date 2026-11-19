@@ -116,8 +116,9 @@ class ImmutableAssetDigestTests(unittest.TestCase):
 
     def test_requested_media_gpu_hash_still_has_no_cpu_fallback(self):
         self.cuda.side_effect=RuntimeError('CUDA failed')
-        for _ in range(2):
-            with self.assertRaisesRegex(RuntimeError,'CUDA failed'):compute.file_digest()
+        with patch.dict(os.environ, {'RANDOM_GPU_FILE_HASH_BACKEND': 'cuda'}):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError,'CUDA failed'):compute.file_digest()
         self.assertEqual(self.cuda.call_count, 2)
 
     def test_finalization_failure_does_not_cache_partial_result(self):
@@ -156,8 +157,12 @@ class ImmutableAssetDigestTests(unittest.TestCase):
 
     def test_public_source_and_output_hash_functions_are_not_cached(self):
         for loader in (fb, tt):
-            for _ in range(2): self.assertEqual(loader.sha256_file(self.file)[0], hashlib.sha256(self.file.read_bytes()).hexdigest())
-        self.assertEqual(self.cuda.call_count, 4)
+            with patch.object(loader, 'file_digest', wraps=compute.file_digest) as digest:
+                for data in (b'first media content', b'other media content'):
+                    self.file.write_bytes(data)
+                    self.assertEqual(loader.sha256_file(self.file)[0], hashlib.sha256(data).hexdigest())
+                self.assertEqual(digest.call_count, 2)
+        self.assertEqual(self.cuda.call_count, 0)
         self.assertEqual(self.asset.call_count, 0)
         self.assertFalse(compute._IMMUTABLE_ASSET_DIGESTS)
 

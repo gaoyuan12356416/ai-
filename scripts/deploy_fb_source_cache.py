@@ -127,7 +127,7 @@ def recycle(runtime, workers_file, unit):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('action',choices=['plan','apply','rollback','recycle','catalog-admission'])
+    p.add_argument('action',choices=['plan','apply','rollback','recycle','catalog-admission','media-hash'])
     p.add_argument('--source',type=Path)
     p.add_argument('--runtime',type=Path)
     p.add_argument('--backup',type=Path)
@@ -153,7 +153,7 @@ def main():
         (a.backup/'manifest.json').write_text(json.dumps(record,indent=2))
         print(json.dumps(record))
         return
-    if a.action=='catalog-admission':
+    if a.action in ('catalog-admission','media-hash'):
         commit=verified_source(a.source)
         entry='features/random_gpu/gpu_compute.py'
         target=a.runtime/entry

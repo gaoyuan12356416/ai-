@@ -184,8 +184,17 @@ def enabled():
 
 
 def file_digest():
-    """Select file hashing explicitly; small control/identity hashes stay host."""
-    if enabled():
+    """Hash media on the host; keep CUDA available as an explicit opt-in.
+
+    Standard SHA-256 chains every block to the previous block. Our CUDA
+    implementation runs that chain on one thread and competes with rendering;
+    the host implementation preserves exactly the same digest and file bytes.
+    This setting does not change enabled() or any video/audio computation.
+    """
+    backend = os.environ.get("RANDOM_GPU_FILE_HASH_BACKEND", "cpu")
+    if backend not in {"cpu", "cuda"}:
+        raise ValueError("invalid_file_hash_backend")
+    if backend == "cuda" and enabled():
         return CudaSHA256()
     import hashlib
     return hashlib.sha256()
