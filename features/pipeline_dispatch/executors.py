@@ -25,6 +25,9 @@ from urllib.parse import quote
 from .client import CoordinatorError
 
 
+from features.random_gpu.profiles import HD_PROFILES, SD_PROFILES, base_profile
+
+
 class ExecutionError(RuntimeError):
     def __init__(self, code, *, unknown=False):
         self.code, self.unknown_outcome = code, bool(unknown)
@@ -225,6 +228,7 @@ class NodeExecutors:
         kinds = {kind for kind in supported if kind in enabled}
         stages = {("prepare" if kind in self.PREPARE else "publish") + ":" + kind.split("_", 1)[0] for kind in kinds}
         profiles = {"profile:" + name.strip() for name in os.environ.get("PIPELINE_RENDER_PROFILES", "").split(",") if name.strip()}
+        profiles.update("profile:" + SD_PROFILES[name] for name in SD_PROFILES if "profile:" + name in profiles)
         routed_assets = set()
         if "tt_prepare" in kinds:
             from .tt_profiles import PROFILE_SPECS, supported_profiles
@@ -278,7 +282,7 @@ class NodeExecutors:
         return getattr(self, kind)(payload, job.get("artifact") or payload.get("artifact"), context)
 
     def _processor(self, kind, profile=None):
-        cache_key = (kind, profile) if kind == "tt_prepare" and profile else kind
+        cache_key = (kind, profile) if profile and (kind == "tt_prepare" or profile in HD_PROFILES) else kind
         if cache_key in self.processors:
             return self.processors[cache_key]
         if kind in self.factories:
@@ -300,13 +304,18 @@ class NodeExecutors:
                 from features.fb_gpu.render_process import run_render
                 def render(command, **kwargs):
                     return run_render(cpu_thread_command(command) if cpu else command, **kwargs)
-                processor = RandomTemplateProcessor(repair, asset_root=os.environ.get("X_POST_RANDOM_TEMPLATE_ASSET_ROOT", ""), manifest_sha256=os.environ.get("X_POST_RANDOM_TEMPLATE_MANIFEST_SHA256", ""), backend=self.config["backend"], runner=render)
+                processor = RandomTemplateProcessor(repair, asset_root=os.environ.get("X_POST_RANDOM_TEMPLATE_ASSET_ROOT", ""), manifest_sha256=os.environ.get("X_POST_RANDOM_TEMPLATE_MANIFEST_SHA256", ""), backend=self.config["backend"], runner=render, profile=profile)
         elif kind == "fb_prepare":
             from features.fb_gpu.prepare_worker import WorkerConfig, PrepareProcessor
             from features.fb_gpu.render_process import run_render
             def render(command, **kwargs):
                 return run_render(cpu_thread_command(command) if self.config["backend"] == "cpu" else command, **kwargs)
-            processor = PrepareProcessor(WorkerConfig.from_env(), runner=render)
+            config = WorkerConfig.from_env()
+            if profile in HD_PROFILES:
+                if base_profile(profile) != base_profile(config.profile):
+                    raise ExecutionError("frozen_renderer_profile_mismatch")
+                config = replace(config, profile=profile)
+            processor = PrepareProcessor(config, runner=render)
         elif kind == "tt_prepare":
             from features.tt_gpu.worker import WorkerConfig, TTPostGPUProcessor, media_runner
             from .tt_profiles import TTProfileError, select_config
@@ -365,7 +374,7 @@ class NodeExecutors:
                 return {"status": "ready", "enqueue": True}
             return self.youtube_prepare(request, context, recovery_only=bool(payload.get("recovery_only")), resume_once=payload.get("resume_once") is True)
         expected_profile = request.get("expected_profile") or request.get("profile")
-        processor = self._processor(kind, expected_profile if kind == "tt_prepare" else None)
+        processor = self._processor(kind, expected_profile if kind in {"tt_prepare", "fb_prepare", "x_random"} else None)
         if expected_profile and getattr(processor.config, "profile", "") != expected_profile:
             raise ExecutionError("frozen_renderer_profile_mismatch")
         result = self._prepare_processor(kind, processor, request, context)
@@ -584,7 +593,7 @@ class NodeExecutors:
             if request.get("random_request"):
                 frozen = dict(request["random_request"])
                 frozen.update(source_url=artifact["url"], source_sha256=artifact["sha256"], source_size=artifact["size"], source_duration=artifact["duration_seconds"])
-                processor = self._processor("x_random")
+                processor = self._processor("x_random", frozen["profile"])
                 prepared = self._prepare_processor("x_random", processor, frozen, context)
                 return {"status": "ready", "artifact": _artifact(prepared), "preparation": prepared}
             return {"status": "ready", **checkpoint, "probe": probe}

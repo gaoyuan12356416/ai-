@@ -20,9 +20,9 @@ def enabled():
 
 
 def command(source, output, info, recipe, assets, *, cache_root=None,
-            encoder_options=None, audio_bitrate=192000, ffmpeg='/usr/bin/ffmpeg'):
+            encoder_options=None, audio_bitrate=192000, ffmpeg='/usr/bin/ffmpeg', canvas_size=(720, 1280)):
     """Build the FB H264/CQ21 contract without credentials or source URLs."""
-    spec = dict(source=str(source), info=info, recipe=recipe,
+    spec = dict(source=str(source), info=info, recipe=recipe, canvas=list(canvas_size),
                 assets={key:str(value) for key,value in assets.items()},
                 cache_root=cache_root or os.environ.get('RANDOM_GPU_ASSET_CACHE_ROOT'),
                 encoder_options=encoder_options,audio_bitrate=audio_bitrate,ffmpeg=str(ffmpeg))
@@ -43,6 +43,10 @@ def render(spec, output, work_dir=None):
     from .cpu_mux import CpuMP4
     from .native_resize import CachedWeightRenderer
     from .native_video import CachedAssets, encode_video
+    from .profiles import HD, SD
+    canvas_size = tuple(spec.get("canvas", HD))
+    if canvas_size not in (HD, SD):
+        raise ValueError("unsupported random overlay canvas")
     output = Path(output)
     progress = progress_path(output)
     started = time.monotonic()
@@ -78,12 +82,12 @@ def render(spec, output, work_dir=None):
             advance('video')
             record = encode_video(spec['source'], scratch/'video.h264',
                 spec['info'], spec['recipe'], layers, check,
-                encoder_options=spec.get('encoder_options'), renderer_class=CachedWeightRenderer)
+                encoder_options=spec.get('encoder_options'), renderer_class=CachedWeightRenderer, canvas_size=canvas_size)
         finally:
             layers.close()
         advance('video_packets')
         video = native_video_track(scratch/'video.h264', record,
-                                   scratch/'video.avcc', check=check, mux=CpuMP4())
+                                   scratch/'video.avcc', width=canvas_size[0], height=canvas_size[1], check=check, mux=CpuMP4())
         advance('audio')
         audio = prepare_audio_track(spec['source'], scratch,
             spec['info']['duration'], check=check,

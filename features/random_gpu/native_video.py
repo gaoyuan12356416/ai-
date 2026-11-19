@@ -278,9 +278,11 @@ class CachedAssets:
 
 
 class NativeRenderer:
-    def __init__(self, recipe, video):
+    def __init__(self, recipe, video, canvas_size=(WIDTH, HEIGHT)):
+        self.width, self.height = canvas_size
+        self.compile_options = ("--std=c++11", f"-DCANVAS_WIDTH={self.width}", f"-DCANVAS_HEIGHT={self.height}")
         from .compositor import kernel_source, validate_source_overlay
-        kernel_source(recipe)  # Reuse frozen recipe validation.
+        kernel_source(recipe, canvas_size)  # Reuse frozen recipe validation.
         self.overlay = validate_source_overlay(recipe)
         self.recipe, self.video = recipe, video
         from .gpu_pipeline import qualification,ENV
@@ -292,12 +294,12 @@ class NativeRenderer:
         self.cp, self.nvc, self.context = codec_runtime()
         self.stream = self.cp.cuda.get_current_stream()
         source = Path(__file__).with_suffix('.cu').read_text(encoding='utf-8')
-        self.module = self.cp.RawModule(code=source, options=('--std=c++11',),
+        self.module = self.cp.RawModule(code=source, options=self.compile_options,
                                       name_expressions=('fit_nv12', 'compose_rgba','fit_components'))
         self.fit = self.module.get_function('fit_nv12')
         self.compose = self.module.get_function('compose_rgba')
         self.components = self.module.get_function('fit_components')
-        self.back = self.cp.empty((HEIGHT, WIDTH, 4), dtype=self.cp.uint8)
+        self.back = self.cp.empty((self.height, self.width, 4), dtype=self.cp.uint8)
         self.main = self.cp.empty_like(self.back)
         self.output = self.cp.empty_like(self.back)
 
@@ -334,9 +336,9 @@ class NativeRenderer:
                  cp.int32({'bt709':1,'bt2020nc':2,'bt2020c':2,'smpte240m':3,'fcc':4}.get(self.video.get('color_space'),0)),
                  cp.float32(.5 if chroma == 'center' else 0),
                  cp.float32(0 if chroma == 'topleft' else .5), cp.float32(1),cp.int32(bits),cp.int32(self.legacy_fit))
-        grid, block = ((WIDTH+15)//16, (HEIGHT+15)//16), (16,16)
+        grid, block = ((self.width+15)//16, (self.height+15)//16), (16,16)
         self.fit(grid, block, (*args, self.back, cp.int32(1), *color))
-        if iw * HEIGHT == ih * WIDTH:
+        if iw * self.height == ih * self.width:
             main = self.back
         else:
             self.fit(grid, block, (*args, self.main, cp.int32(0), *color))
@@ -353,14 +355,14 @@ class NativeRenderer:
         color=(cp.int32(video.get('color_range')=='pc' or video.get('pix_fmt','').startswith('yuvj')),
                cp.int32({'bt709':1,'bt2020nc':2,'bt2020c':2,'smpte240m':3,'fcc':4}.get(video.get('color_space'),0)),
                cp.int32(video.get('chroma_location')=='center'),cp.int32(video.get('chroma_location')=='topleft'),cp.int32(self.legacy_fit))
-        grid,block=((WIDTH+15)//16,(HEIGHT+15)//16),(16,16)
+        grid,block=((self.width+15)//16,(self.height+15)//16),(16,16)
         for target,cover in ((self.back,1),(self.main,0)):
             self.components(grid,block,(*args,target,cp.int32(cover),*color))
         self.stream.synchronize()
 
     def _compose_frame(self, main, assets):
         cp=self.cp
-        grid,block=((WIDTH+15)//16,(HEIGHT+15)//16),(16,16)
+        grid,block=((self.width+15)//16,(self.height+15)//16),(16,16)
         layers = []
         for name in ('border', 'opacity', 'corners', 'tint'):
             array = assets[name]
@@ -370,7 +372,7 @@ class NativeRenderer:
             layers.extend((array, cp.int32(array.shape[1]), cp.int32(array.shape[0])))
         scale = self.recipe['scale_bp'] / 10000
         self.compose(grid, block, (self.back, main, *layers, self.output,
-            cp.int32(math.floor(WIDTH*scale/2)*2), cp.int32(math.floor(HEIGHT*scale/2)*2),
+            cp.int32(math.floor(self.width*scale/2)*2), cp.int32(math.floor(self.height*scale/2)*2),
             cp.float32(self.recipe['rotation_millidegrees']*math.pi/180000),
             cp.float32(self.recipe['tint_opacity_bp']/10000),
             cp.float32(self.overlay['opacity_bp']/10000 if self.overlay else 0),
@@ -382,14 +384,14 @@ class NativeRenderer:
 
 
 def encode_video(source, output, info, recipe, assets_at, check, *, duration=None,
-                 encoder_options=None, renderer_class=None):
+                 encoder_options=None, renderer_class=None, canvas_size=(WIDTH, HEIGHT)):
     """Write Annex B H264/HEVC and an AU sidecar for the independent muxer.
 
     `assets_at(frame_index)` must return four GPU RGBA arrays. Compressed AU
     offsets/sizes refer to output. PTS/DTS/duration use the exact 1/30 timebase.
     No file is promoted or task state mutated by this function.
     """
-    renderer = (renderer_class or NativeRenderer)(recipe, info['video'])
+    renderer = (renderer_class or NativeRenderer)(recipe, info['video'], canvas_size)
     nvc = renderer.nvc
     options = (dict(codec='h264', profile='high', preset='P5', rc='vbr', cq=21,
                    bitrate=0, fps=FPS, gop=60, idrperiod=60)
@@ -420,7 +422,7 @@ def encode_video(source, output, info, recipe, assets_at, check, *, duration=Non
 def _encode_video(renderer, source, output, info, assets_at, check, duration,
                   options, construction):
     nvc = renderer.nvc
-    encoder,encoder_configuration=create_encoder(nvc,WIDTH,HEIGHT,renderer.context,
+    encoder,encoder_configuration=create_encoder(nvc,renderer.width,renderer.height,renderer.context,
                                                 renderer.stream.ptr,construction)
     try:
         return _encode_frames(encoder, encoder_configuration, renderer, source,

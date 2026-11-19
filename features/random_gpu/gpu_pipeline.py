@@ -118,20 +118,23 @@ def source_qualification(command, info):
     return 'qualified'
 
 
-def kernel_source(recipe, video):
+def kernel_source(recipe, video, canvas_size=(720, 1280)):
+    width, height = canvas_size
     from .compositor import kernel_source as composition_source
     chroma = video.get('chroma_location')
     defs = {
+        'FIT_WIDTH': str(width), 'FIT_HEIGHT': str(height),
         'GPU_BT709': '1' if video.get('color_space') == 'bt709' else '0',
         'GPU_FULL_RANGE': '1' if video.get('color_range') == 'pc' or video.get('pix_fmt') == 'yuvj420p' else '0',
         'GPU_CHROMA_X': '0.5f' if chroma == 'center' else '0.0f',
         'GPU_CHROMA_Y': '0.0f' if chroma == 'topleft' else '0.5f',
     }
     return (''.join('#define %s %s\n' % row for row in defs.items())
-            + KERNEL.read_text(encoding='utf-8') + '\n' + composition_source(recipe))
+            + KERNEL.read_text(encoding='utf-8') + '\n' + composition_source(recipe, canvas_size))
 
 
-def fuse_command(command, recipe, output, info):
+def fuse_command(command, recipe, output, info, *, canvas_size=(720, 1280)):
+    width, height = canvas_size
     from .asset_cache import replace_asset_inputs
     from .compositor import _escape
     if qualification(info) != 'qualified': raise ValueError('gpu_pipeline_source_not_qualified')
@@ -141,7 +144,7 @@ def fuse_command(command, recipe, output, info):
     indices = [i for i, value in enumerate(prefix) if value == '-i']
     if len(indices) not in (5, 6): raise ValueError('gpu_pipeline_input_contract')
     video = info['video']
-    code = kernel_source(recipe, video)
+    code = kernel_source(recipe, video, canvas_size)
     target = Path(output).parent / ('gpu-fit-' + hashlib.sha256(code.encode()).hexdigest()[:20] + '.cl')
     with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent,
                                      prefix='.gpu-fit-', delete=False) as handle:
@@ -165,13 +168,13 @@ def fuse_command(command, recipe, output, info):
                 inputs.extend(['-framerate', '30'])
             number += 1
         inputs.append(value)
-    program = "program_opencl=inputs=4:size=720x1280:source='%s':kernel=" % _escape(target)
+    program = f"program_opencl=inputs=4:size={width}x{height}:source='%s':kernel=" % _escape(target)
     # The operator accepts the NVENC packed-RGB color conversion. Downloading
     # RGBA is a transfer, not a CPU colorspace conversion; NVENC performs CSC.
     # At the delivery aspect ratio cover and contain are identical, including
     # rounding, offset and alpha. Share the exact fitted frame instead of
     # dispatching the same expensive GPU sampling operation twice.
-    shared_fit = video['width'] * 1280 == video['height'] * 720
+    shared_fit = video['width'] * height == video['height'] * width
     graph = [
         '[0:v]hwdownload,format=nv12,format=yuv420p,fps=30:start_time=0,extractplanes=y+u+v[y][u][vplane]',
     ]
@@ -183,7 +186,7 @@ def fuse_command(command, recipe, output, info):
     graph.append('[clockback][yback][uback][vback]' + program + 'fit_yuv_cover:shortest=1:eof_action=endall' + (',split=2[source][main]' if shared_fit else '[source]'))
     if not shared_fit:
         graph.append('[clockmain][ymain][umain][vmain]' + program + 'fit_yuv_contain:shortest=1:eof_action=endall[main]')
-    graph.append("[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size=720x1280:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1[v]" % _escape(target))
+    graph.append(f"[source][main][border][opacity][corners][tint]program_opencl=inputs=6:size={width}x{height}:source='%s':kernel=compose_random_overlay_v2:shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1[v]" % _escape(target))
     tail = nvenc_rgb_tail(command[graph_index + 2:])
     return [prefix[0], '-filter_complex_threads', '2', '-filter_threads', '2',
             '-init_hw_device', 'opencl=ocl:0.0', '-filter_hw_device', 'ocl',

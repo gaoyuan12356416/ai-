@@ -41,7 +41,8 @@ def validate_source_overlay(recipe):
     return overlay
 
 
-def kernel_source(recipe):
+def kernel_source(recipe, canvas_size=(720, 1280)):
+    width, height = canvas_size
     limits = {"rotation_millidegrees": (-2000, 2000), "scale_bp": (9800, 10200),
               "tint_opacity_bp": (100, 1000)}
     for key, (low, high) in limits.items():
@@ -50,9 +51,9 @@ def kernel_source(recipe):
             raise ValueError("invalid random compositor transform")
     scale = recipe["scale_bp"] / 10000
     definitions = {
-        "SCENE_WIDTH": "720", "SCENE_HEIGHT": "1280",
-        "SCENE_MAIN_WIDTH": str(math.floor(720 * scale / 2) * 2),
-        "SCENE_MAIN_HEIGHT": str(math.floor(1280 * scale / 2) * 2),
+        "SCENE_WIDTH": str(width), "SCENE_HEIGHT": str(height),
+        "SCENE_MAIN_WIDTH": str(math.floor(width * scale / 2) * 2),
+        "SCENE_MAIN_HEIGHT": str(math.floor(height * scale / 2) * 2),
         "SCENE_ROTATION_RADIANS": "%.12ff" % (recipe["rotation_millidegrees"] * math.pi / 180000),
         "SCENE_TINT_OPACITY": "%.8ff" % (recipe["tint_opacity_bp"] / 10000),
     }
@@ -70,17 +71,18 @@ def _escape(path):
     return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
 
 
-def fuse_command(command, recipe, output, info=None):
+def fuse_command(command, recipe, output, info=None, *, canvas_size=(720, 1280)):
     """Keep the existing delivery arguments and replace the CPU composition."""
+    width, height = canvas_size
     from .gpu_pipeline import qualification, source_qualification, fuse_command as accelerated_command, nvenc_rgb_tail, rgb_output_enabled, write_provenance
     if qualification(info) == 'qualified' and source_qualification(command, info) == 'qualified':
-        return accelerated_command(command, recipe, output, info)
+        return accelerated_command(command, recipe, output, info, canvas_size=canvas_size)
     graph_index = command.index("-filter_complex")
     prefix = replace_asset_inputs(list(command[:graph_index]))
     source_indices = [index for index, value in enumerate(prefix) if value == "-i"]
     if len(source_indices) not in (5, 6):
         raise ValueError("random compositor requires source plus four assets")
-    code = kernel_source(recipe)
+    code = kernel_source(recipe, canvas_size)
     target = Path(output).parent / ("compositor-" + hashlib.sha256(code.encode()).hexdigest()[:20] + ".cl")
     # Job locking is owned by the caller. Atomic replacement also keeps offline
     # concurrent benchmark invocations from observing a partially written kernel.
@@ -110,10 +112,10 @@ def fuse_command(command, recipe, output, info=None):
     # video frame. CFR pads this initial gap instead of advancing video alone.
     graph = [
         "[0:v]fps=30:start_time=0,split=2[backraw][mainraw]",
-        "[backraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos:eval=frame,"
-        "crop=720:1280,setsar=1,format=rgba,hwupload[source]",
-        "[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos:eval=frame,"
-        "format=rgba,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0:eval=frame,"
+        f"[backraw]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos:eval=frame,"
+        f"crop={width}:{height},setsar=1,format=rgba,hwupload[source]",
+        f"[mainraw]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos:eval=frame,"
+        f"format=rgba,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0:eval=frame,"
         "setsar=1,hwupload[main]",
     ]
     for index, label in enumerate(("border", "opacity", "corners", "tint"), start=1):
@@ -121,7 +123,7 @@ def fuse_command(command, recipe, output, info=None):
     tail = list(command[graph_index + 2:])
     gpu_output = rgb_output_enabled(tail)
     graph.append("[source][main][border][opacity][corners][tint]program_opencl=inputs=6:"
-                 "size=720x1280:source='%s':kernel=compose_random_overlay_v2:"
+                 f"size={width}x{height}:source='%s':kernel=compose_random_overlay_v2:"
                  "shortest=1:eof_action=endall,hwdownload,format=rgba,setsar=1%s[v]"
                  % (_escape(target), '' if gpu_output else ',format=yuv420p'))
     if gpu_output:

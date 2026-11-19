@@ -8,8 +8,8 @@ from .native_video import NativeRenderer
 class CachedWeightRenderer(NativeRenderer):
     resize_implementation = 'cuda_lanczos_cached_weights_v1'
 
-    def __init__(self, recipe, video):
-        super().__init__(recipe, video)
+    def __init__(self, recipe, video, canvas_size=(720, 1280)):
+        super().__init__(recipe, video, canvas_size)
         source = Path(__file__).with_name('native_video.cu').read_text()
         start = source.index('extern "C" __global__ void fit_nv12(')
         end = source.index('__device__ float4 pixel_rgba', start)
@@ -25,7 +25,7 @@ class CachedWeightRenderer(NativeRenderer):
         macro = ('#define sample_plane(p,pitch,step,w,h,lx,ly,rx,ry,bits) '
                  'sample_precomputed(p,pitch,step,w,h,lx,ly,rx,ry,bits,x,y,step==1?0:1,mx,my,wx,wy,taps)\n')
         compiled = source[:start]+Path(__file__).with_suffix('.cu').read_text()+'\n'+macro+fit+'\n#undef sample_plane\n'
-        self.weight_module = self.cp.RawModule(code=compiled, options=('--std=c++11',),
+        self.weight_module = self.cp.RawModule(code=compiled, options=self.compile_options,
             name_expressions=('fit_weights', 'fit_nv12_cached'))
         self.build_weights = self.weight_module.get_function('fit_weights')
         self.cached_fit = self.weight_module.get_function('fit_nv12_cached')
@@ -42,10 +42,10 @@ class CachedWeightRenderer(NativeRenderer):
             self.plans.clear()
             self.shape = shape
         if key not in self.plans:
-            taps = math.ceil(6*max(iw/720, ih/1280, 1))+8
-            mx, my = cp.empty((2,720,2), cp.int32), cp.empty((2,1280,2), cp.int32)
-            wx, wy = cp.empty((2,720,taps), cp.float32), cp.empty((2,1280,taps), cp.float32)
-            for axis, n, meta, weights in ((0,720,mx,wx),(1,1280,my,wy)):
+            taps = math.ceil(6*max(iw/self.width, ih/self.height, 1))+8
+            mx, my = cp.empty((2,self.width,2), cp.int32), cp.empty((2,self.height,2), cp.int32)
+            wx, wy = cp.empty((2,self.width,taps), cp.float32), cp.empty((2,self.height,taps), cp.float32)
+            for axis, n, meta, weights in ((0,self.width,mx,wx),(1,self.height,my,wy)):
                 self.build_weights(((n+127)//128,2),(128,),
                     (cp.int32(iw),cp.int32(ih),cp.int32(cover),args[14],args[10],args[11],
                      cp.int32(axis),cp.int32(taps),meta,weights))

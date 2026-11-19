@@ -47,19 +47,19 @@ extern "C" __global__ void fit_nv12(
     float chroma_x, float chroma_y, float sar, int bits, int legacy_fit) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= 720 || y >= 1280) return;
+    if (x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
     // ffmpeg scale first fits storage dimensions; its following setsar=1
     // intentionally normalizes non-square pixels. sar remains an explicit
     // argument so admission can prove the selected geometry contract.
     (void)sar;
-    float factor = cover ? fmaxf(720.0f / iw, 1280.0f / ih)
-                         : fminf(720.0f / iw, 1280.0f / ih);
+    float factor = cover ? fmaxf(((float)CANVAS_WIDTH) / iw, ((float)CANVAS_HEIGHT) / ih)
+                         : fminf(((float)CANVAS_WIDTH) / iw, ((float)CANVAS_HEIGHT) / ih);
     int fw = max(1, (int)floorf(iw * factor + 0.5f));
     int fh = max(1, (int)floorf(ih * factor + 0.5f));
-    int px = x + (cover ? (fw - 720) / 2 : -((720 - fw) / 2));
-    int py = y + (cover ? (fh - 1280) / 2 : -((1280 - fh) / 2));
+    int px = x + (cover ? (fw - CANVAS_WIDTH) / 2 : -((CANVAS_WIDTH - fw) / 2));
+    int py = y + (cover ? (fh - CANVAS_HEIGHT) / 2 : -((CANVAS_HEIGHT - fh) / 2));
     if (!cover && (px < 0 || py < 0 || px >= fw || py >= fh)) {
-        out[y * 720 + x] = make_uchar4(0, 0, 0, 0); return;
+        out[y * CANVAS_WIDTH + x] = make_uchar4(0, 0, 0, 0); return;
     }
     float rx = (float)iw / fw, ry = (float)ih / fh;
     float lx = (px + 0.5f) * rx - 0.5f, ly = (py + 0.5f) * ry - 0.5f;
@@ -90,7 +90,7 @@ extern "C" __global__ void fit_nv12(
         r=yy+2*(1-kr)*v;b=yy+2*(1-kb)*u;
         g=yy-2*kb*(1-kb)/(1-kr-kb)*u-2*kr*(1-kr)/(1-kr-kb)*v;
     }
-    out[y * 720 + x] = make_uchar4(unorm(r), unorm(g), unorm(b), 255);
+    out[y * CANVAS_WIDTH + x] = make_uchar4(unorm(r), unorm(g), unorm(b), 255);
 }
 
 __device__ float4 pixel_rgba(const uchar4* p, int w, int h, int x, int y, int edge) {
@@ -127,15 +127,15 @@ extern "C" __global__ void compose_rgba(
     uchar4* out, int mw, int mh, float angle, float tint_alpha,
     float source_alpha, float source_scale) {
     int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y*blockDim.y+threadIdx.y;
-    if (x>=720 || y>=1280) return;
-    float u=(x+0.5f)/720.0f, v=(y+0.5f)/1280.0f;
-    float4 value=linear_rgba(source,720,1280,u,v,1); value.w=1.0f;
-    float cx=u*720.0f-360.0f, cy=v*1280.0f-640.0f;
+    if (x>=CANVAS_WIDTH || y>=CANVAS_HEIGHT) return;
+    float u=(x+0.5f)/((float)CANVAS_WIDTH), v=(y+0.5f)/((float)CANVAS_HEIGHT);
+    float4 value=linear_rgba(source,CANVAS_WIDTH,CANVAS_HEIGHT,u,v,1); value.w=1.0f;
+    float cx=u*((float)CANVAS_WIDTH)-0.5f*CANVAS_WIDTH, cy=v*((float)CANVAS_HEIGHT)-0.5f*CANVAS_HEIGHT;
     float cosine=cosf(angle), sine=sinf(angle);
     float sx=mw*0.5f+cx*cosine+cy*sine;
     float sy=mh*0.5f-cx*sine+cy*cosine;
     float4 foreground=(sx<0 || sy<0 || sx>=mw || sy>=mh)
-        ? make_float4(0,0,0,0) : linear_rgba(main,720,1280,sx/mw,sy/mh,0);
+        ? make_float4(0,0,0,0) : linear_rgba(main,CANVAS_WIDTH,CANVAS_HEIGHT,sx/mw,sy/mh,0);
     value=over(value,foreground);
     float4 tp=linear_rgba(tint,tw,th,u,v,0); tp.w*=tint_alpha;
     value=over(value,tp);
@@ -143,11 +143,11 @@ extern "C" __global__ void compose_rgba(
     value=over(value,linear_rgba(border,bw,bh,u,v,0));
     value=over(value,linear_rgba(corners,cw,ch,u,v,0));
     if (source_alpha>0.0f) {
-        float4 ghost=linear_rgba(source,720,1280,(u-0.5f)/source_scale+0.5f,
+        float4 ghost=linear_rgba(source,CANVAS_WIDTH,CANVAS_HEIGHT,(u-0.5f)/source_scale+0.5f,
                                 (v-0.5f)/source_scale+0.5f,1);
         ghost.w=source_alpha; value=over(value,ghost);
     }
-    out[y*720+x]=make_uchar4(unorm(value.x),unorm(value.y),unorm(value.z),255);
+    out[y*CANVAS_WIDTH+x]=make_uchar4(unorm(value.x),unorm(value.y),unorm(value.z),255);
 }
 
 // FFmpeg describes component storage; only these few integers cross the host.
@@ -188,12 +188,12 @@ extern "C" __global__ void fit_components(const unsigned long long* pointers,
     const int* meta,int count,int iw,int ih,int rgb,int big_endian,int float_data,
     uchar4* output,int cover,int full_range,int matrix,int center_chroma,int top_chroma,int legacy_fit) {
     int x=blockIdx.x*blockDim.x+threadIdx.x,y=blockIdx.y*blockDim.y+threadIdx.y;
-    if(x>=720 || y>=1280) return;
-    float factor=cover?fmaxf(720.0f/iw,1280.0f/ih):fminf(720.0f/iw,1280.0f/ih);
+    if(x>=CANVAS_WIDTH || y>=CANVAS_HEIGHT) return;
+    float factor=cover?fmaxf(((float)CANVAS_WIDTH)/iw,((float)CANVAS_HEIGHT)/ih):fminf(((float)CANVAS_WIDTH)/iw,((float)CANVAS_HEIGHT)/ih);
     int fw=max(1,(int)floorf(iw*factor+.5f)),fh=max(1,(int)floorf(ih*factor+.5f));
-    int px=x+(cover?(fw-720)/2:-((720-fw)/2)),py=y+(cover?(fh-1280)/2:-((1280-fh)/2));
+    int px=x+(cover?(fw-CANVAS_WIDTH)/2:-((CANVAS_WIDTH-fw)/2)),py=y+(cover?(fh-CANVAS_HEIGHT)/2:-((CANVAS_HEIGHT-fh)/2));
     if(!cover && (px<0 || py<0 || px>=fw || py>=fh)) {
-        output[y*720+x]=make_uchar4(0,0,0,0);return;
+        output[y*CANVAS_WIDTH+x]=make_uchar4(0,0,0,0);return;
     }
     float rx=(float)iw/fw,ry=(float)ih/fh,lx=(px+.5f)*rx-.5f,ly=(py+.5f)*ry-.5f;
     float c[4]={0,0,0,1};
@@ -223,5 +223,5 @@ extern "C" __global__ void fit_components(const unsigned long long* pointers,
         r=yy+2*(1-kr)*v;b=yy+2*(1-kb)*u;
         g=yy-2*kb*(1-kb)/(1-kr-kb)*u-2*kr*(1-kr)/(1-kr-kb)*v;
     }
-    output[y*720+x]=make_uchar4(unorm(r),unorm(g),unorm(b),unorm(c[3]));
+    output[y*CANVAS_WIDTH+x]=make_uchar4(unorm(r),unorm(g),unorm(b),unorm(c[3]));
 }

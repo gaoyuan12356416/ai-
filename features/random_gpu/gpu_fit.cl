@@ -39,12 +39,12 @@ float4 fit_yuv(__read_only image2d_t yplane, __read_only image2d_t uplane,
                __read_only image2d_t vplane, int2 output, int cover)
 {
     int iw = get_image_width(yplane), ih = get_image_height(yplane);
-    float factor = cover ? fmax(720.0f / iw, 1280.0f / ih)
-                         : fmin(720.0f / iw, 1280.0f / ih);
+    float factor = cover ? fmax(((float)FIT_WIDTH) / iw, ((float)FIT_HEIGHT) / ih)
+                         : fmin(((float)FIT_WIDTH) / iw, ((float)FIT_HEIGHT) / ih);
     int fw = max(1, (int)floor(iw * factor + 0.5f));
     int fh = max(1, (int)floor(ih * factor + 0.5f));
-    int2 offset = cover ? (int2)((fw - 720) / 2, (fh - 1280) / 2)
-                        : (int2)(-((720 - fw) / 2), -((1280 - fh) / 2));
+    int2 offset = cover ? (int2)((fw - FIT_WIDTH) / 2, (fh - FIT_HEIGHT) / 2)
+                        : (int2)(-((FIT_WIDTH - fw) / 2), -((FIT_HEIGHT - fh) / 2));
     int2 pixel = output + offset;
     if (!cover && (pixel.x < 0 || pixel.y < 0 || pixel.x >= fw || pixel.y >= fh))
         return (float4)(0.0f);
@@ -80,7 +80,7 @@ __kernel void fit_yuv_cover(__write_only image2d_t destination, unsigned int fra
 {
     (void)frame; (void)rgba_clock;
     int2 pixel = (int2)(get_global_id(0), get_global_id(1));
-    if (pixel.x < 720 && pixel.y < 1280)
+    if (pixel.x < FIT_WIDTH && pixel.y < FIT_HEIGHT)
         write_imagef(destination, pixel, fit_yuv(y, u, v, pixel, 1));
 }
 
@@ -90,6 +90,6 @@ __kernel void fit_yuv_contain(__write_only image2d_t destination, unsigned int f
 {
     (void)frame; (void)rgba_clock;
     int2 pixel = (int2)(get_global_id(0), get_global_id(1));
-    if (pixel.x < 720 && pixel.y < 1280)
+    if (pixel.x < FIT_WIDTH && pixel.y < FIT_HEIGHT)
         write_imagef(destination, pixel, fit_yuv(y, u, v, pixel, 0));
 }
