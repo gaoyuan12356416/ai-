@@ -1,6 +1,6 @@
 """Verified GitHub overlays; preserve live queues, receipts and scheduler state."""
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack,contextmanager
 import hashlib
 import json
 import os
@@ -22,6 +22,20 @@ TESTS={'x':['scripts.test_hit_drama_target','scripts.test_x_hit_drama','scripts.
        'fb':['scripts.test_hit_drama_target','scripts.test_fb_hit_drama','scripts.test_moboreels_hit.IdentityTests','scripts.test_moboreels_hit.FacebookTests'],
        'mobo':['tests.test_moboreels_content_tools']}
 DROPIN=Path('/etc/systemd/system/x-tag-auto.service.d/80-selection-speed.conf')
+
+
+def active(unit):
+    return run('systemctl','show',unit,'-p','ActiveState','--value') in ('active','activating','deactivating','reloading')
+
+
+@contextmanager
+def lock_file(path):
+    import fcntl
+    # Reuse the existing worker lock and its ownership; never create a root-only lock.
+    with open(path,'r+') as stream:
+        fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        try:yield
+        finally:fcntl.flock(stream,fcntl.LOCK_UN)
 
 
 def prepare(folder):
@@ -102,7 +116,6 @@ def switch(lane,folder,rollback=False):
         activate('fb',stage,rollback)
         return
     if lane=='x':
-        from scripts.deploy_x_hierarchy import active,lock_file
         run(sys.executable,HEALTH,'snapshot','--lane','x','--output',stage/'schedulers-before.json')
         triggers=['x-tag-auto-scheduler.timer','x-tag-auto-runner.timer','x-tag-auto-runner.path']
         states={unit:active(unit) for unit in triggers}
