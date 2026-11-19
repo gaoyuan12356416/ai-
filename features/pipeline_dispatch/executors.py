@@ -308,7 +308,7 @@ class NodeExecutors:
                 return run_render(cpu_thread_command(command) if self.config["backend"] == "cpu" else command, **kwargs)
             processor = PrepareProcessor(WorkerConfig.from_env(), runner=render)
         elif kind == "tt_prepare":
-            from features.tt_gpu.worker import WorkerConfig, TTPostGPUProcessor, media_runner
+            from features.tt_gpu.worker import WorkerConfig, TTPostGPUProcessor
             from .tt_profiles import TTProfileError, select_config
             config = WorkerConfig.from_env()
             try:
@@ -320,7 +320,7 @@ class NodeExecutors:
             if self.config["backend"] == "cpu" and config.video_encoder != "libx264":
                 raise ExecutionError("cpu_profile_requires_libx264")
             def runner(command, **kwargs):
-                return media_runner(cpu_thread_command(command) if self.config["backend"] == "cpu" else command, **kwargs)
+                return subprocess.run(cpu_thread_command(command) if self.config["backend"] == "cpu" else command, **kwargs)
             processor = TTPostGPUProcessor(config, runner=runner)
         else:
             raise ExecutionError("preparation_executor_not_configured")
@@ -459,11 +459,7 @@ class NodeExecutors:
                 previous = getattr(context, "phase_name", "prepare")
                 selected = phase
                 if name == "runner":
-                    command = args[0] if args else []
-                    is_render = bool(command) and (
-                        "ffmpeg" in Path(str(command[0])).name.lower()
-                        or "features.random_gpu.native_pipeline" in command)
-                    selected = "render" if is_render else "probe"
+                    selected = "render" if args and "ffmpeg" in Path(str(args[0][0])).name.lower() else "probe"
                     check = getattr(processor, "execution_check", None)
                     if check:
                         kwargs["progress_check"] = check
@@ -497,7 +493,6 @@ class NodeExecutors:
 
     def x_preflight(self, request, context):
         from features.x_posts.media_repair import WorkerConfig, CosObjectStore, REPAIRABLE_TRIGGER_CODES
-        from features.random_gpu.gpu_compute import file_digest
         from features.x_posts import service as posts
         from PIL import Image
         if request.get("prepared_artifact"):
@@ -513,7 +508,7 @@ class NodeExecutors:
             context.phase("download")
             self._x_download_source(request["source_url"], media, context, hosts=hosts,
                 max_bytes=min(int(request.get("max_media_bytes", request.get("max_bytes", 16 * 1024**3))), 16 * 1024**3))
-            digest = file_digest()
+            digest = hashlib.sha256()
             with media.open("rb") as source:
                 for chunk in iter(lambda: source.read(1024 * 1024), b""):
                     context.check()
@@ -689,10 +684,11 @@ class NodeExecutors:
                     initialized = response.get("data", {})
                     context.checkpoint("x_media_initialized", {"media_id": initialized.get("id") or initialized.get("media_id"), "operation_id": context.last_operation_id})
                 return response
-        # A 4 MiB segment repeatedly exhausted the 30-second socket write budget
-        # on the production uplink. Small segments bound retransmission cost;
-        # very large media still stays within the existing segment-count limit.
-        chunk_bytes = max(1024 * 1024, (artifact["size"] + MAX_UPLOAD_SEGMENTS - 1) // MAX_UPLOAD_SEGMENTS)
+        # Bound media requests already use a 120-second transport budget. Two
+        # MiB segments halve permit/HTTP overhead versus one MiB while staying
+        # below X's 5 MB guidance and avoiding the old four MiB uplink failures.
+        # Never change segmentation within an initialized upload session.
+        chunk_bytes = max(2 * 1024 * 1024, (artifact["size"] + MAX_UPLOAD_SEGMENTS - 1) // MAX_UPLOAD_SEGMENTS)
         client = self.platform_clients.get("x_publish") or BoundXClient(chunk_bytes=chunk_bytes)
         with tempfile.TemporaryDirectory(dir=self.work_root) as temp:
             media = self._download(artifact, Path(temp) / "media.bin", context, x_network=True)
@@ -943,10 +939,21 @@ class NodeExecutors:
             # A successful PUT alone is not publication proof. Confirm the same
             # owned video; an unknown PUT never triggers a second visibility write.
             context.phase("visibility_verify")
-            with context.operation("youtube_video_state", {"video_id": video_id, "channel_id": request["channel_id"]}, write=False) as credential:
-                confirmed = api.read_reviewed_video_state(credential["access_token"], video_id, expected_channel_id=request["channel_id"])
             expected_visibility = "private" if publish_at else "public"
-            if confirmed.get("visibility") != expected_visibility or (publish_at and confirmed.get("preserved_status", {}).get("publishAt") != publish_at):
+            confirmed = {}
+            for attempt in range(5):
+                context.check()
+                with context.operation("youtube_video_state", {"video_id": video_id, "channel_id": request["channel_id"]}, write=False) as credential:
+                    confirmed = api.read_reviewed_video_state(credential["access_token"], video_id, expected_channel_id=request["channel_id"])
+                if confirmed.get("state") == "succeeded" and confirmed.get("visibility") == expected_visibility and (not publish_at or confirmed.get("preserved_status", {}).get("publishAt") == publish_at):
+                    break
+                if attempt < 4:
+                    time.sleep(2 ** attempt)
+            else:
+                # Keep a safe diagnostic receipt; reconciliation owns future GETs.
+                context.checkpoint("youtube_visibility_observation", {"video_id": video_id,
+                    "visibility": confirmed.get("visibility", ""),
+                    "publish_at": confirmed.get("preserved_status", {}).get("publishAt", "")})
                 raise ExecutionError("youtube_visibility_unconfirmed", unknown=True)
             context.checkpoint("youtube_visibility", {"video_id": video_id, "publish_at": publish_at, "status": "scheduled" if publish_at else "public", "confirmed": confirmed})
             comment_id = str(request.get("comment_id") or "")
