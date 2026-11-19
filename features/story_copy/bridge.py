@@ -130,6 +130,11 @@ def fb_final(conn, family, row, *, extra_link_writer=None):
             data["_ord"] = conn.execute(
                 "SELECT rowid FROM fb_video_task WHERE task_id=?", (data["task_id"],)
             ).fetchone()[0]
+        # A supplier link can be created after the publish lease is acquired.
+        # Wait for the authoritative link before recording a final copy decision.
+        if family == "fa" and obj(data.get("moboreels_json")) and not data.get("short_url"):
+            conn.execute("RELEASE story_copy_optional")
+            return
         task = fb_task(family, data)
         if conn.execute(
             "SELECT 1 FROM story_copy_receipt WHERE task_key=?", (task["key"],)

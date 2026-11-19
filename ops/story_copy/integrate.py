@@ -113,6 +113,21 @@ def x_native(text):
     return text
 
 
+def fb_supplier_link(text):
+    """Finish the deferred decision in the supplier link commit, before Graph writes."""
+    marker = 'fb_final(conn, "fa", linked)'
+    if marker in text:
+        return text
+    anchor = '        conn.commit()\n        return dict(conn.execute("SELECT * FROM fb_auto_task'
+    hook = (
+        '        if row["status"] == "running":\n'
+        '            from features.story_copy.bridge import fb_final\n'
+        '            linked = conn.execute("SELECT * FROM fb_auto_task WHERE id=?", (current["id"],)).fetchone()\n'
+        '            ' + marker + '\n'
+    )
+    return replace(text, anchor, hook + anchor)
+
+
 def fb_redirect(text):
     if "from features.story_copy.bridge import restore_fb_optional_link" in text:
         return text

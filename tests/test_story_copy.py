@@ -45,6 +45,23 @@ class CaptionTests(unittest.TestCase):
         for ep in model.ENDPOINTS:
             store.change_setting(ep, True, "fixture")
 
+    def test_supplier_receipt_waits_for_link(self):
+        row = dict(id=88, content_id="drama", material_id="clip", selection_json="{}",
+                   short_url="", long_url="", message_text="Watch {{m_url}}",
+                   moboreels_json='{"creator":{"user_id":"owner"}}')
+        with store.connection(self.fb) as src, patch.object(
+            bridge, "select", return_value=("legacy", "not_ready_at_publish", "fallback", None)
+        ) as select:
+            bridge.fb_final(src, "fa", row)
+            select.assert_not_called()
+            self.assertFalse(src.execute("SELECT 1 FROM story_copy_receipt").fetchone())
+            row.update(short_url="https://example.test/m/one", long_url="https://example.test/watch")
+            bridge.fb_final(src, "fa", row)
+            bridge.fb_final(src, "fa", row)
+            self.assertEqual(select.call_count, 1)
+            self.assertEqual(select.call_args.args[-1], row["short_url"])
+            self.assertEqual(src.execute("SELECT count(*) FROM story_copy_receipt").fetchone()[0], 1)
+
     def task(self, i, f="xm"):
         t = sources.base(
             f,

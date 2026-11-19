@@ -25,6 +25,7 @@ ROOTS = {
 MODULES = {
     "fb": {
         "features/fb_auto_posts/core.py": integrate.fb_auto,
+        "features/fb_auto_posts/moboreels.py": integrate.fb_supplier_link,
         "features/fb_video_publish/core.py": integrate.fb_video,
         "features/fb_auto_posts/publisher.py": integrate.fb_redirect,
         "features/pipeline_dispatch/fb_native.py": integrate.fb_redirect,
