@@ -9,9 +9,9 @@
     dialog.append(node('h2',`${account.username ? '@'+account.username : '频道 '+(account.id || account.account_id)} · 成长画像`));
     dialog.append(node('p',`有效 72 小时样本：${value(p.mature_posts)} 条；近 7 天净增粉：${value(f.net_7d)}；前 7 天净增粉：${value(f.previous_net_7d)}`));
     dialog.append(node('p','媒体播放与观看时长作为辅助观察；涨粉是账号整体净变化，不归因到某条帖子。样本不足时均衡探索，不自动切换画像类型。'));
-    const table=node('table');table.style.cssText='width:100%;border-collapse:collapse;text-align:left';
+    const table=node('table');table.style.cssText='width:100%;min-width:0;table-layout:fixed;border-collapse:collapse;text-align:left;white-space:normal';
     const head=node('tr');['题材','帖子 / 剧数','表现分','状态'].forEach(t=>head.append(node('th',t)));table.append(head);
-    for(const t of p.themes || []) { const row=node('tr');[names[t.theme]||t.theme,`${t.posts} / ${t.dramas}`,String(t.score),t.mature?'可用于优先选材':'继续积累'].forEach(s=>{const c=node('td',s);c.style.padding='10px 4px';row.append(c);});table.append(row); }
+    for(const t of p.themes || []) { const row=node('tr');[names[t.theme]||t.theme,`${t.posts} / ${t.dramas}`,String(t.score),t.mature?'可用于优先选材':'继续积累'].forEach(s=>{const c=node('td',s);c.style.cssText='padding:10px 4px;white-space:normal;overflow-wrap:anywhere';row.append(c);});table.append(row); }
     dialog.append(table);
     if(!p.themes?.length)dialog.append(node('p','尚无足够的成熟内容样本。采集从功能启用后开始，不能补造历史 72 小时指标。'));
     const policy=p.policy || {}, parts=Object.entries(policy.weights || {}).map(([k,v])=>`${names[k]||k} ${(v*100).toFixed(0)}%`);
