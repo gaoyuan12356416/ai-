@@ -58,6 +58,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .credentials import CredentialEnvelopeError, decode_seal_key, open_access_token
+from features.random_gpu.profiles import base_profile, canvas
+
+
 from features.random_gpu.compositor import (
     BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay,
 )
@@ -2032,7 +2035,7 @@ def validate_prepared_output(config, payload, path, max_size, expected_duration)
     if (
         not video_contract_matches
         or str(video.get("pix_fmt") or "").lower() != "yuv420p"
-        or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+        or (width, height) != canvas(getattr(config, "profile", None))
         or abs(rate - 30.0) > 0.01
         or str(audio.get("codec_name") or "").lower() != "aac"
         or audio_profile != "lc"
@@ -2117,7 +2120,7 @@ def _delivery_video_contract(config):
         config.video_encoder,
         config.media_mode,
     )
-    if config.profile != expected_profile:
+    if base_profile(config.profile) != expected_profile:
         raise TTGPUError(
             "invalid_configuration",
             "video encoder and media mode require their exact media profile",
@@ -2313,6 +2316,7 @@ def build_random_overlay_command(
 ):
     """Build the deterministic four-layer TT de-duplication composition."""
 
+    width, height = canvas(getattr(config, "profile", None))
     try:
         rotation = int(recipe["rotation_millidegrees"]) / 1000.0
         scale = int(recipe["scale_bp"]) / 10000.0
@@ -2378,10 +2382,10 @@ def build_random_overlay_command(
         # Split the source before all transforms/assets and retain the same PTS.
         # Normalize to cover, then zoom and center-crop; never rotate this layer.
         source_filter = (
-            "[sourceraw]scale=720:1280:force_original_aspect_ratio=increase:"
-            "flags=lanczos,crop=720:1280,setsar=1,format=rgba,"
+            f"[sourceraw]scale={width}:{height}:force_original_aspect_ratio=increase:"
+            f"flags=lanczos,crop={width}:{height},setsar=1,format=rgba,"
             "scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,"
-            "crop=720:1280,format=rgba,colorchannelmixer=aa=%.4f[sourceghost];"
+            f"crop={width}:{height},format=rgba,colorchannelmixer=aa=%.4f[sourceghost];"
         ) % (source_overlay["scale_bp"] / 10000.0,
              source_overlay["scale_bp"] / 10000.0,
              source_overlay["opacity_bp"] / 10000.0)
@@ -2392,21 +2396,21 @@ def build_random_overlay_command(
         )
     filter_complex = (
         "[0:v]setpts=PTS-STARTPTS,fps=30,%s;"
-        "[backraw]scale=720:1280:force_original_aspect_ratio=increase:"
-        "flags=lanczos,crop=720:1280,setsar=1,format=rgba[back];"
-        "[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:"
-        "flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+        f"[backraw]scale={width}:{height}:force_original_aspect_ratio=increase:"
+        f"flags=lanczos,crop={width}:{height},setsar=1,format=rgba[back];"
+        f"[mainraw]scale={width}:{height}:force_original_aspect_ratio=decrease:"
+        f"flags=lanczos,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
         "setsar=1,format=rgba,"
         "scale=w='trunc(iw*%s/2)*2':h='trunc(ih*%s/2)*2':flags=lanczos,"
         "rotate=%s*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];"
         "[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];"
-        "[4:v]scale=720:1280:flags=lanczos,format=rgba,"
+        f"[4:v]scale={width}:{height}:flags=lanczos,format=rgba,"
         "colorchannelmixer=aa=%s,fps=30,setpts=PTS-STARTPTS[tint];"
-        "[2:v]scale=720:1280:flags=lanczos,format=rgba,"
+        f"[2:v]scale={width}:{height}:flags=lanczos,format=rgba,"
         "fps=30,setpts=PTS-STARTPTS[opacity];"
-        "[1:v]scale=720:1280:flags=lanczos,format=rgba,"
+        f"[1:v]scale={width}:{height}:flags=lanczos,format=rgba,"
         "fps=30,setpts=PTS-STARTPTS[border];"
-        "[3:v]scale=720:1280:flags=lanczos,format=rgba,"
+        f"[3:v]scale={width}:{height}:flags=lanczos,format=rgba,"
         "fps=30,setpts=PTS-STARTPTS[corners];"
         "%s"
         "[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];"
@@ -2467,7 +2471,7 @@ def build_random_overlay_command(
         ]
     )
     if config.compositor_backend == BACKEND:
-        return fuse_command(command, recipe, output_path, input_info)
+        return fuse_command(command, recipe, output_path, input_info, canvas_size=(width, height))
     return command
 
 
@@ -4116,7 +4120,7 @@ def _prepare_response(manifest, reused, config, expected_job_id):
         or duration > float(config.max_duration_seconds)
         or not math.isfinite(frame_rate)
         or abs(frame_rate - 30.0) > 0.01
-        or (width, height) != (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+        or (width, height) != canvas(getattr(config, "profile", None))
         or not video_contract_matches
         or str(probe.get("pixel_format") or "").lower() != "yuv420p"
         or str(probe.get("audio_codec") or "").lower() != "aac"
@@ -5076,6 +5080,7 @@ class TTPostGPUProcessor:
                 "stage_timings_ms": stage_timings_ms,
             }
             if self.config.media_mode == RANDOM_OVERLAY_MEDIA_MODE:
+                result.update(source_sha256=source_sha, source_size=source_size)
                 result["random_overlay_recipe"] = reuse_contract[
                     "random_overlay_recipe"
                 ]

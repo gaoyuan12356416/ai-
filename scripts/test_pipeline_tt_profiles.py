@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from features.pipeline_dispatch.executors import NodeExecutors, ExecutionError
 from features.pipeline_dispatch.tt_profiles import supported_profiles, select_config, asset_capabilities, TTProfileError
+from features.random_gpu.profiles import base_profile
 from features.tt_gpu import worker
 from scripts import test_tt_gpu_worker as fixture
 from scripts.test_pipeline_executors import Context
@@ -24,12 +25,12 @@ class TTProfiles(unittest.TestCase):
         self.base = replace(self.base, fixed_outro_sha256=worker._file_sha256(self.base.fixed_outro_path)[0])
 
     def test_complete_cpu_gpu_profile_matrix_keeps_existing_delivery_gates(self):
-        self.assertEqual(len(supported_profiles('cpu')), 5)
-        self.assertEqual(len(supported_profiles('gpu')), 9)
+        self.assertEqual(len(supported_profiles('cpu')), 6)
+        self.assertEqual(len(supported_profiles('gpu')), 11)
         for backend in ('cpu', 'gpu'):
             for profile in supported_profiles(backend):
                 config = select_config(self.base, profile, backend)
-                self.assertEqual(config.profile, worker._selected_media_profile(config.video_encoder, config.media_mode))
+                self.assertEqual(base_profile(config.profile), worker._selected_media_profile(config.video_encoder, config.media_mode))
                 worker._delivery_video_contract(config)
                 if backend == 'cpu':
                     self.assertEqual(config.video_encoder, 'libx264')

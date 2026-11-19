@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit
 import requests
+from features.random_gpu.profiles import base_profile, canvas
+
+
 from features.random_gpu.compositor import BACKEND, LEGACY, backend, fuse_command, preflight, validate_source_overlay
 from .random_overlay import derive_recipe, load_asset_set, selected_asset_paths, sha256_file, validate_recipe
 from .render_process import RenderStalled, run_render
@@ -49,7 +52,7 @@ class WorkerConfig:
         encoder=str(source.get("FB_PAGE_GPU_VIDEO_ENCODER","h264_nvenc")); profile=str(source.get("FB_PAGE_GPU_PROFILE",PROFILE)); prepare_only=str(source.get("FB_PAGE_GPU_PREPARE_ONLY","1"))
         cpu = str(source.get("PIPELINE_RENDER_BACKEND", "gpu")) == "cpu"
         expected=("libx264",CPU_PROFILE) if cpu else ("h264_nvenc",PROFILE)
-        if (encoder,profile)!=expected:
+        if (encoder,base_profile(profile))!=expected:
             raise PrepareWorkerError("invalid_configuration","H264 prepare-only profile mismatch",500)
         if prepare_only!="1": raise PrepareWorkerError("invalid_configuration","prepare-only required",500)
         hosts=tuple(dict.fromkeys(item.strip().lower() for item in str(source.get("FB_PAGE_GPU_ALLOWED_SOURCE_HOSTS","")).split(",") if item.strip()))
@@ -97,7 +100,7 @@ def validate_request(value,config):
     if not JOB_RE.fullmatch(job) or not 1<=len(content)<=128 or value.get("video_template")!="random_overlay" or value.get("expected_profile")!=getattr(config,"profile",PROFILE) or value.get("source_trim_tail_seconds") not in (0,0.0): raise PrepareWorkerError("invalid_request","prepare identity/profile/trim invalid")
     page_pool = value.get("page_pool") is True
     if parsed.scheme not in (("http","https") if page_pool else ("https",)) or not parsed.hostname or (not page_pool and parsed.hostname.lower() not in config.allowed_source_hosts) or parsed.username or parsed.password or parsed.fragment: raise PrepareWorkerError("invalid_request","source URL host invalid")
-    return {"job_id":job,"content_id":content,"source_url":source, **({"page_pool":True} if page_pool else {})}
+    return {"job_id":job,"content_id":content,"source_url":source, **({"page_pool":True} if page_pool else {}), **({"expected_profile":value["expected_profile"]} if base_profile(value["expected_profile"])!=value["expected_profile"] else {})}
 
 def _probe(config,path):
     try: result=subprocess.run([config.ffprobe,"-v","error","-show_streams","-show_format","-of","json",str(path)],capture_output=True,text=True,timeout=120,check=True); payload=json.loads(result.stdout)
@@ -109,17 +112,18 @@ def _probe(config,path):
     return {"duration":duration,"has_audio":audio is not None,"video":video,"audio":audio}
 
 def build_command(config,source,output,info,recipe,assets):
+    width, height = canvas(getattr(config, "profile", None))
     source_overlay=validate_source_overlay(recipe)
     rotation=int(recipe["rotation_millidegrees"])/1000; scale=int(recipe["scale_bp"])/10000; opacity=int(recipe["tint_opacity_bp"])/10000
     command=[config.ffmpeg,"-y","-nostdin","-hide_banner","-loglevel","error","-i",str(source),"-loop","1","-i",str(assets["border"]),"-stream_loop","-1","-c:v","libvpx-vp9","-i",str(assets["opacity_video"]),"-stream_loop","-1","-c:v","libvpx-vp9","-i",str(assets["corners"]),"-loop","1","-i",str(assets["tint"])]
     if not info["has_audio"]: command += ["-f","lavfi","-i","anullsrc=channel_layout=stereo:sample_rate=48000"]
     audio="0:a:0" if info["has_audio"] else "5:a:0"
-    graph=("[0:v]setpts=PTS-STARTPTS,fps=30,split=2[backraw][mainraw];[backraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,crop=720:1280,setsar=1,format=rgba[back];[mainraw]scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,format=rgba,scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,rotate=%.6f*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];[4:v]scale=720:1280:flags=lanczos,format=rgba,colorchannelmixer=aa=%.4f,fps=30,setpts=PTS-STARTPTS[tint];[2:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[opacity];[1:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[border];[3:v]scale=720:1280:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[corners];[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];[o2][border]overlay=0:0:shortest=1:eof_action=repeat[o3];[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,format=yuv420p[v]")%(scale,scale,rotation,opacity)
+    graph=(f"[0:v]setpts=PTS-STARTPTS,fps=30,split=2[backraw][mainraw];[backraw]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,crop={width}:{height},setsar=1,format=rgba[back];[mainraw]scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,format=rgba,scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,rotate=%.6f*PI/180:ow=rotw(iw):oh=roth(ih):c=black@0[main];[back][main]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat[base];[4:v]scale={width}:{height}:flags=lanczos,format=rgba,colorchannelmixer=aa=%.4f,fps=30,setpts=PTS-STARTPTS[tint];[2:v]scale={width}:{height}:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[opacity];[1:v]scale={width}:{height}:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[border];[3:v]scale={width}:{height}:flags=lanczos,format=rgba,fps=30,setpts=PTS-STARTPTS[corners];[base][tint]overlay=0:0:shortest=1:eof_action=repeat[o1];[o1][opacity]overlay=0:0:shortest=1:eof_action=repeat[o2];[o2][border]overlay=0:0:shortest=1:eof_action=repeat[o3];[o3][corners]overlay=0:0:shortest=1:eof_action=repeat,format=yuv420p[v]")%(scale,scale,rotation,opacity)
     if source_overlay is not None:
         graph=graph.replace("split=2[backraw][mainraw]","split=3[backraw][mainraw][sourceraw]",1)
         graph=graph.removesuffix(",format=yuv420p[v]")+"[composite];"
-        graph+=("[sourceraw]scale=720:1280:force_original_aspect_ratio=increase:flags=lanczos,"
-                "crop=720:1280,setsar=1,format=rgba,"
+        graph+=(f"[sourceraw]scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={width}:{height},setsar=1,format=rgba,"
                 "scale=w='trunc(iw*%.4f/2)*2':h='trunc(ih*%.4f/2)*2':flags=lanczos,"
                 "colorchannelmixer=aa=%.4f[sourceghost];"
                 "[composite][sourceghost]overlay=(W-w)/2:(H-h)/2:shortest=1:eof_action=repeat,format=yuv420p[v]")%(source_overlay["scale_bp"]/10000,source_overlay["scale_bp"]/10000,source_overlay["opacity_bp"]/10000)
@@ -129,7 +133,7 @@ def build_command(config,source,output,info,recipe,assets):
     command += ["-filter_complex",graph,"-map","[v]","-map",audio,"-af","aresample=48000:async=1:first_pts=0,apad","-c:v","h264_nvenc","-profile:v","high","-preset","p5","-rc","vbr","-cq","21","-b:v","0","-pix_fmt","yuv420p","-fps_mode","cfr","-g","60","-keyint_min","60","-c:a","aac","-profile:a","aac_low","-ar","48000","-ac","2","-b:a","192k","-movflags","+faststart","-t","%.6f"%info["duration"],str(output)]
     if getattr(config,"video_encoder","h264_nvenc")=="libx264":
         command=software_command(command)
-    return fuse_command(command,recipe,output,info) if config.compositor_backend==BACKEND else command
+    return fuse_command(command,recipe,output,info,canvas_size=(width,height)) if config.compositor_backend==BACKEND else command
 
 def software_command(command):
     """Explicit CPU backend; never invoked as an automatic GPU error fallback."""
@@ -326,15 +330,15 @@ class PrepareProcessor:
                 output_info=_probe(self.config,output); video=output_info["video"]
                 if abs(output_info["duration"]-source_info["duration"])>1.5:
                     raise PrepareWorkerError("fb_gpu_output_duration_invalid","prepared duration mismatch",502)
-                if video.get("codec_name")!="h264" or str(video.get("profile") or "").lower()!="high" or int(video.get("width") or 0)!=720 or int(video.get("height") or 0)!=1280: raise PrepareWorkerError("fb_gpu_output_contract_invalid","H264 output contract invalid",502)
+                if video.get("codec_name")!="h264" or str(video.get("profile") or "").lower()!="high" or (int(video.get("width") or 0),int(video.get("height") or 0))!=canvas(getattr(self.config,"profile",None)): raise PrepareWorkerError("fb_gpu_output_contract_invalid","H264 output contract invalid",502)
                 output_sha,size=sha256_file(output)
                 callback=getattr(self,"qualified_artifact",None)
                 if callback is not None:
                     key=f"{self.config.cos_prefix}/{output_sha[:2]}/{output_sha}.mp4"
                     url=self.config.cos_domain+"/"+"/".join(quote(part,safe="-._~") for part in key.split("/"))
-                    callback({"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":url,"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":key,"status":"ready","render_seconds":render_seconds},key)
+                    callback({"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":url,"output_sha256":output_sha,"output_size":size,"source_sha256":source_sha,"source_size":source.stat().st_size,"probe":{"codec":"h264","duration":output_info["duration"],"width":video["width"],"height":video["height"]},"random_overlay_recipe":recipe,"storage_key":key,"status":"ready","render_seconds":render_seconds},key)
                 stored=self.object_store.upload(output,job,output_sha,size)
-                result={"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":stored["url"],"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":stored["key"],"status":"ready","render_seconds":render_seconds}
+                result={"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":stored["url"],"output_sha256":output_sha,"output_size":size,"source_sha256":source_sha,"source_size":source.stat().st_size,"probe":{"codec":"h264","duration":output_info["duration"],"width":video["width"],"height":video["height"]},"random_overlay_recipe":recipe,"storage_key":stored["key"],"status":"ready","render_seconds":render_seconds}
                 tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":self.config.compositor_backend,"render_seconds":render_seconds,"source_cache":source_cache_observation(root)},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
             finally: output.unlink(missing_ok=True)
 
