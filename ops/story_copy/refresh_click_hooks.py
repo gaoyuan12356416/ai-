@@ -1,4 +1,4 @@
-"""Upgrade only unfrozen v1 drafts, in batches. Publishing never waits for this job."""
+"""Generate missing story hooks for unfrozen drafts. Publishing never waits."""
 
 import argparse
 import itertools
@@ -21,7 +21,7 @@ No URLs, emoji or markup. The program supplies the entire prefix and formats the
     + "\n"
     + generator.HOOK_RULES
 )
-V1 = "state='ready' AND final IS NULL AND json_extract(draft,'$.click_hook') IS NULL"
+V1 = "state='ready' AND final IS NULL AND coalesce(json_extract(draft,'$.cta_style'),'')!='watch_full_now_hook'"
 
 
 def upgrade(c, task, original, options, reason=None):

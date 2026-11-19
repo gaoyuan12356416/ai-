@@ -93,7 +93,7 @@ class CaptionTests(unittest.TestCase):
         for t in tasks:
             t["facts"] = {"series": "Ada hides the seal. Ben finds the ribbon."}
         request = json.loads(generator.prompt(tasks))
-        self.assertEqual(request["cta"], "👆 watch full now")
+        self.assertEqual(request["click_prefix"], "watch full now")
         self.assertEqual(len(request["fact_text"]), 1)
         self.assertNotIn("recent", request)
         for item in request["tasks"]:
@@ -623,7 +623,7 @@ class CaptionTests(unittest.TestCase):
             "기사의 정체를 확인해 봐",
             ", by poznać wybór smoka",
             " a odhal Bjornův původ",
-            "untuk melihat kartu Gabe",
+            "dan lihat Gabe",
         ]
         for i, s in enumerate(samples):
             t = dict(self.task(i + 1), language=s["lang"])
@@ -683,19 +683,20 @@ class CaptionTests(unittest.TestCase):
             selected = bridge.select(t, "original", link)
             self.assertEqual(selected[:2], ("ai", ""))
             self.assertIn("👆 watch full now", selected[2])
-            self.assertNotIn("to find the seal", selected[2])
+            self.assertIn("to find the seal!", selected[2])
         t = dict(self.task(20), language="zh-Hant-TW")
-        candidates = ["👆 點連結看他反擊", "看後續", "看她反擊"]
+        candidates = ["👆 點連結看他反擊", "立即觀看完整版", "看她反擊"]
         self.assertEqual(
             [x["cta"] for x in model.click_options(t, candidates)],
-            ["👆 立即觀看完整版"],
+            ["👆 立即觀看完整版，看她反擊"],
         )
         self.assertEqual(model.click_prefix("zh-SG"), "立即观看完整版")
         self.assertEqual(model.click_prefix("en-US"), "watch full now")
         self.assertEqual(model.click_prefix("jp"), "今すぐ全編を視聴")
-        for hooks in (None, [], ["wrong language"], "not an array"):
+        for hooks in (None, [], ["watch full now"], "not an array"):
             item = dict(self.item(self.task(30)), hooks=hooks)
-            self.assertEqual(model.validate(self.task(30), item)["cta"], "👆 watch full now")
+            with self.assertRaisesRegex(ValueError, "invalid_click_hook"):
+                model.validate(self.task(30), item)
 
     def test_upgrade_only_unfrozen_draft(self):
         t = self.task(1, "fa")
@@ -734,7 +735,7 @@ class CaptionTests(unittest.TestCase):
             self.assertFalse(refresh_click_hooks.upgrade(c, t, old, opts))
             after = json.loads(c.execute("SELECT draft FROM jobs").fetchone()[0])
             self.assertEqual(after["previous_cta"], "See more")
-            self.assertEqual(after["cta"], "👆 watch full now")
+            self.assertEqual(after["cta"], "👆 watch full now to find the ring")
             self.assertEqual(after["opening"], "A ring.")
 
     def test_busy_publisher_only_defers_that_hook_and_reuses_generation(self):

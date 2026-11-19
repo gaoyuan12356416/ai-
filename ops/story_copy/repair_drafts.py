@@ -52,13 +52,18 @@ def audit_write(audit, entry):
     os.fsync(audit.fileno())
 
 
-def refresh(rows, audit):
+def refresh(rows, audit, hooks=None):
     outcomes = Counter()
     with store.connection() as c:
         for before in rows:
             task = json.loads(before["payload"])
             draft = json.loads(before["draft"])
-            revised = dict(draft, **model.click_options(task, None)[0])
+            hook = (hooks or {}).get(before["key"], draft.get("click_hook"))
+            try:
+                revised = dict(draft, **model.click_options(task, [hook])[0])
+            except ValueError:
+                outcomes["needs_hook_generation"] += 1
+                continue
             if revised == draft:
                 outcomes["unchanged"] += 1
                 continue
@@ -115,13 +120,14 @@ def main():
     parser.add_argument("action", choices=("refresh-cta", "regenerate"))
     parser.add_argument("--key", action="append", default=[])
     parser.add_argument("--audit", type=Path)
+    parser.add_argument("--restore-hooks-from", type=Path)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     if args.action == "regenerate" and not args.key:
         parser.error("regeneration requires explicit task keys")
     with store.connection(readonly=True) as c:
         if args.action == "refresh-cta":
-            rows = [dict(r) for r in c.execute("SELECT * FROM jobs WHERE state='ready' AND final IS NULL AND coalesce(json_extract(draft,'$.cta_style'),'')!='watch_full_now' ORDER BY created,key")]
+            rows = [dict(r) for r in c.execute("SELECT * FROM jobs WHERE state='ready' AND final IS NULL AND coalesce(json_extract(draft,'$.cta_style'),'')!='watch_full_now_hook' ORDER BY created,key")]
         else:
             rows = []
             for key in dict.fromkeys(args.key):
@@ -134,9 +140,18 @@ def main():
         return
     if args.audit is None:
         parser.error("--apply requires --audit")
+    hooks = {}
+    if args.restore_hooks_from:
+        for line in args.restore_hooks_from.read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            before = entry.get("before")
+            if entry.get("action") == "refresh_cta" and isinstance(before, dict):
+                draft = json.loads(before["draft"])
+                if draft.get("click_hook") and draft.get("cta_style") != "watch_full_now":
+                    hooks[before["key"]] = draft["click_hook"]
     with args.audit.open("x", encoding="utf-8") as audit:
         args.audit.chmod(0o600)
-        result = refresh(rows, audit) if args.action == "refresh-cta" else regenerate(rows, audit)
+        result = refresh(rows, audit, hooks) if args.action == "refresh-cta" else regenerate(rows, audit)
     print(store.dump(result), flush=True)
 
 

@@ -50,7 +50,7 @@ EPISODES = {
     "fil": "Episode {n}",
 }
 
-# Fixed localized CTA. Models supply only the story, never a CTA continuation.
+# Fixed localized CTA prefix; a short model-written story hook follows it.
 CLICK_PREFIX = {
     "zh": "立即观看完整版",
     "zh-tw": "立即觀看完整版",
@@ -62,11 +62,11 @@ CLICK_PREFIX = {
     "pt": "Assista à versão completa agora",
     "pt-pt": "Vê a versão completa agora",
     "fr": "Regardez en entier maintenant",
-    "de": "Jetzt in voller Länge ansehen",
+    "de": "Jetzt komplett ansehen",
     "it": "Guarda subito la versione completa",
-    "pl": "Obejrzyj całość teraz",
+    "pl": "Obejrzyj całość już",
     "cs": "Sleduj celé hned",
-    "id": "Tonton versi lengkapnya sekarang",
+    "id": "Tonton penuh sekarang",
     "ms": "Tonton versi penuh sekarang",
     "vi": "Xem bản đầy đủ ngay",
     "ar": "شاهد النسخة الكاملة الآن",
@@ -142,11 +142,35 @@ def click_prefix(language):
 
 
 def click_options(task, values):
-    # Keep the draft fields understood by all already-running native renderers.
-    # The legacy hooks argument is intentionally ignored, even if malformed.
-    text = click_prefix(task["language"])
-    return [dict(click_hook=text, hook_key=normalized(text), cta="👆 " + text,
-                 cta_style="watch_full_now")]
+    prefix = click_prefix(task["language"])
+    lang = canonical_lang(task["language"]).split("-")[0]
+    script = SCRIPTS.get(lang)
+    options = []
+    for value in values if isinstance(values, list) else []:
+        try:
+            hook = one_line(value, {"zh": 16, "ja": 24}.get(lang, 66))
+        except ValueError:
+            continue
+        key = normalized(hook)
+        if (len(key) < 2 or len(hook.split()) > 12
+                or (script and not re.search(script, hook))
+                or normalized(prefix) in key
+                or re.search(r"[↑⬆☝👉👆]", hook)
+                or (task.get("episode") and re.search(
+                    r"直[達达看]|直行|direct(?:ly)? to|directo al episodio|direto ao epis[oó]dio", hook, re.I))):
+            continue
+        separator = {"zh": "，", "ja": "｜", "ko": " · "}.get(lang, " ")
+        if hook[0] in ",،，.!?:—–":
+            separator = ""
+        cta = "👆 " + prefix + separator + hook
+        if key not in {o["hook_key"] for o in options}:
+            options.append(dict(click_hook=hook, hook_key=key, cta=cta,
+                                cta_style="watch_full_now_hook"))
+    if not options:
+        raise ValueError("invalid_click_hook")
+    if task.get("endpoint", "").startswith("x_"):
+        options.sort(key=lambda item: weight(item["cta"]))
+    return options
 
 
 def weight(text):
