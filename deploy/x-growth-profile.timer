@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect X growth evidence every fifteen minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,15,30,45:00
+Persistent=true
+RandomizedDelaySec=30
+Unit=x-growth-profile.service
+
+[Install]
+WantedBy=timers.target

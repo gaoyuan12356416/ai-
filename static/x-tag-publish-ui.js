@@ -2,6 +2,7 @@
   const reasons = {portrait_mapping_outdated:'画像标签版本待更新，暂按原筛选排序分配',portrait_unavailable:'画像暂不可用，按原筛选排序分配',portrait_incomplete:'画像历史日期不完整，按原筛选排序分配',no_revenue_history:'暂无收入画像，按原筛选排序分配',no_positive_revenue:'暂无正收入，按原筛选排序分配',invalid_revenue_distribution:'收入比例暂不可用，按原筛选排序分配',no_known_revenue_tags:'暂无可识别的收入标签，按原筛选排序分配',candidate_labels_unavailable:'候选标签暂不可用，按原筛选排序分配',no_matching_eligible_tag:'当前候选没有匹配标签，按原筛选排序分配',preferred_tag_no_eligible_material:'首选标签无合格素材，已匹配其他偏好标签'};
   function explain(a) {
     if (!a || !a.policy_version) return '尚未形成分配记录';
+    if(a.profile_mode==='growth')return [a.explanation || '成长画像',a.selected_tag ? `题材：${a.selected_tag}` : '标签不足，保留模板排序',`有效样本 ${a.growth_mature_posts || 0} 条`,a.profile_version ? `画像 ${a.profile_version}` : '冷启动探索'].join(' · ');
     if (a.hierarchy_version) {
       const hierarchyReasons={portrait_hierarchy_outdated:'三级画像待更新，按原顺序',candidate_metadata_unavailable:'候选分类暂不可用，按原顺序',no_valid_type_profile:'无有效类型画像，按原顺序',no_valid_audience_profile:'保留类型偏好，受众层按原顺序',no_valid_theme_profile:'保留类型和受众偏好，题材层按原顺序',preferred_type_no_eligible_material:'首选类型无合格素材，已切换类型',preferred_audience_no_eligible_material:'同类型首选受众无合格素材，已切换受众',preferred_theme_no_eligible_material:'同类型同受众下改选其他画像题材',no_matching_eligible_theme:'同类型同受众下按原顺序选择其他题材'};
       if(a.profile_levels?.[0]==='audience')Object.assign(hierarchyReasons,{portrait_hierarchy_outdated:'受众题材画像待更新，按原顺序',no_valid_audience_profile:'无有效受众画像，按原顺序',no_valid_theme_profile:'保留受众偏好，题材按原顺序',preferred_audience_no_eligible_material:'首选受众无合格素材，已改选其他受众',preferred_theme_no_eligible_material:'同受众下改选其他画像题材',no_matching_eligible_theme:'同受众下按原顺序选择其他题材'});
@@ -50,7 +51,7 @@
     const host=document.querySelector('main,.main') || document.body;
     const banner=node('section', '', 'tag-lane-banner');
     banner.append(node('strong','X 标签画像发布'));
-    banner.append(node('p','模板、素材池、排期、防重和频道发布量独立计算。按受众方向 → 题材逐层按收入比例选择，受众优先。先在同受众内放宽题材，再尝试其他受众；无有效受众画像时沿用原排序，题材画像缺失时保留受众偏好。'));
+    banner.append(node('p','各频道可手动选择收入画像或成长画像。收入画像沿用受众和题材收入偏好；成长画像根据成熟内容表现探索和调整。系统不会自动切换画像类型，已生成任务保持原选择。'));
     const nav=node('nav');
     for(const [href,label] of [['/x-tag-auto-publish-templates.html','自动发布模板'],['/x-tag-material-pool.html','画像素材池'],['/x-tag-auto-publish-runs.html','模板运行记录'],['/x-tag-post-logs.html','画像发布日志'],['/x-account-list.html','频道收入画像']]){const a=node('a',label);a.href=href;nav.append(a);}
     banner.append(nav);

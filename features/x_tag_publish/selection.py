@@ -55,7 +55,12 @@ class ProfileSelector(TwoStageSelector):
         candidates = super()._eligible_dramas(request, rows, metrics, rejection_counts)
         bridge = XPostAutoBridgeClient(os.environ['X_POST_AUTOMATION_INTERNAL_URL'],
                                       os.environ['X_POST_AUTO_INTERNAL_TOKEN'])
-        account = bridge.account_snapshot(request.account_id)
+        account = dict(bridge.account_snapshot(request.account_id))
+        # Real tasks freeze the operator's choice at creation. Previews have no task.
+        get_task = getattr(self._run_store, 'get_task', None)
+        if callable(get_task):
+            task = get_task(request.task_id)
+            account['selection_profile'] = task.account_snapshot.get('selection_profile') or {'mode': 'revenue', 'mode_version': 0, 'profile': {}}
         decision = Decision(account, ['auto', request.template_id, request.template_version, request.run_id, request.task_id])
         context = dict(decision=decision, catalog={}, language=language(request.language), fallback='', hit=target, now=request.now)
         self._profile_context.value = context

@@ -58,7 +58,11 @@ def material_candidates(config, sidecar, accounts, *, source_date, connection_fa
                     and language(item.get('material_language')) == language(account.get('drama_language'))
                     and (account.get('long_video_eligible') or float(item.get('source_duration') or 0) <= 1200)]
         metadata = lambda item: catalog.get((str(item['content_id']), language(item.get('material_language'))), {})
-        ranked = sorted(eligible, key=lambda item: decision.rank(metadata(item)))
+        if hasattr(decision, 'prepare'):
+            decision.prepare([metadata(item) for item in eligible])
+            ranked = sorted(eligible, key=lambda item: decision.candidate_rank(metadata(item), item['content_id']))
+        else:
+            ranked = sorted(eligible, key=lambda item: decision.rank(metadata(item)))
         for candidate in ranked:
             planned, rejected = runner._preflight_material_candidates(config, sidecar, [candidate], [account],
                 source_date=source_date, timestamp=timestamp, downloader=downloader, prober=prober,

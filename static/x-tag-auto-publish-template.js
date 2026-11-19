@@ -237,6 +237,7 @@
       metrics.appendChild(ui.element("span", { text: `累计收入 ${revenue === null ? "—" : "$" + revenue.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` }));
       metrics.appendChild(ui.element("span", { text: `粉丝 ${followers === null ? "—" : followers.toLocaleString("zh-CN")}` }));
       details.appendChild(metrics);
+      if (window.XGrowthProfile) details.appendChild(window.XGrowthProfile.controls(item));
       const meta = ui.element("div");
       meta.appendChild(ui.element("span", {
         className: `language-chip${eligible ? "" : " badge warning"}`,

@@ -47,7 +47,7 @@ def weighted_order(weights, seed):
     return [key for _, key in sorted(ranked)]
 
 
-class Decision:
+class RevenueDecision:
     def __init__(self, account, identity, snapshot=None):
         data, meta = snapshot if snapshot is not None else portrait_snapshot([account.get('x_user_id')])
         self.meta = meta
@@ -124,7 +124,7 @@ class Decision:
             elif not matched:reason,level='no_matching_eligible_theme','theme'
             elif matched != order[0]:reason,level='preferred_theme_no_eligible_material','theme'
         names = (AUDIENCES, THEMES)
-        return dict(policy_version=VERSION, tag_mapping_version=TAG_MAPPING_VERSION,
+        return dict(policy_version=VERSION, profile_mode="revenue", tag_mapping_version=TAG_MAPPING_VERSION,
                     hierarchy_version=HIERARCHY_VERSION, profile_levels=['audience', 'theme'], classification=data,
                     preferred_path=preferred, preferred_path_names=[names[i][key] for i,key in enumerate(preferred)],
                     selected_path=selected if metadata is not None else [],
@@ -142,6 +142,14 @@ class Decision:
                     weights=[{'key': k, 'name': AUDIENCES[k], 'revenue_cents': v} for k,v in sorted(self.weights.items())],
                     conditional_weights=[dict(path=list(path), weights=values) for path,values in self.node_weights.items()
                                          if path in ((), (audience,))])
+
+
+def Decision(account, identity, snapshot=None):
+    from features.x_growth_profile.selection import GrowthDecision, choose_context
+    context = choose_context(account)
+    if context.get('mode') == 'growth':
+        return GrowthDecision(account, identity, context)
+    return RevenueDecision(account, identity, snapshot)
 
 
 def catalog_labels(source, dramas):
@@ -181,6 +189,17 @@ def ranked_dramas(source, candidates, context, batch_size=40):
     """
     deferred = []
     decision = context['decision']
+    if hasattr(decision, 'prepare'):
+        try:
+            context['catalog'].update(catalog_labels(source, candidates))
+        except Exception:
+            context['fallback'] = 'candidate_metadata_unavailable'
+            yield from candidates
+            return
+        metadata = lambda d: context['catalog'].get((d.content_id, language(d.language)), {})
+        decision.prepare([metadata(d) for d in candidates])
+        yield from sorted(candidates, key=lambda d: decision.candidate_rank(metadata(d), d.content_id))
+        return
     def rank(drama):
         return decision.rank(context['catalog'].get((drama.content_id, language(drama.language)), {}))
     for start in range(0, len(candidates), batch_size):
