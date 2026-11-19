@@ -81,7 +81,16 @@ def caption_groups(text, words):
                 {"start": aligned[first]["start"], "end": word["end"], "text": fragment}
             )
             first = i + 1
-    return groups
+    joined = []
+    for cue in groups:
+        if (joined and len(cue["text"]) <= 12 and
+                not re.search(r'[.!?。！？][”’"』」]*$', joined[-1]["text"]) and
+                len(joined[-1]["text"] + cue["text"]) <= 76):
+            joined[-1]["text"] += ("" if limit == 22 else " ") + cue["text"]
+            joined[-1]["end"] = cue["end"]
+        else:
+            joined.append(cue)
+    return joined
 
 
 def render_voice(text, language, folder, deadline):
