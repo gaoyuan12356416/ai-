@@ -57,7 +57,7 @@ def overlay(folder,name,live):
             part=data[start:end]
             part=part.replace(b'        duration_policy_version=2,\n',b'        duration_policy_version=2,\n        schedule_policy="",\n        planned_publish_at_utc="",\n',1)
             part=part.replace(b'                    and str(existing["actor_user_id"]) == actor_user_id\n',b'                    and str(existing["actor_user_id"]) == actor_user_id\n                    and str(existing["schedule_policy"]) == schedule_policy\n                    and str(existing["planned_publish_at_utc"]) == planned_publish_at_utc\n',1)
-            part=part.replace(b'duration_policy_version"',b'duration_policy_version,schedule_policy,planned_publish_at_utc"')
+            part=part.replace(b'created_at,updated_at,duration_policy_version"',b'created_at,updated_at,duration_policy_version,schedule_policy,planned_publish_at_utc"')
             part=part.replace(b'duration_policy_version,reuse_context_json"',b'duration_policy_version,schedule_policy,planned_publish_at_utc,reuse_context_json"')
             part=part.replace(b"'queued',1,?,?,?)",b"'queued',1,?,?,?,?,?)").replace(b"'queued',1,?,?,?,?)",b"'queued',1,?,?,?,?,?,?)")
             part=part.replace(b'                        duration_policy_version,\n',b'                        duration_policy_version,\n                        schedule_policy,\n                        planned_publish_at_utc,\n',1)
