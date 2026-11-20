@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 
 SOURCE=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(SOURCE))
@@ -110,13 +111,13 @@ def activate(folder,rollback=False):
     for lane,path in ROOTS.items():assert str(path.resolve())==info['roots'][lane],'runtime_moved:'+lane
     for path,row in info['files'].items():assert digest(path) in (row['before'],row['after']),'concurrent_change:'+path
     for lane in ('x','fb','tt','youtube','coordinator'):
-        run(sys.executable,HEALTH,'snapshot','--lane',lane,'--output',folder/(action+'-before-'+lane+'.json'))
-    # Owners execute their established stop barrier; no timeout kills or lease resets.
-    for unit in UNITS:
-        print('draining '+unit,flush=True);run('systemctl','stop',unit)
+        baseline=folder/(action+'-before-'+lane+'.json')
+        if not baseline.exists():run(sys.executable,HEALTH,'snapshot','--lane',lane,'--output',baseline)
+    original_pids={unit:run('systemctl','show',unit,'-p','MainPID','--value') for unit in UNITS}
     try:
         for path,row in info['files'].items():
             assert digest(path) in (row['before'],row['after']),'concurrent_change:'+path
+            if '/static/' in path or path.startswith('/usr/share/nginx/html/'):continue
             if rollback and not row['existed']:continue
             atomic(Path(path),Path(row['backup' if rollback else 'next']).read_bytes(),row)
         if not rollback:
@@ -128,9 +129,29 @@ def activate(folder,rollback=False):
         if not rollback:
             run('systemctl','enable','--now','x-material-effects-api.service')
             run('systemctl','disable','--now','x-growth-profile.timer')
-        for unit in UNITS:run('systemctl','start',unit)
+        # A standalone stop can be superseded by a dependent timer's start job.
+        # Install the reviewed delta, then request atomic managed restarts. The
+        # existing ExecStop barriers keep old processes alive until work drains.
+        for unit in ('x-post-automation.service','x-tag-post.service','drama-material-api.service'):
+            print('requesting managed restart '+unit,flush=True);run('systemctl','restart','--no-block',unit)
+        while True:
+            pending=[]
+            for unit in ('x-post-automation.service','x-tag-post.service','drama-material-api.service'):
+                state=run('systemctl','show',unit,'-p','ActiveState','--value')
+                pid=run('systemctl','show',unit,'-p','MainPID','--value')
+                if state!='active' or pid in ('0',original_pids[unit]):pending.append(unit)
+            if not pending:break
+            print('waiting for owned work: '+','.join(pending),flush=True);time.sleep(20)
+        for unit in ('x-auto-post-service.service','x-tag-auto.service','x-tag-gateway.service'):
+            run('systemctl','restart',unit)
         for lane in ('x','fb','tt','youtube','coordinator'):
             run(sys.executable,HEALTH,'restore','--baseline',folder/(action+'-before-'+lane+'.json'),'--wait-seconds','25','--output',folder/(action+'-after-'+lane+'.json'))
+        for path,row in info['files'].items():
+            if '/static/' not in path and not path.startswith('/usr/share/nginx/html/'):continue
+            assert digest(path) in (row['before'],row['after']),'concurrent_static_change:'+path
+            if rollback and not row['existed']:continue
+            atomic(Path(path),Path(row['backup' if rollback else 'next']).read_bytes(),row)
+        info['controller_commit']=run('git','-C',SOURCE,'rev-parse','HEAD')
         info['status']='rolled_back' if rollback else 'active';save(folder/'manifest.json',info)
         print(json.dumps(dict(status=info['status'],commit=info['commit'])),flush=True)
     except Exception:
