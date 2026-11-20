@@ -193,6 +193,21 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(c.execute("SELECT count(*) FROM batches WHERE finished IS NOT NULL AND accepted=1").fetchone()[0], 3)
             self.assertEqual(c.execute("SELECT count(*) FROM retries").fetchone()[0], 0)
 
+    def test_older_tag_publisher_schedule_schema(self):
+        stamp = "2026-11-20T01:00:00Z"
+        with store.connection(self.fb) as c:
+            c.execute("CREATE TABLE x_post_manual_run(id INTEGER,trigger_source TEXT,external_task_key TEXT,template_version INTEGER,copy_contract_version INTEGER,scheduled_at TEXT)")
+            c.execute("INSERT INTO x_post_manual_run VALUES(1,'manual','',1,1,?)", (stamp,))
+            c.execute("CREATE TABLE x_post_schedule_run(id INTEGER,run_date TEXT,publish_time TEXT)")
+            c.execute("INSERT INTO x_post_schedule_run VALUES(1,'2026-11-20','09:00:00')")
+            row = dict(id=1, manual_run_id=1, source_type="material", content_id="story", material_id="m1",
+                       material_language="en", drama_name="Title", description="Fact")
+            for manual, scheduled in [(1, None), (None, 1)]:
+                row.update(manual_run_id=manual, schedule_run_id=scheduled)
+                task = sources.x_task(c, row, tag=True)
+                self.assertEqual(task["family"], "tm")
+                self.assertEqual(task["publish_at"], sources.publish_time(stamp))
+
     def test_live_batch_recovery_does_not_interrupt_other_worker(self):
         with store.connection() as c:
             for i in (1, 2):
@@ -1012,10 +1027,10 @@ class CaptionTests(unittest.TestCase):
                 "CREATE TABLE x_post_queue(id INTEGER,source_type TEXT,manual_run_id INTEGER,content_id TEXT,account_drama_language TEXT,material_language TEXT,drama_name TEXT,description TEXT,material_id TEXT,body_template TEXT)"
             )
             c.execute(
-                "CREATE TABLE x_post_manual_run(id INTEGER,trigger_source TEXT,external_task_key TEXT,template_version INT,copy_contract_version INT,planned_publish_at_utc TEXT,scheduled_at TEXT)"
+                "CREATE TABLE x_post_manual_run(id INTEGER,trigger_source TEXT,external_task_key TEXT,template_version INT,copy_contract_version INT)"
             )
             c.execute(
-                "INSERT INTO x_post_manual_run VALUES(1,'auto_template','x-auto-task-35',7,1,'','')"
+                "INSERT INTO x_post_manual_run VALUES(1,'auto_template','x-auto-task-35',7,1)"
             )
             c.execute(
                 "INSERT INTO x_post_queue VALUES(3,'material',1,'story','ja','ja','TITLE','FACT','55','{{url}}')"

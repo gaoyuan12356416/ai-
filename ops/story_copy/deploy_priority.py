@@ -20,7 +20,7 @@ release.SERVICES = ("story-copy-worker.service", "story-copy-settings.service",
 
 
 def prepare(folder):
-    release.prepare(folder)
+    release.prepare(folder, base="3989a010e33a4ad3d1e9494501c44131d8b3be52")
     backup = folder / "captions-before.sqlite3"
     with store.connection(readonly=True) as source, sqlite3.connect(backup) as target:
         source.backup(target)

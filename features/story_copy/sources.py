@@ -107,8 +107,8 @@ def x_task(conn, row, tag=False):
     parent = {}
     if row.get("manual_run_id"):
         rec = conn.execute(
-            "SELECT trigger_source,external_task_key,template_version,copy_contract_version,"
-            "planned_publish_at_utc,scheduled_at FROM x_post_manual_run WHERE id=?",
+            # Tag and ordinary publishers keep different additive schedule schemas.
+            "SELECT * FROM x_post_manual_run WHERE id=?",
             (row["manual_run_id"],),
         ).fetchone()
         if rec:
@@ -116,7 +116,7 @@ def x_task(conn, row, tag=False):
     timing = parent
     if row.get("schedule_run_id"):
         rec = conn.execute(
-            "SELECT planned_publish_at_utc,run_date,publish_time FROM x_post_schedule_run WHERE id=?",
+            "SELECT * FROM x_post_schedule_run WHERE id=?",
             (row["schedule_run_id"],),
         ).fetchone()
         timing = dict(rec) if rec else {}

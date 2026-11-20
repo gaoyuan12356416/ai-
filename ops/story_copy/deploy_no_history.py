@@ -25,11 +25,11 @@ def services():
             for name in SERVICES}
 
 
-def prepare(folder):
+def prepare(folder, base="HEAD^"):
     old = d.CENTRAL.resolve(strict=True)
     files = {}
     for name in FILES:
-        expected = d.run("git", "-C", SRC, "show", "HEAD^:" + name, stdout=-1).stdout
+        expected = d.run("git", "-C", SRC, "show", base + ":" + name, stdout=-1).stdout
         if (old / name).read_bytes() != expected:
             raise RuntimeError("active source differs from reviewed base: " + name)
         after = (SRC / name).read_bytes()
@@ -42,7 +42,7 @@ def prepare(folder):
     for name in FILES:
         d.atomic(candidate / name, (SRC / name).read_bytes())
     d.save(folder, dict(commit=d.read("git", "-C", SRC, "rev-parse", "HEAD"),
-                       source=str(SRC), before=str(old), candidate=str(candidate),
+                       source=str(SRC), base=base, before=str(old), candidate=str(candidate),
                        files=files, services_before=services(), state="prepared"))
     print("prepared", candidate, flush=True)
 
