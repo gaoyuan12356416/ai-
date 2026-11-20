@@ -19,6 +19,7 @@ from .adapters import AdapterError, obj, artifact_from, public_descriptor
 from .native_common import claim_hash, dump, prepare_capabilities
 from features.fb_auto_posts.publisher import GraphResult, RequestsGraphTransport
 from features.fb_auto_posts.gpu import PROFILE
+from features.fb_auto_posts.video_template import valid_publish_media
 from features.fb_auto_posts.core import utc_iso
 from features.fb_auto_posts.links import validate_short_url, build_short_url, validate_w2a_url
 from features.fb_video_publish.links import short_url, validate_long_url
@@ -124,7 +125,7 @@ class FBNativeBridge:
         return {"page_id": task["page_id"], "media_url": media_url, "message": task["caption"], "title": title}
 
     def _auto_preflight(self, task):
-        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or (task.get("prepared_media_url") == task.get("source_media_url") and task.get("media_selection_kind") != "deadline_original"):
+        if not valid_publish_media(task):
             raise AdapterError("fb_auto_prepared_media_required")
         short, long = str(task.get("short_url") or ""), str(task.get("long_url") or "")
         if bool(short) != bool(long):
@@ -283,6 +284,7 @@ class FBNativeBridge:
                                   "body": request["message"], "artifact": artifact_from(task)}
                     descriptor["artifact"]["url"] = request["media_url"]
                     if (task.get("media_selection_kind")=="deadline_original" or obj(task.get("prepared_json")).get("media_selection_kind")=="deadline_original"
+                            or (family == "auto" and task.get("video_template") == "original")
                             or (family=="video" and task["processing_mode"]=="original")):
                         descriptor["processing_mode"] = "original"
                         descriptor["artifact"]["identity_mode"] = "remote_url"

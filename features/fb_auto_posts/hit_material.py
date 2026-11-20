@@ -13,6 +13,7 @@ from .manual_batch import BatchError, canonical, digest
 from .strategy import daily_capacity, daily_limit
 from . import page_caption
 from .explicit_publish import MARKER as INDEPENDENT_PUBLISH
+from .video_template import SUPPORTED as VIDEO_TEMPLATES, ready_original
 
 
 KIND = "exact_material_all_pages_v1"
@@ -54,8 +55,8 @@ def _existing(conn, request):
 def _validate_template(template, request):
     if int(template["current_version"]) != request["expected_version"]:
         raise StoreError("fb_auto_version_conflict", "模板版本已更新，请刷新列表后重试", 409)
-    if json.loads(template["config_json"]).get("video_template") != "random_overlay":
-        raise StoreError("fb_auto_video_template_required", "爆款素材发布需要随机排重视频模板", 409)
+    if json.loads(template["config_json"]).get("video_template") not in VIDEO_TEMPLATES:
+        raise StoreError("fb_auto_video_template_required", "请选择随机排重模板或不制作（使用原视频）", 409)
 
 
 def _gates(runtime):
@@ -161,10 +162,10 @@ def publish_material(runtime, template_id, actor, payload):
         frozen_config = {**config, INDEPENDENT_PUBLISH: True, MARKER: {"sha256": sha, "manifest": manifest}}
         cur = conn.execute("""INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,
             total_pages,publishable_pages,missing_token_pages,queued_tasks,skipped_tasks,created_at_utc,completed_at_utc,
-            planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,'manual',?,?,?,?,?,?,?,?,?,?,'[]','random_overlay')""",
+            planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,'manual',?,?,?,?,?,?,?,?,?,?,'[]',?)""",
             (template_id, request["expected_version"], slot, "queued" if count else "completed", canonical(frozen_config),
              len(pages), sum(p.eligible_token_count > 0 for p in pages), sum(p.eligible_token_count <= 0 for p in pages),
-             count, len(skipped), stamp, "" if count else stamp, stamp))
+             count, len(skipped), stamp, "" if count else stamp, stamp, config["video_template"]))
         run_id = int(cur.lastrowid)
         entry_by_page = {e["page_id"]: e for e in entries}
         for page in pages:
@@ -177,12 +178,13 @@ def publish_material(runtime, template_id, actor, payload):
             selection = {MARKER: sha, "sequence": entry_by_page.get(page.page_id, {}).get("sequence", 0)}
             cur = conn.execute("""INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,skip_reason,
                 material_id,content_id,created_at_utc,completed_at_utc,planned_publish_at_utc,video_template,gpu_job_id,
-                source_media_url,selection_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'random_overlay',?,?,?)""",
+                source_media_url,selection_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, template_id, request["expected_version"], page.page_id, page.group_id, "skipped" if reason else "planned",
-                 reason, material.material_id, material.content_id, stamp, stamp if reason else "", stamp, job,
+                 reason, material.material_id, material.content_id, stamp, stamp if reason else "", stamp, config["video_template"], job,
                  material.media_url, canonical(selection)))
             if not reason:
                 task_id = int(cur.lastrowid)
+                ready_original(conn, task_id, config['video_template'], stamp)
                 selection['caption'] = page_caption.freeze(store, conn, config, page, material,
                     task_id, int(now.timestamp()), caption_snapshot)
                 conn.execute('UPDATE fb_auto_task SET selection_json=? WHERE id=?', (canonical(selection), task_id))

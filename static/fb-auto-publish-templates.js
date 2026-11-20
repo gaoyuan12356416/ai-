@@ -82,7 +82,7 @@
       return [
         "<tr>",
         "<td><strong>", ui.escapeHtml(item.name || config.name || ("模板 " + id)), "</strong><br><small>v", version, " · ",
-        config.video_template === "random_overlay" ? "随机排重模板" : "视频模板缺失", "</small></td>",
+        ui.escapeHtml(({random_overlay: "随机排重模板", original: "不制作（使用原视频）"})[config.video_template] || "视频模板缺失"), "</small></td>",
         "<td>", ui.escapeHtml(config.product || "—"), " / ", poolIds || "未选择 Page 池", "</td>",
         '<td><span class="badge ', enabled ? "success" : "warning", '">', enabled ? "已启用" : "已停用", "</span></td>",
         "<td><strong>", ui.escapeHtml(schedule.frequency), "</strong><br><small>", ui.escapeHtml(schedule.details), "</small></td>",
@@ -204,7 +204,7 @@
     ui.byId("materialSubmit").disabled = false;
     ui.byId("materialSubmit").textContent = state.material.draft ? "重试确认" : "确认发布";
     ui.byId("materialClose").textContent = "取消";
-    materialStatus(state.material.draft ? "上次提交尚未确认结果，请重试确认同一轮任务。" : "确认后将开始制作并排队发布。", Boolean(state.material.draft));
+    materialStatus(state.material.draft ? "上次提交尚未确认结果，请重试确认同一轮任务。" : "确认后将按模板设置排队发布。", Boolean(state.material.draft));
     if (state.material.result) renderMaterialResult(state.material.result);
     if (!ui.byId("materialDialog").open) ui.byId("materialDialog").showModal();
     ui.byId("hitMaterialId").focus();

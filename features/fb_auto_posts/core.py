@@ -21,6 +21,7 @@ from features import social_random_schedule as target_daily
 from . import target_schedule
 from . import page_caption
 from . import explicit_publish
+from .video_template import ready_original, ready_media_sql
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
 from .languages import page_language
 from .profile_selection import Decision, load_profiles
@@ -855,7 +856,9 @@ class FBAutoPostStore:
                 except Exception as story_error:
                     __import__('logging').getLogger(__name__).warning('story_copy.fallback %s',type(story_error).__name__)
                 conn.execute("UPDATE fb_auto_task SET selection_json=? WHERE id=?", (json.dumps(selection, sort_keys=True), int(task_cursor.lastrowid)))
-                if status == "planned": queued += 1
+                if status == "planned":
+                    ready_original(conn, task_cursor.lastrowid, config["video_template"], now)
+                    queued += 1
                 else: skipped += 1
             run_status = "completed" if queued == 0 else "queued"
             conn.execute("UPDATE fb_auto_run SET status=?,queued_tasks=?,skipped_tasks=?,completed_at_utc=? WHERE id=?", (run_status, queued, skipped, now if queued == 0 else "", run_id))
@@ -1002,11 +1005,11 @@ class FBAutoPostStore:
             invalid_runs = [
                 int(item[0])
                 for item in conn.execute(
-                    "SELECT DISTINCT run_id FROM fb_auto_task WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||fb_auto_task.id) AND (? IS NULL OR id=?) AND status='ready' AND (TRIM(prepared_at_utc)='' OR TRIM(prepared_media_url)='' OR media_url<>prepared_media_url OR (prepared_media_url=source_media_url AND media_selection_kind<>'deadline_original'))", (task_id, task_id)
+                    f"SELECT DISTINCT run_id FROM fb_auto_task WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||fb_auto_task.id) AND (? IS NULL OR id=?) AND status='ready' AND NOT {ready_media_sql()}", (task_id, task_id)
                 )
             ]
             conn.execute(
-                "UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_prepared_contract_invalid',error_code='fb_auto_prepared_contract_invalid',error_message='成片审计契约不完整，已安全终止且不会发布',lease_owner='',lease_expires_at_utc='',completed_at_utc=? WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||fb_auto_task.id) AND (? IS NULL OR id=?) AND status='ready' AND (TRIM(prepared_at_utc)='' OR TRIM(prepared_media_url)='' OR media_url<>prepared_media_url OR (prepared_media_url=source_media_url AND media_selection_kind<>'deadline_original'))",
+                f"UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_prepared_contract_invalid',error_code='fb_auto_prepared_contract_invalid',error_message='成片审计契约不完整，已安全终止且不会发布',lease_owner='',lease_expires_at_utc='',completed_at_utc=? WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||fb_auto_task.id) AND (? IS NULL OR id=?) AND status='ready' AND NOT {ready_media_sql()}",
                 (now, task_id, task_id),
             )
             for run_id in invalid_runs:
@@ -1061,7 +1064,7 @@ class FBAutoPostStore:
                 if recent:
                     conn.execute("UPDATE fb_auto_task SET status='skipped',skip_reason='fb_auto_drama_cooldown_at_publish',error_code='fb_auto_drama_cooldown_at_publish',completed_at_utc=? WHERE id=? AND status='ready'", (now,candidate['id']))
                     self._refresh_run(conn, int(candidate['run_id']), now)
-            rows = conn.execute(f"SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND {explicit_publish.task_status_sql(task='x')} AND (t.current_version=x.template_version OR x.schedule_policy='target_midnight_v1') WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND (x.schedule_policy='target_midnight_v1' OR x.recovery_until_utc='' OR x.recovery_until_utc>?) AND x.unknown_outcome=0 AND TRIM(x.prepared_at_utc)<>'' AND TRIM(x.prepared_media_url)<>'' AND x.media_url=x.prepared_media_url AND (x.prepared_media_url<>x.source_media_url OR x.media_selection_kind='deadline_original') AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status='running') AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now, now, task_id, task_id)).fetchall()
+            rows = conn.execute(f"SELECT x.* FROM fb_auto_task x JOIN fb_auto_template t ON t.id=x.template_id AND {explicit_publish.task_status_sql(task='x')} AND (t.current_version=x.template_version OR x.schedule_policy='target_midnight_v1') WHERE NOT EXISTS(SELECT 1 FROM pipeline_canonical_hold h WHERE h.source_key='fb:auto:'||x.id) AND x.status='ready' AND (x.schedule_policy='target_midnight_v1' OR x.recovery_until_utc='' OR x.recovery_until_utc>?) AND x.unknown_outcome=0 AND {ready_media_sql('x.')} AND x.planned_publish_at_utc<=? AND NOT EXISTS (SELECT 1 FROM fb_auto_task other WHERE other.page_id=x.page_id AND other.id<>x.id AND other.status='running') AND (? IS NULL OR x.id=?) ORDER BY x.planned_publish_at_utc,x.id LIMIT 1000", (now, now, task_id, task_id)).fetchall()
             row = None
             for candidate in rows:
                 if (manual_block(conn, candidate["page_id"], candidate["material_id"], execution=True)
@@ -1077,7 +1080,7 @@ class FBAutoPostStore:
                 break
             if row is None:
                 conn.commit(); return None
-            updated = conn.execute(f"UPDATE fb_auto_task SET status='running',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=? AND status='ready' AND unknown_outcome=0 AND TRIM(prepared_at_utc)<>'' AND TRIM(prepared_media_url)<>'' AND media_url=prepared_media_url AND (prepared_media_url<>source_media_url OR media_selection_kind='deadline_original') AND planned_publish_at_utc<=? AND EXISTS (SELECT 1 FROM fb_auto_template t WHERE t.id=fb_auto_task.template_id AND {explicit_publish.task_status_sql(task='fb_auto_task')} AND (t.current_version=fb_auto_task.template_version OR fb_auto_task.schedule_policy='target_midnight_v1')) AND NOT EXISTS (SELECT 1 FROM fb_auto_task x WHERE x.page_id=fb_auto_task.page_id AND x.id<>fb_auto_task.id AND x.status='running')", (worker_id, lease, now, int(row["id"]), now)).rowcount
+            updated = conn.execute(f"UPDATE fb_auto_task SET status='running',lease_owner=?,lease_expires_at_utc=?,attempt_count=attempt_count+1,started_at_utc=CASE WHEN started_at_utc='' THEN ? ELSE started_at_utc END WHERE id=? AND status='ready' AND unknown_outcome=0 AND {ready_media_sql()} AND planned_publish_at_utc<=? AND EXISTS (SELECT 1 FROM fb_auto_template t WHERE t.id=fb_auto_task.template_id AND {explicit_publish.task_status_sql(task='fb_auto_task')} AND (t.current_version=fb_auto_task.template_version OR fb_auto_task.schedule_policy='target_midnight_v1')) AND NOT EXISTS (SELECT 1 FROM fb_auto_task x WHERE x.page_id=fb_auto_task.page_id AND x.id<>fb_auto_task.id AND x.status='running')", (worker_id, lease, now, int(row["id"]), now)).rowcount
             if updated != 1:
                 conn.rollback(); return None
             conn.execute("UPDATE fb_auto_run SET status='running' WHERE id=?", (int(row["run_id"]),))

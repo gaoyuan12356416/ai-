@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from .core import BEIJING, StoreError, utc_iso
 from .effects import choose_material, load_scores
 from .languages import page_language
+from .video_template import ready_original
 from .strategy import cooldown_content_ids, daily_limit
 from features.fb_video_publish.guards import automatic_block, manual_block, has_table
 
@@ -150,6 +151,7 @@ def recover_skipped(store, run_ids, pages, materials, snapshots, *, operation_id
                         WHERE id=? AND status='skipped' AND skip_reason=?""",
                         (material.material_id, material.content_id, material.media_url, store._message(config, material, short),
                          short, long, publish_at, json.dumps(chosen, sort_keys=True), until, task["id"], REASON))
+                    ready_original(conn, task["id"], task["video_template"], now)
                     conn.execute("UPDATE fb_auto_run_page SET snapshot_status='eligible',skip_reason='',eligible_token_count=? "
                                  "WHERE run_id=? AND page_id=?", (page.eligible_token_count, rid, page.page_id))
                     report["restored"].append(dict(record, material_id=material.material_id,

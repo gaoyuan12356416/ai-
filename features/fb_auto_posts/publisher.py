@@ -14,6 +14,7 @@ from typing import Any, Dict, Mapping, Protocol
 import requests
 
 from .core import FBAutoPostStore
+from .video_template import valid_publish_media
 from .links import FBPostLinkError, build_short_url, validate_short_url, validate_w2a_url, write_short_redirect
 from .repositories import PageCredential, PagePoolRepository
 
@@ -152,8 +153,8 @@ class AutoPostExecutor:
             task = ensure_link(self.store, task)
         except MoboreelsFBError as exc:
             return self.store.complete_task(int(task["id"]), {"status":"failed","error_code":exc.code,"error_message":str(exc),"definite_attempts":0})
-        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or (task.get("prepared_media_url") == task.get("source_media_url") and task.get("media_selection_kind") != "deadline_original"):
-            return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_prepared_media_required", "error_message": "任务缺少独立GPU成片，已禁止发布", "definite_attempts": 0})
+        if not valid_publish_media(task):
+            return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_prepared_media_required", "error_message": "发布视频与任务保存的制作方式或视频地址不符", "definite_attempts": 0})
         short_url, long_url = str(task.get("short_url") or ""), str(task.get("long_url") or "")
         if bool(short_url) != bool(long_url):
             return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_short_link_snapshot_invalid", "error_message": "任务短链快照不完整，已禁止发布", "definite_attempts": 0})
