@@ -59,7 +59,7 @@ def install(path, source):
     tmp.replace(path)
 
 
-def stage(folder, profile='clicks', baseline='HEAD^'):
+def stage(folder, profile='clicks', baseline='HEAD^', mirror_baselines=None):
     previous = CURRENT.resolve()
     candidate = folder/'candidate'
     if run('git','-C',SOURCE,'status','--porcelain','--untracked-files=no'):
@@ -78,12 +78,15 @@ def stage(folder, profile='clicks', baseline='HEAD^'):
         manifest['overlays'][name] = {'old':expected, 'new':digest(candidate/name)}
         targets = [MAIN/name] + ([PUBLIC/Path(name).name] if name.startswith('static/') else [])
         for path in targets:
-            if digest(path) != expected:
+            # An explicitly reviewed mirror-only edit (for example a navigation
+            # asset revision) keeps its own before-hash and exact rollback copy.
+            mirror_expected = (mirror_baselines or {}).get(str(path), expected)
+            if digest(path) != mirror_expected:
                 raise RuntimeError('runtime mirror differs from Git baseline: '+str(path))
             backup = folder/'backups'/str(len(manifest['files']))
             if path.exists():
                 shutil.copy2(path, backup)
-            manifest['files'][str(path)] = {'name':name, 'backup':str(backup), 'old':expected, 'new':digest(candidate/name)}
+            manifest['files'][str(path)] = {'name':name, 'backup':str(backup), 'old':mirror_expected, 'new':digest(candidate/name)}
     (folder/'manifest.json').write_text(json.dumps(manifest, indent=2))
     rollback = folder/'rollback.sh'
     rollback.write_text('#!/bin/sh\nexec /usr/bin/python3 '+shlex.quote(str(Path(__file__).resolve()))+
@@ -199,13 +202,15 @@ if __name__ == '__main__':
     args.add_argument('folder', type=Path)
     args.add_argument('--profile', choices=PROFILES, default='clicks')
     args.add_argument('--baseline', default='HEAD^', help='Verified source commit for the currently active files')
+    args.add_argument('--mirror-baselines', type=Path, help='Reviewed JSON mapping of mirror paths to their existing SHA-256 hashes')
     opts = args.parse_args()
     folder = opts.folder.resolve()
     if (not folder.is_relative_to('/mnt/data-disk') or
             run('findmnt','-n','-o','UUID','--mountpoint','/mnt/data-disk') != '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'):
         raise SystemExit('Moboreels data disk unavailable')
     if opts.action == 'stage':
-        stage(folder, opts.profile, opts.baseline)
+        stage(folder, opts.profile, opts.baseline,
+              json.loads(opts.mirror_baselines.read_text()) if opts.mirror_baselines else None)
     else:
         with (folder/'switch.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
