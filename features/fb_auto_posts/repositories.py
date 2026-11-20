@@ -47,6 +47,12 @@ class PageTarget:
     eligible_token_count: int
     page_name: str = ""
 
+    def __post_init__(self):
+        # An unset Page language means English. Material/drama language remains
+        # strict, and an explicitly supplied invalid Page language is not guessed.
+        if not str(self.language or "").strip():
+            object.__setattr__(self, "language", "en")
+
 
 @dataclass(frozen=True)
 class PageCredential:

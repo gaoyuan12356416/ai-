@@ -153,7 +153,7 @@ class SourceRepository:
                 continue
             item = grouped.setdefault(pid, {
                 "page_id": pid, "page_name": str(row.get("page_name") or pid).strip()[:255],
-                "language": page_language(str(row.get("language") or "")[:32]),
+                "language": page_language((str(row.get("language") or "").strip() or "en")[:32]),
                 "eligible_token_count": int(row.get("eligible_token_count") or 0), "group_ids": [],
             })
         result = []
