@@ -93,7 +93,9 @@ def prepare(folder):
             path.parent.mkdir(parents=True,exist_ok=True)
             remember(folder,info,path,data)
         save(folder/'manifest.json',info)
-    for name in (n for n in changed if n.startswith('static/')):
+    # The public navigation.json is operator-managed. The effects item is
+    # registered by quick-nav.js, which also filters retired saved entries.
+    for name in (n for n in changed if n.startswith('static/') and n != 'static/navigation.json'):
         for root in [ROOTS['main'],Path('/usr/share/nginx/html')]:
             path=root/(Path(name).name if root.name=='html' else name)
             data=overlay(folder,name,path.read_bytes() if path.exists() else b'')

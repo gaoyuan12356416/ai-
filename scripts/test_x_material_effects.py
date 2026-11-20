@@ -12,6 +12,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from features.x_material_effects import model,store,selection,migrations,reuse,collector,api
+from features.retired_modules import retired_path
 from features.x_auto_posts.selector import DramaFilterRule,SortRule,DecimalRange,MaterialFilterRule
 from features.x_auto_posts.validation import normalize_template_payload,ValidationError
 from features.x_auto_posts.publisher import selector_rules
@@ -25,6 +26,11 @@ def post(pid='100',material='7',account='1',**changes):
     data.update({k:0 for k in model.METRICS});data.update(views=100,likes=3,revenue_cents=125);data.update(changes);return data
 
 class EffectsTests(unittest.TestCase):
+    def test_effects_keep_the_public_ordinary_template_api_retired(self):
+        self.assertTrue(retired_path('/api/admin/x-auto-publish/templates'))
+        self.assertFalse(retired_path('/api/admin/x-tag-auto-publish/templates'))
+        self.assertFalse(retired_path('/api/x-material-effects'))
+
     def setUp(self):self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
     def tearDown(self):self.temp.cleanup()
     def snapshot(self,posts):

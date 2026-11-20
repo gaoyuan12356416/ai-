@@ -1,0 +1,111 @@
+"""Restore the public ordinary-X retirement on the main API and its two web roots."""
+import argparse
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+SOURCE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE))
+from scripts.deploy_drama_launch_range import remember
+from scripts.deploy_hit_drama_multi_id import atomic
+from scripts.deploy_x_material_effects import digest, run
+
+BASE = '52a218fc0579d5fa144becdd6ed13ac5d1714494'
+MAIN = Path('/root/drama_material_service')
+WEB = Path('/usr/share/nginx/html')
+HEALTH = '/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
+API = 'drama-material-api.service'
+NAV_SRC = re.compile(br'<script src="/quick-nav\.js(?:\?[^"]*)?"></script>')
+CHARSET = b'  <meta charset="utf-8" />'
+REDIRECT = b'<script src="/x-legacy-publish-redirect.js?v=20261112retirement1"></script>'
+
+
+def updated_bytes(relative, live):
+    old = subprocess.check_output(['git', '-C', SOURCE, 'show', f'{BASE}:{relative}'])
+    new = (SOURCE / relative).read_bytes()
+    if live == old or live == new:
+        return new
+    if relative.endswith('.html'):
+        # Other releases own the contents of these pages. Apply only our script tags.
+        def update(html):
+            tags = NAV_SRC.findall(new)
+            if len(tags) != 1 or len(NAV_SRC.findall(html)) != 1:
+                raise ValueError('Ambiguous navigation script in ' + relative)
+            html = NAV_SRC.sub(lambda _: tags[0], html)
+            if REDIRECT in new and REDIRECT not in old and REDIRECT not in html:
+                if html.count(CHARSET) != 1:
+                    raise ValueError('Missing charset anchor in ' + relative)
+                newline = b'\r\n' if CHARSET + b'\r\n' in html else b'\n'
+                html = html.replace(CHARSET, CHARSET + newline + b'  ' + REDIRECT)
+            return html
+        if update(old) == new:
+            return update(live)
+    raise ValueError('The live change needs to be merged for ' + relative)
+
+
+def prepare(folder):
+    commit = run('git', '-C', SOURCE, 'rev-parse', 'HEAD')
+    if run('git', '-C', SOURCE, 'status', '--porcelain') or not run('git', '-C', SOURCE, 'branch', '-r', '--contains', commit):
+        raise ValueError('Use a clean checkout of the pushed commit')
+    folder.mkdir(parents=True, mode=0o700, exist_ok=False)
+    info = {'commit': commit, 'files': {}}
+    names = run('git', '-C', SOURCE, 'diff', '--name-only', BASE, commit, '--',
+                'features/retired_modules.py', 'static/quick-nav.js', 'static/*.html').splitlines()
+    for relative in names:
+        paths = [MAIN / relative]
+        if relative.startswith('static/'):
+            paths.append(WEB / Path(relative).name)
+        for path in paths:
+            live = path.read_bytes()
+            new = updated_bytes(relative, live)
+            if live == new:
+                continue
+            remember(folder, info, path, new)
+            row = info['files'][str(path.resolve())]
+            if Path(row['backup']).read_bytes() != live or digest(row['backup']) != row['before']:
+                raise ValueError('File changed during backup: ' + str(path))
+    (folder / 'manifest.json').write_text(json.dumps(info, indent=2) + '\n')
+    print(f"Prepared {len(info['files'])} files from {commit}", flush=True)
+
+
+def switch(folder, action):
+    rows = json.loads((folder / 'manifest.json').read_text())['files']
+    target, contents = ('after', 'next') if action == 'apply' else ('before', 'backup')
+    for name, row in rows.items():
+        if digest(name) not in (row['before'], row['after']) or digest(row[contents]) != row[target]:
+            raise ValueError('Changed since staging: ' + name)
+    baseline = folder / (action + '-schedulers-before.json')
+    result = folder / (action + '-schedulers-after.json')
+    if result.exists() and json.loads(result.read_text()).get('ok') and all(
+            digest(name) == row[target] for name, row in rows.items()):
+        print(f'{action}: already applied and verified')
+        return
+    if not baseline.exists():
+        run(sys.executable, HEALTH, 'snapshot', '--lane', 'youtube', '--output', baseline)
+    for name, row in rows.items():
+        current = digest(name)
+        if current == row[target]:
+            continue
+        if current not in (row['before'], row['after']):
+            raise ValueError('Concurrent change: ' + name)
+        atomic(Path(name), Path(row[contents]).read_bytes(), row)
+    print(f'{action}: installed files, requesting managed restart of {API}', flush=True)
+    run('systemctl', 'restart', API)
+    run(sys.executable, HEALTH, 'restore', '--baseline', baseline, '--wait-seconds', '25', '--output', result)
+    print(f'{action}: {API} {run("systemctl", "is-active", API)}', flush=True)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('prepare', 'apply', 'rollback'))
+    parser.add_argument('folder', type=Path)
+    args = parser.parse_args()
+    folder = args.folder.resolve()
+    if Path('/mnt/data-disk') not in folder.parents or run('findmnt', '-rn', '-o', 'UUID', '--mountpoint', '/mnt/data-disk') != '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':
+        parser.error('Use a release directory on the mounted data disk')
+    if args.action == 'prepare':
+        prepare(folder)
+    else:
+        switch(folder, args.action)

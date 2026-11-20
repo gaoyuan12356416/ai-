@@ -104,26 +104,15 @@ class XAutoPublishUiTest(unittest.TestCase):
         self.assertIn("window.UiTopbar.render", SCRIPTS["common"])
         self.assertIn("window.UiTopbar.handleAuthAction", SCRIPTS["common"])
 
-    def test_navigation_registers_pages_after_accounts_before_existing_pools(self):
+    def test_navigation_keeps_profile_workflows_and_retires_plain_entry_points(self):
         group = next(item for item in NAVIGATION if item.get("key") == "x_platform")
-        ordered = sorted(group["items"], key=lambda item: item["order"])
-        ordered_keys = [item["key"] for item in ordered]
-        expected = {
-            "xAutoPublishTemplates": "/x-auto-publish-templates.html",
-            "xAutoPublishRuns": "/x-auto-publish-runs.html",
-        }
-        items = {item["key"]: item for item in ordered}
-        for key, href in expected.items():
-            with self.subTest(key=key):
-                self.assertEqual(items[key]["href"], href)
-                self.assertEqual(items[key]["module"], "x_accounts")
-                self.assertTrue(items[key]["enabled"])
-                self.assertIn(f'key: "{key}"', QUICK_NAV)
-                self.assertIn(f'{key}: "{href}"', QUICK_NAV)
-        self.assertLess(ordered_keys.index("xAccountList"), ordered_keys.index("xAutoPublishTemplates"))
-        self.assertLess(ordered_keys.index("xAutoPublishRuns"), ordered_keys.index("xPostMaterialPool"))
-        self.assertIn("xAutoPublishTemplatesExists", QUICK_NAV)
-        self.assertIn("xAutoPublishRunsExists", QUICK_NAV)
+        items = {item["key"]: item for item in group["items"]}
+        for key in ("xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"):
+            self.assertNotIn(key, items)
+        for key in ("xTagAutoPublishTemplates", "xTagMaterialPool", "xPostDramaPool", "xPostLogs"):
+            self.assertEqual(items[key]["module"], "x_accounts")
+            self.assertTrue(items[key]["enabled"])
+        self.assertIn("!retiredXItem(item)", QUICK_NAV)
 
     def test_pages_use_only_the_new_admin_namespace(self):
         combined = "\n".join(SCRIPTS.values())

@@ -57,11 +57,10 @@ class XPostMultiScheduleUiTest(unittest.TestCase):
         self.assertEqual(drama["label"], "Post短剧池")
         self.assertEqual(drama["href"], "/x-post-drama-pool.html")
         self.assertEqual(drama["module"], "x_accounts")
-        self.assertFalse(items["xPostMaterialPool"]["adminOnly"])
+        self.assertNotIn("xPostMaterialPool", items)
         self.assertFalse(drama["adminOnly"])
         self.assertTrue(drama["enabled"])
         self.assertEqual(drama["order"], 40)
-        self.assertEqual(items["xPostMaterialPool"]["order"], 30)
         self.assertEqual(items["xPostLogs"]["order"], 50)
 
         self.assertIn('xPostDramaPool: "/x-post-drama-pool.html"', QUICK_NAV)

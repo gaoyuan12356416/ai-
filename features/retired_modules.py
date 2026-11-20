@@ -5,15 +5,18 @@ from urllib.parse import unquote, urlsplit
 RETIRED_GROUPS = frozenset({"ad_control", "ad_control_v3", "ad_material", "ad_material_test"})
 RETIRED_MODULES = frozenset({"ad_control_center", "ad_control_v3", "ad_material_tasks", "ad_material_test"})
 RETIRED_MESSAGE = "该功能已下线"
-RETIRED_X_KEYS = frozenset({"xPostMaterialPool"})
+RETIRED_X_KEYS = frozenset({"xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"})
 RETIRED_X_PAGES = frozenset({
-    "/x-post-material-pool.html",
+    "/x-auto-publish-templates.html", "/x-auto-publish-template.html",
+    "/x-auto-publish-runs.html", "/x-post-material-pool.html",
 })
 
 
 def retired_path(path):
     path = unquote(urlsplit(str(path or "")).path)
     if path in RETIRED_X_PAGES:
+        return True
+    if path == "/api/admin/x-auto-publish" or path.startswith("/api/admin/x-auto-publish/"):
         return True
     # Manual publishing still shares the material-pool API namespace. Retire
     # only pool management and schedules, keeping its preview/manual receipts.
