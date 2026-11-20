@@ -125,6 +125,9 @@ def receipt(runtime, actor, jid):
 
 def process_source(runtime, actor, snap, workdir):
     asset = runtime.asset(snap['source_id'], actor)
+    if asset.get('_cos'):
+        from .cloud_media import materialize
+        materialize(runtime, asset)
     current = snapshot(asset)
     require(current['_stamp'] == snap['_stamp'] and current['duration_ms'] == snap['duration_ms'],
             'smart_source_changed', '素材版本已变化，请重新分析', 409)

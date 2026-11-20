@@ -103,6 +103,17 @@ class Handler(platform.DramaMaterialHandler):
         expected=self.server.worker_token
         check(expected and hmac.compare_digest(self.headers.get('Authorization',''), 'Bearer '+expected),
               'unauthorized','需要制作节点身份',401)
+        if path == '/internal/uploads/claim' and self.command == 'POST':
+            self.payload()
+            return self.reply(200, {'item': self.runtime.cloud.claim()})
+        upload = re.fullmatch(r'/internal/uploads/(au_[a-f0-9]{32})/(heartbeat|verified|failed)', path)
+        if upload and self.command == 'POST':
+            return self.reply(200, self.runtime.cloud.worker_update(upload[1],
+                self.headers.get('X-Edit-Lease', ''), upload[2], self.payload()))
+        source_location = re.fullmatch(r'/internal/tasks/(at_[a-f0-9]{32})/sources/(aa_[a-f0-9]{32})/location', path)
+        if source_location and self.command == 'GET':
+            item = self.runtime.worker_asset(source_location[1], self.headers.get('X-Edit-Lease', ''), source_location[2])
+            return self.reply(200, self.runtime.cloud.location(item) if item.get('_cos') else {'url': None})
         if path=='/internal/claim' and self.command=='POST':
             self.payload()
             return self.reply(200,{'item':self.runtime.claim()})
@@ -121,6 +132,9 @@ class Handler(platform.DramaMaterialHandler):
         check(re.fullmatch(r'[0-9a-f]{32}',lease),'lease_invalid','缺少有效的制作租约',409)
         if sid and self.command in ('GET','HEAD'):
             item=self.runtime.worker_asset(tid,lease,sid)
+            if item.get('_cos'):
+                from .cloud_media import materialize
+                materialize(self.runtime, item)
             return self.stream(item['path'],sid+'.mp4',item['sha256'])
         if action=='receipt' and self.command=='GET':
             digest=self.headers.get('X-Output-Sha256','').lower()
@@ -164,6 +178,8 @@ class Handler(platform.DramaMaterialHandler):
         if verb in ('POST','PATCH'):
             if not self._require_same_origin_json():return
             body=self.payload()
+        if path == '/uploads' or path.startswith('/uploads/'):
+            return self.reply(200, rt.cloud.dispatch(actor, verb, path, body))
         if path.startswith('/catalog/'):
             from .catalog_imports import dispatch
             return self.reply(200, dispatch(rt, self.server.catalog, actor, verb, path, params, body))
@@ -179,6 +195,14 @@ class Handler(platform.DramaMaterialHandler):
         m=re.fullmatch('/assets/(aa_[0-9a-f]{32})(/media)?',path)
         if m and verb in ('GET','HEAD'):
             item=rt.asset(m[1],actor)
+            if m[2] and item.get('_cos'):
+                self.send_response(307)
+                self.send_header('Location', rt.cloud.location(item, download=q('download')=='1')['url'])
+                self.send_header('Cache-Control', 'private, no-store')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
             if m[2]:return self.stream(item['path'],item['name'],download=q('download')=='1')
             return self.reply(200,{'item':public_asset(item)})
         if path.startswith('/analyses') or path=='/plans':
@@ -241,6 +265,8 @@ class Handler(platform.DramaMaterialHandler):
 
 def main():
     rt=Runtime(os.getenv('AI_VIDEO_EDITING_ROOT','/mnt/data-disk/ai-video-editing'))
+    from .cloud_uploads import CloudUploads
+    rt.cloud = CloudUploads(rt, platform.get_cos_client(timeout=20, retry=0), platform.COS_BUCKET, platform.COS_REGION)
     from .studio import start
     start(rt)
     from .catalog import Catalog

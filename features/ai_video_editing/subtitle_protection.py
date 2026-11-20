@@ -49,6 +49,9 @@ def resolve(rt, actor, clips, value):
             frame = Path(temp) / "frame.png"
             source = rt.asset(sid, actor)
             try:
+                if source.get('_cos'):
+                    from .cloud_media import materialize
+                    materialize(rt, source)
                 run = subprocess.run(
                     [
                         "ffmpeg",

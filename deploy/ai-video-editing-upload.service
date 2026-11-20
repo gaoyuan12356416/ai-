@@ -1,0 +1,27 @@
+[Unit]
+Description=AI editor Hong Kong COS upload verification
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/data/ai-video-editing
+
+[Service]
+Type=simple
+WorkingDirectory=/data/ai-video-editing/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONNOUSERSITE=1
+Environment=AI_VIDEO_EDITING_UPLOAD_WORK=/data/ai-video-editing/upload-work
+EnvironmentFile=-/etc/ai-video-editing/render.env
+ExecStart=/usr/bin/python3.9 -m features.ai_video_editing.upload_worker
+Restart=always
+RestartSec=5
+TimeoutStopSec=1800
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/data/ai-video-editing/upload-work
+
+[Install]
+WantedBy=multi-user.target

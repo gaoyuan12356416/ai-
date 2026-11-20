@@ -285,6 +285,13 @@ class InternalAPI:
             return json.loads(resp.read(1024 * 1024))
 
     def download(self, tid, lease, sid, path, stopped, kind='sources'):
+        if kind == 'sources':
+            with self.open('/tasks/%s/sources/%s/location' % (tid, sid), lease=lease, timeout=30) as response:
+                location = json.loads(response.read(65536))
+            if location.get('url'):
+                from .cloud_media import download
+                download(location, path, stopped)
+                return
         with self.open('/tasks/%s/%s/%s' % (tid, kind, sid), lease=lease) as resp:
             expected = resp.headers.get('X-Source-Sha256', '').lower()
             size = int(resp.headers.get('Content-Length', '0'))

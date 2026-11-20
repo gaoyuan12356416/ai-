@@ -454,6 +454,9 @@ def prepare(rt, actor, analysis, config):
                 sid = c["source_id"]
                 if sid not in translated:
                     asset = rt.asset(sid, actor)
+                    if asset.get('_cos'):
+                        from .cloud_media import materialize
+                        materialize(rt, asset)
                     translated[sid] = transcribe(
                         asset["path"], translation["source_language"]
                     )["cues"]

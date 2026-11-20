@@ -743,9 +743,14 @@
     $("assetCount").textContent = "已选 " + sourceSelection.length + " 个";
   }
   async function uploadFiles() {
+    if (uploading) return;
     const files = Array.from($("uploadFile").files);
     if (!files.length) throw new Error("请选择文件");
     uploading = true;
+    $("uploadStart").disabled = true;
+    $("uploadFile").disabled = true;
+    $("uploadSeries").disabled = true;
+    $("uploadEpisode").disabled = true;
     $("uploadProgress").hidden = false;
     try {
       for (let i = 0; i < files.length; i++) {
@@ -754,47 +759,24 @@
           throw new Error("请选择不超过 1 GiB 的 MP4 或 MOV");
         $("uploadStatus").textContent =
           `正在上传 ${i + 1}/${files.length}：${file.name}`;
-        const data = await new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open(
-            "POST",
-            API +
-              "/assets?" +
-              new URLSearchParams({
-                name: file.name,
-                series: $("uploadSeries").value,
-                episode: $("uploadEpisode").value
-                  ? Number($("uploadEpisode").value) + i
-                  : 0,
-              }),
-          );
-          xhr.setRequestHeader("Content-Type", "application/octet-stream");
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable)
-              $("uploadProgress").value = (e.loaded / e.total) * 100;
-          };
-          xhr.onerror = () =>
-            reject(new Error("上传连接中断，请查询媒资库后重试"));
-          xhr.onload = () => {
-            let d;
-            try {
-              d = JSON.parse(xhr.responseText);
-            } catch {
-              return reject(new Error("上传结果无法读取，请查询媒资库"));
-            }
-            xhr.status < 300
-              ? resolve(d)
-              : reject(new Error(d.error || "上传未完成"));
-          };
-          xhr.send(file);
+        const item = await window.AIEditorUpload.upload({
+          file,
+          series: $("uploadSeries").value,
+          episode: $("uploadEpisode").value ? Number($("uploadEpisode").value) + i : 0,
+          actor: auth.user || auth.name || 'signed-in',
+          api,
+          onProgress: ({percent, text}) => {
+            $("uploadProgress").value = percent;
+            $("uploadStatus").textContent = `${i + 1}/${files.length}：${file.name} · ${text}`;
+          },
         });
-        if (!sourceSelection.includes(data.item.id))
-          sourceSelection.push(data.item.id);
+        if (!sourceSelection.includes(item.id)) sourceSelection.push(item.id);
       }
       $("uploadStatus").textContent = "上传完成，已自动选中";
       await readAssets();
     } finally {
       uploading = false;
+      for (const id of ["uploadStart", "uploadFile", "uploadSeries", "uploadEpisode"]) if ($(id)) $(id).disabled = false;
     }
   }
   const field = (name, label, control, extra = "") =>

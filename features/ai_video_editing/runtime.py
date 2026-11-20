@@ -128,6 +128,10 @@ class Runtime:
                 row=db.execute('SELECT * FROM assets WHERE id=?',(rid,)).fetchone()
             return self.asset_info(row)
 
+    def local_asset(self, rid, actor):
+        from .cloud_media import materialize
+        return materialize(self, self.asset(rid, actor))
+
     def assets(self,actor,q,limit,offset,series=''):
         args=(owner(actor),q,q)
         cond='owner=? AND (instr(lower(name),lower(?))>0 OR instr(lower(series),lower(?))>0)'
@@ -317,4 +321,6 @@ class Runtime:
 
 
 def public_asset(asset):
-    return {k:v for k,v in asset.items() if k not in ('path','sha256')}
+    value = {k:v for k,v in asset.items() if k not in ('path','sha256','_cos')}
+    value['metadata'] = {k:v for k,v in value.get('metadata', {}).items() if k != '_cos'}
+    return value
