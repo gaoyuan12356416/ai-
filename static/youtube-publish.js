@@ -498,7 +498,7 @@
     const key = materialKey(search,uploaderId);
     const query = new URLSearchParams({search}); if (force) query.set('refresh','1');
     if (uploaderId) query.set('uploader_id',uploaderId);
-    const request = api('/materials?' + query).then(data => {
+    const request = api('/material-cards?' + query).then(data => {
       if (!Array.isArray(data.items)) throw new Error('素材数据格式无效，请重试。');
       materialCache.delete(key); materialCache.set(key,{data,at:Date.now()});
       if (materialCache.size > 20) materialCache.delete(materialCache.keys().next().value);
@@ -509,7 +509,7 @@
   async function loadMaterials(view, force = false, polling = false) {
     const search = view.search || '', uploaderId = view.uploaderId || '', key = materialKey(search,uploaderId), serial = ++materialSerial;
     clearTimeout(materialPollTimer);
-    if (!polling) view.pollUntil = Date.now() + 90000;
+    if (!polling) { view.pollStarted = Date.now(); view.pollUntil = Date.now() + 90000; }
     view.loading = true; view.error = ''; view.pollExpired = false;
     const cached = materialCache.get(key);
     if (view.loadedKey !== key) { view.items = cached?.data.items || []; view.cache = cached?.data.cache; view.cacheAt = cached?.at; }
@@ -520,7 +520,7 @@
       state.materials = data.items; view.items = data.items; view.uploaders = data.uploaders || []; view.cache = data.cache; view.cacheAt = materialCache.get(key)?.at || Date.now(); view.loadedKey = key;
       state.source = {configured:data.configured,message:data.message}; view.loading = false; showSource();
       if (data.cache?.refreshing) {
-        if (Date.now() < view.pollUntil) materialPollTimer = setTimeout(() => { if (stack.includes(view) && materialKey(view.search || '',view.uploaderId || '') === key) void loadMaterials(view,false,true); },2000);
+        if (Date.now() < view.pollUntil) materialPollTimer = setTimeout(() => { if (stack.includes(view) && materialKey(view.search || '',view.uploaderId || '') === key) void loadMaterials(view,false,true); },!data.items.length && Date.now() - view.pollStarted < 5000 ? 400 : 2000);
         else view.pollExpired = true;
       }
       renderModals();
@@ -531,6 +531,40 @@
       materialCache.delete(key);
       renderModals();
     }
+  }
+  async function selectMaterial(view, material) {
+    view.readController?.abort();
+    const controller = new AbortController(); view.readController = controller;
+    view.selected = material; view.detailLoading = Boolean(material?.metadata_pending); view.detailError = '';
+    renderModals();
+    if (!view.detailLoading) return;
+    const active = () => stack.includes(view) && view.readController === controller && !controller.signal.aborted;
+    const until = Date.now() + 90000;
+    try {
+      while (active()) {
+        const data = await api('/materials?' + new URLSearchParams({search:String(material.id)}),{signal:controller.signal});
+        if (!active()) return;
+        const full = data.items?.find(item => String(item.id) === String(material.id));
+        if (full && !full.metadata_pending) { view.selected = full; return; }
+        if (!data.cache?.refreshing) throw new Error(data.cache?.error || '素材已不在可发布范围内，请重新选择。');
+        if (Date.now() >= until) throw new Error('素材详情加载超时，请再次点击素材重试。');
+        await new Promise(resolve => {
+          const done = () => { clearTimeout(timer); controller.signal.removeEventListener('abort',done); resolve(); };
+          const timer = setTimeout(done,500);
+          controller.signal.addEventListener('abort',done,{once:true});
+        });
+      }
+    } catch (error) {
+      if (active()) view.detailError = error.message + ' 可再次点击素材重试。';
+    } finally {
+      if (active()) { view.detailLoading = false; renderModals(); }
+    }
+  }
+  function confirmMaterial(view) {
+    if (!view.selected || view.selected.metadata_pending || view.detailLoading || state.source?.configured === false) return;
+    draft.material = view.selected;
+    if (!draft.title.trim()) draft.title = '{name}';
+    delete draft.errors.material; delete draft.errors.reference; closeModal();
   }
   function newDraft() { return {channelTemplate:{status:'idle',serial:0,channelId:'',fields:[],error:''},operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',publishAt:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
   function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
@@ -631,12 +665,12 @@
     const configured = state.source?.configured !== false, materials = v.items || [];
     const cacheStatus = v.error ? '素材更新失败，请点击刷新素材重试。' : v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
     const age = v.cache?.age_seconds == null ? NaN : Number(v.cache.age_seconds);
-    const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>`;
+    const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>${v.detailError ? `<div class="note-box note-error" role="alert">${esc(v.detailError)}</div>` : ''}`;
     const uploaders = [...(v.uploaders || [])];
     if (v.uploaderId && !uploaders.some(u => String(u.id) === v.uploaderId)) uploaders.push({id:v.uploaderId,name:'用户 ' + v.uploaderId});
     const uploaderFilter = `<label class="material-uploader-filter" for="material-uploader"><span>上传人</span><select class="select" id="material-uploader" aria-label="上传人筛选"><option value="">全部上传人</option>${uploaders.map(u => `<option value="${esc(u.id)}" ${String(u.id) === (v.uploaderId || '') ? 'selected' : ''}>${esc(u.name)}${String(u.id) === '0' ? '' : '（' + esc(u.id) + '）'}</option>`).join('')}</select></label>`;
     const body = `<div class="picker-toolbar">${uploaderFilter}<div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${String(v.selected?.id) === String(m.id) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${String(v.selected?.id) === String(m.id)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${String(v.selected?.id) === String(m.id) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请调整上传人或关键词，或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
-    return shell(v,'选择发布素材','按素材 ID 倒序排列，每个任务选择一条视频素材。',body,`<span class="footer-hint">${v.selected ? '已选择：' + esc(v.selected.name) : '尚未选择素材'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-material" ${!v.selected || !configured || v.loading ? 'disabled' : ''}>确认选择</button></div>`,true);
+    return shell(v,'选择发布素材','按素材 ID 倒序排列，每个任务选择一条视频素材。',body,`<span class="footer-hint">${v.selected ? '已选择：' + esc(v.selected.name) : '尚未选择素材'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-material" ${!v.selected || !configured || v.detailLoading || v.selected.metadata_pending ? 'disabled' : ''}>${v.detailLoading ? '正在读取素材详情…' : '确认选择'}</button></div>`,true);
   }
   function previewView(v) { const m = v.material; return shell(v,'素材预览',esc(m.name),`${safeUrl(m.url) ? `<video class="material-video" controls preload="metadata" ${safeUrl(m.thumbnail_url) ? `poster="${esc(safeUrl(m.thumbnail_url))}"` : ''} src="${esc(safeUrl(m.url))}"></video>` : '<div class="note-box note-amber">该素材暂无可用的视频预览链接。</div>'}<div class="summary-grid"><div class="summary-item"><span>素材名称</span><strong>${esc(m.name)}</strong></div><div class="summary-item"><span>素材 ID</span><strong>${esc(m.id)}</strong></div><div class="summary-item"><span>时长 / 大小</span><strong>${esc(m.duration || '—')} / ${esc(m.size || '—')}</strong></div><div class="summary-item"><span>语言</span><strong>${esc(m.language || '—')}</strong></div></div>`,'<button class="btn btn-secondary" data-action="close-modal">返回素材列表</button>',true); }
   function reviewView(v) {
@@ -857,8 +891,8 @@
     else if (action === 'reload-materials') loadMaterials(v,true);
     else if (action === 'insert-macro') { const input = $('#' + b.dataset.target); if (!input || input.disabled) return; const [start,end] = carets.get(input.id) || [input.value.length,input.value.length]; input.setRangeText(b.dataset.macro === "m_url" ? "{{m_url}}" : `{${b.dataset.macro}}`,Math.min(start,input.value.length),Math.min(end,input.value.length),'end'); input.focus({preventScroll:true}); rememberCaret(input); input.dispatchEvent(new Event('input',{bubbles:true})); }
     else if (action === 'choose-material') { openModal('picker',{selected:draft.material,search:'',uploaderId:'',loading:true}); loadMaterials(top()); }
-    else if (action === 'select-material') { v.selected = (v.items || state.materials).find(m => String(m.id) === String(id)); renderModals(); }
-    else if (action === 'confirm-material') { draft.material = v.selected; if (!draft.title.trim()) draft.title = '{name}'; delete draft.errors.material; delete draft.errors.reference; closeModal(); }
+    else if (action === 'select-material') void selectMaterial(v,(v.items || state.materials).find(m => String(m.id) === String(id)));
+    else if (action === 'confirm-material') confirmMaterial(v);
     else if (action === 'preview-material') { const material = (v.items || state.materials).find(m => String(m.id) === String(id)); if (material) openModal('preview',{material}); }
     else if (action === 'cover-source') { draft.coverSource = id; renderModals(); }
     else if (action === 'upload-draft') $('#draft-cover-file')?.click();

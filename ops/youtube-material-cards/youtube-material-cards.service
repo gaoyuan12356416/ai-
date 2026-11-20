@@ -1,0 +1,18 @@
+[Unit]
+Description=YouTube read-only material cards
+After=network.target drama-material-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/youtube-material-cards/current
+EnvironmentFile=/root/drama_material_service/.env
+EnvironmentFile=/etc/youtube-auto-publish.env
+EnvironmentFile=/etc/ads-ai-storage/drama-material-api.service.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m features.youtube_auto_publish.material_cards
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

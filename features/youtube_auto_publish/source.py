@@ -57,7 +57,7 @@ class MaterialSource:
             return '', {'configured':False,'message':'素材筛选规则待配置，请等待管理员提供最终 SQL。'}
         return validate_sql(text), {'configured':True,'message':''}
 
-    def _read(self, sql, material_id='', search='', uploader_id='', moboreels=False):
+    def _read(self, sql, material_id='', search='', uploader_id='', moboreels=False, compact=False):
         projection = ','.join("'%s',COALESCE(CAST(pool.`%s` AS CHAR),'')" % (key,key) for key in COLUMNS)
         condition = "1=1"
         if material_id:
@@ -92,6 +92,13 @@ class MaterialSource:
             ids=[item['id'] for item in items]
             if len(ids)!=len(set(ids)):
                 raise WorkflowError('material_source_ambiguous','素材查询存在重复 ID，请管理员调整 SQL',503)
+            if compact:
+                # Cards need only video fields. Resolve drama/link/cover metadata
+                # for the selected ID through the full read before applying it.
+                for item in items:
+                    item.update(metadata_pending=True, macro_name='', macro_desc='',
+                                long_url='', link_ready=False)
+                return items
             mobo_items = [item for item in items if moboreels or is_mobo_product("", item.get("app_id"))]
             if mobo_items:
                 from features.moboreels_library.macro_client import lookup_story, MoboreelsLinkError
@@ -148,17 +155,17 @@ class MaterialSource:
         except Exception:
             raise WorkflowError('material_query_failed','上传人查询失败，请稍后刷新',503) from None
 
-    def list(self, search='', *, refresh=False, uploader_id=''):
+    def list(self, search='', *, refresh=False, uploader_id='', compact=False):
         uploader_id = str(uploader_id or '').strip()
         if uploader_id and re.fullmatch(r'0|[1-9][0-9]{0,18}', uploader_id) is None:
             raise WorkflowError('invalid_uploader_id','上传人筛选条件无效')
         sql, state = self.configuration()
         if not sql: return dict(state,items=[],uploaders=[])
         search=str(search or '').strip().casefold()[:200]
-        cache_key=(sql,search,uploader_id)
+        cache_key=(sql,search,uploader_id,compact)
         if self.read_cache is not None:
             uploaders, uploader_meta = self.uploader_cache.read(sql, lambda: self._read_uploaders(sql), refresh=refresh)
-            rows, metadata = self.read_cache.read(cache_key, lambda: self._read(sql,search=search,uploader_id=uploader_id), refresh=refresh)
+            rows, metadata = self.read_cache.read(cache_key, lambda: self._read(sql,search=search,uploader_id=uploader_id,compact=compact), refresh=refresh)
             metadata['refreshing'] = metadata['refreshing'] or uploader_meta['refreshing']
             metadata['error'] = metadata['error'] or uploader_meta['error']
             return dict(state,items=rows,uploaders=uploaders,cache=metadata)
@@ -167,7 +174,7 @@ class MaterialSource:
                 self.uploader_snapshot=(sql,time.monotonic(),self._read_uploaders(sql))
             uploaders=[dict(row) for row in self.uploader_snapshot[2]]
             if refresh or not self.cache or self.cache[0]!=cache_key or time.monotonic()-self.cache[1]>20:
-                self.cache=(cache_key,time.monotonic(),self._read(sql,search=search,uploader_id=uploader_id))
+                self.cache=(cache_key,time.monotonic(),self._read(sql,search=search,uploader_id=uploader_id,compact=compact))
             rows=[dict(row) for row in self.cache[2]]
         return dict(state,items=rows,uploaders=uploaders)
 
