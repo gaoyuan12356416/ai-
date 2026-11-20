@@ -197,6 +197,7 @@ def transcribe(path, source_language="auto", *, ranges=None, temp_dir=None, prog
     temp_dir = Path(temp_dir or os.environ.get("AI_VIDEO_EDITING_ROOT", "/mnt/data-disk/ai-video-editing"))/"temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     cues = []
+    used = set()
     for index, (a, b) in enumerate(chunks):
         try:
             with tempfile.TemporaryDirectory(prefix="captions-", dir=temp_dir) as folder:
@@ -224,6 +225,15 @@ def transcribe(path, source_language="auto", *, ranges=None, temp_dir=None, prog
                         require(p.returncode == 0 and result.is_file(), "language_media_failed", "当前分段语音识别失败", 503)
                         part = [c for c in _parse_srt(result.read_text(encoding="utf-8", errors="replace"), b-a)
                                 if c["text"].strip() != "[BLANK_AUDIO]" and _has_sound(samples, c["start"], c["end"])]
+                    if not part and any(s["codec_type"] == "video" for s in streams):
+                        # Rendered videos can have a silent audio track and burned
+                        # captions. Preserve the former ASR -> OCR fallback, but
+                        # only inside this successful empty chunk's chosen range.
+                        part = _hard_captions(path, a, b, source_language, root)
+                        if part:
+                            used.add("ocr")
+                    elif part:
+                        used.add("asr")
                     _append_cues(cues, part, a, b, a)
                 else:
                     _append_cues(cues, _hard_captions(path, a, b, source_language, root), a, b, a)
@@ -231,6 +241,10 @@ def transcribe(path, source_language="auto", *, ranges=None, temp_dir=None, prog
             raise SmartError(exc.code, f"源视频 {a/1000:.3f}–{b/1000:.3f} 秒识别失败：{exc.message}", exc.status) from None
         if progress:
             progress(index+1, len(chunks))
+    if engine == "asr" and used == {"ocr"}:
+        engine = "ocr"
     notes = {"embedded": "已读取视频内嵌字幕轨。", "asr": "已按分段原声生成字幕草稿，请校对对白。",
              "ocr": "从画面字幕区域逐段抽样识别，文字与起止时间请校对。"}
+    if used == {"asr", "ocr"}:
+        notes["asr"] = "已逐段读取原声，并在无对白的分段读取画面字幕；请校对识别草稿。"
     return {"cues": cues, "source": engine, "note": notes[engine], "ranges": ranges, "chunks": len(chunks)}

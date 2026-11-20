@@ -93,6 +93,17 @@ class ChunkTests(unittest.TestCase):
              patch.object(media, '_process', side_effect=AssertionError('silent audio needs no model')):
             self.assertEqual(media.transcribe('private.mp4',ranges=[(1000000,1002000)],temp_dir=self.root)['cues'],[])
 
+    def test_silent_video_keeps_selected_ocr_fallback(self):
+        with patch.object(media, 'probe', return_value=(1072, [{'codec_type':'audio'},{'codec_type':'video'}])), \
+             patch.object(media.shutil, 'which', return_value='whisper'), \
+             patch.dict(os.environ, {'AI_VIDEO_EDITING_WHISPER_MODEL':str(self.model)}), \
+             patch.object(media, 'command'), patch.object(media, '_audio_samples', return_value=[0]*32000), \
+             patch.object(media, '_hard_captions',return_value=[{'start':0,'end':2000,'text':'Burned caption'}]) as ocr:
+            result=media.transcribe('private.mp4',ranges=[(1000000,1002000)],temp_dir=self.root)
+        self.assertEqual(ocr.call_args.args[1:3],(1000000,1002000))
+        self.assertEqual(result['source'],'ocr')
+        self.assertEqual(result['cues'],[{'start':1000000,'end':1002000,'text':'Burned caption'}])
+
 
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'requires FFmpeg')
 class EmbeddedTests(unittest.TestCase):
