@@ -147,5 +147,24 @@ console.log(JSON.stringify(paths.map(path=>{let target=null;
         self.assertNotIn('才按账号顺序领取最新上传的未绑定短剧',source)
 
 
+class RetirementDeploymentTest(unittest.TestCase):
+    def test_html_rollback_keeps_followup_page_changes_and_rejects_conflicting_nav(self):
+        from scripts.deploy_x_ordinary_retirement_fix import merge_change, REDIRECT
+
+        before = (b'  <meta charset="utf-8" />\n<p>old FB copy</p>\n'
+                  b'<script src="/quick-nav.js?v=old"></script>\n'
+                  b'<script src="/fb-auto-publish-templates.js?v=1"></script>')
+        for with_redirect in (False, True):
+            after = before.replace(b'?v=old', b'?v=new')
+            if with_redirect:
+                after = after.replace(b'/>\n', b'/>\n  ' + REDIRECT + b'\n', 1)
+            live = after.replace(b'old FB copy', b'new FB copy').replace(b'?v=1', b'?v=2')
+            result = merge_change('page.html', after, before, live)
+            self.assertEqual(result, before.replace(b'old FB copy', b'new FB copy').replace(b'?v=1', b'?v=2'))
+            self.assertEqual(merge_change('page.html', before, after, result), live)
+            with self.assertRaises(ValueError):
+                merge_change('page.html', after, before, live.replace(b'?v=new', b'?v=another'))
+
+
 if __name__ == '__main__':
     unittest.main()

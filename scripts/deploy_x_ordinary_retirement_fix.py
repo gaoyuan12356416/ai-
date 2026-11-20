@@ -1,5 +1,6 @@
 """Restore the public ordinary-X retirement on the main API and its two web roots."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -22,23 +23,28 @@ CHARSET = b'  <meta charset="utf-8" />'
 REDIRECT = b'<script src="/x-legacy-publish-redirect.js?v=20261112retirement1"></script>'
 
 
-def updated_bytes(relative, live):
-    old = subprocess.check_output(['git', '-C', SOURCE, 'show', f'{BASE}:{relative}'])
-    new = (SOURCE / relative).read_bytes()
+def merge_change(relative, old, new, live):
     if live == old or live == new:
         return new
     if relative.endswith('.html'):
-        # Other releases own the contents of these pages. Apply only our script tags.
+        # Apply or reverse only the script tags that this release changed.
+        old_tags, new_tags = NAV_SRC.findall(old), NAV_SRC.findall(new)
+        if len(old_tags) != 1 or len(new_tags) != 1:
+            raise ValueError('Ambiguous navigation script in ' + relative)
         def update(html):
-            tags = NAV_SRC.findall(new)
-            if len(tags) != 1 or len(NAV_SRC.findall(html)) != 1:
-                raise ValueError('Ambiguous navigation script in ' + relative)
-            html = NAV_SRC.sub(lambda _: tags[0], html)
+            if NAV_SRC.findall(html) not in (old_tags, new_tags):
+                raise ValueError('Conflicting navigation version in ' + relative)
+            html = NAV_SRC.sub(lambda _: new_tags[0], html)
+            newline = b'\r\n' if CHARSET + b'\r\n' in html else b'\n'
+            redirect_line = b'  ' + REDIRECT + newline
             if REDIRECT in new and REDIRECT not in old and REDIRECT not in html:
                 if html.count(CHARSET) != 1:
                     raise ValueError('Missing charset anchor in ' + relative)
-                newline = b'\r\n' if CHARSET + b'\r\n' in html else b'\n'
                 html = html.replace(CHARSET, CHARSET + newline + b'  ' + REDIRECT)
+            elif REDIRECT in old and REDIRECT not in new and REDIRECT in html:
+                if html.count(redirect_line) != 1:
+                    raise ValueError('Conflicting redirect script in ' + relative)
+                html = html.replace(redirect_line, b'')
             return html
         if update(old) == new:
             return update(live)
@@ -59,7 +65,8 @@ def prepare(folder):
             paths.append(WEB / Path(relative).name)
         for path in paths:
             live = path.read_bytes()
-            new = updated_bytes(relative, live)
+            old = subprocess.check_output(['git', '-C', SOURCE, 'show', f'{BASE}:{relative}'])
+            new = merge_change(relative, old, (SOURCE / relative).read_bytes(), live)
             if live == new:
                 continue
             remember(folder, info, path, new)
@@ -70,27 +77,36 @@ def prepare(folder):
     print(f"Prepared {len(info['files'])} files from {commit}", flush=True)
 
 
-def switch(folder, action):
+def planned_changes(folder, action):
     rows = json.loads((folder / 'manifest.json').read_text())['files']
-    target, contents = ('after', 'next') if action == 'apply' else ('before', 'backup')
+    updates = []
     for name, row in rows.items():
-        if digest(name) not in (row['before'], row['after']) or digest(row[contents]) != row[target]:
-            raise ValueError('Changed since staging: ' + name)
+        old, new = Path(row['backup']).read_bytes(), Path(row['next']).read_bytes()
+        if hashlib.sha256(old).hexdigest() != row['before'] or hashlib.sha256(new).hexdigest() != row['after']:
+            raise ValueError('Changed release backup: ' + name)
+        if action == 'rollback':
+            old, new = new, old
+        path = Path(name)
+        live = path.read_bytes()
+        data = merge_change(name, old, new, live)
+        if data != live:
+            updates.append((path, row, live, data))
+    return updates
+
+
+def switch(folder, action):
+    updates = planned_changes(folder, action)
     baseline = folder / (action + '-schedulers-before.json')
     result = folder / (action + '-schedulers-after.json')
-    if result.exists() and json.loads(result.read_text()).get('ok') and all(
-            digest(name) == row[target] for name, row in rows.items()):
+    if result.exists() and json.loads(result.read_text()).get('ok') and not updates:
         print(f'{action}: already applied and verified')
         return
     if not baseline.exists():
         run(sys.executable, HEALTH, 'snapshot', '--lane', 'youtube', '--output', baseline)
-    for name, row in rows.items():
-        current = digest(name)
-        if current == row[target]:
-            continue
-        if current not in (row['before'], row['after']):
-            raise ValueError('Concurrent change: ' + name)
-        atomic(Path(name), Path(row[contents]).read_bytes(), row)
+    for path, row, live, data in updates:
+        if path.read_bytes() != live:
+            raise ValueError('Concurrent change: ' + str(path))
+        atomic(path, data, row)
     print(f'{action}: installed files, requesting managed restart of {API}', flush=True)
     run('systemctl', 'restart', API)
     run(sys.executable, HEALTH, 'restore', '--baseline', baseline, '--wait-seconds', '25', '--output', result)
@@ -99,7 +115,7 @@ def switch(folder, action):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'apply', 'rollback'))
+    parser.add_argument('action', choices=('prepare', 'apply', 'check-rollback', 'rollback'))
     parser.add_argument('folder', type=Path)
     args = parser.parse_args()
     folder = args.folder.resolve()
@@ -107,5 +123,7 @@ if __name__ == '__main__':
         parser.error('Use a release directory on the mounted data disk')
     if args.action == 'prepare':
         prepare(folder)
+    elif args.action == 'check-rollback':
+        print('Verified rollback for', len(planned_changes(folder, 'rollback')), 'files')
     else:
         switch(folder, args.action)
