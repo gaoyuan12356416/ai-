@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <script src="/x-legacy-publish-redirect.js?v=20261112retirement1"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
@@ -88,14 +89,14 @@
 {{desc}}
 
 #shortdrama #shortfilms #tvdrama #aidrama #dramawave</textarea>
-                    <span id="bodyTemplateHelp" class="helper">必须且只能各包含一次 {{drama_name}}、{{desc}}；{{url}} 可选且最多一次。其他宏不允许。<span id="bodyTemplateCount">0 / 2000</span></span>
+                    <span id="bodyTemplateHelp" class="helper">必须且只能各包含一次 {{drama_name}}、{{desc}}；{{url}} 为原剧短链，{{m_url}} 为 Moboreels 推广短链，按素材中的上游剧 ID 生成并归属模板创建者。<span id="bodyTemplateCount">0 / 2000</span></span>
                   </div>
                 </div>
               </section>
 
               <section class="panel">
                 <div class="section-head">
-                  <div><h2>选择 X 账号</h2><p>支持多选；仅当前 active 且已批准发布的账号可进入正式任务，最终发布前会再次校验。</p></div>
+                  <div><h2>选择 X 账号</h2><p>支持多选；受限频道可正常选择和保存，发布时按当前状态自动跳过，其他频道继续发布。</p></div>
                   <span id="selectedAccountCount" class="badge">已选 0 个</span>
                 </div>
                 <div class="account-toolbar">
@@ -113,7 +114,7 @@
                 <div id="accountList" class="account-list" role="group" aria-label="选择 X 账号">
                   <div class="empty">正在加载账号…</div>
                 </div>
-                <p id="accountRefreshStatus" class="helper" aria-live="polite">Token 过期但已批准发布的账号可在此显式刷新；刷新成功后才会解锁选择。未批准账号不会被自动开放，前端显示也不替代服务端最终校验。</p>
+                <p id="accountRefreshStatus" class="helper" aria-live="polite">可刷新已批准发布的账号资格。受限状态不影响选择和保存；每次发布时重新校验，恢复可用后可自动参与后续发布。</p>
               </section>
 
               <section class="panel">
@@ -122,7 +123,7 @@
                 </div>
                 <div class="notice warning">
                   <div class="notice-mark">!</div>
-                  <div><strong>黑名单和历史素材永久排除属于强制安全条件。</strong>系统会在筛选和最终冻结前排除 ads_setting.ads_facebook_post_blacklist 中的剧/资源，以及旧发布池或新系统已经出现的素材；模板不能关闭这些条件。</div>
+                  <div><strong>X 发布不限制剧黑名单。</strong>筛选和最终冻结均忽略剧黑名单；仍会排除资源黑名单命中的素材，以及旧发布池或新系统已经出现的素材。历史素材永久防重继续生效。</div>
                 </div>
                 <div class="compact-grid" style="margin-bottom: 15px;">
                   <div class="field">
@@ -133,7 +134,7 @@
                   <div class="field">
                     <label for="cooldownDays">同剧冷却窗口（天）</label>
                     <input id="cooldownDays" type="number" min="0" max="3650" step="1" value="0" />
-                    <span class="helper">仅在当前模板内按短剧身份冷却；填 0 不限制。</span>
+                    <span class="helper">同一模板内，每个目标频道独立计算剧目冷却，从素材预占时起算；填 0 不限制。</span>
                   </div>
                 </div>
 
@@ -286,8 +287,8 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=d64e9c9ccd31"></script>
+  <script src="/quick-nav.js?v=ac11d7b304fb"></script>
   <script src="/x-auto-publish-common.js?v=20260814language1"></script>
-  <script src="/x-auto-publish-template.js?v=20261110-target-midnight"></script>
+  <script src="/x-auto-publish-template.js?v=ea9c7721fadf"></script>
 </body>
 </html>

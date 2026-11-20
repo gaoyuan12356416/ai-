@@ -3426,11 +3426,19 @@ def verify_auto_template_account_request(payload, account_id):
         "only_refresh_required",
         "preserve_transient_status",
         "require_publish_approved",
+        "schedule_preflight",
     }
     if set(payload).difference(allowed) or any(
         not isinstance(payload.get(key), bool) for key in payload
     ):
         raise ServiceError("invalid_request", "账号校验请求无效", 400)
+    if payload.get("schedule_preflight") is True:
+        XPostError, XPostStore, _publish_canary = _x_posts_api()
+        blocker = XPostStore(POST_DB_PATH).schedule_account_blockers([int(account_id)]).get(int(account_id))
+        # Match pool preflight: a rejected profile check can recover on verify;
+        # a recorded platform lock or unresolved publication remains isolated.
+        if blocker and blocker["code"] != ACCOUNT_VERIFY_REJECTED:
+            raise ServiceError(blocker["code"], blocker["message"], 409)
     account = verify_account(
         account_id,
         AUTO_TEMPLATE_ACTOR,
@@ -3532,34 +3540,17 @@ def save_post_schedule_request(payload, source_type, navigation_item):
         finally:
             conn.close()
     accounts = [row_to_item(row) for row in rows]
-    eligible_ids = [
-        int(account["id"])
-        for account in accounts
-        if account.get("publish_eligible")
-    ]
+    known_ids = [int(account["id"]) for account in accounts]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     try:
         store = XPostStore(POST_DB_PATH)
-        save_options = {}
-        if source_type == "material":
-            # Only trusted local account/ledger state may exclude an account.
-            # Saving settings never refreshes tokens or calls X.
-            blocked = {
-                account_id for account_id, hold in store.schedule_account_blockers(eligible_ids).items()
-                if hold.get("code") in {"x_post_account_locked", "x_account_not_publishable"}
-            }
-            # An active upload also has a needs-review fence while X responds.
-            # Keep that healthy selection; execution still honors its fence.
-            save_options["skippable_account_ids"] = [
-                int(account["id"]) for account in accounts
-                if not account.get("publish_eligible") or int(account["id"]) in blocked
-            ]
+        # Preserve selected restricted accounts; the runner filters current
+        # restrictions before taking material or creating a publishing queue.
         item = store.save_schedule_config(
             source_type,
             settings,
             actor,
-            eligible_account_ids=eligible_ids,
-            **save_options,
+            known_account_ids=known_ids,
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -3682,8 +3673,6 @@ def _auto_template_run(item):
     """Return the frozen execution identity required by the auto runner."""
     source = item if isinstance(item, dict) else {}
     allowed_run = (
-        "schedule_policy",
-        "planned_publish_at_utc",
         "id",
         "trigger_source",
         "external_task_key",
@@ -3770,7 +3759,6 @@ def create_post_auto_template_run_request(payload):
             AUTO_TEMPLATE_ACTOR,
             duration_policy_version=payload.get("duration_policy_version", 2),
             random_template_enabled=payload.get("random_template_enabled", False),
-            **({"schedule_policy": payload["schedule_policy"], "planned_publish_at_utc": payload.get("planned_publish_at_utc", "")} if payload.get("schedule_policy") else {}),
         )
     except XPostError as exc:
         _raise_x_post_error(exc)
@@ -4276,7 +4264,6 @@ def available_post_drama_pool_request(payload):
                     if account.get("long_video_eligible")
                 ],
                 configured_account_ids=payload.get("configured_account_ids"),
-                schedule_identity=payload.get("schedule_identity"),
             )
         }
     except XPostError as exc:
@@ -4472,8 +4459,6 @@ def _safe_schedule_plan_query_result(result):
             503,
         )
     allowed_run = (
-        "schedule_policy",
-        "planned_publish_at_utc",
         "id",
         "slot_key",
         "source_type",

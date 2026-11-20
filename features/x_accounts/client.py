@@ -9,6 +9,11 @@ import urllib.request
 
 
 SAFE_ERROR_CODES = {
+    "x_account_busy",
+    "identity_inactive",
+    "identity_permission_denied",
+    "identity_unavailable",
+    "x_platform_permission_denied",
     "youtube_share_forbidden",
     "youtube_share_not_found",
     "youtube_share_idempotency_conflict",
@@ -181,14 +186,26 @@ def normalize_actor(actor):
         "name": str(actor.get("name", "") or "")[:255],
         "email": str(actor.get("email", "") or "")[:255],
         "role": str(actor.get("role", "user") or "user")[:32],
+        "x_platform_access": actor.get("x_platform_access") is True,
     }
 
 
 def normalize_scope(scope):
     value = str(scope or "mine").strip().lower()
-    if value not in {"mine", "all"}:
+    if value not in {"mine", "all", "platform"}:
         raise XAccountsClientError("invalid_request", "X账号查询范围无效", 400)
     return value
+
+
+def query_x_api_credits(actor):
+    return _request("/internal/accounts/credits", method="POST", payload={"actor": normalize_actor(actor)})
+
+
+def delete_x_account(account_id, actor):
+    account_id = str(account_id or "")
+    if not account_id.isdigit():
+        raise XAccountsClientError("invalid_request", "X账号记录ID无效", 400)
+    return _request("/internal/accounts/%s/delete" % account_id, method="POST", payload={"actor": normalize_actor(actor)})
 
 
 def query_x_accounts(actor, scope="mine"):

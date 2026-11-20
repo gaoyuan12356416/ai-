@@ -154,14 +154,14 @@
         },
       });
       checkbox.checked = state.selectedAccountIds.has(id);
-      checkbox.disabled = !eligible && !checkbox.checked;
+      checkbox.disabled = false;
       const details = ui.element("div");
       details.appendChild(ui.element("strong", { text: accountName(item) }));
       details.appendChild(ui.element("span", { className: "secondary mono", text: id }));
       const meta = ui.element("div");
       meta.appendChild(ui.element("span", {
         className: `language-chip${eligible ? "" : " badge warning"}`,
-        text: accountEligibilityText(item),
+        text: eligible ? accountEligibilityText(item) : `${accountEligibilityText(item)} · 发布时自动跳过`,
       }));
       meta.appendChild(ui.element("span", { className: "secondary", text: accountMembershipLabel(item) }));
       meta.appendChild(ui.element("span", {
@@ -387,7 +387,7 @@
     const macros = Array.from(bodyTemplate.matchAll(/\{\{([a-z_]+)\}\}/g), match => match[1]);
     const unmatched = bodyTemplate.replace(/\{\{([a-z_]+)\}\}/g, "");
     if (unmatched.includes("{{") || unmatched.includes("}}")) throw new Error("X Post 正文模板包含不完整或格式无效的宏。");
-    const allowedMacros = new Set(["drama_name", "desc", "url"]);
+    const allowedMacros = new Set(["drama_name", "desc", "url", "m_url"]);
     const unknownMacros = Array.from(new Set(macros.filter(macro => !allowedMacros.has(macro))));
     if (unknownMacros.length) throw new Error(`X Post 正文模板包含不支持的宏：${unknownMacros.join("、")}。`);
     for (const requiredMacro of ["drama_name", "desc"]) {
@@ -608,7 +608,6 @@
     });
     ui.byId("selectVisibleAccounts").addEventListener("click", () => {
       ui.byId("accountList").querySelectorAll("input[data-account-id]").forEach(checkbox => {
-        if (checkbox.dataset.accountEligible !== "1") return;
         checkbox.checked = true;
         state.selectedAccountIds.add(checkbox.dataset.accountId);
       });

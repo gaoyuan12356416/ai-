@@ -128,7 +128,7 @@
     }
     .account-option:last-child { border-bottom: 0; }
     .account-option:hover { background: #f8faff; }
-    .account-option.disabled { cursor: not-allowed; opacity: .62; background: #fafbfc; }
+    .account-option.disabled { opacity: .62; background: #fafbfc; }
     .account-option input { width: 17px; height: 17px; accent-color: var(--blue); }
     .account-option strong, .account-option span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .account-option span { margin-top: 3px; color: var(--muted); font-size: 12px; }
@@ -322,7 +322,7 @@
       <header class="topbar">
         <div class="title">
           <h1>Post短剧池</h1>
-          <p>每个账号固定续发自己已开始的短剧；其他账号按上传时间倒序领取尚未发布过的新剧，并分别按免费集数正序发布。</p>
+          <p>已开播短剧由原频道持续续发；新短剧按标签画像匹配所选频道，并按免费集数正序发布。</p>
         </div>
         <div class="top-actions">
           <div id="userCard" class="user-card"></div>
@@ -345,13 +345,13 @@
         <section class="panel">
           <div class="section-head">
             <h2>自动发布设置</h2>
-            <p>每个账号会持续发布自己已绑定短剧的下一集；该剧免费集发完后，才按账号顺序领取最新上传的未绑定短剧。调整账号顺序不会改变已有绑定。</p>
+            <p>新短剧优先匹配所选同语言频道的受众、题材画像；无有效画像时按原顺序分配。已开播短剧继续由原频道发布，调整频道顺序不会改变已有绑定。</p>
             <p>新任务按最终成片时长分配：20 分钟（1200 秒）以内可由普通账号直接发布；超过 20 分钟继续按会员资格及同语言会员代发规则处理。</p>
           </div>
           <div class="schedule-grid">
             <div class="field">
               <div class="field-head">
-                <label for="accountSearch">发布账号</label>
+                <label for="accountSearch">候选发布频道</label>
                 <div class="inline-actions">
                   <button id="refreshAccounts" class="button small" type="button">刷新账号</button>
                   <a class="text-link" href="/x-accounts.html">添加/授权新账号</a>
@@ -362,6 +362,7 @@
                 <div class="empty">正在加载账号…</div>
               </div>
               <div id="selectedAccountSummary" class="selection-summary">尚未选择发布账号。</div>
+              <span class="helper">仅从已勾选频道中按标签画像匹配新剧；高优短剧优先分配，同优先级按最新入池顺序处理。</span>
             </div>
             <div class="field">
               <label>发布方式</label>
@@ -428,7 +429,7 @@ Episode {{episode_number}}
 {{desc}}
 
 #shortdrama #shortfilms #tvdrama #aidrama #dramawave</textarea>
-            <span id="dramaPostTemplateHelp" class="helper">必需宏：{{drama_name}}、{{episode_number}}、{{desc}}；可选宏：{{url}}（当前队列的追踪短链）。编辑后点击上方“保存发布设置”生效。</span>
+            <span id="dramaPostTemplateHelp" class="helper">必需宏：{{drama_name}}、{{episode_number}}、{{desc}}；可选宏：{{url}}（原剧追踪短链）、{{m_url}}（按素材上游剧 ID 生成 Moboreels 推广短链，归属任务创建者）。编辑后点击上方“保存发布设置”生效。</span>
           </div>
         </section>
 
@@ -511,7 +512,7 @@ Episode {{episode_number}}
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=d64e9c9ccd31"></script>
+  <script src="/quick-nav.js?v=ac11d7b304fb"></script>
   <script>
     (() => {
       const state = {
@@ -728,7 +729,7 @@ Episode {{episode_number}}
           const checkbox = document.createElement("input");
           checkbox.type = "checkbox";
           checkbox.checked = selected;
-          checkbox.disabled = !eligible && !selected;
+          checkbox.disabled = false;
           checkbox.dataset.accountId = id;
           const textWrap = document.createElement("span");
           const strong = document.createElement("strong");
@@ -743,7 +744,7 @@ Episode {{episode_number}}
             status,
             eligible
               ? (item.status === "expired" ? "可尝试发布 · Token 已到期" : "可发布")
-              : (selected ? "不可发布，请重新授权" : "不可发布")
+              : "当前受限，发布时自动跳过"
           );
           label.append(checkbox, textWrap, status);
           container.appendChild(label);
@@ -927,7 +928,7 @@ Episode {{episode_number}}
           return;
         }
         if (enabled && !selectedIds.length) {
-          setMessage("scheduleMessage", "启用自动发布前，请至少选择一个可发布账号。", true);
+          setMessage("scheduleMessage", "启用自动发布前，请至少选择一个频道。", true);
           return;
         }
         if (enabled && scheduleMode === "fixed" && !state.schedule.publishTimes.length) {
@@ -937,13 +938,6 @@ Episode {{episode_number}}
         if (scheduleMode === "random" && (!Number.isInteger(randomDailyCount) || randomDailyCount < 1 || randomDailyCount > 24)) {
           setMessage("scheduleMessage", "每天随机发布次数必须是1到24的整数。", true);
           byId("randomDailyCount").focus();
-          return;
-        }
-        if (enabled && selectedIds.some(id => {
-          const item = state.accountOptions.find(account => accountId(account) === id);
-          return !item || !accountEligible(item);
-        })) {
-          setMessage("scheduleMessage", "已选账号中存在不可发布或已失效账号，请先校验或重新授权；已绑定短剧会保留并暂停续发。", true);
           return;
         }
         const removedAccountIds = (state.schedule.savedAccountIds || []).filter(id => !state.schedule.accountIds.has(id));
@@ -1384,7 +1378,7 @@ Episode {{episode_number}}
             assignmentLabel = "绑定异常";
             assignmentNote = "已暂停，请人工核查";
           } else {
-            assignmentNote = "首次发布时自动绑定";
+            assignmentNote = "首次分配时按标签画像匹配频道";
           }
           appendCell(
             row,
@@ -1666,13 +1660,7 @@ Episode {{episode_number}}
         const checkbox = event.target.closest("input[data-account-id]");
         if (!checkbox) return;
         const id = String(checkbox.dataset.accountId || "");
-        const item = state.accountOptions.find(account => accountId(account) === id);
         if (checkbox.checked) {
-          if (!accountEligible(item)) {
-            checkbox.checked = false;
-            setMessage("scheduleMessage", "该账号当前不可发布，请先完成授权或校验。", true);
-            return;
-          }
           state.schedule.accountIds.add(id);
         } else {
           state.schedule.accountIds.delete(id);
@@ -1795,5 +1783,6 @@ Episode {{episode_number}}
       init();
     })();
   </script>
+<script defer src="/story-copy-settings.js?v=1.1" data-endpoint="x_drama"></script>
 </body>
 </html>

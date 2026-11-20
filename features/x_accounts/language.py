@@ -31,6 +31,11 @@ def canonical_drama_language(value, *, default=DEFAULT_DRAMA_LANGUAGE):
 def same_drama_language(left, right):
     """Compare language tags with legacy aliases such as ``jp`` and ``ja``."""
     try:
-        return canonical_drama_language(left) == canonical_drama_language(right)
+        # The source catalog uses pt for the Brazilian Portuguese account
+        # language. Compare the aliases without rewriting stored/frozen tags.
+        aliases = {"pt": "pt-br"}
+        left = canonical_drama_language(left)
+        right = canonical_drama_language(right)
+        return aliases.get(left, left) == aliases.get(right, right)
     except ValueError:
         return False

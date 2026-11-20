@@ -1,5 +1,36 @@
 (function () {
+  const TAG_PUBLISH_ITEMS = [
+    { key: "xTagAutoPublishTemplates", label: "标签画像自动发布",
+      description: "按频道标签收入画像选择剧目和素材", kind: "page",
+      href: "/x-tag-auto-publish-templates.html", module: "x_accounts",
+      adminOnly: false, enabled: true, order: 25 },
+    { key: "xTagMaterialPool", label: "标签画像素材池",
+      description: "维护按频道标签画像分配的独立素材池", kind: "page",
+      href: "/x-tag-material-pool.html", module: "x_accounts",
+      adminOnly: false, enabled: true, order: 26 },
+  ];
+  const TAG_PAGE_ACTIVE_KEYS = {
+    "/x-tag-auto-publish-templates.html": "xTagAutoPublishTemplates",
+    "/x-tag-auto-publish-template.html": "xTagAutoPublishTemplates",
+    "/x-tag-auto-publish-runs.html": "xTagAutoPublishTemplates",
+    "/x-tag-material-pool.html": "xTagMaterialPool",
+  };
+  const RETIRED_X_KEYS = new Set(["xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"]);
+  const RETIRED_X_PAGES = new Set([
+    "/x-auto-publish-templates.html", "/x-auto-publish-template.html",
+    "/x-auto-publish-runs.html", "/x-post-material-pool.html",
+  ]);
+  function retiredXItem(item) {
+    if (!item) return false;
+    const path = String(item.href || "").split(/[?#]/, 1)[0];
+    return RETIRED_X_KEYS.has(item.key) || RETIRED_X_KEYS.has(item.view) || RETIRED_X_PAGES.has(path);
+  }
   const DEFAULT_NAV = [
+    {key:"partner_libraries", label:"合作方剧库", order:16, enabled:true,
+     items:[{key:"moboreelsLibrary", label:"Moboreels 短剧库", order:10,
+       href:"/moboreels-library.html", module:"moboreels_library", enabled:true},
+       {key:"moboreelsRecommendations",label:"Moboreels 推荐剧单",order:20,href:"/moboreels-recommendations.html",module:"moboreels_library",enabled:true},
+       {key:"moboreelsMediaAccounts",label:"Moboreels 媒体账号报备",order:30,href:"/moboreels-media-accounts.html",module:"moboreels_library",enabled:true}]},
     {
       key: "pipeline_overview", label: "运行监测", order: 1,
       items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,
@@ -10,7 +41,10 @@
       key: "video_editing", label: "视频剪辑", order: 15, module: "video_editing",
       items: [{ key: "videoEditing", label: "视频剪辑工作台", order: 10,
         description: "共享视频素材、逐剧剪辑与制作任务", kind: "page",
-        href: "/video-editing.html", module: "video_editing", enabled: true }],
+        href: "/video-editing.html", module: "video_editing", enabled: true },
+        { key: "videoEditingAi", label: "AI 智能剪辑", order: 20,
+          description: "分析原片、调整剪辑方案并制作成片", kind: "page",
+          href: "/video-editing-ai.html", module: "video_editing", enabled: true }],
     },
     {
       key: "ad_control",
@@ -269,6 +303,7 @@
       order: 40,
       module: "x_accounts",
       items: [
+        ...TAG_PUBLISH_ITEMS,
         {
           key: "xAccounts",
           label: "X账号授权",
@@ -291,42 +326,9 @@
           order: 20,
         },
         {
-          key: "xAutoPublishTemplates",
-          label: "X Post 自动发布模板",
-          description: "维护独立的选材、文案和发布时间模板",
-          kind: "page",
-          href: "/x-auto-publish-templates.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 21,
-        },
-        {
-          key: "xAutoPublishRuns",
-          label: "X Post 自动发布记录",
-          description: "查看模板运行、账号任务和最终发布结果",
-          kind: "page",
-          href: "/x-auto-publish-runs.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 22,
-        },
-        {
-          key: "xPostMaterialPool",
-          label: "Post素材池",
-          description: "维护定时发布使用的自定义素材",
-          kind: "page",
-          href: "/x-post-material-pool.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 30,
-        },
-        {
           key: "xPostDramaPool",
           label: "Post短剧池",
-          description: "按短剧免费集数顺序维护和发布Post",
+          description: "按频道标签画像分配新剧并顺序续发",
           kind: "page",
           href: "/x-post-drama-pool.html",
           module: "x_accounts",
@@ -573,6 +575,7 @@
   const INTERNAL_VIEW_HREFS = {
     pipelineMonitor: "/pipeline-monitor.html",
     videoEditing: "/video-editing.html",
+    videoEditingAi: "/video-editing-ai.html",
     tasks: "/drama-synthesis.html",
     screenshots: "/screenshots.html",
     adMaterials: "/ad-material-tasks.html",
@@ -587,9 +590,8 @@
     xAccountList: "/x-account-list.html",
     xVideoPublish: "/x-video-publish.html",
     xVideoPublishRecords: "/x-video-publish.html?view=records",
-    xAutoPublishTemplates: "/x-auto-publish-templates.html",
-    xAutoPublishRuns: "/x-auto-publish-runs.html",
-    xPostMaterialPool: "/x-post-material-pool.html",
+    xTagAutoPublishTemplates: "/x-tag-auto-publish-templates.html",
+    xTagMaterialPool: "/x-tag-material-pool.html",
     xPostDramaPool: "/x-post-drama-pool.html",
     xPostLogs: "/x-post-logs.html",
     socialAnalytics: "/social-analytics.html",
@@ -620,6 +622,14 @@
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    // DRAMA_PAY_RANK_NAV_V1
+    if (!normalized.some(g => (g.items || []).some(i => i.key === "dramaPayRank"))) {
+      const rankItem = {key:"dramaPayRank", label:"短剧付费 TOP100", kind:"page",
+        href:"/drama-pay-rank.html", module:"drama_pay_rank", enabled:true, order:5};
+      const reports = normalized.find(g => g.label === "数据报表");
+      if (reports) (reports.items || (reports.items=[])).push(rankItem);
+      else normalized.push({key:"drama_reports",label:"数据报表",enabled:true,order:70,items:[rankItem]});
+    }
     if (!normalized.some(group => (group.items || []).some(item => item.key === "pipelineMonitor"))) {
       normalized.unshift({ key: "pipeline_overview", label: "运行监测", order: 1,
         items: [{ key: "pipelineMonitor", label: "制作与发布监测", order: 1,
@@ -673,14 +683,17 @@
       }
     }
 
-    if (!normalized.some(group => group && Array.isArray(group.items) &&
-        group.items.some(item => item && item.key === "videoEditing"))) {
-      const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
-      const editorGroup = normalized.find(group => group && group.key === "video_editing");
-      if (editorGroup) {
-        if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
-        editorGroup.items.push(JSON.parse(JSON.stringify(editorDefault.items[0])));
-      } else normalized.push(JSON.parse(JSON.stringify(editorDefault)));
+    const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
+    const missingEditorItems = editorDefault.items.filter(entry => !normalized.some(group =>
+      Array.isArray(group?.items) && group.items.some(item => item?.key === entry.key)));
+    if (missingEditorItems.length) {
+      let editorGroup = normalized.find(group => group?.key === editorDefault.key);
+      if (!editorGroup) {
+        editorGroup = {...editorDefault, items: []};
+        normalized.push(editorGroup);
+      }
+      if (!Array.isArray(editorGroup.items)) editorGroup.items = [];
+      editorGroup.items.push(...missingEditorItems.map(item => ({...item})));
     }
     // Migrate both saved server navigation and cached legacy navigation.
     let assetItem;
@@ -830,6 +843,11 @@
     }
     if (xPlatform) {
       if (!Array.isArray(xPlatform.items)) xPlatform.items = [];
+      TAG_PUBLISH_ITEMS.forEach(item => {
+        if (!xPlatform.items.some(existing => existing && existing.key === item.key)) {
+          xPlatform.items.push({ ...item });
+        }
+      });
       [
         { key: "xVideoPublish", label: "手动发布", description: "全部账号选材、配对与定时发布", href: "/x-video-publish.html", order: 23 },
         { key: "xVideoPublishRecords", label: "手动发布记录", description: "查看手动、素材池和 Excel 发布批次", href: "/x-video-publish.html?view=records", order: 24 },
@@ -843,58 +861,12 @@
           item.module = "x_accounts"; item.adminOnly = false;
         }
       });
-      const xAutoPublishTemplatesExists = xPlatform.items.some(
-        item => item && item.key === "xAutoPublishTemplates"
-      );
-      if (!xAutoPublishTemplatesExists) {
-        xPlatform.items.push({
-          key: "xAutoPublishTemplates",
-          label: "X Post 自动发布模板",
-          description: "维护独立的选材、文案和发布时间模板",
-          kind: "page",
-          href: "/x-auto-publish-templates.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 21,
-        });
-      }
-      const xAutoPublishRunsExists = xPlatform.items.some(
-        item => item && item.key === "xAutoPublishRuns"
-      );
-      if (!xAutoPublishRunsExists) {
-        xPlatform.items.push({
-          key: "xAutoPublishRuns",
-          label: "X Post 自动发布记录",
-          description: "查看模板运行、账号任务和最终发布结果",
-          kind: "page",
-          href: "/x-auto-publish-runs.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 22,
-        });
-      }
-      const exists = xPlatform.items.some(item => item && item.key === "xPostMaterialPool");
-      if (!exists) {
-        xPlatform.items.push({
-          key: "xPostMaterialPool",
-          label: "Post素材池",
-          description: "维护定时发布使用的自定义素材",
-          kind: "page",
-          href: "/x-post-material-pool.html",
-          module: "x_accounts",
-          adminOnly: false,
-          enabled: true,
-          order: 30,
-        });
-      }
       const dramaPoolExists = xPlatform.items.some(item => item && item.key === "xPostDramaPool");
       if (!dramaPoolExists) {
         xPlatform.items.push({
           key: "xPostDramaPool",
           label: "Post短剧池",
-          description: "按短剧免费集数顺序维护和发布Post",
+          description: "按频道标签画像分配新剧并顺序续发",
           kind: "page",
           href: "/x-post-drama-pool.html",
           module: "x_accounts",
@@ -913,7 +885,7 @@
     return normalized
       .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module))
       .map(group => Object.assign({}, group, {
-        items: (group.items || []).filter(item => !retiredModules.has(item.module)),
+        items: (group.items || []).filter(item => !retiredModules.has(item.module) && !retiredXItem(item)),
       }));
   }
 
@@ -1020,6 +992,7 @@
   }
 
   function setActive(container, activeKey) {
+    activeKey = TAG_PAGE_ACTIVE_KEYS[window.location.pathname] || activeKey;
     const root = typeof container === "string" ? document.querySelector(container) : container;
     if (!root) return;
     root.querySelectorAll(".nav-item").forEach(item => {

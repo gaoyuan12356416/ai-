@@ -3652,6 +3652,9 @@ ADMIN_NAMES = [item.strip() for item in os.environ.get("DRAMA_ADMIN_NAMES", DEFA
 
 
 MODULE_PERMISSIONS = {
+    "drama_pay_rank": "短剧付费 TOP100",
+    "moboreels_library": "Moboreels 短剧库",
+    "moboreels_report": "Moboreels 收益报表",
     "video_editing": "视频剪辑",
     "x_video_publish": "X 个人视频发布",
     "fb_video_publish": "Facebook 视频批量发布", # FB_VIDEO_PUBLISH_INTEGRATION_V1
@@ -3735,6 +3738,9 @@ MODULE_PERMISSIONS = {
 
 
 DEFAULT_USER_PERMISSIONS = {
+    "drama_pay_rank": False,
+    "moboreels_library": False,
+    "moboreels_report": False,
     "video_editing": False,
     "x_video_publish": False,
     "fb_video_publish": False,
@@ -14655,7 +14661,9 @@ def decorate_drama_synthesis_job(job):
         elif item.get("status") != "done":
             item["status_label"] = item["remote_progress"]["stage_label"]
         item["active_started_at"] = snapshot.get("first_started_at") or snapshot.get("started_at") or item.get("active_started_at")
-    return item
+    import sys
+    from features.drama_synthesis.material_source import decorate
+    return decorate(item, sys.modules[__name__])
 
 
 def drama_synthesis_error_payload(exc):
@@ -22683,11 +22691,14 @@ def upload_file_to_cos(path, *, return_receipt=False, checkpoint_job_id=None):
             WORK_ROOT, ".runtime", "uploads", upload_job_id,
             hashlib.sha256(object_key.encode("utf-8")).hexdigest() + ".json",
         )
+        from features.drama_synthesis.storage_targets import checkpoint_target
+        upload_bucket, upload_domain = checkpoint_target(checkpoint_path, COS_BUCKET, COS_DOMAIN)
+        object_url = "https://" + upload_domain.strip().strip("/") + "/" + object_key.lstrip("/")
         receipt = resume_upload(
             # The SDK otherwise retries POST internally, outside the durable
             # create/complete fences. Retry only via the verified checkpoint.
             get_cos_client(timeout=max(COS_UPLOAD_TIMEOUT, COS_MULTIPART_TIMEOUT), retry=0),
-            bucket=COS_BUCKET, key=object_key, path=path,
+            bucket=upload_bucket, key=object_key, path=path,
             checkpoint_path=checkpoint_path, progress_callback=media_upload_progress,
             content_type=guess_content_type(path), acl="public-read",
         )
@@ -31421,7 +31432,8 @@ def notify_screenshot_ai_source_callback(job, raise_on_error=False):
         except Exception:
             logging.exception("failed to write callback failure audit log")
         if raise_on_error:
-            raise
+            from features.cover_material_source import ScreenshotMaterialIngestionError
+            raise ScreenshotMaterialIngestionError(exc) from exc
         return {"failed": True, "error": str(exc)}
 
 
@@ -38396,6 +38408,10 @@ def screenshot_failed_size_labels(error_text):
 
 
 def humanize_screenshot_failure_reason(job, error_text):
+    from features.cover_material_source import screenshot_ingestion_failure_reason
+    ingestion_reason = screenshot_ingestion_failure_reason(job, error_text)
+    if ingestion_reason:
+        return ingestion_reason
     raw_reason = (
         str(error_text or "").strip()
         or str(job.get("error_message", "") or "").strip()
@@ -38441,15 +38457,20 @@ def humanize_screenshot_failure_reason(job, error_text):
 
 
 def build_screenshot_failure_message(job, error_text):
+    from features.cover_material_source import screenshot_ingestion_failure_reason
+    ingestion_failed = bool(screenshot_ingestion_failure_reason(job, error_text))
+    title = ("封面图片已生成，素材入库失败，已停止本轮重试。" if ingestion_failed
+             else "封面图片生成失败，系统已停止继续重试。")
     reason = humanize_screenshot_failure_reason(job, error_text)
     return (
-        "封面图合成任务失败，系统已停止继续重试。\n"
+        "%s\n"
         "剧名：%s\n"
         "content_id：%s\n"
         "job_id：%s\n"
         "失败原因：%s\n"
         "已生成尺寸：1.91:1=%s，1:1=%s，4:5=%s"
         % (
+            title,
             str(job.get("drama_name", "") or ""),
             str(job.get("content_id", "") or ""),
             str(job.get("job_id", "") or ""),
@@ -41284,6 +41305,8 @@ from features.x_accounts.client import (
     query_x_post_runs,
     query_x_post_schedule,
     query_x_accounts as query_x_authorized_accounts,
+    query_x_api_credits,
+    delete_x_account,
     logout_x_account,
     save_x_post_schedule,
     set_x_post_drama_pool_priority,
@@ -41339,6 +41362,7 @@ except ValueError:
     )
 
 X_ACCOUNTS_ERROR_META = {
+    "x_account_busy": (409, "该账号正在发布、同步或有结果待核对的任务，请处理完成后再删除"),
     "x_post_drama_owner_not_configured": (409, "未完结短剧的正常绑定账号必须保留在排期中"),
     "x_post_schedule_slot_in_progress": (409, "当前发布时间点正在冻结或执行，请在90秒窗口结束后再修改配置"),
     "invalid_random_daily_count": (400, "每日随机发布次数无效"),
@@ -41478,7 +41502,7 @@ def x_post_admin_query_params(raw_query, *, runs=False):
             result["unknown_outcome"] = 1 if unknown_outcome in ("1", "true") else 0
         task_source = str((raw.get("task_source") or [""])[0] or "").strip().lower()
         if task_source:
-            if task_source not in {"drama_pool", "material_pool", "auto_publish"}:
+            if task_source not in {"drama_pool", "material_pool", "auto_publish", "manual_publish"}:
                 raise ValueError("invalid task_source")
             result["task_source"] = task_source
     return result
@@ -43452,6 +43476,9 @@ def list_products(force=False):
 
 
 
+
+    from features.moboreels_library.synthesis import include_product
+    items = include_product(items)
 
     with PRODUCT_CACHE_LOCK:
 
@@ -55947,12 +55974,14 @@ def delete_session(session_token):
 
 
 def load_navigation_config():
+    from features.drama_pay_rank.routes import ensure_navigation as ensure_drama_pay_navigation
+    from features.moboreels_library.navigation import ensure_navigation as ensure_moboreels_navigation, ensure_report_navigation
     from features.socialkit_analytics.navigation import ensure_navigation as ensure_socialkit_navigation
     with open(NAVIGATION_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
         from features.fb_video_publish.navigation import ensure_navigation
         from features.x_video_publish.navigation import ensure_navigation as ensure_x_video_navigation
         from features.pipeline_dispatch.monitor import ensure_navigation as ensure_pipeline_navigation
-        return ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle))))))
+        return ensure_drama_pay_navigation(ensure_report_navigation(ensure_moboreels_navigation(ensure_socialkit_navigation(filter_navigation(ensure_pipeline_navigation(ensure_x_video_navigation(ensure_navigation(json.load(handle)))))))))
 
 
 def navigation_item_access(session, item_key, config):
@@ -63296,6 +63325,9 @@ def pick_drama_variant(content_id, app_id=None):
 
 
 def fetch_drama_episodes(content_id, app_id=None):
+    if str(app_id or "").strip() == "3360":
+        from features.moboreels_library.synthesis import fetch_episodes
+        return fetch_episodes(content_id)
 
 
 
@@ -94205,6 +94237,17 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_GET(self):
+        if urlparse(self.path).path == "/api/drama-pay-rank/list":
+            from features.drama_pay_rank.routes import dispatch
+            return dispatch(self, urlparse(self.path), globals())
+        if urlparse(self.path).path == "/api/moboreels" or urlparse(self.path).path.startswith("/api/moboreels/"):
+            from features.moboreels_library.bridge import dispatch
+            return dispatch(self, urlparse(self.path), globals())
+        # SYNTHESIS_MATERIAL_SOURCE_V1
+        if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
+            from features.drama_synthesis.material_source import handle
+            handle(self, "GET", __import__("sys").modules[__name__])
+            return
 
 
 
@@ -94256,6 +94299,19 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in {
+            "/drama-pay-rank.html",
+            "/drama-pay-rank.js",
+            "/drama-pay-rank.css",
+            "/moboreels-library.html",
+            "/moboreels-report.html",
+            "/moboreels-report.js",
+            "/moboreels-report.css",
+            "/moboreels-library.js",
+            "/moboreels-library.css",
+            "/moboreels-recommendations.html",
+            "/moboreels-media-accounts.html",
+            "/moboreels-tools.js",
+            "/moboreels-tools.css",
             "/pipeline-monitor.html",
             "/pipeline-monitor.css",
             "/pipeline-monitor.js",
@@ -94418,6 +94474,11 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
 
+            return
+
+        if parsed.path == "/api/report-auth/yuesiying":
+            from features.private_reports import authorize
+            authorize(self, globals())
             return
 
         if parsed.path == "/api/report-auth/tt-minis-native-growth":
@@ -94633,6 +94694,16 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                 json_response(self, status, payload, no_store=True)
             return
 
+        if parsed.path == "/api/admin/x-accounts/credits":
+            if not self._require_cookie_module("x_accounts"):
+                return
+            try:
+                json_response(self, 200, query_x_api_credits(x_platform_accounts_actor(self._session() or {})), no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
+            return
+
         if parsed.path == "/api/admin/x-accounts":
             if not self._require_cookie_module("x_accounts"):
                 return
@@ -94655,18 +94726,8 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/admin/x-posts/logs":
-            if not self._require_cookie_admin():
-                return
-            try:
-                params = x_post_admin_query_params(parsed.query)
-                params.update({"actor": x_accounts_actor(self._session()), "scope": "all"})
-                json_response(self, 200, query_x_post_logs(params), no_store=True)
-            except ValueError as exc:
-                json_response(self, 400, {"error": "invalid_request", "message": str(exc)}, no_store=True)
-            except XAccountsClientError as exc:
-                status, payload = x_accounts_error_payload(exc)
-                json_response(self, status, payload, no_store=True)
-            return
+            from features.x_posts.log_management import dispatch
+            return dispatch(self, parsed, globals())
 
         if parsed.path == "/api/admin/x-posts/runs":
             if not self._require_cookie_admin():
@@ -98000,6 +98061,14 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
 
 
     def do_POST(self):
+        if urlparse(self.path).path == "/api/moboreels" or urlparse(self.path).path.startswith("/api/moboreels/"):
+            from features.moboreels_library.bridge import dispatch
+            return dispatch(self, urlparse(self.path), globals())
+        # SYNTHESIS_MATERIAL_SOURCE_V1
+        if re.fullmatch(r"/api/drama-material/jobs/[0-9a-f]{32}/material-source", urlparse(self.path).path):
+            from features.drama_synthesis.material_source import handle
+            handle(self, "POST", __import__("sys").modules[__name__])
+            return
 
         if urlparse(self.path).path.startswith("/api/video-editing/") or urlparse(self.path).path in {"/video-editing.html", "/video-editing.js", "/video-editing.css"}:
             import sys
@@ -98007,6 +98076,10 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
             video_editing_handle(self, "POST", sys.modules[__name__])
             return
         parsed = urlparse(self.path)
+        if parsed.path == "/api/admin/x-posts/queue-actions":
+            from features.x_posts.log_management import dispatch
+            return dispatch(self, parsed, globals())
+
         if parsed.path.startswith("/internal/pipeline-dispatch/youtube/"):
             from features.pipeline_dispatch.native_gateway import dispatch_youtube
             return dispatch_youtube(self, parsed.path, globals())
@@ -98701,7 +98774,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                         "请求体必须是对象",
                         400,
                     )
-                if parsed.path == "/api/admin/tt-posts/test-publish":
+                if parsed.path in ("/api/admin/tt-posts/test-publish", "/api/admin/tt-posts/material-pool"):
                     request_payload = {key: value for key, value in request_payload.items() if key not in {
                         "_internal_actor", "actor", "actor_user_id", "actor_name", "user_id", "name",
                         "created_by_user_id", "created_by_name", "owner_user_id", "owner_name",
@@ -98710,6 +98783,7 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
                     request_payload["_internal_actor"] = {
                         "user_id": str(session.get("user_id") or ""),
                         "name": str(session.get("name") or ""),
+                        "tenant_key": str(session.get("tenant_key") or ""),
                     }
                 if parsed.path.endswith("/batch"):
                     raw_targets = request_payload.get("targets")
@@ -100727,6 +100801,23 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if retired_path(parsed.path):
             json_response(self, 410, {"error": "module_retired", "message": RETIRED_MESSAGE}, no_store=True)
+            return
+
+        x_account_delete_match = re.fullmatch(r"/api/admin/x-accounts/([0-9]+)", parsed.path)
+        if x_account_delete_match:
+            if not self._require_cookie_admin():
+                return
+            if not self._require_same_origin_json():
+                return
+            session = self._session() or {}
+            account_id = x_account_delete_match.group(1)
+            try:
+                result = delete_x_account(account_id, x_accounts_actor(session))
+                append_audit_log(session, "delete_x_account", "x_account", account_id, {"history_preserved": True})
+                json_response(self, 200, result, no_store=True)
+            except XAccountsClientError as exc:
+                status, payload = x_accounts_error_payload(exc)
+                json_response(self, status, payload, no_store=True)
             return
 
         x_pool_delete_match = re.fullmatch(
