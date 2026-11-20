@@ -52,6 +52,8 @@ def main():
     if not args.apply:
         store = existing_store(snapshot_path)
     page_repo, materials = repositories(env, operation)
+    from features.fb_auto_posts.metric_mysql import metric_store_from_env
+    materials.metric_store = metric_store_from_env(env)
     report = {'runtime': str(runtime), 'applied': args.apply, 'operation': operation, 'runs': []}
     for rid in args.run_ids:
         with store.connect() as c:
