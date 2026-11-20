@@ -155,6 +155,16 @@ class EffectsTest(unittest.TestCase):
         self.query()
         self.assertEqual(len(self.fixture.queries), 6)
 
+    def test_empty_sqlite_logs_do_not_invalidate_income_cache(self):
+        before = self.effects._generation(self.jobs)
+        wal = self.settings.data_dir / 'sync.sqlite3-wal'
+        wal.write_bytes(b'')
+        self.assertEqual(self.effects._generation(self.jobs), before)
+        wal.write_bytes(b'0' * 32)
+        self.assertEqual(self.effects._generation(self.jobs), before)
+        wal.write_bytes(b'0' * 33)
+        self.assertNotEqual(self.effects._generation(self.jobs), before)
+
     def test_ttl_expiry_failure_and_detached_responses(self):
         with patch('features.moboreels_library.effects.time.monotonic', return_value=100):
             first = self.query()

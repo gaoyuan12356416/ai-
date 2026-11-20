@@ -65,7 +65,10 @@ class Effects:
             for suffix in ('', '-wal'):
                 try:
                     stat = (self.settings.data_dir / (name + suffix)).stat()
-                    stamps.append((stat.st_ino, stat.st_mtime_ns, stat.st_size))
+                    # Opening a WAL database can create/remove an empty log even
+                    # for reads. Only a log containing frames changes its data.
+                    stamps.append(None if suffix == '-wal' and stat.st_size <= 32 else
+                                  (stat.st_ino, stat.st_mtime_ns, stat.st_size))
                 except FileNotFoundError:
                     stamps.append(None)
         return (tuple((j.get('run_id'), j.get('status'), j.get('updated_at'), j.get('finished_at')) for j in jobs), tuple(stamps))
