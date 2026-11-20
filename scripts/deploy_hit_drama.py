@@ -116,7 +116,7 @@ def verify_current(info,rollback):
     for name,row in info['files'].items():assert sha(current/name)==row['after' if rollback else 'before'],'live_file_changed:'+name
     return current
 
-def activate(platform,folder,rollback=False):
+def activate(platform,folder,rollback=False,*,defer_plan_read=True):
     info=json.loads((folder/'manifest.json').read_text());assert info['platform']==platform
     if not rollback and info['status']=='prepared' and str(settings(platform)[0].resolve())==info['candidate']:
         for name,row in info['files'].items():assert sha(Path(info['candidate'])/name)==row['after'],'candidate_changed'
@@ -146,7 +146,7 @@ def activate(platform,folder,rollback=False):
             manifest=dict(lanes=dict(fb=dict(previous_root=str(current.resolve()),candidate=destination,files={k:dict(before=v['after' if rollback else 'before'],after=v['before' if rollback else 'after']) for k,v in info['files'].items() if (Path(destination)/k).is_file()})))
             # The helper saves its own manifest; retain this deployment manifest.
             switch_folder=folder/('rollback-switch' if rollback else 'switch');switch_folder.mkdir(exist_ok=True)
-            fb.switch('fb',switch_folder,manifest,audit,defer_plan_read=True)
+            fb.switch('fb',switch_folder,manifest,audit,defer_plan_read=defer_plan_read)
             publish_static(info,rollback)
         finally:
             fb.fb_enabled('fb' in before['enabled_channels'],'fb' in before.get('preparation_only_channels',[]))

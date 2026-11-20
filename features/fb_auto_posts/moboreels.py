@@ -57,8 +57,8 @@ def validate_rules(config):
                 raise RepositoryError("moboreels_metrics_unsupported", "Moboreels暂不支持Dramawave消耗或ROAS筛选，请清空这些筛选", 409)
     hit = config.get('hit_drama_publish') or {}
     mobo_hit = hit.get('catalog') == 'moboreels' and bool(hit.get('content_ids'))
-    if config.get("drama_rule", {}).get("resource_type_v2") or (config.get("drama_launch_window_days") and not mobo_hit):
-        raise RepositoryError("moboreels_rules_unsupported", "Moboreels分类及未注明时区的上架日期不能用于旧剧目类型或上线天数筛选，请清空这些筛选", 409)
+    if config.get("drama_rule", {}).get("resource_type_v2"):
+        raise RepositoryError("moboreels_rules_unsupported", "Moboreels分类不支持旧剧目类型筛选，请清空剧目类型", 409)
     if (hit and not mobo_hit) or config.get("feedback_selection", {}).get("enabled"):
         raise RepositoryError("moboreels_rules_unsupported", "Moboreels暂不支持旧Post效果或爆剧规则，请关闭该选材规则", 409)
     if "{{url}}" in str(config.get("message_template") or ""):
@@ -82,6 +82,7 @@ def candidate_snapshot(repo, config):
     hit = config.get('hit_drama_publish') or {}
     source_index = 'PRIMARY'
     target_sql, target_params = '', ()
+    launch_join, launch_params, published_at = '', (), '0'
     if hit:
         from features.hit_drama_target import content_ids
         target_ids = tuple(content_ids(hit, language))
@@ -92,6 +93,26 @@ def candidate_snapshot(repo, config):
         slots = ','.join('%s' for _ in target_ids)
         target_sql = f' AND s.data_source_id IN ({slots}) AND d.story_id IN ({slots})'
         target_params = target_ids + target_ids
+    elif config.get('drama_launch_window_days'):
+        from features.drama_launch_window import bounds, is_range
+        from features.moboreels_hit import MOBO_APP_ID
+
+        window = config['drama_launch_window_days']
+        lower, upper = bounds(window, int(repo.now_fn().timestamp()))
+        lower_op = '>=' if is_range(window) else '>'
+        source_index = 'idx_source_type_source_id'
+        # Mobo package rows can repeat a story. Use its unambiguous first
+        # publication epoch without duplicating materials or guessing a timezone.
+        launch_join = f"""
+            JOIN (SELECT content_id, MIN(published_at) AS published_at
+                    FROM `{repo.mysql.schema}`.ads_drama_info
+                   WHERE app_id=%s AND published_at>0
+                   GROUP BY content_id
+                  HAVING MIN(published_at)=MAX(published_at)
+                     AND MIN(published_at){lower_op}%s AND MIN(published_at)<=%s
+                 ) launch ON launch.content_id=s.data_source_id"""
+        launch_params = (MOBO_APP_ID, lower, upper)
+        published_at = 'launch.published_at'
     language_ids={"zh-tw":2,"en":3,"es":4,"pt":5,"fr":6,"ru":7,"it":8,"ja":9,"ar":10,"id":11,"th":12,"vi":13,"ko":14,"tl":15,"de":16,"hi":17,"bn":18,"ms":21,"tr":22}
     source_language_sql="LOWER(TRIM(s.language))=%s"
     language_params=[language]
@@ -109,14 +130,16 @@ def candidate_snapshot(repo, config):
         rows=repo.mysql.select(f"""
           SELECT CAST(s.id AS CHAR) material_id,TRIM(s.data_source_id) content_id,
                  s.url media_url,COALESCE(s.name,'') material_name,COALESCE(s.tag_name,'') material_tag,
-                 LOWER(TRIM(s.language)) language,s.video_duration,d.story_name drama_name,d.introduce drama_description
+                 LOWER(TRIM(s.language)) language,s.video_duration,d.story_name drama_name,d.introduce drama_description,
+                 {published_at} AS published_at
             FROM `{repo.mysql.schema}`.ads_custom_source s FORCE INDEX({source_index})
             JOIN `ads_ai`.cdreader_koc_drama d ON d.story_id=s.data_source_id AND d.institution_user_id=%s AND d.project_type=2 AND d.is_show=1
+            {launch_join}
            WHERE s.data_source=%s{product_sql}{target_sql} AND s.type=2 AND s.is_delete=0
              AND {source_language_sql} AND s.video_duration>=%s AND s.video_duration<=%s
              AND s.id>%s
            ORDER BY s.id LIMIT %s
-        """,(institution,int(config["material_data_source"]),*product_params,*target_params,*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
+        """,(institution,*launch_params,int(config["material_data_source"]),*product_params,*target_params,*language_params,rule["duration_min_seconds"],rule["duration_max_seconds"],cursor,page_size))
         page_count+=1
         for row in rows:
             mid=str(row.get("material_id") or "")
@@ -131,7 +154,8 @@ def candidate_snapshot(repo, config):
                 material_name=str(row.get("material_name") or ""),drama_name=str(row.get("drama_name") or ""),
                 language=language,duration_seconds=duration,material_spend=None,material_roas=None,
                 drama_spend=None,drama_roas=None,resource_type_v2="moboreels",
-                drama_description=str(row.get("drama_description") or ""),material_tag=str(row.get("material_tag") or ""))
+                drama_description=str(row.get("drama_description") or ""),material_tag=str(row.get("material_tag") or ""),
+                deploy_time=int(row.get("published_at") or 0))
             candidates.append(MaterialCandidate(**{key:value for key,value in values.items() if key in MaterialCandidate.__dataclass_fields__}))
         if len(rows)<page_size:
             break
