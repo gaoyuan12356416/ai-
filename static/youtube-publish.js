@@ -491,7 +491,7 @@
       materialRefreshes.set(key,refresh); return refresh;
     }
     const cached = materialCache.get(key), ttl = Math.min(60000,Math.max(0,Number(cached?.data.cache?.ttl_seconds ?? 60) - Number(cached?.data.cache?.age_seconds || 0)) * 1000);
-    if (!force && cached && !cached.data.cache?.refreshing && !cached.data.cache?.stale && Date.now() - cached.at < ttl) return Promise.resolve(cached.data);
+    if (!force && cached && !cached.data.cache?.refreshing && !cached.data.cache?.stale && !cached.data.cache?.error && Date.now() - cached.at < ttl) return Promise.resolve(cached.data);
     return startMaterialRead(search,force,uploaderId);
   }
   function startMaterialRead(search, force, uploaderId) {
@@ -524,7 +524,13 @@
         else view.pollExpired = true;
       }
       renderModals();
-    } catch (error) { if (serial !== materialSerial || !stack.includes(view) || materialKey(view.search || '',view.uploaderId || '') !== key) return; view.loading = false; view.error = error.message; renderModals(); }
+    } catch (error) {
+      if (serial !== materialSerial || !stack.includes(view) || materialKey(view.search || '',view.uploaderId || '') !== key) return;
+      view.loading = false; view.error = error.message;
+      view.cache = {...view.cache,refreshing:false,error:''};
+      materialCache.delete(key);
+      renderModals();
+    }
   }
   function newDraft() { return {channelTemplate:{status:'idle',serial:0,channelId:'',fields:[],error:''},operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',publishAt:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
   function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
@@ -623,7 +629,7 @@
   }
   function pickerView(v) {
     const configured = state.source?.configured !== false, materials = v.items || [];
-    const cacheStatus = v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
+    const cacheStatus = v.error ? '素材更新失败，请点击刷新素材重试。' : v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
     const age = v.cache?.age_seconds == null ? NaN : Number(v.cache.age_seconds);
     const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>`;
     const uploaders = [...(v.uploaders || [])];
