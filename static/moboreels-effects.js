@@ -27,7 +27,15 @@
     if(key==='total_revenue_usd')return data.complete_order_days>0||data.complete_ad_days>0;
     return data.complete_order_days>0;
   }
-  function value(data,row,key){return available(data,key)?row[key]:null;}
+  function value(data,row,key){
+    const day=row.dimensions?.find(d=>d.key==='day')?.value;
+    if(day&&day!=='unknown'){
+      const coverage=data.trend.find(r=>r.date===day);
+      const known=coverage&&(key==='clicks'||key==='automated'||key==='links_clicked'?coverage.clicks_covered:key==='advertising_revenue_usd'?coverage.ads_synced:key==='total_revenue_usd'?coverage.orders_synced&&coverage.ads_synced:coverage.orders_synced);
+      if(!known)return null;
+    }
+    return available(data,key)?row[key]:null;
+  }
   // Compare successful timestamps, even if the tab never observed the running state.
   function syncChanged(oldValue,newValue){return !!newValue&&oldValue!==newValue;}
   function csvCell(v){let s=String(v??'');if(/^\s*[=+@]/.test(s)||/^[\t\r]/.test(s)||(/^\s*-/.test(s)&&!/^-[0-9]+(?:\.[0-9]+)?$/.test(s)))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';}

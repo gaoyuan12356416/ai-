@@ -57,7 +57,7 @@ def install(path, source):
     tmp.replace(path)
 
 
-def stage(folder, profile='clicks'):
+def stage(folder, profile='clicks', baseline='HEAD^'):
     previous = CURRENT.resolve()
     candidate = folder/'candidate'
     if run('git','-C',SOURCE,'status','--porcelain','--untracked-files=no'):
@@ -68,7 +68,7 @@ def stage(folder, profile='clicks'):
     run('cp','-a','--reflink=auto',previous,candidate)
     manifest = {'commit':commit, 'previous':str(previous), 'profile':profile, 'files':{}, 'overlays':{}}
     for name in PROFILES[profile]:
-        result = subprocess.run(['git','-C',SOURCE,'show','HEAD^:'+name], capture_output=True)
+        result = subprocess.run(['git','-C',SOURCE,'show',baseline+':'+name], capture_output=True)
         expected = hashlib.sha256(result.stdout).hexdigest() if not result.returncode else None
         if digest(previous/name) != expected:
             raise RuntimeError('active source differs from Git baseline: '+name)
@@ -196,13 +196,14 @@ if __name__ == '__main__':
     args.add_argument('action', choices=('stage','apply','rollback'))
     args.add_argument('folder', type=Path)
     args.add_argument('--profile', choices=PROFILES, default='clicks')
+    args.add_argument('--baseline', default='HEAD^', help='Verified source commit for the currently active files')
     opts = args.parse_args()
     folder = opts.folder.resolve()
     if (not folder.is_relative_to('/mnt/data-disk') or
             run('findmnt','-n','-o','UUID','--mountpoint','/mnt/data-disk') != '3e8ac4e8-7770-456d-9e89-2ec5dd405fa8'):
         raise SystemExit('Moboreels data disk unavailable')
     if opts.action == 'stage':
-        stage(folder, opts.profile)
+        stage(folder, opts.profile, opts.baseline)
     else:
         with (folder/'switch.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -45,3 +45,6 @@ function fixture(){const summary={clicks:12,order_recharge_count:2,order_recharg
   const denied=harness();denied.requests[0].reply({authenticated:true,user:{permissions:{moboreels_library:true}}});await flush();assert.equal(denied.requests.length,1);assert.equal(denied.element('content').hidden,true);
   console.log('Mobo effects interaction checks passed: authorization, rendering, stale reads, missed sync completion, revocation');
 })().catch(e=>{console.error(e);process.exitCode=1;});
+const dailyUnknown={...d,group_by:['day'],trend:[{date:'2026-11-20',orders_synced:false,ads_synced:false,clicks_covered:true}],list:[{dimensions:[{key:'day',value:'2026-11-20',label:'2026-11-20'}],clicks:5,total_revenue_usd:'0'}]};
+const dailyCsv=csv(dailyUnknown).split('\r\n')[1];
+assert.ok(!dailyCsv.includes('"0"'),'an unsynced day must not be exported as zero revenue');
