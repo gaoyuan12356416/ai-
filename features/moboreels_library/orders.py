@@ -259,9 +259,9 @@ class ReportStore:
         return _query_report(self, params or {}, star_id)
 
 
-def _period(params=None):
+def _period(params=None, today=None):
     params = params or {}
-    today = datetime.now(timezone.utc).date()
+    today = today or datetime.now(timezone.utc).date()
     yesterday = today - timedelta(days=1)
     start = date.fromisoformat(str(params.get("date_from") or (yesterday - timedelta(days=30)).isoformat()))
     end = date.fromisoformat(str(params.get("date_to") or yesterday.isoformat()))
@@ -595,14 +595,14 @@ COUNT_METRICS = ("order_recharge_count", "order_refund_count", "unclassified_ord
                  "unmatched_order_count", "unmatched_ad_count", "undated_order_count")
 
 
-def _query_report(store, params, star_id):
+def _query_report(store, params, star_id, *, facts=False):
     with localcontext() as context:
         context.prec = 65
-        return _query_report_precise(store, params, star_id)
+        return _query_report_precise(store, params, star_id, facts=facts)
 
 
-def _query_report_precise(store, params, star_id):
-    start, end = _period(params)
+def _query_report_precise(store, params, star_id, *, facts=False):
+    start, end = _period(params, datetime.now(timezone(timedelta(hours=8))).date() if facts else None)
     try:
         page, size = int(params.get("page_index", 1)), int(params.get("page_size", 50))
     except (ValueError, TypeError):
@@ -663,9 +663,9 @@ def _query_report_precise(store, params, star_id):
             return None
         if query and query not in code_value and query not in story_id:
             return None
-        key = (day,) if group_by == "day" else (story_id,) if group_by == "story" else (code_value, story_id, owner_id)
+        key = (day, code_value, story_id, owner_id) if facts else (day,) if group_by == "day" else (story_id,) if group_by == "story" else (code_value, story_id, owner_id)
         if key not in groups:
-            item = {"date": day if group_by == "day" else None,
+            item = {"date": day if facts or group_by == "day" else None,
                     "koc_code": code_value if group_by == "promotion" else "",
                     "story_id": story_id if group_by != "day" else "",
                     "story_name": story_names.get(story_id, "") if group_by != "day" else "",
@@ -742,7 +742,7 @@ def _query_report_precise(store, params, star_id):
     for name in MONEY_METRICS:
         summary[name] = format(summary[name], "f")
     coverage = next((row for row in source if row["_kind"] == "coverage"), {})
-    return {"list": result[(page - 1) * size:page * size], "total": len(result), "page_index": page,
+    return {"list": result if facts else result[(page - 1) * size:page * size], "total": len(result), "page_index": page,
             "page_size": size, "summary": summary, "group_by": group_by,
             "date_from": start.isoformat(), "date_to": end.isoformat(), "source_timezone": "unspecified",
             "currency": "USD", "ad_data_as_of": coverage.get("ad_data_as_of"), "complete_ad_days": coverage.get("complete_days", 0),

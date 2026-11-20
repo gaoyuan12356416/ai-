@@ -1,95 +1,37 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Moboreels 点击与收益报表 - AI自动后台</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/ui-topbar.css?v=20261113report1">
-  <link rel="stylesheet" href="/moboreels-report.css?v=3e377d7d3246">
-</head>
-<body>
-  <div class="app">
-    <aside class="sidebar">
-      <a class="brand" href="/"><span class="brand-mark">AI</span><span><strong>AI 自动后台</strong><small>创作与运营工作台</small></span></a>
-      <nav id="quickNav" class="nav" aria-label="功能导航"></nav>
-    </aside>
-    <main class="main">
-      <header class="topbar">
-        <div><h1>Moboreels 点击与收益报表</h1></div>
-        <div class="top-actions"><div id="userCard" class="user-card">正在确认登录状态…</div><button id="loginBtn" class="btn" type="button">登录</button></div>
-      </header>
-      <div id="accessNotice" class="notice hidden" role="alert"></div>
-      <section class="panel click-panel" aria-labelledby="clickHeading">
-        <div class="panel-head"><div><h2 id="clickHeading">短链点击</h2><p class="muted">每次打开有效推广短链计一次。发布渠道和发布人取自生成短链时的发布记录。</p></div><span id="clickScope" class="badge">范围待确认</span></div>
-        <form id="clickForm" class="click-controls">
-          <fieldset id="clickFields" class="filters" disabled>
-            <label>开始日期（北京时间）<input id="clickFrom" type="date" required></label>
-            <label>结束日期（北京时间）<input id="clickTo" type="date" required></label>
-            <label>分组维度<select id="clickGroup">
-              <option value="platform_publisher">发布渠道 × 发布人</option><option value="platform">发布渠道</option>
-              <option value="publisher">发布人</option><option value="referrer">访问来源</option>
-              <option value="day">点击日期</option><option value="account">发布账号</option>
-              <option value="story">剧目 ID</option><option value="material">素材 ID</option>
-            </select></label>
-            <label>发布渠道<select id="clickPlatform"><option value="">全部渠道</option><option value="x">X</option><option value="fb">Facebook</option><option value="tt">TikTok</option><option value="youtube">YouTube</option></select></label>
-            <button class="btn btn-primary" type="submit">查询点击</button><button id="clickToday" class="btn" type="button">今天</button>
-          </fieldset>
-          <p id="clickError" class="error-text hidden" role="alert"></p>
-        </form>
-        <div class="click-totals" aria-live="polite">
-          <div><span>点击量</span><strong id="clickCount">—</strong></div>
-          <div><span>有点击的短链</span><strong id="clickLinks">—</strong></div>
-          <div><span>预览及自动访问</span><strong id="clickAutomated">—</strong></div>
-        </div>
-        <p id="clickCoverage" class="click-note muted" aria-live="polite"></p>
-        <div class="table-wrap"><table class="click-table"><thead><tr><th id="clickDimension" scope="col">发布渠道 × 发布人</th><th class="number" scope="col">点击量</th><th class="number" scope="col">有点击的短链</th><th class="number" scope="col">预览及自动访问</th></tr></thead><tbody id="clickRows"><tr><td colspan="4" class="empty">正在读取点击数据…</td></tr></tbody></table></div>
-        <footer class="pagination"><span id="clickPage" class="muted"></span><div><button id="clickPrev" class="btn" type="button" disabled>上一页</button><button id="clickNext" class="btn" type="button" disabled>下一页</button></div></footer>
-      </section>
-      <h2 class="revenue-heading">订单与广告收益</h2>
-      <section class="panel filters-panel" aria-label="报表筛选">
-        <form id="filterForm">
-          <fieldset id="filterFields" class="filters" disabled>
-            <label>来源起始日期<input id="dateFrom" type="date" required></label>
-            <label>来源结束日期<input id="dateTo" type="date" required></label>
-            <label>汇总方式<select id="groupBy"><option value="promotion">按推广口令</option><option value="day">按来源日期</option><option value="story">按短剧</option></select></label>
-            <label class="search-field">剧目 ID / 推广口令<input id="searchInput" type="search" maxlength="200" placeholder="搜索剧目 ID 或口令"></label>
-            <button class="btn btn-primary" type="submit">查询</button><button id="resetBtn" class="btn" type="button">最近 31 天</button>
-          </fieldset>
-        </form>
-        <div class="filter-meta"><span id="scopeLabel" class="badge">范围：待确认</span><span id="queryPeriod" class="muted">默认查询截至昨日的最近 31 个日历日期，单次最多 31 天。</span></div>
-        <div id="filterError" class="error-text hidden" role="alert"></div>
-      </section>
-      <section class="report-notes" aria-label="统计口径">
-        <p><strong>金额单位：USD。</strong>订单净额＝充值−退款，不含未分类订单金额，不代表机构佣金。</p>
-        <p>日期按供应方原始日期展示，来源时区未注明，不换算为北京时间。广告收益为 T+1；同一来源日期、口令的广告收益只计算一次，不按多个渠道重复分摊。</p>
-        <p>未匹配归因金额已包含在对应的订单净额或广告收益中，请勿再次相加。<span id="adCoverage">广告数据更新日期：待查询</span></p>
-        <p id="undatedNote" class="hidden"></p>
-      </section>
-      <section id="summaryCards" class="summary-grid" aria-label="查询范围汇总" aria-live="polite"></section>
-      <section class="panel" aria-labelledby="reportHeading">
-        <div class="panel-head"><div><h2 id="reportHeading">收益明细</h2><p id="resultCount" class="muted">正在加载…</p></div><button id="refreshBtn" class="btn" type="button" disabled>刷新报表</button></div>
-        <div id="reportError" class="notice error hidden" role="alert"></div>
-        <div class="table-wrap">
-          <table><thead><tr><th id="dimensionHeading" scope="col">推广口令 / 短剧</th><th scope="col">归属 / 匹配状态</th><th class="number" scope="col">充值 USD</th><th class="number" scope="col">退款 USD</th><th class="number" scope="col">订单净额 USD</th><th class="number" scope="col">广告收益 USD</th><th class="number" scope="col">未分类订单 USD</th><th class="number" scope="col">未匹配归因 USD</th></tr></thead><tbody id="reportRows"><tr><td colspan="8" class="empty">正在读取报表…</td></tr></tbody></table>
-        </div>
-        <footer class="pagination"><span id="pageSummary" class="muted">每页 50 条</span><div><button id="prevPage" class="btn" type="button" disabled>上一页</button><span id="pageNumber">1 / 1</span><button id="nextPage" class="btn" type="button" disabled>下一页</button></div></footer>
-      </section>
-      <section class="panel sync-panel" aria-labelledby="syncHeading">
-        <div class="panel-head"><div><h2 id="syncHeading">报表同步</h2><p class="muted">更新所选日期范围的订单与广告数据。任务在后台执行，刷新页面后仍可查看进度。</p></div><button id="syncBtn" class="btn btn-primary" type="button" disabled>更新当前日期范围</button></div>
-        <div class="sync-body">
-          <div class="sync-meta"><span id="syncStatus" class="badge">正在读取同步状态</span><span id="lastSuccess" class="muted">最近成功：—</span></div>
-          <p id="syncRange" class="muted"></p>
-          <div id="progressWrap" class="hidden"><progress id="syncProgress" value="0" max="100" aria-label="报表同步进度"></progress><p id="progressText" class="muted" aria-live="polite"></p></div>
-          <p id="syncError" class="error-text hidden" role="alert"></p>
-          <details id="syncDetails" class="hidden"><summary>查看订单和广告日期的同步明细</summary><div id="syncParts" class="sync-parts"></div></details>
-        </div>
-      </section>
-    </main>
-  </div>
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/quick-nav.js?v=ac11d7b304fb"></script>
-  <script src="/ui-topbar.js?v=20261113report1"></script>
-  <script src="/moboreels-report.js?v=d94d4f84f143"></script>
-</body>
-</html>
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>MoboReels 社媒效果分析 · AI自动后台</title><link rel="stylesheet" href="/ui-topbar.css?v=20261113report1"><link rel="stylesheet" href="/moboreels-report.css?v=20261120-effects1"></head>
+<body><div class="app">
+<aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">AI</span><span><strong>AI 自动后台</strong><small>创作与运营工作台</small></span></a><nav id="quickNav" class="nav" aria-label="功能导航"></nav></aside>
+<main class="main effects-main">
+<header class="topbar"><div><div class="eyebrow">MOBOREELS · ANALYTICS</div><h1>MoboReels 社媒效果分析</h1><p class="muted">统一查看各渠道、发布人和剧目的点击与收入。</p></div><div class="top-actions"><div id="userCard" class="user-card"></div><button id="loginBtn" class="btn" type="button">登录</button><button id="refreshBtn" class="btn" type="button" disabled>刷新数据</button></div></header>
+<div class="scope-strip"><span id="scopeLabel">正在核验权限</span><span id="freshness">收入同步状态待读取</span></div>
+<div id="message" class="notice" role="status" aria-live="polite">正在加载报表…</div>
+<form id="filters" class="panel filters-panel"><fieldset id="fields" disabled>
+<div class="filter-heading"><h2>筛选与分组</h2><span class="muted">一组筛选，同时查看点击和收入</span></div>
+<div class="effect-filters">
+<label>开始日期<input type="date" id="dateFrom" required></label><label>结束日期<input type="date" id="dateTo" required></label>
+<label>发布渠道<select id="platform"><option value="">全部渠道</option><option value="x">X</option><option value="fb">Facebook</option><option value="tt">TikTok</option><option value="youtube">YouTube</option><option value="shared">多渠道共用</option><option value="unknown">渠道待归属</option></select></label>
+<label>发布人<select id="publisher"><option value="">全部发布人</option></select></label>
+<label class="search-field">搜索<input type="search" id="search" placeholder="剧名、剧 ID、推广口令或账号" maxlength="200"></label></div>
+<div class="group-row"><span>分组维度 <small class="muted">最多 3 项</small></span><div id="groups" class="group-choices"></div></div>
+<div class="filter-actions"><div class="presets"><button class="btn" type="button" data-days="1">今天</button><button class="btn" type="button" data-days="7">近 7 天</button><button class="btn" type="button" data-days="30">近 30 天</button></div><div><button class="btn" id="resetBtn" type="button">重置</button><button class="btn btn-primary" type="submit">应用筛选</button></div></div>
+</fieldset></form>
+<section id="content" hidden aria-label="效果分析结果">
+<div class="report-context"><div><strong id="period"></strong><span id="queriedAt" class="muted"></span></div><button class="btn" type="button" id="exportBtn">↓ 导出全部分组 CSV</button></div>
+<div id="coverage" class="notice" role="status"></div><div id="summary" class="summary-grid effects-kpis"></div>
+<div class="effects-charts">
+<section class="panel"><div class="panel-head"><div><h2>每日趋势</h2><p class="muted">当前筛选范围 · 未同步日期显示「未同步」</p></div><select id="trendMetric" aria-label="趋势指标"><option value="clicks">点击量</option><option value="total_revenue_usd">合计净收入</option><option value="order_recharge_count">充值订单数</option></select></div><div id="trend" class="effect-bars"></div></section>
+<section class="panel"><div class="panel-head"><div><h2>分组表现 TOP 10</h2><p class="muted">与下方明细使用相同分组</p></div><select id="rankMetric" aria-label="排名指标"><option value="total_revenue_usd">合计净收入</option><option value="clicks">点击量</option></select></div><div id="ranking" class="effect-bars"></div></section>
+</div>
+<section class="panel"><div class="panel-head"><div><h2>分组数据明细</h2><p id="tableNote" class="muted">金额单位 USD；点击表头可排序。</p></div><label class="page-size">每页 <select id="pageSize"><option>20</option><option selected>50</option><option>100</option></select> 组</label></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="可横向滚动的效果明细"><table class="effects-table"><thead id="tableHead"></thead><tbody id="tableBody"></tbody><tfoot id="tableFoot"></tfoot></table></div>
+<div class="pagination"><span id="pageSummary"></span><div><button id="prev" class="btn" type="button">上一页</button><span id="pageNumber"></span><button id="next" class="btn" type="button">下一页</button></div></div></section>
+<details class="panel definitions"><summary>指标口径与归因说明</summary><div>
+<p><strong>日期：</strong>点击按北京时间自然日，收入按 Mobo 来源日期（供应方未注明时区）；同一日期筛选分别应用到两类数据，不做时区推断，也不表示同一批点击的转化。</p>
+<p><strong>点击：</strong>有效推广短链的跳转次数，不是人数、社媒曝光或视频播放量。已识别的预览和自动访问单列。渠道、人员、账号取自生成链接时的记录；生成链接不等于已确认发帖。直达 Mobo 原链接的点击无法由本地短链统计。</p>
+<p><strong>收入：</strong>合计净收入 = 订单充值 − 订单退款 + 广告收益，不代表机构佣金。广告通常为 T+1；未同步日期不当作已确认的 0。金额显示保留常用小数，悬停和 CSV 可查看原始精度。</p>
+<p><strong>共用口令：</strong>同一口令覆盖多个渠道或账号时，供应方收入无法区分具体来源，分别列入「多渠道共用」或「多账号共用」。按人员、剧目或口令汇总仍只计一次。筛选单一渠道不包含共用或待归属收入，不按点击比例分摊。</p>
+<p><strong>统计范围：</strong>点击来自本地推广短链；收入覆盖当前授权范围内已采集的 Mobo 订单与广告收益。没有本地渠道记录的收入列为待归属。未知状态订单及日期未明确订单另行提示，不计入已分类净收入。</p>
+</div></details></section>
+<details class="panel definitions" id="syncPanel"><summary>数据同步 <span id="syncStatus" class="muted">每日北京时间 10:00 自动更新</span></summary><div><p id="syncDetail" class="muted">可手动从 Mobo 更新当前选择的日期范围。</p><button id="syncBtn" class="btn" disabled type="button">更新当前日期范围</button><p id="syncError" class="error-text" role="status"></p></div></details>
+</main></div><script src="/quick-nav.js?v=20261113report1"></script><script src="/ui-topbar.js?v=20261113report1"></script><script src="/moboreels-effects.js?v=20261120-effects1"></script></body></html>

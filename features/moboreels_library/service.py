@@ -19,6 +19,7 @@ from .settings import Settings
 from .sync import SyncManager
 from .short_links import ShortLinks
 from .orders import Reports
+from .effects import Effects
 from .actors import resolve_actor
 from .content_tools import ContentTools
 from .media_accounts import MediaAccounts
@@ -89,6 +90,8 @@ class Application:
                 raise ValueError('剧目 ID 无效')
             return 200, self.content.episodes(story, refresh=query.get('refresh') == '1')
         if method == 'GET' and path == '/reports':
+            if query.get('view') == 'effects':
+                return 200, Effects(self.settings, self.reports, self.clicks).query(query, actor)
             if query.get('view') == 'clicks':
                 return 200, self.clicks.query(query, actor)
             return 200, self.reports.query(query, actor, all_users=actor.get('is_admin') is True)
