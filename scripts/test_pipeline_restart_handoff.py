@@ -66,6 +66,14 @@ class RestartHandoffTests(unittest.TestCase):
                 self.assertEqual(len(self.state()['pending']), 1)
                 self.assertFalse(self.state()['continuing_renders'])
 
+    def test_x_preflight_render_is_carried_but_its_checkpoint_phase_waits(self):
+        self.change(channel='x', payload_json=json.dumps({'kind': 'x_preflight'}))
+        self.assertEqual(len(self.state()['continuing_renders']), 1)
+        with self.store.transaction() as c:
+            c.execute('UPDATE pipeline_worker SET observation_json=?',
+                      (json.dumps({'phase': 'probe'}),))
+        self.assertEqual(len(self.state()['pending']), 1)
+
     def test_stale_missing_or_nonrender_observation_waits(self):
         for observation, age in [({'phase': 'download'}, 0), ({'phase': 'idle'}, 0),
                                   ({'phase': 'render'}, 31), ({}, 0)]:

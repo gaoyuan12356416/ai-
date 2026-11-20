@@ -10,7 +10,9 @@ import json
 from .maintenance import matches
 
 COORDINATOR = 'pipeline-coordinator.service'
-LOCAL_RENDERERS = {'fb_prepare', 'tt_prepare', 'x_random', 'x_repair'}
+# x_preflight delegates its render phase to the same local X repair/random
+# renderer; its download/probe/checkpoint phases still wait normally.
+LOCAL_RENDERERS = {'fb_prepare', 'tt_prepare', 'x_random', 'x_repair', 'x_preflight'}
 IDENTITY = ('id', 'generation', 'node_id', 'worker_id')
 
 
