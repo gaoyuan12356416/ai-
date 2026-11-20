@@ -1,13 +1,16 @@
 import base64
 import hashlib
 import json
+import io
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from features.ai_video_editing.cloud_uploads import CloudUploads, PART_BYTES
-from features.ai_video_editing.cloud_media import validate_url, materialize
+from features.ai_video_editing.cloud_media import validate_url, materialize, download
 from features.ai_video_editing.runtime import Fault, Runtime, public_asset
 
 
@@ -184,6 +187,58 @@ class CloudUploadTests(unittest.TestCase):
                     good.replace('test-123.', 'user:pass@test-123.'), good.replace('/ai-video-editing/', '/other/')]:
             with self.assertRaises(Fault):
                 validate_url(url)
+
+    def test_cos_read_checks_version_and_digest_without_worker_credentials(self):
+        good = 'https://test-123.cos.ap-hongkong.myqcloud.com/ai-video-editing/v1/uploads/id/source.mp4?q=x'
+        location = {'url': good, 'etag': '"version"', 'size': len(self.bytes),
+                    'sha256': hashlib.sha256(self.bytes).hexdigest()}
+        class Response(io.BytesIO):
+            status = 200
+            headers = {'Content-Length': str(len(self.bytes)), 'ETag': '"version"'}
+        def open_request(request, timeout):
+            self.assertNotIn('Authorization', request.headers)
+            self.assertEqual(request.headers['If-match'], '"version"')
+            return Response(self.bytes)
+        with patch('features.ai_video_editing.cloud_media.build_opener') as opener:
+            opener.return_value.open.side_effect = open_request
+            target = self.rt.root / 'read.mp4'
+            self.assertEqual(download(location, target), location['sha256'])
+            with self.assertRaises(Fault):
+                download({**location, 'sha256': 'a' * 64}, target)
+            self.assertFalse(target.exists())
+
+    def test_private_http_worker_location_and_legacy_source(self):
+        from features.ai_video_editing.http_api import Handler
+        from features.ai_video_editing.render_worker import InternalAPI, LeaseLost, Rejected
+        uid, _, _ = self.ready()
+        aid = self.cloud.row(uid)['asset_id']
+        project = self.rt.save(self.actor, {'operation_id': 'transport-project', 'name': 'transport',
+            'units': [{'id': 'one', 'title': 'one', 'clips': [{'source_id': aid, 'start_ms': 0, 'end_ms': 1000}]}]})['item']
+        self.rt.render(project['id'], self.actor, {'operation_id': 'transport-render', 'expected_version': project['version']})
+        class Quiet(Handler):
+            def log_message(self, *args):
+                pass
+        with ThreadingHTTPServer(('127.0.0.1', 0), Quiet) as server:
+            server.runtime, server.worker_token = self.rt, 'private-worker-token'
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = 'http://127.0.0.1:%d/api/ai-video-editing/internal' % server.server_port
+                api = InternalAPI(base, server.worker_token)
+                job = api.post('/claim')['item']
+                path = '/tasks/%s/sources/%s/location' % (job['id'], aid)
+                with api.open(path, lease=job['lease']) as response:
+                    location = json.loads(response.read())
+                self.assertEqual(location['sha256'], hashlib.sha256(self.bytes).hexdigest())
+                self.assertIn('.cos.ap-hongkong.', location['url'])
+                with self.assertRaises(LeaseLost):
+                    api.open(path, lease='wrong')
+                with self.assertRaises(Rejected):
+                    InternalAPI(base, 'wrong').open(path, lease=job['lease'])
+                self.assertFalse(Path(self.rt.asset(aid, self.actor)['path']).exists())
+            finally:
+                server.shutdown()
+                thread.join(2)
 
 
 if __name__ == '__main__':
