@@ -13,7 +13,7 @@ from typing import Any, Dict, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 from .client import FB_AUTO_ADMIN_PREFIX, contains_sensitive_key
-from .strategy import daily_capacity
+from .strategy import daily_capacity, frequency
 from .core import ActorScope, FBAutoPostStore, StoreError
 from .gpu import GPUPrepareClient, PrepareExecutor
 from .publisher import AutoPostExecutor, RequestsGraphTransport
@@ -29,11 +29,11 @@ class ServiceError(RuntimeError):
 
 
 class Runtime:
-    def __init__(self, store: FBAutoPostStore, pages: PagePoolRepository, materials: MaterialRepository, executor: AutoPostExecutor, preparer: PrepareExecutor, internal_token: str, *, metric_store: FBAutoPostStore | None = None, max_daily_jobs: int = 500, max_publishable_pages: int = 500, max_jobs_per_slot: int = 20, max_enabled_templates: int = 10, prepare_ahead_seconds: int = 14400, prebuild_days_ahead: int = 1, max_late_seconds: int = 600, prebuild_enabled: bool | None = None):
+    def __init__(self, store: FBAutoPostStore, pages: PagePoolRepository, materials: MaterialRepository, executor: AutoPostExecutor, preparer: PrepareExecutor, internal_token: str, *, metric_store: FBAutoPostStore | None = None, max_daily_jobs: int = 500, max_publishable_pages: int = 500, max_jobs_per_slot: int = 20, prepare_ahead_seconds: int = 14400, prebuild_days_ahead: int = 1, max_late_seconds: int = 600, prebuild_enabled: bool | None = None):
         self.store, self.pages, self.materials, self.executor, self.preparer, self.internal_token = store, pages, materials, executor, preparer, internal_token
         self.max_daily_jobs, self.max_publishable_pages = int(max_daily_jobs), int(max_publishable_pages)
         self.max_jobs_per_slot = int(max_jobs_per_slot)
-        self.max_enabled_templates, self.prepare_ahead_seconds = int(max_enabled_templates), int(prepare_ahead_seconds)
+        self.prepare_ahead_seconds = int(prepare_ahead_seconds)
         self.prebuild_days_ahead, self.max_late_seconds = int(prebuild_days_ahead), int(max_late_seconds)
         self.prebuild_enabled = bool(executor.live_enabled) if prebuild_enabled is None else prebuild_enabled is True
         self.store.max_late_seconds = self.max_late_seconds
@@ -77,29 +77,12 @@ class Runtime:
         if legacy: raise ServiceError("fb_auto_legacy_queue_conflict", "所选Page池仍被旧版自动发布队列占用", 409, legacy)
         pages = self.pages.list_pages(config["group_ids"], is_admin=bool(template["scope_is_admin"]), owner_user_id=str(template["owner_user_id"]))
         page_ids = {page.page_id for page in pages}
-        other_slot_jobs = 0
-        enabled_sources = self.store.enabled_template_sources(int(template["id"]))
-        enabled_fingerprint = [(int(item["template_id"]),int(item["template_version"])) for item in enabled_sources]
-        for other in enabled_sources:
-            other_pages = self.pages.list_pages(other["config"]["group_ids"], is_admin=other["scope_is_admin"], owner_user_id=other["owner_user_id"])
-            other_slot_jobs += sum(page.eligible_token_count > 0 for page in other_pages)
         publishable = sum(page.eligible_token_count > 0 for page in pages)
-        schedule = config["schedule"]
-        daily_count = len(schedule["times"]) if schedule["mode"] == "fixed" else int(schedule["daily_count"])
-        daily_jobs = daily_capacity(config, pages)
         configured_ids = {p["page_id"] for p in config.get("page_daily_limits", [])}
         if configured_ids - page_ids:
             raise ServiceError("fb_auto_frequency_page_outside_pool", "分档Page不在当前Page池中，请更新频次列表", 409)
-        with self.store.connect() as conn:
-            enabled_count = int(conn.execute("SELECT COUNT(*) FROM fb_auto_template WHERE status='enabled' AND id<>?", (int(template["id"]),)).fetchone()[0])
-        global_slot_jobs = publishable + other_slot_jobs
-        summary = {"total_pages": len(pages), "publishable_pages": publishable, "missing_token_pages": len(pages) - publishable, "daily_frequency": daily_count, "estimated_jobs_per_slot": publishable, "estimated_global_jobs_per_slot": global_slot_jobs, "estimated_daily_gpu_jobs": daily_jobs if config.get("video_template") == "random_overlay" else 0, "estimated_daily_graph_posts": daily_jobs, "capacity_limits": {"publishable_pages": self.max_publishable_pages, "jobs_per_slot": self.max_jobs_per_slot, "daily_jobs": self.max_daily_jobs, "enabled_templates": self.max_enabled_templates, "prepare_ahead_seconds": self.prepare_ahead_seconds, "prebuild_days_ahead": self.prebuild_days_ahead, "max_late_seconds": self.max_late_seconds}}
-        summary["_enabled_fingerprint"] = enabled_fingerprint
         if not pages: raise ServiceError("fb_auto_page_pool_empty", "所选Page池没有有效Page", 409)
         if not publishable: raise ServiceError("fb_auto_page_pool_unpublishable", "所选Page池没有任何可发布Page", 409)
-        summary["capacity_scope"] = "template_slot"
-        if publishable > self.max_publishable_pages or publishable > self.max_jobs_per_slot or daily_jobs > self.max_daily_jobs or enabled_count + 1 > self.max_enabled_templates:
-            raise ServiceError("fb_auto_capacity_exceeded", f"容量门禁拒绝启用：可发布Page {publishable}/{self.max_publishable_pages}，本模板单批任务 {publishable}/{self.max_jobs_per_slot}，每日发布任务 {daily_jobs}/{self.max_daily_jobs}，启用模板 {enabled_count + 1}/{self.max_enabled_templates}", 409)
         if config.get("video_template") not in VIDEO_TEMPLATES:
             raise ServiceError("fb_auto_video_template_required", "请选择随机排重模板或不制作（使用原视频）", 409)
         today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).date()
@@ -110,7 +93,16 @@ class Runtime:
             validate_rules(config)
         else:
             self.metric_store.load_metric_window(product="Dramawave", platform=0, dates=metric_dates)
-        return summary
+        daily_jobs = daily_capacity(config, pages)
+        return {
+            "total_pages": len(pages),
+            "publishable_pages": publishable,
+            "missing_token_pages": len(pages) - publishable,
+            "daily_frequency": frequency(config),
+            "estimated_jobs_per_slot": publishable,
+            "estimated_daily_gpu_jobs": daily_jobs if config.get("video_template") == "random_overlay" else 0,
+            "estimated_daily_graph_posts": daily_jobs,
+        }
 
     def tick(self) -> Dict[str, Any]:
         if not self._tick_lock.acquire(blocking=False):
@@ -149,9 +141,6 @@ class Runtime:
                 expected_due_id=int(due["id"]),
                 expected_due_lease_owner=str(due["lease_owner"]),
                 expected_due_lease_expires_at_utc=str(due["lease_expires_at_utc"]),
-                max_publishable_pages=self.max_publishable_pages,
-                max_jobs_per_slot=self.max_jobs_per_slot,
-                max_daily_jobs=self.max_daily_jobs,
             )
             self.store.complete_due_slot(int(due["id"]), run_id=int(result["run_id"]), expected_lease_owner=str(due["lease_owner"]), expected_lease_expires_at_utc=str(due["lease_expires_at_utc"]))
             return result
@@ -314,8 +303,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ServiceError("invalid_request", "保护未提交任务的截止时间必须为含时区的ISO时间", 400)
                 template = self.runtime.store.get_template(template_id, actor)
                 summary = self.runtime.validate_activation(template) if action == "enable" else {}
-                fingerprint = summary.pop("_enabled_fingerprint", None)
-                result = {"ok": True, "template": self.runtime.store.set_template_status(template_id, action == "enable", actor, payload["expected_version"], expected_enabled_fingerprint=fingerprint, preserve_unsubmitted_before_utc=payload.get("preserve_unsubmitted_before_utc")), "page_summary": summary}
+                result = {"ok": True, "template": self.runtime.store.set_template_status(template_id, action == "enable", actor, payload["expected_version"], preserve_unsubmitted_before_utc=payload.get("preserve_unsubmitted_before_utc")), "page_summary": summary}
             elif action == "run-now" and "drama_id" in payload:
                 from .hit_drama import publish_drama
                 result = publish_drama(self.runtime, template_id, actor, payload)
@@ -393,12 +381,11 @@ def build_runtime(environ: Mapping[str, str] | None = None) -> Runtime:
         "max_daily_jobs": int(env.get("FB_AUTO_MAX_DAILY_JOBS", "500")),
         "max_publishable_pages": int(env.get("FB_AUTO_MAX_PUBLISHABLE_PAGES", "500")),
         "max_jobs_per_slot": int(env.get("FB_AUTO_MAX_JOBS_PER_SLOT", "20")),
-        "max_enabled_templates": int(env.get("FB_AUTO_MAX_ENABLED_TEMPLATES", "10")),
         "prepare_ahead_seconds": int(env.get("FB_AUTO_PREPARE_AHEAD_SECONDS", "14400")),
         "prebuild_days_ahead": int(env.get("FB_AUTO_PREBUILD_DAYS_AHEAD", "1")),
         "max_late_seconds": int(env.get("FB_AUTO_MAX_LATE_SECONDS", "600")),
     }
-    if not 1 <= limits["max_daily_jobs"] <= 100000 or not 1 <= limits["max_publishable_pages"] <= 10000 or not 1 <= limits["max_jobs_per_slot"] <= 5000 or not 1 <= limits["max_enabled_templates"] <= 1000 or not 3600 <= limits["prepare_ahead_seconds"] <= 86400 or not 0 <= limits["prebuild_days_ahead"] <= 7 or not 0 <= limits["max_late_seconds"] <= 86400:
+    if not 1 <= limits["max_daily_jobs"] <= 100000 or not 1 <= limits["max_publishable_pages"] <= 10000 or not 1 <= limits["max_jobs_per_slot"] <= 5000 or not 3600 <= limits["prepare_ahead_seconds"] <= 86400 or not 0 <= limits["prebuild_days_ahead"] <= 7 or not 0 <= limits["max_late_seconds"] <= 86400:
         raise ValueError("FB auto capacity configuration invalid")
     runtime = Runtime(store, pages, materials, executor, preparer, token, metric_store=metric_store, prebuild_enabled=prebuild_enabled, **limits)
     from features.fb_video_publish.core import Store as ManualStore

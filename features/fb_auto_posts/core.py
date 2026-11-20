@@ -363,7 +363,7 @@ class FBAutoPostStore:
             conn.commit()
             return self._template_dto(self._template_row(conn, template_id, actor))
 
-    def set_template_status(self, template_id: int, enabled: bool, actor: ActorScope, version: Any, *, expected_enabled_fingerprint: Sequence[tuple[int,int]] | None = None, preserve_unsubmitted_before_utc: str | None = None) -> Dict[str, Any]:
+    def set_template_status(self, template_id: int, enabled: bool, actor: ActorScope, version: Any, *, preserve_unsubmitted_before_utc: str | None = None) -> Dict[str, Any]:
         expected, now = expected_version(version), utc_iso(self.now_fn())
         preserve_cutoff = None
         if preserve_unsubmitted_before_utc is not None:
@@ -402,10 +402,6 @@ class FBAutoPostStore:
                     raise StoreError("fb_auto_disable_unsubmitted_conflict", "模板存在执行中、手动或保护截止时间之前的未提交任务，本次未停用或修改任务，请等待完成后重试", 409)
             if not enabled and conn.execute("SELECT 1 FROM fb_auto_task WHERE template_id=? AND status='running' LIMIT 1", (template_id,)).fetchone():
                 raise StoreError("fb_auto_template_running_change_denied", "模板存在正在向Meta提交的任务，请等待发布结果落账后再停用", 409)
-            if enabled and expected_enabled_fingerprint is not None:
-                current = {(int(item[0]),int(item[1])) for item in conn.execute("SELECT id,current_version FROM fb_auto_template WHERE status='enabled' AND id<>?", (template_id,))}
-                if current != set(expected_enabled_fingerprint):
-                    raise StoreError("fb_auto_capacity_snapshot_changed", "启用模板集合在校验期间变化，请重新启用以复核容量", 409)
             if not enabled:
                 conn.execute(
                     "UPDATE fb_auto_due_slot SET status='pending',error_code='fb_auto_due_slot_template_disabled',lease_owner='',lease_expires_at_utc='',available_at_utc=?,updated_at_utc=? WHERE template_id=? AND trigger_type='auto' AND status='preparing'",
@@ -617,8 +613,7 @@ class FBAutoPostStore:
                 or expected_template_version is None
             ):
                 raise StoreError("fb_auto_due_slot_template_changed", "模板已停用或版本已变化，原计划时隙不再执行", 409)
-            # Expired workers must reach a visible terminal/quarantined state
-            # before applying the unchanged per-template backlog capacity gate.
+            # Resolve expired workers before evaluating Page reservations.
             self.maintenance_tick()
             config = _loads(template["config_json"], {})
             if hit_drama:
@@ -632,8 +627,7 @@ class FBAutoPostStore:
             if existing and upcoming_claim is None and conn.execute(
                     'SELECT 1 FROM fb_auto_mobo_plan WHERE run_id=?',(existing[0],)).fetchone():
                 return {"ok": True, "run_id": int(existing[0]), "idempotent": True}
-            # Freeze the first observed target set before authorization, backlog,
-            # capacity and material preflight can prevent a run from being created.
+            # Freeze the first observed target set before Page and material preflight.
             # Reuse the same Page read below; audit data never drives publication.
             page_rows = pages.list_pages(config["group_ids"], is_admin=scope_admin, owner_user_id=scope_owner)
             if hit_drama and hit_drama.get('match_policy'):
@@ -651,24 +645,27 @@ class FBAutoPostStore:
             error = StoreError("fb_auto_legacy_queue_conflict", "所选Page池仍被旧版自动发布队列占用", 409)
             error.conflicts = legacy
             raise error
-        # Templates may share a group or individual Pages. Each template's slot
-        # has its own capacity; actual Page writes retain the execution mutex.
-        enabled_others = self.enabled_template_sources(template_id)
-        enabled_fingerprint = {(template_id, int(template["current_version"]))} if template['status'] == 'enabled' else set()
-        for other in enabled_others:
-            enabled_fingerprint.add((int(other["template_id"]), int(other["template_version"])))
-        total, publishable = len(page_rows), sum(1 for page in page_rows if page.eligible_token_count > 0)
-        schedule = config["schedule"]
-        daily_count = len(schedule["times"]) if schedule["mode"] == "fixed" else int(schedule["daily_count"])
-        if trigger_type == "auto" or any(value is not None for value in (max_publishable_pages,max_jobs_per_slot,max_daily_jobs)):
-            if total == 0 and upcoming_claim is None:
-                raise StoreError("fb_auto_page_pool_empty", "所选Page池当前没有有效Page，未创建空运行", 409)
-            if publishable == 0 and upcoming_claim is None:
-                raise StoreError("fb_auto_page_pool_unpublishable", "所选Page池当前没有可发布Page，未创建运行", 409)
-            if ((max_publishable_pages is not None and publishable > int(max_publishable_pages))
-                    or (max_jobs_per_slot is not None and publishable > int(max_jobs_per_slot))
-                    or (max_daily_jobs is not None and daily_capacity(config, page_rows) > int(max_daily_jobs))):
-                raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
+        # Only explicit one-off callers supply a batch budget. Scheduled and
+        # ordinary manual plans still require an eligible Page in both reads.
+        bounded = any(limit is not None for limit in (max_publishable_pages, max_jobs_per_slot, max_daily_jobs))
+        require_eligible = upcoming_claim is None and (trigger_type == "auto" or expected_template_version is not None or bounded)
+
+        def checked_page_counts(rows):
+            publishable = sum(page.eligible_token_count > 0 for page in rows)
+            if require_eligible:
+                if not rows:
+                    raise StoreError("fb_auto_page_pool_empty", "所选Page池当前没有有效Page，未创建空运行", 409)
+                if not publishable:
+                    raise StoreError("fb_auto_page_pool_unpublishable", "所选Page池当前没有可发布Page，未创建运行", 409)
+            if bounded:
+                daily_jobs = daily_capacity(config, rows)
+                if ((max_publishable_pages is not None and publishable > int(max_publishable_pages))
+                        or (max_jobs_per_slot is not None and publishable > int(max_jobs_per_slot))
+                        or (max_daily_jobs is not None and daily_jobs > int(max_daily_jobs))):
+                    raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_jobs}/{max_daily_jobs or '-'}", 409)
+            return len(rows), publishable
+
+        checked_page_counts(page_rows)
         source_pages = upcoming_claim.scoped(page_rows) if upcoming_claim else page_rows
         with self.connect() as conn:
             max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in source_pages),default=0)
@@ -688,10 +685,7 @@ class FBAutoPostStore:
             '_profile_selection':profile_enabled,
             '_page_caption_description':page_caption.needs_description(caption_snapshot)},source_pages,materials,caption_snapshot)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
-        # Catalog/metric freezing can be the longest read in planning.  Re-read
-        # every mutable Page-side input afterwards so a pool disable, membership
-        # growth, token loss, legacy enable, or sibling-template enable cannot
-        # create an empty or over-capacity run from a stale snapshot.
+        # Refresh membership, language and authorization after the catalog read.
         legacy = pages.legacy_conflicts(config["group_ids"])
         if legacy:
             error = StoreError("fb_auto_legacy_queue_conflict", "所选Page池仍被旧版自动发布队列占用", 409)
@@ -704,19 +698,7 @@ class FBAutoPostStore:
         if any(page_language(page.language) and (page.page_id not in candidate_snapshots or
                 page_language(page.language)!=caption_languages.get(page.page_id)) for page in (upcoming_claim.scoped(page_rows) if upcoming_claim else page_rows)):
             raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
-        enabled_fingerprint = {(template_id, int(template["current_version"]))} if template['status'] == 'enabled' else set()
-        for other in self.enabled_template_sources(template_id):
-            enabled_fingerprint.add((int(other["template_id"]), int(other["template_version"])))
-        total, publishable = len(page_rows), sum(page.eligible_token_count > 0 for page in page_rows)
-        if trigger_type == "auto" or any(value is not None for value in (max_publishable_pages,max_jobs_per_slot,max_daily_jobs)):
-            if total == 0 and upcoming_claim is None:
-                raise StoreError("fb_auto_page_pool_empty", "所选Page池当前没有有效Page，未创建空运行", 409)
-            if publishable == 0 and upcoming_claim is None:
-                raise StoreError("fb_auto_page_pool_unpublishable", "所选Page池当前没有可发布Page，未创建运行", 409)
-            if ((max_publishable_pages is not None and publishable > int(max_publishable_pages))
-                    or (max_jobs_per_slot is not None and publishable > int(max_jobs_per_slot))
-                    or (max_daily_jobs is not None and daily_capacity(config, page_rows) > int(max_daily_jobs))):
-                raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
+        total, publishable = checked_page_counts(page_rows)
         slot_times = None
         if not target_slot and (config.get('page_daily_limits') or 'default_daily_count' in config):
             slot_date = datetime.fromisoformat(planned_publish_at_utc or utc_iso(self.now_fn())).astimezone(BEIJING).date().isoformat()
@@ -743,13 +725,6 @@ class FBAutoPostStore:
                     expected_due_lease_owner=expected_due_lease_owner,
                     expected_due_lease_expires_at_utc=expected_due_lease_expires_at_utc,
                 )
-            if trigger_type == "auto" or expected_template_version is not None:
-                current_enabled = {(int(row[0]), int(row[1])) for row in conn.execute("SELECT id,current_version FROM fb_auto_template WHERE status='enabled'")}
-                if target_slot:
-                    enabled_fingerprint.discard((template_id, int(template["current_version"])))
-                    enabled_fingerprint.add((template_id, int(current["current_version"])))
-                if current_enabled != enabled_fingerprint:
-                    raise StoreError("fb_auto_capacity_snapshot_changed", "启用模板集合在计划期间变化，请重试容量复核", 409)
             if existing and hit_drama:
                 result = receipt(conn, template_id, slot_key, hit_drama['request'])
                 conn.commit()

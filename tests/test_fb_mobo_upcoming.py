@@ -96,6 +96,7 @@ class UpcomingPageTests(unittest.TestCase):
         return self.store.get_run(rid,self.actor)['run']
 
     def test_partial_release_wait_no_material_then_fill_original_slot(self):
+        self.runtime.max_publishable_pages = 1
         first=self.manual()
         rid=first['run_id']
         self.assertEqual(first['summary']['waiting_mobo'],1)

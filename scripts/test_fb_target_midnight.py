@@ -5,10 +5,12 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import Mock
 
 from features import social_random_schedule as daily
 from features.fb_auto_posts.core import ActorScope, FBAutoPostStore
 from features.fb_auto_posts.repositories import CandidateSnapshot, MaterialCandidate, PageTarget
+from features.fb_auto_posts.service import Runtime
 from features.fb_auto_posts import target_schedule
 from scripts.test_fb_auto_validation import payload
 
@@ -51,6 +53,27 @@ class TargetMidnightTests(unittest.TestCase):
     def tasks(self):
         with self.store.connect() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM fb_auto_task ORDER BY page_id,planned_publish_at_utc")]
+
+    def test_template_enable_and_planning_exceed_explicit_batch_limits(self):
+        runtime = Runtime(self.store, Pages(), Materials(), SimpleNamespace(live_enabled=True),
+                          SimpleNamespace(), "fixture", metric_store=Mock(),
+                          max_publishable_pages=1, max_jobs_per_slot=1, max_daily_jobs=1)
+        tid = self.template["id"]
+        disabled = self.store.set_template_status(tid, False, self.actor, 1)
+        summary = runtime.validate_activation(disabled)
+        self.assertEqual((summary["publishable_pages"], summary["estimated_daily_graph_posts"]), (2, 4))
+        self.store.set_template_status(tid, True, self.actor, 1)
+        self.store.enqueue_manual_due_slot(tid, self.actor, expected_template_version=1,
+                                           operation_id="capacity-manual-round")
+        manual = runtime.plan_next("planner")
+        self.assertEqual(manual["summary"]["queued_tasks"], 2)
+        with self.store.connect() as conn:
+            row = conn.execute("SELECT trigger_type FROM fb_auto_run WHERE id=?", (manual["run_id"],)).fetchone()
+        self.assertEqual(row[0], "manual")
+        self.now += timedelta(days=1)
+        self.store.enqueue_due_slots(live_enabled=True, prebuild_days_ahead=1)
+        scheduled = runtime.plan_next("planner")
+        self.assertEqual(scheduled["summary"]["queued_tasks"], 2)
 
     def test_midnight_independent_times_and_restart(self):
         self.assertEqual(len(self.plan()),2)

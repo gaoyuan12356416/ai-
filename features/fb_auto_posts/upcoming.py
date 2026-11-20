@@ -201,8 +201,7 @@ def resume(runtime, lease_seconds):
         return runtime.store.create_run(r['template_id'],r['slot_key'],r['trigger_type'],
             ActorScope('scheduler','自动调度',item.scope_admin,item.owner),runtime.pages,runtime.materials,
             planned_publish_at_utc=r['planned_publish_at_utc'],expected_template_version=r['template_version'],
-            max_publishable_pages=runtime.max_publishable_pages,max_jobs_per_slot=runtime.max_jobs_per_slot,
-            max_daily_jobs=runtime.max_daily_jobs,upcoming_claim=item)
+            upcoming_claim=item)
     except (RepositoryError,StoreError) as exc:
         defer(runtime.store,item,exc.code)
         return {'ok': False,'status': 'deferred','run_id': r['id'],'error': exc.code}
