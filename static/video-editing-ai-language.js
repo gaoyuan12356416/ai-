@@ -58,7 +58,16 @@
     const voiceFingerprint=()=>[field('language').value,field('speed').value,field('voiceType').value,field(field('voiceType').value==='cues'?'target':'speechText').value].join('\n');
     for(const k of ['language','speed','speechText','target','voiceType'])field(k).addEventListener('input',clearVoice);
     decorate('extract','正在读取内嵌字幕、原声或画面文字',async()=>{
-      const result=await request('/generate',{mode:'transcribe',task_id:taskId,source_language:field('sourceLanguage').value});
+      let job=await request('/generate',{mode:'transcribe',async:true,task_id:taskId,source_language:field('sourceLanguage').value});
+      while(['queued','running'].includes(job.status)){
+        if(!d.open)return;
+        say(job.total?'正在识别字幕 '+job.done+' / '+job.total+' 段':'字幕识别已排队，完成后自动载入');
+        await new Promise(resolve=>setTimeout(resolve,2500));
+        job=await request('/transcripts/'+job.id);
+      }
+      if(!d.open)return;
+      if(job.status!=='completed')throw new Error(job.error||'字幕识别失败');
+      const result=job.result;
       field('source').value=subs.toSrt(result.cues);say(result.note+' 共 '+result.cues.length+' 段。');
     });
     decorate('translate','正在翻译字幕',async()=>{

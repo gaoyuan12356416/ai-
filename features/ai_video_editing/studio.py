@@ -407,6 +407,14 @@ def prepare(rt, actor, analysis, config):
         ]
         warnings = []
     translated = {}
+    # Plan every variant before reading media, so shared/overlapping source
+    # windows are recognized once and never fall back to the entire source.
+    recognition_ranges = {}
+    for unit in units:
+        for c in unit["clips"]:
+            recognition_ranges.setdefault(c["source_id"], []).append(
+                (c["start_ms"], c["end_ms"])
+            )
     prepared = {}
     for unit in units:
         # Different visual variants of the same script share their timed language assets.
@@ -477,7 +485,8 @@ def prepare(rt, actor, analysis, config):
                         from .cloud_media import materialize
                         materialize(rt, asset)
                     translated[sid] = transcribe(
-                        asset["path"], translation["source_language"]
+                        asset["path"], translation["source_language"],
+                        ranges=recognition_ranges[sid], temp_dir=rt.root,
                     )["cues"]
                 for cue in translated[sid]:
                     a = max(c["start_ms"], cue["start"])
@@ -495,13 +504,25 @@ def prepare(rt, actor, analysis, config):
         if translation:
             check(cues, "subtitle_empty", "未识别到字幕，请调整素材或源语种")
             spoken = []
-            for first in range(0, len(cues), 100):
+            batches = []
+            batch, characters = [], 0
+            for cue in cues:
+                size = len(cue["text"])
+                check(size <= 12000, "subtitle_limit", "单段字幕超过 12000 字，请拆分字幕")
+                if batch and (len(batch) >= 100 or characters + size > 12000):
+                    batches.append(batch)
+                    batch, characters = [], 0
+                batch.append(cue)
+                characters += size
+            if batch:
+                batches.append(batch)
+            for batch in batches:
                 spoken.extend(
                     generate(
                         {
                             "mode": "translate",
                             "language": translation["language"],
-                            "cues": cues[first : first + 100],
+                            "cues": batch,
                         }
                     )["cues"]
                 )

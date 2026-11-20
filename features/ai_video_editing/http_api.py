@@ -241,8 +241,14 @@ class Handler(platform.DramaMaterialHandler):
                 return self.stream(rt.root/'outputs'/(m[1]+'.mp4'),rec['item']['name']+'.mp4',download=q('download')=='1')
         if path.startswith('/language/'):
             from . import language_tools as lang
+            from . import transcript_jobs
+            transcript_job = re.fullmatch(r'/language/transcripts/(tr_[a-f0-9]{32})', path)
+            if transcript_job and verb == 'GET':
+                return self.reply(200, transcript_jobs.receipt(rt, actor, transcript_job[1]))
             if path=='/language/capabilities' and verb=='GET':return self.reply(200,lang.capabilities())
             if path=='/language/generate' and verb=='POST':
+                if body.get('mode') == 'transcribe' and body.get('async') is True:
+                    return self.reply(202, transcript_jobs.submit(rt, actor, body))
                 task=body.get('task_id')
                 if task:
                     rec=rt.list_records('tasks',actor,task)['item']
@@ -283,6 +289,8 @@ def main():
     rt.cloud = CloudUploads(rt, platform.get_cos_client(timeout=20, retry=0), platform.COS_BUCKET, platform.COS_REGION)
     from .studio import start
     start(rt)
+    from .transcript_jobs import start as start_transcripts
+    start_transcripts(rt)
     from .catalog import Catalog
     from .catalog_imports import start as start_imports
     catalog = Catalog(platform)
