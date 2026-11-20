@@ -71,7 +71,11 @@ def prepare(folder):
         test_file = module.replace(".", "/") + ".py"
         shutil.copy2(SOURCE / test_file, candidate / test_file)
     with tempfile.TemporaryDirectory(dir=folder) as temp:
-        env = dict(os.environ, STORY_COPY_ROOT=temp, FB_AUTO_PROFILE_ROOT=temp, FB_AUTO_POST_SHORT_LINK_ROOT=temp)
+        support = Path(temp) / "scripts"
+        support.mkdir()
+        shutil.copy2(SOURCE / "scripts/recover_fb_skipped_runs.py", support)
+        env = dict(os.environ, PYTHONPATH=temp, STORY_COPY_ROOT=temp, FB_AUTO_PROFILE_ROOT=temp,
+                   FB_AUTO_POST_SHORT_LINK_ROOT=temp)
         proof = subprocess.run([sys.executable, "-B", "-m", "unittest", "-q", TEST, "scripts.test_fb_auto_validation",
                                 "scripts.test_fb_hit_drama", "tests.test_fb_hit_material_batch.BatchTests",
                                 "tests.test_fb_mobo_launch_window", "tests.test_fb_skipped_recovery"],
