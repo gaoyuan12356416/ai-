@@ -986,8 +986,10 @@
 
   function buildNavHtml(config, options) {
     return sortItems(config).map(group => {
-      if (!visibleFor(options.auth || {}, group)) return "";
-      const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item));
+      const groupAllowed = visibleFor(options.auth || {}, group);
+      const effectsOnly = group.key === "x_platform" && group.enabled !== false && !group.adminOnly && userCan(options.auth || {}, "x_material_effects");
+      if (!groupAllowed && !effectsOnly) return "";
+      const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item) && (groupAllowed || item.key === "xMaterialEffects"));
       if (!items.length) return "";
       return renderGroup(group, items, options.activeKey);
     }).join("");
