@@ -40,6 +40,7 @@ SOURCES = {
 TAG_POSTS = "/mnt/data-disk/x-tag-publisher/posts.sqlite3"
 SOURCES["tm"] = ("x_material", TAG_POSTS, "x_post_queue")
 RETRY_DELAY_SECONDS = 60
+NEAR_PUBLISH_SECONDS = 300
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS switches(id INTEGER PRIMARY KEY,endpoint TEXT,enabled INTEGER,marks TEXT,actor TEXT,at REAL);
 CREATE INDEX IF NOT EXISTS switch_endpoint ON switches(endpoint,id DESC);
@@ -146,7 +147,19 @@ def enqueue(c, task):
     if not eligible(c, task["family"], task["ordinal"]):
         return False
     manual = task.get("manual")
-    if c.execute("SELECT 1 FROM jobs WHERE key=?", (task["key"],)).fetchone():
+    existing = c.execute(
+        "SELECT state,json_extract(payload,'$.publish_at') AS publish_at FROM jobs WHERE key=?",
+        (task["key"],),
+    ).fetchone()
+    if existing:
+        # Refresh only queue priority, never frozen facts or an accepted/final draft.
+        if existing["state"] in ("pending", "retry_wait") and existing["publish_at"] != task.get("publish_at"):
+            c.execute(
+                """UPDATE jobs SET payload=json_set(payload,'$.publish_at',?)
+                WHERE key=? AND state IN ('pending','retry_wait')
+                AND json_extract(payload,'$.publish_at') IS NOT ?""",
+                (task.get("publish_at"), task["key"], task.get("publish_at")),
+            )
         return True
     task = dict(task, facts=dict(task["facts"]))
     for row in c.execute(
@@ -181,24 +194,36 @@ def claim(c):
     c.execute("BEGIN IMMEDIATE")
     now = time.time()
     row = c.execute(
-        """SELECT product,content,lang FROM jobs WHERE state='pending' GROUP BY product,content,lang
-        HAVING count(*)>=100 OR min(created)<=? OR max(coalesce(json_extract(payload,'$.urgent'),0))=1
-        ORDER BY min(created) LIMIT 1""",
-        (now - 60,),
+        """SELECT product,content,lang,
+        min(coalesce(json_extract(payload,'$.publish_at'),created)) AS due
+        FROM jobs WHERE state='pending' GROUP BY product,content,lang
+        HAVING count(*)>=100 OR min(created)<=?
+          OR max(coalesce(json_extract(payload,'$.urgent'),0))=1
+          OR min(json_extract(payload,'$.publish_at'))<=?
+        ORDER BY due,min(created),product,content,lang LIMIT 1""",
+        (now - 60, now + NEAR_PUBLISH_SECONDS),
     ).fetchone()
     # Carry failures into the next ready queue, even if its drama/language differs.
     # With no new work, retry after one normal collection window instead of waiting forever.
     rows = c.execute(
-        """SELECT j.key,j.payload FROM jobs j JOIN retries r ON r.key=j.key
+        """SELECT j.key,j.payload,j.created,
+        coalesce(json_extract(j.payload,'$.publish_at'),j.created) AS due
+        FROM jobs j JOIN retries r ON r.key=j.key
         WHERE j.state='retry_wait' AND r.state='pending' AND (r.retry_after<=? OR ?)
-        ORDER BY r.created,j.key LIMIT 100""",
+        ORDER BY due,r.created,j.key LIMIT 100""",
         (now, row is not None),
     ).fetchall()
-    if row and len(rows) < 100:
+    if row:
         rows += c.execute(
-            "SELECT key,payload FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=? ORDER BY created,key LIMIT ?",
-            (*row, 100 - len(rows)),
+            """SELECT key,payload,created,
+            coalesce(json_extract(payload,'$.publish_at'),created) AS due
+            FROM jobs WHERE state='pending' AND product=? AND content=? AND lang=?
+              AND coalesce(json_extract(payload,'$.publish_at'),created)<=?
+            ORDER BY due,created,key LIMIT 100""",
+            (row["product"], row["content"], row["lang"],
+             max(now, row["due"]) + NEAR_PUBLISH_SECONDS),
         ).fetchall()
+    rows = sorted(rows, key=lambda r: (r["due"], r["created"], r["key"]))[:100]
     if not rows:
         c.commit()
         return None, []

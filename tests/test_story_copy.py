@@ -4,7 +4,10 @@ import json
 import random
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -87,6 +90,177 @@ class CaptionTests(unittest.TestCase):
             turn=sentence(),
             tags=["ShortDrama", "Mystery"],
         )
+
+    def test_deadline_priority_and_near_group_does_not_claim_tomorrows_work(self):
+        now = time.time()
+        later = dict(self.task(1), content="old-group", publish_at=now + 7200)
+        near = dict(self.task(2), content="near-group", publish_at=now + 30, urgent=False)
+        tomorrow = dict(self.task(3), content="near-group", publish_at=now + 86400)
+        sooner = dict(self.task(4), content="near-group", publish_at=now + 10, urgent=False)
+        with store.connection() as c:
+            for t in (later, near, tomorrow, sooner):
+                store.enqueue(c, t)
+            c.commit()
+            _, rows = store.claim(c)
+            self.assertEqual([t["key"] for t in rows], [sooner["key"], near["key"]])
+            _, rows = store.claim(c)
+            self.assertEqual([t["key"] for t in rows], [later["key"]])
+
+    def test_future_schedule_retains_collection_window(self):
+        now = time.time()
+        with store.connection() as c:
+            t = dict(self.task(1), urgent=False, publish_at=now + 3600)
+            store.enqueue(c, t)
+            c.commit()
+            self.assertFalse(store.claim(c)[1])
+            with patch.object(store.time, "time", return_value=now + 61):
+                self.assertEqual(len(store.claim(c)[1]), 1)
+
+    def test_deadline_refresh_preserves_facts_and_finalized_copy(self):
+        t = dict(self.task(1), publish_at=100)
+        with store.connection() as c:
+            store.enqueue(c, t)
+            changed = dict(t, publish_at=200, facts={"series": "Changed source fact"})
+            store.enqueue(c, changed)
+            payload = json.loads(c.execute("SELECT payload FROM jobs").fetchone()[0])
+            self.assertEqual(payload["publish_at"], 200)
+            self.assertEqual(payload["facts"], t["facts"])
+            c.execute("UPDATE jobs SET state='ready'")
+            c.commit()
+            store.enqueue(c, dict(t, publish_at=300))
+            self.assertFalse(c.in_transaction)
+            self.assertEqual(json.loads(c.execute("SELECT payload FROM jobs").fetchone()[0]), payload)
+
+    def test_due_fresh_job_precedes_future_retry(self):
+        now = time.time()
+        with store.connection() as c:
+            old = dict(self.task(1), publish_at=now + 3600)
+            store.enqueue(c, old)
+            c.commit()
+            b, rows = store.claim(c)
+            worker.generate_batch(c, b, rows, self.provider_down)
+            fresh = dict(self.task(2), content="near", publish_at=now + 10)
+            store.enqueue(c, fresh)
+            c.commit()
+            _, rows = store.claim(c)
+            self.assertEqual([t["key"] for t in rows], [fresh["key"], old["key"]])
+
+    def test_native_schedule_mapping_all_entry_points(self):
+        stamp = "2026-11-20T01:00:00Z"
+        epoch = sources.publish_time(stamp)
+        self.assertEqual(epoch, sources.publish_time("invalid", "2026-11-20T09:00:00+08:00"))
+        self.assertIsNone(sources.publish_time("invalid", ""))
+        fb = dict(id=1, content_id="story", planned_publish_at_utc=stamp)
+        self.assertEqual(sources.fb_task("fa", fb)["publish_at"], epoch)
+        video = dict(_ord=1, task_id="v1", content_id="story", planned_at_utc=stamp)
+        self.assertEqual(sources.fb_task("fv", video)["publish_at"], epoch)
+        tag = dict(id=1, content_id="story", material_id="m1", language="en", template_version=1,
+                   scheduled_at_utc=stamp, selection_json={"material": {"material_id": "m1", "content_id": "story"}})
+        self.assertEqual(sources.tag_task(tag)["publish_at"], epoch)
+        with store.connection(self.fb) as c:
+            c.execute("CREATE TABLE x_post_manual_run(id INTEGER,trigger_source TEXT,scheduled_at TEXT,planned_publish_at_utc TEXT,external_task_key TEXT,template_version INTEGER,copy_contract_version INTEGER)")
+            c.execute("INSERT INTO x_post_manual_run VALUES(1,'manual',?,'','',1,1)", (stamp,))
+            c.execute("CREATE TABLE x_post_schedule_run(id INTEGER,run_date TEXT,publish_time TEXT,planned_publish_at_utc TEXT)")
+            c.execute("INSERT INTO x_post_schedule_run VALUES(1,'2026-11-20','09:00:00','')")
+            row = dict(id=1, manual_run_id=1, source_type="material", content_id="story", material_id="m1",
+                       material_language="en", drama_name="Title", description="Fact")
+            self.assertEqual(sources.x_task(c, row)["publish_at"], epoch)
+            row.update(manual_run_id=None, schedule_run_id=1)
+            self.assertEqual(sources.x_task(c, row)["publish_at"], epoch)
+
+    def test_three_generation_workers_claim_once_and_overlap(self):
+        tasks = [dict(self.task(i), content="story-" + str(i)) for i in range(1, 4)]
+        with store.connection() as c:
+            for t in tasks:
+                store.enqueue(c, t)
+        barrier = threading.Barrier(3)
+        seen = []
+        lock = threading.Lock()
+
+        def run(rows, emit, usage):
+            with lock:
+                seen.extend(t["key"] for t in rows)
+            barrier.wait(timeout=10)
+            for t in rows:
+                emit(self.item(t))
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(worker.generation_cycle, run) for _ in range(3)]
+            self.assertTrue(all(f.result(timeout=15) for f in futures))
+        self.assertCountEqual(seen, [t["key"] for t in tasks])
+        with store.connection() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM jobs WHERE state='ready'").fetchone()[0], 3)
+            self.assertEqual(c.execute("SELECT count(*) FROM batches WHERE finished IS NOT NULL AND accepted=1").fetchone()[0], 3)
+            self.assertEqual(c.execute("SELECT count(*) FROM retries").fetchone()[0], 0)
+
+    def test_live_batch_recovery_does_not_interrupt_other_worker(self):
+        with store.connection() as c:
+            for i in (1, 2):
+                store.enqueue(c, dict(self.task(i), content="story-" + str(i)))
+        barrier = threading.Barrier(2)
+        release = threading.Event()
+        original = worker.generate_batch
+
+        def generate(c, batch, rows, runner):
+            barrier.wait(timeout=10)
+            if rows[0]["key"] == "slot-1":
+                raise RuntimeError("fixture worker failure")
+            self.assertTrue(release.wait(timeout=10))
+            original(c, batch, rows, lambda items, emit, usage: [emit(self.item(t)) for t in items])
+
+        with patch.object(worker, "generate_batch", side_effect=generate), ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(worker.generation_cycle) for _ in range(2)]
+            try:
+                deadline = time.monotonic() + 10
+                while not any(f.done() for f in futures) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                failed = next(f for f in futures if f.done())
+                with self.assertRaisesRegex(RuntimeError, "fixture worker failure"):
+                    failed.result()
+                with store.connection() as c:
+                    self.assertEqual(c.execute("SELECT state FROM jobs WHERE key='slot-2'").fetchone()[0], "generating")
+                    self.assertEqual(c.execute("SELECT count(*) FROM batches WHERE finished IS NULL").fetchone()[0], 1)
+                    self.assertEqual(c.execute("SELECT count(*) FROM retries WHERE key='slot-2'").fetchone()[0], 0)
+            finally:
+                release.set()
+            for f in futures:
+                if f is not failed:
+                    self.assertTrue(f.result(timeout=10))
+        with store.connection() as c:
+            self.assertEqual(c.execute("SELECT state FROM jobs WHERE key='slot-2'").fetchone()[0], "ready")
+
+    def test_native_receipt_wins_against_inflight_generation(self):
+        task = self.task(1)
+        with store.connection() as c:
+            store.enqueue(c, task)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def run(rows, emit, usage):
+            entered.set()
+            self.assertTrue(release.wait(timeout=10))
+            emit(self.item(task))
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(worker.generation_cycle, run)
+            try:
+                self.assertTrue(entered.wait(timeout=10))
+                with store.connection(self.fb) as native:
+                    bridge.receipt(native, task, "legacy", "not_ready_at_publish", "frozen", "", None)
+                with store.connection() as c:
+                    worker.sync_receipts(c)
+            finally:
+                release.set()
+            self.assertTrue(future.result(timeout=10))
+        with store.connection() as c:
+            row = c.execute("SELECT state,final,draft FROM jobs").fetchone()
+            self.assertEqual(tuple(row), ("legacy", "frozen", None))
+            self.assertEqual(c.execute("SELECT count(*) FROM retries").fetchone()[0], 0)
+
+    def test_worker_concurrency_configuration(self):
+        for value, expected in [("3", 3), ("1", 1), ("0", 3), ("bad", 3)]:
+            with patch.dict("os.environ", {"STORY_COPY_CONCURRENCY": value}):
+                self.assertEqual(worker.concurrency(), expected)
 
     def test_prompt_uses_current_facts_without_history_or_variation(self):
         tasks = [self.task(1), self.task(2, "fa")]
@@ -838,10 +1012,10 @@ class CaptionTests(unittest.TestCase):
                 "CREATE TABLE x_post_queue(id INTEGER,source_type TEXT,manual_run_id INTEGER,content_id TEXT,account_drama_language TEXT,material_language TEXT,drama_name TEXT,description TEXT,material_id TEXT,body_template TEXT)"
             )
             c.execute(
-                "CREATE TABLE x_post_manual_run(id INTEGER,trigger_source TEXT,external_task_key TEXT,template_version INT,copy_contract_version INT)"
+                "CREATE TABLE x_post_manual_run(id INTEGER,trigger_source TEXT,external_task_key TEXT,template_version INT,copy_contract_version INT,planned_publish_at_utc TEXT,scheduled_at TEXT)"
             )
             c.execute(
-                "INSERT INTO x_post_manual_run VALUES(1,'auto_template','x-auto-task-35',7,1)"
+                "INSERT INTO x_post_manual_run VALUES(1,'auto_template','x-auto-task-35',7,1,'','')"
             )
             c.execute(
                 "INSERT INTO x_post_queue VALUES(3,'material',1,'story','ja','ja','TITLE','FACT','55','{{url}}')"

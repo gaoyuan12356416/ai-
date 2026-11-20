@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from datetime import datetime, timezone
 
 from . import store
 from .model import canonical_lang, product
@@ -16,6 +17,19 @@ def obj(raw):
         return value if isinstance(value, dict) else {}
     except (TypeError, ValueError):
         return {}
+
+
+def publish_time(*values):
+    """Native schedules are UTC ISO timestamps; missing values retain FIFO priority."""
+    for value in values:
+        if not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp()
+        except (ValueError, TypeError, OverflowError):
+            continue
+    return None
 
 
 def base(
@@ -60,6 +74,7 @@ def fb_task(family, row):
             extra_link=info.get("link", []),
             manual=False,
             urgent=False,
+            publish_at=publish_time(row.get("planned_publish_at_utc")),
             publish_batch="fb:auto:" + str(row["run_id"]) if row.get("run_id") else "",
         )
     snap = obj(row.get("snapshot_json"))
@@ -83,6 +98,7 @@ def fb_task(family, row):
         clip=mat.get("material_name", ""),
         manual=bool(snap.get("story_copy_manual", False)),
         urgent=row.get("source_kind") == "manual",
+        publish_at=publish_time(row.get("planned_at_utc")),
         publish_batch="fb:video:" + str(row["batch_id"]) if row.get("batch_id") else "",
     )
 
@@ -91,11 +107,23 @@ def x_task(conn, row, tag=False):
     parent = {}
     if row.get("manual_run_id"):
         rec = conn.execute(
-            "SELECT trigger_source,external_task_key,template_version,copy_contract_version FROM x_post_manual_run WHERE id=?",
+            "SELECT trigger_source,external_task_key,template_version,copy_contract_version,"
+            "planned_publish_at_utc,scheduled_at FROM x_post_manual_run WHERE id=?",
             (row["manual_run_id"],),
         ).fetchone()
         if rec:
             parent = dict(rec)
+    timing = parent
+    if row.get("schedule_run_id"):
+        rec = conn.execute(
+            "SELECT planned_publish_at_utc,run_date,publish_time FROM x_post_schedule_run WHERE id=?",
+            (row["schedule_run_id"],),
+        ).fetchone()
+        timing = dict(rec) if rec else {}
+    publish_at = publish_time(timing.get("planned_publish_at_utc"), timing.get("scheduled_at"))
+    if publish_at is None and timing.get("run_date") and timing.get("publish_time"):
+        # Native fixed pool schedules store Beijing wall time separately.
+        publish_at = publish_time(timing["run_date"] + "T" + timing["publish_time"] + "+08:00")
     if tag and parent.get("trigger_source") == "auto_template":
         key = re.fullmatch(
             r"x-auto-task-(\d+)", str(parent.get("external_task_key", ""))
@@ -114,6 +142,7 @@ def x_task(conn, row, tag=False):
             row["description"],
             parent.get("template_version"),
             material_id=row["material_id"],
+            publish_at=publish_at,
         )
     if (
         parent.get("trigger_source") == "auto_template"
@@ -154,6 +183,7 @@ def x_task(conn, row, tag=False):
         clip=row.get("material_name", ""),
         material_id=row["material_id"],
         urgent=bool(parent),
+        publish_at=publish_at,
     )
     # Accept episode-specific evidence only when it carries both identities.
     evidence = obj(row.get("episode_evidence"))
@@ -193,6 +223,7 @@ def tag_task(row):
         material_id=row["material_id"],
         clip=mat.get("material_name", ""),
         audience=(sel.get("tag_profile") or {}).get("selected_path_names", []),
+        publish_at=publish_time(row.get("scheduled_at_utc")),
     )
 
 

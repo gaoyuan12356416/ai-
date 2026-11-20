@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import threading
 import time
 
@@ -192,9 +193,11 @@ def background(fn, delay):
         time.sleep(delay)
 
 
-def restore(c):
+def restore(c, batch_id=None):
+    # Startup may recover all abandoned batches. A live worker may recover only its own.
     for (batch,) in c.execute(
-        "SELECT id FROM batches WHERE finished IS NULL"
+        "SELECT id FROM batches WHERE finished IS NULL AND (? IS NULL OR id=?)",
+        (batch_id, batch_id),
     ).fetchall():
         rows = c.execute(
             "SELECT payload FROM jobs WHERE batch=? AND state='generating'", (batch,)
@@ -216,6 +219,42 @@ def restore(c):
     c.commit()
 
 
+def generation_cycle(runner=generator.run):
+    with store.connection() as c:
+        batch, tasks = store.claim(c)
+        if tasks:
+            LOG.info("caption batch %s starting %s tasks", batch, len(tasks))
+            try:
+                generate_batch(c, batch, tasks, runner)
+            except Exception:
+                c.rollback()
+                restore(c, batch)
+                raise
+            LOG.info("caption batch %s finished", batch)
+    return bool(tasks)
+
+
+def generation_loop():
+    while True:
+        try:
+            if not generation_cycle():
+                time.sleep(1)
+        except Exception:
+            LOG.exception("caption generation cycle")
+            time.sleep(2)
+
+
+def concurrency():
+    try:
+        count = int(os.environ.get("STORY_COPY_CONCURRENCY", "3"))
+        if count > 0:
+            return count
+    except ValueError:
+        pass
+    LOG.warning("invalid STORY_COPY_CONCURRENCY; using 3")
+    return 3
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--init", action="store_true")
@@ -223,29 +262,21 @@ def main():
     store.initialize()
     if args.init:
         return
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     # Keep the WAL read index available to read-only native publishing identities.
     keeper = __import__("sqlite3").connect(str(store.DB))
     keeper.execute("SELECT count(*) FROM switches").fetchone()
     with store.connection() as c:
         restore(c)
+        # Populate deadlines on existing unfinished jobs before the first claims.
+        sources.discover(c)
     for fn, delay in ((sources.discover, 2), (sync_receipts, 3), (alerts.deliver, 6)):
         threading.Thread(target=background, args=(fn, delay), daemon=True).start()
-    while True:
-        try:
-            with store.connection() as c:
-                batch, tasks = store.claim(c)
-                if tasks:
-                    try:
-                        generate_batch(c, batch, tasks)
-                    except Exception:
-                        c.rollback()
-                        restore(c)
-                        raise
-            if not tasks:
-                time.sleep(1)
-        except Exception:
-            LOG.exception("caption generation cycle")
-            time.sleep(2)
+    count = concurrency()
+    LOG.info("caption generation workers=%s priority=publish_time", count)
+    for i in range(1, count):
+        threading.Thread(target=generation_loop, name="caption-" + str(i), daemon=True).start()
+    generation_loop()
 
 
 if __name__ == "__main__":
