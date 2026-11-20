@@ -75,6 +75,20 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(rows[0]["source_line_sha256"], history.sha(raw.rstrip()))
         self.assertEqual(digest, history.sha(raw + raw))
 
+    def test_checkpoint_preserves_query_times_and_source_totals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "read-checkpoints"
+            folder.mkdir()
+            path = folder / "day-2026-10-09.json"
+            total = dict(date="2026-10-09", n=17, zero_rows_omitted=9, **dict.fromkeys(history.METRICS, 0))
+            meta = dict(query_time="2026-10-16 18:26:17", completed_at="2026-10-16 18:26:52", isolation="REPEATABLE-READ", total=total)
+            path.write_text(json.dumps(dict(meta, rows=[])))
+            self.assertEqual(history.probe_rows(path, "dw_daily")[2], meta)
+            total["unreviewed"] = "extra"
+            path.write_text(json.dumps(dict(meta, rows=[])))
+            with self.assertRaisesRegex(ValueError, "unreviewed_metadata_fields"):
+                history.probe_rows(path, "dw_daily")
+
     def test_unsupported_and_sensitive_values_are_retained(self):
         self.assertIsNone(history.match("../analysis/hotdrama-review-1/perf.json"))
         self.assertIsNone(history.match("analysis/hotdrama-review-1/arbitrary.json"))

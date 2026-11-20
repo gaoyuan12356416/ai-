@@ -181,6 +181,26 @@ def match(rel):
     return None
 
 
+def checkpoint_header(meta, path):
+    if set(meta) != {"query_time", "completed_at", "isolation", "total"}:
+        return False
+    if meta["isolation"] != "REPEATABLE-READ":
+        return False
+    total = meta["total"]
+    if not isinstance(total, dict) or set(total) != {"date", "n", "zero_rows_omitted", *METRICS}:
+        return False
+    if path.stem != "day-" + str(total["date"]):
+        return False
+    for key in ("query_time", "completed_at"):
+        if not isinstance(meta[key], str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", meta[key]):
+            return False
+        datetime.datetime.fromisoformat(meta[key])
+    return all(
+        type(total[key]) in (int, float) and Decimal(str(total[key])).is_finite()
+        for key in (*METRICS, "n", "zero_rows_omitted")
+    )
+
+
 def probe_rows(path, dataset):
     before = path.stat()
     if dataset == "fb_receipt_index":
@@ -210,10 +230,12 @@ def probe_rows(path, dataset):
             rows = doc.pop("rows")
             meta = doc
             kind = "object-rows"
-            check(
-                not set(meta) - {"totals", "start", "end", "date", "dt", "count", "from", "to"},
-                "unreviewed_metadata_fields",
-            )
+            standard = not set(meta) - {"totals", "start", "end", "date", "dt", "count", "from", "to"}
+            if not standard:
+                check(
+                    dataset == "dw_daily" and path.parent.name == "read-checkpoints" and checkpoint_header(meta, path),
+                    "unreviewed_metadata_fields",
+                )
             check(
                 len(encoded(meta).encode()) <= 65536 and not SENSITIVE.search(encoded(meta)),
                 "unreviewed_metadata_values",

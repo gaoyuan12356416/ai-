@@ -19,6 +19,8 @@ Use a new, empty output path for an export. Export preserves rows, order, nulls,
 
 HotDrama positional exports use a matching SQL projection from the source directory when available. For the 17 historical files listed in `reviewed-ordinal-sources.json`, the original labels could not be established. The manifest identifies the reviewed bytes and path. The snapshot preserves scalar cells and row order with ordinal columns, sets `business_column_mapping` to `unavailable`, and leaves typed metric totals and dates empty. A normal `read` reconstructs the original arrays.
 
+The DramaWave daily files under `read-checkpoints` also retain the query and completion times, transaction isolation, original control totals, and the source count of omitted zero rows. These header counts describe the source query. The snapshot record count measures the rows actually contained in the file.
+
 ## Scope and recovery
 
 63350 serves all searches, page reads and verification. 63353 accepts the fixed DDL and inserts or primary-key status updates on the two named tables. The writer uses one connection and small batches. Each snapshot's ordered `page_ids` may include a page more than once. Use that order for queries and sums. Adding all physical pages would mix unrelated report versions.
