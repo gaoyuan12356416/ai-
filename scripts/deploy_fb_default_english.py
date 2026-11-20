@@ -28,9 +28,10 @@ def overlay(name, text):
         expected = new.split('\n    def __post_init__')[0].rstrip()
         if old.rstrip() == new.rstrip():
             return text
-        if old.rstrip() != expected:
+        if old.rstrip() not in (expected, expected.replace('    page_name: str = ""', '').rstrip()):
             raise RuntimeError('PageTarget changed; preserve runtime variant')
-        return text.replace(old, new, 1)
+        method = '\n    def __post_init__' + new.split('\n    def __post_init__', 1)[1]
+        return text.replace(old, old.rstrip() + '\n' + method, 1)
     old = '"language": page_language(str(row.get("language") or "")[:32]),'
     new = '"language": page_language((str(row.get("language") or "").strip() or "en")[:32]),'
     if text.count(old) != 1:
