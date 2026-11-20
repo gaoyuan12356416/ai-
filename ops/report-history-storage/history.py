@@ -86,9 +86,10 @@ POSITIONAL = {
     ),
 }
 HOT.update(("name", "type", "category", "data_source"))
+REVIEWED_ORDINAL_SOURCES = Path(__file__).with_name("reviewed-ordinal-sources.json")
 
 
-def source_column_order(path):
+def source_column_order(path, source_hash=None):
     spec = POSITIONAL.get(path.stem)
     check(spec is not None, "unknown_positional_layout")
     projection, columns = spec
@@ -105,6 +106,10 @@ def source_column_order(path):
         if source.is_file() and not source.is_symlink() and source.stat().st_size < 1024 * 1024:
             if expected.search(source.read_text(encoding="utf8", errors="replace")):
                 return columns.split()
+    if source_hash and BASE in path.parents:
+        reviewed = json.loads(REVIEWED_ORDINAL_SOURCES.read_text())
+        if reviewed.get(path.relative_to(BASE).as_posix()) == source_hash:
+            return [f"ordinal_{i:02d}" for i in range(1, len(columns.split()) + 1)]
     raise ValueError("positional_columns_unconfirmed")
 
 
@@ -220,13 +225,17 @@ def probe_rows(path, dataset):
             kind = "array"
             if rows and isinstance(rows[0], list):
                 check(dataset == "hotdrama_report", "unknown_positional_layout")
-                order = source_column_order(path)
+                order = source_column_order(path, source_hash)
                 for ordinal, cells in enumerate(rows):
                     check(isinstance(cells, list) and len(cells) == len(order), "positional_width_changed")
                     rows[ordinal] = dict(zip(order, cells))
                 kind = "positional"
                 meta = {"source_column_order": order}
+                if order[0].startswith("ordinal_"):
+                    meta["business_column_mapping"] = "unavailable"
         allowed = {"dw_daily": DW, "dw_adset": META, "hotdrama_report": HOT}[dataset]
+        if kind == "positional":
+            allowed = set(meta["source_column_order"])
         cols = set()
         for row in rows:
             check(isinstance(row, dict), "unrecognized_row")
@@ -444,6 +453,10 @@ def migrate(path, dataset, reader, writer):
     rel = path.relative_to(BASE).as_posix()
     st = path.stat()
     source_hash, original = identical_version(reader, dataset, path)
+    if original and original[4] == "positional":
+        order = source_column_order(path, source_hash)
+        if Path(original[1]).stem != path.stem or order != json.loads(original[6])["source_column_order"]:
+            original = None
     pages = []
     if original:
         check(original[2].lower() == source_hash and st.st_size == original[3], "source_size_mismatch")

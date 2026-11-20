@@ -17,6 +17,8 @@ py=/mnt/data-disk/report-material-catalog/venv/bin/python
 
 Use a new, empty output path for an export. Export preserves rows, order, nulls, missing fields, IDs, metrics and document metadata. JSON whitespace can change. A receipt export contains the selected IDs, statuses, timestamps and the original line hash. Private archives contain the original bytes where a file was retired.
 
+HotDrama positional exports use a matching SQL projection from the source directory when available. For the 17 historical files listed in `reviewed-ordinal-sources.json`, the original labels could not be established. The manifest identifies the reviewed bytes and path. The snapshot preserves scalar cells and row order with ordinal columns, sets `business_column_mapping` to `unavailable`, and leaves typed metric totals and dates empty. A normal `read` reconstructs the original arrays.
+
 ## Scope and recovery
 
 63350 serves all searches, page reads and verification. 63353 accepts the fixed DDL and inserts or primary-key status updates on the two named tables. The writer uses one connection and small batches. Each snapshot's ordered `page_ids` may include a page more than once. Use that order for queries and sums. Adding all physical pages would mix unrelated report versions.

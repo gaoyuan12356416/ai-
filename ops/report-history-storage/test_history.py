@@ -109,6 +109,27 @@ class ImportTests(unittest.TestCase):
         digest = "eaa" + "0" * 61
         history.pack_pages([{"source_line_sha256": digest}], "fb_receipt_index", ["source_line_sha256"])
 
+    def test_reviewed_unlabelled_cells_roundtrip_by_position_without_inferred_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rel = "analysis/hotdrama-optimizer-20261021-22/logs.json"
+            path = root / rel
+            path.parent.mkdir(parents=True)
+            document = [["075", "4", None, "2026-10-21", "9"], ["075", "5", "", "2026-10-22", "9"]]
+            path.write_text(json.dumps(document))
+            manifest = root / "review.json"
+            manifest.write_text(json.dumps({rel: history.sha(path.read_bytes())}))
+            with patch.object(history, "BASE", root), patch.object(history, "REVIEWED_ORDINAL_SOURCES", manifest):
+                rows, kind, meta, _, _ = history.probe_rows(path, "hotdrama_report")
+                self.assertEqual((kind, meta["business_column_mapping"]), ("positional", "unavailable"))
+                order = meta["source_column_order"]
+                self.assertEqual([[r[k] for k in order] for r in rows], document)
+                pages, _ = history.pack_pages(rows, "hotdrama_report", order)
+                self.assertEqual(pages[0][2:9], (None,) * 7)
+                path.write_text(json.dumps(document[:1]))
+                with self.assertRaisesRegex(ValueError, "positional_columns_unconfirmed"):
+                    history.probe_rows(path, "hotdrama_report")
+
 
 if __name__ == "__main__":
     unittest.main()
