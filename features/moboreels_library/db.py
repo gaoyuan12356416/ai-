@@ -131,6 +131,21 @@ class Database:
     def _scope(self):
         return "institution_user_id=%s AND project_type=2" % _literal(self.settings.institution_user_id)
 
+    def recommendation_resource_ids(self, story_ids):
+        """Mobo business resource codes, not story IDs or episode primary keys."""
+        ids = list(dict.fromkeys(str(value) for value in story_ids))
+        if not ids:
+            return {}
+        rows = self._read("SELECT DISTINCT JSON_OBJECT('story_id',content_id,'resource_id',series_code) "
+                          "FROM kunlunads_dev.ads_drama_info FORCE INDEX(ac) "
+                          "WHERE app_id=2373 AND content_id IN (%s);" % ",".join(_literal(v) for v in ids))
+        codes = {value: set() for value in ids}
+        for row in rows:
+            story, code = str(row.get('story_id') or ''), str(row.get('resource_id') or '').strip()
+            if story in codes and code:
+                codes[story].add(code)
+        return {story: next(iter(values)) for story, values in codes.items() if len(values) == 1}
+
     def save_media_registration(self, record):
         columns = ("record_key", "institution_user_id", "tenant_key", "user_id", "star_user_id", "star_name",
                    "project_type", "platform_type", "account_id", "nickname", "platform_link", "status", "message",
