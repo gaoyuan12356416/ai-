@@ -23,6 +23,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 ROOT = Path('/mnt/data-disk/x-post-automation')
 CURRENT = Path('/opt/x-post-automation/current')
 MONITOR = Path('/mnt/data-disk/x-api-credit-monitor')
+CREDIT_THRESHOLD_USD = '50'
 ENV = Path('/etc/x-post-automation.env')
 DB = Path('/var/lib/x-post-automation/accounts.sqlite3')
 TOKENS = Path('/var/lib/x-post-automation/tokens')
@@ -178,7 +179,7 @@ def main():
         atomic_copy(next_env, ENV)
         monitor_config = json.loads((MONITOR / 'config.json').read_text())
         monitor_config.update(expected_client_id_sha256=config['new_client_id_sha256'],
-                              threshold_usd='10', app_name=config['app_name'])
+                              threshold_usd=CREDIT_THRESHOLD_USD, app_name=config['app_name'])
         monitor_config['feishu'].update(config['feishu_recipient'])
         save(MONITOR / 'config.json', monitor_config)
         save(MONITOR / 'data/state.json', {'version': 1, 'scope': 'production', 'previous_state_backup': str(backup / 'monitor-state.json')})

@@ -80,16 +80,18 @@ class AppSwitchTest(unittest.TestCase):
             self.assertEqual(value['total_balance'], '109.97')
             self.assertEqual(evidence['token_source'], 'production_app_billing')
 
-    def test_ten_dollar_threshold_rearms_and_deduplicates(self):
+    def test_fifty_dollar_threshold_rearms_and_deduplicates(self):
         state = {}
         sender = mock.Mock(return_value={'status': 'sent', 'message_id': 'receipt'})
         def run(value):
             return credits.update(state, {'total_balance': value}, notify=True, setup=False,
-                persist=lambda value: None, sender=sender, threshold='10', message_builder=lambda *_: 'low balance')
-        self.assertEqual(run('10')['status'], 'healthy')
-        run('9.99'); run('8')
+                persist=lambda value: None, sender=sender, threshold='50', message_builder=lambda *_: 'low balance')
+        self.assertEqual(run('50.00')['status'], 'healthy')
+        self.assertEqual(run('49.99')['status'], 'notification_sent')
+        self.assertEqual(run('40')['status'], 'low_already_notified')
         sender.assert_called_once()
-        run('10'); run('9')
+        self.assertEqual(run('50.00')['status'], 'healthy')
+        self.assertEqual(run('49.99')['status'], 'notification_sent')
         self.assertEqual(sender.call_count, 2)
 
     def test_group_alert_contains_real_mention_and_receipt(self):

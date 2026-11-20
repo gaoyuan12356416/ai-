@@ -17,8 +17,10 @@ take over an account.
 The production balance monitor reads the running service's application and
 checks its configured Client ID hash. Its optional app-only billing bearer
 supports checking credits while all user accounts await authorization. A
-configured threshold of USD 10 alerts only below 10, once per low-balance
-episode, rearming after a successful reading at or above 10. The configured
+configured threshold of USD 50 alerts once per low-balance episode when the
+available total falls below USD 50. A successful reading of USD 50 or more
+rearms the alert. The hourly check reads `threshold_usd` from
+`/mnt/data-disk/x-api-credit-monitor/config.json` on each run. The configured
 Feishu chat message contains a real open-ID mention. Failed reads remain
 unknown, and ambiguous sends are held without retry.
 
@@ -71,7 +73,7 @@ binding guard or fully reconcile credentials before enabling publishing.
 Focused tests cover cross-App read/refresh/publish rejection before network,
 same-account reauthorization preserving IDs/ownership/language/approval, strict
 legacy-token handling, disabled-account preservation, balance queries without
-authorized users, strict USD 10 threshold/rearming, and real Feishu mention
+authorized users, strict USD 50 threshold/rearming, and real Feishu mention
 payload/receipt. Existing OAuth and monitor regression suites also apply.
 
 ## Production acceptance, 2026-10-29
