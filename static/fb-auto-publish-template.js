@@ -27,6 +27,7 @@
   }
 
   function buildPayload() {
+    const saved = state.template?.config || {};
     const schedule = ui.byId("scheduleMode").value === "fixed"
       ? {
           mode: "fixed",
@@ -41,6 +42,9 @@
     return {
       name: ui.byId("name").value,
       group_ids: Array.from(document.querySelectorAll('input[name="group"]:checked')).map(input => input.value),
+      page_daily_limits: saved.page_daily_limits,
+      default_daily_count: saved.default_daily_count,
+      feedback_selection: saved.feedback_selection,
       message_template: ui.byId("message").value,
       video_template: ui.byId("videoTemplate").value,
       material_data_source: Number(ui.byId("dataSource").value),
@@ -52,7 +56,7 @@
       stagger_minutes: schedule.mode === "fixed" ? Number(ui.byId("staggerMinutes").value) : 0,
       drama_rule: {
         ...range("d"),
-        resource_type_v2: [],
+        resource_type_v2: saved.drama_rule?.resource_type_v2 || [],
       },
       material_rule: {
         ...range("m"),
@@ -126,7 +130,9 @@
 
   function hydrateTemplate(item) {
     const config = item.config || {};
-    if (config.video_template !== "random_overlay") throw new Error("该模板缺少受支持的视频制作模板，无法编辑。");
+    if (!Array.from(ui.byId("videoTemplate").options).some(option => option.value === config.video_template)) {
+      throw new Error("该模板缺少受支持的视频制作模板，无法编辑。");
+    }
     ui.byId("pageTitle").textContent = "编辑 FB Page 自动发布模板";
     document.title = "编辑 FB Page 自动发布模板 - AI自动后台";
     ui.byId("templateStatusBadge").textContent = (item.status === "enabled" ? "已启用" : "已停用") + " · v" + ui.templateVersion(item);

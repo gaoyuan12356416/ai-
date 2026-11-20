@@ -19,6 +19,7 @@ from .gpu import GPUPrepareClient, PrepareExecutor
 from .publisher import AutoPostExecutor, RequestsGraphTransport
 from .repositories import MaterialRepository, PagePoolRepository, ReadOnlyMySQL, RepositoryError
 from .validation import ValidationError, valid_internal_bearer
+from .video_template import SUPPORTED as VIDEO_TEMPLATES
 
 
 class ServiceError(RuntimeError):
@@ -92,15 +93,15 @@ class Runtime:
         with self.store.connect() as conn:
             enabled_count = int(conn.execute("SELECT COUNT(*) FROM fb_auto_template WHERE status='enabled' AND id<>?", (int(template["id"]),)).fetchone()[0])
         global_slot_jobs = publishable + other_slot_jobs
-        summary = {"total_pages": len(pages), "publishable_pages": publishable, "missing_token_pages": len(pages) - publishable, "daily_frequency": daily_count, "estimated_jobs_per_slot": publishable, "estimated_global_jobs_per_slot": global_slot_jobs, "estimated_daily_gpu_jobs": daily_jobs, "estimated_daily_graph_posts": daily_jobs, "capacity_limits": {"publishable_pages": self.max_publishable_pages, "jobs_per_slot": self.max_jobs_per_slot, "daily_jobs": self.max_daily_jobs, "enabled_templates": self.max_enabled_templates, "prepare_ahead_seconds": self.prepare_ahead_seconds, "prebuild_days_ahead": self.prebuild_days_ahead, "max_late_seconds": self.max_late_seconds}}
+        summary = {"total_pages": len(pages), "publishable_pages": publishable, "missing_token_pages": len(pages) - publishable, "daily_frequency": daily_count, "estimated_jobs_per_slot": publishable, "estimated_global_jobs_per_slot": global_slot_jobs, "estimated_daily_gpu_jobs": daily_jobs if config.get("video_template") == "random_overlay" else 0, "estimated_daily_graph_posts": daily_jobs, "capacity_limits": {"publishable_pages": self.max_publishable_pages, "jobs_per_slot": self.max_jobs_per_slot, "daily_jobs": self.max_daily_jobs, "enabled_templates": self.max_enabled_templates, "prepare_ahead_seconds": self.prepare_ahead_seconds, "prebuild_days_ahead": self.prebuild_days_ahead, "max_late_seconds": self.max_late_seconds}}
         summary["_enabled_fingerprint"] = enabled_fingerprint
         if not pages: raise ServiceError("fb_auto_page_pool_empty", "所选Page池没有有效Page", 409)
         if not publishable: raise ServiceError("fb_auto_page_pool_unpublishable", "所选Page池没有任何可发布Page", 409)
         summary["capacity_scope"] = "template_slot"
         if publishable > self.max_publishable_pages or publishable > self.max_jobs_per_slot or daily_jobs > self.max_daily_jobs or enabled_count + 1 > self.max_enabled_templates:
-            raise ServiceError("fb_auto_capacity_exceeded", f"容量门禁拒绝启用：可发布Page {publishable}/{self.max_publishable_pages}，本模板单批任务 {publishable}/{self.max_jobs_per_slot}，每日GPU任务和Graph发布 {daily_jobs}/{self.max_daily_jobs}，启用模板 {enabled_count + 1}/{self.max_enabled_templates}", 409)
-        if config.get("video_template") != "random_overlay":
-            raise ServiceError("fb_auto_video_template_required", "视频制作模板必填，当前仅支持随机排重模板", 409)
+            raise ServiceError("fb_auto_capacity_exceeded", f"容量门禁拒绝启用：可发布Page {publishable}/{self.max_publishable_pages}，本模板单批任务 {publishable}/{self.max_jobs_per_slot}，每日发布任务 {daily_jobs}/{self.max_daily_jobs}，启用模板 {enabled_count + 1}/{self.max_enabled_templates}", 409)
+        if config.get("video_template") not in VIDEO_TEMPLATES:
+            raise ServiceError("fb_auto_video_template_required", "请选择随机排重模板或不制作（使用原视频）", 409)
         today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).date()
         metric_dates = [(today - timedelta(days=offset)).isoformat() for offset in range(int(config["metric_window_days"]), 0, -1)]
         from features.fb_video_publish.moboreels import contains

@@ -8,6 +8,8 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping
 
+from .video_template import SUPPORTED as VIDEO_TEMPLATES
+
 
 RESOURCE_TYPES = {str(i) for i in range(23)} | {"100"}
 TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
@@ -143,10 +145,10 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         raise ValidationError("invalid_request", str(exc)) from None
     required = {"name", "group_ids", "message_template", "drama_rule", "material_rule", "schedule", "video_template"}
     optional = {"language", "metric_window_days", "drama_launch_window_days", "cooldown_days", "material_data_source", "material_product", "material_products", "app_id", "product", "metric_product", "metric_platform", "drama_cooldown_hours", "page_daily_limits", "default_daily_count", "stagger_minutes", "feedback_selection"}
-    if "video_template" not in value or value.get("video_template") != "random_overlay":
+    if value.get("video_template") not in VIDEO_TEMPLATES:
         raise ValidationError(
             "fb_auto_video_template_required",
-            "视频制作模板必填，当前仅支持随机排重模板",
+            "请选择随机排重模板或不制作（使用原视频）",
             409,
         )
     _keys(value, required, optional, "模板")
@@ -186,7 +188,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "product": str(value.get("product") or "")[:128],
         "metric_product": str(value.get("metric_product") or "")[:128],
         "metric_platform": _int(value.get("metric_platform", 0), "指标平台", 0, 255),
-        "video_template": "random_overlay",
+        "video_template": value["video_template"],
         "drama_rule": _rule(value.get("drama_rule"), material=False),
         "material_rule": _rule(value.get("material_rule"), material=True),
         "schedule": _schedule(value.get("schedule")),

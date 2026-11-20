@@ -3,6 +3,7 @@ import hashlib
 import json
 from datetime import datetime,timedelta,timezone
 from .core import StoreError,utc_iso
+from .video_template import ready_original
 from .languages import candidate_snapshots_for_pages,page_language
 
 
@@ -82,6 +83,7 @@ def extend_future_runs(store,run_ids,pages,materials,*,operation_id,expected_sco
                 job='fb-page-'+hashlib.sha256(f"{run['template_id']}:{run['template_version']}:{run['slot_key']}:{page.page_id}".encode()).hexdigest()[:48]
                 cur=conn.execute('INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,material_id,content_id,media_url,message_text,created_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(rid,run['template_id'],run['template_version'],page.page_id,page.group_id,'planned',material.material_id,material.content_id,'',store._message(config,material),now,publish_at,config['video_template'],job,material.media_url))
                 tid=int(cur.lastrowid)
+                ready_original(conn, tid, config["video_template"], now)
                 if '{{url}}' in str(config['message_template']):
                     short,long=store._link_values(page,material,tid,int(store.now_fn().timestamp()))
                     conn.execute('UPDATE fb_auto_task SET message_text=?,short_url=?,long_url=? WHERE id=?',(store._message(config,material,short),short,long,tid))

@@ -95,8 +95,8 @@
               <label class="required" for="videoTemplate">视频制作模板</label>
               <select id="videoTemplate" required>
                 <option value="random_overlay">随机排重模板</option>
+                <option value="original">不制作（使用原视频）</option>
               </select>
-              <span class="helper">每个 Page 独立制作成片，失败不会回退源素材。</span>
             </div>
             <div class="field">
               <label for="cooldown">Page 素材冷却天数</label>
@@ -178,7 +178,7 @@
               <span class="helper">每个 Page 在时段起点后分散发布；0 表示不额外错峰。</span>
             </div>
             <div class="field wide form-actions">
-              <div id="capacityEstimate" class="helper">请选择 Page 池后查看每日预计 GPU 任务和 Graph 发布量。</div>
+              <div id="capacityEstimate" class="helper">选择 Page 池后可查看每日预计发布量。</div>
               <div class="actions">
                 <button id="saveTemplate" disabled class="button primary" type="submit">保存模板</button>
                 <a class="button link-button" href="/fb-auto-publish-templates.html?v=20260820-list-only-v2">取消并返回</a>
@@ -199,6 +199,6 @@
   <script src="/fb-auto-publish-common.js?v=20261119-fast1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/fb-auto-publish-template.js?v=20261119-fast1"></script>
+  <script src="/fb-auto-publish-template.js?v=20261120-original1"></script>
 </body>
 </html>

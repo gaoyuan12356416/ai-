@@ -12,11 +12,13 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .languages import page_language
 from .repositories import MaterialCandidate
+from .video_template import SUPPORTED as VIDEO_TEMPLATES, ready_original
 
 KIND = "exact_material_round_robin_v1"
 LANGUAGE_ORDER = ("en", "es", "zh-tw", "id", "th")
 WAITING = ("planned", "preparing", "ready", "running")
 COS_SOURCE_HOST = "advertising-1306474899.cos.ap-hongkong.myqcloud.com"
+AI_SOURCE_HOST = "ads-ai-1306474899.cos.ap-hongkong.myqcloud.com"
 
 
 class BatchError(RuntimeError):
@@ -34,7 +36,8 @@ def digest(value):
 def prepare_source_url(value):
     """The same known COS object over TLS; preserve the original source receipt."""
     parsed = urlsplit(str(value or ""))
-    if (parsed.scheme not in {"http", "https"} or parsed.hostname != COS_SOURCE_HOST
+    if (parsed.scheme not in {"http", "https"} or parsed.hostname not in (COS_SOURCE_HOST, AI_SOURCE_HOST)
+            or (parsed.scheme == "http" and parsed.hostname != COS_SOURCE_HOST)
             or parsed.port is not None or parsed.username or parsed.password or parsed.fragment
             or not parsed.path.lower().endswith(".mp4")):
         raise BatchError("Manual source must be an MP4 on the configured COS source host")
@@ -48,8 +51,8 @@ def build_manifest(conn, template, pages, materials, input_ids, operation_id,
     config = json.loads(template["config_json"])
     from features.fb_video_publish.moboreels import contains
     is_moboreels = contains(config.get("message_template"))
-    if template["status"] != "enabled" or config["video_template"] != "random_overlay":
-        raise BatchError("An enabled random-overlay template is required")
+    if template["status"] != "enabled" or config["video_template"] not in VIDEO_TEMPLATES:
+        raise BatchError("An enabled template with a supported video mode is required")
     if len(set(input_ids)) != len(input_ids) or set(input_ids) != set(materials):
         raise BatchError("Exact input material IDs are required")
     if len({p.page_id for p in pages}) != len(pages):
@@ -94,8 +97,9 @@ def build_manifest(conn, template, pages, materials, input_ids, operation_id,
                 skipped.append({"page_id": p.page_id, "language": language, "reason": reason})
                 continue
             m = materials[selected]
+            source_url = prepare_source_url(m["media_url"]) if config["video_template"] == "original" else m["media_url"]
             queue.append({"page_id": p.page_id, "group_id": p.group_id, "language": language,
-                          "material_id": selected, "content_id": m["content_id"], "source_media_url": m["media_url"]})
+                          "material_id": selected, "content_id": m["content_id"], "source_media_url": source_url})
         queues[language] = queue
     entries = []
     for offset in range(max((len(q) for q in queues.values()), default=0)):
@@ -162,7 +166,7 @@ def reserve_batch(store, manifest, *, max_jobs, max_daily_jobs, automatic_daily_
             raise BatchError("Batch exceeds the existing daily capacity")
         config = json.loads(template["config_json"])
         config["operator_material_batch"] = {"sha256": sha, "manifest": manifest}
-        cur = conn.execute("INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,total_pages,publishable_pages,missing_token_pages,queued_tasks,skipped_tasks,created_at_utc,planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,'manual','queued',?,?,?,?,?,0,?,?, '[]','random_overlay')", (manifest["template_id"], manifest["template_version"], slot, canonical(config), count, count, 0, count, stamp, stamp))
+        cur = conn.execute("INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,total_pages,publishable_pages,missing_token_pages,queued_tasks,skipped_tasks,created_at_utc,planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,'manual','queued',?,?,?,?,?,0,?,?, '[]',?)", (manifest["template_id"], manifest["template_version"], slot, canonical(config), count, count, 0, count, stamp, stamp, config["video_template"]))
         rid = cur.lastrowid
         page_map = {p["page_id"]: p for p in manifest["pages"]}
         for entry in manifest["entries"]:
@@ -170,8 +174,9 @@ def reserve_batch(store, manifest, *, max_jobs, max_daily_jobs, automatic_daily_
             conn.execute("INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,'eligible','')", (rid, p["page_id"], p["group_id"], json.dumps(p["group_ids"]), p["owner_user_id"], p["timezone"], entry["language"], p["eligible_token_count"]))
             job = "fb-page-" + hashlib.sha256(f"{manifest['template_id']}:{manifest['template_version']}:{slot}:{p['page_id']}".encode()).hexdigest()[:48]
             selection = canonical({"operator_material_batch": sha, "sequence": entry["sequence"]})
-            cur = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,material_id,content_id,created_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url,selection_json) VALUES(?,?,?,?,?,'planned',?,?,?,?,'random_overlay',?,?,?)", (rid, manifest["template_id"], manifest["template_version"], p["page_id"], p["group_id"], m.material_id, m.content_id, stamp, stamp, job, m.media_url, selection))
+            cur = conn.execute("INSERT INTO fb_auto_task(run_id,template_id,template_version,page_id,group_id,status,material_id,content_id,created_at_utc,planned_publish_at_utc,video_template,gpu_job_id,source_media_url,selection_json) VALUES(?,?,?,?,?,'planned',?,?,?,?,?,?,?,?)", (rid, manifest["template_id"], manifest["template_version"], p["page_id"], p["group_id"], m.material_id, m.content_id, stamp, stamp, config["video_template"], job, entry["source_media_url"], selection))
             tid = cur.lastrowid
+            ready_original(conn, tid, config["video_template"], stamp)
             from .repositories import PageTarget
             page = PageTarget(**p)
             from features.fb_video_publish.moboreels import contains

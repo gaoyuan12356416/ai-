@@ -82,7 +82,7 @@
       return [
         "<tr>",
         "<td><strong>", ui.escapeHtml(item.name || config.name || ("模板 " + id)), "</strong><br><small>v", version, " · ",
-        config.video_template === "random_overlay" ? "随机排重模板" : "视频模板缺失", "</small></td>",
+        ui.escapeHtml(({random_overlay: "随机排重模板", original: "不制作（使用原视频）"})[config.video_template] || "视频模板缺失"), "</small></td>",
         "<td>", ui.escapeHtml(config.product || "—"), " / ", poolIds || "未选择 Page 池", "</td>",
         '<td><span class="badge ', enabled ? "success" : "warning", '">', enabled ? "已启用" : "已停用", "</span></td>",
         "<td><strong>", ui.escapeHtml(schedule.frequency), "</strong><br><small>", ui.escapeHtml(schedule.details), "</small></td>",
@@ -92,8 +92,8 @@
         '<button class="button small danger" type="button" data-action="delete" data-template-id="', id, '"', busy, '>删除</button>',
         '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",
         '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
-        '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', runDisabled, runTitle, ">爆款素材发布</button>",
-        '<button class="button small primary" type="button" data-action="drama" data-template-id="', id, '"', runDisabled, runTitle, ">爆款剧发布</button>",
+        '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', busy, ">爆款素材发布</button>",
+        '<button class="button small primary" type="button" data-action="drama" data-template-id="', id, '"', busy, ">爆款剧发布</button>",
         "</div></td>",
         "</tr>",
       ].join("");
@@ -204,7 +204,7 @@
     ui.byId("materialSubmit").disabled = false;
     ui.byId("materialSubmit").textContent = state.material.draft ? "重试确认" : "确认发布";
     ui.byId("materialClose").textContent = "取消";
-    materialStatus(state.material.draft ? "上次提交尚未确认结果，请重试确认同一轮任务。" : "确认后将开始制作并排队发布。", Boolean(state.material.draft));
+    materialStatus(state.material.draft ? "上次提交尚未确认结果，请重试确认同一轮任务。" : "确认后将按模板设置排队发布。", Boolean(state.material.draft));
     if (state.material.result) renderMaterialResult(state.material.result);
     if (!ui.byId("materialDialog").open) ui.byId("materialDialog").showModal();
     ui.byId("hitMaterialId").focus();
@@ -280,7 +280,7 @@
     if (!item || state.busyIds.has(id)) return;
     const action = button.dataset.action;
     const enabled = isEnabled(item);
-    if (["run", "material", "drama"].includes(action) && !enabled) {
+    if (action === "run" && !enabled) {
       ui.showToast("模板已停用，请先启用后再手动执行。", true);
       return;
     }
@@ -296,7 +296,7 @@
       : action === "run"
       ? await ui.confirmAction("确认手动执行", "将创建可追踪的手动计划，由后台异步冻结 Page 和素材。确认继续？")
       : await ui.confirmAction(enabled ? "确认停用模板" : "确认启用模板", enabled
-        ? "停用后不再生成新时隙；未提交 Meta 的手动执行会取消，自动预制任务保留并暂停。正在提交 Meta 时需等待本次结果后再停用。"
+        ? "停用后不再生成新时隙；未提交 Meta 的普通手动执行会取消，自动预制任务保留并暂停；爆款剧和爆款素材发布任务继续。正在提交 Meta 时需等待本次结果后再停用。"
         : "启用后系统会按模板时间创建 Page 发布任务；当天新启用从下一个完整北京时间自然日开始生成新时隙。已预制的同版本自动任务会继续。");
     if (!accepted) return;
     state.busyIds.add(id);
