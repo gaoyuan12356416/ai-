@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh cumulative X material metrics and attributed revenue
+After=network.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/x-material-effects/current
+EnvironmentFile=/etc/x-tag-publisher.env
+Environment=SQL_GATE_JOB_NAME=x-material-effects
+ExecStart=/usr/bin/python3 -B -m features.x_material_effects.refresh
+TimeoutStartSec=45min
+UMask=0022

@@ -351,7 +351,7 @@
     state.version = Math.max(0, ui.numberValue(state.template.version || state.template.current_version, 0));
     setValue("templateName", state.template.name);
     setValue("platform", configValue("platform", 0), "0");
-    setValue("profileModel", configValue("profile_model", "revenue"), "revenue");
+    setValue("profileModel", "revenue", "revenue");
     setValue("metricWindowDays", configValue("metric_window_days", 7), "7");
     setValue("bodyTemplate", configValue("body_template", ""));
     document.getElementById("randomTemplateEnabled").checked = configValue("random_template_enabled", false) === true;
@@ -360,6 +360,8 @@
 
     const drama = ui.objectValue(configValue("drama_rule", {}));
     const material = ui.objectValue(configValue("material_rule", {}));
+    window.XEffectFields.fill("drama", drama);
+    window.XEffectFields.fill("material", material);
     const resourceTypes = Array.isArray(drama.resource_type_v2) ? drama.resource_type_v2 : [];
     setResourceTypes(resourceTypes);
     setValue("dramaRoasMin", ruleValue(drama, "roas_min"));
@@ -537,6 +539,8 @@
       },
       schedule,
     };
+    Object.assign(payload.drama_rule, window.XEffectFields.read("drama"));
+    Object.assign(payload.material_rule, window.XEffectFields.read("material"));
     if (templateId) payload.expected_version = state.version;
     return payload;
   }

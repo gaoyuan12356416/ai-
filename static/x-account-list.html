@@ -165,8 +165,8 @@
           <div id="publishingNotice" class="subtle" role="status" hidden></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>X账号</th><th>运营统计</th><th class="xtr-col">收入画像<small>受众方向 · 占频道收入</small></th><th class="xtr-col xtr-col-theme">收入画像<small>题材 · 主要受众内</small></th><th class="xtr-col">成长画像<small>题材表现 · 净增粉</small></th><th class="publishing-ports-col">活跃发布端口</th><th class="drama-language-col">剧语言</th><th>公众数据</th><th>后台状态</th><th>操作</th></tr></thead>
-              <tbody id="accountRows"><tr><td colspan="10" class="empty">正在加载…</td></tr></tbody>
+              <thead><tr><th>X账号</th><th>运营统计</th><th class="xtr-col">收入画像<small>受众方向 · 占频道收入</small></th><th class="xtr-col xtr-col-theme">收入画像<small>题材 · 主要受众内</small></th><th class="publishing-ports-col">活跃发布端口</th><th class="drama-language-col">剧语言</th><th>公众数据</th><th>后台状态</th><th>操作</th></tr></thead>
+              <tbody id="accountRows"><tr><td colspan="9" class="empty">正在加载…</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -176,7 +176,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/x-growth-profile.js?v=20261119-cold-start"></script>
   <script src="/x-video-account-settings.js?v=20261104pool-status"></script>
   <script src="/quick-nav.js?v=203bf1a08903"></script>
   <script>
@@ -510,7 +509,7 @@
         const body = el("accountRows");
         const items = filteredAccounts();
         el("resultCount").textContent = `显示 ${items.length} / ${state.accounts.length} 个账号`;
-        if (!items.length) { body.innerHTML = `<tr><td colspan="10" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
+        if (!items.length) { body.innerHTML = `<tr><td colspan="9" class="empty">没有符合当前筛选条件的 X 账号。</td></tr>`; return; }
         body.innerHTML = items.map(item => {
           const avatar = safeImage(item.profile_image_url);
           const username = item.username ? `@${item.username}` : "未命名账号";
@@ -533,7 +532,6 @@
             <td>${operatingMetricsHtml(item)}</td>
             <td class="xtr-col" data-x-tag-id="${escapeHtml(item.id)}" data-x-tag-level="audience">${window.XTagRevenue ? window.XTagRevenue.cell(item.id, "audience") : "读取中…"}</td>
             <td class="xtr-col xtr-col-theme" data-x-tag-id="${escapeHtml(item.id)}" data-x-tag-level="theme">${window.XTagRevenue ? window.XTagRevenue.cell(item.id, "theme") : "读取中…"}</td>
-            <td class="xtr-col" data-growth-account="${escapeHtml(item.id)}"></td>
             <td class="publishing-ports-col" data-publishing-ports-id="${escapeHtml(item.id)}" aria-live="polite">${publishingPortsHtml(item.id)}</td>
             <td class="drama-language-col"><select class="drama-language-select" data-drama-language-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(username)} 剧语言">${dramaLanguageOptions(item.drama_language)}</select><div class="subtle">仅影响新生成任务</div></td>
             <td>${metricsHtml(item)}</td>
@@ -543,7 +541,6 @@
             </td>
           </tr>`;
         }).join("");
-        window.XGrowthProfile?.paint(body);
       }
 
       function renderLanguageFilter() {
@@ -567,7 +564,7 @@
         state.ports = null;
         state.portsError = "";
         state.personalPools.clear();
-        el("accountRows").innerHTML = `<tr><td colspan="10" class="empty">正在加载…</td></tr>`;
+        el("accountRows").innerHTML = `<tr><td colspan="9" class="empty">正在加载…</td></tr>`;
         el("resultCount").textContent = "正在读取账号…";
         try {
           // Start the primary list first. Optional settings never hold its rows.
@@ -581,11 +578,10 @@
           renderStats(); renderOperatingSummary(); renderLanguageFilter(); renderRows();
           performance.mark("x-account-list-ready");
           window.XTagRevenue?.refresh(state.statsMeta?.version || "");
-          void window.XGrowthProfile?.refresh(state.accounts);
           void refreshCredits();
         } catch (error) {
           if (loadVersion !== state.loadVersion) return;
-          el("accountRows").innerHTML = `<tr><td colspan="10" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
+          el("accountRows").innerHTML = `<tr><td colspan="9" class="empty">加载失败：${escapeHtml(error.message)}</td></tr>`;
           el("resultCount").textContent = "加载失败";
           toast(`加载失败：${error.message}`);
         } finally {

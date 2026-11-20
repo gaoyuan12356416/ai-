@@ -1,5 +1,7 @@
 (function () {
   const TAG_PUBLISH_ITEMS = [
+    {key:"xAutoPublishTemplates",label:"普通自动发布",description:"按剧目与素材效果自动选材",kind:"page",href:"/x-auto-publish-templates.html",module:"x_accounts",adminOnly:false,enabled:true,order:24},
+    {key:"xMaterialEffects",label:"X 素材效果",description:"查看 X 素材累计浏览、互动与收入",kind:"page",href:"/x-material-effects.html",module:"x_material_effects",adminOnly:false,enabled:true,order:27},
     { key: "xTagAutoPublishTemplates", label: "标签画像自动发布",
       description: "按频道标签收入画像选择剧目和素材", kind: "page",
       href: "/x-tag-auto-publish-templates.html", module: "x_accounts",
@@ -10,15 +12,15 @@
       adminOnly: false, enabled: true, order: 26 },
   ];
   const TAG_PAGE_ACTIVE_KEYS = {
+    "/x-material-effects.html":"xMaterialEffects",
     "/x-tag-auto-publish-templates.html": "xTagAutoPublishTemplates",
     "/x-tag-auto-publish-template.html": "xTagAutoPublishTemplates",
     "/x-tag-auto-publish-runs.html": "xTagAutoPublishTemplates",
     "/x-tag-material-pool.html": "xTagMaterialPool",
   };
-  const RETIRED_X_KEYS = new Set(["xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"]);
+  const RETIRED_X_KEYS = new Set(["xPostMaterialPool"]);
   const RETIRED_X_PAGES = new Set([
-    "/x-auto-publish-templates.html", "/x-auto-publish-template.html",
-    "/x-auto-publish-runs.html", "/x-post-material-pool.html",
+    "/x-post-material-pool.html",
   ]);
   function retiredXItem(item) {
     if (!item) return false;

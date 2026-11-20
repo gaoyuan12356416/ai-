@@ -1,0 +1,14 @@
+[Unit]
+Description=X material effects report and reservation broker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/x-material-effects/current
+ExecStart=/usr/bin/python3 -B -m features.x_material_effects.api
+Restart=on-failure
+RestartSec=5
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target

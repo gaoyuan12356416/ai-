@@ -160,6 +160,7 @@ def selector_rules(
             "metric_window_days": config.get("metric_window_days", 7),
             "platform": config.get("platform", 0),
             "drama": {
+                "x_effect": {m: {"min": drama.get("x_"+m+"_min"), "max": drama.get("x_"+m+"_max")} for m in ("views","likes","comments","shares","revenue")},
                 "spend": {
                     "min": drama.get("spend_min"),
                     "max": drama.get("spend_max"),
@@ -170,7 +171,7 @@ def selector_rules(
                 },
                 "sort": {
                     "field": (
-                        "d0_roas" if drama.get("sort_by") == "roas" else "spend"
+                        "d0_roas" if drama.get("sort_by") == "roas" else drama.get("sort_by", "spend")
                     ),
                     "direction": drama.get("sort_direction", "desc"),
                 },
@@ -179,6 +180,7 @@ def selector_rules(
                 "cooldown_days": config.get("cooldown_days", 0),
             },
             "material": {
+                "x_effect": {m: {"min": material.get("x_"+m+"_min"), "max": material.get("x_"+m+"_max")} for m in ("views","likes","comments","shares","revenue")},
                 "spend": {
                     "min": material.get("spend_min"),
                     "max": material.get("spend_max"),
@@ -189,7 +191,7 @@ def selector_rules(
                 },
                 "sort": {
                     "field": (
-                        "d0_roas" if material.get("sort_by") == "roas" else "spend"
+                        "d0_roas" if material.get("sort_by") == "roas" else material.get("sort_by", "spend")
                     ),
                     "direction": material.get("sort_direction", "desc"),
                 },
@@ -490,6 +492,9 @@ class AutoPostExecutor:
             "random_template_enabled": random_template_enabled,
             "actor": "x_auto_post_service",
         }
+        if (task.selection.get('x_effect') or {}).get('policy'):
+            from features.x_material_effects.reuse import lane
+            payload['reuse_task'] = dict(lane=lane(), task_id=task.id)
         try:
             raw = self.bridge.create_run(payload)
         except XPostBridgeError as exc:

@@ -279,6 +279,8 @@
 
     const drama = ui.objectValue(configValue("drama_rule", {}));
     const material = ui.objectValue(configValue("material_rule", {}));
+    window.XEffectFields.fill("drama", drama);
+    window.XEffectFields.fill("material", material);
     const resourceTypes = Array.isArray(drama.resource_type_v2) ? drama.resource_type_v2 : [];
     setResourceTypes(resourceTypes);
     setValue("dramaRoasMin", ruleValue(drama, "roas_min"));
@@ -455,6 +457,8 @@
       },
       schedule,
     };
+    Object.assign(payload.drama_rule, window.XEffectFields.read("drama"));
+    Object.assign(payload.material_rule, window.XEffectFields.read("material"));
     if (templateId) payload.expected_version = state.version;
     return payload;
   }

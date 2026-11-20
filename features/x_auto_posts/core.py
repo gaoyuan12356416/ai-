@@ -744,8 +744,8 @@ def ensure_storage(db_path: Any) -> None:
                 );
 
                 CREATE TABLE IF NOT EXISTS x_auto_material_ledger (
-                    material_id TEXT PRIMARY KEY COLLATE BINARY,
-                    task_id INTEGER NOT NULL UNIQUE,
+                    material_id TEXT NOT NULL COLLATE BINARY,
+                    task_id INTEGER PRIMARY KEY,
                     run_id INTEGER NOT NULL,
                     template_id INTEGER NOT NULL,
                     content_id TEXT NOT NULL COLLATE BINARY,
@@ -826,6 +826,8 @@ def ensure_storage(db_path: Any) -> None:
             )
             if "created_by_tenant_key" not in {r[1] for r in conn.execute("PRAGMA table_info(x_auto_template)")}:
                 conn.execute("ALTER TABLE x_auto_template ADD COLUMN created_by_tenant_key TEXT NOT NULL DEFAULT ''")
+            from features.x_material_effects.migrations import auto_ledger
+            auto_ledger(conn)
             template_columns = {
                 str(row["name"])
                 for row in conn.execute("PRAGMA table_info(x_auto_template)")
@@ -2724,7 +2726,16 @@ class XAutoPostStore:
                 "SELECT task_id FROM x_auto_material_ledger WHERE material_id=?",
                 (clean_material_id,),
             ).fetchone()
-            if existing_ledger is not None:
+            from features.x_material_effects.selection import POLICY
+            effect = _json_object(selection_json).get('x_effect') or {}
+            if effect.get('policy') == POLICY:
+                from features.x_material_effects.reuse import client, lane
+                try:
+                    client('reserve', lane=lane(), task_id=normalized_task_id,
+                        account_id=str(task['account_id']), material_id=clean_material_id)
+                except (OSError, ValueError, RuntimeError):
+                    raise XAutoPostStoreError('x_auto_material_already_reserved', '素材已被同账号使用或其他在途任务占用', 409) from None
+            elif existing_ledger is not None:
                 raise XAutoPostStoreError("x_auto_material_already_reserved", "material has already appeared in the automatic publishing ledger", 409)
             conn.execute(
                 """

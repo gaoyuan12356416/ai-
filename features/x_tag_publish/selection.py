@@ -78,7 +78,11 @@ class ProfileSelector(TwoStageSelector):
             # Exact-drama requests never use ordinary no-profile/rank fallback.
             return [drama for drama in candidates if not match_reason(decision,
                 context['catalog'].get((drama.content_id, language(drama.language))))]
-        return ranked_dramas(self.source, candidates, context)
+        ranked = ranked_dramas(self.source, candidates, context)
+        if request.rules.drama.sort.field.startswith('x_'):
+            from features.x_material_effects.selection import apply
+            return apply(list(ranked), request.rules.drama, 'drama', rejection_counts)
+        return ranked
 
     def _eligible_materials(self, request, drama, rows, blacklist, metrics, rejection_counts):
         get_run = getattr(self._run_store, 'get_run', None)

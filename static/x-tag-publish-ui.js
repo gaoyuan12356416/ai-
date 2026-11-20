@@ -51,7 +51,7 @@
     const host=document.querySelector('main,.main') || document.body;
     const banner=node('section', '', 'tag-lane-banner');
     banner.append(node('strong','X 标签画像发布'));
-    banner.append(node('p','在 X 账号列表查看每个频道的收入画像和成长画像。自动发布按本次选择的模型为各频道选材。'));
+    banner.append(node('p','在 X 账号列表查看收入画像。自动发布结合收入画像与模板筛选条件为各频道选材。'));
     const nav=node('nav');
     for(const [href,label] of [['/x-tag-auto-publish-templates.html','自动发布模板'],['/x-tag-material-pool.html','画像素材池'],['/x-tag-auto-publish-runs.html','模板运行记录'],['/x-tag-post-logs.html','画像发布日志'],['/x-account-list.html','频道画像']]){const a=node('a',label);a.href=href;nav.append(a);}
     banner.append(nav);

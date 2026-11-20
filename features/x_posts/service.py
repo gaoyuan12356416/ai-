@@ -2623,6 +2623,7 @@ def ensure_storage(db_path):
                 )
             }
             manual_run_additive_columns = {
+                "reuse_context_json": "TEXT NOT NULL DEFAULT '{}'",
                 "trigger_source": (
                     "TEXT NOT NULL DEFAULT 'manual' "
                     "CHECK(trigger_source IN ('manual','auto_template'))"
@@ -2650,6 +2651,11 @@ def ensure_storage(db_path):
                         % (name, definition)
                     )
 
+            conn.execute("CREATE TRIGGER IF NOT EXISTS trg_x_effect_parent_frozen BEFORE UPDATE OF reuse_context_json ON x_post_manual_run WHEN OLD.reuse_context_json<>NEW.reuse_context_json BEGIN SELECT RAISE(ABORT,'reuse policy immutable'); END")
+            conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_x_effect_account_dedupe BEFORE INSERT ON x_post_queue
+                WHEN EXISTS(SELECT 1 FROM x_post_manual_run m WHERE m.id=NEW.manual_run_id AND m.reuse_context_json<>'{}')
+                AND EXISTS(SELECT 1 FROM x_post_queue q WHERE q.material_key=NEW.material_key AND q.account_id=NEW.account_id)
+                BEGIN SELECT RAISE(ABORT,'effect material already used by account'); END""")
             schedule_config_columns = {
                 row[1]
                 for row in conn.execute(
@@ -3369,7 +3375,7 @@ def ensure_storage(db_path):
                       NOT EXISTS(
                           SELECT 1 FROM x_post_manual_run
                            WHERE id=NEW.manual_run_id
-                             AND trigger_source='manual'
+                             AND (trigger_source='manual' OR (trigger_source='auto_template' AND reuse_context_json<>'{}'))
                       )
                       AND (
                           EXISTS(
@@ -4383,7 +4389,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_queue q
@@ -4403,7 +4409,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_queue q
@@ -4455,7 +4461,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_material_pool
@@ -4475,7 +4481,7 @@ def ensure_storage(db_path):
                   AND NOT EXISTS(
                       SELECT 1 FROM x_post_manual_run mr
                        WHERE mr.id=NEW.manual_run_id
-                         AND mr.trigger_source='manual'
+                         AND (mr.trigger_source='manual' OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))
                   )
                   AND EXISTS(
                       SELECT 1 FROM x_post_material_pool
@@ -9361,6 +9367,7 @@ class XPostStore:
                 404,
             )
         item = _row_dict(row)
+        item["reuse_context"] = json.loads(item.pop("reuse_context_json", "{}"))
         item["trigger_source"] = _manual_trigger_source(
             item.get("trigger_source")
         )
@@ -9644,7 +9651,9 @@ class XPostStore:
         actor=None,
         random_template_enabled=False,
         duration_policy_version=2,
+        reuse_context=None,
     ):
+        reuse_context = dict(reuse_context or {})
         duration_policy_version = duration_policy.version({"duration_policy_version": duration_policy_version})
         random_template_enabled = _random_template_enabled(random_template_enabled)
         material_ids = _manual_material_ids([material_id])
@@ -9717,6 +9726,7 @@ class XPostStore:
                     == body_template_sha256
                     and bool(existing["random_template_enabled"]) == random_template_enabled
                     and str(existing["actor_user_id"]) == actor_user_id
+                    and json.loads(existing["reuse_context_json"] or "{}") == reuse_context
                 )
                 if not same:
                     conn.rollback()
@@ -9762,6 +9772,10 @@ class XPostStore:
                 "WHERE material_key=? AND state='active' LIMIT 1",
                 (material_key,),
             ).fetchone()
+            if reuse_context:
+                from features.x_material_effects.reuse import local_conflict
+                in_pool = local_conflict(conn, material_key, account_ids[0])
+                already_used = False
             if in_pool or already_used or already_reserved:
                 conn.rollback()
                 raise XPostError(
@@ -9776,8 +9790,8 @@ class XPostStore:
                     "template_ref,template_version,body_template_sha256,"
                     "run_date,source_date,account_ids_json,material_ids_json,"
                     "body_template,random_template_enabled,actor_user_id,actor_name,status,"
-                    "expected_count,created_at,updated_at,duration_policy_version"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,?)",
+                    "expected_count,created_at,updated_at,duration_policy_version,reuse_context_json"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',1,?,?,?,?)",
                     (
                         idempotency_key,
                         AUTO_TEMPLATE_TRIGGER_SOURCE,
@@ -9796,6 +9810,7 @@ class XPostStore:
                         timestamp,
                         timestamp,
                         duration_policy_version,
+                        json.dumps(reuse_context, sort_keys=True),
                     ),
                 )
                 run_id = int(cursor.lastrowid)
@@ -10237,6 +10252,11 @@ class XPostStore:
         if not isinstance(candidates, list):
             raise XPostError("invalid_request", "candidates必须是数组", 400)
         frozen = self.get_manual_run(run_id, trigger_source)
+        reuse_context = frozen.get('reuse_context') or {}
+        if reuse_context:
+            from features.x_material_effects.reuse import client
+            client('execution', **reuse_context, account_id=str(frozen['account_ids'][0]),
+                material_id=str(frozen['material_ids'][0]), external_task_key=frozen['external_task_key'])
         personal = None
         if int(frozen.get("copy_contract_version", 1)) == 2:
             from features.x_video_publish.core import personal_task, personal_batch_held
@@ -10455,7 +10475,11 @@ class XPostStore:
                     409,
                 )
 
-            if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE:
+            if reuse_context:
+                from features.x_material_effects.reuse import local_conflict
+                if local_conflict(conn, material_ids[0], account_ids[0]):
+                    raise XPostError('x_post_auto_template_material_unavailable', '素材已被同账号使用或在途任务占用', 409)
+            if trigger_source == AUTO_TEMPLATE_TRIGGER_SOURCE and not json.loads(run['reuse_context_json'] or '{}'):
                 material_placeholders = ",".join("?" for _item in material_ids)
                 if conn.execute(
                     "SELECT 1 FROM x_post_material_pool "

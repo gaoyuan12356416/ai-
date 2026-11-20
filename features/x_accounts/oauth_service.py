@@ -3748,6 +3748,12 @@ def create_post_auto_template_run_request(payload):
     accounts = _manual_publish_accounts([payload.get("account_id")])
     account = accounts[0]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
+    reuse = payload.get('reuse_task') or {}
+    if reuse:
+        from features.x_material_effects.reuse import client
+        client('execution', lane=reuse['lane'], task_id=reuse['task_id'],
+            account_id=str(account['id']), material_id=str(payload.get('material_id')),
+            external_task_key=payload.get('external_task_key'))
     try:
         item = XPostStore(POST_DB_PATH).create_auto_template_run(
             payload.get("material_id"),
@@ -3757,6 +3763,7 @@ def create_post_auto_template_run_request(payload):
             payload.get("template_version"),
             payload.get("body_template"),
             AUTO_TEMPLATE_ACTOR,
+            **({'reuse_context': reuse} if reuse else {}),
             duration_policy_version=payload.get("duration_policy_version", 2),
             random_template_enabled=payload.get("random_template_enabled", False),
         )

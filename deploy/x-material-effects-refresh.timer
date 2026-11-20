@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly X material effect refresh
+[Timer]
+OnCalendar=*-*-* *:20:00
+RandomizedDelaySec=30
+Persistent=true
+Unit=x-material-effects-refresh.service
+[Install]
+WantedBy=timers.target

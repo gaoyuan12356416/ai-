@@ -145,10 +145,6 @@ class RevenueDecision:
 
 
 def Decision(account, identity, snapshot=None):
-    from features.x_growth_profile.selection import GrowthDecision, choose_context
-    context = choose_context(account)
-    if context.get('mode') == 'growth':
-        return GrowthDecision(account, identity, context)
     return RevenueDecision(account, identity, snapshot)
 
 

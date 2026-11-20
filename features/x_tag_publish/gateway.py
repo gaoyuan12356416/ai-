@@ -253,29 +253,16 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == '/healthz' and self.command == 'GET':
             return 200, dict(ok=True, service='x-tag-publish-gateway')
-        if path in (POST + '/profiles/growth', POST + '/account-publishing-ports'):
+        if path in (POST + '/profiles/growth', '/internal/x-tag/growth-origins'):
+            raise Error('growth_profile_retired', '成长画像已下线', 410)
+        if path == POST + '/account-publishing-ports':
             if self.command != 'GET':
                 raise Error('method_not_allowed', '', 405)
             cookie = self.headers.get('Cookie', '')
             authorize(cookie, 'xAccountList')
-            # Use the canonical account list so scope and deleted-account rules
-            # stay identical to the page, even if those rules change.
             accounts = rpc('http://127.0.0.1:8787', '/api/admin/x-accounts', cookie=cookie)
-            if path == POST + '/account-publishing-ports':
-                paths = lane_paths()
-                return 200, account_publishing_ports(accounts['items'], paths['X_AUTO_POST_DB_PATH'],
-                                                     paths['X_POST_DB_PATH'])
-            from features.x_growth_profile.listing import account_profiles
-            return 200, dict(items=account_profiles(accounts['items']))
-        if path == '/internal/x-tag/growth-origins' and self.command == 'POST':
-            token = os.environ.get('X_INTERNAL_TOKEN', '')
-            if len(token) < 32 or not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
-                raise Error('permission_denied', '', 403)
-            body = self.body()
-            if set(body) != {'since'}:
-                raise Error('invalid_request', '', 400)
-            from features.x_growth_profile.origins import read_origins
-            return 200, dict(items=read_origins(body['since']))
+            paths = lane_paths()
+            return 200, account_publishing_ports(accounts['items'], paths['X_AUTO_POST_DB_PATH'], paths['X_POST_DB_PATH'])
         if path == '/internal/x-tag/hit-origin' and self.command == 'POST':
             token = os.environ.get('X_INTERNAL_TOKEN', '')
             if len(token) < 32 or not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):

@@ -178,14 +178,20 @@ def _range_rule(
     _keys(
         value,
         required=base | set(extra_required),
-        optional=extra_optional,
+        optional=set(extra_optional) | {"x_"+metric+"_"+bound for metric in ("views","likes","comments","shares","revenue") for bound in ("min","max")},
         label=label,
     )
     result: Dict[str, Any] = {
         key: _decimal_text(value.get(key), f"{label}{key}")
         for key in ("spend_min", "spend_max", "roas_min", "roas_max")
     }
-    for prefix in ("spend", "roas"):
+    for metric in ("views", "likes", "comments", "shares", "revenue"):
+        for bound in ("min", "max"):
+            key = "x_" + metric + "_" + bound
+            result[key] = _decimal_text(value.get(key), label + key)
+            if metric != "revenue" and result[key] is not None and Decimal(result[key]) != Decimal(result[key]).to_integral_value():
+                raise ValidationError("invalid_request", "X 互动指标必须为整数")
+    for prefix in ("spend", "roas", "x_views", "x_likes", "x_comments", "x_shares", "x_revenue"):
         minimum = result[f"{prefix}_min"]
         maximum = result[f"{prefix}_max"]
         if (
@@ -198,7 +204,7 @@ def _range_rule(
             )
     sort_by = str(value.get("sort_by") or "").strip().lower()
     direction = str(value.get("sort_direction") or "").strip().lower()
-    if sort_by not in {"spend", "roas"} or direction not in {"asc", "desc"}:
+    if sort_by not in {"spend", "roas", "x_views", "x_likes", "x_comments", "x_shares", "x_revenue"} or direction not in {"asc", "desc"}:
         raise ValidationError("invalid_request", f"{label}排序设置无效")
     result["sort_by"] = sort_by
     result["sort_direction"] = direction
@@ -321,7 +327,7 @@ def profile_model(config, override=None):
     value = source.get("profile_model", "revenue")
     if value not in ("revenue", "growth"):
         raise ValidationError("invalid_request", "画像模型必须为收入画像或成长画像")
-    return value
+    return "revenue"
 
 
 def normalize_template_payload(raw: Any) -> Dict[str, Any]:

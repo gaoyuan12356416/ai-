@@ -108,13 +108,7 @@ def set_mode(account_id, mode, expected_version, actor, db_path=None):
     return channel_details(account_id, db_path)
 
 def publish_profile_context(account_id, model):
-    """Load this account's data for the model selected for a publication."""
+    """Retired growth input remains readable, but all new selection uses revenue."""
     if model not in ('revenue', 'growth'):
         raise ValueError('invalid_profile_model')
-    context = {'mode': model, 'profile': {}}
-    if model == 'growth' and path().is_file():
-        with connect() as db:
-            row = db.execute('SELECT data_json FROM growth_profile WHERE account_id=?', (int(account_id),)).fetchone()
-        if row:
-            context['profile'] = json.loads(row[0])
-    return context
+    return {'mode': 'revenue', 'profile': {}, 'retired_growth': model == 'growth'}
