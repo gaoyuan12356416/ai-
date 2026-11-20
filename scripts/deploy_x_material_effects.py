@@ -44,6 +44,25 @@ def overlay(folder,name,live):
         before=before.replace(anchor,anchor+addition)
     if name=='features/x_auto_posts/validation.py' and b'def profile_model(' not in live:
         after=after.replace(b'    return "revenue"\n\n\ndef normalize_template_payload',b'    return value\n\n\ndef normalize_template_payload')
+    if name=='features/x_auto_posts/selector.py' and b'from features.x_posts.moboreels_auto import Source, adapt' in live:
+        start=live.index(b'        from features.x_posts.moboreels import source_enabled',live.index(b'    def _select('))
+        end=live.index(b'        existing = (',start)
+        adapter=live[start:end]
+        before=before.replace(b'        existing = (',adapter+b'        existing = (',1)
+        after=after.replace(b'        existing = (',adapter+b'        existing = (',1)
+    if name=='features/x_posts/service.py' and b'duration_policy_version,schedule_policy,planned_publish_at_utc"' in live:
+        def scheduled_variant(data):
+            start=data.index(b'    def create_auto_template_run(')
+            end=data.index(b'\n    def ',start+8)
+            part=data[start:end]
+            part=part.replace(b'        duration_policy_version=2,\n',b'        duration_policy_version=2,\n        schedule_policy="",\n        planned_publish_at_utc="",\n',1)
+            part=part.replace(b'                    and str(existing["actor_user_id"]) == actor_user_id\n',b'                    and str(existing["actor_user_id"]) == actor_user_id\n                    and str(existing["schedule_policy"]) == schedule_policy\n                    and str(existing["planned_publish_at_utc"]) == planned_publish_at_utc\n',1)
+            part=part.replace(b'duration_policy_version"',b'duration_policy_version,schedule_policy,planned_publish_at_utc"')
+            part=part.replace(b'duration_policy_version,reuse_context_json"',b'duration_policy_version,schedule_policy,planned_publish_at_utc,reuse_context_json"')
+            part=part.replace(b"'queued',1,?,?,?)",b"'queued',1,?,?,?,?,?)").replace(b"'queued',1,?,?,?,?)",b"'queued',1,?,?,?,?,?,?)")
+            part=part.replace(b'                        duration_policy_version,\n',b'                        duration_policy_version,\n                        schedule_policy,\n                        planned_publish_at_utc,\n',1)
+            return data[:start]+part+data[end:]
+        before,after=scheduled_variant(before),scheduled_variant(after)
     scratch=folder/'overlay-scratch';scratch.write_bytes(live)
     delta=''.join(difflib.unified_diff(before.decode().splitlines(True),after.decode().splitlines(True),fromfile='a/overlay-scratch',tofile='b/overlay-scratch',n=1))
     result=subprocess.run(['git','apply','--whitespace=nowarn','-'],cwd=folder,input=delta.encode(),capture_output=True)
