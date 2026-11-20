@@ -286,10 +286,58 @@ def reassemble(args,record,folder):
     return plan
 
 
+def update_publisher_ui(args,folder):
+    repo, version = args.repo, args.version
+    if git(repo,'rev-parse','HEAD').decode().strip()!=version:
+        raise RuntimeError('Source checkout differs from requested commit')
+    parent=git(repo,'rev-parse',version+'^').decode().strip()
+    changed=names(repo,parent,version,'publisher')
+    if not changed or any(not name.startswith('static/youtube-publish') for name in changed):
+        raise RuntimeError('Expected a static-only publisher update')
+    installing=args.action=='install'
+    manifest=folder/'manifest.json'
+    if not manifest.exists() and not installing:
+        raise RuntimeError('Missing UI installation manifest')
+    record=json.loads(manifest.read_text()) if manifest.exists() else {
+        'scope':args.scope,'version':version,'parent':parent,'state':'prepared','files':[],
+        'time':datetime.now(timezone.utc).isoformat()}
+    folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+    plan={}
+    first=not manifest.exists()
+    for name in changed:
+        old,new=blob(repo,parent,name),blob(repo,version,name)
+        if old is None or new is None:raise RuntimeError('Expected existing UI files')
+        before,after=(old,new) if installing else (new,old)
+        for path in (HOST/name, WEB/Path(name).name):
+            live=filebytes(path)
+            is_page=path.name in PAGES
+            if live is None:raise RuntimeError('Missing UI file: '+str(path))
+            already_set=live==after
+            if is_page:
+                already_set=NAV_URL.sub(b'/quick-nav.js',live)==NAV_URL.sub(b'/quick-nav.js',after)
+            if not first and already_set:
+                continue
+            if is_page:result=page_splice(live,before,after)
+            elif live==before:result=after
+            else:raise RuntimeError('UI file changed independently: '+str(path))
+            if first:
+                backup=str(len(record['files']))
+                atomic(folder/backup,live,0o600)
+                record['files'].append({'target':str(path),'backup':backup,'old':digest(live),'new':digest(result)})
+            plan[path]=(live,result)
+    save(folder,record)
+    for path,(before,after) in plan.items():
+        if filebytes(path)!=before:raise RuntimeError('Concurrent UI change: '+str(path))
+        atomic(path,after)
+    record['state']='active' if installing else 'rolled_back'
+    save(folder,record)
+    print(json.dumps({'status':record['state'],'version':version,'backup':str(folder),'files':len(record['files'])}))
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('action',choices=('install','rollback'))
-    p.add_argument('scope',choices=('editor-gpu','editor-cpu','publisher'))
+    p.add_argument('scope',choices=('editor-gpu','editor-cpu','publisher','publisher-ui'))
     p.add_argument('repo',type=Path)
     p.add_argument('version')
     args=p.parse_args()
@@ -297,6 +345,8 @@ def main():
     if scope!='editor-gpu' and cmd('findmnt','-no','UUID','--target',CPU_DATA).decode().strip()!='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':
         raise RuntimeError('Wrong CPU data mount')
     folder=(GPU_DATA if scope=='editor-gpu' else CPU_DATA)/'youtube-regular-deploy'/'backups'/scope/args.version
+    if scope=='publisher-ui':
+        return update_publisher_ui(args,folder)
     if scope=='editor-cpu':check_editor_work()
     units={'publisher':[PREPARATION,API_UNIT],'editor-gpu':[RENDER],'editor-cpu':[EDITOR_API]}[scope]
     before={u:service(u) for u in units}

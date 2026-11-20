@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from features.drama_synthesis.core import DramaSynthesisStore
+from features.drama_synthesis.core import DramaSynthesisError, DramaSynthesisStore
 from features.youtube_auto_publish.regular import RegularPublication
 from features.youtube_auto_publish.regular_media import dimensions, editor_object_sha
 from features.youtube_auto_publish.regular_routes import edit_title, stream_preview
@@ -123,6 +123,35 @@ class Ordinary(unittest.TestCase):
         for _ in range(3): self.workflow.run_once()
         row=self.engine.get_reviewed_youtube_by_preparation(task['id'])
         self.assertTrue(row['publish_at'])
+
+    def test_receipts_reconcile_unknown_then_resume_thumbnail_on_same_video(self):
+        task = self.prepare()
+        self.workflow.review(self.actor, task['id'], dict(action='approve', version=1, review_token=task['review_token']))
+        self.workflow.run_once()
+        with self.workflow.db(True) as db:
+            db.execute("UPDATE drama_youtube_publish SET status='unknown', reviewed_phase='upload', unknown_outcome=1, "
+                       "resumable_session_uri='https://example.org/session', video_attempt_count=1")
+        with self.assertRaises(DramaSynthesisError) as ctx:
+            self.workflow.retry(self.actor, task['id'])
+        self.assertEqual(ctx.exception.code, 'youtube_retry_unsafe')
+        with self.workflow.db(True) as db:
+            db.execute("UPDATE drama_youtube_publish SET status='failed', reviewed_phase='thumbnail', "
+                       "video_id='Az01_-bcDeF', unknown_outcome=0")
+        self.workflow.retry(self.actor, task['id'])
+        row = self.engine.get_reviewed_youtube_by_preparation(task['id'])
+        self.assertEqual((row['reviewed_phase'], row['video_id'], row['video_attempt_count'], row['resumable_session_uri']),
+                         ('thumbnail', 'Az01_-bcDeF', 1, 'https://example.org/session'))
+        with self.workflow.db(True) as db:
+            db.execute("UPDATE drama_youtube_publish SET schedule_status='armed'")
+        waiting = self.workflow.get_task(self.actor, task['id'])['task']
+        self.assertEqual(waiting['status'], 'scheduled')
+        self.assertFalse(waiting['can_share_x'])
+        with self.workflow.db(True) as db:
+            db.execute("UPDATE drama_youtube_publish SET status='published', video_state='published', "
+                       "public_status='succeeded', reviewed_phase='complete', schedule_status='none', comment_status='skipped'")
+        public = self.workflow.get_task(self.actor, task['id'])['task']
+        self.assertEqual((public['status'], public['video_id'], public['can_share_x']), ('published', 'Az01_-bcDeF', True))
+        self.assertEqual(self.ledger_count(), 1)
 
     def test_legacy_local_behavior_preserved(self):
         legacy=self.workflow.create_task(self.actor,self.base)['task']

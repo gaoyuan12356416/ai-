@@ -11,7 +11,7 @@ vm.createContext(context);
 let source = fs.readFileSync(path.join(__dirname,'../static/youtube-publish.js'),'utf8');
 source = source.replace(/  init\(\);\s*\}\)\(\);\s*$/, `
   renderModals=()=>{}; showSource=()=>{}; closeModal=()=>{stack.pop();};
-  globalThis.uiTest={selectMaterial,confirmMaterial,pickerView,
+  globalThis.uiTest={selectMaterial,confirmMaterial,pickerView,publicWatchUrl,
     setup(view,request){stack=[view];state.source={configured:true};api=request;draft={title:'',errors:{},material:null};},
     applied:()=>draft.material, close:()=>{stack=[];}};
 })();`);
@@ -21,6 +21,11 @@ const card = id => ({id,name:'Video '+id,metadata_pending:true});
 const full = id => ({id,name:'Video '+id,macro_name:'Drama '+id,link_ready:true,drama_cover_status:'available'});
 
 (async()=>{
+  const receipt={regular_media:{},video_id:'Az01_-bcDeF',video_url:'https://example.org/private',can_share_x:false};
+  assert.equal(ui.publicWatchUrl(receipt),'');
+  assert.equal(ui.publicWatchUrl({...receipt,can_share_x:true}),'https://www.youtube.com/watch?v=Az01_-bcDeF');
+  assert.equal(ui.publicWatchUrl({...receipt,can_share_x:true,video_id:'invalid'}),'');
+  assert.equal(ui.publicWatchUrl({video_url:'https://example.org/legacy'}),'https://example.org/legacy');
   const view={type:'picker',items:[card('1'),card('2')]};
   let finishFirst;
   ui.setup(view,()=>new Promise(resolve=>{finishFirst=resolve;}));
