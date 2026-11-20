@@ -127,6 +127,107 @@ class FacebookAttributionTests(unittest.TestCase):
         self.assertTrue(all(row["publications"][0]["date"] == "2026-10-19" for row in catalog))
         self.assertTrue(all(value["freshness"] == "fresh" for value in meta.values()))
 
+    def make_moboreels(self):
+        saved = dict(creator=dict(user_id="creator", tenant_key="tenant-A"),
+                     material=dict(material_id="55", content_id="dramA", resource_type_v2="moboreels"),
+                     link=dict(short_link_id="s" * 64, short_url="https://example.test/m/short",
+                               koc_code="KOC123", story_id="dramA", status="succeeded",
+                               target_url="https://eng.moboreels.com/story/KOC123"))
+        self.change("ALTER TABLE fb_auto_task ADD COLUMN moboreels_json TEXT DEFAULT '{}'")
+        self.change("UPDATE fb_auto_task SET moboreels_json=?,long_url=?,short_url=?",
+                    (json.dumps(saved), saved["link"]["target_url"], saved["link"]["short_url"]))
+        return saved
+
+    def test_moboreels_recovers_old_unresolved_rows_and_preserves_publications(self):
+        self.make_moboreels()
+        reader = fb._read_old
+        def legacy_reader(conn):
+            records = reader(conn)
+            for record in records:
+                record["evidence"].pop("moboreels", None)
+            return records
+        with patch.object(fb, "_read_old", side_effect=legacy_reader):
+            self.run_collect()
+        before = self.saved()
+        self.assertEqual(before["status"], "unresolved")
+        self.assertEqual(self.run_collect(LATER)["status"], "complete")
+        after = self.saved()
+        identity = json.loads(after["identity_json"])
+        self.assertEqual(identity["owner"], "creator")
+        self.assertEqual(identity["product"], "moboreels")
+        self.assertEqual(identity["exclusion_reason"], "outside_dramawave_report_scope")
+        self.assertEqual(after["status"], "frozen")
+        self.assertEqual(after["publications_json"], before["publications_json"])
+        self.assertNotEqual(after["publications_json"], "[]")
+        catalog, errors, meta = self.read(LATER)
+        self.assertFalse(errors)
+        self.assertEqual([r["site_id"] for r in catalog], ["2310"])
+        self.assertEqual(meta["facebook:2049"]["outside_scope_count"], 1)
+        self.assertEqual(self.run_collect(LATER)["sources"]["2049"]["changed"], 0)
+
+    def test_new_moboreels_does_not_change_frozen_dramawave_evidence(self):
+        self.run_collect()
+        before = self.saved()
+        self.change("ALTER TABLE fb_auto_task ADD COLUMN moboreels_json TEXT DEFAULT '{}'")
+        self.assertEqual(self.run_collect(LATER)["status"], "complete")
+        for key in ("identity_json", "evidence_json", "evidence_hash", "publications_json", "frozen_at"):
+            self.assertEqual(self.saved()[key], before[key])
+
+    def test_moboreels_missing_proof_is_not_a_domain_based_exemption(self):
+        self.change("UPDATE fb_auto_task SET long_url='https://eng.moboreels.com/story/KOC123'")
+        self.assertEqual(self.run_collect()["status"], "partial")
+        self.assertEqual(self.saved()["error_code"], "link_identity_invalid")
+
+    def test_moboreels_mismatched_product_owner_material_or_link_stays_unresolved(self):
+        saved = self.make_moboreels()
+        for section, key, value in (("creator", "user_id", "editor"),
+                                     ("material", "resource_type_v2", "dramawave"),
+                                     ("material", "material_id", "other"),
+                                     ("link", "story_id", "other"),
+                                     ("link", "status", "pending"),
+                                     ("link", "target_url", "https://evil.test/story/KOC123"),
+                                     ("link", "koc_code", "other")):
+            with self.subTest(section=section, key=key):
+                changed = copy.deepcopy(saved)
+                changed[section][key] = value
+                self.change("UPDATE fb_auto_task SET moboreels_json=?", (json.dumps(changed),))
+                self.assertEqual(self.run_collect()["status"], "partial")
+                self.assertEqual(self.saved()["status"], "unresolved")
+
+    def test_moboreels_bad_json_is_local_and_does_not_hide_other_source(self):
+        self.make_moboreels()
+        self.change("UPDATE fb_auto_task SET moboreels_json='broken'")
+        result = self.run_collect()
+        self.assertEqual(result["sources"]["2049"]["conflicts"], 1)
+        self.assertEqual(result["sources"]["2310"]["status"], "complete")
+
+    def test_moboreels_invalid_host_or_port_is_a_local_identity_error(self):
+        saved = self.make_moboreels()
+        for url in ("https://moboreels.com.evil.test/story/KOC123",
+                    "https://eng.moboreels.com:bad/story/KOC123"):
+            saved["link"]["target_url"] = url
+            self.change("UPDATE fb_auto_task SET moboreels_json=?,long_url=?", (json.dumps(saved), url))
+            self.assertEqual(self.run_collect()["status"], "partial")
+            self.assertEqual(self.saved()["error_code"], "moboreels_link_identity_invalid")
+
+    def test_moboreels_unconfirmed_publication_remains_a_conflict(self):
+        self.make_moboreels()
+        self.change("UPDATE fb_auto_publish_ledger SET unknown_outcome=1")
+        self.assertEqual(self.run_collect()["status"], "partial")
+        self.assertNotEqual(self.saved()["status"], "frozen")
+
+    def test_moboreels_frozen_owner_and_publication_cannot_be_replaced(self):
+        saved = self.make_moboreels()
+        self.run_collect()
+        before = self.saved()
+        saved["creator"]["user_id"] = "editor"
+        self.change("UPDATE fb_auto_task SET moboreels_json=?", (json.dumps(saved),))
+        self.assertEqual(self.run_collect(LATER)["status"], "partial")
+        after = self.saved()
+        self.assertEqual(after["status"], "conflict")
+        self.assertEqual(after["identity_json"], before["identity_json"])
+        self.assertEqual(after["publications_json"], before["publications_json"])
+
     def manual_drama_label(self, raw, label):
         from datetime import datetime
         saved = copy.deepcopy(self.snapshot)

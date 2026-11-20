@@ -165,8 +165,10 @@ def parse_link(url, site, task_id):
 
 
 def _read_old(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fb_auto_task)")}
+    product_column = ",moboreels_json" if "moboreels_json" in columns else ""
     tasks = rows(conn, "fb_auto_task", "id,run_id,template_id,template_version,page_id,material_id,"
-                 "content_id,status,long_url,short_url,graph_post_id,unknown_outcome,created_at_utc,completed_at_utc")
+                 "content_id,status,long_url,short_url,graph_post_id,unknown_outcome,created_at_utc,completed_at_utc" + product_column)
     templates = index(rows(conn, "fb_auto_template",
                            "id,owner_user_id,created_by,created_name,created_at_utc"), "id")
     versions = index(rows(conn, "fb_auto_template_version",
@@ -188,6 +190,20 @@ def _read_old(conn):
                         template=templates.get(str(task["template_id"])),
                         version1=versions.get(str(task["template_id"])),
                         run=runs.get(str(task["run_id"])))
+        # Product-specific proof belongs to the immutable publication snapshot.
+        # Leave existing DramaWave evidence byte-for-byte compatible.
+        raw = task.get("moboreels_json")
+        if raw and raw != "{}":
+            try:
+                saved = obj(raw)
+                if saved:
+                    evidence["moboreels"] = {
+                        key: take(obj(saved.get(key)), fields) for key, fields in (
+                            ("creator", "user_id tenant_key"),
+                            ("material", "material_id content_id resource_type_v2"),
+                            ("link", "short_link_id short_url koc_code story_id target_url status"))}
+            except AttributionError:
+                evidence["moboreels"] = {"invalid_snapshot_hash": digest(raw)}
         facts = dict(task=take(task, "status graph_post_id unknown_outcome completed_at_utc"),
                      ledger=ledgers.get(str(task["id"])))
         result.append(dict(record_id=str(task["id"]), evidence=evidence, facts=facts))
@@ -363,6 +379,8 @@ def identity_old(record, users):
         raise AttributionError("task_id_invalid")
     creator = same(template["created_by"], version["created_by"])
     same(template["created_at_utc"], version["created_at_utc"])
+    if "moboreels" in evidence:
+        return identity_moboreels(record, users, creator)
     fields = parse_link(task["long_url"], "2049", task["id"])
     same(fields["af_adset_id"], task["page_id"])
     same(fields["af_ad_id"], task["material_id"])
@@ -380,6 +398,42 @@ def identity_old(record, users):
     # a fallback that maps arbitrary unresolved FB traffic to 郜远.
     owner["sub_user_id"] = str(template.get("owner_user_id") or "")
     return _base("2049", record, fields, owner, "auto_template")
+
+
+def identity_moboreels(record, users, creator):
+    """Freeze real Mobo ownership without inventing DramaWave campaign IDs.
+
+    The current effect/billing sources cover DramaWave. A verified other-product
+    publication is auditable outside that scope, not a broken DramaWave link.
+    publications() still independently verifies every task and publish receipt.
+    """
+    evidence = record["evidence"]
+    task, saved = evidence["task"], evidence["moboreels"]
+    actor, material, link = (obj(saved[key]) for key in ("creator", "material", "link"))
+    same(actor["user_id"], creator)
+    same(material["resource_type_v2"], "moboreels")
+    same(material["material_id"], task["material_id"])
+    same(material["content_id"], task["content_id"], link["story_id"])
+    same(link["status"], "succeeded")
+    same(link["target_url"], task["long_url"])
+    same(link["short_url"], task["short_url"])
+    short_id, koc_code = required(link["short_link_id"]), required(link["koc_code"])
+    try:
+        parsed = urlsplit(task["long_url"])
+        host = parsed.hostname or ""
+        if (parsed.scheme != "https" or not (host == "moboreels.com" or host.endswith(".moboreels.com"))
+                or parsed.username or parsed.password or parsed.port is not None or parsed.fragment
+                or parsed.path.rstrip("/").split("/")[-1] != koc_code):
+            raise ValueError()
+    except ValueError:
+        raise AttributionError("moboreels_link_identity_invalid") from None
+    owner = user_identity(users, creator, actor.get("tenant_key") or None)
+    return dict(platform="facebook", site_id="2049", product="moboreels",
+                excluded=True, exclusion_reason="outside_dramawave_report_scope",
+                key=["moboreels:" + short_id, koc_code],
+                link_id="facebook:moboreels:" + record["record_id"],
+                channel="facebook:" + required(task["page_id"]), drama=task["content_id"],
+                date=day(task["created_at_utc"]), link_type="auto_template", **owner)
 
 
 def identity_new(record, users):
@@ -804,6 +858,11 @@ def read_facebook(app):
                             continue
                         if identity["site_id"] != site or identity["platform"] != "facebook":
                             raise AttributionError("ledger_identity_invalid")
+                        if identity.get("product") == "moboreels":
+                            # Its frozen owner and confirmed publication remain
+                            # in the ledger. Never join a Mobo key to DW billing.
+                            metadata[key]["outside_scope_count"] = metadata[key].get("outside_scope_count", 0) + 1
+                            continue
                         identity["publications"] = json.loads(record["publications_json"])
                         identity["attribution_status"] = record["status"]
                         pool_owner = pool_owners.get(record["record_id"]) if site == "2310" else None
