@@ -39,7 +39,7 @@
     const refreshButton = resolveElement(options.refreshButton);
     if (refreshButton && !refreshButton.dataset.topbarBound) {
       refreshButton.dataset.topbarBound = "1";
-      refreshButton.addEventListener("click", () => location.reload());
+      refreshButton.addEventListener("click", options.onRefresh || (() => location.reload()));
     }
   }
 

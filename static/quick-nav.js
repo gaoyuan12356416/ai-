@@ -1,6 +1,5 @@
 (function () {
   const TAG_PUBLISH_ITEMS = [
-    {key:"xMaterialEffects",label:"X 素材效果",description:"查看 X 素材累计浏览、互动与收入",kind:"page",href:"/x-material-effects.html",module:"x_material_effects",adminOnly:false,enabled:true,order:27},
     { key: "xTagAutoPublishTemplates", label: "标签画像自动发布",
       description: "按频道标签收入画像选择剧目和素材", kind: "page",
       href: "/x-tag-auto-publish-templates.html", module: "x_accounts",
@@ -11,12 +10,23 @@
       adminOnly: false, enabled: true, order: 26 },
   ];
   const TAG_PAGE_ACTIVE_KEYS = {
-    "/x-material-effects.html":"xMaterialEffects",
     "/x-tag-auto-publish-templates.html": "xTagAutoPublishTemplates",
     "/x-tag-auto-publish-template.html": "xTagAutoPublishTemplates",
     "/x-tag-auto-publish-runs.html": "xTagAutoPublishTemplates",
     "/x-tag-material-pool.html": "xTagMaterialPool",
   };
+  const INDEPENDENT_REPORTS = [
+    {
+      key: "socialkitAnalytics", label: "SocialKit 效果报表", order: 30,
+      description: "按平台、产品、账号和剧目查看每日发布与收入",
+      kind: "page", href: "/socialkit-analytics.html", module: "socialkit_analytics", enabled: true,
+    },
+    {
+      key: "xMaterialEffects", label: "X 素材效果", order: 40,
+      description: "查看 X 素材累计浏览、互动与收入",
+      kind: "page", href: "/x-material-effects.html", module: "x_material_effects", enabled: true,
+    },
+  ];
   const RETIRED_X_KEYS = new Set(["xAutoPublishTemplates", "xAutoPublishRuns", "xPostMaterialPool"]);
   const RETIRED_X_PAGES = new Set([
     "/x-auto-publish-templates.html", "/x-auto-publish-template.html",
@@ -453,7 +463,7 @@
     },
   ];
 
-  const CONFIG_CACHE_KEY = "quickNavConfigCache:v5";
+  const CONFIG_CACHE_KEY = "quickNavConfigCache:v6";
   const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const AUTH_CACHE_KEY = "dramaAdminAuthCache";
   let navCache = null;
@@ -567,6 +577,7 @@
     if (item.enabled === false) return false;
     if (item.adminOnly && !(user && user.is_admin)) return false;
     if (item.module && !userCan(auth, item.module)) return false;
+    if (item.requiredModules && !item.requiredModules.every(key => userCan(auth, key))) return false;
     return true;
   }
 
@@ -598,6 +609,7 @@
     xPostLogs: "/x-post-logs.html",
     socialAnalytics: "/social-analytics.html",
     socialkitAnalytics: "/socialkit-analytics.html",
+    xMaterialEffects: "/x-material-effects.html",
     adControl: "/ad-control.html",
     adControlRules: "/ad-control-rules.html",
     adControlPools: "/ad-control-account-pools.html",
@@ -621,16 +633,95 @@
     return JSON.parse(JSON.stringify(Array.isArray(config) ? config : []));
   }
 
+  // The source configuration also authorizes API requests. Project its group
+  // and item permissions onto individual links when combining sidebar groups.
+  function inheritNavAccess(item, group, skipModule = false) {
+    if (group.enabled === false) item.enabled = false;
+    if (group.adminOnly) item.adminOnly = true;
+    if (!skipModule && group.module && group.module !== item.module) {
+      item.requiredModules = [...new Set([...(item.requiredModules || []), group.module])];
+    }
+  }
+
+  function consolidateReportNavigation(groups) {
+    const defaults = DEFAULT_NAV.find(group => group.key === "social_reports");
+    let reports = groups.find(group => group.key === defaults.key);
+    if (!reports) {
+      reports = cloneNav([defaults])[0];
+      groups.push(reports);
+    }
+    reports.label = defaults.label;
+    if (!Array.isArray(reports.items)) reports.items = [];
+    const sourceReports = { ...reports };
+    const oldMixedAcl = sourceReports.module && (sourceReports.module !== "social_analytics" ||
+      reports.items.some(item => item.module && item.module !== "social_analytics"));
+    const oldX = groups.find(group => group.key === "x_platform");
+    const oldSocialKit = groups.find(group => group.key === "socialkit_reports");
+
+    // A saved link in the destination takes precedence over a legacy duplicate.
+    const sources = [reports, ...groups.filter(group => group !== reports)];
+    for (const definition of INDEPENDENT_REPORTS) {
+      let saved;
+      for (const group of sources) {
+        group.items = (group.items || []).filter(item => {
+          if (item.key !== definition.key && item.view !== definition.key &&
+              String(item.href || "").split(/[?#]/, 1)[0] !== definition.href) return true;
+          if (!saved) {
+            saved = { ...definition, ...item, key: definition.key, href: definition.href };
+            // The dedicated report module is always required, including for old aliases.
+            if (saved.module !== definition.module) {
+              inheritNavAccess(saved, { module: definition.module });
+            }
+            inheritNavAccess(saved, group, group.key === "x_platform" && definition.key === "xMaterialEffects");
+          }
+          return false;
+        });
+      }
+      const entry = saved || { ...definition };
+      if (!saved && definition.key === "xMaterialEffects" && oldX) inheritNavAccess(entry, oldX, true);
+      if (!saved && definition.key === "socialkitAnalytics") {
+        if (oldSocialKit) inheritNavAccess(entry, oldSocialKit);
+        else if (!oldMixedAcl) inheritNavAccess(entry, sourceReports, true);
+      }
+      reports.items.push(entry);
+    }
+    // Existing data reports keep their former group AND item restrictions.
+    for (const item of reports.items) {
+      if (!INDEPENDENT_REPORTS.some(report => report.key === item.key)) inheritNavAccess(item, sourceReports);
+    }
+    delete reports.module;
+    const analytics = reports.items.find(item => item.key === "socialAnalytics");
+    if (analytics) analytics.label = "社媒效果分析";
+    if (!reports.items.some(item => item.key === "aiImageDaily")) {
+      const daily = { ...defaults.items.find(item => item.key === "aiImageDaily") };
+      inheritNavAccess(daily, sourceReports);
+      reports.items.push(daily);
+    }
+    // Older releases could create a second group when the main one was absent.
+    for (const group of groups) {
+      if (!["socialkit_reports", "drama_reports", "moboreels_reports"].includes(group.key)) continue;
+      for (const item of group.items || []) {
+        if (reports.items.some(existing => existing.key === item.key)) continue;
+        inheritNavAccess(item, group);
+        reports.items.push(item);
+      }
+      group.items = [];
+    }
+    return reports;
+  }
+
   function normalizeNavConfig(config) {
     if (!Array.isArray(config)) return null;
     const normalized = cloneNav(config);
+    const reports = consolidateReportNavigation(normalized);
     // DRAMA_PAY_RANK_NAV_V1
     if (!normalized.some(g => (g.items || []).some(i => i.key === "dramaPayRank"))) {
       const rankItem = {key:"dramaPayRank", label:"短剧付费 TOP100", kind:"page",
         href:"/drama-pay-rank.html", module:"drama_pay_rank", enabled:true, order:5};
-      const reports = normalized.find(g => g.label === "数据报表");
-      if (reports) (reports.items || (reports.items=[])).push(rankItem);
-      else normalized.push({key:"drama_reports",label:"数据报表",enabled:true,order:70,items:[rankItem]});
+      // In stored navigation this report inherits the data group's original ACL.
+      const sourceGroup = config.find(group => group.key === "social_reports");
+      if (sourceGroup) inheritNavAccess(rankItem, sourceGroup);
+      reports.items.push(rankItem);
     }
     if (!normalized.some(group => (group.items || []).some(item => item.key === "pipelineMonitor"))) {
       normalized.unshift({ key: "pipeline_overview", label: "运行监测", order: 1,
@@ -638,53 +729,6 @@
           description: "任务进度、服务器容量与制作发布效率", kind: "page",
           href: "/pipeline-monitor.html", enabled: true }] });
     }
-    // SocialKit has its own module; retain inherited permissions on old items.
-    let socialkitReports = normalized.find(group => group && group.key === "social_reports");
-    if (!socialkitReports) {
-      socialkitReports = cloneNav([DEFAULT_NAV.find(group => group.key === "social_reports")])[0];
-      normalized.push(socialkitReports);
-    }
-    if (!Array.isArray(socialkitReports.items)) socialkitReports.items = [];
-    const socialkitExists = normalized.some(group => Array.isArray(group.items) &&
-      group.items.some(item => item && item.key === "socialkitAnalytics"));
-    const customReportAcl = socialkitReports.module && (socialkitReports.module !== "social_analytics" ||
-      socialkitReports.items.some(item => item && item.module && item.module !== "social_analytics"));
-    if (!socialkitExists && customReportAcl) {
-      let separate = normalized.find(group => group && group.key === "socialkit_reports");
-      if (!separate) {
-        separate = {key: "socialkit_reports", label: "数据报表 · SocialKit", order: 51, items: []};
-        normalized.push(separate);
-      }
-      socialkitReports = separate;
-    }
-    if (!socialkitExists && socialkitReports.module === "social_analytics") {
-      socialkitReports.items.forEach(item => { if (!item.module) item.module = "social_analytics"; });
-      delete socialkitReports.module;
-    }
-    if (!socialkitExists) {
-      socialkitReports.items.push({key: "socialkitAnalytics", label: "SocialKit 效果报表",
-        description: "按平台、产品、账号和剧目查看每日发布与收入",
-        kind: "page", href: "/socialkit-analytics.html", module: "socialkit_analytics",
-        enabled: true, order: 30});
-    }
-
-
-    // Upgrade saved and cached navigation without replacing other groups or ACLs.
-    const reportDefault = DEFAULT_NAV.find(group => group.key === "social_reports");
-    let reports = normalized.find(group => group && group.key === "social_reports");
-    if (!reports) {
-      reports = cloneNav([reportDefault])[0];
-      normalized.push(reports);
-    } else {
-      reports.label = "数据报表";
-      if (!Array.isArray(reports.items)) reports.items = [];
-      const analytics = reports.items.find(item => item && item.key === "socialAnalytics");
-      if (analytics) analytics.label = "社媒效果分析";
-      if (!reports.items.some(item => item && item.key === "aiImageDaily")) {
-        reports.items.push(cloneNav(reportDefault.items.filter(item => item.key === "aiImageDaily"))[0]);
-      }
-    }
-
     const editorDefault = DEFAULT_NAV.find(group => group.key === "video_editing");
     const missingEditorItems = editorDefault.items.filter(entry => !normalized.some(group =>
       Array.isArray(group?.items) && group.items.some(item => item?.key === entry.key)));
@@ -885,7 +929,8 @@
     const retiredGroups = new Set(["ad_control", "ad_control_v3", "ad_material", "ad_material_test"]);
     const retiredModules = new Set(["ad_control_center", "ad_control_v3", "ad_material_tasks", "ad_material_test"]);
     return normalized
-      .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module))
+      .filter(group => !retiredGroups.has(group.key) && !retiredModules.has(group.module) &&
+        (!["socialkit_reports", "drama_reports", "moboreels_reports"].includes(group.key) || group.items.length))
       .map(group => Object.assign({}, group, {
         items: (group.items || []).filter(item => !retiredModules.has(item.module) && !retiredXItem(item)),
       }));
@@ -986,10 +1031,8 @@
 
   function buildNavHtml(config, options) {
     return sortItems(config).map(group => {
-      const groupAllowed = visibleFor(options.auth || {}, group);
-      const effectsOnly = group.key === "x_platform" && group.enabled !== false && !group.adminOnly && userCan(options.auth || {}, "x_material_effects");
-      if (!groupAllowed && !effectsOnly) return "";
-      const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item) && (groupAllowed || item.key === "xMaterialEffects"));
+      if (!visibleFor(options.auth || {}, group)) return "";
+      const items = sortItems(group.items).filter(item => visibleFor(options.auth || {}, item));
       if (!items.length) return "";
       return renderGroup(group, items, options.activeKey);
     }).join("");
