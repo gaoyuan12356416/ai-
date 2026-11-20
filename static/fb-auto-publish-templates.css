@@ -6,8 +6,8 @@
 .template-list-table th { padding: 12px 16px; background: #f8fafc; }
 .template-list-table td { padding: 12px 16px; vertical-align: middle; line-height: 1.5; }
 .template-list-table td small { display: inline-block; margin-top: 3px; line-height: 1.6; }
-.template-list-table th:first-child { width: 17%; }
-.template-list-table th:nth-child(2) { width: 16%; }
+.template-list-table th:first-child { width: 15%; }
+.template-list-table th:nth-child(2) { width: 14%; }
 .template-list-table th:nth-child(3) { width: 100px; text-align: center; }
 .template-list-table th:last-child { width: 444px; text-align: center; }
 .template-list-table td:first-child strong { overflow-wrap: anywhere; }

@@ -9,15 +9,10 @@ import subprocess
 
 SOURCE = Path(__file__).resolve().parents[1]
 BASELINES = {
-    "fb-auto-publish-templates.js": {
-        "82406dbda72ecda064a606112839e93c419e8ea97180cd966439afeb44b06489",
-        "57cccc45e9a2dfe30d6daa28e6234edeb23a0fcae22caefea9337c3407b075ef",
-    },
     "fb-auto-publish-templates.html": {
-        "72d7c9204dc28f5614706171db10aa117cdad38ae85e39807668e191ba3e63af",
-        "754d9a90aa9aea3ae6a1fea6d10856a84cdf1412fd31a74d001bf51302bd53f6",
+        "5b712535dafd73e032838332880b4ecabd71047cf8794580fee2dabf67d53ce3",
     },
-    "fb-auto-publish-templates.css": {"7dc7edccec1bfb80d4a0df1b50a933f3e63e892efe047e54d3a3e351d13aa895", None},
+    "fb-auto-publish-templates.css": {"9373c62d5ebedaf3d8fd80566153bb23f13560c1d48702fb6b79fa1220208890"},
 }
 
 
@@ -50,7 +45,6 @@ def install(folder):
     assert not run("git", "-C", str(SOURCE), "status", "--porcelain"), "source must be clean"
     commit = run("git", "-C", str(SOURCE), "rev-parse", "HEAD")
     assert run("git", "-C", str(SOURCE), "branch", "-r", "--contains", commit), "commit must come from GitHub"
-    run("node", "--check", str(SOURCE / "static/fb-auto-publish-templates.js"))
     runtime = Path("/opt/fb-auto-post/current").resolve()
     roots = [Path("/root/drama_material_service/static").resolve(), runtime / "static", Path("/usr/share/nginx/html")]
     info = {"commit": commit, "runtime": str(runtime), "services_before": services(), "files": {}, "status": "prepared"}
