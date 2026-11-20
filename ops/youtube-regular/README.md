@@ -9,7 +9,7 @@
 先在香港用新版本运行普通视频 FFmpeg 测试，再依次执行以下命令。每条命令在对应主机执行。
 
 ```sh
-python3 "$RUN" install editor-gpu "$EDITOR_REPO" "$EDITOR_SHA"
+/usr/bin/python3.9 "$RUN" install editor-gpu "$EDITOR_REPO" "$EDITOR_SHA"
 python3 "$RUN" install editor-cpu "$EDITOR_REPO" "$EDITOR_SHA"
 python3 "$RUN" install publisher "$PUBLISH_REPO" "$PUBLISH_SHA"
 ```
@@ -23,7 +23,7 @@ python3 "$RUN" install publisher "$PUBLISH_REPO" "$PUBLISH_SHA"
 ```sh
 python3 "$RUN" rollback publisher "$PUBLISH_REPO" "$PUBLISH_SHA"
 python3 "$RUN" rollback editor-cpu "$EDITOR_REPO" "$EDITOR_SHA"
-python3 "$RUN" rollback editor-gpu "$EDITOR_REPO" "$EDITOR_SHA"
+/usr/bin/python3.9 "$RUN" rollback editor-gpu "$EDITOR_REPO" "$EDITOR_SHA"
 ```
 
 每个 scope 的 `backups/<scope>/<SHA>/manifest.json` 记录原版本、目标文件和进程切换。若后续部署修改了相同文件，依据 manifest 合并回退本次差异。若已有另一份编辑 release 生效，使用其版本记录继续核对。

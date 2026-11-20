@@ -206,7 +206,11 @@ def build(args, folder):
         if name.endswith('.py'): compile(new,name,'exec')
         if name.startswith('features/ai_video_editing/'):
             target=Path(name if scope=='editor-gpu' else name.removeprefix('features/'))
-            if filebytes(prev/target)!=old: raise RuntimeError('Editor baseline changed: '+name)
+            live=filebytes(prev/target)
+            # Older Hong Kong packages were checked out on Windows before installation.
+            if live is not None and scope=='editor-gpu' and name.endswith('.py'):
+                live=live.replace(b'\r\n',b'\n')
+            if live!=old: raise RuntimeError('Editor baseline changed: '+name)
             package[target]=new
             continue
         if scope=='editor-gpu': continue
