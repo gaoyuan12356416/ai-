@@ -181,8 +181,9 @@ def collect_metrics(posts,state_path,*,limit=0):
                 if error:
                     failures+=1;metrics=old[1] if old else '{}';at=old[2] if old else ''
                 else:success+=1;metrics=encoded(extract(value));at=stamp
+                next_attempt=now+timedelta(seconds=interval(post['published_at'],now)) if error=='post_unavailable' else retry
                 db.execute('INSERT INTO observations VALUES(?,?,?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET metrics_json=excluded.metrics_json,metrics_at=excluded.metrics_at,attempt_at=excluded.attempt_at,error_code=excluded.error_code,retry_at=excluded.retry_at',
-                    (post['post_id'],metrics,at,stamp,error,retry.isoformat() if error else ''))
+                    (post['post_id'],metrics,at,stamp,error,next_attempt.isoformat() if error else ''))
             if code in ('x_http_401','x_http_402','x_http_403','x_http_429'):
                 upstream=code
                 db.execute('INSERT INTO collection_state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET error_code=excluded.error_code,retry_at=excluded.retry_at',(code,retry.isoformat()))
