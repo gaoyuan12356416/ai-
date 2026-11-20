@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep two private Codex logins; reset the new account before falling back.
+"""Use both Codex accounts' allowance before redeeming a new-account reset.
 
 Only official app-server account methods are used. No inference is started.
 Running Codex sessions are never interrupted or logged out.
@@ -18,6 +18,10 @@ import tempfile
 import threading
 import time
 import uuid
+
+
+RESET_ACCEPTED = ("reset", "alreadyRedeemed")
+RESET_DECLINED = ("noCredit", "nothingToReset")
 
 
 class RpcError(RuntimeError):
@@ -265,12 +269,22 @@ class Watch:
             raise ValueError("credential identity changed during usage readback")
         return result
 
-    def switch(self, destination, reason):
+    def finish_switch(self, destination, reason):
+        self.state["active"] = destination
+        # Retain the on-disk phase understood by the previous release.
+        self.state["phase"] = "watching" if destination == "new" else "fallback_complete"
+        self.state.pop("pendingSwitch", None)
+        if reason == "reset_verified":
+            self.state.pop("pendingReset", None)
+        elif reason == "new_quota_available_after_request" and "pendingReset" in self.state:
+            self.state["pendingReset"]["recoveryObserved"] = True
+
+    def switch(self, destination, reason, summary=None):
         current = self.state["active"]
         candidate_home = self.home(destination)
-        candidate = self.usage(candidate_home, self.expected(destination))
-        summary = summarize_usage(candidate)
-        if summary["remainingPercent"] is None or summary["remainingPercent"] <= self.state["thresholdPercent"]:
+        if summary is None:
+            summary = summarize_usage(self.usage(candidate_home, self.expected(destination)))
+        if summary["remainingPercent"] is None or summary["remainingPercent"] <= 0:
             self.event("destination_unavailable", destination=destination, usage=summary)
             return False
         with credential_switch_window(self.active_home):
@@ -280,15 +294,13 @@ class Watch:
             next_auth = read_json(candidate_home / "auth.json")
             if auth_identity(next_auth) != self.expected(destination):
                 raise ValueError("destination credential identity changed")
-            # Save the latest refreshed original credential immediately before handoff.
+            # Save the outgoing account's latest credential immediately before handoff.
             atomic_json(self.home(current) / "auth.json", current_auth)
             self.state["pendingSwitch"] = {"from": current, "to": destination, "reason": reason}
             self.save()
             atomic_json(self.active_home / "auth.json", next_auth)
-            self.state["active"] = destination
-            self.state["phase"] = "watching" if destination == "new" else "fallback_complete"
-            self.state.pop("pendingSwitch", None)
-            self.state.pop("pendingReset", None)
+            self.finish_switch(destination, reason)
+            self.state["lastUsage"] = {"account": destination, "at": int(time.time()), **summary}
             self.event("account_switched", account=destination, reason=reason, usage=summary,
                        existingSessions="unchanged_until_reconnect")
         return True
@@ -299,10 +311,7 @@ class Watch:
             return
         identity = auth_identity(read_json(self.active_home / "auth.json"))
         if identity == self.expected(pending["to"]):
-            self.state["active"] = pending["to"]
-            self.state["phase"] = "watching" if pending["to"] == "new" else "fallback_complete"
-            self.state.pop("pendingReset", None)
-            self.state.pop("pendingSwitch")
+            self.finish_switch(pending["to"], pending.get("reason"))
             self.event("switch_reconciled", account=self.state["active"])
         elif identity == self.expected(pending["from"]):
             self.state.pop("pendingSwitch")
@@ -310,87 +319,160 @@ class Watch:
         else:
             raise ValueError("pending switch has an unknown credential identity")
 
-    def tick(self):
-        self.reconcile_switch()
-        active = self.state["active"]
-        if self.state["phase"] == "waiting_new_login":
-            auth_path = self.home("new") / "auth.json"
-            if not auth_path.exists():
-                self.event("waiting_new_login")
-                return
-            identity = auth_identity(read_json(auth_path))
-            if identity == self.expected("original"):
-                self.event("new_login_is_original_account")
-                return
-            self.state["identities"]["new"] = identity
-            self.save()
-            self.switch("new", "new_login_verified")
+    def register_new_login(self):
+        auth_path = self.home("new") / "auth.json"
+        if not auth_path.exists():
+            self.event("waiting_new_login")
             return
-        usage = self.usage(self.active_home, self.expected(active))
-        summary = summarize_usage(usage)
-        self.state["lastUsage"] = {"account": active, "at": int(time.time()), **summary}
-        self.save()
-        if self.state["phase"] == "fallback_complete":
-            self.event("fallback_active", usage=summary)
+        identity = auth_identity(read_json(auth_path))
+        if identity == self.expected("original"):
+            self.event("new_login_is_original_account")
             return
-        remaining = summary["remainingPercent"]
-        if remaining is None:
-            self.event("usage_unknown")
-            return
-        if remaining > self.state["thresholdPercent"]:
-            self.state.pop("pendingReset", None)
-            self.state.pop("resetNotEligibleAt", None)
-            self.event("new_account_healthy", usage=summary)
-            return
+        summary = summarize_usage(self.usage(self.home("new"), identity))
+        self.state["identities"]["new"] = identity
+        if summary["remainingPercent"] is None:
+            self.event("usage_unknown", account="new")
+        elif summary["remainingPercent"] >= self.state["thresholdPercent"]:
+            self.switch("new", "new_login_verified", summary)
+        else:
+            self.state["phase"] = "fallback_complete"
+            self.event("new_login_registered", usage=summary)
+
+    def verify_reset(self, summary):
+        """Use restored new-account quota while retaining any unconfirmed charge."""
         pending = self.state.get("pendingReset")
-        if pending and pending.get("outcome") in ("reset", "alreadyRedeemed"):
-            # A successful reset must be visible in the official usage readback.
-            # Never consume another card merely because propagation is delayed.
-            self.event("awaiting_reset_readback", usage=summary)
+        remaining = summary["remainingPercent"]
+        if not pending or remaining is None or remaining <= 0:
+            return False
+        if pending.get("outcome") in RESET_DECLINED:
+            self.state.pop("pendingReset")
+            return False
+        if pending.get("outcome") not in RESET_ACCEPTED:
+            # A timeout can hide a successful reset. Keep its key until the official
+            # receipt, even if usable quota and a lower credit balance are visible.
+            before, now = pending.get("creditsBefore"), summary["resetCredits"]
+            if not pending.get("recoveryObserved") and before is not None and now is not None and now < before:
+                if self.state["active"] == "original" and remaining >= self.state["thresholdPercent"]:
+                    self.switch("new", "new_quota_available_after_request", summary)
+                    return True
+                pending["recoveryObserved"] = True
+            return False
+        if self.state["active"] == "original":
+            self.switch("new", "reset_verified", summary)
+        else:
+            self.state.pop("pendingReset")
+            self.state["lastUsage"] = {"account": "new", "at": int(time.time()), **summary}
+            self.event("reset_verified", account="new", usage=summary)
+        return True
+
+    def reset_new(self, home, usage, summary):
+        pending = self.state.get("pendingReset")
+        if pending and pending.get("outcome") in RESET_ACCEPTED:
+            if pending["outcome"] == "alreadyRedeemed" and pending.get("recoveryObserved"):
+                # The previous allowance was restored, used, and its original key confirmed.
+                self.state.pop("pendingReset")
+                self.event("previous_reset_reconciled", account="new", usage=summary)
+                return
+            self.event("awaiting_reset_readback", account="new", usage=summary)
             return
-        if summary["resetCredits"] == 0 and not pending:
-            self.switch("original", "new_low_and_no_reset_credit")
+        count = summary["resetCredits"]
+        if not pending and (count is None or count == 0):
+            if count == 0:
+                self.state.pop("resetNotEligibleAt", None)
+            self.event("reset_credit_count_unknown" if count is None else "both_exhausted_no_credit",
+                       account="new", usage=summary)
             return
-        if summary["resetCredits"] is None and not pending:
-            self.event("reset_credit_count_unknown", usage=summary)
-            return
-        usage_signature = {"remainingPercent": remaining, "windows": summary["windows"]}
+        credit = choose_credit(usage)
+        usage_signature = {"remainingPercent": summary["remainingPercent"], "windows": summary["windows"],
+                           "resetCredits": count}
+        if credit:
+            usage_signature["creditFingerprint"] = hashlib.sha256(credit.encode()).hexdigest()
         if not pending and self.state.get("resetNotEligibleAt") == usage_signature:
             self.event("reset_not_yet_eligible", usage=summary)
             return
         if not pending:
             self.state.pop("resetNotEligibleAt", None)
-            pending = {"idempotencyKey": str(uuid.uuid4()), "startedAt": int(time.time())}
-            credit = choose_credit(usage)
+            pending = {"idempotencyKey": str(uuid.uuid4()), "startedAt": int(time.time()), "creditsBefore": count}
             if credit:
                 pending["creditId"] = credit
             self.state["pendingReset"] = pending
             self.save()
-        params = {k: pending[k] for k in ("idempotencyKey", "creditId") if k in pending}
-        # Retries always keep the same key, including after timeout or service restart.
-        with self.client_factory(self.active_home) as client:
-            outcome = client.call("account/rateLimitResetCredit/consume", params).get("outcome")
-        pending["outcome"] = outcome
-        self.save()
-        if outcome == "noCredit":
-            self.state.pop("pendingReset", None)
+        outcome = pending.get("outcome")
+        if outcome not in RESET_DECLINED:
+            # Only this new-account credential may redeem the persisted request.
+            params = {k: pending[k] for k in ("idempotencyKey", "creditId") if k in pending}
+            with self.client_factory(home) as client:
+                if auth_identity(read_json(home / "auth.json")) != self.expected("new"):
+                    raise ValueError("reset credential does not match the registered new account")
+                outcome = client.call("account/rateLimitResetCredit/consume", params).get("outcome")
+            pending["outcome"] = outcome
+        if outcome in RESET_ACCEPTED:
             self.save()
-            self.switch("original", "official_reset_no_credit")
-        elif outcome in ("reset", "alreadyRedeemed"):
-            updated = summarize_usage(self.usage(self.active_home, self.expected(active)))
-            if updated["remainingPercent"] is not None and updated["remainingPercent"] > self.state["thresholdPercent"]:
-                self.state.pop("pendingReset", None)
-                self.event("reset_verified", usage=updated)
-            else:
-                self.event("awaiting_reset_readback", usage=updated)
-        elif outcome == "nothingToReset":
-            # This definitive reply did not spend a card. Retry with a new key
-            # only when the quota changes (some accounts require 0% remaining).
+            updated = summarize_usage(self.usage(home, self.expected("new")))
+            if not self.verify_reset(updated):
+                self.event("awaiting_reset_readback", account="new", usage=updated)
+        elif outcome in RESET_DECLINED:
             self.state.pop("pendingReset", None)
             self.state["resetNotEligibleAt"] = usage_signature
-            self.event("reset_not_yet_eligible", usage=summary)
+            self.event("both_exhausted_no_credit" if outcome == "noCredit" else "reset_not_yet_eligible",
+                       account="new", usage=summary)
         else:
-            self.event("reset_outcome_unknown")
+            self.event("reset_outcome_unknown", account="new")
+
+    def tick(self):
+        self.reconcile_switch()
+        if self.state["phase"] == "waiting_new_login":
+            self.register_new_login()
+            return
+        active = self.state["active"]
+        usage = self.usage(self.active_home, self.expected(active))
+        current = summarize_usage(usage)
+        self.state["lastUsage"] = {"account": active, "at": int(time.time()), **current}
+        self.save()
+        remaining = current["remainingPercent"]
+        if remaining is None:
+            self.event("usage_unknown", account=active)
+            return
+        if active == "new":
+            if self.verify_reset(current):
+                return
+            if remaining >= self.state["thresholdPercent"]:
+                self.state.pop("resetNotEligibleAt", None)
+                self.event("new_account_healthy", usage=current)
+                return
+            new_home = self.active_home
+            new_usage, new_summary = usage, current
+            original = summarize_usage(self.usage(self.home("original"), self.expected("original")))
+            if original["remainingPercent"] is None:
+                self.event("usage_unknown", account="original")
+                return
+            if original["remainingPercent"] > 0:
+                self.switch("original", "new_below_threshold", original)
+                return
+        else:
+            if remaining > 0 and not self.state.get("pendingReset"):
+                self.event("fallback_active", usage=current)
+                return
+            new_home = self.home("new")
+            new_usage = self.usage(new_home, self.expected("new"))
+            new_summary = summarize_usage(new_usage)
+            if self.verify_reset(new_summary):
+                return
+            if new_summary["remainingPercent"] is None:
+                self.event("usage_unknown", account="new")
+                return
+            if remaining > 0:
+                self.event("fallback_active", usage=current)
+                return
+        if new_summary["remainingPercent"] > 0:
+            self.state.pop("resetNotEligibleAt", None)
+            if active == "original":
+                self.switch("new", "new_quota_available", new_summary)
+            else:
+                self.event("new_quota_available", usage=new_summary)
+            return
+        # Both accounts reported zero in this tick; a retry still belongs to the new account.
+        self.reset_new(new_home, new_usage, new_summary)
 
 
 def main():
