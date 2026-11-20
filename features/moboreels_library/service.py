@@ -53,6 +53,7 @@ class Application:
         self.short_links = short_links if short_links is not None else ShortLinks(settings, self.db, self.promotions)
         self.clicks = ClickStats(settings)
         self.reports = reports if reports is not None else Reports(settings, db=self.db, provider=self.provider)
+        self.effects = Effects(settings, self.reports, self.clicks)
         self.content = ContentTools(settings, self.catalog, self.provider)
         self._media = None
         self._media_lock = threading.Lock()
@@ -93,7 +94,7 @@ class Application:
             return 200, self.content.episodes(story, refresh=query.get('refresh') == '1')
         if method == 'GET' and path == '/reports':
             if query.get('view') == 'effects':
-                return 200, Effects(self.settings, self.reports, self.clicks).query(query, actor)
+                return 200, self.effects.query(query, actor)
             if query.get('view') == 'clicks':
                 return 200, self.clicks.query(query, actor)
             return 200, self.reports.query(query, actor, all_users=actor.get('is_admin') is True)

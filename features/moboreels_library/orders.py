@@ -595,13 +595,13 @@ COUNT_METRICS = ("order_recharge_count", "order_refund_count", "unclassified_ord
                  "unmatched_order_count", "unmatched_ad_count", "undated_order_count")
 
 
-def _query_report(store, params, star_id, *, facts=False):
+def _query_report(store, params, star_id, *, facts=False, story_ids=()):
     with localcontext() as context:
         context.prec = 65
-        return _query_report_precise(store, params, star_id, facts=facts)
+        return _query_report_precise(store, params, star_id, facts=facts, story_ids=story_ids)
 
 
-def _query_report_precise(store, params, star_id, *, facts=False):
+def _query_report_precise(store, params, star_id, *, facts=False, story_ids=()):
     start, end = _period(params, datetime.now(timezone(timedelta(hours=8))).date() if facts else None)
     try:
         page, size = int(params.get("page_index", 1)), int(params.get("page_size", 50))
@@ -641,16 +641,41 @@ def _query_report_precise(store, params, star_id, *, facts=False):
         ON s.institution_user_id=a.institution_user_id AND s.project_type=a.project_type
         AND s.ad_time=a.ad_time AND s.snapshot_id=a.snapshot_id WHERE %s GROUP BY a.ad_time,a.code;""" % (AD_TABLE, AD_DAY_TABLE, ad_where)
     coverage_sql = "SELECT JSON_OBJECT('_kind','coverage','ad_data_as_of',MAX(ad_time),'complete_days',COUNT(*)) FROM %s WHERE %s AND ad_time%s;" % (AD_DAY_TABLE, store.scope(), period)
-    source = store.reader._read(order_sql + "\n" + ad_sql + "\n" + coverage_sql)
+    extra_sql = []
+    if facts:
+        # Reuse the exact day pointers for both coverage and the effects trend.
+        coverage_sql = "SELECT JSON_OBJECT('_kind','ad_day','date',ad_time) FROM %s WHERE %s AND ad_time%s;" % (AD_DAY_TABLE, store.scope(), period)
+        ids = sorted(set(story_ids))
+        for offset in range(0, len(ids), 500):
+            extra_sql.append("SELECT JSON_OBJECT('_kind','story','story_id',story_id,'story_name',story_name) FROM ads_ai.cdreader_koc_drama WHERE %s AND story_id IN (%s);" % (
+                store.scope(), ','.join(_literal(v) for v in ids[offset:offset+500])))
+    source = store.reader._read("\n".join([order_sql, ad_sql, coverage_sql] + extra_sql[:1]))
+    for sql in extra_sql[1:]:
+        source.extend(store.reader._read(sql))
     codes = sorted({row["code"] for row in source if row.get("code")})
     mappings = {}
     for offset in range(0, len(codes), 500):
         names = ("id", "star_user_id", "story_id", "koc_code", "request_id", "star_name", "tenant_key", "user_id")
-        rows = store.reader._read("SELECT %s FROM ads_ai.cdreader_koc_promotion WHERE %s AND status='succeeded' AND koc_code IN (%s);" % (
-            _json_expr(names), store.scope(), ",".join(_literal(value) for value in codes[offset:offset + 500])))
+        if facts:
+            # The unique institution/project/story catalog key keeps promotion
+            # cardinality intact, including ambiguous codes shared by owners.
+            fields = ','.join("'%s',p.`%s`" % (n, n) for n in names)
+            rows = store.reader._read("SELECT JSON_OBJECT(%s,'catalog_story_name',d.story_name) FROM ads_ai.cdreader_koc_promotion p LEFT JOIN ads_ai.cdreader_koc_drama d ON d.institution_user_id=p.institution_user_id AND d.project_type=p.project_type AND d.story_id=p.story_id WHERE p.%s AND p.status='succeeded' AND p.koc_code IN (%s);" % (
+                fields, store.scope().replace(' AND project_type', ' AND p.project_type'),
+                ','.join(_literal(v) for v in codes[offset:offset+500])))
+        else:
+            rows = store.reader._read("SELECT %s FROM ads_ai.cdreader_koc_promotion WHERE %s AND status='succeeded' AND koc_code IN (%s);" % (
+                _json_expr(names), store.scope(), ",".join(_literal(value) for value in codes[offset:offset + 500])))
         for row in rows:
             mappings.setdefault(row["koc_code"], []).append(row)
-    story_names = {row["story_id"]: row.get("story_name", "") for row in source if row.get("story_id")}
+    story_names = {row["story_id"]: row.get("story_name", "") for row in source if row.get("story_id") and row['_kind'] == 'order'}
+    if facts:
+        for row in source:
+            if row['_kind'] == 'story':
+                story_names.setdefault(row['story_id'], row['story_name'])
+        for rows in mappings.values():
+            for row in rows:
+                story_names.setdefault(row['story_id'], row.get('catalog_story_name') or '')
     missing_names = sorted({row["story_id"] for rows in mappings.values() for row in rows if row["story_id"] not in story_names})
     for offset in range(0, len(missing_names), 500):
         rows = store.reader._read("SELECT JSON_OBJECT('story_id',story_id,'story_name',story_name) FROM ads_ai.cdreader_koc_drama WHERE %s AND story_id IN (%s);" % (
@@ -684,7 +709,7 @@ def _query_report_precise(store, params, star_id, *, facts=False):
         return groups[key]
 
     for row in source:
-        if row["_kind"] == "coverage":
+        if row["_kind"] in ("coverage", "ad_day", "story"):
             continue
         matches = mappings.get(row["code"], [])
         if row["_kind"] == "ad":
@@ -742,10 +767,14 @@ def _query_report_precise(store, params, star_id, *, facts=False):
     for name in MONEY_METRICS:
         summary[name] = format(summary[name], "f")
     coverage = next((row for row in source if row["_kind"] == "coverage"), {})
+    ad_dates = sorted({row['date'] for row in source if row['_kind'] == 'ad_day'})
+    if facts:
+        coverage = {'ad_data_as_of': max(ad_dates, default=None), 'complete_days': len(ad_dates)}
     return {"list": result if facts else result[(page - 1) * size:page * size], "total": len(result), "page_index": page,
             "page_size": size, "summary": summary, "group_by": group_by,
             "date_from": start.isoformat(), "date_to": end.isoformat(), "source_timezone": "unspecified",
             "currency": "USD", "ad_data_as_of": coverage.get("ad_data_as_of"), "complete_ad_days": coverage.get("complete_days", 0),
+            **({'ad_dates': ad_dates, 'story_names': story_names} if facts else {}),
             "net_definition": "按数值状态过滤核对的充值金额减退款金额；不含未分类订单，不代表平台佣金",
             "attribution_note": "广告按来源日期和口令唯一汇总，只匹配本地成功推广记录；不会按多个短链重复分摊",
             "undated_note": "时间格式未明确的订单单独列为未分类，不参与已分类收入"}

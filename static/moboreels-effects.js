@@ -100,18 +100,24 @@
       const selected=el.publisher.value;el.publisher.innerHTML='<option value="">全部发布人</option>'+d.publishers.map(p=>`<option value="${esc(p.value)}">${esc(p.label)}</option>`).join('');el.publisher.value=selected;
       charts();table();
     }
-    async function load(){
-      if(!state.allowed||!state.query)return;const seq=++state.seq;state.controller?.abort();state.controller=new AbortController();el.refreshBtn.disabled=true;el.exportBtn.disabled=true;el.content.setAttribute('aria-busy','true');message('正在查询点击与收入…');
-      try{const d=await api(API+'/reports?'+new URLSearchParams(state.query),{signal:state.controller.signal});if(!state.allowed||seq!==state.seq)return;if(d.view!=='effects'||!Array.isArray(d.list))throw Error('报表格式异常');state.data=d;state.lastSuccess=d.last_success_at;render();message('');}
+    function load(force=false){
+      if(!state.allowed||!state.query)return Promise.resolve();
+      const url=API+'/reports?'+new URLSearchParams(state.query);
+      if(!force&&state.pending?.url===url)return state.pending.promise;
+      const seq=++state.seq;state.controller?.abort();state.controller=new AbortController();el.refreshBtn.disabled=true;el.exportBtn.disabled=true;el.content.setAttribute('aria-busy','true');message('正在查询点击与收入…');
+      const request={url};state.pending=request;
+      request.promise=(async()=>{
+      try{const d=await api(url,{signal:state.controller.signal});if(!state.allowed||seq!==state.seq)return;if(d.view!=='effects'||!Array.isArray(d.list))throw Error('报表格式异常');state.data=d;state.lastSuccess=d.last_success_at;render();message('');}
       catch(e){if(e.name!=='AbortError'&&seq===state.seq){state.data=null;el.content.hidden=true;message(e.message,true);}}
-      finally{if(seq===state.seq){el.refreshBtn.disabled=!state.allowed;el.exportBtn.disabled=!state.data;el.content.setAttribute('aria-busy','false');}}
+      finally{if(state.pending===request)state.pending=null;if(seq===state.seq){el.refreshBtn.disabled=!state.allowed;el.exportBtn.disabled=!state.data;el.content.setAttribute('aria-busy','false');}}
+      })();return request.promise;
     }
     function schedule(){clearTimeout(state.timer);if(state.allowed&&state.active&&doc.visibilityState!=='hidden')state.timer=setTimeout(poll,state.run&&['queued','running'].includes(state.run.status)?3000:30000);}
     async function poll(){
       if(!state.allowed||!state.active||state.polling||doc.visibilityState==='hidden')return;state.polling=true;
       try{const d=await api(API+'/report-sync-runs/latest');if(!state.allowed||!state.active)return;const prior=state.run;state.run=d.run;
         const changed=syncChanged(state.lastSuccess,d.last_success_at)||(prior&&d.run&&prior.updated_at!==d.run.updated_at&&d.run.status==='failed');
-        if(changed){state.lastSuccess=d.last_success_at;await load();}
+        if(changed){state.lastSuccess=d.last_success_at;await load(true);}
         const r=d.run,active=r&&['queued','running'].includes(r.status);el.syncBtn.disabled=state.starting||!!active;
         el.syncStatus.textContent=active?'正在同步…':r?.status==='failed'?'最近同步部分失败':'每小时整点自动更新（北京时间）';
         el.syncDetail.textContent=r?`最近任务：${r.date_from} 至 ${r.date_to}；${(r.parts||[]).filter(p=>p.status==='succeeded').length}/${(r.parts||[]).length} 分项完成。最近成功：${beijing(d.last_success_at)}`:'尚无同步任务';el.syncError.textContent=r?.error||'';

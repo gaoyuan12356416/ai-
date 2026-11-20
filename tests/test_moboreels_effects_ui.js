@@ -38,7 +38,9 @@ function fixture(){const summary={clicks:12,order_recharge_count:2,order_recharg
   p.requests.at(-1).reply({run:{status:'succeeded',updated_at:'two'},last_success_at:'2026-11-20T03:00:00Z'});await flush();
   assert.equal(p.requests.length,before+2,'completed background sync refreshes data without seeing running status');
   p.requests.at(-1).reply(fixture());await flush();
-  p.element('refreshBtn').emit('click');const old=p.requests.findLast(r=>r.url.includes('/reports?'));p.element('refreshBtn').emit('click');assert.equal(old.aborted,true);
+  p.element('refreshBtn').emit('click');const old=p.requests.findLast(r=>r.url.includes('/reports?'));const count=p.requests.length;
+  p.element('refreshBtn').emit('click');assert.equal(old.aborted,false);assert.equal(p.requests.length,count,'identical pending report is shared');
+  p.element('search').value='different';p.element('filters').emit('submit',{preventDefault(){}});assert.equal(old.aborted,true,'changed filters cancel superseded read');
   const latest=p.requests.findLast(r=>r.url.includes('/reports?'));latest.reply(fixture());await flush();
   assert.equal(p.element('content').hidden,false);p.requests.findLast(r=>r.url.includes('/report-sync-runs/')).reply({run:null});await flush();
   p.element('refreshBtn').emit('click');p.requests.findLast(r=>r.url.includes('/reports?')).reply({error:'permission_denied'},403);await flush();assert.equal(p.element('content').hidden,true);assert.equal(p.element('fields').disabled,true);

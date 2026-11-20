@@ -4,13 +4,17 @@ A shared provider promotion cannot identify the converting post. Preserve that
 ambiguity as a dimension value; never fan its revenue out across tracked links.
 """
 from contextlib import closing
+from collections import OrderedDict
+from concurrent.futures import Future
+from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 import json
 import sqlite3
+import threading
+import time
 
 from .clicks import BEIJING, publication
-from .db import _literal
 from .orders import MONEY_METRICS, COUNT_METRICS, _period, _query_report
 from .promotions import identity
 
@@ -49,6 +53,53 @@ def read_records(path, table):
 class Effects:
     def __init__(self, settings, reports, clicks):
         self.settings, self.reports, self.clicks = settings, reports, clicks
+        self._lock = threading.Lock()
+        self._cache = OrderedDict()
+        self._pending = {}
+
+    def _generation(self, jobs):
+        # Local receipts change after partial/successful syncs and new promotion
+        # mappings. A 30-second bound also covers external replica corrections.
+        stamps = []
+        for name in ('promotions.sqlite3', 'sync.sqlite3'):
+            for suffix in ('', '-wal'):
+                try:
+                    stat = (self.settings.data_dir / (name + suffix)).stat()
+                    stamps.append((stat.st_ino, stat.st_mtime_ns, stat.st_size))
+                except FileNotFoundError:
+                    stamps.append(None)
+        return (tuple((j.get('run_id'), j.get('status'), j.get('updated_at'), j.get('finished_at')) for j in jobs), tuple(stamps))
+
+    def _source(self, period, actor, star, story_ids, jobs):
+        key = (self.settings.institution_user_id, actor['tenant_key'], actor['user_id'], star,
+               period['date_from'], period['date_to'], story_ids, self._generation(jobs))
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached and cached[0] > time.monotonic():
+                self._cache.move_to_end(key)
+                return deepcopy(cached[1])
+            self._cache.pop(key, None)
+            pending = self._pending.get(key)
+            owner = pending is None
+            if owner:
+                pending = self._pending[key] = Future()
+        if not owner:
+            return deepcopy(pending.result())
+        try:
+            source = _query_report(self.reports.store, dict(period, group_by='promotion'), star,
+                                   facts=True, story_ids=story_ids)
+        except BaseException as exc:
+            with self._lock:
+                self._pending.pop(key, None)
+                pending.set_exception(exc)
+            raise
+        with self._lock:
+            self._cache[key] = (time.monotonic() + 30, source)
+            while len(self._cache) > 32:
+                self._cache.popitem(last=False)
+            self._pending.pop(key, None)
+            pending.set_result(source)
+        return deepcopy(source)
 
     def query(self, params, actor):
         with localcontext() as context:
@@ -72,7 +123,7 @@ class Effects:
             raise ValueError('筛选内容过长')
         admin = actor.get('is_admin') is True
         own_star = identity(self.settings.institution_user_id, actor)[0]
-        source = _query_report(self.reports.store, dict(period, group_by='promotion'), None if admin else own_star, facts=True)
+        period = {'date_from': str(start), 'date_to': str(end)}
         root = self.settings.data_dir
 
         def in_scope(row):
@@ -82,13 +133,12 @@ class Effects:
 
         links = [r for r in read_records(root / 'short-links.sqlite3', 'links') if in_scope(r) and publication(r)]
         promotions = [r for r in read_records(root / 'promotions.sqlite3', 'promotions') if in_scope(r)]
+        jobs = self.reports._jobs()
+        source = self._source(period, actor, None if admin else own_star,
+                              tuple(sorted({r['story_id'] for r in links})), jobs)
         names = {r['star_user_id']: r.get('star_name') or r.get('user_id') or '发布人待归属' for r in promotions}
-        story_names = {r['story_id']: r.get('story_name') or r['story_id'] for r in source['list'] if r.get('story_id')}
-        missing = sorted({r['story_id'] for r in links} - set(story_names))
-        for offset in range(0, len(missing), 500):
-            rows = self.reports.store.reader._read("SELECT JSON_OBJECT('story_id',story_id,'story_name',story_name) FROM ads_ai.cdreader_koc_drama WHERE %s AND story_id IN (%s);" % (
-                self.reports.store.scope(), ','.join(_literal(v) for v in missing[offset:offset+500])))
-            story_names.update({r['story_id']: r['story_name'] for r in rows})
+        story_names = source.get('story_names', {}).copy()
+        story_names.update({r['story_id']: r.get('story_name') or r['story_id'] for r in source['list'] if r.get('story_id')})
         by_code = {r['short_code']: r for r in links}
         destinations = {}
         for r in links:
@@ -148,13 +198,10 @@ class Effects:
                 add(daily.setdefault(row['day'], blank()), row)
         rows = [public(r) for r in grouped.values()]
         rows.sort(key=lambda r: (-Decimal(r['total_revenue_usd']), -r['clicks'], str(r['dimensions'])))
-        jobs = self.reports._jobs()
         order_ranges = [{'date_from': j['date_from'], 'date_to': j['date_to'], 'updated_at': j.get('updated_at')}
                         for j in jobs if any(p.get('kind') == 'orders' and p.get('status') == 'succeeded' for p in j.get('parts', []))]
         # Day ledger, not nonzero rows: a successfully synced empty day is known zero.
-        ad_days = self.reports.store.reader._read("SELECT JSON_OBJECT('day',ad_time) FROM ads_ai.cdreader_koc_ad_day_snapshot WHERE %s AND ad_time BETWEEN CAST(%s AS DATE) AND CAST(%s AS DATE);" % (
-            self.reports.store.scope(), _literal(str(start)), _literal(str(end))))
-        ad_dates = {r['day'] for r in ad_days}
+        ad_dates = set(source.get('ad_dates', ()))
         dates = [str(start + timedelta(days=i)) for i in range((end-start).days+1)]
         order_dates = {d for d in dates if any(r['date_from'] <= d <= r['date_to'] for r in order_ranges)}
         trend = [dict(public(daily.get(d, blank())), date=d, orders_synced=d in order_dates, ads_synced=d in ad_dates,

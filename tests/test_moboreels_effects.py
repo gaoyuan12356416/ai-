@@ -1,8 +1,11 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -29,9 +32,11 @@ class EffectsTest(unittest.TestCase):
             if r.get('_kind') == 'order':
                 r['real_star_user_id'] = self.star
         def read(sql):
-            if "SELECT JSON_OBJECT('day',ad_time)" in sql:
-                return [{'day': SOURCE_DAY}]
-            return reader._read(sql)
+            result = reader._read(sql)
+            if "'_kind','ad_day'" in sql:
+                result = [r for r in result if r['_kind'] != 'coverage']
+                result.append({'_kind': 'ad_day', 'date': SOURCE_DAY})
+            return result
         self.store = ReportStore(self.settings, SimpleNamespace(_read=read))
         self.jobs = [{'date_from': SOURCE_DAY, 'date_to': SOURCE_DAY, 'status': 'succeeded',
                       'finished_at': '2026-11-11T02:00:00Z', 'parts': [{'kind':'orders','status':'succeeded'}]}]
@@ -117,5 +122,85 @@ class EffectsTest(unittest.TestCase):
         self.assertEqual({x['date'] for x in r['list']},{SOURCE_DAY,'2026-11-11'})
         legacy=self.store.query(dict(date_from=SOURCE_DAY,date_to='2026-11-11',page_size=1))
         self.assertEqual(len(legacy['list']),1)
+
+    def test_income_reused_across_filters_but_clicks_are_live(self):
+        first = self.query()
+        self.assertEqual(len(self.fixture.queries), 2)
+        with self.clicks.connect() as conn:
+            conn.execute("UPDATE daily SET clicks=clicks+1 WHERE short_code='x1'")
+        second = self.query(group_by='story')
+        self.assertEqual(len(self.fixture.queries), 2)
+        self.assertEqual(second['summary']['clicks'], first['summary']['clicks']+1)
+        self.assertEqual(second['summary']['total_revenue_usd'], first['summary']['total_revenue_usd'])
+        self.query(platform='x', q='Title')
+        self.assertEqual(len(self.fixture.queries), 2)
+
+    def test_cache_never_crosses_owner_or_admin_scope(self):
+        self.query()
+        owner = self.effects.query(PERIOD, self.actor)
+        self.assertEqual(len(self.fixture.queries), 4)
+        self.assertEqual(Decimal(owner['summary']['total_revenue_usd']), Decimal('7.00125'))
+        with patch('features.moboreels_library.effects._query_report', return_value={'list': [], 'ad_dates': [], 'ad_data_as_of': None}) as read:
+            foreign = self.effects.query(PERIOD, dict(self.actor, user_id='foreign'))
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(foreign['summary']['clicks'], 0)
+            self.assertEqual(Decimal(foreign['summary']['total_revenue_usd']), 0)
+
+    def test_sync_and_promotion_receipts_invalidate_income_cache(self):
+        self.query()
+        self.jobs[0]['updated_at'] = '2026-11-20T11:01:00Z'
+        self.query()
+        self.assertEqual(len(self.fixture.queries), 4)
+        self.write('promotions.sqlite3', 'promotions', [dict(self.base, star_name='New name')])
+        self.query()
+        self.assertEqual(len(self.fixture.queries), 6)
+
+    def test_ttl_expiry_failure_and_detached_responses(self):
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=100):
+            first = self.query()
+            first['summary']['total_revenue_usd'] = '999'
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=129.9):
+            self.assertNotEqual(self.query()['summary']['total_revenue_usd'], '999')
+        self.assertEqual(len(self.fixture.queries), 2)
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=130), \
+                patch.object(self.store.reader, '_read', side_effect=RuntimeError('unavailable')):
+            with self.assertRaises(RuntimeError): self.query()
+        self.query()
+        self.assertEqual(len(self.fixture.queries), 4)
+
+    def test_simultaneous_queries_share_only_income_read(self):
+        entered, release = threading.Event(), threading.Event()
+        original = _query_report
+        def blocked(*args, **kwargs):
+            entered.set()
+            if not release.wait(3): raise RuntimeError('test timed out')
+            return original(*args, **kwargs)
+        with patch('features.moboreels_library.effects._query_report', side_effect=blocked) as read:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = [pool.submit(self.query) for _ in range(4)]
+                self.assertTrue(entered.wait(3))
+                time.sleep(.05)
+                release.set()
+                results = [r.result(3) for r in results]
+            self.assertEqual(read.call_count, 1)
+        self.assertTrue(all(r['summary'] == results[0]['summary'] for r in results))
+
+    def test_click_only_story_names_and_empty_ad_day_coverage_are_batched(self):
+        self.links.append(dict(self.base, short_code='only', story_id='99', platform='youtube', account_id='four'))
+        self.write('short-links.sqlite3', 'links', self.links)
+        with self.clicks.connect() as conn:
+            conn.execute('INSERT INTO daily VALUES(?,?,?,?,?)', (SOURCE_DAY, 'only', 'youtube', 2, 0))
+        original = self.store.reader._read
+        def read(sql):
+            rows = original(sql)
+            if "'_kind','story'" in sql:
+                rows.append({'_kind': 'story', 'story_id': '99', 'story_name': 'Click only'})
+            return rows
+        self.store.reader._read = read
+        result = self.query(group_by='story', q='Click only')
+        self.assertEqual(result['summary']['clicks'], 2)
+        self.assertEqual(result['list'][0]['dimensions'][0]['label'], 'Click only')
+        self.assertTrue(result['trend'][0]['ads_synced'])
+        self.assertEqual(len(self.fixture.queries), 2)
 
 if __name__=='__main__':unittest.main()
