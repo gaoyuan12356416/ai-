@@ -75,6 +75,17 @@ class EffectsTests(unittest.TestCase):
         self.assertEqual(rules.drama.sort.field,'x_comments')
         raw['drama_rule']['x_views_min']='1.5'
         with self.assertRaises(ValidationError):normalize_template_payload(raw)
+    def test_complete_selector_filters_ranks_and_freezes_effect_version(self):
+        from scripts.test_x_auto_post_selector import FakeSource,FakeMetricStore,FakeStore,drama,material,selector,request,rules
+        source=FakeSource([drama('C1'),drama('C2')],{'C1':[material('101','C1')],'C2':[material('201','C2'),material('202','C2')]})
+        ledger=FakeStore()
+        self.snapshot([post('100','101',content_id='C1',views=100),post('101','201',content_id='C2',views=600),post('102','202',content_id='C2',views=900)])
+        chosen=rules(drama={'sort':{'field':'x_views','direction':'desc'}},material={'x_effect':{'views':{'min':500}},'sort':{'field':'x_views','direction':'asc'}})
+        with patch.dict('os.environ',{'X_MATERIAL_EFFECT_ROOT':str(self.root)}),patch.object(reuse,'client',return_value={'ok':True,'blocked':[]}):
+            selected=selector(source,FakeMetricStore([]),store=ledger).select_and_reserve(request(chosen))
+        self.assertEqual(selected.material.source.material_id,'201')
+        frozen=ledger.reserve_calls[0]['selection_snapshot']['x_effect']
+        self.assertEqual(frozen['version'],'20261120T010000Z');self.assertEqual(frozen['material']['views'],600);self.assertEqual(frozen['drama']['views'],1500)
     def test_legacy_templates_do_not_enable_reuse(self):
         config=normalize_template_payload(valid_payload());self.assertFalse(selection.config_enabled(config));self.assertFalse(selection.enabled(selector_rules(config)))
     def test_ledger_migration_preserves_history_and_is_idempotent(self):
@@ -135,6 +146,12 @@ class BrokerTests(unittest.TestCase):
             sources[2].update(status='published',material_id='701')
             sources[3]=dict(account_id='2',material_id='',status='selecting')
             self.assertFalse(reuse.handle(dict(one,task_id=3),directory)['ok'])
+    def test_canceled_selection_without_material_releases_its_grant(self):
+        sources={1:dict(account_id='2',material_id='',status='selecting'),2:dict(account_id='3',material_id='',status='selecting')}
+        with tempfile.TemporaryDirectory() as directory,patch.object(reuse,'task',side_effect=lambda lane,tid:sources[tid]),patch.object(reuse,'conflicts',return_value=set()):
+            one=dict(action='reserve',lane='tag',task_id=1,account_id='2',material_id='701')
+            self.assertTrue(reuse.handle(one,directory)['ok']);sources[1]['status']='canceled'
+            self.assertTrue(reuse.handle(dict(one,task_id=2,account_id='3'),directory)['ok'])
     def test_unknown_or_active_canonical_conflict_never_grants(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(reuse,'task',return_value=dict(account_id='2',material_id='',status='selecting')), patch.object(reuse,'conflicts',return_value={'701'}):
             self.assertFalse(reuse.handle(dict(action='reserve',lane='tag',task_id=1,account_id='2',material_id='701'),directory)['ok'])

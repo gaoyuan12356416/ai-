@@ -20,7 +20,9 @@ def local_conflict(db,material_id,account_id):
     if db.execute('''SELECT 1 FROM x_post_material_pool p WHERE p.material_key=?
         AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id) LIMIT 1''',(material_id,)).fetchone():return True
     return bool(db.execute('''SELECT 1 FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
-        WHERE q.material_key=? AND (q.account_id=? OR q.status NOT IN ('published','failed','cancelled') OR l.unknown_outcome=1) LIMIT 1''',
+        LEFT JOIN x_post_repost_ledger relay ON relay.queue_id=q.id
+        WHERE q.material_key=? AND (q.account_id=? OR q.status NOT IN ('published','failed','cancelled') OR l.unknown_outcome=1
+        OR l.status IN ('post_creating','repost_creating') OR relay.unknown_outcome=1 OR relay.status='needs_review') LIMIT 1''',
         (material_id,account_id)).fetchone())
 
 def lane():return 'tag' if '/x-tag-publisher/' in os.environ.get('X_AUTO_POST_DB_PATH','') else 'ordinary'
@@ -47,12 +49,15 @@ def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external=''):
     if not ids:return blocked
     for lane_name,path in zip(('ordinary','tag'),LEDGERS):
         with closing(readonly(path)) as db:
-            for r in db.execute(f'''SELECT q.material_key,q.account_id,q.status,l.unknown_outcome,mr.external_task_key
+            for r in db.execute(f'''SELECT q.material_key,q.account_id,q.status,l.unknown_outcome,mr.external_task_key,
+                    l.status AS log_status,relay.unknown_outcome AS relay_unknown,relay.status AS relay_status
                     FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
+                    LEFT JOIN x_post_repost_ledger relay ON relay.queue_id=q.id
                     LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id
                     WHERE q.material_key IN ({marks})''',ids):
                 if lane_name==own_lane and own_external and r['external_task_key']==own_external:continue
-                if str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','cancelled') or r['unknown_outcome']:
+                if (str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','cancelled') or r['unknown_outcome']
+                    or r['log_status'] in ('post_creating','repost_creating') or r['relay_unknown'] or r['relay_status']=='needs_review'):
                     blocked.add(str(r['material_key']))
             for r in db.execute(f'''SELECT p.material_key FROM x_post_material_pool p WHERE p.material_key IN ({marks})
                     AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id)''',ids):blocked.add(str(r[0]))
@@ -63,7 +68,7 @@ def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external=''):
         with closing(readonly(path)) as db:
             for r in db.execute(f'SELECT id,account_id,material_id,status FROM x_auto_task WHERE material_id IN ({marks})',ids):
                 if name==own_lane and int(r['id'])==int(own_task):continue
-                if str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','cancelled','skipped'):
+                if str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','canceled','no_candidate','skipped'):
                     blocked.add(str(r['material_id']))
     return blocked
 
@@ -102,7 +107,7 @@ def handle(payload,root=ROOT):
         for row in db.execute("SELECT * FROM grants WHERE material_id=? AND state='active'",(mid,)).fetchall():
             if row['lane']==name and row['task_id']==tid:continue
             prior=task(row['lane'],row['task_id'])
-            if prior['status'] in ('published','failed','cancelled','skipped'):
+            if prior['status'] in ('published','failed','canceled','no_candidate','skipped'):
                 state='finished' if prior.get('material_id') else 'released'
                 db.execute('UPDATE grants SET state=? WHERE lane=? AND task_id=?',(state,row['lane'],row['task_id']))
         occupied=db.execute("SELECT 1 FROM grants WHERE material_id=? AND (state='active' OR (account_id=? AND state='finished')) AND NOT(lane=? AND task_id=?) LIMIT 1",(mid,account,name,tid)).fetchone()
