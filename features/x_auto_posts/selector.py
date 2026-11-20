@@ -75,6 +75,16 @@ class CandidateRejected(SelectionError):
     """One candidate is unusable; deterministic scanning may continue."""
 
 
+class MoboUpcomingWait(SelectionError):
+    def __init__(self, upcoming):
+        self.upcoming = upcoming
+        self.retry_at = datetime.fromtimestamp(upcoming["retry_at"], UTC)
+        local = self.retry_at.astimezone(BEIJING_TZ).strftime("%m-%d %H:%M")
+        message = (f"Moboreels 预扫候选：{upcoming['pending']} 部待上架，"
+                   f"{upcoming['ready']} 部已到期；北京时间 {local} 复查上架与可用素材")
+        super().__init__("x_mobo_upcoming_wait", message)
+
+
 class NoEligibleMaterial(SelectionError):
     def __init__(self, rejection_counts: Mapping[str, int]):
         self.rejection_counts = dict(rejection_counts)
@@ -88,6 +98,8 @@ class NoEligibleMaterial(SelectionError):
             "material_history_seen": "素材已有发布记录", "material_auto_seen": "素材已被预占",
             "material_strict_rejected": "素材预检未通过",
             "account_duration_limit": "素材超过账号时长上限",
+            "x_mobo_upcoming_daily_full": "该账号今日模板次数已用完",
+            "x_mobo_upcoming_paused": "模板已停用，结束此自动时隙",
         }
         summary = "；".join(
             "%s %s" % (labels.get(key, key), count)
@@ -382,6 +394,7 @@ class SelectionRequest:
     rules: SelectionRules
     now: datetime
     claim_token: str = ""
+    preview_upcoming: Optional[Mapping[str, Any]] = None
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -722,12 +735,14 @@ class TwoStageSelector:
         earliest, latest = launch_bounds(window, now_epoch)
         explicit_range = is_range(window)
         allowed_types = set(request.rules.drama.resource_types)
+        ready_times = getattr(self.source, "mobo_ready_times", {})
         grouped: Dict[str, List[DramaSourceRow]] = {}
         for row in rows:
             mobo = row.catalog == "moboreels"
             if (
                 (not mobo and row.app_id != self.app_id)
-                or (mobo and (row.app_id != 0 or window or allowed_types))
+                or (mobo and (row.app_id != 0 or allowed_types
+                              or (window and ready_times.get(row.content_id) != row.deploy_time)))
                 or row.catalog not in {"dramawave", "moboreels"}
                 or row.release_status != 1
                 or row.language != language

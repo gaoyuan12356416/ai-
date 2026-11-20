@@ -603,6 +603,8 @@ class XAutoPostService:
                     "invalid_request", "preview account is not in this template", 400
                 )
             account_ids = [requested]
+        discover = getattr(self.selector, "upcoming_plan", None)
+        preview_plan = discover(template.config, self._now()) if discover else None
         results = []
         for index, account_id in enumerate(account_ids, start=1):
             try:
@@ -623,6 +625,7 @@ class XAutoPostService:
                         account_id=account_id,
                         language=language,
                         rules=selector_rules(template.config, account=account),
+                        preview_upcoming=preview_plan,
                         now=self._now(),
                     )
                 )
@@ -633,6 +636,7 @@ class XAutoPostService:
                         "ok": False,
                         "error_code": str(getattr(exc, "code", "x_auto_preview_failed")),
                         "error_message": safe_public_message(exc),
+                        **({"upcoming": exc.upcoming} if hasattr(exc, "upcoming") else {}),
                     }
                 )
             else:
@@ -759,7 +763,10 @@ class XAutoPostService:
                 return self.store.get_run(existing.id), False
             blacklist = self.selector.source.blacklist_snapshot()
             shanghai_date = scheduled_at.astimezone(BEIJING_TZ).date().isoformat()
+            discover = getattr(self.selector, "upcoming_plan", None)
+            plan = discover(template.config, self._now()) if discover else None
             run = self.store.create_run(
+                **({"mobo_upcoming": plan} if plan is not None else {}),
                 run_key=run_key,
                 template_id=template.id,
                 template_version=template.version,

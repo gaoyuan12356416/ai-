@@ -74,18 +74,25 @@ def candidate_snapshot(repo, config):
     rule=config["material_rule"]
     from features.material_products import selected
     products=selected(config)
+    language=str(config["language"])
+    review = config.get('_mobo_reviews', {}).get(language)
+    if review is not None:
+        from features.moboreels_hit import MOBO_PRODUCTS
+        # A numeric story ID alone cannot attach another product's video to a Mobo link.
+        products = tuple(p for p in products if p.casefold() in MOBO_PRODUCTS)
+        if not products:
+            return CandidateSnapshot((), (), ())
     # Frozen legacy m_url runs retain their previous catalog scope.
     filter_products="material_products" in config
     product_sql=(" AND s.product IN ("+",".join("%s" for _ in products)+")") if filter_products else ""
     product_params=products if filter_products else ()
-    language=str(config["language"])
     hit = config.get('hit_drama_publish') or {}
     source_index = 'PRIMARY'
     target_sql, target_params = '', ()
     launch_join, launch_params, published_at = '', (), '0'
-    if hit:
+    if hit or review is not None:
         from features.hit_drama_target import content_ids
-        target_ids = tuple(content_ids(hit, language))
+        target_ids = tuple(content_ids(hit, language)) if hit else tuple(review.ready)
         if not target_ids:
             return CandidateSnapshot((), (), ())
         # Give the source index an explicit ID range as well as scoping the provider catalog.
@@ -116,6 +123,20 @@ def candidate_snapshot(repo, config):
     language_ids={"zh-tw":2,"en":3,"es":4,"pt":5,"fr":6,"ru":7,"it":8,"ja":9,"ar":10,"id":11,"th":12,"vi":13,"ko":14,"tl":15,"de":16,"hi":17,"bn":18,"ms":21,"tr":22}
     source_language_sql="LOWER(TRIM(s.language))=%s"
     language_params=[language]
+    if review is not None:
+        from features.moboreels_upcoming import language_key
+        from features.moboreels_hit import LANGUAGES
+        key = language_key(language)
+        aliases = sorted({code for code in (language,key,'jp','ja','pt','pt-br','tl','fil','zh-tw','zh-hant')
+                          if language_key(code) == key})
+        ids = tuple(i for i,code in {**LANGUAGES,23:'pl'}.items() if language_key(code) == key)
+        if not ids:
+            return CandidateSnapshot((), (), ())
+        marks = ','.join('%s' for _ in aliases)
+        source_language_sql = f"LOWER(REPLACE(TRIM(s.language),'_','-')) IN ({marks})"
+        language_params = aliases
+        target_sql += ' AND d.lang_id IN (' + ','.join('%s' for _ in ids) + ')'
+        target_params += ids
     if any(p.casefold()=="dramawavesource" for p in products):
         source_product_sql="LOWER(s.product)='dramawavesource' AND " if filter_products else ""
         source_language_sql="("+source_language_sql+" OR ("+source_product_sql+"TRIM(COALESCE(s.language,''))='' AND d.lang_id=%s))"
@@ -155,7 +176,8 @@ def candidate_snapshot(repo, config):
                 language=language,duration_seconds=duration,material_spend=None,material_roas=None,
                 drama_spend=None,drama_roas=None,resource_type_v2="moboreels",
                 drama_description=str(row.get("drama_description") or ""),material_tag=str(row.get("material_tag") or ""),
-                deploy_time=int(row.get("published_at") or 0))
+                deploy_time=(int(review.ready[str(row["content_id"])]["at"]) if review is not None
+                             else int(row.get("published_at") or 0)))
             candidates.append(MaterialCandidate(**{key:value for key,value in values.items() if key in MaterialCandidate.__dataclass_fields__}))
         if len(rows)<page_size:
             break

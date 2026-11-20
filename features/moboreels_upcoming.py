@@ -187,12 +187,11 @@ def assess(select, schema, plan, language, now_epoch):
             if row['is_show'] != 1:
                 # Upstream first-publish timestamps can arrive before the hourly
                 # supplier catalog. A scheduled, as-yet-unlisted item still waits.
-                if original.get('scheduled') or not row['live_max']:
+                if original.get('scheduled') or not row['live_max'] or row['lang_id'] in (None, -1):
                     pending[sid] = near_retry
                 continue
-            # Provider language 23 is Polish in this catalog (588 listed editions
-            # cross-checked against their product-scoped language). Require both
-            # independent sources to agree as for every other language.
+            # Provider language 23 maps to Polish in the Mobo product catalog.
+            # Require the package and provider language to agree.
             provider_language = language_key('pl' if row['lang_id'] == 23 else LANGUAGES.get(row['lang_id']))
             if provider_language == lang:
                 ready[sid] = {'name': str(row['story_name'] or ''), 'at': at}

@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from .links import FBPostLinkError, build_short_url, build_w2a_url
 from .strategy import daily_capacity, in_slot, planned_time, cooldown_content_ids, diverse_candidates
 from features import social_random_schedule as target_daily
-from . import target_schedule
+from . import target_schedule, upcoming
 from . import page_caption
 from .effects import ensure_schema as ensure_effect_schema, load_scores, choose_material
 from .languages import page_language
@@ -194,6 +194,7 @@ class FBAutoPostStore:
         """
         with self.connect() as conn:
             conn.executescript(schema)
+            upcoming.ensure_schema(conn)
             ensure_effect_schema(conn)
             target_daily.ensure_schema(conn, now=self.now_fn())
             columns = {row[1] for row in conn.execute("PRAGMA table_info(fb_auto_run_page)")}
@@ -311,6 +312,7 @@ class FBAutoPostStore:
             if int(row["current_version"]) != expected:
                 raise StoreError("fb_auto_template_version_conflict", "模板版本已变化，请刷新后重试", 409)
             if row["status"] != "deleted":
+                upcoming.cancel(self,conn,template_id,now,'fb_auto_template_deleted')
                 conn.execute("UPDATE fb_auto_template SET status='deleted',updated_at_utc=? WHERE id=?", (now, template_id))
             conn.commit()
         return {"ok": True, "template_id": template_id, "deleted": True}
@@ -333,6 +335,7 @@ class FBAutoPostStore:
                     "已启用模板不能直接编辑，请先停用后再修改",
                     409,
                 )
+            upcoming.cancel(self,conn,template_id,now,'fb_auto_template_version_changed',superseded=True)
             new_version = expected + 1
             encoded = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             conn.execute("INSERT INTO fb_auto_template_version VALUES(?,?,?,?,?,?)", (template_id, new_version, encoded, config_hash(config), actor.user_id, now))
@@ -389,7 +392,10 @@ class FBAutoPostStore:
                     "trigger_type='manual' OR julianday(planned_publish_at_utc) IS NULL OR julianday(planned_publish_at_utc)<julianday(?)))) LIMIT 1",
                     (template_id, preserve_cutoff),
                 ).fetchone()
-                if task_conflict or due_conflict:
+                waiting_conflict = conn.execute("""SELECT 1 FROM fb_auto_mobo_wait w JOIN fb_auto_run r ON r.id=w.run_id
+                    WHERE r.template_id=? AND (r.trigger_type='manual' OR w.original_due<?) LIMIT 1""",
+                    (template_id,preserve_cutoff)).fetchone()
+                if task_conflict or due_conflict or waiting_conflict:
                     raise StoreError("fb_auto_disable_unsubmitted_conflict", "模板存在执行中、手动或保护截止时间之前的未提交任务，本次未停用或修改任务，请等待完成后重试", 409)
             if not enabled and conn.execute("SELECT 1 FROM fb_auto_task WHERE template_id=? AND status='running' LIMIT 1", (template_id,)).fetchone():
                 raise StoreError("fb_auto_template_running_change_denied", "模板存在正在向Meta提交的任务，请等待发布结果落账后再停用", 409)
@@ -419,6 +425,8 @@ class FBAutoPostStore:
                 )
                 for run_id in manual_runs:
                     self._refresh_run(conn, run_id, now)
+            if not enabled:
+                upcoming.cancel(self,conn,template_id,now,'fb_auto_manual_template_disabled',manual_only=True)
             target_status = "enabled" if enabled else "disabled"
             if row["status"] != target_status:
                 conn.execute("UPDATE fb_auto_template SET status=?,updated_at_utc=? WHERE id=?", (target_status, now, template_id))
@@ -571,7 +579,7 @@ class FBAutoPostStore:
                  planned_publish_at_utc, len(targets), json.dumps(targets), utc_iso(self.now_fn())),
             )
 
-    def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None, hit_drama: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    def create_run(self, template_id: int, slot_key: str, trigger_type: str, actor: ActorScope, pages: PagePoolRepository, materials: MaterialRepository, *, planned_publish_at_utc: str = "", expected_template_version: int | None = None, expected_due_id: int | None = None, expected_due_lease_owner: str | None = None, expected_due_lease_expires_at_utc: str | None = None, max_publishable_pages: int | None = None, max_jobs_per_slot: int | None = None, max_daily_jobs: int | None = None, hit_drama: Mapping[str, Any] | None = None, upcoming_claim: upcoming.Claim | None = None) -> Dict[str, Any]:
         if trigger_type not in {"auto", "manual"} or not slot_key or len(slot_key) > 120:
             raise StoreError("invalid_request", "运行触发参数无效", 400)
         if hit_drama:
@@ -594,7 +602,7 @@ class FBAutoPostStore:
             if expected_template_version is not None and template["status"] != "enabled":
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
-            if expected_template_version is not None and not hit_drama:
+            if expected_template_version is not None and not hit_drama and upcoming_claim is None:
                 self._validate_due_claim(
                     conn, template_id=template_id, slot_key=slot_key, trigger_type=trigger_type,
                     expected_template_version=int(expected_template_version), expected_due_id=expected_due_id,
@@ -616,6 +624,9 @@ class FBAutoPostStore:
             scope_admin, scope_owner = bool(template["scope_is_admin"]), str(template["owner_user_id"])
             existing = conn.execute("SELECT id FROM fb_auto_run WHERE template_id=? AND slot_key=?", (template_id, slot_key)).fetchone()
             if existing and expected_template_version is None:
+                return {"ok": True, "run_id": int(existing[0]), "idempotent": True}
+            if existing and upcoming_claim is None and conn.execute(
+                    'SELECT 1 FROM fb_auto_mobo_plan WHERE run_id=?',(existing[0],)).fetchone():
                 return {"ok": True, "run_id": int(existing[0]), "idempotent": True}
             # Freeze the first observed target set before authorization, backlog,
             # capacity and material preflight can prevent a run from being created.
@@ -646,26 +657,32 @@ class FBAutoPostStore:
         schedule = config["schedule"]
         daily_count = len(schedule["times"]) if schedule["mode"] == "fixed" else int(schedule["daily_count"])
         if trigger_type == "auto" or any(value is not None for value in (max_publishable_pages,max_jobs_per_slot,max_daily_jobs)):
-            if total == 0:
+            if total == 0 and upcoming_claim is None:
                 raise StoreError("fb_auto_page_pool_empty", "所选Page池当前没有有效Page，未创建空运行", 409)
-            if publishable == 0:
+            if publishable == 0 and upcoming_claim is None:
                 raise StoreError("fb_auto_page_pool_unpublishable", "所选Page池当前没有可发布Page，未创建运行", 409)
             if ((max_publishable_pages is not None and publishable > int(max_publishable_pages))
                     or (max_jobs_per_slot is not None and publishable > int(max_jobs_per_slot))
                     or (max_daily_jobs is not None and daily_capacity(config, page_rows) > int(max_daily_jobs))):
                 raise StoreError("fb_auto_capacity_exceeded", f"运行前容量复核失败：可发布Page {publishable}/{max_publishable_pages or '-'}，本模板单批任务 {publishable}/{max_jobs_per_slot or '-'}，本模板每日任务 {daily_capacity(config, page_rows)}/{max_daily_jobs or '-'}", 409)
+        source_pages = upcoming_claim.scoped(page_rows) if upcoming_claim else page_rows
         with self.connect() as conn:
-            max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in page_rows),default=0)
-            caption_snapshot=page_caption.load(conn,template['created_by'],[p.page_id for p in page_rows])
+            max_reserved=max((len(self._cooldown_material_ids(conn,p.page_id,int(config['cooldown_days']))) for p in source_pages),default=0)
+            caption_snapshot=page_caption.load(conn,template['created_by'],[p.page_id for p in source_pages])
         candidate_limit=min(5000,max(1000 if config.get("drama_cooldown_hours") else 500,max_reserved+100))
         profile_supported = not hit_drama and str(config.get('app_id')) == '1479'
         profile_snapshot = load_profiles([p.page_id for p in page_rows]) if profile_supported else ({'pages': {}}, {})
         profile_identity = [template_id, int(template['current_version']), slot_key]
         profile_enabled = profile_supported and any(not Decision(p.page_id, profile_identity, profile_snapshot).reason for p in page_rows)
         caption_languages={page.page_id:page_language(page.language) for page in page_rows}
-        candidate_snapshots = page_caption.candidate_snapshots({**config,'_candidate_limit':candidate_limit,
+        mobo_plan = upcoming_claim.plan if upcoming_claim else None
+        if mobo_plan is None and not hit_drama and upcoming.enabled(config):
+            mobo_plan = upcoming.discover(materials,config,self.now_fn())
+        page_reviews = upcoming.reviews(materials,mobo_plan,[page_language(p.language) for p in source_pages],self.now_fn())
+        source_config = dict(config, _mobo_reviews=page_reviews) if mobo_plan is not None else config
+        candidate_snapshots = page_caption.candidate_snapshots({**source_config,'_candidate_limit':candidate_limit,
             '_profile_selection':profile_enabled,
-            '_page_caption_description':page_caption.needs_description(caption_snapshot)},page_rows,materials,caption_snapshot)
+            '_page_caption_description':page_caption.needs_description(caption_snapshot)},source_pages,materials,caption_snapshot)
         metric_generation_ids=sorted({value for snapshot in candidate_snapshots.values() for value in snapshot.metric_generation_ids})
         # Catalog/metric freezing can be the longest read in planning.  Re-read
         # every mutable Page-side input afterwards so a pool disable, membership
@@ -681,16 +698,16 @@ class FBAutoPostStore:
             from .hit_profile import filter_pages
             page_rows = filter_pages(page_rows, hit_drama)
         if any(page_language(page.language) and (page.page_id not in candidate_snapshots or
-                page_language(page.language)!=caption_languages.get(page.page_id)) for page in page_rows):
+                page_language(page.language)!=caption_languages.get(page.page_id)) for page in (upcoming_claim.scoped(page_rows) if upcoming_claim else page_rows)):
             raise StoreError("fb_auto_page_language_changed", "Page语言在计划期间变化，请重试", 409)
         enabled_fingerprint = {(template_id, int(template["current_version"]))}
         for other in self.enabled_template_sources(template_id):
             enabled_fingerprint.add((int(other["template_id"]), int(other["template_version"])))
         total, publishable = len(page_rows), sum(page.eligible_token_count > 0 for page in page_rows)
         if trigger_type == "auto" or any(value is not None for value in (max_publishable_pages,max_jobs_per_slot,max_daily_jobs)):
-            if total == 0:
+            if total == 0 and upcoming_claim is None:
                 raise StoreError("fb_auto_page_pool_empty", "所选Page池当前没有有效Page，未创建空运行", 409)
-            if publishable == 0:
+            if publishable == 0 and upcoming_claim is None:
                 raise StoreError("fb_auto_page_pool_unpublishable", "所选Page池当前没有可发布Page，未创建运行", 409)
             if ((max_publishable_pages is not None and publishable > int(max_publishable_pages))
                     or (max_jobs_per_slot is not None and publishable > int(max_jobs_per_slot))
@@ -715,7 +732,7 @@ class FBAutoPostStore:
             if current["status"] != "enabled" and (expected_template_version is not None or trigger_type == "auto"):
                 code = "fb_auto_due_slot_template_disabled" if trigger_type == "auto" else "fb_auto_due_slot_template_changed"
                 raise StoreError(code, "模板已停用，自动计划已暂停；重新启用后可在迟到宽限内继续" if trigger_type == "auto" else "模板已停用，手动执行计划已取消", 409)
-            if expected_template_version is not None and not hit_drama:
+            if expected_template_version is not None and not hit_drama and upcoming_claim is None:
                 self._validate_due_claim(
                     conn, template_id=template_id, slot_key=slot_key, trigger_type=trigger_type,
                     expected_template_version=int(expected_template_version), expected_due_id=expected_due_id,
@@ -733,7 +750,14 @@ class FBAutoPostStore:
                 result = receipt(conn, template_id, slot_key, hit_drama['request'])
                 conn.commit()
                 return result
-            if existing:
+            if upcoming_claim:
+                if not existing or int(existing[0]) != upcoming_claim.run['id']:
+                    raise StoreError('fb_auto_mobo_wait_identity','等待新剧的原运行已变化',409)
+                claimed_pages = upcoming.owned(conn,upcoming_claim,self.now_fn())
+                if not claimed_pages:
+                    return {"ok": True,"run_id": int(existing[0]),"idempotent": True}
+                page_rows = [p for p in upcoming_claim.scoped(page_rows) if p.page_id in claimed_pages]
+            elif existing:
                 conn.commit()
                 return {"ok": True, "run_id": int(existing[0]), "idempotent": True}
             # Independent Page/material reservations replace the former whole-template backlog gate.
@@ -751,10 +775,20 @@ class FBAutoPostStore:
                 total = len(page_rows)
                 publishable = sum(p.eligible_token_count > 0 for p in page_rows)
                 missing = total - publishable
-            cur = conn.execute("INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,total_pages,publishable_pages,missing_token_pages,created_at_utc,planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, int(template["current_version"]), slot_key, trigger_type, "queued", template["config_json"], total, publishable, missing, now, publish_at, json.dumps(metric_generation_ids), str(config["video_template"])))
-            run_id, queued, skipped = int(cur.lastrowid), 0, 0
-            if target_slot:
-                conn.execute("UPDATE fb_auto_run SET schedule_policy=? WHERE id=?", (target_daily.POLICY, run_id))
+            queued, skipped, waiting = 0, 0, 0
+            if upcoming_claim:
+                run_id = int(existing[0])
+                absent = claimed_pages.difference(p.page_id for p in page_rows)
+                upcoming.finish_absent(conn,run_id,absent)
+                skipped += len(absent)
+            else:
+                cur = conn.execute("INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,total_pages,publishable_pages,missing_token_pages,created_at_utc,planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, int(template["current_version"]), slot_key, trigger_type, "queued", template["config_json"], total, publishable, missing, now, publish_at, json.dumps(metric_generation_ids), str(config["video_template"])))
+                run_id = int(cur.lastrowid)
+                if target_slot:
+                    conn.execute("UPDATE fb_auto_run SET schedule_policy=? WHERE id=?", (target_daily.POLICY, run_id))
+                if mobo_plan is not None:
+                    conn.execute('INSERT INTO fb_auto_mobo_plan(run_id,plan_json) VALUES(?,?)',
+                                 (run_id,json.dumps(mobo_plan,ensure_ascii=False)))
             for page in page_rows:
                 # The final cooldown read and material choice share this
                 # BEGIN IMMEDIATE transaction with task insertion. Concurrent
@@ -762,11 +796,17 @@ class FBAutoPostStore:
                 # earlier planned/preparing/ready reservation before choosing.
                 language=page_language(page.language)
                 task_publish_at = target_times[page.page_id] if target_slot else planned_time(config, page.page_id, slot_key, publish_at, manual=trigger_type=="manual")
+                original_due = upcoming_claim.pages[page.page_id]['original_due'] if upcoming_claim else task_publish_at
+                if mobo_plan is not None:
+                    task_publish_at = max(original_due,now)
                 slot_allowed = True if target_slot else in_slot(config, page.page_id, slot_key, manual=trigger_type=="manual", times=slot_times)
                 pre_reason = (automatic_block(conn, page.page_id) or manual_block(conn, page.page_id)
                               or ("" if language else "fb_auto_page_language_missing"))
                 if not pre_reason and not slot_allowed:
                     pre_reason = "fb_auto_page_frequency_limit"
+                if not pre_reason and mobo_plan is not None and trigger_type == 'auto' and upcoming.day_full(
+                        conn,template_id,page.page_id,config,max(task_publish_at,now)):
+                    pre_reason = 'fb_auto_page_frequency_limit'
                 material, selection = None, {}
                 if page.eligible_token_count > 0 and not pre_reason:
                     excluded=self._cooldown_material_ids(conn,page.page_id,int(config['cooldown_days']))
@@ -805,7 +845,20 @@ class FBAutoPostStore:
                         task_publish_at = selection['hit_publish_timing']['publish_at_utc']
                 reason = pre_reason or ("" if page.eligible_token_count > 0 else "fb_page_missing_eligible_token")
                 snapshot_status = "eligible" if not reason else "skipped"
-                conn.execute("INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, page.page_id, page.group_id, json.dumps(list(page.group_ids)), page.owner_user_id, page.timezone, language, page.eligible_token_count, snapshot_status, reason))
+                if upcoming_claim:
+                    conn.execute("UPDATE fb_auto_run_page SET snapshot_status=?,skip_reason=?,eligible_token_count=? WHERE run_id=? AND page_id=?",
+                                 (snapshot_status,reason,page.eligible_token_count,run_id,page.page_id))
+                else:
+                    conn.execute("INSERT INTO fb_auto_run_page(run_id,page_id,group_id,group_ids_json,owner_user_id,timezone,language,eligible_token_count,snapshot_status,skip_reason) VALUES(?,?,?,?,?,?,?,?,?,?)", (run_id, page.page_id, page.group_id, json.dumps(list(page.group_ids)), page.owner_user_id, page.timezone, language, page.eligible_token_count, snapshot_status, reason))
+                review = page_reviews.get(language)
+                future_alternatives = (review is not None and review.pending and reason in
+                                       {'fb_auto_no_video_after_drama_cooldown','fb_auto_no_video_after_material_cooldown'})
+                if material is None and review is not None and review.retry_at is not None and (not reason or future_alternatives):
+                    upcoming.wait(conn,run_id,page.page_id,original_due,review)
+                    waiting += 1
+                    continue
+                if upcoming_claim:
+                    conn.execute('DELETE FROM fb_auto_mobo_wait WHERE run_id=? AND page_id=?',(run_id,page.page_id))
                 status = "planned"
                 if reason:
                     status = "skipped"
@@ -854,10 +907,15 @@ class FBAutoPostStore:
                 conn.execute("UPDATE fb_auto_task SET selection_json=? WHERE id=?", (json.dumps(selection, sort_keys=True), int(task_cursor.lastrowid)))
                 if status == "planned": queued += 1
                 else: skipped += 1
-            run_status = "completed" if queued == 0 else "queued"
-            conn.execute("UPDATE fb_auto_run SET status=?,queued_tasks=?,skipped_tasks=?,completed_at_utc=? WHERE id=?", (run_status, queued, skipped, now if queued == 0 else "", run_id))
+            if upcoming_claim:
+                conn.execute('UPDATE fb_auto_run SET queued_tasks=queued_tasks+?,skipped_tasks=skipped_tasks+? WHERE id=?',
+                             (queued,skipped,run_id))
+                self._refresh_run(conn,run_id,now)
+            else:
+                run_status = "queued" if queued or waiting else "completed"
+                conn.execute("UPDATE fb_auto_run SET status=?,queued_tasks=?,skipped_tasks=?,completed_at_utc=? WHERE id=?", (run_status, queued, skipped, now if run_status == "completed" else "", run_id))
             conn.commit()
-        return {"ok": True, "run_id": run_id, "idempotent": False, "summary": {"total_pages": total, "publishable_pages": publishable, "missing_token_pages": missing, "overlap_pages": sum(len(page.group_ids) > 1 for page in page_rows), "queued_tasks": queued, "skipped_tasks": skipped}}
+        return {"ok": True, "run_id": run_id, "idempotent": False, "summary": {"total_pages": total, "publishable_pages": publishable, "missing_token_pages": missing, "overlap_pages": sum(len(page.group_ids) > 1 for page in page_rows), "queued_tasks": queued, "skipped_tasks": skipped, **({"waiting_mobo": waiting} if mobo_plan is not None else {})}}
 
     def _late_cutoff(self, max_late_seconds: int | None = None) -> str:
         seconds = self.max_late_seconds if max_late_seconds is None else int(max_late_seconds)
@@ -1208,7 +1266,8 @@ class FBAutoPostStore:
     @staticmethod
     def _refresh_run(conn: sqlite3.Connection, run_id: int, now: str) -> None:
         counts = {row[0]: int(row[1]) for row in conn.execute("SELECT status,COUNT(*) FROM fb_auto_task WHERE run_id=? GROUP BY status", (run_id,))}
-        if any(counts.get(name) for name in ("planned", "preparing", "ready", "queued", "running")):
+        if (any(counts.get(name) for name in ("planned", "preparing", "ready", "queued", "running"))
+                or conn.execute('SELECT 1 FROM fb_auto_mobo_wait WHERE run_id=? LIMIT 1',(run_id,)).fetchone()):
             status, completed = "running", ""
         elif counts.get("unknown") or counts.get("submitted"):
             status, completed = "attention_required", now
@@ -1236,6 +1295,10 @@ class FBAutoPostStore:
                 raise StoreError("fb_auto_run_not_found", "运行记录不存在", 404)
             tasks = conn.execute("SELECT id,page_id,group_id,status,skip_reason,schedule_policy,selection_json,material_id,content_id,short_url,long_url,video_template,gpu_job_id,planned_publish_at_utc,prepared_profile,prepared_sha256,prepared_size_bytes,prepared_duration_seconds,prepared_at_utc,graph_post_id,error_code,error_message,unknown_outcome,created_at_utc,completed_at_utc FROM fb_auto_task WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
             pages = conn.execute("SELECT page_id,group_id,group_ids_json,timezone,language,eligible_token_count,snapshot_status,skip_reason FROM fb_auto_run_page WHERE run_id=? ORDER BY page_id", (run_id,)).fetchall()
+            waiting = conn.execute("""SELECT w.page_id,w.original_due,w.next_check,p.skip_reason
+                FROM fb_auto_mobo_wait w JOIN fb_auto_run_page p ON p.run_id=w.run_id AND p.page_id=w.page_id
+                WHERE w.run_id=? ORDER BY w.next_check,w.page_id""", (run_id,)).fetchall()
+            plan = conn.execute('SELECT plan_json FROM fb_auto_mobo_plan WHERE run_id=?',(run_id,)).fetchone()
             attempts = conn.execute("SELECT a.task_id,a.sequence,a.credential_id,a.fb_user_id,a.result_kind,a.error_code,a.trace_id,a.created_at_utc FROM fb_auto_publish_attempt a JOIN fb_auto_task t ON t.id=a.task_id WHERE t.run_id=? ORDER BY a.task_id,a.sequence", (run_id,)).fetchall()
         result = {key: run[key] for key in run.keys() if key != "config_json"}
         result["config"] = _loads(run["config_json"], {})
@@ -1255,8 +1318,17 @@ class FBAutoPostStore:
             item["group_ids"] = _loads(item.pop("group_ids_json"), [])
             result["page_snapshots"].append(item)
         result["attempts"] = [dict(row) for row in attempts]
+        if plan:
+            result["mobo_discovery"] = upcoming.discovery_summary(json.loads(plan["plan_json"]))
+        if waiting:
+            result["waiting_pages"] = [{"page_id": row["page_id"], "reason": row["skip_reason"],
+                "original_planned_publish_at_utc": row["original_due"],
+                "next_check_at_utc": utc_iso(datetime.fromtimestamp(row["next_check"], UTC))} for row in waiting]
         result["skipped_pages"] = [{"page_id": task["page_id"], "reason": task["skip_reason"] or task["error_code"]}
                                    for task in result["tasks"] if task["status"] == "skipped"]
+        native_pages = {t["page_id"] for t in result["tasks"]}
+        result["skipped_pages"].extend({"page_id": p["page_id"], "reason": p["skip_reason"]}
+            for p in result["page_snapshots"] if p["snapshot_status"] == "skipped" and p["page_id"] not in native_pages)
         return {"ok": True, "run": result}
 
     @staticmethod

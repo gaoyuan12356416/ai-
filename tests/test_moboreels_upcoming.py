@@ -101,6 +101,14 @@ class UpcomingCatalogTests(unittest.TestCase):
         self.assertFalse(self.assess(plan,self.now,'en').ready)
         self.assertIn('p',self.assess(plan,self.now,'pl').ready)
 
+    def test_recent_first_publication_waits_for_hourly_supplier_snapshot(self):
+        self.package('recent', live=self.now-60)
+        self.listing('recent', shown=0, lang_id=-1)
+        plan = self.discover('-1~1')
+        self.assertIn('recent',self.assess(plan,self.now).pending)
+        self.db.execute('UPDATE ads_ai.cdreader_koc_drama SET is_show=1,lang_id=3')
+        self.assertIn('recent',self.assess(plan,self.now+900).ready)
+
     def test_material_hints_dont_reserve_or_gate_new_arrivals(self):
         self.package('a', after=0, language='pt')
         self.listing('a', lang_id=5)

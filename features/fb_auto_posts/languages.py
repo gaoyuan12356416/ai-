@@ -17,8 +17,20 @@ def candidate_snapshots_for_pages(config,pages,materials):
     if not languages:return result
     # Each repository SELECT opens its own read-only connection. Bound catalog
     # fan-out independently of Page count so seven languages fit the plan lease.
+    def read(language):
+        from .repositories import RepositoryError
+        try:
+            return materials.candidate_snapshot({**config,'language':language})
+        except RepositoryError as exc:
+            reviews = config.get('_mobo_reviews')
+            if reviews is None or (exc.status < 500 and exc.code != 'moboreels_catalog_incomplete'):
+                raise
+            from .upcoming import PendingRead
+            reviews[language] = PendingRead({}, {}, int(materials.now_fn().timestamp()) + 300, exc.code)
+            return CandidateSnapshot((),(),())
+
     with ThreadPoolExecutor(max_workers=min(3,len(languages))) as pool:
-        snapshots=list(pool.map(lambda language:materials.candidate_snapshot({**config,'language':language}),languages))
+        snapshots=list(pool.map(read,languages))
     for language,snapshot in zip(languages,snapshots):
         # Defend against a stale or incorrectly scoped adapter response too.
         candidates=tuple(item for item in snapshot.candidates if page_language(item.language)==language)

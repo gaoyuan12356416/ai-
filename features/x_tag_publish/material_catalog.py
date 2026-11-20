@@ -5,12 +5,32 @@ date, advertising metrics or label mapping is borrowed for those stories.
 """
 import copy
 import hashlib
+import logging
 import os
 from datetime import datetime, timezone
 
 from features.x_auto_posts.repositories import BlacklistSnapshot, DramaSourceRow, MetricWindowSnapshot
 
 MOBO_PRODUCTS = frozenset({'moboreels', 'moboshort'})
+
+
+def upcoming_plan(source, config, now):
+    from features.material_products import selected
+    from features import moboreels_upcoming
+    window = config.get('drama_launch_window_days', 0)
+    if (not moboreels_upcoming.applies(window)
+            or config.get('drama_rule', {}).get('resource_type_v2')
+            or not any(p.casefold() in MOBO_PRODUCTS for p in selected(config))):
+        return None
+    epoch = int(now.timestamp())
+    try:
+        return moboreels_upcoming.discover(source._stream_select, source.schema, window,
+                                           epoch, material_config=config)
+    except Exception as exc:
+        # Freeze the original scan time. A read failure must not prevent other
+        # products or templates from getting their normal slots.
+        logging.getLogger(__name__).warning('Mobo discovery deferred: %s', type(exc).__name__)
+        return {'policy': 'mobo_upcoming_v1', 'scanned_at': epoch}
 
 
 class CatalogSource:
@@ -20,6 +40,26 @@ class CatalogSource:
         self.mobo_products = tuple(p for p in products if p.casefold() in MOBO_PRODUCTS)
         self.has_dramawave = any(p.casefold() not in MOBO_PRODUCTS for p in products)
         self.mobo_ids = set()
+        self.upcoming = None
+        self.watching = False
+        self.source_material_count = None
+        self.mobo_ready_times = {}
+
+    def assess_upcoming(self, plan, request):
+        from features import moboreels_upcoming
+        self.upcoming = moboreels_upcoming.assess(self.original._stream_select, self.schema, plan,
+                                                  request.language, int(request.now.timestamp()))
+        self.mobo_ready_times = {cid: row['at'] for cid, row in self.upcoming.ready.items()}
+        scoped = set(self.upcoming.ready) | set(self.upcoming.pending)
+        hints = [plan['stories'][sid].get('source_material_count') for sid in scoped]
+        if hints and all(count is not None for count in hints):
+            self.source_material_count = sum(hints)
+
+    def upcoming_summary(self):
+        if self.upcoming is None:
+            return {'status': 'catalog_temporarily_unavailable'}
+        return {'ready': len(self.upcoming.ready), 'pending': len(self.upcoming.pending),
+                'retry_at': self.upcoming.retry_at, 'source_material_count': self.source_material_count}
 
     def __getattr__(self, name):
         return getattr(self.original, name)
@@ -32,6 +72,12 @@ class CatalogSource:
 
     def list_drama_rows(self, **kwargs):
         rows = list(self.original.list_drama_rows(**kwargs)) if self.has_dramawave else []
+        if self.upcoming is not None:
+            for sid, detail in self.upcoming.ready.items():
+                self.mobo_ids.add(sid)
+                rows.append(DramaSourceRow(sid, sid, sid, kwargs['language'], '', detail['at'],
+                                           0, 1, detail['name'], 'Moboreels', catalog='moboreels'))
+            return rows
         # The Mobo catalog supplies no timezone-qualified launch date or the
         # DramaWave resource classifications. Those explicit filters cannot match.
         if kwargs.get('resource_types') or kwargs.get('deploy_since_epoch'):

@@ -3,9 +3,14 @@ import os
 import threading
 from dataclasses import replace
 
-from features.x_auto_posts.selector import TwoStageSelector
+from features.x_auto_posts.selector import MoboUpcomingWait, NoEligibleMaterial, TwoStageSelector
 from features.x_auto_posts.x_sidecar import XPostAutoBridgeClient
 from .policy import Decision, ranked_dramas, language
+
+
+def _check_slot_error(exc):
+    if getattr(exc, 'code', '') in ('x_mobo_upcoming_daily_full', 'x_mobo_upcoming_paused'):
+        raise NoEligibleMaterial({exc.code: 1}) from None
 
 
 class AuditStore:
@@ -23,15 +28,25 @@ class AuditStore:
             audit = context['decision'].audit(metadata, fallback=context.get('fallback', ''))
             snapshot = dict(kwargs.get('selection_snapshot') or {})
             snapshot['tag_profile'] = audit
+            if context.get('upcoming') is not None:
+                snapshot['mobo_upcoming'] = context['upcoming']
             if (context.get('hit') or {}).get('timing_policy'):
                 from features.hit_publish import timing
                 snapshot['hit_publish_timing'] = timing(context['hit']['release_times'], kwargs['content_id'], context['language'], context['now'])
             kwargs['selection_snapshot'] = snapshot
             context['selected_audit'] = audit
-        return self.store.reserve_material(**kwargs)
+        try:
+            return self.store.reserve_material(**kwargs)
+        except Exception as exc:
+            _check_slot_error(exc)
+            raise
 
 
 class ProfileSelector(TwoStageSelector):
+    def upcoming_plan(self, config, now):
+        from .material_catalog import upcoming_plan
+        return upcoming_plan(self.source, config, now)
+
     def __init__(self, source, metrics, history, store, **kwargs):
         self._profile_context = threading.local()
         # Claimed selectors wrap the ledger; previews must remain unbound.
@@ -64,6 +79,8 @@ class ProfileSelector(TwoStageSelector):
             account['selection_profile'] = task.account_snapshot.get('selection_profile') or {'mode': 'revenue', 'mode_version': 0, 'profile': {}}
         decision = Decision(account, ['auto', request.template_id, request.template_version, request.run_id, request.task_id])
         context = dict(decision=decision, catalog={}, language=language(request.language), fallback='', hit=target, now=request.now)
+        if getattr(self.source, 'watching', False):
+            context['upcoming'] = self.source.upcoming_summary()
         self._profile_context.value = context
         if target:
             from .policy import catalog_labels
@@ -93,15 +110,63 @@ class ProfileSelector(TwoStageSelector):
         try:
             from features.hit_publish import future_scope
             get_run = getattr(self._run_store, 'get_run', None)
-            frozen = get_run(request.run_id).blacklist_snapshot if callable(get_run) else {}
+            run = get_run(request.run_id) if callable(get_run) else None
+            frozen = run.blacklist_snapshot if run is not None else {}
             hit = frozen.get('hit_material_publish') or frozen.get('hit_drama_publish') or {}
+            plan = frozen.get('mobo_upcoming') if callable(get_run) else request.preview_upcoming
+            read_error = None
+            if plan is not None and not hit and hasattr(self.source, 'assess_upcoming'):
+                self.source.watching = True
+                if reserve and self.store.get_task_reservation(request.task_id) is not None:
+                    return super()._select(request, reserve=reserve)
+                if getattr(run, 'trigger_type', None) == 'auto' and not self._run_store.get_template(request.template_id).enabled:
+                    raise NoEligibleMaterial({'x_mobo_upcoming_paused': 1})
+                from features.moboreels_upcoming import discover
+                def recover_plan():
+                    template = self._run_store.get_template(request.template_id, version=request.template_version) if run else None
+                    return discover(self.source._stream_select, self.source.schema,
+                                    request.rules.drama.launch_window_days, plan['scanned_at'],
+                                    material_config=template.config if template else None)
+                try:
+                    if callable(get_run):
+                        plan = self._run_store.mobo_upcoming_plan(request.run_id, recover_plan)
+                    elif 'stories' not in plan:
+                        plan = recover_plan()
+                    self.source.assess_upcoming(plan, request)
+                except Exception as exc:
+                    if not self.source.has_dramawave:
+                        raise
+                    read_error = exc
             if frozen.get('hit_drama_publish'):
                 # Override only this request, before source SQL and hard gates.
                 request = replace(request, rules=replace(request.rules,
                     drama=replace(request.rules.drama, launch_window_days=0)))
-            with future_scope(hit.get('release_times', {})):
-                result = super()._select(request, reserve=reserve)
+            try:
+                with future_scope(hit.get('release_times', {})):
+                    result = super()._select(request, reserve=reserve)
+            except NoEligibleMaterial as exc:
+                if 'x_mobo_upcoming_daily_full' in exc.rejection_counts or 'x_mobo_upcoming_paused' in exc.rejection_counts:
+                    raise
+                if read_error is not None:
+                    raise read_error
+                state = getattr(self.source, 'upcoming', None)
+                from features.x_auto_posts.repositories import MetricTotals
+                empty = MetricTotals()
+                rules = (request.rules.drama, request.rules.material)
+                if (state is not None and state.retry_at is not None
+                        and all(rule.spend.contains(empty.spend) and rule.d0_roas.contains(empty.d0_roas)
+                                for rule in rules)):
+                    if state.ready and getattr(run, 'trigger_type', None) == 'auto':
+                        try:
+                            self._run_store.check_mobo_wait_capacity(request.task_id, request.now)
+                        except Exception as slot_error:
+                            _check_slot_error(slot_error)
+                            raise
+                    raise MoboUpcomingWait(self.source.upcoming_summary()) from None
+                raise
             context = getattr(self._profile_context, 'value', None)
+            if context and context.get('upcoming') is not None:
+                result = replace(result, reservation=dict(result.reservation, upcoming=context['upcoming']))
             if context and context.get('selected_audit'):
                 # Preview and execution responses include the same frozen explanation.
                 result = replace(result, reservation=dict(result.reservation, tag_profile=context['selected_audit']))

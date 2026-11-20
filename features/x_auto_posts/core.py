@@ -678,6 +678,11 @@ def ensure_storage(db_path: Any) -> None:
                         ON DELETE RESTRICT
                 );
 
+                CREATE TABLE IF NOT EXISTS x_auto_mobo_upcoming (
+                    run_id INTEGER PRIMARY KEY REFERENCES x_auto_run(id),
+                    plan_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS x_auto_task (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id INTEGER NOT NULL,
@@ -1555,6 +1560,7 @@ class XAutoPostStore:
         publish_time: Any,
         metric_generation_id: Optional[Any] = None,
         blacklist_snapshot: Optional[Mapping[str, Any]] = None,
+        mobo_upcoming: Optional[Mapping[str, Any]] = None,
         actor: AuditActor = AuditActor(),
     ) -> RunRecord:
         clean_key = _bounded_text(run_key, "run key", 255)
@@ -1567,6 +1573,9 @@ class XAutoPostStore:
         normalized_date = _shanghai_date(shanghai_date)
         normalized_publish_time = _publish_time(publish_time)
         generation_id = None if metric_generation_id is None else _positive_int(metric_generation_id, "metric generation id")
+        if mobo_upcoming is not None:
+            marker = {key: mobo_upcoming[key] for key in ("policy", "scanned_at")}
+            blacklist_snapshot = dict(blacklist_snapshot or {}, mobo_upcoming=marker)
         blacklist_json, _ = _canonical_json(blacklist_snapshot or {}, "blacklist snapshot")
         actor = AuditActor.from_values(actor.user_id, actor.name, actor.tenant_key)
         now = self._now_iso()
@@ -1676,6 +1685,9 @@ class XAutoPostStore:
                 ),
             )
             run_id = int(cursor.lastrowid)
+            if mobo_upcoming is not None and "stories" in mobo_upcoming:
+                conn.execute("INSERT INTO x_auto_mobo_upcoming(run_id,plan_json) VALUES(?,?)",
+                             (run_id, json.dumps(mobo_upcoming, ensure_ascii=False)))
             self._event(
                 conn,
                 run_id=run_id,
@@ -1687,6 +1699,51 @@ class XAutoPostStore:
             row = conn.execute("SELECT * FROM x_auto_run WHERE id=?", (run_id,)).fetchone()
         assert row is not None
         return _run_from_row(row)
+
+    @staticmethod
+    def _check_mobo_daily_limit(conn, task, effective_at):
+        # A delayed slot shares the release day's normal account allowance.
+        # Check under the same write lock as the material reservation.
+        row = conn.execute(
+            "SELECT v.config_json,t.enabled FROM x_auto_template_version v JOIN x_auto_template t "
+            "ON t.id=v.template_id WHERE v.template_id=? AND v.version=?",
+            (task["template_id"], task["template_version"]),
+        ).fetchone()
+        if not row["enabled"]:
+            raise XAutoPostStoreError("x_mobo_upcoming_paused", "模板已停用，结束此自动时隙", 409)
+        schedule = json.loads(row["config_json"])["schedule"]
+        limit = len(schedule["times"]) if schedule["mode"] == "fixed" else int(schedule["daily_count"])
+        zone = timezone(timedelta(hours=8))
+        day = datetime.fromisoformat(effective_at).astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        start, end = _utc_iso(day), _utc_iso(day + timedelta(days=1))
+        used = conn.execute(
+            "SELECT count(*) FROM x_auto_task WHERE account_id=? AND template_id=? "
+            "AND trigger_priority=1 AND id<>? AND material_id<>'' AND "
+            "((max(scheduled_at_utc,reserved_at_utc)>=? AND max(scheduled_at_utc,reserved_at_utc)<?) "
+            "OR (published_at_utc>=? AND published_at_utc<?))",
+            (task["account_id"], task["template_id"], task["id"], start, end, start, end),
+        ).fetchone()[0]
+        if used >= limit:
+            raise XAutoPostStoreError("x_mobo_upcoming_daily_full", "该账号今日模板次数已用完", 409)
+
+    def check_mobo_wait_capacity(self, task_id, now):
+        with self._reader() as conn:
+            task = conn.execute("SELECT * FROM x_auto_task WHERE id=?", (task_id,)).fetchone()
+            if task is not None and task["trigger_priority"] == 1:
+                self._check_mobo_daily_limit(conn, task, _utc_iso(now))
+
+    def mobo_upcoming_plan(self, run_id, load):
+        """Freeze once, including retries after an unavailable discovery database."""
+        sql = "SELECT plan_json FROM x_auto_mobo_upcoming WHERE run_id=?"
+        with self._reader() as conn:
+            row = conn.execute(sql, (run_id,)).fetchone()
+        if row is None:
+            plan = load()
+            with self._transaction() as conn:
+                conn.execute("INSERT OR IGNORE INTO x_auto_mobo_upcoming(run_id,plan_json) VALUES(?,?)",
+                             (run_id, json.dumps(plan, ensure_ascii=False)))
+                row = conn.execute(sql, (run_id,)).fetchone()
+        return json.loads(row[0])
 
     def get_run(self, run_id: Any) -> RunRecord:
         normalized_id = _positive_int(run_id, "run id")
@@ -2661,6 +2718,9 @@ class XAutoPostStore:
                 return _reservation_from_row(ledger)
             if str(task["status"]) not in {"pending", "selecting"}:
                 raise XAutoPostStoreError("x_auto_task_not_selectable", "task cannot reserve a material in its current status", 409)
+            if task["trigger_priority"] == 1 and "mobo_upcoming" in (selection_snapshot or {}):
+                timing = selection_snapshot.get("hit_publish_timing") or {}
+                self._check_mobo_daily_limit(conn, task, max(now, timing.get("publish_at_utc") or now))
             if cooldown_since_utc is not None:
                 cooldown_start = _utc_iso(cooldown_since_utc, "cooldown start")
                 cooldown_hit = conn.execute(
@@ -2734,6 +2794,10 @@ class XAutoPostStore:
                     raise XAutoPostStoreError('x_auto_hit_timing_invalid', 'invalid hit timing', 409)
                 conn.execute('UPDATE x_auto_task SET scheduled_at_utc=? WHERE id=?',
                              (_utc_iso(hit_timing['publish_at_utc']), normalized_task_id))
+            elif "mobo_upcoming" in (selection_snapshot or {}) and task["scheduled_at_utc"] < now:
+                # The run retains the original slot. Dispatch the same task at
+                # today's confirmed readiness time after a cross-day wait.
+                conn.execute("UPDATE x_auto_task SET scheduled_at_utc=? WHERE id=?", (now, normalized_task_id))
             self._event(
                 conn,
                 run_id=int(task["run_id"]),

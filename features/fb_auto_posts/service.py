@@ -131,7 +131,8 @@ class Runtime:
             return {"ok": True, "status": status, "claimed": False}
         due = self.store.claim_due_slot(worker_id, lease_seconds, max_late_seconds=self.max_late_seconds)
         if due is None:
-            return {"ok": True, "status": "no_due_slot", "claimed": False}
+            from .upcoming import resume
+            return resume(self,lease_seconds)
         actor = ActorScope("scheduler", "自动调度", bool(due["scope_is_admin"]), str(due["owner_user_id"]))
         try:
             trigger_type = "manual" if str(due.get("trigger_type") or "auto") == "manual" else "auto"
