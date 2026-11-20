@@ -338,15 +338,96 @@
     $("pageCreator").onchange=e=>{creator=e.target.value;page=0;render();};
     $("pageSearch").oninput=e=>{query=e.target.value;page=0;render();};$("pagePrev").onclick=()=>{page--;render();};$("pageNext").onclick=()=>{page++;render();};
     $("reloadPages").onclick=e=>busy(e.target,()=>{window.FbPagePortraits?.clear();return load().catch(err=>errorAt("pageError",err));});
-    async function editor(existing) {
-      let chosen=new Set(),available=[],generation=0,searchTimer;
-      const modal=dialog("pageEditor",existing?"编辑 Page":"创建 Page 配置",`<div class="notice">配置在同租户内共用。其他有权访问此 Page 的用户也会使用保存的语言和文案；已提交的任务保持冻结内容。</div><div id="editorError" class="error" role="alert" hidden></div><div class="form-grid"><label class="field"><span>剧语言</span><select id="editLanguage">${langOptions("请选择剧语言",existing?.language)}</select>${existing?'<span class="helper">更改剧语言会暂停素材池；请处理语言不匹配的待发布项后再启用。</span>':""}</label><div class="field"><span>落地页</span><div class="notice mono">${LANDING}</div></div><label class="field"><span>默认标题（选填）</span><input id="editTitle" value="${esc(existing?.title || "")}" placeholder="本次发布未填标题时使用"></label><div class="field"><label for="editCaption">默认发布文案（选填）</label><textarea id="editCaption" rows="8">${esc(existing?.caption_template || "")}</textarea>${macroButtons("editCaption")}<p class="helper">支持 {name}、{desc}、{url}、{{m_url}} 替换；其他文本原样保留。缺少剧名或简介时对应宏为空。</p></div><div class="field"><span>示例文案预览</span><div id="editPreview" class="copy-preview"></div><span class="helper">使用示例剧目演示宏替换，不绑定发布素材、不生成真实链接。</span></div>${existing?`<div class="full notice"><strong>${esc(existing.page_name)}</strong> · ${esc(existing.page_id)} · 当前版本 v${existing.version}</div>`:`<div class="full"><div class="filters"><input id="availableSearch" placeholder="搜索可访问的 Page 名称或 ID" aria-label="搜索可访问的 Page"><button class="button" id="searchAvailable">搜索</button></div><div class="helper" id="availableCount"></div><div class="pick-list" id="availablePages"></div></div>`}</div>`,`<button class="button" data-close>取消</button><button class="button primary" id="savePage">${existing?"保存修改":"创建所选 Page"}</button>`);
+    function editor(existing) {
+      if ($("pageEditor")) return;
+      const chosen = new Set();
+      const picker = existing ? "" : `
+        <div class="field">
+          <label for="availableSearch">选择 Page</label>
+          <div class="filters"><input id="availableSearch" placeholder="搜索可访问的 Page 名称或 ID"><button type="button" class="button" id="searchAvailable">搜索</button></div>
+          <div class="helper" id="availableCount" role="status">已选择 0 个 Page</div>
+          <div id="availableFeedback" class="helper" role="status"></div>
+          <div class="pick-list" id="availablePages" style="max-height:32vh;overflow:auto"></div>
+          <button type="button" class="button small" id="moreAvailable" hidden>显示更多 Page</button>
+        </div>`;
+      const modal=dialog("pageEditor",existing?"编辑 Page":"创建 Page 配置",`<div class="notice">配置在同租户内共用。其他有权访问此 Page 的用户也会使用保存的语言和文案；已提交的任务保持冻结内容。</div><div id="editorError" class="error" role="alert" hidden></div>${picker}<div class="form-grid" style="align-items:start"><label class="field"><span>剧语言</span><select id="editLanguage">${langOptions("请选择剧语言",existing?.language)}</select>${existing?'<span class="helper">更改剧语言会暂停素材池；请处理语言不匹配的待发布项后再启用。</span>':""}</label><div class="field"><span>落地页</span><div class="notice mono">${LANDING}</div></div><label class="field"><span>默认标题（选填）</span><input id="editTitle" value="${esc(existing?.title || "")}" placeholder="本次发布未填标题时使用"></label><div class="field"><label for="editCaption">默认发布文案（选填）</label><textarea id="editCaption" rows="8">${esc(existing?.caption_template || "")}</textarea>${macroButtons("editCaption")}<p class="helper">支持 {name}、{desc}、{url}、{{m_url}} 替换；其他文本原样保留。缺少剧名或简介时对应宏为空。</p></div><div class="field"><span>示例文案预览</span><div id="editPreview" class="copy-preview"></div><span class="helper">使用示例剧目演示宏替换，不绑定发布素材、不生成真实链接。</span></div>${existing?`<div class="full notice"><strong>${esc(existing.page_name)}</strong> · ${esc(existing.page_id)} · 当前版本 v${existing.version}</div>`:""}</div>`,`<button class="button" data-close>取消</button><button class="button primary" id="savePage">${existing?"保存修改":"创建所选 Page"}</button>`);
       function preview(){const example={drama_name:$("editLanguage").value==="en"?"A New Beginning":"她的第二人生",drama_description:$("editLanguage").value==="en"?"An unexpected meeting changes her life.":"她决定重新开始，却意外遇见改变命运的人。"};$("editPreview").textContent=expand($("editCaption").value,example);}
       $("editCaption").oninput=preview;$("editLanguage").onchange=preview;preview();
-      function showAvailable(){const configured=new Set(configs.map(p=>p.page_id));$("availablePages").innerHTML=available.map(p=>`<label class="pick"><input type="checkbox" value="${esc(p.page_id)}"${chosen.has(p.page_id)?" checked":""}${configured.has(p.page_id)?" disabled":""}><span><strong>${esc(p.page_name)}</strong><small>${esc(p.page_id)}</small><small>${configured.has(p.page_id)?"已配置，请在列表单独编辑":esc(p.blocked_reason || "可创建配置")}</small></span></label>`).join("") || '<div class="empty">没有可选 Page</div>';$("availableCount").textContent=`已选择 ${chosen.size} 个 Page`;}
-      async function searchAvailable(){const gen=++generation;const data=await api("/pages/available?q="+encodeURIComponent($("availableSearch").value));if(!modal.isConnected || gen!==generation)return;available=data.items || [];showAvailable();}
-      if(!existing){$("availablePages").onchange=e=>{if(e.target.type==="checkbox"){e.target.checked?chosen.add(e.target.value):chosen.delete(e.target.value);$("availableCount").textContent=`已选择 ${chosen.size} 个 Page`;}};$("availableSearch").oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>searchAvailable().catch(err=>errorAt("editorError",err)),350);};$("searchAvailable").onclick=()=>searchAvailable().catch(err=>errorAt("editorError",err));await searchAvailable().catch(err=>errorAt("editorError",err));}
-      if(!modal.isConnected)return;
+      if (!existing) {
+        const input = $("availableSearch"), button = $("searchAvailable");
+        const list = $("availablePages"), more = $("moreAvailable"), feedback = $("availableFeedback");
+        const configured = new Set(configs.map(p => p.page_id));
+        let results = [], shown = 0, timer, active = null, queued = false;
+
+        function appendResults() {
+          const batch = results.slice(shown, shown + 50);
+          list.insertAdjacentHTML("beforeend", batch.map(p => `<label class="pick"><input type="checkbox" value="${esc(p.page_id)}"${chosen.has(p.page_id) ? " checked" : ""}${configured.has(p.page_id) ? " disabled" : ""}><span><strong>${esc(p.page_name)}</strong><small>${esc(p.page_id)}</small><small>${configured.has(p.page_id) ? "已配置，请在列表单独编辑" : esc(p.blocked_reason || "可创建配置")}</small></span></label>`).join(""));
+          shown += batch.length;
+          more.hidden = shown >= results.length;
+          feedback.textContent = results.length ? `已显示 ${shown} / ${results.length} 个 Page`
+            : input.value.trim() ? "当前账号可访问的 Page 中没有匹配项。请核对名称、ID 或 Page 负责人。" : "当前账号的授权范围内没有可显示的 Page。";
+        }
+
+        function pending() {
+          feedback.className = "helper";
+          feedback.textContent = "正在查询可访问的 Page…";
+          list.replaceChildren();
+          more.hidden = true;
+          button.textContent = "搜索";
+        }
+
+        async function searchAvailable() {
+          clearTimeout(timer);
+          if (!modal.open) return;
+          const query = input.value.trim();
+          if (active) {
+            queued = query !== active.query;
+            return;
+          }
+          const controller = new AbortController();
+          active = {query, controller};
+          pending();
+          try {
+            const data = await api("/pages/available?q=" + encodeURIComponent(query), {signal:controller.signal});
+            if (!modal.open || input.value.trim() !== query) return;
+            results = data.items;
+            shown = 0;
+            appendResults();
+          } catch (error) {
+            if (!modal.open || input.value.trim() !== query || controller.signal.aborted) return;
+            feedback.className = "error";
+            const message = [502, 504].includes(error.status) ? `Page 查询服务暂时不可用（HTTP ${error.status}）` : error.message;
+            feedback.textContent = `${message} 可点击“重试搜索”，已填内容会保留。`;
+            button.textContent = "重试搜索";
+          } finally {
+            active = null;
+            if (queued && modal.open) {
+              queued = false;
+              void searchAvailable();
+            }
+          }
+        }
+
+        list.onchange = event => {
+          const box = event.target;
+          if (box.type !== "checkbox") return;
+          if (box.checked) chosen.add(box.value); else chosen.delete(box.value);
+          $("availableCount").textContent = `已选择 ${chosen.size} 个 Page`;
+        };
+        input.oninput = () => {
+          clearTimeout(timer);
+          queued = false;
+          pending();
+          if (active?.query !== input.value.trim()) timer = setTimeout(searchAvailable, 350);
+        };
+        input.onkeydown = event => {
+          if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); void searchAvailable(); }
+        };
+        button.onclick = searchAvailable;
+        more.onclick = appendResults;
+        modal.addEventListener("close", () => { clearTimeout(timer); active?.controller.abort(); }, {once:true});
+        void searchAvailable();
+      }
       $("savePage").onclick=e=>busy(e.target,async()=>{
         try {
           const language=$("editLanguage").value,caption_template=$("editCaption").value,title=$("editTitle").value;validateTemplate(caption_template);if(!existing&&!chosen.size)throw new Error("请至少选择一个 Page。");
