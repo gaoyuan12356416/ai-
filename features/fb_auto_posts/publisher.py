@@ -152,7 +152,7 @@ class AutoPostExecutor:
             task = ensure_link(self.store, task)
         except MoboreelsFBError as exc:
             return self.store.complete_task(int(task["id"]), {"status":"failed","error_code":exc.code,"error_message":str(exc),"definite_attempts":0})
-        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or task.get("prepared_media_url") == task.get("source_media_url"):
+        if not task.get("prepared_media_url") or task.get("media_url") != task.get("prepared_media_url") or (task.get("prepared_media_url") == task.get("source_media_url") and task.get("media_selection_kind") != "deadline_original"):
             return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": "fb_auto_prepared_media_required", "error_message": "任务缺少独立GPU成片，已禁止发布", "definite_attempts": 0})
         short_url, long_url = str(task.get("short_url") or ""), str(task.get("long_url") or "")
         if bool(short_url) != bool(long_url):
@@ -164,7 +164,12 @@ class AutoPostExecutor:
                 validate_w2a_url(long_url)
                 if not secrets.compare_digest(normalized_short, expected_short) or str(task.get("message_text") or "").count(normalized_short) != 1:
                     raise FBPostLinkError("fb_auto_short_link_snapshot_invalid", "任务短链快照与发布文案不一致", 409)
-                self.short_link_writer(self.short_link_root, int(task["id"]), long_url)
+                try:
+                    self.short_link_writer(self.short_link_root, int(task["id"]), long_url)
+                except Exception:
+                    from features.story_copy.bridge import restore_fb_optional_link
+                    if not restore_fb_optional_link(self.store,task):
+                        raise
             except FBPostLinkError as exc:
                 return self.store.complete_task(int(task["id"]), {"status": "failed", "error_code": exc.code, "error_message": str(exc), "definite_attempts": 0})
             except Exception:

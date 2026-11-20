@@ -12,6 +12,7 @@ from .core import ActorScope, BEIJING, StoreError, utc_iso
 from .manual_batch import BatchError, canonical, digest
 from .strategy import daily_capacity, daily_limit
 from . import page_caption
+from .explicit_publish import MARKER as INDEPENDENT_PUBLISH
 
 
 KIND = "exact_material_all_pages_v1"
@@ -53,8 +54,6 @@ def _existing(conn, request):
 def _validate_template(template, request):
     if int(template["current_version"]) != request["expected_version"]:
         raise StoreError("fb_auto_version_conflict", "模板版本已更新，请刷新列表后重试", 409)
-    if template["status"] != "enabled":
-        raise StoreError("fb_auto_template_disabled", "模板已停用，请启用后再发布爆款素材", 409)
     if json.loads(template["config_json"]).get("video_template") != "random_overlay":
         raise StoreError("fb_auto_video_template_required", "爆款素材发布需要随机排重视频模板", 409)
 
@@ -104,8 +103,8 @@ def publish_material(runtime, template_id, actor, payload):
     if runtime.pages.legacy_conflicts(config["group_ids"]):
         raise StoreError("fb_auto_legacy_queue_conflict", "模板Page池仍被旧版自动发布队列占用，未创建运行", 409)
     enabled = store.enabled_template_sources(template_id)
-    fingerprint = {(int(template_id), request["expected_version"])}
-    automatic_daily_jobs = daily_capacity(config, pages)
+    fingerprint = {(int(template_id), request["expected_version"])} if template['status'] == 'enabled' else set()
+    automatic_daily_jobs = daily_capacity(config, pages) if template['status'] == 'enabled' else 0
     for other in enabled:
         other_pages = runtime.pages.list_pages(other["config"]["group_ids"], is_admin=other["scope_is_admin"], owner_user_id=other["owner_user_id"])
         automatic_daily_jobs += daily_capacity(other["config"], other_pages)
@@ -159,7 +158,7 @@ def publish_material(runtime, template_id, actor, payload):
                     "actor": asdict(actor), "pages": [asdict(p) for p in pages], "material": frozen_material,
                     "entries": entries, "result": result, "cooldown_days": int(config["cooldown_days"])}
         sha = digest(manifest)
-        frozen_config = {**config, MARKER: {"sha256": sha, "manifest": manifest}}
+        frozen_config = {**config, INDEPENDENT_PUBLISH: True, MARKER: {"sha256": sha, "manifest": manifest}}
         cur = conn.execute("""INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,
             total_pages,publishable_pages,missing_token_pages,queued_tasks,skipped_tasks,created_at_utc,completed_at_utc,
             planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,'manual',?,?,?,?,?,?,?,?,?,?,'[]','random_overlay')""",

@@ -11,6 +11,7 @@ from .manual_batch import canonical, digest
 from .strategy import daily_capacity
 from . import hit_material as legacy, page_caption
 from .hit_profile import freeze_match, profileaudit
+from .explicit_publish import MARKER as INDEPENDENT_PUBLISH
 
 
 def publish_material(runtime, template_id, actor, payload):
@@ -48,8 +49,8 @@ def publish_material(runtime, template_id, actor, payload):
         raise StoreError('fb_auto_page_scope_invalid', 'Page 池返回重复 Page', 409)
     if runtime.pages.legacy_conflicts(config['group_ids']):
         raise StoreError('fb_auto_legacy_queue_conflict', '模板 Page 池仍被旧版自动发布队列占用', 409)
-    fingerprint = {(int(template_id), request['expected_version'])}
-    automatic_jobs = daily_capacity(config, pages)
+    fingerprint = {(int(template_id), request['expected_version'])} if template['status'] == 'enabled' else set()
+    automatic_jobs = daily_capacity(config, pages) if template['status'] == 'enabled' else 0
     for other in store.enabled_template_sources(template_id):
         other_pages = runtime.pages.list_pages(other['config']['group_ids'], is_admin=other['scope_is_admin'], owner_user_id=other['owner_user_id'])
         automatic_jobs += daily_capacity(other['config'], other_pages)
@@ -122,7 +123,7 @@ def publish_material(runtime, template_id, actor, payload):
         manifest = dict(kind=POLICY, request=request, template_config_sha256=template['config_sha256'],
                         actor=asdict(actor), entries=entries, result=result, cooldown_days=int(config['cooldown_days']))
         sha = digest(manifest)
-        frozen_config = {**config, legacy.MARKER:dict(sha256=sha, manifest=manifest)}
+        frozen_config = {**config, INDEPENDENT_PUBLISH: True, legacy.MARKER:dict(sha256=sha, manifest=manifest)}
         slot = 'manual:hit-material:'+request['operation_id']
         cur = conn.execute("INSERT INTO fb_auto_run(template_id,template_version,slot_key,trigger_type,status,config_json,total_pages,publishable_pages,missing_token_pages,queued_tasks,skipped_tasks,created_at_utc,completed_at_utc,planned_publish_at_utc,metric_generation_ids_json,video_template) VALUES(?,?,?,'manual',?,?,?,?,?,?,?,?,?,?,'[]','random_overlay')", (template_id,request['expected_version'],slot,'queued' if count else 'completed',canonical(frozen_config),len(pages),sum(p.eligible_token_count>0 for p in pages),sum(p.eligible_token_count<=0 for p in pages),count,0,stamp,'' if count else stamp,min((e['timing']['publish_at_utc'] for e in entries),default=stamp)))
         run_id = int(cur.lastrowid)
