@@ -85,6 +85,8 @@ def reason_counts(items):
                 reason += '（待核实）'
         if item.get('confidence') == 'inferred':
             reason += '（推测）'
+        if item.get('outcome') == 'policy_skipped':
+            reason += '（已跳过）'
         result[reason[:100]] += item['count']
     return result
 
@@ -196,8 +198,12 @@ def build_card(report, *, compact=False):
             if one['skipped'] != 0:
                 result.append('按规则跳过 %s' % number(one['skipped']))
             source_lines.append(source + '：' + ' · '.join(result))
-            counts = reason_counts(row.get('reasons', []) + row.get('policy_reasons', []))
-            combined.update(counts)
+            counts = reason_counts(row.get('reasons', []) + [
+                dict(r, outcome='policy_skipped') for r in row.get('policy_reasons', [])])
+            # Skip/closed reasons have their own counter; do not present them
+            # as unfinished work just because they share an error code.
+            combined.update(reason_counts([r for r in row.get('reasons', [])
+                                           if r.get('outcome') != 'policy_skipped']))
             if counts:
                 limit = 5 if compact else 20
                 lines = ['**%s · %s**' % (name, source)]
@@ -231,7 +237,7 @@ def build_card(report, *, compact=False):
     order = [name for name in ('FB', 'TT', 'X') if name in main_reasons]
     order += [name for name in main_reasons if name not in order]
     elements += [md('**主要未发布原因**\n' + '\n'.join('**%s** · %s' % (name, main_reasons[name]) for name in order)),
-                 note('以上含按规则跳过的任务；数字为任务条数。其余原因可展开查看。'),
+                 note('未完成原因与已跳过任务分开统计；数字为任务条数。其余原因可展开查看。'),
                  panel('发布来源 · 看每种来源的完成情况', sources)]
     if details:
         elements.append(panel('全部具体原因 · 按平台和来源查看', details))
@@ -288,6 +294,13 @@ SOURCE_NAMES = {('TT', 'auto_template:random_overlay'): '随机叠加模板',
  ('X', 'profile_auto_template'): '画像自动模板'}
 
 REASON_NAMES = {'canonical_execution_failed': '执行失败，具体原因未记录',
+ 'fb_graph_368': '平台因违规或风控限制拒绝发布',
+ 'fb_graph_190': '平台明确拒绝授权凭证',
+ 'moboreels_link_unavailable': '剧目链接暂不可用',
+ 'media_transcode_failed': '视频转码失败',
+ 'x_tag_dispatch_failed': '发布任务交接失败',
+ 'media_decision_pending': '媒体处理方案待确定',
+ 'execution_pending': '等待执行',
  'source_url_not_allowed': '源视频地址未通过校验',
  'tt_upstream_rejected': '平台拒绝发布请求',
  'fb_page_missing_eligible_token': '主页发布授权不可用',

@@ -73,16 +73,19 @@ def _row(source):
             "reasons": [], "warnings": [], "form_counts": {}, "unqueued": 0}
 
 
-def _reason(row, code, count=1, confidence="confirmed"):
+def _reason(row, code, count=1, confidence="confirmed", outcome=None):
     if count <= 0:
         return
     text, suggestion = ERRORS.get(code, ("发布未完成，需核对批次错误记录", "检查对应批次的账号、媒体和平台返回记录"))
     text = REASONS.get(code, text)
     for item in row["reasons"]:
-        if item["code"] == code and item["confidence"] == confidence:
+        if item["code"] == code and item["confidence"] == confidence and item.get('outcome') == outcome:
             item["count"] += count
             return
-    row["reasons"].append({"code": code, "reason": text, "suggestion": suggestion, "count": count, "confidence": confidence})
+    item = {"code": code, "reason": text, "suggestion": suggestion, "count": count, "confidence": confidence}
+    if outcome is not None:
+        item['outcome'] = outcome
+    row["reasons"].append(item)
 
 
 def _delivery(queue, log, relay):
@@ -128,10 +131,10 @@ def _record(row, outcome, window, seen=None, counted_expected=True):
             row["late"] += 1
         else:
             row["pending"] += 1
-            _reason(row, "execution_pending")
+            _reason(row, "execution_pending", outcome='pending')
         return
     row[state] += 1
-    _reason(row, code or "publish_failed")
+    _reason(row, code or "publish_failed", outcome=state)
 
 
 def _best(outcomes):
@@ -154,28 +157,28 @@ def _missing(row, run, count, account=None, logs_by_id=None):
     if run.get('status') in {'cancelled', 'canceled'}:
         row['policy_skipped'] += count
         row['unqueued'] -= count
-        _reason(row, 'plan_cancelled', count)
+        _reason(row, 'plan_cancelled', count, outcome='policy_skipped')
         return
     if account is not None and f"账号{account}授权或发布开关不可用" in message:
         row["blocked"] += count
-        _reason(row, "x_account_not_publishable", count)
+        _reason(row, "x_account_not_publishable", count, outcome='blocked')
         return
     if account is not None:
         for log_id in re.findall(r"日志(\d+)", message):
             log = (logs_by_id or {}).get(int(log_id), {})
             if str(log.get("account_id")) == str(account) and log.get("unknown_outcome"):
                 row["blocked"] += count
-                _reason(row, "x_historical_outcome_hold", count)
+                _reason(row, "x_historical_outcome_hold", count, outcome='blocked')
                 return
     if run.get("status") in {"failed_preflight", "failed", "stopped", "completed_with_errors"}:
         row["blocked"] += count
-        _reason(row, code or "publish_failed", count)
+        _reason(row, code or "publish_failed", count, outcome='blocked')
     elif run.get("status") == "completed":
         row["blocked"] += count
-        _reason(row, "x_post_schedule_partial_capacity", count, confidence="unknown")
+        _reason(row, "x_post_schedule_partial_capacity", count, confidence="unknown", outcome='blocked')
     else:
         row["pending"] += count
-        _reason(row, "task_not_created" if run else "schedule_not_created", count)
+        _reason(row, "task_not_created" if run else "schedule_not_created", count, outcome='pending')
 
 
 def _root_ids(db):
@@ -291,7 +294,7 @@ def _shared_outcome(outcome, context, source_key, window):
     if outcome[0] in {'published', 'unknown', 'policy_skipped'}:
         return outcome
     override = daily_override(context, source_key, window.cutoff)
-    if override and override[1] == 'failure_reason_unrecorded' and outcome[0] == 'failed' and outcome[3]:
+    if override and override[1] in {'failure_reason_unrecorded', 'canonical_execution_failed'} and outcome[0] == 'failed' and outcome[3]:
         return outcome
     return (override[0], None, outcome[2], override[1]) + outcome[4:] if override else outcome
 
@@ -352,7 +355,7 @@ def _collect_primary(db, window, output, row_by_source, context=None, seen=None,
         row["expected"] += count
         row["pending"] += count
         row['unqueued'] += count
-        _reason(row, "random_plan_not_created", count)
+        _reason(row, "random_plan_not_created", count, outcome='pending')
         output["evidence"].setdefault("unmaterialized_random_targets", {})[source] = count
     by_slot = defaultdict(list)
     for run in runs.values():

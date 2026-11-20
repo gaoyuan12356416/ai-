@@ -19,6 +19,21 @@ def visible(value):
 
 
 class PresentationTests(unittest.TestCase):
+    def test_suspended_skip_is_separate_from_failed_prepared_task(self):
+        from features.post_daily_report import x
+        from features.post_daily_report.common import Window
+        row = x._row('auto_template')
+        row['expected'] = 75
+        for state, count in [('policy_skipped', 72), ('failed', 3)]:
+            for _ in range(count):
+                x._record(row, (state, None, '直接发布', 'x_account_suspended'), Window.for_date('2026-11-19'))
+        self.assertEqual([(r['outcome'], r['count']) for r in row['reasons']], [('policy_skipped', 72), ('failed', 3)])
+        card = build_card({'date': '2026-11-19', 'channels': [{'channel': 'X', 'rows': [row]}]})
+        main = '\n'.join(e['content'] for e in card['elements'] if e['tag'] == 'markdown')
+        self.assertIn('**3** 条', main)
+        self.assertNotIn('**72** 条', main)
+        self.assertIn('（已跳过） **72** 条', '\n'.join(visible(card)))
+
     def report(self):
         return {'date': '2026-11-17', 'channels': [{'channel': 'FB', 'accounting': 'actual-fb-v2',
             'rows': [{'source': 'auto_template', 'expected': 10, 'published': 4, 'late': 1,

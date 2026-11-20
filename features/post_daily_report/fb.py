@@ -398,11 +398,18 @@ def collect(paths, window):
                 row["unknown"] += 1
             elif override and status != 'skipped':
                 bucket, code, _ = override
+                if (bucket == 'failed' and code in {'canonical_execution_failed', 'failure_reason_unrecorded'}
+                        and status == 'failed' and task.get('error_code')):
+                    code = task['error_code']
                 row[bucket] += 1
             elif status in {"planned", "preparing", "ready", "queued", "running", "submitted"}:
                 row["pending"] += 1
             elif status == "skipped":
-                if code in _POLICY_SKIPS:
+                auth_skipped = (code == 'fb_page_missing_eligible_token'
+                                and attempted is not None and task['id'] not in attempted
+                                and ledger is None and not task.get('material_id')
+                                and not task.get('prepared_at_utc') and not task.get('graph_post_id'))
+                if code in _POLICY_SKIPS or auth_skipped:
                     row["policy_skipped"] += 1
                     policy_reasons[key][code] += 1
                     continue

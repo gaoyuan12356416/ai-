@@ -52,6 +52,29 @@ class FBReportTests(unittest.TestCase):
     def row(self, source="auto_template"):
         return next(r for r in self.result()["rows"] if r["source"] == source)
 
+    def test_no_authorization_skip_requires_zero_work_evidence(self):
+        self.run_row(pages=3)
+        self.db.execute('CREATE TABLE fb_auto_publish_attempt(task_id INTEGER,error_code TEXT)')
+        self.db.execute('ALTER TABLE fb_auto_task ADD COLUMN material_id TEXT')
+        for task_id in (1, 2, 3):
+            self.task(task_id=task_id, status='skipped', ledger_status=None)
+        self.db.execute("UPDATE fb_auto_task SET graph_post_id='', skip_reason='fb_page_missing_eligible_token'")
+        self.db.execute("INSERT INTO fb_auto_publish_attempt VALUES(2,'fb_graph_190')")
+        self.db.execute("UPDATE fb_auto_task SET material_id='material' WHERE id=3")
+        row = self.row()
+        self.assertEqual((row['policy_skipped'], row['blocked'], row['failed']), (1, 2, 0))
+        self.assertEqual(row['policy_reasons'][0]['count'], 1)
+
+    def test_generic_central_failure_retains_native_platform_error(self):
+        from unittest.mock import patch
+        self.run_row()
+        self.task(status='failed', ledger_status=None)
+        self.db.execute("UPDATE fb_auto_task SET graph_post_id='',error_code='fb_graph_190'")
+        with patch('features.post_daily_report.fb.daily_override', return_value=('failed', 'canonical_execution_failed', '')):
+            row = self.row()
+        self.assertEqual(row['failed'], 1)
+        self.assertEqual(row['reasons'][0]['code'], 'fb_graph_190')
+
     def test_planned_date_not_advance_creation_date_and_late_separate(self):
         self.run_row(pages=3)
         self.task()
