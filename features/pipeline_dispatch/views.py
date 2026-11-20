@@ -22,6 +22,7 @@ from .monitor_contract import CHANNELS, CHANNEL_MODULES, STAGES, TOTAL_KEYS
 
 _CACHE = OrderedDict()
 _LOCK = threading.Lock()
+_INFLIGHT = set()
 CACHE_SECONDS = 5
 HEARTBEAT_SECONDS = 45
 SOURCE_STALE_SECONDS = 120
@@ -415,6 +416,25 @@ def query(store, view, actor, filters):
         if cached and time.monotonic() - cached[0] < CACHE_SECONDS:
             _CACHE.move_to_end(key)
             return copy.deepcopy(cached[1])
+        # A gateway timeout does not cancel a running snapshot. Repeated page
+        # refreshes must not accumulate expensive scans in the publishing owner.
+        if key in _INFLIGHT:
+            raise DispatchError("monitor_refresh_in_progress", status=503)
+        _INFLIGHT.add(key)
+    try:
+        result = _query_snapshot(store, view, safe_actor, filters)
+        with _LOCK:
+            _CACHE[key] = (time.monotonic(), copy.deepcopy(result))
+            _CACHE.move_to_end(key)
+            while len(_CACHE) > 128:
+                _CACHE.popitem(last=False)
+        return result
+    finally:
+        with _LOCK:
+            _INFLIGHT.discard(key)
+
+
+def _query_snapshot(store, view, safe_actor, filters):
     now = store.clock().astimezone(dt.timezone.utc)
     start, end = _window(filters, now)
     scope, args, channels = _scope(safe_actor, filters)
@@ -472,9 +492,4 @@ def query(store, view, actor, filters):
         support = read_snapshot(now, safe_actor, channels)
         if support is not None:
             result['fb_support'] = support
-    with _LOCK:
-        _CACHE[key] = (time.monotonic(), copy.deepcopy(result))
-        _CACHE.move_to_end(key)
-        while len(_CACHE) > 128:
-            _CACHE.popitem(last=False)
     return result

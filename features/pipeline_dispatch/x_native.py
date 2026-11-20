@@ -685,4 +685,12 @@ def handle(handler, runtime, path):
             result = _BRIDGE.dispatch(path.rsplit("/", 1)[-1], payload)
         handler.send_json(200, result)
     except Exception as exc:
+        if not getattr(exc, "code", None):
+            # Keep diagnostics useful without logging source URLs, credentials,
+            # request bodies, exception messages or local values.
+            import traceback
+            frames = traceback.extract_tb(exc.__traceback__)
+            stack = " > ".join("%s:%s:%s" % (frame.filename.rsplit("/", 1)[-1], frame.lineno, frame.name)
+                               for frame in frames[-10:])
+            logging.getLogger(__name__).error("x_dispatch_failed type=%s stack=%s", type(exc).__name__, stack)
         handler.send_json(409, {"code": getattr(exc, "code", "x_dispatch_failed")})

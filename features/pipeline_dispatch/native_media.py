@@ -682,6 +682,12 @@ def handle(bridge, action, payload):
         except InvalidMedia as exc:
             if kind != "deadline_original":
                 return {"candidate_invalid": True, "reason": str(exc)}
+            if job["channel"] == "x" and str(exc) in {
+                "invalid_media_codec", "invalid_media_dimensions"
+            }:
+                # These sources can be normalized by the existing preparation
+                # lane. Missing a deadline is not grounds to discard them.
+                return {"already_started": True, "reason": "native_media_repair_required"}
             art, reason = {}, str(exc)
         except (OSError, requests.RequestException, subprocess.TimeoutExpired) as exc:
             return {"retry": True, "reason": "media_preflight_unavailable"}
