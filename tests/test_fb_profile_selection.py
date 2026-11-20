@@ -249,7 +249,12 @@ class CatalogTests(unittest.TestCase):
                 return [dict(base, labels="female,Romance,CEO")] if "ads_drama_resource" in sql else [dict(base, resource_type=2)]
 
         mysql = MySQL()
-        result = load_classifications(mysql, ["drama", "drama"])
+        # Deployed taxonomy reads gender from the authoritative audience API.
+        # Keep this catalog test offline and compatible with that source.
+        from unittest.mock import patch
+        record = dict(audience="female", status="matched", languages=["ja"], audience_labels=["female"])
+        with patch("features.x_tag_revenue.taxonomy.audience_records", return_value={"drama": record}, create=True):
+            result = load_classifications(mysql, ["drama", "drama"])
         self.assertEqual(set(result), {("drama", "ja")})
         self.assertEqual(result[("drama", "ja")]["audience"], "female")
         self.assertEqual(len(mysql.calls), 2)
