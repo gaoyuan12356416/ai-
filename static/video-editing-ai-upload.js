@@ -57,7 +57,8 @@
   async function upload({file, series, episode, actor, api, onProgress, store = localStorage, transfer = put}) {
     if (!/\.(mp4|mov)$/i.test(file.name) || file.size < 1 || file.size > 1024 ** 3)
       throw new Error('请选择不超过 1 GiB 的 MP4 或 MOV');
-    const key = 'ai-editor-cos-upload:' + JSON.stringify([actor, file.name, file.size, file.lastModified, series, episode]);
+    const actorKey = actor && typeof actor === 'object' ? [actor.tenant_key, actor.user_id] : actor;
+    const key = 'ai-editor-cos-upload:' + JSON.stringify([actorKey, file.name, file.size, file.lastModified, series, episode]);
     let operation;
     try { operation = store.getItem(key); } catch { /* Storage may be unavailable in private mode. */ }
     if (!operation) {

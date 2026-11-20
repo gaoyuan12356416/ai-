@@ -31,7 +31,7 @@ const {md5Base64, upload} = require('../static/video-editing-ai-upload.js');
     assert.equal(path, '/uploads/upload/complete');
     return {item: {status: 'ready', asset}};
   };
-  const args = {file, series: '', episode: 0, actor: 'user', api, store,
+  const args = {file, series: '', episode: 0, actor: {tenant_key: 'tenant', user_id: 'user', name: 'old name'}, api, store,
     onProgress: p => progress.push(p), transfer: async (signature, blob, cb) => {
       sent.push(signature.number); cb(blob.size);
     }};
@@ -39,7 +39,7 @@ const {md5Base64, upload} = require('../static/video-editing-ai-upload.js');
   assert.deepEqual(signed.sort(), [1, 2, 3, 4, 5]);
   assert.deepEqual(sent.sort(), [2, 3, 4, 5]);
   assert(progress.every(p => p.percent >= 0 && p.percent <= 100));
-  await upload(args);
+  await upload({...args, actor: {...args.actor, name: 'new name', avatar_url: 'changed'}});
   let active = 0, maximum = 0;
   await assert.rejects(upload({...args, transfer: async () => {
     maximum = Math.max(maximum, ++active);
