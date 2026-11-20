@@ -29,3 +29,9 @@ python3 /opt/private-storage-archive/current/scripts/private_storage_archive.py 
 ```
 
 Stop the scoped import unit to pause a migration. Completed verified records remain available and staging records remain hidden from the reader. Roll back a consumer by restoring its archived original input and its previous binding. Fresh deployments keep existing production readers and operational queues in place. Removing database history requires a separate data-retention decision once verified data is present.
+
+For the 2026-11-20 CPU cleanup, `retire_verified.py` reads the original frozen inventory, the import receipts and delivery checks. It rechecks snapshot identity on the replica, the original file and the delivery hashes. With `--archive` it uses the existing private archive, verifies the remote bytes and records the recovery receipt before removing each qualifying local file. Original FB operation receipts stay available. To restore an exact missing report input for an older report builder, run the same tool with its original path relative to the data disk:
+
+```sh
+"$py" -B retire_verified.py --restore "$relative_source_path"
+```
