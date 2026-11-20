@@ -18,6 +18,7 @@ def main():
     p.add_argument('--apply', action='store_true')
     args = p.parse_args()
     runtime = Path('/opt/fb-auto-post/current').resolve()
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     sys.path.insert(0, str(runtime))
     from scripts.recover_fb_skipped_runs import existing_store, service_env, repositories, save
     from features.fb_auto_posts import core
