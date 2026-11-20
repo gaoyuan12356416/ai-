@@ -67,8 +67,9 @@ def prepare(folder):
             for public_root in (release.MAIN, release.WEB):
                 path = public_root / dest.name
                 external(folder, info, path, update_static(path, old, new))
-    test_file = TEST.replace(".", "/") + ".py"
-    shutil.copy2(SOURCE / test_file, candidate / test_file)
+    for module in (TEST, "tests.test_fb_skipped_recovery"):
+        test_file = module.replace(".", "/") + ".py"
+        shutil.copy2(SOURCE / test_file, candidate / test_file)
     with tempfile.TemporaryDirectory(dir=folder) as temp:
         env = dict(os.environ, STORY_COPY_ROOT=temp, FB_AUTO_PROFILE_ROOT=temp, FB_AUTO_POST_SHORT_LINK_ROOT=temp)
         proof = subprocess.run([sys.executable, "-B", "-m", "unittest", "-q", TEST, "scripts.test_fb_auto_validation",
