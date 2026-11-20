@@ -1,5 +1,3 @@
-import json
-import re
 import sqlite3
 import unittest
 from pathlib import Path
@@ -18,11 +16,13 @@ class UploaderIndexTests(unittest.TestCase):
         self.db.executemany('INSERT INTO materials VALUES (?,?,?,?)',
                             [(1, 947, 2, 'one'), (2, 904, 2, 'two'), (3, 947, 2, 'three'),
                              (4, 947, 1, 'image'), (5, 0, 2, 'unknown'), (6, None, 2, 'null')])
-        self.sql = """SELECT id,user_id AS uploader_id,name,
+        self.sql = """SELECT m.id,COALESCE(CAST(uploaders.user_id AS CHAR),'0') AS uploader_id,m.name,
             'https://ai.yingliangads.com/video.mp4' AS url,'' AS thumbnail_url,
             '' AS content_id,'' AS source_job_id,'' AS source_kind,'' AS macro_name,
             '' AS macro_desc,'en' AS language,'' AS duration,'' AS size,1479 AS app_id,
-            '' AS uploader_name FROM materials WHERE type=2"""
+            '' AS uploader_name FROM materials m
+            LEFT JOIN (SELECT DISTINCT user_id FROM materials) uploaders ON uploaders.user_id=m.user_id
+            WHERE m.type=2"""
         self.plans = []
         def query(sql):
             self.plans.append(self.db.execute('EXPLAIN QUERY PLAN ' + sql).fetchall())
@@ -47,9 +47,11 @@ class UploaderIndexTests(unittest.TestCase):
             with self.assertRaises(WorkflowError): self.source.list(uploader_id=value)
         self.assertEqual(self.plans, [])
 
-    def test_deployed_projection_keeps_numeric_uploader(self):
+    def test_deployed_projection_uses_complete_indexed_uploader_dimension(self):
         sql = (Path(__file__).parents[1] / 'ops/youtube-material-refresh-20261120/material-source.sql').read_text(encoding='utf-8')
-        self.assertRegex(sql, r'\bs\.user_id AS uploader_id\b')
+        self.assertIn('SELECT DISTINCT user_id FROM `kunlunads_dev`.`ads_custom_source`', sql)
+        self.assertIn('ON uploaders.user_id=s.user_id', sql)
+        self.assertIn("COALESCE(CAST(uploaders.user_id AS CHAR), '0') AS uploader_id", sql)
 
 
 if __name__ == '__main__':

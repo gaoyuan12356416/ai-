@@ -70,10 +70,7 @@ class MaterialSource:
             literal=str(search).encode('utf-8').hex()
             condition += " AND LOCATE(LOWER(CONVERT(0x%s USING utf8mb4)),LOWER(CONCAT(CAST(pool.id AS CHAR),' ',COALESCE(pool.name,''))))>0" % literal
         if uploader_id:
-            # Keep the source's numeric user_id visible to its existing index.
-            # Casting this column scans the catalog for sparse uploaders.
-            condition += (" AND (pool.uploader_id=0 OR pool.uploader_id IS NULL)" if uploader_id == '0'
-                          else " AND pool.uploader_id=%s" % uploader_id)
+            condition += " AND CAST(pool.uploader_id AS CHAR)='%s'" % uploader_id
         query = "SELECT HEX(JSON_OBJECT(%s)) FROM (%s) AS pool WHERE %s ORDER BY pool.id DESC LIMIT 100" % (projection,sql,condition)
         try:
             rows = self.query_runner(query)

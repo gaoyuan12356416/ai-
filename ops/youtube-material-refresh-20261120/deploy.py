@@ -1,4 +1,4 @@
-"""Scoped install/activation and code-only rollback for the material picker."""
+"""SQL/static hot update and scoped rollback for the material picker."""
 import argparse
 import hashlib
 import json
@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parents[2]
 DATA = Path('/mnt/data-disk/youtube-material-refresh-20261120')
 BACKUP = DATA / 'backup'
 API = 'drama-material-api.service'
-HEALTH = '/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
 BASELINES = {
     'features/youtube_auto_publish/source.py': '658f86696ae12ac528a581a0a364d5c7e81527afce628e7e52f10be5deb72827',
     'static/youtube-publish.js': 'f7657859b7461de520c62bd74f889892f63ac5a6894a4af389ea6046e15ec826',
@@ -58,29 +57,9 @@ def save(record):
     (BACKUP / 'manifest.json').write_text(json.dumps(record, indent=2) + '\n')
 
 
-def activate(record):
-    old = record['api_before']['MainPID']
-    current = state()
-    # A verified concurrent rollout already owns this restart. Reuse its drain.
-    if current['MainPID'] == old and current['ActiveState'] != 'deactivating':
-        subprocess.run(['systemctl', 'restart', '--no-block', API], check=True)
-    deadline = time.monotonic() + 3600
-    while time.monotonic() < deadline:
-        current = state()
-        if current['ActiveState'] == 'active' and current['MainPID'] not in ('0', old):
-            subprocess.run(['python3', HEALTH, 'restore', '--baseline', str(BACKUP / 'schedulers-before.json'),
-                            '--wait-seconds', '25', '--output', str(BACKUP / 'schedulers-after.json')], check=True)
-            record.update(status='active', api_after=current)
-            save(record)
-            print(json.dumps({'status': 'active', 'api': current}), flush=True)
-            return
-        time.sleep(3)
-    raise RuntimeError('API activation is still pending; do not force the drain')
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('install', 'activate', 'rollback'))
+    parser.add_argument('action', choices=('install', 'finish-install', 'rollback'))
     parser.add_argument('commit')
     args = parser.parse_args()
     assert subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip() == args.commit
@@ -95,7 +74,6 @@ def main():
         py_compile.compile(str(ROOT / 'features/youtube_auto_publish/source.py'), doraise=True)
         BACKUP.mkdir(mode=0o700)
         record = dict(commit=args.commit, status='prepared', api_before=state(), files=[])
-        subprocess.run(['python3', HEALTH, 'snapshot', '--lane', 'youtube', '--output', str(BACKUP / 'schedulers-before.json')], check=True)
         for number, (name, target, expected) in enumerate(targets()):
             backup = BACKUP / str(number)
             shutil.copy2(target, backup)
@@ -105,23 +83,38 @@ def main():
         for row in record['files']:
             install_bytes(ROOT / row['source'], Path(row['target']))
             assert digest(row['target']) == row['after']
-        record.update(status='installed', installed_at=time.time())
+        record.update(status='active', installed_at=time.time(), activation='sql_static_hot_reload', api_after=state())
         save(record)
-        print(json.dumps({'status': 'installed', 'backup': str(BACKUP), 'api': state()}))
+        print(json.dumps({'status': 'active', 'backup': str(BACKUP), 'api': state()}))
         return
     record = json.loads((BACKUP / 'manifest.json').read_text())
-    assert record['commit'] == args.commit
-    if args.action == 'rollback':
+    if args.action == 'finish-install':
+        assert record['commit'] == '99a54c8c8c9b1a6d93f174694cd5358574332e61'
+        assert record['status'] in ('installed', 'active'), 'Reconcile deployment before proceeding'
+        subprocess.run(['systemctl', 'stop', 'youtube-material-refresh-activate-20261120.service'], check=True)
+        # Preserve the original backup; audit and fence every already installed file.
+        for row in record['files']:
+            assert digest(row['target']) == row['after'], 'Later drift: ' + row['target']
+            source = ROOT / row['source']
+            assert source.read_bytes() == subprocess.check_output(['git', '-C', str(ROOT), 'show', args.commit + ':' + row['source']])
+        (BACKUP / 'previous-manifest.json').write_text(json.dumps(record, indent=2) + '\n')
+        for row in record['files']:
+            source = ROOT / row['source']
+            if digest(source) != row['after']: install_bytes(source, Path(row['target']))
+            row['after'] = digest(source)
+            assert digest(row['target']) == row['after']
+        record.update(commit=args.commit, status='active', activation='sql_static_hot_reload', api_after=state())
+        save(record)
+        print(json.dumps({'status': 'active', 'backup': str(BACKUP), 'api': state()}))
+    else:
+        assert record['commit'] == args.commit
         for row in record['files']:
             assert digest(row['target']) == row['after'], 'Later drift: ' + row['target']
             assert digest(row['backup']) == row['before']
-        record['api_before'] = state()
         for row in record['files']: install_bytes(Path(row['backup']), Path(row['target']))
-        record['status'] = 'rollback_installed'
+        record['status'] = 'rolled_back'
         save(record)
-    activate(record)
-    if args.action == 'rollback':
-        record['status'] = 'rolled_back'; save(record)
+        print(json.dumps({'status': 'rolled_back', 'api': state()}))
 
 
 if __name__ == '__main__': main()
