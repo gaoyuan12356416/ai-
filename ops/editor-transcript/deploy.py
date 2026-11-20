@@ -26,6 +26,9 @@ def cmd(*args):
 def atomic(path, data):
     temp = path.with_name('.transcript-'+path.name)
     temp.write_bytes(data)
+    # The server shell uses umask 0077. Preserve public static readability on
+    # replacement and use normal source-file permissions for newly added code.
+    temp.chmod(path.stat().st_mode & 0o777 if path.exists() else 0o644)
     temp.replace(path)
 
 

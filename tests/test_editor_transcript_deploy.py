@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import signal
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -12,6 +13,18 @@ spec.loader.exec_module(deploy)
 
 
 class DeployTests(unittest.TestCase):
+    def test_atomic_static_preserves_readability_under_private_umask(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'public.js'
+            path.write_text('old');path.chmod(0o644)
+            before=os.umask(0o077)
+            try:
+                deploy.atomic(path,b'new')
+            finally:
+                os.umask(before)
+            self.assertEqual(path.stat().st_mode & 0o777,0o644)
+            self.assertEqual(path.read_bytes(),b'new')
+
     def test_active_work_is_resumed_without_termination_or_switch(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
