@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import build_opener, HTTPRedirectHandler, Request
 
+from .youtube_subtitles import Captions, UnsupportedCaptions
 
 LOG = logging.getLogger('ai_video_editing.render')
 ID = re.compile(r'[a-zA-Z0-9_-]{1,128}\Z')
@@ -165,6 +166,13 @@ def render(unit, sources, output, workdir, *, encoder='h264_nvenc', ffmpeg='ffmp
     workdir = Path(workdir)
     workdir.mkdir(mode=0o700, parents=True, exist_ok=True)
     meta = {}
+    canvas = unit.get('youtube_regular', {}).get('canvas', [720, 1280])
+    require(isinstance(canvas, list) and len(canvas) == 2 and
+            all(type(x) is int and 2 <= x <= 1920 and x % 2 == 0 for x in canvas), '成片画幅无效')
+    target_w, target_h = canvas
+    captions = None
+    if unit.get('youtube_regular'):
+        captions = Captions(ffmpeg, ffprobe, stopped, run_tool)
     total_frames = 0
     manifest = []
     for idx, clip in enumerate(clips):
@@ -194,10 +202,16 @@ def render(unit, sources, output, workdir, *, encoder='h264_nvenc', ffmpeg='ffmp
                 '-filter_complex_threads', '1', *window, '-protocol_whitelist', 'file', '-f', 'mov', '-i', str(sources[sid])]
         # First normalize the pixel aspect ratio; resolution changes must retain
         # the source's display aspect ratio for both contain and cover.
-        geometry = ('scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,'
-                    'pad=720:1280:(ow-iw)/2:(oh-ih)/2' if fit == 'contain' else
-                    'scale=720:1280:force_original_aspect_ratio=increase:force_divisible_by=2,crop=720:1280')
+        dimensions = '%d:%d' % (target_w, target_h)
+        geometry = ('scale={0}:force_original_aspect_ratio=decrease:force_divisible_by=2,'
+                    'pad={0}:(ow-iw)/2:(oh-ih)/2' if fit == 'contain' else
+                    'scale={0}:force_original_aspect_ratio=increase:force_divisible_by=2,crop={0}').format(dimensions)
         view = [geometry]
+        if captions:
+            subtitles = captions.segment(sid, sources[sid], first, last, total_frames, workdir, idx)
+            if subtitles:
+                escaped = str(subtitles.resolve()).replace('\\','/').replace(':',r'\:').replace("'",r"\'")
+                view.append("subtitles=filename='%s'" % escaped)
         from .subtitle_protection import settings as protection_settings
         protection=protection_settings(unit.get('composition',{}).get('subtitle_protection'))
         if mirror and not protection['enabled']:
@@ -205,9 +219,9 @@ def render(unit, sources, output, workdir, *, encoder='h264_nvenc', ffmpeg='ffmp
         if zoom > 100:
             # Scale the completed canvas around its center; nearest even
             # dimensions preserve chroma alignment for the final 4:2:0 crop.
-            width = 2 * ((720 * zoom + 100) // 200)
-            height = 2 * ((1280 * zoom + 100) // 200)
-            view.extend(['scale=%d:%d' % (width, height), 'crop=720:1280:(iw-ow)/2:(ih-oh)/2'])
+            width = 2 * ((target_w * zoom + 100) // 200)
+            height = 2 * ((target_h * zoom + 100) // 200)
+            view.extend(['scale=%d:%d' % (width, height), 'crop=%s:(iw-ow)/2:(ih-oh)/2' % dimensions])
         video = ('[0:%s]fps=30:start_time=0,tpad=stop_mode=clone:stop_duration=1,'
                  'trim=start_frame=%d:end_frame=%d,setpts=PTS-STARTPTS,'
                  'scale=trunc(iw*sar/2)*2:ih,setsar=1,%s,setsar=1,format=yuv420p[v]'
@@ -238,8 +252,10 @@ def render(unit, sources, output, workdir, *, encoder='h264_nvenc', ffmpeg='ffmp
               '-b:a', '128k', '-movflags', '+faststart', '-map_metadata', '-1', str(output)], stopped)
     if unit.get('composition'):
         finish(unit['composition'],sources,output,workdir,total_frames,encoder,ffmpeg,stopped)
+    if captions:
+        captions.mux(output, workdir)
     v, a, duration = inspect(output, ffprobe, stopped)
-    require((v['codec_name'], v['width'], v['height'], v['pix_fmt']) == ('h264', 720, 1280, 'yuv420p')
+    require((v['codec_name'], v['width'], v['height'], v['pix_fmt']) == ('h264', target_w, target_h, 'yuv420p')
             and int(v.get('nb_frames') or 0) == total_frames and a and a['codec_name'] == 'aac'
             and a.get('channels') == 2 and int(a.get('sample_rate') or 0) == 48000
             and abs(duration - total_frames * 1000 / FPS) < 40,
@@ -284,6 +300,12 @@ class InternalAPI:
         with self.open(path, lease=lease, data=b'{}', headers={'Content-Type': 'application/json'}, timeout=20) as resp:
             return json.loads(resp.read(1024 * 1024))
 
+    def unsupported_captions(self, tid, lease):
+        with self.open('/tasks/%s/fail' % tid, lease=lease,
+                       data=b'{"reason":"unsupported_embedded_subtitles"}',
+                       headers={'Content-Type': 'application/json'}, timeout=20) as resp:
+            return json.loads(resp.read(65536))
+
     def download(self, tid, lease, sid, path, stopped, kind='sources'):
         if kind == 'sources':
             with self.open('/tasks/%s/sources/%s/location' % (tid, sid), lease=lease, timeout=30) as response:
@@ -315,7 +337,8 @@ class InternalAPI:
         with path.open('rb') as body:
             headers = {'Content-Type': 'video/mp4', 'Content-Length': str(path.stat().st_size),
                        'X-Output-Sha256': digest}
-            with self.open('/tasks/%s/complete' % tid, data=body, headers=headers, lease=lease, timeout=300) as response:
+            timeout = max(300, path.stat().st_size // (512 * 1024) + 60)
+            with self.open('/tasks/%s/complete' % tid, data=body, headers=headers, lease=lease, timeout=timeout) as response:
                 result = json.loads(response.read(65536))
                 if not isinstance(result, dict) or not result.get('ok'):
                     raise TransferError('完成请求暂未取得回执')
@@ -394,7 +417,10 @@ def run_job(api, job, root, encoder, ffmpeg, ffprobe):
     except Exception as exc:
         LOG.warning('render failed for %s (%s)', tid, type(exc).__name__)
         if not keep and not stopped.is_set():
-            api.post('/tasks/%s/fail' % tid, lease)
+            if isinstance(exc, UnsupportedCaptions):
+                api.unsupported_captions(tid, lease)
+            else:
+                api.post('/tasks/%s/fail' % tid, lease)
     finally:
         done.set()
         thread.join(1)

@@ -148,12 +148,14 @@ class Handler(platform.DramaMaterialHandler):
             digest=self.headers.get('X-Output-Sha256','').lower()
             check(re.fullmatch('[0-9a-f]{64}',digest),'digest_missing','缺少成片摘要')
             if self.runtime.completion_receipt(tid,lease,digest):return self.reply(200,{'ok':True})
-            with self.runtime.db() as db:self.runtime.leased(db,tid,lease)
-            with spool(self.rfile,self.length(MAX_BYTES),self.runtime.root/'temp') as (file_path,actual):
+            with self.runtime.db() as db:
+                task = self.runtime.leased(db,tid,lease)
+                limit = 8 * MAX_BYTES if json.loads(task['unit_data']).get('youtube_regular') else MAX_BYTES
+            with spool(self.rfile,self.length(limit),self.runtime.root/'temp') as (file_path,actual):
                 check(actual==digest,'digest_mismatch','成片传输校验失败',422)
                 return self.reply(200,self.runtime.update_job(tid,lease,action,file_path,digest))
-        self.payload()
-        self.reply(200,self.runtime.update_job(tid,lease,action))
+        body = self.payload()
+        self.reply(200,self.runtime.update_job(tid,lease,action,reason=body.get('reason', '')))
 
     def user_route(self,path,params,actor):
         rt=self.runtime
@@ -178,6 +180,16 @@ class Handler(platform.DramaMaterialHandler):
         if verb in ('POST','PATCH'):
             if not self._require_same_origin_json():return
             body=self.payload()
+        if path.startswith('/youtube-material/'):
+            from . import youtube_material
+            status, data = youtube_material.dispatch(rt, actor, verb, path, body, params)
+            return self.reply(status, data)
+        regular_task = re.fullmatch(r'/youtube-regular/tasks/(at_[0-9a-f]{32})/timeline', path)
+        if regular_task and verb in ('GET', 'POST'):
+            from . import youtube_regular
+            if verb == 'GET':
+                return self.reply(200, youtube_regular.timeline(rt, actor, regular_task[1]))
+            return self.reply(200, youtube_regular.refine(rt, actor, regular_task[1], body))
         if path == '/uploads' or path.startswith('/uploads/'):
             return self.reply(200, rt.cloud.dispatch(actor, verb, path, body))
         if path.startswith('/catalog/'):
@@ -249,6 +261,8 @@ class Handler(platform.DramaMaterialHandler):
             if not self._require_cookie_module('video_editing'):return
             session=self._session() or {}
             actor={k:session.get(k) for k in ('tenant_key','user_id','name')}
+            if path.startswith('/youtube-material/'):
+                actor['email'] = session.get('email')
             return self.user_route(path,parse_qs(parsed.query),actor)
         except (Fault,SmartError) as exc:self.reply(exc.status,{'code':exc.code,'error':exc.message})
         except (ConnectionError,BrokenPipeError):return
@@ -273,6 +287,8 @@ def main():
     from .catalog_imports import start as start_imports
     catalog = Catalog(platform)
     start_imports(rt, catalog)
+    from . import youtube_material
+    youtube_material.start(rt, catalog, platform)
     with ThreadingHTTPServer(('127.0.0.1',18983),Handler) as http:
         http.runtime=rt
         http.catalog=catalog

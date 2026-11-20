@@ -2004,3 +2004,15 @@ body {
     margin: auto;
   }
 }
+.regular-rows { display: grid; gap: .6rem; }
+.regular-row { padding: .75rem; border: 1px solid #dbe3ed; border-radius: .5rem; }
+.regular-row small { display: block; color: #59697b; margin-top: .2rem; }
+.regular-options { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .7rem; margin-top: .6rem; }
+.regular-options label { display: inline-flex; align-items: center; gap: .35rem; }
+.regular-options input[type=number] { width: 5.5rem; padding: .3rem; }
+.regular-options button { padding: .25rem .5rem; }
+.regular-preview { display: block; width: 100%; max-height: 30vh; margin-bottom: .75rem; background: #111827; }
+.regular-preview[hidden] { display: none; }
+.regular-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .7rem; }
+.regular-actions span { flex: 1 1 12rem; color: #536379; font-size: .85rem; }
+.regular-actions[hidden] { display: none; }

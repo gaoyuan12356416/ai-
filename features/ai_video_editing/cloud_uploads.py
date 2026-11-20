@@ -262,7 +262,11 @@ class CloudUploads:
                               [('duration_ms', 86400000), ('width', 16384), ('height', 16384)]),
                       'metadata_invalid', '视频校验回执无效', 422)
                 payload = json.loads(row['payload'])
+                display = {k: meta[k] for k in ('display_width', 'display_height')
+                           if type(meta.get(k)) is int and meta[k] > 0}
                 meta = {k: meta[k] for k in ('duration_ms', 'width', 'height', 'has_audio')}
+                if len(display) == 2:
+                    meta.update(display)
                 meta['_cos'] = {'bucket': self.bucket, 'key': self.key(row), 'size': payload['size'], 'etag': row['etag']}
                 args = (row['owner'], payload['name'], payload['series'], payload['episode'], digest)
                 previous = db.execute('SELECT id FROM assets WHERE owner=? AND name=? AND series=? AND episode=? AND sha256=?', args).fetchone()

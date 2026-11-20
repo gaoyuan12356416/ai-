@@ -207,9 +207,9 @@
       session = item;
       assets = item.assets;
       results = [
-        ...item.runs.flatMap((r) => r.tasks),
+        ...item.runs.flatMap((r) => [...(r.revisions || []), ...r.tasks]),
         ...extraResults.filter(
-          (x) => !item.runs.some((r) => r.tasks.some((t) => t.id === x.id)),
+          (x) => !item.runs.some((r) => [...(r.revisions || []), ...r.tasks].some((t) => t.id === x.id)),
         ),
       ];
       pollFailures = 0;
@@ -238,6 +238,10 @@
       );
   }
   function configSummary(c) {
+    if (c.youtube_regular) {
+      const y = c.youtube_regular;
+      return `<div class="configuration-summary"><strong>YouTube 普通视频</strong><div>正片 ${y.body_source_ids.length} 条 · ${y.hook_source_ids.length ? "片头从指定的 " + y.hook_source_ids.length + " 条素材选取" : "片头从正片选取"}</div></div>`;
+    }
     return `<div class="configuration-summary"><strong>${c.clip ? esc(methods[c.clip.method]?.[0]) : "视频创作"}${c.narration ? " · 影视解说" : ""}${c.translation ? " · 视频翻译" : ""}</strong><div class="summary-grid"><div><span>素材处理</span>${c.merge === false ? "逐条处理" : "合并素材"}</div><div><span>输出数量</span>${(c.merge === false ? assets.length : 1) * (c.clip?.script_count || 1) * (c.clip?.variant_count || 1)} 条</div>${c.clip ? `<div><span>目标时长</span>${c.clip.seconds ? c.clip.seconds + " 秒" : "自动"}</div><div><span>脚本 × 裂变</span>${c.clip.script_count} × ${c.clip.variant_count}</div>` : ""}${c.translation ? `<div><span>翻译语种</span>${esc(languageName(c.translation.language))}</div><div><span>字幕</span>${c.translation.mode === "bilingual" ? "双语" : "仅译文"}</div>` : ""}</div></div>`;
   }
   function languageName(code) {
@@ -280,14 +284,14 @@
   }
   function updateComposer() {
     const c = config();
-    $("configChips").innerHTML = ["clip", "narration", "translation"]
+    $("configChips").innerHTML = ["clip", "narration", "translation", "youtube_regular"]
       .filter((k) => c[k])
       .map(
         (k) =>
-          `<span class="chip"><button type="button" data-action="${k}">${{ clip: "智能剪辑", narration: "影视解说", translation: "视频翻译" }[k]}</button><button type="button" data-remove-config="${k}" aria-label="移除${k}">×</button></span>`,
+          `<span class="chip"><button type="button" data-action="${k}">${{ clip: "智能剪辑", narration: "影视解说", translation: "视频翻译", youtube_regular: "YouTube 普通视频" }[k]}</button><button type="button" data-remove-config="${k}" aria-label="移除${k}">×</button></span>`,
       )
       .join("");
-    const configured = !!(c.clip || c.narration || c.translation),
+    const configured = !!(c.clip || c.narration || c.translation || c.youtube_regular),
       count =
         (c.merge === false ? assets.length : 1) *
         (c.clip?.script_count || 1) *
@@ -326,6 +330,14 @@
     $("resultView").classList.toggle("active", view === "result");
     $("resultCount").textContent = finished().length;
     $("exportButton").hidden = view !== "result" || !media;
+    const ordinary = view === "result" && media?.youtube_regular;
+    $("regularActions").hidden = !ordinary;
+    if (ordinary) {
+      const m = media.output.metadata;
+      const short = m.width <= m.height && m.duration_ms <= 180000;
+      $("regularInfo").textContent = `版本 ${media.version} · ${m.width} × ${m.height}` +
+        (short ? " · 这条成片会被 YouTube 归为 Shorts。要发普通视频，请调整时长或画幅。" : "");
+    }
     $("stripLabel").innerHTML =
       view === "source" ? "待处理<br>视频" : "已完成<br>作品";
     const stripKey = JSON.stringify([view, index, list.map((m) => m.id)]);
@@ -422,8 +434,8 @@
     const text = $("prompt").value.trim(),
       c = config();
     await ensureSession();
-    if (!text && (c.clip || c.narration || c.translation)) {
-      const signature = JSON.stringify([session.id, c]);
+    if (!text && (c.clip || c.narration || c.translation || c.youtube_regular)) {
+      const signature = JSON.stringify([session.id, assets.map((a) => a.id), c]);
       if (!requestReceipt || requestReceipt.signature !== signature)
         requestReceipt = { signature, operation: op() };
       await api("/studio/sessions/" + session.id + "/submit", {
@@ -680,7 +692,7 @@
     }
   }
 
-  async function openAssets() {
+  async function openAssets(afterSave) {
     sourceSelection = assets.map((a) => a.id);
     openModal(
       "媒资库",
@@ -711,6 +723,7 @@
         closeModal();
         if (!same || !analysis) await analyze();
         else render();
+        if (afterSave) await afterSave();
       });
     await readAssets();
     connectLibrary();
@@ -1191,7 +1204,9 @@
                   mode: $("subtitleMode").value,
                 }),
           };
-        await save({ config: { ...config(), [kind]: next } });
+        const nextConfig = { ...config(), [kind]: next };
+        delete nextConfig.youtube_regular;
+        await save({ config: nextConfig });
         closeModal();
         toast("配置已添加，点击发送开始制作");
       });
@@ -1265,6 +1280,10 @@
   async function showCopy() {
     const media = currentMedia();
     if (view !== "result" || !media) return;
+    if (media.youtube_regular) {
+      $("copyPanel").hidden = true;
+      return;
+    }
     $("copyPanel").hidden = false;
     const tid = media.id;
     const data = await api("/studio/copies/" + tid);
@@ -1328,6 +1347,25 @@
       });
   }
   async function handle(name) {
+    if (name === "youtube_regular") {
+      const configure = () => window.YoutubeRegular.configure({
+        assets, current: config().youtube_regular, openModal, closeModal, esc, action,
+        save: async (youtube_regular) => { await save({config: {youtube_regular}}); toast("已设置普通视频，点击发送开始制作"); },
+      });
+      if (!assets.length) return openAssets(configure);
+      return configure();
+    }
+    if (name === "regular-trim") {
+      const task = currentMedia();
+      if (!task || !task.youtube_regular || view !== "result") return;
+      return window.YoutubeRegular.refine({task, api, openModal, closeModal, action, esc, toast,
+        openOriginal: chooseResult, refresh: session ? refresh : openWorks});
+    }
+    if (name === "regular-intake") {
+      const task = currentMedia();
+      if (view === "result" && task?.youtube_regular) return window.YoutubeMaterial.open(task.id);
+      return;
+    }
     if (["clip", "narration", "translation"].includes(name))
       return openConfig(name);
     if (name === "assets") return openAssets();

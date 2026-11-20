@@ -6,13 +6,15 @@
     <meta name="referrer" content="same-origin" />
     <title>AI 智能剪辑 · AI 后台</title>
     <link rel="stylesheet" href="/ui-topbar.css" />
-    <link rel="stylesheet" href="/video-editing-ai.css?v=20261119-subtitle2" />
+    <link rel="stylesheet" href="/video-editing-ai.css?v=20261120-regular" />
     <script defer src="/quick-nav.js"></script>
     <script defer src="/ui-topbar.js"></script>
     <script defer src="/video-editing-ai-upload.js?v=20261120-hk-cos2"></script>
+    <script defer src="/video-editing-ai-youtube-material.js?v=20261120-regular"></script>
+    <script defer src="/video-editing-ai-regular.js?v=20261120-regular"></script>
     <script
       defer
-      src="/video-editing-ai-studio.js?v=20261120-hk-cos"
+      src="/video-editing-ai-studio.js?v=20261120-regular"
     ></script>
   </head>
   <body>
@@ -76,6 +78,8 @@
           <span>智影解析</span></button
         ><button data-action="clip" data-icon="scissors">
           <span>智能剪辑</span></button
+        ><button data-action="youtube_regular" data-icon="media">
+          <span>YouTube 普通视频</span></button
         ><button data-action="narration" data-icon="mic">
           <span>影视解说</span></button
         ><button data-action="translation" data-icon="translate">
@@ -166,6 +170,11 @@
             </button>
           </div>
         </header>
+        <div id="regularActions" hidden class="regular-actions">
+          <span id="regularInfo" aria-live="polite"></span>
+          <button id="regularTrim" class="quiet" data-action="regular-trim">精修原片剪点</button>
+          <button id="regularIntake" class="primary" data-action="regular-intake">定稿入库</button>
+        </div>
         <div class="player-area" id="playerArea">
           <video
             id="player"

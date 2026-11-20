@@ -85,10 +85,17 @@ def session(rt, actor, sid):
 
 def run_dto(rt, row, actor):
     state = json.loads(row["state"])
+    frozen = json.loads(row["snapshot"])
     tasks = [
         rt.list_records("tasks", actor, tid)["item"]
         for tid in state.get("task_ids", [])
     ]
+    revisions = []
+    if frozen["config"].get("youtube_regular") and state.get("project_id"):
+        with rt.db() as db:
+            revisions = [rt.task_info(r) for r in db.execute(
+                "SELECT * FROM tasks WHERE owner=? AND project=? AND version>1 ORDER BY version DESC",
+                (owner(actor), state["project_id"]))]
     return {
         "id": row["id"],
         "status": row["status"],
@@ -96,8 +103,9 @@ def run_dto(rt, row, actor):
         "created_at": row["created"],
         "analysis_id": state.get("analysis_id", ""),
         "tasks": tasks,
+        "revisions": revisions,
         "warnings": state.get("warnings", []),
-        "config": json.loads(row["snapshot"])["config"],
+        "config": frozen["config"],
         "kind": json.loads(row["snapshot"])["kind"],
     }
 
@@ -131,6 +139,11 @@ def configuration(value):
     from .language_tools import LANGUAGES, capabilities as lang_caps
 
     check(isinstance(value, dict), "config_invalid", "制作配置无效")
+    if "youtube_regular" in value:
+        from .youtube_regular import settings
+        check(not any(value.get(k) for k in ("clip","translation","narration")),
+              "regular_config", "普通视频模式使用原片声音和字幕")
+        return {"merge": True, "youtube_regular": settings(value["youtube_regular"])}
     result = {"merge": value.get("merge", True)}
     check(type(result["merge"]) is bool, "config_invalid", "合并选项无效")
     clip = value.get("clip")
@@ -230,9 +243,12 @@ def submit(rt, actor, sid, body, kind="create"):
     sources = current["source_ids"]
     smart_api.source_snapshots(rt, actor, sources)
     config = configuration(body.get("config", current["config"]))
+    if kind == "create" and "youtube_regular" in config:
+        from .youtube_regular import check_sources
+        check_sources(config["youtube_regular"], sources)
     check(
         kind == "analysis"
-        or any(k in config for k in ("clip", "narration", "translation")),
+        or any(k in config for k in ("clip", "narration", "translation", "youtube_regular")),
         "config_empty",
         "请先添加制作配置",
     )
@@ -335,6 +351,9 @@ def script(rt, actor, sources, analysis, settings, clip=None, merge=True):
 
 
 def prepare(rt, actor, analysis, config):
+    if "youtube_regular" in config:
+        from .youtube_regular import build
+        return build(rt, actor, analysis, config["youtube_regular"])
     from .language_tools import generate, synthesize
     from .language_media import transcribe
 
@@ -568,7 +587,8 @@ def advance(rt, row):
             units, warnings = prepare(rt, actor, analysis, frozen["config"])
             state["warnings"] = warnings
             project = rt.save(
-                actor, {"name": "AI 创作", "units": units, "operation_id": row["id"]}
+                actor, {"name": "AI 创作", "units": units, "operation_id": row["id"]},
+                regular="youtube_regular" in frozen["config"],
             )["item"]
         tasks = rt.render(
             project["id"],

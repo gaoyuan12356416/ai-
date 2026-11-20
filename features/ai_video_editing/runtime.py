@@ -9,6 +9,7 @@ import subprocess
 import time
 import uuid
 from contextlib import contextmanager
+from fractions import Fraction
 from pathlib import Path
 
 PREFIX = '/api/ai-video-editing'
@@ -51,7 +52,19 @@ def probe(path):
         width, height = int(v['width']), int(v['height'])
         if not (math.isfinite(seconds) and 0 < seconds <= 86400 and 1 <= width <= 16384 and 1 <= height <= 16384):
             raise ValueError()
+        sar = v.get('sample_aspect_ratio') or '1:1'
+        try:
+            pixel_aspect = Fraction(sar.replace(':', '/'))
+            if pixel_aspect <= 0: pixel_aspect = 1
+        except (ValueError, ZeroDivisionError):
+            pixel_aspect = 1
+        display_width, display_height = max(1,round(width*pixel_aspect)), height
+        angle = next((s['rotation'] for s in v.get('side_data_list', []) if 'rotation' in s),
+                     v.get('tags', {}).get('rotate', 0))
+        if round(float(angle) / 90) % 2:
+            display_width, display_height = display_height, display_width
         return {'duration_ms': round(seconds*1000),'width':width,'height':height,
+                'display_width':display_width,'display_height':display_height,
                 'has_audio':any(s['codec_type']=='audio' for s in data['streams'])}
     except (subprocess.SubprocessError, ValueError, KeyError, StopIteration, TypeError):
         raise Fault('invalid_video','无法读取视频。请选择含有效画面的 MP4 或 MOV 文件。',422) from None
@@ -148,7 +161,7 @@ class Runtime:
             return {'items':[dict(r) for r in db.execute(
                 "SELECT series AS series_code,count(*) AS asset_count FROM assets WHERE owner=? AND series<>'' GROUP BY series ORDER BY max(created) DESC",(owner(actor),))]}
 
-    def normalize(self,units,actor):
+    def normalize(self,units,actor,*,regular=False):
         check(isinstance(units,list) and 1<=len(units)<=100,'units_invalid','请提供 1–100 个制作单元')
         result, seen, assets = [], set(), {}
         for i,u in enumerate(units):
@@ -176,6 +189,9 @@ class Runtime:
                               'zoom_percent':zoom})
             item={'id':uid,'title':str(u.get('title') or '作品 '+str(i+1))[:200],
                   'series_code':str(u.get('series_code',''))[:180],'clips':clean}
+            if 'youtube_regular' in u:
+                check(regular, 'regular_mode_required', '请通过普通视频任务保存或精修', 409)
+                item['youtube_regular'] = u['youtube_regular']
             if u.get('composition') is not None:
                 from .composition import normalize, audio
                 item['composition']=normalize(u['composition'],sum(c['end_ms']-c['start_ms'] for c in clean))
@@ -203,8 +219,8 @@ class Runtime:
         check(row is not None,'project_missing','剪辑草稿不存在或没有访问权限',404)
         return {'id':row['id'],'name':row['name'],'version':row['version'],'units':json.loads(row['units']),'updated_at':row['updated']}
 
-    def save(self, actor, body, pid=None):
-        units=self.normalize(body.get('units'),actor)
+    def save(self, actor, body, pid=None, *, regular=False):
+        units=self.normalize(body.get('units'),actor,regular=regular)
         name=body.get('name')
         check(isinstance(name,str) and 0<len(name.strip())<=180,'name_invalid','请填写不超过 180 字的草稿名')
         def write(db,key):
@@ -243,10 +259,15 @@ class Runtime:
     @staticmethod
     def task_info(row):
         check(row is not None,'task_missing','作品不存在或没有访问权限',404)
-        name=json.loads(row['unit_data'])['title']
+        unit=json.loads(row['unit_data'])
+        name=unit['title']
         rid=row['id']
         result={'id':rid,'project_id':row['project'],'name':name,'drama_title':name,'status':row['status'],
                 'unit_id':row['unit_id'],'created_at':row['created'],'error_message':row['error']}
+        if unit.get('youtube_regular'):
+            profile = unit['youtube_regular']
+            result.update(youtube_regular=True, version=row['version'], parent_task_id=profile['parent_task_id'],
+                          original_task_id=profile['original_task_id'] or rid, canvas=profile['canvas'])
         if row['status']=='completed':
             uri=f'{PREFIX}/tasks/{rid}/media'
             result['output']={'preview_url':uri,'download_url':uri+'?download=1','metadata':json.loads(row['meta'])}
@@ -296,7 +317,7 @@ class Runtime:
                   'lease_lost','这项制作已有不同回执',409)
             return True
 
-    def update_job(self,tid,lease,action,path=None,digest=''):
+    def update_job(self,tid,lease,action,path=None,digest='',reason=''):
         meta=probe(path) if path else None
         with self.db(True) as db:
             if action=='complete':
@@ -306,16 +327,20 @@ class Runtime:
                     return {'ok':True}
             job=self.leased(db,tid,lease)
             if action=='complete':
-                clips=json.loads(job['unit_data'])['clips']
+                unit=json.loads(job['unit_data'])
+                clips=unit['clips']
                 frames=sum((c['end_ms']*30+500)//1000-(c['start_ms']*30+500)//1000 for c in clips)
-                check(meta['width']==720 and meta['height']==1280 and meta['has_audio'] and abs(meta['duration_ms']-frames*1000/30)<150,
+                canvas=unit.get('youtube_regular',{}).get('canvas',[720,1280])
+                check([meta['width'],meta['height']]==canvas and meta['has_audio'] and abs(meta['duration_ms']-frames*1000/30)<150,
                       'output_mismatch','成片尺寸、时长或音轨校验失败',422)
                 dest=self.root/'outputs'/(tid+'.mp4')
                 os.replace(path,dest)
                 meta['sha256']=digest
                 db.execute("UPDATE tasks SET status='completed',meta=? WHERE id=?",(packed(meta),tid))
             elif action=='fail':
-                db.execute("UPDATE tasks SET status='failed',lease='',error='此素材制作失败，可重试或调整时间线' WHERE id=?",(tid,))
+                message = ('原片含暂不支持的内封字幕格式，请换用文字字幕或已压制字幕的源片'
+                           if reason == 'unsupported_embedded_subtitles' else '此素材制作失败，可重试或调整时间线')
+                db.execute("UPDATE tasks SET status='failed',lease='',error=? WHERE id=?",(message,tid))
             else: db.execute('UPDATE tasks SET expires=? WHERE id=?',(time.time()+180,tid))
         return {'ok':True}
 
