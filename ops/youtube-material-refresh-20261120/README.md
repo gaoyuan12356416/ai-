@@ -10,8 +10,11 @@ with the current API process and takes effect through SQL hot reload.
 
 Video scope, descending IDs, 100-row limit, product mapping, uploader option
 permissions and submission revalidation remain unchanged. The LEFT JOIN retains
-every material, including zero/null uploaders and deleted/missing admin users.
-DISTINCT prevents duplicate material rows; uploader DTOs keep the same strings.
+every material, including zero uploaders and deleted/missing admin users.
+The production user_id column is NOT NULL. DISTINCT prevents duplicate material
+rows; uploader DTOs keep the same strings. Do not wrap the dimension projection
+in COALESCE: that hides the null-rejecting filter from MySQL and restores the
+slow material scan. The shared source reader already formats uploader strings.
 
 The picker also retained `cache.refreshing=true` after a failed poll. Clear that
 state, preserve displayed/selected materials, invalidate the failed frontend

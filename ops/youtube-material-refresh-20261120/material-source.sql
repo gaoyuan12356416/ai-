@@ -14,7 +14,7 @@ SELECT
   CASE WHEN s.video_duration > 0 THEN CONCAT(FLOOR(s.video_duration / 60), ':', LPAD(MOD(s.video_duration, 60), 2, '0')) ELSE '' END AS duration,
   '' AS size,
   CASE WHEN LOCATE('dramawave',LOWER(TRIM(s.product)))=1 OR LOCATE('[w2a]dramawave',LOWER(TRIM(s.product)))=1 OR LOWER(TRIM(s.product)) IN ('drama-b','drama-c','drama-comics','drama-novel','drama-ai素材','drama-社媒专用素材','[w2a]drama-double') THEN 1479 ELSE COALESCE(app.id,1479) END AS app_id,
-  COALESCE(CAST(uploaders.user_id AS CHAR), '0') AS uploader_id,
+  uploaders.user_id AS uploader_id,
   COALESCE(NULLIF(TRIM(u.name), ''), NULLIF(TRIM(u.username), ''),
     CASE WHEN COALESCE(s.user_id, 0)=0 THEN '未知上传人' ELSE CONCAT('用户 ', s.user_id) END) AS uploader_name
 FROM `kunlunads_dev`.`ads_custom_source` s
