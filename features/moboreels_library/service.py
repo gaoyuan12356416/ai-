@@ -71,6 +71,8 @@ class Application:
         actor = request.get("actor") or {}
         identity(self.settings.institution_user_id, actor)
         query, body = request.get("query") or {}, request.get("body") or {}
+        if method == "GET" and path == "/recent-ids":
+            return 200, self.db.recent_catalog_ids(query.get("kind"))
         if method == 'GET' and path == '/recommendations':
             return 200, self.content.recommendations(query)
         if path == '/media-accounts/preview' and method == 'POST':

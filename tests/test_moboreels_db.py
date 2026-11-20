@@ -2,6 +2,7 @@ import datetime
 import errno
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 from types import SimpleNamespace
 import unittest
@@ -144,6 +145,47 @@ class DatabaseBoundaryTest(unittest.TestCase):
         self.assertIn("is_show=1", sql)
         with self.assertRaises(ValueError):
             self.db.list_dramas({"page_size": 101})
+
+    def test_recent_ids_follow_listed_source_time_and_only_unique_mobo_resources(self):
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.executescript("""
+            ATTACH ':memory:' AS ads_ai;
+            ATTACH ':memory:' AS kunlunads_dev;
+            CREATE TABLE ads_ai.cdreader_koc_drama
+                (institution_user_id, project_type, story_id, is_show, source_publish_time);
+            CREATE TABLE kunlunads_dev.ads_drama_info (app_id, content_id, series_code);
+        """)
+        clock = datetime.datetime(2026, 11, 20, 12, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
+        rows = [
+            ("newest", 1, "2026-11-20 12:00:00"), ("translation", 1, "2026-11-20 11:00:00"),
+            ("missing", 1, "2026-11-20 10:00:00"), ("ambiguous", 1, "2026-11-20 09:00:00"),
+            ("boundary", 1, "2026-11-19 12:00:00"), ("old", 1, "2026-11-19 11:59:59"),
+            ("future", 1, "2026-11-20 12:00:01"), ("hidden", 0, "2026-11-20 11:00:00"),
+        ]
+        conn.executemany("INSERT INTO ads_ai.cdreader_koc_drama VALUES (?,?,?,?,?)",
+                         [("institution", 2, *row) for row in rows]
+                         + [("other", 2, *rows[0]), ("institution", 1, *rows[0])])
+        conn.executemany("INSERT INTO kunlunads_dev.ads_drama_info VALUES (?,?,?)", [
+            (2373, "newest", "XY1"), (2373, "translation", "XY1"), (2373, "boundary", "XY2"),
+            (2373, "ambiguous", "XY3"), (2373, "ambiguous", "XY4"), (1479, "missing", "DW1"),
+        ])
+
+        def read(sql):
+            return [json.loads(row[0]) for row in conn.execute(sql.replace(" FORCE INDEX(ac)", ""))]
+
+        def literal(value):
+            return conn.execute("SELECT quote(?)", (value,)).fetchone()[0]
+
+        with patch("features.moboreels_library.db._literal", side_effect=literal), \
+                patch("features.moboreels_library.db.datetime.datetime") as now, \
+                patch.object(self.db, "_read", side_effect=read):
+            now.now.return_value = clock
+            self.assertEqual(self.db.recent_catalog_ids("story")["ids"],
+                             ["newest", "translation", "missing", "ambiguous", "boundary"])
+            self.assertEqual(self.db.recent_catalog_ids("resource"),
+                             {"ids": ["XY1", "XY2"], "story_count": 5, "unmapped_count": 2})
+            self.assertEqual(now.now.call_args.args[0], clock.tzinfo)
 
     def test_promotion_mirror_keeps_success_and_uses_only_fixed_table(self):
         row = {"institution_user_id": "institution", "star_user_id": "star", "project_type": 2,

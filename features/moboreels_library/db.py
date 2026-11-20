@@ -131,6 +131,28 @@ class Database:
     def _scope(self):
         return "institution_user_id=%s AND project_type=2" % _literal(self.settings.institution_user_id)
 
+    def recent_catalog_ids(self, kind):
+        if kind not in ("story", "resource"):
+            raise ValueError("请选择短剧 ID 或资源 ID")
+        # The catalogue displays unzoned source timestamps. Use the Beijing UI clock for both bounds.
+        end = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+        start = end - datetime.timedelta(hours=24)
+        rows = self._read(
+            "SELECT JSON_OBJECT('story_id',story_id) FROM %s WHERE %s AND is_show=1 "
+            "AND source_publish_time BETWEEN %s AND %s ORDER BY source_publish_time DESC,story_id DESC;"
+            % (CATALOG_TABLE, self._scope(), _literal(start.strftime("%Y-%m-%d %H:%M:%S")),
+               _literal(end.strftime("%Y-%m-%d %H:%M:%S")))
+        )
+        stories = [row["story_id"] for row in rows]
+        if kind == "story":
+            return {"ids": stories, "story_count": len(stories), "unmapped_count": 0}
+
+        resources = {}
+        for start in range(0, len(stories), 500):
+            resources.update(self.recommendation_resource_ids(stories[start:start + 500]))
+        ids = list(dict.fromkeys(resources[story] for story in stories if story in resources))
+        return {"ids": ids, "story_count": len(stories), "unmapped_count": len(stories) - len(resources)}
+
     def recommendation_resource_ids(self, story_ids):
         """Mobo business resource codes, not story IDs or episode primary keys."""
         ids = list(dict.fromkeys(str(value) for value in story_ids))

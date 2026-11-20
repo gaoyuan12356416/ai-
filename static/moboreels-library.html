@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://video-cdn3.cdreader.com">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457ff'/%3E%3Cpath d='M20 18h24v8H20zm0 12h24v8H20zm0 12h16v8H20z' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/ui-topbar.css?v=20261112mobo1">
-  <link rel="stylesheet" href="/moboreels-library.css?v=f79d6f82dc37">
+  <link rel="stylesheet" href="/moboreels-library.css?v=dd4333ba6cf9">
   <link rel="stylesheet" href="/moboreels-tools.css?v=f3d4e8e09942">
 </head>
 <body>
@@ -30,7 +30,19 @@
         <p id="syncError" class="error-text hidden" role="alert"></p>
       </section>
       <section class="panel library-panel" aria-labelledby="libraryHeading">
-        <div class="panel-head"><div><h2 id="libraryHeading">短剧目录</h2><span id="resultCount" class="muted">正在加载…</span></div><button id="refreshBtn" class="btn" type="button" disabled>刷新列表</button></div>
+        <div class="panel-head catalog-head">
+          <div><h2 id="libraryHeading">短剧目录</h2><span id="resultCount" class="muted">正在加载…</span></div>
+          <div class="catalog-actions">
+            <div class="recent-copy-actions" role="group" aria-labelledby="recentCopyLabel">
+              <span id="recentCopyLabel" class="muted" title="按北京时间对照全库的来源上架时间，仅含当前已上架短剧">近 24 小时新上架</span>
+              <button id="copyRecentStories" class="btn" type="button" disabled>复制短剧 ID</button>
+              <button id="copyRecentResources" class="btn" type="button" disabled>复制资源 ID</button>
+            </div>
+            <button id="refreshBtn" class="btn" type="button" disabled>刷新列表</button>
+          </div>
+        </div>
+        <p id="recentCopyStatus" class="recent-copy-status muted" role="status"></p>
+        <textarea id="recentCopyManual" class="recent-copy-manual" aria-label="可手动复制的 ID" rows="4" readonly hidden></textarea>
         <form id="filterForm" class="filters">
           <fieldset id="filterFields" disabled>
             <label class="search-field">名称 / 剧目 ID<input id="searchInput" name="search" type="search" maxlength="200" placeholder="搜索剧名或输入剧目 ID"></label>
@@ -54,7 +66,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/quick-nav.js?v=43969bd46e10"></script>
   <script src="/ui-topbar.js?v=20261112mobo1"></script>
-  <script src="/moboreels-library.js?v=d8f7ca2b0ec0"></script>
+  <script src="/moboreels-library.js?v=bcb9cec6e952"></script>
   <script src="/moboreels-tools.js?v=1528ce9f04b1"></script>
 </body>
 </html>

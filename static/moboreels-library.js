@@ -159,12 +159,15 @@
 
   async function boot() {
     const doc = root.document, byId = id => doc.getElementById(id);
-    const ids = ["quickNav","userCard","loginBtn","syncBtn","syncStatus","lastSuccess","syncUpdated","syncProgressWrap","syncProgress","syncProgressText","syncCounts","syncError","accessNotice","resultCount","refreshBtn","filterForm","filterFields","searchInput","languageFilter","statusFilter","typeFilter","audioFilter","resetFiltersBtn","listError","dramaRows","pageSize","pageSummary","pageNumber","prevPage","nextPage","detailDialog","detailTitle","detailBody","promotionDialog","promotionTitle","promotionBody","toast"];
+    const ids = ["quickNav","userCard","loginBtn","syncBtn","syncStatus","lastSuccess","syncUpdated","syncProgressWrap","syncProgress","syncProgressText","syncCounts","syncError","accessNotice","resultCount","refreshBtn","copyRecentStories","copyRecentResources","recentCopyStatus","recentCopyManual","filterForm","filterFields","searchInput","languageFilter","statusFilter","typeFilter","audioFilter","resetFiltersBtn","listError","dramaRows","pageSize","pageSummary","pageNumber","prevPage","nextPage","detailDialog","detailTitle","detailBody","promotionDialog","promotionTitle","promotionBody","toast"];
     const el = Object.fromEntries(ids.map(id => [id,byId(id)]));
     const requestedStory = new URLSearchParams(root.location.search).get("story_id");
     if (requestedStory) { el.searchInput.value = requestedStory.slice(0,64); el.statusFilter.value = ""; }
     const state = {auth:{},allowed:false,accessDenied:false,pageActive:true,rows:[],total:0,page:1,size:50,listSequence:0,listBusy:false,sync:null,lastSuccess:null,syncTimer:null,syncPending:null,syncRevision:0,syncStarting:false,promotionTimer:null,promotionSequence:0,promotionRow:null,promotion:null,detail:null,detailSequence:0};
-    let toastTimer;
+    let toastTimer, copyingRecent = false;
+    function updateRecentButtons() {
+      el.copyRecentStories.disabled = el.copyRecentResources.disabled = !state.allowed || copyingRecent;
+    }
     function toast(message, isError) { el.toast.textContent=message;el.toast.classList.toggle("error",!!isError);el.toast.classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.toast.classList.remove("show"),isError?5000:2500); }
     function stopPolling() { clearTimeout(state.syncTimer);clearTimeout(state.promotionTimer); }
     function permissionAllowed() { const user=state.auth.user;return !!(state.auth.authenticated && user && (user.is_admin || user.role==="admin" || (user.permissions && user.permissions.moboreels_library))); }
@@ -172,6 +175,12 @@
       if(root.UiTopbar)root.UiTopbar.render({auth:state.auth,userCard:el.userCard,authButton:el.loginBtn,loginText:"登录",logoutText:"退出登录"});
       else {el.userCard.textContent=state.auth.user?state.auth.user.name||"已登录":"未登录";el.loginBtn.textContent=state.auth.authenticated?"退出登录":"登录";}
       state.allowed=!state.accessDenied&&permissionAllowed();el.filterFields.disabled=!state.allowed;el.refreshBtn.disabled=!state.allowed||state.listBusy;el.syncBtn.disabled=!state.allowed||ACTIVE_RUN.has((state.sync||{}).status);el.pageSize.disabled=!state.allowed;
+      updateRecentButtons();
+      if (!state.allowed) {
+        el.recentCopyStatus.textContent = "";
+        el.recentCopyManual.value = "";
+        el.recentCopyManual.hidden = true;
+      }
       el.accessNotice.classList.toggle("hidden",state.allowed);
       if(!state.allowed){el.accessNotice.textContent=state.auth.authenticated?"当前账号没有 Moboreels 短剧库权限，请联系管理员在用户管理中分配。":"请先登录 AI 后台后使用 Moboreels 短剧库。";stopPolling();listReads.cancel();syncReads.cancel();state.listSequence++;state.promotionSequence++;state.detailSequence++;state.rows=[];state.promotion=null;state.detail=null;[el.detailDialog,el.promotionDialog].forEach(dialog=>{if(dialog.open)dialog.close();});el.detailBody.textContent="";el.promotionBody.textContent="";el.dramaRows.innerHTML='<tr><td colspan="7" class="empty">登录并获得剧库权限后查看短剧。</td></tr>';el.resultCount.textContent="";el.prevPage.disabled=true;el.nextPage.disabled=true;}
     }
@@ -305,6 +314,65 @@
         if (revision === channelLinkRevision) submit.disabled = false;
       }
     });
+    async function writeClipboard(value) {
+      if (root.isSecureContext && root.navigator.clipboard) {
+        try { await root.navigator.clipboard.writeText(value); return; }
+        catch (_) { /* Try the browser's selection-based copy below. */ }
+      }
+      const box = doc.createElement("textarea");
+      const previous = doc.activeElement;
+      box.value = value;
+      box.readOnly = true;
+      box.style.cssText = "position:fixed;left:-9999px;top:0";
+      (doc.querySelector("dialog[open]") || doc.body).appendChild(box);
+      try {
+        box.select();
+        if (!doc.execCommand("copy")) throw new Error("复制失败");
+      } finally {
+        box.remove();
+        if (previous) previous.focus({preventScroll: true});
+      }
+    }
+    async function copyRecentIds(kind) {
+      if (!state.allowed || copyingRecent) return;
+      const label = kind === "story" ? "短剧 ID" : "资源 ID";
+      const feedback = el.recentCopyStatus, manual = el.recentCopyManual;
+      copyingRecent = true;
+      updateRecentButtons();
+      manual.hidden = true;
+      manual.value = "";
+      feedback.textContent = `正在读取近 24 小时新上架的${label}…`;
+      try {
+        const data = await api(`${API}/recent-ids?kind=${kind}`);
+        if (!state.allowed || !state.pageActive) return;
+        if (!Array.isArray(data.ids)) throw new Error("读取 ID 失败，请重试。");
+        if (!data.ids.length) {
+          feedback.textContent = data.story_count
+            ? `近 24 小时新上架的 ${count(data.story_count)} 部短剧均未匹配到唯一资源 ID。`
+            : "近 24 小时没有新上架的短剧。";
+          return;
+        }
+        const value = data.ids.join("\n");
+        const missing = data.unmapped_count ? ` ${count(data.unmapped_count)} 部短剧未匹配到唯一资源 ID，已跳过。` : "";
+        try {
+          await writeClipboard(value);
+          feedback.textContent = `已复制 ${count(data.ids.length)} 个${label}，每行一个。${missing}`;
+        } catch (_) {
+          manual.value = value;
+          manual.hidden = false;
+          manual.focus();
+          manual.select();
+          feedback.textContent = `请手动复制下方已选中的 ${count(data.ids.length)} 个${label}。${missing}`;
+        }
+      } catch (error) {
+        if (state.allowed) feedback.textContent = error.message;
+      } finally {
+        copyingRecent = false;
+        updateRecentButtons();
+      }
+    }
+    el.copyRecentStories.addEventListener("click", () => copyRecentIds("story"));
+    el.copyRecentResources.addEventListener("click", () => copyRecentIds("resource"));
     async function copy(key) {
       let value;
       if (key === "channel_link") value = byId("channelShortValue").value;
@@ -313,12 +381,7 @@
       if (key === "deep_link" || key === "home_link") value = safeUrl(value);
       if (!value) { toast("暂无可复制的内容。",true); return; }
       try {
-        if (root.navigator.clipboard && root.isSecureContext) await root.navigator.clipboard.writeText(String(value));
-        else {
-          const box=doc.createElement("textarea");box.value=String(value);box.style.position="fixed";box.style.opacity="0";
-          (doc.querySelector("dialog[open]")||doc.body).appendChild(box);box.select();
-          const done=doc.execCommand("copy");box.remove();if(!done)throw new Error("copy");
-        }
+        await writeClipboard(String(value));
         toast("已复制。");
       } catch (_) { toast("复制失败，请选中内容后手动复制。",true); }
     }

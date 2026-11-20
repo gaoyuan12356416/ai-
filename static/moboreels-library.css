@@ -13,3 +13,13 @@
 .channel-link-result[hidden] { display: none; }
 .channel-link-result input { flex: 1; min-width: 0; }
 .channel-link-form + .link-card + details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.catalog-head, .catalog-actions, .recent-copy-actions { flex-wrap: wrap; }
+.catalog-actions, .recent-copy-actions { display: flex; align-items: center; gap: 8px; }
+.catalog-actions { margin-left: auto; }
+.recent-copy-status { margin: 12px 22px 0; }
+.recent-copy-status:empty { display: none; }
+.recent-copy-manual { display: block; margin: 8px 22px; width: calc(100% - 44px); }
+.recent-copy-manual[hidden] { display: none; }
+@media (max-width: 680px) {
+  .catalog-actions { margin-left: 0; }
+}
