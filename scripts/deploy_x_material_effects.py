@@ -108,16 +108,23 @@ def prepare(folder):
 
 def activate(folder,rollback=False):
     info=json.loads((folder/'manifest.json').read_text());action='rollback' if rollback else 'apply'
+    owned={path:set() for path in info['files']}
+    for audit in folder.glob('*followup.json'):
+        for row in json.loads(audit.read_text()).get('files',[]):
+            assert row['path'] in owned,'unknown_followup_path'
+            owned[row['path']].add(row['after'])
     for lane,path in ROOTS.items():assert str(path.resolve())==info['roots'][lane],'runtime_moved:'+lane
-    for path,row in info['files'].items():assert digest(path) in (row['before'],row['after']),'concurrent_change:'+path
+    for path,row in info['files'].items():assert digest(path) in {row['before'],row['after'],*owned[path]},'concurrent_change:'+path
     for lane in ('x','fb','tt','youtube','coordinator'):
         baseline=folder/(action+'-before-'+lane+'.json')
         if not baseline.exists():run(sys.executable,HEALTH,'snapshot','--lane',lane,'--output',baseline)
     original_pids={unit:run('systemctl','show',unit,'-p','MainPID','--value') for unit in UNITS}
     try:
         for path,row in info['files'].items():
-            assert digest(path) in (row['before'],row['after']),'concurrent_change:'+path
+            current=digest(path)
+            assert current in {row['before'],row['after'],*owned[path]},'concurrent_change:'+path
             if '/static/' in path or path.startswith('/usr/share/nginx/html/'):continue
+            if not rollback and current in owned[path]:continue
             if rollback and not row['existed']:continue
             atomic(Path(path),Path(row['backup' if rollback else 'next']).read_bytes(),row)
         if not rollback:
@@ -148,7 +155,9 @@ def activate(folder,rollback=False):
             run(sys.executable,HEALTH,'restore','--baseline',folder/(action+'-before-'+lane+'.json'),'--wait-seconds','25','--output',folder/(action+'-after-'+lane+'.json'))
         for path,row in info['files'].items():
             if '/static/' not in path and not path.startswith('/usr/share/nginx/html/'):continue
-            assert digest(path) in (row['before'],row['after']),'concurrent_static_change:'+path
+            current=digest(path)
+            assert current in {row['before'],row['after'],*owned[path]},'concurrent_static_change:'+path
+            if not rollback and current in owned[path]:continue
             if rollback and not row['existed']:continue
             atomic(Path(path),Path(row['backup' if rollback else 'next']).read_bytes(),row)
         info['controller_commit']=run('git','-C',SOURCE,'rev-parse','HEAD')
