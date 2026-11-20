@@ -34,10 +34,18 @@ def overlay(folder,name,live):
         return after
     before=result.stdout.replace(b'\r\n',b'\n');live=live.replace(b'\r\n',b'\n')
     if live==before or live==after:return after
+    if name=='features/x_auto_posts/publisher.py':
+        # Ordinary lane has an additional frozen scheduling block immediately
+        # after this payload. Preserve it and insert at the shared left anchor.
+        addition=b"        if (task.selection.get('x_effect') or {}).get('policy'):\n            from features.x_material_effects.reuse import lane\n            payload['reuse_task'] = dict(lane=lane(), task_id=task.id)\n"
+        anchor=b'            "actor": "x_auto_post_service",\n        }\n'
+        assert live.count(anchor)==1 and after.count(addition)==1
+        live=live.replace(anchor,anchor+addition)
+        before=before.replace(anchor,anchor+addition)
     scratch=folder/'overlay-scratch';scratch.write_bytes(live)
     delta=''.join(difflib.unified_diff(before.decode().splitlines(True),after.decode().splitlines(True),fromfile='a/overlay-scratch',tofile='b/overlay-scratch',n=2))
-    result=subprocess.run(['git','apply','--whitespace=nowarn','-'],cwd=folder,input=delta,text=True,capture_output=True)
-    assert not result.returncode,'live_variant_requires_review:'+name+':'+result.stderr
+    result=subprocess.run(['git','apply','--whitespace=nowarn','-'],cwd=folder,input=delta.encode(),capture_output=True)
+    assert not result.returncode,'live_variant_requires_review:'+name+':'+result.stderr.decode()
     return scratch.read_bytes()
 
 def prepare(folder):
