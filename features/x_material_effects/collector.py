@@ -143,10 +143,18 @@ def revenue(posts,warehouse_root):
                 assigned_revenue_cents=assigned,unassigned_revenue_cents=unassigned)
 
 def collect_metrics(posts,state_path,*,limit=0):
-    now=datetime.now(timezone.utc);stamp=now.isoformat();calls=0;success=0;failures=0
+    now=datetime.now(timezone.utc);stamp=now.isoformat();calls=0;success=0;failures=0;upstream=''
     with closing(sqlite3.connect(state_path)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS observations(post_id TEXT PRIMARY KEY,metrics_json TEXT,metrics_at TEXT,attempt_at TEXT,error_code TEXT,retry_at TEXT)')
+        db.execute('CREATE TABLE IF NOT EXISTS collection_state(id INTEGER PRIMARY KEY CHECK(id=1),error_code TEXT,retry_at TEXT)')
         previous={r[0]:r for r in db.execute('SELECT * FROM observations')}
+        hold=db.execute('SELECT error_code,retry_at FROM collection_state WHERE id=1').fetchone()
+        if not hold:
+            # Upgrade an initial refresh which observed depleted credits.
+            stopped=[r for r in previous.values() if r[4]=='x_http_402' and r[3]]
+            if stopped:
+                latest=max(stopped,key=lambda r:r[3]);hold=('x_http_402',(instant(latest[3])+timedelta(hours=6)).isoformat())
+                db.execute('INSERT INTO collection_state VALUES(1,?,?)',hold);db.commit()
         due=[]
         for post in posts:
             old=previous.get(post['post_id'])
@@ -154,6 +162,8 @@ def collect_metrics(posts,state_path,*,limit=0):
                 due.append(post)
         due.sort(key=lambda p:(p['post_id'] in previous,-instant(p['published_at']).timestamp()))
         if limit:due=due[:limit]
+        pending=len(due)
+        if hold and instant(hold[1])>now:upstream=hold[0];due=[]
         token=credentials() if due else None
         for offset in range(0,len(due),100):
             batch=due[offset:offset+100];values={};code='';retry=now+timedelta(hours=1)
@@ -162,7 +172,7 @@ def collect_metrics(posts,state_path,*,limit=0):
                 response=request(url,token);calls+=1;values={str(v['id']):v for v in response.get('data',[])}
             except urllib.error.HTTPError as exc:
                 code='x_http_'+str(exc.code)
-                if exc.code in (401,403,429):retry=now+timedelta(hours=6)
+                if exc.code in (401,402,403,429):retry=now+timedelta(hours=6)
             except (OSError,ValueError):code='x_metrics_transport_error'
             for post in batch:
                 value=values.get(post['post_id']);old=previous.get(post['post_id'])
@@ -173,12 +183,16 @@ def collect_metrics(posts,state_path,*,limit=0):
                 else:success+=1;metrics=encoded(extract(value));at=stamp
                 db.execute('INSERT INTO observations VALUES(?,?,?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET metrics_json=excluded.metrics_json,metrics_at=excluded.metrics_at,attempt_at=excluded.attempt_at,error_code=excluded.error_code,retry_at=excluded.retry_at',
                     (post['post_id'],metrics,at,stamp,error,retry.isoformat() if error else ''))
+            if code in ('x_http_401','x_http_402','x_http_403','x_http_429'):
+                upstream=code
+                db.execute('INSERT INTO collection_state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET error_code=excluded.error_code,retry_at=excluded.retry_at',(code,retry.isoformat()))
+                db.commit();break
+            if values:db.execute('DELETE FROM collection_state WHERE id=1')
             db.commit()
-            if code in ('x_http_401','x_http_403','x_http_429'):break
         observations={r[0]:r for r in db.execute('SELECT * FROM observations')}
         for post in posts:
             row=observations.get(post['post_id'])
             post.update({k:None for k in METRICS if k not in ('revenue_cents','refund_cents')})
             post.update(json.loads(row[1]) if row else {})
             post.update(metrics_at=row[2] if row else None,error_code=row[4] if row else 'not_collected')
-    return dict(api_calls=calls,metrics_updated=success,metrics_failed=failures,metrics_due=len(due))
+    return dict(api_calls=calls,metrics_updated=success,metrics_failed=failures,metrics_due=pending,metrics_upstream_error=upstream)

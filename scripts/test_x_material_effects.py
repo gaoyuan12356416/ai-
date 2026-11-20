@@ -13,7 +13,7 @@ from types import SimpleNamespace
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from features.x_material_effects import model,store,selection,migrations,reuse,collector,api
 from features.x_auto_posts.selector import DramaFilterRule,SortRule,DecimalRange,MaterialFilterRule
-from features.x_auto_posts.validation import normalize_template_payload,profile_model,ValidationError
+from features.x_auto_posts.validation import normalize_template_payload,ValidationError
 from features.x_auto_posts.publisher import selector_rules
 from scripts.test_x_auto_post_validation import valid_payload
 

@@ -35,7 +35,8 @@ def query(params,actor,root=None):
             visible={str(r[0]) for r in db.execute('SELECT id FROM x_authorized_account WHERE owner_user_id=? AND owner_tenant_key=?',(actor['user_id'],actor.get('tenant_key','')))}
         posts=[p for p in posts if str(p['account_id']) in visible]
     search=get('q').strip().casefold()
-    for key in ('namespace','material_id','product','language','account_id'):
+    if get('account_id'):posts=[p for p in posts if get('account_id') in p.get('account_ids',[str(p['account_id'])])]
+    for key in ('namespace','material_id','product','language'):
         if get(key):posts=[p for p in posts if str(p.get(key,''))==get(key)]
     if search:posts=[p for p in posts if any(search in str(p.get(k,'')).casefold() for k in ('material_id','material_name','content_id','drama_name'))]
     from datetime import timedelta
@@ -50,6 +51,7 @@ def query(params,actor,root=None):
     known.sort(key=lambda p:p[sort],reverse=direction=='desc');items=known+missing
     meta=dict(meta,stale=(datetime.now(timezone.utc)-instant(meta['generated_at'])).total_seconds()>7200,
               revenue_stale=(datetime.now(timezone.utc)-instant(meta['revenue_source_generated_at'])).total_seconds()>7200)
+    if any(p.get('error_code')=='x_http_402' for p in posts):meta['metrics_upstream_error']='x_http_402'
     summary={k:sum(p[k] for p in posts if p.get(k) is not None) for k in METRICS}
     coverage={k:sum(p.get(k) is not None for p in posts) for k in METRICS}
     return dict(ok=True,items=items[(page-1)*size:page*size],total=len(items),page=page,page_size=size,
