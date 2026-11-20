@@ -20,8 +20,9 @@ def main():
     runtime = Path('/opt/fb-auto-post/current').resolve()
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     sys.path.insert(0, str(runtime))
-    from scripts.recover_fb_skipped_runs import existing_store, service_env, repositories, save
     from features.fb_auto_posts import core
+    from scripts.recover_fb_skipped_runs import existing_store, service_env, repositories, save
+    sys.path.insert(0, str(runtime))
     from features.fb_auto_posts.skipped_recovery import untouched, published_materials, REASON as OLD_REASON
     from features.fb_auto_posts.strategy import daily_limit
     from features.story_copy.bridge import fb_plan
