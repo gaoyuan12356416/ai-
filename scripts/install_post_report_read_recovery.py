@@ -17,7 +17,8 @@ BASELINE = {
     'features/post_daily_report/report.py': 'e2b54823ad934a7676df36e3b2b7f9bae5874ffda7b61fb4439040468519e2f7',
     'features/post_daily_report/x.py': '096a66a54daa8f41e958de4b81cd42dc371106dfe0abfb3612a987c231a635e4',
 }
-OVERLAY = list(BASELINE) + ['tests/test_post_daily_report_read_recovery.py']
+OVERLAY = list(BASELINE) + ['tests/test_post_daily_report_read_recovery.py',
+                          'tests/test_post_daily_report_x.py']
 TESTS = ['tests.test_post_daily_report_read_recovery', 'tests.test_post_daily_report',
          'tests.test_post_daily_report_presentation', 'tests.test_post_daily_report_x.XCollectorTests',
          'tests.test_post_daily_report_x_profile_targets.ProfileTargetTests',
