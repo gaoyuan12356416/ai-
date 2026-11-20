@@ -29,6 +29,8 @@ def collect(c, n, job_id):
     p['resources'] = rows(c, 'SELECT * FROM pipeline_resource WHERE job_id=?', (job_id,))
     p['legacy_resources'] = rows(c, 'SELECT * FROM pipeline_legacy_resource WHERE job_id=?', (job_id,))
     p['reposts'] = rows(n, 'SELECT * FROM x_post_repost_ledger WHERE queue_id=?', (qid,))
+    p['parent'] = (one(n, 'SELECT * FROM x_post_manual_run WHERE id=?', (p['queue']['manual_run_id'],))
+                   if p['queue'].get('manual_run_id') else None)
     return p
 
 
@@ -37,6 +39,10 @@ def validate(p):
     require(j['channel']=='x' and j['family']=='queue' and j['status']=='failed'
             and not j['external_intent'] and not j['hold_reason'], 'dispatch_not_unstarted_failure')
     require(q['status']=='failed', 'native_not_failed')
+    if p.get('parent'):
+        require(p['parent']['status'] not in ('stopped','canceled','cancelled','needs_review')
+                and not p['parent']['error_code'] and not p['parent']['unknown_count'],
+                'parent_recovery_fenced')
     require(not any(p[k] for k in ('operations','native_operations','publications','holds','resources','legacy_resources','reposts')),
             'external_intent_or_resource_present')
     if j['stage']=='prepare':
@@ -102,6 +108,15 @@ def apply(plan, directory):
             if item['action']=='first_publish':
                 n.execute("UPDATE x_post_publish_log SET status='reserved',updated_at=? WHERE queue_id=?",(now,qid))
             XPostStore._sync_run(n,qid,now)
+            # A frozen auto execution has already passed parent admission.
+            # Generic counters call a zero-attempt run "queued", but its native
+            # execution fence requires "running". Preserve that admitted state
+            # for the exact single-child recovery, never a stopped parent.
+            n.execute("""UPDATE x_post_manual_run SET status='running',updated_at=?
+                WHERE id=(SELECT manual_run_id FROM x_post_queue WHERE id=?)
+                AND trigger_source='auto_template' AND status='queued'
+                AND error_code='' AND unknown_count=0 AND failed_count=0
+                AND expected_count=1 AND queued_count=1""", (now,qid))
             c.execute('INSERT INTO '+TABLE+' VALUES(?,?,?,?)',values)
             c.execute("UPDATE pipeline_job SET status=?,hold_reason='',started_at='',finished_at='',lease_expires_at='',node_id='',worker_id='',claim_hash='',error_code='',error_message='',updated_at=? WHERE id=?",
                       ('queued' if job['stage']=='prepare' else 'ready',now,job['id']))
