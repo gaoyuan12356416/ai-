@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import re
+from pathlib import Path
 from datetime import timedelta
 
 from .core import DomainError, actor_checked, canonical, digest, id_text, normalize_batch, plan_pairs, stamp
@@ -140,15 +141,37 @@ class Service:
                 "preview_hash": digest(facts), "items": items, "repeat_required": bool(repeats),
                 "repeat_fingerprint": digest(repeats), "landing_url": "https://www.dramawavew2a.com/ads/101/2310/view"}
 
-    def configured_pages(self, actor, *, for_publish=False):
+    def configured_pages(self, actor, *, for_publish=False, verify_ids=None):
+        # The catalog is tenant-local. Remote authorization is deliberately opt-in
+        # and bounded; opening a list must not occupy the source SQL queue.
         configs = self.store.configs(actor)
-        if for_publish:
-            visible = self.sources.list_pages(actor)
-            return {"ok": True, "items": [{**p, **configs.get(p["page_id"], self.store.unconfigured(p["page_id"]))} for p in visible]}
-        if not configs:
-            return {"ok": True, "items": []}
-        visible = {p["page_id"]: p for p in self.sources.list_pages(actor, page_ids=list(configs))}
-        return {"ok": True, "items": [{**c, **visible[pid], "language": c["language"]} for pid, c in configs.items() if pid in visible]}
+        if verify_ids is not None:
+            ids = str(verify_ids).split(",")
+            if not 1 <= len(ids) <= 8 or len(set(ids)) != len(ids) or any(
+                    not re.fullmatch(r"[1-9][0-9]{0,30}", pid) for pid in ids):
+                raise DomainError("invalid_request", "每次授权核验请选择1至8个不重复的Page")
+            if any(pid not in configs for pid in ids):
+                raise DomainError("page_not_found", "Page未配置或不在当前租户", 404)
+            visible = {p["page_id"]: p for p in self.sources.list_pages(actor, page_ids=ids)}
+            # Return display fields only: never replace an edited config with an
+            # authorization response, or silently drop a missing source record.
+            return {"ok": True, "items": [{
+                "page_id": pid, "page_name": visible.get(pid, {}).get("page_name", pid),
+                "eligible_token_count": visible.get(pid, {}).get("eligible_token_count", 0),
+                "blocked_reason": visible.get(pid, {}).get("blocked_reason", "Page授权记录不存在，无法发布"),
+                "authorization_pending": False, "authorization_unknown": False,
+            } for pid in ids]}
+        try:
+            names = json.loads(Path("/mnt/data-disk/fb-page-portraits/page-names.json").read_text())["names"]
+            if not isinstance(names, dict):
+                names = {}
+        except (OSError, ValueError, KeyError, TypeError):
+            names = {}
+        return {"ok": True, "authorization_pending": True, "items": [{
+            **c, "page_name": str(names.get(pid) or pid)[:255],
+            "eligible_token_count": 0, "blocked_reason": "",
+            "authorization_pending": True, "authorization_unknown": True,
+        } for pid, c in configs.items()]}
 
     def _config_access(self, actor, ids):
         if not ids or len(ids) > 200 or len(set(ids)) != len(ids):
@@ -190,7 +213,8 @@ class Service:
             if route == "/pages/available":
                 return {"ok": True, "items": self.sources.list_pages(actor, q=str(query.get("q", ""))[:200])}
             if route == "/pages":
-                return self.configured_pages(actor, for_publish=query.get("purpose") == "publish")
+                return self.configured_pages(actor, for_publish=query.get("purpose") == "publish",
+                                             verify_ids=query.get("verify_ids"))
             if route == "/materials":
                 return {"ok": True, **self.sources.search_materials(
                     {**query, "search": query.get("q", query.get("search", ""))}, enforce_blacklist=False, manual=True)}

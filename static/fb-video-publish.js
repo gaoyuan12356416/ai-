@@ -42,7 +42,7 @@
     document.body.appendChild(el); el.addEventListener("close",()=>el.remove()); el.addEventListener("click",e=>{if(e.target.closest("[data-close]"))el.close();const macro=e.target.closest("[data-macro]");if(macro)insertMacro(macro);});el.showModal();return el;
   }
   function shell() {
-    const info={pages:["Page 管理","同租户共用 Page 文案和剧语言；仅显示当前账号有权访问的 Page。","fbPageManagement"],publish:["Facebook 视频发布","多选素材与 Page，按剧语言建立对应关系，逐条核对后提交。","fbVideoPublish"],records:["批量发布记录","查看本模块发布批次、冻结文案、真实链接和执行结果。","fbVideoPublishRecords"]}[view];
+    const info={pages:["Page 管理","同租户共用 Page 配置；授权状态单独核验，发布前再次检查。","fbPageManagement"],publish:["Facebook 视频发布","多选素材与 Page，按剧语言建立对应关系，逐条核对后提交。","fbVideoPublish"],records:["批量发布记录","查看本模块发布批次、冻结文案、真实链接和执行结果。","fbVideoPublishRecords"]}[view];
     $("fbApp").innerHTML=`<div class="fb-shell"><aside class="fb-sidebar" id="sidebar"><div class="fb-brand"><b>AI</b><div><strong>AI自动后台</strong><small>ai.yingliangads.com</small></div></div><nav id="quickNav"></nav><button class="button mobile-nav" id="hideNav" type="button">收起导航</button></aside><main class="fb-main"><header class="topbar"><div><button type="button" class="button small mobile-nav" id="showNav">☰ 导航</button><h1>${info[0]}</h1><p class="muted">${info[1]}</p></div><div class="top-actions"><div id="userCard" class="user-card"></div><button class="button" id="refreshPage">刷新</button><button class="button" id="authButton">登录</button></div></header><nav class="fb-tabs"><a class="${view==="pages"?"active":""}" href="/fb-pages.html">Page 管理</a><a class="${view==="publish"?"active":""}" href="/fb-video-publish.html">视频发布</a><a class="${view==="records"?"active":""}" href="/fb-video-publish-records.html">批量发布记录</a></nav><div id="gate" class="panel gate">正在读取登录状态…</div><div id="pageError" class="error" role="alert" hidden></div><div id="content" hidden></div></main></div><div id="toast" class="fb-toast" role="status" hidden></div>`;
     $("showNav").onclick=()=>$("sidebar").classList.add("open");$("hideNav").onclick=()=>$("sidebar").classList.remove("open");
     return info[2];
@@ -271,7 +271,7 @@
   }
 
   async function pageManagement() {
-    let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false,listGeneration=0,sourceController=null;
+    let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false,listGeneration=0,sourceController=null,sourceAttempted=new Set();
     let excelAsset=null;
     $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><select id="pageCreator" aria-label="按创建人筛选" disabled><option value="">全部创建人</option></select><button id="reloadPages" class="button">刷新列表</button></div><p id="pageAuthorizationNotice" class="helper" role="status" hidden></p><p id="pagePortraitNotice" class="helper">画像按近 7 个完整报告日统计，列表就绪后加载当前页摘要。</p><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>近 7 天收入（USD）</th><th>收入画像 / 比例</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
     function authorizationBadge(p) {
@@ -291,6 +291,7 @@
       $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td>${window.FbPagePortraits?.cells(p.page_id)||'<td>画像组件加载中</td><td>请刷新页面</td>'}<td>${authorizationBadge(p)}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
       $("pageTotal").textContent=`共 ${rows.length} 个 Page · 第 ${page+1} 页`;$("pagePrev").disabled=page===0;$("pageNext").disabled=(page+1)*20>=rows.length;
       window.FbPagePortraits?.load(rows.slice(page*20,(page+1)*20).map(p=>p.page_id));
+      void verifySource(listGeneration);
     }
     function setConfigs(items) {
       configs=items||[];loaded=true;
@@ -299,31 +300,47 @@
       $("pageCreator").innerHTML='<option value="">全部创建人</option>'+creators.map(([id,name])=>`<option value="${esc(id)}">${esc(name)}</option>`).join("");$("pageCreator").value=creator;
     }
     async function verifySource(generation) {
+      if(sourceController||loading||!loaded)return;
+      const ids=[...document.querySelectorAll("[data-edit-page]")].map(el=>el.dataset.editPage).filter(id=>!sourceAttempted.has(id));
+      if(!ids.length)return;
+      // Claim the displayed page before the first await; renders cannot enqueue
+      // the same IDs again. A refresh creates a new generation and attempt set.
+      ids.forEach(id=>sourceAttempted.add(id));
       const controller=new AbortController();sourceController=controller;
-      $("pageAuthorizationNotice").hidden=false;$("pageAuthorizationNotice").textContent="Page 已载入，正在后台核验授权状态…";
+      $("pageAuthorizationNotice").hidden=false;$("pageAuthorizationNotice").textContent="Page 已载入，正在核验当前页授权状态…";
       try {
-        const data=await api("/pages",{signal:controller.signal});
-        if(generation!==listGeneration)return;
-        setConfigs(data.items);$("pageAuthorizationNotice").hidden=true;render();
-      } catch(err) {
-        if(generation!==listGeneration||err.name==="AbortError")return;
-        configs=configs.map(p=>({...p,authorization_pending:false,authorization_unknown:true}));
-        $("pageAuthorizationNotice").textContent="Page 列表已载入，授权状态暂未核验。可刷新重试；发布时会重新核验。";render();
-      } finally { if(sourceController===controller)sourceController=null; }
+        for(let offset=0;offset<ids.length;offset+=8){
+          const batch=ids.slice(offset,offset+8);
+          try {
+            const data=await api("/pages?verify_ids="+encodeURIComponent(batch.join(",")),{signal:controller.signal});
+            if(generation!==listGeneration)return;
+            const verified=new Map((data.items||[]).map(p=>[p.page_id,p]));
+            configs=configs.map(p=>{
+              const v=verified.get(p.page_id);if(!v)return p;
+              return {...p,page_name:v.page_name===p.page_id?p.page_name:v.page_name,eligible_token_count:v.eligible_token_count,blocked_reason:v.blocked_reason,authorization_pending:false,authorization_unknown:false};
+            });
+          } catch(err) {
+            if(generation!==listGeneration||err.name==="AbortError")return;
+            configs=configs.map(p=>batch.includes(p.page_id)?{...p,authorization_pending:false,authorization_unknown:true}:p);
+          }
+          render();
+        }
+      } finally {
+        if(sourceController===controller){
+          sourceController=null;
+          $("pageAuthorizationNotice").textContent="仅核验已显示的 Page；暂未核验项可刷新重试，发布前会实时核验。";
+          if(generation===listGeneration)render();
+        }
+      }
     }
     async function load() {
-      if(loading)return;const generation=++listGeneration;sourceController?.abort();sourceController=null;
+      if(loading)return;const generation=++listGeneration;sourceController?.abort();sourceController=null;sourceAttempted=new Set();
       loading=true;render();errorAt("pageError","");$("pageAuthorizationNotice").hidden=true;
       try {
-        let data;
-        if(auth.user?.is_admin){
-          try{data=await api("/api/fb-page-portraits/pages");}
-          catch(err){if(![403,404,503].includes(err.status))throw err;data=await api("/pages");}
-        }else data=await api("/pages");
+        const data=await api("/pages");
         if(generation!==listGeneration)return;
         setConfigs(data.items);
         performance.mark("fb-page-list-ready");
-        if(data.authorization_pending)void verifySource(generation);
       } finally {loading=false;render();}
     }
     async function loadLanguageOptions() {
@@ -467,10 +484,10 @@
     let configById=new Map(),pageFilter=null,pageNumber=0,pageResults=[];
     const pageSize=50;
     const storageKey=`fb-video-pending:${auth.user?.tenant_key || ""}:${auth.user?.user_id || ""}`;
-    $("content").innerHTML=`<div id="pendingNotice" class="notice warning" hidden><strong>上次提交的受理结果正在核对</strong><p id="pendingText">请查询原操作结果，避免重复发布。</p><div class="actions"><button class="button" id="queryOperation">查询原操作</button><button class="button" id="retryOperation">按原操作重试</button></div></div><div id="legacyDraftNotice" class="notice warning" hidden><strong>发现旧版草稿</strong><p>旧版整批预约和间隔不会自动套用。转换后保留素材、Page 和文案，清空预约时间，请逐条重新设置。</p><button id="convertDraft" class="button">转换草稿并重新设置时间</button></div><fieldset id="publishFields"><section class="panel"><div class="section-head"><div><h2>01 选择素材</h2><p>素材来自现有 Facebook 素材库，支持跨页多选。</p></div><button id="chooseMaterials" class="button primary">选择素材（可多选）</button></div><div id="selectedMaterials"></div></section><section class="panel"><div class="section-head"><div><h2>02 选择 Page</h2><p>仅显示在「Page 管理」中已创建且当前账号有权访问的 Page；异常授权显示原因。</p></div><a class="button" href="/fb-pages.html">管理 Page</a></div><form id="targetPageFilters" class="form-grid"><div class="field"><label for="targetPageCreator">添加者</label><select id="targetPageCreator" disabled><option value="">全部添加者</option></select></div><div class="field"><label for="targetPageLanguage">语言</label><select id="targetPageLanguage">${langOptions("全部语言")}<option value="__unset__">未设置语言</option></select></div><div class="field"><label for="targetPageId">Page ID</label><input id="targetPageId" placeholder="输入 Page ID，支持部分 ID" autocomplete="off"></div><div class="field"><label for="targetPageName">名称</label><input id="targetPageName" placeholder="输入 Page 名称，支持模糊搜索" autocomplete="off"></div><div class="actions full"><button type="submit" class="button primary" id="applyPageFilters" disabled>确定</button></div></form><p id="targetPageFilterNotice" class="helper" role="status">正在加载 Page 筛选信息…</p><div class="row"><button type="button" class="button small" id="selectPages" disabled>全选本页可用 Page</button><button type="button" class="button small" id="clearCurrentPages" disabled>取消本页选择</button><button type="button" class="button small" id="clearPages" disabled>清空已选</button><button type="button" class="button small" id="refreshConfigs">刷新配置</button><span class="helper" id="targetPageSelected" role="status"></span></div><div id="targetPages" class="pick-list"></div><div class="pager"><span class="helper" id="targetPageTotal" role="status"></span><div class="actions"><button type="button" class="button small" id="targetPagePrev" disabled>上一页</button><button type="button" class="button small" id="targetPageNext" disabled>下一页</button></div></div><div id="missingTargetPages" class="notice warning" hidden></div></section><section class="panel" id="pairSection"><div class="section-head"><div><h2>03 核对素材与 Page 对应关系</h2><p>一个勾选代表一条任务；同一素材可发到多个 Page。</p></div><button class="button primary" id="matchPairs">全部配对</button></div><div class="summary" id="batchSummary"></div><div class="filters"><select id="pairLanguage" aria-label="筛选配对语言">${langOptions("全部剧语言")}</select><label class="check"><input type="checkbox" id="unmatchedOnly">只看未分配素材</label></div><div id="pairRows"></div></section><section class="panel"><div class="section-head"><div><h2>04 逐条编辑发布文案</h2><p>本次文案与标题分别优先使用填写值；留空使用 Page 默认值，Page 也未设置则留空。</p></div></div><div class="field"><label for="captionPair">当前编辑配对</label><select id="captionPair"></select></div><div class="form-grid" style="margin-top:16px"><div class="field"><label for="pairTitle">本次标题（选填）</label><input id="pairTitle" placeholder="留空使用 Page 默认标题"><label for="pairCaption">本次发布文案（选填）</label><textarea id="pairCaption" rows="7"></textarea>${macroButtons("pairCaption")}<div class="row spread"><span class="helper" id="captionVersion"></span><button id="resetCaption" class="button small">重新应用当前 Page 文案</button></div></div><div class="field"><span>文案预览</span><div class="copy-preview" id="captionPreview"></div><span class="helper">短链为占位，最终提交时生成；缺失的剧名和简介宏会留空。</span></div></div></section><section class="panel"><div class="section-head"><div><h2>05 视频加工</h2><p>视频加工与历史重复发布校验分别处理。</p></div></div><div class="processing"><label class="pick"><input type="radio" name="processing" value="original" checked><span><strong>不去重（原片发布）</strong><small>直接使用通过校验的源视频</small></span></label><label class="pick"><input type="radio" name="processing" value="random_overlay"><span><strong>随机加工</strong><small>使用现有 Facebook 随机加工流程，每条任务冻结加工设置</small></span></label></div><p class="helper">发布时间在每条素材上设置。未填写则立即发布；同一 Page 按预约时间、素材原顺序依次执行，加工或平台处理可能使实际时间顺延。</p></section></fieldset><div class="sticky-actions actions"><span class="helper" id="draftStatus">草稿保存到当前账号</span><button class="button" id="saveDraft">保存草稿</button><button class="button primary" id="preflight">核对并确认发布</button></div>`;
+    $("content").innerHTML=`<div id="pendingNotice" class="notice warning" hidden><strong>上次提交的受理结果正在核对</strong><p id="pendingText">请查询原操作结果，避免重复发布。</p><div class="actions"><button class="button" id="queryOperation">查询原操作</button><button class="button" id="retryOperation">按原操作重试</button></div></div><div id="legacyDraftNotice" class="notice warning" hidden><strong>发现旧版草稿</strong><p>旧版整批预约和间隔不会自动套用。转换后保留素材、Page 和文案，清空预约时间，请逐条重新设置。</p><button id="convertDraft" class="button">转换草稿并重新设置时间</button></div><fieldset id="publishFields"><section class="panel"><div class="section-head"><div><h2>01 选择素材</h2><p>素材来自现有 Facebook 素材库，支持跨页多选。</p></div><button id="chooseMaterials" class="button primary">选择素材（可多选）</button></div><div id="selectedMaterials"></div></section><section class="panel"><div class="section-head"><div><h2>02 选择 Page</h2><p>显示同租户在「Page 管理」中已创建的 Page；发布前实时核验授权。</p></div><a class="button" href="/fb-pages.html">管理 Page</a></div><form id="targetPageFilters" class="form-grid"><div class="field"><label for="targetPageCreator">添加者</label><select id="targetPageCreator" disabled><option value="">全部添加者</option></select></div><div class="field"><label for="targetPageLanguage">语言</label><select id="targetPageLanguage">${langOptions("全部语言")}<option value="__unset__">未设置语言</option></select></div><div class="field"><label for="targetPageId">Page ID</label><input id="targetPageId" placeholder="输入 Page ID，支持部分 ID" autocomplete="off"></div><div class="field"><label for="targetPageName">名称</label><input id="targetPageName" placeholder="输入 Page 名称，支持模糊搜索" autocomplete="off"></div><div class="actions full"><button type="submit" class="button primary" id="applyPageFilters" disabled>确定</button></div></form><p id="targetPageFilterNotice" class="helper" role="status">正在加载 Page 筛选信息…</p><div class="row"><button type="button" class="button small" id="selectPages" disabled>全选本页可用 Page</button><button type="button" class="button small" id="clearCurrentPages" disabled>取消本页选择</button><button type="button" class="button small" id="clearPages" disabled>清空已选</button><button type="button" class="button small" id="refreshConfigs">刷新配置</button><span class="helper" id="targetPageSelected" role="status"></span></div><div id="targetPages" class="pick-list"></div><div class="pager"><span class="helper" id="targetPageTotal" role="status"></span><div class="actions"><button type="button" class="button small" id="targetPagePrev" disabled>上一页</button><button type="button" class="button small" id="targetPageNext" disabled>下一页</button></div></div><div id="missingTargetPages" class="notice warning" hidden></div></section><section class="panel" id="pairSection"><div class="section-head"><div><h2>03 核对素材与 Page 对应关系</h2><p>一个勾选代表一条任务；同一素材可发到多个 Page。</p></div><button class="button primary" id="matchPairs">全部配对</button></div><div class="summary" id="batchSummary"></div><div class="filters"><select id="pairLanguage" aria-label="筛选配对语言">${langOptions("全部剧语言")}</select><label class="check"><input type="checkbox" id="unmatchedOnly">只看未分配素材</label></div><div id="pairRows"></div></section><section class="panel"><div class="section-head"><div><h2>04 逐条编辑发布文案</h2><p>本次文案与标题分别优先使用填写值；留空使用 Page 默认值，Page 也未设置则留空。</p></div></div><div class="field"><label for="captionPair">当前编辑配对</label><select id="captionPair"></select></div><div class="form-grid" style="margin-top:16px"><div class="field"><label for="pairTitle">本次标题（选填）</label><input id="pairTitle" placeholder="留空使用 Page 默认标题"><label for="pairCaption">本次发布文案（选填）</label><textarea id="pairCaption" rows="7"></textarea>${macroButtons("pairCaption")}<div class="row spread"><span class="helper" id="captionVersion"></span><button id="resetCaption" class="button small">重新应用当前 Page 文案</button></div></div><div class="field"><span>文案预览</span><div class="copy-preview" id="captionPreview"></div><span class="helper">短链为占位，最终提交时生成；缺失的剧名和简介宏会留空。</span></div></div></section><section class="panel"><div class="section-head"><div><h2>05 视频加工</h2><p>视频加工与历史重复发布校验分别处理。</p></div></div><div class="processing"><label class="pick"><input type="radio" name="processing" value="original" checked><span><strong>不去重（原片发布）</strong><small>直接使用通过校验的源视频</small></span></label><label class="pick"><input type="radio" name="processing" value="random_overlay"><span><strong>随机加工</strong><small>使用现有 Facebook 随机加工流程，每条任务冻结加工设置</small></span></label></div><p class="helper">发布时间在每条素材上设置。未填写则立即发布；同一 Page 按预约时间、素材原顺序依次执行，加工或平台处理可能使实际时间顺延。</p></section></fieldset><div class="sticky-actions actions"><span class="helper" id="draftStatus">草稿保存到当前账号</span><button class="button" id="saveDraft">保存草稿</button><button class="button primary" id="preflight">核对并确认发布</button></div>`;
     const material = id => selected.get(String(id));
     const config = id => configById.get(String(id));
-    const reason = p => p.blocked_reason || (!p.eligible_token_count?"暂无有效发布授权":"");
+    const reason = p => (p.authorization_pending||p.authorization_unknown)?"":(p.blocked_reason || (!p.eligible_token_count?"暂无有效发布授权":""));
     function touch(){dirty=true;preview=null;operation=uid();$("draftStatus").textContent="有未保存的修改";}
     function orderedPairs(){return [...selected.keys()].flatMap(m=>pageIds.map(p=>pairs.get(pairKey(m,p))).filter(Boolean));}
     function makePair(m,p){return {material_id:m.material_id,page_id:p.page_id,config_instance_id:p.config_instance_id,config_version:p.version,caption_template:"",title:""};}
@@ -520,7 +537,7 @@
     function currentPageRows(){return pageResults.slice(pageNumber*pageSize,(pageNumber+1)*pageSize);}
     function renderPageChoices(){
       const rows=currentPageRows(),chosen=new Set(pageIds);
-      $("targetPages").innerHTML=!pageFilter?'<div class="empty">设置筛选条件并点击“确定”后显示 Page。</div>':rows.map(p=>`<label class="pick"><input type="checkbox" data-page="${esc(p.page_id)}"${chosen.has(p.page_id)?" checked":""}${reason(p)?" disabled":""}><span><strong>${esc(p.page_name)}</strong><small>${esc(p.page_id)} · ${esc(lang(p.language))}</small><small>添加者：${esc(p.created_by_name || p.created_by || "未记录")}</small>${reason(p)?`<small>${esc(reason(p))}</small>`:""}</span></label>`).join("") || '<div class="empty">没有符合条件的 Page，请调整筛选条件后点击“确定”。</div>';
+      $("targetPages").innerHTML=!pageFilter?'<div class="empty">设置筛选条件并点击“确定”后显示 Page。</div>':rows.map(p=>`<label class="pick"><input type="checkbox" data-page="${esc(p.page_id)}"${chosen.has(p.page_id)?" checked":""}${reason(p)?" disabled":""}><span><strong>${esc(p.page_name)}</strong><small>${esc(p.page_id)} · ${esc(lang(p.language))}</small><small>添加者：${esc(p.created_by_name || p.created_by || "未记录")}</small>${reason(p)?`<small>${esc(reason(p))}</small>`:(p.authorization_pending||p.authorization_unknown)?"<small>发布时核验</small>":""}</span></label>`).join("") || '<div class="empty">没有符合条件的 Page，请调整筛选条件后点击“确定”。</div>';
       $("targetPageTotal").textContent=pageFilter?`共 ${pageResults.length} 个 Page · 第 ${pageResults.length?pageNumber+1:0} / ${Math.ceil(pageResults.length/pageSize)} 页 · 每页 ${pageSize} 条`:"尚未搜索";
       $("targetPageSelected").textContent=`已选 ${pageIds.length} 个 Page（跨页保留）`;
       $("targetPagePrev").disabled=!pageFilter||pageNumber===0;$("targetPageNext").disabled=!pageFilter||(pageNumber+1)*pageSize>=pageResults.length;
