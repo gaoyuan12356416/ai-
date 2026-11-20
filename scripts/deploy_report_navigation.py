@@ -84,7 +84,7 @@ def prepare(folder):
             if path.is_symlink():
                 raise ValueError(f'Inspect static symlink before updating {path}')
             remember(folder, manifest, path, after)
-            row = manifest['files'][str(path)]
+            row = manifest['files'][str(path.resolve())]
             if row['before'] != (hashlib.sha256(before).hexdigest() if before is not None else ''):
                 raise ValueError(f'Changed while preparing {path}')
             if row['existed'] and digest(row['backup']) != row['before']:
