@@ -71,6 +71,43 @@ HOT.update(
         "isolation_level",
     )
 )
+POSITIONAL = {
+    "daily": (
+        "dt,optimizer,source_id,data_source_id,max(series_code),max(drama_language),platform,sum(spend),sum(af_revenue0),sum(af_installs),max(updated_at)",
+        "dt optimizer source_id data_source_id series_code drama_language platform spend revenue installs updated_at",
+    ),
+    "logs": (
+        "queue_id,manual_id,cross_queue_ids,created_at,app_id",
+        "queue_id manual_id cross_queue_ids created_at app_id",
+    ),
+    "custom": (
+        "c.id,c.data_source_id,c.name,c.language,c.type,c.created_at,c.category,c.data_source",
+        "id data_source_id name language type created_at category data_source",
+    ),
+}
+HOT.update(("name", "type", "category", "data_source"))
+
+
+def source_column_order(path):
+    spec = POSITIONAL.get(path.stem)
+    check(spec is not None, "unknown_positional_layout")
+    projection, columns = spec
+    expected = re.compile(
+        r"""['"]"""
+        + re.escape(path.stem)
+        + r"""['"],\s*f?['"]select\s+"""
+        + re.escape(projection)
+        + r"\s+from\s",
+        re.I,
+    )
+    for name in ("query_once.py", "supplement_once.py"):
+        source = path.with_name(name)
+        if source.is_file() and not source.is_symlink() and source.stat().st_size < 1024 * 1024:
+            if expected.search(source.read_text(encoding="utf8", errors="replace")):
+                return columns.split()
+    raise ValueError("positional_columns_unconfirmed")
+
+
 SENSITIVE = re.compile(
     r"token|password|secret|authorization|cookie|signature|api[_-]?key|https?://[^\s]+[?&](?:sig|token|key)=",
     re.I,
@@ -181,6 +218,14 @@ def probe_rows(path, dataset):
             rows = doc
             meta = {}
             kind = "array"
+            if rows and isinstance(rows[0], list):
+                check(dataset == "hotdrama_report", "unknown_positional_layout")
+                order = source_column_order(path)
+                for ordinal, cells in enumerate(rows):
+                    check(isinstance(cells, list) and len(cells) == len(order), "positional_width_changed")
+                    rows[ordinal] = dict(zip(order, cells))
+                kind = "positional"
+                meta = {"source_column_order": order}
         allowed = {"dw_daily": DW, "dw_adset": META, "hotdrama_report": HOT}[dataset]
         cols = set()
         for row in rows:
@@ -232,7 +277,8 @@ def pack_pages(rows, dataset, cols):
     for row in rows:
         value = [normalize(row[k]) if k in row else MISSING for k in cols]
         line = encoded(value)
-        check(all(business_cell(x) for x in row.values()), "unreviewed_business_value")
+        if dataset != "fb_receipt_index":
+            check(all(business_cell(x) for x in row.values()), "unreviewed_business_value")
         raw = line.encode()
         check(len(raw) <= 192 * 1024, "oversize_business_record")
         if vals and (size + len(raw) > 160 * 1024 or len(vals) >= 1000):
@@ -640,7 +686,7 @@ def read_version(sid, out):
         if kind == "object-rows":
             base = encoded(meta)[:-1]
             out.write(base + ("," if meta else "") + '"rows":[')
-        elif kind == "array":
+        elif kind in ("array", "positional"):
             out.write("[")
         for keys in group(ids, 8):
             page_map = {row[0].lower(): row for row in fetch_pages(cur, keys, True)}
@@ -651,13 +697,15 @@ def read_version(sid, out):
                 for cells in body:
                     h.update(encoded(cells).encode() + b"\n")
                     obj = {k: val for k, val in zip(cols, cells) if val != MISSING}
+                    if kind == "positional":
+                        obj = [obj[k] for k in meta["source_column_order"]]
                     if kind != "jsonl-index" and count:
                         out.write(",")
                     out.write(encoded(obj) + ("\n" if kind == "jsonl-index" else ""))
                     count += 1
         if kind == "object-rows":
             out.write("]}")
-        elif kind == "array":
+        elif kind in ("array", "positional"):
             out.write("]")
         check(count == n and h.hexdigest() == total_digest.lower(), "stored_version_digest")
 

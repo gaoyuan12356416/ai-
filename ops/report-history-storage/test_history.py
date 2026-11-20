@@ -92,6 +92,23 @@ class ImportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unreviewed_row_fields"):
                 history.probe_rows(p, "hotdrama_report")
 
+    def test_positional_rows_require_the_original_projection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "logs.json"
+            path.write_text('[["4","5","6","2026-01-01","7"]]')
+            with self.assertRaisesRegex(ValueError, "positional_columns_unconfirmed"):
+                history.probe_rows(path, "hotdrama_report")
+            path.with_name("query_once.py").write_text(
+                """jobs=[('logs',f"SELECT queue_id,manual_id,cross_queue_ids,created_at,app_id FROM original_log")]"""
+            )
+            rows, kind, meta, _, _ = history.probe_rows(path, "hotdrama_report")
+            self.assertEqual(kind, "positional")
+            self.assertEqual(
+                [rows[0][k] for k in meta["source_column_order"]], json.loads(path.read_text())[0]
+            )
+        digest = "eaa" + "0" * 61
+        history.pack_pages([{"source_line_sha256": digest}], "fb_receipt_index", ["source_line_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()
