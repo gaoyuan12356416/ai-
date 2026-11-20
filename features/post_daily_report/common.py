@@ -46,12 +46,28 @@ def read_db(path):
     uri = Path(path).resolve().as_uri() + "?mode=ro"
     db = sqlite3.connect(uri, uri=True, timeout=2)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA query_only=ON")
-    db.execute("PRAGMA busy_timeout=2000")
-    deadline = time.monotonic() + 25
-    db.set_progress_handler(lambda: int(time.monotonic() > deadline), 20000)
     try:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA busy_timeout=2000")
         db.execute("BEGIN")
+        # Acquire the read snapshot before handing the connection to collectors.
+        # Rollback-journal publishers can briefly hold a pending/exclusive lock.
+        # Retry only that lock contention, never missing/corrupt/schema errors.
+        acquisition_deadline = time.monotonic() + 15
+        while True:
+            try:
+                db.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+                break
+            except sqlite3.OperationalError as exc:
+                if str(exc) not in ("database is locked", "database table is locked"):
+                    raise
+                remaining = acquisition_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                db.execute("PRAGMA busy_timeout=%d" % min(2000, max(1, int(remaining * 1000))))
+                time.sleep(min(0.1, remaining))
+        deadline = time.monotonic() + 25
+        db.set_progress_handler(lambda: int(time.monotonic() > deadline), 20000)
         yield db
     finally:
         db.close()

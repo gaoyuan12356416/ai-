@@ -115,6 +115,8 @@ def _record(row, outcome, window, seen=None, counted_expected=True):
         if identity in seen:
             if counted_expected and row['expected'] is not None:
                 row['expected'] = max(0, row['expected'] - 1)
+            if counted_expected and 'known_expected' in row:
+                row['known_expected'] = max(0, row['known_expected'] - 1)
             row['warnings'].append('重复发布证据按 Post／队列身份只计一次。')
             return
         seen.add(identity)
@@ -500,6 +502,10 @@ def _auto_plans(db, window, runs, versions, row, tasks_by_run=None):
             if times is None and began < window.end and until > window.start:
                 row["expected"] = None
                 row["warnings"].append("X Auto 随机计划缺失，原计划总数待核对")
+                row.setdefault('unresolved_plans', []).append({
+                    'template_id': template_id, 'version': version,
+                    'enabled_at': began.isoformat(), 'until': until.isoformat(),
+                    'reason': 'random_plan_missing'})
             for time in times or []:
                 stamp = _slot(window.date, time)
                 if stamp and began <= stamp < until:
@@ -546,8 +552,10 @@ def _collect_auto(db, window, output, row, queue_outcomes, counted_prior, contex
                         if seen is not None:
                             seen.add(result[4])
     plans = _auto_plans(db, window, runs, versions, row, tasks_by_run)
+    row['known_expected'] = 0
     for run, accounts in plans.values():
         tasks = {str(t["account_id"]): t for t in tasks_by_run.get(run.get("id"), [])}
+        row['known_expected'] += len(accounts)
         if row["expected"] is not None:
             row["expected"] += len(accounts)
         for account in accounts:

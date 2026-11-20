@@ -95,6 +95,8 @@ def summary(channel):
     available = not channel.get('error') and all(r.get('data_available', True) for r in rows)
     success = sums['published'] + sums['late'] if available else None
     return {'channel': channel['channel'], 'expected': sums['expected'] if available else None,
+            'expected_lower_bound': sums['expected_lower_bound'] if available else None,
+            'unfinished_lower_bound': sums['known_missing'] if available else None,
             'success': success, 'unfinished': sums['missing'] if available else None,
             'skipped': sum(r.get('policy_skipped', 0) for r in rows) if available else None,
             'late': sums['late'] if available else None,
@@ -105,6 +107,18 @@ def summary(channel):
 def sum_known(items, key):
     values = [item[key] for item in items]
     return sum(values) if all(value is not None for value in values) else None
+
+
+def metric(item, key):
+    value = item[key]
+    lower = item.get(key + '_lower_bound')
+    return '≥' + number(lower) if value is None and lower is not None else number(value)
+
+
+def combined_metric(items, key):
+    value = sum_known(items, key)
+    lower = [item[key] if item[key] is not None else item.get(key + '_lower_bound') for item in items]
+    return metric({key: value, key + '_lower_bound': sum(lower) if all(v is not None for v in lower) else None}, key)
 
 
 def cost_text(cost):
@@ -151,16 +165,16 @@ def build_card(report, *, compact=False):
     cutoff = parse_time(report.get('cutoff_utc')) or Window.for_date(report['date']).cutoff
     cutoff_label = cutoff.astimezone(BEIJING).strftime('%m.%d %H:%M')
     elements = [columns([
-        '<font color="grey">%s</font>\n**%s**' % (label, number(sum_known(summaries, key)))
-        if key == 'expected' else '<font color="grey">%s</font>\n<font color="%s">**%s**</font>' % (label, color, number(sum_known(summaries, key)))
+        '<font color="grey">%s</font>\n**%s**' % (label, combined_metric(summaries, key))
+        if key == 'expected' else '<font color="grey">%s</font>\n<font color="%s">**%s**</font>' % (label, color, combined_metric(summaries, key))
         for label, key, color in [('应发', 'expected', 'grey'), ('确认成功', 'success', 'green'), ('未完成', 'unfinished', 'orange')]])]
     if incomplete:
-        elements.append(md('⚠️ **数据不完整：未知数量不计为零，合计显示未知；已核实的平台单独展示。**'))
+        elements.append(md('⚠️ **数据不完整：≥ 表示已核实的数量下限，另有计划待核实；读取失败仍显示未知，不计为零。**'))
     elements += [{'tag': 'hr'}, columns(['**平台**', '**应发**', '**成功**', '**未完成**', '**按规则跳过**'], True)]
     for s in summaries:
-        elements.append(columns(['**%s**' % s['channel'], number(s['expected']),
+        elements.append(columns(['**%s**' % s['channel'], metric(s, 'expected'),
                                  '<font color="green">**%s**</font>' % number(s['success']),
-                                 '<font color="orange">%s</font>' % number(s['unfinished']), number(s['skipped'])]))
+                                 '<font color="orange">%s</font>' % metric(s, 'unfinished'), number(s['skipped'])]))
     elements += [note('成功含次日补发 %s 条；另完成往期计划 %s 条。' % (
         number(sum_known(summaries, 'late')), number(sum_known(summaries, 'prior')))), {'tag': 'hr'}]
     sources, details, explanations, main_reasons = [], [], [], {}
@@ -176,9 +190,9 @@ def build_card(report, *, compact=False):
                 continue
             source = literal(source_name(name, row))
             one = summary({'channel': name, 'rows': [row]})
-            result = ['成功 **%s** / 应发 %s' % (number(one['success']), number(one['expected']))]
+            result = ['成功 **%s** / 应发 %s' % (number(one['success']), metric(one, 'expected'))]
             if one['unfinished'] != 0:
-                result.append('未完成 %s' % number(one['unfinished']))
+                result.append('未完成 %s' % metric(one, 'unfinished'))
             if one['skipped'] != 0:
                 result.append('按规则跳过 %s' % number(one['skipped']))
             source_lines.append(source + '：' + ' · '.join(result))
@@ -204,7 +218,7 @@ def build_card(report, *, compact=False):
         if sums['available']:
             statuses = ' · '.join('%s %s' % (label, number(sum(r.get(key, 0) for r in rows))) for key, label in
                                   [('failed', '失败'), ('blocked', '受阻'), ('pending', '处理中'), ('unknown', '待确认')])
-            explanations.append(md('**%s · 实际应发 %s · 确认成功 %s**\n%s' % (name, number(sums['expected']), number(sums['success']), statuses)))
+            explanations.append(md('**%s · 实际应发 %s · 确认成功 %s**\n%s' % (name, metric(sums, 'expected'), number(sums['success']), statuses)))
         if channel.get('accounting') == 'actual-fb-v2':
             explanations.append(md('FB 按冻结的主页频次与发布时段计算；已排除频次外 %s 个位置、执行前已失效的旧计划 %s 个时隙。' % (
                 number(sum(r.get('frequency_excluded', 0) for r in rows)), number(sum(r.get('superseded_slots', 0) for r in rows)))))

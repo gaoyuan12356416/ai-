@@ -48,12 +48,19 @@ def validate_channel(channel):
 def total(rows):
     available = all(r.get("data_available", True) for r in rows)
     known = available and all(r.get("expected") is not None for r in rows)
-    expected = sum(r.get("expected") or 0 for r in rows)
+    expected = sum(r.get("expected") if r.get("expected") is not None
+                   else r.get("known_expected", 0) for r in rows)
     published = sum(r.get("published", 0) for r in rows)
     late = sum(r.get("late", 0) for r in rows)
+    # An explicit collector lower bound may survive an absent plan. Do not infer
+    # a quota from successful Posts or turn an unavailable source into zero.
+    bounded = available and all(r.get('expected') is not None or 'known_expected' in r for r in rows)
+    missing = expected - published - late - sum(r.get('policy_skipped', 0) for r in rows)
     return {"expected": expected if known else None, "known_expected": expected,
+            "known_missing": max(0, missing) if bounded else None,
+            "expected_lower_bound": expected if bounded else None,
             "published": published if available else None, "late": late if available else None,
-            "missing": expected - published - late - sum(r.get('policy_skipped', 0) for r in rows) if known else None}
+            "missing": missing if known else None}
 
 
 
