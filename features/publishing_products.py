@@ -10,31 +10,43 @@ _APP = ContextVar('post_material_app_id', default=1479)
 # HotDrama and other products retain their own internal catalog lookup.
 DRAMAWAVE_MATERIAL_PRODUCTS = (
     'drama-b', 'drama-c', 'drama-comics', 'drama-novel',
-    'drama-ai素材', 'drama-社媒专用素材',
+    'drama-ai素材', 'drama-社媒专用素材', '[w2a]drama-double',
 )
+# Readers without a product label (the existing YouTube SELECT contract) use
+# the current product-catalog identities. Keep attribution IDs unchanged.
+MOBO_MATERIAL_APP_IDS = frozenset({'2373', '2430', '2432', '2471', '3360', '3442', '3642'})
+MOBO_MATERIAL_PRODUCTS = ('社媒moboreel',)
 
 
 def is_mobo_product(product, app_id=None):
     """Recognize Mobo materials independently of the chosen caption macros."""
     value = str(product or '').strip().casefold()
-    return value.startswith(('mobo', '[w2a]mobo')) or str(app_id or '').strip() in {'2373', '3360'}
+    return (value.startswith(('mobo', '[w2a]mobo')) or value in MOBO_MATERIAL_PRODUCTS
+            or str(app_id or '').strip() in MOBO_MATERIAL_APP_IDS)
 
 
 def mobo_product_sql(alias):
     if not re.fullmatch(r'[A-Za-z0-9_]+', alias):
         raise ValueError('invalid catalog identifier')
     value = 'LOWER(TRIM(%s.product))' % alias
-    return "LOCATE('mobo',%s)=1 OR LOCATE('[w2a]mobo',%s)=1" % (value, value)
+    variants = ','.join("'%s'" % name for name in MOBO_MATERIAL_PRODUCTS)
+    return "LOCATE('mobo',%s)=1 OR LOCATE('[w2a]mobo',%s)=1 OR %s IN (%s)" % (value, value, value, variants)
+
+
+def dramawave_product_sql(alias):
+    if not re.fullmatch(r'[A-Za-z0-9_]+', alias):
+        raise ValueError('invalid catalog identifier')
+    product = "LOWER(TRIM(%s.product))" % alias
+    variants = ','.join("'%s'" % name for name in DRAMAWAVE_MATERIAL_PRODUCTS)
+    return ("LOCATE('dramawave',{product})=1 OR "
+            "LOCATE('[w2a]dramawave',{product})=1 OR "
+            "{product} IN ({variants})").format(product=product, variants=variants)
 
 
 def source_app_sql(alias, schema):
     if not all(re.fullmatch(r'[A-Za-z0-9_]+', value) for value in (alias, schema)):
         raise ValueError('invalid catalog identifier')
-    product = "LOWER(TRIM(%s.product))" % alias
-    variants = ','.join("'%s'" % name for name in DRAMAWAVE_MATERIAL_PRODUCTS)
-    family = ("LOCATE('dramawave',{product})=1 OR "
-              "LOCATE('[w2a]dramawave',{product})=1 OR "
-              "{product} IN ({variants})").format(product=product, variants=variants)
+    family = dramawave_product_sql(alias)
     # Resolve family variants before the app-name lookup, so a material product
     # ID such as Drama-comics never replaces the authoritative drama app ID.
     # Other named products keep the exact prior scalar lookup and blank fallback.

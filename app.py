@@ -93565,6 +93565,9 @@ class DramaMaterialHandler(BaseHTTPRequestHandler):
         if path == "/short-links" or path.startswith("/short-links/"):
             from features.youtube_auto_publish.manual_link_routes import dispatch
             return dispatch(self, parsed, actor, globals())
+        if path.startswith("/regular/"):
+            from features.youtube_auto_publish.regular_routes import dispatch
+            return dispatch(self, parsed, actor, globals())
         if "/x-share" in path:
             from features.youtube_auto_publish.x_share import dispatch
             if dispatch(self, parsed, actor, globals()):

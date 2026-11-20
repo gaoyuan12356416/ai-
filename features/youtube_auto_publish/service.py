@@ -268,7 +268,12 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         self._schedule_dto(value,body,ledger)
         status=value['status'];error=value['error']
         value['can_review']=(body['status']=='review' or (body['status']=='schedule_missed' and body.get('schedule_resume_state')=='review')) and not ledger
-        value['can_upload_cover']=not ledger and (value['can_review'] or body['status']=='generation_failed')
+        owner_review = not body.get('regular_media') or self._actor(actor) == self._actor(body['creator'])
+        value['can_review'] = value['can_review'] and owner_review
+        if body.get('regular_media') and value['can_review']:
+            from .regular import review_token
+            value['review_token'] = review_token(body)
+        value['can_upload_cover']=owner_review and not ledger and (value['can_review'] or body['status']=='generation_failed')
         value['versions']=[dict(v,url=self.asset_url(v['asset_id'])) for v in value.get('versions',[]) if v.get('asset_id')]
         current=next((v for v in value['versions'] if v['number']==body['current_version']),None)
         value['cover_url']=current['url'] if current else ''
@@ -282,6 +287,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             # projections. Full details and all write gates remain authoritative.
             row={key:value.get(key) for key in ('id','title','status','cover_source','created_at','publish_at','schedule_state','current_version','can_review','can_retry','thumbnail_url','cover_preview','can_share_x','video_id','x_player_card')}
             row['material']={'name':value['material'].get('name','')}
+            if body.get('regular_media'):
+                row['is_regular'] = True
             row['channel']={key:value['channel'].get(key,'') for key in ('name','language')}
             row['schedule_control']={'state':(value.get('schedule_control') or {}).get('state','')}
             return row
@@ -386,7 +393,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
             result['revision']=revision
         return result
 
-    def create_task(self,actor,payload):
+    def create_task(self,actor,payload,*,regular_media=None):
         tenant,owner=self._actor(actor)
         if not self.enabled:raise WorkflowError('feature_disabled','YouTube 自动发布暂未启用',503)
         if not isinstance(payload,dict):raise WorkflowError('invalid_request','请求格式无效')
@@ -394,6 +401,8 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         if not re.fullmatch(r'[A-Za-z0-9_-]{16,128}',op):raise WorkflowError('operation_id_required','缺少有效提交标识，请刷新页面')
         allowed=('material_id','channel_id','title_template','description_template','comment_template','cover_source','requirements','cover_asset_id')
         request={key:payload.get(key,'') for key in allowed}
+        if regular_media is not None:
+            request['regular_media'] = regular_media
         publish_at=normalize_publish_at(payload.get('publish_at',''))
         # Omitted and blank retain old idempotency hashes for existing clients.
         if publish_at:request['publish_at']=publish_at
@@ -406,6 +415,10 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         normalize_publish_at(publish_at,future=True)
         needs_m_url=contains_macro(*(request[field+'_template'] for field in ('title','description','comment')))
         material=self.source.get(str(request['material_id']), **({'moboreels':True} if needs_m_url else {}))
+        if regular_media is not None:
+            from .regular import identity
+            if tuple(regular_media['source_identity']) != identity(material):
+                raise WorkflowError('regular_media_changed','正式素材已更新，请重新预览后准备发布',409)
         if self.channel_directory is not None:
             channel=self.channel_directory.validate(actor,str(request['channel_id']),comment=bool(request['comment_template']))
         else:
@@ -452,6 +465,11 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                   publish_at=publish_at,schedule_version=0,schedule_state='pending' if publish_at else 'none',schedule_control=None)
         state='queued_generation' if cover_source=='ai' else 'enqueue_pending'
         body['versions']=[{'number':1,'asset_id':asset['id'] if cover_source=='local' else '', 'feedback':'','created_at':created,'source':cover_source,'approved':cover_source=='local'}]
+        if regular_media is not None:
+            body['regular_media'] = regular_media
+            body['versions'][0]['approved'] = False
+            if cover_source == 'local':
+                state = 'review'
         body['status']=state
         with self.db(True) as c:
             try:c.execute('INSERT INTO youtube_auto_preparation(id,tenant,owner,operation_id,request_sha,state,version,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(task_id,tenant,owner,op,digest,state,1,encode(body),created,created))
@@ -467,6 +485,17 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         if action=='reject' and (not feedback or len(feedback)>2000):raise WorkflowError('feedback_required','请填写 1–2000 字修改意见')
         with self.db(True) as c:
             row,body=self._row(c,task_id,actor)
+            ordinary = bool(body.get('regular_media'))
+            if ordinary:
+                from .regular import review_token
+                if self._actor(actor) != (row['tenant'], row['owner']):
+                    raise WorkflowError('regular_owner_required','请由创建这条任务的运营完成最终确认',403)
+                if action == 'approve':
+                    token = payload.get('review_token')
+                    if token and token == body.get('regular_approval'):
+                        return {'task':self._dto(body,actor)}
+                    if not token or token != review_token(body):
+                        raise WorkflowError('regular_review_changed','视频、标题、封面或发布安排已更新，请重新查看',409)
             try:version=int(payload.get('version'))
             except (TypeError,ValueError):raise WorkflowError('version_required','请刷新后审核当前版本') from None
             reviewable=row['state']=='review' or (row['state']=='schedule_missed' and body.get('schedule_resume_state')=='review')
@@ -492,8 +521,14 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                     current={'number':body['current_version'],'asset_id':asset['id'],'feedback':'人工替换封面','created_at':now(),'source':'manual','approved':True}
                     body['versions'].append(current)
                 else:self._asset(c,current['asset_id'],body['creator'])
-                current.update(approved=True,reviewer_user_id=str(actor['user_id']),approved_at=now())
-                state='enqueue_pending'
+                if ordinary and action == 'manual':
+                    current['approved'] = False
+                    state = 'review'
+                else:
+                    current.update(approved=True,reviewer_user_id=str(actor['user_id']),approved_at=now())
+                    state='enqueue_pending'
+                    if ordinary:
+                        body['regular_approval'] = payload['review_token']
             if is_due(body.get('publish_at')):
                 self._mark_schedule_missed(c,body,state)
             else:
@@ -532,6 +567,9 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                     body['schedule_state']='cancelled' if action=='cancel' else 'pending' if at else 'none'
                     body['schedule_control']={'action':action,'state':'confirmed','publish_at':at,'operation_id':op,'request_sha':digest,'message':'发布安排已保存'}
                     state='cancelled' if action=='cancel' else body.get('schedule_resume_state',body['status']) if body['status']=='schedule_missed' else body['status']
+                    if body.get('regular_media') and state != 'cancelled' and body.pop('regular_approval',None):
+                        body['versions'][-1]['approved'] = False
+                        state = 'review'
                     body.pop('schedule_resume_state',None)
                     if body.get('error',{}).get('code')=='schedule_missed':body['error']={}
                     self._save(c,body,state)
@@ -618,6 +656,11 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                 else:
                     approved=body['versions'][-1]
                     if not approved.get('approved'):raise WorkflowError('cover_not_approved','封面尚未审核',409)
+                    regular = body.get('regular_media')
+                    if regular:
+                        from .regular import review_token
+                        if body.get('regular_approval') != review_token(body):
+                            raise WorkflowError('regular_confirmation_required','请先确认最终成片和发布安排',409)
                     from .eligibility import assert_body_publishable
                     assert_body_publishable(body)
                     with self.db() as c:asset=self._asset(c,approved['asset_id'],body['creator'])
@@ -625,6 +668,7 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
                     if self.channel_directory is not None:
                         ch=self.channel_directory.validate(body['creator'],str(ch['id']),comment=bool(body['comment']),expected=ch)
                     ledger=self._ledger(body) or self.engine_store.enqueue_reviewed_youtube(
+                        **({'expected_source_sha256':regular['sha256'],'expected_source_size':regular['size_bytes']} if regular else {}),
                         preparation_id=task_id,source_material_id=m['id'],approved_cover_path=asset['path'],approved_cover_sha256=asset['sha256'],
                         operation_id='youtube-auto-'+task_id,job_id=(task_id if m.get('attribution') else m.get('source_job_id') or m.get('link_job_id') or task_id),content_id=m.get('content_id') or ('custom_source:'+m['id']),app_id='1479',
                         channel_local_id=str(ch['id']),channel_id=ch['channel_id'],youtube_account_id=ch['youtube_account_id'],source_kind='custom_source',source_url=m['url'],title=body['title'],

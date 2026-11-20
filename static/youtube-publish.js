@@ -147,7 +147,7 @@
   const setText = (node,value) => { if (node.textContent !== String(value)) node.textContent = value; };
   async function api(path, options = {}) {
     const isPost = String(options.method || 'GET').toUpperCase() === 'POST';
-    const controller = new AbortController(), timeoutMs = isPost ? 45000 : 12000;
+    const controller = new AbortController(), timeoutMs = options.timeoutMs || (isPost ? 45000 : 12000);
     const externalSignal = options.signal;
     let timedOut = false;
     const cancel = () => controller.abort();
@@ -419,7 +419,7 @@
     }
     if (state.listLoaded) { setText($('#task-count'),state.listRefreshError ? '自动刷新失败，稍后重试（保留上次数据）' : `共 ${state.total} 条任务${state.bounded ? ' · 最近 ' + state.limit + ' 条内查询' : ''}`); setText($('#footer-total'),`已显示 ${state.tasks.length} 条 / 共 ${state.total} 条${state.bounded ? '（最近 ' + state.limit + ' 条）' : ''}`); }
     if (state.listError) { syncMarkup($('#task-table'),`<tr><td colspan="6"><div class="empty-state table-error">${icon('warning')}<h3>任务加载失败</h3><p>${esc(state.listError)}</p><button class="btn btn-secondary" data-action="reload-tasks">重新加载</button></div></td></tr>`); return; }
-    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(t.thumbnail_url || currentCover(t),coverPreviewLabel(t))}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div><div class="task-subtitle cover-preview-label">${esc(coverPreviewLabel(t))}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${playerCardBadge(t)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div><div class="task-subtitle schedule-list-time">${esc(t.publish_at ? '预约：' + beijingTime(t.publish_at) : '未设置预约')}</div>${pendingSchedule(t) ? '<div class="task-subtitle schedule-list-notice">发布安排变更待确认</div>' : missedSchedule(t) && t.status !== 'schedule_missed' ? '<div class="task-subtitle schedule-list-notice">已错过预约时间</div>' : ''}</td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">审核封面</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}${shareXButton(t)}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
+    syncMarkup($('#task-table'),state.tasks.length ? state.tasks.map(t => `<tr data-task-id="${esc(t.id)}"><td><div class="task-cell"><button type="button" class="task-thumb" data-action="details" data-id="${esc(t.id)}" aria-label="查看任务详情">${image(t.thumbnail_url || currentCover(t),coverPreviewLabel(t))}<span>${icon('play')}</span></button><div><button type="button" class="task-title" data-action="details" data-id="${esc(t.id)}">${esc(t.title || t.title_template || '待处理发布任务')}</button><div class="task-subtitle">${esc(t.id)} · ${esc(t.material?.name || '—')}</div><div class="task-subtitle cover-preview-label">${esc(coverPreviewLabel(t))}</div></div></div></td><td><div class="channel-cell"><span class="channel-avatar">YT</span><div><strong>${esc(t.channel?.name || '—')}</strong><span class="task-subtitle">${esc(t.channel?.language || '')}</span></div></div></td><td><span class="source-label">${icon(t.cover_source === 'ai' ? 'spark' : 'upload')}${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</span></td><td>${badge(t.status)}${playerCardBadge(t)}${t.status === 'comment_failed' ? '<div class="task-subtitle status-subtitle">视频已公开</div>' : t.status === 'thumbnail_failed' ? '<div class="task-subtitle status-subtitle">视频保持私享</div>' : ''}</td><td><div class="date-cell">${esc(time(t.created_at))}</div><div class="task-subtitle schedule-list-time">${esc(t.publish_at ? '预约：' + beijingTime(t.publish_at) : '未设置预约')}</div>${pendingSchedule(t) ? '<div class="task-subtitle schedule-list-notice">发布安排变更待确认</div>' : missedSchedule(t) && t.status !== 'schedule_missed' ? '<div class="task-subtitle schedule-list-notice">已错过预约时间</div>' : ''}</td><td><div class="task-actions">${t.can_review ? `<button class="btn btn-primary btn-sm" data-action="review" data-id="${esc(t.id)}">${t.regular_media || t.is_regular ? '最终确认' : '审核封面'}</button>` : `<button class="btn btn-${t.can_retry ? 'secondary' : 'ghost'} btn-sm" data-action="details" data-id="${esc(t.id)}">${t.can_retry ? '处理异常' : '查看详情'}</button>`}${t.can_review ? `<button class="icon-btn" data-action="details" data-id="${esc(t.id)}" aria-label="查看详情">${icon('chevron')}</button>` : ''}${shareXButton(t)}</div></td></tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">${icon('folder')}<h3>${state.search || state.status !== 'all' || state.tab !== 'all' ? '没有找到匹配的任务' : '暂无发布任务'}</h3><p>${state.source?.configured === false ? '素材筛选规则待配置，配置完成后即可新建发布。' : '点击「新建发布」，选择素材与频道后开始。'}</p></div></td></tr>`);
   }
   async function loadTasks(quiet = false) {
     const serial = ++listSerial;
@@ -444,6 +444,7 @@
     finally { if (serial === listSerial) { state.listLoading = false; if (!quiet || !state.listLoaded || !state.listError) renderList(); } }
   }
   function channelsValid() { return state.channels.loaded && !state.channels.loading && !state.channels.error; }
+  function channelFormOpen() { return stack.some(v => v.type === 'publish' || v.type === 'regular'); }
   async function loadChannels(force = false, polling = false) {
     if (channelPromise) return force ? channelPromise.then(() => loadChannels(true)) : channelPromise;
     // Reopen reads current tenant language settings; server still caches OAuth checks.
@@ -466,8 +467,8 @@
         Object.assign(state.channels,{items:data.channels,loaded:true,loadedAt:Date.now(),checking:data.checking === true,checkedAt:data.checked_at,pollExpired:false});
         state.bootstrap.channels = data.channels;
         if (draft?.channelId && !data.channels.some(c => String(c.id) === String(draft.channelId) && c.eligible === true)) draft.channelId = '';
-        if (state.channels.checking && stack.some(v => v.type === 'publish')) {
-          if (Date.now() < channelPollUntil) channelPollTimer = setTimeout(() => { if (stack.some(v => v.type === 'publish')) void loadChannels(false,true); },2000);
+        if (state.channels.checking && channelFormOpen()) {
+          if (Date.now() < channelPollUntil) channelPollTimer = setTimeout(() => { if (channelFormOpen()) void loadChannels(false,true); },2000);
           else state.channels.pollExpired = true;
         }
         return data.channels;
@@ -533,6 +534,12 @@
     }
   }
   async function selectMaterial(view, material) {
+    if (view.regularSelection && material) {
+      const key = String(material.id);
+      if (view.regularSelection.has(key)) view.regularSelection.delete(key);
+      else view.regularSelection.set(key,material);
+      renderModals(); return;
+    }
     view.readController?.abort();
     const controller = new AbortController(); view.readController = controller;
     view.selected = material; view.detailLoading = Boolean(material?.metadata_pending); view.detailError = '';
@@ -561,6 +568,11 @@
     }
   }
   function confirmMaterial(view) {
+    if (view.regularSelection) {
+      const materials = [...view.regularSelection.values()];
+      if (materials.length) { closeModal(); regularUi.start(materials); }
+      return;
+    }
     if (!view.selected || view.selected.metadata_pending || view.detailLoading || state.source?.configured === false) return;
     draft.material = view.selected;
     if (!draft.title.trim()) draft.title = '{name}';
@@ -569,8 +581,8 @@
   function newDraft() { return {channelTemplate:{status:'idle',serial:0,channelId:'',fields:[],error:''},operationId:uid(),material:null,channelId:'',title:'',description:state.bootstrap.settings?.default_description || '',comment:'',publishAt:'',coverSource:'ai',requirements:'',cover:null,errors:{},pendingPayload:null}; }
   function openModal(type, data = {}) { if (!stack.length) lastFocus = document.activeElement; stack.push({type,key:++modalSerial,...data}); renderModals(true); }
   function releaseCover(cover) { if (cover?.preview) URL.revokeObjectURL(cover.preview); }
-  function closeModal() { if (busy) return; const v = stack.pop(); v?.readController?.abort(); if (v?.type === 'shareX') stopShareX(v); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (v?.type === 'publish') { clearTimeout(channelPollTimer); } if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) { lastFocus?.focus(); if (v && ['details','review'].includes(v.type)) void loadTasks(true); } }
-  function closeAll() { stack.forEach(v => { v.readController?.abort(); releaseCover(v.manualCover); if (v.type === 'shareX') stopShareX(v); }); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
+  function closeModal() { if (busy) return; const v = stack.pop(); v?.readController?.abort(); if (v?.type === 'shareX') stopShareX(v); if (v?.type === 'regular') regularUi.close(v); if (v?.type === 'picker') { clearTimeout(materialPollTimer); clearTimeout(materialTimer); ++materialSerial; } if (!channelFormOpen()) clearTimeout(channelPollTimer); if (v?.type === 'publish') { releaseCover(draft?.cover); draft = null; } if (v?.manualCover) releaseCover(v.manualCover); renderModals(true); if (!stack.length) { lastFocus?.focus(); if (v && ['details','review'].includes(v.type)) void loadTasks(true); } }
+  function closeAll() { stack.forEach(v => { v.readController?.abort(); releaseCover(v.manualCover); if (v.type === 'shareX') stopShareX(v); if (v.type === 'regular') regularUi.close(v); }); stack = []; releaseCover(draft?.cover); draft = null; renderModals(); }
   function shell(v,title,subtitle,body,footer = '',large = false) { return `<div class="modal-overlay${top() !== v ? ' modal-behind' : ''}" data-modal-key="${v.key}" ${top() !== v ? 'inert aria-hidden="true"' : ''}><section class="modal${large ? ' modal-lg' : ''}" role="dialog" aria-modal="${top() === v}" aria-labelledby="modal-title-${v.key}" tabindex="-1"><header class="modal-header"><div><h2 class="modal-title" id="modal-title-${v.key}">${title}</h2><p class="modal-subtitle">${subtitle}</p></div><button class="icon-btn close-modal" data-action="close-modal" aria-label="关闭弹窗">${icon('x')}</button></header><div class="modal-body">${v.error ? `<div class="note-box note-error inline-error" role="alert">${esc(v.error)}</div>` : ''}${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ''}</section></div>`; }
   const label = (text,required = false,id = '') => `<label class="field-label"${id ? ` for="${id}"` : ''}>${text}${required ? '<span class="required">*</span>' : ''}</label>`;
   const fieldError = field => draft?.errors[field] ? `<span class="error-message" role="alert">${esc(draft.errors[field])}</span>` : '';
@@ -663,19 +675,27 @@
   }
   function pickerView(v) {
     const configured = state.source?.configured !== false, materials = v.items || [];
+    const selected = m => v.regularSelection ? v.regularSelection.has(String(m.id)) : String(v.selected?.id) === String(m.id);
     const cacheStatus = v.error ? '素材更新失败，请点击刷新素材重试。' : v.pollExpired ? '更新尚未完成，已暂停自动查询，请手动刷新。' : v.cache?.refreshing ? '素材正在更新，可先选择已显示的素材。' : v.loading ? '正在读取素材…' : v.cache?.stale ? '当前为上次缓存，更新暂不可用。' : '素材已更新';
     const age = v.cache?.age_seconds == null ? NaN : Number(v.cache.age_seconds);
     const cacheHint = `<div class="material-cache-status" role="status">${esc(cacheStatus)}${Number.isFinite(age) ? ' · 更新于 ' + esc(time((v.cacheAt || Date.now()) - age * 1000)) : ''}${v.cache?.error ? ' · ' + esc(v.cache.error) : ''}</div>${v.detailError ? `<div class="note-box note-error" role="alert">${esc(v.detailError)}</div>` : ''}`;
     const uploaders = [...(v.uploaders || [])];
     if (v.uploaderId && !uploaders.some(u => String(u.id) === v.uploaderId)) uploaders.push({id:v.uploaderId,name:'用户 ' + v.uploaderId});
     const uploaderFilter = `<label class="material-uploader-filter" for="material-uploader"><span>上传人</span><select class="select" id="material-uploader" aria-label="上传人筛选"><option value="">全部上传人</option>${uploaders.map(u => `<option value="${esc(u.id)}" ${String(u.id) === (v.uploaderId || '') ? 'selected' : ''}>${esc(u.name)}${String(u.id) === '0' ? '' : '（' + esc(u.id) + '）'}</option>`).join('')}</select></label>`;
-    const body = `<div class="picker-toolbar">${uploaderFilter}<div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${String(v.selected?.id) === String(m.id) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${String(v.selected?.id) === String(m.id)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${String(v.selected?.id) === String(m.id) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请调整上传人或关键词，或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
+    const body = `<div class="picker-toolbar">${uploaderFilter}<div class="search-input-wrap">${icon('search')}<input class="input" id="material-search" value="${esc(v.search || '')}" placeholder="搜索素材名称或 ID" aria-label="搜索素材"/></div><button type="button" class="btn btn-secondary btn-sm" data-action="reload-materials" ${v.loading ? 'disabled' : ''}>刷新素材</button></div>${cacheHint}${!configured ? '<div class="note-box note-amber"><strong>素材筛选规则待配置</strong><span>已预留素材查询配置，配置完成后展示符合条件的视频素材。</span></div>' : ''}<div class="material-grid">${!materials.length && (v.loading || (v.cache?.refreshing && !v.pollExpired)) ? '<div class="empty-state material-empty">正在加载素材…</div>' : materials.length ? materials.map(m => `<article class="material-card ${selected(m) ? 'selected' : ''}"><button class="material-select" data-action="select-material" data-id="${esc(m.id)}" aria-pressed="${selected(m)}"><div class="material-cover">${image(m.thumbnail_url,m.name)}<span class="material-duration">${esc(m.duration || '—')}</span><span class="material-check">${selected(m) ? icon('check') : ''}</span></div><div class="material-info"><strong>${esc(m.name)}</strong><span class="material-meta">${esc(m.id)} · ${esc(m.language || '—')}</span><span class="material-meta">${esc(m.size || '')}</span></div></button><button class="btn btn-ghost btn-sm material-preview" data-action="preview-material" data-id="${esc(m.id)}">${icon('play')}预览素材</button></article>`).join('') : `<div class="empty-state material-empty">${icon('folder')}<h3>${configured ? '暂无符合条件的素材' : '素材筛选规则待配置'}</h3><p>${configured ? '请调整上传人或关键词，或稍后重试。' : '当前无法选择素材，配置完成后自动使用新的素材筛选范围。'}</p>${v.error ? '<button class="btn btn-secondary" data-action="reload-materials">重新加载</button>' : ''}</div>`}</div>`;
+    if (v.regularSelection) {
+      const n = v.regularSelection.size;
+      return shell(v,'选择普通视频素材','可选择一条或多条自定义视频。',body,
+        '<span class="footer-hint">已选 ' + n + ' 条</span><button class="btn btn-primary" data-action="confirm-material" ' +
+        (!n || !configured ? 'disabled' : '') + '>继续设置</button>',true);
+    }
     return shell(v,'选择发布素材','按素材 ID 倒序排列，每个任务选择一条视频素材。',body,`<span class="footer-hint">${v.selected ? '已选择：' + esc(v.selected.name) : '尚未选择素材'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">取消</button><button class="btn btn-primary" data-action="confirm-material" ${!v.selected || !configured || v.detailLoading || v.selected.metadata_pending ? 'disabled' : ''}>${v.detailLoading ? '正在读取素材详情…' : '确认选择'}</button></div>`,true);
   }
   function previewView(v) { const m = v.material; return shell(v,'素材预览',esc(m.name),`${safeUrl(m.url) ? `<video class="material-video" controls preload="metadata" ${safeUrl(m.thumbnail_url) ? `poster="${esc(safeUrl(m.thumbnail_url))}"` : ''} src="${esc(safeUrl(m.url))}"></video>` : '<div class="note-box note-amber">该素材暂无可用的视频预览链接。</div>'}<div class="summary-grid"><div class="summary-item"><span>素材名称</span><strong>${esc(m.name)}</strong></div><div class="summary-item"><span>素材 ID</span><strong>${esc(m.id)}</strong></div><div class="summary-item"><span>时长 / 大小</span><strong>${esc(m.duration || '—')} / ${esc(m.size || '—')}</strong></div><div class="summary-item"><span>语言</span><strong>${esc(m.language || '—')}</strong></div></div>`,'<button class="btn btn-secondary" data-action="close-modal">返回素材列表</button>',true); }
   function reviewView(v) {
     const t = task(v.id); if (!t) return shell(v,'审核封面','正在加载任务…','');
     if (!t.can_review || t.status !== 'review') return detailsView(v);
+    if (t.regular_media && regularUi) return regularUi.review(v,t);
     const requestedVersion = Number(v.viewVersion || t.current_version), version = versions(t).find(x => Number(x.number) === requestedVersion), isCurrent = requestedVersion === Number(t.current_version);
     const preview = coverPreview(t), reviewUrl = isCurrent ? (preview?.is_current ? preview.url : '') : safeUrl(version?.url);
     let inline = '';
@@ -692,7 +712,7 @@
   function detailsView(v) {
     const t = task(v.id); if (!t) return shell(v,'发布任务详情','正在加载任务…','');
     const notification = t.notification;
-    return shell(v,'发布任务详情','查看封面、发布文案与每个处理阶段。',`<div class="review-task-heading"><div><strong>${esc(t.title || t.title_template)}</strong><span class="task-subtitle">${esc(t.id)} · 创建于 ${esc(time(t.created_at))}</span></div>${badge(t.status)}</div><div class="detail-layout"><div>${scheduleCard(t,true)}${detailCover(t)}${manualCoverPanel(v,t)}${taskReference(t)}<div class="summary-grid"><div class="summary-item"><span>发布频道</span><strong>${esc(t.channel?.name)}</strong></div><div class="summary-item"><span>封面来源</span><strong>${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</strong></div><div class="summary-item"><span>素材</span><strong>${esc(t.material?.name)}</strong></div><div class="summary-item"><span>当前阶段</span><strong>${esc(phaseLabels[t.phase] || statuses[t.status]?.[0] || t.status)}</strong></div></div><div class="detail-copy">${copyField(t,'title','视频标题')}${copyField(t,'description','视频描述')}${copyField(t,'comment','首条评论 <span class="optional-label">选填</span>')}</div>${linkHelp(t.material)}</div><div>${t.error?.message ? `<div class="note-box note-error"><strong>${esc(statuses[t.status]?.[0] || '任务异常')}</strong><span>${esc(t.error.message)}</span></div>` : ''}${['queued','queued_generation','generating','generation_failed','review'].includes(t.status) ? `<div class="generation-summary"><span class="generation-icon">${icon(t.status === 'generation_failed' ? 'warning' : 'spark')}</span><div><strong>${t.status === 'review' ? '当前封面 V' + esc(t.current_version) + ' 待审核' : esc(statuses[t.status]?.[0])}</strong><p>${esc(t.requirements || '')}</p>${t.status === 'generating' ? '<div class="progress-track"><span class="progress-fill indeterminate"></span></div>' : ''}</div></div>` : ''}${notification ? `<div class="note-box ${notification.status === 'failed' ? 'note-amber' : 'note-blue'}"><strong>飞书审核提醒</strong><span>${esc(notification.message || {sent:'已发送审核提醒',pending:'等待发送提醒',failed:'提醒发送失败，请在当前页面完成审核',none:'尚未发送审核提醒'}[notification.status] || notification.status)}</span></div>` : ''}${failureNotice(t)}<h3 class="section-heading">发布进度</h3>${timeline(t)}${safeUrl(t.video_url) ? `<a class="btn btn-secondary" href="${esc(safeUrl(t.video_url))}" target="_blank" rel="noopener noreferrer">打开 YouTube 视频${icon('arrow')}</a>` : ''}</div></div>`,`<span class="footer-hint">${activeStatuses.includes(t.status) ? '执行中，任务状态会自动更新' : '发布结果以各阶段记录为准'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">关闭</button>${t.can_upload_cover ? `<button class="btn btn-secondary" data-action="manual">${icon('upload')}上传封面</button>` : ''}${t.can_review ? '<button class="btn btn-primary" data-action="details-review">审核封面</button>' : t.can_retry ? `<button class="btn btn-primary" data-action="retry">${icon('retry')}${t.status === 'comment_failed' ? '仅重试首评' : t.status === 'generation_failed' ? '重新生成封面' : '重试失败阶段'}</button>` : ''}</div>`,true);
+    return shell(v,'发布任务详情','查看封面、发布文案与每个处理阶段。',`<div class="review-task-heading"><div><strong>${esc(t.title || t.title_template)}</strong><span class="task-subtitle">${esc(t.id)} · 创建于 ${esc(time(t.created_at))}</span></div>${badge(t.status)}</div><div class="detail-layout"><div>${scheduleCard(t,true)}${detailCover(t)}${manualCoverPanel(v,t)}${taskReference(t)}<div class="summary-grid"><div class="summary-item"><span>发布频道</span><strong>${esc(t.channel?.name)}</strong></div><div class="summary-item"><span>封面来源</span><strong>${t.cover_source === 'ai' ? 'AI 生成' : '本地上传'}</strong></div><div class="summary-item"><span>素材</span><strong>${esc(t.material?.name)}</strong></div><div class="summary-item"><span>当前阶段</span><strong>${esc(phaseLabels[t.phase] || statuses[t.status]?.[0] || t.status)}</strong></div></div><div class="detail-copy">${copyField(t,'title','视频标题')}${copyField(t,'description','视频描述')}${copyField(t,'comment','首条评论 <span class="optional-label">选填</span>')}</div>${linkHelp(t.material)}</div><div>${t.error?.message ? `<div class="note-box note-error"><strong>${esc(statuses[t.status]?.[0] || '任务异常')}</strong><span>${esc(t.error.message)}</span></div>` : ''}${['queued','queued_generation','generating','generation_failed','review'].includes(t.status) ? `<div class="generation-summary"><span class="generation-icon">${icon(t.status === 'generation_failed' ? 'warning' : 'spark')}</span><div><strong>${t.status === 'review' ? '当前封面 V' + esc(t.current_version) + ' 待审核' : esc(statuses[t.status]?.[0])}</strong><p>${esc(t.requirements || '')}</p>${t.status === 'generating' ? '<div class="progress-track"><span class="progress-fill indeterminate"></span></div>' : ''}</div></div>` : ''}${notification ? `<div class="note-box ${notification.status === 'failed' ? 'note-amber' : 'note-blue'}"><strong>飞书审核提醒</strong><span>${esc(notification.message || {sent:'已发送审核提醒',pending:'等待发送提醒',failed:'提醒发送失败，请在当前页面完成审核',none:'尚未发送审核提醒'}[notification.status] || notification.status)}</span></div>` : ''}${failureNotice(t)}<h3 class="section-heading">发布进度</h3>${timeline(t)}${safeUrl(t.video_url) ? `<a class="btn btn-secondary" href="${esc(safeUrl(t.video_url))}" target="_blank" rel="noopener noreferrer">打开 YouTube 视频${icon('arrow')}</a>` : ''}</div></div>`,`<span class="footer-hint">${activeStatuses.includes(t.status) ? '执行中，任务状态会自动更新' : '发布结果以各阶段记录为准'}</span><div class="inline-actions"><button class="btn btn-secondary" data-action="close-modal">关闭</button>${t.can_upload_cover ? `<button class="btn btn-secondary" data-action="manual">${icon('upload')}上传封面</button>` : ''}${t.can_review ? `<button class="btn btn-primary" data-action="details-review">${t.regular_media || t.is_regular ? '最终确认' : '审核封面'}</button>` : t.can_retry ? `<button class="btn btn-primary" data-action="retry">${icon('retry')}${t.status === 'comment_failed' ? '仅重试首评' : t.status === 'generation_failed' ? '重新生成封面' : '重试失败阶段'}</button>` : ''}</div>`,true);
   }
   function scheduleView(v) {
     const t = task(v.id); if (!t) return shell(v,'发布安排','正在加载任务…','');
@@ -707,7 +727,7 @@
     const active = document.activeElement, activeId = active?.id;
     const offsets = [...root.querySelectorAll('.modal-body')].map(node => ({node,top:node.scrollTop,left:node.scrollLeft}));
     let selection; try { selection = [active.selectionStart,active.selectionEnd,active.selectionDirection]; } catch (_) {}
-    const views = {publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView,verifyThumbnail:verifyThumbnailView,schedule:scheduleView,shareX:shareXView};
+    const views = {regular:regularUi?.view,publish:publishView,picker:pickerView,preview:previewView,review:reviewView,details:detailsView,settings:settingsView,verifyThumbnail:verifyThumbnailView,schedule:scheduleView,shareX:shareXView};
     const changed = syncMarkup(root,stack.map(v => v.loadingTask || v.taskLoadFailed ? taskLoadingView(v) : views[v.type](v)).join(''),String(busy));
     document.body.style.overflow = 'hidden';
     if (!changed && !focus) return;
@@ -813,8 +833,13 @@
     busy = true; v.error = ''; renderModals();
     try {
       const asset = action === 'manual' ? await uploadCover(v.manualCover) : null;
-      const data = await post('/tasks/' + encodeURIComponent(t.id) + '/review',{action,version:Number(v.version || t.current_version),feedback:v.feedback?.trim() || '',cover_asset_id:asset?.id || ''});
-      upsert(data.task,true); releaseCover(v.manualCover); v.manualCover = null; v.mode = ''; v.type = 'details'; busy = false; renderModals(); toast(action === 'reject' ? '已打回重做，生成新封面后将再次提醒审核。' : data.task.status === 'schedule_missed' ? '封面已确认，请重新安排发布时间。' : '封面已确认，任务进入上传发布流程。'); void loadTasks(true);
+      const data = await post('/tasks/' + encodeURIComponent(t.id) + '/review',{action,version:Number(v.version || t.current_version),feedback:v.feedback?.trim() || '',cover_asset_id:asset?.id || '',...(t.regular_media && action === 'approve' ? {review_token:v.regularReviewToken} : {})});
+      upsert(data.task,true); releaseCover(v.manualCover); v.manualCover = null; v.mode = '';
+      if (t.regular_media && action === 'manual') {
+        v.type='review'; v.version=data.task.current_version; v.viewVersion=v.version; busy=false; renderModals();
+        toast('替换封面已保存，请核对最终成片并确认发布。'); return;
+      }
+      v.type = 'details'; busy = false; renderModals(); toast(action === 'reject' ? '已打回重做，生成新封面后将再次提醒审核。' : data.task.status === 'schedule_missed' ? '封面已确认，请重新安排发布时间。' : '封面已确认，任务进入上传发布流程。'); void loadTasks(true);
     } catch (error) {
       v.error = error.message;
       if (error.status === 409) { try { const latest = await loadTask(t.id); v.version = latest.current_version; v.viewVersion = latest.current_version; v.mode = ''; v.error = '当前封面已更新或已被处理，已重新加载最新状态。请重新查看后操作。'; } catch (refreshError) { v.error += ' 最新状态加载失败：' + refreshError.message; } }
@@ -863,7 +888,12 @@
         const v = top();
         // An open task owns the polling budget. Refresh the list on return.
         if (v && ['details','review'].includes(v.type) && !busy && !v.loadingTask && !v.taskLoadFailed) {
-          try { const old = task(v.id); const updated = await loadTask(v.id); if (!stack.includes(v)) return; if (v.type === 'details') renderModals(); else if (!v.mode && Number(updated.current_version) !== Number(v.version)) { v.error = '任务封面已更新，请查看最新版本后审核。'; v.version = updated.current_version; v.viewVersion = updated.current_version; renderModals(); } else if (old?.status !== updated.status || old?.schedule_version !== updated.schedule_version || old?.schedule_state !== updated.schedule_state || JSON.stringify(old?.schedule_control) !== JSON.stringify(updated.schedule_control) || !updated.can_review) renderModals(); } catch (_) {}
+          try { const old = task(v.id); const updated = await loadTask(v.id); if (!stack.includes(v)) return; if (v.type === 'details') {
+            if (!v.mode && v.requestedType === 'review' && updated.regular_media && updated.status === 'review' && updated.can_review) {
+              v.type = 'review'; v.version = updated.current_version; v.viewVersion = updated.current_version;
+            }
+            renderModals();
+          } else if (!v.mode && Number(updated.current_version) !== Number(v.version)) { v.error = '任务封面已更新，请查看最新版本后审核。'; v.version = updated.current_version; v.viewVersion = updated.current_version; renderModals(); } else if (old?.status !== updated.status || old?.schedule_version !== updated.schedule_version || old?.schedule_state !== updated.schedule_state || JSON.stringify(old?.schedule_control) !== JSON.stringify(updated.schedule_control) || !updated.can_review) renderModals(); } catch (_) {}
         } else if (!v && !state.listLoading) await loadTasks(true);
       } finally { pollInFlight = false; if (state.ready) schedulePoll(); }
     },6000);
@@ -922,6 +952,15 @@
     const elements = [...$('#modal-root').lastElementChild.querySelectorAll('button:not([disabled]),input:not([disabled]):not([type=file]),textarea:not([disabled]),select:not([disabled]),a[href],summary')].filter(el => el.getClientRects().length);
     if (!elements.length) { event.preventDefault(); return; } const first = elements[0], last = elements.at(-1);
     if (event.shiftKey && (document.activeElement === first || !elements.includes(document.activeElement))) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && (document.activeElement === last || !elements.includes(document.activeElement))) { event.preventDefault(); first.focus(); }
+  });
+  const regularUi = window.createYoutubeRegular?.({esc,shell,api,post,render:renderModals,safeUrl,top,openModal,openTask,uploadCover,toast,upsert,task,coverInput,
+    isOpen:v=>stack.includes(v),channels:()=>state.channels.items,channelState:()=>state.channels,
+    defaultDescription:()=>state.bootstrap?.settings?.default_description || '',
+    loadTasks,loadChannels,scheduleError,publishAtIso,beijingTime});
+  $('#regular-publish')?.addEventListener('click',()=>{
+    if (!regularUi || !state.ready || busy || state.bootstrap.enabled === false) return;
+    openModal('picker',{regularSelection:new Map(),search:'',uploaderId:'',loading:true});
+    void loadMaterials(top());
   });
   $('#new-publish').addEventListener('click', () => { if (!state.ready || busy || state.bootstrap.enabled === false) return; draft = newDraft(); openModal('publish'); void loadChannels(); void readMaterials('').catch(() => {}); });
   $('#settings-button').addEventListener('click', () => { if (state.bootstrap?.can_manage_settings && !busy) openModal('settings',{value:state.bootstrap.settings?.default_description || ''}); });

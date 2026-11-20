@@ -782,21 +782,28 @@ class DramaSynthesisStore:
         """Public/UI callers can never select the internal privacy lane."""
         if (
             request.get("operation_id") == CANARY_OPERATION_ID
-            or any(key in request for key in ("privacy_status", "_privacy_status", "canary_operation_id", "_workflow", "workflow", "_reviewed", "_publish_at", "_schedule_version", "publish_at", "schedule_version"))
+            or any(key in request for key in ("privacy_status", "_privacy_status", "canary_operation_id", "_workflow", "workflow", "_reviewed", "_publish_at", "_schedule_version", "publish_at", "schedule_version", "_source_fingerprint", "expected_source_sha256", "expected_source_size"))
         ):
             raise DramaSynthesisError("youtube_canary_internal_only", "内部测试不可通过正式发布入口创建", 403)
         return self._enqueue_youtube(**request)
 
     def enqueue_reviewed_youtube(self, *, preparation_id: str, source_material_id: str,
                                  approved_cover_path: str, approved_cover_sha256: str,
+                                 expected_source_sha256: str = "", expected_source_size: int = 0,
                                  publish_at: str = "", schedule_version: int = 0, attribution_pending: bool = False, **request: Any) -> Dict[str, Any]:
         """Internal handoff after the preparation service freezes an approved cover.
 
         Both workflows allocate IDs from this table because the shared HK media
         executor caches task-{publish_id}; separate counters would mix videos.
         """
-        if any(key in request for key in ("workflow", "_workflow", "_privacy_status", "privacy_status", "_reviewed", "_publish_at", "_schedule_version", "_attribution_pending")):
+        if any(key in request for key in ("workflow", "_workflow", "_privacy_status", "privacy_status", "_reviewed", "_publish_at", "_schedule_version", "_attribution_pending", "_source_fingerprint")):
             raise DramaSynthesisError("youtube_reviewed_request_invalid", "审核发布请求无效", 400)
+        fingerprint = None
+        if expected_source_sha256 != "" or type(expected_source_size) is not int or expected_source_size != 0:
+            if (not isinstance(expected_source_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_source_sha256)
+                    or type(expected_source_size) is not int or not 0 < expected_source_size <= 2**63 - 1):
+                raise DramaSynthesisError("youtube_reviewed_source_invalid", "所选成片缺少可核对的视频指纹或文件大小", 400)
+            fingerprint = (expected_source_sha256, expected_source_size)
         if (not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(preparation_id or ""))
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(source_material_id or ""))
                 or not Path(approved_cover_path).is_absolute()
@@ -808,7 +815,8 @@ class DramaSynthesisStore:
         request["scopes"] = scopes
         return self._enqueue_youtube(_workflow=REVIEWED_WORKFLOW,
             _reviewed=(str(preparation_id), str(source_material_id), str(approved_cover_path), approved_cover_sha256),
-            _publish_at=normalize_youtube_publish_at(publish_at), _schedule_version=schedule_version, _attribution_pending=attribution_pending, **request)
+            _publish_at=normalize_youtube_publish_at(publish_at), _schedule_version=schedule_version,
+            _attribution_pending=attribution_pending, _source_fingerprint=fingerprint, **request)
 
     def enqueue_youtube_canary(
         self, *, job_id: str, content_id: str, source_kind: str, source_url: str,
@@ -852,6 +860,7 @@ class DramaSynthesisStore:
         _publish_at: str = "",
         _schedule_version: int = 0,
         _attribution_pending: bool = False,
+        _source_fingerprint: Optional[tuple[str, int]] = None,
     ) -> Dict[str, Any]:
         if type(_schedule_version) is not int or _schedule_version < 0:
             raise DramaSynthesisError("youtube_schedule_version_invalid", "发布时间版本无效", 400)
@@ -908,7 +917,9 @@ class DramaSynthesisStore:
                     if (immutable != stored or existing["workflow"] != _workflow
                             or (_workflow == REVIEWED_WORKFLOW and tuple(existing[key] for key in
                                 ("preparation_id", "source_material_id", "approved_cover_path", "approved_cover_sha256")) != _reviewed)
-                            or (_workflow == REVIEWED_WORKFLOW and existing["initial_publish_at"] != _publish_at)):
+                            or (_workflow == REVIEWED_WORKFLOW and existing["initial_publish_at"] != _publish_at)
+                            or (_source_fingerprint is not None and
+                                (existing["source_sha256"], existing["source_size"]) != _source_fingerprint)):
                         raise DramaSynthesisError("youtube_operation_conflict", "发布操作ID已用于不同请求", 409)
                     conn.commit()
                     return dict(existing)
@@ -932,13 +943,14 @@ class DramaSynthesisStore:
                         source_kind,source_url,title,description_template,description_rendered,comment_text,duplicate_confirmed,
                         operator_user_id,operator_name,privacy_status,status,video_state,comment_status,sync_status,created_at_utc,updated_at_utc,
                         workflow,preparation_id,source_material_id,approved_cover_path,approved_cover_sha256,
-                        publish_at,initial_publish_at,schedule_version,schedule_status
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        publish_at,initial_publish_at,schedule_version,schedule_status,source_sha256,source_size
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         operation_id, job_id, content_id, app_id, channel_local_id, channel_id, youtube_account_id,
                         source_kind, source_url, title, description_template, description_rendered, comment_text, int(bool(duplicate_confirmed)),
                         operator_user_id, str(operator_name)[:128], _privacy_status, "queued", "queued", comment_status, "pending", now, now,
                         _workflow, *_reviewed, _publish_at, _publish_at, _schedule_version, "pending" if _publish_at else "none",
+                        *(_source_fingerprint or ("", 0)),
                     ),
                 )
                 task_id = int(cursor.lastrowid)
