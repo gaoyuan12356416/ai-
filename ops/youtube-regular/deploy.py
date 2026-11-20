@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -24,6 +25,8 @@ EDITOR = Path('/opt/ai-video-editing')
 NGINX = Path('/etc/nginx/default.d/ai-video-editing.conf')
 TITLE_NGINX = Path('/etc/nginx/default.d/youtube-regular-titles.conf')
 TITLE_CONF = 'ops/youtube-regular/title-route.conf'
+PAGES = {'video-editing-ai.html','youtube-publish.html'}
+NAV_URL = re.compile(rb'(?<=src=")/quick-nav\.js(?:\?v=[a-zA-Z0-9._-]+)?(?=")')
 HEALTH = '/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
 BASE = {'editor': 'fa0a7eabc7ceae0fa70c32b1c2bc79db66428eb7',
         'publisher': '0651959c9b77f5af234387fe861a157c564f4c4b'}
@@ -169,6 +172,16 @@ def app_splice(live, old, new):
     return live.replace(before,after,1)
 
 
+def page_splice(live, old, new):
+    # Navigation deployments maintain their own cache key on every backend page.
+    if any(data is None for data in (live,old,new)):
+        raise RuntimeError('Expected the existing page and its navigation script')
+    source, current = NAV_URL.findall(old), NAV_URL.findall(live)
+    if len(source)!=1 or len(current)!=1 or NAV_URL.findall(new)!=source or NAV_URL.sub(source[0],live)!=old:
+        raise RuntimeError('Page changed beyond its shared navigation script')
+    return NAV_URL.sub(current[0],new)
+
+
 def names(repo, base, version, scope):
     changed=git(repo,'diff','--no-renames','--name-only',base,version).decode().splitlines()
     if scope=='publisher':
@@ -225,6 +238,7 @@ def build(args, folder):
         for target in targets:
             live=filebytes(target)
             if name=='app.py': result=app_splice(live,old,new)
+            elif target.name in PAGES: result=page_splice(live,old,new)
             elif live!=old: raise RuntimeError('Scoped runtime file differs from baseline: '+str(target))
             else: result=new
             if name.endswith('.py'): ast.parse(result,filename=str(target))
@@ -262,6 +276,9 @@ def reassemble(args,record,folder):
             elif target.parent==WEB: name='static/'+target.name
             else: name=str(target.relative_to(HOST))
             new=blob(args.repo,args.version,name)
+            if target.name in PAGES:
+                track='publisher' if args.scope=='publisher' else 'editor'
+                new=page_splice(live,blob(args.repo,BASE[track],name),new)
         if digest(new)!=row['new']:raise RuntimeError('Release contents changed: '+str(target))
         if row['backup'] is not None and digest(filebytes(folder/row['backup']))!=row['old']:
             raise RuntimeError('Backup differs: '+str(target))
@@ -321,6 +338,10 @@ def main():
                 new=app_splice(live,blob(args.repo,args.version,'app.py'),blob(args.repo,BASE['publisher'],'app.py'))
             elif digest(live)==row['old']:
                 continue
+            elif target.name in PAGES and live is not None:
+                track='publisher' if scope=='publisher' else 'editor'
+                rel='static/'+target.name
+                new=page_splice(live,blob(args.repo,args.version,rel),blob(args.repo,BASE[track],rel))
             else:
                 raise RuntimeError('Review later change before rollback: '+str(target))
             plan[target]=(live,new)
