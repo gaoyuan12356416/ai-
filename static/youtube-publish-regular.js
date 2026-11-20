@@ -4,6 +4,27 @@ window.createYoutubeRegular = function (ui) {
   const route = '/regular';
   const refresh = view => { if (ui.isOpen(view)) render(); };
   const count = text => Array.from(text || '').length;
+  const languageNames = {en:'英语',es:'西班牙语','zh-tw':'繁体中文','zh-cn':'简体中文',zh:'中文',ja:'日语',
+    ko:'韩语',th:'泰语',id:'印尼语',pt:'葡萄牙语',fr:'法语',de:'德语',ru:'俄语',ar:'阿拉伯语',
+    tr:'土耳其语',hi:'印地语',vi:'越南语',it:'意大利语',ms:'马来语'};
+  function titleLanguage(row) {
+    if (row.titleLanguageInfo) return row.titleLanguageInfo;
+    const channel = ui.channels().find(c => String(c.id) === row.channel);
+    const saved = row.languageChannel === row.channel ? row.channelLanguage : channel?.language;
+    for (const [value, source] of [[saved,'channel'],[row.material.language,'material']]) {
+      let code = String(value || '').trim().toLowerCase().replaceAll('_','-');
+      code = ({'zh-hant':'zh-tw','zh-hans':'zh-cn'})[code] || code;
+      code = Object.keys(languageNames).find(key => languageNames[key] === code) || code;
+      if (languageNames[code]) return {language:code,language_label:languageNames[code],language_source:source};
+    }
+    return {language:'en',language_label:'英语',language_source:'default'};
+  }
+  function invalidateTitles(row, channelChanged = false) {
+    row.titleGeneration = (row.titleGeneration || 0) + 1;
+    row.candidates = []; row.translationsZh = []; row.titleLanguageInfo = null;
+    if (channelChanged && row.selectedTitle === row.title) row.title = '';
+    row.selectedTitle = ''; row.selectedTranslation = '';
+  }
   const button = (id, action, label, disabled = false, primary = false) =>
     '<button type="button" class="btn ' + (primary ? 'btn-primary' : 'btn-secondary') +
     ' btn-sm" data-regular-action="' + action + '" data-regular-id="' + esc(id) + '"' +
@@ -41,11 +62,18 @@ window.createYoutubeRegular = function (ui) {
     if (info.shorts) return '<article class="regular-material" data-key="r-' + id + '">' + heading + player +
       '<p>' + esc(spec) + '</p><p class="note-box note-amber">竖屏或方形且不超过 3 分钟。请调整成片后再作为普通视频发布。</p></article>';
     const channels = [['', '请选择频道'], ...ui.channels().map(c => [String(c.id),
-      c.name + (c.eligible ? '' : '（' + (c.reason || '暂不可发布') + '）'), !c.eligible])];
+      c.name + ' · ' + (c.language_label || languageNames[c.language] || '未设置语种') +
+      (c.eligible ? '' : '（' + (c.reason || '暂不可发布') + '）'), !c.eligible])];
     const selected = channels.some(c => c[0] === row.channel);
     if (row.channel && !selected) channels.push([row.channel, '默认频道暂不可用，请重新选择', true]);
-    const candidates = row.candidates.map((t, i) => '<div class="regular-candidate"><span>' + esc(t) +
-      '</span>' + button(id, 'use-' + i, '用这个') + button(id, 'copy-' + i, '复制') + '</div>').join('');
+    const language = titleLanguage(row);
+    const languageHint = !row.channel ? '选择频道后，按频道语言生成标题并附中文翻译。' :
+      '标题语言：' + language.language_label + (language.language_source === 'channel' ? '（随频道）' :
+        language.language_source === 'material' ? '（频道未设置语种，使用素材语言）' : '（频道和素材未设置可用语种，默认英语）');
+    const candidates = row.candidates.map((t, i) => '<div class="regular-candidate"><span><bdi lang="' +
+      esc(language.language) + '">' + esc(t) + '</bdi><small class="field-hint" lang="zh-CN">' +
+      (row.translationsZh?.[i] ? '中文：' + esc(row.translationsZh[i]) : '中文翻译未返回，可重新生成') +
+      '</small></span>' + button(id, 'use-' + i, '用这个') + button(id, 'copy-' + i, '复制') + '</div>').join('');
     const coverInputs = row.coverSource === 'local'
       ? '<label class="field"><span class="field-label">上传 JPG 或 PNG（最多 2 MB）</span><input type="file" accept="image/jpeg,image/png" data-regular-file="' + id + '"></label>' +
         (row.cover ? '<img class="regular-thumb" src="' + esc(row.cover.preview) + '" alt="本地封面预览">' : '')
@@ -58,11 +86,15 @@ window.createYoutubeRegular = function (ui) {
       '<div class="regular-actions">' + button(id, 'default', '设为本剧默认频道', !row.channel || !row.material.content_id) +
       (row.channel && row.channel === row.defaultChannel ? '<span class="field-hint">本剧默认频道</span>' : '') +
       (row.templateStatus === 'error' ? button(id, 'template', '重读频道模板') : '') + '</div>' +
-      select(row, 'mode', '英文标题写法', [['', '请选择生成依据'], ['clip', '本条成片内容'], ['story', '全剧推广卖点']]) +
+      select(row, 'mode', '标题写法', [['', '请选择生成依据'], ['clip', '本条成片内容'], ['story', '全剧推广卖点']]) +
+      '<p class="field-hint">' + esc(languageHint) + '</p>' +
       (row.mode === 'story' ? rowField(row, 'synopsis', '全剧简介（可修改）', 'textarea') : '') +
       (row.mode === 'clip' ? rowField(row, 'notes', info.clip_evidence ? '片中剧情补充（可选）' : '填写本条视频实际出现的剧情', 'textarea') : '') +
-      '<div class="regular-actions">' + button(id, 'titles', row.generating ? '正在生成…' : row.candidates.length ? '重新生成 3 个英文标题' : '生成 3 个英文标题', !row.mode || row.generating) + '</div>' +
+      '<div class="regular-actions">' + button(id, 'titles', row.generating ? '正在生成…' :
+        (row.candidates.length ? '重新生成' : '生成') + ' 3 个' + (row.channel ? language.language_label : '') + '标题',
+        !row.channel || !row.mode || row.generating) + '</div>' +
       candidates + rowField(row, 'title', '发布标题（可直接填写）', 'text', 'maxlength="100"') +
+      (row.selectedTitle === row.title && row.selectedTranslation ? '<p class="field-hint" lang="zh-CN">中文：' + esc(row.selectedTranslation) + '</p>' : '') +
       rowField(row, 'description', '视频描述', 'textarea') + rowField(row, 'comment', '首条评论（可选）', 'textarea') +
       select(row, 'coverSource', '封面来源', [['local', '运营上传'], ['ai', 'AI 参考原剧封面生成']]) +
       coverInputs + '</fieldset><div class="regular-actions">' +
@@ -117,6 +149,8 @@ window.createYoutubeRegular = function (ui) {
 
   async function template(v, row) {
     const channel = row.channel, generation = ++row.templateGeneration;
+    if (row.templateChannel !== channel) invalidateTitles(row, true);
+    row.templateChannel = channel;
     row.templateStatus = channel ? 'loading' : 'ready';
     function set(field, text) { if (!row.dirty.has(field)) row[field] = text; }
     set('description', ui.defaultDescription()); set('comment', ''); set('requirements', '');
@@ -126,6 +160,8 @@ window.createYoutubeRegular = function (ui) {
       if (row.templateGeneration !== generation || !ui.isOpen(v)) return;
       const value = data.template;
       if (!value) throw new Error('频道模板信息不完整');
+      if (row.languageChannel === channel && row.channelLanguage !== value.language) invalidateTitles(row, true);
+      row.languageChannel = channel; row.channelLanguage = value.language || '';
       if (value.description_template) set('description', value.description_template);
       if (value.comment_template) set('comment', value.comment_template);
       if (value.cover_requirements_template) set('requirements', value.cover_requirements_template);
@@ -162,7 +198,7 @@ window.createYoutubeRegular = function (ui) {
 
   function start(materials) {
     const rows = materials.map(material => ({id:String(material.id), material, info:null, channel:'', defaultChannel:'',
-      mode:'', title:'', synopsis:'', notes:'', candidates:[], description:ui.defaultDescription(), comment:'',
+      mode:'', title:'', synopsis:'', notes:'', candidates:[], translationsZh:[], description:ui.defaultDescription(), comment:'',
       time:'', coverSource:'local', requirements:'', cover:null, dirty:new Set(), templateStatus:'ready',
       templateGeneration:0, operationId:crypto.randomUUID(), pending:null, taskId:'', error:''}));
     openModal('regular', {rows});
@@ -217,19 +253,29 @@ window.createYoutubeRegular = function (ui) {
     }
     if (action === 'titles') {
       if (row.generating) return;
+      if (!row.channel) throw new Error('请先选择发布频道');
       const generation = row.titleGeneration = (row.titleGeneration || 0) + 1;
       row.generating = true; refresh(v);
       try {
         const response = await api(route + '/titles',{method:'POST',timeoutMs:140000,body:JSON.stringify({
-          material_id:row.id,sha256:row.info.media.sha256,mode:row.mode,synopsis:row.synopsis,clip_notes:row.notes})});
-        if (row.titleGeneration === generation) row.candidates = response.titles;
+          material_id:row.id,sha256:row.info.media.sha256,channel_id:row.channel,
+          mode:row.mode,synopsis:row.synopsis,clip_notes:row.notes})});
+        if (row.titleGeneration === generation && ui.isOpen(v)) {
+          row.candidates = response.titles; row.translationsZh = response.translations_zh || [];
+          row.titleLanguageInfo = response;
+        }
+      } catch (error) {
+        if (row.titleGeneration === generation && ui.isOpen(v)) throw error;
       } finally { row.generating = false; }
       return;
     }
     const choice = /^(use|copy)-(\d+)$/.exec(action);
     if (choice && row.candidates[Number(choice[2])]) {
       const title = row.candidates[Number(choice[2])];
-      if (choice[1] === 'use') row.title = title;
+      if (choice[1] === 'use') {
+        row.title = title; row.selectedTitle = title;
+        row.selectedTranslation = row.translationsZh?.[Number(choice[2])] || '';
+      }
       else { await navigator.clipboard.writeText(title); toast('已复制标题'); }
     }
   }
@@ -268,9 +314,10 @@ window.createYoutubeRegular = function (ui) {
     const row = v.rows.find(r => r.id === el.dataset.regularId), field=el.dataset.regularField;
     if (!row || row.pending || row.preparing) return;
     row[field]=el.value; row.dirty.add(field);
-    if (['mode','synopsis','notes'].includes(field)) { row.titleGeneration=(row.titleGeneration||0)+1; row.candidates=[]; }
+    if (['mode','synopsis','notes'].includes(field)) invalidateTitles(row);
+    if (field==='title') { row.selectedTitle=''; row.selectedTranslation=''; }
     if (field==='channel') void template(v,row);
-    if (['channel','mode','coverSource'].includes(field)) refresh(v);
+    if (['channel','mode','coverSource','title','synopsis','notes'].includes(field)) refresh(v);
   });
   document.addEventListener('change',event=>{
     const el=event.target,v=top();

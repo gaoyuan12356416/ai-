@@ -80,4 +80,5 @@ body{background:radial-gradient(circle at top left,rgba(36,87,255,.12),transpare
 .regular-review-cover { display: block; max-width: 100%; max-height: 310px; object-fit: contain; margin-top: 8px; }
 .regular-actions, .regular-candidate { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .regular-candidate span { flex: 1 1 230px; overflow-wrap: anywhere; }
+.regular-candidate small { display: block; margin-top: 4px; }
 @media(max-width:640px) { .regular-grid { grid-template-columns: 1fr; } }

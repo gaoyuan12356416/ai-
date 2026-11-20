@@ -238,13 +238,18 @@ class RegularPublication:
                     default_channel=self.default(actor, material))
 
     def titles(self, actor, body):
+        channel_id = str(body.get('channel_id') or '').strip()
+        if not channel_id:
+            raise WorkflowError('regular_title_channel', '请先选择发布频道，再生成对应语言的标题')
+        template = self.workflow.get_channel_template(actor, channel_id)['template']
         media = self.stored(actor, body.get('material_id'), body.get('sha256'))
         material = self._catalog(media['material_id'])
         if tuple(media['source_identity']) != identity(material):
             raise WorkflowError('regular_media_changed', '素材已更新，请重新选择', 409)
+        language = regular_titles.title_language(template.get('language'), material.get('language'))
         prompt = regular_titles.title_prompt(body.get('mode'), material, media.get('evidence'),
-                                            body.get('synopsis', ''), body.get('clip_notes', ''))
-        return {'titles': self.generate(prompt, self.workflow.root)}
+                                            body.get('synopsis', ''), body.get('clip_notes', ''), language['language'])
+        return {**self.generate(prompt, self.workflow.root), **language}
 
     def prepare(self, actor, body):
         item = self.stored(actor, body.get('material_id'), body.get('sha256'))

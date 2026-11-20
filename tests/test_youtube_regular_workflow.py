@@ -20,7 +20,7 @@ from features.drama_synthesis.core import DramaSynthesisError, DramaSynthesisSto
 from features.youtube_auto_publish.regular import RegularPublication
 from features.youtube_auto_publish.regular_media import dimensions, editor_object_sha
 from features.youtube_auto_publish.regular_routes import edit_title, stream_preview
-from features.youtube_auto_publish.regular_titles import title_prompt, validated_titles
+from features.youtube_auto_publish.regular_titles import title_language, title_prompt, validated_result, validated_titles
 from features.youtube_auto_publish.service import YouTubeWorkflow
 from features.youtube_auto_publish.templates import WorkflowError
 
@@ -62,7 +62,8 @@ class Ordinary(unittest.TestCase):
                            content_id='original', language='en', size_bytes=23, width=1920, height=1080,
                            duration_ms=120000, evidence=[{'description':'They meet at the station','transcript':'Hello'}])
         self.reg = RegularPublication(self.workflow, evidence=lambda mid,cookie:dict(self.editor, material_id=mid,
-                                      url=self.catalog.get(mid)['url']), generate=lambda prompt, root: ['One', 'Two', 'Three'])
+                                      url=self.catalog.get(mid)['url']), generate=lambda prompt, root:
+                                      dict(titles=['One', 'Two', 'Three'], translations_zh=['一', '二', '三']))
         self.addCleanup(self.reg.pool.shutdown)
         self.cover = self.workflow.upload_cover(self.actor, {'data':base64.b64encode(photo('navy')).decode()})['asset']['id']
         self.base = dict(material_id='140', sha256=self.sha, channel_id='1', title_template='At the station',
@@ -214,6 +215,50 @@ class Ordinary(unittest.TestCase):
         self.assertIn('Owner synopsis',title_prompt('story',first['material'],[],'Owner synopsis',''))
         with self.assertRaises(WorkflowError):
             validated_titles(['One','one','Two'])
+
+    def test_titles_use_current_tenant_channel_language(self):
+        self.reg.describe(self.actor, '140', 'session')
+        calls = []
+        self.reg.generate = lambda prompt, root: calls.append(prompt) or dict(
+            titles=['運命の再会', '駅で始まる恋', 'ふたりの新たな旅'], translations_zh=['命运的重逢', '车站开始的恋情', '两人的新旅程'])
+        def save(actor, language, version):
+            return self.workflow.save_channel_template(actor, '1', dict(
+                channel_id=self.options[0]['channel_id'], version=version, language=language,
+                title_template='', description_template='', comment_template=''))
+        save(self.actor, 'ja', 0)
+        save(dict(self.actor, tenant_key='other-team'), 'ko', 0)
+        result = self.reg.titles(self.actor, dict(self.base, mode='clip', language='en'))
+        self.assertEqual(result['language'], 'ja')
+        self.assertEqual(result['language_source'], 'channel')
+        self.assertEqual(result['translations_zh'][0], '命运的重逢')
+        self.assertIn('language code: ja', calls[-1])
+        self.assertIn('Simplified Chinese', calls[-1])
+        self.assertNotIn('Final wedding', calls[-1])
+        save(self.actor, 'zh-tw', 1)
+        self.reg.titles(self.actor, dict(self.base, mode='story'))
+        self.assertIn('language code: zh-tw', calls[-1])
+        self.assertIn('Final wedding', calls[-1])
+        self.assertEqual(self.reg.titles(self.actor, dict(self.base, channel_id='2', mode='story'))['language_source'], 'material')
+        with self.assertRaisesRegex(WorkflowError, '选择发布频道'):
+            self.reg.titles(self.actor, dict(self.base, channel_id='', mode='clip'))
+        with self.assertRaises(WorkflowError):
+            self.reg.titles(self.actor, dict(self.base, channel_id='missing', mode='clip'))
+
+    def test_multilingual_titles_and_translation_degradation(self):
+        for samples in (['逃跑的王后', '雙生姊妹的犧牲', '點燃特洛伊的愛情'],
+                        ['運命の再会', '駅で始まる恋', 'ふたりの旅'], ['뜻밖의 재회', '운명의 사랑', '새로운 시작'],
+                        ['ملكة جديدة', 'حب ومصير', 'سر التوأم'], ['ราชินีคนใหม่', 'รักและโชคชะตา', 'ความลับของฝาแฝด']):
+            self.assertEqual(validated_titles(samples), samples)
+        values = validated_result(dict(titles=['First reunion', 'A new queen', 'The twin sacrifice'],
+                                       translations_zh=['初次重逢', '', '双生姊妹的牺牲']))
+        self.assertEqual(values['translations_zh'], ['初次重逢', '', '双生姊妹的牺牲'])
+        self.assertEqual(validated_result(dict(titles=values['titles']))['titles'], values['titles'])
+        self.assertEqual(validated_result(dict(titles=values['titles'], translations_zh=['错位']))['translations_zh'], ['', '', ''])
+        self.assertEqual(title_language('', 'zh_TW')['language'], 'zh-tw')
+        self.assertEqual(title_language('', '')['language_source'], 'default')
+        for bad in (['One', 'one', 'Two'], ['a'*101, 'Two', 'Three'], ['A\nB', 'Two', 'Three'], ['https://x.com', 'Two', 'Three']):
+            with self.assertRaises(WorkflowError):
+                validated_titles(bad)
 
     def test_legacy_snapshot_bytes_range_and_terminal_cleanup(self):
         evidence_calls = []
