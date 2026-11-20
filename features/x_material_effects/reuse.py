@@ -28,6 +28,11 @@ def local_conflict(db,material_id,account_id):
 def lane():return 'tag' if '/x-tag-publisher/' in os.environ.get('X_AUTO_POST_DB_PATH','') else 'ordinary'
 
 def client(action,**payload):
+    if action=='check' and len(payload.get('material_ids',[]))>500:
+        ids=payload['material_ids'];blocked=set()
+        for offset in range(0,len(ids),500):
+            blocked.update(client(action,**dict(payload,material_ids=ids[offset:offset+500]))['blocked'])
+        return dict(ok=True,blocked=sorted(blocked))
     token=os.environ.get('X_POST_AUTO_INTERNAL_TOKEN') or os.environ.get('X_AUTO_POST_INTERNAL_TOKEN') or os.environ.get('X_TAG_ACCOUNT_BROKER_TOKEN')
     if not token:raise RuntimeError('x_effect_broker_credentials_missing')
     result=request('http://127.0.0.1:8899/internal/x-material-effects/reuse',token,dict(action=action,**payload))
@@ -77,7 +82,9 @@ def handle(payload,root=ROOT):
     if action=='check':
         ids=payload.get('material_ids',[])
         if not isinstance(ids,list) or len(ids)>1000 or any(not str(v).isdigit() for v in ids):raise ValueError('invalid_material_ids')
-        return dict(ok=True,blocked=sorted(conflicts(ids,account,own_lane=name,own_task=tid)))
+        # Preview uses synthetic positive task IDs. At selection time no real
+        # material is frozen yet, so the read-only check excludes no task.
+        return dict(ok=True,blocked=sorted(conflicts(ids,account,own_lane=name)))
     if action not in ('reserve','execution'):raise ValueError('invalid_action')
     source=task(name,tid);mid=str(payload.get('material_id',''))
     if not mid.isdigit() or str(source['account_id'])!=account:raise ValueError('identity_mismatch')
