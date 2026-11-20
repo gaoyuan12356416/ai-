@@ -21,6 +21,10 @@ HotDrama positional exports use a matching SQL projection from the source direct
 
 The DramaWave daily files under `read-checkpoints` also retain the query and completion times, transaction isolation, original control totals, and the source count of omitted zero rows. These header counts describe the source query. The snapshot record count measures the rows actually contained in the file.
 
+MySQL JSON can round the decimal rendering of binary floating-point numbers. New page writes protect nonintegral floats using a reserved `__report_float_hex_v1__` cell containing `float.hex()`. `fetch_pages` decodes these cells before hashes, totals or exports are checked; existing plain numeric pages remain readable. Page identities and hashes still describe the original normalized business values. Use this version or newer when exporting protected pages; older readers intentionally fail their digest checks rather than returning changed data.
+
+`repair_staging_numbers.py` handles the two frozen HotDrama daily files affected by that rendering loss. It defaults to a read-only diagnosis. `--apply` first saves the original page payloads in the private handoff directory, then conditionally repairs only pages whose differences are within 32 floating-point ULPs and which no verified snapshot references. All other fields and digests must match. It uses one writer, retains snapshot and page IDs, rereads every page on the replica, and appends ordinary verified import receipts. Supply a plan copied exactly from the frozen inventory, a new `--backup` path under `handoff-cpu` and a `--journal` under `receipts`. Do not run DDL or reimport unrelated files. A failed/ambiguous update must be reconciled against the original backup before another apply.
+
 ## Scope and recovery
 
 63350 serves all searches, page reads and verification. 63353 accepts the fixed DDL and inserts or primary-key status updates on the two named tables. The writer uses one connection and small batches. Each snapshot's ordered `page_ids` may include a page more than once. Use that order for queries and sums. Adding all physical pages would mix unrelated report versions.

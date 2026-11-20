@@ -63,6 +63,36 @@ class ImportTests(unittest.TestCase):
             history.read_version("a" * 64, dst)
         self.assertEqual(json.loads(dst.getvalue()), document)
 
+    def test_mysql_decimal_rendering_cannot_round_stored_binary_floats(self):
+        original = [[1.9700000000000002, 3.2199999999999998, 0.43000000000000005, -1.1300000000000001]]
+        payload = history.storage_payload(history.encoded(original))
+        # MySQL's JSON serialization changes unprotected numeric cells.
+        rendered = json.loads(payload, parse_float=lambda text: float(format(float(text), '.15g')))
+        self.assertEqual(history.storage_values(rendered, decode=True), original)
+        self.assertNotEqual(json.loads(history.encoded(original), parse_float=lambda text: float(format(float(text), '.15g'))), original)
+        cells = [{'spend': n} for n in original[0]]
+        pages, _ = history.pack_pages(cells, 'hotdrama_report', ['spend'])
+        stored = (pages[0][0], 'hotdrama_report', *pages[0][1:-1], history.storage_payload(pages[0][-1]))
+
+        class JsonCursor:
+            def execute(self, *args):
+                pass
+
+            def fetchall(self):
+                return [stored]
+
+        history.verify_block(JsonCursor(), pages, 'hotdrama_report', ['spend'])
+        for value in (float('inf'), float('nan')):
+            with self.assertRaisesRegex(ValueError, 'invalid_stored_float'):
+                history.storage_values(value)
+
+    def test_numeric_repair_rejects_business_changes(self):
+        from repair_staging_numbers import rendering_loss
+        self.assertTrue(rendering_loss([[1.9700000000000002, '017', None]], [[1.97, '017', None]]))
+        self.assertFalse(rendering_loss([[1.97]], [[1.98]]))
+        self.assertFalse(rendering_loss([['017']], [['17']]))
+        self.assertFalse(rendering_loss([[1.0]], [[1]]))
+
     def test_duplicate_receipts_keep_every_line_but_only_safe_fields(self):
         raw = b'{"ad_id":"123","final_status":"ok","response":{"access_token":"test"}}\n'
         with tempfile.TemporaryDirectory() as directory:

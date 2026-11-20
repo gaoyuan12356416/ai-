@@ -6,6 +6,7 @@ import datetime
 from decimal import Decimal
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -146,6 +147,29 @@ def normalize(v):
     if isinstance(v, list):
         return [normalize(x) for x in v]
     return v
+
+
+FLOAT_HEX = "__report_float_hex_v1__"
+
+
+def storage_values(value, decode=False):
+    """Keep binary floats exact across MySQL JSON's decimal rendering."""
+    if decode and isinstance(value, dict) and set(value) == {FLOAT_HEX}:
+        number = float.fromhex(value[FLOAT_HEX])
+        check(math.isfinite(number), "invalid_stored_float")
+        return number
+    if not decode and isinstance(value, float):
+        check(math.isfinite(value), "invalid_stored_float")
+        return {FLOAT_HEX: value.hex()}
+    if isinstance(value, list):
+        return [storage_values(v, decode) for v in value]
+    if isinstance(value, dict):
+        return {k: storage_values(v, decode) for k, v in value.items()}
+    return value
+
+
+def storage_payload(payload):
+    return encoded(storage_values(json.loads(payload)))
 
 
 def business_cell(value):
@@ -389,7 +413,10 @@ def fetch_pages(cur, keys, detail):
         + ")"
     )
     cur.execute(sql, keys)
-    return cur.fetchall()
+    rows = cur.fetchall()
+    if detail:
+        return [(*row[:-1], encoded(storage_values(json.loads(row[-1]), decode=True))) for row in rows]
+    return rows
 
 
 def verified_view(reader, sid):
@@ -529,7 +556,7 @@ def migrate(path, dataset, reader, writer):
         unique = list({p[0]: p for p in pages}.values())
         for window in group(unique, 90):
             already = {r[0].lower() for r in fetch_pages(get, [p[0] for p in window], False)}
-            missing = [(p[0], dataset, *p[1:]) for p in window if p[0] not in already]
+            missing = [(p[0], dataset, *p[1:-1], storage_payload(p[-1])) for p in window if p[0] not in already]
             for batch in group(missing, 3):
                 put.executemany(
                     "INSERT INTO "
