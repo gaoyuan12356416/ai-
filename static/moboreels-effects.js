@@ -88,7 +88,7 @@
     function render(){
       const d=state.data;el.content.hidden=false;el.scopeLabel.textContent=d.scope.label+' · 金额 USD';el.freshness.textContent='最近收入同步：'+beijing(d.last_success_at);
       el.period.textContent=d.date_from+' 至 '+d.date_to+' · '+d.group_by.map(k=>DIMS[k]).join(' × ');el.queriedAt.textContent='查询更新：'+beijing(d.queried_at);
-      const notes=[`订单已同步 ${d.complete_order_days}/${d.requested_days} 天，广告已同步 ${d.complete_ad_days}/${d.requested_days} 天（广告最新来源日 ${d.ad_data_as_of||'未同步'}）。`, '点击按北京时间；收入按 Mobo 来源日期。每日 10:00 自动同步收入，广告通常 T+1。'];
+      const notes=[`订单已同步 ${d.complete_order_days}/${d.requested_days} 天，广告已同步 ${d.complete_ad_days}/${d.requested_days} 天（广告最新来源日 ${d.ad_data_as_of||'未同步'}）。`, '点击按北京时间；收入按 Mobo 来源日期。每小时整点自动同步收入，广告通常 T+1。'];
       if(d.complete_order_days<d.requested_days||d.complete_ad_days<d.requested_days)notes.unshift('收入部分日期尚未同步，下方合计仅含已采集收入，不能当作完整期间收入。');
       if(d.date_from<d.click_coverage_from)notes.push('点击统计从 '+d.click_coverage_from+' 开始，更早日期未覆盖。');
       if(Number(d.excluded_shared.total_revenue_usd)!==0)notes.push('本次渠道筛选未包含共用或待归属收入 '+format(d.excluded_shared.total_revenue_usd,'total_revenue_usd')+'，可切换“全部渠道”核对。');
@@ -113,7 +113,7 @@
         const changed=syncChanged(state.lastSuccess,d.last_success_at)||(prior&&d.run&&prior.updated_at!==d.run.updated_at&&d.run.status==='failed');
         if(changed){state.lastSuccess=d.last_success_at;await load();}
         const r=d.run,active=r&&['queued','running'].includes(r.status);el.syncBtn.disabled=state.starting||!!active;
-        el.syncStatus.textContent=active?'正在同步…':r?.status==='failed'?'最近同步部分失败':'每日北京时间 10:00 自动更新';
+        el.syncStatus.textContent=active?'正在同步…':r?.status==='failed'?'最近同步部分失败':'每小时整点自动更新（北京时间）';
         el.syncDetail.textContent=r?`最近任务：${r.date_from} 至 ${r.date_to}；${(r.parts||[]).filter(p=>p.status==='succeeded').length}/${(r.parts||[]).length} 分项完成。最近成功：${beijing(d.last_success_at)}`:'尚无同步任务';el.syncError.textContent=r?.error||'';
       }catch(e){if(state.allowed)el.syncError.textContent='同步状态读取失败：'+e.message;}finally{state.polling=false;schedule();}
     }

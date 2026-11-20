@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import urllib.request
 from .settings import Settings
@@ -24,7 +25,12 @@ def main():
         if not settings.internal_token:
             raise SystemExit("Internal service credential is missing")
         body = {"method": "POST", "path": "/sync-runs" if args.command == 'sync' else '/report-sync-runs', "body": {"trigger": "scheduled"},
-                "actor": {"tenant_key": "system", "user_id": "moboreels-scheduler", "name": "每日定时同步"}}
+                "actor": {"tenant_key": "system", "user_id": "moboreels-scheduler", "name": "定时同步"}}
+        if args.command == 'report-sync':
+            # The service caps the UTC request window at now and fetches ads only
+            # for completed source days. Include intraday orders in hourly runs.
+            today = datetime.now(timezone.utc).date()
+            body['body'].update(date_from=(today - timedelta(days=30)).isoformat(), date_to=today.isoformat())
         request = urllib.request.Request("http://127.0.0.1:{}/internal/dispatch".format(settings.bind_port),
             data=json.dumps(body).encode(), method="POST",
             headers={"Content-Type": "application/json", "Authorization": "Bearer " + settings.internal_token})
@@ -32,7 +38,7 @@ def main():
         with opener.open(request, timeout=30) as response:
             payload = json.load(response)
         run = payload["run"]
-        print(json.dumps({"run_id": run.get("id"), "status": run.get("status"), "reused": payload.get("reused")}))
+        print(json.dumps({"run_id": run.get("run_id") or run.get("id"), "status": run.get("status"), "reused": payload.get("reused")}))
     else:
         from .db import Database
         from .promotions import PromotionManager
