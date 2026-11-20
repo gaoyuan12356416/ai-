@@ -7,6 +7,7 @@
     total: 0,
     limit: 50,
     offset: 0,
+    filterStatus: "",
     busyIds: new Set(),
     material: null,
     materialBusy: false,
@@ -69,39 +70,123 @@
       updatePager();
       return;
     }
-    body.innerHTML = state.templates.map(item => {
-      const config = item.config || {};
-      const schedule = scheduleSummary(config);
-      const id = ui.positiveId(item.id || item.template_id);
-      const version = ui.templateVersion(item);
-      const enabled = isEnabled(item);
-      const poolIds = Array.isArray(config.group_ids) ? config.group_ids.map(ui.escapeHtml).join(", ") : "";
-      const busy = state.busyIds.has(id) ? " disabled" : "";
-      const runDisabled = state.busyIds.has(id) || !enabled ? " disabled" : "";
-      const runTitle = enabled ? "" : ' title="请先启用模板"';
-      return [
-        "<tr>",
-        "<td><strong>", ui.escapeHtml(item.name || config.name || ("模板 " + id)), "</strong><br><small>v", version, " · ",
-        ui.escapeHtml(({random_overlay: "随机排重模板", original: "不制作（使用原视频）"})[config.video_template] || "视频模板缺失"), "</small></td>",
-        "<td>", ui.escapeHtml(config.product || "—"), " / ", poolIds || "未选择 Page 池", "</td>",
-        '<td><span class="badge ', enabled ? "success" : "warning", '">', enabled ? "已启用" : "已停用", "</span></td>",
-        "<td><strong>", ui.escapeHtml(schedule.frequency), "</strong><br><small>", ui.escapeHtml(schedule.details), "</small></td>",
-        '<td><div class="table-actions">',
-        '<a class="button small link-button" href="/fb-auto-publish-template.html?v=20260820-list-only-v2&id=', id, '">编辑</a>',
-        '<button class="button small" type="button" data-action="copy" data-template-id="', id, '"', busy, '>复制</button>',
-        '<button class="button small danger" type="button" data-action="delete" data-template-id="', id, '"', busy, '>删除</button>',
-        '<button class="button small" type="button" data-action="toggle" data-template-id="', id, '"', busy, ">", enabled ? "停用" : "启用", "</button>",
-        '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
-        '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', busy, ">爆款素材发布</button>",
-        '<button class="button small primary" type="button" data-action="drama" data-template-id="', id, '"', busy, ">爆款剧发布</button>",
-        "</div></td>",
-        "</tr>",
-      ].join("");
-    }).join("");
+    body.innerHTML = state.templates.map(templateRow).join("");
     updatePager();
   }
 
-  async function loadTemplates() {
+  function templateRow(item) {
+    const config = item.config || {};
+    const schedule = scheduleSummary(config);
+    const id = ui.positiveId(item.id || item.template_id);
+    const version = ui.templateVersion(item);
+    const enabled = isEnabled(item);
+    const poolIds = Array.isArray(config.group_ids) ? config.group_ids.map(ui.escapeHtml).join(", ") : "";
+    const busy = state.busyIds.has(id) ? " disabled" : "";
+    const runDisabled = state.busyIds.has(id) || !enabled ? " disabled" : "";
+    const runTitle = enabled ? "" : ' title="请先启用模板"';
+    return [
+      '<tr data-template-id="', id, '">',
+      "<td><strong>", ui.escapeHtml(item.name || config.name || ("模板 " + id)), "</strong><br><small>v", version, " · ",
+      ui.escapeHtml(({random_overlay: "随机排重模板", original: "不制作（使用原视频）"})[config.video_template] || "视频模板缺失"), "</small></td>",
+      "<td>", ui.escapeHtml(config.product || "—"), " / ", poolIds || "未选择 Page 池", "</td>",
+      '<td><div class="template-status-control"><span class="badge ', enabled ? "success" : "warning", '">', enabled ? "已启用" : "已停用", '</span>',
+      '<button class="template-status-switch" type="button" role="switch" aria-checked="', String(enabled),
+      '" aria-busy="', String(state.busyIds.has(id)), '" aria-label="', ui.escapeHtml(item.name || config.name || ("模板 " + id)),
+      ' 自动发布" title="', enabled ? "点击暂停自动发布" : "点击启用自动发布", '" data-action="toggle" data-template-id="', id, '"', busy, '></button></div></td>',
+      "<td><strong>", ui.escapeHtml(schedule.frequency), "</strong><br><small>", ui.escapeHtml(schedule.details), "</small></td>",
+      '<td><div class="table-actions">',
+      '<a class="button small link-button" href="/fb-auto-publish-template.html?v=20260820-list-only-v2&id=', id, '">编辑</a>',
+      '<button class="button small" type="button" data-action="copy" data-template-id="', id, '"', busy, '>复制</button>',
+      '<button class="button small danger" type="button" data-action="delete" data-template-id="', id, '"', busy, '>删除</button>',
+      '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
+      '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', busy, ">爆款素材发布</button>",
+      '<button class="button small primary" type="button" data-action="drama" data-template-id="', id, '"', busy, ">爆款剧发布</button>",
+      "</div></td>",
+      "</tr>",
+    ].join("");
+  }
+
+  function updateRowState(id) {
+    const item = findTemplate(id);
+    const row = ui.byId("templateRows").querySelector(`tr[data-template-id="${id}"]`);
+    if (!item || !row) return;
+    const busy = state.busyIds.has(id);
+    const enabled = isEnabled(item);
+    row.querySelectorAll("button").forEach(button => {
+      button.disabled = busy || (button.dataset.action === "run" && !enabled);
+    });
+    const badge = row.querySelector(".template-status-control .badge");
+    badge.className = "badge " + (enabled ? "success" : "warning");
+    badge.textContent = enabled ? "已启用" : "已停用";
+    const toggle = row.querySelector('[role="switch"]');
+    toggle.setAttribute("aria-checked", String(enabled));
+    toggle.setAttribute("aria-busy", String(busy));
+    toggle.title = enabled ? "点击暂停自动发布" : "点击启用自动发布";
+    const run = row.querySelector('[data-action="run"]');
+    if (enabled) run.removeAttribute("title");
+    else run.title = "请先启用模板";
+  }
+
+  function applyTemplateUpdate(id, payload) {
+    const next = ui.readItem(payload);
+    if (ui.positiveId(next.id || next.template_id) !== id || !["enabled", "disabled"].includes(next.status) || !ui.templateVersion(next)) {
+      throw new Error("模板状态返回不完整，请核对后重试。");
+    }
+    const index = state.templates.findIndex(item => ui.positiveId(item.id || item.template_id) === id);
+    if (index < 0) return next;
+    const previous = state.templates[index];
+    const current = { ...previous, ...next };
+    state.templates[index] = current;
+    // A version conflict can include new configuration. Replace only that row.
+    if (ui.templateVersion(previous) !== ui.templateVersion(current)) {
+      const row = ui.byId("templateRows").querySelector(`tr[data-template-id="${id}"]`);
+      if (row) {
+        const hadFocus = row.contains(document.activeElement);
+        const holder = document.createElement("tbody");
+        holder.innerHTML = templateRow(current);
+        const replacement = holder.firstElementChild;
+        row.replaceWith(replacement);
+        if (hadFocus) replacement.querySelector('[role="switch"]').focus({ preventScroll: true });
+      }
+    }
+    updateRowState(id);
+    return current;
+  }
+
+  async function toggleTemplate(item) {
+    const id = ui.positiveId(item.id || item.template_id);
+    const action = isEnabled(item) ? "disable" : "enable";
+    const restoreFocus = document.activeElement?.matches(`[role="switch"][data-template-id="${id}"]`);
+    state.busyIds.add(id);
+    updateRowState(id);
+    let updated;
+    try {
+      const payload = await ui.api(ui.API_BASE + "/templates/" + id + "/" + action, {
+        method: "POST", body: JSON.stringify({ expected_version: ui.templateVersion(item) }),
+      });
+      updated = applyTemplateUpdate(id, payload);
+      ui.showToast(isEnabled(updated) ? "模板已启用。" : "模板已停用。");
+    } catch (error) {
+      try {
+        updated = applyTemplateUpdate(id, await ui.api(ui.API_BASE + "/templates/" + id));
+      } catch (_) {
+        // Keep the last confirmed state and never retry an uncertain write.
+      }
+      ui.showToast(error.message || "状态更新失败，请核对后重试。", true);
+    } finally {
+      state.busyIds.delete(id);
+      updateRowState(id);
+      if (restoreFocus && document.activeElement === document.body) {
+        ui.byId("templateRows").querySelector(`[role="switch"][data-template-id="${id}"]`)?.focus({ preventScroll: true });
+      }
+    }
+    if (updated && state.filterStatus && updated.status !== state.filterStatus) {
+      state.offset = Math.min(state.offset, Math.floor(Math.max(0, state.total - 2) / state.limit) * state.limit);
+      await loadTemplates({ quiet: true });
+    }
+  }
+
+  async function loadTemplates({ quiet = false } = {}) {
     const params = new URLSearchParams({
       limit: String(state.limit),
       offset: String(state.offset),
@@ -110,14 +195,19 @@
     const status = ui.byId("filterStatus").value;
     if (query) params.set("q", query);
     if (status) params.set("status", status);
-    ui.byId("templateRows").innerHTML = '<tr><td colspan="5" class="empty">正在加载模板…</td></tr>';
+    if (!quiet) ui.byId("templateRows").innerHTML = '<tr><td colspan="5" class="empty">正在加载模板…</td></tr>';
     try {
       const data = await ui.api(ui.API_BASE + "/templates?" + params.toString());
       state.templates = Array.isArray(data.items) ? data.items : [];
       state.total = Math.max(0, Number(data.total || 0));
+      state.filterStatus = status;
       renderTemplates();
       return true;
     } catch (error) {
+      if (quiet) {
+        ui.showToast(error.message || "模板列表刷新失败", true);
+        return false;
+      }
       state.templates = [];
       state.total = 0;
       ui.byId("templateRows").innerHTML = '<tr><td colspan="5" class="empty">模板列表加载失败：' + ui.escapeHtml(error.message || "请求失败") + "</td></tr>";
@@ -279,6 +369,7 @@
     const item = findTemplate(id);
     if (!item || state.busyIds.has(id)) return;
     const action = button.dataset.action;
+    if (action === "toggle") { await toggleTemplate(item); return; }
     const enabled = isEnabled(item);
     if (action === "run" && !enabled) {
       ui.showToast("模板已停用，请先启用后再手动执行。", true);
@@ -293,11 +384,7 @@
       ? await ui.confirmAction("复制模板", "将复制全部模板配置，新模板默认停用，复制后可继续编辑。")
       : action === "delete"
       ? await ui.confirmAction("删除模板", "确认删除“" + (item.name || id) + "”？删除后将从模板列表移除并停止新调度；已生成任务和历史发布记录保留。")
-      : action === "run"
-      ? await ui.confirmAction("确认手动执行", "将创建可追踪的手动计划，由后台异步冻结 Page 和素材。确认继续？")
-      : await ui.confirmAction(enabled ? "确认停用模板" : "确认启用模板", enabled
-        ? "停用后不再生成新时隙；未提交 Meta 的普通手动执行会取消，自动预制任务保留并暂停；爆款剧和爆款素材发布任务继续。正在提交 Meta 时需等待本次结果后再停用。"
-        : "启用后系统会按模板时间创建 Page 发布任务；当天新启用从下一个完整北京时间自然日开始生成新时隙。已预制的同版本自动任务会继续。");
+      : await ui.confirmAction("确认手动执行", "将创建可追踪的手动计划，由后台异步冻结 Page 和素材。确认继续？");
     if (!accepted) return;
     state.busyIds.add(id);
     renderTemplates();
@@ -325,12 +412,6 @@
           }),
         });
         ui.showToast("手动执行计划已创建，可在发布记录中查看。");
-      } else {
-        await ui.api(ui.API_BASE + "/templates/" + id + "/" + (enabled ? "disable" : "enable"), {
-          method: "POST",
-          body: JSON.stringify({ expected_version: version }),
-        });
-        ui.showToast(enabled ? "模板已停用。" : "模板已启用。");
       }
       listFailed = !(await loadTemplates());
     } catch (error) {
