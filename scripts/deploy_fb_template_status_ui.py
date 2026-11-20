@@ -9,12 +9,15 @@ import subprocess
 
 SOURCE = Path(__file__).resolve().parents[1]
 BASELINES = {
-    "fb-auto-publish-templates.js": {"57cccc45e9a2dfe30d6daa28e6234edeb23a0fcae22caefea9337c3407b075ef"},
+    "fb-auto-publish-templates.js": {
+        "82406dbda72ecda064a606112839e93c419e8ea97180cd966439afeb44b06489",
+        "57cccc45e9a2dfe30d6daa28e6234edeb23a0fcae22caefea9337c3407b075ef",
+    },
     "fb-auto-publish-templates.html": {
-        "14aee693ceb0d86c20dfe82092e88dcc51289ba31a5f63fdf5064751eff81d25",
+        "72d7c9204dc28f5614706171db10aa117cdad38ae85e39807668e191ba3e63af",
         "754d9a90aa9aea3ae6a1fea6d10856a84cdf1412fd31a74d001bf51302bd53f6",
     },
-    "fb-auto-publish-templates.css": {None},
+    "fb-auto-publish-templates.css": {"7dc7edccec1bfb80d4a0df1b50a933f3e63e892efe047e54d3a3e351d13aa895", None},
 }
 
 
