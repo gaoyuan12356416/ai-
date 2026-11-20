@@ -436,6 +436,15 @@ def switch(group, revert=False):
                         + "".join(
                             "Environment=" + k + "=" + v + "\n"
                             for k, v in m["environment"].items()
+                        )
+                        # ProtectSystem=strict also makes the data disk read-only.
+                        # Preflight downloads need only their configured directory.
+                        + (
+                            "ReadWritePaths="
+                            + m["environment"]["PIPELINE_MEDIA_PREFLIGHT_TMP"]
+                            + "\n"
+                            if m["environment"].get("PIPELINE_MEDIA_PREFLIGHT_TMP")
+                            else ""
                         ),
                     )
         elif revert:
