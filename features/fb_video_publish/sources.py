@@ -80,10 +80,10 @@ class SourceRepository:
                 raise ValueError("invalid source schema")
 
     def _page_rows(self, actor: Mapping[str, Any], page_ids=None, *, search="") -> list[dict]:
-        admin = actor.get("is_admin") is True
-        owner = str(actor.get("business_owner_id") or "")
-        if not admin and not re.fullmatch(r"[1-9][0-9]{0,30}", owner):
-            raise SourceError("fb_auto_owner_mapping_missing", "当前账号未唯一映射到Facebook授权用户", 403)
+        # Page management and manual publishing share the authorized Page catalog.
+        # The gateway checks module access and the store scopes configs by tenant;
+        # the creator/responsible user does not narrow the selectable Page list.
+        # Publishing attribution and operator-only credentials retain their actor.
         if page_ids is not None:
             if page_ids == []:
                 return []
@@ -94,25 +94,7 @@ class SourceRepository:
         result = []
         for batch in batches:
             page_sql = "" if batch is None else " AND TRIM(p.page_id) IN (" + ",".join("%s" for _ in batch) + ")"
-            # The trusted email mapping resolves the same business user used by
-            # operator-only credentials. Keep existing pool-owner grants and add
-            # the current per-Page responsible user as another delegated grant.
-            # Neither delegation changes operator-only credential selection.
-            owner_sql = "" if admin else f""" AND (EXISTS (
-                SELECT 1 FROM `{self.mysql.schema}`.ads_facebook_info f
-                 WHERE f.user_id=%s
-                   AND CAST(p.fb_user_id AS BINARY)=CAST(f.facebookUserID AS BINARY)
-                   AND TRIM(p.fb_user_id)<>'')
-                OR p.page_id IN (
-                    SELECT i.page_id FROM `{self.mysql.schema}`.ads_facebook_page_group g
-                    JOIN `{self.mysql.schema}`.ads_apps_setting a ON a.id=g.app_id
-                    JOIN `{self.mysql.schema}`.ads_facebook_page_group_ins i ON i.group_id=g.id
-                     WHERE g.user_id=%s AND g.is_delete=0 AND g.type IN (0,1)
-                       AND g.app_id=1479 AND LOWER(a.name)='dramawave' AND i.deleted_at=0)
-                OR EXISTS (
-                    SELECT 1 FROM `{self.mysql.schema}`.ads_facebook_page_ins pi
-                     WHERE pi.page_id=p.page_id AND pi.user_id=%s))"""
-            params = ([] if admin else [owner, owner, owner]) + (batch or [])
+            params = list(batch or [])
             exact_id = bool(re.fullmatch(r"[1-9][0-9]{0,30}", search))
             search_sql, having = "", ""
             if search:
@@ -131,7 +113,7 @@ class SourceRepository:
                        COUNT(CASE WHEN p.status<>1 AND TRIM(p.page_access_token)<>''
                              THEN 1 END) AS eligible_token_count
                   FROM `{self.mysql.schema}`.ads_facebook_page_post p
-                 WHERE TRIM(p.page_id)<>''{owner_sql}{page_sql}{search_sql}
+                 WHERE TRIM(p.page_id)<>''{page_sql}{search_sql}
                  GROUP BY p.page_id{having}
                  ORDER BY p.page_id LIMIT 20001
             """
