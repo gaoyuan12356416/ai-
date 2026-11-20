@@ -71,7 +71,7 @@ def publish_drama(runtime, template_id, actor, payload):
     target = freeze_match(page_rows, target, mysql, [template_id, request['expected_version'], slot],
                           app_id=config['app_id'])
     if not target['page_ids']:
-        error = StoreError('hit_drama_no_matching_page', '没有语言、受众和题材收入画像同时匹配的可发布Page，未创建发布任务', 409)
+        error = StoreError('hit_drama_no_matching_page', '没有语言匹配且有发布授权的Page，未创建发布任务', 409)
         error.conflicts = target['skipped_pages']
         raise error
     from features.hit_publish import release_times, POLICY

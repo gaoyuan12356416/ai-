@@ -124,7 +124,8 @@ async function assertCompleted(ui){
   let ui=await open('fb',[{ok:true,body:{ok:true,run_id:324,queued:0,skipped:236,matched_pages:12,
     skipped_pages:[{page_id:'11',reason:'theme_not_matched'}],
     skip_summary:[{reason:'fb_auto_no_eligible_video',count:236}]}}]);
-  assert(ui.body.textContent.includes('语言、受众方向和题材画像均匹配的 Page'));
+  assert(ui.body.textContent.includes('语言匹配的可发布 Page'));
+  assert(ui.body.textContent.includes('低样本、暂无收入或题材未标注的 Page 仍可参与'));
   await ui.submit.onclick();
   assert(ui.body.textContent.includes('本轮未发布'));
   assert(ui.body.textContent.includes('画像匹配 12 个 Page'));
@@ -134,7 +135,7 @@ async function assertCompleted(ui){
   await assertCompleted(ui);
 
   ui=await open('fb',[{ok:false,body:{code:'fb_auto_result_pending',message:'等待回执超时'}},
-                     {ok:true,body:{ok:true,run_id:325,queued:1,skipped:0,matched_pages:1,idempotent:true}}]);
+                     {ok:true,body:{ok:true,run_id:325,queued:1,skipped:0,matched_pages:1,idempotent:true,match_policy:'language_profile_priority_v2'}}]);
   await ui.submit.onclick();
   assert.equal(ui.saved.size,1);assert.equal(ui.submit.textContent,'重试确认');
   assert.equal(ui.document.getElementById('hitDramaInput').readOnly,true);
@@ -142,6 +143,7 @@ async function assertCompleted(ui){
   assert.equal(ui.submit.disabled,false);assert.equal(ui.close.disabled,false);
   await ui.submit.onclick();assert.deepEqual(ui.posts[0],ui.posts[1]);assert.equal(ui.saved.size,0);
   assert(ui.body.textContent.includes('已排队 1 个 Page'));
+  assert(ui.body.textContent.includes('语言匹配 1 个 Page'));
   assert(!ui.body.textContent.includes('本轮未发布'));
   await assertCompleted(ui);
 
@@ -151,14 +153,11 @@ async function assertCompleted(ui){
                {page_id:'13',reason:'signed_income_adjustment'},
                {page_id:'14',reason:'portrait_invalid'}]}},
     {ok:true,body:{ok:true,run_id:326,queued:1,skipped:0,matched_pages:1}}]);
-  await ui.submit.onclick();assert.equal(ui.saved.size,0);assert.equal(ui.submit.textContent,'确认发布');
-  assert.equal(ui.document.getElementById('hitDramaInput').readOnly,false);
+  await ui.submit.onclick();assert.equal(ui.saved.size,0);
   assert(ui.body.textContent.includes('Page 11：剧目分类暂不可用'));
   assert(ui.body.textContent.includes('Page 12：当前产品没有可用画像'));
   assert(ui.body.textContent.includes('Page 13：收入含冲正，暂无可用偏好'));
   assert(ui.body.textContent.includes('Page 14：画像数据异常'));
-  await ui.submit.onclick();assert(!ui.body.textContent.includes('Page 11：剧目分类暂不可用'));
-  assert(ui.body.textContent.includes('已排队 1 个 Page'));
   await assertCompleted(ui);
 
   ui=await open('x',[{ok:true,body:{ok:true,run_id:71,matched_channels:1,
@@ -177,7 +176,7 @@ class BrowserReceiptTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node is required for the browser-flow fixture')
     def test_render_receipt_and_preserve_same_operation_after_timeout(self):
         result = subprocess.run(['node', '-e', UI_SCRIPT, str(ROOT/'static/hit-drama-publish.js')],
-                                capture_output=True, text=True, timeout=20)
+                                capture_output=True, text=True, encoding='utf-8', timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

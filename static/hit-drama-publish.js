@@ -14,7 +14,7 @@
     const dialog=el('dialog'); dialog.id='hitDramaDialog'; dialog.setAttribute('aria-labelledby','hitDramaTitle');dialog.style.width='min(650px, calc(100vw - 32px))';dialog.style.maxWidth='650px';
     const title=el('h2','爆款剧发布'); title.id='hitDramaTitle'; const head=el('div','','dialog-head');head.append(title);
     const body=el('div','','dialog-body');body.style.display='grid';body.style.gap='12px';
-    const scope=el('p',isX?'每个 ID 仅向模板中语言、受众方向和题材画像均匹配的频道各发布一次；无有效画像或不匹配的频道会跳过。':'每个 ID 仅向模板中语言、受众方向和题材画像均匹配的 Page 各发布一次；无有效画像或不匹配的 Page 会跳过。');
+    const scope=el('p',isX?'每个 ID 仅向模板中语言、受众方向和题材画像均匹配的频道各发布一次；无有效画像或不匹配的频道会跳过。':'每个 ID 向模板中语言匹配的可发布 Page 各发布一次；受众和题材画像用于优先排序，低样本、暂无收入或题材未标注的 Page 仍可参与。');
     const tip=el('p','本次不限制剧目上线天数，沿用模板的素材、指标和冷却条件。未到可投放时间的剧先制作，预约在可投放前 30 分钟发布；该时点已过则尽快发布。本次操作不修改日常排期。');
     const label=el('label','ID 类型');label.htmlFor='hitDramaType';const type=el('select');type.id='hitDramaType';
     for(const [value,text] of [['content_id','剧 ID（单语言版本）'],['resource_id','资源 ID（关联各语言版本）']]){const option=el('option',text);option.value=value;type.append(option);}
@@ -49,7 +49,7 @@
     function showResult(result,target){
       let message=isX?`已创建运行 ${result.run_id}：匹配 ${result.matched_channels} 个频道，跳过 ${(result.skipped_channels||[]).length} 个频道。实际选材和发布进度请查看记录。`:`已创建运行 ${result.run_id}：已排队 ${result.queued} 个 Page，跳过 ${result.skipped} 个 Page。`;
       if(!isX){
-        const matched=Number.isInteger(result.matched_pages)?`画像匹配 ${result.matched_pages} 个 Page。`:'';
+        const matched=Number.isInteger(result.matched_pages)?`${result.match_policy==='language_profile_priority_v2'?'语言匹配':'画像匹配'} ${result.matched_pages} 个 Page。`:'';
         const skipped=Number(result.skipped||0)+(Array.isArray(result.skipped_pages)?result.skipped_pages.length:0);
         message=Number(result.queued)===0?`运行 ${result.run_id}：本轮未发布。${matched}已排队 0 个 Page，共跳过 ${skipped} 个 Page。`:`已创建运行 ${result.run_id}：${matched}已排队 ${result.queued} 个 Page，共跳过 ${skipped} 个 Page。实际发布进度请查看记录。`;
         if(result.match_policy==='legacy_language_only')message+=' 本条为改造前的提交回执，当时未按画像筛选 Page。';

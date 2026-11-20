@@ -121,10 +121,19 @@ class HitDramaTests(unittest.TestCase):
             self.assertEqual([row[0] for row in conn.execute('SELECT page_id FROM fb_auto_task')],['11'])
         self.assertEqual(result['matched_pages'],1)
 
-    def test_no_matching_profile_creates_no_run(self):
+    def test_missing_profile_still_creates_language_matched_run(self):
         with patch('features.fb_auto_posts.hit_profile.load_profiles', return_value=({'pages':{}},{})):
-            with self.assertRaisesRegex(Exception,'没有语言'):
-                publish_drama(self.runtime,self.template['id'],self.actor,self.request)
+            result = publish_drama(self.runtime,self.template['id'],self.actor,self.request)
+        self.assertEqual(result['queued'], 1)
+        self.assertEqual(result['match_policy'], 'language_profile_priority_v2')
+        with self.store.connect() as conn:
+            audit=json.loads(conn.execute('SELECT selection_json FROM fb_auto_task').fetchone()[0])['tag_profile']
+        self.assertEqual(audit['fallback_reason'], 'no_revenue_history')
+
+    def test_language_mismatch_creates_no_run(self):
+        self.pages.list_pages=lambda *a,**k:[PageTarget('6',('6',),'12','1','UTC','id',1)]
+        with self.assertRaisesRegex(Exception,'没有语言'):
+            publish_drama(self.runtime,self.template['id'],self.actor,self.request)
         with self.store.connect() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM fb_auto_run').fetchone()[0],0)
 

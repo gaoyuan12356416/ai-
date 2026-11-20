@@ -55,6 +55,14 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(result['queued'],1)
         self.assertEqual(len(result['skipped_materials']),2)
 
+    def test_no_income_pages_can_receive_distinct_materials(self):
+        self.profiles = snapshot()
+        self.pages = self.pages[:2]
+        result = self.publish()
+        self.assertEqual(result['queued'], 2)
+        self.assertEqual({a['page_id'] for a in result['assignments']}, {'11', '12'})
+        self.assertTrue(all(a['tag_profile']['fallback'] for a in result['assignments']))
+
     def test_paused_page_does_not_take_a_material(self):
         with self.store.connect() as conn:
             row=conn.execute('SELECT config_json FROM fb_auto_template_version').fetchone()

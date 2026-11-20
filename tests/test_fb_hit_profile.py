@@ -1,11 +1,11 @@
-"""Strict reverse portrait matching for FB's explicit hit-drama action."""
+"""Language gates and soft portrait priority for FB hit-drama publishing."""
 from copy import deepcopy
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from features.fb_auto_posts.hit_profile import (
-    MATCH_POLICY, filter_pages, freeze_match, match_reason, profileaudit,
+    MATCH_POLICY, LEGACY_MATCH_POLICY, filter_pages, freeze_match, match_reason, profileaudit,
 )
 from features.fb_auto_posts.profile_selection import (
     Decision, HIERARCHY_VERSION, TAXONOMY_VERSION,
@@ -49,18 +49,19 @@ class HitProfileTests(unittest.TestCase):
             frozen = freeze_match(pages, raw_target, object(), ["template", 1, "operation"], **kwargs)
         return frozen, reader, labels
 
-    def test_only_language_audience_and_positive_theme_match(self):
+    def test_only_language_and_publishability_block_pages(self):
         pages = [page(1), page(2), page(3), page(4, eligible=0), page(5, "id")]
         profiles = snapshot(portrait(1), portrait(2, themes={"revenge": 1000}),
                             portrait(3, "male", {"revenge": 1000}), portrait(4), portrait(5))
         original = target(en=["A"])
         frozen, reader, labels = self.freeze(pages, original, profiles, {("A", "en"): classification()})
-        self.assertEqual(frozen["page_ids"], ["1"])
-        self.assertEqual(frozen["page_content_ids"], {"1": ["A"]})
-        self.assertEqual(frozen["page_languages"], {"1": "en"})
+        self.assertEqual(frozen["page_ids"], ["1", "2", "3"])
+        self.assertEqual(frozen["page_content_ids"], {"1": ["A"], "2": ["A"], "3": ["A"]})
+        self.assertEqual(frozen["page_languages"], {"1": "en", "2": "en", "3": "en"})
         self.assertEqual({row["page_id"]: row["reason"] for row in frozen["skipped_pages"]},
-                         {"2": "theme_not_matched", "3": "audience_not_matched",
-                          "4": "page_not_publishable", "5": "language_not_matched"})
+                         {"4": "page_not_publishable", "5": "language_not_matched"})
+        self.assertEqual(profileaudit("2", "A", frozen)["fallback_reason"], "theme_not_matched")
+        self.assertEqual(profileaudit("3", "A", frozen)["fallback_reason"], "audience_not_matched")
         reader.assert_called_once_with(["1", "2", "3", "4", "5"])
         labels.assert_called_once()
         self.assertEqual(labels.call_args.args[1], ["A"])
@@ -74,10 +75,11 @@ class HitProfileTests(unittest.TestCase):
                    ("idWrong", "id"): classification("female", ["sweet_romance"])}
         profiles = snapshot(portrait(1), portrait(2, "male", {"revenge": 1000}))
         frozen, _, _ = self.freeze([page(1), page(2, "id")], raw_target, profiles, catalog)
-        self.assertEqual(frozen["page_content_ids"], {"1": ["enA"], "2": ["idB"]})
-        self.assertEqual(set(frozen["profiles"]["2"]), {"idB"})
+        self.assertEqual(frozen["page_content_ids"], {"1": ["enA"], "2": ["idB", "idWrong"]})
+        self.assertEqual(set(frozen["profiles"]["2"]), {"idB", "idWrong"})
         self.assertEqual(profileaudit("2", "idB", frozen)["classification"]["language"], "id")
-        self.assertFalse(profileaudit("2", "idWrong", frozen)["matched"])
+        self.assertTrue(profileaudit("2", "idWrong", frozen)["matched"])
+        self.assertFalse(profileaudit("2", "idWrong", frozen)["profile_matched"])
 
     def test_portuguese_alias_does_not_include_portugal_variant(self):
         raw_target = target(pt=["ptA"])
@@ -95,34 +97,34 @@ class HitProfileTests(unittest.TestCase):
                                   {("jaA", "ja"): classification()})
         self.assertEqual(frozen["page_content_ids"], {"1": ["jaA"]})
 
-    def test_missing_zero_and_signed_income_skip_without_ordinary_fallback(self):
+    def test_missing_zero_and_signed_income_remain_eligible(self):
         profiles = snapshot(portrait(2, income=0, status="no_income"),
                             portrait(3, status="signed_adjustment"))
         frozen, _, _ = self.freeze([page(1), page(2), page(3)], target(en=["A"]), profiles,
                                   {("A", "en"): classification()})
-        self.assertEqual(frozen["page_ids"], [])
-        self.assertEqual([p["reason"] for p in frozen["skipped_pages"]],
+        self.assertEqual(frozen["page_ids"], ["1", "2", "3"])
+        self.assertEqual([profileaudit(pid, "A", frozen)["fallback_reason"] for pid in frozen["page_ids"]],
                          ["no_revenue_history", "no_positive_revenue", "signed_income_adjustment"])
 
-    def test_unavailable_profile_never_matches_all_pages(self):
+    def test_unavailable_profile_retains_language_matches(self):
         frozen, _, _ = self.freeze([page(1)], target(en=["A"]), ({"pages": {}}, {"unavailable": True}),
                                   {("A", "en"): classification()})
-        self.assertEqual(frozen["page_ids"], [])
-        self.assertEqual(frozen["skipped_pages"][0]["reason"], "portrait_unavailable")
+        self.assertEqual(frozen["page_ids"], ["1"])
+        self.assertEqual(profileaudit("1", "A", frozen)["fallback_reason"], "portrait_unavailable")
 
-    def test_classification_outage_has_explicit_skipped_reason(self):
+    def test_classification_outage_has_explicit_fallback_reason(self):
         with patch("features.fb_auto_posts.hit_profile.load_profiles", return_value=snapshot(portrait(1))), \
                 patch("features.fb_auto_posts.hit_profile.load_classifications", side_effect=RuntimeError("unavailable")):
             frozen = freeze_match([page(1)], target(en=["A"]), object(), "operation")
-        self.assertEqual(frozen["page_ids"], [])
-        self.assertEqual(frozen["skipped_pages"][0]["reason"], "candidate_metadata_unavailable")
+        self.assertEqual(frozen["page_ids"], ["1"])
+        self.assertEqual(profileaudit("1", "A", frozen)["fallback_reason"], "candidate_metadata_unavailable")
 
     def test_other_product_does_not_consume_dramawave_profiles(self):
         frozen, reader, labels = self.freeze([page(1)], target(en=["A"]), snapshot(portrait(1)), {}, app_id="other")
         reader.assert_not_called()
         labels.assert_not_called()
-        self.assertEqual(frozen["page_ids"], [])
-        self.assertEqual(frozen["skipped_pages"][0]["reason"], "unsupported_profile_product")
+        self.assertEqual(frozen["page_ids"], ["1"])
+        self.assertEqual(profileaudit("1", "A", frozen)["fallback_reason"], "unsupported_profile_product")
 
     def test_positive_minor_theme_is_match_without_random_first_preference(self):
         profiles = snapshot(portrait(1, themes={"sweet_romance": 990, "ceo_wealth": 10}))
@@ -186,10 +188,38 @@ class HitProfileTests(unittest.TestCase):
             self.assertEqual(filter_pages([page(1)], copy), [])
         self.assertEqual(filter_pages([page(1)], target(en=["A"])), [])
 
-    def test_missing_classification_skips_without_raising(self):
+    def test_missing_classification_falls_back_without_raising(self):
         frozen, _, _ = self.freeze([page(1)], target(en=["A"]), snapshot(portrait(1)), {})
-        self.assertEqual(frozen["page_ids"], [])
-        self.assertEqual(frozen["skipped_pages"][0]["reason"], "candidate_metadata_missing")
+        self.assertEqual(frozen["page_ids"], ["1"])
+        self.assertEqual(profileaudit("1", "A", frozen)["fallback_reason"], "candidate_metadata_missing")
+
+    def test_priority_survives_planner_page_order_and_low_sample_is_eligible(self):
+        low = portrait(2, income=1)
+        low.update(drama_count=1, active_days=1)
+        frozen, _, _ = self.freeze([page(1), page(2), page(3)], target(en=["A"]),
+                                  snapshot(low), {("A", "en"): classification()})
+        self.assertEqual(frozen["page_ids"], ["2", "1", "3"])
+        self.assertEqual([p.page_id for p in filter_pages([page(3), page(1), page(2)], frozen)], ["2", "1", "3"])
+        self.assertGreater(profileaudit("2", "A", frozen)["match_score"], 1)
+        self.assertEqual(profileaudit("1", "A", frozen)["profile_score"], 0)
+
+    def test_fallback_edges_remain_assignable_with_profile_priority(self):
+        from features.hit_publish import assign
+        frozen, _, _ = self.freeze([page(1), page(2)], target(en=["A", "B"]),
+                                  snapshot(portrait(1)), {("A", "en"): classification()})
+        scores = {(cid, pid): profileaudit(pid, cid, frozen)["match_score"]
+                  for cid in ["A", "B"] for pid in ["1", "2"]}
+        self.assertEqual(assign(["A", "B"], ["1", "2"], scores), {"A": "1", "B": "2"})
+
+    def test_legacy_frozen_scope_is_not_expanded_or_reordered(self):
+        frozen, _, _ = self.freeze([page(1), page(2)], target(en=["A"]),
+                                  snapshot(portrait(1), portrait(2)), {("A", "en"): classification()})
+        frozen["match_policy"] = LEGACY_MATCH_POLICY
+        for audits in frozen["profiles"].values():
+            for audit in audits.values():
+                audit["match_policy"] = LEGACY_MATCH_POLICY
+        self.assertEqual([p.page_id for p in filter_pages([page(2), page(3), page(1)], frozen)], ["2", "1"])
+        self.assertTrue(profileaudit("1", "A", frozen)["matched"])
 
 
 if __name__ == "__main__":
