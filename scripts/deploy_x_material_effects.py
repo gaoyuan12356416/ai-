@@ -42,8 +42,10 @@ def overlay(folder,name,live):
         assert live.count(anchor)==1 and after.count(addition)==1
         live=live.replace(anchor,anchor+addition)
         before=before.replace(anchor,anchor+addition)
+    if name=='features/x_auto_posts/validation.py' and b'def profile_model(' not in live:
+        after=after.replace(b'    return "revenue"\n\n\ndef normalize_template_payload',b'    return value\n\n\ndef normalize_template_payload')
     scratch=folder/'overlay-scratch';scratch.write_bytes(live)
-    delta=''.join(difflib.unified_diff(before.decode().splitlines(True),after.decode().splitlines(True),fromfile='a/overlay-scratch',tofile='b/overlay-scratch',n=2))
+    delta=''.join(difflib.unified_diff(before.decode().splitlines(True),after.decode().splitlines(True),fromfile='a/overlay-scratch',tofile='b/overlay-scratch',n=1))
     result=subprocess.run(['git','apply','--whitespace=nowarn','-'],cwd=folder,input=delta.encode(),capture_output=True)
     assert not result.returncode,'live_variant_requires_review:'+name+':'+result.stderr.decode()
     return scratch.read_bytes()

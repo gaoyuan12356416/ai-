@@ -24,8 +24,9 @@ def scope(request):
     if enabled(request.rules):
         try:
             meta,path=store.current()
+            products=getattr(request.rules,'material_products',None)
             posts=[p for p in store.rows(path,'posts') if p['language']==request.language and
-                   p['product'].casefold() in {v.casefold() for v in request.rules.material_products}]
+                   (not products or p['product'].casefold() in {v.casefold() for v in products})]
             snapshot=dict(meta=meta,material={(r['namespace'],r['material_id']):r for r in aggregate(posts)},
                           drama={(r['catalog'],r['content_id'],r['language']):r for r in aggregate(posts,level='drama')})
         except (OSError,ValueError,KeyError):
@@ -38,7 +39,11 @@ def scope(request):
 def facts(candidate,level):
     snapshot=ACTIVE.get()
     if not snapshot:return {}
-    key=(candidate.catalog,candidate.content_id,candidate.language) if level=='drama' else ('ads_custom_source',str(candidate.source.material_id))
+    catalog=getattr(candidate,'catalog',None)
+    if level=='drama' and catalog is None:
+        from features.x_posts.moboreels import source_enabled
+        catalog='moboreels' if source_enabled() else 'dramawave'
+    key=(catalog,candidate.content_id,candidate.language) if level=='drama' else ('ads_custom_source',str(candidate.source.material_id))
     return snapshot[level].get(key,{})
 
 def value(row,metric):
