@@ -29,3 +29,5 @@ python3 "$RUN" rollback editor-cpu "$EDITOR_REPO" "$EDITOR_SHA"
 每个 scope 的 `backups/<scope>/<SHA>/manifest.json` 记录原版本、目标文件和进程切换。若后续部署修改了相同文件，依据 manifest 合并回退本次差异。若已有另一份编辑 release 生效，使用其版本记录继续核对。
 
 发布详情的公开链接可作为静态更新单独上线。当已经运行上一个发布端提交时，在 CPU 上从新的 GitHub 工作树执行 `python3 "$RUN" install publisher-ui "$UI_REPO" "$UI_SHA"`。回退整套功能时，先用相同参数将 `install` 换为 `rollback`，再回退发布服务。静态更新独立备份页面和脚本，两份页面均沿用线上导航版本，无需切换进程。
+
+发布端已有普通视频能力时，后续跨页面和服务的增量更新可在 `install publisher` 命令末尾加 `--from-version "$PREVIOUS_SHA"`。该 SHA 必须是当前生产版本对应的 GitHub 祖先提交。安装按变更文件核对线上内容并备份，回滚从本次 manifest 读取前一版本。多次上线按实际顺序倒序回退。

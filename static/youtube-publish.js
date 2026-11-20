@@ -574,6 +574,10 @@
       return;
     }
     if (!view.selected || view.selected.metadata_pending || view.detailLoading || state.source?.configured === false) return;
+    const source = safeUrl(view.selected.url);
+    if (regularUi && source && /^\/ai-video-editing\/youtube-final\/v1\/at_[a-f0-9]{32}-[a-f0-9]{64}\.mp4$/.test(new URL(source).pathname)) {
+      closeModal(); regularUi.start([view.selected]); return;
+    }
     draft.material = view.selected;
     if (!draft.title.trim()) draft.title = '{name}';
     delete draft.errors.material; delete draft.errors.reference; closeModal();

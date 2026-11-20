@@ -154,6 +154,13 @@ class Ordinary(unittest.TestCase):
         self.assertEqual(self.ledger_count(), 1)
 
     def test_legacy_local_behavior_preserved(self):
+        legacy_material = self.catalog.get('140')
+        final_url = 'https://example.org/ai-video-editing/youtube-final/v1/at_' + 'a' * 32 + '-' + self.sha + '.mp4'
+        with patch.object(self.catalog,'get',return_value=dict(legacy_material,url=final_url)):
+            with self.assertRaises(WorkflowError) as ctx:
+                self.workflow.create_task(self.actor,self.base)
+        self.assertEqual(ctx.exception.code,'regular_final_requires_review')
+        self.assertEqual(self.ledger_count(),0)
         legacy=self.workflow.create_task(self.actor,self.base)['task']
         self.assertEqual(legacy['status'],'enqueue_pending')
         self.assertNotIn('regular_media',legacy)

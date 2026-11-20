@@ -415,7 +415,11 @@ CREATE TABLE IF NOT EXISTS youtube_auto_notification(
         normalize_publish_at(publish_at,future=True)
         needs_m_url=contains_macro(*(request[field+'_template'] for field in ('title','description','comment')))
         material=self.source.get(str(request['material_id']), **({'moboreels':True} if needs_m_url else {}))
-        if regular_media is not None:
+        if regular_media is None:
+            from .regular_media import editor_object_sha
+            if editor_object_sha(material.get('url') or ''):
+                raise WorkflowError('regular_final_requires_review','这条是剪辑定稿，请在「普通视频发布」核对成片和封面后确认',409)
+        else:
             from .regular import identity
             if tuple(regular_media['source_identity']) != identity(material):
                 raise WorkflowError('regular_media_changed','正式素材已更新，请重新预览后准备发布',409)

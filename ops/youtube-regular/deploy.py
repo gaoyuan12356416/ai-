@@ -248,7 +248,7 @@ def build(args, folder):
         shutil.copytree(prev,release,symlinks=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
         for target,data in package.items():
             atomic(release/target,data)
-    record={'scope':scope,'version':version,'repo':str(repo),'state':'prepared','files':[],
+    record={'scope':scope,'version':version,'from_version':args.from_version,'repo':str(repo),'state':'prepared','files':[],
             'previous':str(prev) if prev else None,'release':str(release) if release else None,
             'current':str(current) if current else None,'time':datetime.now(timezone.utc).isoformat()}
     for i,(target,(before,after)) in enumerate(plan.items()):
@@ -340,6 +340,7 @@ def main():
     p.add_argument('scope',choices=('editor-gpu','editor-cpu','publisher','publisher-ui'))
     p.add_argument('repo',type=Path)
     p.add_argument('version')
+    p.add_argument('--from-version',help='Previously deployed ordinary-video publisher commit for an incremental update')
     args=p.parse_args()
     scope=args.scope
     if scope!='editor-gpu' and cmd('findmnt','-no','UUID','--target',CPU_DATA).decode().strip()!='3e8ac4e8-7770-456d-9e89-2ec5dd405fa8':
@@ -347,6 +348,15 @@ def main():
     folder=(GPU_DATA if scope=='editor-gpu' else CPU_DATA)/'youtube-regular-deploy'/'backups'/scope/args.version
     if scope=='publisher-ui':
         return update_publisher_ui(args,folder)
+    if (folder/'manifest.json').is_file():
+        prior=json.loads((folder/'manifest.json').read_text()).get('from_version')
+        if args.from_version and prior!=args.from_version:raise RuntimeError('Incremental baseline differs from original backup')
+        args.from_version=prior
+    if args.from_version:
+        if scope!='publisher' or not re.fullmatch('[0-9a-f]{40}',args.from_version):raise RuntimeError('Invalid incremental publisher baseline')
+        git(args.repo,'merge-base','--is-ancestor',args.from_version,args.version)
+        git(args.repo,'cat-file','-e',args.from_version+':features/youtube_auto_publish/regular.py')
+        BASE['publisher']=args.from_version
     if scope=='editor-cpu':check_editor_work()
     units={'publisher':[PREPARATION,API_UNIT],'editor-gpu':[RENDER],'editor-cpu':[EDITOR_API]}[scope]
     before={u:service(u) for u in units}
@@ -373,7 +383,7 @@ def main():
             record['database_backed_up']=True
             save(folder,record)
     else:
-        check_rollback(scope)
+        if not args.from_version: check_rollback(scope)
         record=json.loads((folder/'manifest.json').read_text())
         if record['version']!=args.version or record['scope']!=scope: raise RuntimeError('Rollback record mismatch')
         plan={}

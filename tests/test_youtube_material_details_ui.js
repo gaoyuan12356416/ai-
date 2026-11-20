@@ -4,8 +4,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const node = {dataset:{},addEventListener(){}};
+let routed;
 const context = {document:{querySelector:()=>node,addEventListener(){}},
-  window:{addEventListener(){}},location:{origin:'https://ai.yingliangads.com'},
+  window:{addEventListener(){},createYoutubeRegular:()=>({start(rows){routed=rows;}})},location:{origin:'https://ai.yingliangads.com'},
   URL,URLSearchParams,TextEncoder,AbortController,console,setTimeout,clearTimeout};
 vm.createContext(context);
 let source = fs.readFileSync(path.join(__dirname,'../static/youtube-publish.js'),'utf8');
@@ -26,6 +27,10 @@ const full = id => ({id,name:'Video '+id,macro_name:'Drama '+id,link_ready:true,
   assert.equal(ui.publicWatchUrl({...receipt,can_share_x:true}),'https://www.youtube.com/watch?v=Az01_-bcDeF');
   assert.equal(ui.publicWatchUrl({...receipt,can_share_x:true,video_id:'invalid'}),'');
   assert.equal(ui.publicWatchUrl({video_url:'https://example.org/legacy'}),'https://example.org/legacy');
+  const editorFinal={...full('42'),url:'https://example.org/ai-video-editing/youtube-final/v1/at_'+'a'.repeat(32)+'-'+'2'.repeat(64)+'.mp4'};
+  const legacyPicker={type:'picker',selected:editorFinal};
+  ui.setup(legacyPicker,()=>{});ui.confirmMaterial(legacyPicker);
+  assert.equal(routed[0].id,'42');assert.equal(ui.applied(),null);
   const view={type:'picker',items:[card('1'),card('2')]};
   let finishFirst;
   ui.setup(view,()=>new Promise(resolve=>{finishFirst=resolve;}));
