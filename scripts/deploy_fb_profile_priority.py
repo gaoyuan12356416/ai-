@@ -1,6 +1,7 @@
 """Scoped GitHub patch overlay for FB profile priority and shared Arabic aliases."""
 import argparse
 from contextlib import closing
+from datetime import datetime, timezone
 import difflib
 import hashlib
 import json
@@ -119,7 +120,16 @@ def activate(folder, rollback=False):
     # previously active schedulers. Do not restore publication databases.
     for path, record in info['static'].items():
         assert release.sha(path) == record['after' if rollback else 'before'], 'external_drift:' + path
-    release.activate('fb', folder, rollback)
+    from scripts import deploy_fb_skipped_recheck as fb
+    original = fb.native_active
+    try:
+        # Rendering is performed by independent CPU/GPU workers. Their durable
+        # prepare claims survive an idle HTTP owner's restart. Only exclude an
+        # exact, unexpired persisted claim; drain all accepted handlers as usual.
+        fb.native_active = owner_active
+        release.activate('fb', folder, rollback)
+    finally:
+        fb.native_active = original
     if rollback:
         # Generic rollback keeps shared JS for older additive releases. Here both
         # versions support historical receipts, so restore our exact backup.
@@ -127,6 +137,29 @@ def activate(folder, rollback=False):
             if Path(path).name == 'hit-drama-publish.js':
                 assert release.sha(path) == record['after']
                 release.atomic(path, Path(record['backup']).read_bytes())
+
+
+def owner_active():
+    from scripts.deploy_fb_skipped_recheck import FB_DB
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(sqlite3.connect(FB_DB.as_uri() + '?mode=ro', uri=True)) as conn:
+        active = 0
+        for task_id, status, owner, expires in conn.execute(
+                "SELECT id,status,lease_owner,lease_expires_at_utc FROM fb_auto_task WHERE status IN ('running','preparing')"):
+            persisted = False
+            if status == 'preparing' and owner.startswith('pipeline:') and expires > now:
+                for task, descriptor in conn.execute(
+                        "SELECT task_json,descriptor_json FROM pipeline_fb_claim WHERE source_key=? AND stage='prepare' AND receipt_json=''",
+                        ('fb:auto:' + str(task_id),)):
+                    frozen = json.loads(task)
+                    if (frozen.get('lease_owner') == owner and frozen.get('lease_expires_at_utc') == expires
+                            and json.loads(descriptor).get('kind') == 'fb_prepare'):
+                        persisted = True
+                        break
+            active += not persisted
+        active += conn.execute("SELECT count(*) FROM fb_video_task WHERE status='running' OR "
+                               "(status='queued' AND (prepare_state='preparing' OR link_state='writing'))").fetchone()[0]
+        return active
 
 
 if __name__ == '__main__':
