@@ -2949,7 +2949,8 @@ def ensure_storage(db_path):
                 "SELECT q.material_key,COUNT(*) AS total FROM x_post_queue q "
                 "WHERE q.material_key<>'' AND NOT EXISTS("
                 "SELECT 1 FROM x_post_manual_run mr "
-                "WHERE mr.id=q.manual_run_id AND mr.trigger_source='manual'"
+                "WHERE mr.id=q.manual_run_id AND (mr.trigger_source='manual' "
+                "OR (mr.trigger_source='auto_template' AND mr.reuse_context_json<>'{}'))"
                 ") GROUP BY q.material_key HAVING COUNT(*)>1 LIMIT 1"
             ).fetchone()
             if duplicate_material:
