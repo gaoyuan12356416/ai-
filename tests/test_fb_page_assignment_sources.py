@@ -200,6 +200,32 @@ class ProfileSnapshotTests(unittest.TestCase):
         self.point()
         self.assertEqual(load_profiles(['101'], self.root), ({}, {}, ['profile_snapshot_unavailable']))
 
+    def test_mysql_pointer_pins_version_and_keeps_theme_children(self):
+        from unittest.mock import Mock
+        version = "20261121T120411062335Z"
+        (self.root / "current.json").write_text(json.dumps(dict(
+            version=version, backend="mysql", database="ads_ai.fb_page_revenue_profile")))
+        reader = Mock()
+        child = dict(key="theme", share_bp=5000, dramas=["large list"])
+        profile = dict(page_id="101", status="ready", audiences=[dict(children=[child])])
+        reader.query.return_value = [dict(version=version), dict(id="101", profile=json.dumps(profile))]
+        found, meta, warnings = load_profiles(["101"], self.root, reader=reader)
+        self.assertFalse(warnings)
+        self.assertEqual(found["101"]["audiences"][0]["children"], [dict(key="theme", share_bp=5000)])
+        self.assertEqual(meta["version"], version)
+        load_profiles(["101"], self.root, reader=reader)
+        reader.query.assert_called_once()
+
+    def test_missing_mysql_version_does_not_cache_failure(self):
+        from unittest.mock import Mock
+        version = "20261121T120411062335Z"
+        (self.root / "current.json").write_text(json.dumps(dict(
+            version=version, backend="mysql", database="ads_ai.fb_page_revenue_profile")))
+        reader = Mock()
+        reader.query.side_effect = [[], [dict(version=version)]]
+        self.assertEqual(load_profiles(["101"], self.root, reader=reader)[2], ["profile_snapshot_unavailable"])
+        self.assertEqual(load_profiles(["101"], self.root, reader=reader)[2], [])
+
     def test_invalid_page_json_does_not_hide_other_profiles(self):
         self.snapshot(profiles={'101': '{broken', '102': {'page_id': '102', 'status': 'ready'}, '103': '[]'})
         self.point()

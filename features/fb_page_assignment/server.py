@@ -111,14 +111,17 @@ def main():
     token = env.get("FB_PAGE_ASSIGNMENT_API_TOKEN", "")
     if len(token) < 32:
         raise RuntimeError("independent_api_token_not_configured")
-    from .sources import Sources
+    from functools import partial
+    from .sources import Sources, load_profiles
     from .storage import Store, Writer
     from .notify import Notifier
     from .request_log import RequestBodyLog
     from .service import Service
     root = Path(args.data_root)
     root.mkdir(parents=True, exist_ok=True)
-    service = Service(Sources(env), Store(root / "outbox.sqlite3"), Writer(env), Notifier(env))
+    sources = Sources(env)
+    service = Service(sources, Store(root / "outbox.sqlite3"), Writer(env), Notifier(env),
+                      profile_loader=partial(load_profiles, reader=sources.reader))
     service.start()
     request_logger = RequestBodyLog(root / "request-bodies", secrets=(token,))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(service, token, request_logger))
