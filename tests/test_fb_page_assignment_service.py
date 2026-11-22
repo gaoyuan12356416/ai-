@@ -90,6 +90,26 @@ class ServiceTests(ServiceFixture, unittest.TestCase):
         self.assertEqual(self.store.get(response["task_id"])["sync_status"], "synced")
         self.assertEqual(self.notifier.calls, [])
 
+    def test_relaxed_assignment_is_logged_but_only_failures_are_announced(self):
+        from features.fb_page_assignment.notify import alert_text
+        relaxed = dict(page_id="123", drama_id="quiet_drama", status="degraded", diagnostics={},
+                       selection_stage="language_relaxed", error_code="profile_relaxed")
+        failed = dict(page_id=None, drama_id="missing_drama", status="failed", diagnostics={},
+                      selection_stage=None, error_code="no_available_page")
+        with patch("features.fb_page_assignment.service.assign", return_value=[relaxed]):
+            self.request("quiet", ["quiet_drama"])
+        self.service.tick()
+        self.assertFalse(self.notifier.calls)
+        self.assertEqual(self.store.get("quiet")["rows"][0]["error_code"], "profile_relaxed")
+        with patch("features.fb_page_assignment.service.assign", return_value=[relaxed, failed]):
+            self.request("mixed", ["quiet_drama", "missing_drama"])
+        self.service.tick()
+        self.assertEqual(len(self.notifier.calls), 1)
+        task = self.notifier.calls[0]
+        self.assertEqual(task["alert_reasons"], ["no_available_page"])
+        self.assertNotIn("quiet_drama", alert_text(task))
+        self.assertIn("missing_drama", alert_text(task))
+
     def test_source_failure_preserves_each_id_and_alerts_once(self):
         self.sources.error = SourceError("source_query_timeout")
         status, response = self.request(ids=["drama_1", "drama_2"])

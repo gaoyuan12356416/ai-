@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 import time
 
+from .notify import assigned_with_relaxed_profile
 from .runtime import log
 from .selector import assign
 from .sources import SourceError, load_profiles
@@ -136,7 +137,7 @@ class Service:
                                       source_read_at=data.get("source_read_at"),
                                       source_warnings=data.get("warnings", []), profile_warnings=warnings,
                                       group_id=62)
-            if row.get("status") in {"failed", "degraded"}:
+            if row.get("status") in {"failed", "degraded"} and not assigned_with_relaxed_profile(row):
                 reasons.append(row.get("error_code") or row["status"])
         results = [dict(drama_id=row["drama_id"], page_id=row["page_id"]) for row in rows]
         log("assignment_selected", task_id=task_id, external_task_id=external,

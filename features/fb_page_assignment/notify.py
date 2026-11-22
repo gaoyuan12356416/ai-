@@ -18,13 +18,18 @@ class DeliveryError(Exception):
         self.uncertain = uncertain
 
 
+def assigned_with_relaxed_profile(row):
+    return bool(row.get("page_id") and row.get("status") == "degraded"
+                and row.get("error_code") == "profile_relaxed")
+
+
 def alert_text(task):
     lines = ["【剧目 Page 分配异常】", "调用方关联 ID：" + str(task.get("external_task_id") or "未提供"),
              "本次 task_id：" + task["task_id"],
              "北京时间：" + datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
              "原因：" + "; ".join(str(r) for r in task.get("alert_reasons", [])),
              "查询表：ads_ai.fb_drama_page_assignment_log"]
-    rows = task.get("rows", [])
+    rows = [row for row in task.get("rows", []) if not assigned_with_relaxed_profile(row)]
     for row in rows[:20]:
         lines.append("剧 " + str(row.get("drama_id") or "无有效剧ID") + " → Page " +
                      str(row.get("page_id") or "未分配") + "；" +
