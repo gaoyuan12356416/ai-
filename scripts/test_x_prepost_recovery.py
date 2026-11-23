@@ -207,6 +207,35 @@ class PrepostRecoveryTests(unittest.TestCase):
         with self.assertRaises(AdapterError): self.bridge.reserve(job,job)
         self.assertEqual(self.log()['attempt_count'],1)
 
+    def test_audited_upload_unknown_preserves_facts_and_arms_once(self):
+        with self.bridge.connect() as c:
+            c.execute('UPDATE x_post_publish_log SET unknown_outcome=1')
+        with self.store.transaction() as c:
+            c.execute("UPDATE pipeline_job SET status='unknown' WHERE id=?",(self.pub['id'],))
+            c.execute('INSERT INTO pipeline_resource VALUES(?,?,?,?,?)',
+                      ('task:'+self.pub['source_key'],self.pub['id'],self.pub['generation'],1,0))
+            c.execute('INSERT INTO pipeline_legacy_resource VALUES(?,?)',('task:'+self.pub['source_key'],self.pub['id']))
+        plan=recovery.make_plan(self.central,self.runtime.POST_DB_PATH,[self.q['id']],'publish',self.days,self.now,media_only=True)
+        self.apply(plan)
+        self.assertEqual(self.log()['unknown_outcome'],0)
+        self.assertEqual(self.log()['attempt_count'],1)
+        with self.bridge.connect() as c:
+            proof=json.loads(c.execute('SELECT proof_json FROM pipeline_x_prepost_recovery').fetchone()[0])
+            self.assertEqual(proof['prior_log']['unknown_outcome'],1)
+        self.assertEqual(self.store.get_job(self.pub['id'])['status'],'ready')
+        retry=self.claim('publish')
+        self.bridge.reserve(retry,retry)
+        op=self.operation(retry,'POST','/2/media/upload/initialize',self.initial,'audited-new-init')
+        self.store.begin_operation(retry,op);self.bridge.begin_operation(retry,retry,op)
+        self.assertEqual(self.log()['attempt_count'],2)
+
+    def test_media_only_reconciliation_still_rejects_post_intent(self):
+        with self.bridge.connect() as c:
+            c.execute('INSERT INTO pipeline_x_operation VALUES(?,?,?,?,?,?)',
+                      ('unsafe',self.pub['source_key'],0,'x:POST:/2/tweets','a'*64,self.now.isoformat()))
+        with self.assertRaises(recovery.RecoveryRejected):
+            recovery.make_plan(self.central,self.runtime.POST_DB_PATH,[self.q['id']],'publish',self.days,self.now,media_only=True)
+
     def test_zero_attempt_publish_authorization_is_consumed_on_first_upload(self):
         q = self.queue(identity=3, auto=True)
         self.store.offer(self.adapter.project(self.adapter.read(q['id'])))
