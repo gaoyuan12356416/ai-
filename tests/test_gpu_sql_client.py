@@ -29,7 +29,7 @@ class ClientTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.now=[100.0];self.book=LeaseBook(self.root/'leases.sqlite3',clock=lambda:self.now[0])
-        self.calls=[];owner=self
+        self.calls=[];self.sql=[];owner=self
         class LocalBroker:
             def flush_closed(self):pass
             def call(self,op,payload):
@@ -49,7 +49,7 @@ class ClientTests(unittest.TestCase):
             connection._sock=Wire();connection._rfile=None;connection._closed=False
             # PyMySQL sends initialization SQL before its constructor returns.
             connection._execute_command(3,'SET NAMES utf8mb4')
-        for name,value in [('__init__',initialize),('_execute_command',lambda *args:None),('cursor',lambda connection:Cursor(connection)),('_write_bytes',lambda *args:None),('_force_close',lambda *args:None)]:
+        for name,value in [('__init__',initialize),('_execute_command',lambda connection,command,sql:owner.sql.append(sql)),('cursor',lambda connection:Cursor(connection)),('_write_bytes',lambda *args:None),('_force_close',lambda *args:None)]:
             item=patch('pymysql.connections.Connection.'+name,new=value);item.start();self.patches.append(item)
 
     def tearDown(self):
@@ -60,13 +60,16 @@ class ClientTests(unittest.TestCase):
         session=Session(self.broker,'fixture')
         session.connect(user='fixture',password='fixture')
         try:
-            self.assertEqual(self.calls.count('query'),5)
+            self.assertEqual(self.calls.count('query'),6)
+            self.assertIn('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ',self.sql)
+            self.assertIn('START TRANSACTION READ ONLY',self.sql)
+            self.assertFalse(any('WITH CONSISTENT SNAPSHOT' in sql for sql in self.sql))
             self.assertEqual(self.book.occupied,1)
             session.cursor().execute('SELECT 1')
-            self.assertEqual(self.calls.count('query'),6)
+            self.assertEqual(self.calls.count('query'),7)
             for sql in ('UPDATE table_name SET value=1','SET SESSION TRANSACTION READ WRITE','DELETE FROM table_name'):
                 with self.assertRaises(AdmissionError):session.cursor().execute(sql)
-            self.assertEqual(self.calls.count('query'),6)
+            self.assertEqual(self.calls.count('query'),7)
         finally:session.close()
         self.assertEqual(self.book.occupied,0)
 
