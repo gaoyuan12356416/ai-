@@ -28,6 +28,8 @@ def setup(rt):
           priority INTEGER NOT NULL DEFAULT 0,lease TEXT NOT NULL DEFAULT '',expires REAL NOT NULL DEFAULT 0,
           attempts INTEGER NOT NULL DEFAULT 0,created REAL NOT NULL,updated REAL NOT NULL,not_before REAL NOT NULL DEFAULT 0,
           UNIQUE(asset_id,sha256,profile))''')
+        if 'timings' not in {r[1] for r in db.execute('PRAGMA table_info(editor_previews)')}:
+            db.execute("ALTER TABLE editor_previews ADD COLUMN timings TEXT NOT NULL DEFAULT '{}'")
 
 
 def decorations(rt, aid):
@@ -108,7 +110,8 @@ def process(rt,job):
                     if not db.execute("UPDATE editor_previews SET expires=? WHERE id=? AND lease=?",(time.time()+120,job['id'],job['lease'])).rowcount:return
             except Exception:LOG.warning('Preview heartbeat delayed %s',job['id'])
     pulse=threading.Thread(target=heartbeat,daemon=True);pulse.start()
-    began=time.monotonic()
+    began=time.monotonic();timings=json.loads(job.get('timings','{}'))
+    timings.setdefault('queue_ms',round(max(0,time.time()-job['created'])*1000))
     try:
         digest=hashlib.sha256()
         with source.open('rb') as stream:
@@ -124,7 +127,8 @@ def process(rt,job):
             finally:
                 part.unlink(missing_ok=True)
             with rt.db(True) as db:
-                db.execute("UPDATE editor_previews SET poster=1,status='queued',lease='',expires=0,attempts=0,updated=? WHERE id=? AND lease=?",(time.time(),job['id'],job['lease']))
+                timings['poster_ms']=round((time.monotonic()-began)*1000)
+                db.execute("UPDATE editor_previews SET poster=1,status='queued',lease='',expires=0,attempts=0,timings=?,updated=? WHERE id=? AND lease=?",(json.dumps(timings),time.time(),job['id'],job['lease']))
             return
         subprocess.run(base+['-i',str(source),'-map','0:v:0','-map','0:a:0?',
              '-vf',"scale='min(854,iw)':'min(854,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
@@ -138,7 +142,8 @@ def process(rt,job):
             valid=db.execute("SELECT 1 FROM editor_previews WHERE id=? AND lease=? AND status='running'",(job['id'],job['lease'])).fetchone()
             check(valid,'preview_lease_lost','预览任务已转交',409)
             os.replace(temp,video);os.chmod(video,0o640)
-            db.execute("UPDATE editor_previews SET status='ready',error='',lease='',expires=0,updated=? WHERE id=? AND lease=?",(time.time(),job['id'],job['lease']))
+            timings['proxy_ms']=round((time.monotonic()-began)*1000)
+            db.execute("UPDATE editor_previews SET status='ready',error='',lease='',expires=0,timings=?,updated=? WHERE id=? AND lease=?",(json.dumps(timings),time.time(),job['id'],job['lease']))
         LOG.info('Preview ready id=%s elapsed_ms=%d bytes=%d',job['id'],(time.monotonic()-began)*1000,video.stat().st_size)
     except Exception as exc:
         LOG.warning('Preview failed %s %s',job['id'],type(exc).__name__)
@@ -149,6 +154,7 @@ def process(rt,job):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
     rt=Runtime(os.environ.get('AI_VIDEO_EDITING_ROOT','/mnt/data-disk/ai-video-editing'))
     setup(rt)
     stopping=threading.Event()

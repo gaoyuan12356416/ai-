@@ -129,5 +129,23 @@ class SelectionTests(unittest.TestCase):
         selections.tick(self.rt);self.assertEqual(self.analyze(),1);selections.tick(self.rt)
         self.assertEqual(selections.progress(self.rt,self.actor,first['id'])['status'],'succeeded')
 
+    def test_creation_receipt_survives_readiness_and_rejects_stale_new_intent(self):
+        self.ready(1);s=self.create()
+        body={'operation_id':'create-once','version':s['version'],'config':{'clip':{'method':'hook_first','seconds':30}}}
+        receipt=studio.submit(self.rt,self.actor,s['id'],body)
+        current=studio.session(self.rt,self.actor,s['id'])
+        self.assertEqual(current['version'],s['version']+1)
+        for i in range(2,6):self.ready(i)
+        selections.tick(self.rt)
+        self.assertEqual(studio.submit(self.rt,self.actor,s['id'],body),receipt)
+        with self.assertRaises(Fault) as error:
+            studio.submit(self.rt,self.actor,s['id'],dict(body,operation_id='stale-new'))
+        self.assertEqual(error.exception.code,'version_conflict')
+
+    def test_limit_uses_unique_materials(self):
+        refs=[{'kind':'asset','asset_id':self.asset(i)} for i in range(1,22)]
+        s=self.create(refs[:20]+refs[:4]);self.assertEqual(s['selection']['summary']['total'],20)
+        with self.assertRaises(Fault):self.create(refs,op='too-many')
+
 
 if __name__=='__main__':unittest.main()

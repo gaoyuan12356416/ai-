@@ -512,7 +512,7 @@
       player.pause();
       $("playerLoading").hidden = !url;
       $("playerLoading").textContent = "正在载入预览…";
-      if (url) player.src = url;
+      if (url) {player.dataset.loadStarted=performance.now();player.src = url;}
       else {
         player.removeAttribute("src");
         player.load();
@@ -2199,9 +2199,11 @@
     previewQuality = $("previewQuality").value;
     player.dataset.identity = "";
     renderPlayer();
+    const identity=player.dataset.identity;
     player.addEventListener(
       "loadedmetadata",
       () => {
+        if(player.dataset.identity!==identity)return;
         player.currentTime = Math.min(position, player.duration || position);
         if (playing) player.play().catch(() => {});
       },
@@ -2213,6 +2215,11 @@
   });
   $("player").addEventListener("loadeddata", () => {
     $("playerLoading").hidden = true;
+    const start=Number($("player").dataset.loadStarted);
+    if(start) {
+      $("player").dataset.firstFrameMs=String(Math.round(performance.now()-start));
+      performance.measure("editor-first-frame:"+$("player").dataset.identity,{start});
+    }
   });
   $("player").addEventListener("playing", () => {
     $("playerLoading").hidden = true;
