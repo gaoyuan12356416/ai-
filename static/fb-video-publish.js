@@ -271,7 +271,7 @@
   }
 
   async function pageManagement() {
-    let configs=[],page=0,query="",creator="",loading=false,loaded=false,languageReady=false,listGeneration=0,sourceController=null,sourceAttempted=new Set();
+    let configs=[],page=0,total=0,query="",creator="",loading=false,loaded=false,languageReady=false,listGeneration=0,listController=null,searchTimer=null,sourceController=null,sourceAttempted=new Set();
     let excelAsset=null;
     $("content").innerHTML=`<section class="panel"><div class="section-head"><div><h2>已配置 Page</h2><p>创建时可选择多个 Page，保存后每个 Page 独立管理。</p></div><div class="actions"><button id="excelPublishButton" class="button" disabled>Excel 批量发布</button><button id="createPage" class="button primary" disabled>创建</button></div></div><div id="pageLanguageNotice" class="helper" role="status">正在加载剧语言选项…</div><div class="filters"><input id="pageSearch" placeholder="搜索 Page 名称或 ID" aria-label="搜索已配置 Page" disabled><select id="pageCreator" aria-label="按创建人筛选" disabled><option value="">全部创建人</option></select><button id="reloadPages" class="button">刷新列表</button></div><p id="pageAuthorizationNotice" class="helper" role="status" hidden></p><p id="pagePortraitNotice" class="helper">画像按近 7 个完整报告日统计，列表就绪后加载当前页摘要。</p><div class="table-wrap"><table><thead><tr><th>Page 名称 / ID</th><th>剧语言</th><th>近 7 天收入（USD）</th><th>收入画像 / 比例</th><th>授权状态</th><th>发布文案</th><th>创建人</th><th>更新时间（北京）</th><th>操作</th></tr></thead><tbody id="pageRows"></tbody></table></div><div class="pager"><span class="helper" id="pageTotal"></span><div class="actions"><button class="button small" id="pagePrev" disabled>上一页</button><button class="button small" id="pageNext" disabled>下一页</button></div></div></section>`;
     function authorizationBadge(p) {
@@ -286,16 +286,16 @@
         $("pageRows").innerHTML=`<tr><td colspan="9" class="empty">${loading?"正在加载 Page 列表…":"Page 列表加载失败，请点击“刷新列表”重试。"}</td></tr>`;
         $("pageTotal").textContent="";$("pagePrev").disabled=true;$("pageNext").disabled=true;return;
       }
-      const rows=configs.filter(p=>(!creator||p.created_by===creator)&&`${p.page_name} ${p.page_id}`.toLowerCase().includes(query.toLowerCase()));
-      page=Math.min(page,Math.max(0,Math.ceil(rows.length/20)-1));
-      $("pageRows").innerHTML=rows.slice(page*20,(page+1)*20).map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td>${window.FbPagePortraits?.cells(p.page_id)||'<td>画像组件加载中</td><td>请刷新页面</td>'}<td>${authorizationBadge(p)}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
-      $("pageTotal").textContent=`共 ${rows.length} 个 Page · 第 ${page+1} 页`;$("pagePrev").disabled=page===0;$("pageNext").disabled=(page+1)*20>=rows.length;
-      window.FbPagePortraits?.load(rows.slice(page*20,(page+1)*20).map(p=>p.page_id));
+      const rows=configs;
+      $("pageRows").innerHTML=rows.map(p=>`<tr><td><strong>${esc(p.page_name)}</strong><br><span class="mono">${esc(p.page_id)}</span></td><td>${esc(lang(p.language))}</td>${window.FbPagePortraits?.cells(p.page_id)||'<td>画像组件加载中</td><td>请刷新页面</td>'}<td>${authorizationBadge(p)}</td><td><div class="caption-summary">${esc(p.caption_template)}</div><span class="helper">v${p.version}</span></td><td>${esc(p.created_by_name || p.created_by || "—")}</td><td class="no-break">${esc(atBJ(p.updated_at_utc))}</td><td><div class="actions"><button class="button small" data-pool-page="${esc(p.page_id)}">素材池${poolPending(p)?" · 待核对":""}</button><button class="button small" data-edit-page="${esc(p.page_id)}"${languageReady?"":" disabled"}>编辑</button><button class="button small danger" data-delete-page="${esc(p.page_id)}">删除</button></div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">${query?"没有匹配的 Page":"尚未配置 Page，点击“创建”设置文案、剧语言和 Page。"}</td></tr>`;
+      $("pageTotal").textContent=`共 ${total} 个 Page · 第 ${page+1} 页`;$("pagePrev").disabled=loading||page===0;$("pageNext").disabled=loading||(page+1)*20>=total;
+      window.FbPagePortraits?.load(rows.map(p=>p.page_id));
       void verifySource(listGeneration);
     }
-    function setConfigs(items) {
-      configs=items||[];loaded=true;
-      const creators=[...new Map(configs.map(p=>[p.created_by,p.created_by_name||p.created_by||"未记录"])).entries()].sort((a,b)=>a[1].localeCompare(b[1],"zh-CN"));
+    function setConfigs(data) {
+      configs=data.items||[];total=Number(data.total)||0;page=Math.max(0,Number(data.page_index||1)-1);loaded=true;
+      const names=new Map(configs.map(p=>[p.created_by,p.created_by_name]));
+      const creators=(data.creators||[]).map(c=>[c.value,names.get(c.value)||c.label||c.value]).sort((a,b)=>a[1].localeCompare(b[1],"zh-CN"));
       if(creator&&!creators.some(([id])=>id===creator))creator="";
       $("pageCreator").innerHTML='<option value="">全部创建人</option>'+creators.map(([id,name])=>`<option value="${esc(id)}">${esc(name)}</option>`).join("");$("pageCreator").value=creator;
     }
@@ -334,14 +334,16 @@
       }
     }
     async function load() {
-      if(loading)return;const generation=++listGeneration;sourceController?.abort();sourceController=null;sourceAttempted=new Set();
+      const generation=++listGeneration;listController?.abort();const controller=new AbortController();listController=controller;sourceController?.abort();sourceController=null;sourceAttempted=new Set();
       loading=true;render();errorAt("pageError","");$("pageAuthorizationNotice").hidden=true;
       try {
-        const data=await api("/pages");
+        const params=new URLSearchParams({page_index:String(page+1),page_size:"20",q:query,created_by:creator});
+        const data=await api("/pages?"+params,{signal:controller.signal});
         if(generation!==listGeneration)return;
-        setConfigs(data.items);
+        setConfigs(data);
         performance.mark("fb-page-list-ready");
-      } finally {loading=false;render();}
+      } catch(err) {if(generation===listGeneration&&err.name!=="AbortError"){loaded=false;throw err;}}
+      finally {if(generation===listGeneration){loading=false;listController=null;render();}}
     }
     async function loadLanguageOptions() {
       $("pageLanguageNotice").hidden=false;$("pageLanguageNotice").textContent="正在加载剧语言选项…";
@@ -352,8 +354,10 @@
       }
       render();
     }
-    $("pageCreator").onchange=e=>{creator=e.target.value;page=0;render();};
-    $("pageSearch").oninput=e=>{query=e.target.value;page=0;render();};$("pagePrev").onclick=()=>{page--;render();};$("pageNext").onclick=()=>{page++;render();};
+    const reload=()=>load().catch(err=>errorAt("pageError",err));
+    $("pageCreator").onchange=e=>{creator=e.target.value;page=0;clearTimeout(searchTimer);void reload();};
+    $("pageSearch").oninput=e=>{query=e.target.value;page=0;clearTimeout(searchTimer);searchTimer=setTimeout(reload,250);};
+    $("pagePrev").onclick=()=>{page--;void reload();};$("pageNext").onclick=()=>{page++;void reload();};
     $("reloadPages").onclick=e=>busy(e.target,()=>{window.FbPagePortraits?.clear();return load().catch(err=>errorAt("pageError",err));});
     function editor(existing) {
       if ($("pageEditor")) return;
@@ -378,7 +382,7 @@
 
         function appendResults() {
           const batch = results.slice(shown, shown + 50);
-          list.insertAdjacentHTML("beforeend", batch.map(p => `<label class="pick"><input type="checkbox" value="${esc(p.page_id)}"${chosen.has(p.page_id) ? " checked" : ""}${configured.has(p.page_id) ? " disabled" : ""}><span><strong>${esc(p.page_name)}</strong><small>${esc(p.page_id)}</small><small>${configured.has(p.page_id) ? "已配置，请在列表单独编辑" : esc(p.blocked_reason || "可创建配置")}</small></span></label>`).join(""));
+          list.insertAdjacentHTML("beforeend", batch.map(p => `<label class="pick"><input type="checkbox" value="${esc(p.page_id)}"${chosen.has(p.page_id) ? " checked" : ""}${(p.configured||configured.has(p.page_id)) ? " disabled" : ""}><span><strong>${esc(p.page_name)}</strong><small>${esc(p.page_id)}</small><small>${(p.configured||configured.has(p.page_id)) ? "已配置，请在列表单独编辑" : esc(p.blocked_reason || "可创建配置")}</small></span></label>`).join(""));
           shown += batch.length;
           more.hidden = shown >= results.length;
           feedback.textContent = results.length ? `已显示 ${shown} / ${results.length} 个 Page`

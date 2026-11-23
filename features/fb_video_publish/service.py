@@ -141,7 +141,7 @@ class Service:
                 "preview_hash": digest(facts), "items": items, "repeat_required": bool(repeats),
                 "repeat_fingerprint": digest(repeats), "landing_url": "https://www.dramawavew2a.com/ads/101/2310/view"}
 
-    def configured_pages(self, actor, *, for_publish=False, verify_ids=None):
+    def configured_pages(self, actor, *, for_publish=False, verify_ids=None, pagination=None):
         # The catalog is tenant-local. Remote authorization is deliberately opt-in
         # and bounded; opening a list must not occupy the source SQL queue.
         configs = self.store.configs(actor)
@@ -167,11 +167,34 @@ class Service:
                 names = {}
         except (OSError, ValueError, KeyError, TypeError):
             names = {}
-        return {"ok": True, "authorization_pending": True, "items": [{
+        rows = [{
             **c, "page_name": str(names.get(pid) or pid)[:255],
             "eligible_token_count": 0, "blocked_reason": "",
             "authorization_pending": True, "authorization_unknown": True,
-        } for pid, c in configs.items()]}
+        } for pid, c in configs.items()]
+        result = {"ok": True, "authorization_pending": True, "items": rows}
+        if pagination is None:
+            return result
+        try:
+            page = int(pagination.get('page_index', 1))
+            size = int(pagination.get('page_size', 20))
+            query = str(pagination.get('q') or '').strip().casefold()
+            creator = str(pagination.get('created_by') or '').strip()
+            if not 1 <= page <= 1000000 or not 1 <= size <= 100 or len(query) > 200 or len(creator) > 200:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise DomainError('invalid_request', 'Page分页或筛选参数无效') from None
+        creators = {}
+        for row in rows:
+            if row.get('created_by'):
+                creators[row['created_by']] = row.get('created_by_name') or row['created_by']
+        filtered = [r for r in rows if (not creator or r.get('created_by') == creator)
+                    and (not query or query in (r['page_name'] + ' ' + r['page_id']).casefold())]
+        total = len(filtered)
+        page = min(page, max(1, (total + size - 1) // size))
+        return {**result, 'items': filtered[(page - 1) * size:page * size],
+                'total': total, 'unfiltered_total': len(rows), 'page_index': page, 'page_size': size,
+                'creators': [{'value': k, 'label': v} for k, v in sorted(creators.items(), key=lambda pair: (pair[1], pair[0]))]}
 
     def _config_access(self, actor, ids):
         if not ids or len(ids) > 200 or len(set(ids)) != len(ids):
@@ -211,10 +234,13 @@ class Service:
             if route == "/languages":
                 return {"ok": True, "items": [{"value": v, "label": label} for v, label in LANGUAGES.items()]}
             if route == "/pages/available":
-                return {"ok": True, "items": self.sources.list_pages(actor, q=str(query.get("q", ""))[:200])}
+                configs = self.store.configs(actor)
+                return {"ok": True, "items": [{**p, 'configured': p['page_id'] in configs}
+                        for p in self.sources.list_pages(actor, q=str(query.get("q", ""))[:200])]}
             if route == "/pages":
                 return self.configured_pages(actor, for_publish=query.get("purpose") == "publish",
-                                             verify_ids=query.get("verify_ids"))
+                                             verify_ids=query.get("verify_ids"),
+                                             pagination=query if 'page_index' in query or 'page_size' in query else None)
             if route == "/materials":
                 return {"ok": True, **self.sources.search_materials(
                     {**query, "search": query.get("q", query.get("search", ""))}, enforce_blacklist=False, manual=True)}

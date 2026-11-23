@@ -16,7 +16,16 @@ async page => {
     if(url.pathname.endsWith('/languages'))return reply(route,{ok:true,items:[{value:'en',label:'英语'}]});
     if(url.pathname.endsWith('/draft'))return reply(route,{ok:true,draft:null});
     if(url.pathname.endsWith('/pages')){
-      if(!url.searchParams.has('verify_ids')){lists++;return reply(route,{ok:true,items,authorization_pending:true});}
+      if(!url.searchParams.has('verify_ids')){
+        lists++;
+        if(!url.searchParams.has('page_index'))return reply(route,{ok:true,items,authorization_pending:true});
+        const index=Number(url.searchParams.get('page_index')),size=Number(url.searchParams.get('page_size'));
+        assert(size===20,'management did not request a bounded page');
+        const q=(url.searchParams.get('q')||'').toLowerCase(),creator=url.searchParams.get('created_by');
+        const filtered=items.filter(p=>(!q||(p.page_name+' '+p.page_id).toLowerCase().includes(q))&&(!creator||p.created_by===creator));
+        return reply(route,{ok:true,items:filtered.slice((index-1)*size,index*size),total:filtered.length,
+          page_index:index,page_size:size,creators:[{value:'creator',label:'Creator'}],authorization_pending:true});
+      }
       const ids=url.searchParams.get('verify_ids').split(',');calls.push(ids);
       assert(ids.length<=8,'verification exceeded 8 IDs');
       if(mode==='busy')return reply(route,{ok:false,code:'source_busy',message:'素材查询繁忙'},503);
@@ -43,13 +52,13 @@ async page => {
   assert(await page.locator('#pageError').isHidden(),'source busy became a full-page error');
   await page.locator('#pageNext').click();await settled(6);
   assert(calls.slice(3).flat().join(',')===items.slice(20,40).map(p=>p.page_id).join(','),'next page queried wrong rows');
-  await page.locator('#pagePrev').click();await settled(6);
-  await page.locator('#reloadPages').click();await settled(9);
+  await page.locator('#pagePrev').click();await settled(9);
+  await page.locator('#reloadPages').click();await settled(12);
   mode='hold';await page.locator('#reloadPages').click();
   await page.waitForFunction(()=>document.querySelector('#pageAuthorizationNotice')?.textContent.includes('正在核验'));
   // The first old request is held while a newer generation completes.
   await page.waitForTimeout(100);assert(held,'stale fixture did not start');mode='ok';
-  await page.locator('#reloadPages').click();await settled(13);
+  await page.locator('#reloadPages').click();await settled(16);
   releaseOld();await page.waitForTimeout(200);
   const text=await page.locator('#pageRows').innerText();
   assert(!text.includes('OLD RESPONSE'),'old generation overwrote current list');
@@ -57,6 +66,16 @@ async page => {
   const summary={busy_list_retained:true,creation_enabled:true,excel_enabled:true,
     initial_rows:20,batches:[8,8,4],next_page:true,no_render_loop:true,refresh_retries:true,
     stale_response_ignored:true,config_merge_preserved:true,requests:calls.length};
+  await page.locator('#pageSearch').fill('Page 3909');
+  await page.waitForFunction(()=>document.querySelector('#pageTotal')?.textContent==='共 1 个 Page · 第 1 页');
+  assert((await page.locator('#pageRows').innerText()).includes('4909'),'search missed an item outside loaded pages');
+  await page.locator('#pageCreator').selectOption('creator');
+  await page.waitForTimeout(400);
+  assert((await page.locator('#pageTotal').innerText()).includes('共 1 个 Page'),'creator filter lost full-catalog search');
+  await page.locator('#pageSearch').fill('no-such-page');
+  await page.waitForFunction(()=>document.querySelector('#pageTotal')?.textContent.startsWith('共 0 个 Page'));
+  assert(await page.locator('#pageNext').isDisabled(),'empty result still advances');
+  summary.server_pagination=true;summary.full_catalog_search=true;summary.creator_filter=true;
   await page.goto('https://fb-list.test/publish.html');
   await page.locator('#applyPageFilters').click();
   const first=page.locator('#targetPages [data-page]').first();
