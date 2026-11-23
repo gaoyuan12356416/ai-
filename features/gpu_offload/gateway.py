@@ -74,6 +74,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
 
     def reply(self, value):
+        self.response_status = value.status
         self.send_response(value.status)
         for key, data in value.headers.items():
             if key.lower() not in ('content-length', 'connection', 'cache-control', 'vary'):
@@ -91,7 +92,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         started = time.monotonic()
-        route, outcome = 'none', 'failed'
+        route, outcome, path = 'none', 'failed', ''
+        self.response_status = 500
         try:
             path = urlsplit(self.path).path
             if path not in PATHS | MONITOR_PATHS or len(self.path) > 16000: return self.error(404, 'not_found')
@@ -138,7 +140,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception: return self.error(503, 'snapshot_unavailable')
         finally:
             # Excludes query parameters, cookies, identifiers and report content.
-            print(json.dumps({'kind': 'read', 'route': route, 'outcome': outcome,
+            print(json.dumps({'kind': 'read', 'route': route, 'outcome': outcome, 'status': self.response_status,
+                              'path': path if path in PATHS | MONITOR_PATHS else 'unsupported',
                               'milliseconds': round((time.monotonic()-started)*1000)}), flush=True)
 
 
