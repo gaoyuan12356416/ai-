@@ -79,8 +79,17 @@
     function cells(row){return METRICS.map(([key])=>`<td class="number" title="${esc(value(state.data,row,key)??'尚未同步')}">${esc(format(value(state.data,row,key),key))}</td>`).join('');}
     function table(){
       const d=state.data;if(!d)return;const size=Number(el.pageSize.value),pages=Math.max(1,Math.ceil(d.list.length/size));state.page=Math.min(state.page,pages);
-      const rows=[...d.list].sort((a,b)=>(state.desc?-1:1)*(Number(a[state.sort])-Number(b[state.sort])));
-      el.tableHead.innerHTML='<tr>'+d.group_by.map(k=>`<th>${DIMS[k]}</th>`).join('')+METRICS.map(([key,label])=>`<th class="number" aria-sort="${state.sort===key?(state.desc?'descending':'ascending'):'none'}"><button data-sort="${key}">${label}${state.sort===key?(state.desc?' ↓':' ↑'):''}</button></th>`).join('')+'</tr>';
+      const rows=[...d.list].sort((a,b)=>{
+        if(state.sort==='day'){
+          const dayA=a.dimensions.find(x=>x.key==='day')?.value,dayB=b.dimensions.find(x=>x.key==='day')?.value;
+          const knownA=!!dayA&&dayA!=='unknown',knownB=!!dayB&&dayB!=='unknown';
+          if(knownA!==knownB)return knownA?-1:1;
+          return knownA?(state.desc?-1:1)*dayA.localeCompare(dayB):0;
+        }
+        return (state.desc?-1:1)*(Number(a[state.sort])-Number(b[state.sort]));
+      });
+      const heading=(key,label,cls='')=>`<th${cls?` class="${cls}"`:''} aria-sort="${state.sort===key?(state.desc?'descending':'ascending'):'none'}"><button type="button" data-sort="${key}">${label}${state.sort===key?(state.desc?' ↓':' ↑'):''}</button></th>`;
+      el.tableHead.innerHTML='<tr>'+d.group_by.map(k=>k==='day'?heading(k,DIMS[k]):`<th>${DIMS[k]}</th>`).join('')+METRICS.map(([key,label])=>heading(key,label,'number')).join('')+'</tr>';
       el.tableBody.innerHTML=rows.slice((state.page-1)*size,state.page*size).map(r=>'<tr>'+r.dimensions.map(x=>`<td class="dim">${esc(x.label)}${x.key==='story'&&x.value!==x.label?`<small>${esc(x.value)}</small>`:''}</td>`).join('')+cells(r)+'</tr>').join('')||`<tr><td colspan="${d.group_by.length+METRICS.length}" class="empty">当前日期和筛选范围暂无记录；请结合上方同步覆盖日期查看。</td></tr>`;
       el.tableFoot.innerHTML=`<tr><td colspan="${d.group_by.length}">全部筛选结果合计</td>${cells(d.summary)}</tr>`;
       el.pageSummary.textContent=`共 ${d.list.length} 组 · 每页 ${size} 组`;el.pageNumber.textContent=`${state.page} / ${pages}`;el.prev.disabled=state.page<=1;el.next.disabled=state.page>=pages;
@@ -123,7 +132,11 @@
         el.syncDetail.textContent=r?`最近任务：${r.date_from} 至 ${r.date_to}；${(r.parts||[]).filter(p=>p.status==='succeeded').length}/${(r.parts||[]).length} 分项完成。最近成功：${beijing(d.last_success_at)}`:'尚无同步任务';el.syncError.textContent=r?.error||'';
       }catch(e){if(state.allowed)el.syncError.textContent='同步状态读取失败：'+e.message;}finally{state.polling=false;schedule();}
     }
-    async function apply(){try{state.query=filters();state.page=1;await load();}catch(e){message(e.message,true);}}
+    async function apply(){try{
+      const query=filters();
+      if(query.group_by!==state.query?.group_by){state.sort=query.group_by.split(',').includes('day')?'day':'total_revenue_usd';state.desc=true;}
+      state.query=query;state.page=1;await load();
+    }catch(e){message(e.message,true);}}
     el.filters.addEventListener('submit',e=>{e.preventDefault();apply();});
     el.groups.addEventListener('change',e=>{if(el.groups.querySelectorAll('input:checked').length>3){e.target.checked=false;message('最多选择 3 个分组维度');}});
     doc.querySelectorAll('[data-days]').forEach(btn=>btn.addEventListener('click',()=>{setDates(Number(btn.dataset.days));apply();}));
@@ -131,7 +144,7 @@
     el.refreshBtn.addEventListener('click',()=>{load();poll();});
     el.trendMetric.addEventListener('change',charts);el.rankMetric.addEventListener('change',charts);el.pageSize.addEventListener('change',()=>{state.page=1;table();});
     el.prev.addEventListener('click',()=>{state.page=Math.max(1,state.page-1);table();});el.next.addEventListener('click',()=>{state.page++;table();});
-    el.tableHead.addEventListener('click',e=>{const key=e.target.dataset.sort;if(!key)return;state.desc=state.sort===key?!state.desc:true;state.sort=key;table();});
+    el.tableHead.addEventListener('click',e=>{const key=e.target.dataset.sort;if(!key)return;state.desc=state.sort===key?!state.desc:true;state.sort=key;state.page=1;table();});
     el.exportBtn.addEventListener('click',()=>{if(!state.data)return;const url=URL.createObjectURL(new Blob([csv(state.data)],{type:'text/csv;charset=utf-8'}));const a=doc.createElement('a');a.href=url;a.download=`MoboReels_社媒效果_${state.data.date_from}_${state.data.date_to}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
     el.syncBtn.addEventListener('click',async()=>{if(!state.allowed||state.starting)return;let period;try{period=validate(el.dateFrom.value,el.dateTo.value);}catch(e){message(e.message,true);return;}state.starting=true;el.syncBtn.disabled=true;try{const d=await api(API+'/report-sync-runs',{method:'POST',body:JSON.stringify(period)});state.run=d.run;el.syncError.textContent='';await poll();}catch(e){el.syncError.textContent=e.message;}finally{state.starting=false;el.syncBtn.disabled=!state.allowed||['queued','running'].includes(state.run?.status);schedule();}});
     el.loginBtn.addEventListener('click',()=>root.UiTopbar?root.UiTopbar.handleAuthAction({auth:state.auth,api,afterLogout:()=>root.location.reload()}):root.location.assign('/api/auth/feishu/login?next='+encodeURIComponent(root.location.pathname)));
