@@ -27,6 +27,7 @@ from .core import TERMINAL_TASK_STATUSES, TaskRecord, XAutoPostStore
 from .dispatch_reader import read_dispatch_state
 from .operator_retry import execution_key
 from .selector import (
+    MoboUpcomingWait,
     NoEligibleMaterial,
     SelectionRequest,
     SelectionRules,
@@ -492,7 +493,7 @@ class AutoPostExecutor:
             "random_template_enabled": random_template_enabled,
             "actor": "x_auto_post_service",
         }
-        if (task.selection.get('x_effect') or {}).get('policy'):
+        if (task.selection.get('x_effect') or {}).get('policy') or task.selection.get('candidate_pool'):
             from features.x_material_effects.reuse import lane
             payload['reuse_task'] = dict(lane=lane(), task_id=task.id)
         try:
@@ -987,7 +988,8 @@ class AutoPostExecutor:
                 },
                 event_type="task_x_reconcile_retry",
             )
-        if status >= 500:
+        waiting = phase == "selection" and isinstance(exc, MoboUpcomingWait)
+        if status >= 500 or waiting:
             return self.store.transition_task(
                 task.id,
                 "retry_wait",
@@ -998,11 +1000,11 @@ class AutoPostExecutor:
                     "claim_worker": "",
                     "claim_token": "",
                     "lease_expires_at_utc": "",
-                    "next_attempt_at_utc": self._now() + timedelta(minutes=5),
+                    "next_attempt_at_utc": exc.retry_at if waiting else self._now() + timedelta(minutes=5),
                     "error_code": code,
                     "error_message": message,
                 },
-                event_type="task_x_transient_failure",
+                event_type="task_x_mobo_upcoming_wait" if waiting else "task_x_transient_failure",
             )
         canonical_failure_recorded = False
         if task.execution_run_id:
