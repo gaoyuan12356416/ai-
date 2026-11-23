@@ -17,6 +17,9 @@ MemoryLimit=1536M
 Nice=15
 IOSchedulingClass=idle
 NoNewPrivileges=true
+TimeoutStopSec=infinity
+SendSIGKILL=no
+KillMode=process
 UMask=0077
 
 [Install]
