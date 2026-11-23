@@ -33,6 +33,8 @@ def manifest():
         raise RuntimeError('backup schema or count mismatch')
     if file_hash(HISTORY/'task-references.jsonl.gz')!=m['task_reference_sha256']:
         raise RuntimeError('backup task index checksum mismatch')
+    if file_hash(HISTORY/'restore-tools.tar.gz')!=m['restore_tools_sha256']:
+        raise RuntimeError('backup recovery tools checksum mismatch')
     for v in m['versions']:
         folder=HISTORY/'versions'/checked(v['version'])
         if file_hash(folder/'snapshot.json')!=v['manifest_sha256'] or file_hash(folder/'restored.json')!=v['restore_sha256']:
@@ -42,6 +44,7 @@ def manifest():
 
 def remove_locked():
     disk();cfg=env();ready,m=manifest()
+    if not ready.get('archive_flushed'):raise RuntimeError('backup durability acknowledgement missing')
     if m['references']['unexpected_absence']:raise RuntimeError('an expected task reference needs reconciliation')
     if read_config()!='live':raise RuntimeError('legacy mirror not frozen')
     if not (ROOT/'qa/postarchive-rollback.json').is_file():raise RuntimeError('postarchive restoration rehearsal missing')

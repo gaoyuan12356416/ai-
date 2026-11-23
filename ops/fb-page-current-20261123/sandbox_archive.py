@@ -33,7 +33,8 @@ def main():
             if sha(raw)!=h or meta['version']!=v:raise RuntimeError('reference recovery failed')
         (base/'schema.sql').write_text(ddl+';\n')
         (base/'task-references.jsonl.gz').write_bytes(gzip.compress(b'',mtime=0))
-        manifest=dict(rows=len(pids),schema_sha256=file_hash(base/'schema.sql'),
+        revision,tools_hash=package_tools(base)
+        manifest=dict(rows=len(pids),schema_sha256=file_hash(base/'schema.sql'),recovery_revision=revision,restore_tools_sha256=tools_hash,
             task_reference_sha256=file_hash(base/'task-references.jsonl.gz'),
             versions=[dict(version=v,manifest_sha256=got['manifest_sha256'],restore_sha256=file_hash(base/'versions'/v/'restored.json'))])
         atomic(base/'manifest.json',manifest)

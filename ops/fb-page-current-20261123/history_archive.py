@@ -42,6 +42,17 @@ def file_hash(path):
     return h.hexdigest()
 
 
+def package_tools(base):
+    revision=Path(__file__).resolve().parents[2].name
+    if len(revision)!=40 or any(c not in '0123456789abcdef' for c in revision):raise RuntimeError('unversioned recovery tools')
+    target=base/'restore-tools.tar.gz';temp=base/'restore-tools.partial'
+    subprocess.run(['git','--git-dir='+str(ROOT/'source.git'),'archive','--format=tar.gz','--prefix=fb-page-current-restore/',
+                    '-o',str(temp),revision,'features/__init__.py','features/fb_page_current','features/fb_page_portrait',
+                    'features/fb_page_assignment','ops/fb-page-current-20261123'],check=True)
+    temp.replace(target)
+    return revision,file_hash(target)
+
+
 def write_blob(path,packet):
     path.parent.mkdir(exist_ok=True,parents=True)
     tmp=path.with_suffix('.partial')
@@ -258,6 +269,7 @@ def run():
             total+=m['rows']
             print(encoded(dict(completed=idx+1,versions=len(versions),total_rows=total,version=v)),flush=True)
         ref=confirm_references(db,set(versions),base)
+        revision,tools_hash=package_tools(base)
         sizes={};size=0;blobs=0
         for root,_,names in os.walk(base):
             for name in names:
@@ -265,12 +277,15 @@ def run():
                 if f.parent.parent==base/'blobs':blobs+=1
         out=dict(at=stamp(),cutoff=frozen['version'],versions=snapshots,rows=total,references=ref,
                  schema_sha256=file_hash(base/'schema.sql'),task_reference_sha256=file_hash(base/'task-references.jsonl.gz'),
+                 recovery_revision=revision,restore_tools_sha256=tools_hash,
                  compressed_bytes=size,unique_detail_blobs=blobs)
         atomic(base/'manifest.json',out)
+        # Flush the archive's mounted filesystem before issuing the external, deletion-eligible receipt.
+        subprocess.run(['sync','-f',str(base/'manifest.json')],check=True)
         # The external receipt includes the manifest itself and excludes transient progress and lock files.
-        exact_bytes=sum(f.stat().st_size for f in (base/'schema.sql',base/'manifest.json',base/'task-references.jsonl.gz'))
+        exact_bytes=sum(f.stat().st_size for f in (base/'schema.sql',base/'manifest.json',base/'task-references.jsonl.gz',base/'restore-tools.tar.gz'))
         exact_bytes+=sum(f.stat().st_size for folder in ('versions','blobs') for f in (base/folder).rglob('*') if f.is_file())
-        atomic(ROOT/'history-ready.json',dict(at=stamp(),versions=len(versions),rows=total,references=ref,
+        atomic(ROOT/'history-ready.json',dict(at=stamp(),versions=len(versions),rows=total,references=ref,archive_flushed=True,
                compressed_bytes=exact_bytes,manifest_sha256=file_hash(base/'manifest.json')))
         return {k:v for k,v in out.items() if k!='versions'}
 
