@@ -55,7 +55,6 @@ def switch(record,folder,rollback=False,full=False):
     target=Path(record['previous'] if full else record['compatibility']) if rollback else Path(record['release'])
     if CURRENT.resolve()!=expected:raise RuntimeError('Concurrent release change')
     changes=[]
-    observed=json.loads((repo/'ops/editor-performance/static-baseline.json').read_text())
     for item in record['files']:
         if rollback and not full and item['kind']!='static':continue
         path=Path(item['path']);before=folder/item['before'] if item['before'] else None
@@ -114,6 +113,7 @@ def main():
     if a.action=='rollback':return switch(json.loads(a.manifest.read_text()),a.manifest.parent,True,a.full)
     if a.manifest:return switch(json.loads(a.manifest.read_text()),a.manifest.parent)
     repo=a.repo
+    observed=json.loads((repo/'ops/editor-performance/static-baseline.json').read_text())
     if cmd('git','-C',repo,'rev-parse','HEAD')!=a.version or cmd('git','-C',repo,'status','--porcelain'):raise RuntimeError('Need a clean exact checkout')
     for version in (a.version,a.compat_version):
         if not cmd('git','-C',repo,'branch','-r','--contains',version):raise RuntimeError('Version was not fetched from GitHub')
