@@ -32,13 +32,15 @@ def recover(action):
                 for frozen in scope:
                     if frozen['template_id']!=9000000000007:raise RuntimeError('scope_changed')
                     if action=='selection' and frozen['status']!='no_candidate':continue
-                    if action=='receipts' and frozen['execution_queue_id'] not in authorized:continue
                     row=dict(a.execute('SELECT * FROM x_auto_task WHERE id=?',(frozen['id'],)).fetchone())
-                    assert all(row[k]==frozen[k] for k in ('run_id','template_id','template_version','account_id','material_id','execution_queue_id'))
+                    if action=='receipts' and not row['execution_queue_id']:continue
+                    assert all(row[k]==frozen[k] for k in ('run_id','template_id','template_version','account_id'))
+                    assert not frozen['material_id'] or row['material_id']==frozen['material_id']
+                    assert not frozen['execution_queue_id'] or row['execution_queue_id']==frozen['execution_queue_id']
                     if row['claim_token'] or row['status']=='published':
                         result['unchanged'].append({'task':row['id'],'reason':'active_or_published'});continue
-                    if a.execute('SELECT 1 FROM x_auto_event WHERE task_id=? AND event_type=?',
-                                 (row['id'],'today_'+action+'_recovered')).fetchone():continue
+                    if action=='selection' and a.execute('SELECT 1 FROM x_auto_event WHERE task_id=? AND event_type=?',
+                                 (row['id'],'today_selection_recovered')).fetchone():continue
                     run=a.execute('SELECT status FROM x_auto_run WHERE id=?',(row['run_id'],)).fetchone()
                     assert run and run[0]!='canceled'
                     if action=='selection':
@@ -49,10 +51,17 @@ def recover(action):
                         assert not p.execute('SELECT 1 FROM x_post_manual_run WHERE external_task_key=?',('x-auto-task-'+str(row['id']),)).fetchone()
                         phase='selection'
                     else:
-                        assert row['status'] in ('failed','retry_wait','reconciling')
+                        if row['status'] not in ('failed','retry_wait','reconciling'):continue
                         auth=p.execute('SELECT * FROM pipeline_x_prepost_recovery WHERE source_key=? ORDER BY from_generation DESC LIMIT 1',
                             ('x:queue:'+str(row['execution_queue_id']),)).fetchone()
-                        assert auth and auth['state'] in ('armed','consumed')
+                        if not auth:continue
+                        assert auth['state'] in ('armed','consumed')
+                        if a.execute("SELECT 1 FROM x_auto_event WHERE task_id=? AND event_type='today_receipts_recovered' AND json_extract(details_json,'$.plan_sha256')=?",
+                                     (row['id'],auth['plan_sha256'])).fetchone():continue
+                        q=p.execute('SELECT * FROM x_post_queue WHERE id=?',(row['execution_queue_id'],)).fetchone()
+                        manual=p.execute('SELECT * FROM x_post_manual_run WHERE id=?',(q['manual_run_id'],)).fetchone()
+                        assert str(q['account_id'])==row['account_id'] and q['material_id']==row['material_id']
+                        assert manual['external_task_key']=='x-auto-task-'+str(row['id'])
                         log=p.execute('SELECT * FROM x_post_publish_log WHERE queue_id=?',(row['execution_queue_id'],)).fetchone()
                         assert log
                         if log['unknown_outcome']:
