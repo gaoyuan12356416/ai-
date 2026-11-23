@@ -1,0 +1,13 @@
+{
+  "coordinator": {
+    "root": "/opt/pipeline-dispatch/current",
+    "files": [
+      {
+        "path": "features/pipeline_dispatch/core.py",
+        "patch": "dispatch_receipt_indexes.patch",
+        "before": "f48f7c070be61b8a7f362f069f9b5721601596041200ed35f0ec48aa66786a6a",
+        "after": "110e710b6702264ed5a3c523da0ad5390862bffe9f42a03d3aa383a9db5c8ebd"
+      }
+    ]
+  }
+}
