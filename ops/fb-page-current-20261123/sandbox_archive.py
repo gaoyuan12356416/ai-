@@ -1,8 +1,13 @@
 """Rehearse archive, per-column recovery, and post-archive latest-service restoration on a Unix socket."""
-from contextlib import closing
+from contextlib import closing,ExitStack
+from functools import partial
 import tempfile
+from unittest.mock import patch
 from history_archive import *
-from recovery import create_legacy
+import operations
+import recovery
+import cutover
+from features.fb_page_current import common
 from sandbox_check import connect
 from features.fb_page_current.mirror import legacy
 from cutover import swap_sql
@@ -10,7 +15,8 @@ from cutover import swap_sql
 
 def main():
     disk()
-    base=Path(tempfile.mkdtemp(dir=ROOT,prefix='qa-history-'))
+    test_root=Path(tempfile.mkdtemp(dir=ROOT,prefix='qa-history-'))
+    base=test_root/'history';base.mkdir()
     with closing(connect()) as source,source.cursor() as c,closing(private_mysql()) as restore:
         if one(c,'SELECT @@socket')[0]!='/run/portrait-qa/mysql.sock':raise RuntimeError('sandbox required')
         if shape(c,PUBLIC)!=('profile_version','page_id') or shape(c,NEXT)!=('page_id',):raise RuntimeError('run sandbox_check first')
@@ -25,16 +31,39 @@ def main():
         for pid,h in pids.items():
             raw,meta=lookup(v,pid,base)
             if sha(raw)!=h or meta['version']!=v:raise RuntimeError('reference recovery failed')
-        # Simulate loss of the old table and hydrate it from the current, verified physical table.
-        swap_sql(c,True)
-        c.execute('DROP TABLE '+LEGACY)
-        create_legacy(source,ddl)
-        legacy(ManualReader(source),{},meta,proof,source_items(source,PUBLIC,v,pids),connector=connect)
-        swap_sql(c,False)
-        if dict_all(c,v)!=pids:raise RuntimeError('restored active version differs')
+        (base/'schema.sql').write_text(ddl+';\n')
+        (base/'task-references.jsonl.gz').write_bytes(gzip.compress(b'',mtime=0))
+        manifest=dict(rows=len(pids),schema_sha256=file_hash(base/'schema.sql'),
+            task_reference_sha256=file_hash(base/'task-references.jsonl.gz'),
+            versions=[dict(version=v,manifest_sha256=got['manifest_sha256'],restore_sha256=file_hash(base/'versions'/v/'restored.json'))])
+        atomic(base/'manifest.json',manifest)
+        atomic(test_root/'history-ready.json',dict(rows=len(pids),manifest_sha256=file_hash(base/'manifest.json')))
+        portraits=test_root/'portraits'
+        atomic(portraits/'current.json',dict(version=v))
+        atomic(portraits/(v+'.receipt.json'),proof)
+        # All SQL goes to the private socket. The systemd restoration step only records the private target.
+        with ExitStack() as overrides:
+            for mod in (recovery,cutover):
+                for name,value in dict(ROOT=test_root,env=lambda:{},connect_reader=connect,writer=connect).items():
+                    overrides.enter_context(patch.object(mod,name,value))
+            overrides.enter_context(patch.object(common,'ROOT',test_root))
+            overrides.enter_context(patch.object(operations,'PORTRAITS',portraits))
+            overrides.enter_context(patch.object(cutover,'PORTRAITS',portraits))
+            overrides.enter_context(patch.object(recovery,'HISTORY',base))
+            overrides.enter_context(patch.object(recovery,'legacy',partial(legacy,connector=connect)))
+            overrides.enter_context(patch.object(recovery,'restore_writer',lambda:atomic(test_root/'restored-unit.json',dict(sandbox=True))))
+            for missing in (False,True):
+                swap_sql(c,True)
+                cutover.mode('live' if missing else 'live-mirror')
+                if missing:c.execute('DROP TABLE '+LEGACY)
+                outcome=recovery.rollback()
+                if outcome['version']!=v or dict_all(c,v)!=pids or cutover.layout(source)!=cutover.BEFORE:
+                    raise RuntimeError('executable rollback did not restore the complete legacy layout')
+        if not (test_root/'restored-unit.json').is_file():raise RuntimeError('sandbox unit handoff missing')
         result=dict(at=stamp(),mysql_socket='/run/portrait-qa/mysql.sock',version=v,restored_rows=got['rows'],
-                    references=len(pids),all_12_columns_verified=True,postarchive_latest_rollback=True)
-        atomic(ROOT/'qa/postarchive-rollback.json',result);print(encoded(result))
+                    references=len(pids),all_12_columns_verified=True,existing_legacy_rollback=True,postarchive_latest_rollback=True,
+                    command='recovery.py rollback',isolated_unit_restore=True)
+        atomic(ROOT/'qa/postarchive-rollback.json',result);return result
 
 
 def dict_all(c,v):
@@ -42,4 +71,4 @@ def dict_all(c,v):
     return dict(c.fetchall())
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':print(encoded(main()))

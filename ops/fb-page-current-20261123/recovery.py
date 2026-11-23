@@ -187,5 +187,10 @@ def restore_reference(v):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('action',choices=['remove','rollback','restore-version']);p.add_argument('--version')
+    p.add_argument('--sandbox',action='store_true',help='exercise rollback on the isolated MySQL Unix socket')
     a=p.parse_args();disk()
-    print(encoded(remove() if a.action=='remove' else rollback() if a.action=='rollback' else restore_reference(a.version)),flush=True)
+    if a.sandbox:
+        if a.action!='rollback':p.error('--sandbox exercises the rollback command')
+        from sandbox_archive import main
+        print(encoded(main()),flush=True)
+    else:print(encoded(remove() if a.action=='remove' else rollback() if a.action=='rollback' else restore_reference(a.version)),flush=True)

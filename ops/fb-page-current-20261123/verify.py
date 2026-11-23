@@ -50,19 +50,22 @@ def start_pin():
                     if code!=404:raise RuntimeError('mixed authorization not rejected')
                     fact=dict(at=stamp(),pid=pid,v=v,path=path,count=len(dramas),p1=sha(encoded(dramas[:50])),
                               p2=sha(encoded(dramas[50:100])),mixed_acl=404,kind='isolated session, real published payload')
-                    atomic(QA/'pin-open.json',fact);return fact
+                    atomic(QA/'pins'/(v+'.open.json'),fact);atomic(QA/'pin-open.json',fact);return fact
     raise RuntimeError('no paginated sample in this slice')
 
 
 def finish_pin():
     saved=json.loads((QA/'pin-open.json').read_text());pid=saved['pid'];old=saved['v']
-    b=Store(reader=Gate(),pins=Pins(QA/'sample-pins.sqlite3',AUTH)).for_cookie(COOKIE)
-    page=b.dramas(pid,saved['path'],old,2)
+    pins=Pins(QA/'sample-pins.sqlite3',AUTH)
+    class PinOnly:
+        def query(self,sql):raise RuntimeError('previously opened Page lost its local version')
+    page=Store(reader=PinOnly(),pins=pins).for_cookie(COOKIE).dramas(pid,saved['path'],old,2)
+    b=Store(reader=Gate(),pins=pins).for_cookie(COOKIE)
     latest=b.load([pid],detail=True)
     if not (page['version']==old and page['total']==saved['count'] and sha(encoded(page['items']))==saved['p2']
             and latest['meta']['version']>old):raise RuntimeError('cross-refresh pagination or latest failed')
     fact=dict(at=stamp(),old=old,current=latest['meta']['version'],count=page['total'],second_page_hash=saved['p2'])
-    atomic(QA/'pin-verified.json',fact);return fact
+    atomic(QA/'pins'/(old+'.verified.json'),fact);atomic(QA/'pin-verified.json',fact);return fact
 
 
 def snapshot_metrics(label):
