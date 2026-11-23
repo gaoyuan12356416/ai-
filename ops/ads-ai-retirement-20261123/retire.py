@@ -2,6 +2,7 @@
 import argparse
 import concurrent.futures
 from contextlib import closing
+import gzip
 import hashlib
 import json
 import os
@@ -86,15 +87,52 @@ def schema_check(local, group):
             raise RuntimeError("trigger not included in archived schema")
 
 
-def frozen_digest(part, local):
+class TupleStream:
+    """Hash the ordered SQL tuples independently of INSERT statement boundaries."""
+    def __init__(self, table):
+        self.prefix = ("INSERT INTO `" + table + "` VALUES ").encode()
+        self.digest = hashlib.sha256()
+        self.has_rows = False
+
+    def add(self, line):
+        if not line.startswith(b"INSERT "):
+            return
+        statement = line.rstrip(b"\r\n")
+        if not statement.startswith(self.prefix) or not statement.endswith(b";"):
+            raise ValueError("unexpected data statement in dump")
+        if self.has_rows:
+            self.digest.update(b",")
+        self.has_rows = True
+        self.digest.update(memoryview(statement)[len(self.prefix):-1])
+
+
+def original_tuples(part, local_json=False):
+    rows = TupleStream(part["table"])
+    if local_json:
+        cmd, env = archive.dump_command(part, True)
+        with subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+            for line in proc.stdout:
+                rows.add(line)
+            if proc.wait():
+                raise RuntimeError("local dump failed")
+    else:
+        with gzip.open(archive.BUNDLE / part["file"], "rb") as stream:
+            for line in stream:
+                rows.add(line)
+    return rows.digest.hexdigest()
+
+
+def frozen_digest(part, local, local_json_hashes):
     cmd, env = archive.dump_command(part, local)
     name = part["table"]
     cmd[-1] = PREFIX + name
     before = ("INSERT INTO `" + cmd[-1] + "` ").encode()
     after = ("INSERT INTO `" + name + "` ").encode()
     digest = hashlib.sha256()
+    tuples = TupleStream(cmd[-1])
     with subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
         for line in proc.stdout:
+            tuples.add(line)
             if line.startswith(before):
                 line = after + line[len(before):]
             digest.update(line)
@@ -105,7 +143,11 @@ def frozen_digest(part, local):
         recorded = json.loads((archive.ROOT / "restore-verified.json").read_text())
         expected = recorded["restored_sql_sha256"][part["file"]]
     if digest.hexdigest() != expected:
-        raise RuntimeError("frozen content differs from the backup: " + part["file"])
+        # The longer frozen name can change where mysqldump starts a new INSERT.
+        # Compare the complete value stream, including every separator and value.
+        expected_tuples = local_json_hashes.get(name) or original_tuples(part)
+        if tuples.digest.hexdigest() != expected_tuples:
+            raise RuntimeError("frozen content differs from the backup: " + part["file"])
     print(archive.stamp(), "frozen data matched", part["file"], flush=True)
 
 
@@ -114,12 +156,20 @@ def process(local, group_id, sql, group, drops, manifest, receipt_dir):
     original = set(group)
     frozen = set(group.values())
     proof = receipt_dir / ("group-%d-frozen-proof.json" % group_id)
+    json_hash_file = receipt_dir / ("group-%d-local-json.json" % group_id)
+    local_json_hashes = json.loads(json_hash_file.read_text()) if json_hash_file.exists() else {}
     manifest_hash = archive.file_hash(archive.BUNDLE / "manifest.json")
     partial = proof.is_file() and json.loads(proof.read_text())["manifest_sha256"] == manifest_hash
     if not original & names and not frozen & names and partial:
         return
     if original <= names and not frozen & names:
         schema_check(local, group)
+        if local:
+            for part in manifest["parts"]:
+                name = part["table"]
+                if name in group and name in archive.JSON_TARGETS:
+                    local_json_hashes[name] = original_tuples(part, local_json=True)
+            archive.write_json(json_hash_file, local_json_hashes)
         exec_ddl(local, [sql])
     elif original & names or (not frozen <= names and not partial):
         raise RuntimeError("unexpected mix of old, frozen, or missing names")
@@ -128,7 +178,7 @@ def process(local, group_id, sql, group, drops, manifest, receipt_dir):
         try:
             parts = [part for part in manifest["parts"] if part["table"] in group]
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-                list(pool.map(lambda part: frozen_digest(part, local), parts))
+                list(pool.map(lambda part: frozen_digest(part, local, local_json_hashes), parts))
         except Exception:
             # All originals are still held under the private frozen names here.
             observed = inventory(local)
