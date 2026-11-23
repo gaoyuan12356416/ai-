@@ -339,9 +339,9 @@ def dispatch(rt, catalog, actor, verb, path, params, body):
         return params.get(name, [default])[0]
 
     if path == "/catalog/dramas" and verb == "GET":
-        return catalog.search(q("product"), q("q").strip(), int(q("page", "1")))
+        return catalog.search(q("product"), q("q").strip(), int(q("page", "1")), refresh=q('refresh')=='1')
     if path == "/catalog/episodes" and verb == "GET":
-        return catalog.episodes(q("product"), q("key"))
+        return catalog.episodes(q("product"), q("key"), refresh=q('refresh')=='1')
     if path == "/catalog/imports":
         if verb == "GET":
             return list_imports(rt, actor)

@@ -699,6 +699,73 @@
     libraryTotal = 0,
     catalogImports = [];
   const libraryCache = new Map();
+  const browseRequests = new Map();
+  let browseStorageLoaded = "";
+  const canCacheBrowse = () => auth?.user?.is_admin === true || auth?.user?.role === "admin" || auth?.user?.permissions?.video_editing === true;
+  const browseStorageKey = () => "editor-browse-v1:" + JSON.stringify([
+    auth?.user?.tenant_key, auth?.user?.user_id || auth?.name,
+  ]);
+  function cachedBrowse(key) {
+    if (!canCacheBrowse()) return null;
+    const storageKey = browseStorageKey();
+    if (browseStorageLoaded !== storageKey) {
+      browseStorageLoaded = storageKey;
+      for (const name of libraryCache.keys())
+        if (/^(catalog|episodes):/.test(name)) libraryCache.delete(name);
+      try {
+        for (const [name, entry] of JSON.parse(sessionStorage.getItem(storageKey) || "[]"))
+          if (Date.now() - entry.at < 86400000) libraryCache.set(name, entry);
+      } catch {}
+    }
+    const cached = libraryCache.get(key);
+    return cached && Date.now() - cached.at < 86400000 ? cached : null;
+  }
+  function storeBrowse(key, data) {
+    if (!canCacheBrowse()) return;
+    cachedBrowse(key);
+    libraryCache.set(key, { data, at: Math.min(Date.now(), (data.cache?.updated_at || Date.now()/1000)*1000) });
+    try {
+      const entries = [...libraryCache].filter(([name]) => /^(catalog|episodes):/.test(name));
+      entries.sort((a,b) => b[1].at-a[1].at);
+      sessionStorage.setItem(browseStorageKey(), JSON.stringify(entries.slice(0,40)));
+    } catch {}
+  }
+  function readBrowse(key, url, signal, force = false) {
+    let prior = browseRequests.get(key);
+    if (prior?.signal?.aborted) {
+      browseRequests.delete(key);
+      prior = null;
+    }
+    if (prior) {
+      if (force && !prior.force)
+        return prior.promise.catch(() => {}).then(() => readBrowse(key, url, signal, true));
+      return prior.promise;
+    }
+    const promise = api(url + (force ? "&refresh=1" : ""), undefined, undefined, { signal })
+      .then((data) => { storeBrowse(key, data); return data; })
+      .finally(() => {
+        if (browseRequests.get(key)?.promise === promise) browseRequests.delete(key);
+      });
+    browseRequests.set(key, { promise, force, signal });
+    return promise;
+  }
+  function browseStatus(data, updating = false) {
+    const node = $("catalogReadStatus");
+    if (!node) return;
+    const at = data?.cache?.updated_at;
+    node.textContent = data
+      ? `${at ? "更新于 " + new Date(at*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "已显示上次结果"}${updating ? " · 正在更新，可继续选择" : ""}${data.cache?.error ? " · 更新暂不可用，保留上次结果" : ""}`
+      : "正在读取，可随时切换来源或返回";
+  }
+  function prefetchBrowse(key, url) {
+    const cached = cachedBrowse(key);
+    if ((cached && Date.now()-cached.at < 300000) || browseRequests.size >= 2) return;
+    readBrowse(key, url).catch(() => {});
+  }
+  function warmCatalogs() {
+    for (const product of ["dramawave", "moboreels"])
+      prefetchBrowse("catalog:" + JSON.stringify([product,1,""]), "/catalog/dramas?" + new URLSearchParams({product,page:1,q:""}));
+  }
   const draftKey = () =>
     "editor-selection:" +
     JSON.stringify([
@@ -785,7 +852,7 @@
       .join("");
   }
   function libraryMarkup() {
-    return `<div class="library-tabs" role="tablist" aria-label="媒体来源"><button data-library-source="local" class="active">我的素材</button><button data-library-source="dramawave">DramaWave 短剧</button><button data-library-source="moboreels">MoboReels 短剧</button></div><section id="catalogPanel" hidden><div class="modal-tools"><input id="catalogQuery" type="search" placeholder="输入剧名或剧目 ID"><button id="searchCatalog">搜索剧目</button></div><div id="catalogContent"></div></section>`;
+    return `<div class="library-tabs" role="tablist" aria-label="媒体来源"><button data-library-source="local" class="active">我的素材</button><button data-library-source="dramawave">DramaWave 短剧</button><button data-library-source="moboreels">MoboReels 短剧</button></div><section id="catalogPanel" hidden><div class="modal-tools"><input id="catalogQuery" type="search" placeholder="输入剧名或剧目 ID"><button id="searchCatalog">搜索剧目</button></div><div class="catalog-summary"><span id="catalogReadStatus" class="muted" role="status"></span><button id="refreshCatalog">更新列表</button></div><div id="catalogContent"></div></section>`;
   }
   function cachedImport(episode) {
     return catalogImports.find(
@@ -823,19 +890,20 @@
             $("localLibrary").hidden = librarySource !== "local";
             $("catalogPanel").hidden = librarySource === "local";
             if (librarySource === "local")
-              action(() => readAssets(), "read-assets");
-            else action(readCatalog, "read-catalog-" + librarySource);
+              readAssets();
+            else readCatalog();
           }),
       );
     $("searchCatalog").onclick = () => {
       catalogPage = 1;
       readCatalog();
     };
+    $("refreshCatalog").onclick = () => catalogDrama ? openDrama(catalogDrama, true) : readCatalog(true);
     $("catalogQuery").onkeydown = (e) => {
       if (e.key === "Enter") $("searchCatalog").click();
     };
   }
-  async function readCatalog() {
+  async function readCatalog(force = false) {
     catalogController?.abort();
     catalogController = new AbortController();
     catalogDrama = null;
@@ -852,54 +920,62 @@
       $("catalogContent")
         .querySelectorAll("[data-drama-index]")
         .forEach(
-          (b) =>
-            (b.onclick = () =>
-              action(
-                () => openDrama(data.items[Number(b.dataset.dramaIndex)]),
-                "drama-read",
-              )),
+          (b) => {
+            const drama = data.items[Number(b.dataset.dramaIndex)];
+            b.onclick = () => openDrama(drama);
+            let intentTimer;
+            const prefetch = () => prefetchBrowse("episodes:" + source + ":" + drama.key,
+              "/catalog/episodes?" + new URLSearchParams({product:source,key:drama.key}));
+            b.onpointerenter = () => { intentTimer = setTimeout(prefetch, 180); };
+            b.onpointerleave = () => clearTimeout(intentTimer);
+            b.onfocus = prefetch;
+          },
         );
       $("catalogPrev").onclick = () => {
         catalogPage--;
-        action(readCatalog, "catalog-page");
+        readCatalog();
       };
       $("catalogNext").onclick = () => {
         catalogPage++;
-        action(readCatalog, "catalog-page");
+        readCatalog();
       };
     };
-    const cached = libraryCache.get(key);
+    const cached = cachedBrowse(key);
     if (cached) paint(cached.data);
     else
       $("catalogContent").innerHTML =
         '<p class="modal-empty">正在读取剧目…</p>';
-    if (cached && Date.now() - cached.at < 30000) return;
+    const fresh = cached && Date.now() - cached.at < 300000;
+    browseStatus(cached?.data, !!cached && (force || !fresh));
+    if (fresh && !force) return;
     try {
-      const data = await api(
-        "/catalog/dramas?" + new URLSearchParams({ product: source, page, q }),
-        undefined,
-        undefined,
-        { signal: catalogController.signal },
-      );
+      const url = "/catalog/dramas?" + new URLSearchParams({ product: source, page, q });
+      let data = await readBrowse(key, url, catalogController.signal, force === true || !!cached);
       if (
         epoch !== libraryEpoch ||
         modalKind !== "assets" ||
         source !== librarySource
       )
         return;
-      if (libraryCache.size > 40) libraryCache.clear();
-      libraryCache.set(key, { data, at: Date.now() });
       paint(data);
+      browseStatus(data, data.cache?.state === "stale");
+      if (data.cache?.state === "stale") {
+        data = await readBrowse(key, url, catalogController.signal, true);
+        if (epoch !== libraryEpoch || modalKind !== "assets" || source !== librarySource) return;
+        paint(data);browseStatus(data);
+      }
     } catch (e) {
       if (
         e.name !== "AbortError" &&
         epoch === libraryEpoch &&
         modalKind === "assets"
-      )
+      ) {
+        if ($("catalogReadStatus")) $("catalogReadStatus").textContent = "更新失败，已有结果和选择已保留，可点击更新列表重试";
         toast("剧目读取失败，选择已保留。" + e.message, true);
+      }
     }
   }
-  async function openDrama(drama) {
+  async function openDrama(drama, force = false) {
     catalogController?.abort();
     catalogController = new AbortController();
     catalogDrama = drama;
@@ -911,7 +987,7 @@
       catalogEpisodes = data.items;
       $("catalogContent").innerHTML =
         `<div class="catalog-summary"><button id="backCatalog">‹ 返回剧目</button><strong>${esc(drama.name)}</strong><span>${esc(drama.language)} · ${data.items.length} 集</span></div><p class="muted">勾选后加入下方完整选择，确认后在后台导入和解析。每次最多 20 个素材。</p><div class="catalog-summary"><button id="selectFirstEpisodes">选择前 3 集</button><button id="clearEpisodes">清空本剧选择</button><span id="episodeCount"></span></div><div class="episode-grid">${data.items.map((e) => `<label><input type="checkbox" name="catalogEpisode" value="${e.number}">第 ${e.number} 集</label>`).join("")}</div>`;
-      $("backCatalog").onclick = () => action(readCatalog, "read-catalog");
+      $("backCatalog").onclick = () => readCatalog();
       $("catalogContent")
         .querySelectorAll('[name="catalogEpisode"]')
         .forEach(
@@ -956,35 +1032,41 @@
       };
       drawSelection();
     };
-    const cached = libraryCache.get(key);
+    const cached = cachedBrowse(key);
     if (cached) paint(cached.data);
-    else
+    else {
       $("catalogContent").innerHTML =
-        '<p class="modal-empty">正在读取分集…</p>';
-    if (cached && Date.now() - cached.at < 30000) return;
+        `<div class="catalog-summary"><button id="backCatalog">‹ 返回剧目</button><strong>${esc(drama.name)}</strong></div><p class="modal-empty">正在读取分集…</p>`;
+      $("backCatalog").onclick = () => readCatalog();
+    }
+    const fresh = cached && Date.now() - cached.at < 300000;
+    browseStatus(cached?.data, !!cached && (force || !fresh));
+    if (fresh && !force) return;
     try {
-      const data = await api(
-        "/catalog/episodes?" +
-          new URLSearchParams({ product: source, key: drama.key }),
-        undefined,
-        undefined,
-        { signal: catalogController.signal },
-      );
+      const url = "/catalog/episodes?" + new URLSearchParams({ product: source, key: drama.key });
+      let data = await readBrowse(key, url, catalogController.signal, force === true || !!cached);
       if (
         epoch !== libraryEpoch ||
         modalKind !== "assets" ||
         catalogDrama?.key !== drama.key
       )
         return;
-      libraryCache.set(key, { data, at: Date.now() });
       paint(data);
+      browseStatus(data, data.cache?.state === "stale");
+      if (data.cache?.state === "stale") {
+        data = await readBrowse(key, url, catalogController.signal, true);
+        if (epoch !== libraryEpoch || modalKind !== "assets" || catalogDrama?.key !== drama.key) return;
+        paint(data);browseStatus(data);
+      }
     } catch (e) {
       if (
         e.name !== "AbortError" &&
         epoch === libraryEpoch &&
         modalKind === "assets"
-      )
+      ) {
+        if ($("catalogReadStatus")) $("catalogReadStatus").textContent = "更新失败，已有分集和选择已保留，可点击更新列表重试";
         toast("分集读取失败，已有选择保留。" + e.message, true);
+      }
     }
   }
   async function confirmSelection(afterSave) {
@@ -1120,13 +1202,14 @@
     $("mergeSources").onchange = persistDraft;
     connectLibrary();
     drawSelection();
+    warmCatalogs();
     const epoch = libraryEpoch;
     api("/catalog/imports")
       .then((data) => {
         if (epoch === libraryEpoch) catalogImports = data.items;
       })
       .catch(() => {});
-    action(() => readAssets(), "read-assets");
+    readAssets();
   }
   async function readAssets(more = false) {
     assetController?.abort();

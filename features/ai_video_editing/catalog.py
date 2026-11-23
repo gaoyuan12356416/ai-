@@ -109,11 +109,12 @@ def environment_file(path):
 
 
 class Catalog:
-    def __init__(self, platform):
+    def __init__(self, platform, browse_cache_path=None):
         self.platform = platform
         self.settings = environment_file("/etc/moboreels-library.env")
         self.settings.update(os.environ)
-        self.cache = {}
+        from .catalog_cache import BrowseCache
+        self.browse = BrowseCache(browse_cache_path)
         self.lock = threading.Lock()
         self.provider_lock = threading.Lock()
         self.last_request = 0
@@ -201,17 +202,21 @@ class Catalog:
             + " AND project_type=2 AND is_show=1"
         )
 
-    def search(self, product, query="", page=1):
+    def browse_key(self, kind, *values):
+        scope = [getattr(self.platform, 'MYSQL_BASE_CMD', []), getattr(self.platform, 'DB_NAME', ''),
+                 getattr(self.platform, 'SOURCE_TABLE', ''), self.settings.get('MOBOREELS_INSTITUTION_USER_ID', '')]
+        return hashlib.sha256(packed(['catalog-metadata-v1', scope, kind, values]).encode()).hexdigest()
+
+    def search(self, product, query="", page=1, refresh=False):
         check(
             product in PRODUCTS and len(query) <= 100 and 1 <= page <= 250,
             "catalog_query_invalid",
             "剧库查询条件无效",
         )
-        key = (product, query, page)
-        with self.lock:
-            cached = self.cache.get(key)
-            if cached and cached[0] > time.monotonic():
-                return cached[1]
+        return self.browse.get(self.browse_key('dramas', product, query, page),
+                               lambda: self._search(product, query, page), refresh)
+
+    def _search(self, product, query, page):
         if product == "dramawave":
             where = "app_id='1479' AND type=2 AND sub_number=1 AND sub_url<>''"
             fields = "HEX(JSON_OBJECT('id',CAST(content_id AS CHAR),'name',name,'cover',cover,'app',app,'country',country,'language',language,'episodes',all_episodes_count))"
@@ -293,13 +298,13 @@ class Catalog:
             "page": page,
             "product": product,
         }
-        with self.lock:
-            if len(self.cache) >= 100:
-                self.cache.clear()
-            self.cache[key] = (time.monotonic() + 60, result)
         return result
 
-    def episodes(self, product, key, private=False):
+    def episodes(self, product, key, private=False, refresh=False):
+        decode_key(key, product)
+        if not private:
+            return self.browse.get(self.browse_key('episodes', product, key),
+                                   lambda: self.episodes(product, key, private=True), refresh)
         identity=(product,key)
         with self.lock:
             lock=self.episode_locks.setdefault(identity,threading.Lock())

@@ -27,7 +27,7 @@ from features.ai_video_editing.runtime import Runtime, owner, packed
 from features.ai_video_editing import studio, selections, catalog_imports, source_jobs, smart_api, previews
 from features.ai_video_editing.catalog import source_key
 
-ACTOR={'tenant_key':'isolated-browser-fixture','user_id':'fixture','name':'Browser fixture'}
+ACTOR={'tenant_key':'isolated-browser-fixture','user_id':'fixture','name':'Browser fixture','permissions':{'video_editing':True}}
 KEY=source_key(['42','DramaWave','TW','zh-TW'])
 
 

@@ -337,7 +337,7 @@ def main():
     start_transcripts(rt)
     from .catalog import Catalog
     from .catalog_imports import start as start_imports
-    catalog = Catalog(platform)
+    catalog = Catalog(platform, browse_cache_path=rt.root/'catalog-browse.sqlite3')
     start_imports(rt, catalog)
     from . import youtube_material
     youtube_material.start(rt, catalog, platform)

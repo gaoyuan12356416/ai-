@@ -76,3 +76,14 @@ python3 CHECKOUT/ops/editor-performance/static_update.py rollback --manifest STA
 
 需要回退整个版本时，先回退这个静态补充，再运行前述兼容回滚。
 真实公网首次预览仍受链路波动影响，不能把缓存复播或服务器处理时间当作公网首帧达标证据。
+
+## 剧目与分集读取补充
+
+- 浏览目录元数据保存到独立 `catalog-browse.sqlite3`：5 分钟新鲜期，24 小时以内先返回上次结果并后台更新；同键冷读取合并，背景更新 1 路且有界。
+- 只持久保存剧目/分集公开字段，下载 URL 始终排除；实际导入继续使用原 30 秒私有地址缓存和源校验。数据库读取只读验证、SQL Gate 和供应方间隔不变。
+- 缓存按数据库来源及 Mobo 机构配置隔离；前端仅在已有模块权限时按账号使用 sessionStorage，刷新页面可恢复。提供更新时间、后台更新状态及手动更新入口。
+- 打开媒资库预读两端首页，停留/聚焦剧目预读分集；移除只读操作的共享忙碌锁，慢读取时也能返回或切换，旧响应不得覆盖当前视图。
+- 新增 7 个缓存测试，加原剧库 8 个和 HTTP 3 个均通过；浏览器暂停目录接口后刷新，剧目/分集可直接使用，待更新时仍可返回及切源。
+- `catalog_probe.py --cache PATH --output PATH` 仅查询真实剧库并写入目录缓存和测量记录，不创建导入、解析、制作任务。
+- 发布用 `catalog_deploy.py install --repo CHECKOUT --base API_SHA --static-base STATIC_SHA --version SHA`。在线备份与原有在途检查后，仅切换独立 API 和相关 HTML/JS；预览进程、主后台及其他执行服务保持运行。
+- 回滚用 `catalog_deploy.py rollback --manifest MANIFEST`，恢复前一兼容 API/静态版本，保留全部素材、账本、5 集选择及新增的可丢弃目录缓存。
