@@ -108,6 +108,11 @@ def finish():
     else:
         code='import sys,sqlite3\nsys.path.insert(0,'+repr(str(LIVE))+')\nfrom features.x_material_effects.window import install_queue_guard\nc=sqlite3.connect('+repr(POSTS)+')\ninstall_queue_guard(c)\nc.close()'
     run('runuser','-u','x-post-automation','--',sys.executable,'-B','-c',code)
+    if not rollback and 'defaults' not in m:
+        m['defaults']=json.loads(run('runuser','-u','x-post-daily','--',sys.executable,'-B',
+            SOURCE/'scripts/initialize_x_material_window.py',AUTO))
+        m['operations_commit']=run('git','-C',SOURCE,'rev-parse','HEAD')
+        save('deployment.json',m)
     run('systemctl','restart','x-tag-auto.service')
     for f in m['files']:
         if f['name'].startswith('static/'):

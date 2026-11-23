@@ -134,10 +134,36 @@ class QueueWindowTests(unittest.TestCase):
 
 
 class GrantWindowTests(unittest.TestCase):
+    def test_defaults_append_versions_and_preserve_tasks_schedule_and_thresholds(self):
+        from features.x_auto_posts.core import XAutoPostStore
+        from scripts.initialize_x_material_window import initialize
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'auto.sqlite3';auto=XAutoPostStore(path,now_fn=lambda:NOW)
+            config=valid_payload(account_ids=['2'],schedule=dict(mode='random',daily_count=2))
+            config['drama_rule']['x_views_min']='1000';config['material_rule']['x_views_min']='100'
+            template=auto.create_template(name='default',config=config,confirmation={'accepted':True})
+            auto.set_template_enabled(template.id,True,expected_version=1)
+            day=NOW.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+            auto.put_random_plan(template.id,1,day,['07:10','19:20'])
+            run=auto.create_run(run_key='old',template_id=template.id,template_version=1,trigger_type='auto',scheduled_at_utc=NOW.isoformat(),shanghai_date=day,publish_time='07:10')
+            task=auto.create_task(run_id=run.id,account_id='2',language='en',account_snapshot_version=1)
+            before=auto.get_template(template.id)
+            with closing(sqlite3.connect(path)) as db:
+                changes=initialize(db,NOW)
+                self.assertEqual(initialize(db,NOW),[])
+            current=auto.get_template(template.id)
+            self.assertEqual(len(changes),1)
+            self.assertEqual(current.version,2)
+            self.assertEqual(current.config,dict(before.config,material_window_days=30))
+            self.assertEqual((current.enabled,current.enabled_at_utc),(before.enabled,before.enabled_at_utc))
+            self.assertEqual(auto.get_template(template.id,version=1).config,before.config)
+            self.assertEqual(auto.get_task(task.id).template_version,1)
+            self.assertEqual(auto.get_random_plan(template.id,2,day),['07:10','19:20'])
+
     def test_auto_store_reserves_expired_material_through_real_frozen_broker(self):
         from features.x_auto_posts.core import XAutoPostStore, XAutoPostStoreError
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);auto=XAutoPostStore(root/'auto.sqlite3')
+            root=Path(directory);auto=XAutoPostStore(root/'auto.sqlite3',now_fn=lambda:NOW)
             XPostStore(root/'posts.sqlite3')
             template=auto.create_template(name='window',config=normalize_template_payload(valid_payload(account_ids=['2'])),confirmation={'accepted':True})
             auto.set_template_enabled(template.id,True,expected_version=template.version)
