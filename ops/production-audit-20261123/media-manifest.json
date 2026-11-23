@@ -1,0 +1,53 @@
+{
+  "cpu": {
+    "root": "/mnt/data-disk/social-480-20261119/cpu-d5b35f6937da/candidate",
+    "files": [
+      {
+        "path": "features/x_posts/media_repair.py",
+        "patch": "../media-patches/features_x_posts_media_repair.py.patch",
+        "before": "7d56c0059633f90b82952283b4b348d4321d04a37538e0b3c7b37e7886601247",
+        "after": "b1f40b840e46a3373da41efb45ce57f8bab1f526381f0871db54cae010576382"
+      },
+      {
+        "path": "features/fb_gpu/prepare_worker.py",
+        "patch": "../media-patches/features_fb_gpu_prepare_worker.py.patch",
+        "before": "5a30880fa45b34155333018a0360bc44fe0d1e26a10ed09bb641acac23094012",
+        "after": "c5d6988349f471d2a4c49ad63d97cd7e750db4319fbbf2328fde859c78bd2836"
+      }
+    ]
+  },
+  "hk": {
+    "root": "/data/social-480-20261119/hk-2a40e97d42ad/candidate",
+    "files": [
+      {
+        "path": "features/x_posts/media_repair.py",
+        "patch": "../media-patches/features_x_posts_media_repair.py.patch",
+        "before": "48094c648f260890ad4425ef60bdcdfe63c80cbc07ffbda853d4491c2ffe0aa6",
+        "after": "5fbcde9f179e9a12ebed903a78389d412682ea11d600fdf9c7c3b8857d92e80d"
+      },
+      {
+        "path": "features/fb_gpu/prepare_worker.py",
+        "patch": "../media-patches/features_fb_gpu_prepare_worker.py.patch",
+        "before": "a04560df5113726d1384af01ba099142dd02c1cd22e2d08544c10ae05135596e",
+        "after": "8ce92c6206a14ceef0dd9bb7905f5757316a70ea362b3ce181cc46102910463a"
+      },
+      {
+        "path": "features/random_gpu/gpu_audio.py",
+        "patch": "../media-patches/features_random_gpu_gpu_audio.py.patch",
+        "before": "44a48cc6de2c18d2f8f9c2c1bd9d3ce2a9a0108e416081e73bd45277e93aeac4",
+        "after": "c28d59f5d6f38cc25c6800bcf80fa0abb743155ed8975b83a99892be5cc18cfc"
+      }
+    ]
+  },
+  "coordinator": {
+    "root": "/opt/pipeline-dispatch/current",
+    "files": [
+      {
+        "path": "features/pipeline_dispatch/core.py",
+        "patch": "../media-patches/features_pipeline_dispatch_core.py.patch",
+        "before": "c2ac7b1b263a388dcfc26d9dade86eb4ba562fc4b0ca51b3ae251374335fa3c4",
+        "after": "f48f7c070be61b8a7f362f069f9b5721601596041200ed35f0ec48aa66786a6a"
+      }
+    ]
+  }
+}

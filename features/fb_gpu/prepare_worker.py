@@ -323,7 +323,11 @@ class PrepareProcessor:
                 except Exception as exc:
                     if getattr(exc, "code", "") == "pipeline_lease_lost":
                         raise
-                    raise PrepareWorkerError("fb_gpu_transcode_failed","random-overlay transcode failed",502) from None
+                    from features.pipeline_dispatch.diagnostics import safe_failure_message
+                    stderr = getattr(exc, "stderr", "")
+                    tail = "\n".join(stderr.splitlines()[-3:]) if isinstance(stderr, str) else ""
+                    detail = safe_failure_message(tail or type(exc).__name__)
+                    raise PrepareWorkerError("fb_gpu_transcode_failed","random-overlay transcode failed: " + detail,502) from None
                 render_seconds=round(time.monotonic()-render_started,3)
                 output_info=_probe(self.config,output); video=output_info["video"]
                 if abs(output_info["duration"]-source_info["duration"])>1.5:

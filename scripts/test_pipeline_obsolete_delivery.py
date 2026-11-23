@@ -42,6 +42,19 @@ class ObsoleteDeliveryTests(unittest.TestCase):
         self.assertTrue(f.client.post('jobs/fail', payload)['delivery_only'])
         self.assertEqual(f.snapshot(), before)
 
+    def test_rejected_image_checkpoint_survives_cleared_current_claim(self):
+        f=self.f
+        with f.store.transaction() as c:
+            c.execute("UPDATE pipeline_job SET stage='prepare',error_code='x_random_requires_video',claim_hash=''")
+        claim=dict(f.claim,generation=2,claim_token='b'*32)
+        checkpoint={**claim,'checkpoint_id':'rejected-image','phase':'x_preflight','receipt':{'artifact':{'mime':'image/png'}}}
+        before=f.snapshot()
+        self.assertTrue(f.client.post('jobs/checkpoint',checkpoint)['delivery_only'])
+        failure={**claim,'receipt_id':'rejected-image-followup','error_code':'coordinator_operation_failed','unknown_outcome':False}
+        self.assertTrue(f.client.post('jobs/fail',failure)['delivery_only'])
+        self.assertEqual(f.snapshot(),before)
+        self.assertEqual(f.native.fail_calls,0)
+
     def test_unknown_wrong_identity_and_external_operations_are_excluded(self):
         f = self.f
         for change in ({'unknown_outcome': True}, {'claim_token': 'wrong'}, {'worker_id': 'another'}):

@@ -1459,7 +1459,12 @@ class DispatchStore:
             if not row or not isinstance(generation, int) or generation > row["generation"]:
                 return None
             old = generation < row["generation"]
-            if not old and (action != "jobs/fail" or row["status"] != "failed" or row["external_intent"]
+            rejected_image = (row["channel"] == "x" and row["stage"] == "prepare"
+                              and row["status"] == "failed" and not row["external_intent"]
+                              and row["error_code"] == "x_random_requires_video"
+                              and (action == "jobs/checkpoint" or request.get("error_code") in
+                                   {"x_random_requires_video", "coordinator_operation_failed", "claim_conflict"}))
+            if not old and not rejected_image and (action != "jobs/fail" or row["status"] != "failed" or row["external_intent"]
                             or not row["error_code"] or row["error_code"] != request.get("error_code")):
                 return None
             if not old and not c.execute("SELECT 1 FROM pipeline_claim_history WHERE job_id=? AND generation<? LIMIT 1", (job_id, generation)).fetchone():
