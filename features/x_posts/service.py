@@ -2652,10 +2652,8 @@ def ensure_storage(db_path):
                     )
 
             conn.execute("CREATE TRIGGER IF NOT EXISTS trg_x_effect_parent_frozen BEFORE UPDATE OF reuse_context_json ON x_post_manual_run WHEN OLD.reuse_context_json<>NEW.reuse_context_json BEGIN SELECT RAISE(ABORT,'reuse policy immutable'); END")
-            conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_x_effect_account_dedupe BEFORE INSERT ON x_post_queue
-                WHEN EXISTS(SELECT 1 FROM x_post_manual_run m WHERE m.id=NEW.manual_run_id AND m.reuse_context_json<>'{}')
-                AND EXISTS(SELECT 1 FROM x_post_queue q WHERE q.material_key=NEW.material_key AND q.account_id=NEW.account_id)
-                BEGIN SELECT RAISE(ABORT,'effect material already used by account'); END""")
+            from features.x_material_effects.window import install_queue_guard
+            install_queue_guard(conn)
             schedule_config_columns = {
                 row[1]
                 for row in conn.execute(
@@ -9681,8 +9679,8 @@ class XPostStore:
         reuse_context=None,
     ):
         reuse_context = dict(reuse_context or {})
-        from features.x_material_effects.reuse import pool_scope
-        share_scope = pool_scope(reuse_context)
+        from features.x_material_effects.reuse import freeze_context
+        reuse_context, share_scope = freeze_context(reuse_context)
         if share_scope:
             reuse_context['pool_scope'] = share_scope
         duration_policy_version = duration_policy.version({"duration_policy_version": duration_policy_version})

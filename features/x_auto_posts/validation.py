@@ -354,6 +354,7 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "metric_window_days",
         "drama_launch_window_days",
         "cooldown_days",
+        "material_window_days",
         "platform",
     }
     _keys(value, required=required, optional=optional, label="模板")
@@ -393,6 +394,9 @@ def normalize_template_payload(raw: Any) -> Dict[str, Any]:
         "drama_launch_window_days": _launch_window(value.get("drama_launch_window_days", 0)),
         "cooldown_days": _integer(
             value.get("cooldown_days", 0), "剧冷却窗口", 0, 3650
+        ),
+        "material_window_days": _integer(
+            value.get("material_window_days", 30), "素材窗口期", 1, 3650
         ),
         "platform": platform,
         "drama_rule": _drama_rule(value.get("drama_rule")),

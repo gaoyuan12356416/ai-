@@ -324,10 +324,14 @@ class SelectionRules:
     drama: DramaFilterRule = field(default_factory=DramaFilterRule)
     material: MaterialFilterRule = field(default_factory=MaterialFilterRule)
     material_products: Tuple[str, ...] = (DEFAULT_PRODUCT,)
+    material_window_days: Optional[int] = None
 
     def __post_init__(self) -> None:
         from features.material_products import normalize
         object.__setattr__(self, "material_products", normalize(self.material_products))
+        if self.material_window_days is not None:
+            from features.x_material_effects.window import days
+            days(self.material_window_days)
         if isinstance(self.metric_window_days, bool):
             raise ValueError("metric_window_days is invalid")
         if int(self.metric_window_days) < 1 or int(self.metric_window_days) > 30:
@@ -339,7 +343,7 @@ class SelectionRules:
     def from_mapping(cls, raw: Any) -> "SelectionRules":
         if not isinstance(raw, Mapping):
             raise ValueError("selection rules must be an object")
-        allowed = {"metric_window_days", "platform", "drama", "material", "material_products"}
+        allowed = {"metric_window_days", "platform", "drama", "material", "material_products", "material_window_days"}
         if set(raw).difference(allowed):
             raise ValueError("selection rules have unknown fields")
         raw_days = raw.get("metric_window_days")
@@ -358,6 +362,7 @@ class SelectionRules:
         )
         return cls(
             metric_window_days=days,
+            material_window_days=raw.get("material_window_days"),
             material_products=raw.get("material_products", (DEFAULT_PRODUCT,)),
             platform=platform,
             drama=DramaFilterRule.from_mapping(raw.get("drama")),
@@ -367,6 +372,7 @@ class SelectionRules:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "metric_window_days": int(self.metric_window_days),
+            **({"material_window_days": self.material_window_days} if self.material_window_days is not None else {}),
             "material_products": list(self.material_products),
             "platform": int(self.platform),
             "drama": {
@@ -899,10 +905,11 @@ class TwoStageSelector:
             return []
         ids = [item.source.material_id for item in prepared]
         from features.x_material_effects.selection import enabled
-        if enabled(request.rules) or request.candidate_pool:
+        if enabled(request.rules) or request.candidate_pool or request.rules.material_window_days is not None:
             from features.x_material_effects.reuse import client, lane
             history_seen = set(client('check', lane=lane(), task_id=request.task_id,
-                account_id=request.account_id, material_ids=ids, candidate_pool=bool(request.candidate_pool))['blocked'])
+                account_id=request.account_id, material_ids=ids, candidate_pool=bool(request.candidate_pool),
+                material_window_days=request.rules.material_window_days)['blocked'])
             auto_seen = set()
         else:
             history_seen = {str(value) for value in self.history.seen_material_ids(ids)}
@@ -1059,10 +1066,11 @@ class TwoStageSelector:
                     self._reject(rejection_counts, "material_blacklist_final")
                     break
                 from features.x_material_effects.selection import enabled
-                if enabled(request.rules) or request.candidate_pool:
+                if enabled(request.rules) or request.candidate_pool or request.rules.material_window_days is not None:
                     from features.x_material_effects.reuse import client, lane
                     seen = client('check', lane=lane(), task_id=request.task_id, account_id=request.account_id,
-                        material_ids=[material.source.material_id], candidate_pool=bool(request.candidate_pool))['blocked']
+                        material_ids=[material.source.material_id], candidate_pool=bool(request.candidate_pool),
+                        material_window_days=request.rules.material_window_days)['blocked']
                 else:
                     seen = self.history.seen_material_ids([material.source.material_id])
                 if material.source.material_id in {str(value) for value in seen}:
@@ -1083,6 +1091,9 @@ class TwoStageSelector:
                         "final_loaded_at_utc": final_blacklist.loaded_at_utc,
                     },
                 }
+                if request.rules.material_window_days is not None:
+                    from features.x_material_effects.window import POLICY as WINDOW_POLICY
+                    snapshot['material_window'] = dict(policy=WINDOW_POLICY, days=request.rules.material_window_days)
                 if request.candidate_pool:
                     from features.publish_candidate_pool import POLICY
                     snapshot["candidate_pool"] = dict(policy=POLICY, run_id=request.run_id)
@@ -1090,7 +1101,7 @@ class TwoStageSelector:
                     snapshot["hit_publish_timing"] = release_timing(drama.deploy_time, now_utc)
                 if not reserve:
                     return ReservedSelection(
-                        reservation={"selection_snapshot": snapshot} if snapshot["x_effect"] else {},
+                        reservation={"selection_snapshot": snapshot} if snapshot["x_effect"] or snapshot.get('material_window') else {},
                         drama=drama,
                         material=validated,
                         metric_dates=metric_dates,

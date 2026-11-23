@@ -146,7 +146,7 @@
                 </div>
                 <div class="notice warning">
                   <div class="notice-mark">!</div>
-                  <div><strong>X 发布不限制剧黑名单。</strong>筛选和最终冻结均忽略剧黑名单；仍会排除资源黑名单命中的素材，以及本画像流程已保留或发布过的素材（防重独立于原流程）。未启用 X 效果条件的模板保持历史素材防重；启用后允许跨账号复用，同一账号仍不重复。</div>
+                  <div><strong>X 发布不限制剧黑名单。</strong>筛选和最终冻结均忽略剧黑名单；仍会排除资源黑名单命中的素材。同一账号按素材窗口期跨模板排重，普通发布与画像发布的记录都会核对；在途和结果待确认的素材继续保留防重保护。</div>
                 </div>
                 <div class="compact-grid" style="margin-bottom: 15px;">
                   <div class="field">
@@ -158,6 +158,11 @@
                     <label for="cooldownDays">同剧冷却窗口（天）</label>
                     <input id="cooldownDays" type="number" min="0" max="3650" step="1" value="0" />
                     <span class="helper">同一模板内，每个目标频道独立计算剧目冷却，从素材预占时起算；填 0 不限制。</span>
+                  </div>
+                  <div class="field">
+                    <label for="materialWindowDays">素材窗口期（天）</label>
+                    <input id="materialWindowDays" type="number" min="1" max="3650" step="1" value="30" />
+                    <span class="helper">默认 30 天。同一账号在窗口内使用过的素材不再入选；成功发布从回执时间起算，明确失败从任务结束时起算。在途或待确认任务不因到期解除占用。保存后对新任务生效。</span>
                   </div>
                 </div>
 
@@ -317,6 +322,6 @@
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
   <script src="/x-effect-fields.js?v=20261120effects1"></script>
-  <script src="/x-tag-auto-publish-template.js?v=20261123transfer1"></script>
+  <script src="/x-tag-auto-publish-template.js?v=20261123window1"></script>
 </body>
 </html>

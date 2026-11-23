@@ -100,12 +100,12 @@ class PublisherContextTests(unittest.TestCase):
             db.row_factory = sqlite3.Row
             db.executescript('''
                 CREATE TABLE x_post_material_pool(id INTEGER,material_key TEXT);
-                CREATE TABLE x_post_queue(id INTEGER,pool_item_id INTEGER,account_id TEXT,status TEXT,material_key TEXT,manual_run_id INTEGER);
-                CREATE TABLE x_post_publish_log(queue_id INTEGER,unknown_outcome INTEGER,status TEXT);
-                CREATE TABLE x_post_repost_ledger(queue_id INTEGER,unknown_outcome INTEGER,status TEXT);
+                CREATE TABLE x_post_queue(id INTEGER,pool_item_id INTEGER,account_id TEXT,status TEXT,material_key TEXT,manual_run_id INTEGER,updated_at TEXT);
+                CREATE TABLE x_post_publish_log(queue_id INTEGER,unknown_outcome INTEGER,status TEXT,x_post_id TEXT,published_at TEXT);
+                CREATE TABLE x_post_repost_ledger(queue_id INTEGER,unknown_outcome INTEGER,status TEXT,repost_id TEXT,reposted_at TEXT);
                 CREATE TABLE x_post_manual_run(id INTEGER,reuse_context_json TEXT);
-                INSERT INTO x_post_queue VALUES(1,NULL,'2','published','701',1);
-                INSERT INTO x_post_publish_log VALUES(1,0,'published');
+                INSERT INTO x_post_queue VALUES(1,NULL,'2','published','701',1,'');
+                INSERT INTO x_post_publish_log VALUES(1,0,'published','receipt','');
                 INSERT INTO x_post_manual_run VALUES(1,'{}');
             ''')
             with patch.object(reuse, 'publisher_task', return_value=dict(source(), _publisher_context=True)):

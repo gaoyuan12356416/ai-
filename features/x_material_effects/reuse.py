@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 from .collector import readonly,request,LEDGERS
 from .selection import config_enabled,POLICY
 from .store import ROOT
+from .window import days, history_conflict, task_completed_at
 
 AUTO_PATHS={'ordinary':'/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3',
             'tag':'/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3'}
@@ -45,6 +46,18 @@ def pool_scope(context):
     return source['_lane'] + ':' + str(source['_pool_run']) if source.get('_pool_run') else ''
 
 
+def freeze_context(context):
+    """Only the broker's frozen template can authorize a database window."""
+    if not context:
+        return {}, ''
+    source = publisher_task(context['lane'], context['task_id'])
+    frozen = dict(lane=context['lane'], task_id=context['task_id'])
+    if '_material_window_days' in source:
+        frozen['material_window_days'] = days(source['_material_window_days'])
+    scope = source['_lane'] + ':' + str(source['_pool_run']) if source.get('_pool_run') else ''
+    return frozen, scope
+
+
 def reservation_conflict(db, material_id, account_id, scope):
     for row in db.execute('''SELECT r.share_scope,m.account_ids_json FROM x_post_manual_material_reservation r
         JOIN x_post_manual_run m ON m.id=r.manual_run_id WHERE r.material_key=? AND r.state='active' ''',(material_id,)):
@@ -55,20 +68,24 @@ def reservation_conflict(db, material_id, account_id, scope):
 
 def local_conflict(db, material_id, account_id, *, reuse_context=None):
     source = publisher_task(reuse_context['lane'], reuse_context['task_id']) if reuse_context else None
+    if source and str(source['account_id']) != str(account_id):
+        return True
     if db.execute('''SELECT 1 FROM x_post_material_pool p WHERE p.material_key=?
         AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id) LIMIT 1''',(material_id,)).fetchone():
         return True
     for row in db.execute('''SELECT q.account_id,q.status,l.unknown_outcome,l.status AS log_status,
+        CASE WHEN q.status='published' OR coalesce(l.x_post_id,'')<>'' OR coalesce(relay.repost_id,'')<>''
+            THEN coalesce(nullif(relay.reposted_at,''),l.published_at) ELSE q.updated_at END AS completed_at,
         relay.unknown_outcome AS relay_unknown,relay.status AS relay_status,m.reuse_context_json
         FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
         LEFT JOIN x_post_repost_ledger relay ON relay.queue_id=q.id
         LEFT JOIN x_post_manual_run m ON m.id=q.manual_run_id WHERE q.material_key=?''',(material_id,)):
         if sibling_context(source, row['reuse_context_json'], row['account_id']):
             continue
-        if (source and source.get('_pool_run') and not source['_effect_policy']) or (
-            str(row['account_id']) == str(account_id) or row['status'] not in ('published','failed','cancelled')
+        if (row['status'] not in ('published','failed','cancelled')
             or row['unknown_outcome'] or row['log_status'] in ('post_creating','repost_creating')
-            or row['relay_unknown'] or row['relay_status'] == 'needs_review'):
+            or row['relay_unknown'] or row['relay_status'] == 'needs_review'
+            or history_conflict(source or dict(account_id=account_id), row['account_id'], row['completed_at'])):
             return True
     return False
 
@@ -118,6 +135,11 @@ def publisher_task(lane_name, task_id):
             or type(source.get('_effect_policy')) is not bool
             or type(source.get('_pool_run')) is not int):
         raise XPostError('x_effect_context_invalid', '发布选材服务返回的任务身份不一致，已停止本次发布', 503)
+    if '_material_window_days' in source:
+        try:
+            days(source['_material_window_days'])
+        except ValueError:
+            raise XPostError('x_effect_context_invalid', '发布素材窗口期无效，保留原任务等待核对', 503) from None
     return dict(source, _publisher_context=True)
 
 
@@ -131,10 +153,13 @@ def task(lane_name,task_id):
         run = db.execute('SELECT blacklist_snapshot_json FROM x_auto_run WHERE id=?',(row['run_id'],)).fetchone()
         from features.publish_candidate_pool import POLICY as POOL_POLICY
         pool = json.loads(run[0]).get('candidate_pool', {}) if run else {}
-        effect = bool(version and config_enabled(json.loads(version[0])))
+        config = json.loads(version[0]) if version else {}
+        effect = bool(config_enabled(config))
+        window = days(config['material_window_days']) if 'material_window_days' in config else None
         is_pool = pool.get('policy') == POOL_POLICY and str(row['account_id']) in pool.get('account_ids', [])
-        if not effect and not is_pool:raise ValueError('reuse_policy_not_frozen')
+        if not effect and not is_pool and window is None:raise ValueError('reuse_policy_not_frozen')
         data.update(_pool_run=int(row['run_id']) if is_pool else 0, _effect_policy=effect, _lane=lane_name)
+        if window is not None:data['_material_window_days'] = window
         return data
 
 def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external='',source=None):
@@ -143,6 +168,8 @@ def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external='',s
     for lane_name,path in zip(('ordinary','tag'),LEDGERS):
         with closing(readonly(path)) as db:
             for r in db.execute(f'''SELECT q.material_key,q.account_id,q.status,l.unknown_outcome,mr.external_task_key,
+                    CASE WHEN q.status='published' OR coalesce(l.x_post_id,'')<>'' OR coalesce(relay.repost_id,'')<>''
+                        THEN coalesce(nullif(relay.reposted_at,''),l.published_at) ELSE q.updated_at END AS completed_at,
                     l.status AS log_status,relay.unknown_outcome AS relay_unknown,relay.status AS relay_status,mr.reuse_context_json
                     FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
                     LEFT JOIN x_post_repost_ledger relay ON relay.queue_id=q.id
@@ -150,8 +177,9 @@ def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external='',s
                     WHERE q.material_key IN ({marks})''',ids):
                 if lane_name==own_lane and own_external and r['external_task_key']==own_external:continue
                 if sibling_context(source, r['reuse_context_json'], r['account_id']):continue
-                if (bool(source and source.get('_pool_run') and not source['_effect_policy']) or str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','cancelled') or r['unknown_outcome']
-                    or r['log_status'] in ('post_creating','repost_creating') or r['relay_unknown'] or r['relay_status']=='needs_review'):
+                if (r['status'] not in ('published','failed','cancelled') or r['unknown_outcome']
+                    or r['log_status'] in ('post_creating','repost_creating') or r['relay_unknown'] or r['relay_status']=='needs_review'
+                    or history_conflict(source or dict(account_id=account_id), r['account_id'], r['completed_at'])):
                     blocked.add(str(r['material_key']))
             for r in db.execute(f'''SELECT p.material_key FROM x_post_material_pool p WHERE p.material_key IN ({marks})
                     AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id)''',ids):blocked.add(str(r[0]))
@@ -162,10 +190,11 @@ def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external='',s
                 if lane_name!=own_lane or not own_external or r['external_task_key']!=own_external:blocked.add(str(r[0]))
     for name,path in AUTO_PATHS.items():
         with closing(readonly(path)) as db:
-            for r in db.execute(f'SELECT id,account_id,material_id,status FROM x_auto_task WHERE material_id IN ({marks})',ids):
+            for r in db.execute(f'SELECT id,account_id,material_id,status,unknown_outcome,published_at_utc,finished_at_utc,updated_at FROM x_auto_task WHERE material_id IN ({marks})',ids):
                 if name==own_lane and int(r['id'])==int(own_task):continue
                 if same_pool(source,name,r['id'],r['account_id']):continue
-                if (source and source.get('_pool_run') and not source['_effect_policy']) or str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','canceled','no_candidate','skipped'):
+                if (r['unknown_outcome'] or r['status'] not in ('published','failed','canceled','no_candidate','skipped')
+                    or history_conflict(source or dict(account_id=account_id), r['account_id'], task_completed_at(dict(r)))):
                     blocked.add(str(r['material_id']))
     return blocked
 
@@ -174,6 +203,7 @@ def handle(payload,root=ROOT):
     if action == 'context':
         source = task(name, tid)
         fields = ('id', 'run_id', 'account_id', 'material_id', '_pool_run', '_effect_policy', '_lane')
+        if '_material_window_days' in source:fields += ('_material_window_days',)
         return dict(ok=True, item={key: source[key] for key in fields})
     if action=='check':
         ids=payload.get('material_ids',[])
@@ -183,6 +213,11 @@ def handle(payload,root=ROOT):
         source = task(name, tid) if payload.get('candidate_pool') is True else None
         if source and not source.get('_pool_run'):raise ValueError('pool_policy_not_frozen')
         if source and str(source['account_id']) != account:raise ValueError('identity_mismatch')
+        if source is None and payload.get('material_window_days') is not None:
+            # Advisory preview/selection only. Reservation and execution always
+            # reload the real task's immutable template version below.
+            source = dict(account_id=account, _pool_run=0, _effect_policy=False, _lane=name,
+                          _material_window_days=days(payload['material_window_days']))
         return dict(ok=True,blocked=sorted(conflicts(ids,account,own_lane=name,source=source)))
     if action not in ('reserve','execution'):raise ValueError('invalid_action')
     source=task(name,tid);mid=str(payload.get('material_id',''))
@@ -213,13 +248,17 @@ def handle(payload,root=ROOT):
         for row in db.execute("SELECT * FROM grants WHERE material_id=? AND state='active'",(mid,)).fetchall():
             if row['lane']==name and row['task_id']==tid:continue
             prior=task(row['lane'],row['task_id'])
-            if prior['status'] in ('published','failed','canceled','no_candidate','skipped'):
+            if prior['status'] in ('published','failed','canceled','no_candidate','skipped') and not prior.get('unknown_outcome'):
                 state='finished' if prior.get('material_id') else 'released'
                 db.execute('UPDATE grants SET state=? WHERE lane=? AND task_id=?',(state,row['lane'],row['task_id']))
         occupied = False
         for grant in db.execute("SELECT * FROM grants WHERE material_id=? AND state<>'released' AND NOT(lane=? AND task_id=?)", (mid,name,tid)):
             if same_pool(source,grant['lane'],grant['task_id'],grant['account_id']):continue
-            if grant['state']=='active' or grant['account_id']==account or (source['_pool_run'] and not source['_effect_policy']):
+            if (grant['state'] != 'active' and grant['account_id'] != account
+                    and (source.get('_material_window_days') is not None or not source.get('_pool_run') or source.get('_effect_policy'))):
+                continue
+            if grant['state']=='active' or history_conflict(source, grant['account_id'],
+                    task_completed_at(task(grant['lane'], grant['task_id']))):
                 occupied = True
                 break
         if occupied or conflicts([mid],account,own_lane=name,own_task=tid,own_external=external or (existing['external_key'] if existing else ''),source=source):

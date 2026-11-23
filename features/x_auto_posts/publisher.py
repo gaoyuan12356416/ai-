@@ -159,6 +159,7 @@ def selector_rules(
         {
             "material_products": selected(config),
             "metric_window_days": config.get("metric_window_days", 7),
+            "material_window_days": config.get("material_window_days"),
             "platform": config.get("platform", 0),
             "drama": {
                 "x_effect": {m: {"min": drama.get("x_"+m+"_min"), "max": drama.get("x_"+m+"_max")} for m in ("views","likes","comments","shares","revenue")},
@@ -493,7 +494,7 @@ class AutoPostExecutor:
             "random_template_enabled": random_template_enabled,
             "actor": "x_auto_post_service",
         }
-        if (task.selection.get('x_effect') or {}).get('policy') or task.selection.get('candidate_pool'):
+        if (task.selection.get('x_effect') or {}).get('policy') or task.selection.get('candidate_pool') or task.selection.get('material_window'):
             from features.x_material_effects.reuse import lane
             payload['reuse_task'] = dict(lane=lane(), task_id=task.id)
         try:

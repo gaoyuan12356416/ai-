@@ -357,6 +357,7 @@
     document.getElementById("randomTemplateEnabled").checked = configValue("random_template_enabled", false) === true;
     setValue("dramaLaunchWindowDays", configValue("drama_launch_window_days", 0), "0");
     setValue("cooldownDays", configValue("cooldown_days", 0), "0");
+    setValue("materialWindowDays", configValue("material_window_days", 30), "30");
 
     const drama = ui.objectValue(configValue("drama_rule", {}));
     const material = ui.objectValue(configValue("material_rule", {}));
@@ -481,6 +482,8 @@
     if (!Number.isInteger(metricWindowDays) || metricWindowDays < 1 || metricWindowDays > 30) throw new Error("指标统计窗口必须为 1–30 天。");
     const launchWindow = window.normalizeDramaLaunchWindow(ui.byId("dramaLaunchWindowDays").value);
     const cooldown = integerValue("cooldownDays", 0);
+    const materialWindowDays = integerValue("materialWindowDays", 30);
+    if (!Number.isInteger(materialWindowDays) || materialWindowDays < 1 || materialWindowDays > 3650) throw new Error("素材窗口期必须为 1–3650 天的整数。");
     if (!Number.isInteger(cooldown) || cooldown < 0) throw new Error("同剧冷却窗口必须为大于等于 0 的整数。");
 
     validateRange("dramaRoasMin", "dramaRoasMax", "剧 D0 ROAS");
@@ -517,6 +520,7 @@
       metric_window_days: metricWindowDays,
       drama_launch_window_days: launchWindow,
       cooldown_days: cooldown,
+      material_window_days: materialWindowDays,
       platform: integerValue("platform", 0),
       drama_rule: {
         resource_type_v2: parseResourceTypes(),

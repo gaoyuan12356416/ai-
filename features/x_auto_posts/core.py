@@ -2790,7 +2790,9 @@ class XAutoPostStore:
             effect = _json_object(selection_json).get('x_effect') or {}
             pool = _json_object(selection_json).get('candidate_pool') or {}
             from features.publish_candidate_pool import POLICY as POOL_POLICY
-            if effect.get('policy') == POLICY or pool.get('policy') == POOL_POLICY:
+            from features.x_material_effects.window import POLICY as WINDOW_POLICY
+            window = _json_object(selection_json).get('material_window') or {}
+            if effect.get('policy') == POLICY or pool.get('policy') == POOL_POLICY or window.get('policy') == WINDOW_POLICY:
                 from features.x_material_effects.reuse import client, lane
                 try:
                     client('reserve', lane=lane(), task_id=normalized_task_id,
