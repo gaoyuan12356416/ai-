@@ -104,8 +104,10 @@ class Session:
                 try:
                     if time.monotonic()>=self.deadline:raise AdmissionError('refresh_deadline')
                     self.broker.call('heartbeat',{'lease_id':self.key})
-                except Exception:
+                except Exception as exc:
                     self.lost.set();self.locally_aborted=True
+                    print(json.dumps({'event':'offload_sql_lease_lost','task':self.task,'lease':self.key,
+                                      'error_type':type(exc).__name__,'code':getattr(exc,'code',None)}),flush=True)
                     try:self.connection._sock.shutdown(socket.SHUT_RDWR)
                     except (OSError,AttributeError):pass
                     return
@@ -152,6 +154,9 @@ class Session:
             # was lost. It conservatively retains that case for reconciliation.
             try:self.broker.call('release',{'lease_id':self.key})
             except Exception:pass
+        if self.key and self.connect_attempted and not eof:
+            print(json.dumps({'event':'offload_sql_close_unconfirmed','task':self.task,'lease':self.key,
+                              'locally_aborted':self.locally_aborted}),flush=True)
         # Issued but unconfirmed sessions deliberately retain their shared slot.
 
 
