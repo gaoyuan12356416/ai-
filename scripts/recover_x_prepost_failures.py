@@ -147,7 +147,8 @@ def snapshot(c, n, queue_id, stage, days, now, media_only=False):
     for field, table in [('manual_run_id','x_post_manual_run'),('schedule_run_id','x_post_schedule_run'),('run_id','x_post_daily_run'),('catchup_run_id','x_post_catchup_run')]:
         if q.get(field):
             found = rows(n,'SELECT * FROM '+table+' WHERE id=?',(q[field],))
-            require(len(found)==1 and found[0]['status'] not in ('cancelled','canceled','stopped','needs_review'), 'parent_not_recoverable')
+            require(len(found)==1 and found[0]['status'] not in ('cancelled','canceled','stopped')
+                    and (media_only or found[0]['status']!='needs_review'), 'parent_not_recoverable')
             parent.append({k:v for k,v in found[0].items() if k not in ('status','updated_at','published_count','failed_count','unknown_count','finished_at','error_code','error_message')})
     require(len(parent)==1, 'parent_not_unique')
     frozen = {'queue':q, 'log':log, 'jobs':[stable_job(j) for j in jobs], 'native_ops':native_ops,
