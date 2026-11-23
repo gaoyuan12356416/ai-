@@ -13,7 +13,7 @@ from cutover import layout,AFTER
 SOCKET=ROOT/'sandbox-socket/mysql.sock'
 FROZEN=ROOT/'history-frozen.json'
 PAGE_SQL=('page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,meta_json,'
-          'payload_sha256,created_at,SHA2(detail_json,256)')
+          'payload_sha256,created_at,SHA2(detail_json,256),OCTET_LENGTH(detail_json)')
 
 
 def private_mysql():
@@ -30,7 +30,7 @@ def private_mysql():
 
 
 def normalize(v,r):
-    pid,start,end,a,b,s,summary,meta,h,ts,calc=r
+    pid,start,end,a,b,s,summary,meta,h,ts,calc,length=r
     if calc!=h:raise RuntimeError('source detail does not match stored checksum')
     return [v,pid,str(start),str(end),a,b,s,summary,meta,h,str(ts)]
 
@@ -60,7 +60,7 @@ def write_blob(path,packet):
     tmp.replace(path)
 
 
-def missing_bodies(db,source,v,records,base):
+def missing_bodies(db,source,v,records,base,lengths):
     missing={r[1]:r[9] for r in records if not blob_path(r[9],base).is_file()}
     stored=0
     with db.cursor() as c:
@@ -73,15 +73,15 @@ def missing_bodies(db,source,v,records,base):
                 if missing[pid]!=h or sha(unpack(packed))!=h:raise RuntimeError('historical blob mismatch')
                 dest=blob_path(h,base)
                 if not dest.exists():write_blob(dest,packed);stored+=len(packed)
-    return stored
+    return stored,sum(lengths[pid] for pid in missing)
 
 
-def export_version(db,source,v,base,*,proof=None,rate=4*1024**2):
+def export_version(db,source,v,base,*,proof=None,rate=4*1024**2,source_rate=24*1024**2):
     checked_table(source);checked(v)
     dest=base/'versions'/v;dest.mkdir(parents=True,exist_ok=True)
     marker=dest/'snapshot.json'
     if marker.exists():return json.loads(marker.read_text())
-    parts=[];amount=[0,0,0];published_hashes={};meta=None;n=0;last='';limit=128
+    parts=[];amount=[0,0,0];published_hashes={};meta=None;n=0;last='';limit=128;source_bytes=0
     with db.cursor() as c:
         while True:
             started=time.monotonic()
@@ -95,7 +95,11 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2):
             if not result:break
             batch=[normalize(v,row) for row in result]
             if batch[0][1]<=last:raise RuntimeError('frozen cursor did not advance')
-            saved=missing_bodies(db,source,v,batch,base)
+            lengths={row[0]:row[-1] for row in result}
+            saved,reread=missing_bodies(db,source,v,batch,base,lengths)
+            small=sum(len(r[7].encode())+len(r[8].encode()) for r in batch)
+            read_bytes=sum(lengths.values())+reread+small
+            source_bytes+=read_bytes
             filename='part-%05d.jsonl.gz'%len(parts);out=dest/filename;temp=dest/(filename+'.partial')
             with temp.open('wb') as fp:
                 with gzip.GzipFile(fileobj=fp,mode='wb',compresslevel=3,mtime=0) as gz:
@@ -109,8 +113,10 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2):
             temp.replace(out)
             parts.append(dict(name=filename,first=batch[0][1],last=batch[-1][1],rows=len(batch),sha256=file_hash(out),bytes=out.stat().st_size))
             n+=len(batch);last=batch[-1][1]
-            atomic(base/'progress.json',dict(phase='export',version=v,rows=n,at=stamp()))
-            if rate:time.sleep(max(.01,(saved+sum(len(r[7])+len(r[8]) for r in batch))/rate-(time.monotonic()-started)))
+            atomic(base/'progress.json',dict(phase='export',version=v,rows=n,source_bytes=source_bytes,at=stamp()))
+            if rate:
+                duration=max((saved+small)/rate,read_bytes/source_rate)
+                time.sleep(max(.01,duration-(time.monotonic()-started)))
         count=one(c,f'SELECT COUNT(*) FROM {source} WHERE profile_version=%s',(v,))[0]
         if count!=n or not n:raise RuntimeError('frozen row count mismatch')
     if proof and (proof['payload_hashes']!=published_hashes or amount!=[proof[k] for k in MONEY]):
@@ -123,7 +129,8 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2):
         temp.replace(original)
         receipt_hash=file_hash(original)
     manifest=dict(version=v,rows=n,amounts=amount,meta=meta,parts=parts,
-                  source_receipt_checked=bool(proof),source_receipt_sha256=receipt_hash,at=stamp())
+                  source_receipt_checked=bool(proof),source_receipt_sha256=receipt_hash,
+                  source_scan_bytes=source_bytes,source_limit_bytes_per_second=source_rate,transfer_limit_bytes_per_second=rate,at=stamp())
     atomic(marker,manifest)
     return manifest
 
@@ -173,6 +180,7 @@ def restore_version(db,manifest,base,ddl):
                 observed.append([rv,p,str(a),str(b),x,y,z,ss,ms,ds,str(t)])
             if observed!=[identity(row) for row in records]:raise RuntimeError('restored Page columns differ')
             total+=len(records)
+            atomic(base/'progress.json',dict(phase='isolated_restore',version=v,rows=total,total=manifest['rows'],at=stamp()))
             for row in records:
                 for i in range(3):sums[i]+=row[4+i]
         c.execute(f'SELECT COUNT(*),COUNT(DISTINCT page_id),SUM(paid_cents),SUM(social_cents),SUM(spend_cents) FROM {PUBLIC}')
@@ -242,33 +250,38 @@ def confirm_references(db,versions,base):
     return dict(receipts=counts,unique_pairs=len(pairs),found=found,absent_in_source=absent,unexpected_absence=unexplained)
 
 
-def run():
+def run(source_rate=24*1024**2,transfer_rate=4*1024**2):
     disk()
     if read_config()!='live':raise RuntimeError('history still receives mirror writes')
     frozen=json.loads(FROZEN.read_text());base=HISTORY
     base.mkdir(exist_ok=True,mode=0o700)
-    with (base/'archive.lock').open('a') as lock,closing(connect_reader(env())) as db,closing(private_mysql()) as lab:
+    cfg=env()
+    with (base/'archive.lock').open('a') as lock,closing(private_mysql()) as lab:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        if layout(db)!=AFTER:raise RuntimeError('frozen source identity changed')
-        with db.cursor() as c:ddl=one(c,'SHOW CREATE TABLE '+LEGACY)[1]
+        versions=frozen['versions']
+        with closing(connect_reader(cfg)) as db,db.cursor() as c:
+            if layout(db)!=AFTER:raise RuntimeError('frozen source identity changed')
+            ddl=one(c,'SHOW CREATE TABLE '+LEGACY)[1]
+            c.execute(f'SELECT DISTINCT profile_version FROM {LEGACY} ORDER BY profile_version')
+            if [r[0] for r in c.fetchall()]!=versions:raise RuntimeError('frozen version inventory changed')
         prefix='CREATE TABLE `'+LEGACY+'`'
         if not ddl.startswith(prefix):raise RuntimeError('unexpected frozen DDL')
         ddl='CREATE TABLE `'+PUBLIC+'`'+ddl[len(prefix):]
         (base/'schema.sql').write_text(ddl+';\n')
-        versions=frozen['versions']
-        with db.cursor() as c:
-            c.execute(f'SELECT DISTINCT profile_version FROM {LEGACY} ORDER BY profile_version')
-            if [r[0] for r in c.fetchall()]!=versions:raise RuntimeError('frozen version inventory changed')
         snapshots=[];total=0
         for idx,v in enumerate(versions):
             original_proof=receipt(v) if (PORTRAITS/(v+'.receipt.json')).is_file() else None
-            m=export_version(db,LEGACY,v,base,proof=original_proof)
+            marker=base/'versions'/v/'snapshot.json'
+            if marker.is_file():m=json.loads(marker.read_text())
+            else:
+                with closing(connect_reader(cfg)) as db:
+                    m=export_version(db,LEGACY,v,base,proof=original_proof,rate=transfer_rate,source_rate=source_rate)
             restored=restore_version(lab,m,base,ddl)
             snapshots.append(dict(version=v,rows=m['rows'],manifest_sha256=restored['manifest_sha256'],
                                   restore_sha256=file_hash(base/'versions'/v/'restored.json')))
             total+=m['rows']
             print(encoded(dict(completed=idx+1,versions=len(versions),total_rows=total,version=v)),flush=True)
-        ref=confirm_references(db,set(versions),base)
+        with closing(connect_reader(cfg)) as db:ref=confirm_references(db,set(versions),base)
         revision,tools_hash=package_tools(base)
         sizes={};size=0;blobs=0
         for root,_,names in os.walk(base):
@@ -290,4 +303,10 @@ def run():
         return {k:v for k,v in out.items() if k!='versions'}
 
 
-if __name__=='__main__':print(encoded(run()),flush=True)
+if __name__=='__main__':
+    args=argparse.ArgumentParser()
+    args.add_argument('--source-mib-per-second',type=int,default=24)
+    args.add_argument('--transfer-mib-per-second',type=int,default=4)
+    flags=args.parse_args()
+    if min(flags.source_mib_per_second,flags.transfer_mib_per_second)<=0:args.error('rates must be positive')
+    print(encoded(run(flags.source_mib_per_second*1024**2,flags.transfer_mib_per_second*1024**2)),flush=True)
