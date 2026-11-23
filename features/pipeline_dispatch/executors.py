@@ -560,7 +560,7 @@ class NodeExecutors:
                 checkpoint["repair"] = repaired
                 checkpoint["repair_request"] = repair_request
             context.checkpoint("x_preflight", checkpoint)
-            if request.get("random_request"):
+            if request.get("random_request") and kind == "video":
                 frozen = dict(request["random_request"])
                 frozen.update(source_url=artifact["url"], source_sha256=artifact["sha256"], source_size=artifact["size"], source_duration=artifact["duration_seconds"])
                 prepared = self._x_transform("x_random", frozen, context)

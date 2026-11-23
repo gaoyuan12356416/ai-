@@ -53,6 +53,10 @@ class MetricWaitTests(unittest.TestCase):
         store.register_node('cpu-main', ['prepare:tt', 'backend:cpu'])
         store.worker_heartbeat('cpu-main', 'one', 'prepare')
         store.offer(dict(f.offer, capabilities=['prepare:tt'], execution_available=True, observation_only=False))
+        with store.transaction() as c:
+            # Exercise the legacy direct reservation route; normal new tasks
+            # now select through the media gate before taking a render claim.
+            c.execute("INSERT OR REPLACE INTO pipeline_media_gate(source_key,phase) VALUES(?,'native')", (f.offer['source_key'],))
         job = store.claim('cpu-main', 'one', 'prepare')['job']
         observation = {'canonical_status': 'retry_wait',
                        'canonical_receipt': {'source_key': job['source_key'], 'publish_id': ''},

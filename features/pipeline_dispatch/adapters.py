@@ -222,8 +222,10 @@ class LedgerAdapter:
         if key == ("x", "queue"):
             if self._exists(conn, "pipeline_x_artifact"):
                 frozen = conn.execute("SELECT artifact_json FROM pipeline_x_artifact WHERE queue_id=?", (row["id"],)).fetchone()
-                if frozen and not row.get("random_template_enabled"):
+                if frozen and (not row.get("random_template_enabled") or obj(frozen["artifact_json"]).get("mime", "").startswith("image/")):
                     row["_dispatch_artifact"] = obj(frozen["artifact_json"])
+                    if row["_dispatch_artifact"].get("mime", "").startswith("image/"):
+                        row["random_prepared"] = True  # Images bypass only the video template.
             auto_owner = {}
             if self.cross_paths.get("x_auto"):
                 origin = conn.execute("SELECT * FROM pipeline_x_auto.x_auto_task WHERE execution_queue_id=?", (row["id"],)).fetchall()
@@ -449,6 +451,10 @@ class LedgerAdapter:
             # claim retries precede the platform boundary and are not publishes.
             attempts = int(bool(row.get("publish_started_at_utc") or row.get("publish_id")))
         started = state in INFLIGHT or row.get("ledger_status") in INFLIGHT or (spec.channel == "fb" and spec.family == "video" and row.get("prepare_state") == "preparing")
+        if ((spec.channel, spec.family) == ("tt", "auto") and state == "selecting"
+                and row.get("claim_worker") == "pipeline:media-selection" and row.get("claim_phase") == "selection"
+                and not any(row.get(k) for k in ("material_id", "gpu_job_id", "publish_id", "unknown_outcome", "publish_attempt_count"))):
+            started = False  # The media gate owns this read-only selection, not a legacy renderer.
         youtube_dispatch_owned = spec.channel == "youtube" and spec.family == "preparation" and bool(row.get("_youtube_dispatch_owned"))
         if youtube_dispatch_owned:
             # The dispatch job and generation journal already own this work.

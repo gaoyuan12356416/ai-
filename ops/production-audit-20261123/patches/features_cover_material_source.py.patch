@@ -1,0 +1,7 @@
+--- a/features/cover_material_source.py
++++ b/features/cover_material_source.py
+@@ -26,3 +26,3 @@
+                         pl="PL", ru="RU", tr="TR", ar="SA", ja="JP", ko="KR",
+-                        id="ID", th="TH", vi="VN", cs="CZ", el="GR", ro="RO",
++                        id="ID", th="TH", vi="VN", cs="CZ", el="GR", ro="RO", hi="IN", ms="MY",
+                         **{"zh-tw": "TW", "zh-cn": "CN"})

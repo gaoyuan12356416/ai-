@@ -168,6 +168,17 @@ class Coordinator:
                     context = selection.get("context") or selection.get("media_context")
                     if context and context.get("source_identity"):
                         offer["media_context"] = context
+                    if (job["channel"], job["family"]) == ("tt", "auto"):
+                        from .adapters import canonical_fingerprint
+                        before = (job.get("payload") or {}).get("canonical_fingerprint")
+                        # Selection legitimately adds material/content, before a
+                        # renderer has ever claimed this task. Nothing else in
+                        # its account/template/source identity may change.
+                        if (row.get("status") == "reserved" and row.get("material_id") and row.get("content_id")
+                                and not any(row.get(k) for k in ("gpu_job_id", "source_media_url", "prepared_media_url",
+                                    "claim_token", "unknown_outcome", "publish_id", "publish_attempt_count", "preparation_attempt_count"))
+                                and canonical_fingerprint(dict(row, material_id="", content_id=""), adapter.spec.identity) == before):
+                            offer["tt_selection_from_fingerprint"] = before
                 if applied_here:
                     artifact = (offer or {}).get("artifact") or {}
                     expected = result.get("artifact") or decision.get("artifact") or {}

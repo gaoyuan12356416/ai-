@@ -241,6 +241,10 @@ class XNativeBridge:
             selected = existing(c, "x:queue:" + str(queue["id"]))
         if selected.get("status") == "applied":
             return obj(selected["artifact_json"])
+        with self.connect() as c:
+            image = c.execute("SELECT artifact_json FROM pipeline_x_artifact WHERE queue_id=?", (queue["id"],)).fetchone()
+        if image and obj(image[0]).get("mime") in {"image/jpeg", "image/png", "image/gif"}:
+            return obj(image[0])
         if queue.get("random_template_enabled"):
             if not record or record["status"] != "ready":
                 raise AdapterError("x_random_preparation_required")
@@ -530,8 +534,6 @@ class XNativeBridge:
             parent = c.execute("SELECT trigger_source FROM x_post_manual_run WHERE id=?", (queue.get("manual_run_id"),)).fetchone()
         if parent and parent[0] == "auto_template" and (is_image or duration > self.r.AUTO_TEMPLATE_MAX_DURATION_SECONDS):
             raise AdapterError("x_post_auto_template_duration_exceeded")
-        if is_image and request.get("random_request"):
-            raise AdapterError("x_random_requires_video")
         evidence = {"material_url": queue["material_url"], "preflight_sha256": artifact["sha256"], "preflight_size": artifact["size"],
                     "preflight_duration": duration, "preflight_width": artifact.get("width", 0), "preflight_height": artifact.get("height", 0)}
         if queue.get("delivery_mode") == "duration_pending":
@@ -555,7 +557,7 @@ class XNativeBridge:
             if old and any(obj(old[0]).get(k) != artifact.get(k) for k in ("url", "sha256", "size", "mime", "duration_seconds", "profile")):
                 raise AdapterError("x_artifact_identity_changed")
             c.execute("INSERT INTO pipeline_x_artifact VALUES(?,?,?) ON CONFLICT(queue_id) DO NOTHING", (queue["id"], canonical(artifact), receipt["source_url"]))
-        if descriptor["request"].get("random_request"):
+        if descriptor["request"].get("random_request") and not is_image:
             random_request = dict(descriptor["request"]["random_request"])
             random_request.update(source_url=artifact["url"], source_sha256=artifact["sha256"], source_size=artifact["size"], source_duration=duration)
             PreparationStore(self.r.POST_DB_PATH).freeze(queue["id"], random_request)
@@ -565,7 +567,8 @@ class XNativeBridge:
             record, descriptor = self.stored(job, claim)
             if job["stage"] == "prepare":
                 result = receipt.get("preparation", {})
-                if descriptor["kind"] == "x_random" or descriptor.get("request", {}).get("random_request"):
+                image = receipt.get("artifact", {}).get("mime") in {"image/jpeg", "image/png", "image/gif"}
+                if descriptor["kind"] == "x_random" or (descriptor.get("request", {}).get("random_request") and not image):
                     request = PreparationStore(self.r.POST_DB_PATH).get(record["queue_id"])["request"]
                     validate_receipt(request, result)
                     expected_artifact = {"url": result["output_url"], "sha256": result["output_sha256"], "size": result["output_size"],

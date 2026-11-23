@@ -1,0 +1,22 @@
+--- a/features/pipeline_dispatch/core.py
++++ b/features/pipeline_dispatch/core.py
+@@ -705,2 +705,19 @@
+                 meta = json.loads(existing["source_meta_json"])
++                selected_from = offer.get("tt_selection_from_fingerprint")
++                if (selected_from and (channel, offer.get("family"), stage) == ("tt", "auto", "prepare")
++                        and existing["generation"] == 0 and existing["status"] in ("queued", "ready", "legacy_running")
++                        and not existing["external_intent"] and not existing["claim_hash"] and not existing["canonical_receipt"]
++                        and offer.get("source_status") == "reserved"
++                        and meta.get("canonical_fingerprint") == selected_from):
++                    gate = c.execute("SELECT phase,decision FROM pipeline_media_gate WHERE source_key=?", (existing["source_key"],)).fetchone()
++                    history = any(c.execute("SELECT 1 FROM " + table + " WHERE job_id=? LIMIT 1", (existing["id"],)).fetchone()
++                                  for table in ("pipeline_claim_history", "pipeline_operation", "pipeline_checkpoint", "pipeline_receipt", "pipeline_delivery"))
++                    if gate and gate["phase"] == "pending" and json.loads(gate["decision"]).get("kind") == "select_source" and not history:
++                        payload = json.loads(existing["payload_json"])
++                        payload["canonical_fingerprint"] = offer["canonical_fingerprint"]
++                        meta["canonical_fingerprint"] = offer["canonical_fingerprint"]
++                        c.execute("UPDATE pipeline_job SET status='queued',payload_json=?,source_meta_json=?,resource_keys_json=?,updated_at=? WHERE id=?",
++                                  (dumps(payload), dumps(meta), dumps(offer.get("resource_keys", [])), now, existing["id"]))
++                        c.execute("DELETE FROM pipeline_legacy_resource WHERE job_id=?", (existing["id"],))
++                        self.event(c, existing["id"], "tt_media_selection_adopted", {"before": selected_from, "after": offer["canonical_fingerprint"]}, now)
+                 if offer.get("fb_skipped_recovery"):

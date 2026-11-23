@@ -1,0 +1,41 @@
+--- a/features/pipeline_dispatch/native_media.py
++++ b/features/pipeline_dispatch/native_media.py
+@@ -11,2 +11,4 @@
+ import tempfile
++import threading
++from contextlib import contextmanager
+ from datetime import datetime, timedelta, timezone
+@@ -451,2 +453,20 @@
+ 
++@contextmanager
++def _tt_selection_lease(store, task_id, token, interval=30):
++    stopped = threading.Event()
++    def renew():
++        while not stopped.wait(interval):
++            try:
++                store.renew_task_claim(task_id, token, lease_seconds=180)
++            except Exception:
++                return  # The final native transition still validates ownership.
++    thread = threading.Thread(target=renew, name="tt-selection-lease", daemon=True)
++    thread.start()
++    try:
++        yield
++    finally:
++        stopped.set()
++        thread.join(timeout=2)
++
++
+ def _selected_tt(bridge, job, row):
+@@ -454,4 +474,4 @@
+         row.get("material_id")
+-        or row.get("status") not in {"pending", "retry_wait"}
+-        or row.get("claim_token")
++        or row.get("status") not in {"pending", "retry_wait", "selecting"}
++        or (row.get("claim_token") and row.get("status") != "selecting")
+     ):
+@@ -472,3 +492,4 @@
+     try:
+-        selected = executor._select(claim.task, token)
++        with _tt_selection_lease(bridge.store, claim.task.id, token):
++            selected = executor._select(claim.task, token)
+         # Existing selection ledger owns this material. A separate native

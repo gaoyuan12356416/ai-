@@ -9,6 +9,8 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -449,11 +451,29 @@ def _connect(bridge, job):
     return bridge.connect()
 
 
+@contextmanager
+def _tt_selection_lease(store, task_id, token, interval=30):
+    stopped = threading.Event()
+    def renew():
+        while not stopped.wait(interval):
+            try:
+                store.renew_task_claim(task_id, token, lease_seconds=180)
+            except Exception:
+                return  # The final native transition still validates ownership.
+    thread = threading.Thread(target=renew, name="tt-selection-lease", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=2)
+
+
 def _selected_tt(bridge, job, row):
     if (
         row.get("material_id")
-        or row.get("status") not in {"pending", "retry_wait"}
-        or row.get("claim_token")
+        or row.get("status") not in {"pending", "retry_wait", "selecting"}
+        or (row.get("claim_token") and row.get("status") != "selecting")
     ):
         return None
     executor = bridge.service.executor
@@ -470,7 +490,8 @@ def _selected_tt(bridge, job, row):
         return {"retry": True, "reason": "tt_selection_not_claimable"}
     token = claim.reveal_claim_token()
     try:
-        selected = executor._select(claim.task, token)
+        with _tt_selection_lease(bridge.store, claim.task.id, token):
+            selected = executor._select(claim.task, token)
         # Existing selection ledger owns this material. A separate native
         # rendering claim may later take the reserved row if no reuse exists.
         bridge.store.transition_task(

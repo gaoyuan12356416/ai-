@@ -1,0 +1,7 @@
+--- a/features/pipeline_dispatch/executors.py
++++ b/features/pipeline_dispatch/executors.py
+@@ -562,3 +562,3 @@
+             context.checkpoint("x_preflight", checkpoint)
+-            if request.get("random_request"):
++            if request.get("random_request") and kind == "video":
+                 frozen = dict(request["random_request"])

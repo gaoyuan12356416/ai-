@@ -427,5 +427,23 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(result["artifact"], artifact)
         self.assertEqual(self.context.checkpoints, [])
 
+    def test_random_template_png_is_probed_and_uploaded_without_rendering(self):
+        raw = io.BytesIO()
+        Image.new('RGB', (640, 360)).save(raw, format='PNG')
+        cloud = MemoryCOS(); store = MemoryStore(cloud)
+        executor = NodeExecutors(self.config)
+        request = {'identity_mode': 'source_to_fingerprint', 'source_url': 'https://media.example/image.png',
+                   'random_request': {'job_key': 'frozen-video-template'}}
+        with patch.dict(os.environ, {'PIPELINE_MEDIA_ALLOWED_HOSTS': 'media.example'}), \
+                patch('features.drama_synthesis.youtube.YouTubeHTTPClient.download', side_effect=lambda url, path, **kw: path.write_bytes(raw.getvalue())), \
+                patch.object(executor, '_preflight_store', return_value=store), \
+                patch('features.x_posts.service.probe_image', return_value={'width': 640, 'height': 360, 'duration': 0}), \
+                patch.object(executor, '_x_transform', side_effect=AssertionError('images must not render')):
+            result = executor.x_preflight(request, self.context)
+        self.assertEqual(result['artifact']['mime'], 'image/png')
+        self.assertEqual(result['artifact']['duration_seconds'], 0)
+        self.assertEqual(self.context.checkpoints[0][0], 'x_preflight')
+        self.assertEqual(len(cloud.objects), 1)
+
 
 if __name__ == "__main__": unittest.main()
