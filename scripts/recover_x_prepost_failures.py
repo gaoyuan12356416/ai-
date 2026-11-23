@@ -40,8 +40,12 @@ def stable_job(row):
 
 
 def media_facts(conn, queue_id):
-    return {table: rows(conn, 'SELECT * FROM '+table+' WHERE queue_id=?', (queue_id,))
-            for table in ('pipeline_x_artifact', 'x_post_random_template_preparation')}
+    facts={table: rows(conn, 'SELECT * FROM '+table+' WHERE queue_id=?', (queue_id,))
+           for table in ('pipeline_x_artifact', 'x_post_random_template_preparation')}
+    facts['pipeline_native_media_decision']=rows(conn,
+        'SELECT * FROM pipeline_native_media_decision WHERE source_key=?',('x:queue:'+str(queue_id),)) if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='pipeline_native_media_decision'").fetchone() else []
+    return facts
 
 
 def snapshot(c, n, queue_id, stage, days, now, media_only=False):
@@ -65,7 +69,6 @@ def snapshot(c, n, queue_id, stage, days, now, media_only=False):
             and not job['hold_reason'] and not job['canonical_receipt'], 'dispatch_not_known_failure')
     original = date(json.loads(job['source_meta_json']).get('cutover_due_at') or job['scheduled_at'])
     require((original + dt.timedelta(hours=8)).date().isoformat() in days, 'outside_authorized_dates')
-    require(job['finished_at'] and date(job['finished_at']) <= now-dt.timedelta(seconds=120), 'failure_not_settled')
     require(all(j['status'] in (('failed','completed','unknown') if media_only else ('failed','completed')) and (not j['lease_expires_at'] or date(j['lease_expires_at']) <= now)
                 for j in jobs), 'source_inflight_or_unknown')
     require(not c.execute('SELECT 1 FROM pipeline_publication WHERE source_key=?', (key,)).fetchone(), 'published_evidence')
@@ -92,6 +95,8 @@ def snapshot(c, n, queue_id, stage, days, now, media_only=False):
     central_cp = rows(c, 'SELECT * FROM pipeline_checkpoint WHERE job_id IN ('+params+') ORDER BY checkpoint_id', ids)
     require(all(r['phase'] in ('x_preflight','x_media_initialized') for r in central_cp), 'central_later_checkpoint')
     failures = rows(c, "SELECT * FROM pipeline_event WHERE job_id=? AND event_type='failed' ORDER BY id", (job['id'],))
+    settled_at=job['finished_at'] or (failures[-1]['created_at'] if media_only and failures else '')
+    require(settled_at and date(settled_at) <= now-dt.timedelta(seconds=120), 'failure_not_settled')
     require(failures and (media_only or json.loads(failures[-1]['details_json']).get('unknown') is False)
             and json.loads(failures[-1]['details_json']).get('code') == job['error_code'], 'known_failure_fact_missing')
     all_failures = rows(c, "SELECT * FROM pipeline_event WHERE job_id IN ("+params+") AND event_type='failed' ORDER BY id", ids)
@@ -120,7 +125,11 @@ def snapshot(c, n, queue_id, stage, days, now, media_only=False):
                 and desc.get('account_resource') == 'x:account:'+str(q['account_id']), 'frozen_publish_descriptor_missing')
         require(all(log[k] for k in ('long_url','short_url','post_text')), 'unfrozen_post_body')
         require(prior and all(p.get('artifact') == artifact and p.get('request') == desc['request'] for p in prior), 'prior_publish_descriptor_changed')
-        if q.get('random_template_enabled'):
+        decisions=media['pipeline_native_media_decision']
+        if decisions and decisions[0]['status']=='applied':
+            require(len(decisions)==1 and json.loads(decisions[0]['artifact_json'])==artifact,
+                    'frozen_media_decision_changed')
+        elif q.get('random_template_enabled'):
             prepared = media['x_post_random_template_preparation']
             require(len(prepared)==1 and prepared[0]['status']=='ready', 'frozen_render_missing')
             request, result = json.loads(prepared[0]['request_json']), json.loads(prepared[0]['result_json'])
