@@ -37,7 +37,8 @@ def main():
         alias='fb' if key.startswith('fb:') else 'tag' if int(job['source_id'])>9000000000000 else 'x'
         table='fb_auto_task' if alias=='fb' else 'x_post_queue'
         native=dict(c.execute('SELECT * FROM '+alias+'.'+table+' WHERE id=?',(job['source_id'],)).fetchone())
-        require(canonical_fingerprint(native,'id')==json.loads(job['payload_json'])['canonical_fingerprint'],'frozen_source_identity_changed')
+        expected=json.loads(job['payload_json']).get('canonical_fingerprint') or json.loads(job['source_meta_json']).get('canonical_fingerprint')
+        require(canonical_fingerprint(native,'id')==expected,'frozen_source_identity_changed')
         evidence={'job':job,'native':native}
         now=dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
         if alias=='fb':
