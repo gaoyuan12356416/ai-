@@ -16,14 +16,60 @@ from .store import ROOT
 AUTO_PATHS={'ordinary':'/mnt/data-disk/x-auto-post-publisher/x-auto-post.sqlite3',
             'tag':'/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3'}
 
-def local_conflict(db,material_id,account_id):
+def same_pool(source, prior_lane, prior_id, prior_account):
+    """Only different accounts in the same verified submission may share."""
+    if not source or not source.get('_pool_run') or str(prior_account) == str(source['account_id']):
+        return False
+    if prior_lane != source['_lane'] or not prior_id:
+        return False
+    try:
+        prior = task(prior_lane, prior_id)
+    except ValueError:
+        return False
+    return prior.get('_pool_run') == source['_pool_run']
+
+
+def sibling_context(source, context, account_id):
+    if not source or not source.get('_pool_run'):
+        return False
+    data = json.loads(context or '{}')
+    return same_pool(source, data.get('lane'), data.get('task_id'), account_id)
+
+
+def pool_scope(context):
+    if not context:
+        return ''
+    source = task(context['lane'], context['task_id'])
+    return source['_lane'] + ':' + str(source['_pool_run']) if source.get('_pool_run') else ''
+
+
+def reservation_conflict(db, material_id, account_id, scope):
+    for row in db.execute('''SELECT r.share_scope,m.account_ids_json FROM x_post_manual_material_reservation r
+        JOIN x_post_manual_run m ON m.id=r.manual_run_id WHERE r.material_key=? AND r.state='active' ''',(material_id,)):
+        if not scope or row['share_scope'] != scope or str(account_id) in {str(a) for a in json.loads(row['account_ids_json'])}:
+            return True
+    return False
+
+
+def local_conflict(db, material_id, account_id, *, reuse_context=None):
+    source = task(reuse_context['lane'], reuse_context['task_id']) if reuse_context else None
     if db.execute('''SELECT 1 FROM x_post_material_pool p WHERE p.material_key=?
-        AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id) LIMIT 1''',(material_id,)).fetchone():return True
-    return bool(db.execute('''SELECT 1 FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
+        AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id) LIMIT 1''',(material_id,)).fetchone():
+        return True
+    for row in db.execute('''SELECT q.account_id,q.status,l.unknown_outcome,l.status AS log_status,
+        relay.unknown_outcome AS relay_unknown,relay.status AS relay_status,m.reuse_context_json
+        FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
         LEFT JOIN x_post_repost_ledger relay ON relay.queue_id=q.id
-        WHERE q.material_key=? AND (q.account_id=? OR q.status NOT IN ('published','failed','cancelled') OR l.unknown_outcome=1
-        OR l.status IN ('post_creating','repost_creating') OR relay.unknown_outcome=1 OR relay.status='needs_review') LIMIT 1''',
-        (material_id,account_id)).fetchone())
+        LEFT JOIN x_post_manual_run m ON m.id=q.manual_run_id WHERE q.material_key=?''',(material_id,)):
+        if sibling_context(source, row['reuse_context_json'], row['account_id']):
+            continue
+        if (source and source.get('_pool_run') and not source['_effect_policy']) or (
+            str(row['account_id']) == str(account_id) or row['status'] not in ('published','failed','cancelled')
+            or row['unknown_outcome'] or row['log_status'] in ('post_creating','repost_creating')
+            or row['relay_unknown'] or row['relay_status'] == 'needs_review'):
+            return True
+    return False
+
 
 def lane():return 'tag' if '/x-tag-publisher/' in os.environ.get('X_AUTO_POST_DB_PATH','') else 'ordinary'
 
@@ -46,34 +92,44 @@ def task(lane_name,task_id):
         if not row:raise ValueError('task_missing')
         data=dict(row)
         version=db.execute('SELECT config_json FROM x_auto_template_version WHERE template_id=? AND version=?',(row['template_id'],row['template_version'])).fetchone()
-        if not version or not config_enabled(json.loads(version[0])):raise ValueError('effect_policy_not_frozen')
+        run = db.execute('SELECT blacklist_snapshot_json FROM x_auto_run WHERE id=?',(row['run_id'],)).fetchone()
+        from features.publish_candidate_pool import POLICY as POOL_POLICY
+        pool = json.loads(run[0]).get('candidate_pool', {}) if run else {}
+        effect = bool(version and config_enabled(json.loads(version[0])))
+        is_pool = pool.get('policy') == POOL_POLICY and str(row['account_id']) in pool.get('account_ids', [])
+        if not effect and not is_pool:raise ValueError('reuse_policy_not_frozen')
+        data.update(_pool_run=int(row['run_id']) if is_pool else 0, _effect_policy=effect, _lane=lane_name)
         return data
 
-def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external=''):
+def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external='',source=None):
     blocked=set();ids=list(dict.fromkeys(str(v) for v in material_ids));marks=','.join('?' for _ in ids)
     if not ids:return blocked
     for lane_name,path in zip(('ordinary','tag'),LEDGERS):
         with closing(readonly(path)) as db:
             for r in db.execute(f'''SELECT q.material_key,q.account_id,q.status,l.unknown_outcome,mr.external_task_key,
-                    l.status AS log_status,relay.unknown_outcome AS relay_unknown,relay.status AS relay_status
+                    l.status AS log_status,relay.unknown_outcome AS relay_unknown,relay.status AS relay_status,mr.reuse_context_json
                     FROM x_post_queue q LEFT JOIN x_post_publish_log l ON l.queue_id=q.id
                     LEFT JOIN x_post_repost_ledger relay ON relay.queue_id=q.id
                     LEFT JOIN x_post_manual_run mr ON mr.id=q.manual_run_id
                     WHERE q.material_key IN ({marks})''',ids):
                 if lane_name==own_lane and own_external and r['external_task_key']==own_external:continue
-                if (str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','cancelled') or r['unknown_outcome']
+                if sibling_context(source, r['reuse_context_json'], r['account_id']):continue
+                if (bool(source and source.get('_pool_run') and not source['_effect_policy']) or str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','cancelled') or r['unknown_outcome']
                     or r['log_status'] in ('post_creating','repost_creating') or r['relay_unknown'] or r['relay_status']=='needs_review'):
                     blocked.add(str(r['material_key']))
             for r in db.execute(f'''SELECT p.material_key FROM x_post_material_pool p WHERE p.material_key IN ({marks})
                     AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id)''',ids):blocked.add(str(r[0]))
-            for r in db.execute(f'''SELECT r.material_key,m.external_task_key FROM x_post_manual_material_reservation r
+            for r in db.execute(f'''SELECT r.material_key,m.external_task_key,m.reuse_context_json,m.account_ids_json FROM x_post_manual_material_reservation r
                     JOIN x_post_manual_run m ON m.id=r.manual_run_id WHERE r.state='active' AND r.material_key IN ({marks})''',ids):
+                accounts = json.loads(r['account_ids_json'])
+                if len(accounts) == 1 and sibling_context(source, r['reuse_context_json'], accounts[0]):continue
                 if lane_name!=own_lane or not own_external or r['external_task_key']!=own_external:blocked.add(str(r[0]))
     for name,path in AUTO_PATHS.items():
         with closing(readonly(path)) as db:
             for r in db.execute(f'SELECT id,account_id,material_id,status FROM x_auto_task WHERE material_id IN ({marks})',ids):
                 if name==own_lane and int(r['id'])==int(own_task):continue
-                if str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','canceled','no_candidate','skipped'):
+                if same_pool(source,name,r['id'],r['account_id']):continue
+                if (source and source.get('_pool_run') and not source['_effect_policy']) or str(r['account_id'])==str(account_id) or r['status'] not in ('published','failed','canceled','no_candidate','skipped'):
                     blocked.add(str(r['material_id']))
     return blocked
 
@@ -84,7 +140,10 @@ def handle(payload,root=ROOT):
         if not isinstance(ids,list) or len(ids)>1000 or any(not str(v).isdigit() for v in ids):raise ValueError('invalid_material_ids')
         # Preview uses synthetic positive task IDs. At selection time no real
         # material is frozen yet, so the read-only check excludes no task.
-        return dict(ok=True,blocked=sorted(conflicts(ids,account,own_lane=name)))
+        source = task(name, tid) if payload.get('candidate_pool') is True else None
+        if source and not source.get('_pool_run'):raise ValueError('pool_policy_not_frozen')
+        if source and str(source['account_id']) != account:raise ValueError('identity_mismatch')
+        return dict(ok=True,blocked=sorted(conflicts(ids,account,own_lane=name,source=source)))
     if action not in ('reserve','execution'):raise ValueError('invalid_action')
     source=task(name,tid);mid=str(payload.get('material_id',''))
     if not mid.isdigit() or str(source['account_id'])!=account:raise ValueError('identity_mismatch')
@@ -117,8 +176,13 @@ def handle(payload,root=ROOT):
             if prior['status'] in ('published','failed','canceled','no_candidate','skipped'):
                 state='finished' if prior.get('material_id') else 'released'
                 db.execute('UPDATE grants SET state=? WHERE lane=? AND task_id=?',(state,row['lane'],row['task_id']))
-        occupied=db.execute("SELECT 1 FROM grants WHERE material_id=? AND (state='active' OR (account_id=? AND state='finished')) AND NOT(lane=? AND task_id=?) LIMIT 1",(mid,account,name,tid)).fetchone()
-        if occupied or conflicts([mid],account,own_lane=name,own_task=tid,own_external=external or (existing['external_key'] if existing else '')):
+        occupied = False
+        for grant in db.execute("SELECT * FROM grants WHERE material_id=? AND state<>'released' AND NOT(lane=? AND task_id=?)", (mid,name,tid)):
+            if same_pool(source,grant['lane'],grant['task_id'],grant['account_id']):continue
+            if grant['state']=='active' or grant['account_id']==account or (source['_pool_run'] and not source['_effect_policy']):
+                occupied = True
+                break
+        if occupied or conflicts([mid],account,own_lane=name,own_task=tid,own_external=external or (existing['external_key'] if existing else ''),source=source):
             db.rollback();return dict(ok=False,code='x_effect_material_reserved')
         if action=='execution' and not existing:raise ValueError('grant_missing')
         if existing:
