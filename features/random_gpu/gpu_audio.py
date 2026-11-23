@@ -136,6 +136,7 @@ class PreparedAudio:
 _CPU_DSP_COMPATIBILITY_REASONS = frozenset({
     "channel_layout_requires_explicit_matrix", "changing_audio_format",
     "missing_audio_timestamps", "discontinuous_audio_timestamps",
+    "compressed_audio_invalid_packet",
 })
 
 
@@ -220,8 +221,13 @@ def prepare_audio_track(source, output_dir, duration_seconds, check=None,
         with tempfile.TemporaryDirectory(prefix="cuda-audio-", dir=directory) as scratch, ExitStack() as resources:
             compatibility_reason = None
             try:
-                decoded = decode_contiguous_audio(source,Path(scratch)/"native.pcm",
-                                                  stop_seconds=decode_stop,check=check)
+                try:
+                    decoded = decode_contiguous_audio(source,Path(scratch)/"native.pcm",
+                                                      stop_seconds=decode_stop,check=check)
+                except av.error.InvalidDataError:
+                    # Damaged compressed packets need the established FFmpeg
+                    # async timeline compensation, before any CUDA operation.
+                    raise AudioQualificationError("compressed_audio_invalid_packet") from None
             except AudioQualificationError as exc:
                 reason = str(exc)
                 if reason not in _CPU_DSP_COMPATIBILITY_REASONS:

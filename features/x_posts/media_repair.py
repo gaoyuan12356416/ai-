@@ -809,7 +809,7 @@ def build_ffmpeg_command(config, source_path, output_path, source_info):
     canvas_width, canvas_height = source_info["canvas"]
     video_filter = (
         "yadif=mode=send_frame:parity=auto:deint=interlaced,"
-        "scale=w=%d:h=%d:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        "scale=w=%d:h=%d:force_original_aspect_ratio=decrease:force_divisible_by=2:in_range=auto:out_range=tv,"
         "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,"
         "setsar=1,fps=30,format=yuv420p"
         % (canvas_width, canvas_height, canvas_width, canvas_height)
@@ -846,6 +846,8 @@ def build_ffmpeg_command(config, source_path, output_path, source_info):
             "high",
             "-pix_fmt",
             "yuv420p",
+            "-color_range",
+            "tv",
             "-r",
             "30",
             "-fps_mode",

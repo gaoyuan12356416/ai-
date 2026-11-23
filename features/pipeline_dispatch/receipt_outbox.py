@@ -145,6 +145,10 @@ class ReceiptOutbox:
     def _fail(self, identity, owner, attempt, code):
         now = self.clock()
         delay = 15 * (2 ** min(attempt - 1, 2))
+        if code in {"claim_conflict", "historical_receipt_requires_reconciliation", "coordinator_operation_failed"} and attempt > 5:
+            # Reconciliation conflicts need changed evidence, not a request per
+            # minute forever. Keep the original fact pending and observable.
+            delay = min(3600, 60 * (2 ** min(attempt - 5, 6)))
         with self.connect() as conn:
             conn.execute("UPDATE receipt_outbox SET delivery_owner='',delivery_lease_until=0,next_attempt_at=?,last_error_code=? WHERE id=? AND acked_at IS NULL AND delivery_owner=?",
                          (now + delay, _error_code(code), identity, owner))
