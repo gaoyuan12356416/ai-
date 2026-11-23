@@ -44,7 +44,7 @@ class GateReconciliation:
             if row['state']=='unknown' and identity and identity.get('database_user'):
                 pending.append(dict(lease_id=row['id'],**identity))
         signature=json.dumps(pending,sort_keys=True)
-        if signature!=self.signature and self.requests.parent.is_dir():
+        if (signature!=self.signature or not self.requests.is_file()) and self.requests.parent.is_dir():
             atomic_json(self.requests,{'sessions':pending[:2]},0o644);self.signature=signature
 
 
@@ -68,7 +68,6 @@ def watchdog_reconcile(connection,requests=REQUESTS,proofs=PROOFS):
                 'EXISTS(SELECT 1 FROM information_schema.PROCESSLIST WHERE ID=%s AND USER=%s) AS session_present',
                 (int(row['connection_id']),row['database_user']))
             observation=cursor.fetchone()
-            if (observation['server_uuid']!=row['server_uuid'] or observation['database_user']!=row['database_user']):continue
             results.append(dict(lease_id=row['lease_id'],server_uuid=observation['server_uuid'],
                                 database_user=observation['database_user'],connection_id=int(row['connection_id']),
                                 session_present=bool(observation['session_present'])))
