@@ -1,0 +1,17 @@
+[Unit]
+Description=Mobo social income daily report to the authorized Feishu group
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/moboreels-social-daily-report/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/moboreels-social-daily-report/current/scripts/moboreels_social_daily_report.py --send
+TimeoutStartSec=600
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
