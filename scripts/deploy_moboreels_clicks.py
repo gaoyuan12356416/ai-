@@ -26,6 +26,7 @@ UNIT = 'moboreels-library.service'
 CODE = ['features/moboreels_library/'+name+'.py' for name in ('service','short_links','clicks')]
 STATIC = ['static/moboreels-report.'+ext for ext in ('js','css','html')]
 PROFILES = {
+    'order-events': ['features/moboreels_library/orders.py'],
     'report-speed': ['features/moboreels_library/' + name + '.py' for name in ('service', 'orders', 'effects')]
                     + ['static/moboreels-report.html', 'static/moboreels-effects.js'],
     'effects': ['features/moboreels_library/' + name + '.py' for name in ('service', 'orders', 'effects')]

@@ -1,9 +1,9 @@
 -- Reviewed deployment DDL only. Runtime code never executes DDL.
 CREATE TABLE IF NOT EXISTS ads_ai.cdreader_koc_order (
-  row_key CHAR(64) NOT NULL COMMENT '机构、短剧业务和外部订单号的确定性摘要',
+  row_key CHAR(64) NOT NULL COMMENT '机构、短剧业务、外部订单号和充值退款事件的确定性摘要',
   institution_user_id CHAR(32) NOT NULL COMMENT '畅读KOC机构用户ID',
   project_type TINYINT UNSIGNED NOT NULL COMMENT '请求业务类型，固定2短剧',
-  ref_order_id VARCHAR(255) COLLATE utf8mb4_bin NOT NULL COMMENT '供应方外部订单号，同单状态变化更新原记录',
+  ref_order_id VARCHAR(255) COLLATE utf8mb4_bin NOT NULL COMMENT '供应方外部订单号，充值和退款分别保留',
   source_create_time VARCHAR(64) NOT NULL COMMENT '供应方原始订单时间文本，时区未说明，不转换北京时间',
   source_date DATE DEFAULT NULL COMMENT '从有效供应方原始时间提取的来源日期，时区未说明',
   code VARCHAR(64) COLLATE utf8mb4_bin NOT NULL COMMENT '供应方返回的推广口令',
@@ -23,11 +23,11 @@ CREATE TABLE IF NOT EXISTS ads_ai.cdreader_koc_order (
   last_seen_at DATETIME(3) NOT NULL COMMENT '最近成功观测时间，UTC',
   last_sync_run_id CHAR(32) NOT NULL COMMENT '最近确认该记录的统计同步任务ID',
   PRIMARY KEY(row_key),
-  UNIQUE KEY uk_order(institution_user_id,project_type,ref_order_id),
+  KEY idx_order_ref(institution_user_id,project_type,ref_order_id),
   KEY idx_order_date(institution_user_id,project_type,source_date),
   KEY idx_order_owner(real_star_user_id,source_date),
   KEY idx_order_code(code)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Moboreels订单当前状态，历史观测保留于耐久快照';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Moboreels充值退款事件，历史观测保留于耐久快照';
 
 CREATE TABLE IF NOT EXISTS ads_ai.cdreader_koc_ad_revenue (
   row_key CHAR(64) NOT NULL COMMENT '机构、业务、日期、口令和快照版本的确定性摘要',

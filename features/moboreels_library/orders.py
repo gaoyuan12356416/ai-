@@ -100,7 +100,10 @@ def normalize_order(raw, institution_user_id, recharge_ids=(), refund_ids=()):
     elif recharge or refund:
         classification, reason = (0 if recharge else 1), "confirmed_by_status_filter"
     return {
-        "row_key": _key(institution_user_id, 2, ref), "institution_user_id": institution_user_id,
+        # The supplier returns recharge and refund as separate financial events
+        # sharing ref_order_id. Keep legacy recharge keys; refunds must not replace them.
+        "row_key": (_key(institution_user_id, 2, ref, "refund") if refund and not recharge
+                    else _key(institution_user_id, 2, ref)), "institution_user_id": institution_user_id,
         "project_type": 2, "ref_order_id": ref, "source_create_time": source_time, "source_date": source_date,
         "code": _text(raw.get("code"), "code", 64), "story_id": _text(raw.get("story_id"), "story_id", 64),
         "story_name": _text(raw.get("story_name"), "story_name", 65535), "amount_usd": amount,
@@ -153,6 +156,40 @@ def _same_order_observation(left, right):
     return (Decimal(_amount(left.get("amount"))) == Decimal(_amount(right.get("amount")))
             and _canonical({key: left.get(key) for key in fields})
             == _canonical({key: right.get(key) for key in fields}))
+
+
+def reconcile_order_events(snapshots, institution_user_id):
+    """Match each observation to the numeric filters, not to order ID alone."""
+    grouped, duplicates = {}, 0
+    for status in (-1, 0, 1):
+        grouped[status] = {}
+        for row in snapshots[status]:
+            ref = _text(row.get("ref_order_id"), "ref_order_id", 255, True)
+            observations = grouped[status].setdefault(ref, [])
+            if any(_same_order_observation(row, old) for old in observations):
+                duplicates += 1
+                continue
+            observations.append(row)
+            if status != -1 and len(observations) > 1:
+                raise ReportError("同类订单返回不同金额、时间或归属，未写入此分项")
+    memberships = {}
+    for status in (0, 1):
+        for ref, rows in grouped[status].items():
+            if ref not in grouped[-1]:
+                raise ReportError("订单状态筛选与完整目录不一致，未写入此分项")
+            matches = [index for index, raw in enumerate(grouped[-1][ref])
+                       if _same_order_observation(raw, rows[0])]
+            if not matches:
+                raise ReportError("订单状态快照期间金额、归属或状态发生变化，未写入此分项；继续同步将重新取数")
+            memberships.setdefault((ref, matches[0]), set()).add(status)
+    records = []
+    for ref, rows in grouped[-1].items():
+        for index, raw in enumerate(rows):
+            kinds = memberships.get((ref, index), set())
+            records.append(normalize_order(raw, institution_user_id,
+                                           {ref} if 0 in kinds else (),
+                                           {ref} if 1 in kinds else ()))
+    return records, duplicates
 
 
 class ReportStore:
@@ -450,22 +487,10 @@ class Reports:
         if part["kind"] == "orders":
             snapshots = {}
             for status in (-1, 0, 1):
-                rows = self._collect(directory, "orders-status-%s-attempt-%s" % (status, part.get("fetch_attempt", 0)),
-                                     lambda page, status=status: get_order_page(self.provider, run["begin_time"], run["end_time"], status, page), progress)
-                keys = [_text(row.get("ref_order_id"), "ref_order_id", 255, True) for row in rows]
-                if len(set(keys)) != len(keys):
-                    raise ReportError("订单分页出现重复外部订单号，未写入此分项")
-                snapshots[status] = (rows, set(keys))
-            all_ids = snapshots[-1][1]
-            if not snapshots[0][1].issubset(all_ids) or not snapshots[1][1].issubset(all_ids):
-                raise ReportError("订单状态筛选与完整目录不一致，未写入此分项")
-            all_rows = {_text(row.get("ref_order_id"), "ref_order_id", 255, True): row for row in snapshots[-1][0]}
-            for status in (0, 1):
-                for row in snapshots[status][0]:
-                    ref = _text(row.get("ref_order_id"), "ref_order_id", 255, True)
-                    if not _same_order_observation(all_rows[ref], row):
-                        raise ReportError("订单状态快照期间金额、归属或状态发生变化，未写入此分项；继续同步将重新取数")
-            records = [normalize_order(row, self.settings.institution_user_id, snapshots[0][1], snapshots[1][1]) for row in snapshots[-1][0]]
+                snapshots[status] = self._collect(directory, "orders-status-%s-attempt-%s" % (status, part.get("fetch_attempt", 0)),
+                                                  lambda page, status=status: get_order_page(self.provider, run["begin_time"], run["end_time"], status, page), progress)
+            records, duplicates = reconcile_order_events(snapshots, self.settings.institution_user_id)
+            part["duplicate_observations"] = duplicates
         else:
             from .ad_revenue import get_ad_revenue_page, normalize_ad_revenue
             rows = self._collect(directory, part["name"] + "-attempt-%s" % part.get("fetch_attempt", 0),

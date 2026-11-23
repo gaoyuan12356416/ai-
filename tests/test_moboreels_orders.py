@@ -122,7 +122,7 @@ class OrderNormalizationTest(unittest.TestCase):
         self.assertEqual(row["classification"], 0)
         refund = normalize_order(documented_order(status_text="充值订单", amount="-3.0000"), "institution", set(), {"order-1"})
         self.assertEqual(refund["classification"], 1)
-        self.assertEqual(refund["row_key"], row["row_key"])
+        self.assertNotEqual(refund["row_key"], row["row_key"])
         self.assertEqual(refund["amount_usd"], "-3.0000")
 
     def test_unknown_enum_conflicting_filters_and_unknown_timezone_remain_unclassified(self):
@@ -211,16 +211,21 @@ class ReportSyncTest(unittest.TestCase):
         self.assertEqual(self.store.pointers[SOURCE_DAY]["snapshot_id"], run["run_id"])
         self.assertEqual(manager.last_success_at(), run["finished_at"])
 
-    def test_same_order_status_change_updates_one_current_row(self):
+    def test_refund_retains_original_recharge_and_repeated_sync_is_idempotent(self):
         original = documented_order()
         provider = FakeProvider({-1: [original], 0: [original], 1: []})
         manager = self.manager(provider)
         self.assertEqual(self.complete(manager)["status"], "succeeded")
-        changed = documented_order(status_text="退款订单")
+        original_key = next(iter(self.store.rows["orders"]))
+        changed = documented_order(status_text="退款订单", create_time="2026-11-11 16:55:35")
         provider.orders = {-1: [changed], 0: [], 1: [changed]}
         self.assertEqual(self.complete(manager)["status"], "succeeded")
-        self.assertEqual(len(self.store.rows["orders"]), 1)
-        self.assertEqual(next(iter(self.store.rows["orders"].values()))["classification"], 1)
+        self.assertEqual(self.complete(manager)["status"], "succeeded")
+        self.assertEqual(len(self.store.rows["orders"]), 2)
+        self.assertEqual(self.store.rows["orders"][original_key]["classification"], 0)
+        events = {r["classification"]: r for r in self.store.rows["orders"].values()}
+        self.assertEqual(events[0]["source_date"], SOURCE_DAY)
+        self.assertEqual(events[1]["source_date"], "2026-11-11")
 
     def test_partial_refund_snapshot_conflict_preserves_old_orders_and_refetches_on_resume(self):
         original = documented_order(amount="10.0000")
@@ -245,7 +250,8 @@ class ReportSyncTest(unittest.TestCase):
         self.assertEqual(resumed["status"], "succeeded", resumed)
         calls = provider.calls[call_count:]
         self.assertEqual([body["status"] for path, body in calls], [-1, 0, 1])
-        row = next(iter(self.store.rows["orders"].values()))
+        self.assertEqual(len(self.store.rows["orders"]), 2)
+        row = next(r for r in self.store.rows["orders"].values() if r["classification"] == 1)
         self.assertEqual(row["classification"], 1)
         self.assertEqual(row["amount_usd"], "3.0000")
         self.assertEqual(len(list(directory.glob("orders-status-*-attempt-0-*.json"))), 3)
@@ -330,12 +336,45 @@ class ReportSyncTest(unittest.TestCase):
         self.assertEqual(retried["status"], "succeeded", retried)
         self.assertEqual(len(self.store.rows["orders"]), 101)
 
-    def test_duplicate_order_id_blocks_complete_order_snapshot(self):
+    def test_identical_repeated_order_is_counted_once(self):
         row = documented_order()
-        manager = self.manager(FakeProvider({-1: [row, row], 0: [row], 1: []}))
+        manager = self.manager(FakeProvider({-1: [row, row], 0: [row, row], 1: []}))
+        run = self.complete(manager)
+        self.assertEqual(run["status"], "succeeded", run)
+        self.assertEqual(len(self.store.rows["orders"]), 1)
+        self.assertEqual(run["parts"][0]["duplicate_observations"], 2)
+
+    def test_same_id_recharge_and_refund_keep_both_events_with_correct_days(self):
+        recharge = documented_order(amount="9.0000")
+        refund = documented_order(amount="9.0000", status_text="退款订单", create_time="2026-11-11 16:55:35")
+        manager = self.manager(FakeProvider({-1: [refund, recharge], 0: [recharge], 1: [refund]}))
+        run = self.complete(manager)
+        self.assertEqual(run["status"], "succeeded", run)
+        self.assertEqual(run["parts"][0]["verified"], 2)
+        events = {r["classification"]: r for r in self.store.rows["orders"].values()}
+        self.assertEqual(set(events), {0, 1})
+        self.assertEqual(events[0]["source_date"], SOURCE_DAY)
+        self.assertEqual(events[1]["source_date"], "2026-11-11")
+        self.assertEqual(events[0]["amount_usd"], "9.0000")
+        self.assertEqual(events[1]["amount_usd"], "9.0000")
+        self.assertNotEqual(events[0]["row_key"], events[1]["row_key"])
+
+    def test_duplicate_cross_page_preserves_distinct_orders(self):
+        rows = [documented_order(str(index)) for index in range(100)]
+        manager = self.manager(FakeProvider({-1: rows + [rows[0]], 0: rows + [rows[0]], 1: []}))
+        run = self.complete(manager)
+        self.assertEqual(run["status"], "succeeded", run)
+        self.assertEqual(len(self.store.rows["orders"]), 100)
+        self.assertEqual(run["parts"][0]["duplicate_observations"], 2)
+
+    def test_conflicting_same_type_duplicates_are_not_arbitrarily_chosen(self):
+        row, conflict = documented_order(), documented_order(amount="99")
+        manager = self.manager(FakeProvider({-1: [row, conflict], 0: [row, conflict], 1: []}))
         run = self.complete(manager)
         self.assertEqual(run["status"], "failed")
+        self.assertIn("同类订单", run["parts"][0]["error"])
         self.assertEqual(self.store.rows["orders"], {})
+        self.assertIn(SOURCE_DAY, self.store.pointers)
 
     def test_unknown_write_reconciles_committed_rows_before_any_replay(self):
         row = documented_order()
