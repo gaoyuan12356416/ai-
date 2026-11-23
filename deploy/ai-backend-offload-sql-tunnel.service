@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Slice=ai-backend-offload-read.slice
-ExecStart=/usr/bin/ssh -NT -i /etc/ai-backend-offload/tunnel_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ai-backend-offload/known_hosts -L 127.0.0.1:19966:127.0.0.1:19970 -L 127.0.0.1:19969:101.32.56.53:63350 root@43.166.187.96
+ExecStart=/usr/bin/ssh -NT -i /etc/ai-backend-offload/tunnel_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ai-backend-offload/known_hosts -L 127.0.0.1:19966:127.0.0.1:19970 -L 127.0.0.1:19969:101.32.56.53:63350 -R 127.0.0.1:19973:127.0.0.1:19972 root@43.166.187.96
 Restart=always
 RestartSec=10
 Nice=15

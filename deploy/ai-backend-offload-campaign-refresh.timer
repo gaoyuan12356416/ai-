@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the migrated Campaign Copy refresh schedule
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=30
+AccuracySec=5
+Unit=ai-backend-offload-campaign-refresh.service
+
+[Install]
+WantedBy=timers.target
