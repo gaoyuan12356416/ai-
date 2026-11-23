@@ -127,7 +127,7 @@ class ReviewedYouTubeHTTPClient(YouTubeHTTPClient):
         elif upload in {"uploaded", "processing", "processed"} and processing_status == "processing":
             state = "processing"
         return {"state": state, "visibility": visibility, "processing_status": processing_status,
-                "preserved_status": dict(status)}
+                "published_at": str(snippet.get("publishedAt") or ""), "preserved_status": dict(status)}
 
     def set_thumbnail(self, token: str, *, video_id: str, content: bytes, mime_type: str) -> None:
         if not VIDEO_ID_RE.fullmatch(str(video_id)) or mime_type not in {"image/jpeg", "image/png"} or not 0 < len(content) <= MAX_COVER_BYTES:
