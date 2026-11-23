@@ -88,9 +88,7 @@ def switch(record,folder,rollback=False,full=False):
         cmd('systemctl','stop',PREVIEW)
         subprocess.run(['systemctl','disable',PREVIEW],check=False,capture_output=True)
     cmd('systemctl','daemon-reload');cmd('systemctl','restart',UNIT)
-    if full:
-        pass
-    elif not rollback:
+    if not rollback:
         cmd('systemctl','enable','--now',PREVIEW)
     if any(p==NGINX for p,_,_ in changes):cmd('systemctl','reload','nginx')
     record.update(state='full_rollback' if full else 'compatible_rollback' if rollback else 'active',active_release=str(target))
