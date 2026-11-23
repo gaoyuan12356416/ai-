@@ -40,6 +40,29 @@ class SchedulerHealthTests(unittest.TestCase):
         self.assertNotIn('x-video-pool-scheduler.service', selected)
         self.assertNotIn('fb-video-pool-scheduler.service', selected)
 
+    def test_stopped_x_tag_editor_is_detected(self):
+        spec = roles(['x'])['x-tag-auto.service']
+        state = {'LoadState': 'loaded', 'ActiveState': 'inactive', 'SubState': 'dead', 'MainPID': '0'}
+        check = evaluate({'x-tag-auto.service': spec}, {'x-tag-auto.service': state}, 1000)[0]
+        self.assertEqual(check['code'], 'daemon_not_running')
+
+    def test_x_tag_restore_preserves_prior_pauses_and_does_not_replay_jobs(self):
+        specs = roles(['x'])
+        states = {unit: {'ActiveState': 'active'} for unit in specs}
+        states['x-tag-auto.service']['ActiveState'] = 'inactive'
+        states['x-tag-auto-scheduler.timer']['ActiveState'] = 'inactive'
+        selected = restore_targets({'lanes': ['x'], 'states': states, 'specs': specs})
+        self.assertIn('x-tag-post.service', selected)
+        self.assertIn('x-tag-pool.timer', selected)
+        self.assertNotIn('x-tag-auto.service', selected)
+        self.assertNotIn('x-tag-auto-scheduler.timer', selected)
+        self.assertNotIn('x-tag-auto-runner.service', selected)
+        self.assertNotIn('x-tag-manual.service', selected)
+
+    def test_old_snapshot_does_not_start_newly_listed_x_tag_services(self):
+        states = {'x-post-automation.service': {'ActiveState': 'active'}}
+        self.assertEqual(restore_targets({'lanes': ['x'], 'states': states}), ['x-post-automation.service'])
+
 
 if __name__ == '__main__':
     unittest.main()

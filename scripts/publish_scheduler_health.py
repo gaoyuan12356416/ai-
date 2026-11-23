@@ -21,9 +21,13 @@ LANES = {
         'timers': {'fb-auto-post-scheduler.timer': 180, 'fb-auto-post-plan.timer': 300,
                    'fb-auto-post-reconcile.timer': 900}},
     'x': {
-        'daemons': ['x-post-automation.service', 'x-auto-post-service.service', 'x-video-pool-scheduler.service'],
+        'daemons': ['x-post-automation.service', 'x-auto-post-service.service', 'x-video-pool-scheduler.service',
+                    'x-tag-auto.service', 'x-tag-post.service', 'x-tag-gateway.service'],
         'timers': {'x-post-schedule.timer': 180, 'x-post-schedule-claim.timer': 180,
-                   'x-post-manual.timer': 120, 'x-auto-post-scheduler.timer': 180}},
+                   'x-post-manual.timer': 120, 'x-auto-post-scheduler.timer': 180,
+                   'x-tag-auto-scheduler.timer': 180, 'x-tag-auto-runner.timer': 180,
+                   'x-tag-manual.timer': 120, 'x-tag-pool.timer': 180,
+                   'x-tag-metric.timer': 7200, 'x-tag-selection-watchdog.timer': 180}},
     'tt': {
         'daemons': ['tt-post-service.service', 'tt-auto-post-service.service'],
         'timers': {'tt-auto-post-scheduler.timer': 180, 'tt-post-runner.timer': 180,
