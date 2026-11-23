@@ -22,6 +22,7 @@ def connection_factory(session):
     from mysql.connector.connection import MySQLConnection
     from mysql.connector.constants import ClientFlag
     from mysql.connector.network import NetworkBrokerCompressed
+    from .mysql_compression import FragmentSafeCompressedBroker
 
     class Connection(MySQLConnection):
         def cmd_query(self,query,*args,**kwargs):
@@ -39,5 +40,10 @@ def connection_factory(session):
                            conn_attrs={'program_name':'ai-offload/'+session.key})
         if not connection.client_flags & ClientFlag.COMPRESS or not isinstance(connection._socket._netbroker,NetworkBrokerCompressed):
             raise RuntimeError('campaign_protocol_compression_not_negotiated')
+        previous=connection._socket._netbroker
+        if previous._queue_read:raise RuntimeError('unexpected_unread_setup_packet')
+        receiver=FragmentSafeCompressedBroker()
+        receiver._pktnr,receiver._compressed_pktnr=previous._pktnr,previous._compressed_pktnr
+        connection._socket._netbroker=receiver
         return adapter
     return connect
