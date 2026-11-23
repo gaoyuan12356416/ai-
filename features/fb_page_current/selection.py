@@ -34,6 +34,13 @@ def inspect(path=FILE):
             return json.loads(db.execute('SELECT payload FROM head').fetchone()[0])
 
 
+def available(version, path=FILE):
+    try:
+        return (inspect(path) or {}).get('version') == version
+    except (ValueError, TypeError, OSError, sqlite3.DatabaseError):
+        return False
+
+
 class Builder:
     def __init__(self, meta, proof, path=FILE):
         self.path, self.meta, self.proof = path, meta, proof

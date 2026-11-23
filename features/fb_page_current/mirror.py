@@ -1,5 +1,5 @@
 """During migration only, compare the same frozen model outside the hourly service's slot."""
-from contextlib import closing
+from contextlib import closing,nullcontext
 import datetime as dt
 import fcntl
 import gzip
@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 
-from .common import (LEGACY,MONEY,NEXT,ROOT,atomic,checked,encoded,insert_batch,literal,pack,query,
+from .common import (LEGACY,MONEY,NEXT,PORTRAITS,PUBLIC,ROOT,atomic,checked,encoded,insert_batch,literal,pack,query,
                      read_config,sha,stamp,writer)
 from .publish import promote,verify,wait_visible
 
@@ -36,17 +36,23 @@ def seal(data,proof,mode,resumed):
     unit='fb-page-current-mirror-'+version.lower()
     subprocess.run(['systemd-run','--quiet','--collect','--unit='+unit,
                     '--property=Nice=10','--property=MemoryMax=640M','--property=RequiresMountsFor=/mnt/data-disk',
-                    '--working-directory='+str(Path.cwd()),'/usr/bin/python3','-B','-m','features.fb_page_current.mirror'],check=True)
+                    '--property=WorkingDirectory='+str(Path.cwd()),'/usr/bin/python3','-B','-m','features.fb_page_current.mirror'],check=True)
 
 
-def items(directory,meta):
+def items(directory,meta,row_times,proof=None):
+    from . import selection
     from features.fb_page_portrait.storage import projections
-    ts=dt.datetime.fromisoformat(meta['generated_at']).astimezone(dt.timezone.utc).replace(tzinfo=None)
-    with gzip.open(directory/'pages.gz','rb') as data:
+    generated=dt.datetime.fromisoformat(meta['generated_at']).astimezone(dt.timezone.utc).replace(tzinfo=None,microsecond=0)
+    fresh=proof is not None and not selection.available(meta['version'])
+    cache=selection.alongside(meta,proof,selection.FILE) if fresh else nullcontext(None)
+    with gzip.open(directory/'pages.gz','rb') as data,cache as observe:
         for line in data:
             raw=line[:-1] if line.endswith(b'\n') else line
             page=json.loads(raw);summary,_=projections(page)
-            yield page['page_id'],encoded(summary),raw,sha(raw),[page[k] for k in MONEY],ts
+            ts=generated if row_times is None else dt.datetime.fromtimestamp(row_times[page['page_id']],dt.timezone.utc).replace(tzinfo=None)
+            digest=sha(raw)
+            if observe:observe(page['page_id'],page,digest)
+            yield page['page_id'],encoded(summary),raw,digest,[page[k] for k in MONEY],ts
 
 
 def legacy(reader,env,meta,proof,source,*,connector=writer):
@@ -90,12 +96,17 @@ def run():
             ack=ROOT/'comparisons'/(v+'.json')
             if not ack.exists():
                 if read_config()!=job['mode']:raise RuntimeError('pending mirror phase requires review')
-                source=items(d,job['meta'])
                 try:
+                    row_times=None
                     if job['mode']=='shadow':
+                        stamps=query(reader,"SELECT HEX(JSON_OBJECT('p',page_id,'s',UNIX_TIMESTAMP(created_at))) "
+                                     f"FROM {PUBLIC} WHERE profile_version="+literal(v))
+                        row_times={r['p']:r['s'] for r in stamps}
+                        if set(row_times)!=set(proof['payload_hashes']):raise RuntimeError('mirror source times incomplete')
                         catch_up(reader,env,NEXT)
-                        got=promote(reader,env,NEXT,job['meta'],source,matching=proof['payload_hashes'])
-                    elif job['mode']=='live-mirror':got=legacy(reader,env,job['meta'],proof,source)
+                        got=promote(reader,env,NEXT,job['meta'],items(d,job['meta'],row_times,proof),matching=proof['payload_hashes'])
+                    elif job['mode']=='live-mirror':
+                        got=legacy(reader,env,job['meta'],proof,items(d,job['meta'],None))
                     else:raise RuntimeError('unknown mirror job type')
                     if got['payload_hashes']!=proof['payload_hashes'] or any(got[k]!=proof[k] for k in MONEY):
                         raise RuntimeError('mirror proof mismatch')
@@ -105,8 +116,33 @@ def run():
                 except Exception as exc:
                     atomic(ROOT/'comparisons'/(v+'.error.json'),dict(at=stamp(),version=v,error=type(exc).__name__,message=str(exc)[:230]))
                     raise
+            input_file=PORTRAITS/(v+'.input.json')
+            if input_file.is_file() and read_config()==job['mode']:
+                official=json.loads((PORTRAITS/(v+'.receipt.json')).read_text())
+                if official['version']==v and official['payload_hashes']==proof['payload_hashes']:
+                    input_file.unlink(missing_ok=True)
             ready.unlink();(d/'pages.gz').unlink();d.rmdir()
             print(encoded(dict(event='natural_portrait_comparison_complete',version=v,mode=job['mode'])),flush=True)
 
 
-if __name__=='__main__':run()
+def wait_for_invocation(invocation):
+    import re
+    import time
+    if not re.fullmatch('[0-9a-f]{32}',invocation):raise ValueError('invalid systemd invocation')
+    while True:
+        for receipt in QUEUE.glob('*/ready.json'):
+            try:record=json.loads(receipt.read_text())
+            except FileNotFoundError:continue
+            if record['invocation']==invocation:return
+        for receipt in (ROOT/'comparisons').glob('*.json'):
+            if json.loads(receipt.read_text()).get('invocation')==invocation:return
+        time.sleep(2)
+
+
+if __name__=='__main__':
+    import argparse
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--await-invocation')
+    args=parser.parse_args()
+    if args.await_invocation:wait_for_invocation(args.await_invocation)
+    run()

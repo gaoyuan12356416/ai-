@@ -204,7 +204,7 @@ def promote(reader,env,target,meta,items,*,matching=None,root=ROOT,connector=wri
 
 
 def model_items(data,projections):
-    ts=dt.datetime.fromisoformat(data['meta']['generated_at']).astimezone(dt.timezone.utc).replace(tzinfo=None)
+    ts=dt.datetime.fromisoformat(data['meta']['generated_at']).astimezone(dt.timezone.utc).replace(tzinfo=None,microsecond=0)
     for pid,page in data['pages'].items():
         summary,_=projections(page)
         raw=encoded(page).encode()

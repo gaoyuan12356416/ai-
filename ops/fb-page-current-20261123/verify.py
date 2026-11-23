@@ -1,10 +1,12 @@
 """Read-only business acceptance. No assignment POST, Meta write, notification or replay."""
 import argparse
 from contextlib import closing
+import gzip
 import importlib.util
 import json
 import math
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import time
@@ -84,7 +86,55 @@ def snapshot_metrics(label):
         warnings=sum('profile_snapshot_unavailable' in (raw or '') for (raw,) in sq.execute('SELECT proof FROM jobs'))
     fact=dict(at=stamp(),events=events,latency=latency,outbox_pending=pending,recovery_warnings=warnings,
               recovery_pid=subprocess.check_output(['systemctl','show','meta-page-recovery-worker.service','-p','MainPID','--value'],text=True).strip())
+    deployed=ROOT/'readers-live.json'
+    if deployed.is_file():
+        fact['since_handoff']=traffic(dt.datetime.fromisoformat(json.loads(deployed.read_text())['at']))
     atomic(QA/('metrics-'+label+'.json'),fact);return fact
+
+
+def traffic(since):
+    statuses={};latencies=[];alerts={};access={}
+    raw=subprocess.check_output(['journalctl','-u','fb-page-assignment.service','--since','@'+str(int(since.timestamp())),'-o','cat','--no-pager'])
+    for line in raw.splitlines():
+        try:event=json.loads(line)
+        except ValueError:continue
+        if not isinstance(event,dict):continue
+        if event.get('event')=='http_response_sent':
+            status=str(event.get('http_status'));statuses[status]=statuses.get(status,0)+1
+            if 'elapsed_ms' in event:latencies.append(event['elapsed_ms'])
+        if event.get('event')=='assignment_completed':
+            for item in event.get('alert_reasons') or []:
+                alerts[str(item)]=alerts.get(str(item),0)+1
+    for log in Path('/var/log/nginx').glob('access.log*'):
+        if not log.is_file() or log.stat().st_mtime<since.timestamp():continue
+        with (gzip.open if log.suffix=='.gz' else open)(log,'rb') as handle:
+            for line in handle:
+                if b'/api/fb-page-portraits' not in line and b'/api/integrations/v1/drama-page-assignments' not in line:continue
+                m=re.search(rb'\[([^\]]+)\] "(?:GET|POST) (/api/[^ ]+) HTTP/[^"]+" (\d{3}) ',line)
+                if not m:continue
+                timestamp=dt.datetime.strptime(m[1].decode(),'%d/%b/%Y:%H:%M:%S %z')
+                if timestamp<since:continue
+                route='portrait' if m[2].startswith(b'/api/fb-page-portraits') else 'assignment'
+                key=route+'_'+m[3].decode();access[key]=access.get(key,0)+1
+    latencies.sort()
+    return dict(since=since.isoformat(),assignment_http=statuses,assignment_alerts=alerts,nginx=access,
+           p50_ms=latencies[math.ceil(len(latencies)*.5)-1] if latencies else None,
+           p95_ms=latencies[math.ceil(len(latencies)*.95)-1] if latencies else None)
+
+
+def recovery_evidence(label):
+    saved=QA/('meta-jobs-'+label+'.json.gz')
+    if saved.exists():return dict(snapshot=saved.name,existing=True)
+    records=[];warnings=0;statuses={}
+    with closing(sqlite3.connect('file:/mnt/data-disk/meta-page-recovery/state.sqlite3?mode=ro',uri=True,timeout=3)) as db:
+        for task,ad,status,raw in db.execute('SELECT id,ad_id,status,proof FROM jobs ORDER BY id'):
+            proof=json.loads(raw or '{}')
+            row={key:proof.get(key) for key in ('new_page_id','new_creative_id','ad_update_accepted','confirmed_at','profile_version')}
+            row.update(task=task,ad=ad,status=status,proof_sha256=sha(raw or '{}'))
+            if 'profile_snapshot_unavailable' in (proof.get('profile_warnings') or []):warnings+=1
+            records.append(row);statuses[status]=statuses.get(status,0)+1
+    tmp=saved.with_suffix('.partial');tmp.write_bytes(gzip.compress(encoded(records).encode(),mtime=0));tmp.replace(saved)
+    return dict(snapshot=saved.name,jobs=len(records),statuses=statuses,warnings=warnings,sha256=sha(saved.read_bytes()))
 
 
 def fields(db,table,v,ids):
@@ -92,7 +142,7 @@ def fields(db,table,v,ids):
     with db.cursor() as c:
         for part in chunks(sorted(ids),80):
             c.execute(f'SELECT page_id,window_start,window_end,paid_cents,social_cents,spend_cents,'
-                      f'SHA2(summary_json,256),payload_sha256,SHA2(meta_json,256) FROM {table} '
+                      f'SHA2(summary_json,256),payload_sha256,SHA2(meta_json,256),created_at FROM {table} '
                       f'WHERE profile_version=%s AND page_id IN ('+','.join(['%s']*len(part))+')',(v,*part))
             for row in c.fetchall():output[row[0]]=row[1:]
     return output
@@ -100,7 +150,7 @@ def fields(db,table,v,ids):
 
 def prepare_selection():
     v=current();proof=receipt(v)
-    if (selection.inspect() or {}).get('version')==v:
+    if selection.available(v):
         return dict(version=v,available=True,bytes=selection.FILE.stat().st_size)
     with closing(connect_reader(env())) as db,db.cursor() as c:
         # Exact latest legacy version is immutable. HOT needs a transaction so every chunk is from one release.
@@ -118,14 +168,22 @@ def prepare_selection():
 def compare():
     cfg=env()
     with closing(connect_reader(cfg)) as db,db.cursor() as c:
+        c.execute('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY')
         rd=ManualReader(db);v=current_state(rd)['version'];proof=receipt(v)
         if original(c,PUBLIC):old,new=PUBLIC,NEXT
         else:old,new=LEGACY,PUBLIC
+        schemas=[]
+        for table in (old,new):
+            c.execute('SELECT column_name,column_type,is_nullable,column_default,extra,collation_name FROM information_schema.columns '
+                      'WHERE table_schema=DATABASE() AND table_name=%s ORDER BY ordinal_position',(table,))
+            schemas.append(c.fetchall())
+        if len(schemas[0])!=12 or schemas[0]!=schemas[1]:raise RuntimeError('public column schema differs')
         a=fields(db,old,v,proof['payload_hashes']);b=fields(db,new,v,proof['payload_hashes'])
         if a!=b or set(a)!=set(proof['payload_hashes']):raise RuntimeError('field or scope differences')
         for table in (old,new):
             n=one(c,f'SELECT COUNT(*) FROM {table} WHERE profile_version=%s',(v,))[0]
             if n!=len(a):raise RuntimeError('extra rows outside frozen scope')
+        db.rollback()
         c.execute("SELECT drama_id FROM fb_drama_page_assignment_log WHERE drama_id<>'' AND page_id IS NOT NULL "
                   "ORDER BY task_id DESC,item_index LIMIT 30")
         ids=list(dict.fromkeys(str(d) for d, in c.fetchall()))[:7]
@@ -179,7 +237,7 @@ def compare():
             left,lmeta=request(rd,v,sample,table=old,detail=detail,exact=True)
             right,rmeta=request(rd,v,sample,table=new,detail=detail,exact=True)
             if (left,lmeta)!=(right,rmeta):raise RuntimeError('API response differs')
-    fact=dict(at=stamp(),version=v,old=old,new=new,rows=len(a),amounts=proof['paid_cents'],selection_items=len(ids),
+    fact=dict(at=stamp(),version=v,old=old,new=new,rows=len(a),schema_columns=len(schemas[0]),selection_items=len(ids),
               candidate_pages=len(pages),profiled_candidates=len(new_profiles),result_hash=sha(encoded(results)),
               totals={k:proof[k] for k in MONEY},old_cold_ms=old_ms,old_error=old_error,new_cold_ms=round(cold,2),
               new_warm_ms=round(warm,2),selection_sql_calls=observed.calls,sql_fallback_pages=len(subset),api_sample=len(sample))
@@ -187,7 +245,8 @@ def compare():
 
 
 if __name__=='__main__':
-    ps=argparse.ArgumentParser();ps.add_argument('action',choices=['start-pin','finish-pin','compare','metrics','prepare-selection']);ps.add_argument('--label',default='before')
+    ps=argparse.ArgumentParser();ps.add_argument('action',choices=['start-pin','finish-pin','compare','metrics','prepare-selection','recovery-evidence']);ps.add_argument('--label',default='before')
     args=ps.parse_args();disk();QA.mkdir(exist_ok=True)
-    run={'start-pin':start_pin,'finish-pin':finish_pin,'compare':compare,'metrics':lambda:snapshot_metrics(args.label),'prepare-selection':prepare_selection}
+    run={'start-pin':start_pin,'finish-pin':finish_pin,'compare':compare,'metrics':lambda:snapshot_metrics(args.label),
+         'prepare-selection':prepare_selection,'recovery-evidence':lambda:recovery_evidence(args.label)}
     print(encoded(run[args.action]()),flush=True)

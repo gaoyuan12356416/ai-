@@ -76,6 +76,7 @@ def main():
             except ConnectionError:pass
             else:raise AssertionError('failure injection')
         assert current_state(rd)['version']==d
+        old_pending=json.loads((path/'pending.json').read_text())
         catch_up(rd,{},NEXT,root=path,connector=connect)
         assert current_state(rd)['version']==e
         f='20261123T150000000000Z'
@@ -95,13 +96,17 @@ def main():
         assert all(item[2] is None for item in read_delta(path/(g+'.delta.gz')))
         assert promote(rd,{},NEXT,gm,(),root=path,connector=connect,durable_source=True)['version']==g
         assert not (path/'building.json').exists() and not (path/(g+'.delta.gz')).exists()
+        atomic(path/'pending.json',old_pending)
+        catch_up(rd,{},NEXT,root=path,connector=connect)
+        assert current_state(rd)['version']==g and not (path/'pending.json').exists()
+        assert json.loads((path/'superseded'/(e+'.json')).read_text())['newer_version']==g
         from cutover import swap_sql,layout,AFTER,BEFORE
         c.execute(f'INSERT INTO {PUBLIC} SELECT * FROM {NEXT}')
         swap_sql(c,True);assert layout(db)==AFTER
         c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(g,));assert c.fetchone()==(2,)
         swap_sql(c,False);assert layout(db)==BEFORE
         c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(g,));assert c.fetchone()==(2,)
-    out=dict(version=version,socket=socket,at=stamp(),tests=['initial','unchanged-detail-new-summary','signed','remove','add','MVCC','same-version-retry','stale-fence','no-change','pre-commit-failure','commit-disconnect','partial-stage-from-frozen-delta','atomic-rename','rollback-rename'])
+    out=dict(version=version,socket=socket,at=stamp(),tests=['initial','unchanged-detail-new-summary','signed','remove','add','MVCC','same-version-retry','stale-fence','no-change','pre-commit-failure','commit-disconnect','partial-stage-from-frozen-delta','superseded-retry-released','atomic-rename','rollback-rename'])
     atomic(ROOT/'qa/rollback-rehearsed.json',out)
     print(encoded(out),flush=True)
 

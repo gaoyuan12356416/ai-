@@ -1,9 +1,31 @@
 """Integrate current-row storage with the existing frozen-input collector and publisher."""
 from contextlib import closing
 import json
-from .common import (LEGACY,MONEY,NEXT,PORTRAITS,PUBLIC,ROOT,STAGE,atomic,current_state,encoded,
-                     query,read_config,stamp,writer)
-from .publish import clear_build,commit,finalize,model_items,owner,promote,verify
+from .common import (MONEY,NEXT,PUBLIC,ROOT,STAGE,STATE,atomic,checked,current_state,digest_rows,encoded,
+                     query,read_config,scope_hash,stamp,writer)
+from .publish import clear_build,commit,expected_hash,finalize,model_items,owner,promote,verify,wait_visible
+
+
+def retire_older(reader,db,target,root,obsolete,winner):
+    checked(obsolete);checked(winner)
+    if obsolete>=winner:raise ValueError('supersession requires a newer committed version')
+    wait_visible(reader,f"SELECT HEX(JSON_OBJECT('v',active_version)) FROM {STATE} WHERE singleton=1",lambda r:r[0]['v']==winner)
+    head=current_state(reader)
+    latest=root/'last-current-proof.json'
+    proof=json.loads(latest.read_text()) if latest.exists() else {}
+    if proof.get('version')!=winner or proof.get('verified_rows')!=head['pages']:
+        keys=[row['p'] for row in query(reader,f"SELECT HEX(JSON_OBJECT('p',page_id)) FROM {target}")]
+        rows=digest_rows(reader,target,winner,keys)
+        values={pid:[r['calc'],r['summary'],r['a'],r['b'],r['c']] for pid,r in rows.items()}
+        amounts={k:sum(r[i+2] for r in values.values()) for i,k in enumerate(MONEY)}
+        if (len(rows)!=head['pages'] or scope_hash(rows)!=head['scope'] or expected_hash(values)!=head['manifest']
+                or any(r['stored']!=r['calc'] for r in rows.values()) or amounts!=json.loads(head['meta'])['audit']):
+            raise RuntimeError('newer committed release reconciliation failed')
+        proof=dict(version=winner,table='ads_ai.'+PUBLIC,verified_rows=len(rows),payload_hashes={p:r[0] for p,r in values.items()},**amounts)
+        atomic(latest,proof)
+    atomic(root/'superseded'/(obsolete+'.json'),dict(at=stamp(),version=obsolete,newer_version=winner,target=target))
+    with db.cursor() as c:c.execute(f'DELETE FROM {STAGE} WHERE profile_version=%s',(obsolete,))
+    clear_build(root,obsolete)
 
 
 def catch_up(reader,env,target,root=ROOT,connector=writer):
@@ -22,7 +44,11 @@ def catch_up(reader,env,target,root=ROOT,connector=writer):
                 prior={r['p']:r['h'] for r in query(reader,f"SELECT HEX(JSON_OBJECT('p',page_id,'h',payload_sha256)) FROM {target}")}
                 verify(reader,STAGE,v,pending['expected'],base_hashes=prior)
                 commit(db,target,v,pending['base'],pending['meta'],pending['expected'])
-            elif actual!=v:raise RuntimeError('pending receipt conflicts with newer head')
+            elif actual>v:
+                retire_older(reader,db,target,root,v,actual)
+                file.unlink()
+                return
+            elif actual!=v:raise RuntimeError('pending receipt conflicts with published base')
             proof=finalize(db,reader,target,pending,root)
             atomic(root/'last-current-proof.json',proof)
             file.unlink()
@@ -36,7 +62,10 @@ def repair_handoff(reader,env,root):
     marker=ROOT/'building.json'
     if marker.exists():
         staged=json.loads(marker.read_text())
-        if staged.get('durable') and current_state(reader)['version']==staged['base']:
+        head=current_state(reader)['version']
+        if staged['version']<head:
+            with owner(ROOT),closing(writer(env)) as db:retire_older(reader,db,PUBLIC,ROOT,staged['version'],head)
+        elif staged.get('durable') and head==staged['base']:
             promote(reader,env,PUBLIC,staged['meta'],(),durable_source=True)
     proof=json.loads((ROOT/'last-current-proof.json').read_text())
     file=root/'current.json'
