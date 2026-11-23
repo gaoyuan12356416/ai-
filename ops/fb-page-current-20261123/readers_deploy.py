@@ -2,6 +2,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import time
 import urllib.error
@@ -9,8 +10,8 @@ import urllib.request
 from deploy import ROOT,SOURCE,atomic,backup,build,disk,put,stamp
 
 ROLES={
- 'api':('fb-page-portrait',18852,18853,'/etc/nginx/default.d/fb-page-portrait.conf'),
- 'assignment':('fb-page-assignment',8943,18943,'/etc/nginx/default.d/fb-page-assignment.conf'),
+ 'api':('fb-page-portrait',18852,21852,'/etc/nginx/default.d/fb-page-portrait.conf'),
+ 'assignment':('fb-page-assignment',8943,21943,'/etc/nginx/default.d/fb-page-assignment.conf'),
 }
 
 
@@ -20,13 +21,14 @@ def cmd(*args):
 
 def health(role,port):
     uri='http://127.0.0.1:'+str(port)
+    client=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     if role=='api':
-        with urllib.request.urlopen(uri+'/health',timeout=4) as r:
+        with client.open(uri+'/health',timeout=4) as r:
             if json.load(r).get('ok') is not True:raise RuntimeError('portrait unhealthy')
         req=urllib.request.Request(uri+'/api/fb-page-portraits?ids=101')
     else:
         req=urllib.request.Request(uri+'/api/integrations/v1/drama-page-assignments',data=b'{}',method='POST')
-    try:urllib.request.urlopen(req,timeout=4)
+    try:client.open(req,timeout=4)
     except urllib.error.HTTPError as exc:
         if exc.code==401:return True
         raise
@@ -50,6 +52,9 @@ def candidates():
         unit=Path('/etc/systemd/system/'+name+'.service')
         new_name='fb-page-current-'+role+'-green.service'
         path=Path('/etc/systemd/system')/new_name
+        owners=set(re.findall(r'pid=(\d+)',cmd('ss','-Hltnp','sport','=',':'+str(green))))
+        if owners and owners!={cmd('systemctl','show',new_name,'-p','MainPID','--value')}:
+            raise RuntimeError('standby loopback port already in use')
         extra='ReadWritePaths='+str(ROOT/'pins')+'\n' if role=='api' else ''
         args=(f'features.fb_page_portrait.server --port {green}' if role=='api' else
               f'features.fb_page_assignment.server --env /etc/fb-page-assignment.env --port {green} '
@@ -68,6 +73,9 @@ def candidates():
                 cmd('systemctl','restart',new_name)
         else:cmd('systemctl','start',new_name)
         ready(role,green)
+        pid=cmd('systemctl','show',new_name,'-p','MainPID','--value')
+        if pid not in re.findall(r'pid=(\d+)',cmd('ss','-Hltnp','sport','=',':'+str(green))):
+            raise RuntimeError('readiness probe did not reach the standby process')
     atomic(ROOT/'green-ready.json',dict(revision=SOURCE.name,at=stamp()))
 
 
