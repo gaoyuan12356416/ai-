@@ -42,6 +42,7 @@ def manifest():
 
 def remove_locked():
     disk();cfg=env();ready,m=manifest()
+    if m['references']['unexpected_absence']:raise RuntimeError('an expected task reference needs reconciliation')
     if read_config()!='live':raise RuntimeError('legacy mirror not frozen')
     if not (ROOT/'qa/postarchive-rollback.json').is_file():raise RuntimeError('postarchive restoration rehearsal missing')
     frozen=json.loads((ROOT/'history-frozen.json').read_text())

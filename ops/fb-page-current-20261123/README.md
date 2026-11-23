@@ -20,3 +20,5 @@
 - 正在处理的同版写入由刷新端的 `building.json`、冻结差异和 `pending.json` 恢复。写入已提交而回执中断时，重试使用原版本从只读端核对。对照任务失败可从对应发布的 writer 目录运行 `python3 -B -m features.fb_page_current.mirror`，保留原本的自然任务号和冻结数据。
 
 历史表分配量、数据库内可复用空间和云盘物理容量分别记录。共享表空间所在实例的其他业务可能同时读写，云盘容量只按实际可观测值报告。
+
+本次隔离验收可执行 `unshare --net -- python3 -B recovery.py rollback --sandbox`。它在私有 MySQL Unix 套接字上跑上述回滚主流程，包括从归档重建表、逐页核对、原子切回和断言原主键，系统服务恢复在独立测试目录留回执。`python3 -B http_check.py` 使用同一套 HTTP 处理器、隔离会话和真实只读画像，验证列表、详情、模块授权、混合 Page 请求及跨租户拒绝。

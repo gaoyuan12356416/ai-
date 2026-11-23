@@ -1,6 +1,7 @@
 """Integrate current-row storage with the existing frozen-input collector and publisher."""
 from contextlib import closing
 import json
+import time
 from .common import (MONEY,NEXT,PUBLIC,ROOT,STAGE,STATE,atomic,checked,current_state,digest_rows,encoded,
                      query,read_config,scope_hash,stamp,writer)
 from .publish import clear_build,commit,expected_hash,finalize,model_items,owner,promote,verify,wait_visible
@@ -40,16 +41,18 @@ def catch_up(reader,env,target,root=ROOT,connector=writer):
                 # A one-row write fence distinguishes commit-disconnect from replica delay.
                 c.execute('SELECT active_version FROM fb_page_revenue_profile_state WHERE singleton=1 FOR UPDATE')
                 actual=c.fetchone()[0]
+            ack=None
             if actual==pending['base']:
                 prior={r['p']:r['h'] for r in query(reader,f"SELECT HEX(JSON_OBJECT('p',page_id,'h',payload_sha256)) FROM {target}")}
                 verify(reader,STAGE,v,pending['expected'],base_hashes=prior)
                 commit(db,target,v,pending['base'],pending['meta'],pending['expected'])
+                ack=(stamp(),time.monotonic())
             elif actual>v:
                 retire_older(reader,db,target,root,v,actual)
                 file.unlink()
                 return
             elif actual!=v:raise RuntimeError('pending receipt conflicts with published base')
-            proof=finalize(db,reader,target,pending,root)
+            proof=finalize(db,reader,target,pending,root,ack=ack)
             atomic(root/'last-current-proof.json',proof)
             file.unlink()
             clear_build(root,v)

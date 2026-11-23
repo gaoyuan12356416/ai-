@@ -128,9 +128,11 @@ def commit(db,target,version,baseline,meta,expected):
         raise
 
 
-def finalize(db,reader,target,pending,root):
+def finalize(db,reader,target,pending,root,ack=None):
     meta=pending['meta'];version=meta['version'];expected=pending['expected']
     wait_visible(reader,f"SELECT HEX(JSON_OBJECT('v',active_version)) FROM {STATE} WHERE singleton=1",lambda r:r[0]['v']==version)
+    visible=stamp()
+    seen_ms=round((time.monotonic()-ack[1])*1000,2) if ack else None
     head=current_state(reader)
     if head['manifest']!=expected_hash(expected) or head['scope']!=scope_hash(expected) or head['pages']!=len(expected) or json.loads(head['meta'])!=meta:
         raise RuntimeError('published head and input differ')
@@ -141,8 +143,16 @@ def finalize(db,reader,target,pending,root):
         raise RuntimeError('published row uniqueness or money mismatch')
     receipt=dict(version=version,table='ads_ai.'+PUBLIC,verified_rows=len(expected),
                  payload_hashes={k:v[0] for k,v in expected.items()},**meta['audit'])
-    atomic(root/'receipts'/(version+'.json'),dict(version=version,base=pending['base'],target=target,
-           checked=stamp(),facts=counts,scope=head['scope'],manifest=head['manifest'],**pending['stats']))
+    file=root/'receipts'/(version+'.json')
+    record=dict(version=version,base=pending['base'],target=target,
+           checked=stamp(),commit_ack=ack[0] if ack else None,replica_head_visible=visible,
+           replica_observed_after_ack_ms=seen_ms,facts=counts,scope=head['scope'],manifest=head['manifest'],**pending['stats'])
+    if file.exists():
+        previous=json.loads(file.read_text())
+        if previous['manifest']!=head['manifest']:raise RuntimeError('conflicting published receipt')
+        if previous.get('commit_ack'):
+            for name in ('commit_ack','replica_head_visible','replica_observed_after_ack_ms'):record[name]=previous[name]
+    atomic(file,record)
     # The final proof precedes removal of transient data, including after a commit-disconnect.
     with db.cursor() as c:c.execute(f'DELETE FROM {STAGE} WHERE profile_version=%s',(version,))
     return receipt
@@ -196,7 +206,7 @@ def promote(reader,env,target,meta,items,*,matching=None,root=ROOT,connector=wri
         pending=dict(base=baseline,meta=meta,expected=expected,stats=stats,target=target)
         atomic(file,pending)
         commit(db,target,version,baseline,meta,expected)
-        proof=finalize(db,reader,target,pending,root)
+        proof=finalize(db,reader,target,pending,root,ack=(stamp(),time.monotonic()))
         atomic(root/'last-current-proof.json',proof)
         file.unlink()
         clear_build(root,version)

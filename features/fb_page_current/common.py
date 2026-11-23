@@ -135,13 +135,19 @@ def digest_rows(reader,table,version,ids,stage=False):
         if table!=STAGE:raise ValueError('invalid stage')
     else:checked_table(table)
     actual={}
-    for part in chunks(sorted(ids),64):
+    def read(part):
         keys=','.join(literal(checked(pid,PAGE)) for pid in part)
         field="IF(detail_json IS NULL,NULL,SHA2(detail_json,256))"
         statement=("SELECT HEX(JSON_OBJECT('id',page_id,'stored',payload_sha256,'calc',"+field+
                    ",'summary',SHA2(summary_json,256),'a',paid_cents,'b',social_cents,'c',spend_cents)) FROM "+table+
                    " WHERE profile_version="+literal(checked(version))+" AND page_id IN ("+keys+")")
-        for row in query(reader,statement):
+        try:return query(reader,statement)
+        except Exception as error:
+            if len(part)<2 or '3024' not in str(error):raise
+            mid=len(part)//2
+            return read(part[:mid])+read(part[mid:])
+    for part in chunks(sorted(ids),64):
+        for row in read(part):
             if row['id'] in actual:raise RuntimeError('duplicate page')
             actual[row['id']]=row
     return actual

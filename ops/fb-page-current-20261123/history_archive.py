@@ -172,21 +172,27 @@ def restore_version(db,manifest,base,ddl):
 
 
 def references(db,versions,index):
-    pairs=set();counts={'assignment':0,'recovery':0}
+    pairs=set();expected=set();counts={'assignment':0,'recovery':0,'assignment_without_version':0,'outside_table_versions':0}
     last=None
     with db.cursor() as c:
         while True:
             where=' WHERE task_id>%s OR (task_id=%s AND item_index>%s)' if last else ''
-            c.execute('SELECT task_id,item_index,page_id,JSON_UNQUOTE(JSON_EXTRACT(NULLIF(diagnostics_json,\'\'),'
+            c.execute('SELECT task_id,item_index,page_id,selection_stage,JSON_UNQUOTE(JSON_EXTRACT(NULLIF(diagnostics_json,\'\'),'
                       "'$.profile_snapshot.version')) FROM fb_drama_page_assignment_log"+where+
                       ' ORDER BY task_id,item_index LIMIT 160',(last[0],last[0],last[1]) if last else ())
             rows=c.fetchall()
             if not rows:break
             last=rows[-1][:2]
-            for task,item,p,v in rows:
-                if v in versions and p and PAGE.fullmatch(str(p)):
+            for task,item,p,stage,v in rows:
+                if not p or not PAGE.fullmatch(str(p)):continue
+                if not v or v=='null':
+                    counts['assignment_without_version']+=1
+                elif v not in versions:
+                    counts['outside_table_versions']+=1
+                else:
                     pairs.add((v,str(p)));counts['assignment']+=1
-                    index.write(encoded(dict(source='assignment',task=str(task),item=item,version=v,page=str(p)))+'\n')
+                    if not (stage or '').endswith('_unprofiled'):expected.add((v,str(p)))
+                    index.write(encoded(dict(source='assignment',task=str(task),item=item,version=v,page=str(p),stage=stage))+'\n')
     with closing(sqlite3.connect('file:/mnt/data-disk/meta-page-recovery/state.sqlite3?mode=ro',uri=True,timeout=3)) as local:
         for task,raw in local.execute('SELECT id,proof FROM jobs WHERE proof IS NOT NULL'):
             try:o=json.loads(raw)
@@ -195,15 +201,16 @@ def references(db,versions,index):
             p=str(o.get('new_page_id') or '')
             if v in versions and PAGE.fullmatch(p):
                 pairs.add((v,p));counts['recovery']+=1
+                if 'profile_snapshot_unavailable' not in (o.get('profile_warnings') or []):expected.add((v,p))
                 index.write(encoded(dict(source='recovery',task=str(task),version=v,page=p))+'\n')
-    return pairs,counts
+    return pairs,counts,expected
 
 
 def confirm_references(db,versions,base):
     temp=base/'task-references.partial'
-    with gzip.open(temp,'wt',encoding='utf-8') as index:pairs,counts=references(db,versions,index)
+    with gzip.open(temp,'wt',encoding='utf-8') as index:pairs,counts,expected=references(db,versions,index)
     temp.replace(base/'task-references.jsonl.gz')
-    found=absent=0
+    found=absent=0;unexplained=[]
     by_version={}
     for v,p in pairs:by_version.setdefault(v,[]).append(p)
     with db.cursor() as c:
@@ -220,7 +227,8 @@ def confirm_references(db,versions,base):
                     else:
                         if raw is not None:raise RuntimeError('archived Page absent in source')
                         absent+=1
-    return dict(receipts=counts,unique_pairs=len(pairs),found=found,absent_in_source=absent)
+                        if (v,p) in expected:unexplained.append([v,p])
+    return dict(receipts=counts,unique_pairs=len(pairs),found=found,absent_in_source=absent,unexpected_absence=unexplained)
 
 
 def run():
