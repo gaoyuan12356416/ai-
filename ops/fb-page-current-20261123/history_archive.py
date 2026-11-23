@@ -94,20 +94,61 @@ def write_blob(path,packet):
     tmp.replace(path)
 
 
-def missing_bodies(db,source,v,records,base,lengths):
+def body_groups(ids,lengths):
+    group=[];size=0
+    for pid in ids:
+        n=lengths[pid]
+        if group and (len(group)>=20 or size+n>4*1024**2):
+            yield group
+            group=[];size=0
+        group.append(pid);size+=n
+    if group:yield group
+
+
+def fetch_bodies(c,source,v,group,lengths,hashes,rate):
+    size=sum(lengths[pid] for pid in group)
+    try:
+        c.execute(f'SELECT page_id,payload_sha256,COMPRESS(detail_json) FROM {source} WHERE profile_version=%s '
+                  'AND page_id IN ('+','.join(['%s']*len(group))+')',(v,*group))
+        rows=list(c.fetchall())
+    except pymysql.MySQLError as exc:
+        if exc.args[0]!=3024:raise
+    else:
+        if {pid for pid,_,_ in rows}!=set(group) or len(rows)!=len(group):raise RuntimeError('frozen payload count mismatch')
+        return rows,size,sum(len(packet) for _,_,packet in rows)
+    print(encoded(dict(event='archive_compression_timeout',version=v,pages=len(group),uncompressed_bytes=size)),flush=True)
+    if len(group)>1:
+        mid=len(group)//2
+        a,ar,aw=fetch_bodies(c,source,v,group[:mid],lengths,hashes,rate)
+        b,br,bw=fetch_bodies(c,source,v,group[mid:],lengths,hashes,rate)
+        # Count the failed attempt conservatively as well as the successful subqueries.
+        return a+b,size+ar+br,size+aw+bw
+    pid=group[0];digest=hashes[pid];raw=bytearray();step=512*1024
+    for offset in range(0,size,step):
+        started=time.monotonic();want=min(step,size-offset)
+        c.execute(f'SELECT SUBSTRING(CAST(detail_json AS BINARY),%s,%s) FROM {source} '
+                  'WHERE profile_version=%s AND page_id=%s AND payload_sha256=%s',(offset+1,want,v,pid,digest))
+        row=c.fetchone()
+        if row is None or len(row[0])!=want:raise RuntimeError('incomplete historical detail slice')
+        raw.extend(row[0])
+        if rate:time.sleep(max(0,want/rate-(time.monotonic()-started)))
+    raw=bytes(raw)
+    if sha(raw)!=digest:raise RuntimeError('historical byte-slice checksum differs')
+    return [(pid,digest,pack(raw))],size*(1+math.ceil(size/step)),2*size
+
+
+def missing_bodies(db,source,v,records,base,lengths,rate):
     missing={r[1]:r[9] for r in records if not blob_path(r[9],base).is_file()}
-    stored=0
+    transferred=read_bytes=0
     with db.cursor() as c:
-        for group in chunks(list(missing),20):
-            c.execute(f'SELECT page_id,payload_sha256,COMPRESS(detail_json) FROM {source} WHERE profile_version=%s '
-                      'AND page_id IN ('+','.join(['%s']*len(group))+')',(v,*group))
-            got=c.fetchall()
-            if len(got)!=len(group):raise RuntimeError('frozen payload count mismatch')
+        for group in body_groups(missing,lengths):
+            got,used,wire=fetch_bodies(c,source,v,group,lengths,missing,rate)
+            transferred+=wire;read_bytes+=used
             for pid,h,packed in got:
                 if missing[pid]!=h or sha(unpack(packed))!=h:raise RuntimeError('historical blob mismatch')
                 dest=blob_path(h,base)
-                if not dest.exists():write_blob(dest,packed);stored+=len(packed)
-    return stored,sum(lengths[pid] for pid in missing)
+                if not dest.exists():write_blob(dest,packed)
+    return transferred,read_bytes
 
 
 def export_version(db,source,v,base,*,proof=None,rate=4*1024**2,source_rate=24*1024**2):
@@ -125,13 +166,13 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2,source_rate=24*1
                           f'ORDER BY page_id LIMIT {limit}',(v,last))
                 result=c.fetchall()
             except pymysql.MySQLError as e:
-                if e.args[0]==3024 and limit>4:limit=max(4,limit//2);continue
+                if e.args[0]==3024 and limit>1:limit=max(1,limit//2);continue
                 raise
             if not result:break
             batch=[normalize(v,row) for row in result]
             if batch[0][1]<=last:raise RuntimeError('frozen cursor did not advance')
             lengths={row[0]:row[-1] for row in result}
-            saved,reread=missing_bodies(db,source,v,batch,base,lengths)
+            transferred,reread=missing_bodies(db,source,v,batch,base,lengths,rate)
             small=sum(len(r[7].encode())+len(r[8].encode()) for r in batch)
             read_bytes=sum(lengths.values())+reread+small
             source_bytes+=read_bytes
@@ -151,7 +192,7 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2,source_rate=24*1
             n+=len(batch);last=batch[-1][1]
             atomic(base/'progress.json',dict(phase='export',version=v,rows=n,source_bytes=source_bytes,at=stamp()))
             if rate:
-                duration=max((saved+small)/rate,read_bytes/source_rate)
+                duration=max((transferred+small)/rate,read_bytes/source_rate)
                 time.sleep(max(.01,duration-(time.monotonic()-started)))
         count=one(c,f'SELECT COUNT(*) FROM {source} WHERE profile_version=%s',(v,))[0]
         if count!=n or not n:raise RuntimeError('frozen row count mismatch')

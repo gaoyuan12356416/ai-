@@ -1,5 +1,5 @@
 """Run the real freeze-inventory export, isolated restore, targeted removal and rollback on a private socket."""
-from contextlib import closing,ExitStack
+from contextlib import closing,contextmanager,ExitStack
 from functools import partial
 from decimal import Decimal
 import sqlite3
@@ -73,7 +73,21 @@ def main():
                          social=[dict(page_id=p,revenue_cents=b) for p,_,b,_ in values])
                 ops.atomic(portraits/(v+'.input.json'),raw)
                 alternate=work/'missing-receipt'
-                source=archive.export_version(private,ops.LEGACY,v,alternate,rate=0)
+                timeouts=[]
+                class LimitedCursor:
+                    def __init__(self,cursor):self.real=cursor
+                    def __getattr__(self,k):return getattr(self.real,k)
+                    def execute(self,sql,args=()):
+                        if 'COMPRESS(detail_json)' in sql:
+                            timeouts.append(len(args)-1)
+                            raise ops.pymysql.OperationalError(3024,'isolated compression timeout')
+                        return self.real.execute(sql,args)
+                class ColdReader:
+                    @contextmanager
+                    def cursor(self):
+                        with private.cursor() as cursor:yield LimitedCursor(cursor)
+                source=archive.export_version(ColdReader(),ops.LEGACY,v,alternate,rate=0)
+                if 1 not in timeouts or len(hashes) not in timeouts:raise RuntimeError('failed batch did not split to raw Page')
                 if not source['original_files'][0]['original_scope_and_page_cents_verified']:
                     raise RuntimeError('original frozen-input check missing')
                 with closing(archive.private_mysql()) as lab:
@@ -85,7 +99,8 @@ def main():
                 if restored['version']!=v or dict_all(c,v)!=hashes:raise RuntimeError('full rollback failed after removal')
         finally:c.execute('DROP TABLE fb_drama_page_assignment_log')
     outcome=dict(at=ops.stamp(),restored_rows=len(hashes),references=refs['unique_pairs'],archive_flushed=True,
-                 targeted_remove=True,idempotent=True,rollback=True,missing_receipt_original_input=True,socket='/run/portrait-qa/mysql.sock')
+                 targeted_remove=True,idempotent=True,rollback=True,missing_receipt_original_input=True,
+                 compression_timeout_fallback=True,socket='/run/portrait-qa/mysql.sock')
     ops.atomic(ops.ROOT/'qa/complete-archive-rehearsed.json',outcome);return outcome
 
 
