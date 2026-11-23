@@ -51,7 +51,7 @@ def readback(reader,version,ids,table=TABLE):
 def write(data,env,reader,*,create_table=False,table=TABLE):
     import pymysql
     from features.fb_page_current.common import LEGACY
-    if table not in (TABLE,LEGACY) or (create_table and table!=TABLE):
+    if table not in (TABLE,'ads_ai.'+LEGACY) or (create_table and table!=TABLE):
         raise ValueError('invalid legacy destination')
     version = data['meta']['version']
     assert re.fullmatch(VERSION_RE,version)

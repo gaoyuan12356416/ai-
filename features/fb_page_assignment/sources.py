@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import closing
-from functools import lru_cache
+from features.fb_page_current.read import SelectionCache
 from datetime import datetime, timezone
 import json
 import os
@@ -202,33 +202,11 @@ class Sources:
                     source_read_at=datetime.now(timezone.utc).isoformat())
 
 
-@lru_cache(maxsize=8)
+_profile_cache = SelectionCache()
+
+
 def mysql_profiles(reader, version, ids):
-    table = "ads_ai.fb_page_revenue_profile"
-    scope = " FROM " + table + " WHERE profile_version=" + literal(version)
-    queries = ["SELECT HEX(meta_json)" + scope + " LIMIT 1"]
-    for start in range(0, len(ids), 100):
-        batch = ",".join(literal(pid) for pid in ids[start:start + 100])
-        queries.append("SELECT HEX(JSON_OBJECT('id',page_id,'profile',detail_json))" + scope
-                       + " AND page_id IN (" + batch + ")")
-    records = reader.query(queries)
-    if not records or records[0].get("version") != version:
-        raise ValueError("snapshot_version_unavailable")
-    found, warnings = {}, []
-    for row in records[1:]:
-        pid = str(row["id"])
-        try:
-            profile = json.loads(row["profile"])
-            if not isinstance(profile, dict) or str(profile.get("page_id")) != pid:
-                raise ValueError("invalid_profile")
-            # Selection only uses audience/theme keys, matchability and shares.
-            for audience in profile.get("audiences") or []:
-                for theme in audience.get("children") or []:
-                    theme.pop("dramas", None)
-            found[pid] = {key: profile.get(key) for key in ("page_id", "status", "audiences")}
-        except (ValueError, TypeError, AttributeError):
-            warnings.append("profile_invalid:" + pid)
-    return found, records[0], warnings
+    return _profile_cache.load(reader, version, ids)
 
 
 def load_profiles(ids, root="/mnt/data-disk/fb-page-portraits", *, reader=None):

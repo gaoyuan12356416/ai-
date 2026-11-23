@@ -97,7 +97,7 @@ def chunks(seq,n):
 
 
 def query(reader,sql):
-    return reader.query([sql])
+    return reader.query(['USE ads_ai',sql])
 
 
 def current_state(reader):

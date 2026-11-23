@@ -110,6 +110,8 @@ def main():
     parser.add_argument("--env", required=True)
     parser.add_argument("--port", type=int, default=8943)
     parser.add_argument("--data-root", default="/mnt/data-disk/fb-page-assignment")
+    parser.add_argument("--foreground-only", action="store_true",
+                        help="Temporary HTTP handoff while the canonical instance owns the durable outbox")
     args = parser.parse_args()
     env = environment(args.env)
     token = env.get("FB_PAGE_ASSIGNMENT_API_TOKEN", "")
@@ -126,7 +128,8 @@ def main():
     sources = Sources(env)
     service = Service(sources, Store(root / "outbox.sqlite3"), Writer(env), Notifier(env),
                       profile_loader=partial(load_profiles, reader=sources.reader))
-    service.start()
+    if not args.foreground_only:
+        service.start()
     request_logger = RequestBodyLog(root / "request-bodies", secrets=(token,))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(service, token, request_logger))
     # Finish accepted requests before closing the outbox during a scoped restart.

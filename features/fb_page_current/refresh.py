@@ -63,7 +63,7 @@ def secondary(data,env,reader,proof):
             catch_up(reader,env,NEXT)
             got=promote(reader,env,NEXT,data['meta'],model_items(data,storage.projections),matching=proof['payload_hashes'])
         else:
-            got=storage.write(data,env,reader,table=LEGACY)
+            got=storage.write(data,env,reader,table='ads_ai.'+LEGACY)
         if got['payload_hashes']!=proof['payload_hashes'] or any(got[f]!=proof[f] for f in MONEY):
             raise RuntimeError('secondary receipt differs')
         atomic(ROOT/'comparisons'/(version+'.json'),dict(version=version,mode=mode,checked=stamp(),

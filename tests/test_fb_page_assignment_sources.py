@@ -208,7 +208,9 @@ class ProfileSnapshotTests(unittest.TestCase):
         reader = Mock()
         child = dict(key="theme", share_bp=5000, dramas=["large list"])
         profile = dict(page_id="101", status="ready", audiences=[dict(children=[child])])
-        reader.query.return_value = [dict(version=version), dict(id="101", profile=json.dumps(profile))]
+        from features.fb_page_current.common import pack, sha
+        payload=json.dumps(profile).encode()
+        reader.query.return_value = [dict(version=version), dict(id="101", value=pack(payload).hex(), hash=sha(payload))]
         found, meta, warnings = load_profiles(["101"], self.root, reader=reader)
         self.assertFalse(warnings)
         self.assertEqual(found["101"]["audiences"][0]["children"], [dict(key="theme", share_bp=5000)])

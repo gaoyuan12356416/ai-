@@ -10,7 +10,8 @@ import threading
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit,parse_qs
-from .storage import Store,ROOT,VERSION_RE
+from .storage import ROOT,VERSION_RE
+from features.fb_page_current.api_store import Store
 from .runtime import encoded
 from .page_list import current_admin,configured_list
 
@@ -124,9 +125,10 @@ class Handler(BaseHTTPRequestHandler):
             if not 1<=len(ids)<=20 or any(not re.fullmatch(r'[1-9][0-9]{0,30}',i) for i in ids):raise ValueError('invalid_page_ids')
             status,allowed=authorize(self.headers.get('Cookie',''),ids)
             if status!=200:return self.send(status if status in (401,403) else 503,{'message':'请登录并使用已获授权的 Page 管理'})
-            status,result=select(parsed.path,query,allowed,self.store)
+            status,result=select(parsed.path,query,allowed,self.store.for_cookie(self.headers.get('Cookie','')))
             self.send(status,result)
         except FileNotFoundError:self.send(409,{'message':'画像正在刷新，请稍后重新打开'})
+        except PermissionError:self.send(401,{'message':'请重新登录以查看 Page 画像'})
         except ValueError:self.send(400,{'message':'画像请求参数无效'})
         except (BrokenPipeError,ConnectionResetError):pass
         except Exception:self.send(503,{'message':'画像暂不可用，Page 管理其他功能可正常使用'})
