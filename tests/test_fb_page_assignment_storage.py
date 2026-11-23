@@ -21,6 +21,8 @@ class FakeDatabase:
         self.rows = {}
         self.connections = []
         self.lose_commit_receipt = False
+        self.commits = 0
+        self.statements = []
 
     def connect(self, **kwargs):
         connection = FakeConnection(self, kwargs)
@@ -31,18 +33,19 @@ class FakeDatabase:
 class FakeConnection:
     def __init__(self, database, config):
         self.database, self.config = database, config
-        self.rows = copy.deepcopy(database.rows)
         self.closed = False
         self.rolled_back = False
 
     def begin(self):
-        pass
+        self.rows = copy.deepcopy(self.database.rows)
+        self.changed = set()
 
     def cursor(self):
         return FakeCursor(self)
 
     def commit(self):
-        self.database.rows = copy.deepcopy(self.rows)
+        self.database.commits += 1
+        self.database.rows.update({key: copy.deepcopy(self.rows[key]) for key in self.changed})
         if self.database.lose_commit_receipt:
             self.database.lose_commit_receipt = False
             raise TimeoutError("commit receipt lost")
@@ -65,32 +68,43 @@ class FakeCursor:
     def __exit__(self, *args):
         pass
 
-    def fetchone(self):
+    def fetchall(self):
         return self.result
 
     def execute(self, sql, args):
         normalized = " ".join(sql.split())
         self.assert_target(normalized)
-        if normalized.startswith("SELECT payload_hash,revision"):
-            if not normalized.endswith("WHERE task_id=%s AND item_index=%s FOR UPDATE"):
+        self.connection.database.statements.append(normalized)
+        if normalized.startswith("SELECT item_index,payload_hash,revision"):
+            if not re.search(r"WHERE task_id=%s AND item_index IN \(%s(?:,%s)*\) ORDER BY item_index FOR UPDATE$", normalized):
                 raise AssertionError("only precise primary-key transactional reads are allowed")
-            row = self.connection.rows.get(tuple(args))
-            self.result = (row["payload_hash"], row["revision"]) if row else None
+            self.result = [(i, row["payload_hash"], row["revision"]) for i in args[1:]
+                           if (row := self.connection.rows.get((args[0], i))) is not None]
         elif normalized.startswith("INSERT INTO"):
             columns = re.search(r"\((.*?)\) VALUES", normalized).group(1).replace("`", "").split(",")
-            row = dict(zip(columns, args))
-            key = row["task_id"], row["item_index"]
-            if key in self.connection.rows:
-                raise AssertionError("duplicate insert")
-            self.connection.rows[key] = row
+            self.assert_value_lengths(columns, args, normalized)
+            for start in range(0, len(args), len(columns)):
+                row = dict(zip(columns, args[start:start + len(columns)]))
+                key = row["task_id"], row["item_index"]
+                if key in self.connection.rows:
+                    raise AssertionError("duplicate insert")
+                self.connection.rows[key] = row
+                self.connection.changed.add(key)
         elif normalized.startswith("UPDATE"):
-            revision, status, reasons, message_id, error_code, updated_at, task_id, item_index, ceiling = args
-            row = self.connection.rows[(task_id, item_index)]
-            if row["revision"] < ceiling:
-                row.update(revision=revision, alert_status=status, alert_reasons_json=reasons,
-                           feishu_message_id=message_id, alert_error_code=error_code, updated_at=updated_at)
+            revision, status, reasons, message_id, error_code, updated_at, task_id, *indices, ceiling = args
+            for index in indices:
+                row = self.connection.rows[(task_id, index)]
+                if row["revision"] < ceiling:
+                    self.connection.changed.add((task_id, index))
+                    row.update(revision=revision, alert_status=status, alert_reasons_json=reasons,
+                               feishu_message_id=message_id, alert_error_code=error_code, updated_at=updated_at)
         else:
             raise AssertionError("unexpected SQL: " + normalized)
+
+    @staticmethod
+    def assert_value_lengths(columns, args, sql):
+        if len(args) % len(columns) or len(args) != sql.count("%s"):
+            raise AssertionError("VALUES placeholders do not match the bound rows")
 
     @staticmethod
     def assert_target(sql):
@@ -242,6 +256,34 @@ class StorageTests(unittest.TestCase):
         config = self.database.connections[-1].config
         self.assertEqual((config["connect_timeout"], config["read_timeout"], config["write_timeout"]), (3, 5, 5))
         self.assertFalse(config["autocommit"])
+
+    def test_wave_reuses_connection_with_independent_commits_and_bounded_inserts(self):
+        self.save("many", rows=sample_rows() * 17)
+        self.save("large", rows=[dict(sample_rows()[0], diagnostics={"trace": "a" * 300000})] * 2)
+        with self.writer.batch() as session:
+            self.assertTrue(self.store.sync_task("many", session))
+            self.assertTrue(self.store.sync_task("large", session))
+        self.assertEqual((len(self.database.connections), self.database.commits), (1, 2))
+        self.assertEqual(sum(s.startswith("SELECT") for s in self.database.statements), 2)
+        self.assertEqual(sum(s.startswith("INSERT") for s in self.database.statements), 5)
+        self.assertEqual(len(self.database.rows), 19)
+        self.assertEqual(self.store.pending_sync_ids(16), [])
+
+    def test_lost_commit_discards_connection_and_only_defers_its_task(self):
+        self.save("first")
+        self.save("second")
+        self.database.lose_commit_receipt = True
+        with self.writer.batch() as session:
+            self.assertFalse(self.store.sync_task("first", session))
+            self.assertTrue(self.store.sync_task("second", session))
+        self.assertEqual(self.store.get("first")["sync_status"], "pending")
+        retry_at = self.store.get("first")["sync_next_at"]
+        self.store.claim_alert("first")
+        self.store.mark_alert("first", "sent", message_id="qa-receipt")
+        self.assertEqual(self.store.get("first")["sync_next_at"], retry_at)
+        self.assertEqual(len(self.database.connections), 2)
+        self.assertTrue(all(c.closed for c in self.database.connections))
+        self.assertEqual(len(self.database.rows), 2)
 
     def test_two_request_threads_do_not_write_the_same_task_twice(self):
         self.save()

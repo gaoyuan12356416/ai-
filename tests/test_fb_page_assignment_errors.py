@@ -40,6 +40,7 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
         self.assertTrue(options['compress'])
         self.assertTrue(options['buffered'])
         self.assertFalse(options['autocommit'])
+        self.assertEqual(options['init_command'], 'SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED')
         self.assertEqual((options['connection_timeout'], options['read_timeout'], options['write_timeout']), (3, 5, 5))
         connection.begin()
         connection.cursor()

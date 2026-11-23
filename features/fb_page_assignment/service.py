@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 from .notify import assigned_with_relaxed_profile
 from .runtime import log
 from .selector import assign
 from .sources import SourceError, load_profiles
+from .storage import WRITE_CONCURRENCY
+
+IDLE_SECONDS = 2
+TASKS_PER_WAVE = 16
 
 
 class InvalidRequest(Exception):
@@ -48,6 +55,27 @@ class Service:
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.worker = None
+        self._traffic = threading.Lock()
+        self._active_requests = 0
+        self._idle_at = 0.0
+
+    @contextmanager
+    def foreground_request(self):
+        with self._traffic:
+            self._active_requests += 1
+        try:
+            yield
+        finally:
+            with self._traffic:
+                self._active_requests -= 1
+                if not self._active_requests:
+                    self._idle_at = time.monotonic() + IDLE_SECONDS
+                    self.wake.set()
+
+    def _idle(self):
+        # Caller holds _traffic so admitting a foreground request and claiming a
+        # background task have a definite order, without holding it across I/O.
+        return not self._active_requests and time.monotonic() >= self._idle_at and not self.stop.is_set()
 
     def start(self):
         self.store.recover_inflight_alerts()
@@ -80,11 +108,10 @@ class Service:
             persistence_ms=round((time.monotonic() - started) * 1000, 1))
         return code, response
 
-    def _sync_task(self, task):
-        task_id = task["task_id"]
+    def _sync_task(self, task_id, writer):
         started = time.monotonic()
         try:
-            synced = self.store.sync_task(task_id, self.writer)
+            synced = self.store.sync_task(task_id, writer)
         except Exception as exc:
             # Results are already frozen. Never rebuild this task with a
             # different error payload when synchronization coordination fails.
@@ -94,11 +121,12 @@ class Service:
             except Exception as defer_exc:
                 log("sync_deferral_failed", task_id=task_id, error_type=type(defer_exc).__name__)
                 try:
+                    task = self.store.get(task_id)
                     self.notifier.send(dict(task, alert_reasons=["log_sync_pending", "sync_deferral_failed"]))
                 except Exception as notify_exc:
                     log("emergency_alert_failed", task_id=task_id, error_type=type(notify_exc).__name__)
             return
-        saved = self.store.get(task_id)
+        saved = self.store.sync_receipt(task_id)
         log("log_sync_completed" if synced else "log_sync_deferred", task_id=task_id,
             elapsed_ms=round((time.monotonic() - started) * 1000, 1),
             sync_attempts=saved["sync_attempts"], error_code=saved["last_sync_error"])
@@ -148,9 +176,37 @@ class Service:
 
     def tick(self):
         self._deliver_alerts()
-        for task in self.store.pending_sync(limit=5):
-            self._sync_task(task)
+        with self._traffic:
+            if not self._idle():
+                return 0
+        pending = deque(self.store.pending_sync_ids(TASKS_PER_WAVE))
+        if not pending:
+            return 0
+        lanes = min(WRITE_CONCURRENCY, len(pending))
+        started = time.monotonic()
+
+        def drain():
+            count = 0
+            with self.writer.batch() as writer:
+                while True:
+                    with self._traffic:
+                        if not pending or not self._idle():
+                            break
+                        task_id = pending.popleft()
+                    self._sync_task(task_id, writer)
+                    count += 1
+            return count
+
+        if lanes == 1:
+            counts = [drain()]
+        else:
+            with ThreadPoolExecutor(max_workers=lanes, thread_name_prefix="page-audit") as pool:
+                futures = [pool.submit(drain) for _ in range(lanes)]
+                counts = [future.result() for future in futures]
         self._deliver_alerts()
+        log("log_sync_wave", attempted=sum(counts), lanes_used=sum(bool(n) for n in counts),
+            unclaimed=len(pending), elapsed_ms=round((time.monotonic() - started) * 1000, 1))
+        return sum(counts)
 
     def _deliver_alerts(self):
         from .notify import DeliveryError
@@ -172,15 +228,16 @@ class Service:
 
     def _run(self):
         while not self.stop.is_set():
+            self.wake.clear()
             try:
-                self.tick()
+                if self.tick():
+                    continue
             except Exception as exc:
                 log("outbox_iteration_failed", error_type=type(exc).__name__)
             self.wake.wait(2)
-            self.wake.clear()
 
     def close(self):
         self.stop.set()
         self.wake.set()
         if self.worker:
-            self.worker.join(timeout=20)
+            self.worker.join()

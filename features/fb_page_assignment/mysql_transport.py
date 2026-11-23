@@ -18,5 +18,7 @@ def connect_writer(config, *, connect=None):
         from mysql.connector import connect
     raw = connect(**config, charset="utf8mb4", collation="utf8mb4_general_ci",
                   autocommit=False, buffered=True, use_pure=True, compress=True,
+                  # Lock existing exact keys without gap-locking unrelated new tasks.
+                  init_command="SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
                   connection_timeout=3, read_timeout=5, write_timeout=5)
     return Connection(raw)

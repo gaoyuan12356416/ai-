@@ -3,6 +3,7 @@ import copy
 import http.client
 import io
 import json
+import queue
 import tempfile
 import threading
 import unittest
@@ -38,6 +39,9 @@ class FakeWriter:
     def __init__(self):
         self.calls = []
         self.error = None
+
+    def batch(self):
+        return contextlib.nullcontext(self)
 
     def write_task(self, request):
         self.calls.append(copy.deepcopy(request))
@@ -75,6 +79,39 @@ class ServiceFixture:
 
 
 class ServiceTests(ServiceFixture, unittest.TestCase):
+    def test_two_active_writes_finish_but_no_new_task_starts_during_foreground(self):
+        for n in range(6):
+            self.request("task_" + str(n))
+        entered, proceed = queue.Queue(), threading.Event()
+        original = self.writer.write_task
+
+        def blocked(request):
+            entered.put(request["task_id"])
+            if not proceed.wait(5):
+                raise TimeoutError("fixture did not release the lanes")
+            original(request)
+
+        self.writer.write_task = blocked
+        wave = threading.Thread(target=self.service.tick)
+        wave.start()
+        try:
+            first, second = entered.get(timeout=3), entered.get(timeout=3)
+            self.assertNotEqual(first, second)
+            with self.service.foreground_request():
+                proceed.set()
+                wave.join(timeout=3)
+                self.assertFalse(wave.is_alive())
+                self.assertEqual(len(self.writer.calls), 2)
+                self.assertEqual(self.service.tick(), 0)
+            self.assertEqual(self.service.tick(), 0)  # post-response quiet interval
+            with patch("features.fb_page_assignment.service.time.monotonic", return_value=self.service._idle_at + 1):
+                self.assertEqual(self.service.tick(), 4)
+            self.assertEqual(self.store.pending_sync_ids(16), [])
+            self.assertEqual(len({r["task_id"] for r in self.writer.calls}), 6)
+        finally:
+            proceed.set()
+            wave.join(timeout=4)
+
     def test_success_returns_only_task_id_and_ordered_id_pairs(self):
         status, response = self.request(ids=["drama_1", "drama_2", "drama_1"])
         self.assertEqual(status, 200)
@@ -278,6 +315,29 @@ class HttpTests(ServiceFixture, unittest.TestCase):
         self.assertNotIn(self.token, self.logs.getvalue())
         self.assertEqual(list(self.request_logger.root.glob("*/*.json")), [])
 
+    def test_authenticated_http_request_blocks_background_admission_until_after_reply(self):
+        self.request("already_frozen")
+        entered, proceed = threading.Event(), threading.Event()
+        original = self.sources.load
+
+        def slow_read(ids):
+            entered.set()
+            proceed.wait(4)
+            return original(ids)
+
+        self.sources.load = slow_read
+        request = threading.Thread(target=self.http, kwargs={"body": '{"external_task_id":"caller","drama_ids":["d"]}'})
+        request.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(self.service.tick(), 0)
+            self.assertEqual(self.writer.calls, [])
+        finally:
+            proceed.set()
+            request.join(timeout=3)
+        self.assertEqual(self.service.tick(), 0)
+        self.assertEqual(len(self.store.pending_sync_ids(16)), 2)
+
     def test_http_malformed_json_is_logged_and_notified(self):
         status, response = self.http(body="{not_json")
         self.assertEqual(status, 400)
@@ -362,7 +422,8 @@ class HttpTests(ServiceFixture, unittest.TestCase):
         finally:
             release.set()
             self.service.close()
-        self.service.tick()
+        restarted = Service(Mock(), self.store, self.writer, self.notifier)
+        restarted.tick()
         self.assertEqual(self.store.get(second['task_id'])['sync_status'], 'synced')
 
 

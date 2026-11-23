@@ -32,7 +32,10 @@ from .runtime import database_error, log
 TABLE = "`ads_ai`.`fb_drama_page_assignment_log`"
 ENV_PREFIX = "FB_PAGE_ASSIGNMENT_MYSQL_WRITE_"
 ALERT_STATES = frozenset({"none", "pending", "sending", "sent", "failed", "unknown"})
-_WRITER_LOCK = threading.Lock()
+WRITE_CONCURRENCY = 2
+_WRITER_SLOTS = threading.BoundedSemaphore(WRITE_CONCURRENCY)
+MAX_INSERT_ROWS = 8
+INSERT_JSON_BUDGET = 512 * 1024
 
 
 def _json(value):
@@ -66,7 +69,8 @@ class Store:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._sync_lock = threading.Lock()
+        self._sync_condition = threading.Condition()
+        self._syncing = set()
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
@@ -91,6 +95,9 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS idx_fb_assignment_sync
                     ON fb_page_assignment_requests(sync_next_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_fb_assignment_pending_order
+                    ON fb_page_assignment_requests(created_at, task_id)
+                    WHERE synced_revision < revision;
                 CREATE INDEX IF NOT EXISTS idx_fb_assignment_alert
                     ON fb_page_assignment_requests(alert_status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_fb_assignment_external
@@ -180,6 +187,19 @@ class Store:
                 WHERE synced_revision < revision AND sync_next_at <= ?
                 ORDER BY created_at,task_id LIMIT ?""", (time.time(), max(1, min(int(limit), 100))))]
 
+    def pending_sync_ids(self, limit):
+        # Load the potentially large frozen JSON only after a lane claims one task.
+        with self._connect() as db:
+            return [row[0] for row in db.execute("""
+                SELECT task_id FROM fb_page_assignment_requests INDEXED BY idx_fb_assignment_pending_order
+                WHERE synced_revision < revision AND sync_next_at <= ?
+                ORDER BY created_at,task_id LIMIT ?""", (time.time(), limit))]
+
+    def sync_receipt(self, task_id):
+        with self._connect() as db:
+            return db.execute("""SELECT sync_attempts,last_sync_error
+                FROM fb_page_assignment_requests WHERE task_id=?""", (task_id,)).fetchone()
+
     def _sync_failed(self, task_id, exc):
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -201,10 +221,20 @@ class Store:
                 (attempts, time.time() + delay, _safe_error(exc), _json(reasons), status,
                  int(is_new), _utc_now(), task_id))
 
+    @contextmanager
+    def _own_task(self, task_id):
+        with self._sync_condition:
+            self._sync_condition.wait_for(lambda: task_id not in self._syncing)
+            self._syncing.add(task_id)
+        try:
+            yield
+        finally:
+            with self._sync_condition:
+                self._syncing.remove(task_id)
+                self._sync_condition.notify_all()
+
     def sync_task(self, task_id, writer):
-        # The outbox worker owns writes. Keep serialization for any concurrent
-        # maintenance caller; the writer also has a process-wide lock.
-        with self._sync_lock:
+        with self._own_task(task_id):
             request = self.get(task_id)
             if request is None:
                 raise KeyError(task_id)
@@ -244,7 +274,7 @@ class Store:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             changed = db.execute("""UPDATE fb_page_assignment_requests
-                SET alert_status='sending',revision=revision+1,updated_at=?,sync_next_at=0
+                SET alert_status='sending',revision=revision+1,updated_at=?
                 WHERE task_id=? AND alert_status='pending'""", (_utc_now(), task_id)).rowcount
             row = db.execute("SELECT * FROM fb_page_assignment_requests WHERE task_id=?", (task_id,)).fetchone() if changed else None
         return self._decode(row)
@@ -270,7 +300,7 @@ class Store:
             if (previous["alert_status"], previous["feishu_message_id"], previous["alert_error_code"]) != (status, str(message_id), str(error_code)):
                 db.execute("""UPDATE fb_page_assignment_requests
                     SET alert_status=?,feishu_message_id=?,alert_error_code=?,
-                        revision=revision+1,updated_at=?,sync_next_at=0 WHERE task_id=?""",
+                        revision=revision+1,updated_at=? WHERE task_id=?""",
                     (status, str(message_id), str(error_code), _utc_now(), task_id))
         return self.get(task_id)
 
@@ -278,7 +308,7 @@ class Store:
         with self._connect() as db:
             return db.execute("""UPDATE fb_page_assignment_requests
                 SET alert_status='unknown',alert_error_code='delivery_interrupted',
-                    revision=revision+1,updated_at=?,sync_next_at=0
+                    revision=revision+1,updated_at=?
                 WHERE alert_status='sending'""", (_utc_now(),)).rowcount
 
 
@@ -334,54 +364,112 @@ class Writer:
         record["updated_at"] = _mysql_time(record["updated_at"])
         return record
 
-    def write_task(self, request):
-        records = [self._record(request, row) for row in request["rows"]]
-        with _WRITER_LOCK:
-            connection = None
-            phase, started = "connect", time.monotonic()
+    @contextmanager
+    def batch(self):
+        """One exclusive connection per lane, opened lazily and returned after this wave."""
+        with _WRITER_SLOTS:
+            session = _WriteSession(self)
             try:
-                connection = self._connect()
-                phase = "begin"
-                connection.begin()
-                with connection.cursor() as cursor:
-                    for record in records:
-                        identity = (record["task_id"], record["item_index"])
-                        phase = "read_exact_key"
-                        cursor.execute("SELECT payload_hash,revision FROM " + TABLE +
-                                       " WHERE task_id=%s AND item_index=%s FOR UPDATE", identity)
-                        existing = cursor.fetchone()
-                        if existing is not None:
-                            previous_hash, previous_revision = ((existing["payload_hash"], existing["revision"])
-                                                                if isinstance(existing, dict) else existing)
-                            if previous_hash != record["payload_hash"]:
-                                raise PayloadConflictError("assignment log key conflicts with frozen facts")
-                            if int(previous_revision) < record["revision"]:
-                                phase = "update_receipt"
-                                cursor.execute("UPDATE " + TABLE + """ SET revision=%s,
-                                    alert_status=%s,alert_reasons_json=%s,feishu_message_id=%s,
-                                    alert_error_code=%s,updated_at=%s
-                                    WHERE task_id=%s AND item_index=%s AND revision<%s""",
-                                    (record["revision"], record["alert_status"], record["alert_reasons_json"],
-                                     record["feishu_message_id"], record["alert_error_code"], record["updated_at"],
-                                     *identity, record["revision"]))
-                            continue
-                        columns = tuple(record)
-                        phase = "insert"
-                        cursor.execute("INSERT INTO " + TABLE + " (" + ",".join("`" + key + "`" for key in columns) +
-                                       ") VALUES (" + ",".join("%s" for _ in columns) + ")",
-                                       tuple(record[key] for key in columns))
-                phase = "commit"
-                connection.commit()
-            except Exception as exc:
-                log("database_failure", role="writer", port=63353, task_id=request["task_id"],
-                    phase=phase, elapsed_ms=round((time.monotonic() - started) * 1000, 1),
-                    error_type=type(exc).__name__, **database_error(exc))
-                if connection is not None:
-                    try:
-                        connection.rollback()
-                    except Exception:
-                        pass
-                raise
+                yield session
             finally:
-                if connection is not None:
-                    connection.close()
+                session.close()
+
+    def write_task(self, request):
+        with self.batch() as session:
+            session.write_task(request)
+
+
+def _placeholders(count):
+    return ",".join(["%s"] * count)
+
+
+def _insert_groups(records):
+    group, size = [], 0
+    for record in records:
+        length = len(record["diagnostics_json"].encode("utf-8"))
+        if group and (len(group) >= MAX_INSERT_ROWS or size + length > INSERT_JSON_BUDGET):
+            yield group
+            group, size = [], 0
+        group.append(record)
+        size += length
+    if group:
+        yield group
+
+
+class _WriteSession:
+    def __init__(self, writer):
+        self.writer = writer
+        self.connection = None
+
+    def close(self):
+        connection, self.connection = self.connection, None
+        if connection is not None:
+            connection.close()
+
+    def write_task(self, request):
+        task_id = request["task_id"]
+        records = [self.writer._record(request, row) for row in request["rows"]]
+        phase, started = "connect", time.monotonic()
+        try:
+            if self.connection is None:
+                self.connection = self.writer._connect()
+            phase = "begin"
+            self.connection.begin()
+            if not records:
+                phase = "commit"
+                self.connection.commit()
+                return
+            with self.connection.cursor() as cursor:
+                indices = [record["item_index"] for record in records]
+                phase = "read_exact_key"
+                cursor.execute("SELECT item_index,payload_hash,revision FROM " + TABLE +
+                               " WHERE task_id=%s AND item_index IN (" + _placeholders(len(indices)) +
+                               ") ORDER BY item_index FOR UPDATE", (task_id, *indices))
+                existing = {}
+                for row in cursor.fetchall():
+                    if isinstance(row, dict):
+                        existing[row["item_index"]] = (row["payload_hash"], row["revision"])
+                    else:
+                        index, digest, revision = row
+                        existing[index] = (digest, revision)
+                missing, outdated = [], []
+                for record in records:
+                    index = record["item_index"]
+                    if index not in existing:
+                        missing.append(record)
+                        continue
+                    digest, revision = existing[index]
+                    if digest != record["payload_hash"]:
+                        raise PayloadConflictError("assignment log key conflicts with frozen facts")
+                    if revision < record["revision"]:
+                        outdated.append(index)
+                phase = "insert"
+                for group in _insert_groups(missing):
+                    columns = tuple(group[0])
+                    values = "(" + _placeholders(len(columns)) + ")"
+                    cursor.execute("INSERT INTO " + TABLE + " (" + ",".join("`" + k + "`" for k in columns) +
+                                   ") VALUES " + ",".join([values] * len(group)),
+                                   tuple(row[k] for row in group for k in columns))
+                if outdated:
+                    phase = "update_receipt"
+                    # Receipt metadata is shared by all rows of this frozen request.
+                    r = records[0]
+                    cursor.execute("UPDATE " + TABLE + """ SET revision=%s,alert_status=%s,
+                        alert_reasons_json=%s,feishu_message_id=%s,alert_error_code=%s,updated_at=%s
+                        WHERE task_id=%s AND item_index IN (""" + _placeholders(len(outdated)) + ") AND revision<%s",
+                        (r["revision"], r["alert_status"], r["alert_reasons_json"], r["feishu_message_id"],
+                         r["alert_error_code"], r["updated_at"], task_id, *outdated, r["revision"]))
+            phase = "commit"
+            self.connection.commit()
+        except Exception as exc:
+            log("database_failure", role="writer", port=63353, task_id=task_id,
+                phase=phase, elapsed_ms=round((time.monotonic() - started) * 1000, 1),
+                error_type=type(exc).__name__, **database_error(exc))
+            if self.connection is not None:
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+                finally:
+                    self.close()
+            raise

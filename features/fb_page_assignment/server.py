@@ -58,6 +58,10 @@ def handler(service, token, request_logger=None):
             if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
                 log("unauthorized", task_id=task_id)
                 return self.reply(401, {"task_id": task_id, "results": []})
+            with service.foreground_request():
+                return self.assign(task_id)
+
+        def assign(self, task_id):
             payload = None
             try:
                 length = int(self.headers.get("Content-Length", "0"))
