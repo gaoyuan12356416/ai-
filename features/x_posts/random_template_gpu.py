@@ -19,7 +19,6 @@ from features.fb_gpu.random_overlay import derive_recipe, load_asset_set, select
 from features.fb_gpu.prepare_worker import build_command, software_command
 from features.fb_gpu.render_process import RenderStalled, run_render
 from features.random_gpu.compositor import BACKEND
-from features.random_gpu import native_pipeline
 
 from features.random_gpu.profiles import base_profile, canvas
 
@@ -64,22 +63,10 @@ def validate_request(raw, config):
 
 def random_command(config, source, output, info, recipe, assets):
     cpu = base_profile(config.profile) == CPU_PROFILE
-    rate = repair.output_rate_control(config.max_output_bytes, info["duration"])
-    if not cpu and native_pipeline.enabled():
-        # PyNvVideoCodec's rate options use bits/s and differ from FFmpeg's
-        # -maxrate/-bufsize names. Keep the existing X size budget unchanged.
-        options = dict(codec="h264", profile="high", preset="P5", rc="vbr", cq=21,
-                       bitrate=rate["video_bitrate_kbps"] * 1000,
-                       maxbitrate=rate["video_maxrate_kbps"] * 1000,
-                       vbvbufsize=rate["video_bufsize_kbps"] * 1000,
-                       fps=30, gop=60, idrperiod=60, global_header=1)
-        return native_pipeline.command(source, output, info, recipe, assets,
-                                       encoder_options=options,
-                                       audio_bitrate=rate["audio_bitrate_kbps"] * 1000,
-                                       ffmpeg=config.ffmpeg_bin,canvas_size=canvas(config.profile))
     adapter = SimpleNamespace(profile=config.profile, ffmpeg=config.ffmpeg_bin, compositor_backend="cpu_legacy" if cpu else BACKEND,
                               video_encoder="libx264" if cpu else "h264_nvenc")
     command = build_command(adapter, source, output, info, recipe, assets)
+    rate = repair.output_rate_control(config.max_output_bytes, info["duration"])
     command[command.index("-b:v") + 1] = "%sk" % rate["video_bitrate_kbps"]
     command[command.index("-b:a") + 1] = "%sk" % rate["audio_bitrate_kbps"]
     command[-1:-1] = ["-maxrate", "%sk" % rate["video_maxrate_kbps"], "-bufsize", "%sk" % rate["video_bufsize_kbps"]]
@@ -117,7 +104,7 @@ class RandomTemplateProcessor:
         duration = float((raw.get("format") or {}).get("duration") or video.get("duration") or 0)
         if not math.isfinite(duration) or duration < 0.5:
             raise repair.MediaRepairError("x_random_duration_invalid", "source video duration invalid", 422)
-        return {"duration": duration, "video": video, "format": raw.get("format") or {},
+        return {"duration": duration, "video": video,
                 "has_audio": any(s.get("codec_type") == "audio" for s in streams)}
 
     def _render(self, source, output, info, recipe, assets):
@@ -126,10 +113,6 @@ class RandomTemplateProcessor:
             self.runner(random_command(self.config, source, output, info, recipe, assets),
                         capture_output=True, text=True, timeout=self.timeout, check=True)
         except RenderStalled:
-            if base_profile(self.config.profile) != CPU_PROFILE and native_pipeline.enabled():
-                # A native watchdog failure must remain a failed attempt; the
-                # legacy normalization retry would change its media contract.
-                raise
             # Preserve the proven production stall recovery and original recipe.
             normalized = source.with_name("normalized.mp4")
             remaining = lambda: max(1, int(self.timeout - (time.monotonic() - started)))

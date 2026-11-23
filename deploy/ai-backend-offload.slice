@@ -1,0 +1,11 @@
+[Unit]
+Description=AI backend assistance resource budget
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=800%
+CPUShares=128
+MemoryAccounting=yes
+MemoryLimit=16G
+BlockIOAccounting=yes
+BlockIOWeight=100

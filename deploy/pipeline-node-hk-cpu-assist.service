@@ -1,0 +1,31 @@
+[Unit]
+Description=Isolated prepare-only Hong Kong CPU assistance
+After=network-online.target pipeline-node-hk-gpu-tunnel.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pipeline-worker
+Group=pipeline-worker
+WorkingDirectory=/data/ai-backend-offload/current
+EnvironmentFile=/etc/ai-backend-offload/media.env
+ExecStart=/opt/pipeline-dispatch/venvs/68407465a58d99f9dd2c9a14da000f167115f804/bin/python -m features.gpu_offload.media
+Restart=on-failure
+RestartSec=10
+KillMode=process
+TimeoutStopSec=infinity
+SendSIGKILL=no
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+Slice=ai-backend-offload.slice
+CPUAccounting=yes
+CPUQuota=600%
+CPUShares=128
+MemoryAccounting=yes
+MemoryLimit=12G
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

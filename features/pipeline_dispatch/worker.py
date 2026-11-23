@@ -185,8 +185,6 @@ def execute_claim(job, client, outbox, seal_key, executor):
 
 
 def process_worker(config, stage, index):
-    from .gpu_affinity import bind_prepare_process
-    gpu_device = bind_prepare_process(config, stage, index)
     from .executors import NodeExecutors
     stopping = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -196,8 +194,6 @@ def process_worker(config, stage, index):
     outbox = ReceiptOutbox(Path(config["state_root"]) / "receipts.sqlite3")
     executor = NodeExecutors(config)
     identity = {"node_id": config["node_id"], "worker_id": worker_id, "stage": stage, "pid": os.getpid()}
-    if gpu_device:
-        print(json.dumps({"event": "gpu_affinity", "worker_id": worker_id, "gpu_device": gpu_device}), flush=True)
     idle_reason = "awaiting_assignment"
     stage_available = any(name in executor.capabilities(stage) for name in (executor.PREPARE if stage == "prepare" else executor.PUBLISH))
     while not stopping.is_set():
@@ -331,9 +327,6 @@ def enroll_node(destination, environ=None):
 def run_node(config=None):
     """OS processes track the authority's active target; shrink drains claims."""
     config = configuration() if config is None else config
-    if config["backend"] == "gpu":
-        from .gpu_affinity import discover_devices
-        config = {**config, "gpu_devices": discover_devices()}
     client = CoordinatorClient(config["coordinator_url"], config["node_token"])
     from .executors import NodeExecutors
     executor = NodeExecutors(config)
