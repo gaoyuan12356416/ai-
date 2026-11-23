@@ -90,14 +90,25 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(value,route,value.headers.get('X-Ai-Stale')=='true')
                 return self.reply(request(cfg['origin_port'],local,cookie=cookie),route)
             route='hk-campaign-snapshot'
-            def load_status():return request(cfg['reader_port'],'/v1/status',token=self.server.token,timeout=5,limit=65536)
-            status,status_stale,_=self.server.status.get('current',load_status,wait=6)
-            version=json.loads(status.body)['version'];key=cache_key(actor,local,version)
-            def load():
-                return request(cfg['reader_port'],'/v1/query',token=self.server.token,
+            def remote_snapshot():
+                def load_status():return request(cfg['reader_port'],'/v1/status',token=self.server.token,timeout=5,limit=65536)
+                status,status_stale,_=self.server.status.get('current',load_status,wait=6)
+                version=json.loads(status.body)['version'];key=cache_key(actor,local,version)
+                def load():
+                    return request(cfg['reader_port'],'/v1/query',token=self.server.token,
+                        body=json.dumps({'actor':actor,'target':local},separators=(',',':')).encode())
+                value,stale,hit=self.server.cache.get(key,load,wait=180)
+                return value,stale or status_stale or value.headers.get('X-Ai-Stale')=='true',hit
+            try:value,stale,hit=remote_snapshot()
+            except Exception:
+                # A newly authenticated user may have no front-cache entry.
+                # The verified CPU immutable index can still answer without
+                # waking the retired SQL refresher or retrying a DB query.
+                if not cfg.get('origin_reader_port'):raise
+                route='cpu-campaign-cache'
+                value=request(cfg['origin_reader_port'],'/v1/query',token=self.server.token,
                     body=json.dumps({'actor':actor,'target':local},separators=(',',':')).encode())
-            value,stale,hit=self.server.cache.get(key,load,wait=180)
-            stale=stale or status_stale or value.headers.get('X-Ai-Stale')=='true'
+                stale,hit=True,False
             outcome='stale' if stale else 'hit' if hit else 'miss'
             return self.reply(value,route,stale)
         except PermissionError:return self.error(403,'permission_denied')
@@ -111,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server=Server(('127.0.0.1',19974),os.environ['CAMPAIGN_GATEWAY_CONFIG'],os.environ['OFFLOAD_INTERNAL_TOKEN'])
+    server=Server(('127.0.0.1',int(os.environ.get('CAMPAIGN_GATEWAY_PORT','19974'))),os.environ['CAMPAIGN_GATEWAY_CONFIG'],os.environ['OFFLOAD_INTERNAL_TOKEN'])
     def stop(*_):threading.Thread(target=server.shutdown,daemon=True).start()
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
     try:server.serve_forever()

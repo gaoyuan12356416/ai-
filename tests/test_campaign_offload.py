@@ -118,9 +118,10 @@ class CampaignSnapshotTests(unittest.TestCase):
                 inner.send_response(200);inner.send_header('Content-Length',str(len(body)));inner.end_headers();inner.wfile.write(body)
         auth=ThreadingHTTPServer(('127.0.0.1',0),Auth);auth.actor=actor;auth.checks=0;auth.allowed=True
         reader=Server(('127.0.0.1',0),self.root/'index','t'*40,'company')
+        fallback=Server(('127.0.0.1',0),self.root/'index','t'*40,'company')
         config=self.root/'gateway.json';config.write_text(json.dumps({'api_port':auth.server_port,'source_tenant':'company','reader_port':reader.server_port,'origin_port':1,'percentage':100}))
         gateway=Gateway(('127.0.0.1',0),config,'t'*40)
-        servers=[auth,reader,gateway];threads=[]
+        servers=[auth,reader,fallback,gateway];threads=[]
         for server in servers:
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();threads.append(thread)
         def call(cookie='session=fixture'):
@@ -142,6 +143,15 @@ class CampaignSnapshotTests(unittest.TestCase):
             reader.shutdown();reader.server_close();servers.remove(reader)
             _,value=gateway.status.entries['current'];gateway.status.entries['current']=(time.monotonic()-10,value)
             result=call();self.assertEqual(result[0],200);self.assertEqual(result[1]['X-Report-Cache'],'stale');self.assertEqual(result[2],first[2])
+            # A different current user has no actor-keyed front cache. It
+            # still receives the verified local index, never an origin SQL
+            # refresh, and remains subject to fresh login/tenant checks.
+            configured['origin_reader_port']=fallback.server_port;config.write_text(json.dumps(configured))
+            gateway.status.entries.clear();auth.actor=dict(actor,user_id='new-user')
+            result=call();self.assertEqual(result[0],200);self.assertEqual(gzip.decompress(result[2]),gzip.decompress(first[2]))
+            self.assertEqual(result[1]['X-AI-Backend'],'cpu-campaign-cache');self.assertEqual(result[1]['X-AI-Stale'],'true')
+            auth.allowed=False;self.assertEqual(call()[0],401);auth.allowed=True
+            auth.actor=dict(actor,tenant_key='other');self.assertEqual(call()[0],403)
         finally:
             for server in servers:server.shutdown();server.server_close()
             for thread in threads:thread.join(timeout=5)

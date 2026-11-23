@@ -1,0 +1,22 @@
+[Unit]
+Description=Authenticated Campaign Copy snapshot gateway (%i)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/campaign-gateway-current
+EnvironmentFile=/etc/ai-backend-offload/campaign-gateway-%i.env
+ExecStart=/usr/bin/python3 -m features.gpu_offload.campaign_gateway
+Restart=on-failure
+RestartSec=5
+CPUQuota=100%
+MemoryLimit=768M
+Nice=10
+NoNewPrivileges=true
+KillMode=process
+SendSIGKILL=no
+TimeoutStopSec=infinity
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
