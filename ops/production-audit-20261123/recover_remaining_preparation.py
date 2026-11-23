@@ -19,18 +19,23 @@ def require(value,reason):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--apply',action='store_true');p.add_argument('--job-id',type=int);p.add_argument('--recover-qualified-sha');a=p.parse_args()
+    if a.recover_qualified_sha:
+        require(a.job_id==109116 and a.recover_qualified_sha=='61d990e9f3d4ac3708c23f0fa73cdfd12199e4d96b3b6f6fe8fc82e10f2565cc','qualified_recovery_scope_changed')
     scope=json.loads((ROOT/'historical-publish-holds.json').read_text())['tasks']
     c=sqlite3.connect('/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3',timeout=20,isolation_level=None);c.row_factory=sqlite3.Row
     for alias,path in DBS.items():c.execute('ATTACH DATABASE ? AS '+alias,(path,))
     result=[]
     for item in scope:
+        if a.job_id is not None and item['prepare_id']!=a.job_id:continue
         key=item['source_key']
         if not key.startswith(('fb:','x:queue:')):continue
         c.execute('BEGIN IMMEDIATE')
         job=dict(c.execute('SELECT * FROM pipeline_job WHERE id=?',(item['prepare_id'],)).fetchone())
         if job['status']!='failed':c.rollback();result.append({'id':job['id'],'already_changed':job['status']});continue
         require(job['stage']=='prepare' and not job['external_intent'],'not_local_preparation')
+        if a.recover_qualified_sha:
+            require(job['generation']==2 and job['error_code']=='artifact_upload_incomplete','qualified_recovery_state_changed')
         hold=c.execute("SELECT status,hold_reason FROM pipeline_job WHERE source_key=? AND stage='publish'",(key,)).fetchone()
         require(hold and tuple(hold)==('backlog_paused','historical_preparation_only'),'publish_hold_missing')
         require(not c.execute('SELECT 1 FROM pipeline_operation WHERE job_id=? LIMIT 1',(job['id'],)).fetchone(),'external_operation_present')
@@ -70,6 +75,7 @@ def main():
             c.execute('UPDATE '+alias+".x_post_queue SET status='queued',updated_at=? WHERE id=?",(now,native['id']))
             c.execute('UPDATE '+alias+".x_post_publish_log SET status='reserved',updated_at=? WHERE id=?",(now,logs[0]['id']))
         meta=json.loads(job['source_meta_json']);meta.update(legacy_inflight=False,reconcile_only=False,source_attempt_count=0)
+        if a.recover_qualified_sha:meta['recover_missing_qualified_sha256']=a.recover_qualified_sha
         c.execute("UPDATE pipeline_job SET status='queued',source_status=?,hold_reason='',source_meta_json=?,claim_hash='',node_id='',worker_id='',lease_expires_at='',updated_at=? WHERE id=?",
                   ('preparing' if alias=='fb' and binding else 'planned' if alias=='fb' else 'queued',json.dumps(meta),now,job['id']))
         c.execute("UPDATE pipeline_media_gate SET phase='waiting',ticket='',decision='{}',retry_at='',error='' WHERE source_key=?",(key,))
@@ -77,7 +83,7 @@ def main():
         c.execute('DELETE FROM pipeline_legacy_resource WHERE job_id=?',(job['id'],))
         c.execute('INSERT INTO pipeline_event(job_id,event_type,details_json,created_at) VALUES(?,?,?,?)',(job['id'],'audited_preparation_only_recovery',json.dumps({'previous_error':job['error_code'],'generation_preserved':job['generation'],'publish_held':True}),now))
         if a.apply:
-            path=ROOT/('remaining-recovery-before-%d.json'%job['id'])
+            path=ROOT/('remaining-recovery-before-%d-g%d.json'%(job['id'],job['generation']))
             with path.open('x') as f:os.chmod(str(path),0o600);json.dump(evidence,f);f.flush();os.fsync(f.fileno())
             c.commit()
         else:c.rollback()

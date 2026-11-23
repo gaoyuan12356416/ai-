@@ -1,0 +1,86 @@
+--- a/features/pipeline_dispatch/executors.py
++++ b/features/pipeline_dispatch/executors.py
+@@ -69,7 +69,7 @@
+     """
+     MAX_RECEIPT = 4 * 1024 * 1024
+ 
+-    def __init__(self, store, kind, request, *, source_key=""):
++    def __init__(self, store, kind, request, *, source_key="", predecessor=None):
+         self.store, self.config, self.client = store, store.config, store.client
+         identity = request.get("job_id") or request.get("job_key")
+         if kind == "youtube_prepare":
+@@ -83,6 +83,10 @@
+                         "request_sha256": self.digest(request), "configuration_sha256": self.digest(configuration)}
+         locator = self.digest({"kind": kind, "identity": str(identity)})
+         self.key = self.config.cos_prefix.rstrip("/") + "/pipeline-receipts/v1/" + locator + ".json"
++        if predecessor is not None:
++            previous = self.digest(predecessor)
++            self.binding["predecessor_receipt_sha256"] = previous
++            self.key = self.key[:-5] + ".reconstruction-" + previous + ".json"
+ 
+     @staticmethod
+     def encoded(value):
+@@ -379,7 +383,12 @@
+             store = processor._object_store()
+         journal = COSArtifactStore(store, kind, request, source_key=getattr(context, "job", {}).get("source_key", ""))
+         context.phase("artifact_recovery")
+-        recovered = journal.recover()
++        try:
++            recovered = journal.recover()
++        except ExecutionError as exc:
++            if kind != "fb_prepare" or exc.code != "artifact_upload_incomplete":
++                raise
++            return self._resume_qualified_fb(processor, request, context, journal)
+         if recovered is not None:
+             return recovered
+         previous = getattr(processor, "qualified_artifact", None)
+@@ -399,6 +408,49 @@
+             return journal.recover()
+         finally:
+             processor.qualified_artifact = previous
++
++    def _resume_qualified_fb(self, processor, request, context, journal):
++        """Resume retained bytes or append a scoped reconstruction receipt."""
++        receipt=journal._read()
++        expected=_artifact(receipt['result'])
++        proof=getattr(context,'job',{}).get('recover_missing_qualified_sha256')
++        reconstruction=None
++        if proof==expected['sha256']:
++            reconstruction=COSArtifactStore(journal.store,'fb_prepare',request,
++                source_key=getattr(context,'job',{}).get('source_key',''),predecessor=receipt)
++            try:
++                recovered=reconstruction.recover()
++            except ExecutionError as exc:
++                if exc.code!='artifact_upload_incomplete':raise
++                return self._resume_qualified_fb(processor,request,context,reconstruction)
++            if recovered is not None:return recovered
++        output=Path(processor.config.work_root)/'jobs'/request['job_id']/'output.tmp.mp4'
++        if output.is_file():
++            digest=hashlib.sha256()
++            with output.open('rb') as stream:
++                for chunk in iter(lambda:stream.read(1024**2),b''):digest.update(chunk)
++            if output.stat().st_size!=expected['size'] or digest.hexdigest()!=expected['sha256']:
++                raise ExecutionError('qualified_local_artifact_changed')
++            context.check();context.phase('artifact_upload')
++            journal.store.upload(output,request['job_id'],expected['sha256'],expected['size'])
++            recovered=journal.recover()
++            output.unlink()
++            return recovered
++        if reconstruction is None:
++            raise ExecutionError('artifact_upload_incomplete')
++        # Encoder output can differ while the frozen input and recipe remain
++        # identical. Preserve the old receipt and append the new artifact fact.
++        def verify(result,key):
++            fields=('job_id','content_id','profile','source_sha256','source_size','random_overlay_recipe')
++            if any(result.get(k)!=receipt['result'].get(k) for k in fields):
++                raise ExecutionError('artifact_rebuild_identity_mismatch')
++            reconstruction.qualified(dict(result,reconstructed_from_sha256=expected['sha256']),key)
++        previous=getattr(processor,'qualified_artifact',None)
++        processor.qualified_artifact=verify
++        try:
++            with self._measure_processor(processor,context):processor.prepare(request)
++            return reconstruction.recover()
++        finally:processor.qualified_artifact=previous
+ 
+     def youtube_prepare(self, request, context, *, recovery_only=False, resume_once=False):
+         from .youtube_cover import generate_cover, image_bytes

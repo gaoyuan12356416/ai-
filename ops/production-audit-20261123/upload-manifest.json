@@ -1,0 +1,36 @@
+{
+  "cpu": {
+    "root": "/mnt/data-disk/social-480-20261119/cpu-d5b35f6937da/candidate",
+    "files": [
+      {
+        "path": "features/fb_gpu/prepare_worker.py",
+        "patch": "../upload-patches/cpu_features_fb_gpu_prepare_worker.py.patch",
+        "before": "c5d6988349f471d2a4c49ad63d97cd7e750db4319fbbf2328fde859c78bd2836",
+        "after": "4c493dda80d633c3a07f13390d263f85d004cd7808de9ca55de74df95b99fe0a"
+      },
+      {
+        "path": "features/pipeline_dispatch/executors.py",
+        "patch": "../upload-patches/cpu_features_pipeline_dispatch_executors.py.patch",
+        "before": "898b27ecd82bf45b652e0ef3069233787ed579b1addbf811fecdfbcf048ad5e1",
+        "after": "4e65fcee3a3709bfcf4e0abee13ed244748d304180b185b2adc094e26f1e85ef"
+      }
+    ]
+  },
+  "hk": {
+    "root": "/data/social-480-20261119/hk-2a40e97d42ad/candidate",
+    "files": [
+      {
+        "path": "features/fb_gpu/prepare_worker.py",
+        "patch": "../upload-patches/hk_features_fb_gpu_prepare_worker.py.patch",
+        "before": "8ce92c6206a14ceef0dd9bb7905f5757316a70ea362b3ce181cc46102910463a",
+        "after": "1935fef635a55c6d7b516a687920b45aad0e74290aab02beadde1659889123fb"
+      },
+      {
+        "path": "features/pipeline_dispatch/executors.py",
+        "patch": "../upload-patches/hk_features_pipeline_dispatch_executors.py.patch",
+        "before": "c86455b7e262230760fa4982245e99ab893869d7530367c983bd8256ac43026b",
+        "after": "7bc41f09bc1c570c2917a711a1acf6a37f95fec64d4e35f921774c87fd907f96"
+      }
+    ]
+  }
+}

@@ -295,6 +295,7 @@ class PrepareProcessor:
             source_info=_probe(self.config,source)
             output=root/"output.tmp.mp4"; output.unlink(missing_ok=True)
             render_started=time.monotonic()
+            qualified_output=False
             try:
                 try:
                     paths=selected_asset_paths(recipe,assets)
@@ -339,10 +340,13 @@ class PrepareProcessor:
                     key=f"{self.config.cos_prefix}/{output_sha[:2]}/{output_sha}.mp4"
                     url=self.config.cos_domain+"/"+"/".join(quote(part,safe="-._~") for part in key.split("/"))
                     callback({"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":url,"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":key,"status":"ready","render_seconds":render_seconds},key)
+                qualified_output=callback is not None
                 stored=self.object_store.upload(output,job,output_sha,size)
+                qualified_output=False
                 result={"job_id":job,"content_id":request["content_id"],"profile":getattr(self.config,"profile",PROFILE),"output_url":stored["url"],"output_sha256":output_sha,"output_size":size,"probe":{"duration":output_info["duration"]},"random_overlay_recipe":recipe,"storage_key":stored["key"],"status":"ready","render_seconds":render_seconds}
                 tmp=manifest.with_suffix(".tmp"); tmp.write_text(json.dumps({"request":request,"source_sha256":source_sha,"result":result,"compositor_backend":self.config.compositor_backend,"render_seconds":render_seconds},sort_keys=True,separators=(",",":")),encoding="utf-8"); os.replace(tmp,manifest); source.unlink(missing_ok=True); return {**result,"reused":False}
-            finally: output.unlink(missing_ok=True)
+            finally:
+                if not qualified_output: output.unlink(missing_ok=True)
 
 class Server(ThreadingHTTPServer):
     def __init__(self,address,processor,token): super().__init__(address,Handler); self.processor,self.token=processor,token
