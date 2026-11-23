@@ -90,6 +90,10 @@ class SharedGateTests(unittest.TestCase):
     def test_handover_command_preserves_old_lease_and_refuses_busy_retirement(self):
         canonical=self.root/'gate.sock';staged=self.root/'staged.sock';old_state=self.root/'old-state.json'
         old=legacy.GateCoordinator(14,100,300,legacy.DEFAULT_POOL,str(old_state),active_timeout=1500)
+        # The live daemon has accumulated more per-job metrics than its own
+        # control-message limit permits. That must not block the accept barrier.
+        for number in range(50):old._job_metrics('old-metric-'+str(number))['granted']=1
+        old.write_state()
         self.server(canonical,old);inflight=self.acquire(canonical)
         self.coordinator.set_legacy_reserved(14);self.server(staged,self.coordinator)
         unit=self.root/'units'/'old.service';unit.parent.mkdir();unit.write_text('[Service]\nExecStart=old-gate\n')
@@ -108,6 +112,15 @@ class SharedGateTests(unittest.TestCase):
                 self.assertTrue(unit.is_file());self.assertFalse(unit.is_symlink())
                 inflight.settimeout(0.05)
                 with self.assertRaises(socket.timeout):inflight.recv(1)
+
+    def test_large_metrics_do_not_break_compatible_status(self):
+        path=self.root/'gate.sock';self.server(path,self.coordinator)
+        for number in range(50):self.coordinator._job_metrics('metric-'+str(number))['granted']=1
+        self.coordinator.write_state()
+        snapshot=legacy.status_request(str(path))
+        self.assertEqual(snapshot['capacity'],14)
+        self.assertIn('details_state_path',snapshot)
+        self.assertEqual(len(json.loads(Path(snapshot['details_state_path']).read_text())['job_metrics']),50)
 
 
 if __name__=='__main__':unittest.main()

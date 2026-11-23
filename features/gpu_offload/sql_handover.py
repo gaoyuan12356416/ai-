@@ -26,13 +26,23 @@ def systemctl(*args):
     return subprocess.check_output(['systemctl']+list(args),stderr=subprocess.PIPE).decode().strip()
 
 
+def old_snapshot(path):
+    response=legacy.status_request(str(path))
+    if (response.get('status')=='error' and response.get('code')=='invalid_request'
+            and response.get('message')=='message too large'):
+        # This error still proves that the old listener accepted and handled
+        # the barrier request. Its unbounded atomic state file carries metrics.
+        return json.loads(LEGACY_STATE.read_text())
+    return response
+
+
 def activate(root):
     root=Path(root);marker_path=root/'handover.json'
     if marker_path.exists():raise RuntimeError('handover_already_recorded')
     old_pid=int(systemctl('show',OLD_UNIT,'-p','MainPID','--value'))
     identity=legacy.read_proc_identity(old_pid)
     if not identity:raise RuntimeError('old_gate_not_running')
-    old_status=legacy.status_request(str(CANONICAL))
+    old_status=old_snapshot(CANONICAL)
     candidate=legacy.status_request(str(STAGED))
     if old_status['version']!='1.1.0' or old_status['capacity']!=14:raise RuntimeError('old_gate_version_changed')
     if (candidate['version']!='2.0.0-offload' or candidate['local_in_use'] or candidate['remote_in_use']
@@ -61,7 +71,7 @@ def activate(root):
                 raise RuntimeError('old_gate_identity_changed')
         os.replace(str(STAGED),str(CANONICAL));replaced=True
         # This request is behind the old listener's pre-switch accept backlog.
-        barrier=legacy.status_request(str(ALIAS))
+        barrier=old_snapshot(ALIAS)
         if barrier['capacity']!=14:raise RuntimeError('legacy_budget_changed')
         marker.update(barrier_complete=True,canonical_inode=CANONICAL.stat().st_ino,
                       shared_pid=int(systemctl('show',NEW_UNIT,'-p','MainPID','--value')))

@@ -50,6 +50,16 @@ class SharedCoordinator(legacy.GateCoordinator):
                       available=max(0,self.capacity-len(self.active)))
         return result
 
+    def snapshot(self):
+        result=super().snapshot()
+        if len(json.dumps(result,separators=(',',':')).encode())>3600:
+            # The compatible wire protocol is limited to 4096 bytes. Full job
+            # metrics remain in the atomic state file; admission never depends
+            # on their fitting into a control reply.
+            result={key:value for key,value in result.items() if key not in ('job_metrics','active_jobs','queued_jobs','counters')}
+            result['details_state_path']=self.state_path
+        return result
+
     def _ledger_projection_unlocked(self, exclude_ticket_id=None):
         sessions = dict(self.recovered_local)
         for key, ticket in self.active.items():
