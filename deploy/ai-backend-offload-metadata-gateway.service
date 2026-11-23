@@ -1,0 +1,20 @@
+[Unit]
+Description=Current-permission gateway for named metadata reads
+After=network.target
+
+[Service]
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/metadata-current
+EnvironmentFile=/etc/ai-backend-offload/metadata-gateway.env
+ExecStart=/usr/bin/python3 -m features.gpu_offload.metadata_gateway
+CPUQuota=100%
+MemoryLimit=256M
+Nice=15
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=5
+SendSIGKILL=no
+TimeoutStopSec=infinity
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
