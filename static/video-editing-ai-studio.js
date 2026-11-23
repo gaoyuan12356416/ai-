@@ -1203,10 +1203,19 @@
     connectLibrary();
     drawSelection();
     warmCatalogs();
-    const epoch = libraryEpoch;
     api("/catalog/imports")
       .then((data) => {
-        if (epoch === libraryEpoch) catalogImports = data.items;
+        // Import identities are account-wide; a source/tab change does not invalidate them.
+        catalogImports = data.items;
+        if (modalKind === "assets") {
+          sourceSelection = Sources.unique(sourceSelection.map((item) => {
+            if (item.kind !== "catalog") return item;
+            const found = catalogImports.find((job) => job.product === item.product &&
+              job.source_key === item.key && job.episode === item.episode && job.asset_id);
+            return found ? { ...item, asset_id: found.asset_id } : item;
+          }));
+          drawSelection();
+        }
       })
       .catch(() => {});
     readAssets();
