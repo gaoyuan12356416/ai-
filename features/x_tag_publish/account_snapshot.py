@@ -48,6 +48,8 @@ def install_reader(runtime):
             raise runtime.ServiceError('x_tag_account_snapshot_invalid', '账号读取结果与发布任务不一致', 503)
         return row
     runtime.find_scoped_account_row = scoped
+    runtime.find_account = lambda account_id: runtime.row_to_item(
+        scoped(int(account_id),runtime.AUTO_TEMPLATE_ACTOR,'all'))
     def accounts(_payload):
         try:
             result=rpc('http://127.0.0.1:8898','/internal/x-tag/account-snapshot',runtime.INTERNAL_TOKEN,

@@ -50,6 +50,7 @@ class AccountSnapshotTests(unittest.TestCase):
         row.update(id=7, x_user_id='77', status='active', publish_approved=True)
         old = oauth.find_scoped_account_row
         old_accounts=oauth.auto_template_accounts_request
+        old_find=oauth.find_account
         try:
             with patch.object(oauth, 'db_connect', side_effect=sqlite3.OperationalError('unable to open database file')), \
                  patch.object(oauth, 'row_to_item', side_effect=lambda value: dict(value)), \
@@ -57,6 +58,7 @@ class AccountSnapshotTests(unittest.TestCase):
                  patch.object(oauth, 'read_token_file', return_value={'access_token':'test-only'}), \
                  patch('features.x_tag_publish.transport.rpc', return_value={'record':row}):
                 account_snapshot.install_reader(oauth)
+                self.assertEqual(oauth.find_account(7)['id'],7)
                 with oauth.publish_credentials(7, ACTOR, 'all') as (item, token):
                     self.assertEqual((item['id'], token), (7, 'test-only'))
                 row['publish_approved'] = False
@@ -70,6 +72,7 @@ class AccountSnapshotTests(unittest.TestCase):
         finally:
             oauth.find_scoped_account_row = old
             oauth.auto_template_accounts_request=old_accounts
+            oauth.find_account=old_find
 
     def test_account_list_uses_owner_broker_and_existing_projection(self):
         row=dict.fromkeys(account_snapshot.FIELDS,'');row.update(id=7)
