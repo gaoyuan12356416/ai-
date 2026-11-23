@@ -296,7 +296,7 @@ def ensure_storage():
         try:
             conn.executescript(
                 """
-                PRAGMA journal_mode=DELETE;
+                PRAGMA journal_mode=WAL;
                 PRAGMA busy_timeout=30000;
                 CREATE TABLE IF NOT EXISTS x_authorized_account (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

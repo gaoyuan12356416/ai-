@@ -1,0 +1,24 @@
+{
+  "x": {
+    "root": "/opt/x-post-automation/current",
+    "files": [
+      {
+        "path": "features/x_accounts/oauth_service.py",
+        "patch": "../wal-patches/x-oauth-storage.patch",
+        "before": "081a59050c1c8a6fc8184115c91dc08e679d3292b008f58530a40b5bfb1a2dd6",
+        "after": "2da855ee70c62d7daf1f51dd7a44bb98f38fd0f10b2e8d4c9e11f9455141f91e"
+      }
+    ]
+  },
+  "tag": {
+    "root": "/opt/x-tag-publisher/current",
+    "files": [
+      {
+        "path": "features/x_accounts/oauth_service.py",
+        "patch": "../wal-patches/tag-oauth-storage.patch",
+        "before": "411d1e2feeaca36ccb2c3bd43df411ad043920e46650b1cde49c8b899dd0dbb3",
+        "after": "502481312e6747c68b5a43b2cb2c9ddf594c3c13a04677343d6981dc155ff945"
+      }
+    ]
+  }
+}

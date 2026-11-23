@@ -1,0 +1,11 @@
+--- a/features/x_accounts/oauth_service.py
++++ b/features/x_accounts/oauth_service.py
+@@ -301,7 +301,7 @@
+         try:
+             conn.executescript(
+                 """
+-                PRAGMA journal_mode=DELETE;
++                PRAGMA journal_mode=WAL;
+                 PRAGMA busy_timeout=30000;
+                 CREATE TABLE IF NOT EXISTS x_authorized_account (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
