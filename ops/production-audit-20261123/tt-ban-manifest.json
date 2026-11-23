@@ -1,0 +1,13 @@
+{
+  "tt": {
+    "root": "/opt/tt-auto-post/current",
+    "files": [
+      {
+        "path": "features/tt_auto_posts/publisher.py",
+        "patch": "tt_posting_ban.patch",
+        "before": "d0319d37b03ed82469b6280caa4d242ca6dbbe224a96626578970ec37c64f287",
+        "after": "dfe0178730e1b7818c2e7a689d48ed78e67c93d6df896f6ed5faedd7cb2fb5ae"
+      }
+    ]
+  }
+}

@@ -515,7 +515,9 @@ class AutoPostExecutor:
             or phase == "reconcile"
         )
         retry_phase = "reconcile" if publish_evidence else phase
-        transient_selection = status >= 500 and phase == "selection"
+        posting_banned = (isinstance(exc, GPUClientError)
+                         and exc.details.get("upstream_code") == "spam_risk_user_banned_from_posting")
+        transient_selection = status >= 500 and phase == "selection" and not posting_banned
         transient_reserved = (
             status >= 500
             and bool(task.material_id)
