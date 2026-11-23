@@ -274,7 +274,7 @@
     requestReceipt = null;
     $("copyPanel").hidden = true;
     location.hash = id;
-    await refresh();
+    await refresh(true, item);
   }
   function queueRefresh() {
     clearTimeout(timer);
@@ -294,7 +294,7 @@
             : 2000,
       );
   }
-  async function refresh(full = true) {
+  async function refresh(full = true, loadedSession = null) {
     clearTimeout(timer);
     if (!session) return;
     const sid = session.id,
@@ -338,7 +338,7 @@
       } else full = true;
       const oldCompleted = new Set(finished().map((r) => r.id));
       if (full) {
-        item = (await api("/studio/sessions/" + sid)).item;
+        item = loadedSession || (await api("/studio/sessions/" + sid)).item;
         if (session?.id !== sid || epoch !== navigationEpoch) return;
         adoptSession(item);
         if (sourceProgress) {
@@ -355,6 +355,8 @@
             ),
         ),
       ];
+      // Source cards and playback are usable before optional analysis details arrive.
+      render();
       if (
         session.analysis_id &&
         (analysis?.analysis_id !== session.analysis_id ||

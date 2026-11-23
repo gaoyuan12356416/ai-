@@ -62,3 +62,17 @@ python3 CHECKOUT/ops/editor-performance/deploy.py rollback --manifest MANIFEST -
 不恢复旧数据库，不删除原片、派生文件、解析缓存、创作输入或回执。配置并发可独立调小，但应用需等独立 API 安全切换点。
 
 本次最终提交号、manifest 路径、线上浏览器截图、恢复回执及测试实际结果随发布验收记录提供。
+
+## 浏览器验收后的静态补充
+
+创作恢复直接复用首次会话响应，先显示完整素材和播放器，再读取解析详情。
+隔离浏览器暂停解析详情请求后，5 张素材卡及可播放视频仍显示，初始化会话读取仅 1 次。
+该补充只发布 HTML/JS，不切换 API、不重启服务，不修改任何任务或数据库。
+
+```sh
+python3 CHECKOUT/ops/editor-performance/static_update.py install --repo CHECKOUT --base PREVIOUS_STATIC_SHA --version SHA
+python3 CHECKOUT/ops/editor-performance/static_update.py rollback --manifest STATIC_MANIFEST
+```
+
+需要回退整个版本时，先回退这个静态补充，再运行前述兼容回滚。
+真实公网首次预览仍受链路波动影响，不能把缓存复播或服务器处理时间当作公网首帧达标证据。
