@@ -49,7 +49,7 @@ def items(directory,meta):
             yield page['page_id'],encoded(summary),raw,sha(raw),[page[k] for k in MONEY],ts
 
 
-def legacy(reader,env,meta,proof,source):
+def legacy(reader,env,meta,proof,source,*,connector=writer):
     v=meta['version'];where=' WHERE profile_version='+literal(v)
     countsql=f"SELECT HEX(JSON_OBJECT('n',COUNT(*))) FROM {LEGACY}"+where
     count=query(reader,countsql)[0]['n'];expected={}
@@ -57,7 +57,7 @@ def legacy(reader,env,meta,proof,source):
     sql=f'INSERT INTO {LEGACY}(profile_version,page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,detail_json,meta_json,payload_sha256,created_at) VALUES '
     shape='(%s,%s,%s,%s,%s,%s,%s,%s,UNCOMPRESS(%s),%s,%s,%s)'
     small_meta=encoded(meta)
-    with closing(writer(env)) as db,db.cursor() as c:
+    with closing(connector(env)) as db,db.cursor() as c:
         if not count:db.begin()
         try:
             batch=[];size=0

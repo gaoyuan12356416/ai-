@@ -1,7 +1,7 @@
 """Version-consistent API projections and session-pinned drama pagination."""
 import json
 from pathlib import Path
-from .common import LEGACY,PORTRAITS,PUBLIC,ROOT,checked,read_config
+from .common import LEGACY,PORTRAITS,PUBLIC,ROOT,checked,encoded,literal
 from .pins import Pins,session
 from .read import Gate,request
 
@@ -36,7 +36,18 @@ class Bound:
         try:return request(self.store.reader,hint,ids,detail=detail,exact=exact)
         except FileNotFoundError:
             if not exact:raise
-            if read_config() in ('live-mirror','live') and not (ROOT/'history-dropped.json').exists():
+            if (ROOT/'history-ready.json').exists():
+                from .history import lookup
+                from features.fb_page_portrait.storage import projections
+                found={};meta=None
+                for pid in ids:
+                    raw,meta=lookup(hint,pid)
+                    if raw is not None:
+                        found[pid]=raw if detail else encoded(projections(json.loads(raw))[0]).encode()
+                return found,meta
+            exists=self.store.reader.query(["SELECT HEX(JSON_OBJECT('n',COUNT(*))) FROM information_schema.tables "
+                                "WHERE table_schema='ads_ai' AND table_name="+literal(LEGACY)])
+            if exists and exists[0]['n']:
                 return request(self.store.reader,hint,ids,table=LEGACY,detail=detail,exact=True)
             raise
 
