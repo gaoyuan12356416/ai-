@@ -12,6 +12,7 @@ from cutover import layout,AFTER
 
 SOCKET=ROOT/'sandbox-socket/mysql.sock'
 FROZEN=ROOT/'history-frozen.json'
+META_LEDGER=Path('/mnt/data-disk/meta-page-recovery/state.sqlite3')
 PAGE_SQL=('page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,meta_json,'
           'payload_sha256,created_at,SHA2(detail_json,256),OCTET_LENGTH(detail_json)')
 
@@ -212,7 +213,7 @@ def references(db,versions,index):
                     pairs.add((v,str(p)));counts['assignment']+=1
                     if not (stage or '').endswith('_unprofiled'):expected.add((v,str(p)))
                     index.write(encoded(dict(source='assignment',task=str(task),item=item,version=v,page=str(p),stage=stage))+'\n')
-    with closing(sqlite3.connect('file:/mnt/data-disk/meta-page-recovery/state.sqlite3?mode=ro',uri=True,timeout=3)) as local:
+    with closing(sqlite3.connect(META_LEDGER.as_uri()+'?mode=ro',uri=True,timeout=3)) as local:
         for task,raw in local.execute('SELECT id,proof FROM jobs WHERE proof IS NOT NULL'):
             try:o=json.loads(raw)
             except (TypeError,ValueError):continue
