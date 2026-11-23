@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import uuid
@@ -30,6 +31,21 @@ def identity(institution, actor):
         raise PromotionError("登录用户身份不完整，请重新登录", "invalid_actor", 401)
     raw = json.dumps(["moboreels", institution, tenant, user], ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()[:32], tenant, user, name
+
+
+def link_identity(short_link_id):
+    """A stable 32-character provider identity for one immutable short link."""
+    if not isinstance(short_link_id, str) or not re.fullmatch(r'[0-9a-f]{64}', short_link_id):
+        raise ValueError('短链关联标识无效')
+    return hashlib.sha256(('moboreels-short-link-v1:' + short_link_id).encode()).hexdigest()[:32]
+
+
+def publisher_identity(institution, record):
+    """Recover the actual owner; upstream star IDs may identify a task instead."""
+    if record.get('tenant_key') and record.get('user_id'):
+        return identity(institution, {'tenant_key': record['tenant_key'], 'user_id': record['user_id'],
+                                     'name': record.get('star_name') or record['user_id']})[0]
+    return record.get('star_user_id') or ''
 
 
 def interpret(envelope, story_id):
@@ -139,8 +155,12 @@ class PromotionManager:
                 c.rollback()
                 raise
 
-    def _read_record(self, actor, story):
+    def _read_record(self, actor, story, *, provider_star_id=None):
         star, _, _, _ = identity(self.settings.institution_user_id, actor)
+        if provider_star_id is not None:
+            if not re.fullmatch(r'[0-9a-f]{32}', provider_star_id):
+                raise ValueError('推广任务标识无效')
+            star = provider_star_id
         key = self.key(star, story)
         with self.connect() as c:
             record = self._load(c, key)
@@ -211,8 +231,8 @@ class PromotionManager:
             rows = c.execute("SELECT record_json FROM promotions WHERE identity_key IN (" + ",".join("?" for _ in keys) + ")", keys).fetchall()
         return {r["story_id"]: r["status"] for r in (json.loads(row[0]) for row in rows)}
 
-    def create(self, actor, story):
-        key, record = self._read_record(actor, story)
+    def create(self, actor, story, *, provider_star_id=None):
+        key, record = self._read_record(actor, story, provider_star_id=provider_star_id)
         if record and record["status"] in ("succeeded", "creating", "unknown"):
             return {"promotion": self.public(record), "reused": True}
         drama = self.db.get_drama(str(story))
@@ -221,6 +241,9 @@ class PromotionManager:
         if int(drama.get("is_show") or 0) != 1:
             raise PromotionError("该短剧已下架，不能新建推广链接；已有链接仍可查看", "drama_unavailable", 409)
         star, tenant, user, name = identity(self.settings.institution_user_id, actor)
+        owner_star = star
+        if provider_star_id is not None:
+            star = provider_star_id
         request_id = uuid.uuid4().hex
         body = {"story_id": str(story), "star_user_id": star, "star_name": name, "project_type": 2}
         with self.connect() as c:
@@ -233,6 +256,7 @@ class PromotionManager:
                 "institution_user_id": self.settings.institution_user_id, "star_user_id": star,
                 "project_type": 2, "story_id": str(story), "tenant_key": tenant, "user_id": user,
                 "star_name": name, "status": "creating", "request_id": request_id,
+                "owner_star_user_id": owner_star,
                 "koc_code": None, "deep_link": None, "home_link": None,
                 "request_json": body, "response_json": None,
                 "created_at": current["created_at"] if current else now(), "updated_at": now(),

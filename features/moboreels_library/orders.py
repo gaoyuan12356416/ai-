@@ -15,7 +15,7 @@ import uuid
 import requests
 
 from .db import Database, _json_expr, _literal, _utc_datetime
-from .promotions import identity
+from .promotions import identity, publisher_identity
 from .provider import ProviderClient
 from .sync import _process_lock, _save_json, utc_now
 
@@ -255,8 +255,8 @@ class ReportStore:
                 time.sleep(2)
         raise ReportError("广告日快照切换结果待核对，历史有效版本保留")
 
-    def query(self, params=None, star_id=None):
-        return _query_report(self, params or {}, star_id)
+    def query(self, params=None, star_id=None, *, owner_scope=None):
+        return _query_report(self, params or {}, star_id, owner_scope=owner_scope)
 
 
 def _period(params=None, today=None):
@@ -580,7 +580,8 @@ class Reports:
 
     def query(self, params, actor, all_users=False):
         star_id = None if all_users else identity(self.settings.institution_user_id, actor)[0]
-        result = self.store.query(params, star_id=star_id)
+        owner_scope = None if all_users else (actor['tenant_key'], actor['user_id'])
+        result = self.store.query(params, star_id=star_id, owner_scope=owner_scope)
         result["scope"] = {"kind": "institution" if all_users else "owner", "label": "机构全部" if all_users else "本人推广"}
         result["last_success_at"] = self.last_success_at()
         return result
@@ -595,13 +596,13 @@ COUNT_METRICS = ("order_recharge_count", "order_refund_count", "unclassified_ord
                  "unmatched_order_count", "unmatched_ad_count", "undated_order_count")
 
 
-def _query_report(store, params, star_id, *, facts=False, story_ids=()):
+def _query_report(store, params, star_id, *, facts=False, story_ids=(), owner_scope=None):
     with localcontext() as context:
         context.prec = 65
-        return _query_report_precise(store, params, star_id, facts=facts, story_ids=story_ids)
+        return _query_report_precise(store, params, star_id, facts=facts, story_ids=story_ids, owner_scope=owner_scope)
 
 
-def _query_report_precise(store, params, star_id, *, facts=False, story_ids=()):
+def _query_report_precise(store, params, star_id, *, facts=False, story_ids=(), owner_scope=None):
     start, end = _period(params, datetime.now(timezone(timedelta(hours=8))).date() if facts else None)
     try:
         page, size = int(params.get("page_index", 1)), int(params.get("page_size", 50))
@@ -624,7 +625,12 @@ def _query_report_precise(store, params, star_id, *, facts=False, story_ids=()):
         order_where += " AND code=" + _literal(code)
         ad_where += " AND a.code=" + _literal(code)
     if star_id is not None:
-        order_where += " AND real_star_user_id=" + _literal(star_id)
+        owner_predicate = "real_star_user_id=" + _literal(star_id)
+        if owner_scope is not None:
+            # Tenant/user are authenticated local ownership, not provider task IDs.
+            owner_predicate += " OR real_star_user_id IN (SELECT star_user_id FROM ads_ai.cdreader_koc_promotion WHERE %s AND status='succeeded' AND tenant_key=%s AND user_id=%s)" % (
+                store.scope(), _literal(owner_scope[0]), _literal(owner_scope[1]))
+        order_where += " AND (" + owner_predicate + ")"
     if story:
         order_where += " AND story_id=" + _literal(story)
     order_sql = """SELECT JSON_OBJECT('_kind','order','date',source_date,'code',code,'story_id',story_id,
@@ -683,6 +689,10 @@ def _query_report_precise(store, params, star_id, *, facts=False, story_ids=()):
         story_names.update({row["story_id"]: row["story_name"] for row in rows})
     groups = {}
 
+    def owned(mapping):
+        return mapping is not None and (mapping['star_user_id'] == star_id or
+                (owner_scope is not None and (mapping.get('tenant_key'), mapping.get('user_id')) == tuple(owner_scope)))
+
     def item_for(day, code_value, story_id, owner_id, mapping):
         if story and story_id != story:
             return None
@@ -695,6 +705,7 @@ def _query_report_precise(store, params, star_id, *, facts=False, story_ids=()):
                     "story_id": story_id if group_by != "day" else "",
                     "story_name": story_names.get(story_id, "") if group_by != "day" else "",
                     "real_star_user_id": owner_id if group_by == "promotion" else "",
+                    "publisher_id": (publisher_identity(store.settings.institution_user_id, mapping) if mapping else owner_id) if group_by == "promotion" else "",
                     "promotion_key": None, "promotion_request_id": None, "promotion_record_id": None, "upstream_promotion_id": None,
                     "owner_name": None, "attribution_status": "matched" if mapping else "unmatched", "unknown_states": []}
             item.update({name: Decimal(0) for name in MONEY_METRICS})
@@ -714,7 +725,7 @@ def _query_report_precise(store, params, star_id, *, facts=False, story_ids=()):
         matches = mappings.get(row["code"], [])
         if row["_kind"] == "ad":
             mapping = matches[0] if len(matches) == 1 else None
-            if star_id is not None and (mapping is None or mapping["star_user_id"] != star_id):
+            if star_id is not None and not owned(mapping):
                 continue
             item = item_for(row.get("date"), row["code"], mapping["story_id"] if mapping else "", mapping["star_user_id"] if mapping else "", mapping)
             if item is None:
@@ -729,6 +740,8 @@ def _query_report_precise(store, params, star_id, *, facts=False, story_ids=()):
         else:
             own = [m for m in matches if m["star_user_id"] == row["real_star_user_id"] and m["story_id"] == row["story_id"]]
             mapping = own[0] if len(own) == 1 else None
+            if star_id is not None and row['real_star_user_id'] != star_id and not owned(mapping):
+                continue
             item = item_for(row.get("date"), row["code"], row["story_id"], row["real_star_user_id"], mapping)
             if item is None:
                 continue

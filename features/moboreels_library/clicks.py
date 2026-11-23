@@ -137,7 +137,7 @@ class ClickStats:
             args.append(platform)
         # The immutable code is the join key, even when many posts share one KOC promotion.
         link_fields = ('institution_user_id', 'tenant_key', 'user_id', 'platform', 'account_id',
-                       'story_id', 'material_id', 'star_user_id')
+                       'story_id', 'material_id', 'star_user_id', 'publisher_name')
         projection = ', '.join("json_extract(l.record_json, '$.%s') AS %s" %
                                (k, 'institution' if k == 'institution_user_id' else k) for k in link_fields)
         scoped = f"""WITH attributed AS (
@@ -152,7 +152,7 @@ class ClickStats:
                 conn.execute('ATTACH DATABASE ? AS names', ((self.directory / 'promotions.sqlite3').as_uri()+'?mode=ro',))
                 source += """ LEFT JOIN names.promotions p ON
                     p.identity_key = institution || ':' || star_user_id || ':2:' || story_id"""
-                select_fields += ", COALESCE(MAX(NULLIF(json_extract(p.record_json,'$.star_name'),'')), user_id) AS publisher_name"
+                select_fields += ", COALESCE(MAX(NULLIF(publisher_name,'')), MAX(NULLIF(json_extract(p.record_json,'$.star_name'),'')), user_id) AS publisher_name"
             conn.execute('BEGIN')
             coverage = conn.execute("SELECT value FROM metadata WHERE key='coverage_from'").fetchone()[0]
             summary = dict(conn.execute(scoped+'SELECT '+METRICS+' FROM scoped', args).fetchone())

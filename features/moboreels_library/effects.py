@@ -16,7 +16,7 @@ import time
 
 from .clicks import BEIJING, publication
 from .orders import MONEY_METRICS, COUNT_METRICS, _period, _query_report
-from .promotions import identity
+from .promotions import identity, publisher_identity
 
 
 DIMENSIONS = ('platform', 'publisher', 'story', 'promotion', 'account', 'day')
@@ -90,7 +90,8 @@ class Effects:
             return deepcopy(pending.result())
         try:
             source = _query_report(self.reports.store, dict(period, group_by='promotion'), star,
-                                   facts=True, story_ids=story_ids)
+                                   facts=True, story_ids=story_ids,
+                                   owner_scope=None if star is None else (actor['tenant_key'], actor['user_id']))
         except BaseException as exc:
             with self._lock:
                 self._pending.pop(key, None)
@@ -139,13 +140,15 @@ class Effects:
         jobs = self.reports._jobs()
         source = self._source(period, actor, None if admin else own_star,
                               tuple(sorted({r['story_id'] for r in links})), jobs)
-        names = {r['star_user_id']: r.get('star_name') or r.get('user_id') or '发布人待归属' for r in promotions}
+        names = {publisher_identity(self.settings.institution_user_id, r): r.get('star_name') or r.get('user_id') or '发布人待归属' for r in promotions}
+        for r in links:
+            names.setdefault(r['star_user_id'], r.get('publisher_name') or r.get('user_id') or '发布人待归属')
         story_names = source.get('story_names', {}).copy()
         story_names.update({r['story_id']: r.get('story_name') or r['story_id'] for r in source['list'] if r.get('story_id')})
         by_code = {r['short_code']: r for r in links}
         destinations = {}
         for r in links:
-            key = (r.get('koc_code'), r.get('story_id'), r.get('star_user_id'))
+            key = (r.get('koc_code'), r.get('story_id'), r.get('provider_star_user_id') or r.get('star_user_id'))
             destinations.setdefault(key, set()).add((r.get('platform') or 'unknown', str(r.get('account_id') or '')))
 
         def labels(story, star, code, channel, account, day):
@@ -174,8 +177,9 @@ class Effects:
             platforms = {p for p, _ in choices}
             channel = next(iter(platforms)) if len(platforms) == 1 else 'shared' if platforms else 'unknown'
             account = next(iter(choices))[1] if len(choices) == 1 else 'shared' if choices else ''
-            names.setdefault(row['real_star_user_id'], row.get('owner_name') or '发布人待归属')
-            fact = labels(row['story_id'], row['real_star_user_id'], row['koc_code'], channel, account, row['date'])
+            publisher_id = row.get('publisher_id') or row['real_star_user_id']
+            names.setdefault(publisher_id, row.get('owner_name') or '发布人待归属')
+            fact = labels(row['story_id'], publisher_id, row['koc_code'], channel, account, row['date'])
             fact.update({k: row[k] for k in MONEY_METRICS + COUNT_METRICS})
             facts.append(fact)
 

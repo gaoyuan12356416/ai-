@@ -10,7 +10,7 @@ import threading
 from urllib.parse import urlsplit
 
 from .db import _utc_datetime
-from .promotions import identity, now, PromotionError
+from .promotions import identity, link_identity, now, PromotionError
 
 
 SHORT_COLUMNS = ('short_link_id', 'institution_user_id', 'project_type', 'promotion_key',
@@ -95,12 +95,6 @@ class ShortLinks:
         drama = self.db.get_drama(values['story_id'])
         if not drama or int(drama.get('is_show') or 0) != 1:
             raise PromotionError('短剧不存在或已下架，不能创建新的推广短链；已生成短链仍可查看', 'drama_unavailable', 409)
-        if saved_target:
-            _, promotion = self.promotions._read_record(actor, values['story_id'])
-            if not promotion or promotion['status'] != 'succeeded':
-                raise PromotionError('请先为这部剧生成自己的推广链接', 'promotion_unavailable', 409)
-            if not safe_target(promotion.get(saved_target)):
-                raise PromotionError('供应方未提供有效的目标链接', 'invalid_promotion_target', 409)
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             record = self._get(c, key)
@@ -110,34 +104,32 @@ class ShortLinks:
                 c.commit(); return self.public(record)
             if record is None:
                 code = secrets.token_urlsafe(12)
+                provider_star = link_identity(key)
                 record = dict(values, short_link_id=key, institution_user_id=self.settings.institution_user_id,
-                    project_type=2, promotion_key=promotion_key(self.settings.institution_user_id,star,values['story_id']),
+                    project_type=2, promotion_key=promotion_key(self.settings.institution_user_id,provider_star,values['story_id']),
                     promotion_request_id=None, koc_code=None, tenant_key=tenant, user_id=user, star_user_id=star,
+                    provider_star_user_id=provider_star, publisher_name=name,
                     short_code=code, short_url='https://ai.yingliangads.com/m/'+code, target_url=None,
                     status='preparing', created_at=now(), updated_at=now())
-                if not saved_target:
-                    self._save(c, record)
-            if saved_target:
-                record.update(promotion_request_id=promotion['request_id'], koc_code=promotion.get('koc_code'),
-                              target_url=promotion[saved_target], status='succeeded', updated_at=now())
                 self._save(c, record)
-                c.commit()
-                return self.public(record)
             c.commit()
         # PromotionManager preserves intent, successful receipts and unknown-result fences.
-        self.promotions.create(actor, values['story_id'])
-        _, promotion = self.promotions._read_record(actor, values['story_id'])
+        # Existing unfinished records retain the old scope, including unknown outcomes.
+        provider_star = record.get('provider_star_user_id')
+        self.promotions.create(actor, values['story_id'], provider_star_id=provider_star)
+        _, promotion = self.promotions._read_record(actor, values['story_id'], provider_star_id=provider_star)
         if not promotion:
             raise PromotionError('推广请求记录暂不可用')
         status = promotion['status']
-        if status == 'succeeded' and not safe_target(promotion.get('deep_link')):
+        target_field = saved_target or 'deep_link'
+        if status == 'succeeded' and not safe_target(promotion.get(target_field)):
             raise PromotionError('推广目标地址未经验证，已保留回执供核对', 'invalid_promotion_target', 409)
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             record = self._get(c, key)
             if record['status'] != 'succeeded':
                 record.update(promotion_request_id=promotion['request_id'], koc_code=promotion.get('koc_code'),
-                              target_url=promotion.get('deep_link') if status=='succeeded' else None,
+                              target_url=promotion.get(target_field) if status=='succeeded' else None,
                               status=status, updated_at=now())
                 self._save(c, record)
             c.commit()
