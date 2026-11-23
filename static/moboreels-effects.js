@@ -96,7 +96,7 @@
     }
     function render(){
       const d=state.data;el.content.hidden=false;el.scopeLabel.textContent=d.scope.label+' · 金额 USD';el.freshness.textContent='最近收入同步：'+beijing(d.last_success_at);
-      el.period.textContent=d.date_from+' 至 '+d.date_to+' · '+d.group_by.map(k=>DIMS[k]).join(' × ');el.queriedAt.textContent='查询更新：'+beijing(d.queried_at);
+      el.period.textContent=d.date_from+' 至 '+d.date_to+' · '+d.group_by.map(k=>DIMS[k]).join(' × ');el.queriedAt.textContent='收益读取：'+beijing(d.financial_queried_at||d.queried_at)+' · 点击查询：'+beijing(d.queried_at);
       const notes=[`订单已同步 ${d.complete_order_days}/${d.requested_days} 天，广告已同步 ${d.complete_ad_days}/${d.requested_days} 天（广告最新来源日 ${d.ad_data_as_of||'未同步'}）。`, '点击按北京时间；收入按 Mobo 来源日期。每小时整点自动同步收入，广告通常 T+1。'];
       if(d.complete_order_days<d.requested_days||d.complete_ad_days<d.requested_days)notes.unshift('收入部分日期尚未同步，下方合计仅含已采集收入，不能当作完整期间收入。');
       if(d.date_from<d.click_coverage_from)notes.push('点击统计从 '+d.click_coverage_from+' 开始，更早日期未覆盖。');

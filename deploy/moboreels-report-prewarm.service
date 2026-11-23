@@ -1,0 +1,18 @@
+[Unit]
+Description=Warm one recently viewed Mobo report scope
+After=moboreels-library.service
+ConditionPathIsMountPoint=/mnt/data-disk
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/moboreels-library/current
+EnvironmentFile=/etc/moboreels-library.env
+ExecCondition=/usr/bin/systemctl is-active --quiet moboreels-library.service
+ExecStart=/usr/bin/python3 -m features.moboreels_library.prewarm
+TimeoutStartSec=200
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077

@@ -186,12 +186,12 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, {"error": "not_found"})
 
     def do_POST(self):
-        if self.path not in ("/internal/dispatch", "/internal/short-links", "/internal/story-metadata", "/internal/actor"):
+        if self.path not in ("/internal/dispatch", "/internal/short-links", "/internal/story-metadata", "/internal/actor", "/internal/report-prewarm"):
             return self.respond(404, {"error": "not_found"})
         settings = self.server.app.settings
         supplied = self.headers.get('Authorization', '')
         authorized = bool(settings.internal_token and secrets.compare_digest(supplied, 'Bearer '+settings.internal_token))
-        if self.path != '/internal/dispatch':
+        if self.path not in ('/internal/dispatch', '/internal/report-prewarm'):
             macro_token = getattr(settings, 'macro_token', '')
             authorized = authorized or bool(macro_token and secrets.compare_digest(supplied, 'Bearer '+macro_token))
         if not authorized:
@@ -208,7 +208,9 @@ class Handler(BaseHTTPRequestHandler):
             envelope = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(envelope, dict):
                 raise ValueError("请求格式无效")
-            if self.path == '/internal/actor':
+            if self.path == '/internal/report-prewarm':
+                status, payload = 200, self.server.app.effects.prewarm_one()
+            elif self.path == '/internal/actor':
                 status, payload = 200, {'actor': resolve_actor(self.server.app.settings, envelope.get('user_id'), envelope.get('tenant_key'))}
             elif self.path == '/internal/short-links':
                 status, payload = 200, self.server.app.short_links.resolve(envelope)

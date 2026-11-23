@@ -1,0 +1,12 @@
+[Unit]
+Description=Prewarm recent Mobo reports without starting sync or publishing work
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=5s
+AccuracySec=1s
+Persistent=false
+Unit=moboreels-report-prewarm.service
+
+[Install]
+WantedBy=timers.target

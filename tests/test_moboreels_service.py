@@ -227,6 +227,11 @@ class ServiceRouteTest(unittest.TestCase):
             self.assertEqual(post("wrong")[0], 403)
             self.settings.macro_token = 'macro-test-token'
             self.assertEqual(post(self.settings.macro_token)[0], 403)
+            self.assertEqual(post(self.settings.macro_token, path='/internal/report-prewarm', body={})[0], 403)
+            self.app.effects = SimpleNamespace(prewarm_one=Mock(return_value={'status': 'idle'}))
+            self.assertEqual(post(self.settings.internal_token, path='/internal/report-prewarm', body={}),
+                             (200, {'status': 'idle'}))
+            self.app.effects.prewarm_one.assert_called_once_with()
             self.assertEqual(post(self.settings.macro_token, path='/internal/story-metadata', body={'story_id':'42'})[0], 200)
             status, body = post(self.settings.internal_token)
             self.assertEqual(status, 200)

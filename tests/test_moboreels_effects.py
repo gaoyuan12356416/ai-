@@ -135,6 +135,42 @@ class EffectsTest(unittest.TestCase):
         self.query(platform='x', q='Title')
         self.assertEqual(len(self.fixture.queries), 2)
 
+    def test_prewarm_refreshes_before_expiry_without_extending_recent_interest(self):
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=100):
+            first = self.query()
+            self.assertEqual(self.effects.prewarm_one()['status'], 'idle')
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=121):
+            self.assertEqual(self.effects.prewarm_one()['status'], 'refreshed')
+        self.assertEqual(len(self.fixture.queries), 4)
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=135):
+            second = self.query()
+        self.assertEqual(first['summary'], second['summary'])
+        self.assertEqual(len(self.fixture.queries), 4, 'old 30-second expiry should already be warmed')
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=436):
+            self.assertEqual(self.effects.prewarm_one()['status'], 'idle')
+        self.assertEqual(len(self.effects._recent), 0)
+
+    def test_prewarm_failure_preserves_fresh_value_and_original_expiry(self):
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=100):
+            first = self.query()
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=121), \
+                patch.object(self.store.reader, '_read', side_effect=RuntimeError('unavailable')):
+            self.assertEqual(self.effects.prewarm_one()['status'], 'failed')
+            self.assertEqual(self.query()['summary'], first['summary'])
+        with patch('features.moboreels_library.effects.time.monotonic', return_value=131):
+            self.query()
+        self.assertEqual(len(self.fixture.queries), 4)
+
+    def test_warmup_registry_is_bounded_and_role_tenant_scoped(self):
+        self.query()
+        self.effects.query(PERIOD, self.actor)
+        self.assertEqual(len(self.effects._recent), 2)
+        with patch('features.moboreels_library.effects._query_report', return_value={'list': [], 'ad_dates': [], 'ad_data_as_of': None}):
+            for index in range(6):
+                self.effects.query(PERIOD, dict(self.actor, tenant_key='other', user_id=str(index)))
+        self.assertEqual(len(self.effects._recent), 4)
+        self.assertTrue(all(k[0] == 'other' and k[2] is False for k in self.effects._recent))
+
     def test_cache_never_crosses_owner_or_admin_scope(self):
         self.query()
         owner = self.effects.query(PERIOD, self.actor)

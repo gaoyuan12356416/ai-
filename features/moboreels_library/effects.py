@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -56,6 +57,46 @@ class Effects:
         self._lock = threading.Lock()
         self._cache = OrderedDict()
         self._pending = {}
+        self._recent = OrderedDict()
+
+    def _remember(self, period, actor):
+        # Only contexts received through the authenticated report route are learned.
+        # Role, tenant and user remain part of both the warmup and income cache key.
+        key = (actor['tenant_key'], actor['user_id'], actor.get('is_admin') is True,
+               period['date_from'], period['date_to'])
+        now = time.monotonic()
+        with self._lock:
+            previous = self._recent.get(key, {})
+            self._recent[key] = {'period': dict(period), 'actor': dict(actor),
+                                 'used': now, 'due': previous.get('due', now + 20)}
+            self._recent.move_to_end(key)
+            while len(self._recent) > 4:
+                self._recent.popitem(last=False)
+
+    def prewarm_one(self):
+        """Refresh one recently viewed scope, serially, without fetching provider data."""
+        now = time.monotonic()
+        with self._lock:
+            for key in list(self._recent):
+                if now - self._recent[key]['used'] >= 300:
+                    del self._recent[key]
+            due = [(v['due'], key) for key, v in self._recent.items() if v['due'] <= now]
+            if not due:
+                return {'status': 'idle'}
+            _, key = min(due)
+            item = deepcopy(self._recent[key])
+            # Prevent overlapping warmup requests from selecting the same context.
+            self._recent[key]['due'] = now + 20
+        try:
+            self.query(item['period'], item['actor'], _prewarm=True)
+        except Exception as exc:
+            logging.warning('Moboreels report prewarm failed: %s', type(exc).__name__)
+            return {'status': 'failed', 'error': type(exc).__name__}
+        finally:
+            with self._lock:
+                if key in self._recent:
+                    self._recent[key]['due'] = time.monotonic() + 20
+        return {'status': 'refreshed'}
 
     def _generation(self, jobs):
         # Local receipts change after partial/successful syncs and new promotion
@@ -73,15 +114,17 @@ class Effects:
                     stamps.append(None)
         return (tuple((j.get('run_id'), j.get('status'), j.get('updated_at'), j.get('finished_at')) for j in jobs), tuple(stamps))
 
-    def _source(self, period, actor, star, story_ids, jobs):
+    def _source(self, period, actor, star, story_ids, jobs, *, refresh=False):
         key = (self.settings.institution_user_id, actor['tenant_key'], actor['user_id'], star,
                period['date_from'], period['date_to'], story_ids, self._generation(jobs))
         with self._lock:
             cached = self._cache.get(key)
-            if cached and cached[0] > time.monotonic():
+            if not refresh and cached and cached[0] > time.monotonic():
                 self._cache.move_to_end(key)
                 return deepcopy(cached[1])
-            self._cache.pop(key, None)
+            # A warmup leaves the still-fresh previous value available to readers.
+            if not cached or cached[0] <= time.monotonic():
+                self._cache.pop(key, None)
             pending = self._pending.get(key)
             owner = pending is None
             if owner:
@@ -92,6 +135,7 @@ class Effects:
             source = _query_report(self.reports.store, dict(period, group_by='promotion'), star,
                                    facts=True, story_ids=story_ids,
                                    owner_scope=None if star is None else (actor['tenant_key'], actor['user_id']))
+            source['financial_queried_at'] = datetime.now(BEIJING).isoformat()
         except BaseException as exc:
             with self._lock:
                 self._pending.pop(key, None)
@@ -105,12 +149,12 @@ class Effects:
             pending.set_result(source)
         return deepcopy(source)
 
-    def query(self, params, actor):
+    def query(self, params, actor, *, _prewarm=False):
         with localcontext() as context:
             context.prec = 65
-            return self._query(params, actor)
+            return self._query(params, actor, _prewarm=_prewarm)
 
-    def _query(self, params, actor):
+    def _query(self, params, actor, *, _prewarm=False):
         today = datetime.now(BEIJING).date()
         period = {'date_from': params.get('date_from') or str(today - timedelta(days=6)),
                   'date_to': params.get('date_to') or str(today)}
@@ -139,7 +183,10 @@ class Effects:
         promotions = [r for r in read_records(root / 'promotions.sqlite3', 'promotions') if in_scope(r)]
         jobs = self.reports._jobs()
         source = self._source(period, actor, None if admin else own_star,
-                              tuple(sorted({r['story_id'] for r in links})), jobs)
+                              tuple(sorted({r['story_id'] for r in links})), jobs, refresh=_prewarm)
+        if _prewarm:
+            return None
+        self._remember(period, actor)
         names = {publisher_identity(self.settings.institution_user_id, r): r.get('star_name') or r.get('user_id') or '发布人待归属' for r in promotions}
         for r in links:
             names.setdefault(r['star_user_id'], r.get('publisher_name') or r.get('user_id') or '发布人待归属')
@@ -222,4 +269,5 @@ class Effects:
                 'order_data_as_of': max((r['date_to'] for r in order_ranges), default=None),
                 'ad_data_as_of': source['ad_data_as_of'], 'complete_ad_days': len(ad_dates),
                 'complete_order_days': len(order_dates), 'requested_days': len(dates),
-                'queried_at': datetime.now(BEIJING).isoformat(), 'source_timezone': 'unspecified'}
+                'queried_at': datetime.now(BEIJING).isoformat(),
+                'financial_queried_at': source.get('financial_queried_at'), 'source_timezone': 'unspecified'}
