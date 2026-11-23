@@ -1,6 +1,9 @@
 """Exercise the emitted aggregation SQL against a representative relational fixture."""
 
 import os
+import io
+import json
+import datetime as dt
 import re
 import sqlite3
 from types import SimpleNamespace
@@ -96,6 +99,10 @@ class SqlFixture:
 
     def query(self, sql):
         self.queries.append(sql)
+        statements = (sql,) if isinstance(sql, str) else sql
+        return [row for statement in statements for row in self.execute(statement)]
+
+    def execute(self, sql):
         self.assert_read_only(sql)
         translated = re.sub(r"FORCE\s+INDEX\s*\([^)]*\)", "", sql, flags=re.I)
         translated = re.sub(
@@ -119,7 +126,8 @@ class SourceContractTests(unittest.TestCase):
         self.fixture = SqlFixture()
         self.addCleanup(self.fixture.db.close)
         self.config = {"pool_id": 648}
-        self.source = source.MySQLSource(self.config, query=self.fixture.query)
+        self.source = source.MySQLSource(self.config, query=self.fixture.query,
+                                         today=lambda: dt.date(2026, 11, 6))
 
     def test_actual_pool_membership_excludes_deleted_and_other_pools_and_deduplicates(self):
         self.assertEqual(self.source.load_scope(self.config), ("101", "202"))
@@ -140,7 +148,7 @@ class SourceContractTests(unittest.TestCase):
         # Products B/C/other/empty/NULL and all pages are eligible; the pool and
         # 11/1 floor still exclude the unrelated account and older high values.
         self.assertEqual(rows[-1]["impression"], 1000)
-        self.assertEqual(len(self.fixture.queries), 2)  # scope + one metric SELECT
+        self.assertEqual(len(self.fixture.queries), 2)  # scope + one metric transaction
 
     def test_account_scope_is_byte_exact_despite_case_and_padded_source_collation(self):
         self.fixture.db.executemany(
@@ -198,7 +206,7 @@ class SourceContractTests(unittest.TestCase):
     def test_account_literal_cannot_escape_filter(self):
         suspicious = "101') OR 1=1 --"
         self.assertEqual(self.source.read_daily((suspicious,)), [])
-        self.assertNotIn(suspicious, self.fixture.queries[-1])
+        self.assertNotIn(suspicious, "\n".join(self.fixture.queries[-1]))
 
     def test_missing_pool_configuration_never_queries_database(self):
         for pool_id in (None, "", 0, -1, "648 OR 1=1"):
@@ -257,7 +265,7 @@ class SourceContractTests(unittest.TestCase):
             self.assertEqual(candidate.read_daily(accounts)[0]["revenue"], Decimal("0.25"))
             self.assertEqual(candidate.load_scope(self.config), accounts)
         self.assertEqual(run.call_count, 3)
-        limits = [(20000, 30, 110), (240000, 250, 330), (20000, 30, 110)]
+        limits = [(20000, 30, 110), (60000, 500, 580), (20000, 30, 110)]
         for invocation, (statement_ms, gate_seconds, outer_seconds) in zip(run.call_args_list, limits):
             options = invocation.kwargs
             self.assertEqual(invocation.args[0][0], "/usr/local/bin/mysql-gated")
@@ -268,6 +276,58 @@ class SourceContractTests(unittest.TestCase):
             self.assertEqual(options["timeout"], outer_seconds)
             self.assertEqual(options["env"]["SQL_GATE_WAIT_TIMEOUT_SECONDS"], "60")
             self.assertEqual(options["env"]["SQL_GATE_RETRY_DELAYS_SECONDS"], "")
+        script = run.call_args_list[1].kwargs['input']
+        self.assertEqual(script.count('START TRANSACTION'), 1)
+        self.assertIn('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;', script)
+        self.assertIn('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY;', script)
+        self.assertEqual(script.count('COMMIT;'), 1)
+
+    def test_daily_boundaries_preserve_the_current_and_future_source_days_once(self):
+        self.fixture.db.executemany(
+            'INSERT INTO kunlunads_dev.ads_tiktok_insights VALUES (?,?,?,?,?,?,?)',
+            [('2026-11-07', 'Any', '101', 0, '2.00', '1.00', '0.25'),
+             ('2026-11-09', 'Any', '101', 0, '3.00', '1.00', '0.50')],
+        )
+        rows = self.source.read_daily(('101', '202'))
+        self.assertEqual([row['day'] for row in rows],
+                         ['2026-11-01', '2026-11-03', '2026-11-05',
+                          '2026-11-06', '2026-11-07', '2026-11-09'])
+        self.assertEqual(sum(row['cost'] for row in rows), Decimal('278.50'))
+
+    def test_failed_later_statement_discards_partial_metric_output(self):
+        partial = SimpleNamespace(returncode=1,
+            stdout='1\n2026-11-01\t10\t1\t1\t0.25\t0.50\n',
+            stderr='ERROR 3024 (HY000): statement execution time exceeded')
+        with patch.dict(os.environ, {'W2A_MYSQL_USER': 'fixture_user', 'W2A_MYSQL_PASSWORD': 'fixture'}), \
+                patch.object(source.subprocess, 'run', return_value=partial):
+            with self.assertRaises(source.SourceError):
+                source.MySQLSource(self.config).read_daily(('101',))
+
+    def test_query_failure_logs_only_numeric_error_and_timing(self):
+        diagnostic = io.StringIO()
+        secret = "fixture-private-password"
+        result = SimpleNamespace(returncode=1, stdout="", stderr=(
+            "ERROR 3024 (HY000) at line 4: maximum statement execution time exceeded; "
+            "SELECT private-account; password=" + secret))
+        with patch.dict(os.environ, {"W2A_MYSQL_USER": "fixture_user", "W2A_MYSQL_PASSWORD": secret}), \
+                patch.object(source.subprocess, "run", return_value=result), \
+                patch.object(source.sys, "stderr", diagnostic):
+            with self.assertRaises(source.SourceError):
+                self.source._query("SELECT dt AS day FROM private_table")
+        event = json.loads(diagnostic.getvalue())
+        self.assertEqual(event["mysql_error_code"], 3024)
+        self.assertEqual(event["kind"], "metrics")
+        self.assertEqual(event["statement_limit_seconds"], 60)
+        self.assertGreaterEqual(event["elapsed_seconds"], 0)
+        for private in (secret, "private-account", "private_table", "SELECT"):
+            self.assertNotIn(private, diagnostic.getvalue())
+
+    def test_query_diagnostics_do_not_block_a_successful_read(self):
+        completed = SimpleNamespace(returncode=0, stdout="1\n42\n", stderr="")
+        with patch.dict(os.environ, {"W2A_MYSQL_USER": "fixture_user", "W2A_MYSQL_PASSWORD": "fixture"}), \
+                patch.object(source.subprocess, "run", return_value=completed), \
+                patch.object(source.sys.stderr, "write", side_effect=OSError("sink closed")):
+            self.assertEqual(self.source._query("SELECT 42"), [("42",)])
 
     def test_invalid_source_metrics_raise_instead_of_fabricating_zero(self):
         invalid = [
