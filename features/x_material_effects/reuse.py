@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from urllib.error import HTTPError
 from .collector import readonly,request,LEDGERS
 from .selection import config_enabled,POLICY
 from .store import ROOT
@@ -23,7 +24,8 @@ def same_pool(source, prior_lane, prior_id, prior_account):
     if prior_lane != source['_lane'] or not prior_id:
         return False
     try:
-        prior = task(prior_lane, prior_id)
+        loader = publisher_task if source.get('_publisher_context') else task
+        prior = loader(prior_lane, prior_id)
     except ValueError:
         return False
     return prior.get('_pool_run') == source['_pool_run']
@@ -39,7 +41,7 @@ def sibling_context(source, context, account_id):
 def pool_scope(context):
     if not context:
         return ''
-    source = task(context['lane'], context['task_id'])
+    source = publisher_task(context['lane'], context['task_id'])
     return source['_lane'] + ':' + str(source['_pool_run']) if source.get('_pool_run') else ''
 
 
@@ -52,7 +54,7 @@ def reservation_conflict(db, material_id, account_id, scope):
 
 
 def local_conflict(db, material_id, account_id, *, reuse_context=None):
-    source = task(reuse_context['lane'], reuse_context['task_id']) if reuse_context else None
+    source = publisher_task(reuse_context['lane'], reuse_context['task_id']) if reuse_context else None
     if db.execute('''SELECT 1 FROM x_post_material_pool p WHERE p.material_key=?
         AND NOT EXISTS(SELECT 1 FROM x_post_queue q WHERE q.pool_item_id=p.id) LIMIT 1''',(material_id,)).fetchone():
         return True
@@ -84,6 +86,40 @@ def client(action,**payload):
     result=request('http://127.0.0.1:8899/internal/x-material-effects/reuse',token,dict(action=action,**payload))
     if not result.get('ok'):raise RuntimeError('x_effect_material_reserved')
     return result
+
+def publisher_request(action, **payload):
+    """Keep broker failures distinct from OAuth failures at the publisher boundary."""
+    from features.x_posts.service import XPostError
+    try:
+        return client(action, **payload)
+    except HTTPError as exc:
+        status = exc.code
+        exc.close()
+        if status == 400:
+            raise XPostError('x_effect_context_invalid', '发布选材记录与原任务不一致，请核对任务记录', 409) from None
+        if status in (401, 403):
+            raise XPostError('x_effect_broker_auth_failed', '发布选材服务内部鉴权失败，请检查服务配置', 503) from None
+        raise XPostError('x_effect_context_unavailable', '发布选材记录暂时无法读取，保留原素材等待重试', 503) from None
+    except RuntimeError as exc:
+        if str(exc) == 'x_effect_material_reserved':
+            raise XPostError('x_effect_material_reserved', '该素材存在其他任务占用或本账号发布记录，已阻止重复发布', 409) from None
+        raise XPostError('x_effect_context_unavailable', '发布选材服务配置不可用，保留原素材等待重试', 503) from None
+    except (OSError, ValueError):
+        raise XPostError('x_effect_context_unavailable', '发布选材记录暂时无法读取，保留原素材等待重试', 503) from None
+
+
+def publisher_task(lane_name, task_id):
+    """Read the broker's verified identity summary without opening its owner's DB."""
+    from features.x_posts.service import XPostError
+    result = publisher_request('context', lane=lane_name, task_id=task_id)
+    source = result.get('item')
+    if (not isinstance(source, dict) or source.get('id') != int(task_id)
+            or source.get('_lane') != lane_name or not source.get('account_id')
+            or type(source.get('_effect_policy')) is not bool
+            or type(source.get('_pool_run')) is not int):
+        raise XPostError('x_effect_context_invalid', '发布选材服务返回的任务身份不一致，已停止本次发布', 503)
+    return dict(source, _publisher_context=True)
+
 
 def task(lane_name,task_id):
     if lane_name not in AUTO_PATHS:raise ValueError('invalid_lane')
@@ -135,6 +171,10 @@ def conflicts(material_ids,account_id,*,own_lane='',own_task=0,own_external='',s
 
 def handle(payload,root=ROOT):
     action=payload.get('action');name=payload.get('lane','ordinary');tid=int(payload.get('task_id',0));account=str(payload.get('account_id',''))
+    if action == 'context':
+        source = task(name, tid)
+        fields = ('id', 'run_id', 'account_id', 'material_id', '_pool_run', '_effect_policy', '_lane')
+        return dict(ok=True, item={key: source[key] for key in fields})
     if action=='check':
         ids=payload.get('material_ids',[])
         if not isinstance(ids,list) or len(ids)>1000 or any(not str(v).isdigit() for v in ids):raise ValueError('invalid_material_ids')

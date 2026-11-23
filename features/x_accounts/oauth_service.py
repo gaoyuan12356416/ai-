@@ -3749,12 +3749,12 @@ def create_post_auto_template_run_request(payload):
     account = accounts[0]
     XPostError, XPostStore, _publish_canary = _x_posts_api()
     reuse = payload.get('reuse_task') or {}
-    if reuse:
-        from features.x_material_effects.reuse import client
-        client('execution', lane=reuse['lane'], task_id=reuse['task_id'],
-            account_id=str(account['id']), material_id=str(payload.get('material_id')),
-            external_task_key=payload.get('external_task_key'))
     try:
+        if reuse:
+            from features.x_material_effects.reuse import publisher_request
+            publisher_request('execution', lane=reuse['lane'], task_id=reuse['task_id'],
+                account_id=str(account['id']), material_id=str(payload.get('material_id')),
+                external_task_key=payload.get('external_task_key'))
         item = XPostStore(POST_DB_PATH).create_auto_template_run(
             payload.get("material_id"),
             int(account["id"]),

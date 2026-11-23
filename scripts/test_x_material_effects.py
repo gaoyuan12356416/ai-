@@ -120,7 +120,8 @@ class ReuseQueueTests(unittest.TestCase):
         from features.x_posts.service import XPostStore,XPostError
         from scripts.test_x_post_priority_manual_store import material_candidate
         actor=dict(user_id='admin',name='Admin')
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch.object(reuse, 'publisher_task',
+                return_value=dict(_pool_run=0, _effect_policy=True, _lane='tag', account_id='3')):
             path=Path(directory)/'posts.sqlite3';publisher=XPostStore(path)
             first=publisher.create_manual_run(['701'],[2],'first',actor)
             plan=publisher.create_manual_plan(first['id'],[material_candidate(first,2,'701')])
@@ -135,6 +136,7 @@ class ReuseQueueTests(unittest.TestCase):
 class BrokerTests(unittest.TestCase):
     def test_serial_grants_block_other_task_then_release_after_terminal_receipt(self):
         sources={1:dict(account_id='2',material_id='',status='selecting'),2:dict(account_id='3',material_id='',status='selecting')}
+        for item in sources.values():item.update(_pool_run=0,_effect_policy=True,_lane='tag')
         with tempfile.TemporaryDirectory() as directory, patch.object(reuse,'task',side_effect=lambda lane,tid:sources[tid]), patch.object(reuse,'conflicts',return_value=set()):
             one=dict(action='reserve',lane='tag',task_id=1,account_id='2',material_id='701')
             two=dict(action='reserve',lane='ordinary',task_id=2,account_id='3',material_id='701')
@@ -144,7 +146,7 @@ class BrokerTests(unittest.TestCase):
             sources[1].update(status='published',material_id='701')
             self.assertTrue(reuse.handle(two,directory)['ok'])
             sources[2].update(status='published',material_id='701')
-            sources[3]=dict(account_id='2',material_id='',status='selecting')
+            sources[3]=dict(account_id='2',material_id='',status='selecting',_pool_run=0,_effect_policy=True,_lane='tag')
             self.assertFalse(reuse.handle(dict(one,task_id=3),directory)['ok'])
     def test_canceled_selection_without_material_releases_its_grant(self):
         sources={1:dict(account_id='2',material_id='',status='selecting'),2:dict(account_id='3',material_id='',status='selecting')}

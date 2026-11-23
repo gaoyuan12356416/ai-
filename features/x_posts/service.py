@@ -10288,8 +10288,8 @@ class XPostStore:
         frozen = self.get_manual_run(run_id, trigger_source)
         reuse_context = frozen.get('reuse_context') or {}
         if reuse_context:
-            from features.x_material_effects.reuse import client
-            client('execution', **reuse_context, account_id=str(frozen['account_ids'][0]),
+            from features.x_material_effects.reuse import publisher_request
+            publisher_request('execution', **reuse_context, account_id=str(frozen['account_ids'][0]),
                 material_id=str(frozen['material_ids'][0]), external_task_key=frozen['external_task_key'])
         personal = None
         if int(frozen.get("copy_contract_version", 1)) == 2:
