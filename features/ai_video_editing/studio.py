@@ -288,6 +288,9 @@ def submit(rt, actor, sid, body, kind="create"):
                 409,
             )
             return {"run_id": prior["id"]}
+        latest=db.execute('SELECT version FROM studio_sessions WHERE id=? AND owner=?',(sid,key)).fetchone()
+        check(latest and latest['version']==current['version'] and body.get('version',current['version'])==current['version'],
+              'version_conflict','创作已更新，请核对最新素材和配置后提交',409)
         rid = ident("sr")
         now = time.time()
         db.execute(
@@ -303,7 +306,7 @@ def submit(rt, actor, sid, body, kind="create"):
             {"config": config, "kind": kind},
         )
         db.execute(
-            "UPDATE studio_sessions SET config=?,updated=? WHERE id=?",
+            "UPDATE studio_sessions SET config=?,version=version+1,updated=? WHERE id=?",
             (packed(config), now, sid),
         )
     event=getattr(rt,'_studio_wake',None)

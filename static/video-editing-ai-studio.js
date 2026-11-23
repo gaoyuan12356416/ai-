@@ -633,6 +633,7 @@
     if (!sourceCount()) return openAssets();
     await ensureSession();
     await api("/studio/sessions/" + session.id + "/analyze", {
+      version: session.version,
       config: config(),
       operation_id: op(),
     });
@@ -659,6 +660,7 @@
         requestReceipt = { signature, operation: op() };
       await api("/studio/sessions/" + session.id + "/submit", {
         config: c,
+        version: session.version,
         operation_id: requestReceipt.operation,
       });
       requestReceipt = null;
