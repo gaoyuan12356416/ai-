@@ -5,11 +5,14 @@ import json
 import os
 from pathlib import Path
 import random
+import signal
+import threading
 import time
 from urllib.parse import urlsplit
 
 from .cache import Response, SingleFlightCache, annotated, cache_key
 from .reports import PATHS
+from .monitor_snapshots import MonitorSnapshots
 
 MONITOR_PATHS = frozenset('/api/pipeline-monitor/' + name for name in ('summary', 'tasks', 'workers'))
 FORWARD_HEADERS = {'content-type', 'content-disposition', 'x-ai-data-time', 'x-ai-data-version', 'x-ai-stale', 'set-cookie'}
@@ -60,18 +63,28 @@ def request(port, target, *, cookie='', token='', body=None, timeout=10, limit=6
 
 
 class Gateway(ThreadingHTTPServer):
-    daemon_threads = True
+    daemon_threads = False
 
     def __init__(self, address, config_path, token):
         super().__init__(address, Handler)
         self.config_path, self.token = Path(config_path), token
         self.report_cache, self.monitor_cache = SingleFlightCache(), SingleFlightCache(ttl=10, max_bytes=32*1024*1024)
+        self.monitor_snapshots = MonitorSnapshots(self.monitor_cache)
+        self.monitor_snapshots.start()
+
+    def server_close(self):
+        if hasattr(self, 'monitor_snapshots'): self.monitor_snapshots.close()
+        super().server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
     def log_message(self, *_): pass
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(45)
 
     def reply(self, value):
         self.response_status = value.status
@@ -111,10 +124,27 @@ class Handler(BaseHTTPRequestHandler):
                 if actor['role'] != 'admin' or not config.get('monitor_cache', False):
                     return self.reply(request(config['api_port'], self.path, cookie=cookie))
                 key = cache_key(actor, self.path, 'monitor-v1')
+                target, api_port, config_path = self.path, config['api_port'], self.server.config_path
                 def load_monitor():
-                    value = request(config['api_port'], self.path, cookie=cookie, timeout=10, limit=4*1024*1024)
+                    value = request(api_port, target, cookie=cookie, timeout=10, limit=4*1024*1024)
                     return Response(value.status, dict(value.headers, **{'X-AI-Data-Time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}), value.body)
                 value, stale, hit = self.server.monitor_cache.get(key, load_monitor, wait=12)
+                def authorized_refresh():
+                    latest_config = json.loads(config_path.read_text())
+                    if not latest_config.get('monitor_cache') or not latest_config.get('monitor_prefetch'):
+                        raise Denied(503, 'monitor_prefetch_disabled')
+                    latest = request(api_port, '/api/auth/status', cookie=cookie, timeout=5, limit=256*1024)
+                    if latest.status != 200: raise Denied(401, 'authentication_unavailable')
+                    current = authenticated_actor(json.loads(latest.body))
+                    if current['role'] != 'admin' or cache_key(current, target, 'monitor-v1') != key:
+                        raise Denied(403, 'permission_changed')
+                    refresh_started = time.monotonic()
+                    refreshed = load_monitor()
+                    print(json.dumps({'kind': 'monitor-refresh', 'path': path, 'status': refreshed.status,
+                                      'milliseconds': round((time.monotonic()-refresh_started)*1000)}), flush=True)
+                    return refreshed
+                if value.status == 200 and config.get('monitor_prefetch', False):
+                    self.server.monitor_snapshots.touch(key, authorized_refresh)
             else:
                 if actor['role'] != 'admin' and not actor['permissions'].get('social_analytics'):
                     raise Denied(403, 'permission_denied')
@@ -146,8 +176,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    Gateway(('127.0.0.1', int(os.environ.get('OFFLOAD_GATEWAY_PORT', '19962'))),
-            os.environ['OFFLOAD_GATEWAY_CONFIG'], os.environ['OFFLOAD_INTERNAL_TOKEN']).serve_forever()
+    server = Gateway(('127.0.0.1', int(os.environ.get('OFFLOAD_GATEWAY_PORT', '19962'))),
+                     os.environ['OFFLOAD_GATEWAY_CONFIG'], os.environ['OFFLOAD_INTERNAL_TOKEN'])
+    def stop(*_): threading.Thread(target=server.shutdown, daemon=True).start()
+    for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, stop)
+    try: server.serve_forever()
+    finally: server.server_close()
 
 
 if __name__ == '__main__': main()

@@ -18,6 +18,7 @@ from unittest.mock import patch
 from features.gpu_offload.cache import Response, SingleFlightCache, Unavailable, annotated, cache_key
 from features.gpu_offload.gateway import Gateway, authenticated_actor, navigation_allowed, Denied
 from features.gpu_offload.reader import accept_snapshot
+from features.gpu_offload.monitor_snapshots import MonitorSnapshots
 from features.gpu_offload.reports import render, validate_actor, validate_target
 from tests.test_social_analytics import DAY, catalog, metric
 
@@ -93,19 +94,61 @@ class AuthorizationTests(unittest.TestCase):
             with self.assertRaises(ValueError): validate_target(target)
 
 
+class MonitorSnapshotTests(unittest.TestCase):
+    def test_refresh_keeps_fifteen_second_poll_inside_ten_second_cache(self):
+        now, loads = [0.0], []
+        cache = SingleFlightCache(ttl=10, clock=lambda: now[0])
+        def loader():
+            loads.append(now[0]); return Response(200, {}, str(now[0]).encode())
+        snapshots = MonitorSnapshots(cache, clock=lambda: now[0], pressure=lambda: True)
+        cache.get('admin', loader); snapshots.touch('admin', loader)
+        for value in (5, 10): now[0] = value; snapshots.tick()
+        now[0] = 15
+        value, stale, hit = cache.get('admin', loader)
+        self.assertEqual(value.body, b'10'); self.assertTrue(hit); self.assertFalse(stale)
+        self.assertEqual(loads, [0.0, 5, 10])
+        now[0] = 41; snapshots.tick()
+        self.assertEqual(len(loads), 3); self.assertFalse(snapshots.jobs)
+
+    def test_pressure_pauses_background_reads_without_blocking_foreground(self):
+        now, loads = [0.0], []
+        cache = SingleFlightCache(ttl=10, clock=lambda: now[0])
+        def loader(): loads.append(1); return Response(200, {}, b'current')
+        snapshots = MonitorSnapshots(cache, clock=lambda: now[0], pressure=lambda: False)
+        cache.get('a', loader); snapshots.touch('a', loader)
+        now[0] = 15; snapshots.tick(); self.assertEqual(loads, [1])
+        self.assertEqual(cache.get('a', loader)[0].body, b'current')
+        self.assertEqual(loads, [1, 1])
+
+    def test_revoked_background_read_is_removed_and_not_retried(self):
+        now, attempts = [0.0], []
+        cache = SingleFlightCache(ttl=10, clock=lambda: now[0])
+        cache.get('a', lambda: Response(200, {}, b'old'))
+        def revoked(): attempts.append(1); raise Denied(403, 'permission_changed')
+        snapshots = MonitorSnapshots(cache, clock=lambda: now[0], pressure=lambda: True)
+        snapshots.touch('a', revoked); now[0] = 5; snapshots.tick()
+        now[0] = 10; snapshots.tick()
+        self.assertEqual(attempts, [1]); self.assertFalse(snapshots.jobs)
+
+
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2])
         root = Path(self.temp.name)
         self.user = dict(tenant_key='t', user_id='alice', role='user', permissions={'social_analytics': True})
-        self.auth_calls, self.query_calls, self.failed = 0, 0, False
+        self.auth_calls, self.query_calls, self.monitor_calls, self.failed = 0, 0, 0, False
         owner = self
         class Upstream(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_GET(self):
-                owner.auth_calls += 1
-                data = json.dumps({'authenticated': True, 'user': owner.user}).encode()
-                self.send_response(200); self.end_headers(); self.wfile.write(data)
+                if self.path == '/api/auth/status':
+                    owner.auth_calls += 1
+                    data = json.dumps({'authenticated': True, 'user': owner.user}).encode()
+                else:
+                    owner.monitor_calls += 1
+                    data = json.dumps({'workers': [1]}).encode()
+                self.send_response(200); self.send_header('Content-Type', 'application/json')
+                self.end_headers(); self.wfile.write(data)
             def do_POST(self):
                 owner.query_calls += 1
                 value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
@@ -128,10 +171,10 @@ class GatewayTests(unittest.TestCase):
         for thread in self.threads: thread.join()
         self.temp.cleanup()
 
-    def read(self):
+    def read(self, target='/api/social-analytics/report'):
         connection = http.client.HTTPConnection('127.0.0.1', self.gateway.server_port)
         try:
-            connection.request('GET', '/api/social-analytics/report', headers={'Cookie': 'test_session=real_cookie_only'})
+            connection.request('GET', target, headers={'Cookie': 'test_session=real_cookie_only'})
             response = connection.getresponse(); return response.status, json.loads(response.read())
         finally: connection.close()
 
@@ -158,6 +201,26 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(value['meta']['offload_cache_stale'])
         self.assertTrue(value['warnings'])
         self.read(); self.assertEqual(self.query_calls, 2)
+
+    def test_monitor_prefetch_rechecks_role_and_configuration(self):
+        self.gateway.monitor_snapshots.close()
+        self.gateway.monitor_snapshots.pressure = lambda: True
+        self.user['role'] = 'admin'
+        path = self.gateway.config_path
+        config = json.loads(path.read_text()); config.update(monitor_cache=True, monitor_prefetch=True)
+        path.write_text(json.dumps(config))
+        self.assertEqual(self.read('/api/pipeline-monitor/workers')[0], 200)
+        self.assertEqual(self.monitor_calls, 1)
+        for job in self.gateway.monitor_snapshots.jobs.values(): job['due'] = 0
+        self.user['role'] = 'user'
+        self.gateway.monitor_snapshots.tick()
+        self.assertFalse(self.gateway.monitor_snapshots.jobs); self.assertEqual(self.monitor_calls, 1)
+        self.user['role'] = 'admin'
+        self.assertEqual(self.read('/api/pipeline-monitor/workers')[0], 200)
+        config['monitor_prefetch'] = False; path.write_text(json.dumps(config))
+        for job in self.gateway.monitor_snapshots.jobs.values(): job['due'] = 0
+        self.gateway.monitor_snapshots.tick()
+        self.assertFalse(self.gateway.monitor_snapshots.jobs); self.assertEqual(self.monitor_calls, 1)
 
 
 class SnapshotTests(unittest.TestCase):

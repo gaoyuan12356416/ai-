@@ -35,7 +35,7 @@ class SingleFlightCache:
         self.entries, self.failures, self.pending = OrderedDict(), OrderedDict(), {}
         self.size, self.lock = 0, threading.Lock()
 
-    def get(self, key, loader, wait=40):
+    def get(self, key, loader, wait=40, refresh=False):
         deadline = self.clock() + wait
         while True:
             with self.lock:
@@ -43,7 +43,7 @@ class SingleFlightCache:
                 entry = self.entries.get(key)
                 if entry:
                     self.entries.move_to_end(key)
-                    if now - entry[0] <= self.ttl:
+                    if not refresh and now - entry[0] <= self.ttl:
                         return entry[1], False, True
                 if now < self.failures.get(key, 0):
                     if entry: return entry[1], True, True

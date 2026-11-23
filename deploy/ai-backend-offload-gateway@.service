@@ -1,0 +1,22 @@
+[Unit]
+Description=Authenticated AI backend read cache gateway (%i)
+After=network.target drama-material-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/gateway-%i-current
+EnvironmentFile=/etc/ai-backend-offload/gateway-%i.env
+ExecStart=/usr/bin/python3 -m features.gpu_offload.gateway
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90
+SendSIGKILL=no
+Nice=10
+CPUQuota=100%
+CPUShares=128
+MemoryLimit=768M
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
