@@ -1,0 +1,163 @@
+"""ads_ai is authoritative; publish verified online versions without local copies."""
+import hashlib
+from contextlib import closing
+import json
+from pathlib import Path
+import re
+import os
+import time
+from .runtime import encoded, atomic_json, literal
+
+TABLE = 'ads_ai.fb_page_revenue_profile'
+ROOT = '/mnt/data-disk/fb-page-portraits'
+VERSION_RE = r'[0-9]{8}T[0-9]{12}Z'
+DDL = '''CREATE TABLE IF NOT EXISTS ads_ai.fb_page_revenue_profile (
+ profile_version VARCHAR(32) NOT NULL,page_id VARCHAR(32) NOT NULL,
+ window_start DATE NOT NULL,window_end DATE NOT NULL,
+ paid_cents BIGINT NOT NULL,social_cents BIGINT NOT NULL,spend_cents BIGINT NOT NULL,
+ summary_json LONGTEXT NOT NULL,detail_json LONGTEXT NOT NULL,meta_json LONGTEXT NOT NULL,
+ payload_sha256 CHAR(64) NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(profile_version,page_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Managed Facebook Page 7-day paid plus confirmed-social income portraits' '''
+
+
+def projections(profile):
+    tree = {k:v for k,v in profile.items() if k!='audiences'}
+    tree['audiences'] = [{**a, 'children': [{k:v for k,v in t.items() if k!='dramas'} for t in a['children']]} for a in profile['audiences']]
+    summary = {k:v for k,v in tree.items() if k not in ('audiences','combinations','audience_basis_counts')}
+    summary['audiences'] = [{k:v for k,v in a.items() if k!='children'} for a in tree['audiences']]
+    return summary,tree
+
+
+def readback(reader,version,ids):
+    base=f' FROM {TABLE} WHERE profile_version={literal(version)}'
+    count=reader.query(["SELECT HEX(JSON_OBJECT('rows',COUNT(*)))"+base],timeout=30)
+    if len(count)!=1 or count[0]['rows']!=len(ids):return []
+    def read(part):
+        sql="SELECT HEX(JSON_OBJECT('page_id',page_id,'hash',SHA2(detail_json,256),'paid_cents',paid_cents,'social_cents',social_cents,'spend_cents',spend_cents))"+base
+        sql+=' AND page_id IN ('+','.join(map(literal,part))+')'
+        try:return reader.query([sql],timeout=30)
+        except Exception as exc:
+            if '3024' not in str(exc) or len(part)<=1:raise
+            middle=len(part)//2
+            return read(part[:middle])+read(part[middle:])
+    result=[]
+    for offset in range(0,len(ids),100):
+        result.extend(read(ids[offset:offset+100]))
+        print(encoded(dict(event='profile_readback',verified=len(result),total=len(ids))),flush=True)
+    return result
+
+
+def write(data,env,reader,*,create_table=False):
+    import pymysql
+    version = data['meta']['version']
+    assert re.fullmatch(VERSION_RE,version)
+    pages = data['pages']
+    hashes = {pid:hashlib.sha256(encoded(p).encode()).hexdigest() for pid,p in pages.items()}
+    existing = []
+    if not create_table:
+        existing = reader.query([f'SELECT HEX(JSON_OBJECT(\'page_id\',page_id,\'hash\',payload_sha256)) FROM {TABLE} WHERE profile_version={literal(version)}'],timeout=30)
+    if existing and {r['page_id']:r['hash'] for r in existing} != hashes:
+        raise RuntimeError('existing_version_conflicts_do_not_rewrite')
+    if not existing:
+        with pymysql.connect(host='101.32.56.53',port=63353,user=env['ADMIN_MAPPING_MYSQL_USER'],
+                    password=env['ADMIN_MAPPING_MYSQL_PASSWORD'],database='ads_ai',charset='utf8mb4',
+                    connect_timeout=3,read_timeout=30,write_timeout=30,autocommit=False) as db:
+            with db.cursor() as q:
+                q.execute('SELECT DATABASE(),@@read_only')
+                assert q.fetchone() == ('ads_ai',0)
+                if create_table: q.execute(DDL)
+                def records():
+                    for pid,p in pages.items():
+                        summary,_ = projections(p)
+                        yield (version,pid,data['meta']['start'],data['meta']['end'],p['paid_cents'],p['social_cents'],p['spend_cents'],encoded(summary),encoded(p),encoded(data['meta']),hashes[pid])
+                # The deployed PyMySQL driver consumes this iterator in bounded
+                # ~1 MiB SQL statements, without retaining all page strings.
+                q.executemany('INSERT INTO '+TABLE+' (profile_version,page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,detail_json,meta_json,payload_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',records())
+            db.commit()
+    verified = False
+    for attempt in range(5):
+        check = readback(reader,version,list(pages))
+        if {r['page_id']:r['hash'] for r in check} == hashes:
+            verified = True; break
+        time.sleep(2)
+    if not verified: raise RuntimeError('ads_ai_readback_pending_do_not_repeat_write')
+    for field,total in data['meta']['audit'].items():
+        assert sum(r[field] for r in check) == total
+    return dict(version=version,table=TABLE,verified_rows=len(check),payload_hashes=hashes,**data['meta']['audit'])
+
+
+def publish(data,proof,root=ROOT,*,page_items=None):
+    root = Path(root);root.mkdir(parents=True,exist_ok=True)
+    version = data['meta']['version']
+    count=len(data['pages']) if page_items is None else data['meta']['page_count']
+    assert proof['version']==version and proof['verified_rows']==count
+    # Preserve streaming recovery and validate every committed payload before
+    # changing the tiny pointer. Readers query the authoritative MySQL version.
+    seen=set()
+    for pid,p in (data['pages'].items() if page_items is None else page_items):
+        assert pid not in seen;seen.add(pid)
+        assert hashlib.sha256(encoded(p).encode()).hexdigest()==proof['payload_hashes'][pid]
+    assert len(seen)==count and seen==set(proof['payload_hashes'])
+    if (root/'current.json').exists():
+        current=json.loads((root/'current.json').read_text())
+        if current['version']!=version: atomic_json(root/'previous.json',current)
+    atomic_json(root/'current.json',dict(version=version,database=TABLE,backend='mysql'))
+
+
+class Store:
+    def __init__(self,root=ROOT,connector=None):
+        self.root=Path(root)
+        self.connector=connector
+
+    def chosen_version(self,version=None):
+        if version is not None and not re.fullmatch(VERSION_RE,version):raise ValueError('invalid_version')
+        chosen=version or json.loads((self.root/'current.json').read_text())['version']
+        if not re.fullmatch(VERSION_RE,chosen):raise ValueError('invalid_version')
+        return chosen
+
+    def connect(self):
+        if self.connector is not None:return self.connector()
+        import pymysql
+        env={}
+        for line in Path('/root/drama_material_service/.env').read_text().splitlines():
+            if line and not line.startswith('#') and '=' in line:
+                key,value=line.split('=',1);env[key.strip()]=value.strip().strip('"\'')
+        env.update(os.environ)
+        return pymysql.connect(host='101.32.56.53',port=63353,
+            user=env['ADMIN_MAPPING_MYSQL_USER'],password=env['ADMIN_MAPPING_MYSQL_PASSWORD'],
+            database='ads_ai',charset='utf8mb4',connect_timeout=5,read_timeout=20,
+            write_timeout=10,autocommit=True,
+            init_command='SET SESSION TRANSACTION READ ONLY')
+
+    def load(self,ids,*,detail=False,version=None):
+        assert 1<=len(ids)<=20
+        chosen=self.chosen_version(version)
+        with closing(self.connect()) as db,db.cursor() as q:
+            field='detail_json' if detail else 'summary_json'
+            q.execute(f'SELECT page_id,{field},meta_json FROM {TABLE} WHERE profile_version=%s AND page_id IN ('+','.join('%s' for _ in ids)+')',[chosen,*ids])
+            rows=q.fetchall()
+            if rows:raw_meta=rows[0][2]
+            else:
+                q.execute(f'SELECT meta_json FROM {TABLE} WHERE profile_version=%s LIMIT 1',(chosen,))
+                record=q.fetchone()
+                if record is None:raise FileNotFoundError('snapshot_expired')
+                raw_meta=record[0]
+        meta={k:v for k,v in json.loads(raw_meta).items() if k not in ('audit','page_count')}
+        items={pid:(projections(json.loads(p))[1] if detail else json.loads(p)) for pid,p,_ in rows}
+        return dict(items=items,meta=meta)
+
+    def dramas(self,pid,path,version,page):
+        chosen=self.chosen_version(version)
+        with closing(self.connect()) as db,db.cursor() as q:
+            q.execute(f'SELECT detail_json FROM {TABLE} WHERE profile_version=%s AND page_id=%s',(chosen,pid))
+            row=q.fetchone()
+            if row is None:
+                q.execute(f'SELECT 1 FROM {TABLE} WHERE profile_version=%s LIMIT 1',(chosen,))
+                if q.fetchone() is None:raise FileNotFoundError('snapshot_expired')
+        dramas=[]
+        if row:
+            for audience in json.loads(row[0])['audiences']:
+                for child in audience['children']:
+                    if audience['key']+'/'+child['key']==path:dramas=child['dramas'];break
+        return dict(items=dramas[(page-1)*50:page*50],page=page,page_size=50,total=len(dramas),version=chosen)
