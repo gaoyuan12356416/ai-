@@ -63,6 +63,7 @@ def prepare():
 
 def install(rollback=False,update=False):
     m=json.loads((ROOT/'deployment.json').read_text());assert str(LIVE.resolve())==m['runtime']
+    gateway_changed=not update or sha(SOURCE/'features/x_tag_publish/gateway.py')!=sha(LIVE/'features/x_tag_publish/gateway.py')
     for f in m['files']:
         p=LIVE/f['name'];expected=f['after'] if rollback or update else f['before']
         assert (sha(p) if p.exists() else None)==expected,'concurrent_change:'+f['name']
@@ -74,7 +75,7 @@ def install(rollback=False,update=False):
         tmp=p.with_name(p.name+'.today-next');tmp.write_bytes(src.read_bytes());os.chown(tmp,f['uid'],f['gid']);os.chmod(tmp,f['mode']);os.replace(tmp,p)
         if update:f['after']=sha(src)
     if update:m['commit']=run('git','-C',SOURCE,'rev-parse','HEAD')
-    run('systemctl','restart','x-tag-gateway.service')
+    if gateway_changed:run('systemctl','restart','x-tag-gateway.service')
     m['old_pid']=run('systemctl','show','x-tag-post.service','-p','MainPID','--value')
     m['stage']='rollback_pending' if rollback else 'restart_pending';save('deployment.json',m)
     run('systemctl','restart','--no-block','x-tag-post.service')

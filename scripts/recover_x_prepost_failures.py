@@ -33,7 +33,7 @@ KNOWN_CODES = frozenset(('x_upstream_error', 'media_download_failed',
     'media_download_incomplete', 'youtube_source_download_failed',
     'canonical_bridge_unavailable', 'coordinator_unavailable', 'x_dispatch_failed',
     'x_attribution_resolution_unavailable', 'media_transcode_failed', 'x_tag_dispatch_failed',
-    'x_tag_account_snapshot_unavailable'))
+    'x_tag_account_snapshot_unavailable', 'service_unavailable'))
 
 
 def stable_job(row):
