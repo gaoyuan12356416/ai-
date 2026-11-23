@@ -3,11 +3,13 @@ import argparse
 import json
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import time
 import urllib.error
 import urllib.request
-from deploy import ROOT,SOURCE,atomic,backup,build,disk,put,stamp
+from contextlib import closing
+from deploy import BASES,ROOT,SOURCE,atomic,backup,build,disk,put,stamp
 
 ROLES={
  'api':('fb-page-portrait',18852,21852,'/etc/nginx/default.d/fb-page-portrait.conf'),
@@ -130,20 +132,62 @@ def override(role,rollback=False):
             ('ReadWritePaths='+str(ROOT/'pins')+'\n' if role=='api' else ''))
 
 
+def outbox_snapshot():
+    path='file:/mnt/data-disk/fb-page-assignment/outbox.sqlite3?mode=ro'
+    with closing(sqlite3.connect(path,uri=True,timeout=3)) as db:
+        rows=db.execute('SELECT task_id,initial_hash,feishu_message_id,revision,synced_revision,alert_status FROM fb_page_assignment_requests').fetchall()
+    return {task:(digest,message,revision,synced,status) for task,digest,message,revision,synced,status in rows}
+
+
+def restart_canonical(role,name,normal):
+    if role=='api':
+        # The previous API process has no graceful SIGTERM handler. The old Nginx generation has finished.
+        while cmd('ss','-Htn','state','established','sport','=',':'+str(normal)):time.sleep(.3)
+        cmd('systemctl','restart',name+'.service')
+        return
+    # The canonical assignment worker finishes any active notification or write before its successor starts.
+    # Apply the stop timeout only for this one handoff. Green continues accepting requests.
+    drain=Path('/run/systemd/system')/(name+'.service.d')/'zz-portrait-assignment-drain.conf'
+    content='[Service]\nTimeoutStopSec=infinity\n'
+    if drain.exists() and drain.read_text()!=content:raise RuntimeError('concurrent assignment drain override')
+    put(drain,content)
+    try:
+        cmd('systemctl','daemon-reload')
+        if cmd('systemctl','show',name+'.service','-p','TimeoutStopUSec','--value')!='infinity':
+            raise RuntimeError('assignment handoff cannot preserve in-flight work')
+        cmd('systemctl','restart',name+'.service')
+    finally:
+        drain.unlink(missing_ok=True)
+        cmd('systemctl','daemon-reload')
+
+
 def handoff(rollback=False):
     r=json.loads((ROOT/'green-ready.json').read_text())
     if not rollback and r['revision']!=SOURCE.name:raise RuntimeError('unverified green release')
     for role,(_,_,green,_) in ROLES.items():ready(role,green)
+    ledger_file=ROOT/'qa'/('outbox-'+('rollback-' if rollback else 'forward-')+SOURCE.name+'.json')
+    if ledger_file.exists():before=json.loads(ledger_file.read_text())
+    else:
+        before=outbox_snapshot()
+        atomic(ledger_file,before)
     route(True)
     # A new HTTP owner can already accept requests. The standby cannot start an outbox worker.
     for role,(name,normal,_,_) in ROLES.items():
         override(role,rollback)
         cmd('systemctl','daemon-reload')
-        cmd('systemctl','restart',name+'.service')
+        pid=cmd('systemctl','show',name+'.service','-p','MainPID','--value')
+        expected=BASES[role].resolve() if rollback else build(role)
+        if pid=='0' or Path('/proc/'+pid+'/cwd').resolve()!=expected:restart_canonical(role,name,normal)
         ready(role,normal)
     route(False)
     for role in ROLES:cmd('systemctl','stop','fb-page-current-'+role+'-green.service')
-    atomic(ROOT/('readers-rollback.json' if rollback else 'readers-live.json'),dict(revision=SOURCE.name,at=stamp()))
+    after=outbox_snapshot()
+    changed=[task for task in before.keys() & after.keys() if before[task][0]!=after[task][0]
+             or (before[task][1] and before[task][1]!=after[task][1]) or after[task][3]<before[task][3]]
+    ledger=dict(before=len(before),after=len(after),new=len(after.keys()-before.keys()),removed=len(before.keys()-after.keys()),
+                changed_prior_receipts=len(changed),pending_after=sum(v[2]>v[3] for v in after.values()),
+                sending_after=sum(v[4]=='sending' for v in after.values()))
+    atomic(ROOT/('readers-rollback.json' if rollback else 'readers-live.json'),dict(revision=SOURCE.name,at=stamp(),outbox=ledger))
 
 
 if __name__=='__main__':
