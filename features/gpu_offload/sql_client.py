@@ -73,25 +73,32 @@ class Session:
                 if exc.code!='query_rate' or exc.retry_after>2:raise
                 if self.done.wait(max(0.01,exc.retry_after)):raise AdmissionError('query_session_closed')
 
-    def connect(self,*,user,password,database=None,report_options=False):
-        import pymysql
+    def admit_sql(self,sql):
+        text=bytes(sql).decode('utf-8','replace') if isinstance(sql,(bytes,bytearray)) else str(sql)
+        if self.identity is not None and text.lstrip().split(None,1)[0].upper() not in ('SELECT','SHOW'):
+            raise AdmissionError('business_statement_must_be_read_only')
+        self.query_start()
+
+    def connect(self,*,user,password,database=None,report_options=False,compressed=False):
+        # Resolve the driver before acquiring a scarce database lease.
+        if compressed:
+            from .sql_compressed import connection_factory
+            factory=connection_factory(self)
+        else:
+            import pymysql
+            session=self
+            class Connection(pymysql.connections.Connection):
+                def _execute_command(self,command,sql):
+                    if command==pymysql.constants.COMMAND.COM_QUERY:session.admit_sql(sql)
+                    return super()._execute_command(command,sql)
+            factory=lambda **options:Connection(**options,cursorclass=pymysql.cursors.DictCursor,
+                                               connect_timeout=4,program_name='ai-offload/'+self.key)
         self.broker.flush_closed()
         self.key=self.broker.call('acquire',{'task':self.task})['id']
         self.broker.call('begin',{'lease_id':self.key})
-        session=self
-        class Connection(pymysql.connections.Connection):
-            def _execute_command(self,command,sql):
-                if command==pymysql.constants.COMMAND.COM_QUERY:
-                    text=sql.decode('utf-8','replace') if isinstance(sql,bytes) else str(sql)
-                    if session.identity is not None and text.lstrip().split(None,1)[0].upper() not in ('SELECT','SHOW'):
-                        raise AdmissionError('business_statement_must_be_read_only')
-                    session.query_start()
-                return super()._execute_command(command,sql)
         self.connect_attempted=True
-        self.connection=Connection(host='127.0.0.1',port=19969,user=user,password=password,database=database,
-                                   charset='utf8mb4',cursorclass=pymysql.cursors.DictCursor,connect_timeout=4,
-                                   read_timeout=60,write_timeout=15,autocommit=True,
-                                   program_name='ai-offload/'+self.key)
+        self.connection=factory(host='127.0.0.1',port=19969,user=user,password=password,database=database,
+                                charset='utf8mb4',read_timeout=60,write_timeout=15,autocommit=True)
         def watch():
             while not self.done.wait(5):
                 try:
@@ -137,7 +144,7 @@ class Session:
                     # accepted as that proof.
                     self.connection._write_bytes(b'\x01\x00\x00\x00\x01')
                     wire.settimeout(4);eof=wire.recv(1)==b''
-            except (OSError,AttributeError):pass
+            except Exception:pass  # A driver error is not proof of server EOF.
             finally:self.connection._force_close()
         if eof:self.broker.closed(self.key,self.identity)
         elif self.key and not self.connect_attempted:
@@ -149,10 +156,10 @@ class Session:
 
 
 @contextmanager
-def read_session(broker,task,*,user,password,database=None,budget_seconds=840,statement_timeout_ms=15000,report_options=False):
+def read_session(broker,task,*,user,password,database=None,budget_seconds=840,statement_timeout_ms=15000,report_options=False,compressed=False):
     session=Session(broker,task,budget_seconds=budget_seconds,statement_timeout_ms=statement_timeout_ms)
     try:
-        session.connect(user=user,password=password,database=database,report_options=report_options)
+        session.connect(user=user,password=password,database=database,report_options=report_options,compressed=compressed)
         yield session
         if session.lost.is_set():raise AdmissionError('query_lease_lost')
     finally:session.close()

@@ -2,6 +2,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from contextlib import contextmanager,ExitStack
+from types import SimpleNamespace
 
 from features.gpu_offload.sql_client import Broker,Session,AdmissionError
 from features.gpu_offload.sql_leases import LeaseBook
@@ -97,6 +99,58 @@ class ClientTests(unittest.TestCase):
             broker.flush_closed();self.assertEqual(call.call_count,1)
             self.assertEqual(call.call_args.args[0],'release')
         self.assertFalse(list((self.root/'receipts').glob('*.json')))
+
+    @contextmanager
+    def compressed_driver(self):
+        from mysql.connector.constants import ClientFlag
+        from mysql.connector.network import NetworkBrokerCompressed
+        owner=self;options={};wire=Wire()
+        def connect(connection,**kwargs):
+            options.update(kwargs)
+            connection._socket=SimpleNamespace(sock=wire,_netbroker=NetworkBrokerCompressed())
+            connection._client_flags=ClientFlag.COMPRESS
+            connection.cmd_query('SET NAMES utf8mb4')
+            connection.cmd_query('SET @@session.autocommit = ON')
+        class CompressedCursor(Cursor):
+            def execute(self,sql,args=None):self.connection.cmd_query(sql)
+        def quit_command(connection):wire.quit_written=True
+        replacements=dict(connect=connect,cmd_query=lambda connection,query,*args,**kwargs:owner.sql.append(query),
+                          cursor=lambda connection,**kwargs:CompressedCursor(connection),cmd_quit=quit_command,
+                          shutdown=lambda connection:wire.shutdown(2))
+        with ExitStack() as stack:
+            for name,value in replacements.items():
+                stack.enter_context(patch('mysql.connector.connection.MySQLConnection.'+name,new=value))
+            yield options,wire
+
+    def test_compressed_transport_keeps_setup_rate_readonly_and_peer_close(self):
+        with self.compressed_driver() as (options,wire):
+            session=Session(self.broker,'fixture')
+            session.connect(user='fixture',password='fixture',compressed=True,report_options=True)
+            self.assertTrue(options['compress']);self.assertFalse(options['allow_local_infile'])
+            self.assertEqual(options['read_timeout'],60)
+            self.assertEqual(self.calls.count('query'),9)
+            self.assertEqual(self.book.occupied,1)
+            session.cursor().execute(bytearray(b'SELECT 1'))
+            self.assertEqual(self.calls.count('query'),10)
+            with self.assertRaises(AdmissionError):session.cursor().execute(bytearray(b'DELETE FROM forbidden'))
+            self.assertEqual(self.calls.count('query'),10)
+            session.close()
+            self.assertTrue(wire.quit_written);self.assertTrue(wire.aborted)
+            self.assertEqual(self.book.occupied,0)
+
+    def test_compressed_aborted_socket_never_frees_shared_capacity(self):
+        with self.compressed_driver() as (_,wire):
+            session=Session(self.broker,'fixture')
+            session.connect(user='fixture',password='fixture',compressed=True)
+            session.locally_aborted=True;session.close()
+            self.assertFalse(wire.quit_written);self.assertEqual(self.book.occupied,1)
+
+    def test_compressed_close_error_never_frees_shared_capacity(self):
+        from mysql.connector.errors import InterfaceError
+        with self.compressed_driver(),patch('mysql.connector.connection.MySQLConnection.cmd_quit',side_effect=InterfaceError('connection lost')):
+            session=Session(self.broker,'fixture')
+            session.connect(user='fixture',password='fixture',compressed=True)
+            session.close();self.assertEqual(self.book.occupied,1)
 
 
 if __name__=='__main__':unittest.main()
