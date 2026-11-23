@@ -6,19 +6,19 @@
         "path": "features/pipeline_dispatch/core.py",
         "patch": "features_pipeline_dispatch_core.py.patch",
         "before": "1e7898c670820910fe1d1bd4cd24d2046e27a79684c9ff1bfc9e65b60abd960b",
-        "after": "583f91dd7db98bf734351c6e826c76ec0bb63246425ba2bb9e3e3f853b8ed577"
+        "after": "545901c83c4e782e78460eb82fd8e431ad4d62ceafc5ac101532e032b4cb7f7e"
       },
       {
         "path": "features/pipeline_dispatch/service.py",
         "patch": "features_pipeline_dispatch_service.py.patch",
         "before": "d13ffc7a06cd691398ceb53fc0f7a1f85ed96d7171e2c718a2f8beb04ad65569",
-        "after": "485d9b65328e8c072bbdaa25edafed23af6887b9db4ecb2fc3ba72b3199c768b"
+        "after": "98bdd4295b448ec1683de7770858fe2f5ee791aeb1728700f5fb1eec5df09387"
       },
       {
         "path": "features/pipeline_dispatch/adapters.py",
         "patch": "features_pipeline_dispatch_adapters.py.patch",
         "before": "4cf3bd692bec3b54b311ff427f0af5767a998c9ca2dbb9fffaec7acc5e2f187c",
-        "after": "050ba3b7aa1d210afeb9ab7908cb7b5139eb34bf939ff5ea9b18599c95f0f7bd"
+        "after": "ec6a26ce4f298285848f16f3214075b7ac214393d40a5634c7245d27afdfdcfb"
       }
     ]
   },
@@ -29,7 +29,7 @@
         "path": "features/pipeline_dispatch/native_media.py",
         "patch": "features_pipeline_dispatch_native_media.py.patch",
         "before": "f206a768f4e44e5c0c4c0f5d4ccec43de74329cc9afe2fa5206965be21096e70",
-        "after": "e871fca15f8fcc1684b13d61f85b2c4abce726f4ce80fe9395194c8a94b1ed04"
+        "after": "ed429f5fc29634c5e8f6e8d8839e620380df87b1345d54ae0737183bc46a3388"
       }
     ]
   },
@@ -40,7 +40,7 @@
         "path": "features/pipeline_dispatch/x_native.py",
         "patch": "features_pipeline_dispatch_x_native.py.patch",
         "before": "ff7ef825700aaadfff183537487bad64ece0fd358e5a50ec090d42ad83a5110d",
-        "after": "f1e2ffac8ff75704a04e8f354f0f01b8b10c626940a3b605ae78b28d554c172a"
+        "after": "289fdf4d74fda9dac3f82e33fe8c9b03fcf26941e0ab1f2770fc4a073ae7dce6"
       }
     ]
   },
@@ -51,7 +51,7 @@
         "path": "features/pipeline_dispatch/x_native.py",
         "patch": "features_pipeline_dispatch_x_native.py.patch",
         "before": "da1ed856ac722875b40713255d7f1a2ae3a4c7b9d8c3264a399b2d8d560bea86",
-        "after": "4151a127a6074af406181b5f6744677ee3c232580efe09407a890a13b9c30d23"
+        "after": "c9b3884baa6e06eb6c31b7b6ddb105742f12c443874db75a9d023b1e09bcb8ae"
       }
     ]
   },
@@ -62,7 +62,7 @@
         "path": "features/pipeline_dispatch/executors.py",
         "patch": "features_pipeline_dispatch_executors.py.patch",
         "before": "0c516ddb6066128c6551d1532d76d26dc969478bfb6ae70f740f2d904aa5a56f",
-        "after": "009cc3363d8ac23a396da9374f6dc4580e3842a632d00c81dc12fc7534e8987a"
+        "after": "898b27ecd82bf45b652e0ef3069233787ed579b1addbf811fecdfbcf048ad5e1"
       }
     ]
   },
@@ -73,7 +73,7 @@
         "path": "features/pipeline_dispatch/executors.py",
         "patch": "features_pipeline_dispatch_executors.py.patch",
         "before": "947e9b2ad136e071daaa4f17c3961608ef3b4141ffea85f5d196f5c49bba97da",
-        "after": "eeda3213899a7b5d4c35eb774c09faa3eb76246f6de945376ed3d08fb9f6a047"
+        "after": "c86455b7e262230760fa4982245e99ab893869d7530367c983bd8256ac43026b"
       }
     ]
   },
@@ -84,7 +84,7 @@
         "path": "features/cover_material_source.py",
         "patch": "features_cover_material_source.py.patch",
         "before": "3196443c792e4ed0e84d10e8393e5b0b1f679285d71b39c041ae01faa136ad03",
-        "after": "968e06f04b79172ed70a5366e6f8f5122de7d5572c54828ae5b9c2ba9f5b398b"
+        "after": "71b9b7d60be413c4def81d94c75cc9cdd30157e826716cc4505acae553e93fcf"
       }
     ]
   }
