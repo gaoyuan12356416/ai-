@@ -20,7 +20,11 @@ def main():
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         try:
             initial_env=environment(args.env)
-            repair_handoff(Reader(initial_env),initial_env,root)
+            interrupted=repair_handoff(Reader(initial_env),initial_env,root)
+            if interrupted:
+                if args.resume_input and args.resume_input.resolve()!=interrupted.resolve():
+                    raise ValueError('different unfinished portrait input')
+                args.resume_input=interrupted
             if args.resume_input:
                 from .resume import restore
                 raw,data=restore(root,args.resume_input);env=environment(args.env);reader=Reader(env)

@@ -21,6 +21,13 @@ def expected_hash(expected):
     return sha(encoded(expected))
 
 
+def clear_build(root,version):
+    marker=root/'building.json'
+    if marker.exists() and json.loads(marker.read_text())['version']==version:
+        marker.unlink()
+    (root/(checked(version)+'.delta.gz')).unlink(missing_ok=True)
+
+
 def verify(reader,table,version,expected,*,base_hashes=None):
     staged=base_hashes is not None
     condition=" WHERE profile_version="+literal(checked(version))
@@ -56,19 +63,23 @@ def stage_rows(db,version,items,prior,meta,matching=None):
     byte_count=0
     with db.cursor() as c:
         c.execute(f'DELETE FROM {STAGE} WHERE profile_version=%s',(version,))
-        for pid,summary,raw,digest,amounts,row_time in items:
+        for record in items:
+            pid,summary,raw,digest,amounts,row_time=record[:6]
+            length=record[6] if len(record)>6 else len(raw)
             checked(pid,PAGE)
             if pid in expected or len(amounts)!=3:raise ValueError('duplicate page or malformed money')
             if matching is not None and matching.get(pid)!=digest:raise ValueError('source receipt mismatch')
-            if sha(raw)!=digest:raise ValueError('input detail hash mismatch')
+            if raw is None:
+                if prior.get(pid)!=digest:raise RuntimeError('base of unchanged Page is no longer available')
+            elif sha(raw)!=digest:raise ValueError('input detail hash mismatch')
             if json.loads(summary).get('page_id')!=pid:raise ValueError('input page identity mismatch')
             expected[pid]=[digest,sha(summary),*amounts]
             for key,value in zip(MONEY,amounts):totals[key]+=value
             payload=None
             if prior.get(pid)!=digest:
                 payload=pack(raw)
-                changed+=len(raw)
-            else:skipped+=len(raw)
+                changed+=length
+            else:skipped+=length
             batch.append((version,pid,*amounts,summary,payload,digest,row_time))
             byte_count+=len(payload or b'')+len(summary)
             if byte_count>=900000 or len(batch)>=100:
@@ -137,7 +148,7 @@ def finalize(db,reader,target,pending,root):
     return receipt
 
 
-def promote(reader,env,target,meta,items,*,matching=None,root=ROOT,connector=writer):
+def promote(reader,env,target,meta,items,*,matching=None,root=ROOT,connector=writer,durable_source=False):
     version=checked(meta['version'])
     with owner(root), closing(connector(env)) as db:
         head=current_state(reader);baseline=head['version']
@@ -151,6 +162,7 @@ def promote(reader,env,target,meta,items,*,matching=None,root=ROOT,connector=wri
                 # Keep the pointer handoff available even if the service died after this write.
                 atomic(root/'last-current-proof.json',recovered)
                 file.unlink()
+                clear_build(root,pv)
                 if pv==version:return recovered
             elif pv!=version:
                 raise RuntimeError('unresolved candidate '+pv)
@@ -158,9 +170,25 @@ def promote(reader,env,target,meta,items,*,matching=None,root=ROOT,connector=wri
             proof=json.loads((root/'last-current-proof.json').read_text())
             if proof['version']!=version:raise RuntimeError('verified proof missing')
             if matching is not None and proof['payload_hashes']!=matching:raise RuntimeError('receipt conflicts')
+            if matching is None:
+                replay={pid:[digest,sha(summary),*amounts] for pid,summary,raw,digest,amounts,ts in items
+                        if sha(raw)==digest}
+                if expected_hash(replay)!=head['manifest'] or json.loads(head['meta'])!=meta:
+                    raise RuntimeError('replayed input differs from published payload')
+            clear_build(root,version)
             return proof
+        marker=root/'building.json'
+        existing=json.loads(marker.read_text()) if marker.exists() else None
+        if existing and (existing['version']!=version or existing['base']!=baseline or existing['meta']!=meta):
+            raise RuntimeError('resume the original staged version first')
         prior={r['p']:r['h'] for r in query(reader,
             f"SELECT HEX(JSON_OBJECT('p',page_id,'h',payload_sha256)) FROM {target}")}
+        if durable_source:
+            from . import delta
+            source=root/(version+'.delta.gz')
+            if not existing:delta.freeze(source,items,prior)
+            items=delta.read(source)
+        atomic(marker,dict(version=version,base=baseline,target=target,meta=meta,durable=durable_source))
         expected,stats=stage_rows(db,version,items,prior,meta,matching)
         wait_visible(reader,f"SELECT HEX(JSON_OBJECT('n',COUNT(*))) FROM {STAGE} WHERE profile_version="+literal(version),
                      lambda r:r[0]['n']==len(expected))
@@ -171,6 +199,7 @@ def promote(reader,env,target,meta,items,*,matching=None,root=ROOT,connector=wri
         proof=finalize(db,reader,target,pending,root)
         atomic(root/'last-current-proof.json',proof)
         file.unlink()
+        clear_build(root,version)
         return proof
 
 

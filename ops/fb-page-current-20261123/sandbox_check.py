@@ -85,13 +85,23 @@ def main():
             else:raise AssertionError('failure injection')
         catch_up(rd,{},NEXT,root=path,connector=connect)
         assert current_state(rd)['version']==f
+        g='20261123T160000000000Z'
+        gm,gi=fixture(g,later)
+        with patch('features.fb_page_current.publish.stage_rows',side_effect=ConnectionError('partial staging')):
+            try:promote(rd,{},NEXT,gm,gi,root=path,connector=connect,durable_source=True)
+            except ConnectionError:pass
+            else:raise AssertionError('partial staging failure injection')
+        from features.fb_page_current.delta import read as read_delta
+        assert all(item[2] is None for item in read_delta(path/(g+'.delta.gz')))
+        assert promote(rd,{},NEXT,gm,(),root=path,connector=connect,durable_source=True)['version']==g
+        assert not (path/'building.json').exists() and not (path/(g+'.delta.gz')).exists()
         from cutover import swap_sql,layout,AFTER,BEFORE
         c.execute(f'INSERT INTO {PUBLIC} SELECT * FROM {NEXT}')
         swap_sql(c,True);assert layout(db)==AFTER
-        c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(f,));assert c.fetchone()==(2,)
+        c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(g,));assert c.fetchone()==(2,)
         swap_sql(c,False);assert layout(db)==BEFORE
-        c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(f,));assert c.fetchone()==(2,)
-    out=dict(version=version,socket=socket,at=stamp(),tests=['initial','unchanged-detail-new-summary','signed','remove','add','MVCC','same-version-retry','stale-fence','no-change','pre-commit-failure','commit-disconnect','atomic-rename','rollback-rename'])
+        c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(g,));assert c.fetchone()==(2,)
+    out=dict(version=version,socket=socket,at=stamp(),tests=['initial','unchanged-detail-new-summary','signed','remove','add','MVCC','same-version-retry','stale-fence','no-change','pre-commit-failure','commit-disconnect','partial-stage-from-frozen-delta','atomic-rename','rollback-rename'])
     atomic(ROOT/'qa/rollback-rehearsed.json',out)
     print(encoded(out),flush=True)
 

@@ -3,7 +3,7 @@ from contextlib import closing
 import json
 from .common import (LEGACY,MONEY,NEXT,PORTRAITS,PUBLIC,ROOT,STAGE,atomic,current_state,encoded,
                      query,read_config,stamp,writer)
-from .publish import commit,finalize,model_items,owner,promote,verify
+from .publish import clear_build,commit,finalize,model_items,owner,promote,verify
 
 
 def catch_up(reader,env,target,root=ROOT,connector=writer):
@@ -26,22 +26,38 @@ def catch_up(reader,env,target,root=ROOT,connector=writer):
             proof=finalize(db,reader,target,pending,root)
             atomic(root/'last-current-proof.json',proof)
             file.unlink()
+            clear_build(root,v)
 
 
 def repair_handoff(reader,env,root):
     mode=read_config()
     if mode not in ('live','live-mirror'):return
     catch_up(reader,env,PUBLIC)
+    marker=ROOT/'building.json'
+    if marker.exists():
+        staged=json.loads(marker.read_text())
+        if staged.get('durable') and current_state(reader)['version']==staged['base']:
+            promote(reader,env,PUBLIC,staged['meta'],(),durable_source=True)
     proof=json.loads((ROOT/'last-current-proof.json').read_text())
     file=root/'current.json'
     before=json.loads(file.read_text())
-    if before['version']>=proof['version']:return
-    head=current_state(reader)
-    if head['version']!=proof['version'] or head['pages']!=proof['verified_rows']:
-        raise RuntimeError('unconfirmed pointer repair')
-    atomic(root/(proof['version']+'.receipt.json'),proof)
-    atomic(root/'previous.json',before)
-    atomic(file,dict(version=proof['version'],database='ads_ai.'+PUBLIC,backend='mysql'))
+    if before['version']<proof['version']:
+        head=current_state(reader)
+        if head['version']!=proof['version'] or head['pages']!=proof['verified_rows']:
+            raise RuntimeError('unconfirmed pointer repair')
+        atomic(root/(proof['version']+'.receipt.json'),proof)
+        atomic(root/'previous.json',before)
+        atomic(file,dict(version=proof['version'],database='ads_ai.'+PUBLIC,backend='mysql'))
+    marker=ROOT/'building.json'
+    if marker.exists():
+        candidate=json.loads(marker.read_text())
+        if candidate['version']==proof['version']:
+            clear_build(ROOT,proof['version'])
+        elif candidate['target']==PUBLIC and candidate['base']==proof['version']:
+            path=root/(candidate['version']+'.input.json')
+            if not path.is_file():raise RuntimeError('missing frozen source for interrupted staging')
+            return path
+        else:raise RuntimeError('unresolved staging receipt')
 
 
 def primary(data,env,reader,create_table=False):
@@ -50,7 +66,7 @@ def primary(data,env,reader,create_table=False):
     if mode in ('legacy','shadow'):
         return storage.write(data,env,reader,create_table=create_table)
     if create_table:raise ValueError('runtime DDL disabled')
-    return promote(reader,env,PUBLIC,data['meta'],model_items(data,storage.projections))
+    return promote(reader,env,PUBLIC,data['meta'],model_items(data,storage.projections),durable_source=True)
 
 
 def secondary(data,env,reader,proof,*,resumed=False):
