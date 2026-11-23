@@ -1,0 +1,22 @@
+--- a/features/post_daily_report/accounting.py
++++ b/features/post_daily_report/accounting.py
+@@ -178,11 +178,17 @@
+     if alias_keys:
+         # A successor may lie outside this page. Keep its suppression of the
+         # original target without loading every historical task and receipt.
+-        for row in conn.execute("SELECT source_key,source_meta_json,created_at FROM pipeline_job WHERE source_meta_json LIKE '%\"ancestor_source_keys\"%'"):
++        # Most jobs carry an empty ancestor list. Project only real ancestry
++        # instead of decoding every historical metadata document in Python.
++        for row in conn.execute("SELECT source_key,created_at,"
++                "json_extract(CASE WHEN json_valid(source_meta_json) THEN source_meta_json ELSE '{}' END,"
++                "'$.ancestor_source_keys') ancestors FROM pipeline_job "
++                "WHERE source_meta_json LIKE '%\"ancestor_source_keys\"%' "
++                "AND ancestors IS NOT NULL AND ancestors<>'[]'"):
+             created = parse_time(row['created_at'])
+             if created and created >= cutoff:
+                 continue
+-            for ancestor in (object_value(row['source_meta_json'], {}) or {}).get('ancestor_source_keys', []):
++            for ancestor in object_value(row['ancestors'], []) or []:
+                 if ancestor in alias_keys:
+                     result['aliases'][ancestor] = row['source_key']
+     if 'pipeline_publication' in present:

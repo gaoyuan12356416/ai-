@@ -1,0 +1,39 @@
+--- a/features/pipeline_dispatch/queue_states.py
++++ b/features/pipeline_dispatch/queue_states.py
+@@ -74,7 +74,7 @@
+     return MONITOR_REASONS.get(code) or outcome_label(code)
+ 
+ 
+-def classify(conn, row, now):
++def classify(conn, row, now, *, blocked_resources=None):
+     if row["status"] in ("running", "legacy_running"):
+         issue = running_issue(conn, row, now)
+         return ("abnormal", issue) if issue else ("executing", "")
+@@ -91,6 +91,8 @@
+         resources = []
+     if not isinstance(resources, list) or not resources or not all(isinstance(k, str) for k in resources):
+         return "abnormal", "identity_missing"
++    if blocked_resources is not None:
++        return ("abnormal", "blocked_by_unknown") if blocked_resources.intersection(resources) else ("waiting", "")
+     for resource in set(resources):
+         # Inspect blockers internally without disclosing another owner's task
+         # identity or account in the owner-scoped public DTO.
+@@ -167,10 +169,17 @@
+         totals.update({key: None for key in KEYS})
+         common["warnings"].append("任务状态分类超过读取上限，四类计数暂不可用；未以部分数据代替总数")
+         return
++    # This is the same read transaction as the task snapshot. Reuse its blocker
++    # set instead of doing one resource lookup for every due task/account.
++    blocked_resources = {r[0] for r in conn.execute(
++        "SELECT r.resource_key FROM pipeline_resource r JOIN pipeline_job b ON b.id=r.job_id "
++        "WHERE b.status='unknown' OR r.quarantined=1 UNION "
++        "SELECT r.resource_key FROM pipeline_legacy_resource r JOIN pipeline_job b ON b.id=r.job_id "
++        "WHERE b.status='unknown'")}
+     begin, finish = _time(start), _time(end)
+     for row in rows:
+         item = by[(row["channel"], row["stage"])]
+-        state, reason = classify(conn, row, now)
++        state, reason = classify(conn, row, now, blocked_resources=blocked_resources)
+         if state == "abnormal":
+             occurred = _time(row["anomaly_at"])
+             if occurred is None or not begin <= occurred <= finish:

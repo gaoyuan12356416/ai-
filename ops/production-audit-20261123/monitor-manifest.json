@@ -1,0 +1,19 @@
+{
+  "coordinator": {
+    "root": "/opt/pipeline-dispatch/current",
+    "files": [
+      {
+        "path": "features/post_daily_report/accounting.py",
+        "patch": "../monitor-patches/accounting.patch",
+        "before": "91e83e997025260f163354f35a40ef66a6582a3f3b4bc5f842efa7c823f955e8",
+        "after": "403ab70ebbc673120f105ff11160c540ee855c9cc2378e6514f22d6475ea78f2"
+      },
+      {
+        "path": "features/pipeline_dispatch/queue_states.py",
+        "patch": "../monitor-patches/queue_states.patch",
+        "before": "f1f9316eb9d1bdc3f2bca031df2dd8bfaea58e3441a65a333572b80f59646cb4",
+        "after": "36e3dfe154708d7c65ff06b07d124ccf4b065e005a2e02cc061c75ead2c06a7c"
+      }
+    ]
+  }
+}

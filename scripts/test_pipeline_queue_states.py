@@ -89,6 +89,25 @@ class QueueStatesTests(unittest.TestCase):
             c.execute('INSERT INTO pipeline_legacy_resource VALUES (?,?)', ('shared', blocker))
         self.assertEqual(self.summary()['totals']['abnormal'], 1)
 
+    def test_many_due_jobs_share_snapshot_blockers_without_per_job_queries(self):
+        blocker = self.job('private-quarantine', 'running', owner_user_id='bob')
+        for n in range(60):
+            self.job('due-' + str(n), resource_keys_json=json.dumps(['quarantined' if n < 20 else 'normal']))
+        with self.store.transaction() as c:
+            c.execute('INSERT INTO pipeline_resource VALUES (?,?,1,1,0)', ('quarantined', blocker))
+            c.execute('INSERT INTO pipeline_resource VALUES (?,?,1,0,0)', ('normal', blocker))
+        statements = []
+        original = self.store.connect
+        def traced():
+            connection = original()
+            connection.set_trace_callback(statements.append)
+            return connection
+        with patch.object(self.store, 'connect', side_effect=traced):
+            result = self.summary()
+        self.assertEqual((result['totals']['waiting'], result['totals']['abnormal']), (40, 20))
+        self.assertNotIn('private-quarantine', json.dumps(result))
+        self.assertLess(sum('FROM pipeline_resource' in sql for sql in statements), 10)
+
     def stalled(self, phase='idle', generation=10):
         job = self.job('stalled', 'running', node_id='hk-gpu', worker_id='prepare-1',
                        generation=generation, lease_expires_at=stamp(self.now + dt.timedelta(seconds=90)))
