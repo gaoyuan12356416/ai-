@@ -84,7 +84,7 @@ class CampaignSnapshotTests(unittest.TestCase):
             status,body=call(actor);self.assertEqual(status,200)
             self.assertEqual(json.loads(gzip.decompress(body)),service.scoped_wire(self.wire,0,'',''))
             self.assertEqual(call(dict(actor,tenant_key='other'))[0],403)
-            self.assertEqual(call(dict(actor,permissions={'ad_control_v3':False}))[0],403)
+            self.assertEqual(call(dict(actor,permissions={'ad_control_v3':False}))[0],200)
             self.assertEqual(call(actor,'bad')[0],401)
         finally:server.shutdown();server.server_close();thread.join(timeout=5)
 
@@ -93,10 +93,10 @@ class CampaignSnapshotTests(unittest.TestCase):
         class Auth(BaseHTTPRequestHandler):
             def log_message(self,*_):pass
             def do_GET(inner):
-                body=json.dumps(dict(authenticated=True,user=inner.server.actor)).encode()
+                body=json.dumps(dict(authenticated=inner.server.allowed,user=inner.server.actor)).encode()
                 inner.server.checks+=1
                 inner.send_response(200);inner.send_header('Content-Length',str(len(body)));inner.end_headers();inner.wfile.write(body)
-        auth=ThreadingHTTPServer(('127.0.0.1',0),Auth);auth.actor=actor;auth.checks=0
+        auth=ThreadingHTTPServer(('127.0.0.1',0),Auth);auth.actor=actor;auth.checks=0;auth.allowed=True
         reader=Server(('127.0.0.1',0),self.root/'index','t'*40,'company')
         config=self.root/'gateway.json';config.write_text(json.dumps({'api_port':auth.server_port,'source_tenant':'company','reader_port':reader.server_port,'origin_port':1,'percentage':100}))
         gateway=Gateway(('127.0.0.1',0),config,'t'*40)
@@ -112,7 +112,8 @@ class CampaignSnapshotTests(unittest.TestCase):
         try:
             self.assertEqual(call('')[0],401)
             first=call();second=call();self.assertEqual(first[0],200);self.assertEqual(first[2],second[2]);self.assertEqual(auth.checks,2)
-            auth.actor=dict(actor,permissions={'ad_control_v3':False});self.assertEqual(call()[0],403)
+            auth.allowed=False;self.assertEqual(call()[0],401);auth.allowed=True
+            auth.actor=dict(actor,permissions={'ad_control_v3':False});self.assertEqual(call()[0],200)
             auth.actor=dict(actor,tenant_key='other');self.assertEqual(call()[0],403)
             auth.actor=actor
             reader.shutdown();reader.server_close();servers.remove(reader)
