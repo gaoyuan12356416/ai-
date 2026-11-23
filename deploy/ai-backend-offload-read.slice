@@ -4,5 +4,5 @@ Description=Shared report and tunnel budget inside AI backend offload
 [Slice]
 CPUQuota=200%
 CPUShares=128
-MemoryLimit=4G
+MemoryLimit=8G
 BlockIOWeight=100
