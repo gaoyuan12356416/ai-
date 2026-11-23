@@ -1,5 +1,6 @@
 """Refresh one ended preparation's dispatch observation from its owning ledger."""
 from contextlib import closing
+import importlib.util
 import json
 from pathlib import Path
 import sqlite3
@@ -8,8 +9,11 @@ import sys
 sys.path.insert(0, '/opt/pipeline-dispatch/current')
 from features.pipeline_dispatch.adapters import LedgerAdapter, LedgerSpec
 from features.pipeline_dispatch.core import DispatchStore, utcnow
-sys.path.insert(0, '/opt/x-tag-publisher/current')
-from features.x_auto_posts.selection_recovery import file_lock
+lock_spec = importlib.util.spec_from_file_location('installed_selection_recovery',
+    '/opt/x-tag-publisher/current/features/x_auto_posts/selection_recovery.py')
+lock_module = importlib.util.module_from_spec(lock_spec)
+lock_spec.loader.exec_module(lock_module)
+file_lock = lock_module.file_lock
 
 ROOT = Path('/mnt/data-disk/x-reuse-read-context-20261123')
 TASK_ID = 9000000005278
