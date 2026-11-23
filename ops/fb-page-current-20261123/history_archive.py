@@ -5,6 +5,7 @@ import math
 import os
 import sqlite3
 import time
+from decimal import Decimal,ROUND_HALF_UP
 from operations import *
 from features.fb_page_current.common import insert_batch,pack,read_config
 from features.fb_page_current.history import HISTORY,blob_path,lookup,rows as archived_rows
@@ -41,6 +42,38 @@ def file_hash(path):
     with path.open('rb') as f:
         for buf in iter(lambda:f.read(1024*1024),b''):h.update(buf)
     return h.hexdigest()
+
+
+def frozen_input_amounts(path):
+    with path.open(encoding='utf-8') as f:data=json.load(f)
+    expected={str(pid):[0,0,0] for pid in data['page_ids']}
+    def cents(value):return int((Decimal(str(value or 0))*100).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
+    for row in data['paid']:
+        amount=expected[str(row['page_id'])]
+        amount[0]+=cents(row['revenue']);amount[2]+=cents(row.get('spend'))
+    for row in data['social']:expected[str(row['page_id'])][1]+=int(row['revenue_cents'])
+    return expected
+
+
+def preserve_source_files(v,destination,amounts):
+    evidence=[]
+    for suffix in ('.input.json','.sqlite3'):
+        source=PORTRAITS/(v+suffix)
+        if not source.is_file():continue
+        verified=suffix=='.input.json'
+        if verified and frozen_input_amounts(source)!=amounts:
+            raise RuntimeError('original frozen Page set or cents differs from stored history')
+        name='original'+suffix+'.gz';out=destination/name;temp=out.with_suffix('.partial')
+        raw_hash=hashlib.sha256()
+        with source.open('rb') as src,temp.open('wb') as dest:
+            with gzip.GzipFile(filename='',fileobj=dest,mode='wb',compresslevel=3,mtime=0) as gz:
+                for block in iter(lambda:src.read(1024*1024),b''):
+                    raw_hash.update(block);gz.write(block)
+            dest.flush();os.fsync(dest.fileno())
+        temp.replace(out)
+        evidence.append(dict(name=name,source_sha256=raw_hash.hexdigest(),sha256=file_hash(out),bytes=out.stat().st_size,
+                             original_scope_and_page_cents_verified=verified))
+    return evidence
 
 
 def package_tools(base):
@@ -83,6 +116,7 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2,source_rate=24*1
     marker=dest/'snapshot.json'
     if marker.exists():return json.loads(marker.read_text())
     parts=[];amount=[0,0,0];published_hashes={};meta=None;n=0;last='';limit=128;source_bytes=0
+    source_amounts={} if proof is None else None
     with db.cursor() as c:
         while True:
             started=time.monotonic()
@@ -107,6 +141,7 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2,source_rate=24*1
                     for row in batch:
                         if row[1] in published_hashes:raise RuntimeError('duplicate archival page')
                         published_hashes[row[1]]=row[9]
+                        if source_amounts is not None:source_amounts[row[1]]=row[4:7]
                         for i in range(3):amount[i]+=row[i+4]
                         if meta is None:meta=row[8]
                         gz.write(encoded(row).encode()+b'\n')
@@ -129,7 +164,13 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2,source_rate=24*1
         temp.write_bytes(gzip.compress(encoded(proof).encode(),compresslevel=4,mtime=0))
         temp.replace(original)
         receipt_hash=file_hash(original)
-    manifest=dict(version=v,rows=n,amounts=amount,meta=meta,parts=parts,
+    original_files=[]
+    if source_amounts is not None:
+        declared=json.loads(meta)
+        if declared.get('page_count')!=n or declared.get('audit')!=dict(zip(MONEY,amount)):
+            raise RuntimeError('historical version without a publication receipt differs from its declared count or cents')
+        original_files=preserve_source_files(v,dest,source_amounts)
+    manifest=dict(version=v,rows=n,amounts=amount,meta=meta,parts=parts,original_files=original_files,
                   source_receipt_checked=bool(proof),source_receipt_sha256=receipt_hash,
                   source_scan_bytes=source_bytes,source_limit_bytes_per_second=source_rate,transfer_limit_bytes_per_second=rate,at=stamp())
     atomic(marker,manifest)
@@ -154,6 +195,12 @@ def insert_archived(c,table,records,base):
 
 def restore_version(db,manifest,base,ddl):
     v=manifest['version'];dest=base/'versions'/v;done=dest/'restored.json'
+    for original in manifest.get('original_files',[]):
+        file=dest/original['name'];digest=hashlib.sha256()
+        if file_hash(file)!=original['sha256']:raise RuntimeError('original evidence file checksum mismatch')
+        with gzip.open(file,'rb') as f:
+            for block in iter(lambda:f.read(1024*1024),b''):digest.update(block)
+        if digest.hexdigest()!=original['source_sha256']:raise RuntimeError('original evidence content differs after decompression')
     if manifest.get('source_receipt_sha256'):
         if file_hash(dest/'publication-receipt.json.gz')!=manifest['source_receipt_sha256']:
             raise RuntimeError('archived publication receipt checksum mismatch')
@@ -301,7 +348,9 @@ def run(source_rate=24*1024**2,transfer_rate=4*1024**2):
                     m=export_version(db,LEGACY,v,base,proof=original_proof,rate=transfer_rate,source_rate=source_rate)
             restored=restore_version(lab,m,base,ddl)
             snapshots.append(dict(version=v,rows=m['rows'],manifest_sha256=restored['manifest_sha256'],
-                                  restore_sha256=file_hash(base/'versions'/v/'restored.json')))
+                                  restore_sha256=file_hash(base/'versions'/v/'restored.json'),
+                                  original_publication_receipt=m['source_receipt_checked'],
+                                  original_files=[f['name'] for f in m.get('original_files',[])]))
             total+=m['rows']
             print(encoded(dict(completed=idx+1,versions=len(versions),total_rows=total,version=v)),flush=True)
         with closing(connect_reader(cfg)) as db:ref=confirm_references(db,set(versions),base)

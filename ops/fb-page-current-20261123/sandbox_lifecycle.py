@@ -1,6 +1,7 @@
 """Run the real freeze-inventory export, isolated restore, targeted removal and rollback on a private socket."""
 from contextlib import closing,ExitStack
 from functools import partial
+from decimal import Decimal
 import sqlite3
 import tempfile
 from unittest.mock import patch
@@ -64,6 +65,19 @@ def main():
                 if (refs['found']!=1 or refs['absent_in_source']!=2 or refs['unexpected_absence']
                         or refs['receipts']['assignment']!=2 or refs['receipts'].get('recovery_unprofiled')!=1):
                     raise RuntimeError('isolated task lookup differs')
+                # Some historical MySQL versions only have the original frozen inputs.
+                c.execute(f'SELECT page_id,paid_cents,social_cents,spend_cents FROM {ops.LEGACY} WHERE profile_version=%s',(v,))
+                values=c.fetchall()
+                raw=dict(page_ids=[p for p,*_ in values],
+                         paid=[dict(page_id=p,revenue=str(Decimal(a)/100),spend=str(Decimal(s)/100)) for p,a,_,s in values],
+                         social=[dict(page_id=p,revenue_cents=b) for p,_,b,_ in values])
+                ops.atomic(portraits/(v+'.input.json'),raw)
+                alternate=work/'missing-receipt'
+                source=archive.export_version(private,ops.LEGACY,v,alternate,rate=0)
+                if not source['original_files'][0]['original_scope_and_page_cents_verified']:
+                    raise RuntimeError('original frozen-input check missing')
+                with closing(archive.private_mysql()) as lab:
+                    archive.restore_version(lab,source,alternate,(backup/'schema.sql').read_text().rstrip(';\n'))
                 first=recovery.remove();second=recovery.remove()
                 if first!=second or ops.shape(c,ops.LEGACY) or ops.shape(c,ops.PUBLIC)!=('page_id',):
                     raise RuntimeError('wrong or non-idempotent removal')
@@ -71,7 +85,7 @@ def main():
                 if restored['version']!=v or dict_all(c,v)!=hashes:raise RuntimeError('full rollback failed after removal')
         finally:c.execute('DROP TABLE fb_drama_page_assignment_log')
     outcome=dict(at=ops.stamp(),restored_rows=len(hashes),references=refs['unique_pairs'],archive_flushed=True,
-                 targeted_remove=True,idempotent=True,rollback=True,socket='/run/portrait-qa/mysql.sock')
+                 targeted_remove=True,idempotent=True,rollback=True,missing_receipt_original_input=True,socket='/run/portrait-qa/mysql.sock')
     ops.atomic(ops.ROOT/'qa/complete-archive-rehearsed.json',outcome);return outcome
 
 

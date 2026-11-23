@@ -39,6 +39,8 @@ def manifest():
         folder=HISTORY/'versions'/checked(v['version'])
         if file_hash(folder/'snapshot.json')!=v['manifest_sha256'] or file_hash(folder/'restored.json')!=v['restore_sha256']:
             raise RuntimeError('per-version recovery proof mismatch')
+        for f in json.loads((folder/'snapshot.json').read_text()).get('original_files',[]):
+            if file_hash(folder/f['name'])!=f['sha256']:raise RuntimeError('original historical evidence checksum mismatch')
     return marker,m
 
 
