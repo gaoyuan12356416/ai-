@@ -1,0 +1,21 @@
+[Unit]
+Description=CPU fallback for the verified Campaign Copy snapshot
+After=network.target
+
+[Service]
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/campaign-current
+EnvironmentFile=/etc/ai-backend-offload/campaign-local.env
+ExecStart=/usr/bin/python3 -m features.gpu_offload.campaign_reader
+Restart=on-failure
+RestartSec=5
+CPUQuota=100%
+MemoryLimit=1536M
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+TimeoutStopSec=infinity
+SendSIGKILL=no
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

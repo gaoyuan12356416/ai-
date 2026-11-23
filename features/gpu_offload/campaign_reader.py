@@ -58,14 +58,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self.authenticated():return self.json(401,{'error':'unauthorized'})
-        if self.path!='/v1/status':return self.json(404,{'error':'not_found'})
+        parsed=urlsplit(self.path)
+        if parsed.path not in ('/v1/status','/v1/index'):return self.json(404,{'error':'not_found'})
         try:
             manifest,_=current(self.server.root)
+            if parsed.path=='/v1/index':
+                # Only the exact manifest version may be exported. A caller
+                # cannot choose a filesystem path or another local database.
+                if parsed.query!='version='+manifest['version']:return self.json(409,{'error':'snapshot_version_changed'})
+                archive=self.server.root/(manifest['version']+'.sqlite3.gz')
+                self.connection.settimeout(180)
+                with archive.open('rb') as stream:
+                    self.send_response(200);self.send_header('Content-Type','application/gzip')
+                    self.send_header('Content-Length',str(os.fstat(stream.fileno()).st_size));self.send_header('Connection','close');self.end_headers()
+                    for block in iter(lambda:stream.read(65536),b''):self.wfile.write(block)
+                self.close_connection=True;return
             self.json(200,dict(ok=True,**manifest))
         except Exception:self.json(503,{'error':'snapshot_unavailable'})
 
     def do_POST(self):
-        if not self.authenticated():return self.json(401,{'error':'unauthorized'})
+        if not self.authenticated():
+            # Drain small named-query requests so the closing TCP socket does
+            # not discard the 401 response because unread bytes remain.
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if 0<length<=65536:
+                    self.connection.settimeout(5);self.rfile.read(length)
+            except (ValueError,OSError):pass
+            return self.json(401,{'error':'unauthorized'})
         self.connection.settimeout(240)
         if self.path=='/v1/seed':
             if not self.server.upload.acquire(False):return self.json(409,{'error':'seed_upload_running'})
@@ -132,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     token=os.environ['OFFLOAD_INTERNAL_TOKEN'];tenant=os.environ['OFFLOAD_SOURCE_TENANT']
     if len(token)<32 or not tenant:raise ValueError('private_reader_configuration_required')
-    server=Server(('127.0.0.1',19972),os.environ['CAMPAIGN_SNAPSHOT_ROOT'],token,tenant)
+    server=Server(('127.0.0.1',int(os.environ.get('CAMPAIGN_READER_PORT','19972'))),os.environ['CAMPAIGN_SNAPSHOT_ROOT'],token,tenant)
     def stop(*_):threading.Thread(target=server.shutdown,daemon=True).start()
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
     try:server.serve_forever()

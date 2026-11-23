@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep CPU Campaign Copy fallback within five minutes
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+Unit=ai-backend-offload-campaign-sync.service
+
+[Install]
+WantedBy=timers.target

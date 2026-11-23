@@ -1,0 +1,17 @@
+[Unit]
+Description=Copy Campaign Copy immutable snapshot without business SQL
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/campaign-current
+EnvironmentFile=/etc/ai-backend-offload/campaign-local.env
+ExecStart=/usr/bin/python3 -m features.gpu_offload.campaign_sync
+CPUQuota=100%
+MemoryLimit=512M
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+TimeoutStartSec=240
+TimeoutStopSec=20
+UMask=0077

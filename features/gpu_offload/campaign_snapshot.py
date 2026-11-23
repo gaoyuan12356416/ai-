@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 from urllib.parse import parse_qs
 
 from .campaign import service as original
@@ -50,12 +51,25 @@ def index_snapshot(seed,root):
             if db.execute('PRAGMA quick_check').fetchone()!=('ok',):raise ValueError('campaign_index_invalid')
         with temporary.open('r+b') as f:os.fsync(f.fileno())
         temporary.chmod(0o400);temporary.replace(target)
-        manifest=dict(version=version,database=target.name,generated_at=wire['m']['generated_at'],rows=counts)
+        # A compressed immutable index is also the CPU fallback's source. The
+        # fallback never repeats business SQL or rebuilds the full JSON index.
+        packed=root/(version+'.sqlite3.gz');pending=root/(version+'.gzip.incoming')
+        with target.open('rb') as source,pending.open('wb') as sink:
+            with gzip.GzipFile(fileobj=sink,mode='wb',compresslevel=1,mtime=0) as compressed:
+                shutil.copyfileobj(source,compressed,1024*1024)
+            sink.flush();os.fsync(sink.fileno())
+        packed_digest=hashlib.sha256()
+        with pending.open('rb') as stream:
+            for block in iter(lambda:stream.read(1024*1024),b''):packed_digest.update(block)
+        pending.chmod(0o400);pending.replace(packed)
+        manifest=dict(version=version,database=target.name,generated_at=wire['m']['generated_at'],rows=counts,
+                      archive=packed.name,archive_bytes=packed.stat().st_size,archive_sha256=packed_digest.hexdigest(),database_bytes=target.stat().st_size)
         next_file=root/'current.next';next_file.write_text(json.dumps(manifest));next_file.replace(root/'current.json')
         # Retain the current and two previous immutable indexes.
         versions=sorted(root.glob('*.sqlite3'),key=lambda p:p.stat().st_mtime,reverse=True)
         for p in versions[3:]:
-            if p!=target:p.unlink()
+            if p!=target:
+                p.unlink();p.with_suffix('.sqlite3.gz').unlink(missing_ok=True)
         return manifest
     finally:
         if temporary.exists():temporary.unlink()

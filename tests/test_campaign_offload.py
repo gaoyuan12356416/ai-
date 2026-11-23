@@ -116,6 +116,9 @@ class CampaignSnapshotTests(unittest.TestCase):
             auth.actor=dict(actor,permissions={'ad_control_v3':False});self.assertEqual(call()[0],200)
             auth.actor=dict(actor,tenant_key='other');self.assertEqual(call()[0],403)
             auth.actor=actor
+            configured=json.loads(config.read_text());configured.update(percentage=0,origin_reader_port=reader.server_port);config.write_text(json.dumps(configured))
+            local=call();self.assertEqual(local[2],first[2]);self.assertEqual(local[1]['X-AI-Backend'],'cpu-campaign-cache')
+            configured['percentage']=100;config.write_text(json.dumps(configured))
             reader.shutdown();reader.server_close();servers.remove(reader)
             _,value=gateway.status.entries['current'];gateway.status.entries['current']=(time.monotonic()-10,value)
             result=call();self.assertEqual(result[0],200);self.assertEqual(result[1]['X-Report-Cache'],'stale');self.assertEqual(result[2],first[2])

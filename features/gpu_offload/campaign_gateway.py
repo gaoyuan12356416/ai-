@@ -83,6 +83,11 @@ class Handler(BaseHTTPRequestHandler):
             # the cache key. Authentication is never answered from this cache.
             if random.randrange(100)>=int(cfg.get('percentage',0)):
                 route,outcome='cpu-campaign-origin','forwarded'
+                if cfg.get('origin_reader_port'):
+                    route='cpu-campaign-cache'
+                    value=request(cfg['origin_reader_port'],'/v1/query',token=self.server.token,
+                        body=json.dumps({'actor':actor,'target':local},separators=(',',':')).encode())
+                    return self.reply(value,route,value.headers.get('X-Ai-Stale')=='true')
                 return self.reply(request(cfg['origin_port'],local,cookie=cookie),route)
             route='hk-campaign-snapshot'
             def load_status():return request(cfg['reader_port'],'/v1/status',token=self.server.token,timeout=5,limit=65536)
