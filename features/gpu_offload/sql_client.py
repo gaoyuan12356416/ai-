@@ -110,7 +110,9 @@ class Session:
                 cur.execute('SET SESSION range_optimizer_max_mem_size=67108864')
                 cur.execute("SET SESSION time_zone='+08:00'")
                 cur.execute('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ')
-            cur.execute('START TRANSACTION WITH CONSISTENT SNAPSHOT')
+            # The read/write proxy routes a transaction at START TRANSACTION;
+            # an earlier session default alone does not select a read backend.
+            cur.execute('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY')
             cur.execute('SELECT @@server_uuid AS server_uuid, CONNECTION_ID() AS connection_id, '
                         '@@read_only AS read_only, @@tx_read_only AS transaction_read_only, '
                         "SUBSTRING_INDEX(CURRENT_USER(),'@',1) AS database_user")
