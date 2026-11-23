@@ -1,0 +1,26 @@
+[Unit]
+Description=Independent keepalive transport for the existing SQL admission gate
+After=network.target sql-connection-gate.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+RuntimeDirectory=ai-offload-sql-control
+RuntimeDirectoryMode=0700
+ExecStart=/usr/sbin/nginx -p /run/ai-offload-sql-control/ -c /etc/ai-backend-offload-sql-control/nginx.conf -g "daemon off;"
+Restart=on-failure
+RestartSec=5
+CPUQuota=20%
+MemoryLimit=64M
+LimitNOFILE=256
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+KillSignal=SIGQUIT
+SendSIGKILL=no
+TimeoutStopSec=infinity
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

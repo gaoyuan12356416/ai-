@@ -40,7 +40,9 @@ class Broker:
             conn.request('POST','/v1/lease/'+operation,body=body,headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
             response=conn.getresponse();data=response.read(16385)
             if len(data)>16384:raise AdmissionError('invalid_broker_response')
-            value=json.loads(data)
+            try:value=json.loads(data)
+            except (ValueError,UnicodeDecodeError):
+                raise AdmissionError('invalid_broker_response_http_'+str(response.status)) from None
             if not isinstance(value,dict):raise AdmissionError('invalid_broker_response')
             self.local.used_at=time.monotonic()
             if response.will_close:self.close_transport()

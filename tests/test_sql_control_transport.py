@@ -32,6 +32,11 @@ class Handler(BaseHTTPRequestHandler):
             self.connection.shutdown(socket.SHUT_RDWR)
             self.close_connection = True
             return
+        if payload.get('proxy_unavailable'):
+            self.send_response(502)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         status = 200
         body = {'allowed': True}
         if payload.get('rate_limited'):
@@ -78,6 +83,13 @@ class ControlTransportTests(unittest.TestCase):
         with self.assertRaises((http.client.HTTPException, OSError)):
             self.broker.call('begin', {'lease_id': 'one'})
         self.assertEqual([row[1] for row in self.server.received], ['/v1/lease/begin'])
+        self.assertIsNone(self.broker.local.connection)
+
+    def test_non_json_proxy_failure_is_identified_without_replay(self):
+        with self.assertRaises(AdmissionError) as error:
+            self.broker.call('query', {'proxy_unavailable': True})
+        self.assertEqual(error.exception.code, 'invalid_broker_response_http_502')
+        self.assertEqual(len(self.server.received), 1)
         self.assertIsNone(self.broker.local.connection)
 
     def test_heartbeat_has_an_independent_connection(self):
