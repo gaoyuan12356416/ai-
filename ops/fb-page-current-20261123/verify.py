@@ -168,6 +168,25 @@ def prepare_selection():
     return dict(version=v,rows=proof['verified_rows'],bytes=selection.FILE.stat().st_size)
 
 
+def stale_hint():
+    with closing(connect_reader(env())) as db,db.cursor() as c:
+        c.execute('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY')
+        rd=ManualReader(db);v=current_state(rd)['version']
+        fact=json.loads((ROOT/'receipts'/(v+'.json')).read_text());base=fact['base']
+        prior=json.loads((ROOT/'receipts'/(base+'.json')).read_text())
+        target=NEXT if original(c,PUBLIC) else PUBLIC
+        ids=tuple(sorted(receipt(v)['payload_hashes'])[::359][:16])
+        old_exact=one(c,f'SELECT COUNT(*) FROM {target} WHERE profile_version=%s',(base,))[0]
+        current_rows=one(c,f'SELECT COUNT(*) FROM {target} WHERE profile_version=(SELECT MAX(profile_version) FROM {target})')[0]
+        rows,meta=request(rd,base,ids,table=target)
+        if old_exact or current_rows!=fact['facts']['n'] or set(rows)!=set(ids) or meta['version']!=v:
+            raise RuntimeError('old published hint returned empty or mixed current data')
+        result=dict(at=stamp(),before_read=prior['checked'],old_hint=base,version=v,table=target,
+                    exact_expired_rows=old_exact,single_statement_current_rows=current_rows,returned_pages=len(rows))
+        atomic(QA/('stale-hint-'+target+'.json'),result)
+        return result
+
+
 def compare():
     cfg=env()
     with closing(connect_reader(cfg)) as db,db.cursor() as c:
@@ -248,8 +267,8 @@ def compare():
 
 
 if __name__=='__main__':
-    ps=argparse.ArgumentParser();ps.add_argument('action',choices=['start-pin','finish-pin','compare','metrics','prepare-selection','recovery-evidence']);ps.add_argument('--label',default='before')
+    ps=argparse.ArgumentParser();ps.add_argument('action',choices=['start-pin','finish-pin','compare','metrics','prepare-selection','recovery-evidence','stale-hint']);ps.add_argument('--label',default='before')
     args=ps.parse_args();disk();QA.mkdir(exist_ok=True)
     run={'start-pin':start_pin,'finish-pin':finish_pin,'compare':compare,'metrics':lambda:snapshot_metrics(args.label),
-         'prepare-selection':prepare_selection,'recovery-evidence':lambda:recovery_evidence(args.label)}
+         'prepare-selection':prepare_selection,'recovery-evidence':lambda:recovery_evidence(args.label),'stale-hint':stale_hint}
     print(encoded(run[args.action]()),flush=True)
