@@ -7,9 +7,11 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from features.gpu_offload import legacy_sql_gate as legacy
 from features.gpu_offload.shared_sql_gate import SharedCoordinator, legacy_occupancy
+from features.gpu_offload import sql_handover
 
 
 @unittest.skipUnless(os.name=='posix' and hasattr(socket,'AF_UNIX'),'Linux production socket protocol')
@@ -84,6 +86,28 @@ class SharedGateTests(unittest.TestCase):
         self.assertEqual(self.coordinator.capacity,13)
         self.assertEqual(self.coordinator.snapshot()['recovered_local_reserved'],1)
         self.assertTrue(legacy.process_exists(os.getpid()))
+
+    def test_handover_command_preserves_old_lease_and_refuses_busy_retirement(self):
+        canonical=self.root/'gate.sock';staged=self.root/'staged.sock';old_state=self.root/'old-state.json'
+        old=legacy.GateCoordinator(14,100,300,legacy.DEFAULT_POOL,str(old_state),active_timeout=1500)
+        self.server(canonical,old);inflight=self.acquire(canonical)
+        self.coordinator.set_legacy_reserved(14);self.server(staged,self.coordinator)
+        unit=self.root/'units'/'old.service';unit.parent.mkdir();unit.write_text('[Service]\nExecStart=old-gate\n')
+        state=self.root/'handover';state.mkdir()
+        fake=lambda *args:str(os.getpid()) if args[:1]==('show',) else ''
+        with patch.multiple(sql_handover,CANONICAL=canonical,STAGED=staged,ALIAS=self.root/'legacy.sock',
+                            UNIT_PATH=unit,DROPIN=self.root/'units'/'old.service.d'/'90-offload.conf',LEGACY_STATE=old_state):
+            with patch.object(sql_handover,'systemctl',side_effect=fake) as ctl:
+                result=sql_handover.activate(state)
+                self.assertEqual(result['stage'],'legacy_draining')
+                self.assertEqual(legacy.status_request(str(canonical))['version'],'2.0.0-offload')
+                self.assertEqual(old.snapshot()['in_use'],1)
+                retired=sql_handover.retire(state)
+                self.assertEqual(retired['stage'],'legacy_draining')
+                self.assertFalse(any(call.args[:1]==('stop',) for call in ctl.call_args_list))
+                self.assertTrue(unit.is_file());self.assertFalse(unit.is_symlink())
+                inflight.settimeout(0.05)
+                with self.assertRaises(socket.timeout):inflight.recv(1)
 
 
 if __name__=='__main__':unittest.main()

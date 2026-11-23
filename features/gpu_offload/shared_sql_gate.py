@@ -191,8 +191,9 @@ def main():
         marker=json.loads(marker_path.read_text())
         canonical=Path(marker['canonical'])
         if marker.get('barrier_complete'):
-            if canonical.stat().st_ino!=marker['canonical_inode']:
+            if canonical.exists() and canonical.stat().st_ino!=marker['canonical_inode']:
                 raise RuntimeError('canonical_gate_changed_since_handover')
+            canonical.parent.mkdir(parents=True,exist_ok=True)
             os.replace(str(socket_path),str(canonical))
             marker.update(canonical_inode=canonical.stat().st_ino,shared_pid=os.getpid())
             legacy.durable_replace_json(str(marker_path),marker)
