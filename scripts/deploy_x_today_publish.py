@@ -20,6 +20,7 @@ FILES = ['features/x_tag_publish/account_snapshot.py', 'features/x_tag_publish/r
 UNITS = ['x-tag-post.service','x-tag-auto.service','x-tag-gateway.service',
          'x-tag-auto-runner.timer','x-tag-auto-runner.path','x-tag-auto-scheduler.timer']
 AUTO = '/mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3'
+HEALTH = '/opt/publish-scheduler-health/current/scripts/publish_scheduler_health.py'
 
 def run(*args):return subprocess.check_output(list(map(str,args)),text=True).strip()
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -50,7 +51,14 @@ def prepare():
         tasks=[dict(r) for r in c.execute("SELECT * FROM x_auto_task WHERE template_id=9000000000007 AND created_at>='2026-11-22T16:00:00' AND created_at<'2026-11-23T16:00:00' ORDER BY id")]
         save('today-scope.json',dict(day='2026-11-23',template_id=9000000000007,tasks=tasks))
     for label,path in [('auto',AUTO),('posts','/mnt/data-disk/x-tag-publisher/posts.sqlite3'),('dispatch','/mnt/data-disk/pipeline-dispatch/dispatch.sqlite3')]:
-        with closing(readonly(path)) as src,closing(sqlite3.connect(ROOT/(label+'-before.sqlite3'))) as dst:src.backup(dst,pages=2048,sleep=.01)
+        # Pin the WAL snapshot: otherwise frequent live writes restart an
+        # incremental backup indefinitely. This never pauses the writers.
+        with closing(readonly(path)) as src,closing(sqlite3.connect(ROOT/(label+'-before.sqlite3'))) as dst:
+            src.execute('BEGIN');src.execute('SELECT 1 FROM sqlite_master LIMIT 1').fetchone()
+            src.backup(dst,pages=2048,sleep=.01)
+            assert dst.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+        print('backed_up',label,flush=True)
+    run(sys.executable,HEALTH,'snapshot','--lane','x','--output',ROOT/'schedulers-before.json')
     save('deployment.json',m);print(json.dumps(dict(stage='prepared',commit=commit,tasks=len(tasks))))
 
 def install(rollback=False):
@@ -79,6 +87,8 @@ def finish():
     run('systemctl','restart','x-tag-auto.service')
     for u,before in m['units'].items():
         if u.endswith(('.timer','.path')) and before['ActiveState']=='active':run('systemctl','start',u)
+    run(sys.executable,HEALTH,'restore','--baseline',ROOT/'schedulers-before.json',
+        '--wait-seconds','25','--output',ROOT/'schedulers-after.json')
     s=states();assert all(s[u]['ActiveState']=='active' for u in UNITS)
     m['stage']='rolled_back' if m['stage']=='rollback_pending' else 'active';m['after']=s;save('deployment.json',m)
     print(json.dumps(dict(stage=m['stage'],services=s)))
