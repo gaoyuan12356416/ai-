@@ -38,8 +38,9 @@ def main():
     p.add_argument('action', choices=['stage', 'apply', 'rollback'])
     p.add_argument('--lane', required=True)
     p.add_argument('--state', required=True)
+    p.add_argument('--manifest', default='manifest.json')
     a = p.parse_args()
-    spec = json.loads((BUNDLE / 'manifest.json').read_text())[a.lane]
+    spec = json.loads((BUNDLE / a.manifest).read_text())[a.lane]
     root = Path(spec['root']).resolve()
     state = Path(a.state).resolve() / a.lane
     staged, backup = state / 'staged', state / 'backup'

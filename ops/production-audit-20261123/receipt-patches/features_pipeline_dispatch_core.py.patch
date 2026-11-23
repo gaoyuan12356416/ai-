@@ -1,0 +1,37 @@
+--- a/features/pipeline_dispatch/core.py
++++ b/features/pipeline_dispatch/core.py
+@@ -1446,2 +1446,34 @@
+ 
++    def acknowledge_obsolete_no_write_delivery(self, claim, delivery_id, request, action):
++        """ACK transport of an obsolete local fact, never apply it to a successor.
++
++        Claims and every original receipt remain durable. An operation permit or
++        unknown outcome excludes this path, even when a newer generation exists.
++        """
++        if (not delivery_id or request.get("unknown_outcome") or action not in {"jobs/fail", "jobs/checkpoint"}
++                or (action == "jobs/checkpoint" and request.get("phase") != "x_preflight")):
++            return None
++        with self.transaction() as c:
++            job_id, generation = claim.get("job_id", claim.get("id")), claim.get("generation")
++            row = c.execute("SELECT * FROM pipeline_job WHERE id=?", (job_id,)).fetchone()
++            if not row or not isinstance(generation, int) or generation > row["generation"]:
++                return None
++            old = generation < row["generation"]
++            if not old and (action != "jobs/fail" or row["status"] != "failed" or row["external_intent"]
++                            or not row["error_code"] or row["error_code"] != request.get("error_code")):
++                return None
++            if not old and not c.execute("SELECT 1 FROM pipeline_claim_history WHERE job_id=? AND generation<? LIMIT 1", (job_id, generation)).fetchone():
++                return None  # Initial failures retain the existing native reconciliation path.
++            if action == "jobs/checkpoint" and (row["channel"] != "x" or row["stage"] != "prepare"):
++                return None
++            history = c.execute("SELECT * FROM pipeline_claim_history WHERE job_id=? AND generation=?", (job_id, generation)).fetchone()
++            if (not history or history["node_id"] != claim.get("node_id") or history["worker_id"] != claim.get("worker_id")
++                    or not secrets.compare_digest(history["claim_hash"], digest(claim.get("claim_token", "")))
++                    or c.execute("SELECT 1 FROM pipeline_operation WHERE job_id=? AND generation=? LIMIT 1", (job_id, generation)).fetchone()):
++                return None
++            response = {"accepted": True, "delivery_only": True, "duplicate": not old, "superseded": old, "status_unchanged": True}
++            c.execute("INSERT INTO pipeline_delivery VALUES(?,?,?,?,?,?)", (delivery_id, job_id, generation,
++                digest(claim["claim_token"]), digest(dumps(request)), dumps(response)))
++            return response
++
+     def historical_receipt_claim(self, claim):

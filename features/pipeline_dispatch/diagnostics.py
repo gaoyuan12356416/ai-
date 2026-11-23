@@ -46,6 +46,8 @@ def failure_fields(message):
 def exception_failure_fields(exc):
     try:
         from features.x_posts.service import XPostError
-        return failure_fields(str(exc)) if type(exc) is XPostError else {}
+        from features.x_posts.media_repair import MediaRepairError
+        from features.fb_gpu.prepare_worker import PrepareWorkerError
+        return failure_fields(str(exc)) if type(exc) in {XPostError, MediaRepairError, PrepareWorkerError} else {}
     except Exception:
         return {}

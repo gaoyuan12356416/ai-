@@ -1,0 +1,8 @@
+--- a/features/pipeline_dispatch/service.py
++++ b/features/pipeline_dispatch/service.py
+@@ -326,2 +326,5 @@
+                 return rejected
++            obsolete = self.store.acknowledge_obsolete_no_write_delivery(payload, delivery_id, payload, action)
++            if obsolete:
++                return obsolete
+             if action in ("jobs/complete", "jobs/fail"):

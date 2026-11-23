@@ -324,6 +324,9 @@ class Coordinator:
             rejected = self.store.acknowledge_preparation_rejection(payload, delivery_id, payload, action)
             if rejected:
                 return rejected
+            obsolete = self.store.acknowledge_obsolete_no_write_delivery(payload, delivery_id, payload, action)
+            if obsolete:
+                return obsolete
             if action in ("jobs/complete", "jobs/fail"):
                 historical = self.store.historical_receipt_claim(payload)
                 if historical:

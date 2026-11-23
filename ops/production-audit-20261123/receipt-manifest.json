@@ -1,0 +1,53 @@
+{
+  "coordinator": {
+    "root": "/opt/pipeline-dispatch/current",
+    "files": [
+      {
+        "path": "features/pipeline_dispatch/core.py",
+        "patch": "../receipt-patches/features_pipeline_dispatch_core.py.patch",
+        "before": "545901c83c4e782e78460eb82fd8e431ad4d62ceafc5ac101532e032b4cb7f7e",
+        "after": "c2ac7b1b263a388dcfc26d9dade86eb4ba562fc4b0ca51b3ae251374335fa3c4"
+      },
+      {
+        "path": "features/pipeline_dispatch/service.py",
+        "patch": "../receipt-patches/features_pipeline_dispatch_service.py.patch",
+        "before": "98bdd4295b448ec1683de7770858fe2f5ee791aeb1728700f5fb1eec5df09387",
+        "after": "b52c439f8289b6c2960a64675ac711ff5034bceed181cc4c4ca8228c60da18b6"
+      }
+    ]
+  },
+  "cpu": {
+    "root": "/mnt/data-disk/social-480-20261119/cpu-d5b35f6937da/candidate",
+    "files": [
+      {
+        "path": "features/pipeline_dispatch/receipt_outbox.py",
+        "patch": "../receipt-patches/features_pipeline_dispatch_receipt_outbox.py.patch",
+        "before": "0e91db0afdbaef278ccc3f5ad476e05b1283b5f8bc1667d552eb6dd6e6b48bc7",
+        "after": "b9311e372b9a4e06a7cec820509e5d48d7eba67b166697847f72de67d84da276"
+      },
+      {
+        "path": "features/pipeline_dispatch/diagnostics.py",
+        "patch": "../receipt-patches/features_pipeline_dispatch_diagnostics.py.patch",
+        "before": "c5dc3160352f55fba82e0edfb4d9ae3e61ea0d75bff3847cdacfe672948d73ca",
+        "after": "87826ee2914234d51d137d241214113bb86ec5bc29ff2bed3c5ae7ebeeec94c2"
+      }
+    ]
+  },
+  "hk": {
+    "root": "/data/social-480-20261119/hk-2a40e97d42ad/candidate",
+    "files": [
+      {
+        "path": "features/pipeline_dispatch/receipt_outbox.py",
+        "patch": "../receipt-patches/features_pipeline_dispatch_receipt_outbox.py.patch",
+        "before": "0e91db0afdbaef278ccc3f5ad476e05b1283b5f8bc1667d552eb6dd6e6b48bc7",
+        "after": "b9311e372b9a4e06a7cec820509e5d48d7eba67b166697847f72de67d84da276"
+      },
+      {
+        "path": "features/pipeline_dispatch/diagnostics.py",
+        "patch": "../receipt-patches/features_pipeline_dispatch_diagnostics.py.patch",
+        "before": "c5dc3160352f55fba82e0edfb4d9ae3e61ea0d75bff3847cdacfe672948d73ca",
+        "after": "87826ee2914234d51d137d241214113bb86ec5bc29ff2bed3c5ae7ebeeec94c2"
+      }
+    ]
+  }
+}
