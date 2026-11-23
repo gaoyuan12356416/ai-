@@ -1,5 +1,6 @@
 import unittest
 import sqlite3
+import json
 
 from scripts import recover_x_unentered_publish as recovery
 from scripts import recover_x_prepost_failures as base
@@ -41,6 +42,14 @@ class UnenteredPublishTests(unittest.TestCase):
     def test_native_entry_blocks_recovery(self):
         self.h.bridge.reserve(self.job,self.job)
         with self.assertRaisesRegex(base.RecoveryRejected,'native_current_claim_entered'):self.plan()
+
+    def test_delivery_only_ack_preserves_confirmed_failure(self):
+        with self.h.store.connect() as c:
+            c.execute('UPDATE pipeline_delivery SET response_json=? WHERE delivery_id=?',
+                      (json.dumps(dict(accepted=True,delivery_only=True,duplicate=True,status_unchanged=True,superseded=False)),
+                       'unentered-failure'))
+        p=self.plan()
+        self.assertEqual(recovery.apply_plan(p,self.evidence(p),self.h.root/'unentered-backups','operator')['restored_job_ids'],[self.job['id']])
 
     def test_first_unentered_claim_preserves_unstarted_log(self):
         h=self.h;q=h.queue(identity=3,auto=True)

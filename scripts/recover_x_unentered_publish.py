@@ -74,12 +74,18 @@ def snapshot(c, n, job_id):
     base.require(history and history[-1]['generation']==gen and history[-1]['claim_hash']==j['claim_hash'],
                  'claim_identity_changed')
     delivery=base.rows(c,'SELECT * FROM pipeline_delivery WHERE job_id=? AND generation=?',(job_id,gen))
-    base.require(any(x['claim_hash']==j['claim_hash'] and json.loads(x['response_json'])==
-                     {'accepted':True,'status':'failed'} for x in delivery),'terminal_ack_missing')
+    failures=base.rows(c,"SELECT * FROM pipeline_event WHERE job_id=? AND event_type='failed' ORDER BY id",(job_id,))
+    base.require(failures and json.loads(failures[-1]['details_json'])==
+                 {'code':j['error_code'],'unknown':False} and failures[-1]['created_at']==j['finished_at'],
+                 'terminal_failure_missing')
+    accepted=({'accepted':True,'status':'failed'},
+              {'accepted':True,'delivery_only':True,'duplicate':True,'status_unchanged':True,'superseded':False})
+    base.require(any(x['claim_hash']==j['claim_hash'] and json.loads(x['response_json']) in accepted
+                     for x in delivery),'terminal_ack_missing')
     return dict(job_id=job_id,source_key=key,queue_id=q['id'],from_generation=gen,to_generation=gen+1,
                 scope_job_ids=[x['id'] for x in jobs],node_id=j['node_id'],
                 prior_job=base.stable_job(j),queue=q,log=l,authorization=dict(auth) if auth else None,
-                history=history,delivery=delivery,native_ops=native_ops,central_ops=central_ops,
+                history=history,delivery=delivery,failures=failures,native_ops=native_ops,central_ops=central_ops,
                 checkpoints=checkpoints)
 
 
