@@ -83,13 +83,27 @@ def snapshot(c, n, job_id):
                 checkpoints=checkpoints)
 
 
-def make_plan(central,native,job_ids):
+def check_origin(auto, queue_id):
+    with contextlib.closing(base.read_connection(auto)) as c:
+        found=base.rows(c,'SELECT r.id,r.status,r.error_code FROM x_auto_task t '
+                         'JOIN x_auto_run r ON r.id=t.run_id WHERE t.execution_queue_id=?',(queue_id,))
+    base.require(len(found)==1,'auto_origin_missing')
+    origin=found[0]
+    base.require(origin['status'] not in ('canceled','cancelled','stopped')
+                 and origin['error_code']!='operator_terminated','auto_origin_terminated')
+    return origin
+
+
+def make_plan(central,native,job_ids,auto=None):
     with contextlib.closing(base.read_connection(central)) as c, contextlib.closing(base.read_connection(native)) as n:
         c.execute('BEGIN');n.execute('BEGIN')
         items=[snapshot(c,n,j) for j in job_ids]
     p=dict(kind='x_unentered_publish_recovery',central=str(central),native=str(native),items=items,
            nodes=sorted({h['node_id'] for i in items for h in i['history']}),
            media_only_reconciliation=True,captured_at=base.utcnow().isoformat())
+    if auto:
+        p['auto']=str(auto)
+        p['origins']={str(i['queue_id']):check_origin(auto,i['queue_id']) for i in items}
     p['plan_sha256']=base.document_hash(p)
     return p
 
@@ -108,6 +122,7 @@ def apply_plan(plan,evidence,directory,actor):
         c.execute(DDL)
         for item in plan['items']:
             jid,gen=item['job_id'],item['from_generation'];now=base.utcnow().isoformat()
+            if plan.get('auto'):check_origin(plan['auto'],item['queue_id'])
             old=c.execute('SELECT * FROM '+TABLE+' WHERE job_id=? AND generation=?',(jid,gen)).fetchone()
             base.require(not old or old['plan_sha256']==plan['plan_sha256'],'other_recovery')
             if old and old['state']=='committed':
@@ -160,10 +175,12 @@ def apply_plan(plan,evidence,directory,actor):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('action',choices=['plan','apply']);p.add_argument('--central');p.add_argument('--native')
+    p.add_argument('--auto',help='Original Auto ledger; required when planning')
     p.add_argument('--job-ids',type=int,nargs='+');p.add_argument('--plan');p.add_argument('--evidence',nargs='+')
     p.add_argument('--backup-dir');p.add_argument('--actor');p.add_argument('--output',required=True);a=p.parse_args()
+    if a.action=='plan':base.require(bool(a.auto),'auto_ledger_required')
     with open(a.output,'x') as f:
-        result=(make_plan(a.central,a.native,a.job_ids) if a.action=='plan' else
+        result=(make_plan(a.central,a.native,a.job_ids,a.auto) if a.action=='plan' else
                 apply_plan(json.loads(Path(a.plan).read_text()),[json.loads(Path(x).read_text()) for x in a.evidence],a.backup_dir,a.actor))
         json.dump(result,f)
     print(json.dumps({'ok':True,'count':len(result.get('items',result.get('restored_job_ids',[])))}))

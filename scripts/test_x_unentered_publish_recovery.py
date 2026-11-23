@@ -1,4 +1,5 @@
 import unittest
+import sqlite3
 
 from scripts import recover_x_unentered_publish as recovery
 from scripts import recover_x_prepost_failures as base
@@ -71,6 +72,16 @@ class UnenteredPublishTests(unittest.TestCase):
             c.execute('UPDATE x_post_publish_log SET unknown_outcome=0')
             c.execute("UPDATE pipeline_x_prepost_recovery SET state='consumed'")
         with self.assertRaisesRegex(base.RecoveryRejected,'unused_authorization_required'):self.plan()
+
+    def test_original_operator_termination_blocks_plan(self):
+        path=self.h.root/'auto.sqlite'
+        with sqlite3.connect(path) as c:
+            c.execute('CREATE TABLE x_auto_task(run_id,execution_queue_id)')
+            c.execute('CREATE TABLE x_auto_run(id,status,error_code)')
+            c.execute('INSERT INTO x_auto_task VALUES(1,?)',(self.h.q['id'],))
+            c.execute("INSERT INTO x_auto_run VALUES(1,'canceled','operator_terminated')")
+        with self.assertRaisesRegex(base.RecoveryRejected,'auto_origin_terminated'):
+            recovery.make_plan(self.h.central,self.h.runtime.POST_DB_PATH,[self.job['id']],path)
 
 
 if __name__=='__main__':unittest.main()
