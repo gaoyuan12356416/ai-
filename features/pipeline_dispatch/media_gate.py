@@ -227,10 +227,21 @@ def pending(store, limit):
     from .core import _job
 
     with closing(store.connect()) as c:
+        # A slow media RPC may finish natively after its HTTP reply times out.
+        # Let every channel replay those same tickets alongside large backlogs.
         rows = c.execute(
-            """SELECT j.*,g.ticket,g.decision,g.phase FROM pipeline_media_gate g JOIN pipeline_job j
-                 ON j.source_key=g.source_key AND j.stage='prepare'
-                 WHERE g.phase='pending' AND g.retry_at<=? ORDER BY g.retry_at,j.id LIMIT ?""",
+            """WITH due AS (
+                 SELECT j.id,j.source_key,
+                   ROW_NUMBER() OVER (PARTITION BY j.channel
+                     ORDER BY COALESCE(NULLIF(g.retry_at,''),j.updated_at),j.id) AS channel_rank
+                 FROM pipeline_media_gate g JOIN pipeline_job j
+                   ON j.source_key=g.source_key AND j.stage='prepare'
+                 WHERE g.phase='pending' AND g.retry_at<=?
+               )
+               SELECT j.*,g.ticket,g.decision,g.phase FROM due
+                 JOIN pipeline_job j ON j.id=due.id
+                 JOIN pipeline_media_gate g ON g.source_key=due.source_key
+               ORDER BY due.channel_rank,j.id LIMIT ?""",
             (store.now(), limit),
         ).fetchall()
         return [(_job(r, True), r["ticket"], json.loads(r["decision"])) for r in rows]

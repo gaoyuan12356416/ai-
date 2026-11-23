@@ -47,6 +47,30 @@ class DecisionTests(unittest.TestCase):
         self.store.worker_heartbeat("cpu-main", "worker", "prepare")
         return self.store.claim("cpu-main", "worker", "prepare")["job"]
 
+    def pending_job(self, channel, identity, retry_at=""):
+        self.store.channel_enabled(channel, True)
+        family="queue" if channel=="x" else "auto"
+        key=f"{channel}:{family}:{identity}"
+        job=self.store.offer(dict(self.base,source_key=key,source_id=str(identity),channel=channel,family=family))
+        with self.store.transaction() as c:
+            c.execute("UPDATE pipeline_media_gate SET phase='pending',ticket=?,decision=?,retry_at=? WHERE source_key=?",(key,'{"kind":"deadline_original"}',retry_at,key))
+        return job["id"]
+
+    def test_slow_channel_backlog_does_not_starve_other_channel_receipt_replay(self):
+        for identity in range(1,33):self.pending_job("x",identity)
+        tt=self.pending_job("tt",1,stamp(self.now-dt.timedelta(seconds=20)))
+        first=media_gate.pending(self.store,4)
+        self.assertEqual(len(first),4)
+        self.assertIn(tt,[job["id"] for job,_,_ in first])
+        self.assertEqual(next(ticket for job,ticket,_ in first if job['id']==tt),'tt:auto:1')
+
+    def test_fair_delivery_preserves_backoff_and_single_channel_capacity(self):
+        ids=[self.pending_job("x",identity) for identity in range(1,21)]
+        tt=self.pending_job("tt",1,stamp(self.now+dt.timedelta(seconds=20)))
+        first=media_gate.pending(self.store,16)
+        self.assertEqual([job["id"] for job,_,_ in first],ids[:16])
+        self.assertNotIn(tt,[job["id"] for job,_,_ in first])
+
     def test_boundary_and_no_render_slots(self):
         job = self.store.offer(self.base)
         self.now -= dt.timedelta(milliseconds=1)

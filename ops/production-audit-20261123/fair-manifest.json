@@ -1,0 +1,13 @@
+{
+  "coordinator": {
+    "root": "/opt/pipeline-dispatch/current",
+    "files": [
+      {
+        "path": "features/pipeline_dispatch/media_gate.py",
+        "patch": "../fair-patches/media-gate.patch",
+        "before": "74a3204e3771ac7a49fc49915add9759e8fae44a182d8840e16ad4aa3f401f89",
+        "after": "f787845b1c6fce7ad11ba77475ecdf84a4c9f3953cf3af71d4474ae3688f3389"
+      }
+    ]
+  }
+}
