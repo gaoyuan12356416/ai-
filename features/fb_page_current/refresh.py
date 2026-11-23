@@ -1,19 +1,20 @@
 """Integrate current-row storage with the existing frozen-input collector and publisher."""
 from contextlib import closing
 import json
+import os
 from .common import (LEGACY,MONEY,NEXT,PORTRAITS,PUBLIC,ROOT,STAGE,atomic,current_state,encoded,
                      query,read_config,stamp,writer)
 from .publish import commit,finalize,model_items,owner,promote,verify
 
 
-def catch_up(reader,env,target,root=ROOT):
+def catch_up(reader,env,target,root=ROOT,connector=writer):
     file=root/'pending.json'
     with owner(root):
         if not file.exists():return
         pending=json.loads(file.read_text())
         if pending['target']!=target:raise RuntimeError('pending table needs migration reconciliation')
         v=pending['meta']['version']
-        with closing(writer(env)) as db:
+        with closing(connector(env)) as db:
             with db.cursor() as c:
                 # A one-row write fence distinguishes commit-disconnect from replica delay.
                 c.execute('SELECT active_version FROM fb_page_revenue_profile_state WHERE singleton=1 FOR UPDATE')
@@ -53,7 +54,7 @@ def primary(data,env,reader,create_table=False):
     return promote(reader,env,PUBLIC,data['meta'],model_items(data,storage.projections))
 
 
-def secondary(data,env,reader,proof):
+def secondary(data,env,reader,proof,*,resumed=False):
     from features.fb_page_portrait import storage
     mode=read_config()
     if mode not in ('live-mirror','shadow'):return
@@ -67,7 +68,8 @@ def secondary(data,env,reader,proof):
         if got['payload_hashes']!=proof['payload_hashes'] or any(got[f]!=proof[f] for f in MONEY):
             raise RuntimeError('secondary receipt differs')
         atomic(ROOT/'comparisons'/(version+'.json'),dict(version=version,mode=mode,checked=stamp(),
-               pages=proof['verified_rows'],totals={k:proof[k] for k in MONEY},outcome='matched'))
+               pages=proof['verified_rows'],totals={k:proof[k] for k in MONEY},outcome='matched',
+               invocation=os.environ.get('INVOCATION_ID',''),resumed=resumed))
         print(encoded(dict(event='portrait_dual_verified',mode=mode,version=version,pages=proof['verified_rows'])),flush=True)
     except Exception as exc:
         atomic(ROOT/'comparisons'/(version+'.error.json'),dict(version=version,mode=mode,at=stamp(),error=type(exc).__name__,message=str(exc)[:250]))

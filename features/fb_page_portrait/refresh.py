@@ -44,7 +44,7 @@ def main():
             except Exception as exc:
                 print(encoded(dict(event='partition_cache_maintenance_failed',error=type(exc).__name__)),flush=True)
             atomic_json(root/'status.json',dict(status='ok',**data['meta']))
-            secondary(data,env,reader,proof)
+            secondary(data,env,reader,proof,resumed=bool(args.resume_input))
             try:
                 from features.fb_page_current.pins import Pins
                 Pins().clean()

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import sys
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 import importlib.util
 spec=importlib.util.spec_from_file_location('current_operations',Path(__file__).with_name('operations.py'))
@@ -12,6 +13,7 @@ ops=importlib.util.module_from_spec(spec);spec.loader.exec_module(ops)
 import pymysql
 from features.fb_page_current.common import *
 from features.fb_page_current.publish import promote
+from features.fb_page_current.refresh import catch_up
 from features.fb_page_current.schema import install
 
 SOCKET=ROOT/'sandbox-socket/mysql.sock'
@@ -37,7 +39,11 @@ def main():
         c.execute('SELECT @@version,@@socket');(version,socket)=c.fetchone()
         if not version.startswith('5.7.') or not socket.endswith('mysql.sock'):raise ValueError('private MySQL required')
         c.execute('SHOW TABLES')
-        if c.fetchall():raise RuntimeError('private rehearsal database must be empty')
+        tables={r[0] for r in c.fetchall()}
+        if tables:
+            if '--rerun' not in sys.argv or not tables.issubset({PUBLIC,NEXT,LEGACY,STATE,STAGE}) or socket!='/run/portrait-qa/mysql.sock':
+                raise RuntimeError('private rehearsal database is not empty')
+            for t in sorted(tables):c.execute('DROP TABLE '+t)
         ddl=json.loads((ROOT/'baseline.json').read_text())['ddl']
         c.execute(ddl)
         install(db,(),False)
@@ -64,7 +70,30 @@ def main():
         try:apply(a,first)
         except RuntimeError as e:assert 'newer' in str(e)
         else:raise AssertionError('old replay accepted')
-    print(encoded(dict(version=version,tests=['initial','unchanged-detail-new-summary','signed','remove','add','MVCC','same-version-retry','stale-fence','no-change'])),flush=True)
+        e='20261123T140000000000Z'
+        with patch('features.fb_page_current.publish.commit',side_effect=ConnectionError('before commit')):
+            try:apply(e,first)
+            except ConnectionError:pass
+            else:raise AssertionError('failure injection')
+        assert current_state(rd)['version']==d
+        catch_up(rd,{},NEXT,root=path,connector=connect)
+        assert current_state(rd)['version']==e
+        f='20261123T150000000000Z'
+        with patch('features.fb_page_current.publish.finalize',side_effect=ConnectionError('after commit')):
+            try:apply(f,later)
+            except ConnectionError:pass
+            else:raise AssertionError('failure injection')
+        catch_up(rd,{},NEXT,root=path,connector=connect)
+        assert current_state(rd)['version']==f
+        from cutover import swap_sql,layout,AFTER,BEFORE
+        c.execute(f'INSERT INTO {PUBLIC} SELECT * FROM {NEXT}')
+        swap_sql(c,True);assert layout(db)==AFTER
+        c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(f,));assert c.fetchone()==(2,)
+        swap_sql(c,False);assert layout(db)==BEFORE
+        c.execute(f'SELECT COUNT(*) FROM {PUBLIC} WHERE profile_version=%s',(f,));assert c.fetchone()==(2,)
+    out=dict(version=version,socket=socket,at=stamp(),tests=['initial','unchanged-detail-new-summary','signed','remove','add','MVCC','same-version-retry','stale-fence','no-change','pre-commit-failure','commit-disconnect','atomic-rename','rollback-rename'])
+    atomic(ROOT/'qa/rollback-rehearsed.json',out)
+    print(encoded(out),flush=True)
 
 if __name__=='__main__':main()
 
