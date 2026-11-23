@@ -16,21 +16,21 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
-def validate_url(url):
+def validate_url(url, output=False):
     value = urlsplit(url)
     check(value.scheme == 'https' and not value.username and not value.password
           and value.port in (None, 443) and not value.fragment
           and re.fullmatch(r'[a-z0-9-]+-\d+\.cos\.ap-hongkong\.myqcloud\.com', value.hostname or '')
-          and value.path.startswith('/ai-video-editing/v1/uploads/'),
+          and value.path.startswith('/ai-video-editing/v1/outputs/' if output else '/ai-video-editing/v1/uploads/'),
           'cloud_location_invalid', '素材存储地址无效', 502)
     return url
 
 
-def download(location, target, stopped=None):
+def download(location, target, stopped=None, *, output=False):
     """Never forward the internal worker token to COS; verify the frozen object."""
-    url = validate_url(location['url'])
+    url = validate_url(location['url'], output)
     size, etag = location['size'], location['etag']
-    check(type(size) is int and 0 < size <= MAX_BYTES and isinstance(etag, str) and etag,
+    check(type(size) is int and 0 < size <= (8 * MAX_BYTES if output else MAX_BYTES) and isinstance(etag, str) and etag,
           'cloud_identity_invalid', '素材存储回执无效', 502)
     target = Path(target)
     check(shutil.disk_usage(target.parent).free > size + 128 * 1024**2,

@@ -123,6 +123,20 @@ class Handler(platform.DramaMaterialHandler):
         expected=self.server.worker_token
         check(expected and hmac.compare_digest(self.headers.get('Authorization',''), 'Bearer '+expected),
               'unauthorized','需要制作节点身份',401)
+        output = re.fullmatch(r'/internal/tasks/(at_[a-f0-9]{32})/(complete-object|output-location|output-source|attach-output)', path)
+        if output:
+            from . import output_storage
+            tid, action = output.groups()
+            if action in ('complete-object', 'attach-output') and self.command == 'POST':
+                return self.reply(200, output_storage.complete(self.runtime, tid,
+                    self.headers.get('X-Edit-Lease', ''), self.payload(), migrate=action=='attach-output'))
+            check(self.command in ('GET','HEAD') and action in ('output-location','output-source'),
+                  'method_invalid','请求方式无效',405)
+            meta = output_storage.record(self.runtime, tid)
+            if action == 'output-location':
+                return self.reply(200, output_storage.location(self.runtime, tid) or
+                    {'url':None,'sha256':meta['sha256'],'size':output_storage.file_size(self.runtime,tid)})
+            return self.stream(output_storage.local_file(self.runtime, tid), tid+'.mp4', meta['sha256'])
         if path == '/internal/uploads/claim' and self.command == 'POST':
             self.payload()
             return self.reply(200, {'item': self.runtime.cloud.claim()})
@@ -279,6 +293,16 @@ class Handler(platform.DramaMaterialHandler):
                 rec=rt.list_records('tasks',actor,m[1])
                 if not m[2]:return self.reply(200,rec)
                 check(rec['item']['status']=='completed','not_ready','成片尚未就绪',409)
+                from . import output_storage
+                loc = output_storage.location(rt, m[1], rec['item']['name']+'.mp4', q('download')=='1', self.command)
+                if loc:
+                    self.send_response(307)
+                    self.send_header('Location',loc['url'])
+                    self.send_header('Cache-Control','private, no-store')
+                    self.send_header('Referrer-Policy','no-referrer')
+                    self.send_header('Content-Length','0')
+                    self.end_headers()
+                    return
                 return self.stream(rt.root/'outputs'/(m[1]+'.mp4'),rec['item']['name']+'.mp4',download=q('download')=='1')
         if path.startswith('/language/'):
             from . import language_tools as lang
@@ -294,7 +318,8 @@ class Handler(platform.DramaMaterialHandler):
                 if task:
                     rec=rt.list_records('tasks',actor,task)['item']
                     check(rec['status']=='completed','not_ready','请先完成制作',409)
-                    return self.reply(200,lang.generate(body,media_path=str(rt.root/'outputs'/(rec['id']+'.mp4'))))
+                    from .output_storage import local_file
+                    return self.reply(200,lang.generate(body,media_path=str(local_file(rt,rec['id']))))
                 return self.reply(200,lang.generate(body))
             if path=='/language/speech' and verb=='POST':return self.reply(200,lang.synthesize(body))
         raise Fault('not_found','接口不存在',404)

@@ -1060,12 +1060,10 @@ def dispatch(rt, actor, verb, path, body, query):
             "not_ready",
             "请选择已完成的作品",
         )
-        needed = sum(
-            (rt.root / "outputs" / (row["id"] + ".mp4")).stat().st_size
-            for row in records
-        )
+        from .output_storage import file_size, local_file
+        needed = sum(file_size(rt,row['id']) for row in records)
         check(
-            shutil.disk_usage(rt.root).free > needed + 512 * 1024**2,
+            shutil.disk_usage(rt.root).free > 2 * needed + 512 * 1024**2,
             "export_space",
             "导出空间不足，请减少本次选择数量",
             503,
@@ -1075,7 +1073,7 @@ def dispatch(rt, actor, verb, path, body, query):
         with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_STORED) as bundle:
             for i, row in enumerate(records, 1):
                 bundle.write(
-                    rt.root / "outputs" / (row["id"] + ".mp4"),
+                    local_file(rt,row['id']),
                     "%02d-%s.mp4"
                     % (i, re.sub(r"[^\w\u4e00-\u9fff -]", "_", row["name"])[:80]),
                 )

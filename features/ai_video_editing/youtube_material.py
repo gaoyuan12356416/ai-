@@ -149,11 +149,13 @@ class Workflow:
         check(not known or (known["product"], known["source_key"]) == (product, key),
               "material_drama_conflict", "入库剧目须与正片关联的原剧一致", 409)
         drama = resolve_drama(self.catalog, product, key, country)
-        path = self.rt.root/"outputs"/(tid+".mp4")
-        check(path.is_file() and path.stat().st_size > 0, "material_file_missing", "成片文件暂不可读取", 409)
-        snapshot = dict(drama=drama, request=self.io.request(item, drama, actor), size=path.stat().st_size,
+        from .output_storage import record, file_size
+        source = record(self.rt,tid).get('_cos')
+        snapshot = dict(drama=drama, request=self.io.request(item, drama, actor), size=file_size(self.rt,tid),
                         evidence=observations(self.rt, actor, unit),
                         **{k: item[k] for k in ("width", "height", "duration_ms")})
+        if source:
+            snapshot['cos_source'] = source
         with self.rt.db(True) as db:
             db.execute(f"""INSERT INTO {TABLE}(task_id,owner,version,sha256,snapshot,state,created)
                 VALUES(?,?,?,?,?,'queued',?) ON CONFLICT(task_id) DO NOTHING""",

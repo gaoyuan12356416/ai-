@@ -269,13 +269,14 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 class InternalAPI:
-    def __init__(self, base, token):
+    def __init__(self, base, token, output_store=None):
         parts = urlsplit(base)
         require((parts.scheme == 'https' or parts.scheme == 'http' and parts.hostname in ('localhost', '127.0.0.1', '::1'))
                 and parts.hostname and not parts.username and not parts.password and not parts.query and not parts.fragment,
                 '内部任务地址无效')
         self.base = base.rstrip('/')
         self.token = token.strip()
+        self.output_store = output_store
         require(self.token, '缺少专用 worker 凭证')
 
     def open(self, path, *, lease='', data=None, headers=None, timeout=90):
@@ -334,6 +335,16 @@ class InternalAPI:
             require(actual == size and digest.hexdigest() == expected, '素材内容与回执不一致')
 
     def complete(self, tid, lease, path, digest):
+        if self.output_store is not None:
+            from .output_storage import upload
+            body = upload(*self.output_store, tid, path, digest)
+            with self.open('/tasks/%s/complete-object' % tid, lease=lease,
+                           data=json.dumps(body).encode(), headers={'Content-Type':'application/json'},
+                           timeout=60) as response:
+                result = json.loads(response.read(65536))
+                if not isinstance(result,dict) or not result.get('ok'):
+                    raise TransferError('成片存储回执尚未确认')
+            return
         with path.open('rb') as body:
             headers = {'Content-Type': 'video/mp4', 'Content-Length': str(path.stat().st_size),
                        'X-Output-Sha256': digest}
@@ -484,8 +495,10 @@ def main():
     with (root / 'worker.lock').open('a') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         token_file = Path(os.environ.get('AI_VIDEO_EDITING_WORKER_TOKEN_FILE', '/etc/ai-video-editing/worker.token'))
+        from .output_storage import worker_client
         api = InternalAPI(os.environ.get('AI_VIDEO_EDITING_INTERNAL_URL',
-                          'https://ai.yingliangads.com/api/ai-video-editing/internal'), token_file.read_text().strip())
+                          'https://ai.yingliangads.com/api/ai-video-editing/internal'), token_file.read_text().strip(),
+                          output_store=worker_client())
         while not draining.is_set():
             try:
                 reconcile(api, root)

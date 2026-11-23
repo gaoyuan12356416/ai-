@@ -96,7 +96,17 @@ class MaterialIO:
                          "target_key": key, "artifact": {"sha256": sha, "size_bytes": size},
                          "request": item["request"]}}
         before = self.source._target_head(copy, client)
-        if before is None:
+        if before is None and item.get('cos_source'):
+            from .output_storage import object_key
+            origin = item['cos_source']
+            check(origin['bucket'] == self.bucket and origin['key'] == object_key(item['task_id'],sha)
+                  and origin['size'] == size, 'material_source_changed', '成片存储回执不符', 409)
+            # COS copies the selected final film; no CPU media upload is needed.
+            client.copy(Bucket=self.bucket, Key=key,
+                        CopySource={'Bucket':self.bucket,'Region':self.region,'Key':origin['key']},
+                        CopySourceIfMatch=origin['etag'], CopyStatus='Replaced',
+                        Metadata={'x-cos-meta-sha256':sha}, ACL='public-read', ContentType='video/mp4')
+        elif before is None:
             check(path.is_file() and path.stat().st_size == size,
                   "material_file_changed", "成片文件与渲染记录不一致", 409)
             digest = hashlib.sha256()

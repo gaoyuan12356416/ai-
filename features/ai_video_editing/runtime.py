@@ -271,7 +271,10 @@ class Runtime:
                           original_task_id=profile['original_task_id'] or rid, canvas=profile['canvas'])
         if row['status']=='completed':
             uri=f'{PREFIX}/tasks/{rid}/media'
-            result['output']={'preview_url':uri,'download_url':uri+'?download=1','metadata':json.loads(row['meta'])}
+            meta=json.loads(row['meta'])
+            result['output']={'preview_url':uri,'download_url':uri+'?download=1',
+                              'storage':'cos' if meta.get('_cos') else 'local',
+                              'metadata':{k:v for k,v in meta.items() if k!='_cos'}}
         return result
 
     def list_records(self,kind,actor,rid=None):

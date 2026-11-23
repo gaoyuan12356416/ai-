@@ -96,7 +96,8 @@ def tick(rt):
             tenant, uid = json.loads(row["owner"])
             task = rt.list_records("tasks", {"tenant_key": tenant, "user_id": uid}, row["task"])["item"]
             check(task["status"] == "completed", "not_ready", "成片尚未就绪", 409)
-            result = {"mode": "transcribe", **transcribe(rt.root/"outputs"/(task["id"]+".mp4"), row["language"],
+            from .output_storage import local_file
+            result = {"mode": "transcribe", **transcribe(local_file(rt,task['id']), row["language"],
                                                         temp_dir=rt.root, progress=progress)}
             status, error = "completed", ""
         except Exception as exc:

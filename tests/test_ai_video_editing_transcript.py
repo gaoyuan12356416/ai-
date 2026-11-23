@@ -172,6 +172,7 @@ class JobTests(unittest.TestCase):
         transcript_jobs.setup(self.rt)
         self.actor = {'tenant_key':'test','user_id':'one'}
         self.task = 'at_'+'1'*32
+        (self.rt.root/'outputs'/(self.task+'.mp4')).write_bytes(b'mocked transcript input')
         with self.rt.db(True) as db:
             db.execute("INSERT INTO tasks(id,owner,project,version,unit_id,unit_data,status,created) VALUES(?,?,?,1,'unit',?,'completed',0)",
                        (self.task,owner(self.actor),'project',packed({'title':'fixture','clips':[]})))
