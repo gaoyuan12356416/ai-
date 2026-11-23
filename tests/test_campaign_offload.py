@@ -1,9 +1,11 @@
 import gzip
 import http.client
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -11,6 +13,7 @@ from urllib.parse import urlencode
 from features.gpu_offload.campaign import service
 from features.gpu_offload.campaign_snapshot import index_snapshot,render,compressed_view
 from features.gpu_offload.campaign_reader import Server
+from features.gpu_offload.campaign_gateway import Server as Gateway
 
 
 class CampaignSnapshotTests(unittest.TestCase):
@@ -65,6 +68,40 @@ class CampaignSnapshotTests(unittest.TestCase):
             self.assertEqual(call(dict(actor,permissions={'ad_control_v3':False}))[0],403)
             self.assertEqual(call(actor,'bad')[0],401)
         finally:server.shutdown();server.server_close();thread.join(timeout=5)
+
+    def test_public_gateway_authenticates_cache_hits_and_keeps_stale_snapshot_on_outage(self):
+        actor=dict(tenant_key='company',user_id='u1',role='user',permissions={'ad_control_v3':True})
+        class Auth(BaseHTTPRequestHandler):
+            def log_message(self,*_):pass
+            def do_GET(inner):
+                body=json.dumps(dict(authenticated=True,user=inner.server.actor)).encode()
+                inner.server.checks+=1
+                inner.send_response(200);inner.send_header('Content-Length',str(len(body)));inner.end_headers();inner.wfile.write(body)
+        auth=ThreadingHTTPServer(('127.0.0.1',0),Auth);auth.actor=actor;auth.checks=0
+        reader=Server(('127.0.0.1',0),self.root/'index','t'*40,'company')
+        config=self.root/'gateway.json';config.write_text(json.dumps({'api_port':auth.server_port,'source_tenant':'company','reader_port':reader.server_port,'origin_port':1,'percentage':100}))
+        gateway=Gateway(('127.0.0.1',0),config,'t'*40)
+        servers=[auth,reader,gateway];threads=[]
+        for server in servers:
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();threads.append(thread)
+        def call(cookie='session=fixture'):
+            c=http.client.HTTPConnection(*gateway.server_address,timeout=5)
+            try:
+                c.request('GET','/reports/campaign-copy-performance/api/data?view=cohort&level=0&copy_start=&copy_end=',headers={'Cookie':cookie})
+                response=c.getresponse();return response.status,dict(response.getheaders()),response.read()
+            finally:c.close()
+        try:
+            self.assertEqual(call('')[0],401)
+            first=call();second=call();self.assertEqual(first[0],200);self.assertEqual(first[2],second[2]);self.assertEqual(auth.checks,2)
+            auth.actor=dict(actor,permissions={'ad_control_v3':False});self.assertEqual(call()[0],403)
+            auth.actor=dict(actor,tenant_key='other');self.assertEqual(call()[0],403)
+            auth.actor=actor
+            reader.shutdown();reader.server_close();servers.remove(reader)
+            _,value=gateway.status.entries['current'];gateway.status.entries['current']=(time.monotonic()-10,value)
+            result=call();self.assertEqual(result[0],200);self.assertEqual(result[1]['X-Report-Cache'],'stale');self.assertEqual(result[2],first[2])
+        finally:
+            for server in servers:server.shutdown();server.server_close()
+            for thread in threads:thread.join(timeout=5)
 
 
 if __name__=='__main__':unittest.main()
