@@ -1,4 +1,6 @@
 import gzip
+import copy
+import io
 import http.client
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
@@ -14,6 +16,8 @@ from features.gpu_offload.campaign import service
 from features.gpu_offload.campaign_snapshot import index_snapshot,render,compressed_view
 from features.gpu_offload.campaign_reader import Server
 from features.gpu_offload.campaign_gateway import Server as Gateway
+from features.gpu_offload.campaign_history import write_merged_seed
+from features.gpu_offload.campaign_snapshot import current
 
 
 class CampaignSnapshotTests(unittest.TestCase):
@@ -50,6 +54,21 @@ class CampaignSnapshotTests(unittest.TestCase):
     def test_parameters_remain_bounded_and_cannot_inject_sql(self):
         for query in ('view=cohort&level=7','view=cohort&copy_start=invalid','view=cohort&copy_start=2026-12-01&copy_end=2026-11-01'):
             with self.assertRaises(ValueError):render(self.root/'index',query)
+
+    def test_streaming_history_matches_original_refresh_and_removed_membership(self):
+        payload=dict(meta=dict(generated_at='2026-11-14 09:00:00',read_only_verified=True),
+            copy_pipeline={},copy_pipelines={},
+            campaigns=[dict(zip(self.wire['cf'],row)) for row in self.wire['c'] if row[1]!='empty'],
+            extra_entities=[dict(zip(self.wire['xf'],self.wire['x'][0]))],
+            daily=[dict(platform=0,campaign_id='same',dt='2026-11-11',spend=44)],
+            extra_daily=[dict(entity_key='0:1:7',dt='2026-11-11',spend=55)])
+        dates=['2026-11-11'];next_history='2026-10-01'
+        expected=service.encode_wire_payload(service.merge_history(copy.deepcopy(payload),self.wire,dates,next_history))
+        output=io.StringIO()
+        write_merged_seed(service.encode_wire_payload(payload),current(self.root/'index')[1],self.wire['m'],dates,next_history,output)
+        self.assertEqual(json.loads(output.getvalue()),expected)
+        self.assertEqual(len(expected['d']),3) # New day plus both platforms' old facts.
+        self.assertEqual(len(expected['xd']),2) # Removed Ad's old facts are excluded.
 
     def test_private_http_rechecks_tenant_and_permission_before_cached_response(self):
         server=Server(('127.0.0.1',0),self.root/'index','t'*40,'company')
