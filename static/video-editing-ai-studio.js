@@ -74,8 +74,13 @@
   };
   const Sources = window.AIEditorSourceState;
   const actionLocks = new Map();
-  let saveChain = Promise.resolve(), sessionPromise = null, navigationEpoch = 0;
-  let sourceProgress = null, progressEtag = "", progressRevision = "", previewQuality = "proxy";
+  let saveChain = Promise.resolve(),
+    sessionPromise = null,
+    navigationEpoch = 0;
+  let sourceProgress = null,
+    progressEtag = "",
+    progressRevision = "",
+    previewQuality = "proxy";
   const refreshing = new Set();
   const sourceCount = () => session?.selection?.summary?.total || assets.length;
   let auth,
@@ -104,7 +109,13 @@
     copySaveTimer,
     extraResults = [];
   const isActive = (s) =>
-    ["queued", "waiting_sources", "analyzing", "preparing", "rendering"].includes(s);
+    [
+      "queued",
+      "waiting_sources",
+      "analyzing",
+      "preparing",
+      "rendering",
+    ].includes(s);
   const config = () => session?.config || {};
   const finished = () => results.filter((x) => x.status === "completed");
   async function api(path, body, method, options = {}) {
@@ -120,7 +131,9 @@
       .catch(() => ({ error: "服务未返回有效响应" }));
     if (!response.ok) {
       const error = new Error(data.error || data.message || "请求未完成");
-      error.code = data.code; error.status = response.status; throw error;
+      error.code = data.code;
+      error.status = response.status;
+      throw error;
     }
     return data;
   }
@@ -134,17 +147,25 @@
   async function action(fn, key = document.activeElement) {
     key ||= fn;
     if (actionLocks.has(key)) return actionLocks.get(key);
-    const button = key instanceof HTMLElement && key.tagName === "BUTTON" ? key : null;
+    const button =
+      key instanceof HTMLElement && key.tagName === "BUTTON" ? key : null;
     if (button) button.disabled = true;
-    const work = Promise.resolve().then(fn).catch((e) => {
-      if (e.name !== "AbortError") toast(e.message, true);
-    }).finally(() => {
-      actionLocks.delete(key);
-      if (button?.isConnected) button.disabled = false;
-      busy = actionLocks.has("send"); updateComposer();
-      if(key==="confirm-selection"&&modalKind==="assets")drawSelection();
-    });
-    actionLocks.set(key, work); busy = actionLocks.has("send"); updateComposer();
+    const work = Promise.resolve()
+      .then(fn)
+      .catch((e) => {
+        if (e.name !== "AbortError") toast(e.message, true);
+      })
+      .finally(() => {
+        actionLocks.delete(key);
+        if (button?.isConnected) button.disabled = false;
+        busy = actionLocks.has("send");
+        updateComposer();
+        if (key === "confirm-selection" && modalKind === "assets")
+          drawSelection();
+      });
+    actionLocks.set(key, work);
+    busy = actionLocks.has("send");
+    updateComposer();
     return work;
   }
   function openModal(title, subtitle, body, footer = "", kind = "") {
@@ -166,7 +187,9 @@
       toast("文件正在上传，请稍候");
       return;
     }
-    ++libraryEpoch; catalogController?.abort(); assetController?.abort();
+    ++libraryEpoch;
+    catalogController?.abort();
+    assetController?.abort();
     $("stylePreviewVideo")?.pause();
     settingsObserver?.disconnect();
     $("modal").close();
@@ -175,41 +198,71 @@
   }
   function adoptSession(item) {
     const current = view === "source" ? assets[index]?.id : null;
-    session = item; assets = item.assets;
+    session = item;
+    assets = item.assets;
     sourceProgress = item.selection || null;
-    if (current) { const found = assets.findIndex((a) => a.id === current); if (found >= 0) index = found; }
+    if (current) {
+      const found = assets.findIndex((a) => a.id === current);
+      if (found >= 0) index = found;
+    }
   }
   async function ensureSession() {
     if (session) return session;
-    if (!sessionPromise) sessionPromise = api("/studio/sessions", {source_ids:[]}).then((d) => {
-      adoptSession(d.item); location.hash = session.id; return session;
-    }).finally(() => {sessionPromise = null;});
+    if (!sessionPromise)
+      sessionPromise = api("/studio/sessions", { source_ids: [] })
+        .then((d) => {
+          adoptSession(d.item);
+          location.hash = session.id;
+          return session;
+        })
+        .finally(() => {
+          sessionPromise = null;
+        });
     return sessionPromise;
   }
   function save(change) {
-    const sid = session?.id, epoch = navigationEpoch;
-    const work = saveChain.catch(() => {}).then(async () => {
-      if (epoch !== navigationEpoch || (sid && session?.id !== sid)) throw new Error("创作已切换，请在当前创作中重新保存");
-      await ensureSession();
-      let item;
-      try {item = (await api("/studio/sessions/" + session.id, {...change,version:session.version},"PATCH")).item;}
-      catch(e) {
-        if(e.code==="version_conflict") {
-          const latest=(await api("/studio/sessions/"+session.id)).item;
-          if(epoch===navigationEpoch)adoptSession(latest);
-          throw new Error("另一窗口已更新创作，当前表单已保留。请核对配置后再保存。");
+    const sid = session?.id,
+      epoch = navigationEpoch;
+    const work = saveChain
+      .catch(() => {})
+      .then(async () => {
+        if (epoch !== navigationEpoch || (sid && session?.id !== sid))
+          throw new Error("创作已切换，请在当前创作中重新保存");
+        await ensureSession();
+        let item;
+        try {
+          item = (
+            await api(
+              "/studio/sessions/" + session.id,
+              { ...change, version: session.version },
+              "PATCH",
+            )
+          ).item;
+        } catch (e) {
+          if (e.code === "version_conflict") {
+            const latest = (await api("/studio/sessions/" + session.id)).item;
+            if (epoch === navigationEpoch) adoptSession(latest);
+            throw new Error(
+              "另一窗口已更新创作，当前表单已保留。请核对配置后再保存。",
+            );
+          }
+          throw e;
         }
-        throw e;
-      }
-      if (epoch === navigationEpoch && session?.id === item.id) {adoptSession(item); render();}
-    });
-    saveChain = work; return work;
+        if (epoch === navigationEpoch && session?.id === item.id) {
+          adoptSession(item);
+          render();
+        }
+      });
+    saveChain = work;
+    return work;
   }
   async function loadSession(id) {
     const epoch = ++navigationEpoch;
     const item = (await api("/studio/sessions/" + encodeURIComponent(id))).item;
     if (epoch !== navigationEpoch) return;
-    adoptSession(item); progressEtag = ""; progressRevision = "";
+    adoptSession(item);
+    progressEtag = "";
+    progressRevision = "";
     analysis = null;
     results = [];
     extraResults = [];
@@ -226,29 +279,60 @@
   function queueRefresh() {
     clearTimeout(timer);
     if (!session) return;
-    const active = sourceProgress?.active || assets.some((a)=>["queued","running"].includes(a.preview_status)) || session.runs.some((r) => isActive(r.status)) || ["queued","running"].includes(analysis?.status);
-    if (active || pollFailures) timer = setTimeout(() => refresh(false), document.hidden ? 10000 : pollFailures ? [4000,8000,15000][Math.min(2,pollFailures-1)] : 2000);
+    const active =
+      sourceProgress?.active ||
+      assets.some((a) => ["queued", "running"].includes(a.preview_status)) ||
+      session.runs.some((r) => isActive(r.status)) ||
+      ["queued", "running"].includes(analysis?.status);
+    if (active || pollFailures)
+      timer = setTimeout(
+        () => refresh(false),
+        document.hidden
+          ? 10000
+          : pollFailures
+            ? [4000, 8000, 15000][Math.min(2, pollFailures - 1)]
+            : 2000,
+      );
   }
   async function refresh(full = true) {
     clearTimeout(timer);
     if (!session) return;
-    const sid = session.id, epoch = navigationEpoch;
+    const sid = session.id,
+      epoch = navigationEpoch;
     if (refreshing.has(sid)) return;
     refreshing.add(sid);
     try {
       let item;
       if (!full && session.selection_id) {
-        const response = await fetch(API + "/studio/sessions/" + sid + "/source-progress", {credentials:"same-origin",headers:progressEtag ? {"If-None-Match":progressEtag} : {}});
+        const response = await fetch(
+          API + "/studio/sessions/" + sid + "/source-progress",
+          {
+            credentials: "same-origin",
+            headers: progressEtag ? { "If-None-Match": progressEtag } : {},
+          },
+        );
         if (session?.id !== sid || epoch !== navigationEpoch) return;
-        if (response.status === 304) {pollFailures=0; return;}
+        if (response.status === 304) {
+          pollFailures = 0;
+          return;
+        }
         if (!response.ok) throw new Error("暂时无法读取素材进度");
         const progress = (await response.json()).selection;
-        if (!progress || progress.selection_revision < (session.selection_revision || 0)) return;
+        if (
+          !progress ||
+          progress.selection_revision < (session.selection_revision || 0)
+        )
+          return;
         progressEtag = response.headers.get("ETag") || progress.etag;
         const current = assets[index]?.id;
-        sourceProgress = progress; session.selection = progress;
-        assets = progress.items.filter((i) => i.asset).map((i) => i.asset); session.assets = assets;
-        if (current) {const found=assets.findIndex((a) => a.id===current); if(found>=0) index=found;}
+        sourceProgress = progress;
+        session.selection = progress;
+        assets = progress.items.filter((i) => i.asset).map((i) => i.asset);
+        session.assets = assets;
+        if (current) {
+          const found = assets.findIndex((a) => a.id === current);
+          if (found >= 0) index = found;
+        }
         if (progress.session_revision !== progressRevision) full = true;
         progressRevision = progress.session_revision;
       } else full = true;
@@ -257,24 +341,48 @@
         item = (await api("/studio/sessions/" + sid)).item;
         if (session?.id !== sid || epoch !== navigationEpoch) return;
         adoptSession(item);
-        if (sourceProgress) {progressEtag=sourceProgress.etag;progressRevision=sourceProgress.session_revision;}
+        if (sourceProgress) {
+          progressEtag = sourceProgress.etag;
+          progressRevision = sourceProgress.session_revision;
+        }
       }
-      results = [...session.runs.flatMap((r) => [...(r.revisions||[]), ...r.tasks]),
-        ...extraResults.filter((x) => !session.runs.some((r) => [...(r.revisions||[]),...r.tasks].some((t) => t.id===x.id)))];
-      if (session.analysis_id && (analysis?.analysis_id !== session.analysis_id || !["succeeded","failed"].includes(analysis?.status))) {
-        const data=await api("/analyses/"+session.analysis_id);
-        if(session?.id!==sid || epoch!==navigationEpoch)return;
-        analysis=data;showTimeline=true;
+      results = [
+        ...session.runs.flatMap((r) => [...(r.revisions || []), ...r.tasks]),
+        ...extraResults.filter(
+          (x) =>
+            !session.runs.some((r) =>
+              [...(r.revisions || []), ...r.tasks].some((t) => t.id === x.id),
+            ),
+        ),
+      ];
+      if (
+        session.analysis_id &&
+        (analysis?.analysis_id !== session.analysis_id ||
+          !["succeeded", "failed"].includes(analysis?.status))
+      ) {
+        const data = await api("/analyses/" + session.analysis_id);
+        if (session?.id !== sid || epoch !== navigationEpoch) return;
+        analysis = data;
+        showTimeline = true;
       }
-      const newlyCompleted=finished().find((r) => !oldCompleted.has(r.id));
-      if(newlyCompleted && !$("modal").open) {view="result";index=finished().findIndex((r)=>r.id===newlyCompleted.id);showTimeline=false;}
-      pollFailures=0;render();
-      if(newlyCompleted && !$("modal").open) await showCopy();
-    } catch(e) {
-      if(session?.id===sid && epoch===navigationEpoch) {pollFailures++;if(pollFailures===1)toast("进度暂不可读取，将自动重连。"+e.message,true);}
+      const newlyCompleted = finished().find((r) => !oldCompleted.has(r.id));
+      if (newlyCompleted && !$("modal").open) {
+        view = "result";
+        index = finished().findIndex((r) => r.id === newlyCompleted.id);
+        showTimeline = false;
+      }
+      pollFailures = 0;
+      render();
+      if (newlyCompleted && !$("modal").open) await showCopy();
+    } catch (e) {
+      if (session?.id === sid && epoch === navigationEpoch) {
+        pollFailures++;
+        if (pollFailures === 1)
+          toast("进度暂不可读取，将自动重连。" + e.message, true);
+      }
     } finally {
       refreshing.delete(sid);
-      if(session?.id===sid && epoch===navigationEpoch)queueRefresh();
+      if (session?.id === sid && epoch === navigationEpoch) queueRefresh();
     }
   }
   function configSummary(c) {
@@ -324,14 +432,24 @@
   }
   function updateComposer() {
     const c = config();
-    $("configChips").innerHTML = ["clip", "narration", "translation", "youtube_regular"]
+    $("configChips").innerHTML = [
+      "clip",
+      "narration",
+      "translation",
+      "youtube_regular",
+    ]
       .filter((k) => c[k])
       .map(
         (k) =>
           `<span class="chip"><button type="button" data-action="${k}">${{ clip: "智能剪辑", narration: "影视解说", translation: "视频翻译", youtube_regular: "YouTube 普通视频" }[k]}</button><button type="button" data-remove-config="${k}" aria-label="移除${k}">×</button></span>`,
       )
       .join("");
-    const configured = !!(c.clip || c.narration || c.translation || c.youtube_regular),
+    const configured = !!(
+        c.clip ||
+        c.narration ||
+        c.translation ||
+        c.youtube_regular
+      ),
       count =
         (c.merge === false ? sourceCount() : 1) *
         (c.clip?.script_count || 1) *
@@ -353,18 +471,41 @@
     if (index >= list.length) index = 0;
     const media = list[index],
       identity = view + ":" + (media?.id || "") + ":" + previewQuality;
-    if(view==="source"&&media&&$("player").dataset.prepared!==media.id) {
-      $("player").dataset.prepared=media.id;
-      api("/assets/"+media.id+"/preview",{}).then(()=>refresh(false)).catch(()=>{});
+    if (
+      view === "source" &&
+      media &&
+      $("player").dataset.prepared !== media.id
+    ) {
+      $("player").dataset.prepared = media.id;
+      api("/assets/" + media.id + "/preview", {})
+        .then(() => refresh(false))
+        .catch(() => {});
     }
     const keep = $("player").dataset.identity === identity;
-    const url = keep ? mediaKey : view === "source" ? (previewQuality === "proxy" ? media?.proxy_url || media?.preview_url : media?.preview_url) : media?.output?.preview_url;
+    const url = keep
+      ? mediaKey
+      : view === "source"
+        ? previewQuality === "proxy"
+          ? media?.proxy_url || media?.preview_url
+          : media?.preview_url
+        : media?.output?.preview_url;
     $("player").dataset.identity = identity;
-    if(media?.poster_url) $("player").poster=media.poster_url;
+    if (media?.poster_url) $("player").poster = media.poster_url;
     else $("player").removeAttribute("poster");
     $("previewQuality").hidden = view !== "source" || !media;
-    $("previewQuality").value = media?.proxy_url && url===media.preview_url ? "original" : previewQuality;
-    $("previewHint").textContent = view === "source" && media ? media.preview_error || (media.proxy_url ? (mediaKey === media.preview_url ? "流畅预览已就绪，可切换" : "流畅预览不影响原片导出") : "正在后台准备流畅预览，可先播放原片") : "";
+    $("previewQuality").value =
+      media?.proxy_url && url === media.preview_url
+        ? "original"
+        : previewQuality;
+    $("previewHint").textContent =
+      view === "source" && media
+        ? media.preview_error ||
+          (media.proxy_url
+            ? mediaKey === media.preview_url
+              ? "流畅预览已就绪，可切换"
+              : "流畅预览不影响原片导出"
+            : "正在后台准备流畅预览，可先播放原片")
+        : "";
     if (url !== mediaKey) {
       mediaKey = url || "";
       const player = $("player");
@@ -389,19 +530,33 @@
     if (ordinary) {
       const m = media.output.metadata;
       const short = m.width <= m.height && m.duration_ms <= 180000;
-      $("regularInfo").textContent = `版本 ${media.version} · ${m.width} × ${m.height}` +
-        (short ? " · 这条成片会被 YouTube 归为 Shorts。要发普通视频，请调整时长或画幅。" : "");
+      $("regularInfo").textContent =
+        `版本 ${media.version} · ${m.width} × ${m.height}` +
+        (short
+          ? " · 这条成片会被 YouTube 归为 Shorts。要发普通视频，请调整时长或画幅。"
+          : "");
     }
     $("stripLabel").innerHTML =
       view === "source" ? "待处理<br>视频" : "已完成<br>作品";
-    const strip = view === "source" && sourceProgress ? sourceProgress.items.map((x) => x.asset || {id:x.id,name:x.name,pending:true}) : list;
-    const stripKey = JSON.stringify([view, media?.id, strip.map((m) => [m.id,m.poster_url,m.pending])]);
-    if($("filmstrip").dataset.key!==stripKey) {
-      $("filmstrip").dataset.key=stripKey;
-      $("filmstrip").innerHTML=strip.map((m,i) => {
-        const actual=list.findIndex((a)=>a.id===m.id);
-        return `<button class="thumbnail ${media?.id===m.id?"active":""}" data-media="${actual}" ${actual<0?"disabled":""} aria-label="素材 ${i+1}：${esc(m.name)}">${m.poster_url?`<img src="${esc(m.poster_url)}" alt="" loading="lazy">`:'<span class="poster-placeholder">▶</span>'}<span class="number">${i+1}</span><span class="duration">${m.pending?"准备中":time(m.duration_ms||m.output?.metadata?.duration_ms)}</span></button>`;
-      }).join("");
+    const strip =
+      view === "source" && sourceProgress
+        ? sourceProgress.items.map(
+            (x) => x.asset || { id: x.id, name: x.name, pending: true },
+          )
+        : list;
+    const stripKey = JSON.stringify([
+      view,
+      media?.id,
+      strip.map((m) => [m.id, m.poster_url, m.pending]),
+    ]);
+    if ($("filmstrip").dataset.key !== stripKey) {
+      $("filmstrip").dataset.key = stripKey;
+      $("filmstrip").innerHTML = strip
+        .map((m, i) => {
+          const actual = list.findIndex((a) => a.id === m.id);
+          return `<button class="thumbnail ${media?.id === m.id ? "active" : ""}" data-media="${actual}" ${actual < 0 ? "disabled" : ""} aria-label="素材 ${i + 1}：${esc(m.name)}">${m.poster_url ? `<img src="${esc(m.poster_url)}" alt="" loading="lazy">` : '<span class="poster-placeholder">▶</span>'}<span class="number">${i + 1}</span><span class="duration">${m.pending ? "准备中" : time(m.duration_ms || m.output?.metadata?.duration_ms)}</span></button>`;
+        })
+        .join("");
     }
     $("stageSuggestions").hidden = !!assets.length;
     const active = session?.runs.find(
@@ -464,7 +619,9 @@
   function render() {
     $("sessionTitle").textContent = session?.title || "新建创作";
     $("sessionState").textContent = sourceCount()
-      ? sourceProgress ? preparationSummary(sourceProgress) : `已选 ${assets.length} 个素材 · ${analysis?.status === "succeeded" ? "解析完成" : "随时添加创作配置"}`
+      ? sourceProgress
+        ? preparationSummary(sourceProgress)
+        : `已选 ${assets.length} 个素材 · ${analysis?.status === "succeeded" ? "解析完成" : "随时添加创作配置"}`
       : "和 AI 一起完成你的下一条视频";
     renderPreparation();
     renderMessages();
@@ -489,8 +646,15 @@
     const text = $("prompt").value.trim(),
       c = config();
     await ensureSession();
-    if (!text && (c.clip || c.narration || c.translation || c.youtube_regular)) {
-      const signature = JSON.stringify([session.id, session.selection_id || assets.map((a) => a.id), c]);
+    if (
+      !text &&
+      (c.clip || c.narration || c.translation || c.youtube_regular)
+    ) {
+      const signature = JSON.stringify([
+        session.id,
+        session.selection_id || assets.map((a) => a.id),
+        c,
+      ]);
       if (!requestReceipt || requestReceipt.signature !== signature)
         requestReceipt = { signature, operation: op() };
       await api("/studio/sessions/" + session.id + "/submit", {
@@ -519,181 +683,542 @@
       await refresh();
     } else openConfig("clip");
   }
-  let librarySource="local",catalogPage=1,catalogItems=[],catalogDrama=null,catalogEpisodes=[];
-  let libraryEpoch=0,catalogController,assetController,libraryOffset=0,libraryTotal=0,catalogImports=[];
-  const libraryCache=new Map();
-  const draftKey=()=>"editor-selection:"+JSON.stringify([auth?.user?.tenant_key,auth?.user?.user_id||auth?.name,session?.id||"new"]);
-  const pendingKey=()=>"editor-selection-operation:"+JSON.stringify([auth?.user?.tenant_key,auth?.user?.user_id||auth?.name]);
+  let librarySource = "local",
+    catalogPage = 1,
+    catalogItems = [],
+    catalogDrama = null,
+    catalogEpisodes = [];
+  let libraryEpoch = 0,
+    catalogController,
+    assetController,
+    libraryOffset = 0,
+    libraryTotal = 0,
+    catalogImports = [];
+  const libraryCache = new Map();
+  const draftKey = () =>
+    "editor-selection:" +
+    JSON.stringify([
+      auth?.user?.tenant_key,
+      auth?.user?.user_id || auth?.name,
+      session?.id || "new",
+    ]);
+  const pendingKey = () =>
+    "editor-selection-operation:" +
+    JSON.stringify([auth?.user?.tenant_key, auth?.user?.user_id || auth?.name]);
   function persistDraft() {
-    try {sessionStorage.setItem(draftKey(),JSON.stringify({items:sourceSelection,version:session?.version,merge:$("mergeSources")?.checked!==false}));}catch{}
+    try {
+      sessionStorage.setItem(
+        draftKey(),
+        JSON.stringify({
+          items: sourceSelection,
+          version: session?.version,
+          merge: $("mergeSources")?.checked !== false,
+        }),
+      );
+    } catch {}
   }
   function preparationSummary(progress) {
-    const n=progress.summary;
-    return `已选 ${n.total} 个 · 导入完成 ${n.imported}/${n.total} · 解析完成 ${n.analyzed}/${n.total}${n.failed?` · ${n.failed} 个需处理`:""}`;
+    const n = progress.summary;
+    return `已选 ${n.total} 个 · 导入完成 ${n.imported}/${n.total} · 解析完成 ${n.analyzed}/${n.total}${n.failed ? ` · ${n.failed} 个需处理` : ""}`;
   }
-  const importLabels={queued:"等待导入",resolving:"获取地址",downloading:"下载中",validating:"校验中",ready:"已就绪",failed:"导入失败"};
-  const analysisLabels={waiting_import:"等待素材",queued:"等待解析",running:"解析中",succeeded:"解析完成",failed:"解析失败"};
+  const importLabels = {
+    queued: "等待导入",
+    resolving: "获取地址",
+    downloading: "下载中",
+    validating: "校验中",
+    ready: "已就绪",
+    failed: "导入失败",
+  };
+  const analysisLabels = {
+    waiting_import: "等待素材",
+    queued: "等待解析",
+    running: "解析中",
+    succeeded: "解析完成",
+    failed: "解析失败",
+  };
   function renderPreparation() {
-    const panel=$("sourcePreparation");panel.hidden=!sourceProgress;
-    if(!sourceProgress)return;
-    $("sourcePreparationSummary").textContent=preparationSummary(sourceProgress);
-    const signature=JSON.stringify(sourceProgress.items.map((i)=>[i.id,i.import_stage,i.analysis_status,i.bytes,i.total,i.speed,i.error,i.asset?.preview_status,i.asset?.poster_url]));
-    if(panel.dataset.key===signature)return;
-    panel.dataset.key=signature;
-    $("sourcePreparationItems").innerHTML=sourceProgress.items.map((item,i)=>{
-      const downloading=item.import_status==="downloading";
-      const bytes=item.bytes?` · ${(item.bytes/1048576).toFixed(1)}${item.total?" / "+(item.total/1048576).toFixed(1):""} MB`:"";
-      const speed=downloading&&item.speed>0?` · ${(item.speed/1048576).toFixed(2)} MB/s`:"";
-      const preview=item.asset ? item.asset.preview_status==="ready"?"可播放":item.asset.preview_status==="failed"?"准备失败，原片可用":item.asset.poster_url?"预览准备中":"封面准备中" : "等待原片";
-      return `<div class="source-progress-item"><span class="source-position">${i+1}</span><div><strong>${esc(item.name)}</strong><small>导入：${importLabels[item.import_stage]||importLabels[item.import_status]}${bytes}${speed} · 解析：${analysisLabels[item.analysis_status]||"等待解析"}</small><small>预览：${preview}${item.asset?.preview_error?" · "+esc(item.asset.preview_error):""}</small>${item.error?`<p class="source-error">${esc(item.error)}</p>`:""}${item.warnings?.length?`<small>${esc(item.warnings.join("；"))}</small>`:""}${downloading?`<progress ${item.total?`max="${item.total}" value="${item.bytes}"`:""}></progress>`:""}</div>${item.asset?`<button data-ready-source="${item.asset_id}">预览</button>`:""}${item.asset?.preview_status==="failed"?`<button data-preview-retry="${item.asset_id}">重试预览</button>`:""}${item.error?`<button data-source-retry="${item.id}">重试</button><button data-source-remove="${item.id}">移除</button>`:""}</div>`;
-    }).join("");
+    const panel = $("sourcePreparation");
+    panel.hidden = !sourceProgress;
+    if (!sourceProgress) return;
+    $("sourcePreparationSummary").textContent =
+      preparationSummary(sourceProgress);
+    const signature = JSON.stringify(
+      sourceProgress.items.map((i) => [
+        i.id,
+        i.import_stage,
+        i.analysis_status,
+        i.bytes,
+        i.total,
+        i.speed,
+        i.error,
+        i.asset?.preview_status,
+        i.asset?.poster_url,
+      ]),
+    );
+    if (panel.dataset.key === signature) return;
+    panel.dataset.key = signature;
+    $("sourcePreparationItems").innerHTML = sourceProgress.items
+      .map((item, i) => {
+        const downloading = item.import_status === "downloading";
+        const bytes = item.bytes
+          ? ` · ${(item.bytes / 1048576).toFixed(1)}${item.total ? " / " + (item.total / 1048576).toFixed(1) : ""} MB`
+          : "";
+        const speed =
+          downloading && item.speed > 0
+            ? ` · ${(item.speed / 1048576).toFixed(2)} MB/s`
+            : "";
+        const preview = item.asset
+          ? item.asset.preview_status === "ready"
+            ? "可播放"
+            : item.asset.preview_status === "failed"
+              ? "准备失败，原片可用"
+              : item.asset.poster_url
+                ? "预览准备中"
+                : "封面准备中"
+          : "等待原片";
+        return `<div class="source-progress-item"><span class="source-position">${i + 1}</span><div><strong>${esc(item.name)}</strong><small>导入：${importLabels[item.import_stage] || importLabels[item.import_status]}${bytes}${speed} · 解析：${analysisLabels[item.analysis_status] || "等待解析"}</small><small>预览：${preview}${item.asset?.preview_error ? " · " + esc(item.asset.preview_error) : ""}</small>${item.error ? `<p class="source-error">${esc(item.error)}</p>` : ""}${item.warnings?.length ? `<small>${esc(item.warnings.join("；"))}</small>` : ""}${downloading ? `<progress ${item.total ? `max="${item.total}" value="${item.bytes}"` : ""}></progress>` : ""}</div>${item.asset ? `<button data-ready-source="${item.asset_id}">预览</button>` : ""}${item.asset?.preview_status === "failed" ? `<button data-preview-retry="${item.asset_id}">重试预览</button>` : ""}${item.error ? `<button data-source-retry="${item.id}">重试</button><button data-source-remove="${item.id}">移除</button>` : ""}</div>`;
+      })
+      .join("");
   }
   function libraryMarkup() {
     return `<div class="library-tabs" role="tablist" aria-label="媒体来源"><button data-library-source="local" class="active">我的素材</button><button data-library-source="dramawave">DramaWave 短剧</button><button data-library-source="moboreels">MoboReels 短剧</button></div><section id="catalogPanel" hidden><div class="modal-tools"><input id="catalogQuery" type="search" placeholder="输入剧名或剧目 ID"><button id="searchCatalog">搜索剧目</button></div><div id="catalogContent"></div></section>`;
   }
   function cachedImport(episode) {
-    return catalogImports.find((j)=>j.product===librarySource&&j.source_key===catalogDrama.key&&j.episode===episode);
+    return catalogImports.find(
+      (j) =>
+        j.product === librarySource &&
+        j.source_key === catalogDrama.key &&
+        j.episode === episode,
+    );
   }
   function episodeIntent(episode) {
-    const cached=cachedImport(episode);
-    return {kind:"catalog",product:librarySource,key:catalogDrama.key,episode,name:`${catalogDrama.name} · 第 ${episode} 集`,...(cached?.asset_id?{asset_id:cached.asset_id}:{})};
+    const cached = cachedImport(episode);
+    return {
+      kind: "catalog",
+      product: librarySource,
+      key: catalogDrama.key,
+      episode,
+      name: `${catalogDrama.name} · 第 ${episode} 集`,
+      ...(cached?.asset_id ? { asset_id: cached.asset_id } : {}),
+    };
   }
   function connectLibrary() {
-    $("modalBody").querySelectorAll("[data-library-source]").forEach((button)=>button.onclick=()=>{
-      librarySource=button.dataset.librarySource;catalogDrama=null;catalogPage=1;
-      catalogController?.abort();++libraryEpoch;
-      $("modalBody").querySelectorAll("[data-library-source]").forEach((b)=>b.classList.toggle("active",b===button));
-      $("localLibrary").hidden=librarySource!=="local";$("catalogPanel").hidden=librarySource==="local";
-      if(librarySource==="local")action(()=>readAssets(),"read-assets");else action(readCatalog,"read-catalog-"+librarySource);
-    });
-    $("searchCatalog").onclick=()=>{catalogPage=1;readCatalog();};
-    $("catalogQuery").onkeydown=(e)=>{if(e.key==="Enter")$("searchCatalog").click();};
+    $("modalBody")
+      .querySelectorAll("[data-library-source]")
+      .forEach(
+        (button) =>
+          (button.onclick = () => {
+            librarySource = button.dataset.librarySource;
+            catalogDrama = null;
+            catalogPage = 1;
+            catalogController?.abort();
+            ++libraryEpoch;
+            $("modalBody")
+              .querySelectorAll("[data-library-source]")
+              .forEach((b) => b.classList.toggle("active", b === button));
+            $("localLibrary").hidden = librarySource !== "local";
+            $("catalogPanel").hidden = librarySource === "local";
+            if (librarySource === "local")
+              action(() => readAssets(), "read-assets");
+            else action(readCatalog, "read-catalog-" + librarySource);
+          }),
+      );
+    $("searchCatalog").onclick = () => {
+      catalogPage = 1;
+      readCatalog();
+    };
+    $("catalogQuery").onkeydown = (e) => {
+      if (e.key === "Enter") $("searchCatalog").click();
+    };
   }
   async function readCatalog() {
-    catalogController?.abort();catalogController=new AbortController();catalogDrama=null;++libraryEpoch;
-    const epoch=libraryEpoch,source=librarySource,page=catalogPage,q=$("catalogQuery").value;
-    const key="catalog:"+JSON.stringify([source,page,q]);
-    const paint=(data)=>{
-      catalogItems=data.items;
-      $("catalogContent").innerHTML=`<div class="catalog-summary"><strong>选择剧目</strong><span>第 ${page} 页 · 按语言区分版本</span></div><div class="catalog-grid">${data.items.map((d,i)=>`<button class="drama-card" data-drama-index="${i}"><img loading="lazy" referrerpolicy="no-referrer" src="${esc(d.cover||"")}" alt=""><span class="card-body"><strong>${esc(d.name)}</strong><small>${esc(d.language||"未知语言")} · ID ${esc(d.id)}</small></span></button>`).join("")||'<p class="modal-empty">没有匹配剧目</p>'}</div><div class="catalog-summary"><button id="catalogPrev" ${page===1?"disabled":""}>上一页</button><button id="catalogNext" ${!data.has_more?"disabled":""}>下一页</button></div>`;
-      $("catalogContent").querySelectorAll("[data-drama-index]").forEach((b)=>b.onclick=()=>action(()=>openDrama(data.items[Number(b.dataset.dramaIndex)]),"drama-read"));
-      $("catalogPrev").onclick=()=>{catalogPage--;action(readCatalog,"catalog-page");};
-      $("catalogNext").onclick=()=>{catalogPage++;action(readCatalog,"catalog-page");};
+    catalogController?.abort();
+    catalogController = new AbortController();
+    catalogDrama = null;
+    ++libraryEpoch;
+    const epoch = libraryEpoch,
+      source = librarySource,
+      page = catalogPage,
+      q = $("catalogQuery").value;
+    const key = "catalog:" + JSON.stringify([source, page, q]);
+    const paint = (data) => {
+      catalogItems = data.items;
+      $("catalogContent").innerHTML =
+        `<div class="catalog-summary"><strong>选择剧目</strong><span>第 ${page} 页 · 按语言区分版本</span></div><div class="catalog-grid">${data.items.map((d, i) => `<button class="drama-card" data-drama-index="${i}"><img loading="lazy" referrerpolicy="no-referrer" src="${esc(d.cover || "")}" alt=""><span class="card-body"><strong>${esc(d.name)}</strong><small>${esc(d.language || "未知语言")} · ID ${esc(d.id)}</small></span></button>`).join("") || '<p class="modal-empty">没有匹配剧目</p>'}</div><div class="catalog-summary"><button id="catalogPrev" ${page === 1 ? "disabled" : ""}>上一页</button><button id="catalogNext" ${!data.has_more ? "disabled" : ""}>下一页</button></div>`;
+      $("catalogContent")
+        .querySelectorAll("[data-drama-index]")
+        .forEach(
+          (b) =>
+            (b.onclick = () =>
+              action(
+                () => openDrama(data.items[Number(b.dataset.dramaIndex)]),
+                "drama-read",
+              )),
+        );
+      $("catalogPrev").onclick = () => {
+        catalogPage--;
+        action(readCatalog, "catalog-page");
+      };
+      $("catalogNext").onclick = () => {
+        catalogPage++;
+        action(readCatalog, "catalog-page");
+      };
     };
-    const cached=libraryCache.get(key);
-    if(cached)paint(cached.data);else $("catalogContent").innerHTML='<p class="modal-empty">正在读取剧目…</p>';
-    if(cached&&Date.now()-cached.at<30000)return;
+    const cached = libraryCache.get(key);
+    if (cached) paint(cached.data);
+    else
+      $("catalogContent").innerHTML =
+        '<p class="modal-empty">正在读取剧目…</p>';
+    if (cached && Date.now() - cached.at < 30000) return;
     try {
-      const data=await api("/catalog/dramas?"+new URLSearchParams({product:source,page,q}),undefined,undefined,{signal:catalogController.signal});
-      if(epoch!==libraryEpoch||modalKind!=="assets"||source!==librarySource)return;
-      if(libraryCache.size>40)libraryCache.clear();libraryCache.set(key,{data,at:Date.now()});paint(data);
-    } catch(e) {if(e.name!=="AbortError"&&epoch===libraryEpoch&&modalKind==="assets")toast("剧目读取失败，选择已保留。"+e.message,true);}
+      const data = await api(
+        "/catalog/dramas?" + new URLSearchParams({ product: source, page, q }),
+        undefined,
+        undefined,
+        { signal: catalogController.signal },
+      );
+      if (
+        epoch !== libraryEpoch ||
+        modalKind !== "assets" ||
+        source !== librarySource
+      )
+        return;
+      if (libraryCache.size > 40) libraryCache.clear();
+      libraryCache.set(key, { data, at: Date.now() });
+      paint(data);
+    } catch (e) {
+      if (
+        e.name !== "AbortError" &&
+        epoch === libraryEpoch &&
+        modalKind === "assets"
+      )
+        toast("剧目读取失败，选择已保留。" + e.message, true);
+    }
   }
   async function openDrama(drama) {
-    catalogController?.abort();catalogController=new AbortController();catalogDrama=drama;++libraryEpoch;
-    const epoch=libraryEpoch,source=librarySource,key="episodes:"+source+":"+drama.key;
-    const paint=(data)=>{
-      catalogEpisodes=data.items;
-      $("catalogContent").innerHTML=`<div class="catalog-summary"><button id="backCatalog">‹ 返回剧目</button><strong>${esc(drama.name)}</strong><span>${esc(drama.language)} · ${data.items.length} 集</span></div><p class="muted">勾选后加入下方完整选择，确认后在后台导入和解析。每次最多 20 个素材。</p><div class="catalog-summary"><button id="selectFirstEpisodes">选择前 3 集</button><button id="clearEpisodes">清空本剧选择</button><span id="episodeCount"></span></div><div class="episode-grid">${data.items.map((e)=>`<label><input type="checkbox" name="catalogEpisode" value="${e.number}">第 ${e.number} 集</label>`).join("")}</div>`;
-      $("backCatalog").onclick=()=>action(readCatalog,"read-catalog");
-      $("catalogContent").querySelectorAll('[name="catalogEpisode"]').forEach((input)=>input.onchange=()=>{
-        try {sourceSelection=Sources.toggle(sourceSelection,episodeIntent(Number(input.value)));drawSelection();}catch(e){input.checked=false;toast(e.message,true);}
-      });
-      $("selectFirstEpisodes").onclick=()=>{
-        try {let next=[...sourceSelection];for(const e of data.items.slice(0,3)){const item=episodeIntent(e.number);if(!next.some((x)=>Sources.same(x,item)))next=Sources.toggle(next,item);}sourceSelection=next;drawSelection();}catch(e){toast(e.message,true);}
+    catalogController?.abort();
+    catalogController = new AbortController();
+    catalogDrama = drama;
+    ++libraryEpoch;
+    const epoch = libraryEpoch,
+      source = librarySource,
+      key = "episodes:" + source + ":" + drama.key;
+    const paint = (data) => {
+      catalogEpisodes = data.items;
+      $("catalogContent").innerHTML =
+        `<div class="catalog-summary"><button id="backCatalog">‹ 返回剧目</button><strong>${esc(drama.name)}</strong><span>${esc(drama.language)} · ${data.items.length} 集</span></div><p class="muted">勾选后加入下方完整选择，确认后在后台导入和解析。每次最多 20 个素材。</p><div class="catalog-summary"><button id="selectFirstEpisodes">选择前 3 集</button><button id="clearEpisodes">清空本剧选择</button><span id="episodeCount"></span></div><div class="episode-grid">${data.items.map((e) => `<label><input type="checkbox" name="catalogEpisode" value="${e.number}">第 ${e.number} 集</label>`).join("")}</div>`;
+      $("backCatalog").onclick = () => action(readCatalog, "read-catalog");
+      $("catalogContent")
+        .querySelectorAll('[name="catalogEpisode"]')
+        .forEach(
+          (input) =>
+            (input.onchange = () => {
+              try {
+                sourceSelection = Sources.toggle(
+                  sourceSelection,
+                  episodeIntent(Number(input.value)),
+                );
+                drawSelection();
+              } catch (e) {
+                input.checked = false;
+                toast(e.message, true);
+              }
+            }),
+        );
+      $("selectFirstEpisodes").onclick = () => {
+        try {
+          let next = [...sourceSelection];
+          for (const e of data.items.slice(0, 3)) {
+            const item = episodeIntent(e.number);
+            if (!next.some((x) => Sources.same(x, item)))
+              next = Sources.toggle(next, item);
+          }
+          sourceSelection = next;
+          drawSelection();
+        } catch (e) {
+          toast(e.message, true);
+        }
       };
-      $("clearEpisodes").onclick=()=>{sourceSelection=sourceSelection.filter((x)=>!(x.kind==="catalog"&&x.product===source&&x.key===drama.key));drawSelection();};
+      $("clearEpisodes").onclick = () => {
+        sourceSelection = sourceSelection.filter(
+          (x) =>
+            !(
+              x.kind === "catalog" &&
+              x.product === source &&
+              x.key === drama.key
+            ),
+        );
+        drawSelection();
+      };
       drawSelection();
     };
-    const cached=libraryCache.get(key);if(cached)paint(cached.data);else $("catalogContent").innerHTML='<p class="modal-empty">正在读取分集…</p>';
-    if(cached&&Date.now()-cached.at<30000)return;
+    const cached = libraryCache.get(key);
+    if (cached) paint(cached.data);
+    else
+      $("catalogContent").innerHTML =
+        '<p class="modal-empty">正在读取分集…</p>';
+    if (cached && Date.now() - cached.at < 30000) return;
     try {
-      const data=await api("/catalog/episodes?"+new URLSearchParams({product:source,key:drama.key}),undefined,undefined,{signal:catalogController.signal});
-      if(epoch!==libraryEpoch||modalKind!=="assets"||catalogDrama?.key!==drama.key)return;
-      libraryCache.set(key,{data,at:Date.now()});paint(data);
-    }catch(e){if(e.name!=="AbortError"&&epoch===libraryEpoch&&modalKind==="assets")toast("分集读取失败，已有选择保留。"+e.message,true);}
+      const data = await api(
+        "/catalog/episodes?" +
+          new URLSearchParams({ product: source, key: drama.key }),
+        undefined,
+        undefined,
+        { signal: catalogController.signal },
+      );
+      if (
+        epoch !== libraryEpoch ||
+        modalKind !== "assets" ||
+        catalogDrama?.key !== drama.key
+      )
+        return;
+      libraryCache.set(key, { data, at: Date.now() });
+      paint(data);
+    } catch (e) {
+      if (
+        e.name !== "AbortError" &&
+        epoch === libraryEpoch &&
+        modalKind === "assets"
+      )
+        toast("分集读取失败，已有选择保留。" + e.message, true);
+    }
   }
   async function confirmSelection(afterSave) {
-    if(!sourceSelection.length)throw new Error("请至少选择一个素材");
-    await saveChain.catch(()=>{});
-    const sid=session?.id||null,epoch=navigationEpoch,oldDraft=draftKey();
-    const payload={items:sourceSelection.map(Sources.intent),config:{...config(),merge:$("mergeSources").checked},...(sid?{version:session.version}:{})};
-    const signature=JSON.stringify([sid,payload]);let pending;
-    try{pending=JSON.parse(sessionStorage.getItem(pendingKey())||"null");}catch{}
-    if(!pending||pending.signature!==signature){pending={signature,sid,body:{...payload,operation_id:op()}};sessionStorage.setItem(pendingKey(),JSON.stringify(pending));}
+    if (!sourceSelection.length) throw new Error("请至少选择一个素材");
+    await saveChain.catch(() => {});
+    let sid = session?.id || null;
+    const epoch = navigationEpoch,
+      oldDraft = draftKey();
+    const payload = {
+      items: sourceSelection.map(Sources.intent),
+      config: { ...config(), merge: $("mergeSources").checked },
+      ...(sid ? { version: session.version } : {}),
+    };
+    let signature = JSON.stringify([sid, payload]),
+      pending;
+    try {
+      pending = JSON.parse(sessionStorage.getItem(pendingKey()) || "null");
+    } catch {}
+    if (pending && pending.signature !== signature) {
+      const prior = (
+        await api(
+          "/studio/selection-operations?" +
+            new URLSearchParams({ operation_id: pending.body.operation_id }),
+        )
+      ).receipt;
+      const settled = prior
+        ? await api("/studio/sessions/" + prior.session_id)
+        : await api(
+            pending.sid
+              ? "/studio/sessions/" + pending.sid + "/selection"
+              : "/studio/sessions",
+            pending.body,
+          );
+      if (epoch !== navigationEpoch) return;
+      if (pending.sid === sid) {
+        adoptSession(settled.item);
+        sid = session.id;
+        payload.version = session.version;
+        signature = JSON.stringify([sid, payload]);
+      }
+      sessionStorage.removeItem(pendingKey());
+      pending = null;
+    }
+    const recovering = !!pending;
+    if (!pending) {
+      pending = { signature, sid, body: { ...payload, operation_id: op() } };
+      sessionStorage.setItem(pendingKey(), JSON.stringify(pending));
+    }
     let saved;
-    try{
-      const previous=(await api("/studio/selection-operations?"+new URLSearchParams({operation_id:pending.body.operation_id}))).receipt;
-      saved=previous?await api("/studio/sessions/"+previous.session_id):await api(sid?"/studio/sessions/"+sid+"/selection":"/studio/sessions",pending.body);
-    }catch(e){
-      if(e.code==="version_conflict"){
-        const latest=(await api("/studio/sessions/"+sid)).item;
-        if(session?.id===sid){adoptSession(latest);persistDraft();}
+    try {
+      const previous = recovering
+        ? (
+            await api(
+              "/studio/selection-operations?" +
+                new URLSearchParams({
+                  operation_id: pending.body.operation_id,
+                }),
+            )
+          ).receipt
+        : null;
+      saved = previous
+        ? await api("/studio/sessions/" + previous.session_id)
+        : await api(
+            sid ? "/studio/sessions/" + sid + "/selection" : "/studio/sessions",
+            pending.body,
+          );
+    } catch (e) {
+      if (e.code === "version_conflict") {
+        const latest = (await api("/studio/sessions/" + sid)).item;
+        if (session?.id === sid) {
+          adoptSession(latest);
+          persistDraft();
+        }
         sessionStorage.removeItem(pendingKey());
-        throw new Error("另一窗口已更新创作，你的选择草稿已保留。核对后再次确认即可。");
+        throw new Error(
+          "另一窗口已更新创作，你的选择草稿已保留。核对后再次确认即可。",
+        );
       }
       throw e;
     }
-    sessionStorage.removeItem(pendingKey());sessionStorage.removeItem(oldDraft);
-    if(epoch!==navigationEpoch)return;
-    adoptSession(saved.item);location.hash=session.id;view="source";index=0;analysis=null;progressEtag="";progressRevision="";
-    closeModal();render();queueRefresh();
+    sessionStorage.removeItem(pendingKey());
+    sessionStorage.removeItem(oldDraft);
+    if (epoch !== navigationEpoch) return;
+    adoptSession(saved.item);
+    location.hash = session.id;
+    view = "source";
+    index = 0;
+    analysis = null;
+    progressEtag = "";
+    progressRevision = "";
+    closeModal();
+    render();
+    queueRefresh();
     toast(`已保存完整 ${sourceCount()} 个素材，后台将逐集准备`);
-    if(afterSave)await afterSave();
+    if (afterSave) await afterSave();
   }
   async function openAssets(afterSave) {
-    ++libraryEpoch;librarySource="local";catalogDrama=null;libraryOffset=0;
-    sourceSelection=Sources.unique(session?.selection?.items.map(Sources.intent)||assets.map((a)=>({kind:"asset",asset_id:a.id,name:a.name})));
-    let draft;try{draft=JSON.parse(sessionStorage.getItem(draftKey())||"null");}catch{}
-    if(draft?.items&&draft.version===session?.version)sourceSelection=Sources.unique(draft.items);
-    openModal("媒资库","保留完整选择，导入和解析在后台逐集完成",`${libraryMarkup()}<section id="localLibrary"><div class="modal-tools"><input id="assetQuery" type="search" placeholder="搜索素材或剧名"><button id="searchAssets">查询</button><button id="toggleUpload" class="primary" data-icon="plus">上传视频</button></div><div id="uploadZone" class="upload-zone" hidden><input id="uploadFile" type="file" accept=".mp4,.mov" multiple><div class="form-grid"><label class="field">剧名（选填）<input id="uploadSeries" maxlength="80"></label><label class="field">起始集号（选填）<input id="uploadEpisode" type="number" min="1" max="100000"></label></div><p>每个视频最多 1 GiB</p><progress id="uploadProgress" max="100" value="0" hidden></progress><p id="uploadStatus"></p><button id="uploadStart">开始上传</button></div><p id="assetListStatus" class="muted"></p><div id="assetGrid" class="asset-grid"></div><button id="moreAssets" hidden>加载更多</button></section><p class="library-selection-title">完整选择 · 按下方顺序创作</p><div id="selectionTray" class="selection-tray"></div>`,`<label class="checks"><input type="checkbox" id="mergeSources" ${draft?.merge===false||config().merge===false?"":"checked"}>合并所选素材</label><span id="assetCount"></span><button id="confirmAssets" class="primary">确认选择并后台准备</button>`,"assets");
-    $("toggleUpload").onclick=()=>$("uploadZone").hidden=!$("uploadZone").hidden;
-    $("searchAssets").onclick=()=>{libraryOffset=0;readAssets();};
-    $("assetQuery").onkeydown=(e)=>{if(e.key==="Enter")$("searchAssets").click();};
-    $("moreAssets").onclick=()=>action(()=>readAssets(true),"more-assets");
-    $("uploadStart").onclick=()=>action(uploadFiles,"upload-files");
-    $("confirmAssets").onclick=()=>action(()=>confirmSelection(afterSave),"confirm-selection");
-    $("mergeSources").onchange=persistDraft;
-    connectLibrary();drawSelection();
-    const epoch=libraryEpoch;
-    api("/catalog/imports").then((data)=>{if(epoch===libraryEpoch)catalogImports=data.items;}).catch(()=>{});
-    action(()=>readAssets(),"read-assets");
-  }
-  async function readAssets(more=false) {
-    assetController?.abort();assetController=new AbortController();
-    const epoch=libraryEpoch,q=$("assetQuery").value,offset=more?library.length:0,key="assets:"+q+":"+offset;
-    const paint=(data)=>{
-      library=more?[...library,...data.items.filter((a)=>!library.some((x)=>x.id===a.id))]:data.items;
-      libraryTotal=data.total;drawAssets();$("moreAssets").hidden=library.length>=libraryTotal;
-      $("assetListStatus").textContent=`已显示 ${library.length} / ${libraryTotal} 个素材`;
+    ++libraryEpoch;
+    librarySource = "local";
+    catalogDrama = null;
+    libraryOffset = 0;
+    sourceSelection = Sources.unique(
+      session?.selection?.items.map(Sources.intent) ||
+        assets.map((a) => ({ kind: "asset", asset_id: a.id, name: a.name })),
+    );
+    let draft;
+    try {
+      draft = JSON.parse(sessionStorage.getItem(draftKey()) || "null");
+    } catch {}
+    if (draft?.items && draft.version === session?.version)
+      sourceSelection = Sources.unique(draft.items);
+    openModal(
+      "媒资库",
+      "保留完整选择，导入和解析在后台逐集完成",
+      `${libraryMarkup()}<section id="localLibrary"><div class="modal-tools"><input id="assetQuery" type="search" placeholder="搜索素材或剧名"><button id="searchAssets">查询</button><button id="toggleUpload" class="primary" data-icon="plus">上传视频</button></div><div id="uploadZone" class="upload-zone" hidden><input id="uploadFile" type="file" accept=".mp4,.mov" multiple><div class="form-grid"><label class="field">剧名（选填）<input id="uploadSeries" maxlength="80"></label><label class="field">起始集号（选填）<input id="uploadEpisode" type="number" min="1" max="100000"></label></div><p>每个视频最多 1 GiB</p><progress id="uploadProgress" max="100" value="0" hidden></progress><p id="uploadStatus"></p><button id="uploadStart">开始上传</button></div><p id="assetListStatus" class="muted"></p><div id="assetGrid" class="asset-grid"></div><button id="moreAssets" hidden>加载更多</button></section><p class="library-selection-title">完整选择 · 按下方顺序创作</p><div id="selectionTray" class="selection-tray"></div>`,
+      `<label class="checks"><input type="checkbox" id="mergeSources" ${draft?.merge === false || config().merge === false ? "" : "checked"}>合并所选素材</label><span id="assetCount"></span><button id="confirmAssets" class="primary">确认选择并后台准备</button>`,
+      "assets",
+    );
+    $("toggleUpload").onclick = () =>
+      ($("uploadZone").hidden = !$("uploadZone").hidden);
+    $("searchAssets").onclick = () => {
+      libraryOffset = 0;
+      readAssets();
     };
-    const cached=libraryCache.get(key);if(cached&&!more)paint(cached.data);
-    if(!cached)$("assetListStatus").textContent="正在读取素材，可继续切换来源或选择分集…";
-    try{
-      const data=await api("/assets?"+new URLSearchParams({q,limit:24,offset}),undefined,undefined,{signal:assetController.signal});
-      if(epoch!==libraryEpoch||modalKind!=="assets"||$("assetQuery").value!==q)return;
-      libraryCache.set(key,{data,at:Date.now()});paint(data);
-    }catch(e){if(e.name!=="AbortError"&&epoch===libraryEpoch&&modalKind==="assets")$("assetListStatus").textContent="读取失败，已有选择保留："+e.message;}
+    $("assetQuery").onkeydown = (e) => {
+      if (e.key === "Enter") $("searchAssets").click();
+    };
+    $("moreAssets").onclick = () =>
+      action(() => readAssets(true), "more-assets");
+    $("uploadStart").onclick = () => action(uploadFiles, "upload-files");
+    $("confirmAssets").onclick = () =>
+      action(() => confirmSelection(afterSave), "confirm-selection");
+    $("mergeSources").onchange = persistDraft;
+    connectLibrary();
+    drawSelection();
+    const epoch = libraryEpoch;
+    api("/catalog/imports")
+      .then((data) => {
+        if (epoch === libraryEpoch) catalogImports = data.items;
+      })
+      .catch(() => {});
+    action(() => readAssets(), "read-assets");
+  }
+  async function readAssets(more = false) {
+    assetController?.abort();
+    assetController = new AbortController();
+    const epoch = libraryEpoch,
+      q = $("assetQuery").value,
+      offset = more ? library.length : 0,
+      key = "assets:" + q + ":" + offset;
+    const paint = (data) => {
+      library = more
+        ? [
+            ...library,
+            ...data.items.filter((a) => !library.some((x) => x.id === a.id)),
+          ]
+        : data.items;
+      libraryTotal = data.total;
+      drawAssets();
+      $("moreAssets").hidden = library.length >= libraryTotal;
+      $("assetListStatus").textContent =
+        `已显示 ${library.length} / ${libraryTotal} 个素材`;
+    };
+    const cached = libraryCache.get(key);
+    if (cached && !more) paint(cached.data);
+    if (!cached)
+      $("assetListStatus").textContent =
+        "正在读取素材，可继续切换来源或选择分集…";
+    try {
+      const data = await api(
+        "/assets?" + new URLSearchParams({ q, limit: 24, offset }),
+        undefined,
+        undefined,
+        { signal: assetController.signal },
+      );
+      if (
+        epoch !== libraryEpoch ||
+        modalKind !== "assets" ||
+        $("assetQuery").value !== q
+      )
+        return;
+      libraryCache.set(key, { data, at: Date.now() });
+      paint(data);
+    } catch (e) {
+      if (
+        e.name !== "AbortError" &&
+        epoch === libraryEpoch &&
+        modalKind === "assets"
+      )
+        $("assetListStatus").textContent =
+          "读取失败，已有选择保留：" + e.message;
+    }
   }
   function drawAssets() {
-    $("assetGrid").innerHTML=library.map((a)=>`<button class="asset-card" data-asset="${a.id}">${a.poster_url?`<img loading="lazy" src="${esc(a.poster_url)}" alt="">`:'<span class="poster-placeholder">▶</span>'}<span class="card-check">+</span><span class="card-body"><strong>${esc(a.name)}</strong><small>${esc(a.series_code||"本地视频")} · ${time(a.duration_ms)}</small></span></button>`).join("")||'<p class="modal-empty">暂无素材</p>';
+    $("assetGrid").innerHTML =
+      library
+        .map(
+          (a) =>
+            `<button class="asset-card" data-asset="${a.id}">${a.poster_url ? `<img loading="lazy" src="${esc(a.poster_url)}" alt="">` : '<span class="poster-placeholder">▶</span>'}<span class="card-check">+</span><span class="card-body"><strong>${esc(a.name)}</strong><small>${esc(a.series_code || "本地视频")} · ${time(a.duration_ms)}</small></span></button>`,
+        )
+        .join("") || '<p class="modal-empty">暂无素材</p>';
     drawSelection();
   }
   function drawSelection() {
-    if(modalKind!=="assets")return;
-    $("assetGrid").querySelectorAll("[data-asset]").forEach((button)=>{
-      const position=sourceSelection.findIndex((x)=>x.asset_id===button.dataset.asset);
-      button.classList.toggle("selected",position>=0);button.querySelector(".card-check").textContent=position>=0?position+1:"+";
-    });
-    let checked=0;
-    $("catalogContent").querySelectorAll('[name="catalogEpisode"]').forEach((input)=>{
-      input.checked=sourceSelection.some((x)=>Sources.same(x,episodeIntent(Number(input.value))));if(input.checked)checked++;
-    });
-    if($("episodeCount"))$("episodeCount").textContent=`本剧已选 ${checked} 集`;
-    $("selectionTray").innerHTML=sourceSelection.map((item,i)=>`<div class="selection-item">${i+1}. ${esc(item.name||"已选素材")}<button data-move-source="${i}" data-dir="-1" ${i===0?"disabled":""} aria-label="上移">↑</button><button data-move-source="${i}" data-dir="1" ${i===sourceSelection.length-1?"disabled":""} aria-label="下移">↓</button><button data-remove-source="${i}" aria-label="移除素材">×</button></div>`).join("")||'<span class="muted">勾选分集或选择已有素材</span>';
-    $("assetCount").textContent=`已选 ${sourceSelection.length} 个`;
-    $("confirmAssets").textContent=`确认 ${sourceSelection.length} 个素材并后台准备`;
-    $("confirmAssets").disabled=!sourceSelection.length||actionLocks.has("confirm-selection");
+    if (modalKind !== "assets") return;
+    $("assetGrid")
+      .querySelectorAll("[data-asset]")
+      .forEach((button) => {
+        const position = sourceSelection.findIndex(
+          (x) => x.asset_id === button.dataset.asset,
+        );
+        button.classList.toggle("selected", position >= 0);
+        button.querySelector(".card-check").textContent =
+          position >= 0 ? position + 1 : "+";
+      });
+    let checked = 0;
+    $("catalogContent")
+      .querySelectorAll('[name="catalogEpisode"]')
+      .forEach((input) => {
+        input.checked = sourceSelection.some((x) =>
+          Sources.same(x, episodeIntent(Number(input.value))),
+        );
+        if (input.checked) checked++;
+      });
+    if ($("episodeCount"))
+      $("episodeCount").textContent = `本剧已选 ${checked} 集`;
+    $("selectionTray").innerHTML =
+      sourceSelection
+        .map(
+          (item, i) =>
+            `<div class="selection-item">${i + 1}. ${esc(item.name || "已选素材")}<button data-move-source="${i}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="上移">↑</button><button data-move-source="${i}" data-dir="1" ${i === sourceSelection.length - 1 ? "disabled" : ""} aria-label="下移">↓</button><button data-remove-source="${i}" aria-label="移除素材">×</button></div>`,
+        )
+        .join("") || '<span class="muted">勾选分集或选择已有素材</span>';
+    $("assetCount").textContent = `已选 ${sourceSelection.length} 个`;
+    $("confirmAssets").textContent =
+      `确认 ${sourceSelection.length} 个素材并后台准备`;
+    $("confirmAssets").disabled =
+      !sourceSelection.length || actionLocks.has("confirm-selection");
     persistDraft();
   }
   async function uploadFiles() {
@@ -716,22 +1241,36 @@
         const item = await window.AIEditorUpload.upload({
           file,
           series: $("uploadSeries").value,
-          episode: $("uploadEpisode").value ? Number($("uploadEpisode").value) + i : 0,
-          actor: auth.user || auth.name || 'signed-in',
+          episode: $("uploadEpisode").value
+            ? Number($("uploadEpisode").value) + i
+            : 0,
+          actor: auth.user || auth.name || "signed-in",
           api,
-          onProgress: ({percent, text}) => {
+          onProgress: ({ percent, text }) => {
             $("uploadProgress").value = percent;
-            $("uploadStatus").textContent = `${i + 1}/${files.length}：${file.name} · ${text}`;
+            $("uploadStatus").textContent =
+              `${i + 1}/${files.length}：${file.name} · ${text}`;
           },
         });
-        if (!sourceSelection.some((x) => x.asset_id === item.id)) sourceSelection.push({kind:"asset",asset_id:item.id,name:item.name});
+        if (!sourceSelection.some((x) => x.asset_id === item.id))
+          sourceSelection.push({
+            kind: "asset",
+            asset_id: item.id,
+            name: item.name,
+          });
         persistDraft();
       }
       $("uploadStatus").textContent = "上传完成，已自动选中";
       await readAssets();
     } finally {
       uploading = false;
-      for (const id of ["uploadStart", "uploadFile", "uploadSeries", "uploadEpisode"]) if ($(id)) $(id).disabled = false;
+      for (const id of [
+        "uploadStart",
+        "uploadFile",
+        "uploadSeries",
+        "uploadEpisode",
+      ])
+        if ($(id)) $(id).disabled = false;
     }
   }
   const field = (name, label, control, extra = "") =>
@@ -743,7 +1282,8 @@
   let settingsObserver;
   function settingsPreviewMarkup() {
     const source = assets[Math.min(index, assets.length - 1)] || assets[0];
-    if (!source) return `<aside class="settings-preview"><h3>字幕位置预览</h3><p>所选素材正在准备，可先保存字幕设置。</p></aside>`;
+    if (!source)
+      return `<aside class="settings-preview"><h3>字幕位置预览</h3><p>所选素材正在准备，可先保存字幕设置。</p></aside>`;
     return `<aside class="settings-preview"><h3>字幕位置预览</h3><p class="muted">拖动高度滑块，字幕即时移动</p>
       <div id="stylePreviewFrame" class="settings-preview-frame"><video id="stylePreviewVideo" muted playsinline preload="metadata" src="${esc(source.preview_url)}"></video><div id="heightGuide" class="height-guide"></div><div id="stylePreviewCaption" class="settings-preview-caption"></div></div>
       <div class="preview-playback"><button type="button" id="toggleStylePlayback">播放预览</button><span id="stylePreviewTime">0:00</span></div>
@@ -1289,22 +1829,41 @@
   }
   async function handle(name) {
     if (name === "youtube_regular") {
-      const configure = () => window.YoutubeRegular.configure({
-        assets, current: config().youtube_regular, openModal, closeModal, esc, action,
-        save: async (youtube_regular) => { await save({config: {youtube_regular}}); toast("已设置普通视频，点击发送开始制作"); },
-      });
+      const configure = () =>
+        window.YoutubeRegular.configure({
+          assets,
+          current: config().youtube_regular,
+          openModal,
+          closeModal,
+          esc,
+          action,
+          save: async (youtube_regular) => {
+            await save({ config: { youtube_regular } });
+            toast("已设置普通视频，点击发送开始制作");
+          },
+        });
       if (!assets.length) return openAssets(configure);
       return configure();
     }
     if (name === "regular-trim") {
       const task = currentMedia();
       if (!task || !task.youtube_regular || view !== "result") return;
-      return window.YoutubeRegular.refine({task, api, openModal, closeModal, action, esc, toast,
-        openOriginal: chooseResult, refresh: session ? refresh : openWorks});
+      return window.YoutubeRegular.refine({
+        task,
+        api,
+        openModal,
+        closeModal,
+        action,
+        esc,
+        toast,
+        openOriginal: chooseResult,
+        refresh: session ? refresh : openWorks,
+      });
     }
     if (name === "regular-intake") {
       const task = currentMedia();
-      if (view === "result" && task?.youtube_regular) return window.YoutubeMaterial.open(task.id);
+      if (view === "result" && task?.youtube_regular)
+        return window.YoutubeMaterial.open(task.id);
       return;
     }
     if (["clip", "narration", "translation"].includes(name))
@@ -1315,7 +1874,11 @@
     if (name === "works") return openWorks();
     if (name === "new") {
       clearTimeout(timer);
-      ++navigationEpoch;clearTimeout(timer);sourceProgress=null;progressEtag="";progressRevision="";
+      ++navigationEpoch;
+      clearTimeout(timer);
+      sourceProgress = null;
+      progressEtag = "";
+      progressRevision = "";
       session = null;
       assets = [];
       analysis = null;
@@ -1405,7 +1968,10 @@
     if (!b || b.disabled) return;
     if (b.dataset.action) {
       e.preventDefault();
-      return action(() => handle(b.dataset.action),"action:"+b.dataset.action);
+      return action(
+        () => handle(b.dataset.action),
+        "action:" + b.dataset.action,
+      );
     }
     if (b.hasAttribute("data-prompt")) {
       $("prompt").value = b.dataset.prompt;
@@ -1414,21 +1980,74 @@
       return;
     }
     if (b.dataset.asset) {
-      const item=library.find((a)=>a.id===b.dataset.asset);
-      if(item)try{sourceSelection=Sources.toggle(sourceSelection,{kind:"asset",asset_id:item.id,name:item.name});drawSelection();}catch(error){toast(error.message,true);}
+      const item = library.find((a) => a.id === b.dataset.asset);
+      if (item)
+        try {
+          sourceSelection = Sources.toggle(sourceSelection, {
+            kind: "asset",
+            asset_id: item.id,
+            name: item.name,
+          });
+          drawSelection();
+        } catch (error) {
+          toast(error.message, true);
+        }
       return;
     }
-    if(b.hasAttribute("data-move-source")) {sourceSelection=Sources.move(sourceSelection,Number(b.dataset.moveSource),Number(b.dataset.dir));drawSelection();return;}
-    if(b.hasAttribute("data-remove-source")) {sourceSelection=sourceSelection.filter((_,i)=>i!==Number(b.dataset.removeSource));drawSelection();return;}
-    if(b.dataset.sourceRetry) return action(async()=>{await api("/studio/sessions/"+session.id+"/selection/items/"+b.dataset.sourceRetry+"/retry",{});await refresh();},"source-retry:"+b.dataset.sourceRetry);
-    if(b.dataset.previewRetry) return action(async()=>{await api("/assets/"+b.dataset.previewRetry+"/preview",{retry:true});await refresh();},"preview-retry:"+b.dataset.previewRetry);
-    if(b.dataset.sourceRemove) return action(async()=>{
-      const remaining=session.selection.items.filter((i)=>i.id!==b.dataset.sourceRemove).map(Sources.intent);
-      if(!remaining.length)throw new Error("至少保留一个素材；也可以重试当前素材");
-      await openAssets();sourceSelection=remaining;drawSelection();
-      toast("已从草稿移除该素材，确认新选择后继续制作");
-    },"source-remove");
-    if(b.dataset.readySource) {index=assets.findIndex((a)=>a.id===b.dataset.readySource);view="source";renderPlayer();renderTimeline();return;}
+    if (b.hasAttribute("data-move-source")) {
+      sourceSelection = Sources.move(
+        sourceSelection,
+        Number(b.dataset.moveSource),
+        Number(b.dataset.dir),
+      );
+      drawSelection();
+      return;
+    }
+    if (b.hasAttribute("data-remove-source")) {
+      sourceSelection = sourceSelection.filter(
+        (_, i) => i !== Number(b.dataset.removeSource),
+      );
+      drawSelection();
+      return;
+    }
+    if (b.dataset.sourceRetry)
+      return action(async () => {
+        await api(
+          "/studio/sessions/" +
+            session.id +
+            "/selection/items/" +
+            b.dataset.sourceRetry +
+            "/retry",
+          {},
+        );
+        await refresh();
+      }, "source-retry:" + b.dataset.sourceRetry);
+    if (b.dataset.previewRetry)
+      return action(async () => {
+        await api("/assets/" + b.dataset.previewRetry + "/preview", {
+          retry: true,
+        });
+        await refresh();
+      }, "preview-retry:" + b.dataset.previewRetry);
+    if (b.dataset.sourceRemove)
+      return action(async () => {
+        const remaining = session.selection.items
+          .filter((i) => i.id !== b.dataset.sourceRemove)
+          .map(Sources.intent);
+        if (!remaining.length)
+          throw new Error("至少保留一个素材；也可以重试当前素材");
+        await openAssets();
+        sourceSelection = remaining;
+        drawSelection();
+        toast("已从草稿移除该素材，确认新选择后继续制作");
+      }, "source-remove");
+    if (b.dataset.readySource) {
+      index = assets.findIndex((a) => a.id === b.dataset.readySource);
+      view = "source";
+      renderPlayer();
+      renderTimeline();
+      return;
+    }
     if (b.dataset.removeConfig)
       return action(async () => {
         const c = clone(config());
@@ -1437,7 +2056,7 @@
       });
     if (b.hasAttribute("data-media"))
       return action(async () => {
-        if (Number(b.dataset.media)<0) return;
+        if (Number(b.dataset.media) < 0) return;
         index = Number(b.dataset.media);
         renderPlayer();
         renderTimeline();
@@ -1526,16 +2145,18 @@
     $("stylePreviewVideo")?.pause();
     settingsObserver?.disconnect();
     modalKind = "";
-    ++libraryEpoch;catalogController?.abort();assetController?.abort();
+    ++libraryEpoch;
+    catalogController?.abort();
+    assetController?.abort();
   });
   $("composer").onsubmit = (e) => {
     e.preventDefault();
-    action(send,"send");
+    action(send, "send");
   };
   $("prompt").onkeydown = (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      action(send,"send");
+      action(send, "send");
     }
   };
   $("player").addEventListener("timeupdate", updatePlayhead);
@@ -1566,16 +2187,38 @@
     if (!document.hidden && session) refresh(false);
     else queueRefresh();
   });
-  window.addEventListener("online",()=>{if(session)refresh(false);});
-  $("previewQuality").onchange=()=>{
-    const player=$("player"),position=player.currentTime,playing=!player.paused;
-    previewQuality=$("previewQuality").value;player.dataset.identity="";renderPlayer();
-    player.addEventListener("loadedmetadata",()=>{player.currentTime=Math.min(position,player.duration||position);if(playing)player.play().catch(()=>{});},{once:true});
+  window.addEventListener("online", () => {
+    if (session) refresh(false);
+  });
+  $("previewQuality").onchange = () => {
+    const player = $("player"),
+      position = player.currentTime,
+      playing = !player.paused;
+    previewQuality = $("previewQuality").value;
+    player.dataset.identity = "";
+    renderPlayer();
+    player.addEventListener(
+      "loadedmetadata",
+      () => {
+        player.currentTime = Math.min(position, player.duration || position);
+        if (playing) player.play().catch(() => {});
+      },
+      { once: true },
+    );
   };
-  $("player").addEventListener("waiting",()=>{$("playerLoading").hidden=false;});
-  $("player").addEventListener("loadeddata",()=>{$("playerLoading").hidden=true;});
-  $("player").addEventListener("playing",()=>{$("playerLoading").hidden=true;});
-  $("player").addEventListener("error",()=>{$("playerLoading").hidden=false;$("playerLoading").textContent="视频暂不可播放，可切换原片或重新选择素材";});
+  $("player").addEventListener("waiting", () => {
+    $("playerLoading").hidden = false;
+  });
+  $("player").addEventListener("loadeddata", () => {
+    $("playerLoading").hidden = true;
+  });
+  $("player").addEventListener("playing", () => {
+    $("playerLoading").hidden = true;
+  });
+  $("player").addEventListener("error", () => {
+    $("playerLoading").hidden = false;
+    $("playerLoading").textContent = "视频暂不可播放，可切换原片或重新选择素材";
+  });
   $("openNavigation").onclick = () => {
     $("navigationPanel").classList.add("is-open");
     $("openNavigation").setAttribute("aria-expanded", "true");
@@ -1598,14 +2241,39 @@
       container: "#quickNav",
       auth,
       activeKey: "videoEditingAi",
-    }).catch(()=>{});
+    }).catch(() => {});
     if (!auth.authenticated) {
       $("gate").textContent = "请登录后进入智能剪辑工作台";
       return;
     }
-    api("/studio/capabilities").then((data)=>{caps=data;}).catch((e)=>toast(e.message,true));
+    api("/studio/capabilities")
+      .then((data) => {
+        caps = data;
+      })
+      .catch((e) => toast(e.message, true));
     $("gate").hidden = true;
     $("workspace").hidden = false;
+    let pending;
+    try {
+      pending = JSON.parse(sessionStorage.getItem(pendingKey()) || "null");
+    } catch {}
+    if (pending) {
+      try {
+        const receipt = (
+          await api(
+            "/studio/selection-operations?" +
+              new URLSearchParams({ operation_id: pending.body.operation_id }),
+          )
+        ).receipt;
+        if (receipt) {
+          sessionStorage.removeItem(pendingKey());
+          if (!/^#ss_[a-f0-9]{32}$/.test(location.hash))
+            location.hash = receipt.session_id;
+        }
+      } catch {
+        toast("上次选择回执暂时无法核对，选择草稿仍已保留", true);
+      }
+    }
     if (/^#ss_[a-f0-9]{32}$/.test(location.hash))
       await loadSession(location.hash.slice(1));
     else render();
