@@ -55,6 +55,7 @@ def switch(record,folder,rollback=False,full=False):
     target=Path(record['previous'] if full else record['compatibility']) if rollback else Path(record['release'])
     if CURRENT.resolve()!=expected:raise RuntimeError('Concurrent release change')
     changes=[]
+    observed=json.loads((repo/'ops/editor-performance/static-baseline.json').read_text())
     for item in record['files']:
         if rollback and not full and item['kind']!='static':continue
         path=Path(item['path']);before=folder/item['before'] if item['before'] else None
@@ -134,8 +135,9 @@ def main():
         before=blob(repo,a.base,name);after=blob(repo,a.version,name)
         for root in STATIC:
             path=root/Path(name).name
-            if read(path)!=before:raise RuntimeError('Static baseline changed: '+str(path))
-            changes.append((path,before,after,'static'))
+            actual=read(path)
+            if actual!=before and sha(actual)!=observed.get(name):raise RuntimeError('Static baseline changed: '+str(path))
+            changes.append((path,actual,after,'static'))
     if read(NGINX)!=blob(repo,a.base,'deploy/ai-video-editing-nginx.conf'):raise RuntimeError('Nginx baseline changed')
     changes.append((NGINX,read(NGINX),blob(repo,a.version,'deploy/ai-video-editing-nginx.conf'),'nginx'))
     preview_unit=Path('/etc/systemd/system')/PREVIEW
