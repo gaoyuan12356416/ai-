@@ -19,7 +19,7 @@ from scripts.deploy_pipeline_runtime import preserve_tree_owners, verify_source
 BASE = '21e10416'
 FILES = ['features/fb_auto_posts/' + name + '.py' for name in ('core', 'repositories', 'service')]
 STATIC = ['static/fb-auto-publish-template' + ext for ext in ('.js', '.html')]
-NGINX = Path('/etc/nginx/default.d/fb-auto-publish.conf')
+NGINX = Path('/etc/nginx/default.d/fb-auto-publish-api.conf')
 
 
 def patched(path, relative):
@@ -59,7 +59,7 @@ def prepare(folder):
             for root in (release.MAIN, release.WEB):
                 external(folder, info, root / dest.name, patched(root / dest.name, name))
     nginx_new = folder / 'nginx.new'
-    nginx_new.write_bytes((SOURCE / 'deploy/nginx/fb-auto-publish.conf').read_bytes())
+    nginx_new.write_bytes((SOURCE / 'deploy/nginx/fb-auto-publish-api.conf').read_bytes())
     if NGINX.exists():
         raise RuntimeError('preserve_existing_nginx_config:' + str(NGINX))
     info['nginx'] = dict(path=str(NGINX), before='', after=release.sha(nginx_new), next=str(nginx_new))
