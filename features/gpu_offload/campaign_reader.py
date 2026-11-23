@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from .cache import SingleFlightCache,Response,cache_key
 from .campaign_snapshot import current,compressed_view
 from .campaign import service as original
-from .reports import validate_actor
+from .identity import validate_actor
 
 
 def authorize(actor,source_tenant):

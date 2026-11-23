@@ -4,6 +4,7 @@ import json
 from urllib.parse import urlsplit
 
 from .cache import Response
+from .identity import validate_actor
 from features.social_analytics import routes, warehouse_reader
 
 PATHS = frozenset('/api/social-analytics/' + name for name in ('options', 'report', 'export.csv'))
@@ -16,15 +17,6 @@ def validate_target(target):
     if parsed.scheme or parsed.netloc or parsed.fragment or parsed.path not in PATHS:
         raise ValueError('unsupported_query')
     return parsed
-
-
-def validate_actor(actor):
-    if not isinstance(actor, dict) or actor.get('role') not in ('user', 'admin'):
-        raise ValueError('invalid_actor')
-    if any(not isinstance(actor.get(k), str) or not actor[k].strip() for k in ('tenant_key', 'user_id')):
-        raise ValueError('invalid_actor')
-    if actor.get('_system_report') or actor.get('auth_type') == 'api_token':
-        raise ValueError('invalid_actor')
 
 
 class Capture:
