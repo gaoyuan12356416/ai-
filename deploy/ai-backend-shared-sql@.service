@@ -1,0 +1,26 @@
+[Unit]
+Description=Shared CPU and Hong Kong SQL admission (%i)
+After=network.target
+
+[Service]
+Type=simple
+RuntimeDirectory=sql-connection-gate
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/sql-%i-current
+EnvironmentFile=/etc/ai-backend-offload/shared-sql-%i.env
+ExecStart=/usr/bin/python3 -m features.gpu_offload.shared_sql_gate
+Restart=on-failure
+RestartSec=10
+KillMode=process
+TimeoutStopSec=infinity
+SendSIGKILL=no
+Nice=10
+CPUQuota=100%
+CPUShares=128
+MemoryLimit=192M
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

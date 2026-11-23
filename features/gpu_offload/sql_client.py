@@ -112,7 +112,8 @@ class Session:
                 cur.execute('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ')
             cur.execute('START TRANSACTION WITH CONSISTENT SNAPSHOT')
             cur.execute('SELECT @@server_uuid AS server_uuid, CONNECTION_ID() AS connection_id, '
-                        '@@read_only AS read_only, @@tx_read_only AS transaction_read_only')
+                        '@@read_only AS read_only, @@tx_read_only AS transaction_read_only, '
+                        "SUBSTRING_INDEX(CURRENT_USER(),'@',1) AS database_user")
             identity=cur.fetchone()
             self.broker.call('bind',{'lease_id':self.key,'identity':identity})
             self.identity=identity

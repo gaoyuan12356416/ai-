@@ -15,6 +15,7 @@ import time
 
 from . import legacy_sql_gate as legacy
 from .sql_leases import LeaseBook, LeaseError
+from .sql_reconciliation import GateReconciliation
 
 
 class SharedCoordinator(legacy.GateCoordinator):
@@ -192,6 +193,7 @@ def main():
     lock=legacy.acquire_daemon_lock(str(run/'daemon.lock'))
     legacy.prepare_session_cleanup_locks()
     coordinator=SharedCoordinator(root=root,state_path=run/'state.json')
+    reconciliation=GateReconciliation(coordinator.book)
     socket_path=run/'staged.sock'
     if socket_path.exists():socket_path.unlink()
     server=legacy.ThreadingUnixGateServer(str(socket_path),legacy.GateRequestHandler)
@@ -217,6 +219,11 @@ def main():
                 if marker_path.exists():coordinator.set_legacy_reserved(legacy_occupancy(json.loads(marker_path.read_text())))
                 if time.monotonic()-last_expire>=5:
                     coordinator.book.expire();coordinator.write_state();last_expire=time.monotonic()
+                    try:reconciliation.tick()
+                    except Exception:
+                        # A failed auxiliary readback retains the specific
+                        # unknown lease; it does not freeze unrelated CPU work.
+                        print(json.dumps({'event':'remote_lease_reconciliation_unavailable'}),flush=True)
                     with coordinator.condition:coordinator.condition.notify_all()
             except Exception:
                 coordinator.set_legacy_reserved(14)

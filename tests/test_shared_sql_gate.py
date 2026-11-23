@@ -13,6 +13,7 @@ from unittest.mock import patch
 from features.gpu_offload import legacy_sql_gate as legacy
 from features.gpu_offload.shared_sql_gate import SharedCoordinator, legacy_occupancy
 from features.gpu_offload import sql_handover
+from features.gpu_offload import sql_upgrade
 
 
 @unittest.skipUnless(os.name=='posix' and hasattr(socket,'AF_UNIX'),'Linux production socket protocol')
@@ -145,6 +146,36 @@ class SharedGateTests(unittest.TestCase):
         self.assertEqual(result['stage'],'shared_active')
         self.assertEqual(canonical.read_text(),'new listener')
         self.assertFalse(dropin.exists())
+
+    def test_shared_upgrade_keeps_admitted_connection_and_combines_budget(self):
+        old_run=self.root/'old-run';new_run=self.root/'new-run'
+        old_run.mkdir();new_run.mkdir()
+        old_root=self.root/'old-root';new_root=self.root/'shared'
+        canonical=self.root/'gate.sock';alias=self.root/'gate.service';alias.symlink_to('old.service')
+        old=SharedCoordinator(root=old_root,state_path=old_run/'state.json',legacy_reserved=0)
+        try:
+            self.server(old_run/'staged.sock',old);os.replace(str(old_run/'staged.sock'),str(canonical))
+            inflight=self.acquire(canonical)
+            self.coordinator.set_legacy_reserved(14);self.server(new_run/'staged.sock',self.coordinator)
+            def props(unit,key):
+                return {'RuntimeDirectoryPreserve':'yes','SendSIGKILL':'no','MainPID':str(os.getpid())}[key]
+            def manager(args,**kwargs):
+                if args[:2]==['systemctl','stop']:old.drain()
+            with patch.multiple(sql_upgrade,CANONICAL=canonical,UNIT_ALIAS=alias),patch.object(sql_upgrade,'unit_property',side_effect=props),patch.object(sql_upgrade.subprocess,'run',side_effect=manager):
+                sql_upgrade.promote(old_unit='old.service',old_run=old_run,old_root=old_root,new_unit='new.service',new_run=new_run,new_root=new_root)
+            marker=json.loads((new_root/'handover.json').read_text())
+            self.coordinator.set_legacy_reserved(legacy_occupancy(marker))
+            self.assertGreaterEqual(self.coordinator.legacy_reserved,1)
+            self.acquire(canonical,'new-work')
+            self.assertEqual(self.coordinator.snapshot()['in_use'],2)
+            self.assertFalse(sql_upgrade.finish(new_root))
+            inflight.settimeout(0.05)
+            with self.assertRaises(socket.timeout):inflight.recv(1)
+            legacy.send_json_line(inflight,{'op':'release','reason':'completed'})
+            inflight.settimeout(2);self.assertEqual(inflight.recv(1),b'')
+            self.assertTrue(sql_upgrade.finish(new_root))
+            self.assertTrue(canonical.exists());self.assertEqual(alias.readlink().name,'new.service')
+        finally:old.book.close()
 
 
 if __name__=='__main__':unittest.main()

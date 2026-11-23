@@ -113,7 +113,12 @@ class LeaseBook:
             reader, transaction = int(value['read_only']), int(value['transaction_read_only'])
         except (ValueError, TypeError, KeyError): raise LeaseError('database_identity_required')
         if connection <= 0 or reader != 1 or transaction != 1: raise LeaseError('read_only_session_required')
-        return dict(server_uuid=server, connection_id=connection, read_only=reader, transaction_read_only=transaction)
+        result=dict(server_uuid=server, connection_id=connection, read_only=reader, transaction_read_only=transaction)
+        if value.get('database_user'):
+            username=str(value['database_user'])
+            if not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}',username):raise LeaseError('invalid_database_user')
+            result['database_user']=username
+        return result
 
     def bind(self, key, node, identity):
         identity = self.identity(identity)
