@@ -45,4 +45,6 @@ def tick(root):
         atomic_json(state_path,state);return state
 
 
-if __name__=='__main__':print(json.dumps(tick(os.environ['CAMPAIGN_STATE_ROOT'])),flush=True)
+if __name__=='__main__':
+    result=tick(os.environ['CAMPAIGN_STATE_ROOT']);print(json.dumps(result),flush=True)
+    if result.get('status')=='failed':raise SystemExit(1)

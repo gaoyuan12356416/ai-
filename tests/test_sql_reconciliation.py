@@ -5,7 +5,7 @@ import time
 import unittest
 
 from features.gpu_offload.sql_leases import LeaseBook
-from features.gpu_offload.sql_reconciliation import GateReconciliation,watchdog_reconcile
+from features.gpu_offload.sql_reconciliation import GateReconciliation,watchdog_reconcile,reconcile_live_book
 
 IDENTITY=dict(server_uuid='14129611-64cd-4b66-8b8c-822d2363c0ae',connection_id=123,read_only=1,transaction_read_only=1,database_user='reader')
 
@@ -57,6 +57,23 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_absence_without_verified_visibility_keeps_occupancy(self):
         self.check();self.assertEqual(self.book.occupied,1)
+
+    def test_short_lived_session_can_be_proven_absent_by_same_account_observer(self):
+        self.check(observer_session_visible=True);self.assertEqual(self.book.occupied,0)
+
+    def test_visibility_for_a_different_account_does_not_release_unknown(self):
+        conn=Connection(dict(server_uuid=IDENTITY['server_uuid'],database_user='another',session_present=0,observer_session_visible=True))
+        watchdog_reconcile(conn,self.requests,self.proofs);self.gate.tick()
+        self.assertEqual(self.book.occupied,1)
+
+    def test_external_reconciler_does_not_recover_or_reset_a_live_reservation(self):
+        self.book.node_limit=2
+        reserved=self.book.reserve('hk-read-assist','unrelated',available=lambda:14)['id']
+        conn=Connection(dict(server_uuid=IDENTITY['server_uuid'],database_user='reader',session_present=0,observer_session_visible=True))
+        watchdog_reconcile(conn,self.requests,self.proofs)
+        result=reconcile_live_book(self.root/'book.sqlite3',proofs=self.proofs)
+        self.assertEqual(result,dict(before=2,after=1,business_queries=0))
+        self.assertEqual(self.book.get(reserved)['state'],'reserved')
 
     def test_wrong_backend_or_user_cannot_prove_absence(self):
         for server,user in [('other','reader'),(IDENTITY['server_uuid'],'different-user')]:

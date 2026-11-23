@@ -38,6 +38,10 @@ def refresh(seed):
                           budget_seconds=840,statement_timeout_ms=15000,report_options=True) as session:
             yield session
     original.report_connection=connection
+    # The original 250,000-row batch lost its connection while streaming over
+    # the private tunnel. Smaller disjoint pages retain the exact full scan,
+    # filters and snapshot, while staying under the original 15-second limit.
+    original.COPY_LOG_PAGE_ROWS=min(original.COPY_LOG_PAGE_ROWS,50000)
     started=time.monotonic()
     raw=original.query_raw(previous)
     prior_meta=previous.get('m',{})

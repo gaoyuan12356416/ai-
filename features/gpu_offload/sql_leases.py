@@ -183,7 +183,7 @@ class LeaseBook:
             with self.transaction():
                 self.db.execute('INSERT OR IGNORE INTO session_visibility VALUES(?,?)',(key,self.clock()))
 
-    def reconcile_absence(self, key, *, observed_server_uuid, observed_connection_id, session_present):
+    def reconcile_absence(self, key, *, observed_server_uuid, observed_connection_id, session_present, observer_session_visible=False):
         """Only called by the CPU reconciler after its own bounded database read."""
         with self.lock:
             row = self.get(key)
@@ -192,7 +192,7 @@ class LeaseBook:
             if (observed_server_uuid != identity['server_uuid'] or observed_connection_id != identity['connection_id']
                     or session_present is not False):
                 raise LeaseError('session_absence_not_proven')
-            if not self.db.execute('SELECT 1 FROM session_visibility WHERE lease_id=?',(key,)).fetchone():
+            if observer_session_visible is not True and not self.db.execute('SELECT 1 FROM session_visibility WHERE lease_id=?',(key,)).fetchone():
                 raise LeaseError('prior_session_visibility_not_proven')
             with self.transaction():
                 self.db.execute("UPDATE remote_lease SET state='closed',reason='verified_session_absent' WHERE id=?", (key,))

@@ -1,6 +1,7 @@
 import gzip
 import copy
 import io
+import re
 import http.client
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
@@ -69,6 +70,25 @@ class CampaignSnapshotTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()),expected)
         self.assertEqual(len(expected['d']),3) # New day plus both platforms' old facts.
         self.assertEqual(len(expected['xd']),2) # Removed Ad's old facts are excluded.
+
+    def test_smaller_disjoint_copy_log_pages_preserve_sparse_full_history(self):
+        identities=[1,2,10,100,115,1000,1200]
+        class Cursor:
+            def __init__(self):self.sql='';self.args=();self.ranges=[]
+            def execute(self,sql,args=None):self.sql=' '.join(sql.split());self.args=args
+            def fetchone(self):
+                if 'MAX(id)' in self.sql:return {'max_id':max(identities)}
+                offset=int(re.search(r'LIMIT (\d+),1',self.sql).group(1))
+                choices=[value for value in identities if self.args[0]<value<=self.args[1]]
+                return {'id':choices[offset]} if offset<len(choices) else None
+            def fetchall(self):
+                self.ranges.append(self.args)
+                return [{'id':value} for value in identities if self.args[0]<value<=self.args[1]]
+        full,small=Cursor(),Cursor()
+        with patch.object(service,'COPY_LOG_PAGE_ROWS',250000):expected=service.read_copy_logs(full)
+        with patch.object(service,'COPY_LOG_PAGE_ROWS',2):actual=service.read_copy_logs(small)
+        self.assertEqual(actual,expected);self.assertEqual([row['id'] for row in actual],identities)
+        self.assertTrue(all(previous[1]==following[0] for previous,following in zip(small.ranges,small.ranges[1:])))
 
     def test_private_http_rechecks_tenant_and_permission_before_cached_response(self):
         server=Server(('127.0.0.1',0),self.root/'index','t'*40,'company')

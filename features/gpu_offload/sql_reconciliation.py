@@ -26,7 +26,7 @@ class GateReconciliation:
         self.book,self.requests,self.proofs=book,Path(requests),Path(proofs)
         self.signature=None
 
-    def tick(self):
+    def apply_proofs(self):
         if self.proofs.is_file():
             payload=json.loads(self.proofs.read_text())
             if time.time()-float(payload.get('observed_at',0))<120:
@@ -41,8 +41,12 @@ class GateReconciliation:
                             continue
                         if float(payload['observed_at'])<row['heartbeat']:continue
                         self.book.reconcile_absence(proof['lease_id'],observed_server_uuid=proof['server_uuid'],
-                            observed_connection_id=int(proof['connection_id']),session_present=proof['session_present'])
+                            observed_connection_id=int(proof['connection_id']),session_present=proof['session_present'],
+                            observer_session_visible=proof.get('observer_session_visible') is True)
                     except (KeyError,ValueError,RuntimeError):continue
+
+    def tick(self):
+        self.apply_proofs()
         pending=[]
         for row in self.book.rows():
             identity=json.loads(row['identity']) if row['identity'] else None
@@ -70,11 +74,37 @@ def watchdog_reconcile(connection,requests=REQUESTS,proofs=PROOFS):
             if not row.get('database_user') or int(row.get('connection_id',0))<=0:continue
             cursor.execute("SELECT /*+ MAX_EXECUTION_TIME(1000) */ @@server_uuid AS server_uuid, "
                 "SUBSTRING_INDEX(CURRENT_USER(),'@',1) AS database_user, "
-                'EXISTS(SELECT 1 FROM information_schema.PROCESSLIST WHERE ID=%s AND USER=%s) AS session_present',
+                'EXISTS(SELECT 1 FROM information_schema.PROCESSLIST WHERE ID=%s AND USER=%s) AS session_present, '
+                "EXISTS(SELECT 1 FROM information_schema.PROCESSLIST WHERE ID=CONNECTION_ID() "
+                "AND USER=SUBSTRING_INDEX(CURRENT_USER(),'@',1)) AS observer_session_visible",
                 (int(row['connection_id']),row['database_user']))
             observation=cursor.fetchone()
             results.append(dict(lease_id=row['lease_id'],server_uuid=observation['server_uuid'],
                                 database_user=observation['database_user'],connection_id=int(row['connection_id']),
-                                session_present=bool(observation['session_present'])))
+                                session_present=bool(observation['session_present']),
+                                observer_session_visible=bool(observation.get('observer_session_visible',False))))
     atomic_json(proofs,{'observed_at':time.time(),'sessions':results})
     return len(results)
+
+
+def reconcile_live_book(path,*,proofs=PROOFS):
+    """Consume the watchdog proof without restarting the admission daemon.
+
+    This helper only releases proven-ended unknown leases. It never reserves,
+    expires, recovers or resets leases, and never opens a database connection.
+    MySQL users can see their own account's threads. A fresh matching-server,
+    matching-user observation which also sees the observer's own session is
+    therefore sufficient even if a short-lived connection was missed between
+    watchdog scans. Missing/unknown visibility retains the reservation.
+    """
+    from .sql_leases import LeaseBook
+    book=LeaseBook(path,recover=False)
+    try:
+        before=book.occupied;GateReconciliation(book,proofs=proofs).apply_proofs()
+        return {'before':before,'after':book.occupied,'business_queries':0}
+    finally:book.close()
+
+
+if __name__=='__main__':
+    import sys
+    print(json.dumps(reconcile_live_book(sys.argv[1])),flush=True)

@@ -1,0 +1,14 @@
+[Unit]
+Description=Reconcile unknown offload leases using the existing watchdog proof
+After=sql-query-watchdog.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/reconcile-current
+ExecStart=/usr/bin/python3 -m features.gpu_offload.sql_reconciliation /mnt/data-disk/gpu-backend-offload-20261123/sql-teal-state/remote-leases.sqlite3
+CPUQuota=10%
+MemoryLimit=64M
+Nice=15
+NoNewPrivileges=true
+TimeoutStartSec=15
+UMask=0077

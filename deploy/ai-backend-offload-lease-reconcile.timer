@@ -1,0 +1,10 @@
+[Unit]
+Description=Consume same-account session absence proofs
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+Unit=ai-backend-offload-lease-reconcile.service
+
+[Install]
+WantedBy=timers.target
