@@ -223,10 +223,13 @@ def compare():
                 return live.reader.query([s.replace('ads_ai.'+PUBLIC,'ads_ai.'+old) for s in sql])
         legacy_reader=OldReader()
         start=time.monotonic()
-        old_error=None
+        old_error=None;old_warm=None;smaller=None
         try:
             prior_profiles,prior_meta,prior_warnings=prior.mysql_profiles(legacy_reader,v,pages)
             old_ms=round((time.monotonic()-start)*1000,2)
+            start=time.monotonic()
+            prior.mysql_profiles(legacy_reader,v,pages)
+            old_warm=round((time.monotonic()-start)*1000,4)
         except prior.SourceError as exc:
             # Record the genuine legacy failure, then replay its identical implementation in smaller immutable slices.
             old_error=exc.code;old_ms=None;prior_profiles={};prior_warnings=[];prior_meta=None
@@ -250,6 +253,18 @@ def compare():
         fallback=SelectionCache(selection_path=None).load(live.reader,v,subset,table=new)
         if fallback!=({pid:prior_profiles[pid] for pid in subset if pid in prior_profiles},prior_meta,[]):
             raise RuntimeError('selection SQL fallback differs')
+        if old_error:
+            # Preserve the measured full-size failure; compare cache states on one identical smaller request.
+            small_old=OldReader();small_new=SelectionCache()
+            timings={}
+            for label,load in (('old',lambda:prior.mysql_profiles(small_old,v,subset)),
+                               ('new',lambda:small_new.load(observed,v,subset,table=new))):
+                for state in ('cold','warm'):
+                    start=time.monotonic()
+                    value=load()
+                    timings[label+'_'+state+'_ms']=round((time.monotonic()-start)*1000,4)
+                    if value!=fallback:raise RuntimeError('matched-size cache timing used different profiles')
+            smaller=dict(pages=len(subset),**timings)
         if (prior_profiles,prior_meta,prior_warnings)!=(new_profiles,new_meta,new_warnings) or not new_profiles:
             raise RuntimeError('selection inputs differ or missing')
         results=assign(ids,data['dramas'],data['pages'],prior_profiles)
@@ -262,7 +277,8 @@ def compare():
     fact=dict(at=stamp(),version=v,old=old,new=new,rows=len(a),schema_columns=len(schemas[0]),selection_items=len(ids),
               candidate_pages=len(pages),profiled_candidates=len(new_profiles),result_hash=sha(encoded(results)),
               totals={k:proof[k] for k in MONEY},old_cold_ms=old_ms,old_error=old_error,new_cold_ms=round(cold,2),
-              new_warm_ms=round(warm,2),selection_sql_calls=observed.calls,sql_fallback_pages=len(subset),api_sample=len(sample))
+              old_warm_ms=old_warm,new_warm_ms=round(warm,4),smaller_same_request=smaller,
+              selection_sql_calls=observed.calls,sql_fallback_pages=len(subset),api_sample=len(sample))
     atomic(QA/('compare-'+new+'.json'),fact);return fact
 
 
