@@ -19,18 +19,37 @@ class AdmissionError(RuntimeError):
 class Broker:
     def __init__(self,port,token,receipt_root):
         self.port,self.token,self.receipt_root=port,token,Path(receipt_root)
+        # Query admission and heartbeat run on separate threads. Reuse each
+        # thread's control connection, without sharing an HTTP response stream.
+        self.local=threading.local()
+
+    def close_transport(self):
+        conn=getattr(self.local,'connection',None)
+        if conn is not None:conn.close()
+        self.local.connection=None
 
     def call(self,operation,payload):
-        conn=http.client.HTTPConnection('127.0.0.1',self.port,timeout=4)
+        conn=getattr(self.local,'connection',None)
+        if conn is not None and time.monotonic()-self.local.used_at>=15:
+            self.close_transport();conn=None
+        if conn is None:
+            conn=http.client.HTTPConnection('127.0.0.1',self.port,timeout=4)
+            self.local.connection=conn
         try:
             body=json.dumps(payload,separators=(',',':')).encode()
-            conn.request('POST','/v1/lease/'+operation,body=body,headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json','Connection':'close'})
+            conn.request('POST','/v1/lease/'+operation,body=body,headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
             response=conn.getresponse();data=response.read(16385)
             if len(data)>16384:raise AdmissionError('invalid_broker_response')
             value=json.loads(data)
-            if response.status!=200:raise AdmissionError(value.get('error','admission_unavailable'),float(value.get('retry_after',0)))
-            return value
-        finally:conn.close()
+            if not isinstance(value,dict):raise AdmissionError('invalid_broker_response')
+            self.local.used_at=time.monotonic()
+            if response.will_close:self.close_transport()
+        except Exception:
+            # Never replay a request after an ambiguous response. In particular
+            # acquire/begin must not create an unaccounted second reservation.
+            self.close_transport();raise
+        if response.status!=200:raise AdmissionError(value.get('error','admission_unavailable'),float(value.get('retry_after',0)))
+        return value
 
     def flush_closed(self):
         self.receipt_root.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -100,17 +119,21 @@ class Session:
         self.connection=factory(host='127.0.0.1',port=19969,user=user,password=password,database=database,
                                 charset='utf8mb4',read_timeout=60,write_timeout=15,autocommit=True)
         def watch():
-            while not self.done.wait(5):
-                try:
-                    if time.monotonic()>=self.deadline:raise AdmissionError('refresh_deadline')
-                    self.broker.call('heartbeat',{'lease_id':self.key})
-                except Exception as exc:
-                    self.lost.set();self.locally_aborted=True
-                    print(json.dumps({'event':'offload_sql_lease_lost','task':self.task,'lease':self.key,
-                                      'error_type':type(exc).__name__,'code':getattr(exc,'code',None)}),flush=True)
-                    try:self.connection._sock.shutdown(socket.SHUT_RDWR)
-                    except (OSError,AttributeError):pass
-                    return
+            try:
+                while not self.done.wait(5):
+                    try:
+                        if time.monotonic()>=self.deadline:raise AdmissionError('refresh_deadline')
+                        self.broker.call('heartbeat',{'lease_id':self.key})
+                    except Exception as exc:
+                        self.lost.set();self.locally_aborted=True
+                        print(json.dumps({'event':'offload_sql_lease_lost','task':self.task,'lease':self.key,
+                                          'error_type':type(exc).__name__,'code':getattr(exc,'code',None)}),flush=True)
+                        try:self.connection._sock.shutdown(socket.SHUT_RDWR)
+                        except (OSError,AttributeError):pass
+                        return
+            finally:
+                close=getattr(self.broker,'close_transport',None)
+                if close:close()
         self.watcher=threading.Thread(target=watch,name='read-only-sql-lease',daemon=True);self.watcher.start()
         with self.connection.cursor() as cur:
             cur.execute('SET SESSION MAX_EXECUTION_TIME=%s',(self.statement_timeout_ms,))
@@ -148,7 +171,11 @@ class Session:
                     wire.settimeout(4);eof=wire.recv(1)==b''
             except Exception:pass  # A driver error is not proof of server EOF.
             finally:self.connection._force_close()
-        if eof:self.broker.closed(self.key,self.identity)
+        if eof:
+            try:self.broker.closed(self.key,self.identity)
+            finally:
+                close=getattr(self.broker,'close_transport',None)
+                if close:close()
         elif self.key and not self.connect_attempted:
             # The server may already have issued begin permission if its reply
             # was lost. It conservatively retains that case for reconciliation.
@@ -157,6 +184,8 @@ class Session:
         if self.key and self.connect_attempted and not eof:
             print(json.dumps({'event':'offload_sql_close_unconfirmed','task':self.task,'lease':self.key,
                               'locally_aborted':self.locally_aborted}),flush=True)
+        close=getattr(self.broker,'close_transport',None)
+        if close:close()
         # Issued but unconfirmed sessions deliberately retain their shared slot.
 
 

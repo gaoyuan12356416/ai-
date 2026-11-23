@@ -420,6 +420,7 @@ class MeasuredCursor:
         except Exception as exc:
             print(json.dumps({"event": "campaign_copy_report_query_failed", "phase": self.phase,
                               "error_type": type(exc).__name__,
+                              "phase_stats": self.stats,
                               "error_code": exc.args[0] if exc.args and isinstance(exc.args[0], int) else None}),
                   flush=True)
             raise
