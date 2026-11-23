@@ -71,11 +71,12 @@ def install(rollback=False,update=False):
     for u in ('x-tag-auto-runner.timer','x-tag-auto-runner.path'):run('systemctl','stop',u)
     for f in m['files']:
         if rollback and f['before'] is None:continue  # unused additive helper is harmless
+        if rollback and f['name']=='features/x_tag_publish/gateway.py':continue
         p=LIVE/f['name'];src=(ROOT/'before'/f['name']) if rollback else SOURCE/f['name']
         tmp=p.with_name(p.name+'.today-next');tmp.write_bytes(src.read_bytes());os.chown(tmp,f['uid'],f['gid']);os.chmod(tmp,f['mode']);os.replace(tmp,p)
         if update:f['after']=sha(src)
     if update:m['commit']=run('git','-C',SOURCE,'rev-parse','HEAD')
-    if gateway_changed:run('systemctl','restart','x-tag-gateway.service')
+    if gateway_changed and not rollback:run('systemctl','restart','x-tag-gateway.service')
     m['old_pid']=run('systemctl','show','x-tag-post.service','-p','MainPID','--value')
     m['stage']='rollback_pending' if rollback else 'restart_pending';save('deployment.json',m)
     run('systemctl','restart','--no-block','x-tag-post.service')
@@ -84,6 +85,14 @@ def install(rollback=False,update=False):
 def finish():
     m=json.loads((ROOT/'deployment.json').read_text());s=states()
     assert s['x-tag-post.service']['ActiveState']=='active' and s['x-tag-post.service']['MainPID'] not in ('0',m['old_pid']),'publisher_draining'
+    if m['stage']=='rollback_pending':
+        # Keep the additive owner-read endpoint until all new-code upload
+        # clients have drained and the prior publisher is serving again.
+        f=next(f for f in m['files'] if f['name']=='features/x_tag_publish/gateway.py')
+        p=LIVE/f['name'];assert sha(p)==f['after']
+        tmp=p.with_name(p.name+'.today-next');tmp.write_bytes((ROOT/'before'/f['name']).read_bytes())
+        os.chown(tmp,f['uid'],f['gid']);os.chmod(tmp,f['mode']);os.replace(tmp,p)
+        run('systemctl','restart','x-tag-gateway.service')
     with closing(readonly(AUTO)) as c:
         assert not c.execute("SELECT 1 FROM x_auto_task WHERE claim_token<>'' AND status IN ('selecting','preparing','publishing') LIMIT 1").fetchone(),'auto_request_inflight'
     assert run('systemctl','show','x-tag-auto-runner.service','-p','MainPID','--value')=='0','runner_still_finishing'
