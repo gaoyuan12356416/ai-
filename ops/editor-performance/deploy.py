@@ -136,7 +136,7 @@ def main():
         for root in STATIC:
             path=root/Path(name).name
             actual=read(path)
-            if actual!=before and sha(actual)!=observed.get(name):raise RuntimeError('Static baseline changed: '+str(path))
+            if actual!=before and (name not in observed or sha(actual)!=observed[name]):raise RuntimeError('Static baseline changed: '+str(path))
             changes.append((path,actual,after,'static'))
     if read(NGINX)!=blob(repo,a.base,'deploy/ai-video-editing-nginx.conf'):raise RuntimeError('Nginx baseline changed')
     changes.append((NGINX,read(NGINX),blob(repo,a.version,'deploy/ai-video-editing-nginx.conf'),'nginx'))
