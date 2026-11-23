@@ -10,7 +10,7 @@ from unittest.mock import patch, Mock
 
 from features.x_accounts import oauth_service as oauth
 from features.x_tag_publish import account_snapshot, dispatch_native
-from features.x_tag_publish import gateway
+from features.x_tag_publish.transport import Error
 from features.x_auto_posts.selector import DecimalRange, DramaFilterRule, SortRule
 from features.x_material_effects import selection
 
@@ -20,9 +20,8 @@ ACTOR = {'user_id': 'u', 'tenant_key': 't', 'role': 'admin'}
 class AccountSnapshotTests(unittest.TestCase):
     def test_gateway_reads_owner_api_and_returns_no_tokens(self):
         item={'id':7,'scopes':['tweet.write'],'access_token':'private','publish_approved':False}
-        with patch.dict('os.environ',{'X_TAG_ACCOUNT_BROKER_TOKEN':'test-only'}), \
-             patch.object(gateway,'rpc',return_value={'items':[item]}) as rpc:
-            row=gateway.read_account_snapshot({'account_id':7,'actor':ACTOR,'scope':'mine'})
+        rpc=Mock(return_value={'items':[item]})
+        row=account_snapshot.read_owner_snapshot({'account_id':7,'actor':ACTOR,'scope':'mine'},rpc,'test-only',Error)
         self.assertNotIn('access_token',row)
         self.assertFalse(row['publish_approved'])
         self.assertEqual(json.loads(row['scopes_json']),['tweet.write'])

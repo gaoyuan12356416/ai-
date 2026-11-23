@@ -80,3 +80,26 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+def read_owner_snapshot(body, rpc, token, Error):
+    if set(body) != {'account_id', 'actor', 'scope'}:
+        raise Error('invalid_request', '', 400)
+    account_id=body['account_id']
+    if account_id is not None and (type(account_id) is not int or account_id<=0):
+        raise Error('invalid_request','账号编号无效',400)
+    # runuser inherits this gateway's read-only mount namespace. The existing
+    # account owner API alone reads its live WAL and validates actor/scope.
+    value=rpc('http://127.0.0.1:8810','/internal/accounts/query',
+              token,
+              payload={'actor':body['actor'],'scope':body['scope']},timeout=12)
+    records=[]
+    for item in value.get('items',[]):
+        if account_id is not None and item.get('id')!=account_id:continue
+        record={key:item.get(key,'') for key in FIELDS}
+        record['scopes_json']=json.dumps(item.get('scopes',[]))
+        records.append(record)
+    if account_id is None:return records
+    if len(records)!=1:raise Error('x_account_not_found','X账号记录不存在',404)
+    return records[0]
+

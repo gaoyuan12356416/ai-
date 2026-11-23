@@ -98,12 +98,15 @@ def finish():
 def gateway_only():
     m=json.loads((ROOT/'deployment.json').read_text());assert m['stage']=='active'
     commit=run('git','-C',SOURCE,'rev-parse','HEAD');assert run('git','-C',SOURCE,'branch','-r','--contains',commit)
-    f=next(f for f in m['files'] if f['name']=='features/x_tag_publish/gateway.py')
-    p=LIVE/f['name'];assert sha(p)==f['after']
-    src=SOURCE/f['name'];compile(src.read_bytes(),f['name'],'exec')
-    tmp=p.with_name(p.name+'.today-next');tmp.write_bytes(src.read_bytes());os.chown(tmp,f['uid'],f['gid']);os.chmod(tmp,f['mode']);os.replace(tmp,p)
+    files=[f for f in m['files'] if f['name'] in ('features/x_tag_publish/gateway.py','features/x_tag_publish/account_snapshot.py')]
+    for f in files:
+        p=LIVE/f['name'];assert sha(p)==f['after']
+    for f in files:
+        p=LIVE/f['name'];src=SOURCE/f['name'];compile(src.read_bytes(),f['name'],'exec')
+        tmp=p.with_name(p.name+'.today-next');tmp.write_bytes(src.read_bytes());os.chown(tmp,f['uid'],f['gid']);os.chmod(tmp,f['mode']);os.replace(tmp,p)
+        f['after']=sha(p)
     run('systemctl','restart','x-tag-gateway.service')
-    f['after']=sha(p);m['commit']=commit;m['after']=states();save('deployment.json',m)
+    m['commit']=commit;m['after']=states();save('deployment.json',m)
     print(json.dumps({'stage':'active','gateway_commit':commit}))
 
 if __name__=='__main__':
