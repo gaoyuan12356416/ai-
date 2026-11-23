@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new immutable report snapshot once a minute
+
+[Timer]
+OnBootSec=90
+OnUnitInactiveSec=60
+AccuracySec=10
+Unit=ai-backend-offload-sync.service
+
+[Install]
+WantedBy=timers.target

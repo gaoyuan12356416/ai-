@@ -1,0 +1,18 @@
+[Unit]
+Description=Synchronize an already published immutable social report snapshot
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/data-disk/gpu-backend-offload-20261123/read-current
+EnvironmentFile=/etc/ai-backend-offload/sync.env
+ExecStart=/usr/bin/python3 -m features.gpu_offload.sync
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=100%
+CPUShares=64
+MemoryLimit=256M
+TimeoutStartSec=240
+NoNewPrivileges=true
+UMask=0077

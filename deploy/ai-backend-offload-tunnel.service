@@ -1,0 +1,18 @@
+[Unit]
+Description=Private tunnel for immutable GPU report snapshots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -i /etc/ai-backend-offload/tunnel_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ai-backend-offload/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -R 127.0.0.1:19961:127.0.0.1:19960 root@43.166.187.96
+Restart=always
+RestartSec=15
+Nice=10
+Slice=ai-backend-offload-read.slice
+CPUQuota=20%
+MemoryLimit=128M
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
