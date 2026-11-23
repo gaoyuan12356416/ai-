@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import time
 
@@ -53,7 +52,7 @@ def activate(root):
     (backup/'state.json').write_bytes(LEGACY_STATE.read_bytes())
     if DROPIN.exists():raise RuntimeError('handover_dropin_already_exists')
     DROPIN.parent.mkdir(exist_ok=True)
-    DROPIN.write_text('[Service]\nRestart=no\n')
+    DROPIN.write_text('[Service]\nRestart=no\nRuntimeDirectoryPreserve=yes\n')
     systemctl('daemon-reload')
     old_inode=CANONICAL.stat().st_ino
     os.link(str(CANONICAL),str(ALIAS))
@@ -98,20 +97,24 @@ def retire(root):
         ledger=json.loads(LEGACY_LEDGER.read_text())
         if ledger.get('sessions'):raise RuntimeError('legacy_sessions_not_empty')
         time.sleep(0.25)
-    if DROPIN.read_text()!='[Service]\nRestart=no\n':raise RuntimeError('handover_dropin_changed')
+    normal_dropin='[Service]\nRestart=no\nRuntimeDirectoryPreserve=yes\n'
+    if DROPIN.read_text()!=normal_dropin:raise RuntimeError('handover_dropin_changed')
     # The idle legacy daemon unlinks the canonical socket in its SIGTERM cleanup.
     # Skip that destructive cleanup only after no accepted/queued/active lease
     # or durable child session remains. No query process receives this signal.
-    DROPIN.write_text('[Service]\nRestart=no\nKillSignal=SIGKILL\nTimeoutStopSec=5\n')
+    DROPIN.write_text(normal_dropin+'KillSignal=SIGKILL\nTimeoutStopSec=5\n')
     systemctl('daemon-reload')
-    if legacy_occupancy(marker):raise RuntimeError('legacy_became_active_before_retirement')
+    if legacy_occupancy(marker):
+        DROPIN.write_text(normal_dropin);systemctl('daemon-reload')
+        raise RuntimeError('legacy_became_active_before_retirement')
     systemctl('stop',OLD_UNIT)
     if legacy.process_exists(marker['pid']):raise RuntimeError('idle_legacy_daemon_still_alive')
     marker.update(retired=True,retired_at=legacy.utc_now_text());legacy.durable_replace_json(str(marker_path),marker)
     # Remove the temporary signal override before the old service name becomes
     # an alias of the new service; otherwise it would affect the new daemon.
     DROPIN.unlink();UNIT_PATH.unlink();UNIT_PATH.symlink_to(NEW_UNIT)
-    state=Path(marker['state_path']);replacement=state.with_name('shared-state.next')
+    state=Path(marker['state_path']);state.parent.mkdir(parents=True,exist_ok=True)
+    replacement=state.with_name('shared-state.next')
     replacement.symlink_to('/run/sql-shared-gate/state.json');replacement.replace(state)
     systemctl('daemon-reload');systemctl('enable',NEW_UNIT)
     return dict(stage='shared_active',pid=marker['shared_pid'],capacity=14,remote_enabled=False,backup=marker['backup'])

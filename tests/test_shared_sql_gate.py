@@ -1,5 +1,6 @@
 """Linux socket tests use no database, system unit or production gate path."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import socket
@@ -121,6 +122,29 @@ class SharedGateTests(unittest.TestCase):
         self.assertEqual(snapshot['capacity'],14)
         self.assertIn('details_state_path',snapshot)
         self.assertEqual(len(json.loads(Path(snapshot['details_state_path']).read_text())['job_metrics']),50)
+
+    def test_retirement_preserves_canonical_runtime_directory(self):
+        run=self.root/'legacy-run';run.mkdir();canonical=run/'gate.sock';canonical.write_text('new listener')
+        unit=self.root/'old.service';unit.write_text('[Service]\nRuntimeDirectory=legacy-run\n')
+        dropin=self.root/'old.service.d'/'90-offload.conf';dropin.parent.mkdir()
+        dropin.write_text('[Service]\nRestart=no\nRuntimeDirectoryPreserve=yes\n')
+        ledger=self.root/'old-ledger.json';ledger.write_text('{"sessions":{}}')
+        handover=self.root/'handover';handover.mkdir()
+        marker=dict(retired=False,barrier_complete=True,canonical_inode=canonical.stat().st_ino,
+                    old_unit_sha256=hashlib.sha256(unit.read_bytes()).hexdigest(),pid=123,shared_pid=456,
+                    state_path=str(run/'state.json'),backup=str(self.root/'backup'))
+        (handover/'handover.json').write_text(json.dumps(marker))
+        def manager(*args):
+            if args[:1]==('stop',):
+                # Simulate the systemd cleanup that caused the production gap.
+                if 'RuntimeDirectoryPreserve=yes' not in dropin.read_text():canonical.unlink();run.rmdir()
+            return ''
+        with patch.multiple(sql_handover,CANONICAL=canonical,UNIT_PATH=unit,DROPIN=dropin,LEGACY_LEDGER=ledger):
+            with patch.object(sql_handover,'systemctl',side_effect=manager),patch.object(sql_handover,'legacy_occupancy',return_value=0),patch.object(legacy,'process_exists',return_value=False):
+                result=sql_handover.retire(handover)
+        self.assertEqual(result['stage'],'shared_active')
+        self.assertEqual(canonical.read_text(),'new listener')
+        self.assertFalse(dropin.exists())
 
 
 if __name__=='__main__':unittest.main()
