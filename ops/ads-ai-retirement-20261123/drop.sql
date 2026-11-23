@@ -1,0 +1,14 @@
+DROP TABLE `ads_ai`.`fb_page_effect_profile`;
+DROP TABLE `ads_ai`.`ad_control_v3_preview_target`;
+DROP TABLE `ads_ai`.`ad_control_v3_execution_target`;
+DROP TABLE `ads_ai`.`ad_control_copy_lineage`;
+DROP TABLE `ads_ai`.`ad_control_v3_copy_intent`;
+DROP TABLE `ads_ai`.`ad_control_v3_runner_event`;
+DROP TABLE `ads_ai`.`ad_control_v3_execution`;
+DROP TABLE `ads_ai`.`ad_control_v3_preview`;
+DROP TABLE `ads_ai`.`ad_control_v3_rule_group_optimizer`;
+DROP TABLE `ads_ai`.`ad_control_v3_rule_group_product`;
+DROP TABLE `ads_ai`.`ad_control_v3_rule_group`;
+DROP TABLE `ads_ai`.`ad_control_v3_product_catalog`;
+DROP TABLE `ads_ai`.`ad_control_action_log`;
+DROP TABLE `ads_ai`.`ads_facebook_device_insights`;
