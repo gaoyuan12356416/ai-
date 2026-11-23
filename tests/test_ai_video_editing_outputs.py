@@ -11,7 +11,7 @@ import threading
 import time
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from features.ai_video_editing import output_storage as storage, render_worker as worker
 from features.ai_video_editing.cloud_uploads import CloudUploads
@@ -149,6 +149,22 @@ class OutputTests(unittest.TestCase):
         self.finish()
         with patch.object(api,'completed',return_value=True),patch.object(api,'complete',side_effect=AssertionError('duplicate')):
             worker.upload_saved(api,folder,reconcile_first=True)
+
+    def test_material_library_copies_cloud_film_without_cpu_file(self):
+        from features.ai_video_editing.youtube_material_io import MaterialIO
+        io=object.__new__(MaterialIO);client=Mock()
+        io.bucket='test-123';io.region='ap-hongkong'
+        io.platform=types.SimpleNamespace(AD_MATERIAL_SOURCE_API_URL='https://aa.yingliangads.com/api/material/source',
+            AD_MATERIAL_SOURCE_API_TOKEN='fixture',get_cos_client=lambda **kw:client)
+        io.source=types.SimpleNamespace(_target_head=Mock(side_effect=[None,{'verified':True}]),
+                                       _public_acl=Mock(),_public_head=Mock())
+        item={'task_id':self.tid,'sha256':self.digest,'size':4,
+              'request':{'url':'https://test-123.cos.ap-hongkong.myqcloud.com/final.mp4'},
+              'cos_source':{'bucket':'test-123','key':self.key,'size':4,'etag':'"verified"'}}
+        io.ensure_file(Path(self.tmp.name)/'absent.mp4',item)
+        self.assertEqual(client.copy.call_args.kwargs['CopyStatus'],'Replaced')
+        self.assertEqual(client.copy.call_args.kwargs['CopySourceIfMatch'],'"verified"')
+        client.upload_file.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

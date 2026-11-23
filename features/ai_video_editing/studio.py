@@ -1062,8 +1062,10 @@ def dispatch(rt, actor, verb, path, body, query):
         )
         from .output_storage import file_size, local_file
         needed = sum(file_size(rt,row['id']) for row in records)
+        cache_needed = sum(file_size(rt,row['id']) for row in records
+                           if not (rt.root/'outputs'/(row['id']+'.mp4')).is_file())
         check(
-            shutil.disk_usage(rt.root).free > 2 * needed + 512 * 1024**2,
+            shutil.disk_usage(rt.root).free > needed + cache_needed + 512 * 1024**2,
             "export_space",
             "导出空间不足，请减少本次选择数量",
             503,
