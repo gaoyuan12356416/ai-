@@ -125,6 +125,9 @@ class Store:
         for column, key in (("rows_json", "rows"), ("response_json", "response"),
                             ("alert_reasons_json", "alert_reasons")):
             result[key] = json.loads(result.pop(column))
+        result["details_cleared"] = isinstance(result["rows"], dict)
+        if result["details_cleared"]:
+            result["rows"] = result["rows"]["confirmed_items"]
         result["sync_status"] = ("synced" if result["synced_revision"] >= result["revision"] else "pending")
         return result
 
@@ -355,7 +358,10 @@ class Writer:
             "diagnostics_json": _json(row.get("diagnostics") or {}),
             "http_status": int(request["http_status"]), "created_at": request["created_at"],
         }
-        record = dict(immutable, payload_hash=_hash(immutable))
+        # Compacted rows can advance receipt metadata on their original keys.
+        # Their stored digest covers the full diagnostics already in MySQL.
+        digest = row["payload_hash"] if request.get("details_cleared") else _hash(immutable)
+        record = dict(immutable, payload_hash=digest)
         record.update(revision=int(request["revision"]), alert_status=request["alert_status"],
                       alert_reasons_json=_json(request["alert_reasons"]),
                       feishu_message_id=request["feishu_message_id"],
@@ -376,7 +382,7 @@ class Writer:
 
     def write_task(self, request):
         with self.batch() as session:
-            session.write_task(request)
+            return session.write_task(request)
 
 
 def _placeholders(count):
@@ -436,6 +442,8 @@ class _WriteSession:
                 for record in records:
                     index = record["item_index"]
                     if index not in existing:
+                        if request.get("details_cleared"):
+                            raise PayloadConflictError("confirmed MySQL assignment row is missing")
                         missing.append(record)
                         continue
                     digest, revision = existing[index]
@@ -461,6 +469,7 @@ class _WriteSession:
                          r["alert_error_code"], r["updated_at"], task_id, *outdated, r["revision"]))
             phase = "commit"
             self.connection.commit()
+            return {r["item_index"]: r["payload_hash"] for r in records}
         except Exception as exc:
             log("database_failure", role="writer", port=63353, task_id=task_id,
                 phase=phase, elapsed_ms=round((time.monotonic() - started) * 1000, 1),

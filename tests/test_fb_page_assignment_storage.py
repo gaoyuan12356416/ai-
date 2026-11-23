@@ -1,4 +1,5 @@
 import copy
+import json
 import re
 import tempfile
 import threading
@@ -209,6 +210,25 @@ class StorageTests(unittest.TestCase):
         row = self.database.rows[("task_1", 1)]
         self.assertEqual((row["alert_status"], row["feishu_message_id"]), ("sent", "om_receipt"))
         self.assertEqual(row["page_id"], "12345678901234567890")
+
+    def test_compact_receipt_updates_original_key_and_never_inserts_partial_facts(self):
+        original = self.save(rows=sample_rows() * 2)
+        hashes = self.writer.write_task(original)
+        compact = [dict(item_index=i, payload_hash=h, drama_id="drama_1", page_id="12345678901234567890")
+                   for i, h in hashes.items()]
+        with self.store._connect() as db:
+            db.execute("UPDATE fb_page_assignment_requests SET rows_json=? WHERE task_id=?",
+                       (json.dumps({"confirmed_items":compact}), "task_1"))
+        saved = self.store.mark_alert("task_1", "sent", message_id="receipt")
+        self.assertTrue(saved["details_cleared"])
+        self.writer.write_task(saved)
+        self.assertEqual(self.database.rows["task_1", 1]["feishu_message_id"], "receipt")
+        self.assertEqual(self.database.rows["task_1", 1]["diagnostics_json"],
+                         self.writer._record(original, original["rows"][0])["diagnostics_json"])
+        del self.database.rows["task_1", 2]
+        with self.assertRaises(PayloadConflictError):
+            self.writer.write_task(saved)
+        self.assertNotIn(("task_1", 2), self.database.rows)
 
     def test_alert_claim_is_exclusive_and_recovery_does_not_resend(self):
         self.save(reasons=["no_page"])
