@@ -29,8 +29,8 @@ def projections(profile):
     return summary,tree
 
 
-def readback(reader,version,ids):
-    base=f' FROM {TABLE} WHERE profile_version={literal(version)}'
+def readback(reader,version,ids,table=TABLE):
+    base=f' FROM {table} WHERE profile_version={literal(version)}'
     count=reader.query(["SELECT HEX(JSON_OBJECT('rows',COUNT(*)))"+base],timeout=30)
     if len(count)!=1 or count[0]['rows']!=len(ids):return []
     def read(part):
@@ -48,15 +48,18 @@ def readback(reader,version,ids):
     return result
 
 
-def write(data,env,reader,*,create_table=False):
+def write(data,env,reader,*,create_table=False,table=TABLE):
     import pymysql
+    from features.fb_page_current.common import LEGACY
+    if table not in (TABLE,LEGACY) or (create_table and table!=TABLE):
+        raise ValueError('invalid legacy destination')
     version = data['meta']['version']
     assert re.fullmatch(VERSION_RE,version)
     pages = data['pages']
     hashes = {pid:hashlib.sha256(encoded(p).encode()).hexdigest() for pid,p in pages.items()}
     existing = []
     if not create_table:
-        existing = reader.query([f'SELECT HEX(JSON_OBJECT(\'page_id\',page_id,\'hash\',payload_sha256)) FROM {TABLE} WHERE profile_version={literal(version)}'],timeout=30)
+        existing = reader.query([f'SELECT HEX(JSON_OBJECT(\'page_id\',page_id,\'hash\',payload_sha256)) FROM {table} WHERE profile_version={literal(version)}'],timeout=30)
     if existing and {r['page_id']:r['hash'] for r in existing} != hashes:
         raise RuntimeError('existing_version_conflicts_do_not_rewrite')
     if not existing:
@@ -73,11 +76,11 @@ def write(data,env,reader,*,create_table=False):
                         yield (version,pid,data['meta']['start'],data['meta']['end'],p['paid_cents'],p['social_cents'],p['spend_cents'],encoded(summary),encoded(p),encoded(data['meta']),hashes[pid])
                 # The deployed PyMySQL driver consumes this iterator in bounded
                 # ~1 MiB SQL statements, without retaining all page strings.
-                q.executemany('INSERT INTO '+TABLE+' (profile_version,page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,detail_json,meta_json,payload_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',records())
+                q.executemany('INSERT INTO '+table+' (profile_version,page_id,window_start,window_end,paid_cents,social_cents,spend_cents,summary_json,detail_json,meta_json,payload_sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',records())
             db.commit()
     verified = False
     for attempt in range(5):
-        check = readback(reader,version,list(pages))
+        check = readback(reader,version,list(pages),table)
         if {r['page_id']:r['hash'] for r in check} == hashes:
             verified = True; break
         time.sleep(2)

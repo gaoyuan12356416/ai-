@@ -9,6 +9,7 @@ from .collect import collect,environment,Reader
 from .runtime import atomic_json,encoded
 from .storage import ROOT,write,publish
 from .page_list import refresh_names
+from features.fb_page_current.refresh import primary,repair_handoff,secondary
 
 
 def main():
@@ -18,6 +19,8 @@ def main():
     with (root/'refresh.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         try:
+            initial_env=environment(args.env)
+            repair_handoff(Reader(initial_env),initial_env,root)
             if args.resume_input:
                 from .resume import restore
                 raw,data=restore(root,args.resume_input);env=environment(args.env);reader=Reader(env)
@@ -32,7 +35,7 @@ def main():
                     print(encoded(dict(event='page_names_preserved',error=type(exc).__name__)),flush=True)
                 data=build(raw)
                 atomic_json(root/(data['meta']['version']+'.input.json'),raw)
-            proof=write(data,env,reader,create_table=args.create_table)
+            proof=primary(data,env,reader,create_table=args.create_table)
             atomic_json(root/(data['meta']['version']+'.receipt.json'),proof)
             publish(data,proof,root)
             try:
@@ -41,6 +44,7 @@ def main():
             except Exception as exc:
                 print(encoded(dict(event='partition_cache_maintenance_failed',error=type(exc).__name__)),flush=True)
             atomic_json(root/'status.json',dict(status='ok',**data['meta']))
+            secondary(data,env,reader,proof)
             # The verified DB version and small receipt are sufficient after
             # success; retain failed inputs for the existing resume workflow.
             (root/(data['meta']['version']+'.input.json')).unlink(missing_ok=True)
