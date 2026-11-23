@@ -497,11 +497,12 @@
         ? previewQuality === "proxy"
           ? media?.proxy_url || media?.preview_url
           : media?.preview_url
-        : media?.output?.preview_url;
+        : media?.output?.preview_url && media.output.preview_url +
+          (previewQuality === "original" ? "?quality=original" : "");
     $("player").dataset.identity = identity;
     if (media?.poster_url) $("player").poster = media.poster_url;
     else $("player").removeAttribute("poster");
-    $("previewQuality").hidden = view !== "source" || !media;
+    $("previewQuality").hidden = !media || (view !== "source" && !media.output?.preview_available);
     $("previewQuality").value =
       media?.proxy_url && url === media.preview_url
         ? "original"
@@ -514,7 +515,7 @@
               ? "流畅预览已就绪，可切换"
               : "流畅预览不影响原片导出"
             : "正在后台准备流畅预览，可先播放原片")
-        : "";
+        : media?.output?.preview_available ? "流畅预览 · 导出保留原画质" : "";
     if (url !== mediaKey) {
       mediaKey = url || "";
       const player = $("player");

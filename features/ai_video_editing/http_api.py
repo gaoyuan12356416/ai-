@@ -294,7 +294,8 @@ class Handler(platform.DramaMaterialHandler):
                 if not m[2]:return self.reply(200,rec)
                 check(rec['item']['status']=='completed','not_ready','成片尚未就绪',409)
                 from . import output_storage
-                loc = output_storage.location(rt, m[1], rec['item']['name']+'.mp4', q('download')=='1', self.command)
+                loc = output_storage.location(rt, m[1], rec['item']['name']+'.mp4', q('download')=='1',
+                                              self.command, preview=q('quality')!='original')
                 if loc:
                     self.send_response(307)
                     self.send_header('Location',loc['url'])

@@ -336,8 +336,8 @@ class InternalAPI:
 
     def complete(self, tid, lease, path, digest):
         if self.output_store is not None:
-            from .output_storage import upload
-            body = upload(*self.output_store, tid, path, digest)
+            from .output_storage import upload_bundle
+            body = upload_bundle(*self.output_store, tid, path, digest)
             with self.open('/tasks/%s/complete-object' % tid, lease=lease,
                            data=json.dumps(body).encode(), headers={'Content-Type':'application/json'},
                            timeout=60) as response:

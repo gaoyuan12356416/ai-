@@ -49,9 +49,11 @@ def main():
             render_worker.run_job(api,job,gpu,'h264_nvenc','ffmpeg','ffprobe')
             item=rt.list_records('tasks',actor,job['id'])['item']
             assert item['status']=='completed' and item['output']['storage']=='cos',item
+            assert item['output']['preview_available'],'GPU preview missing'
             assert not list((rt.root/'outputs').glob('*.mp4')),'media crossed metadata callback'
             assert not list(gpu.glob('render-*')),'unfinished GPU receipt'
-            location=output_storage.location(rt,job['id'])
+            location=output_storage.location(rt,job['id'],preview=True)
+            assert location['sha256']!=item['output']['metadata']['sha256']
             with urlopen(Request(location['url'],headers={'Range':'bytes=0-31'}),timeout=30) as response:
                 assert response.status==206 and len(response.read())==32
             try:
@@ -61,6 +63,7 @@ def main():
                 assert exc.code==403
             result={'task':job['id'],'nvenc':True,'cos_verified':True,'range_status':206,
                     'unsigned_status':403,'metadata_only_callback':True,'size':location['size']}
+            result['gpu_preview_verified']=True
             (a.work/'receipt.json').write_text(json.dumps(result,indent=2))
             print(json.dumps(result))
         finally:http.shutdown();thread.join(2)

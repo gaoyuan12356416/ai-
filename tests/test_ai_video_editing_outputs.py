@@ -135,12 +135,16 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(result['metadata']['duration_ms'],1000)
         storage.upload(self.cos,'test-123',self.tid,file,sha)
         self.assertEqual(self.cos.uploads,1)
+        preview=storage.make_preview(file,Path(self.tmp.name)/'preview.mp4',encoder='libx264')
+        meta=storage.probe(preview)
+        self.assertLessEqual(meta['width'],480);self.assertLessEqual(meta['height'],854)
+        self.assertEqual(meta['duration_ms'],1000);self.assertTrue(meta['has_audio'])
 
     def test_worker_sends_only_metadata_and_retains_pending_on_lost_api_receipt(self):
         folder=Path(self.tmp.name)/'gpu';folder.mkdir();(folder/'output.mp4').write_bytes(b'film')
         (folder/'pending.json').write_text(json.dumps({'id':self.tid,'lease':self.lease,'sha256':self.digest}))
         api=worker.InternalAPI('http://127.0.0.1/internal','fixture',output_store=(self.cos,'test-123'))
-        with patch.object(storage,'probe',return_value=self.meta),patch.object(api,'open',side_effect=worker.TransferError() ) as opening:
+        with patch.object(storage,'upload_bundle',return_value=self.body),patch.object(api,'open',side_effect=worker.TransferError() ) as opening:
             with self.assertRaises(worker.TransferError):worker.upload_saved(api,folder)
             self.assertTrue(opening.call_args.args[0].endswith('/complete-object'))
             self.assertIsInstance(opening.call_args.kwargs['data'],bytes)
@@ -165,6 +169,18 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(client.copy.call_args.kwargs['CopyStatus'],'Replaced')
         self.assertEqual(client.copy.call_args.kwargs['CopySourceIfMatch'],'"verified"')
         client.upload_file.assert_not_called()
+
+    def test_preview_and_download_keep_separate_verified_objects(self):
+        pd=hashlib.sha256(b'preview').hexdigest()
+        self.cos.objects[storage.object_key(self.tid,pd)]={'Content-Length':7,'ETag':'"preview"',
+            'x-cos-meta-sha256':pd,'x-cos-meta-ai-edit-task':self.tid}
+        self.body['preview']={'metadata':{**self.meta,'width':480,'height':852,'sha256':pd},'size':7}
+        self.finish()
+        self.assertEqual(storage.location(self.rt,self.tid,preview=True)['sha256'],pd)
+        self.assertEqual(storage.location(self.rt,self.tid,preview=True,download=True)['sha256'],self.digest)
+        item=self.rt.list_records('tasks',self.actor,self.tid)['item']['output']
+        self.assertTrue(item['preview_available'])
+        self.assertFalse(any(k.startswith('_cos') for k in item['metadata']))
 
 
 if __name__=='__main__':unittest.main()

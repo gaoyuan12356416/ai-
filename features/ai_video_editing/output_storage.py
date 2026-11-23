@@ -1,6 +1,7 @@
 """Immutable private finished films, uploaded by the GPU and served from COS."""
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ from urllib.parse import quote
 from .runtime import MAX_BYTES, check, packed, probe
 
 PREFIX = 'ai-video-editing/v1/outputs/'
+LOG = logging.getLogger(__name__)
 
 
 def object_key(tid, digest):
@@ -80,6 +82,46 @@ def upload(client, bucket, tid, path, digest):
     return {'metadata': meta, 'size': size}
 
 
+def make_preview(source, target, *, encoder=None):
+    """A bounded-bitrate viewing copy; the downloadable master stays unchanged."""
+    from .render_worker import run_tool
+    source, target = Path(source), Path(target)
+    if target.is_file():
+        return target
+    encoder = encoder or os.getenv('AI_VIDEO_EDITING_ENCODER', 'h264_nvenc')
+    codec = (['-c:v','h264_nvenc','-preset','fast','-rc','vbr','-cq','28','-b:v','600k']
+             if encoder == 'h264_nvenc' else
+             ['-c:v','libx264','-threads','2','-preset','veryfast','-crf','28','-b:v','600k'])
+    temporary = target.with_name(target.stem+'.part.mp4')
+    try:
+        run_tool([os.getenv('AI_VIDEO_EDITING_FFMPEG','ffmpeg'),'-hide_banner','-loglevel','error',
+                  '-nostdin','-y','-threads','2','-filter_threads','1','-i',str(source),
+                  '-map','0:v:0','-map','0:a:0?',
+                  '-vf',"scale='min(480,iw)':'min(854,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                  '-fpsmax','30',*codec,'-maxrate','900k','-bufsize','1800k','-pix_fmt','yuv420p',
+                  '-c:a','aac','-b:a','64k','-movflags','+faststart','-map_metadata','-1',str(temporary)])
+        actual, original = probe(temporary), probe(source)
+        check(actual['has_audio'] and abs(actual['duration_ms']-original['duration_ms']) < 150,
+              'preview_mismatch','流畅预览时间轴校验失败',422)
+        os.replace(temporary,target)
+        return target
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def upload_bundle(client, bucket, tid, path, digest, *, require_preview=False):
+    result = upload(client,bucket,tid,path,digest)
+    try:
+        preview = make_preview(path,Path(path).with_name(Path(path).stem+'.preview.mp4'))
+        result['preview'] = upload(client,bucket,tid,preview,file_digest(preview))
+    except Exception as exc:
+        if require_preview:
+            raise
+        # The original film is still usable if an optional derivative fails.
+        LOG.warning('Finished-film preview unavailable task=%s kind=%s',tid,type(exc).__name__)
+    return result
+
+
 def complete(rt, tid, lease, body, *, migrate=False):
     """Only a worker-authenticated route may call this; never accept arbitrary keys."""
     meta, size = body.get('metadata'), body.get('size')
@@ -94,7 +136,7 @@ def complete(rt, tid, lease, body, *, migrate=False):
         if migrate or row['status'] == 'completed':
             check(row['status'] == 'completed' and existing.get('sha256') == digest and
                   (migrate or row['lease'] == lease), 'output_receipt_conflict', '成片回执已变化', 409)
-            if existing.get('_cos'):
+            if existing.get('_cos') and (not body.get('preview') or existing.get('_cos_preview')):
                 return {'ok': True}
         else:
             rt.leased(db, tid, lease)
@@ -110,13 +152,27 @@ def complete(rt, tid, lease, body, *, migrate=False):
     check(obj, 'output_upload_pending', 'COS 成片尚未就绪', 503)
     stored = {k: meta[k] for k in ('width', 'height', 'duration_ms', 'has_audio', 'sha256')}
     stored.update(display_width=meta['width'], display_height=meta['height'], _cos=obj)
+    preview = body.get('preview')
+    if preview:
+        check(isinstance(preview,dict) and isinstance(preview.get('metadata'),dict),
+              'preview_metadata','流畅预览回执无效',422)
+        pm = preview['metadata'];ps = preview.get('size');pd = pm.get('sha256','')
+        check(type(ps) is int and 0 < ps <= MAX_BYTES and
+              type(pm.get('width')) is int and 0 < pm['width'] <= 480 and
+              type(pm.get('height')) is int and 0 < pm['height'] <= 854 and
+              type(pm.get('duration_ms')) is int and abs(pm['duration_ms']-meta['duration_ms']) < 150 and
+              pm.get('has_audio') is True and abs(pm['width']/pm['height']-meta['width']/meta['height']) < .01,
+              'preview_mismatch','流畅预览与成片不一致',422)
+        pobj = head(rt.cloud.client,rt.cloud.bucket,tid,pd,ps)
+        check(pobj,'preview_pending','流畅预览上传尚未确认',503)
+        stored['_cos_preview'] = {**pobj,'sha256':pd}
     with rt.db(True) as db:
         current = db.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()
         if current['status'] == 'completed':
             old = json.loads(current['meta'])
             check(old.get('sha256') == digest and (migrate or current['lease'] == lease),
                   'output_receipt_conflict', '成片回执已变化', 409)
-            stored = {**old, '_cos': obj}
+            stored = {**old,**stored}
         else:
             check(not migrate, 'output_receipt_conflict', '仅可迁移已完成成片', 409)
             rt.leased(db, tid, lease)
@@ -131,15 +187,16 @@ def record(rt, tid):
     return json.loads(row['meta'])
 
 
-def location(rt, tid, name='', download=False, method='GET'):
+def location(rt, tid, name='', download=False, method='GET', preview=False):
     meta = record(rt, tid)
-    obj = meta.get('_cos')
+    obj = (meta.get('_cos_preview') if preview and not download else None) or meta.get('_cos')
     if not obj:
         return None
-    check(obj['bucket'] == rt.cloud.bucket and obj['key'] == object_key(tid, meta['sha256']),
+    digest = obj.get('sha256',meta['sha256'])
+    check(obj['bucket'] == rt.cloud.bucket and obj['key'] == object_key(tid, digest),
           'output_location', '成片存储位置不符', 409)
     params = {'response-content-disposition': "attachment; filename*=UTF-8''" + quote(name, safe='')} if download else {}
-    return {**obj, 'sha256': meta['sha256'], 'url': rt.cloud.client.get_presigned_url(
+    return {**obj, 'sha256': digest, 'url': rt.cloud.client.get_presigned_url(
         Bucket=obj['bucket'], Key=obj['key'], Method=method, Expired=3600, Params=params)}
 
 

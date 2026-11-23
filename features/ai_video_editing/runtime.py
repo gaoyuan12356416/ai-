@@ -274,7 +274,8 @@ class Runtime:
             meta=json.loads(row['meta'])
             result['output']={'preview_url':uri,'download_url':uri+'?download=1',
                               'storage':'cos' if meta.get('_cos') else 'local',
-                              'metadata':{k:v for k,v in meta.items() if k!='_cos'}}
+                              'preview_available':bool(meta.get('_cos_preview')),
+                              'metadata':{k:v for k,v in meta.items() if not k.startswith('_cos')}}
         return result
 
     def list_records(self,kind,actor,rid=None):
