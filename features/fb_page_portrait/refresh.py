@@ -44,7 +44,7 @@ def main():
             except Exception as exc:
                 print(encoded(dict(event='partition_cache_maintenance_failed',error=type(exc).__name__)),flush=True)
             atomic_json(root/'status.json',dict(status='ok',**data['meta']))
-            secondary(data,env,reader,proof,resumed=bool(args.resume_input))
+            sealed=secondary(data,env,reader,proof,resumed=bool(args.resume_input))
             try:
                 from features.fb_page_current.pins import Pins
                 Pins().clean()
@@ -52,7 +52,7 @@ def main():
                 print(encoded(dict(event='portrait_pin_cleanup_deferred',error=type(exc).__name__)),flush=True)
             # The verified DB version and small receipt are sufficient after
             # success; retain failed inputs for the existing resume workflow.
-            (root/(data['meta']['version']+'.input.json')).unlink(missing_ok=True)
+            if sealed:(root/(data['meta']['version']+'.input.json')).unlink(missing_ok=True)
             import resource
             print(encoded(dict(event='profile_memory_peak',max_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)),flush=True)
             print(encoded(dict(event='published',**data['meta'])),flush=True)

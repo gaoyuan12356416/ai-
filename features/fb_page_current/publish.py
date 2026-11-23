@@ -6,7 +6,7 @@ import json
 import time
 
 from .common import (MONEY,PAGE,ROOT,STATE,STAGE,NEXT,PUBLIC,atomic,checked,checked_table,
-                     current_state,digest_rows,encoded,literal,pack,query,scope_hash,sha,stamp,writer)
+                     current_state,digest_rows,encoded,insert_batch,literal,pack,query,scope_hash,sha,stamp,writer)
 
 
 @contextmanager
@@ -50,7 +50,8 @@ def stage_rows(db,version,items,prior,meta,matching=None):
     totals=dict.fromkeys(MONEY,0)
     changed=skipped=0
     sql=(f'INSERT INTO {STAGE}(profile_version,page_id,paid_cents,social_cents,spend_cents,summary_json,'
-         'detail_json,payload_sha256,row_timestamp) VALUES(%s,%s,%s,%s,%s,%s,UNCOMPRESS(%s),%s,%s)')
+         'detail_json,payload_sha256,row_timestamp) VALUES ')
+    placeholders='(%s,%s,%s,%s,%s,%s,UNCOMPRESS(%s),%s,%s)'
     batch=[]
     byte_count=0
     with db.cursor() as c:
@@ -70,9 +71,9 @@ def stage_rows(db,version,items,prior,meta,matching=None):
             else:skipped+=len(raw)
             batch.append((version,pid,*amounts,summary,payload,digest,row_time))
             byte_count+=len(payload or b'')+len(summary)
-            if byte_count>=480000 or len(batch)>=80:
-                c.executemany(sql,batch);batch=[];byte_count=0
-        if batch:c.executemany(sql,batch)
+            if byte_count>=900000 or len(batch)>=100:
+                insert_batch(c,sql,placeholders,batch);batch=[];byte_count=0
+        insert_batch(c,sql,placeholders,batch)
     if not expected or len(expected)!=meta['page_count'] or totals!=meta['audit']:
         raise RuntimeError('source count or financial totals mismatch')
     if matching is not None and set(expected)!=set(matching):raise RuntimeError('source receipt scope mismatch')

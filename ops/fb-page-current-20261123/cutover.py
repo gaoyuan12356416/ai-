@@ -12,7 +12,11 @@ def refresh_lock():
     with (PORTRAITS/'refresh.lock').open('a') as f:
         try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise RuntimeError('refresh in progress; retry after its natural completion') from None
-        with owner(ROOT):yield
+        with (ROOT/'mirror.lock').open('a') as mirror:
+            try:fcntl.flock(mirror,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('current comparison still running') from None
+            if any((ROOT/'mirror-queue').glob('*/ready.json')):raise RuntimeError('sealed comparison is pending')
+            with owner(ROOT):yield
 
 
 def mode(label):

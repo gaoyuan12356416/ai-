@@ -1,7 +1,6 @@
 """Integrate current-row storage with the existing frozen-input collector and publisher."""
 from contextlib import closing
 import json
-import os
 from .common import (LEGACY,MONEY,NEXT,PORTRAITS,PUBLIC,ROOT,STAGE,atomic,current_state,encoded,
                      query,read_config,stamp,writer)
 from .publish import commit,finalize,model_items,owner,promote,verify
@@ -55,23 +54,15 @@ def primary(data,env,reader,create_table=False):
 
 
 def secondary(data,env,reader,proof,*,resumed=False):
-    from features.fb_page_portrait import storage
+    from .mirror import seal
     mode=read_config()
-    if mode not in ('live-mirror','shadow'):return
+    if mode not in ('live-mirror','shadow'):return True
     version=proof['version']
     try:
-        if mode=='shadow':
-            catch_up(reader,env,NEXT)
-            got=promote(reader,env,NEXT,data['meta'],model_items(data,storage.projections),matching=proof['payload_hashes'])
-        else:
-            got=storage.write(data,env,reader,table='ads_ai.'+LEGACY)
-        if got['payload_hashes']!=proof['payload_hashes'] or any(got[f]!=proof[f] for f in MONEY):
-            raise RuntimeError('secondary receipt differs')
-        atomic(ROOT/'comparisons'/(version+'.json'),dict(version=version,mode=mode,checked=stamp(),
-               pages=proof['verified_rows'],totals={k:proof[k] for k in MONEY},outcome='matched',
-               invocation=os.environ.get('INVOCATION_ID',''),resumed=resumed))
-        print(encoded(dict(event='portrait_dual_verified',mode=mode,version=version,pages=proof['verified_rows'])),flush=True)
+        seal(data,proof,mode,resumed)
+        print(encoded(dict(event='portrait_mirror_queued',version=version,mode=mode)),flush=True)
+        return True
     except Exception as exc:
         atomic(ROOT/'comparisons'/(version+'.error.json'),dict(version=version,mode=mode,at=stamp(),error=type(exc).__name__,message=str(exc)[:250]))
-        print(encoded(dict(event='portrait_secondary_failed',version=version,mode=mode,error=type(exc).__name__)),flush=True)
-
+        print(encoded(dict(event='portrait_secondary_deferred',version=version,mode=mode,error=type(exc).__name__)),flush=True)
+        return False

@@ -96,6 +96,13 @@ def chunks(seq,n):
         yield seq[start:start+n]
 
 
+def insert_batch(cursor,prefix,values,rows):
+    # PyMySQL's executemany falls back to one round-trip per row for UNCOMPRESS(%s).
+    # Only repeat the fixed placeholder template. All data stays driver-bound.
+    if rows:
+        cursor.execute(prefix+','.join([values]*len(rows)),tuple(v for row in rows for v in row))
+
+
 def query(reader,sql):
     return reader.query(['USE ads_ai',sql])
 
