@@ -236,6 +236,15 @@ class XNativeBridge:
         return log
 
     def artifact(self, queue, record):
+        from .native_media import existing
+        with self.connect() as c:
+            selected = existing(c, "x:queue:" + str(queue["id"]))
+        if selected.get("status") == "applied":
+            return obj(selected["artifact_json"])
+        with self.connect() as c:
+            image = c.execute("SELECT artifact_json FROM pipeline_x_artifact WHERE queue_id=?", (queue["id"],)).fetchone()
+        if image and obj(image[0]).get("mime") in {"image/jpeg", "image/png", "image/gif"}:
+            return obj(image[0])
         if queue.get("random_template_enabled"):
             if not record or record["status"] != "ready":
                 raise AdapterError("x_random_preparation_required")
@@ -302,7 +311,7 @@ class XNativeBridge:
                             # when the coordinator lost its final receipt.
                             request["prepared_artifact"] = obj(saved[0])
                     if queue.get("random_template_enabled"):
-                        profile = "x-random-overlay-libx264-720x1280-v1" if job.get("executor_backend") == "cpu" else "x-random-overlay-h264-720x1280-v1"
+                        profile = "x-random-overlay-libx264-480x854-v1" if job.get("executor_backend") == "cpu" else "x-random-overlay-h264-480x854-v1"
                         request["random_request"] = frozen["request"] if frozen else {
                             "job_key": "x-random-v1-" + hashlib.sha256(canonical(queue_identity(queue)).encode()).hexdigest(),
                             "queue_id": queue["id"], "content_id": str(queue["content_id"]), "profile": profile,
@@ -313,7 +322,7 @@ class XNativeBridge:
                     if frozen:
                         request = frozen["request"]
                     else:
-                        profile = "x-random-overlay-libx264-720x1280-v1" if job.get("executor_backend") == "cpu" else "x-random-overlay-h264-720x1280-v1"
+                        profile = "x-random-overlay-libx264-480x854-v1" if job.get("executor_backend") == "cpu" else "x-random-overlay-h264-480x854-v1"
                         request = {"job_key": "x-random-v1-" + hashlib.sha256(canonical({"queue": queue_identity(queue), "sha256": queue["preflight_sha256"]}).encode()).hexdigest(),
                                    "queue_id": queue["id"], "content_id": str(queue["content_id"]), "source_url": queue["material_url"],
                                    "source_sha256": queue["preflight_sha256"], "source_size": queue["preflight_size"], "source_duration": float(queue["preflight_duration"]),
@@ -520,8 +529,6 @@ class XNativeBridge:
             parent = c.execute("SELECT trigger_source FROM x_post_manual_run WHERE id=?", (queue.get("manual_run_id"),)).fetchone()
         if parent and parent[0] == "auto_template" and (is_image or duration > self.r.AUTO_TEMPLATE_MAX_DURATION_SECONDS):
             raise AdapterError("x_post_auto_template_duration_exceeded")
-        if is_image and request.get("random_request"):
-            raise AdapterError("x_random_requires_video")
         evidence = {"material_url": queue["material_url"], "preflight_sha256": artifact["sha256"], "preflight_size": artifact["size"],
                     "preflight_duration": duration, "preflight_width": artifact.get("width", 0), "preflight_height": artifact.get("height", 0)}
         if queue.get("delivery_mode") == "duration_pending":
@@ -545,7 +552,7 @@ class XNativeBridge:
             if old and any(obj(old[0]).get(k) != artifact.get(k) for k in ("url", "sha256", "size", "mime", "duration_seconds", "profile")):
                 raise AdapterError("x_artifact_identity_changed")
             c.execute("INSERT INTO pipeline_x_artifact VALUES(?,?,?) ON CONFLICT(queue_id) DO NOTHING", (queue["id"], canonical(artifact), receipt["source_url"]))
-        if descriptor["request"].get("random_request"):
+        if descriptor["request"].get("random_request") and not is_image:
             random_request = dict(descriptor["request"]["random_request"])
             random_request.update(source_url=artifact["url"], source_sha256=artifact["sha256"], source_size=artifact["size"], source_duration=duration)
             PreparationStore(self.r.POST_DB_PATH).freeze(queue["id"], random_request)
@@ -555,7 +562,8 @@ class XNativeBridge:
             record, descriptor = self.stored(job, claim)
             if job["stage"] == "prepare":
                 result = receipt.get("preparation", {})
-                if descriptor["kind"] == "x_random" or descriptor.get("request", {}).get("random_request"):
+                image = receipt.get("artifact", {}).get("mime") in {"image/jpeg", "image/png", "image/gif"}
+                if descriptor["kind"] == "x_random" or (descriptor.get("request", {}).get("random_request") and not image):
                     request = PreparationStore(self.r.POST_DB_PATH).get(record["queue_id"])["request"]
                     validate_receipt(request, result)
                     expected_artifact = {"url": result["output_url"], "sha256": result["output_sha256"], "size": result["output_size"],
@@ -638,6 +646,9 @@ class XNativeBridge:
         return {"held": True, "paused": True, "source_key": job["source_key"], "cutoff": cutoff}
 
     def dispatch(self, action, payload):
+        if action in {"media-context", "media-decision"}:
+            from .native_media import handle
+            return handle(self, action, payload)
         job, claim = payload.get("job", {}), payload.get("claim", {})
         if action == "reserve": return self.reserve(job, claim)
         if action == "begin-operation": return self.begin_operation(job, claim, payload.get("operation", {}))
@@ -672,4 +683,12 @@ def handle(handler, runtime, path):
             result = _BRIDGE.dispatch(path.rsplit("/", 1)[-1], payload)
         handler.send_json(200, result)
     except Exception as exc:
+        if not getattr(exc, "code", None):
+            # Keep diagnostics useful without logging source URLs, credentials,
+            # request bodies, exception messages or local values.
+            import traceback
+            frames = traceback.extract_tb(exc.__traceback__)
+            stack = " > ".join("%s:%s:%s" % (frame.filename.rsplit("/", 1)[-1], frame.lineno, frame.name)
+                               for frame in frames[-10:])
+            logging.getLogger(__name__).error("x_dispatch_failed type=%s stack=%s", type(exc).__name__, stack)
         handler.send_json(409, {"code": getattr(exc, "code", "x_dispatch_failed")})

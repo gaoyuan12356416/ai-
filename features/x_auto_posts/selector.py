@@ -75,6 +75,16 @@ class CandidateRejected(SelectionError):
     """One candidate is unusable; deterministic scanning may continue."""
 
 
+class MoboUpcomingWait(SelectionError):
+    def __init__(self, upcoming):
+        self.upcoming = upcoming
+        self.retry_at = datetime.fromtimestamp(upcoming["retry_at"], UTC)
+        local = self.retry_at.astimezone(BEIJING_TZ).strftime("%m-%d %H:%M")
+        message = (f"Moboreels 预扫候选：{upcoming['pending']} 部待上架，"
+                   f"{upcoming['ready']} 部已到期；北京时间 {local} 复查上架与可用素材")
+        super().__init__("x_mobo_upcoming_wait", message)
+
+
 class NoEligibleMaterial(SelectionError):
     def __init__(self, rejection_counts: Mapping[str, int]):
         self.rejection_counts = dict(rejection_counts)
@@ -88,6 +98,8 @@ class NoEligibleMaterial(SelectionError):
             "material_history_seen": "素材已有发布记录", "material_auto_seen": "素材已被预占",
             "material_strict_rejected": "素材预检未通过",
             "account_duration_limit": "素材超过账号时长上限",
+            "x_mobo_upcoming_daily_full": "该账号今日模板次数已用完",
+            "x_mobo_upcoming_paused": "模板已停用，结束此自动时隙",
         }
         summary = "；".join(
             "%s %s" % (labels.get(key, key), count)
@@ -389,6 +401,8 @@ class SelectionRequest:
     rules: SelectionRules
     now: datetime
     claim_token: str = ""
+    preview_upcoming: Optional[Mapping[str, Any]] = None
+    candidate_pool: Optional[Mapping[str, Any]] = None
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -731,12 +745,14 @@ class TwoStageSelector:
         earliest, latest = launch_bounds(window, now_epoch)
         explicit_range = is_range(window)
         allowed_types = set(request.rules.drama.resource_types)
+        ready_times = getattr(self.source, "mobo_ready_times", {})
         grouped: Dict[str, List[DramaSourceRow]] = {}
         for row in rows:
             mobo = row.catalog == "moboreels"
             if (
                 (not mobo and row.app_id != self.app_id)
-                or (mobo and (row.app_id != 0 or window or allowed_types))
+                or (mobo and (row.app_id != 0 or allowed_types
+                              or (window and ready_times.get(row.content_id) != row.deploy_time)))
                 or row.catalog not in {"dramawave", "moboreels"}
                 or row.release_status != 1
                 or row.language != language
@@ -879,10 +895,10 @@ class TwoStageSelector:
             return []
         ids = [item.source.material_id for item in prepared]
         from features.x_material_effects.selection import enabled
-        if enabled(request.rules):
+        if enabled(request.rules) or request.candidate_pool:
             from features.x_material_effects.reuse import client, lane
             history_seen = set(client('check', lane=lane(), task_id=request.task_id,
-                account_id=request.account_id, material_ids=ids)['blocked'])
+                account_id=request.account_id, material_ids=ids, candidate_pool=bool(request.candidate_pool))['blocked'])
             auto_seen = set()
         else:
             history_seen = {str(value) for value in self.history.seen_material_ids(ids)}
@@ -1039,10 +1055,10 @@ class TwoStageSelector:
                     self._reject(rejection_counts, "material_blacklist_final")
                     break
                 from features.x_material_effects.selection import enabled
-                if enabled(request.rules):
+                if enabled(request.rules) or request.candidate_pool:
                     from features.x_material_effects.reuse import client, lane
                     seen = client('check', lane=lane(), task_id=request.task_id, account_id=request.account_id,
-                        material_ids=[material.source.material_id])['blocked']
+                        material_ids=[material.source.material_id], candidate_pool=bool(request.candidate_pool))['blocked']
                 else:
                     seen = self.history.seen_material_ids([material.source.material_id])
                 if material.source.material_id in {str(value) for value in seen}:
@@ -1063,6 +1079,9 @@ class TwoStageSelector:
                         "final_loaded_at_utc": final_blacklist.loaded_at_utc,
                     },
                 }
+                if request.candidate_pool:
+                    from features.publish_candidate_pool import POLICY
+                    snapshot["candidate_pool"] = dict(policy=POLICY, run_id=request.run_id)
                 if is_range(window) and drama.deploy_time > now_epoch:
                     snapshot["hit_publish_timing"] = release_timing(drama.deploy_time, now_utc)
                 if not reserve:
