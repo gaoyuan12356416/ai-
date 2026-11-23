@@ -2,7 +2,6 @@
 import argparse
 from contextlib import closing
 from datetime import datetime, timezone
-import hashlib
 import importlib.util
 import json
 import os
@@ -51,6 +50,11 @@ def switch(record,manifest,rollback=False):
             if list(work.glob('render-*')) or subprocess.run(['pgrep','-P',str(pid)],capture_output=True).returncode==0:
                 raise RuntimeError('GPU editor is working; leave it running and retry this manifest')
         if current.resolve()!=expected:raise RuntimeError('Concurrent release switch')
+        if role=='gpu' and not rollback:
+            config=Path('/etc/systemd/system/ai-video-editing-render.service.d/60-output-cos.conf')
+            wanted=(Path(record['repo'])/'ops/editor-gpu-cos/render-cos.conf').read_bytes()
+            if config.exists() and config.read_bytes()!=wanted:raise RuntimeError('Concurrent GPU output configuration')
+            atomic(config,wanted)
         link(current,target)
         record['state']='switching';save(manifest,record)
         os.kill(pid,signal.SIGTERM)
