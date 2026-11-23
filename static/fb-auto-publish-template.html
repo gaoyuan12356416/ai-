@@ -52,7 +52,7 @@
           <div class="notice-mark">i</div>
           <div>
             <strong>保存只更新模板配置，不会立即发布。</strong>
-            新模板默认停用；已启用模板必须先在列表页停用，再修改配置。
+            已启用模板可直接编辑；保存成功后自动停用，并返回模板列表。
           </div>
         </section>
 
@@ -178,7 +178,9 @@
               <span class="helper">每个 Page 在时段起点后分散发布；0 表示不额外错峰。</span>
             </div>
             <div class="field wide form-actions">
+              <p class="helper">保存后关闭本模板的自动发布并返回列表。需要继续自动发布时，请在列表中重新启用。</p>
               <div id="capacityEstimate" class="helper">选择 Page 池后可查看每日预计发布量。</div>
+              <p class="helper">Page 池统计最多延迟 30 秒，保存与发布时会实时复核。</p>
               <div class="actions">
                 <button id="saveTemplate" disabled class="button primary" type="submit">保存模板</button>
                 <a class="button link-button" href="/fb-auto-publish-templates.html?v=20260820-list-only-v2">取消并返回</a>
@@ -199,6 +201,6 @@
   <script src="/fb-auto-publish-common.js?v=20261119-fast1"></script>
   <script src="/drama-launch-window.js?v=20261117-range1"></script>
   <script src="/material-product-picker.js?v=20261118products1"></script>
-  <script src="/fb-auto-publish-template.js?v=20261120-original1"></script>
+  <script src="/fb-auto-publish-template.js?v=20261123-edit1"></script>
 </body>
 </html>

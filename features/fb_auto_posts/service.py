@@ -6,6 +6,9 @@ import json
 import os
 import re
 import threading
+import time
+from collections import OrderedDict
+from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +44,9 @@ class Runtime:
             self.preparer.live_enabled = self.prebuild_enabled
         self.metric_store = metric_store or store
         self._tick_lock = threading.Lock()
+        self._groups_lock = threading.Lock()
+        self._groups_cache = OrderedDict()
+        self._groups_loading = {}
 
     @staticmethod
     def actor(payload: Dict[str, Any]) -> ActorScope:
@@ -54,17 +60,44 @@ class Runtime:
         return limit, offset
 
     def groups(self, actor: ActorScope) -> Dict[str, Any]:
-        groups = self.pages.list_groups(is_admin=actor.is_admin, owner_user_id=actor.owner_user_id)
-        items = [{**as_public(group), "group_label": "Post" if group.group_type == 0 else "AD", "missing_token_pages": group.total_pages - group.publishable_pages} for group in groups]
-        return {"ok": True, "items": items, "summary": {"total_groups": len(items), "total_pages": sum(item["total_pages"] for item in items), "publishable_pages": sum(item["publishable_pages"] for item in items), "missing_token_pages": sum(item["total_pages"] - item["publishable_pages"] for item in items)}}
+        # Display-only, short-lived cache. Save/activation/execution never use it.
+        key = (actor.user_id, actor.is_admin, actor.owner_user_id)
+        with self._groups_lock:
+            cached = self._groups_cache.get(key)
+            if cached and time.monotonic() < cached[0]:
+                self._groups_cache.move_to_end(key)
+                return cached[1]
+            pending = self._groups_loading.get(key)
+            leader = pending is None
+            if leader:
+                pending = self._groups_loading[key] = Future()
+        if not leader:
+            return pending.result()
+        try:
+            groups = self.pages.list_groups(is_admin=actor.is_admin, owner_user_id=actor.owner_user_id)
+            items = [{**as_public(group), "group_label": "Post" if group.group_type == 0 else "AD", "missing_token_pages": group.total_pages - group.publishable_pages} for group in groups]
+            result = {"ok": True, "items": items, "summary": {"total_groups": len(items), "total_pages": sum(item["total_pages"] for item in items), "publishable_pages": sum(item["publishable_pages"] for item in items), "missing_token_pages": sum(item["total_pages"] - item["publishable_pages"] for item in items)}, "statistics_max_age_seconds": 30}
+            with self._groups_lock:
+                self._groups_cache[key] = (time.monotonic() + 30, result)
+                self._groups_cache.move_to_end(key)
+                while len(self._groups_cache) > 128:
+                    self._groups_cache.popitem(last=False)
+            pending.set_result(result)
+            return result
+        except Exception as exc:
+            pending.set_exception(exc)
+            raise
+        finally:
+            with self._groups_lock:
+                self._groups_loading.pop(key, None)
 
     def resolve_source(self, payload: Mapping[str, Any], actor: ActorScope) -> Dict[str, Any]:
         group_ids = payload.get("group_ids")
         if not isinstance(group_ids, list) or not group_ids:
             raise ServiceError("invalid_request", "Page池ID无效", 400)
         wanted = {str(item) for item in group_ids}
-        groups = [group for group in self.pages.list_groups(is_admin=actor.is_admin, owner_user_id=actor.owner_user_id) if group.group_id in wanted]
-        if len(groups) != len(wanted):
+        visible = self.pages.visible_group_ids(group_ids, is_admin=actor.is_admin, owner_user_id=actor.owner_user_id)
+        if visible != wanted:
             raise ServiceError("fb_auto_page_group_not_found", "Page池不存在或不属于当前负责人", 404)
         # Pool product labels describe the Page inventory, not the content source.
         # Keep the existing source defaults; material_product and the Moboreels

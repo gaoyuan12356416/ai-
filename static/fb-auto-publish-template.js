@@ -249,13 +249,17 @@
     try {
       const body = buildPayload();
       if (templateId) body.expected_version = ui.templateVersion(state.template);
-      await ui.api(templateId ? ui.API_BASE + "/templates/" + templateId : ui.API_BASE + "/templates", {
+      const result = await ui.api(templateId ? ui.API_BASE + "/templates/" + templateId : ui.API_BASE + "/templates", {
         method: "POST",
         body: JSON.stringify(body),
       });
-      ui.byId("formMessage").textContent = "保存成功，正在返回模板列表…";
+      const saved = ui.readItem(result);
+      if (!ui.positiveId(saved.id || saved.template_id) || saved.status !== "disabled") {
+        throw new Error("未确认模板已保存并关闭自动发布，请刷新核对模板状态。");
+      }
+      ui.byId("formMessage").textContent = "保存成功，自动发布已关闭，正在返回模板列表…";
       ui.byId("formMessage").className = "status-line success";
-      window.location.href = "/fb-auto-publish-templates.html?v=20260820-list-only-v2";
+      window.location.href = "/fb-auto-publish-templates.html";
     } catch (error) {
       ui.byId("formMessage").textContent = error.message || "模板保存失败";
       ui.byId("formMessage").className = "status-line error";

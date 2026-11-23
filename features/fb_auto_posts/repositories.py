@@ -220,6 +220,23 @@ class PagePoolRepository:
     def __init__(self, mysql: ReadOnlyMySQL):
         self.mysql = mysql
 
+    def visible_group_ids(self, group_ids: Sequence[str], *, is_admin: bool, owner_user_id: str) -> set[str]:
+        """Fresh save-time scope check; do not count Pages or read credentials."""
+        ids = list(dict.fromkeys(str(item) for item in group_ids))
+        if not ids or any(not re.fullmatch(r"[1-9][0-9]{0,30}", item) for item in ids):
+            raise RepositoryError("invalid_request", "Page池ID无效", 400)
+        if not is_admin and not re.fullmatch(r"[1-9][0-9]{0,30}", owner_user_id):
+            raise RepositoryError("fb_auto_owner_mapping_missing", "当前账号未唯一映射到Page池负责人", 403)
+        owner_sql = "" if is_admin else " AND CAST(g.user_id AS CHAR)=%s"
+        params = ids + ([] if is_admin else [owner_user_id])
+        rows = self.mysql.select(f"""
+            SELECT CAST(g.id AS CHAR) AS group_id
+              FROM `{self.mysql.schema}`.ads_facebook_page_group g
+             WHERE g.is_delete=0 AND g.type IN (0,1)
+               AND g.id IN ({','.join('%s' for _ in ids)}){owner_sql}
+        """, params)
+        return {str(row["group_id"]) for row in rows}
+
     def list_groups(self, *, is_admin: bool, owner_user_id: str) -> List[PageGroup]:
         owner_sql, params = ("", []) if is_admin else (" AND CAST(g.user_id AS CHAR)=%s", [owner_user_id])
         if not is_admin and not re.fullmatch(r"[1-9][0-9]{0,30}", owner_user_id):

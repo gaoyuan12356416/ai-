@@ -332,17 +332,13 @@ class FBAutoPostStore:
                 raise StoreError("fb_auto_template_version_conflict", "模板已被其他人更新，请刷新后重试", 409)
             if conn.execute("SELECT 1 FROM fb_auto_task WHERE template_id=? AND status='running' LIMIT 1", (template_id,)).fetchone():
                 raise StoreError("fb_auto_template_running_change_denied", "模板存在正在向Meta提交的任务，请等待发布结果落账后再停用或修改", 409)
-            if row["status"] == "enabled":
-                raise StoreError(
-                    "fb_auto_enabled_template_edit_denied",
-                    "已启用模板不能直接编辑，请先停用后再修改",
-                    409,
-                )
             upcoming.cancel(self,conn,template_id,now,'fb_auto_template_version_changed',superseded=True)
             new_version = expected + 1
             encoded = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             conn.execute("INSERT INTO fb_auto_template_version VALUES(?,?,?,?,?,?)", (template_id, new_version, encoded, config_hash(config), actor.user_id, now))
-            conn.execute("UPDATE fb_auto_template SET name=?,current_version=?,updated_at_utc=? WHERE id=?", (config["name"], new_version, now, template_id))
+            # Commit the new immutable version and stop automatic admission together.
+            # Failed validation/version checks leave both configuration and status intact.
+            conn.execute("UPDATE fb_auto_template SET name=?,status='disabled',current_version=?,updated_at_utc=? WHERE id=?", (config["name"], new_version, now, template_id))
             stale_runs = [
                 int(item[0])
                 for item in conn.execute(
@@ -468,7 +464,17 @@ class FBAutoPostStore:
             item = self._template_dto(self._template_row(conn, template_id, actor))
             today = self.now_fn().astimezone(BEIJING).date().isoformat()
             rows = conn.execute("SELECT local_date FROM social_random_day WHERE source_key=? AND local_date>=? ORDER BY local_date LIMIT 2", (target_schedule.source_key(template_id), today)).fetchall()
-            item["target_daily_plans"] = [target_daily.get_day_plan(conn, target_schedule.source_key(template_id), row[0]) for row in rows]
+            item["target_daily_plans"] = []
+            for row in rows:
+                plan = target_daily.get_day_plan(conn, target_schedule.source_key(template_id), row[0])
+                # The editor needs Page IDs and local times, not internal slot bindings
+                # or a second copy of the frozen configuration for every day.
+                item["target_daily_plans"].append({
+                    "local_date": plan["local_date"],
+                    "config_version": plan["config_version"],
+                    "targets": [{"target_id": target["target_id"], "times": target["times"]}
+                                for target in plan["targets"]],
+                })
             return item
 
     def _cooldown_material_ids(self, conn: sqlite3.Connection, page_id: str, days: int) -> set[str]:
