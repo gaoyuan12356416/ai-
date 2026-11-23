@@ -56,13 +56,23 @@ def main():
                 swap_sql(c,True)
                 cutover.mode('live' if missing else 'live-mirror')
                 if missing:c.execute('DROP TABLE '+LEGACY)
+                if not missing:
+                    def lost_ack(cursor,forward):
+                        swap_sql(cursor,forward)
+                        raise pymysql.OperationalError(2013,'private post-rename disconnect')
+                    with patch.object(cutover,'swap_sql',lost_ack):
+                        try:recovery.rollback()
+                        except pymysql.OperationalError as exc:
+                            if exc.args[0]!=2013:raise
+                        else:raise RuntimeError('unexercised DDL disconnect')
+                    if not (test_root/'switch-intent.json').is_file():raise RuntimeError('DDL intent lost')
                 outcome=recovery.rollback()
-                if outcome['version']!=v or dict_all(c,v)!=pids or cutover.layout(source)!=cutover.BEFORE:
+                if outcome['version']!=v or dict_all(c,v)!=pids or cutover.layout(source)!=cutover.BEFORE or (test_root/'switch-intent.json').exists():
                     raise RuntimeError('executable rollback did not restore the complete legacy layout')
         if not (test_root/'restored-unit.json').is_file():raise RuntimeError('sandbox unit handoff missing')
         result=dict(at=stamp(),mysql_socket='/run/portrait-qa/mysql.sock',version=v,restored_rows=got['rows'],
                     references=len(pids),all_12_columns_verified=True,existing_legacy_rollback=True,postarchive_latest_rollback=True,
-                    command='recovery.py rollback',isolated_unit_restore=True)
+                    command='recovery.py rollback',isolated_unit_restore=True,rename_disconnect_reconciled=True)
         atomic(ROOT/'qa/postarchive-rollback.json',result);return result
 
 

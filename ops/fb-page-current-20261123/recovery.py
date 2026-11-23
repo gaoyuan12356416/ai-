@@ -50,6 +50,15 @@ def remove_locked():
     intent=ROOT/'history-drop-intent.json'
     finished=ROOT/'history-dropped.json'
     with closing(connect_reader(cfg)) as db,db.cursor() as c:
+        if intent.exists() and not finished.exists():
+            pending=json.loads(intent.read_text())
+            if pending['manifest_sha256']!=ready['manifest_sha256']:raise RuntimeError('different outstanding removal intent')
+            with closing(writer(cfg)) as w,w.cursor() as wc:actual=shape(wc,LEGACY)
+            if actual not in ((),ORIG):raise RuntimeError('unexpected authoritative rollback table')
+            deadline=time.monotonic()+100
+            while shape(c,LEGACY)!=actual:
+                if time.monotonic()>deadline:raise RuntimeError('old removal acknowledgement still in flight')
+                time.sleep(1)
         before=allocated(c)
         if finished.exists() and LEGACY not in before and shape(c,PUBLIC)==HOT:
             saved=json.loads(finished.read_text())
@@ -59,7 +68,9 @@ def remove_locked():
             if layout(db)!=AFTER:raise RuntimeError('wrong table namespace')
             c.execute(f'SELECT DISTINCT profile_version FROM {LEGACY} ORDER BY profile_version')
             if [r[0] for r in c.fetchall()]!=frozen['versions']:raise RuntimeError('source changed after archive')
-            if one(c,f'SELECT COUNT(*) FROM {LEGACY}')[0]!=m['rows']:raise RuntimeError('source count changed')
+            for snapshot in m['versions']:
+                n=one(c,f'SELECT COUNT(*) FROM {LEGACY} WHERE profile_version=%s',(snapshot['version'],))[0]
+                if n!=snapshot['rows']:raise RuntimeError('source count changed for '+snapshot['version'])
             if not intent.exists():
                 atomic(intent,dict(at=stamp(),name=LEGACY,cutoff=frozen['version'],manifest_sha256=ready['manifest_sha256'],
                     old_bytes=before[LEGACY],schema_before=sum(before.values()),current_bytes=before[PUBLIC],
@@ -121,10 +132,26 @@ def ensure_latest():
 
 def rollback():
     cfg=env()
+    from cutover import confirm_shape,refresh_lock,mode
+    outstanding=ROOT/'switch-intent.json'
+    if outstanding.exists():
+        intent=json.loads(outstanding.read_text())
+        if intent['action']=='rollback':
+            result=transition(False)
+            restore_writer()
+            return result
+        if intent['action']!='cutover':raise RuntimeError('unknown outstanding namespace operation')
+        with refresh_lock(),closing(writer(cfg)) as w,closing(connect_reader(cfg)) as replica:
+            actual=layout(w)
+            if actual not in (BEFORE,AFTER):raise RuntimeError('cannot identify interrupted forward switch')
+            confirm_shape(replica,actual)
+            if actual==BEFORE:
+                atomic(ROOT/'cutover-cancelled.json',dict(at=stamp(),intent=intent))
+                mode('shadow');outstanding.unlink()
+        if actual==AFTER:transition(True)
     with closing(connect_reader(cfg)) as db:
         before=layout(db)==BEFORE
     if before:
-        from cutover import refresh_lock,mode
         with refresh_lock():mode('legacy')
         if (ROOT/'readers-live.json').exists() and not (ROOT/'readers-rollback.json').exists():
             from readers_deploy import candidates,handoff

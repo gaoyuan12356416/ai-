@@ -62,6 +62,14 @@ def transition(forward):
         v=current();rd=ManualReader(db)
         if (ROOT/'pending.json').exists():raise RuntimeError('pending current-row publish')
         if current_state(rd)['version']!=v:raise RuntimeError('source and current table versions differ')
+        if intent_file.exists():
+            previous_intent=json.loads(intent_file.read_text())
+            if previous_intent['action']!=action or previous_intent['version']!=v:
+                raise RuntimeError('resolve the existing DDL intent first')
+            # Only recover this exact DDL. Its source may already have renamed while 63350 is still behind.
+            with closing(writer(cfg)) as authoritative:actual_layout=layout(authoritative)
+            if actual_layout not in (expected,desired):raise RuntimeError('unknown authoritative DDL layout')
+            confirm_shape(db,actual_layout)
         with db.cursor() as c:
             if layout(db)==expected:
                 file=('compare-'+NEXT+'.json') if forward else 'rollback-latest.json'
