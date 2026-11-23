@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -57,7 +58,26 @@ class Handler(platform.DramaMaterialHandler):
         return self.server.runtime
 
     def reply(self,status,obj):
-        platform.json_response(self,status,obj,no_store=True)
+        raw=json.dumps(obj,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type','application/json; charset=utf-8')
+        self.send_header('Content-Length',str(len(raw)))
+        self.send_header('Cache-Control','private, no-store')
+        self.send_header('Server-Timing','app;dur=%.1f'%((time.monotonic()-getattr(self,'_request_start',time.monotonic()))*1000))
+        self.end_headers()
+        if self.command!='HEAD':self.wfile.write(raw)
+
+    def conditional(self,obj,etag):
+        self.send_response(304 if self.headers.get('If-None-Match')==etag else 200)
+        self.send_header('ETag',etag)
+        self.send_header('Cache-Control','private, no-cache')
+        if self.headers.get('If-None-Match')==etag:
+            self.end_headers();return
+        raw=json.dumps(obj,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+        self.send_header('Content-Type','application/json; charset=utf-8')
+        self.send_header('Content-Length',str(len(raw)))
+        self.end_headers()
+        if self.command!='HEAD':self.wfile.write(raw)
 
     def length(self,limit):
         raw=self.headers.get('Content-Length','')
@@ -198,12 +218,33 @@ class Handler(platform.DramaMaterialHandler):
         if path.startswith('/studio/'):
             from .studio import dispatch
             response=dispatch(rt,actor,verb,path[len('/studio'):],body,params)
+            if path.endswith('/source-progress') and response.get('selection'):
+                return self.conditional(response,response['selection']['etag'])
             if 'file' in response:
                 return self.stream(response['file'],response['name'],download=True,mime='application/zip')
             return self.reply(200,response)
         if path=='/assets' and verb=='GET':
             return self.reply(200,rt.assets(actor,q('q'),max(1,min(int(q('limit','50')),200)),max(0,int(q('offset','0'))),q('series')))
         if path=='/series' and verb=='GET':return self.reply(200,rt.series(actor))
+        derivative=re.fullmatch('/assets/(aa_[0-9a-f]{32})/(thumbnail|preview)',path)
+        if derivative:
+            from . import previews
+            aid,kind=derivative.groups()
+            if verb=='POST' and kind=='preview':
+                return self.reply(202,previews.request(rt,actor,aid,priority=100,retry=body.get('retry') is True))
+            if verb in ('GET','HEAD'):
+                target,mime,etag=previews.file(rt,actor,aid,kind)
+                etag='"'+etag+'"'
+                if self.headers.get('If-None-Match')==etag:
+                    self.send_response(304);self.send_header('ETag',etag);self.end_headers();return
+                if os.environ.get('AI_VIDEO_EDITING_PREVIEW_ACCEL','1')=='1':
+                    self.send_response(200)
+                    self.send_header('X-Accel-Redirect','/_private_ai_editor_preview/'+target.name)
+                    self.send_header('Content-Type',mime)
+                    self.send_header('ETag',etag)
+                    self.send_header('Cache-Control','private, no-cache')
+                    self.end_headers();return
+                return self.stream(target,target.name,mime=mime)
         m=re.fullmatch('/assets/(aa_[0-9a-f]{32})(/media)?',path)
         if m and verb in ('GET','HEAD'):
             item=rt.asset(m[1],actor)
@@ -259,6 +300,7 @@ class Handler(platform.DramaMaterialHandler):
         raise Fault('not_found','接口不存在',404)
 
     def dispatch(self):
+        self._request_start=time.monotonic()
         try:
             parsed=urlsplit(self.path)
             check(parsed.path.startswith(PREFIX+'/'),'not_found','接口不存在',404)
@@ -289,6 +331,8 @@ def main():
     rt.cloud = CloudUploads(rt, platform.get_cos_client(timeout=20, retry=0), platform.COS_BUCKET, platform.COS_REGION)
     from .studio import start
     start(rt)
+    from .selections import start as start_selections
+    start_selections(rt)
     from .transcript_jobs import start as start_transcripts
     start_transcripts(rt)
     from .catalog import Catalog

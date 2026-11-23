@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 
 from .smart_common import SmartError, require
 from .smart_model import model_json
@@ -184,8 +185,10 @@ def enrich(candidates, labels):
 
 
 def analyze_file(path, duration_ms, has_audio, workdir, vision=None):
+    began=time.monotonic()
     frames, records, step = decode(path, duration_ms, has_audio)
     candidates = candidate_windows(records, duration_ms, step)
+    preprocess_ms=round((time.monotonic()-began)*1000)
     count = 0
     warning = '当前采用画音测量；未取得视觉语义判断。'
     if vision:
@@ -193,7 +196,7 @@ def analyze_file(path, duration_ms, has_audio, workdir, vision=None):
             count = enrich(candidates, vision(sheets(workdir, frames, step, candidates)))
         except Exception as exc:
             LOG.warning('smart visual analysis unavailable (%s)', type(exc).__name__)
-    return {'engine': 'multimodal' if count else 'signal', 'candidates': candidates,
+    return {'engine': 'multimodal' if count else 'signal', 'candidates': candidates,'_timings':{'preprocess_ms':preprocess_ms},
             'emotion_samples': [{'time_ms': c['anchor_ms'], 'intensity': c['emotion_intensity'], 'reason': c['emotion_reason']}
                                 for c in candidates if 'emotion_intensity' in c],
             'sample_step_ms': step, 'sampled_frames': len(records), 'visual_candidates': count,

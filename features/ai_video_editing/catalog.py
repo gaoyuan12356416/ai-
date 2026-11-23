@@ -117,6 +117,8 @@ class Catalog:
         self.lock = threading.Lock()
         self.provider_lock = threading.Lock()
         self.last_request = 0
+        self.episode_cache = {}
+        self.episode_locks = {}
 
     def query(self, sql):
         command = list(self.platform.MYSQL_BASE_CMD)
@@ -298,6 +300,26 @@ class Catalog:
         return result
 
     def episodes(self, product, key, private=False):
+        identity=(product,key)
+        with self.lock:
+            lock=self.episode_locks.setdefault(identity,threading.Lock())
+        with lock:
+            cached=self.episode_cache.get(identity)
+            if cached and cached[0]>time.monotonic():
+                result=cached[1]
+            else:
+                result=self._episodes(product,key,private=True)
+                with self.lock:
+                    if len(self.episode_cache)>=100:
+                        self.episode_cache.clear()
+                    self.episode_cache[identity]=(time.monotonic()+30,result)
+        return dict(result,items=[dict(r) if private else {k:v for k,v in r.items() if k!='url'} for r in result['items']])
+
+    def invalidate_episodes(self,product,key):
+        with self.lock:
+            self.episode_cache.pop((product,key),None)
+
+    def _episodes(self, product, key, private=False):
         values = decode_key(key, product)
         if product == "dramawave":
             condition = " AND ".join(

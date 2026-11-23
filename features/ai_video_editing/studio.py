@@ -19,10 +19,12 @@ from .composition import EFFECTS, normalize, store_audio
 LOG = logging.getLogger(__name__)
 _threads = {}
 _lock = threading.Lock()
-ACTIVE = ("queued", "analyzing", "preparing", "rendering")
+ACTIVE = ("queued", "waiting_sources", "analyzing", "preparing", "rendering")
 
 
 def setup(rt):
+    if getattr(rt,'_studio_schema_ready',False):
+        return
     smart_api.setup(rt)
     from .composition import setup as audio_setup
 
@@ -41,6 +43,10 @@ def setup(rt):
         CREATE TABLE IF NOT EXISTS studio_exports(id TEXT PRIMARY KEY,owner TEXT NOT NULL,created REAL NOT NULL);
         """)
     (rt.root / "exports").mkdir(exist_ok=True)
+    from . import selections, previews
+    selections.setup(rt)
+    previews.setup(rt)
+    rt._studio_schema_ready=True
 
 
 def message(db, sid, mid, role, kind, data):
@@ -80,6 +86,11 @@ def session(rt, actor, sid):
             )
         ]
     item["assets"] = [public_asset(rt.asset(k, actor)) for k in item["source_ids"]]
+    if item.get('selection_id'):
+        from .selections import progress
+        item['selection']=progress(rt,actor,sid)
+    else:
+        item['selection']=None
     return item
 
 
@@ -241,9 +252,11 @@ def configuration(value):
 def submit(rt, actor, sid, body, kind="create"):
     current = session(rt, actor, sid)
     sources = current["source_ids"]
-    smart_api.source_snapshots(rt, actor, sources)
+    selected=current.get('selection')
+    if not selected:
+        smart_api.source_snapshots(rt, actor, sources)
     config = configuration(body.get("config", current["config"]))
-    if kind == "create" and "youtube_regular" in config:
+    if kind == "create" and "youtube_regular" in config and (not selected or selected['status']=='succeeded'):
         from .youtube_regular import check_sources
         check_sources(config["youtube_regular"], sources)
     check(
@@ -258,7 +271,9 @@ def submit(rt, actor, sid, body, kind="create"):
         "operation_required",
         "缺少操作编号",
     )
-    frozen = {"source_ids": sources, "config": config, "kind": kind, "actor": actor}
+    frozen = {"source_ids": [] if selected else sources, "config": config, "kind": kind, "actor": actor}
+    if selected:
+        frozen.update(selection_id=selected['selection_id'],selection_revision=selected['selection_revision'])
     digest = hashlib.sha256(packed([sid, frozen]).encode()).hexdigest()
     key = owner(actor)
     with rt.db(True) as db:
@@ -277,7 +292,7 @@ def submit(rt, actor, sid, body, kind="create"):
         now = time.time()
         db.execute(
             "INSERT INTO studio_runs(id,session,owner,operation,digest,snapshot,status,state,created,updated) VALUES(?,?,?,?,?,?,?, ?,?,?)",
-            (rid, sid, key, op, digest, packed(frozen), "queued", "{}", now, now),
+            (rid, sid, key, op, digest, packed(frozen), "waiting_sources" if selected else "queued", "{}", now, now),
         )
         message(
             db,
@@ -291,15 +306,20 @@ def submit(rt, actor, sid, body, kind="create"):
             "UPDATE studio_sessions SET config=?,updated=? WHERE id=?",
             (packed(config), now, sid),
         )
+    event=getattr(rt,'_studio_wake',None)
+    if event:event.set()
     return {"run_id": rid}
 
 
 def checkpoint(rt, row, status, state, error=""):
     with rt.db(True) as db:
         changed = db.execute(
-            "UPDATE studio_runs SET status=?,state=?,error=?,updated=? WHERE id=? AND lease=?",
+            "UPDATE studio_runs SET status=?,state=?,error=?,updated=? WHERE id=? AND lease=? AND status<>'superseded'",
             (status, packed(state), error, time.time(), row["id"], row["lease"]),
         ).rowcount
+        if not changed:
+            prior=db.execute('SELECT status FROM studio_runs WHERE id=?',(row['id'],)).fetchone()
+            if prior and prior['status']=='superseded':return
         check(changed, "lease_lost", "任务已由其他进程接管", 409)
         if status in ("completed", "failed"):
             message(
@@ -568,6 +588,21 @@ def advance(rt, row):
     actor = frozen["actor"]
     state = json.loads(row["state"])
     status = row["status"]
+    if status == 'waiting_sources':
+        from .selections import progress
+        selected=progress(rt,actor,row['session'],frozen['selection_id'])
+        if selected['summary']['failed']:
+            checkpoint(rt,row,'needs_attention',state,'所选素材有失败项，请重试或主动移除后继续')
+            return
+        if selected['status']!='succeeded':
+            return
+        state['analysis_id']=selected['analysis_id']
+        state['resolved_source_ids']=[i['asset_id'] for i in selected['items']]
+        if frozen['kind']=='create' and 'youtube_regular' in frozen['config']:
+            from .youtube_regular import check_sources
+            check_sources(frozen['config']['youtube_regular'],state['resolved_source_ids'])
+        checkpoint(rt,row,'analyzing',state)
+        return
     if status == "queued":
         analysis = smart_api.submit(rt, actor, {"source_ids": frozen["source_ids"]})
         smart_api.wake(rt)
@@ -635,7 +670,7 @@ def advance(rt, row):
 def tick(rt):
     with rt.db(True) as db:
         row = db.execute(
-            "SELECT * FROM studio_runs WHERE status IN ('queued','analyzing','preparing','rendering') AND expires<? ORDER BY updated LIMIT 1",
+            "SELECT * FROM studio_runs WHERE status IN ('queued','waiting_sources','analyzing','preparing','rendering') AND expires<? ORDER BY updated LIMIT 1",
             (time.time(),),
         ).fetchone()
         if not row:
@@ -679,7 +714,7 @@ def tick(rt):
         with rt.db(True) as db:
             db.execute(
                 "UPDATE studio_runs SET expires=?,updated=? WHERE id=? AND lease=?",
-                (time.time() + 3, time.time(), row["id"], row["lease"]),
+                (time.time() + 1, time.time(), row["id"], row["lease"]),
             )
     return True
 
@@ -690,13 +725,14 @@ def start(rt):
         if rt.db_path in _threads:
             return
 
+        rt._studio_wake=threading.Event()
         def loop():
             while True:
                 try:
                     tick(rt)
                 except Exception:
                     LOG.exception("studio dispatcher delayed")
-                time.sleep(2)
+                rt._studio_wake.wait(1);rt._studio_wake.clear()
 
         thread = threading.Thread(target=loop, name="independent-studio", daemon=True)
         _threads[rt.db_path] = thread
@@ -775,6 +811,19 @@ def ask(rt, actor, sid, body):
 
 def dispatch(rt, actor, verb, path, body, query):
     setup(rt)
+    from . import selections
+    if path=='/selection-operations' and verb=='GET':
+        return {'receipt':selections.operation(rt,actor,query.get('operation_id',[''])[0])}
+    selected_route=re.fullmatch(r'/sessions/(ss_[a-f0-9]{32})/(selection|source-progress|selection/items/(si_[a-f0-9]{32})/retry)',path)
+    if selected_route:
+        sid=selected_route[1]
+        if verb=='GET' and selected_route[2]=='source-progress':
+            return {'selection':selections.progress(rt,actor,sid)}
+        if verb=='POST' and selected_route[2]=='selection':
+            receipt=selections.submit(rt,actor,sid,body)
+            return {**receipt,'item':session(rt,actor,sid)}
+        if verb=='POST' and selected_route[3]:
+            return selections.retry(rt,actor,sid,selected_route[3])
     q = lambda k, d="": query.get(k, [d])[0]
     if path == "/capabilities" and verb == "GET":
         return capabilities(q("seconds", "0"))
@@ -791,6 +840,9 @@ def dispatch(rt, actor, verb, path, body, query):
                     ]
                 }
         if verb == "POST":
+            if 'items' in body:
+                receipt=selections.submit(rt,actor,None,body)
+                return {**receipt,'item':session(rt,actor,receipt['session_id'])}
             ids = body.get("source_ids", [])
             if ids:
                 smart_api.source_snapshots(rt, actor, ids)
@@ -812,6 +864,8 @@ def dispatch(rt, actor, verb, path, body, query):
         if verb == "GET" and not match[2]:
             return {"item": current}
         if verb == "PATCH" and not match[2]:
+            if 'source_ids' in body and current.get('selection') and current['selection']['status']!='succeeded':
+                check(body.get('selection_revision')==current['selection_revision'],'selection_version_required','素材选择已更新，请刷新；未就绪分集不能被已就绪子集替换',409)
             ids = body.get("source_ids", current["source_ids"])
             if ids:
                 smart_api.source_snapshots(rt, actor, ids)
@@ -823,18 +877,21 @@ def dispatch(rt, actor, verb, path, body, query):
             )[:180]
             with rt.db(True) as db:
                 changed = db.execute(
-                    "UPDATE studio_sessions SET sources=?,config=?,title=?,analysis_id=?,version=version+1,updated=? WHERE id=? AND version=?",
+                    "UPDATE studio_sessions SET sources=CASE WHEN ? THEN ? ELSE sources END,config=?,title=?,analysis_id=CASE WHEN ? THEN '' ELSE analysis_id END,version=version+1,updated=? WHERE id=? AND version=?",
                     (
+                        'source_ids' in body,
                         packed(ids),
                         packed(config),
                         title,
-                        current["analysis_id"] if ids == current["source_ids"] else "",
+                        'source_ids' in body and ids != current['source_ids'],
                         time.time(),
                         sid,
                         body.get("version", current["version"]),
                     ),
                 ).rowcount
                 check(changed, "version_conflict", "会话已更新，请刷新后重试", 409)
+                if 'source_ids' in body and ids!=current['source_ids']:
+                    db.execute("UPDATE studio_sessions SET selection_id='',selection_revision=selection_revision+1 WHERE id=?",(sid,))
             return {"item": session(rt, actor, sid)}
         if verb == "POST":
             if match[3] in ("submit", "analyze"):

@@ -114,9 +114,10 @@ class Runtime:
         check(row is not None,'asset_missing','素材不存在或没有访问权限',404)
         rid = row['id']
         meta = json.loads(row['meta'])
+        from .previews import decorations
         return {'id':rid,'name':row['name'],'series_code':row['series'],'episode_number':row['episode'] or None,'status':'ready','metadata':meta,
                 **meta,'sha256':row['sha256'],'path':str(self.root/'uploads'/(rid+'.mp4')),
-                'preview_url':f'{PREFIX}/assets/{rid}/media'}
+                'preview_url':f'{PREFIX}/assets/{rid}/media',**decorations(self,rid)}
 
     def asset(self, rid, actor):
         with self.db() as db:

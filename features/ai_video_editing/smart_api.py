@@ -59,6 +59,8 @@ def setup(runtime):
             created INTEGER NOT NULL, updated INTEGER NOT NULL)''')
         db.execute('CREATE INDEX IF NOT EXISTS ai_edit_smart_fingerprint ON ai_edit_smart_analysis(owner,fingerprint,created)')
         db.execute('CREATE INDEX IF NOT EXISTS ai_edit_smart_pending ON ai_edit_smart_analysis(status,expires,created)')
+    from . import source_jobs
+    source_jobs.setup(runtime)
 
 
 def snapshot(asset):
@@ -104,6 +106,8 @@ def submit(runtime, actor, body):
                 return dto(previous)
         count = db.execute("SELECT COUNT(*) FROM ai_edit_smart_analysis WHERE owner=? AND status IN ('queued','running')",
                            (who,)).fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='studio_source_batches'").fetchone():
+            count += db.execute("SELECT count(*) FROM studio_source_batches WHERE owner=? AND status='preparing'",(who,)).fetchone()[0]
         require(count < 3, 'smart_queue_full', '已有三个素材分析任务待处理，请等待其中一项完成', 429)
         jid = 'sa_' + uuid.uuid4().hex
         db.execute("""INSERT INTO ai_edit_smart_analysis (id,owner,fingerprint,status,sources,created,updated)
@@ -138,8 +142,25 @@ def process_source(runtime, actor, snap, workdir):
         for chunk in iter(lambda: f.read(1024 * 1024), b''):
             digest.update(chunk)
     require(digest.hexdigest() == snap['_stamp'], 'smart_source_changed', '文件内容与素材指纹不符，请重新入库', 409)
-    vision = vision_service if any(model_config()[:2]) else None
+    from .source_jobs import vision as shared_vision
+    vision = shared_vision if any(model_config()[:2]) else None
     return analyze_file(path, snap['duration_ms'], asset['has_audio'], workdir, vision=vision)
+
+
+def assemble(runtime, actor, snapshots):
+    """Publish an ordered parent receipt from completed content-cache children."""
+    require(snapshots and all(s.get('engine') for s in snapshots),'smart_analysis_not_ready','所选素材尚未全部解析完成',409)
+    fingerprint = hashlib.sha256(encode(['smart-v2-emotion',model_config(),[(s['source_id'],s['_stamp'],s['series_code']) for s in snapshots]]).encode()).hexdigest()
+    now=int(time.time());who=owner(actor)
+    with transaction(runtime) as db:
+        prior=db.execute("SELECT * FROM ai_edit_smart_analysis WHERE owner=? AND fingerprint=? AND status='succeeded' AND updated>? ORDER BY created DESC LIMIT 1",(who,fingerprint,now-86400)).fetchone()
+        if prior:
+            degraded=any(model_config()[:2]) and any(s.get('engine')!='multimodal' for s in json.loads(prior['sources']))
+            if not degraded or prior['updated']>now-120:
+                return dto(prior)
+        jid='sa_'+uuid.uuid4().hex
+        db.execute("INSERT INTO ai_edit_smart_analysis(id,owner,fingerprint,status,sources,created,updated) VALUES(?,?,?,'succeeded',?,?,?)",(jid,who,fingerprint,encode(snapshots),now,now))
+        return dto(db.execute('SELECT * FROM ai_edit_smart_analysis WHERE id=?',(jid,)).fetchone())
 
 
 def claim(runtime):
@@ -179,17 +200,21 @@ def execute_one(runtime):
     pulse.start()
     status, error = 'succeeded', ''
     try:
-        root = Path(os.environ.get('AI_VIDEO_EDITING_SMART_WORK_ROOT') or (Path(str(runtime.db_path)).parent / 'smart-work'))
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        for snap in snapshots:
-            if snap.get('engine'):
-                continue
-            with tempfile.TemporaryDirectory(prefix=jid + '-', dir=str(root)) as workdir:
-                snap.update(process_source(runtime, actor, snap, workdir))
-            with closing(connect(runtime)) as db:
-                if db.execute('UPDATE ai_edit_smart_analysis SET sources=?,updated=? WHERE id=? AND lease=?',
-                              (encode(snapshots), int(time.time()), jid, token)).rowcount != 1:
-                    return True
+        from .source_jobs import collect
+        pending = [s for s in snapshots if not s.get('engine')]
+        rows = collect(runtime, actor, pending, retry=True)
+        for snap, row in zip(pending, rows):
+            snap['status'] = row['status']
+            snap['error'] = row['error']
+            if row['status'] == 'succeeded':
+                snap.update(json.loads(row['result']))
+            else:
+                status = 'failed'
+                error = '部分素材解析失败，请重试失败项'
+        with closing(connect(runtime)) as db:
+            if db.execute('UPDATE ai_edit_smart_analysis SET sources=?,updated=? WHERE id=? AND lease=?',
+                          (encode(snapshots), int(time.time()), jid, token)).rowcount != 1:
+                return True
     except Exception as exc:
         status = 'failed'
         error = str(exc)[:250] if isinstance(exc, SmartError) else '素材分析未能完成，请稍后重试'
