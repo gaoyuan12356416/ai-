@@ -218,6 +218,26 @@ def read_hit_origin(task_id):
         raise Error('x_auto_hit_origin_unavailable','预约来源暂不可用',503) from None
 
 
+def read_account_snapshot(body):
+    import subprocess
+    if set(body) != {'account_id', 'actor', 'scope'}:
+        raise Error('invalid_request', '', 400)
+    try:
+        result = subprocess.run(['/usr/sbin/runuser', '-u', 'x-post-automation', '--',
+            '/usr/bin/python3', '-B', '-m', 'features.x_tag_publish.account_snapshot'],
+            input=json.dumps(body), capture_output=True, text=True, timeout=12, check=True,
+            cwd=str(Path(__file__).resolve().parents[2]),
+            env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
+        if len(result.stdout) > 65536:
+            raise ValueError()
+        value = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise Error('x_tag_account_snapshot_unavailable', '发布账号记录暂时无法读取，保留原任务等待重试', 503) from None
+    if not value.get('ok'):
+        raise Error(value['code'], value['message'], value['status'])
+    return value['record']
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -271,6 +291,11 @@ class Handler(BaseHTTPRequestHandler):
             if set(body) != {'task_id'}:
                 raise Error('invalid_request', '', 400)
             return 200, dict(origin=read_hit_origin(body['task_id']))
+        if path == '/internal/x-tag/account-snapshot' and self.command == 'POST':
+            token = os.environ.get('X_INTERNAL_TOKEN', '')
+            if len(token) < 32 or not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
+                raise Error('permission_denied', '', 403)
+            return 200, dict(record=read_account_snapshot(self.body()))
         if path == '/internal/x-tag/attribution' and self.command == 'POST':
             if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + os.environ['X_INTERNAL_TOKEN']):
                 raise Error('permission_denied', '', 403)

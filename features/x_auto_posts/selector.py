@@ -101,6 +101,10 @@ class NoEligibleMaterial(SelectionError):
             "x_mobo_upcoming_daily_full": "该账号今日模板次数已用完",
             "x_mobo_upcoming_paused": "模板已停用，结束此自动时隙",
         }
+        for level, subject in (("drama", "剧目"), ("material", "素材")):
+            for metric, label in (("views", "播放量"), ("likes", "点赞量"),
+                                  ("comments", "评论量"), ("shares", "分享量"), ("revenue", "收入")):
+                labels[level+"_x_"+metric] = subject+label+"不满足筛选条件或数据尚不完整"
         summary = "；".join(
             "%s %s" % (labels.get(key, key), count)
             for key, count in sorted(self.rejection_counts.items())

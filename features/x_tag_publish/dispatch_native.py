@@ -69,7 +69,6 @@ def handle(handler, runtime, path):
                         return super().begin_operation(job, claim, operation)
                 _bridge = HitBridge(runtime)
         result = _bridge.dispatch(path.rsplit('/', 1)[-1], payload)
-        return handler.send_json(200, result)
     except Exception as exc:
         # Preserve only frame locations and exception type, never values/source.
         import logging
@@ -78,7 +77,18 @@ def handle(handler, runtime, path):
         stack = ' > '.join('%s:%s:%s' % (Path(f.filename).name, f.lineno, f.name)
                            for f in traceback.extract_tb(exc.__traceback__)[-12:])
         logging.getLogger(__name__).error('x_tag_dispatch_failed type=%s stack=%s',type(exc).__name__,stack)
-        return handler.send_json(409, {'code': getattr(exc, 'code', 'x_tag_dispatch_failed')})
+        code = getattr(exc, 'code', 'x_tag_dispatch_failed')
+        status = getattr(exc, 'status', 503)
+        message = str(exc) if code != 'x_tag_dispatch_failed' else 'X 发布内部处理暂不可用，请保留原任务重试'
+        result = {'code': code, 'message': message}
+    else:
+        status = 200
+    try:
+        return handler.send_json(status, result)
+    except (BrokenPipeError, ConnectionResetError):
+        # The operation and its durable receipt have already completed.
+        # Losing the HTTP reader must not become a new business failure.
+        return None
 
 
 def install_attribution(resolver):

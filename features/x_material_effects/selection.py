@@ -51,6 +51,20 @@ def value(row,metric):
     if raw is None:return None
     return Decimal(raw)/100 if metric=='revenue' else Decimal(raw)
 
+def observed_value(row, metric):
+    complete = value(row, metric)
+    return complete if complete is not None else value(row.get('known', {}), metric)
+
+def matches(row, metric, bounds):
+    complete = value(row, metric)
+    if complete is not None or not bounds.constrained:
+        return bounds.contains(complete)
+    # A measured subtotal proves a minimum for additive, nonnegative metrics.
+    # Missing posts cannot prove an upper bound and are never treated as zero.
+    if bounds.maximum is not None:
+        return False
+    return bounds.contains(observed_value(row, metric))
+
 def apply(candidates,rule,level,rejections):
     if not ACTIVE.get():return candidates
     output=[]
@@ -58,16 +72,16 @@ def apply(candidates,rule,level,rejections):
         data=facts(item,level)
         rejected=False
         for metric,bounds in rule.x_effect.items():
-            if not bounds.contains(value(data,metric)):
+            if not matches(data,metric,bounds):
                 key=level+'_x_'+metric;rejections[key]=rejections.get(key,0)+1;rejected=True;break
         if not rejected:output.append(item)
     if rule.sort.field.startswith('x_'):
         metric=rule.sort.field[2:]
         identity=lambda c:c.content_id if level=='drama' else str(c.source.material_id)
         output.sort(key=identity)
-        known=[c for c in output if value(facts(c,level),metric) is not None]
-        missing=[c for c in output if value(facts(c,level),metric) is None]
-        known.sort(key=lambda c:value(facts(c,level),metric),reverse=rule.sort.direction=='desc')
+        known=[c for c in output if observed_value(facts(c,level),metric) is not None]
+        missing=[c for c in output if observed_value(facts(c,level),metric) is None]
+        known.sort(key=lambda c:observed_value(facts(c,level),metric),reverse=rule.sort.direction=='desc')
         output=known+missing
     return output
 

@@ -36,6 +36,11 @@ def install(runtime):
         db.execute('PRAGMA query_only=ON')
         return db
     runtime.db_connect = account_db
+    # A read-only systemd bind mount cannot reliably open a live SQLite WAL
+    # while its owner removes/recreates sidecars. Read scoped metadata through
+    # the existing gateway; token files and publish/disable locks stay here.
+    from .account_snapshot import install_reader
+    install_reader(runtime)
 
     def verify(account_id, actor, scope='mine', *, only_refresh_required=False,
                preserve_transient_status=False, require_publish_approved=False, allow_token_refresh=True):
