@@ -146,10 +146,13 @@ def click_options(task, values):
     lang = canonical_lang(task["language"]).split("-")[0]
     script = SCRIPTS.get(lang)
     options = []
-    for value in values if isinstance(values, list) else []:
+    field_error = None
+    for index, value in enumerate(values if isinstance(values, list) else []):
         try:
-            hook = one_line(value, {"zh": 16, "ja": 24}.get(lang, 66))
-        except ValueError:
+            hook = one_line(value, {"zh": 16, "ja": 24}.get(lang, 66), f"hooks[{index}]")
+        except ValueError as exc:
+            if field_error is None:
+                field_error = str(exc)
             continue
         key = normalized(hook)
         if (len(key) < 2 or len(hook.split()) > 12
@@ -167,7 +170,9 @@ def click_options(task, values):
             options.append(dict(click_hook=hook, hook_key=key, cta=cta,
                                 cta_style="watch_full_now_hook"))
     if not options:
-        raise ValueError("invalid_click_hook")
+        if field_error:
+            raise ValueError(field_error.replace("invalid_copy_field:", "invalid_click_hook:", 1))
+        raise ValueError("invalid_click_hook: hooks: no valid story continuation")
     if task.get("endpoint", "").startswith("x_"):
         options.sort(key=lambda item: weight(item["cta"]))
     return options
@@ -185,19 +190,30 @@ def weight(text):
     )
 
 
-def one_line(value, maximum):
-    if (
-        not isinstance(value, str)
-        or not value.strip()
-        or len(value) > maximum
-        or any(c in value for c in "\r\n#")
-        or re.search(r"(?:https?://|www\.|\{\{)", value, re.I)
-    ):
-        raise ValueError("invalid_copy_field")
-    if any(
-        unicodedata.category(c) in {"Cc", "So"} or c in "\ufe0e\ufe0f" for c in value
-    ):
-        raise ValueError("invalid_copy_field")
+def one_line(value, maximum, field="text"):
+    def fail(reason, index=None):
+        if index is not None:
+            char = value[index]
+            reason += f" {char!r} (U+{ord(char):04X}) at {index + 1}"
+        raise ValueError(f"invalid_copy_field: {field}: {reason}")
+
+    if not isinstance(value, str):
+        fail(f"expected text, got {type(value).__name__}")
+    if len(value) > maximum:
+        fail(f"length {len(value)} exceeds {maximum}")
+    for index, char in enumerate(value):
+        # Degree sign, letterlike units (℃/℉/℥), and CJK square units (㎏/㎞)
+        # are ordinary prose, despite sharing Unicode category So with icons.
+        unit_symbol = char == "°" or "\u2100" <= char <= "\u214f" or "\u3300" <= char <= "\u33ff"
+        category = unicodedata.category(char)
+        if (char in "\r\n#\ufe0e\ufe0f" or category == "Cc"
+                or (category == "So" and not unit_symbol)):
+            fail("forbidden character", index)
+    marker = re.search(r"(?:https?://|www\.|\{\{)", value, re.I)
+    if marker:
+        fail("template marker" if marker.group() == "{{" else "URL marker", marker.start())
+    if not value.strip():
+        fail("empty text")
     return value.strip()
 
 
@@ -232,7 +248,7 @@ def validate(task, item, options=None):
     ):
         raise ValueError("invalid_tags")
     output = {
-        k: one_line(item.get(k), limit)
+        k: one_line(item.get(k), limit, k)
         for k, limit in (("opening", 640), ("turn", 440), ("angle", 90))
     }
     if not normalized(output["opening"]) or not normalized(output["turn"]):
@@ -266,7 +282,7 @@ def render(task, draft, url):
     if task["endpoint"] == "x_drama":
         lang = canonical_lang(task["language"]).split("-")[0]
         label = EPISODES.get(lang, "№ {n}").format(n=int(task["episode"]))
-        title = one_line(task["title"], 500)
+        title = one_line(task["title"], 500, "title")
         episode = (
             f"《{title}》{label}" if lang in ("zh", "ja") else f"{title} · {label}"
         )

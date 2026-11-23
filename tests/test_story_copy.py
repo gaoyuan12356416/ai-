@@ -91,6 +91,94 @@ class CaptionTests(unittest.TestCase):
             tags=["ShortDrama", "Mystery"],
         )
 
+    def test_unit_symbols_survive_generation_and_native_selection(self):
+        task = self.task(1, "fv")
+        item = dict(self.item(task), opening="The doctor treats twins with 50°C fevers.")
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            batch, rows = store.claim(c)
+            worker.generate_batch(c, batch, rows, lambda tasks, emit, usage: emit(item))
+            self.assertEqual(c.execute("SELECT state FROM jobs").fetchone()[0], "ready")
+            self.assertEqual(c.execute("SELECT count(*) FROM retries").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+        source, reason, text, _ = bridge.select(task, "original", "https://example.org/post")
+        self.assertEqual((source, reason), ("ai", ""))
+        self.assertIn("50°C", text)
+
+    def test_common_units_are_preserved_in_prose_and_hooks(self):
+        task = self.task(1, "fa")
+        for unit in ("50°C", "122°F", "50℃", "122℉", "5㎏", "60㎞/h", "20℥",
+                     "5μg/m³", "90°", "2m²", "5ℓ", "±5%"):
+            with self.subTest(unit=unit):
+                item = dict(self.item(task), opening=f"The reading is {unit}.",
+                            turn=f"Who changed the {unit} reading?", angle=f"{unit} reading",
+                            hooks=[f"to investigate the {unit} reading"])
+                draft = model.validate(task, item)
+                self.assertEqual(draft["opening"], item["opening"])
+                self.assertEqual(draft["turn"], item["turn"])
+                self.assertEqual(draft["angle"], item["angle"])
+                self.assertIn(unit, draft["cta"])
+
+    def test_copy_errors_identify_field_character_and_position(self):
+        task = self.task(1, "fa")
+        for field in ("opening", "turn", "angle"):
+            for char in ("💔", "★", "\n", "\r", "\t", "#", "\ufe0f"):
+                with self.subTest(field=field, char=repr(char)):
+                    item = dict(self.item(task), **{field: "Read " + char + " this"})
+                    with self.assertRaises(ValueError) as caught:
+                        model.validate(task, item)
+                    reason = str(caught.exception)
+                    self.assertIn(f"invalid_copy_field: {field}:", reason)
+                    self.assertIn(repr(char), reason)
+                    self.assertIn(f"U+{ord(char):04X}", reason)
+                    self.assertIn("at 6", reason)
+                    self.assertLessEqual(len(reason), 120)
+                    self.assertNotIn("\n", reason)
+        for value, detail in ((None, "expected text"), (" ", "empty text"),
+                              ("x" * 91, "length 91 exceeds 90"),
+                              ("Go https://example.org", "URL marker 'h' (U+0068) at 4"),
+                              ("Use {{name}}", "template marker '{' (U+007B) at 5")):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as caught:
+                    model.validate(task, dict(self.item(task), angle=value))
+                self.assertIn("invalid_copy_field: angle:", str(caught.exception))
+                self.assertIn(detail, str(caught.exception))
+
+    def test_invalid_hook_details_survive_without_rejecting_valid_alternatives(self):
+        task = self.task(1, "fa")
+        bad = "to find 💔"
+        with self.assertRaises(ValueError) as caught:
+            model.click_options(task, [bad])
+        reason = str(caught.exception)
+        self.assertIn("invalid_click_hook: hooks[0]:", reason)
+        self.assertIn("'💔' (U+1F494)", reason)
+        self.assertLessEqual(len(reason), 120)
+        self.assertEqual(model.click_options(task, [bad, "to find the ring"])[0]["click_hook"],
+                         "to find the ring")
+
+    def test_field_details_reach_retry_ledger_and_alert(self):
+        task = self.task(1, "fv")
+        item = dict(self.item(task), turn="A broken 💔")
+        runner = lambda tasks, emit, usage: emit(item)
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            batch, rows = store.claim(c)
+            worker.generate_batch(c, batch, rows, runner)
+            self.assertEqual(c.execute("SELECT state FROM jobs").fetchone()[0], "retry_wait")
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
+            with patch.object(store.time, "time", return_value=time.time() + 61):
+                batch, rows = store.claim(c)
+            worker.generate_batch(c, batch, rows, runner)
+            job = c.execute("SELECT state,reason FROM jobs").fetchone()
+            retry = c.execute("SELECT first_reason,reason FROM retries").fetchone()
+            self.assertEqual(job["state"], "failed")
+            self.assertEqual(tuple(retry), (job["reason"], job["reason"]))
+            message = alerts.message_for(c.execute("SELECT * FROM alerts").fetchall())
+            self.assertIn("invalid_copy_field: turn:", message)
+            self.assertIn("'💔' (U+1F494) at 10", message)
+
     def test_deadline_priority_and_near_group_does_not_claim_tomorrows_work(self):
         now = time.time()
         later = dict(self.task(1), content="old-group", publish_at=now + 7200)
