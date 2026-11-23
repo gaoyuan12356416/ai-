@@ -70,6 +70,12 @@ def _batches(values):
         yield values[offset:offset + 400]
 
 
+def link_in_post(row, link):
+    url = str(link.get('short_url') or '')
+    return bool(url and (row.get('short_url') == url or re.search(
+        re.escape(url) + r'(?![A-Za-z0-9_/?#&=%-])', str(row.get('post_text') or ''))))
+
+
 def collect_publications(links, day, x_paths=X_DATABASES, fb_path=FB_DATABASE):
     """IDs alone are insufficient: account, material and frozen URL must match."""
     pending = [r for r in links if r.get('purpose') == 'post'
@@ -86,7 +92,7 @@ def collect_publications(links, day, x_paths=X_DATABASES, fb_path=FB_DATABASE):
                 with read_only(path) as conn:
                     for ids in _batches(x_ids):
                         sql = '''SELECT l.queue_id,l.account_id,l.status,l.unknown_outcome,
-                            l.x_post_id AS post_id,l.published_at AS published_at,l.short_url,
+                            l.x_post_id AS post_id,l.published_at AS published_at,l.short_url,l.post_text,
                             q.material_id FROM x_post_publish_log l JOIN x_post_queue q ON q.id=l.queue_id
                             WHERE l.queue_id IN (%s)''' % ','.join('?' for _ in ids)
                         for row in conn.execute(sql, ids):
@@ -98,7 +104,8 @@ def collect_publications(links, day, x_paths=X_DATABASES, fb_path=FB_DATABASE):
             with read_only(fb_path) as conn:
                 for ids in _batches(fb_ids):
                     sql = '''SELECT id,page_id AS account_id,status,unknown_outcome,
-                        graph_post_id AS post_id,completed_at_utc AS published_at,short_url,material_id
+                        graph_post_id AS post_id,completed_at_utc AS published_at,short_url,material_id,
+                        message_text AS post_text
                         FROM fb_auto_task WHERE id IN (%s)''' % ','.join('?' for _ in ids)
                     for row in conn.execute(sql, ids):
                         native.setdefault('fb:auto:' + str(row['id']), []).append(dict(row))
@@ -112,9 +119,9 @@ def collect_publications(links, day, x_paths=X_DATABASES, fb_path=FB_DATABASE):
         matches = [r for r in native.get(key, [])
                    if str(r['account_id']) == str(link.get('account_id'))
                    and str(r['material_id']) == str(link.get('material_id'))
-                   and r['short_url'] == link.get('short_url')]
+                   and link_in_post(r, link)]
         if not matches:
-            if any(r['status'] == 'published' for r in native.get(key, [])):
+            if any(r['status'] == 'published' and utc_day(r['published_at']) == day for r in native.get(key, [])):
                 issues.add(CHANNELS.get(link.get('platform'), '未知渠道') + '存在待核对的任务与短链关联')
             continue
         for row in matches:
@@ -194,7 +201,7 @@ def assemble(day, effects, links, publications, warnings, institution):
                    orders_synced=bool(effects and effects['complete_order_days'] == 1),
                    ads_synced=bool(effects and effects['complete_ad_days'] == 1),
                    clicks_covered=bool(effects and effects.get('click_coverage_from', '9999') <= day),
-                   publications_complete=not warnings)
+                   publications_complete=not any(not w.startswith('收益查询未完成') for w in warnings))
     notices = list(warnings)
     if not quality['orders_synced']:
         notices.append('充值／退款数据未完整同步，金额仅为已读取部分，不代表零收入')

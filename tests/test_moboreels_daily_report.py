@@ -25,9 +25,9 @@ class DailyReportTests(unittest.TestCase):
         with closing(sqlite3.connect(self.x)) as c, c:
             c.executescript('CREATE TABLE x_post_queue(id INTEGER,material_id TEXT);'
                 'CREATE TABLE x_post_publish_log(queue_id INTEGER,account_id INTEGER,status TEXT,unknown_outcome INTEGER,'
-                'x_post_id TEXT,published_at TEXT,short_url TEXT);')
+                'x_post_id TEXT,published_at TEXT,short_url TEXT,post_text TEXT);')
             c.execute('INSERT INTO x_post_queue VALUES(1,\'4\')')
-            c.execute('INSERT INTO x_post_publish_log VALUES(1,3,\'published\',0,\'123\',\'2026-11-22T12:00:00Z\',?)',
+            c.execute('INSERT INTO x_post_publish_log VALUES(1,3,\'published\',0,\'123\',\'2026-11-22T12:00:00Z\',?,\'\')',
                       (self.link['short_url'],))
 
     def facts(self, links=None):
@@ -58,6 +58,15 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(facts, [])
         self.assertTrue(issues)
 
+    def test_mobo_url_in_frozen_post_text_with_legacy_tracking_url(self):
+        with closing(sqlite3.connect(self.x)) as c, c:
+            c.execute('UPDATE x_post_publish_log SET short_url=\'https://legacy/s/1\',post_text=?',
+                      ('Watch ' + self.link['short_url'] + ' now',))
+        self.assertEqual(len(self.facts()[0]), 1)
+        with closing(sqlite3.connect(self.x)) as c, c:
+            c.execute('UPDATE x_post_publish_log SET post_text=?', (self.link['short_url'] + 'DIFFERENT',))
+        self.assertEqual(self.facts()[0], [])
+
     def test_nonpublic_links_and_future_links_do_not_count(self):
         self.assertEqual(self.facts([dict(self.link, purpose='manual_home')])[0], [])
         self.assertEqual(self.facts([dict(self.link, created_at='2026-11-23T00:00:00Z')])[0], [])
@@ -71,9 +80,9 @@ class DailyReportTests(unittest.TestCase):
         fb = self.root / 'fb.db'
         with closing(sqlite3.connect(fb)) as c, c:
             c.execute('CREATE TABLE fb_auto_task(id INTEGER,page_id TEXT,status TEXT,unknown_outcome INTEGER,'
-                      'graph_post_id TEXT,completed_at_utc TEXT,short_url TEXT,material_id TEXT)')
+                      'graph_post_id TEXT,completed_at_utc TEXT,short_url TEXT,material_id TEXT,message_text TEXT)')
             c.execute('INSERT INTO fb_auto_task VALUES(1,\'3\',\'published\',0,\'3_45\','
-                      '\'2026-11-23T07:59:59+08:00\',?,\'4\')', (self.link['short_url'],))
+                      '\'2026-11-23T07:59:59+08:00\',?,\'4\',\'\')', (self.link['short_url'],))
         facts, issues = self.facts([dict(self.link, platform='fb', task_id='fb:auto:1')])
         self.assertEqual(len(facts), 1)
         self.assertEqual(issues, [])
