@@ -271,7 +271,7 @@ def fetch_fx_rows(report, month):
     columns = ("dt", "account", "currency", "exchange_rate", "last_exchange_rate", "spend", "spend_usd")
     sql = """
     SELECT dt,account_id,currency,exchange_rate,last_exchange_rate,spend,spend_usd
-    FROM kunlunads_dev.ads_platform_report_items FORCE INDEX(pdpcic)
+    FROM kunlunads_dev.ads_platform_report_items
     WHERE platform=1 AND dt BETWEEN %s AND %s
       AND product IN ('OPay','OPay NGN','OPayPakistan','OPay Pakistan')
     ORDER BY dt,account_id,id

@@ -64,6 +64,25 @@ python3 opay_excellent_creatives.py --backfill --from-month 2026-01 --stage fina
 
 终版默认冻结。只有经过审计的历史修正才使用 `--rebuild`。`latest.json` 是公开提交点，任何失败都不得替换上一成功版本。
 
+### 汇率查询索引兼容修复（2026-11-23）
+
+2026-11-02 的月度任务失败，公开报表停在 2026-09。重现发现 Google
+历史汇率查询的 `FORCE INDEX(pdpcic)` 已失效，MySQL 返回 1176。移除该
+索引提示，保留平台、OPay 产品、月份过滤及 120 秒查询超时，由数据库
+选择现有索引。线上只读 `EXPLAIN` 选择 `report` 的 range 扫描；2026-10
+查询返回 837 行，耗时约 3.3 秒。素材评优、汇率核对、终版冻结和调度规则不变。
+
+部署前备份 current 目标、当前发布入口及 SQLite 一致性副本，GitHub 提交后
+切换独立报表 release。重新运行 `opay-excellent-creatives-refresh@final.service`
+补齐 2026-10；仅成功完成后发布，不重建 1–9 月终版。验证新 manifest、10 月
+真实页面/CSV 与原有月份快照哈希。定时器仍为北京时间每月 2 日 08:00。
+
+代码回滚：确认该报表刷新任务已自然结束，将 current 原子恢复至
+`/opt/opay-excellent-creatives/releases/207f42e1a6af2e53a1a507ba8b0b6f2d84c96ff6`。
+保留当前缓存、快照与已发布结果，不恢复旧数据库。旧代码仍包含失效的索引提示，
+回滚后再次刷新前须重新处理该查询。部署、备份与验收记录存放于
+`/mnt/data-disk/opay-excellent-creatives/backups/20261123-october-refresh/`。
+
 ## 当前 Google CPC 隔离升级（2026-08-27，生产结果待补）
 
 新默认缓存为`cache/opay-excellent-creatives-google-picvid-1000.sqlite3`，从现行`google-cpc.sqlite3`一致性克隆，旧缓存/快照/媒体保留；显式CLI/env路径优先级不变。Google-only历史重建仍需`--refresh --rebuild`。详情显示CPC/基准来源/A暂停原因，CSV原31列不变、末尾追加2个CPC及CTR口径列。
