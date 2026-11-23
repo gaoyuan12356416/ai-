@@ -1,0 +1,19 @@
+[Unit]
+Description=Independent private control channel for the existing shared SQL budget
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Slice=ai-backend-offload-read.slice
+ExecStart=/usr/bin/ssh -NT -i /etc/ai-backend-offload/tunnel_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ai-backend-offload/known_hosts -L 127.0.0.1:19968:127.0.0.1:19970 root@43.166.187.96
+Restart=always
+RestartSec=10
+Nice=15
+CPUQuota=20%
+MemoryLimit=128M
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

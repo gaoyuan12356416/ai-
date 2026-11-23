@@ -1,7 +1,7 @@
 [Unit]
 Description=Single bounded Hong Kong Campaign Copy refresh
-After=network-online.target ai-backend-offload-sql-tunnel.service
-Wants=network-online.target
+After=network-online.target ai-backend-offload-sql-tunnel.service ai-backend-offload-sql-control-tunnel.service
+Wants=network-online.target ai-backend-offload-sql-control-tunnel.service
 
 [Service]
 Type=oneshot
