@@ -69,8 +69,7 @@ def remove_locked():
             return saved
         if LEGACY in before:
             if layout(db)!=AFTER:raise RuntimeError('wrong table namespace')
-            c.execute(f'SELECT DISTINCT profile_version FROM {LEGACY} ORDER BY profile_version')
-            if [r[0] for r in c.fetchall()]!=frozen['versions']:raise RuntimeError('source changed after archive')
+            if versions_on(c,LEGACY)!=frozen['versions']:raise RuntimeError('source changed after archive')
             for snapshot in m['versions']:
                 n=one(c,f'SELECT COUNT(*) FROM {LEGACY} WHERE profile_version=%s',(snapshot['version'],))[0]
                 if n!=snapshot['rows']:raise RuntimeError('source count changed for '+snapshot['version'])

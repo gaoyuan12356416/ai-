@@ -129,8 +129,7 @@ def freeze():
         if facts['version']!=v:raise RuntimeError('post-cut comparison is not current')
         before=json.loads((ROOT/'qa/metrics-before.json').read_text());after=json.loads((ROOT/'qa/metrics-after.json').read_text())
         if before['recovery_pid']!=after['recovery_pid']:raise RuntimeError('review unrelated recovery worker change')
-        c.execute(f'SELECT DISTINCT profile_version FROM {LEGACY} ORDER BY profile_version')
-        versions=[x[0] for x in c.fetchall()]
+        versions=versions_on(c,LEGACY)
         if v!=versions[-1]:raise RuntimeError('legacy high-water mismatch')
         c.execute('SELECT table_name,data_length,index_length FROM information_schema.tables '
                   'WHERE table_schema=DATABASE() AND table_name IN (%s,%s,%s,%s)',(PUBLIC,LEGACY,STATE,STAGE))

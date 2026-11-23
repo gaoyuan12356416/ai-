@@ -228,7 +228,10 @@ def references(db,versions,index):
 
 def confirm_references(db,versions,base):
     temp=base/'task-references.partial'
-    with gzip.open(temp,'wt',encoding='utf-8') as index:pairs,counts,expected=references(db,versions,index)
+    with db.cursor() as c:c.execute('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY')
+    try:
+        with gzip.open(temp,'wt',encoding='utf-8') as index:pairs,counts,expected=references(db,versions,index)
+    finally:db.rollback()
     temp.replace(base/'task-references.jsonl.gz')
     found=absent=0;unexplained=[]
     by_version={}
@@ -263,8 +266,7 @@ def run(source_rate=24*1024**2,transfer_rate=4*1024**2):
         with closing(connect_reader(cfg)) as db,db.cursor() as c:
             if layout(db)!=AFTER:raise RuntimeError('frozen source identity changed')
             ddl=one(c,'SHOW CREATE TABLE '+LEGACY)[1]
-            c.execute(f'SELECT DISTINCT profile_version FROM {LEGACY} ORDER BY profile_version')
-            if [r[0] for r in c.fetchall()]!=versions:raise RuntimeError('frozen version inventory changed')
+            if versions_on(c,LEGACY)!=versions:raise RuntimeError('frozen version inventory changed')
         prefix='CREATE TABLE `'+LEGACY+'`'
         if not ddl.startswith(prefix):raise RuntimeError('unexpected frozen DDL')
         ddl='CREATE TABLE `'+PUBLIC+'`'+ddl[len(prefix):]

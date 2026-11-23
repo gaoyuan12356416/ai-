@@ -75,6 +75,18 @@ def original(c,table):
     return shape(c,table)==('profile_version','page_id')
 
 
+def versions_on(c,table):
+    checked_table(table)
+    versions=[]
+    after=''
+    # One range seek per version keeps the legacy inventory independent of the size of its JSON rows.
+    while True:
+        row=one(c,f'SELECT profile_version FROM {table} WHERE profile_version>%s ORDER BY profile_version LIMIT 1',(after,))
+        if row is None:return versions
+        after=row[0]
+        versions.append(after)
+
+
 def receipt(version):
     p=PORTRAITS/(checked(version)+'.receipt.json')
     proof=json.loads(p.read_text())
@@ -106,7 +118,7 @@ def baseline(db):
         c.execute('SELECT table_name,data_length,index_length FROM information_schema.tables WHERE table_schema=DATABASE() '
                   'AND table_name LIKE %s',(PUBLIC+'%',))
         sizes=c.fetchall()
-        c.execute('SELECT DISTINCT profile_version FROM '+PUBLIC+' ORDER BY profile_version');versions=[r[0] for r in c.fetchall()]
+        versions=versions_on(c,PUBLIC)
     units={}
     for unit in ['fb-page-portrait.service','fb-page-portrait-refresh.timer','fb-page-portrait-refresh.service',
                  'fb-page-assignment.service','meta-page-recovery-worker.service']:
