@@ -4,6 +4,7 @@ from contextlib import closing
 from datetime import datetime, timezone, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -57,13 +58,21 @@ def main():
                 store = object.__new__(XAutoPostStore)
                 store.db_path = str(AUTO)
                 store._now_fn = lambda: datetime.now(timezone.utc)
-                row = store.transition_task(args.task_id, 'retry_wait', expected_statuses={'preparing'},
-                    claim_token=task['claim_token'], updates=dict(claim_phase='prepare', claim_worker='',
-                        claim_token='', lease_expires_at_utc='',
-                        next_attempt_at_utc=datetime.now(timezone.utc)+timedelta(minutes=2)),
-                    event_type='task_prepare_owner_recovered',
-                    message='Ended preparation request returned to its original retry; selected material and execution identity retained',
-                    details=proof)
+                owner = AUTO.stat()
+                original_uid, original_gid = os.geteuid(), os.getegid()
+                try:
+                    os.setegid(owner.st_gid)
+                    os.seteuid(owner.st_uid)
+                    row = store.transition_task(args.task_id, 'retry_wait', expected_statuses={'preparing'},
+                        claim_token=task['claim_token'], updates=dict(claim_phase='prepare', claim_worker='',
+                            claim_token='', lease_expires_at_utc='',
+                            next_attempt_at_utc=datetime.now(timezone.utc)+timedelta(minutes=2)),
+                        event_type='task_prepare_owner_recovered',
+                        message='Ended preparation request returned to its original retry; selected material and execution identity retained',
+                        details=proof)
+                finally:
+                    os.seteuid(original_uid)
+                    os.setegid(original_gid)
                 assert row.material_id == task['material_id'] and row.account_id == task['account_id']
             print(json.dumps(dict(proven=True, applied=args.apply, task_id=args.task_id, preserved_material=task['material_id'])))
 
