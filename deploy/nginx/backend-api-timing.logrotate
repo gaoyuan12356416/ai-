@@ -1,0 +1,14 @@
+/mnt/data-disk/backend-performance/api-timing.log {
+    daily
+    rotate 7
+    maxsize 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 nginx nginx
+    sharedscripts
+    postrotate
+        /bin/systemctl kill --kill-who=main --signal=USR1 nginx.service >/dev/null 2>&1 || true
+    endscript
+}

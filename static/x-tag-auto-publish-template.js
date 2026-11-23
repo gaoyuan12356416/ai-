@@ -774,7 +774,7 @@
       ui.byId("retryEditorLoad").addEventListener("click", () => location.reload());
       // Fetch the small configuration immediately; account options are independent.
       const templateRequest = loadTemplate();
-      void loadAccountOptions();
+      const accountRequest = loadAccountOptions();
       try {
         const templateResult = await templateRequest;
         if (templateId) {
@@ -790,7 +790,9 @@
         ui.hide(ui.byId("editorLoading"));
         ui.show(ui.byId("editorContent"));
         ui.byId("saveTemplate").disabled = !state.accountsLoaded;
-        // The larger revenue snapshot must not compete with initial configuration.
+        // Show the editor first; finish account options before fetching the larger
+        // optional metrics snapshot so both lists do not compete for bandwidth.
+        await accountRequest;
         void loadAccountMetrics();
       } catch (error) {
         ui.setText(ui.byId("editorLoadingMessage"), error.message || "模板配置读取失败，请重试。", "");
