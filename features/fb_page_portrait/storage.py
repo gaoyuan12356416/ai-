@@ -91,6 +91,7 @@ def write(data,env,reader,*,create_table=False,table=TABLE):
 
 
 def publish(data,proof,root=ROOT,*,page_items=None):
+    from features.fb_page_current import selection
     root = Path(root);root.mkdir(parents=True,exist_ok=True)
     version = data['meta']['version']
     count=len(data['pages']) if page_items is None else data['meta']['page_count']
@@ -98,10 +99,14 @@ def publish(data,proof,root=ROOT,*,page_items=None):
     # Preserve streaming recovery and validate every committed payload before
     # changing the tiny pointer. Readers query the authoritative MySQL version.
     seen=set()
-    for pid,p in (data['pages'].items() if page_items is None else page_items):
-        assert pid not in seen;seen.add(pid)
-        assert hashlib.sha256(encoded(p).encode()).hexdigest()==proof['payload_hashes'][pid]
-    assert len(seen)==count and seen==set(proof['payload_hashes'])
+    cache_path = selection.FILE if root == Path(ROOT) else root/'selection'/'current.sqlite3'
+    with selection.alongside(data['meta'],proof,cache_path) as observe:
+        for pid,p in (data['pages'].items() if page_items is None else page_items):
+            assert pid not in seen;seen.add(pid)
+            digest=hashlib.sha256(encoded(p).encode()).hexdigest()
+            assert digest==proof['payload_hashes'][pid]
+            observe(pid,p,digest)
+        assert len(seen)==count and seen==set(proof['payload_hashes'])
     if (root/'current.json').exists():
         current=json.loads((root/'current.json').read_text())
         if current['version']!=version: atomic_json(root/'previous.json',current)

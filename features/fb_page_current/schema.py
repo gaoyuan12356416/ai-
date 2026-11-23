@@ -26,4 +26,3 @@ def install(db,primary,exists):
         c.execute(HEAD_DDL)
         c.execute(STAGE_DDL)
         c.execute(f"INSERT IGNORE INTO {STATE} VALUES(1,'',NULL,NULL,0,'','',0,0,0,'{{}}')")
-

@@ -104,7 +104,15 @@ def export_version(db,source,v,base,*,proof=None,rate=4*1024**2):
         if count!=n or not n:raise RuntimeError('frozen row count mismatch')
     if proof and (proof['payload_hashes']!=published_hashes or amount!=[proof[k] for k in MONEY]):
         raise RuntimeError('stored historical publication proof differs')
-    manifest=dict(version=v,rows=n,amounts=amount,meta=meta,parts=parts,source_receipt_checked=bool(proof),at=stamp())
+    receipt_hash=None
+    if proof:
+        original=dest/'publication-receipt.json.gz'
+        temp=dest/'publication-receipt.partial'
+        temp.write_bytes(gzip.compress(encoded(proof).encode(),compresslevel=4,mtime=0))
+        temp.replace(original)
+        receipt_hash=file_hash(original)
+    manifest=dict(version=v,rows=n,amounts=amount,meta=meta,parts=parts,
+                  source_receipt_checked=bool(proof),source_receipt_sha256=receipt_hash,at=stamp())
     atomic(marker,manifest)
     return manifest
 
@@ -127,6 +135,9 @@ def insert_archived(c,table,records,base):
 
 def restore_version(db,manifest,base,ddl):
     v=manifest['version'];dest=base/'versions'/v;done=dest/'restored.json'
+    if manifest.get('source_receipt_sha256'):
+        if file_hash(dest/'publication-receipt.json.gz')!=manifest['source_receipt_sha256']:
+            raise RuntimeError('archived publication receipt checksum mismatch')
     if done.exists():
         prior=json.loads(done.read_text())
         if prior['manifest_sha256']!=file_hash(dest/'snapshot.json'):raise RuntimeError('restored manifest changed')
@@ -160,7 +171,7 @@ def restore_version(db,manifest,base,ddl):
     atomic(done,result);return result
 
 
-def references(db,versions):
+def references(db,versions,index):
     pairs=set();counts={'assignment':0,'recovery':0}
     last=None
     with db.cursor() as c:
@@ -172,20 +183,27 @@ def references(db,versions):
             rows=c.fetchall()
             if not rows:break
             last=rows[-1][:2]
-            for _,_,p,v in rows:
-                if v in versions and p and PAGE.fullmatch(str(p)):pairs.add((v,str(p)));counts['assignment']+=1
+            for task,item,p,v in rows:
+                if v in versions and p and PAGE.fullmatch(str(p)):
+                    pairs.add((v,str(p)));counts['assignment']+=1
+                    index.write(encoded(dict(source='assignment',task=str(task),item=item,version=v,page=str(p)))+'\n')
     with closing(sqlite3.connect('file:/mnt/data-disk/meta-page-recovery/state.sqlite3?mode=ro',uri=True,timeout=3)) as local:
-        for (raw,) in local.execute('SELECT proof FROM jobs WHERE proof IS NOT NULL'):
+        for task,raw in local.execute('SELECT id,proof FROM jobs WHERE proof IS NOT NULL'):
             try:o=json.loads(raw)
             except (TypeError,ValueError):continue
             v=o.get('profile_version');v=v.get('version') if isinstance(v,dict) else v
             p=str(o.get('new_page_id') or '')
-            if v in versions and PAGE.fullmatch(p):pairs.add((v,p));counts['recovery']+=1
+            if v in versions and PAGE.fullmatch(p):
+                pairs.add((v,p));counts['recovery']+=1
+                index.write(encoded(dict(source='recovery',task=str(task),version=v,page=p))+'\n')
     return pairs,counts
 
 
 def confirm_references(db,versions,base):
-    pairs,counts=references(db,versions);found=absent=0
+    temp=base/'task-references.partial'
+    with gzip.open(temp,'wt',encoding='utf-8') as index:pairs,counts=references(db,versions,index)
+    temp.replace(base/'task-references.jsonl.gz')
+    found=absent=0
     by_version={}
     for v,p in pairs:by_version.setdefault(v,[]).append(p)
     with db.cursor() as c:
@@ -238,12 +256,15 @@ def run():
                 f=Path(root)/name;size+=f.stat().st_size
                 if f.parent.parent==base/'blobs':blobs+=1
         out=dict(at=stamp(),cutoff=frozen['version'],versions=snapshots,rows=total,references=ref,
-                 schema_sha256=file_hash(base/'schema.sql'),compressed_bytes=size,unique_detail_blobs=blobs)
+                 schema_sha256=file_hash(base/'schema.sql'),task_reference_sha256=file_hash(base/'task-references.jsonl.gz'),
+                 compressed_bytes=size,unique_detail_blobs=blobs)
         atomic(base/'manifest.json',out)
+        # The external receipt includes the manifest itself and excludes transient progress and lock files.
+        exact_bytes=sum(f.stat().st_size for f in (base/'schema.sql',base/'manifest.json',base/'task-references.jsonl.gz'))
+        exact_bytes+=sum(f.stat().st_size for folder in ('versions','blobs') for f in (base/folder).rglob('*') if f.is_file())
         atomic(ROOT/'history-ready.json',dict(at=stamp(),versions=len(versions),rows=total,references=ref,
-               compressed_bytes=size,manifest_sha256=file_hash(base/'manifest.json')))
+               compressed_bytes=exact_bytes,manifest_sha256=file_hash(base/'manifest.json')))
         return {k:v for k,v in out.items() if k!='versions'}
 
 
 if __name__=='__main__':print(encoded(run()),flush=True)
-

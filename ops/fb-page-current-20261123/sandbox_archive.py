@@ -43,4 +43,3 @@ def dict_all(c,v):
 
 
 if __name__=='__main__':main()
-

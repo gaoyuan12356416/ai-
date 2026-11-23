@@ -8,8 +8,28 @@ from unittest.mock import Mock
 from features.fb_page_current.common import encoded,pack,sha
 from features.fb_page_current.pins import Pins,session
 from features.fb_page_current.read import SelectionCache,request
+from features.fb_page_current.selection import Builder,load
 
 class CurrentRead(unittest.TestCase):
+    def test_cold_selection_uses_verified_projection_and_cannot_replace_newer_release(self):
+        old='20261123T060000000000Z';v='20261123T070000000000Z'
+        p=dict(page_id='101',status='ready',audiences=[dict(key='a',children=[dict(key='t',share=4,dramas=['big'])])])
+        h=sha(encoded(p))
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'selection.sqlite3'
+            for version in (v,old):
+                proof=dict(version=version,verified_rows=1,payload_hashes={'101':h})
+                with closing(Builder(dict(version=version),proof,path)) as builder:
+                    with self.assertRaises(ValueError):builder.add('101',p,'bad')
+                    builder.add('101',p,h);builder.finish()
+            self.assertIsNone(load(old,('101',),path))
+            reader=Mock()
+            items,meta,warnings=SelectionCache(path).load(reader,v,('101','102'))
+            self.assertEqual(items,{'101':dict(page_id='101',status='ready',audiences=[dict(key='a',children=[dict(key='t',share=4)])])})
+            self.assertEqual((meta,warnings),({'version':v},[]))
+            self.assertEqual(p['audiences'][0]['children'][0]['dramas'],['big'])
+            reader.query.assert_not_called()
+
     def test_replicated_new_version_is_not_stored_under_old_hint(self):
         v1='20261123T060000000000Z';v2='20261123T070000000000Z'
         raw=encoded(dict(page_id='101',status='ready',audiences=[])).encode()
@@ -42,4 +62,3 @@ class CurrentRead(unittest.TestCase):
             self.assertIsNone(pins.get('101',v,b))
 
 if __name__=='__main__':unittest.main()
-

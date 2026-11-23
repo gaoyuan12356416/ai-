@@ -36,4 +36,3 @@ def lookup(v,p,base=HISTORY):
                     return raw,json.loads(row[8])
             break
     return None,json.loads(m['meta'])
-

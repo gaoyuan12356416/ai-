@@ -14,6 +14,7 @@ from features.fb_page_current.read import Gate,SelectionCache,request
 from features.fb_page_current.api_store import Store
 from features.fb_page_current.pins import Pins
 from features.fb_page_current.common import digest_rows
+from features.fb_page_current import selection
 from features.fb_page_portrait.server import select,PREFIX
 
 QA=ROOT/'qa'
@@ -97,6 +98,23 @@ def fields(db,table,v,ids):
     return output
 
 
+def prepare_selection():
+    v=current();proof=receipt(v)
+    if (selection.inspect() or {}).get('version')==v:
+        return dict(version=v,available=True,bytes=selection.FILE.stat().st_size)
+    with closing(connect_reader(env())) as db,db.cursor() as c:
+        # Exact latest legacy version is immutable. HOT needs a transaction so every chunk is from one release.
+        if not original(c,PUBLIC):c.execute('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY')
+        meta=json.loads(one(c,f'SELECT meta_json FROM {PUBLIC} WHERE profile_version=%s LIMIT 1',(v,))[0])
+        with closing(selection.Builder(meta,proof)) as builder:
+            for pid,summary,raw,digest,amounts,ts in source_items(db,PUBLIC,v,proof['payload_hashes']):
+                if sha(raw)!=digest:raise ValueError('replica detail checksum differs')
+                builder.add(pid,json.loads(raw),digest)
+            builder.finish()
+        db.rollback()
+    return dict(version=v,rows=proof['verified_rows'],bytes=selection.FILE.stat().st_size)
+
+
 def compare():
     cfg=env()
     with closing(connect_reader(cfg)) as db,db.cursor() as c:
@@ -113,7 +131,6 @@ def compare():
         ids=list(dict.fromkeys(str(d) for d, in c.fetchall()))[:7]
         if not ids:raise RuntimeError('no representative drama tickets')
         # Use the actual selector and freeze all other business inputs exactly once.
-        from features.fb_page_assignment import sources as new_sources
         from features.fb_page_assignment.runtime import environment
         from features.fb_page_assignment.selector import assign
         prod=Path('/opt/fb-page-assignment/current/features/fb_page_assignment/sources.py')
@@ -126,13 +143,33 @@ def compare():
                 return live.reader.query([s.replace('ads_ai.'+PUBLIC,'ads_ai.'+old) for s in sql])
         legacy_reader=OldReader()
         start=time.monotonic()
-        prior_profiles,prior_meta,prior_warnings=prior.mysql_profiles(legacy_reader,v,pages)
-        old_ms=(time.monotonic()-start)*1000
+        old_error=None
+        try:
+            prior_profiles,prior_meta,prior_warnings=prior.mysql_profiles(legacy_reader,v,pages)
+            old_ms=round((time.monotonic()-start)*1000,2)
+        except prior.SourceError as exc:
+            # Record the genuine legacy failure, then replay its identical implementation in smaller immutable slices.
+            old_error=exc.code;old_ms=None;prior_profiles={};prior_warnings=[];prior_meta=None
+            for part in chunks(pages,24):
+                found,meta,notes=prior.mysql_profiles(legacy_reader,v,part)
+                if prior_meta and prior_meta!=meta:raise RuntimeError('split old reference read crossed versions')
+                prior_profiles.update(found);prior_warnings.extend(notes);prior_meta=meta
         cache=SelectionCache()
+        class Counted:
+            calls=0
+            def query(self,sql):
+                self.calls+=1
+                return live.reader.query(sql)
+        observed=Counted()
         start=time.monotonic()
-        new_profiles,new_meta,new_warnings=cache.load(live.reader,v,pages,table=new)
+        new_profiles,new_meta,new_warnings=cache.load(observed,v,pages,table=new)
         cold=(time.monotonic()-start)*1000
-        start=time.monotonic();cache.load(live.reader,v,pages,table=new);warm=(time.monotonic()-start)*1000
+        start=time.monotonic();cache.load(observed,v,pages,table=new);warm=(time.monotonic()-start)*1000
+        if observed.calls:raise RuntimeError('expected verified selection file for the compared version')
+        subset=pages[:9]
+        fallback=SelectionCache(selection_path=None).load(live.reader,v,subset,table=new)
+        if fallback!=({pid:prior_profiles[pid] for pid in subset if pid in prior_profiles},prior_meta,[]):
+            raise RuntimeError('selection SQL fallback differs')
         if (prior_profiles,prior_meta,prior_warnings)!=(new_profiles,new_meta,new_warnings) or not new_profiles:
             raise RuntimeError('selection inputs differ or missing')
         results=assign(ids,data['dramas'],data['pages'],prior_profiles)
@@ -144,13 +181,13 @@ def compare():
             if (left,lmeta)!=(right,rmeta):raise RuntimeError('API response differs')
     fact=dict(at=stamp(),version=v,old=old,new=new,rows=len(a),amounts=proof['paid_cents'],selection_items=len(ids),
               candidate_pages=len(pages),profiled_candidates=len(new_profiles),result_hash=sha(encoded(results)),
-              old_cold_ms=round(old_ms,2),new_cold_ms=round(cold,2),new_warm_ms=round(warm,2),api_sample=len(sample))
+              totals={k:proof[k] for k in MONEY},old_cold_ms=old_ms,old_error=old_error,new_cold_ms=round(cold,2),
+              new_warm_ms=round(warm,2),selection_sql_calls=observed.calls,sql_fallback_pages=len(subset),api_sample=len(sample))
     atomic(QA/('compare-'+new+'.json'),fact);return fact
 
 
 if __name__=='__main__':
-    ps=argparse.ArgumentParser();ps.add_argument('action',choices=['start-pin','finish-pin','compare','metrics']);ps.add_argument('--label',default='before')
+    ps=argparse.ArgumentParser();ps.add_argument('action',choices=['start-pin','finish-pin','compare','metrics','prepare-selection']);ps.add_argument('--label',default='before')
     args=ps.parse_args();disk();QA.mkdir(exist_ok=True)
-    run={'start-pin':start_pin,'finish-pin':finish_pin,'compare':compare,'metrics':lambda:snapshot_metrics(args.label)}
+    run={'start-pin':start_pin,'finish-pin':finish_pin,'compare':compare,'metrics':lambda:snapshot_metrics(args.label),'prepare-selection':prepare_selection}
     print(encoded(run[args.action]()),flush=True)
-

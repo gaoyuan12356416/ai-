@@ -74,4 +74,3 @@ class Bound:
                 for t in a['children']:
                     if a['key']+'/'+t['key']==path:dramas=t['dramas'];break
         return dict(items=dramas[(page-1)*50:page*50],page=page,page_size=50,total=len(dramas),version=version)
-

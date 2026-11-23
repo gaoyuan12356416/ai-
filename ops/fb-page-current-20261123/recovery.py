@@ -8,12 +8,21 @@ from cutover import AFTER,BEFORE,HOT,ORIG,layout,transition
 from history_archive import HISTORY,file_hash,insert_archived,archived_rows
 from features.fb_page_current.mirror import legacy
 from features.fb_page_current.common import read_config
-from verify import compare
+from verify import fields
 
 
 def allocated(c):
     c.execute('SELECT table_name,data_length,index_length FROM information_schema.tables WHERE table_schema=DATABASE()')
     return {r[0]:int(r[1] or 0)+int(r[2] or 0) for r in c.fetchall()}
+
+
+def shared_allocation(c):
+    per_table=bool(one(c,'SELECT @@innodb_file_per_table')[0])
+    c.execute("SELECT SUM(TOTAL_EXTENTS*EXTENT_SIZE),SUM(FREE_EXTENTS*EXTENT_SIZE) FROM information_schema.FILES "
+              "WHERE ENGINE='InnoDB' AND TABLESPACE_NAME='innodb_system'")
+    total,available=c.fetchone()
+    return dict(file_per_table=per_table,system_bytes=None if total is None else int(total),
+                system_free_bytes=None if available is None else int(available),at=stamp())
 
 
 def manifest():
@@ -22,6 +31,8 @@ def manifest():
     m=json.loads((HISTORY/'manifest.json').read_text())
     if file_hash(HISTORY/'schema.sql')!=m['schema_sha256'] or marker['rows']!=m['rows']:
         raise RuntimeError('backup schema or count mismatch')
+    if file_hash(HISTORY/'task-references.jsonl.gz')!=m['task_reference_sha256']:
+        raise RuntimeError('backup task index checksum mismatch')
     for v in m['versions']:
         folder=HISTORY/'versions'/checked(v['version'])
         if file_hash(folder/'snapshot.json')!=v['manifest_sha256'] or file_hash(folder/'restored.json')!=v['restore_sha256']:
@@ -36,8 +47,13 @@ def remove_locked():
     frozen=json.loads((ROOT/'history-frozen.json').read_text())
     if frozen['versions']!=[r['version'] for r in m['versions']]:raise RuntimeError('backup scope differs from frozen inventory')
     intent=ROOT/'history-drop-intent.json'
+    finished=ROOT/'history-dropped.json'
     with closing(connect_reader(cfg)) as db,db.cursor() as c:
         before=allocated(c)
+        if finished.exists() and LEGACY not in before and shape(c,PUBLIC)==HOT:
+            saved=json.loads(finished.read_text())
+            if saved['manifest_sha256']!=ready['manifest_sha256']:raise RuntimeError('prior drop receipt has a different backup')
+            return saved
         if LEGACY in before:
             if layout(db)!=AFTER:raise RuntimeError('wrong table namespace')
             c.execute(f'SELECT DISTINCT profile_version FROM {LEGACY} ORDER BY profile_version')
@@ -45,7 +61,8 @@ def remove_locked():
             if one(c,f'SELECT COUNT(*) FROM {LEGACY}')[0]!=m['rows']:raise RuntimeError('source count changed')
             if not intent.exists():
                 atomic(intent,dict(at=stamp(),name=LEGACY,cutoff=frozen['version'],manifest_sha256=ready['manifest_sha256'],
-                    old_bytes=before[LEGACY],schema_before=sum(before.values()),current_bytes=before[PUBLIC]))
+                    old_bytes=before[LEGACY],schema_before=sum(before.values()),current_bytes=before[PUBLIC],
+                    shared=shared_allocation(c)))
             event=json.loads(intent.read_text())
             if event['manifest_sha256']!=ready['manifest_sha256']:raise RuntimeError('drop intent backup differs')
             with closing(writer(cfg)) as w,w.cursor() as wc:wc.execute(f'DROP TABLE {LEGACY}')
@@ -60,6 +77,7 @@ def remove_locked():
                archive_versions=len(m['versions']),archive_bytes=ready['compressed_bytes'],
                dropped_table=LEGACY,dropped_table_allocated_bytes=event['old_bytes'],current_table_allocated_bytes=after[PUBLIC],
                schema_before=event['schema_before'],schema_after=sum(after.values()),schema_net_delta=event['schema_before']-sum(after.values()),
+               shared_before=event.get('shared'),shared_after=shared_allocation(c),
                current_head=current_state(ManualReader(db))['version'],sizes={k:after.get(k,0) for k in (PUBLIC,NEXT,STATE,STAGE)})
         atomic(ROOT/'history-dropped.json',output)
         return output
@@ -117,7 +135,12 @@ def rollback():
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         v=ensure_latest()
         if current()!=v:raise RuntimeError('newer version published, rerun to add it before rename')
-        compare()
+        with closing(connect_reader(cfg)) as db:
+            proof=receipt(v)
+            a=fields(db,PUBLIC,v,proof['payload_hashes'])
+            b=fields(db,LEGACY,v,proof['payload_hashes'])
+            if a!=b or set(a)!=set(proof['payload_hashes']):raise RuntimeError('rollback rows or sources differ')
+            atomic(ROOT/'qa/rollback-latest.json',dict(at=stamp(),version=v,rows=len(a)))
         result=transition(False)
     # The compatible readers can serve the append-only table and still have the sessions' frozen Page pages.
     restore_writer()
@@ -166,4 +189,3 @@ if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('action',choices=['remove','rollback','restore-version']);p.add_argument('--version')
     a=p.parse_args();disk()
     print(encoded(remove() if a.action=='remove' else rollback() if a.action=='rollback' else restore_reference(a.version)),flush=True)
-

@@ -59,13 +59,13 @@ def transition(forward):
         expected,desired=(BEFORE,AFTER) if forward else (AFTER,BEFORE)
         action='cutover' if forward else 'rollback'
         intent_file=ROOT/'switch-intent.json'
-        previous='shadow' if forward else 'live-mirror'
         v=current();rd=ManualReader(db)
         if (ROOT/'pending.json').exists():raise RuntimeError('pending current-row publish')
         if current_state(rd)['version']!=v:raise RuntimeError('source and current table versions differ')
         with db.cursor() as c:
             if layout(db)==expected:
-                facts=json.loads((ROOT/'qa'/('compare-'+(NEXT if forward else PUBLIC)+'.json')).read_text())
+                file=('compare-'+NEXT+'.json') if forward else 'rollback-latest.json'
+                facts=json.loads((ROOT/'qa'/file).read_text())
                 if facts['version']!=v:raise RuntimeError('run the focused field and selection comparison for the current version')
                 if forward:
                     natural(v,'shadow')
@@ -77,7 +77,10 @@ def transition(forward):
                 if intent_file.exists():
                     old=json.loads(intent_file.read_text())
                     if (old['action'],old['version'])!=(action,v):raise RuntimeError('conflicting DDL intent')
-                else:atomic(intent_file,dict(action=action,version=v,at=stamp()))
+                    previous=old['previous']
+                else:
+                    previous=read_config()
+                    atomic(intent_file,dict(action=action,version=v,at=stamp(),previous=previous))
                 # Both regular writers reject an unresolved DDL mode, leaving the published reader available.
                 mode('switching')
                 try:
@@ -136,4 +139,3 @@ if __name__=='__main__':
     arg=ps.parse_args().action;disk()
     result=freeze() if arg=='freeze' else transition(arg=='cutover')
     print(encoded({k:v for k,v in result.items() if k!='versions'}),flush=True)
-

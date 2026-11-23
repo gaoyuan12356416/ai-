@@ -23,4 +23,3 @@ def read(path):
         for line in gz:
             pid,summary,detail,digest,amounts,when,length=json.loads(line)
             yield pid,summary,None if detail is None else detail.encode(),digest,amounts,when,length
-

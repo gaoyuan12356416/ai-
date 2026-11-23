@@ -145,4 +145,3 @@ def digest_rows(reader,table,version,ids,stage=False):
             if row['id'] in actual:raise RuntimeError('duplicate page')
             actual[row['id']]=row
     return actual
-

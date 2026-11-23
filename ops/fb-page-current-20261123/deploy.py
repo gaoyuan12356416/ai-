@@ -76,4 +76,3 @@ if __name__=='__main__':
     ps=argparse.ArgumentParser();ps.add_argument('action',choices=['writer','build-api','build-assignment'])
     cmd=ps.parse_args().action
     print(encoded(writer_release() if cmd=='writer' else str(build(cmd[6:]))))
-

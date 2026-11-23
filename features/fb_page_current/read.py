@@ -7,6 +7,7 @@ import subprocess
 import threading
 
 from .common import PAGE,PUBLIC,checked,checked_table,chunks,literal,unpack
+from . import selection
 
 
 def scope(table,hint,exact=False):
@@ -71,9 +72,10 @@ class Gate:
 
 
 class SelectionCache:
-    def __init__(self):
+    def __init__(self,selection_path=selection.FILE):
         self.items=OrderedDict()
         self.lock=threading.Lock()
+        self.selection_path=selection_path
 
     def load(self,reader,version,ids,*,table=PUBLIC):
         key=(reader,table,version,ids)
@@ -81,21 +83,20 @@ class SelectionCache:
             if key in self.items:
                 self.items.move_to_end(key)
                 return self.items[key]
-        warnings=[]
-        def project(pid,raw):
-            p=json.loads(raw)
-            if not isinstance(p,dict) or p.get('page_id')!=pid:
-                warnings.append('profile_invalid:'+pid)
-                return None
-            for audience in p.get('audiences') or []:
-                for theme in audience.get('children') or []:theme.pop('dramas',None)
-            return {k:p.get(k) for k in ('page_id','status','audiences')}
-        projected,meta=request(reader,version,ids,detail=True,transform=project,table=table)
-        found={pid:value for pid,value in projected.items() if value is not None}
-        value=(found,meta,warnings)
+        value=selection.load(version,ids,self.selection_path) if self.selection_path is not None else None
+        if value is None:
+            warnings=[]
+            def project(pid,raw):
+                p=json.loads(raw)
+                if not isinstance(p,dict) or p.get('page_id')!=pid:
+                    warnings.append('profile_invalid:'+pid)
+                    return None
+                return selection.project(p)
+            projected,meta=request(reader,version,ids,detail=True,transform=project,table=table)
+            found={pid:value for pid,value in projected.items() if value is not None}
+            value=(found,meta,warnings)
         with self.lock:
-            key=(reader,table,meta['version'],ids)
+            key=(reader,table,value[1]['version'],ids)
             self.items[key]=value;self.items.move_to_end(key)
             if len(self.items)>8:self.items.popitem(last=False)
         return value
-

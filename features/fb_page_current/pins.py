@@ -70,4 +70,3 @@ class Pins:
                 db.executemany('DELETE FROM lease WHERE sid=?',[(sid,) for sid in part if sid not in valid])
             db.execute('DELETE FROM lease WHERE expires<=?',(now,))
             return db.execute('DELETE FROM payload WHERE NOT EXISTS (SELECT 1 FROM lease WHERE lease.v=payload.v AND lease.p=payload.p)').rowcount
-

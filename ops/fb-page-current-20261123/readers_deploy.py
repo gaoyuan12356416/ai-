@@ -153,4 +153,3 @@ if __name__=='__main__':
     elif action=='handoff':handoff()
     else:candidates();handoff(True)
     print(action,'complete',flush=True)
-

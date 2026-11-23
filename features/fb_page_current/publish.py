@@ -209,4 +209,3 @@ def model_items(data,projections):
         summary,_=projections(page)
         raw=encoded(page).encode()
         yield pid,encoded(summary),raw,sha(raw),[page[k] for k in MONEY],ts
-
