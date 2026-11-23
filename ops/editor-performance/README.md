@@ -87,3 +87,18 @@ python3 CHECKOUT/ops/editor-performance/static_update.py rollback --manifest STA
 - `catalog_probe.py --cache PATH --output PATH` 仅查询真实剧库并写入目录缓存和测量记录，不创建导入、解析、制作任务。
 - 发布用 `catalog_deploy.py install --repo CHECKOUT --base API_SHA --static-base STATIC_SHA --version SHA`。在线备份与原有在途检查后，仅切换独立 API 和相关 HTML/JS；预览进程、主后台及其他执行服务保持运行。
 - 回滚用 `catalog_deploy.py rollback --manifest MANIFEST`，恢复前一兼容 API/静态版本，保留全部素材、账本、5 集选择及新增的可丢弃目录缓存。
+
+## 制作进度与成片入口补充
+
+- 独立制作状态区放在播放器上方，依次显示素材准备、生成方案、排队制作、制作成片和成片完成。以子任务回执区分 `queued` 与 `running`，父批次 `rendering` 不再一律显示为正在合成；排队显示实际已等待时间，不编造编码百分比。
+- 活跃制作持续读取会话与子任务回执，不因素材进度 ETag 未变而停止核对。完成后保留绿色状态、会话完成卡和“查看成片／下载成片”；通知不切走正在观看的原片。
+- “本次成片”查看当前会话结果，“我的作品”保存全部历史结果、自动更新制作中任务，并提供预览和 MP4 下载。列表不为每张卡创建视频元素。发布文案按需展开，避免遮住播放器和下载按钮。
+- 前端阶段推导新增 4 项测试；浏览器通过真实隔离 API 验证排队、领取、完成自动更新，父批次不变时仍更新，作品弹窗保留搜索、出现下载链接，完成不重置原片 URL，刷新后仍可查看成片。合成测试下载返回 206 和附件响应头。
+- 仅发布 `video-editing-ai-production.js`、`video-editing-ai.css`、`video-editing-ai-studio.js`、`video-editing-ai.html`。`static_update.py` 支持显式 `--files`，保留旧文件并记录新增文件；回滚仅移除由本次创建且哈希仍匹配的新静态文件。安装/回滚与并行变更保护测试通过。
+
+```sh
+python3 CHECKOUT/ops/editor-performance/static_update.py install --repo CHECKOUT --base 4578f3b6993919c5b81d4947116d575917c9e7cc --version SHA --files video-editing-ai-production.js video-editing-ai.css video-editing-ai-studio.js video-editing-ai.html
+python3 CHECKOUT/ops/editor-performance/static_update.py rollback --manifest MANIFEST
+```
+
+本次页面变更不调整 GPU 任务或容量保护，不重启 API、预览、GPU 或其他服务。实际任务仍排队时须如实说明未产生成片，不以隔离浏览器的模拟完成替代生产回执。

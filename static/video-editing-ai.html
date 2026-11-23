@@ -6,16 +6,17 @@
     <meta name="referrer" content="same-origin" />
     <title>AI 智能剪辑 · AI 后台</title>
     <link rel="stylesheet" href="/ui-topbar.css" />
-    <link rel="stylesheet" href="/video-editing-ai.css?v=20261123-sources1" />
+    <link rel="stylesheet" href="/video-editing-ai.css?v=20261123-production1" />
     <script defer src="/quick-nav.js?v=43969bd46e10"></script>
     <script defer src="/ui-topbar.js"></script>
     <script defer src="/video-editing-ai-upload.js?v=20261120-hk-cos2"></script>
     <script defer src="/video-editing-ai-youtube-material.js?v=20261120-regular"></script>
     <script defer src="/video-editing-ai-regular.js?v=20261120-regular"></script>
     <script defer src="/video-editing-ai-source-state.js?v=20261123-sources1"></script>
+    <script defer src="/video-editing-ai-production.js?v=20261123-production1"></script>
     <script
       defer
-      src="/video-editing-ai-studio.js?v=20261123-catalog4"
+      src="/video-editing-ai-studio.js?v=20261123-production1"
     ></script>
   </head>
   <body>
@@ -155,22 +156,24 @@
             <button id="sourceView" data-action="source-view" class="active">
               原始素材</button
             ><button id="resultView" data-action="result-view">
-              已完成作品 <span id="resultCount">0</span>
+              本次成片 <span id="resultCount">0</span>
             </button>
           </div>
           <div class="stage-actions">
-            <span id="mediaTitle"></span
-            ><button
+            <span id="mediaTitle"></span>
+            <button id="copyButton" class="quiet" data-action="show-copy" hidden>发布文案</button>
+            <button
               id="exportButton"
               class="quiet"
               data-action="export"
               data-icon="download"
               hidden
             >
-              导出
+              下载成片
             </button>
           </div>
         </header>
+        <section id="productionStatus" class="production-status" role="status" aria-live="polite" aria-label="制作进度" hidden></section>
         <div id="regularActions" hidden class="regular-actions">
           <span id="regularInfo" aria-live="polite"></span>
           <button id="regularTrim" class="quiet" data-action="regular-trim">精修原片剪点</button>
@@ -203,7 +206,6 @@
               选择视频素材</button
             ><small>DramaWave · MoboReels · 本地上传</small>
           </div>
-          <div id="renderOverlay" class="render-overlay" hidden></div>
         </div>
         <div class="filmstrip-wrap">
           <span id="stripLabel">待处理<br />视频</span>

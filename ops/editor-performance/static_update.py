@@ -1,4 +1,4 @@
-"""Publish or roll back only the editor HTML/JS, without restarting services."""
+"""Publish or roll back specified editor static assets without restarting services."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -19,8 +19,14 @@ def digest(data):return hashlib.sha256(data).hexdigest()
 
 
 def atomic(path,data):
+    if data is None:
+        path.unlink(missing_ok=True)
+        return
     temp=path.with_name('.editor-next-'+path.name)
     temp.write_bytes(data);temp.replace(path)
+
+
+def existing(path):return path.read_bytes() if path.exists() else None
 
 
 def main():
@@ -28,6 +34,7 @@ def main():
     p.add_argument('action',choices=['install','rollback'])
     p.add_argument('--repo',type=Path);p.add_argument('--base');p.add_argument('--version')
     p.add_argument('--manifest',type=Path)
+    p.add_argument('--files',nargs='+',default=NAMES)
     args=p.parse_args()
     if args.action=='install':
         if git(args.repo,'rev-parse','HEAD').decode().strip()!=args.version or git(args.repo,'status','--porcelain').strip():
@@ -36,18 +43,22 @@ def main():
             raise RuntimeError('Version has not been fetched from GitHub')
         folder=ROOT/'backups'/('static-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
         prepared=[]
-        for name in NAMES:
-            old=git(args.repo,'show',args.base+':static/'+name)
+        for name in args.files:
+            if Path(name).name!=name or '/' in name or '\\' in name or not name.startswith('video-editing-ai'):
+                raise RuntimeError('Expected editor static filename')
+            present=git(args.repo,'ls-tree','--name-only',args.base,'--','static/'+name).strip()
+            old=git(args.repo,'show',args.base+':static/'+name) if present else None
             new=git(args.repo,'show',args.version+':static/'+name)
             for destination in DESTINATIONS:
                 path=destination/name
-                if path.read_bytes()!=old:raise RuntimeError('Concurrent static change: '+str(path))
+                if existing(path)!=old:raise RuntimeError('Concurrent static change: '+str(path))
                 prepared.append((path,old,new))
         folder.mkdir(parents=True,mode=0o700)
         record={'base':args.base,'version':args.version,'state':'prepared','files':[]}
         for i,(path,old,new) in enumerate(prepared):
-            (folder/f'{i}.before').write_bytes(old);(folder/f'{i}.after').write_bytes(new)
-            record['files'].append({'path':str(path),'before':f'{i}.before','after':f'{i}.after','old_sha256':digest(old),'new_sha256':digest(new)})
+            if old is not None:(folder/f'{i}.before').write_bytes(old)
+            (folder/f'{i}.after').write_bytes(new)
+            record['files'].append({'path':str(path),'before':f'{i}.before' if old is not None else None,'after':f'{i}.after','old_sha256':digest(old) if old is not None else None,'new_sha256':digest(new)})
         manifest=folder/'manifest.json'
         atomic(manifest,json.dumps(record,indent=2).encode())
     else:
@@ -55,9 +66,10 @@ def main():
     changes=[]
     for item in record['files']:
         path=Path(item['path']);install=args.action=='install'
-        before=(folder/item['before' if install else 'after']).read_bytes()
-        after=(folder/item['after' if install else 'before']).read_bytes()
-        if path.read_bytes()!=before:raise RuntimeError('Concurrent static change: '+str(path))
+        before_file=item['before' if install else 'after'];after_file=item['after' if install else 'before']
+        before=(folder/before_file).read_bytes() if before_file else None
+        after=(folder/after_file).read_bytes() if after_file else None
+        if existing(path)!=before:raise RuntimeError('Concurrent static change: '+str(path))
         changes.append((path,before,after))
     completed=[]
     try:

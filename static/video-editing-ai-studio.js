@@ -73,6 +73,8 @@
     succeeded: "解析完成",
   };
   const Sources = window.AIEditorSourceState;
+  const Production = window.AIEditorProduction;
+  let lastSyncedAt = 0, worksTimer, worksEpoch = 0, worksFailures = 0;
   const actionLocks = new Map();
   let saveChain = Promise.resolve(),
     sessionPromise = null,
@@ -173,6 +175,8 @@
     $("modalSubtitle").textContent = subtitle;
     $("modalBody").innerHTML = body;
     $("modalFooter").innerHTML = footer;
+    clearTimeout(worksTimer);
+    ++worksEpoch;
     modalKind = kind;
     $("modal").classList.toggle("assets", kind === "assets");
     $("modal").classList.toggle(
@@ -303,6 +307,9 @@
     refreshing.add(sid);
     try {
       let item;
+      // Source ETags do not cover child render task receipts. Keep following an
+      // active production even when all imported sources are unchanged.
+      if (session.runs.some((r) => r.kind === "create" && isActive(r.status))) full = true;
       if (!full && session.selection_id) {
         const response = await fetch(
           API + "/studio/sessions/" + sid + "/source-progress",
@@ -314,6 +321,8 @@
         if (session?.id !== sid || epoch !== navigationEpoch) return;
         if (response.status === 304) {
           pollFailures = 0;
+          lastSyncedAt = Date.now();
+          renderProduction();
           return;
         }
         if (!response.ok) throw new Error("暂时无法读取素材进度");
@@ -356,6 +365,7 @@
         ),
       ];
       // Source cards and playback are usable before optional analysis details arrive.
+      lastSyncedAt = Date.now();
       render();
       if (
         session.analysis_id &&
@@ -368,19 +378,16 @@
         showTimeline = true;
       }
       const newlyCompleted = finished().find((r) => !oldCompleted.has(r.id));
-      if (newlyCompleted && !$("modal").open) {
-        view = "result";
-        index = finished().findIndex((r) => r.id === newlyCompleted.id);
-        showTimeline = false;
-      }
       pollFailures = 0;
       render();
-      if (newlyCompleted && !$("modal").open) await showCopy();
+      if (newlyCompleted && !loadedSession)
+        toast("成片已制作完成！点击「查看成片」预览，或到右上角「我的作品」下载。");
     } catch (e) {
       if (session?.id === sid && epoch === navigationEpoch) {
         pollFailures++;
         if (pollFailures === 1)
           toast("进度暂不可读取，将自动重连。" + e.message, true);
+        renderProduction();
       }
     } finally {
       refreshing.delete(sid);
@@ -423,11 +430,11 @@
       )
       .join("");
     html += runs
-      .filter((r) => r.status !== "completed")
-      .map(
-        (r) =>
-          `<div class="run-card"><header><strong>${esc(labels[r.status])}</strong><span>${r.tasks.filter((t) => t.status === "completed").length}${r.tasks.length ? " / " + r.tasks.length : ""}</span></header>${r.status === "failed" ? `<p class="muted">${esc(r.error)}</p><button data-retry="${r.id}">重试失败项</button>` : `<progress ${r.status === "rendering" ? `max="${Math.max(1, r.tasks.length)}" value="${r.tasks.filter((t) => t.status === "completed").length}"` : ""}></progress><small>任务已保存，离开页面后会继续处理</small>`}</div>`,
-      )
+      .filter((r) => r.kind === "create" || r.status !== "completed")
+      .map((r) => {
+        const p = Production.describe(r);
+        return `<div class="run-card ${p.tone}"><header><strong>${esc(p.title)}</strong><span>${p.total ? `成片 ${p.completed}/${p.total}` : ""}</span></header><p>${esc(p.detail)}</p>${p.completed ? `<button class="primary" data-run-results="${r.id}">查看成片 ${p.completed} 条</button>` : ""}${r.status === "failed" ? `<button data-retry="${r.id}">重试失败项</button>` : ""}</div>`;
+      })
       .join("");
     box.innerHTML = html;
     if (nearEnd || !entries.length) box.scrollTop = box.scrollHeight;
@@ -527,6 +534,7 @@
     $("resultView").classList.toggle("active", view === "result");
     $("resultCount").textContent = finished().length;
     $("exportButton").hidden = view !== "result" || !media;
+    $("copyButton").hidden = view !== "result" || !media || !!media.youtube_regular;
     const ordinary = view === "result" && media?.youtube_regular;
     $("regularActions").hidden = !ordinary;
     if (ordinary) {
@@ -561,14 +569,30 @@
         .join("");
     }
     $("stageSuggestions").hidden = !!assets.length;
-    const active = session?.runs.find(
-      (r) => isActive(r.status) && r.kind === "create",
-    );
-    $("renderOverlay").hidden = !active;
-    if (active)
-      $("renderOverlay").innerHTML =
-        `${esc(labels[active.status])} · ${active.tasks.filter((t) => t.status === "completed").length} / ${active.tasks.length || "—"} 条<progress ${active.status === "rendering" ? `max="${Math.max(1, active.tasks.length)}" value="${active.tasks.filter((t) => t.status === "completed").length}"` : ""}></progress>`;
   }
+  function renderProduction() {
+    const runs = (session?.runs || []).filter((r) => r.kind === "create" && r.status !== "superseded");
+    const run = [...runs].reverse().find((r) => isActive(r.status)) || runs.at(-1);
+    const panel = $("productionStatus");
+    panel.hidden = !run;
+    if (!run) return;
+    const p = Production.describe(run);
+    const steps = ["素材准备", "生成方案", "排队制作", "制作成片", "成片完成"];
+    const elapsed = p.waitSeconds >= 60 ? `${Math.floor(p.waitSeconds / 60)} 分 ${Math.floor(p.waitSeconds % 60)} 秒` : `${Math.floor(p.waitSeconds)} 秒`;
+    const created = new Date(run.created_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const counts = p.total ? `成片已完成 ${p.completed} / ${p.total} 条` : "已提交制作任务";
+    const details = [p.running ? `制作中 ${p.running} 条` : "", p.queued ? `排队 ${p.queued} 条` : "", p.failed ? `失败 ${p.failed} 条` : ""].filter(Boolean).join(" · ");
+    panel.className = `production-status ${p.tone}`;
+    panel.innerHTML = `<header><div><span class="production-eyebrow">本次制作</span><h2>${esc(p.title)}</h2></div><strong>${counts}</strong></header>
+      <ol class="production-steps" aria-label="制作阶段">${steps.map((label, i) => `<li class="${i < p.phase || p.tone === "complete" ? "done" : i === p.phase ? "current" : ""}" ${i === p.phase ? 'aria-current="step"' : ""}><span>${i < p.phase || p.tone === "complete" ? "✓" : i + 1}</span>${label}</li>`).join("")}</ol>
+      <p>${esc(p.detail)}</p>${details ? `<p class="production-counts">${details}</p>` : ""}
+      <footer><small>${created} 提交${p.queued && !p.running ? ` · 已排队 ${elapsed}` : ""} · ${pollFailures ? "连接中断，正在重连；保留上次状态" : `状态更新于 ${new Date(lastSyncedAt || Date.now()).toLocaleTimeString()}`}</small><div>
+      ${p.completed ? `<button class="primary" data-run-results="${run.id}">查看成片 ${p.completed} 条</button><button data-run-download="${run.id}">下载成片</button>` : ""}
+      ${run.status === "failed" ? `<button data-retry="${run.id}">重试失败项</button>` : ""}
+      ${run.status === "needs_attention" ? '<button data-action="assets">处理素材</button>' : ""}
+      <button data-action="works">我的作品</button></div></footer>`;
+  }
+
   function renderTimeline() {
     $("timelinePanel").hidden =
       !showTimeline || view !== "source" || !assets.length;
@@ -627,6 +651,7 @@
       : "和 AI 一起完成你的下一条视频";
     renderPreparation();
     renderMessages();
+    renderProduction();
     updateComposer();
     renderPlayer();
     renderTimeline();
@@ -1804,43 +1829,59 @@
     );
   }
   async function openWorks() {
-    allWorks = (await api("/tasks")).items;
     openModal(
       "我的作品",
-      "制作中的任务、已完成的作品都保存在这里",
-      `<div class="modal-tools"><input id="workSearch" placeholder="搜索作品名称"><button id="refreshWorkList">刷新</button></div><div id="worksGrid" class="works-grid"></div>`,
-      `<span id="workSelection">选择已完成作品可批量导出</span><button id="batchExport" class="primary">批量导出</button>`,
+      "制作中的任务、已完成的成片都保存在这里；完成后可预览或直接下载。",
+      `<div class="modal-tools"><input id="workSearch" placeholder="搜索作品名称"><button id="refreshWorkList">刷新</button></div><p id="worksStatus" role="status">正在读取作品…</p><div id="worksGrid" class="works-grid"></div>`,
+      `<span id="workSelection">选择已完成成片可批量导出</span><button id="batchExport" class="primary">批量导出</button>`,
       "works",
     );
+    const epoch = worksEpoch;
+    worksFailures = 0;
     $("workSearch").oninput = drawWorks;
-    $("refreshWorkList").onclick = () => action(openWorks);
-    $("batchExport").onclick = () =>
-      action(async () => {
-        const ids = [...document.querySelectorAll(".work-check:checked")].map(
-          (e) => e.value,
-        );
-        await exportBatch(ids);
-      });
-    drawWorks();
+    $("refreshWorkList").onclick = () => action(() => readWorks(epoch), "refresh-works");
+    $("batchExport").onclick = () => action(async () => {
+      const ids = [...document.querySelectorAll(".work-check:checked")].map((e) => e.value);
+      await exportBatch(ids);
+    });
+    await readWorks(epoch);
+  }
+  async function readWorks(epoch) {
+    clearTimeout(worksTimer);
+    if (modalKind !== "works" || epoch !== worksEpoch || $("worksGrid").dataset.loading) return;
+    const grid = $("worksGrid");
+    grid.dataset.loading = "yes";
+    try {
+      const data = await api("/tasks");
+      if (modalKind !== "works" || epoch !== worksEpoch) return;
+      allWorks = data.items;
+      worksFailures = 0;
+      $("worksStatus").textContent = `已完成 ${allWorks.filter((t) => t.status === "completed" && t.output).length} 条 · 制作中 ${allWorks.filter((t) => t.status === "running").length} 条 · 排队 ${allWorks.filter((t) => t.status === "queued").length} 条 · 失败 ${allWorks.filter((t) => t.status === "failed").length} 条`;
+      drawWorks();
+    } catch (error) {
+      if (modalKind !== "works" || epoch !== worksEpoch) return;
+      worksFailures++;
+      $("worksStatus").textContent = "作品状态暂不可读取，正在自动重连。可点击刷新重试。";
+    } finally {
+      delete grid.dataset.loading;
+      if (modalKind === "works" && epoch === worksEpoch && (worksFailures || allWorks.some((t) => ["queued", "running"].includes(t.status))))
+        worksTimer = setTimeout(() => readWorks(epoch), document.hidden ? 10000 : worksFailures ? [4000, 8000, 15000][Math.min(2, worksFailures - 1)] : 2000);
+    }
   }
   function drawWorks() {
+    if (modalKind !== "works") return;
+    const selected = new Set([...document.querySelectorAll(".work-check:checked")].map((e) => e.value));
     let date = "";
-    $("worksGrid").innerHTML =
-      allWorks
-        .filter((t) =>
-          t.name.toLowerCase().includes($("workSearch").value.toLowerCase()),
-        )
-        .map((t) => {
-          const d = new Date(t.created_at * 1000).toLocaleDateString();
-          const heading =
-            d !== date ? `<h3 class="date-heading">${d}</h3>` : "";
-          date = d;
-          return (
-            heading +
-            `<article class="work-card">${t.output ? `<video preload="metadata" muted src="${esc(t.output.preview_url)}#t=0.1"></video><input type="checkbox" class="work-check" value="${t.id}" aria-label="选择 ${esc(t.name)}">` : '<div class="modal-empty">' + esc(labels[t.status] || t.status) + "</div>"}<div class="card-body"><strong>${esc(t.name)}</strong><small>${esc(labels[t.status] || t.status)}${t.output ? " · " + time(t.output.metadata.duration_ms) : ""}</small>${t.output ? `<button data-work="${t.id}">预览作品</button>` : t.status === "failed" ? `<button data-task-retry="${t.id}">重试</button>` : ""}</div></article>`
-          );
-        })
-        .join("") || '<div class="modal-empty">暂无匹配作品</div>';
+    $("worksGrid").innerHTML = allWorks
+      .filter((t) => t.name.toLowerCase().includes($("workSearch").value.toLowerCase()))
+      .map((t) => {
+        const d = new Date(t.created_at * 1000).toLocaleDateString();
+        const heading = d !== date ? `<h3 class="date-heading">${d}</h3>` : "";
+        date = d;
+        const ready = t.status === "completed" && t.output;
+        const state = ready ? "制作完成" : t.status === "queued" ? "排队等待制作" : t.status === "running" ? "正在制作成片" : labels[t.status] || t.status;
+        return heading + `<article class="work-card"><div class="work-cover ${ready ? "ready" : ""}">${ready ? "✓ 成片已就绪" : esc(state)}</div>${ready ? `<input type="checkbox" class="work-check" value="${t.id}" ${selected.has(t.id) ? "checked" : ""} aria-label="选择 ${esc(t.name)}">` : ""}<div class="card-body"><strong>${esc(t.name)}</strong><small>${esc(state)}${ready ? " · " + time(t.output.metadata.duration_ms) : ""}</small>${t.error_message ? `<p class="work-error">${esc(t.error_message)}</p>` : ""}<div class="work-actions">${ready ? `<button class="primary" data-work="${t.id}">预览成片</button><a class="work-download" href="${esc(t.output.download_url)}" download>下载 MP4</a>` : t.status === "failed" ? `<button data-task-retry="${t.id}">重试失败项</button>` : ""}</div></div></article>`;
+      }).join("") || '<div class="modal-empty">暂无匹配作品。成片制作完成后会自动显示在这里。</div>';
   }
   async function chooseResult(task) {
     view = "result";
@@ -1850,9 +1891,9 @@
     }
     index = finished().findIndex((t) => t.id === task.id);
     showTimeline = false;
+    $("copyPanel").hidden = true;
     renderPlayer();
     renderTimeline();
-    await showCopy();
   }
   async function showCopy() {
     const media = currentMedia();
@@ -2003,11 +2044,12 @@
       if (!finished().length) return toast("作品完成后会显示在这里");
       view = "result";
       index = 0;
+      $("copyPanel").hidden = true;
       renderPlayer();
       renderTimeline();
-      await showCopy();
       return;
     }
+    if (name === "show-copy") return showCopy();
     if (name === "hide-timeline") {
       showTimeline = false;
       renderTimeline();
@@ -2156,7 +2198,7 @@
         index = Number(b.dataset.media);
         renderPlayer();
         renderTimeline();
-        if (view === "result") await showCopy();
+        if (view === "result" && !$("copyPanel").hidden) await showCopy();
       });
     if (b.hasAttribute("data-seek")) {
       $("player").currentTime = Number(b.dataset.seek) / 1000;
@@ -2170,6 +2212,16 @@
         closeModal();
         await loadSession(b.dataset.session);
       });
+    if (b.dataset.runResults || b.dataset.runDownload)
+      return action(async () => {
+        const run = session?.runs.find((r) => r.id === (b.dataset.runResults || b.dataset.runDownload));
+        const ready = (run?.tasks || []).filter((t) => t.status === "completed" && t.output);
+        if (!ready.length) return toast("成片尚未就绪，状态将自动更新");
+        if (b.dataset.runDownload) {
+          if (ready.length === 1) download(ready[0].output.download_url);
+          else await exportBatch(ready.map((t) => t.id));
+        } else await chooseResult(ready[0]);
+      }, b.dataset.runDownload ? "download-run" : "view-run");
     if (b.dataset.work)
       return action(async () => {
         const t = allWorks.find((x) => x.id === b.dataset.work);
@@ -2241,6 +2293,8 @@
     $("stylePreviewVideo")?.pause();
     settingsObserver?.disconnect();
     modalKind = "";
+    clearTimeout(worksTimer);
+    ++worksEpoch;
     ++libraryEpoch;
     catalogController?.abort();
     assetController?.abort();
@@ -2282,9 +2336,11 @@
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && session) refresh(false);
     else queueRefresh();
+    if (!document.hidden && modalKind === "works") readWorks(worksEpoch);
   });
   window.addEventListener("online", () => {
     if (session) refresh(false);
+    if (modalKind === "works") readWorks(worksEpoch);
   });
   $("previewQuality").onchange = () => {
     const player = $("player"),

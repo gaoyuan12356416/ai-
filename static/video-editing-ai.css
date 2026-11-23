@@ -917,23 +917,36 @@ button svg {
   line-height: 1.8;
   overflow-wrap: anywhere;
 }
-.render-overlay {
-  position: absolute;
-  left: 18px;
-  right: 18px;
-  bottom: 48px;
-  border: 1px solid #ffffff29;
-  background: #162c48ec;
-  color: white;
-  border-radius: 12px;
-  padding: 14px;
-  font-size: 12px;
-}
-.render-overlay progress {
-  width: 100%;
-  height: 5px;
-  margin-top: 10px;
-  accent-color: #6f98fc;
+.production-status { margin: 0 20px 14px; padding: 16px 18px; border: 1px solid #c9d9ff; border-radius: 12px; background: #f8faff; font-size: 13px; }
+.production-status header, .production-status footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.production-eyebrow { font-size: 11px; color: var(--muted); }
+.production-status h2 { font-size: 18px; margin: 4px 0 0; }
+.production-status header > strong { color: var(--blue); font-size: 14px; }
+.production-status p { margin: 10px 0; line-height: 1.6; }
+.production-status small { color: var(--muted); font-size: 11px; }
+.production-status footer > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.production-status button { padding: 7px 12px; font-size: 12px; }
+.production-steps { display: flex; gap: 6px; list-style: none; padding: 0; margin: 14px 0; }
+.production-steps li { flex: 1; color: #76869d; padding-top: 10px; border-top: 3px solid #e2e8f2; font-size: 12px; }
+.production-steps li span { margin-right: 5px; }
+.production-steps li.current { border-color: #3165eb; color: #2657cc; font-weight: 600; }
+.production-steps li.done { border-color: #53b890; color: #217956; }
+.production-status.complete { border-color: #a9d9c4; background: #f4fbf7; }
+.production-status.complete h2 { color: #16754b; }
+.production-status.error { border-color: #efc4b5; background: #fff8f5; }
+.production-status.error h2, .work-error { color: #a23d2d; }
+.run-card p { font-size: 12px; line-height: 1.7; margin: 9px 0 4px; }
+.run-card.complete { border-color: #a9d9c4; background: #f4fbf7; }
+.work-cover { min-height: 75px; display: grid; place-items: center; padding: 10px; background: #eef3fc; color: #536781; font-size: 14px; }
+.work-cover.ready { color: #16754b; background: #eef8f2; }
+.work-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.work-download { color: var(--blue); text-decoration: none; font-size: 12px; padding: 8px 0; }
+.work-error { font-size: 12px; overflow-wrap: anywhere; }
+#worksStatus { font-size: 12px; color: var(--muted); }
+@media (max-width: 700px) {
+  .production-status { margin: 0 12px 12px; padding: 12px; }
+  .production-steps { flex-wrap: wrap; }
+  .production-steps li { flex: 1 1 28%; }
 }
 .caption-preview {
   position: absolute;

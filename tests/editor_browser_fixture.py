@@ -67,6 +67,12 @@ class FixtureHandler(Handler):
         if path=='/_fixture/preview':
             while job:=previews.claim(self.runtime):previews.process(self.runtime,job)
             return self.reply(200,{'ok':True})
+        if path.startswith('/_fixture/production/'):
+            status=path.rsplit('/',1)[-1]
+            if status not in ('queued','running','completed','failed'):return self.reply(400,{'error':'fixture status'})
+            with self.runtime.db(True) as db:
+                db.execute('UPDATE tasks SET status=?,error=? WHERE id=?',(status,'Fixture render failed' if status=='failed' else '',self.server.production_task))
+            return self.reply(200,{'ok':True})
         if path.startswith('/api/ai-video-editing/'):
             if path.endswith('/assets') and self.command=='GET':time.sleep(self.server.asset_delay)
             return super().dispatch()
@@ -100,10 +106,30 @@ def build(folder):
     return rt
 
 
+def production(rt):
+    """A render task whose parent/source ETag stays fixed while task receipts change."""
+    aid='aa_'+('%032x'%1)
+    item=studio.dispatch(rt,ACTOR,'POST','/sessions',{'items':[{'kind':'asset','asset_id':aid}],'operation_id':'production-fixture'}, {})['item']
+    sid=item['id']
+    rid=studio.submit(rt,ACTOR,sid,{'operation_id':'production-fixture-run','config':{'clip':{'method':'hook_first'}}})['run_id']
+    project=rt.save(ACTOR,{'operation_id':'production-project','name':'Fixture output','units':[{'id':'one','title':'Fixture finished film','clips':[{'source_id':aid,'start_ms':0,'end_ms':4000}]}]})['item']
+    task=rt.render(project['id'],ACTOR,{'operation_id':'production-render','expected_version':project['version']})['items'][0]
+    shutil.copyfile(rt.root/'uploads'/(aid+'.mp4'),rt.root/'outputs'/(task['id']+'.mp4'))
+    with rt.db(True) as db:
+        db.execute('UPDATE tasks SET meta=? WHERE id=?',(packed({'duration_ms':8000,'width':360,'height':640}),task['id']))
+        db.execute("UPDATE studio_runs SET status='rendering',state=? WHERE id=?",(packed({'task_ids':[task['id']],'project_id':project['id']}),rid))
+        db.execute("UPDATE studio_source_batches SET status='succeeded' WHERE id=?",(item['selection_id'],))
+        db.execute("UPDATE studio_sessions SET sources=? WHERE id=?",(packed([aid]),sid))
+    return sid,task['id']
+
+
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--port',type=int,default=18984);p.add_argument('--asset-delay',type=float,default=2)
+    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--port',type=int,default=18984);p.add_argument('--asset-delay',type=float,default=2);p.add_argument('--production',action='store_true')
     args=p.parse_args();os.environ['AI_VIDEO_EDITING_PREVIEW_ACCEL']='0'
     rt=build(args.root)
     with ThreadingHTTPServer(('127.0.0.1',args.port),FixtureHandler) as server:
         server.runtime=rt;server.catalog=Catalog();server.asset_delay=args.asset_delay;server.worker_token='fixture-only'
+        if args.production:
+            sid,server.production_task=production(rt)
+            print('Production fixture: http://127.0.0.1:%s/video-editing-ai.html#%s'%(args.port,sid),flush=True)
         print('Fixture ready on port',args.port,flush=True);server.serve_forever()
