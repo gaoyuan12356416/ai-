@@ -100,7 +100,11 @@ def frozen_digest(part, local):
             digest.update(line)
         if proc.wait():
             raise RuntimeError("frozen read failed: " + part["file"])
-    if digest.hexdigest() != part["sql_sha256"]:
+    expected = part["sql_sha256"]
+    if local:
+        recorded = json.loads((archive.ROOT / "restore-verified.json").read_text())
+        expected = recorded["restored_sql_sha256"][part["file"]]
+    if digest.hexdigest() != expected:
         raise RuntimeError("frozen content differs from the backup: " + part["file"])
     print(archive.stamp(), "frozen data matched", part["file"], flush=True)
 

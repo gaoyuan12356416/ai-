@@ -1,7 +1,9 @@
 """Archive the approved retired tables from the replica and rehearse restoration."""
 import argparse
 import concurrent.futures
+from collections import defaultdict
 from contextlib import closing
+from decimal import Decimal
 import datetime
 import gzip
 import hashlib
@@ -10,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import time
 
@@ -19,7 +22,6 @@ import pymysql
 HOST = "101.32.56.53"
 ROOT = Path("/mnt/data-disk/ads-ai-retirement-20261123")
 BUNDLE = ROOT / "archive"
-DDL = Path(__file__).with_name("drop.sql")
 DATA_MOUNT = "3e8ac4e8-7770-456d-9e89-2ec5dd405fa8"
 DEVICE = "ads_facebook_device_insights"
 SMALL = (
@@ -31,6 +33,7 @@ SMALL = (
     "ad_control_action_log", "fb_page_effect_profile",
 )
 TABLES = (*SMALL, DEVICE)
+JSON_TARGETS = {"ad_control_v3_preview_target", "ad_control_v3_execution_target"}
 PLACEHOLDERS = ",".join(["%s"] * len(TABLES))
 SOCKET = ROOT / "rehearsal-socket/mysql.sock"
 
@@ -250,6 +253,101 @@ def read_bundle():
     return manifest
 
 
+def compare_json(a, b, path, differences):
+    if isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys():
+        for key in a:
+            compare_json(a[key], b[key], path + "." + json.dumps(key), differences)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for index, (left, right) in enumerate(zip(a, b)):
+            compare_json(left, right, path + "[" + str(index) + "]", differences)
+    elif type(a) in (int, Decimal) and type(b) in (int, Decimal):
+        if type(a) != type(b) or str(a) != str(b):
+            differences.append(path)
+    elif type(a) != type(b) or a != b:
+        raise ValueError("JSON value changed on restore")
+
+
+def check_numeric_paths(cur, name, key, ids):
+    marks = ",".join(["%s"] * len(ids))
+    cur.execute("SELECT id, JSON_TYPE(val), CAST(val AS CHAR), val + 0e0 "
+                "FROM (SELECT id,JSON_EXTRACT(detail_json,%s) AS val FROM `" + name +
+                "` WHERE id IN (" + marks + ")) AS compared ORDER BY id", (key, *ids))
+    out = {}
+    for row_id, kind, value, floating in cur.fetchall():
+        if kind == "DOUBLE":
+            canonical = struct.pack("!d", floating)
+        elif kind in ("INTEGER", "UNSIGNED INTEGER", "DECIMAL"):
+            canonical = Decimal(value)
+        else:
+            raise RuntimeError("unexpected JSON numeric type")
+        out[row_id] = (kind, canonical)
+    return out
+
+
+def verify_typed_target(name):
+    if name not in JSON_TARGETS:
+        raise ValueError("unexpected JSON table")
+    paths = defaultdict(list)
+    with closing(connect()) as source, closing(connect(local=True)) as restored:
+        with source.cursor() as left, restored.cursor() as right:
+            for cur in (left, right):
+                cur.execute("SELECT * FROM `" + name + "` ORDER BY id")
+            if [c[0] for c in left.description] != [c[0] for c in right.description]:
+                raise RuntimeError("restored columns changed")
+            cols = [c[0] for c in left.description]
+            pos = cols.index("detail_json")
+            id_pos = cols.index("id")
+            rows_checked = 0
+            while True:
+                left_rows, right_rows = left.fetchmany(256), right.fetchmany(256)
+                if len(left_rows) != len(right_rows):
+                    raise RuntimeError("target row count changed")
+                if not left_rows:
+                    break
+                for a, b in zip(left_rows, right_rows):
+                    if a[:pos] + a[pos+1:] != b[:pos] + b[pos+1:]:
+                        raise RuntimeError("non-JSON column changed")
+                    if a[pos] != b[pos]:
+                        differences = []
+                        compare_json(json.loads(a[pos], parse_float=Decimal),
+                                     json.loads(b[pos], parse_float=Decimal), "$", differences)
+                        for key in differences:
+                            paths[key].append(a[id_pos])
+                    rows_checked += 1
+            for key, ids in paths.items():
+                for offset in range(0, len(ids), 1000):
+                    batch = ids[offset:offset+1000]
+                    src = check_numeric_paths(left, name, key, batch)
+                    dst = check_numeric_paths(right, name, key, batch)
+                    if src.keys() != set(batch) or src != dst:
+                        raise RuntimeError("JSON type or exact numeric value changed")
+    return dict(rows=rows_checked, numeric_paths=len(paths),
+                typed_numeric_comparisons=sum(len(v) for v in paths.values()))
+
+
+def verify_restoration(manifest):
+    with closing(connect(local=True)) as db, db.cursor() as cur:
+        facts = source_facts(cur)
+    if any(facts[key] != manifest[key] for key in facts):
+        raise RuntimeError("restored counts or unresolved states differ")
+    hashes, typed = {}, {}
+    def verify(part):
+        return part, logical_dump(part, local=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        for part, digest in pool.map(verify, manifest["parts"]):
+            name = part["table"]
+            if digest != part["sql_sha256"]:
+                if name not in JSON_TARGETS:
+                    raise RuntimeError("ordered restored data differs: " + part["file"])
+                typed[name] = verify_typed_target(name)
+            hashes[part["file"]] = digest
+    write_json(ROOT / "restore-verified.json",
+               dict(at=stamp(), manifest_sha256=file_hash(BUNDLE / "manifest.json"),
+                    restored_sql_sha256=hashes, byte_identical_parts=len(hashes)-len(typed),
+                    json_type_and_value_checks=typed, **facts))
+    print(stamp(), "restore verified", len(hashes), "parts", flush=True)
+
+
 def restore(*, local):
     manifest = read_bundle()
     db = connect(local=local, writer=not local)
@@ -266,29 +364,24 @@ def restore(*, local):
         print(stamp(), "restored", part["file"], flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=3 if local else 1) as pool:
         list(pool.map(load_device, device_parts))
-    if not local:
-        return
-    with closing(connect(local=True)) as db, db.cursor() as cur:
-        facts = source_facts(cur)
-    if any(facts[key] != manifest[key] for key in facts):
-        raise RuntimeError("restored counts or unresolved states differ")
-    def verify(part):
-        if logical_dump(part, local=True) != part["sql_sha256"]:
-            raise RuntimeError("ordered restored data differs: " + part["file"])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-        list(pool.map(verify, manifest["parts"]))
-    write_json(ROOT / "restore-verified.json",
-               dict(at=stamp(), manifest_sha256=file_hash(BUNDLE / "manifest.json"),
-                    ordered_sql_hashes_verified=len(manifest["parts"]), **facts))
-    print(stamp(), "restore and all ordered SQL hashes verified", flush=True)
+    if local:
+        verify_restoration(manifest)
+    else:
+        with closing(connect()) as db, db.cursor() as cur:
+            facts = source_facts(cur)
+        if any(facts[key] != manifest[key] for key in facts):
+            raise RuntimeError("check replica before considering rollback complete")
+        print(stamp(), "rollback counts and ledger states verified on replica", flush=True)
 
 
 if __name__ == "__main__":
     os.umask(0o077)
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["backup", "rehearse", "rollback"])
+    parser.add_argument("action", choices=["backup", "rehearse", "verify", "rollback"])
     choice = parser.parse_args().action
     if choice == "backup":
         backup()
+    elif choice == "verify":
+        verify_restoration(read_bundle())
     else:
         restore(local=(choice == "rehearse"))
