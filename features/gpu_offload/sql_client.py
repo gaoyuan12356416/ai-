@@ -88,7 +88,7 @@ class Session:
                     session.query_start()
                 return super()._execute_command(command,sql)
         self.connect_attempted=True
-        self.connection=Connection(host='10.89.0.108',port=3306,user=user,password=password,database=database,
+        self.connection=Connection(host='127.0.0.1',port=19969,user=user,password=password,database=database,
                                    charset='utf8mb4',cursorclass=pymysql.cursors.DictCursor,connect_timeout=4,
                                    read_timeout=60,write_timeout=15,autocommit=True,
                                    program_name='ai-offload/'+self.key)
@@ -110,8 +110,7 @@ class Session:
                 cur.execute('SET SESSION range_optimizer_max_mem_size=67108864')
                 cur.execute("SET SESSION time_zone='+08:00'")
             cur.execute('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ')
-            # Live proxy validation routes the WITH CONSISTENT SNAPSHOT form to
-            # the writer, even with READ ONLY. Plain READ ONLY selects a reader.
+            # Keep explicit read-only mode even on the dedicated reader endpoint.
             # REPEATABLE READ keeps one snapshot from the first data read for
             # the entire refresh, with no statement-level auto-commit reads.
             cur.execute('START TRANSACTION READ ONLY')

@@ -54,6 +54,7 @@ class LeaseTests(unittest.TestCase):
         for server,connection,present in [('other',123,False),(IDENTITY['server_uuid'],124,False),(IDENTITY['server_uuid'],123,True)]:
             with self.assertRaises(LeaseError):self.book.reconcile_absence(key,observed_server_uuid=server,observed_connection_id=connection,session_present=present)
             self.assertEqual(self.book.occupied,1)
+        self.book.observe_presence(key,observed_server_uuid=IDENTITY['server_uuid'],observed_connection_id=123)
         self.book.reconcile_absence(key,observed_server_uuid=IDENTITY['server_uuid'],observed_connection_id=123,session_present=False)
         self.assertEqual(self.book.occupied,0)
 

@@ -45,6 +45,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertTrue(sql.startswith('SELECT'));self.assertEqual(args,(123,'reader'))
 
     def test_absence_on_matching_server_and_user_releases_only_unknown_lease(self):
+        self.book.observe_presence(self.key,observed_server_uuid=IDENTITY['server_uuid'],observed_connection_id=123)
         self.check();self.assertEqual(self.book.occupied,0)
         self.assertEqual(self.book.get(self.key)['reason'],'verified_session_absent')
 
@@ -52,6 +53,10 @@ class ReconciliationTests(unittest.TestCase):
         conn=Connection(dict(server_uuid=IDENTITY['server_uuid'],database_user='reader',session_present=1))
         watchdog_reconcile(conn,self.requests,self.proofs);self.gate.tick()
         self.assertEqual(self.book.occupied,1)
+        self.check();self.assertEqual(self.book.occupied,0)
+
+    def test_absence_without_verified_visibility_keeps_occupancy(self):
+        self.check();self.assertEqual(self.book.occupied,1)
 
     def test_wrong_backend_or_user_cannot_prove_absence(self):
         for server,user in [('other','reader'),(IDENTITY['server_uuid'],'different-user')]:

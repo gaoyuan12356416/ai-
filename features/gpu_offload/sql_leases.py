@@ -39,6 +39,7 @@ class LeaseBook:
             heartbeat REAL NOT NULL, identity TEXT, reason TEXT NOT NULL DEFAULT '');
           CREATE INDEX IF NOT EXISTS remote_lease_state ON remote_lease(state);
           CREATE TABLE IF NOT EXISTS query_rate(node TEXT PRIMARY KEY, next_start REAL NOT NULL);
+          CREATE TABLE IF NOT EXISTS session_visibility(lease_id TEXT PRIMARY KEY, observed REAL NOT NULL);
         ''')
         if recover:
           with self.lock, self.transaction():
@@ -93,7 +94,7 @@ class LeaseBook:
             key, now = uuid.uuid4().hex, self.clock()
             with self.transaction():
                 self.db.execute('INSERT INTO remote_lease(id,node,task,state,endpoint,created,heartbeat) VALUES(?,?,?,?,?,?,?)',
-                                (key, node, task, 'reserved', '10.89.0.108:3306', now, now))
+                                (key, node, task, 'reserved', '101.32.56.53:63350 via CPU tunnel', now, now))
             return self.get(key, node)
 
     def begin(self, key, node):
@@ -173,6 +174,15 @@ class LeaseBook:
                                 ('cancelled' if row['state']=='reserved' else 'closed', 'never_connected' if row['state']=='reserved' else 'server_eof', key))
             return self.get(key, node)
 
+    def observe_presence(self,key,*,observed_server_uuid,observed_connection_id):
+        with self.lock:
+            row=self.get(key);identity=row['identity']
+            if (row['state'] not in ('connected','unknown') or identity is None
+                or observed_server_uuid!=identity['server_uuid'] or observed_connection_id!=identity['connection_id']):
+                raise LeaseError('session_visibility_not_proven')
+            with self.transaction():
+                self.db.execute('INSERT OR IGNORE INTO session_visibility VALUES(?,?)',(key,self.clock()))
+
     def reconcile_absence(self, key, *, observed_server_uuid, observed_connection_id, session_present):
         """Only called by the CPU reconciler after its own bounded database read."""
         with self.lock:
@@ -182,6 +192,8 @@ class LeaseBook:
             if (observed_server_uuid != identity['server_uuid'] or observed_connection_id != identity['connection_id']
                     or session_present is not False):
                 raise LeaseError('session_absence_not_proven')
+            if not self.db.execute('SELECT 1 FROM session_visibility WHERE lease_id=?',(key,)).fetchone():
+                raise LeaseError('prior_session_visibility_not_proven')
             with self.transaction():
                 self.db.execute("UPDATE remote_lease SET state='closed',reason='verified_session_absent' WHERE id=?", (key,))
             return self.get(key)

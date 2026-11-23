@@ -34,14 +34,19 @@ class GateReconciliation:
                     try:
                         row=self.book.get(proof['lease_id']);identity=row['identity'] or {}
                         if proof.get('database_user')!=identity.get('database_user'):continue
-                        if not proof.get('database_user') or float(payload['observed_at'])<row['heartbeat']:continue
+                        if not proof.get('database_user') or float(payload['observed_at'])<row['created']:continue
+                        if proof.get('session_present') is True:
+                            self.book.observe_presence(proof['lease_id'],observed_server_uuid=proof['server_uuid'],
+                                observed_connection_id=int(proof['connection_id']))
+                            continue
+                        if float(payload['observed_at'])<row['heartbeat']:continue
                         self.book.reconcile_absence(proof['lease_id'],observed_server_uuid=proof['server_uuid'],
                             observed_connection_id=int(proof['connection_id']),session_present=proof['session_present'])
                     except (KeyError,ValueError,RuntimeError):continue
         pending=[]
         for row in self.book.rows():
             identity=json.loads(row['identity']) if row['identity'] else None
-            if row['state']=='unknown' and identity and identity.get('database_user'):
+            if row['state'] in ('connected','unknown') and identity and identity.get('database_user'):
                 pending.append(dict(lease_id=row['id'],**identity))
         signature=json.dumps(pending,sort_keys=True)
         if (signature!=self.signature or not self.requests.is_file()) and self.requests.parent.is_dir():
