@@ -28,6 +28,8 @@ class AccountSnapshotTests(unittest.TestCase):
             result = account_snapshot.read_snapshot(path, 7, ACTOR, 'mine')
             self.assertEqual(result['id'], 7)
             self.assertNotIn('token_store_key', result)
+            self.assertEqual(account_snapshot.read_snapshot(path,None,ACTOR,'all'),[result])
+            self.assertEqual(account_snapshot.read_snapshot(path,None,dict(ACTOR,tenant_key='other'),'mine'),[])
             with self.assertRaises(oauth.ServiceError) as caught:
                 account_snapshot.read_snapshot(path, 7, dict(ACTOR, tenant_key='other'), 'mine')
             self.assertEqual(caught.exception.code, 'x_account_not_found')
@@ -38,6 +40,7 @@ class AccountSnapshotTests(unittest.TestCase):
         row = dict.fromkeys(account_snapshot.FIELDS, '')
         row.update(id=7, x_user_id='77', status='active', publish_approved=True)
         old = oauth.find_scoped_account_row
+        old_accounts=oauth.auto_template_accounts_request
         try:
             with patch.object(oauth, 'db_connect', side_effect=sqlite3.OperationalError('unable to open database file')), \
                  patch.object(oauth, 'row_to_item', side_effect=lambda value: dict(value)), \
@@ -57,6 +60,18 @@ class AccountSnapshotTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 'x_tag_account_snapshot_invalid')
         finally:
             oauth.find_scoped_account_row = old
+            oauth.auto_template_accounts_request=old_accounts
+
+    def test_account_list_uses_owner_broker_and_existing_projection(self):
+        row=dict.fromkeys(account_snapshot.FIELDS,'');row.update(id=7)
+        runtime=SimpleNamespace(normalize_account_scope=oauth.normalize_account_scope,
+            INTERNAL_TOKEN='test-only',AUTO_TEMPLATE_ACTOR=ACTOR,ServiceError=oauth.ServiceError,
+            row_to_item=lambda r:dict(r,publish_eligible=False),_safe_post_account=lambda r:r,iso_utc=lambda:'now')
+        with patch('features.x_tag_publish.transport.rpc',return_value={'record':[row]}):
+            account_snapshot.install_reader(runtime)
+            result=runtime.auto_template_accounts_request({})
+        self.assertEqual(result['total'],1)
+        self.assertFalse(result['items'][0]['publish_eligible'])
 
     def test_lost_response_does_not_become_business_failure(self):
         handler = SimpleNamespace(headers={'Authorization':'Bearer '+('x'*40)},

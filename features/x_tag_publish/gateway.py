@@ -228,7 +228,7 @@ def read_account_snapshot(body):
             input=json.dumps(body), capture_output=True, text=True, timeout=12, check=True,
             cwd=str(Path(__file__).resolve().parents[2]),
             env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
-        if len(result.stdout) > 65536:
+        if len(result.stdout) > (2*1024*1024 if body['account_id'] is None else 65536):
             raise ValueError()
         value = json.loads(result.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):

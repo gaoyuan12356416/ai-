@@ -8,22 +8,26 @@ import sys
 FIELDS = ('id', 'x_user_id', 'username', 'display_name', 'profile_image_url',
           'scopes_json', 'status', 'access_expires_at', 'deleted_at', 'publish_approved',
           'subscription_type', 'drama_language', 'owner_tenant_key', 'owner_user_id',
-          'owner_name', 'owner_email', 'profile_synced_at', 'verified', 'protected', 'last_error')
+          'owner_name', 'owner_email', 'profile_synced_at', 'verified', 'protected', 'last_error',
+          'created_at', 'updated_at')
 
 
 def read_snapshot(path, account_id, actor, scope):
     from features.x_accounts.oauth_service import normalize_account_scope, ServiceError
     actor, scope = normalize_account_scope(actor, scope)
-    if type(account_id) is not int or account_id <= 0:
+    if account_id is not None and (type(account_id) is not int or account_id <= 0):
         raise ServiceError('invalid_request', '账号编号无效', 400)
     with closing(sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro', uri=True, timeout=8)) as db:
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA query_only=ON')
-        clause, values = 'id=?', [account_id]
+        clause, values = ('1=1', []) if account_id is None else ('id=?', [account_id])
         if scope == 'mine':
             clause += ' AND owner_tenant_key=? AND owner_user_id=?'
             values += [actor['tenant_key'], actor['user_id']]
-        row = db.execute('SELECT '+','.join(FIELDS)+' FROM x_authorized_account WHERE '+clause, values).fetchone()
+        cursor = db.execute('SELECT '+','.join(FIELDS)+' FROM x_authorized_account WHERE '+clause+' ORDER BY updated_at DESC,id DESC', values)
+        if account_id is None:
+            return [dict(row) for row in cursor]
+        row = cursor.fetchone()
     if not row:
         raise ServiceError('x_account_not_found', 'X账号记录不存在', 404)
     return dict(row)
@@ -44,6 +48,18 @@ def install_reader(runtime):
             raise runtime.ServiceError('x_tag_account_snapshot_invalid', '账号读取结果与发布任务不一致', 503)
         return row
     runtime.find_scoped_account_row = scoped
+    def accounts(_payload):
+        try:
+            result=rpc('http://127.0.0.1:8898','/internal/x-tag/account-snapshot',runtime.INTERNAL_TOKEN,
+                       payload={'account_id':None,'actor':runtime.AUTO_TEMPLATE_ACTOR,'scope':'all'},timeout=15)
+        except Error as exc:
+            raise runtime.ServiceError(exc.code,str(exc),exc.status) from None
+        rows=result.get('record')
+        if not isinstance(rows,list) or any(not isinstance(row,dict) or not set(FIELDS).issubset(row) for row in rows):
+            raise runtime.ServiceError('x_tag_account_snapshot_invalid','账号列表读取结果不完整',503)
+        items=[runtime._safe_post_account(runtime.row_to_item(row)) for row in rows]
+        return {'items':items,'total':len(items),'updated_at':runtime.iso_utc()}
+    runtime.auto_template_accounts_request=accounts
 
 
 def main():

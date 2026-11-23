@@ -61,10 +61,10 @@ def prepare():
     run(sys.executable,HEALTH,'snapshot','--lane','x','--output',ROOT/'schedulers-before.json')
     save('deployment.json',m);print(json.dumps(dict(stage='prepared',commit=commit,tasks=len(tasks))))
 
-def install(rollback=False):
+def install(rollback=False,update=False):
     m=json.loads((ROOT/'deployment.json').read_text());assert str(LIVE.resolve())==m['runtime']
     for f in m['files']:
-        p=LIVE/f['name'];expected=f['after'] if rollback else f['before']
+        p=LIVE/f['name'];expected=f['after'] if rollback or update else f['before']
         assert (sha(p) if p.exists() else None)==expected,'concurrent_change:'+f['name']
     # Pause only this planner's triggers while its execution service switches.
     for u in ('x-tag-auto-runner.timer','x-tag-auto-runner.path'):run('systemctl','stop',u)
@@ -72,6 +72,8 @@ def install(rollback=False):
         if rollback and f['before'] is None:continue  # unused additive helper is harmless
         p=LIVE/f['name'];src=(ROOT/'before'/f['name']) if rollback else SOURCE/f['name']
         tmp=p.with_name(p.name+'.today-next');tmp.write_bytes(src.read_bytes());os.chown(tmp,f['uid'],f['gid']);os.chmod(tmp,f['mode']);os.replace(tmp,p)
+        if update:f['after']=sha(src)
+    if update:m['commit']=run('git','-C',SOURCE,'rev-parse','HEAD')
     run('systemctl','restart','x-tag-gateway.service')
     m['old_pid']=run('systemctl','show','x-tag-post.service','-p','MainPID','--value')
     m['stage']='rollback_pending' if rollback else 'restart_pending';save('deployment.json',m)
@@ -94,7 +96,7 @@ def finish():
     print(json.dumps(dict(stage=m['stage'],services=s)))
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','install','finish','rollback']);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','install','finish','rollback','update']);a=p.parse_args()
     if a.action=='prepare':prepare()
     elif a.action=='finish':finish()
-    else:install(a.action=='rollback')
+    else:install(a.action=='rollback',a.action=='update')
