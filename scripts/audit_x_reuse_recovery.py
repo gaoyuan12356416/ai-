@@ -59,14 +59,15 @@ def audit():
                               ('post_id', [q['x_post_id'] for q in queues if q['x_post_id']])]:
         errors.extend(dict(error='duplicate_'+label, identity=key, count=count) for key, count in Counter(identities).items() if count>1)
     confirmed = [q for q in queues if q['log_status']=='published' and q['x_post_id'] and not q['unknown_outcome']]
-    unknown = {t['id'] for t in tasks if t['unknown_outcome']} | {q['task_id'] for q in queues if q['unknown_outcome'] or q['log_status']=='post_creating'}
+    unknown = {t['id'] for t in tasks if t['unknown_outcome']} | {q['task_id'] for q in queues if q['unknown_outcome']}
+    creating = {q['task_id'] for q in queues if q['log_status']=='post_creating' and not q['unknown_outcome']}
     return dict(at=datetime.now(timezone.utc).isoformat(), total=len(tasks), original_scope=len(frozen),
                 task_status=dict(Counter(t['status'] for t in tasks)),
                 task_errors=dict(Counter(t['error_code'] for t in tasks if t['error_code'])),
                 canonical_runs=len(runs), canonical_queues=len(queues),
                 linked_tasks=sum(bool(t['execution_run_id'] and t['execution_queue_id']) for t in tasks),
                 queue_status=dict(Counter(q['status'] for q in queues)), confirmed_posts=len(confirmed),
-                unknown_tasks=sorted(unknown), duplicate_or_identity_errors=errors,
+                unknown_tasks=sorted(unknown), post_creation_inflight=sorted(creating), duplicate_or_identity_errors=errors,
                 tasks=tasks, queues=queues)
 
 
