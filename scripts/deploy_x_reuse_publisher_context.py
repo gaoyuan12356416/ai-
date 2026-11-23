@@ -57,14 +57,15 @@ def prepare():
     assert run('git', '-C', SOURCE, 'branch', '-r', '--contains', commit)
     scope = json.loads((ROOT/'recovery-scope.json').read_text())
     assert len(scope['tasks']) == 250
-    DEPLOY.mkdir(mode=0o700)
+    DEPLOY.mkdir(mode=0o700, exist_ok=True)
+    assert not (DEPLOY/'manifest.json').exists(), 'deployment_already_prepared'
     info = dict(commit=commit, source=str(SOURCE), roots={k: str(p.resolve()) for k, p in ROOTS.items()},
                 units=states(), files=[], stage='prepared')
     for lane, names in FILES.items():
         for name in names:
             live = ROOTS[lane]/name
             before = subprocess.check_output(['git', '-C', str(SOURCE), 'show', BASE+':'+name])
-            assert live.read_bytes() == before, 'concurrent_live_change:'+str(live)
+            assert live.read_bytes().replace(b'\r\n', b'\n') == before.replace(b'\r\n', b'\n'), 'concurrent_live_change:'+str(live)
             content = (SOURCE/name).read_bytes()
             compile(content, name, 'exec')
             target = DEPLOY/'before'/lane/name
