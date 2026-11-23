@@ -191,6 +191,20 @@ def restore_version(db,manifest,base,ddl):
     atomic(done,result);return result
 
 
+def recovery_reference(proof,page_id):
+    choice=proof.get('selection') or {}
+    if not isinstance(choice,dict):choice={}
+    if str(choice.get('page_id') or '')==page_id:
+        stage=choice.get('selection_stage')
+        if (stage in ('language_unprofiled','fallback_unprofiled') and choice.get('match_kind')=='unprofiled'
+                and choice.get('match_basis')=='missing_or_no_income' and choice.get('match_score')==0):
+            return 'unprofiled'
+        if stage in ('language_profile','fallback_profile','language_relaxed','fallback_relaxed'):
+            return 'required'
+    if 'profile_snapshot_unavailable' in (proof.get('profile_warnings') or []):return 'unavailable'
+    return 'required'
+
+
 def references(db,versions,index):
     pairs=set();expected=set();counts={'assignment':0,'recovery':0,'assignment_without_version':0,'outside_table_versions':0}
     last=None
@@ -221,8 +235,12 @@ def references(db,versions,index):
             p=str(o.get('new_page_id') or '')
             if v in versions and PAGE.fullmatch(p):
                 pairs.add((v,p));counts['recovery']+=1
-                if 'profile_snapshot_unavailable' not in (o.get('profile_warnings') or []):expected.add((v,p))
-                index.write(encoded(dict(source='recovery',task=str(task),version=v,page=p))+'\n')
+                use=recovery_reference(o,p)
+                if use=='required':expected.add((v,p))
+                else:counts['recovery_'+use]=counts.get('recovery_'+use,0)+1
+                choice=o.get('selection') if isinstance(o.get('selection'),dict) else {}
+                decision={k:choice.get(k) for k in ('page_id','selection_stage','match_kind','match_basis','match_score')}
+                index.write(encoded(dict(source='recovery',task=str(task),version=v,page=p,profile_use=use,selection=decision))+'\n')
     return pairs,counts,expected
 
 
@@ -233,7 +251,7 @@ def confirm_references(db,versions,base):
         with gzip.open(temp,'wt',encoding='utf-8') as index:pairs,counts,expected=references(db,versions,index)
     finally:db.rollback()
     temp.replace(base/'task-references.jsonl.gz')
-    found=absent=0;unexplained=[]
+    found=absent=0;unexplained=[];missing=[]
     by_version={}
     for v,p in pairs:by_version.setdefault(v,[]).append(p)
     with db.cursor() as c:
@@ -250,8 +268,10 @@ def confirm_references(db,versions,base):
                     else:
                         if raw is not None:raise RuntimeError('archived Page absent in source')
                         absent+=1
+                        missing.append(dict(version=v,page_id=p,claimed_profile=(v,p) in expected))
                         if (v,p) in expected:unexplained.append([v,p])
-    return dict(receipts=counts,unique_pairs=len(pairs),found=found,absent_in_source=absent,unexpected_absence=unexplained)
+    return dict(receipts=counts,unique_pairs=len(pairs),found=found,absent_in_source=absent,
+                source_absences=sorted(missing,key=lambda r:(r['version'],r['page_id'])),unexpected_absence=unexplained)
 
 
 def run(source_rate=24*1024**2,transfer_rate=4*1024**2):

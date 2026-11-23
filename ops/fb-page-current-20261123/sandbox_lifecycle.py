@@ -35,6 +35,11 @@ def main():
         with closing(sqlite3.connect(ledger)) as db,db:
             db.execute('CREATE TABLE jobs(id TEXT,proof TEXT)')
             db.execute('INSERT INTO jobs VALUES(?,?)',('test-recovery',ops.encoded(dict(profile_version=v,new_page_id=pid))))
+            choice=dict(page_id='999998',selection_stage='language_unprofiled',match_kind='unprofiled',
+                        match_basis='missing_or_no_income',match_score=0)
+            unprofiled=dict(profile_version=v,new_page_id='999998',profile_warnings=[],selection=choice)
+            if archive.recovery_reference(unprofiled,'999997')!='required':raise RuntimeError('different selected Page bypassed lookup')
+            db.execute('INSERT INTO jobs VALUES(?,?)',('test-recovery-unprofiled',ops.encoded(unprofiled)))
         c.execute('CREATE TABLE fb_drama_page_assignment_log(task_id VARCHAR(32),item_index INT,page_id VARCHAR(32),'
                   'selection_stage VARCHAR(32),diagnostics_json LONGTEXT,PRIMARY KEY(task_id,item_index))')
         try:
@@ -56,7 +61,8 @@ def main():
                 stack.enter_context(patch.object(recovery,'restore_writer',lambda:None))
                 receipt=archive.run()
                 refs=receipt['references']
-                if refs['found']!=1 or refs['absent_in_source']!=1 or refs['unexpected_absence'] or refs['receipts']['assignment']!=2:
+                if (refs['found']!=1 or refs['absent_in_source']!=2 or refs['unexpected_absence']
+                        or refs['receipts']['assignment']!=2 or refs['receipts'].get('recovery_unprofiled')!=1):
                     raise RuntimeError('isolated task lookup differs')
                 first=recovery.remove();second=recovery.remove()
                 if first!=second or ops.shape(c,ops.LEGACY) or ops.shape(c,ops.PUBLIC)!=('page_id',):
