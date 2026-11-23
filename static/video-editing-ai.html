@@ -6,15 +6,16 @@
     <meta name="referrer" content="same-origin" />
     <title>AI 智能剪辑 · AI 后台</title>
     <link rel="stylesheet" href="/ui-topbar.css" />
-    <link rel="stylesheet" href="/video-editing-ai.css?v=20261120-regular" />
+    <link rel="stylesheet" href="/video-editing-ai.css?v=20261123-sources1" />
     <script defer src="/quick-nav.js"></script>
     <script defer src="/ui-topbar.js"></script>
     <script defer src="/video-editing-ai-upload.js?v=20261120-hk-cos2"></script>
     <script defer src="/video-editing-ai-youtube-material.js?v=20261120-regular"></script>
     <script defer src="/video-editing-ai-regular.js?v=20261120-regular"></script>
+    <script defer src="/video-editing-ai-source-state.js?v=20261123-sources1"></script>
     <script
       defer
-      src="/video-editing-ai-studio.js?v=20261120-regular"
+      src="/video-editing-ai-studio.js?v=20261123-sources1"
     ></script>
   </head>
   <body>
@@ -175,6 +176,13 @@
           <button id="regularTrim" class="quiet" data-action="regular-trim">精修原片剪点</button>
           <button id="regularIntake" class="primary" data-action="regular-intake">定稿入库</button>
         </div>
+        <div class="preview-controls">
+          <span id="previewHint" role="status"></span>
+          <select id="previewQuality" aria-label="预览清晰度" hidden>
+            <option value="proxy">流畅预览</option>
+            <option value="original">原片</option>
+          </select>
+        </div>
         <div class="player-area" id="playerArea">
           <video
             id="player"
@@ -184,6 +192,7 @@
             hidden
           ></video>
           <div id="captionPreview" class="caption-preview" hidden></div>
+          <div id="playerLoading" class="player-loading" role="status" hidden>正在载入预览…</div>
           <div class="stage-empty" id="stageEmpty">
             <div class="empty-art" aria-hidden="true">
               <span>▶</span><i>✦</i>
@@ -203,6 +212,10 @@
             ＋
           </button>
         </div>
+        <details id="sourcePreparation" class="source-preparation" open hidden>
+          <summary id="sourcePreparationSummary"></summary>
+          <div id="sourcePreparationItems" aria-live="polite"></div>
+        </details>
         <section id="timelinePanel" class="timeline-panel" hidden>
           <header>
             <strong>智影解析</strong><span>点击片段定位画面</span

@@ -1,0 +1,24 @@
+[Unit]
+Description=Private AI editor poster and preview preparation
+After=network.target ai-video-editing.service
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai-video-editing/current
+Environment=AI_VIDEO_EDITING_ROOT=/mnt/data-disk/ai-video-editing
+Environment=AI_VIDEO_EDITING_PREVIEW_ROOT=/mnt/data-disk/ai-video-editing-preview
+EnvironmentFile=-/etc/ai-video-editing/runtime.env
+ExecStart=/usr/bin/python3 -m ai_video_editing.previews
+Restart=on-failure
+RestartSec=5
+Nice=10
+CPUQuota=200%
+UMask=0027
+TimeoutStopSec=1900
+KillMode=process
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
