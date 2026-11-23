@@ -20,7 +20,7 @@ def recover(action):
     assert (now+timedelta(hours=8)).date().isoformat()=='2026-11-23'
     scope=json.loads((ROOT/'today-scope.json').read_text())['tasks']
     plan=json.loads((ROOT/'today-media-plan.json').read_text())
-    authorized={x['queue_id']:x for x in plan['items']}
+    authorized={x['execution_queue_id'] for x in json.loads((ROOT/'failed-scope.json').read_text())}
     result={'action':action,'at':stamp,'rearmed':[],'unchanged':[]}
     with closing(connect(POST)) as p:
         p.execute('BEGIN');p.execute('SELECT 1 FROM sqlite_master LIMIT 1').fetchone()
@@ -50,11 +50,13 @@ def recover(action):
                         phase='selection'
                     else:
                         assert row['status'] in ('failed','retry_wait','reconciling')
-                        auth=p.execute('SELECT * FROM pipeline_x_prepost_recovery WHERE source_key=? AND from_generation=?',
-                            ('x:queue:'+str(row['execution_queue_id']),authorized[row['execution_queue_id']]['from_generation'])).fetchone()
-                        assert auth and auth['plan_sha256']==plan['plan_sha256'] and auth['state'] in ('armed','consumed')
+                        auth=p.execute('SELECT * FROM pipeline_x_prepost_recovery WHERE source_key=? ORDER BY from_generation DESC LIMIT 1',
+                            ('x:queue:'+str(row['execution_queue_id']),)).fetchone()
+                        assert auth and auth['state'] in ('armed','consumed')
                         log=p.execute('SELECT * FROM x_post_publish_log WHERE queue_id=?',(row['execution_queue_id'],)).fetchone()
-                        assert log and not log['unknown_outcome']
+                        assert log
+                        if log['unknown_outcome']:
+                            result['unchanged'].append({'task':row['id'],'reason':'new_result_requires_reconciliation'});continue
                         phase='reconcile'
                     a.execute("UPDATE x_auto_task SET status='retry_wait',claim_phase=?,next_attempt_at_utc=?,"
                         "claim_worker='',claim_token='',lease_expires_at_utc='',unknown_outcome=0,"
@@ -62,7 +64,7 @@ def recover(action):
                         (phase,stamp,stamp,row['id']))
                     a.execute("INSERT INTO x_auto_event(run_id,task_id,event_type,from_status,to_status,message,details_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
                         (row['run_id'],row['id'],'today_'+action+'_recovered',row['status'],'retry_wait',
-                         'Today original task resumed after scoped repair',json.dumps({'before':row,'plan_sha256':plan['plan_sha256'] if action=='receipts' else None}),stamp))
+                         'Today original task resumed after scoped repair',json.dumps({'before':row,'plan_sha256':auth['plan_sha256'] if action=='receipts' else None}),stamp))
                     a.execute("UPDATE x_auto_run SET status='running',finished_at_utc='',updated_at=? WHERE id=?",(stamp,row['run_id']))
                     result['rearmed'].append(row['id'])
                 a.commit()

@@ -219,23 +219,26 @@ def read_hit_origin(task_id):
 
 
 def read_account_snapshot(body):
-    import subprocess
+    from .account_snapshot import FIELDS
     if set(body) != {'account_id', 'actor', 'scope'}:
         raise Error('invalid_request', '', 400)
-    try:
-        result = subprocess.run(['/usr/sbin/runuser', '-u', 'x-post-automation', '--',
-            '/usr/bin/python3', '-B', '-m', 'features.x_tag_publish.account_snapshot'],
-            input=json.dumps(body), capture_output=True, text=True, timeout=12, check=True,
-            cwd=str(Path(__file__).resolve().parents[2]),
-            env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
-        if len(result.stdout) > (2*1024*1024 if body['account_id'] is None else 65536):
-            raise ValueError()
-        value = json.loads(result.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        raise Error('x_tag_account_snapshot_unavailable', '发布账号记录暂时无法读取，保留原任务等待重试', 503) from None
-    if not value.get('ok'):
-        raise Error(value['code'], value['message'], value['status'])
-    return value['record']
+    account_id=body['account_id']
+    if account_id is not None and (type(account_id) is not int or account_id<=0):
+        raise Error('invalid_request','账号编号无效',400)
+    # runuser inherits this gateway's read-only mount namespace. The existing
+    # account owner API alone reads its live WAL and validates actor/scope.
+    value=rpc('http://127.0.0.1:8810','/internal/accounts/query',
+              os.environ['X_TAG_ACCOUNT_BROKER_TOKEN'],
+              payload={'actor':body['actor'],'scope':body['scope']},timeout=12)
+    records=[]
+    for item in value.get('items',[]):
+        if account_id is not None and item.get('id')!=account_id:continue
+        record={key:item.get(key,'') for key in FIELDS}
+        record['scopes_json']=json.dumps(item.get('scopes',[]))
+        records.append(record)
+    if account_id is None:return records
+    if len(records)!=1:raise Error('x_account_not_found','X账号记录不存在',404)
+    return records[0]
 
 
 class Handler(BaseHTTPRequestHandler):

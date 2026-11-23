@@ -95,8 +95,20 @@ def finish():
     m['stage']='rolled_back' if m['stage']=='rollback_pending' else 'active';m['after']=s;save('deployment.json',m)
     print(json.dumps(dict(stage=m['stage'],services=s)))
 
+def gateway_only():
+    m=json.loads((ROOT/'deployment.json').read_text());assert m['stage']=='active'
+    commit=run('git','-C',SOURCE,'rev-parse','HEAD');assert run('git','-C',SOURCE,'branch','-r','--contains',commit)
+    f=next(f for f in m['files'] if f['name']=='features/x_tag_publish/gateway.py')
+    p=LIVE/f['name'];assert sha(p)==f['after']
+    src=SOURCE/f['name'];compile(src.read_bytes(),f['name'],'exec')
+    tmp=p.with_name(p.name+'.today-next');tmp.write_bytes(src.read_bytes());os.chown(tmp,f['uid'],f['gid']);os.chmod(tmp,f['mode']);os.replace(tmp,p)
+    run('systemctl','restart','x-tag-gateway.service')
+    f['after']=sha(p);m['commit']=commit;m['after']=states();save('deployment.json',m)
+    print(json.dumps({'stage':'active','gateway_commit':commit}))
+
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','install','finish','rollback','update']);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','install','finish','rollback','update','gateway']);a=p.parse_args()
     if a.action=='prepare':prepare()
     elif a.action=='finish':finish()
+    elif a.action=='gateway':gateway_only()
     else:install(a.action=='rollback',a.action=='update')
