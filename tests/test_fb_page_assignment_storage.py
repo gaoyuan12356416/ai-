@@ -176,6 +176,8 @@ class StorageTests(unittest.TestCase):
         self.database.lose_commit_receipt = True
         self.assertFalse(self.store.sync_task("task_1", self.writer))
         first = self.store.get("task_1")
+        self.assertFalse(first["details_cleared"])
+        self.assertEqual(first["rows"][0]["diagnostics"], sample_rows()[0]["diagnostics"])
         self.assertIn("log_sync_pending", first["alert_reasons"])
         self.assertEqual(first["alert_status"], "pending")
         self.assertEqual(len(self.database.rows), 1)
@@ -304,6 +306,66 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(len(self.database.connections), 2)
         self.assertTrue(all(c.closed for c in self.database.connections))
         self.assertEqual(len(self.database.rows), 2)
+
+    def test_ack_clears_full_payload_reclaims_disk_and_keeps_original_duplicate_receipt(self):
+        rows = sample_rows()
+        rows[0]["diagnostics"]["large"] = "d" * 2000000
+        original = self.save(rows=rows)
+        before = self.store.path.stat().st_size
+        with self.store._connect() as db:
+            self.assertEqual(db.execute("PRAGMA auto_vacuum").fetchone()[0], 1)
+        self.assertTrue(self.store.sync_task("task_1", self.writer))
+        after = self.save(rows=rows)
+        self.assertTrue(after["details_cleared"])
+        self.assertNotIn("diagnostics", after["rows"][0])
+        self.assertEqual(after["initial_hash"], original["initial_hash"])
+        self.assertEqual(after["response"], original["response"])
+        self.assertEqual(after["rows"][0]["payload_hash"], self.database.rows["task_1", 1]["payload_hash"])
+        self.assertIn('"large":', self.database.rows["task_1", 1]["diagnostics_json"])
+        self.assertLess(self.store.path.stat().st_size, before // 4)
+        with self.assertRaises(PayloadConflictError):
+            self.save(rows=sample_rows())
+
+    def test_legacy_cleanup_requires_matching_committed_revision_and_every_original_item(self):
+        original = self.save(rows=sample_rows()*2)
+        hashes = self.writer.write_task(original)
+        def clean(rev=1, fingerprint=original["initial_hash"], items=hashes):
+            return self.store.compact_verified("task_1", rev, fingerprint, items)
+        self.assertFalse(clean())
+        with self.store._connect() as db:
+            db.execute("UPDATE fb_page_assignment_requests SET synced_revision=revision")
+        self.assertFalse(clean(rev=2))
+        self.assertFalse(clean(fingerprint="wrong"))
+        self.assertFalse(clean(items={1:hashes[1]}))
+        self.assertFalse(clean(items={1:hashes[1], 2:"wrong"}))
+        self.assertEqual(self.store.get("task_1")["rows"], original["rows"])
+        self.assertTrue(clean())
+        self.assertFalse(clean())
+
+    def test_pending_alert_keeps_details_until_final_receipt_is_acknowledged(self):
+        self.save(reasons=["no_page"])
+        self.assertTrue(self.store.sync_task("task_1", self.writer))
+        self.assertFalse(self.store.get("task_1")["details_cleared"])
+        self.store.claim_alert("task_1")
+        self.store.mark_alert("task_1", "sent", message_id="test-receipt")
+        self.assertTrue(self.store.sync_task("task_1", self.writer))
+        self.assertTrue(self.store.get("task_1")["details_cleared"])
+        self.assertEqual(self.database.rows["task_1", 1]["feishu_message_id"], "test-receipt")
+
+    def test_revision_race_with_successful_remote_commit_preserves_full_pending_payload(self):
+        original = self.save()
+        def write_and_advance(request):
+            hashes = self.writer.write_task(request)
+            self.store.mark_alert("task_1", "sent", message_id="concurrent-receipt")
+            return hashes
+        writer = Mock()
+        writer.write_task.side_effect = write_and_advance
+        self.assertTrue(self.store.sync_task("task_1", writer))
+        pending = self.store.get("task_1")
+        self.assertEqual(pending["rows"], original["rows"])
+        self.assertLess(pending["synced_revision"], pending["revision"])
+        self.assertTrue(self.store.sync_task("task_1", self.writer))
+        self.assertTrue(self.store.get("task_1")["details_cleared"])
 
     def test_two_request_threads_do_not_write_the_same_task_twice(self):
         self.save()

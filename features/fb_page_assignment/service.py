@@ -129,7 +129,8 @@ class Service:
         saved = self.store.sync_receipt(task_id)
         log("log_sync_completed" if synced else "log_sync_deferred", task_id=task_id,
             elapsed_ms=round((time.monotonic() - started) * 1000, 1),
-            sync_attempts=saved["sync_attempts"], error_code=saved["last_sync_error"])
+            sync_attempts=saved["sync_attempts"], error_code=saved["last_sync_error"],
+            local_details_cleared=bool(saved["details_cleared"]))
 
     def request_error(self, task_id, code, payload=None):
         external = payload.get("external_task_id") if isinstance(payload, dict) else None

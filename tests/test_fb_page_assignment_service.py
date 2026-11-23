@@ -16,7 +16,7 @@ from features.fb_page_assignment.request_log import RequestBodyLog
 from features.fb_page_assignment.server import ROUTE, handler
 from features.fb_page_assignment.service import Service
 from features.fb_page_assignment.sources import SourceError
-from features.fb_page_assignment.storage import Store
+from features.fb_page_assignment.storage import Store, Writer
 
 
 class FakeSources:
@@ -47,6 +47,7 @@ class FakeWriter:
         self.calls.append(copy.deepcopy(request))
         if self.error:
             raise self.error
+        return {row["item_index"]: Writer._record(request, row)["payload_hash"] for row in request["rows"]}
 
 
 class FakeNotifier:

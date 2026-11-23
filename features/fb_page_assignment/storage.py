@@ -46,6 +46,23 @@ def _hash(value):
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def _confirmed_items(request, hashes):
+    if request["details_cleared"] or request["alert_status"] in {"pending", "sending"}:
+        return None
+    rows = request["rows"]
+    if not isinstance(hashes, dict) or not rows or set(hashes) != {row["item_index"] for row in rows}:
+        return None
+    # The response and alert text remain available. Full immutable diagnostics
+    # now live on the acknowledged MySQL rows identified by these digests.
+    keys = ("item_index", "drama_id", "page_id", "status", "selection_stage", "error_code", "error_message")
+    items = []
+    for row in rows:
+        item = {key: row[key] for key in keys if key in row}
+        item["payload_hash"] = hashes[row["item_index"]]
+        items.append(item)
+    return _json({"confirmed_items": items})
+
+
 def _utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -72,6 +89,8 @@ class Store:
         self._sync_condition = threading.Condition()
         self._syncing = set()
         with self._connect() as db:
+            if db.execute("PRAGMA page_count").fetchone()[0] == 0:
+                db.execute("PRAGMA auto_vacuum=FULL")
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS fb_page_assignment_requests (
@@ -200,7 +219,7 @@ class Store:
 
     def sync_receipt(self, task_id):
         with self._connect() as db:
-            return db.execute("""SELECT sync_attempts,last_sync_error
+            return db.execute("""SELECT sync_attempts,last_sync_error,substr(rows_json,1,1)='{' AS details_cleared
                 FROM fb_page_assignment_requests WHERE task_id=?""", (task_id,)).fetchone()
 
     def _sync_failed(self, task_id, exc):
@@ -246,16 +265,34 @@ class Store:
             if request["sync_next_at"] > time.time():
                 return False
             try:
-                writer.write_task(request)
+                hashes = writer.write_task(request)
             except Exception as exc:
                 self._sync_failed(task_id, exc)
                 return False
+            receipt = _confirmed_items(request, hashes)
             with self._connect() as db:
                 db.execute("""UPDATE fb_page_assignment_requests
                     SET synced_revision=MAX(synced_revision,?),sync_attempts=0,
-                        sync_next_at=0,last_sync_error=''
-                    WHERE task_id=?""", (request["revision"], task_id))
+                        sync_next_at=0,last_sync_error='',
+                        rows_json=CASE WHEN revision=? THEN COALESCE(?,rows_json) ELSE rows_json END
+                    WHERE task_id=?""", (request["revision"], request["revision"], receipt, task_id))
             return True
+
+    def compact_verified(self, task_id, revision, initial_hash, hashes):
+        """Release a legacy full payload only for the exact, already-confirmed snapshot."""
+        request = self.get(task_id)
+        if (not request or request["initial_hash"] != initial_hash or
+                request["revision"] != revision or request["synced_revision"] != revision):
+            return False
+        receipt = _confirmed_items(request, hashes)
+        if receipt is None:
+            return False
+        if any(Writer._record(request, row)["payload_hash"] != hashes[row["item_index"]] for row in request["rows"]):
+            return False
+        with self._connect() as db:
+            return db.execute("""UPDATE fb_page_assignment_requests SET rows_json=?
+                WHERE task_id=? AND initial_hash=? AND revision=? AND synced_revision=revision
+                  AND substr(rows_json,1,1)='['""", (receipt, task_id, initial_hash, revision)).rowcount == 1
 
     def defer_sync(self, task_id, exc):
         """Keep frozen results pending after an outbox coordination exception.

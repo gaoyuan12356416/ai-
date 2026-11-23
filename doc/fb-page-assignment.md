@@ -77,6 +77,10 @@ ORDER BY item_index;
 
 最后一个已鉴权分配请求返回满 2 秒后，后台从本机队列按时间取最多 16 个任务 ID，最多两路并发补写。新请求一到就停止领取后续任务，正在写的事务可以完成。每路在本轮复用连接，每个任务独立提交。事务按原主键批量锁定并核对已有记录的 hash，插入按最多 8 行、约 512 KiB 原始诊断 JSON 分组，单条超过预算时单独发送。仅更新较旧的通知回执版本。两路使用 READ COMMITTED，仅锁已存在的目标记录。持续有请求时结果留在数据盘，至下一段空闲继续补写。`log_sync_wave` 记录本轮领取数、实际参与的写入线程数和未领取数。
 
+MySQL 确认整笔事务且回执对应本地最新版本后，SQLite 在记录同步成功的同一事务中释放候选诊断明细。待发送和发送中的通知保留原记录，等最终通知回执同步后释放。提交结果未知或写入失败时，明细继续留在队列。每个任务保留原响应、逐条主键与内容校验值、分配结果和通知回执，供防重及后续回执核对使用。完整诊断按原主键查 MySQL。SQLite 使用 FULL 自动回收空页；历史库在核对旧记录后一次性转换。单独保存的原始请求正文按其原有规则留存。
+
+迁移旧库时先运行 `ops/fb-page-assignment/compact_confirmed.py --manifest "$manifest"`，在 63350 只读副本上逐条比对主键、内容校验值、诊断正文 SHA-256 和回执版本。再次运行同一命令并加 `--apply`，只清理仍与清单一致的本地记录；旧库首次转换自动回收模式时在空闲时段加 `--reclaim`。
+
 按 `task_id` 核对 `assignment_selected` 的数据/画像/选择耗时、`assignment_completed` 的本地持久化耗时、`http_response_sent` 的服务端总耗时，以及后台 `log_sync_completed` / `log_sync_deferred`。`http_response_disconnected` 单独记录连接断开；飞书播报和日志同步状态不能代替 HTTP 返回记录。服务重启先完成已接收请求，再关闭后台 worker；回滚代码保留现有 outbox。
 
 数据库异常另记录 `database_failure`：reader 标明初始会话或读取阶段，writer 标明连接、开始事务、精确主键读取、插入、回执更新或提交阶段；保留数字错误码、固定的 greeting/authentication/query/tls 阶段及 timeout/reset/refused 等标签，不输出原始驱动消息、SQL、请求体或凭据。该诊断不改变分配、重试、持久化和通知规则。
