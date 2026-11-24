@@ -37,8 +37,8 @@ def connect(path):
     return db
 
 
-def catalogs(root, platforms):
-    manifest, path = current(root)
+def catalogs(root, platforms, snapshot=None):
+    manifest, path = snapshot or current(root)
     key = str(path)
     with _lock:
         cached = _catalog_cache.get(key)
@@ -55,13 +55,13 @@ def catalogs(root, platforms):
 
 
 def read_catalogs(app, platforms):
-    catalog, errors, _, _ = catalogs(configured_root(app), platforms)
+    catalog, errors, _, _ = catalogs(configured_root(app), platforms, app.get('SOCIAL_ANALYTICS_FROZEN_SNAPSHOT'))
     return catalog, errors
 
 
 def build_report(app, actor, query, *, include_titles=False, export=False):
     params = parameters(query)
-    catalog, errors, manifest, path = catalogs(configured_root(app), params['platforms'])
+    catalog, errors, manifest, path = catalogs(configured_root(app), params['platforms'], app.get('SOCIAL_ANALYTICS_FROZEN_SNAPSHOT'))
     # Retain global collision resolution before applying the actor's scope.
     catalog, _, _, _ = restrict(catalog, [], params['end'])
     placeholders = ','.join('?' for _ in params['platforms'])
