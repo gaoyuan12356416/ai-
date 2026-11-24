@@ -410,12 +410,14 @@
     }
     return c.seconds?c.seconds+" 秒":c.strategy_version===2?"约 60～90 秒":"自动";
   }
-  function configSummary(c) {
+  function configSummary(c, run) {
     if (c.youtube_regular) {
       const y = c.youtube_regular;
       return `<div class="configuration-summary"><strong>YouTube 普通视频</strong><div>正片 ${y.body_source_ids.length} 条 · ${y.hook_source_ids.length ? "片头从指定的 " + y.hook_source_ids.length + " 条素材选取" : "片头从正片选取"}</div></div>`;
     }
-    return `<div class="configuration-summary"><strong>${c.clip ? esc(methods[c.clip.method]?.[0]) : "视频创作"}${c.narration ? " · 影视解说" : ""}${c.translation ? " · 视频翻译" : ""}</strong><div class="summary-grid"><div><span>素材处理</span>${c.merge === false ? "逐条处理" : "合并素材"}</div><div><span>输出数量</span>${(c.merge === false ? sourceCount() : 1) * (c.clip?.script_count || 1) * (c.clip?.variant_count || 1)} 条</div>${c.clip ? `<div><span>目标时长</span>${esc(clipDuration(c.clip))}</div><div><span>脚本 × 裂变</span>${c.clip.script_count} × ${c.clip.variant_count}</div>` : ""}${c.translation ? `<div><span>翻译语种</span>${esc(languageName(c.translation.language))}</div><div><span>字幕</span>${c.translation.mode === "bilingual" ? "双语" : "仅译文"}</div>` : ""}</div></div>`;
+    return `<div class="configuration-summary"><strong>${c.clip ? esc(methods[c.clip.method]?.[0]) : "视频创作"}${c.narration ? " · 影视解说" : ""}${c.translation ? " · 视频翻译" : ""}</strong><div class="summary-grid"><div><span>素材处理</span>${c.merge === false ? "逐条处理" : "合并素材"}</div><div><span>输出数量</span>${(c.merge === false ? sourceCount() : 1) * (c.clip?.script_count || 1) * (c.clip?.variant_count || 1)} 条</div>${c.clip ? `<div><span>${run?.tasks?.some(t=>t.output)?"成片时长":"目标时长"}</span>${esc(run?.tasks?.some(t=>t.output)
+      ? run.tasks.filter(t=>t.output).map(t=>time(t.output.metadata?.duration_ms)).join(" / ")
+      : c.clip.method==="hook_first"?"完整原片＋精彩开头":clipDuration(c.clip))}</div><div><span>脚本 × 裂变</span>${c.clip.script_count} × ${c.clip.variant_count}</div>` : ""}${c.translation ? `<div><span>翻译语种</span>${esc(languageName(c.translation.language))}</div><div><span>字幕</span>${c.translation.mode === "bilingual" ? "双语" : "仅译文"}</div>` : ""}</div></div>`;
   }
   function languageName(code) {
     return caps.languages?.find((x) => x.code === code)?.name || code;
@@ -442,7 +444,7 @@
     html += entries
       .map(
         (m) =>
-          `<article class="message ${m.role === "user" ? "user" : ""}"><div class="message-author">${m.role === "user" ? "你" : `<span class="assistant-avatar">AI</span>创作助手`}</div>${m.kind === "config" ? configSummary(m.data.config) : `<div class="bubble">${esc(m.data.text)}</div>`}${m.data.config && m.kind === "suggestion" ? configSummary(m.data.config) + `<button class="primary" data-suggestion="${esc(m.id)}">编辑并使用此方案</button>` : ""}${m.kind === "script" ? `<button class="quiet" data-script="${esc(m.id)}">使用此解说稿</button>` : ""}${m.data.evidence?.length ? `<div class="citations">${m.data.evidence.map((e, i) => `<button data-cite="${esc(m.id)}" data-cite-index="${i}">${time(e.start_ms)} – ${time(e.end_ms)} ↗</button>`).join("")}</div>` : ""}</article>`,
+          `<article class="message ${m.role === "user" ? "user" : ""}"><div class="message-author">${m.role === "user" ? "你" : `<span class="assistant-avatar">AI</span>创作助手`}</div>${m.kind === "config" ? configSummary(m.data.config, runs.find(r=>m.id===r.id+"_request")) : `<div class="bubble">${esc(m.data.text)}</div>`}${m.data.config && m.kind === "suggestion" ? configSummary(m.data.config) + `<button class="primary" data-suggestion="${esc(m.id)}">编辑并使用此方案</button>` : ""}${m.kind === "script" ? `<button class="quiet" data-script="${esc(m.id)}">使用此解说稿</button>` : ""}${m.data.evidence?.length ? `<div class="citations">${m.data.evidence.map((e, i) => `<button data-cite="${esc(m.id)}" data-cite-index="${i}">${time(e.start_ms)} – ${time(e.end_ms)} ↗</button>`).join("")}</div>` : ""}</article>`,
       )
       .join("");
     html += runs

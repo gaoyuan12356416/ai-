@@ -10,8 +10,20 @@
     stopPlayer = () => {};
   }
   function orderText(session, mode) {
-    const hint = session?.story_order_hint;
-    if (!hint?.selection?.length) return "素材准备后显示讲述顺序";
+    let hint = session?.story_order_hint;
+    if (!hint) {
+      const selected = session?.selection?.items || session?.assets || [];
+      const rows = selected.map(item => {
+        const asset = item.asset || item;
+        const episode = item.episode || asset.episode_number;
+        const series = item.product && item.source_key ? JSON.stringify([item.product,item.source_key]) : asset.series_code;
+        return {episode,series,label:episode ? "第 "+episode+" 集" : item.name || asset.name};
+      });
+      const verified = rows.length > 0 && rows.every(r=>r.series && r.series===rows[0].series && Number.isInteger(r.episode))
+        && new Set(rows.map(r=>r.episode)).size === rows.length;
+      hint = {verified,selection:rows.map(r=>r.label),episode:(verified?[...rows].sort((a,b)=>a.episode-b.episode):rows).map(r=>r.label)};
+    }
+    if (!hint.selection.length) return "选好素材后显示讲述顺序";
     const forward = mode === "episode" && hint.verified;
     const row = forward ? hint.episode : hint.selection;
     return "选入 " + hint.selection.join(" → ") + "　|　成片 " + row.join(" → ") +
