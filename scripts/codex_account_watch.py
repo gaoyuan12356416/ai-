@@ -6,7 +6,7 @@ Running Codex sessions are never interrupted or logged out.
 """
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import math
@@ -69,6 +69,15 @@ def auth_identity(auth):
     if not account or not subject:
         raise ValueError("ChatGPT account identity is missing from the private auth cache")
     return hashlib.sha256((str(account) + "\0" + str(subject)).encode()).hexdigest()
+
+
+def access_expiry(auth):
+    try:
+        payload = auth["tokens"]["access_token"].split(".")[1]
+        expiry = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["exp"]
+        return expiry if type(expiry) is int else None
+    except (KeyError, ValueError, IndexError, TypeError, AttributeError):
+        return None
 
 
 def summarize_usage(result):
@@ -258,10 +267,23 @@ class Watch:
         return self.state["identities"][account]
 
     def usage(self, home, expected):
-        if auth_identity(read_json(home / "auth.json")) != expected:
+        auth = read_json(home / "auth.json")
+        if auth_identity(auth) != expected:
             raise ValueError("credential identity does not match the registered account")
-        with self.client_factory(home) as client:
-            account = client.call("account/read", {"refreshToken": False}).get("account")
+        expiry = access_expiry(auth)
+        refresh = expiry is not None and expiry <= time.time() + 86400
+        with ExitStack() as scope:
+            if refresh and home == self.active_home:
+                # Existing screenshot writers share this credential. A busy writer
+                # may postpone renewal while the current access token still works.
+                try:
+                    scope.enter_context(credential_switch_window(home))
+                except Deferred:
+                    if expiry <= time.time():
+                        raise
+                    refresh = False
+            client = scope.enter_context(self.client_factory(home))
+            account = client.call("account/read", {"refreshToken": refresh}).get("account")
             if not account or account.get("type") != "chatgpt":
                 raise ValueError("the account is not authenticated with ChatGPT")
             result = client.call("account/rateLimits/read")
@@ -425,6 +447,21 @@ class Watch:
             self.register_new_login()
             return
         active = self.state["active"]
+        if active == "original":
+            # Check the preferred account first, even if the fallback still
+            # has quota or its login has stopped working.
+            new_home = self.home("new")
+            try:
+                new_usage = self.usage(new_home, self.expected("new"))
+            except (RpcError, OSError, ValueError, TimeoutError):
+                new_usage = {}
+            new_summary = summarize_usage(new_usage)
+            if self.verify_reset(new_summary):
+                return
+            if (new_summary["remainingPercent"] or 0) >= self.state["thresholdPercent"]:
+                self.state.pop("resetNotEligibleAt", None)
+                self.switch("new", "new_quota_available", new_summary)
+                return
         usage = self.usage(self.active_home, self.expected(active))
         current = summarize_usage(usage)
         self.state["lastUsage"] = {"account": active, "at": int(time.time()), **current}
@@ -450,14 +487,6 @@ class Watch:
                 self.switch("original", "new_below_threshold", original)
                 return
         else:
-            if remaining > 0 and not self.state.get("pendingReset"):
-                self.event("fallback_active", usage=current)
-                return
-            new_home = self.home("new")
-            new_usage = self.usage(new_home, self.expected("new"))
-            new_summary = summarize_usage(new_usage)
-            if self.verify_reset(new_summary):
-                return
             if new_summary["remainingPercent"] is None:
                 self.event("usage_unknown", account="new")
                 return

@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -110,6 +111,24 @@ class AccountWatchTests(unittest.TestCase):
         self.assertEqual(watch.state["active"], "new")
         self.assertEqual(self.reset_calls, [])
 
+    def test_renews_expiring_credential_in_its_registered_home(self):
+        watch = self.watch()
+        home = watch.home("original")
+        value = auth("original")
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 300}).encode()).decode()
+        value["tokens"]["access_token"] = "test." + payload + ".signature"
+        m.atomic_json(home / "auth.json", value)
+        calls = []
+        real_call = FakeServer.call
+        def record(server, method, params=None):
+            if method == "account/read":
+                calls.append((server.home, params["refreshToken"]))
+            return real_call(server, method, params)
+        with patch.object(FakeServer, "call", record):
+            watch.usage(home, watch.expected("original"))
+            watch.usage(self.active, watch.expected("new"))
+        self.assertEqual(calls, [(home, True), (self.active, False)])
+
     def test_exactly_one_percent_stays_on_new(self):
         self.readbacks = [limits(99, 3)]
         watch = self.watch()
@@ -150,7 +169,7 @@ class AccountWatchTests(unittest.TestCase):
         self.assertEqual(self.reset_calls, [])
         watch.tick()
         self.assertEqual(self.reset_calls, [])
-        self.assertEqual(self.usage_accounts, ["new", "original", "original"])
+        self.assertEqual(self.usage_accounts, ["new", "original", "new", "original"])
 
     def test_unknown_credit_count_still_uses_original_quota(self):
         self.readbacks = [limits(100, None)]
@@ -174,13 +193,24 @@ class AccountWatchTests(unittest.TestCase):
         self.original_limits = {}
         self.readbacks = [limits(100, 3)]
         watch.tick()
-        self.assertEqual(self.usage_accounts, ["original"])
+        self.assertEqual(self.usage_accounts, ["new", "original"])
         self.assertEqual(watch.state["lastEvent"]["account"], "original")
         self.original_limits = limits(100, 5)
         self.readbacks = [{}]
         watch.tick()
         self.assertEqual(watch.state["lastEvent"]["account"], "new")
         self.assertEqual(watch.state["active"], "original")
+        self.assertEqual(self.reset_calls, [])
+
+    def test_first_positive_primary_check_leaves_healthy_fallback(self):
+        watch = self.start_on_original()
+        self.original_limits = limits(10)
+        self.readbacks = [limits(100), limits(99)]
+        watch.tick()
+        self.assertEqual(watch.state["active"], "original")
+        watch.tick()
+        self.assertEqual(watch.state["active"], "new")
+        self.assertEqual(self.usage_accounts, ["new", "original", "new"])
         self.assertEqual(self.reset_calls, [])
 
     def test_both_empty_with_zero_or_unknown_new_cards_waits(self):
