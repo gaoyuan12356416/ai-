@@ -1,5 +1,4 @@
 """One bounded refresh using the existing arithmetic, without a resident cache."""
-from contextlib import contextmanager
 import json
 import gc
 import hashlib
@@ -8,6 +7,7 @@ from pathlib import Path
 import time
 
 from .campaign import service as original
+from .campaign.descriptions import open_descriptions
 from .sql_client import Broker,read_session
 from .sql_reconciliation import atomic_json
 from .campaign_snapshot import current
@@ -31,16 +31,12 @@ def refresh(seed):
     # from the same immutable local index after the SQL lease has closed.
     previous.pop('d',None);previous.pop('xd',None);gc.collect()
     broker=Broker(int(os.environ['SQL_OFFLOAD_PORT']),os.environ['SQL_OFFLOAD_TOKEN'],os.environ['SQL_OFFLOAD_RECEIPTS'])
-    @contextmanager
-    def connection():
+    started=time.monotonic()
+    with open_descriptions(seed.parent/'refresh-descriptions.sqlite3',manifest['version']) as descriptions:
         with read_session(broker,'campaign-copy-report',user=os.environ['SQL_OFFLOAD_USER'],
                           password=os.environ['SQL_OFFLOAD_PASSWORD'],database='ads_business',
                           budget_seconds=840,statement_timeout_ms=15000,report_options=True,compressed=True) as session:
-            yield session
-    original.report_connection=connection
-    # Preserve the original compressed transport, page size and query count.
-    started=time.monotonic()
-    raw=original.query_raw(previous)
+            raw=original.query_raw_connection(session,previous,descriptions=descriptions)
     prior_meta=previous.get('m',{})
     del previous;gc.collect()
     payload=original.build_payload(raw)

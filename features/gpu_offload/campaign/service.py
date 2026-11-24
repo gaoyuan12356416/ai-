@@ -477,7 +477,7 @@ def read_copy_logs(cur):
     return rows
 
 
-def query_raw_connection(conn, previous: dict | None = None) -> dict:
+def query_raw_connection(conn, previous: dict | None = None, *, descriptions=None) -> dict:
     payload: dict[str, object] = {}
     with conn.cursor() as source_cursor:
         cur = MeasuredCursor(source_cursor)
@@ -507,7 +507,7 @@ def query_raw_connection(conn, previous: dict | None = None) -> dict:
 
         cur.phase = "campaign_mapping"
         mapping, metadata, next_bucket, mapping_stats = query_campaign_mapping(
-            cur, logs, previous, safety["server_time"]
+            cur, logs, previous, safety["server_time"], descriptions
         )
         payload.update(mapping=mapping, campaign_metadata=metadata,
                        mapping_metadata_next_bucket=next_bucket, mapping_stats=mapping_stats)

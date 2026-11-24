@@ -55,7 +55,7 @@ def joined(values):
     return "、".join(items[:4]) + (f" 等{len(items)}项" if len(items) > 4 else "")
 
 
-def query_campaign_mapping(cur, logs, previous, now):
+def query_campaign_mapping(cur, logs, previous, now, descriptions=None):
     """Keep current membership/fallback semantics without a million table lookups.
 
     New Campaigns and changed membership get fresh descriptions immediately.
@@ -174,6 +174,13 @@ def query_campaign_mapping(cur, logs, previous, now):
                           "source": table, "membership_campaigns": len(remaining),
                           "detail_campaigns": len(refresh_ids),
                           "deferred_descriptions": len(deferred)}), flush=True)
+        if descriptions is not None:
+            missing = []
+            for part in chunks(refresh_ids, DETAIL_BATCH):
+                missing.extend(descriptions.restore(table, platform, part, metadata, now, METADATA_MAX_AGE))
+            print(json.dumps({"event": "campaign_copy_description_resume", "source": table,
+                              "restored": len(refresh_ids) - len(missing), "remaining": len(missing)}), flush=True)
+            refresh_ids = missing
         for part in chunks(refresh_ids, DETAIL_BATCH):
             placeholders = ",".join(["%s"] * len(part))
             # status, budget and ad_account_id were fetched but never consumed.
@@ -197,6 +204,8 @@ def query_campaign_mapping(cur, logs, previous, now):
                     countries=joined(r.get("country") for r in rows),
                     languages=joined(r.get("language") for r in rows),
                 )
+            if descriptions is not None:
+                descriptions.save(table, platform, part, metadata)
             stats["detail_campaigns"] += len(part)
 
     # Empty lookups must clear old labels and must never remove an entity from
