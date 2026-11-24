@@ -32,6 +32,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--analysis", required=True)
+    parser.add_argument(
+        "--reuse-canary-cache", type=Path, help="Optional earlier isolation run from this fixture"
+    )
     parser.add_argument("--scratch", type=Path, required=True)
     args = parser.parse_args()
     root = args.source_root.resolve()
@@ -41,6 +44,21 @@ def main():
     folder.mkdir(mode=0o700, parents=True, exist_ok=False)
     rt = Runtime(folder / "private")
     studio.setup(rt)
+    if args.reuse_canary_cache:
+        prior = args.reuse_canary_cache.resolve()
+        if prior == root or root in prior.parents or not (prior / "acceptance.json").is_file():
+            raise ValueError("Expected a completed isolated canary directory")
+        with closing(
+            sqlite3.connect((prior / "private/editor.sqlite3").as_uri() + "?mode=ro", uri=True)
+        ) as cache:
+            existing = cache.execute(
+                "SELECT * FROM studio_story_cache WHERE owner=? AND kind IN "
+                "('edges','outline','caption_track','cut_review')",
+                (owner(ACTOR),),
+            ).fetchall()
+        with rt.db(True) as db:
+            db.executemany("INSERT OR IGNORE INTO studio_story_cache VALUES(?,?,?,?,?)", existing)
+        print("reused isolated evidence rows", len(existing), flush=True)
     with closing(sqlite3.connect((root / "editor.sqlite3").as_uri() + "?mode=ro", uri=True)) as src:
         src.row_factory = sqlite3.Row
         receipt = src.execute(

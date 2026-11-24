@@ -40,7 +40,25 @@ def resume(manifest):
             raise RuntimeError("Check active independent editor before resuming")
         record["state"] = "api_active"
         write(manifest, record)
-    if record.get("static_manifest"):
+    if record.get("static_manifest") or record.get("static_verified"):
+        return
+    static_base = record.get("static_base", record["base"])
+    changed = [
+        name
+        for name in FILES
+        if editor.blob(record["repo"], static_base, "static/" + name)
+        != editor.blob(record["repo"], record["version"], "static/" + name)
+    ]
+    if not changed:
+        for dest in editor.STATIC:
+            for name in FILES:
+                if editor.read(dest / name) != editor.blob(
+                    record["repo"], record["version"], "static/" + name
+                ):
+                    raise RuntimeError("Concurrent editor static change: " + str(dest / name))
+        record.update(state="compatible", static_verified=True)
+        write(manifest, record)
+        print(json.dumps({"state": "compatible", "manifest": str(manifest)}))
         return
     cmd = [
         "python3",
@@ -51,9 +69,9 @@ def resume(manifest):
         "--version",
         record["version"],
         "--base",
-        record["base"],
+        static_base,
         "--files",
-        *FILES,
+        *changed,
     ]
     result = json.loads(subprocess.check_output(cmd, text=True))
     record["state"] = "compatible"
@@ -73,9 +91,10 @@ def stage(args):
     previous = editor.CURRENT.resolve()
     if previous.name != args.base:
         raise RuntimeError("Concurrent independent editor release")
+    static_base = args.static_base or args.base
     for dest in editor.STATIC:
         for name in FILES:
-            if editor.read(dest / name) != editor.blob(repo, args.base, "static/" + name):
+            if editor.read(dest / name) != editor.blob(repo, static_base, "static/" + name):
                 raise RuntimeError("Concurrent editor static change: " + str(dest / name))
     folder = editor.ROOT / "backups" / ("story-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     folder.mkdir(parents=True, mode=0o700)
@@ -91,6 +110,7 @@ def stage(args):
         "release": str(release),
         "repo": str(repo),
         "base": args.base,
+        "static_base": static_base,
         "version": args.version,
         "state": "prepared",
     }
@@ -102,7 +122,9 @@ def stage(args):
 
 def default(manifest, version):
     record = json.loads(manifest.read_text())
-    if editor.CURRENT.resolve() != Path(record["release"]) or not record.get("static_manifest"):
+    if editor.CURRENT.resolve() != Path(record["release"]) or not (
+        record.get("static_manifest") or record.get("static_verified")
+    ):
         raise RuntimeError("Verify active compatible release and static resources")
     with closing(sqlite3.connect(editor.DB)) as db:
         with db:
@@ -121,6 +143,7 @@ if __name__ == "__main__":
     parser.add_argument("action", choices=["stage", "resume", "enable", "rollback-default"])
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--base")
+    parser.add_argument("--static-base")
     parser.add_argument("--version")
     parser.add_argument("--manifest", type=Path)
     args = parser.parse_args()

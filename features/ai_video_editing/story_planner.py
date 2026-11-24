@@ -8,9 +8,11 @@ from .runtime import packed
 from .smart_model import model_config, model_json
 from .smart_plans import VARIANT_ZOOM
 from .story_edges import boundaries, snap
+from . import story_cut_review
 
 LOG = logging.getLogger(__name__)
-VERSION = "story-v2.1"
+VERSION = "story-v2.2"
+OUTLINE_VERSION = "story-v2.1"
 ROLES = {
     "hook": "开场冲突",
     "context": "交代起因",
@@ -69,7 +71,7 @@ def outline(rt, actor, sources):
                 ]
             )
     media = [(s["asset"]["sha256"], s["duration_ms"]) for s in sources]
-    cache_key = hashlib.sha256(packed([VERSION, model_config(), media, records]).encode()).hexdigest()
+    cache_key = hashlib.sha256(packed([OUTLINE_VERSION, model_config(), media, records]).encode()).hexdigest()
     data = cached(rt, actor, "outline", cache_key)
     if data is None:
         data = {}
@@ -135,6 +137,7 @@ def assemble(rt, actor, sources, cfg, analysis_id):
                     snap(event, data, source["duration_ms"]),
                     data,
                 )
+            story_cut_review.review(rt, actor, source, edge_cache)
         for script in range(clip["script_count"]):
             picked, notes, problems, story_question = select(
                 rt, actor, story, clip, script, question, beats, hooks, endings, edge_cache
@@ -228,7 +231,9 @@ def select(rt, actor, story, clip, script, question, beats, hooks, endings, edge
         )
 
     def leader(c, preferred, start):
-        semantic = c["tag"] in (("conflict", "hook", "turn") if start else ("cliffhanger", "conflict", "turn"))
+        semantic = c["tag"] in (
+            ("conflict", "hook", "turn") if start else ("cliffhanger", "conflict", "turn")
+        )
         return (
             c["key"] in preferred,
             -preferred.index(c["key"]) if c["key"] in preferred else 0,
@@ -248,6 +253,9 @@ def select(rt, actor, story, clip, script, question, beats, hooks, endings, edge
         if not span:
             return None
         a, b, sig = span
+        b = data.get("cut_review", {}).get("dialogue_end", b)
+        if data.get("review_note") and data["review_note"] not in notes:
+            notes.append(data["review_note"])
         return {
             "source_id": key[0],
             "candidate_id": key[1],
@@ -303,6 +311,10 @@ def select(rt, actor, story, clip, script, question, beats, hooks, endings, edge
         open_seg["role"] = "开场冲突"
         picked.append(open_seg)
     if end_seg:
+        review = edge_cache[end["key"]][1].get("cut_review", {})
+        if "suspense_end" in review:
+            end_seg["end_ms"] = review["suspense_end"]
+            end_seg["reason"] = review.get("cut_reason") or end_seg["reason"]
         end_seg["role"] = "结尾悬念"
         picked.append(end_seg)
     established = bool(end and (end["key"] in endings or end["tag"] == "cliffhanger" and not beats))
@@ -324,6 +336,10 @@ def select(rt, actor, story, clip, script, question, beats, hooks, endings, edge
         seg = measured(c)
         if not seg:
             return False
+        if end_seg and seg["source_id"] == end_seg["source_id"]:
+            seg["end_ms"] = min(seg["end_ms"], end_seg["end_ms"])
+            if seg["end_ms"] <= seg["start_ms"]:
+                return False
         for s in picked:
             if (
                 s["transcript"]

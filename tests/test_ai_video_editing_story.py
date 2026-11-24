@@ -7,6 +7,7 @@ from unittest.mock import patch
 from features.ai_video_editing import smart_api, studio, story_planner, story_receipts
 from features.ai_video_editing.runtime import Fault, Runtime, owner, packed
 from features.ai_video_editing.story_edges import snap
+from features.ai_video_editing import story_cut_review
 
 
 class StoryTest(unittest.TestCase):
@@ -120,7 +121,9 @@ class StoryTest(unittest.TestCase):
                 actor={"tenant_key": "other", "user_id": "a"},
             )
         self.mode(1)
-        self.assertEqual(self.call("GET", "/sessions/" + sid)["item"]["config"]["clip"]["strategy_version"], 2)
+        self.assertEqual(
+            self.call("GET", "/sessions/" + sid)["item"]["config"]["clip"]["strategy_version"], 2
+        )
         self.assertNotIn("clip", self.make()[0]["config"])
 
     def test_new_revision_never_mutates_the_previous_one(self):
@@ -152,7 +155,9 @@ class StoryTest(unittest.TestCase):
         self.assertTrue(p["conflicts"])
         self.assertIn("20", p["conflicts"][0])
         rid = self.call(
-            "POST", "/sessions/" + s["id"] + "/submit", {"operation_id": "limited", "config": frozen["config"]}
+            "POST",
+            "/sessions/" + s["id"] + "/submit",
+            {"operation_id": "limited", "config": frozen["config"]},
         )["run_id"]
         with self.rt.db(True) as db:
             db.execute(
@@ -203,6 +208,54 @@ class StoryTest(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT count(*) FROM projects").fetchone()[0], 2)
                 self.assertEqual(db.execute("SELECT count(*) FROM tasks").fetchone()[0], 24)
 
+    def test_dialogue_finishes_and_suspense_stops_before_any_visible_payoff(self):
+        times = list(range(87000, 96000, 600))
+        evidence = {"cuts": [93400], "cues": []}
+        review = story_cut_review.decision(
+            {"after_line": 12, "first_answer": 5, "cut_reason": "来人伸手"}, times, 87000, 91350, evidence
+        )
+        self.assertEqual(review["dialogue_end"], 93400)
+        self.assertEqual(review["suspense_end"], 88800)
+        self.assertLess(review["suspense_end"], times[4])
+        self.assertEqual(
+            story_cut_review.decision({"after_line": 29, "first_answer": -1}, times, 87000, 91350, evidence),
+            {"dialogue_end": 91350},
+        )
+
+    def test_visual_outgoing_review_reuses_other_episodes_when_selection_changes(self):
+        self.measure.side_effect = lambda *a: {
+            "cuts": [],
+            "captions": [],
+            "quiet": [],
+            "cues": [],
+            "signatures": [],
+        }
+        self.mode(2)
+        s, frozen, analysis = self.make()
+
+        def decisions(prompt, images, folder):
+            return {
+                "windows": [
+                    {"id": str(i + 1), "first_answer": 3, "after_line": 0} for i in range(len(images))
+                ]
+            }
+
+        with (
+            patch.object(story_cut_review, "model_config", return_value=("fixture", "", "")),
+            patch.object(story_cut_review, "contact_sheet"),
+            patch.object(story_cut_review, "model_json", side_effect=decisions) as model,
+        ):
+            plan = story_receipts.ensure(self.rt, self.actor, s["id"], frozen, analysis)
+            first = model.call_count
+            self.assertEqual(first, 3)
+            self.assertLess(plan["outputs"][0]["segments"][-1]["end_ms"], 19100)
+            frozen["config"]["clip"]["story_order"] = "selection"
+            story_receipts.ensure(self.rt, self.actor, s["id"], frozen, analysis)
+            self.assertEqual(model.call_count, first)
+            ns, nf, na = self.make(list(reversed(self.sources[:4])))
+            story_receipts.ensure(self.rt, self.actor, ns["id"], nf, na)
+            self.assertEqual(model.call_count, first + 1)
+
     def test_uncertain_order_short_silent_source_and_title_boundary(self):
         self.mode(2)
         s, frozen, _ = self.make()
@@ -214,7 +267,12 @@ class StoryTest(unittest.TestCase):
             duration_ms=480,
             candidates=[
                 dict(
-                    rows[0]["candidates"][0], start_ms=0, end_ms=480, anchor_ms=200, transcript="", tag="signal"
+                    rows[0]["candidates"][0],
+                    start_ms=0,
+                    end_ms=480,
+                    anchor_ms=200,
+                    transcript="",
+                    tag="signal",
                 )
             ],
         )
