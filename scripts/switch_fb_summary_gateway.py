@@ -15,8 +15,10 @@ import time
 ROOT = Path('/mnt/data-disk/gpu-backend-offload-20261123')
 ETC = Path('/etc/ai-backend-offload')
 ROUTE = Path('/etc/nginx/default.d/ai-backend-offload.conf')
-UNIT = 'ai-backend-offload-gateway@fbclock.service'
-PORT = 19988
+UNIT = 'ai-backend-offload-gateway@fbsummary.service'
+PORT = 19989
+PRIOR_PORT = 19988
+PRIOR_UNIT = 'ai-backend-offload-gateway@fbclock.service'
 BASE = 'bcf6996a0297589ef119fb55c02fa5f7db23056f'
 
 
@@ -72,10 +74,19 @@ def switch(release, rollback):
     folder.mkdir(mode=0o700,exist_ok=True)
     if rollback:
         assert (folder/'deployment.json').exists()
-        checksum=replace_route(PORT,19964)
+        run('systemctl','enable','--now',PRIOR_UNIT)
+        for _ in range(30):
+            try:
+                if anonymous(PRIOR_PORT)==401:break
+            except OSError:pass
+            time.sleep(.2)
+        else:raise RuntimeError('previous summary gateway did not become ready')
+        checksum=replace_route(PORT,PRIOR_PORT)
         run('systemctl','disable',UNIT)
         return {'reverted':True,'route_sha256':checksum}
     assert re.fullmatch('[0-9a-f]{40}',release.name)
+    assert (ROOT/'gateway-fbclock-current').resolve().name=='bf3035d92d53a04f03052b3e20fa910585f4793a'
+    assert prop(PRIOR_UNIT,'ActiveState')=='active' and anonymous(PRIOR_PORT)==401
     assert prop(UNIT,'MainPID')=='0'
     for unit in ('pipeline-coordinator','pipeline-node-cpu-main','drama-material-api'):
         assert prop(unit,'ActiveState')=='active'
@@ -84,13 +95,13 @@ def switch(release, rollback):
     assert template.read_bytes()==(blue/'deploy/ai-backend-offload-gateway@.service').read_bytes()
     with socket.socket() as s:
         s.bind(('127.0.0.1',PORT))
-    link=ROOT/'gateway-fbclock-current'
+    link=ROOT/'gateway-fbsummary-current'
     if not link.exists():link.symlink_to(release)
     assert link.resolve()==release
     source=(ETC/'gateway-blue.env').read_text()
     modified,n=re.subn(r'^OFFLOAD_GATEWAY_PORT=.*$', 'OFFLOAD_GATEWAY_PORT='+str(PORT),source,flags=re.MULTILINE)
     assert n==1
-    env=ETC/'gateway-fbclock.env'
+    env=ETC/'gateway-fbsummary.env'
     if env.exists():assert env.read_text()==modified
     else:
         with env.open('x') as stream:
@@ -106,7 +117,7 @@ def switch(release, rollback):
         time.sleep(.2)
     else:raise RuntimeError('summary gateway did not become ready')
     run('systemctl','enable',UNIT)
-    checksum=replace_route(19964,PORT)
+    checksum=replace_route(PRIOR_PORT,PORT)
     record={'release':release.name,'guarded_route':'/api/pipeline-monitor/summary','sha256':checksum,
             'unit':UNIT,'unit_pid':prop(UNIT,'MainPID'),'protected_pids_before':pids,
             'protected_pids_after':{u:prop(u,'MainPID') for u in pids},'anonymous':anonymous(PORT),

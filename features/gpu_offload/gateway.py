@@ -153,8 +153,10 @@ class Handler(BaseHTTPRequestHandler):
                 if actor['role'] != 'admin' or not config.get('monitor_cache', False):
                     value = request(config['api_port'], self.path, cookie=cookie)
                     return self.reply(recheck_fb_summary(value, actor, path))
-                key = cache_key(actor, self.path, 'monitor-v1')
                 target, api_port, config_path = self.path, config['api_port'], self.server.config_path
+                if path == '/api/pipeline-monitor/summary' and target in (path, path+'?'):
+                    target = path+'?window=today'
+                key = cache_key(actor, target, 'monitor-v1')
                 def load_monitor():
                     value = request(api_port, target, cookie=cookie, timeout=10, limit=4*1024*1024)
                     value = recheck_fb_summary(value, actor, path)

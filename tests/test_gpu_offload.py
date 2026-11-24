@@ -202,6 +202,17 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(value['warnings'])
         self.read(); self.assertEqual(self.query_calls, 2)
 
+    def test_bare_summary_shares_only_the_default_time_window(self):
+        self.user['role'] = 'admin'
+        path = self.gateway.config_path
+        config = json.loads(path.read_text())
+        path.write_text(json.dumps(dict(config, monitor_cache=True)))
+        summary = '/api/pipeline-monitor/summary'
+        for target in (summary, summary+'?window=today', summary+'?window=week'):
+            self.assertEqual(self.read(target)[0], 200)
+        self.assertEqual(self.auth_calls, 3)
+        self.assertEqual(self.monitor_calls, 2)
+
     def test_monitor_prefetch_rechecks_role_and_configuration(self):
         self.gateway.monitor_snapshots.close()
         self.gateway.monitor_snapshots.pressure = lambda: True
