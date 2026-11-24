@@ -435,22 +435,16 @@ class MeasuredCursor:
 def read_copy_logs(cur):
     """One logical full scan in bounded primary-key pages, including corrections.
 
-    The seek query walks only the primary index and returns one upper boundary.
-    Sparse/deleted IDs do not cause empty numeric-range loops. All pages share
-    the refresh's consistent snapshot, so no rows are skipped or counted twice.
+    An integer primary-key interval covers at most COPY_LOG_PAGE_ROWS source
+    rows. Seek to the next existing key only after an empty interval, so a
+    deleted range cannot cause a long sequence of empty requests.
     """
     cur.execute("SELECT MAX(id) AS max_id FROM ads_business.ads_campaign_rule_logs")
     maximum = int((cur.fetchone() or {}).get("max_id") or 0)
     rows = []
     after = 0
     while after < maximum:
-        cur.execute(
-            "SELECT id FROM ads_business.ads_campaign_rule_logs FORCE INDEX (PRIMARY) "
-            f"WHERE id > %s AND id <= %s ORDER BY id LIMIT {COPY_LOG_PAGE_ROWS - 1},1",
-            (after, maximum),
-        )
-        boundary = cur.fetchone()
-        through = int(boundary["id"]) if boundary else maximum
+        through = min(after + COPY_LOG_PAGE_ROWS, maximum)
         cur.execute("""
             SELECT l.id, l.platform, l.level, l.status, l.account_id, l.origin_id, l.new_id, l.queue_id,
                    l.user_id, l.app_id, l.content_id, l.created_at,
@@ -472,8 +466,17 @@ def read_copy_logs(cur):
               AND l.platform IN (0,3) AND l.level IN (0,1,2)
               AND l.data_source=1
             """, (after, through))
-        rows.extend(cur.fetchall())
+        page = cur.fetchall()
+        rows.extend(page)
         after = through
+        if not page and after < maximum:
+            cur.execute(
+                "SELECT id FROM ads_business.ads_campaign_rule_logs FORCE INDEX (PRIMARY) "
+                "WHERE id > %s AND id <= %s ORDER BY id LIMIT 1", (after, maximum))
+            boundary = cur.fetchone()
+            if not boundary:
+                break
+            after = int(boundary["id"]) - 1
     return rows
 
 
