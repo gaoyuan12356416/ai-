@@ -485,15 +485,15 @@ def export_csv(result):
     buf = io.StringIO(newline="")
     writer = csv.writer(buf)
     writer.writerow([DIMENSIONS[k] for k in groups] + ["收入 (USD)" if k == "revenue" else METRICS[k] for k in metric_fields]
-                    + ["快照版本", "收入日期口径", "发布日期口径"] + [METRICS[k] for k in split_fields])
+                    + [METRICS[k] for k in split_fields] + ["快照版本", "收入日期口径", "发布日期口径"])
     def safe(value):
         if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
             return "'" + value
         return value
     for row in result["all_rows"]:
         writer.writerow([safe(row["labels"].get(k, row.get(k, ""))) for k in groups]
-                        + [row.get(k) for k in metric_fields] + [result["meta"]["version"], "UTC", "账号当地日期"]
-                        + [row.get(k) for k in split_fields])
+                        + [row.get(k) for k in metric_fields + split_fields]
+                        + [result["meta"]["version"], "UTC", "账号当地日期"])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 

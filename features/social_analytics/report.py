@@ -524,8 +524,8 @@ def csv_export(report):
             fields.append(("drama_english_display", "英文剧名"))
     fields += [(metric, "收入（USD）" if metric == "revenue" else LABELS[metric])
                for metric in METRICS if metric not in ("iap", "iaa")]
-    fields += [("period", "统计范围（UTC）"), ("data_status_label", "数据完整性"), ("conversion_note", "转化口径")]
     fields += [(metric, LABELS[metric]) for metric in ("iap", "iaa")]
+    fields += [("period", "统计范围（UTC）"), ("data_status_label", "数据完整性"), ("conversion_note", "转化口径")]
 
     def safe(value):
         if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r", "\n")):
