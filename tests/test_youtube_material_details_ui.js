@@ -12,7 +12,8 @@ vm.createContext(context);
 let source = fs.readFileSync(path.join(__dirname,'../static/youtube-publish.js'),'utf8');
 source = source.replace(/  init\(\);\s*\}\)\(\);\s*$/, `
   renderModals=()=>{}; showSource=()=>{}; closeModal=()=>{stack.pop();};
-  globalThis.uiTest={selectMaterial,confirmMaterial,pickerView,publicWatchUrl,
+  globalThis.uiTest={selectMaterial,confirmMaterial,pickerView,publicWatchUrl,coverPreviewLabel,
+    detail(t){taskCache.set(t.id,t);return detailsView({id:t.id,key:'cover-test'});},
     setup(view,request){stack=[view];state.source={configured:true};api=request;draft={title:'',errors:{},material:null};},
     applied:()=>draft.material, close:()=>{stack=[];}};
 })();`);
@@ -22,6 +23,12 @@ const card = id => ({id,name:'Video '+id,metadata_pending:true});
 const full = id => ({id,name:'Video '+id,macro_name:'Drama '+id,link_ready:true,drama_cover_status:'available'});
 
 (async()=>{
+  const rejectedCover = {id:'policy',status:'generation_failed',cover_source:'ai',can_upload_cover:true,
+    error:{code:'cover_generation_policy_blocked',message:'封面生成失败，请检查后重试'}};
+  assert.match(ui.coverPreviewLabel(rejectedCover),/内容审核/);
+  assert.match(ui.detail(rejectedCover),/点击「上传封面」/);
+  assert.doesNotMatch(ui.detail({...rejectedCover,can_upload_cover:false}),/点击「上传封面」/);
+  assert.match(ui.detail({...rejectedCover,error:{code:'cover_generation_failed',message:'普通生成错误'}}),/普通生成错误/);
   const receipt={regular_media:{},video_id:'Az01_-bcDeF',video_url:'https://example.org/private',can_share_x:false};
   assert.equal(ui.publicWatchUrl(receipt),'');
   assert.equal(ui.publicWatchUrl({...receipt,can_share_x:true}),'https://www.youtube.com/watch?v=Az01_-bcDeF');
