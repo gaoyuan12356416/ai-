@@ -57,6 +57,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
       <button type="button" data-level="2">Ad<span class="level-count">读取中</span></button>
     </div>
     <div class="muted" id="scopeHint"></div>
+    <div id="coverageHint" role="status" style="margin-top:6px;color:#92400e;font-weight:600" hidden></div>
   </section>
 
   <section class="panel loading-panel" id="loadingPanel" role="status" aria-live="polite">
@@ -300,7 +301,44 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     get('validationLine').innerHTML='<strong>'+unit+' 复制状态：</strong>成功 '+integer(pipeline.success)+'，失败 '+integer(pipeline.failed)+'，运行中 '+integer(pipeline.running)+'；已关联自动复制规则 '+integer(total.attributed_campaigns)+'/'+integer(total.campaign_count)+'，复制触发来源未归因 '+integer(unattributed)+'；业务映射 '+integer(total.mapped_campaigns)+'/'+integer(total.campaign_count)+'；操作人姓名 '+integer(namedOperators)+'/'+integer(total.campaign_count)+'（未配置 '+integer(total.campaign_count-namedOperators)+'）；统计期无效果数据 '+integer(noInsight)+'；观察 ≥24h '+integer(mature24)+'，不足6h '+integer(young6)+'。<br><strong>效果关联：</strong>'+safe(relation)+'。复制日期 '+safe(copyWindow)+' 仅筛选复制批次；所有消耗、收入、安装、付费及效率指标按数据统计日期 dt '+safe(statWindow)+' 汇总。AF D0 ROAS = SUM(AF D0收入) / SUM(消耗)。<br><strong>归因说明：</strong><code>queue_id=0</code> 仅表示日志未绑定 ads_campaign_auto_rules，不能据此判定为非自动复制。来源：'+safe(meta.source||'')+'。';
   }
 
-  function render(){const rows=filteredRows(),total=finalize(rows.reduce((agg,row)=>addAgg(agg,row),emptyAgg()));renderKpis(total,rows);renderTrend(rows);renderRankings(rows);renderTable(rows);renderStatus(total,rows)}
+  function coverageForDates(meta, start, end) {
+    const through = meta.refreshed_through || meta.stat_end;
+    start = start || meta.stat_start;
+    end = end || through;
+    if (!start || !end || !through || end < start) return null;
+    const missing = [...new Set(meta.pending_refresh_dates || [])].filter(day =>
+      day >= start && day <= end && day <= through && !meta.date_refreshed_at?.[day]).sort();
+    const ranges = [...missing];
+    if (end > through) {
+      const next = new Date(Date.parse(through) + 86400000).toISOString().slice(0,10);
+      const first = start > next ? start : next;
+      ranges.push(first === end ? end : first + ' 至 ' + end);
+    }
+    if (!ranges.length) return null;
+    const last = end < through ? end : through;
+    const days = Math.max(0, (Date.parse(last) - Date.parse(start)) / 86400000 + 1);
+    return {allPending: days === missing.length, label: ranges.join('、')};
+  }
+
+  function render() {
+    const start = get('statStartDate').value, end = get('statEndDate').value;
+    const coverage = coverageForDates(meta, start, end);
+    const emptyRange = coverage?.allPending && !dailyRows.some(row =>
+      (!start || row.dt >= start) && (!end || row.dt <= end));
+    const hint = get('coverageHint');
+    hint.hidden = !coverage;
+    hint.textContent = coverage ? '完整效果待补齐的统计日为 ' + coverage.label +
+      (emptyRange ? '。所选日期暂无可核实的效果数据。' : '。以下金额、排行及导出仅为已有统计行的小计。') : '';
+    get('exportBtn').disabled = Boolean(emptyRange);
+    if (emptyRange) {
+      state.currentExportRows = [];
+      for (const id of ['kpis','trendChart','rankings','pivotTable','validationLine']) get(id).replaceChildren();
+      get('tableHint').textContent = '所选统计日期的效果待补齐';
+      return;
+    }
+    const rows = filteredRows(), total = finalize(rows.reduce((agg,row)=>addAgg(agg,row),emptyAgg()));
+    renderKpis(total,rows);renderTrend(rows);renderRankings(rows);renderTable(rows);renderStatus(total,rows);
+  }
   function scheduleRender(){clearTimeout(state.renderTimer);state.renderTimer=setTimeout(()=>requestAnimationFrame(render),160)}
 
   function resetFilters(){
@@ -308,8 +346,17 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
   }
 
   function exportCsv(){
-    const dims=state.dims,selectedMetrics=state.metrics,headers=[...dims.map(dim=>dimLabels[dim]||dim),...selectedMetrics.map(metric=>metricLabels[metric]||metric)],cell=value=>'"'+text(value).replace(/"/g,'""')+'"',lines=[headers.map(cell).join(',')];
-    state.currentExportRows.forEach(row=>lines.push([...dims.map(dim=>row[dim]),...selectedMetrics.map(metric=>row[metric])].map(cell).join(',')));
+    render(); // Date changes and a debounced filter can precede a click.
+    if (get('exportBtn').disabled) return;
+    const dims=state.dims,selectedMetrics=state.metrics,headers=[...dims.map(dim=>dimLabels[dim]||dim),...selectedMetrics.map(metric=>metricLabels[metric]||metric)],cell=value=>'"'+text(value).replace(/"/g,'""')+'"';
+    const note=get('coverageHint').textContent;
+    if(note) headers.push('统计日期覆盖');
+    const lines=[headers.map(cell).join(',')];
+    state.currentExportRows.forEach(row=>{
+      const values=[...dims.map(dim=>row[dim]),...selectedMetrics.map(metric=>row[metric])];
+      if(note) values.push(note);
+      lines.push(values.map(cell).join(','));
+    });
     const csv=String.fromCharCode(65279)+lines.join(String.fromCharCode(13,10)),blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='campaign-copy-'+currentLevel().name.toLowerCase().replace(' ','-')+'-performance-'+(meta.generated_at||'report').replace(/[-: ]/g,'')+'.csv';document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);
   }
 
@@ -327,7 +374,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     get('metaLine').textContent=currentLevel().name+'｜复制 '+copyStart+' 至 '+copyEnd+'｜统计日 '+statStart+' 至 '+statEnd+(meta.rolling_refresh?'｜本次数据快照 ':'｜更新 ')+generated+'｜成功样本 '+integer(campaigns.length)+' 条｜'+(meta.source||'');
     get('scopeHint').textContent=(staleReport?'数据尚未更新，当前展示上次成功快照；缺少日期不代表零消耗｜':'每15分钟后台自动刷新｜')+'当前复制范围 '+(meta.view_start||'最早')+' 至 '+(meta.view_end||'最新')+'｜'+(meta.platform_scope||'0=Meta, 3=TikTok')+' · level='+state.level+' · data_source=1｜成功 '+integer(pipeline.success)+' · 失败 '+integer(pipeline.failed)+'｜终态成功率 '+percent(pipeline.terminal_success_rate)+'｜AF D0 口径';
     get('scopeHint').style.color=staleReport?'#b45309':'';
-    if(meta.rolling_refresh){get('scopeHint').textContent+='｜逐日完整更新；本次 '+(meta.refreshed_dates||[]).join('、')+'；其余日期保留各自历史快照（待轮转 '+(meta.pending_refresh_dates||[]).length+' 日）';if((meta.pending_refresh_dates||[]).length)get('scopeHint').style.color='#b45309';}
+    if(meta.rolling_refresh){get('scopeHint').textContent+='｜逐日更新，本轮统计日 '+(meta.refreshed_dates||[]).join('、')+'，待轮转 '+(meta.pending_refresh_dates||[]).length+' 日';if((meta.pending_refresh_dates||[]).length)get('scopeHint').style.color='#b45309';}
     if(state.level==='0'&&num(meta.metadata_stale_campaigns)>0){get('scopeHint').textContent+='｜部分广告名称、国家、语言等信息待更新（'+integer(meta.metadata_stale_campaigns)+' 个）；消耗和收入按本次快照统计';get('scopeHint').style.color='#b45309';}
     get('keyword').placeholder='搜索统计日期、规则、'+currentLevel().name+'、账户、短剧、产品、操作人...';render();
   }
@@ -338,7 +385,7 @@ header{position:sticky;top:0;z-index:20;background:#172033;color:#fff;border-bot
     ['copyStartDate','copyEndDate'].forEach(id=>get(id).addEventListener('change',()=>{normalizeDateRange(id);loadCohort(state.level,get('copyStartDate').value,get('copyEndDate').value)}));
     ['copyStartDate','copyEndDate','statStartDate','statEndDate','ruleFilter','productFilter','platformFilter','userFilter','accountFilter','bandFilter','attributionFilter','maturityFilter','minSpend','minRoas','maxCpi','keyword'].forEach(id=>{const event=id==='keyword'||id.startsWith('min')||id==='maxCpi'?'input':'change';get(id).addEventListener(event,event==='input'?scheduleRender:()=>{normalizeDateRange(id);requestAnimationFrame(render)})});
     get('levelTabs').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>loadCohort(button.dataset.level,meta.view_start||'',meta.view_end||'')));get('resetBtn').addEventListener('click',resetFilters);get('exportBtn').addEventListener('click',exportCsv);applyLevel(String(meta.view_level??0));
-    get('resetBtn').disabled=false;get('exportBtn').disabled=false;get('loadingPanel').hidden=true;document.documentElement.dataset.reportReady='1';performance.mark('campaign-copy-render-ready');
+    get('resetBtn').disabled=false;get('loadingPanel').hidden=true;document.documentElement.dataset.reportReady='1';performance.mark('campaign-copy-render-ready');
   }
   function normalizeDateRange(changed){
     for(const prefix of ['copy','stat']){
