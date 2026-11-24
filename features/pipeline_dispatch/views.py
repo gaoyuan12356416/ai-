@@ -489,7 +489,7 @@ def _query_snapshot(store, view, safe_actor, filters):
         if active_holds():
             result['warnings'].append('相关服务正在安全切换：在途任务继续执行，新任务暂缓领取；服务就绪后自动恢复')
         from .support_health import read_snapshot
-        support = read_snapshot(now, safe_actor, channels)
+        support = read_snapshot(store.clock, safe_actor, channels)
         if support is not None:
             result['fb_support'] = support
     return result

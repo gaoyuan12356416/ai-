@@ -16,7 +16,7 @@ COUNTS = ('due_pending', 'overdue_pending', 'future_scheduled', 'platform_proces
           'oldest_pending_seconds', 'threshold_seconds')
 
 
-def read_snapshot(now, actor, channels, path=SNAPSHOT):
+def read_snapshot(clock, actor, channels, path=SNAPSHOT):
     # The snapshot has global counts. Never expose it to ordinary tenant users.
     if not actor.get('is_admin') or 'fb' not in channels:
         return None
@@ -25,7 +25,8 @@ def read_snapshot(now, actor, channels, path=SNAPSHOT):
     try:
         value = json.loads(Path(path).read_text(encoding='utf-8'))
         stamp = dt.datetime.fromisoformat(value['at_utc'])
-        age = (now - stamp).total_seconds()
+        # The sampler can publish during the slower monitor summary query.
+        age = (clock() - stamp).total_seconds()
         if not 0 <= age <= 150:
             return dict(unavailable, code='snapshot_stale', collected_at=value['at_utc'],
                         alerts=['Facebook 辅助服务监测超过 150 秒未更新，当前状态未知。'])
