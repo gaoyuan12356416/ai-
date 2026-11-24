@@ -25,6 +25,7 @@ from features.x_posts.media_limits import MAX_POST_VIDEO_BYTES
 from features.x_accounts.language import canonical_drama_language
 
 from .client import X_AUTO_ADMIN_PREFIX, contains_sensitive_key, safe_public_message
+from . import run_outcomes
 from .core import AuditActor, XAutoPostStore
 from .publisher import AutoLiveGates, AutoPostExecutor, selector_rules
 from .repositories import BEIJING_TZ, MetricWindowRepository, ReadOnlyMySQLRepository
@@ -223,9 +224,9 @@ class XAutoPostService:
             raise AutoPostServiceError("x_auto_clock_invalid", "service clock is invalid", 500)
         return value.astimezone(UTC)
 
-    def _template_item(self, snapshot: Any) -> Dict[str, Any]:
+    def _template_item(self, snapshot: Any, latest=None, summaries=None) -> Dict[str, Any]:
         item = self._template_snapshot_item(snapshot)
-        last_run = self.store.get_latest_run_for_template(snapshot.id)
+        last_run = self.store.get_latest_run_for_template(snapshot.id) if latest is None else latest.get(snapshot.id)
         next_run_at = ""
         if snapshot.enabled:
             now = self._now()
@@ -265,13 +266,15 @@ class XAutoPostService:
         if next_run_at:
             item["next_run_at"] = next_run_at
         if last_run is not None:
-            item["last_run"] = self._run_item(last_run)
-            item["last_run_status"] = last_run.status
+            if summaries is None:
+                summaries, _ = run_outcomes.read(self.store, [last_run], self._now().isoformat(timespec="seconds"))
+            item["last_run"] = self._run_item(last_run, outcome=summaries[last_run.id])
+            item["last_run_status"] = item["last_run"]["display_status"]
             item["last_run_at"] = last_run.created_at
         return item
 
     @staticmethod
-    def _run_item(run: Any, *, template: Optional[Any] = None, tasks=None) -> Dict[str, Any]:
+    def _run_item(run: Any, *, template: Optional[Any] = None, tasks=None, outcome=None) -> Dict[str, Any]:
         item = run.as_dict()
         item["run_id"] = run.id
         if "profile_model" in run.blacklist_snapshot:
@@ -288,51 +291,10 @@ class XAutoPostService:
         if template is not None:
             item["template_name"] = template.name
             item["template_snapshot"] = XAutoPostService._template_snapshot_item(template)
-        if tasks is not None:
-            values = list(tasks)
-            item["task_count"] = len(values)
-            item["completed_task_count"] = sum(
-                task.status in {"published", "no_candidate", "skipped"}
-                for task in values
-            )
-            item["failed_task_count"] = sum(
-                task.status in {"failed", "canceled"} for task in values
-            )
-            item["attention_task_count"] = sum(
-                task.status in {"failed", "canceled", "unknown"} for task in values
-            )
-            # Legacy "completed" also includes no-candidate/skipped tasks.  Keep
-            # that field compatible, but expose disjoint publication outcomes
-            # so the UI never presents it as a count of successful Posts.
-            counts = dict.fromkeys((
-                "published", "no_candidate", "skipped", "failed", "canceled",
-                "unknown", "pending", "ready", "retry_wait", "waiting_result",
-                "active",
-            ), 0)
-            for task in values:
-                if task.status == "unknown" or bool(task.unknown_outcome):
-                    category = "unknown"
-                elif task.status == "retry_wait" and task.execution_queue_id:
-                    # Queue-bound waits observe the canonical publisher; they
-                    # are not permission to submit the same Post again.
-                    category = "waiting_result"
-                elif task.status in counts:
-                    category = task.status
-                else:
-                    category = "active"
-                counts[category] += 1
-            item["task_counts"] = counts
-            item["published_task_count"] = counts["published"]
-            item["unfinished_task_count"] = sum(
-                counts[key] for key in (
-                    "unknown", "pending", "ready", "retry_wait",
-                    "waiting_result", "active",
-                )
-            )
-            if (item.get("status") in {"queued", "running"}
-                    and counts["unknown"] > 0
-                    and item["unfinished_task_count"] == counts["unknown"]):
-                item["display_status"] = "needs_review"
+        if outcome is not None:
+            item.update(outcome)
+        elif tasks is not None:
+            item.update(run_outcomes.summary(run, tasks, {}, datetime.now(UTC).isoformat(timespec="seconds")))
         return item
 
     @staticmethod
@@ -431,7 +393,14 @@ class XAutoPostService:
             values = [item for item in values if q in item.name.casefold()]
         total = len(values)
         page = values[offset : offset + limit]
-        items = [self._template_item(item) for item in page]
+        all_runs = self.store.list_runs()
+        latest = {}
+        for r in all_runs:
+            latest.setdefault(r.template_id, r)
+        open_runs = [r for r in all_runs if r.status in run_outcomes.OPEN]
+        summaries, _ = run_outcomes.read(self.store, open_runs + [latest[t.id] for t in page if t.id in latest],
+                                        self._now().isoformat(timespec="seconds"))
+        items = [self._template_item(item, latest, summaries) for item in page]
         all_values = self.store.list_templates()
         return {
             "ok": True,
@@ -442,7 +411,7 @@ class XAutoPostService:
                 "enabled": sum(item.enabled for item in all_values),
                 "disabled": sum(not item.enabled for item in all_values),
                 "running": sum(
-                    run.status in {"queued", "running"} for run in self.store.list_runs()
+                    summaries[r.id]["display_status"] == "running" for r in open_runs
                 ),
             },
         }
@@ -950,7 +919,7 @@ class XAutoPostService:
         values = self.store.list_runs(
             template_id=None if not template_id else _positive_id(template_id),
             trigger_type=trigger_type or None,
-            status=status or None,
+            status=None if status in run_outcomes.DISPLAY_FILTERS | {"running","queued","unfinished"} else status or None,
         )
         start = _query_one(query, "from")
         end = _query_one(query, "to")
@@ -960,9 +929,19 @@ class XAutoPostService:
         if end:
             upper = _beijing_date_boundary(end, next_day=True)
             values = [run for run in values if run.scheduled_at_utc < upper]
+        open_runs = [r for r in values if r.status in run_outcomes.OPEN]
+        now = self._now().isoformat(timespec="seconds")
+        outcomes, _ = run_outcomes.read(self.store, open_runs, now)
+        if status == "unfinished":
+            values = open_runs
+        elif status in run_outcomes.DISPLAY_FILTERS | {"running","queued"}:
+            values = [r for r in open_runs if outcomes[r.id]["display_status"] == status]
         total = len(values)
+        page = values[offset : offset + limit]
+        page_states, _ = run_outcomes.read(self.store, [r for r in page if r.id not in outcomes], now)
+        outcomes.update(page_states)
         items = []
-        for run in values[offset : offset + limit]:
+        for run in page:
             try:
                 template = self.store.get_template(run.template_id, version=run.template_version)
             except Exception:
@@ -971,7 +950,7 @@ class XAutoPostService:
                 self._run_item(
                     run,
                     template=template,
-                    tasks=self.store.list_tasks(run_id=run.id),
+                    outcome=outcomes[run.id],
                 )
             )
         return {
@@ -980,9 +959,9 @@ class XAutoPostService:
             "items": items,
             "total": total,
             "summary": {
-                "active": sum(run.status in {"queued", "running"} for run in values),
+                "active": sum(run.status in run_outcomes.OPEN and outcomes[run.id]["display_status"] == "running" for run in values),
                 "completed": sum(run.status == "completed" for run in values),
-                "attention": sum(run.status in {"partial_failed", "failed"} for run in values),
+                "attention": sum(run.status in {"partial_failed", "failed"} or (run.status in run_outcomes.OPEN and outcomes[run.id]["display_status"] in {"needs_review","account_blocked","historical_pause"}) for run in values),
             },
         }
 
@@ -1021,8 +1000,15 @@ class XAutoPostService:
         run = self.store.get_run(run_id)
         template = self.store.get_template(run.template_id, version=run.template_version)
         tasks = self.store.list_tasks(run_id=run.id)
-        public_run = self._run_item(run, template=template, tasks=tasks)
-        public_tasks = [self._task_item(task) for task in tasks]
+        now = self._now().isoformat(timespec="seconds")
+        _, holds = run_outcomes.read(self.store, [run], now)
+        public_run = self._run_item(run, template=template, outcome=run_outcomes.summary(run, tasks, holds, now))
+        public_tasks = []
+        for task in tasks:
+            item = self._task_item(task)
+            category = run_outcomes.category(task, holds, now)
+            item["display_status"] = task.status if category == "active" else category
+            public_tasks.append(item)
         events, event_total = self._run_events(run.id)
         return {
             "ok": True,

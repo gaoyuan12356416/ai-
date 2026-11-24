@@ -160,12 +160,29 @@
     return element("span", { className: `badge${kind ? ` ${kind}` : ""}`, text: label });
   }
 
+  const taskCategories = {
+    published: "已发布", no_candidate: "无符合条件素材", skipped: "已跳过", failed: "失败", canceled: "已终止",
+    unknown: "结果待确认", pending: "待处理", ready: "等待发布", retry_wait: "等待重试",
+    waiting_result: "等待发布结果", waiting_release: "待上线", historical_pause: "历史暂停",
+    account_blocked: "账号授权受阻", active: "执行中",
+  };
+  const runLabels = { ...taskCategories, running: "执行中", queued: "等待执行", needs_review: "结果待确认",
+    mixed_wait: "多项等待", completed: "已完成", partial_failed: "部分失败", scheduled: "等待执行" };
+  function runLabel(value) { return runLabels[value] || value || "暂无运行"; }
+  function runSummary(run) {
+    const counts = run.task_counts;
+    if (!counts) return "";
+    const parts = Object.entries(taskCategories).filter(([key]) => counts[key] > 0)
+      .map(([key, label]) => label + " " + counts[key]);
+    if (run.next_task_at_utc) parts.push("计划 " + formatTime(run.next_task_at_utc));
+    return parts.join("；");
+  }
   function statusKind(status) {
     const value = String(status || "").toLowerCase();
     if (["enabled", "published", "completed", "success", "succeeded", "ready"].includes(value)) return "success";
     if (["failed", "error", "blocked", "canceled", "cancelled", "partial_failed"].includes(value)) return "danger";
     if (["running", "queued", "pending", "selecting", "reserved", "preparing", "retry_wait", "publishing", "reconciling", "scheduled"].includes(value)) return "info";
-    if (["needs_review", "unknown", "no_candidate", "skipped", "disabled", "paused", "hold"].includes(value)) return "warning";
+    if (["waiting_release","historical_pause","account_blocked","waiting_result","mixed_wait","needs_review", "unknown", "no_candidate", "skipped", "disabled", "paused", "hold"].includes(value)) return "warning";
     return "";
   }
 
@@ -294,6 +311,6 @@
     show,
     showToast,
     statusBadge,
-    statusKind,
+    statusKind, taskCategories, runLabel, runSummary,
   };
 })();

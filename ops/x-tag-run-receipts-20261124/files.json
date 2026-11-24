@@ -1,0 +1,72 @@
+[
+  {
+    "file": "features/x_auto_posts/execution_body.py",
+    "before": null,
+    "public_before": null
+  },
+  {
+    "file": "features/x_auto_posts/publisher.py",
+    "before": "316e11678e959dc3d7b5bc1ae51716b87c84f387c5938d24aa4320d07b9a87d7",
+    "public_before": null
+  },
+  {
+    "file": "features/x_auto_posts/receipt_reconciliation.py",
+    "before": "b49b8d7d32b677813acfc222b61d29f32081e16fba556ab844fface2764a3a8a",
+    "public_before": null
+  },
+  {
+    "file": "features/x_auto_posts/run_outcomes.py",
+    "before": null,
+    "public_before": null
+  },
+  {
+    "file": "features/x_auto_posts/service.py",
+    "before": "49bc386594bbeed604665a447f50f2bf03c768b1a709764ce7384ed08f374b8c",
+    "public_before": null
+  },
+  {
+    "file": "features/x_tag_publish/dispatch_native.py",
+    "before": "7fd63bc4598cbb20d83dce9bad24b2c565a36c14e7225f0acbd32f04e8c58261",
+    "public_before": null
+  },
+  {
+    "file": "features/x_tag_publish/failed_delivery.py",
+    "before": null,
+    "public_before": null
+  },
+  {
+    "file": "features/x_tag_publish/receipt_settlement.py",
+    "before": null,
+    "public_before": null
+  },
+  {
+    "file": "scripts/x_tag_receipt_settlement.py",
+    "before": null,
+    "public_before": null
+  },
+  {
+    "file": "static/x-tag-auto-publish-common.js",
+    "before": "8bd9c3ab5348e7e2a99e540dff8d8a7985cc14ee88df22814d83aa23ef0b767b",
+    "public_before": "8bd9c3ab5348e7e2a99e540dff8d8a7985cc14ee88df22814d83aa23ef0b767b"
+  },
+  {
+    "file": "static/x-tag-auto-publish-runs.html",
+    "before": "888207bc4996bc5d8e1a09bead74b5e393b5fae71f24bd85a94da508d071f85f",
+    "public_before": "cfbd5f6e4460cf96725913fca9950d3d579f3f0e9d83e33e3ec927c1c8cef97e"
+  },
+  {
+    "file": "static/x-tag-auto-publish-runs.js",
+    "before": "def45f40c865f7516d900641a5553b41c584958a300a09a03b3333f1df5f966a",
+    "public_before": "def45f40c865f7516d900641a5553b41c584958a300a09a03b3333f1df5f966a"
+  },
+  {
+    "file": "static/x-tag-auto-publish-templates.html",
+    "before": "430e6a87025a46ba56eab6a4efa10787fdd3ec4ec88eac89a8abe6feaedcedf5",
+    "public_before": "1eacd8051aca98af4eccda03f947c5b0235cb6eadfc24cd40c4a4c2925e00cc0"
+  },
+  {
+    "file": "static/x-tag-auto-publish-templates.js",
+    "before": "f18621b5446611c19344ecdbf4ccf0dfd3a35f3bc948a4d2e979bcf73b93717f",
+    "public_before": "f18621b5446611c19344ecdbf4ccf0dfd3a35f3bc948a4d2e979bcf73b93717f"
+  }
+]

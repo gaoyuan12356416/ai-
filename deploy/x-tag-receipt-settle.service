@@ -1,0 +1,12 @@
+[Unit]
+Description=Settle original X Tag publish receipts and account waits
+RequiresMountsFor=/mnt/data-disk/x-tag-publisher /mnt/data-disk/pipeline-dispatch
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/x-tag-publisher/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/x-tag-publisher/current/scripts/x_tag_receipt_settlement.py observe --posts /mnt/data-disk/x-tag-publisher/posts.sqlite3 --auto /mnt/data-disk/x-tag-publisher/auto/x-auto-post.sqlite3 --dispatch /mnt/data-disk/pipeline-dispatch/dispatch.sqlite3 --accounts /var/lib/x-post-automation/accounts.sqlite3 --since 2026-11-24T02:10:48+00:00
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+UMask=0007

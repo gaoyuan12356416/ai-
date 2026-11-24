@@ -103,24 +103,6 @@
     return "已停用";
   }
 
-  function runStatusLabel(value) {
-    const labels = {
-      queued: "等待执行",
-      scheduled: "等待执行",
-      running: "执行中",
-      preparing: "准备中",
-      publishing: "发布中",
-      completed: "已完成",
-      published: "已发布",
-      failed: "失败",
-      partial_failed: "部分失败",
-      needs_review: "结果待确认",
-      canceled: "已取消",
-    };
-    const normalized = String(value || "").toLowerCase();
-    return labels[normalized] || value || "暂无运行";
-  }
-
   function actionButton(label, action, id, kind) {
     return ui.element("button", {
       className: `button small${kind ? ` ${kind}` : ""}`,
@@ -210,11 +192,13 @@
     ui.appendTextCell(row, ui.formatTime(item.next_run_at || item.next_scheduled_at));
 
     const lastRun = ui.objectValue(item.last_run);
-    const lastStatus = item.last_run_status || lastRun.status;
+    const lastStatus = lastRun.display_status || item.last_run_status || lastRun.status;
     const lastCell = ui.element("td");
-    lastCell.appendChild(ui.statusBadge(runStatusLabel(lastStatus), ui.statusKind(lastStatus)));
+    lastCell.appendChild(ui.statusBadge(ui.runLabel(lastStatus), ui.statusKind(lastStatus)));
     const lastTime = item.last_run_at || lastRun.created_at || lastRun.triggered_at;
-    if (lastTime) lastCell.appendChild(ui.element("div", { className: "secondary", text: ui.formatTime(lastTime) }));
+    if (lastRun.task_counts) lastCell.appendChild(ui.element("div", { text: ui.runSummary(lastRun) }));
+    if (lastTime) lastCell.appendChild(ui.element("div", { className: "secondary", text: "触发 " + ui.formatTime(lastTime) }));
+    if (lastRun.last_progress_at_utc) lastCell.appendChild(ui.element("div", { className: "secondary", text: "进展 " + ui.formatTime(lastRun.last_progress_at_utc) }));
     row.appendChild(lastCell);
 
     ui.appendTextCell(row, item.operator_name || "—");

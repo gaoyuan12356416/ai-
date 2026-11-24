@@ -62,25 +62,13 @@
     return fallback;
   }
 
-  const TASK_COUNT_LABELS = {
-    published: "已发布", no_candidate: "无符合条件素材", skipped: "已跳过",
-    failed: "失败", canceled: "已终止", unknown: "结果待确认",
-    pending: "待处理", ready: "等待发布", retry_wait: "等待重试",
-    waiting_result: "等待发布结果", active: "执行中",
-  };
+  const TASK_COUNT_LABELS = ui.taskCategories;
 
   function taskCounts(item, total) {
     const counts = ui.objectValue(item.task_counts);
     const values = Object.keys(TASK_COUNT_LABELS).map(key => counts[key]);
     if (!values.every(value => Number.isInteger(value) && value >= 0)) return null;
     return values.reduce((sum, value) => sum + value, 0) === total ? counts : null;
-  }
-
-  function taskSummary(counts) {
-    return Object.entries(TASK_COUNT_LABELS)
-      .filter(([key]) => counts[key] > 0)
-      .map(([key, label]) => `${label} ${counts[key]}`)
-      .join("；");
   }
 
   function setEmpty(message) {
@@ -147,7 +135,7 @@
       const tasksCell = ui.element("td");
       tasksCell.appendChild(ui.element("strong", { text: `已发布 ${publishedTasks == null ? "—" : publishedTasks} / ${totalTasks || "—"}` }));
       if (counts) {
-        const unfinished = counts.unknown + counts.pending + counts.ready + counts.retry_wait + counts.waiting_result + counts.active;
+        const unfinished = Number(item.unfinished_task_count) || 0;
         if (unfinished) tasksCell.appendChild(ui.element("div", { className: "secondary", text: `${unfinished} 个未结束` }));
       } else {
         tasksCell.appendChild(ui.element("div", { className: "secondary", text: `已处理 ${completedTasks}（含无素材或跳过）` }));
@@ -155,12 +143,12 @@
       row.appendChild(tasksCell);
 
       const statusCell = ui.element("td");
-      statusCell.appendChild(ui.statusBadge(statusLabel(status), ui.statusKind(status)));
+      statusCell.appendChild(ui.statusBadge(ui.runLabel(status), ui.statusKind(status)));
       row.appendChild(statusCell);
 
       const reason = item.result_summary || item.summary || item.message || item.error_message;
       const summary = counts
-        ? [taskSummary(counts), reason].filter(Boolean).join("；") || "—"
+        ? [ui.runSummary(item), reason].filter(Boolean).join("；") || "—"
         : reason || (totalTasks
           ? `发布明细待同步${failedTasks ? `；${failedTasks} 个失败或待确认` : ""}`
           : "—");
@@ -333,9 +321,9 @@
 
       const taskStatus = String(item.status || "").toLowerCase();
       const taskStatusCell = ui.element("td");
-      const effectiveStatus = item.unknown_outcome ? "unknown" : taskStatus;
+      const effectiveStatus = item.display_status || (item.unknown_outcome ? "unknown" : taskStatus);
       const taskLabel = effectiveStatus === "retry_wait" && queueId
-        ? "等待发布结果" : statusLabel(effectiveStatus);
+        ? "等待发布结果" : (ui.taskCategories[effectiveStatus] || statusLabel(effectiveStatus));
       taskStatusCell.appendChild(ui.statusBadge(taskLabel, ui.statusKind(effectiveStatus)));
       row.appendChild(taskStatusCell);
 
@@ -414,7 +402,9 @@
       facts.append(
         detailFact("本次选材画像", run.profile_model === "growth" ? "成长画像" : run.profile_model === "revenue" ? "收入画像" : "历史记录"),
         detailFact("触发方式", triggerLabel(run.trigger_type)),
-        detailFact("运行状态", statusLabel(run.display_status || run.status)),
+        detailFact("运行状态", ui.runLabel(run.display_status || run.status)),
+        detailFact("账号结果", ui.runSummary(run)),
+        detailFact("最近实际进展", ui.formatTime(run.last_progress_at_utc)),
         detailFact("计划 / 触发时间", ui.formatTime(run.scheduled_at || run.scheduled_at_utc || run.triggered_at || run.created_at)),
         detailFact("账号任务", `${tasks.length} 个`),
         detailFact("完成时间", ui.formatTime(run.completed_at || run.finished_at || run.finished_at_utc)),

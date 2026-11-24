@@ -62,7 +62,10 @@ def handle(handler, runtime, path):
                         with self._source_lock(job):
                             if acknowledge_unentered_failure(self,job,claim,receipt):
                                 return {'canonical_no_write': True}
-                            return super().fail(job,claim,receipt)
+                            result = super().fail(job,claim,receipt)
+                            from .failed_delivery import record
+                            record(self, job, receipt)
+                            return result
 
                     def begin_operation(self, job, claim, operation):
                         assert_due(lane_paths()['X_AUTO_POST_DB_PATH'].as_uri(), self.store, job['source_id'])

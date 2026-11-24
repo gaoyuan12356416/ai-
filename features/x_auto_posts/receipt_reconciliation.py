@@ -15,6 +15,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+from .execution_body import execution_body
 
 
 SCHEMA = "x-auto-confirmed-receipts-v1"
@@ -89,7 +90,8 @@ def _inspect(auto, native, task_id):
              and str(queue["content_id"]) == str(task["content_id"]), "canonical queue identity mismatch")
     _require(native.execute("SELECT count(*) FROM x_post_queue WHERE manual_run_id=?", (manual["id"],)).fetchone()[0] == 1,
              "canonical Auto run must contain exactly one queue")
-    _require(task["body_template"] == manual["body_template"] == queue["body_template"]
+    material = json.loads(task["selection_json"] or "{}").get("material") or {}
+    _require(execution_body(task["body_template"], material) == manual["body_template"] == queue["body_template"]
              and hashlib.sha256(task["body_template"].encode("utf-8")).hexdigest() == task["body_sha256"],
              "frozen body template mismatch")
     _require(queue["status"] == "published" and log["status"] == "published" and not log["unknown_outcome"],
