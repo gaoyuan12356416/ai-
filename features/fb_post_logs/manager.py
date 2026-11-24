@@ -74,6 +74,7 @@ class Manager:
         with closing(self.connect()) as c:
             c.execute("BEGIN")
             keys, pagination = page_keys(c, params)
+            templates = rows(c, "SELECT id,name FROM fb_auto_template ORDER BY id DESC", ())
             for family, identity, _ in keys:
                 s = snapshot(c, family, identity)
                 item = display(c, family, s["task"], s)
@@ -83,7 +84,7 @@ class Manager:
                     item["can_" + action] = not reason
                     item[action + "_reason"] = reason
                 items.append(item)
-        return {"items": items, "pagination": pagination}
+        return {"items": items, "pagination": pagination, "templates": templates}
 
     def apply(self, payload, actor):
         if not isinstance(payload, dict) or set(payload) != {"operation_id", "items", "action"}:

@@ -26,7 +26,7 @@ NAV = [p / "navigation.json" for p in (PUBLIC, MAIN)]
 FILES = {
     p / name: ROOT / "static" / name
     for p in (PUBLIC, MAIN)
-    for name in ("fb-post-logs.html", "fb-post-logs.js")
+    for name in ("fb-post-logs.html", "fb-post-logs.js", "fb-post-address.js")
 }
 FILES.update({UNIT: Path(__file__).with_name(UNIT.name), NGINX: Path(__file__).with_name(NGINX.name)})
 

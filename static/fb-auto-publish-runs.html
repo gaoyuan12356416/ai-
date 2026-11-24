@@ -1,1 +1,159 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Cache-Control" content="no-store"><title>FB Page 发布记录 - AI自动后台</title><link rel="stylesheet" href="/ui-topbar.css"><style>body{margin:0;font-family:Inter,"Microsoft YaHei",sans-serif;background:#f4f7fb;color:#172033}.app{display:grid;grid-template-columns:250px 1fr;min-height:100vh}.sidebar{background:#101828;color:#fff;padding:22px}.main{padding:24px;min-width:0}.topbar,.actions{display:flex;justify-content:space-between;align-items:center;gap:10px}.panel{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;margin-top:16px}.button{border:1px solid #d0d5dd;background:white;border-radius:7px;padding:8px 12px}.hidden{display:none!important}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #eaecf0;text-align:left;font-size:13px}.badge{background:#eef4ff;padding:3px 7px;border-radius:99px}dialog{max-width:900px;width:90%;border:0;border-radius:12px;padding:18px}pre{white-space:pre-wrap;word-break:break-word}@media(max-width:900px){.app{display:block}.sidebar{display:none}.main{padding:14px}}</style></head><body><div class="app"><aside class="sidebar"><strong>AI自动后台</strong><nav id="quickNav"></nav></aside><main class="main"><header class="topbar"><div><h1>FB Page 发布记录</h1><p>Graph对象ID仅表示视频提交被接受；完成只以对账状态为准。待确认和未知结果永不自动重发。</p></div><div class="actions"><div id="userCard"></div><a class="button" href="/fb-auto-publish-templates.html">模板管理</a><button id="refreshPage" class="button">刷新</button><button id="authButton" class="button">登录</button></div></header><section id="loginGate" class="panel hidden">请先登录。</section><section id="permissionGate" class="panel hidden">当前账号没有 fb_page_posts 权限。</section><div id="pageRoot" class="hidden"><section class="panel"><div class="topbar"><h2>运行列表 · 北京时间（UTC+8）</h2><button id="reload" class="button">刷新</button></div><p>批次会提前生成；请按“计划发布时间”判断发布日期，批次创建时间不代表实际发布时间。任务数量和状态按当前明细统计；“未执行”包含待制作及待发布，“待处理”包含逾期、结果未知或执行状态待核对。“完成时间”仅在全部任务结束后展示。</p><div class="table-wrap"><table><thead><tr><th>计划发布时间</th><th>批次创建时间</th><th>完成时间</th><th>模板</th><th>触发</th><th>Page统计（创建时）</th><th>任务（实时）</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div></section></div></main></div><dialog id="detail"><div class="topbar"><h2>运行详情</h2><button id="close" class="button">关闭</button></div><pre id="detailBody"></pre></dialog><script src="/ui-topbar.js"></script><script src="/quick-nav.js?v=43969bd46e10"></script><script src="/fb-auto-publish-run-summary.js?v=20261124v1"></script><script>(()=>{"use strict";const $=id=>document.getElementById(id);let auth={};const api=async p=>{const r=await fetch(p,{credentials:"same-origin",cache:"no-store"});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.message||d.error||"请求失败");return d};const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));const beijingTime=new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"});const formatTime=value=>{if(!value)return "—";const date=new Date(value);return Number.isNaN(date.getTime())?"时间格式异常":beijingTime.format(date)};async function load(){const d=await api("/api/admin/fb-auto-publish/runs?limit=200&offset=0");$("rows").innerHTML=(d.items||[]).map(r=>`<tr><td>${r.schedule_policy==="target_midnight_v1"?"各 Page 独立时间（详情）":esc(formatTime(r.planned_publish_at_utc))}</td><td>${esc(formatTime(r.created_at_utc))}</td><td>${esc(formatTime(FBRunSummary.completed(r)))}</td><td>${esc(r.name)} v${r.template_version}</td><td>${r.trigger_type==="auto"?"自动":"手动"}</td><td>总${r.total_pages} / 可发${r.publishable_pages} / 缺${r.missing_token_pages}</td><td>${FBRunSummary.counts(r)}</td><td>${FBRunSummary.status(r)}</td><td><button class="button" data-id="${r.id}">详情</button></td></tr>`).join("")||'<tr><td colspan="9">暂无记录</td></tr>'}async function shell(){try{auth=await api("/api/ui/topbar")}catch{auth={authenticated:false}}await QuickNav.render({container:"#quickNav",auth,activeKey:"fbAutoPublishRuns"});UiTopbar.render({auth,userCard:"#userCard",authButton:"#authButton",refreshButton:"#refreshPage"});$("authButton").onclick=()=>UiTopbar.handleAuthAction({auth,api});if(!auth.authenticated){$("loginGate").classList.remove("hidden");return}const u=auth.user||{};if(!(u.is_admin||(u.permissions&&u.permissions.fb_page_posts))){$("permissionGate").classList.remove("hidden");return}$("pageRoot").classList.remove("hidden");await load();const runId=new URLSearchParams(window.location.search).get("run_id");if(runId)await showRun(runId)}async function showRun(id){if(!/^[1-9][0-9]*$/.test(String(id)))return;try{const d=await api(`/api/admin/fb-auto-publish/runs/${id}`);$("detailBody").textContent=`北京时间（UTC+8）\n计划发布时间：${d.run.schedule_policy==="target_midnight_v1"?"各 Page 独立，见下方":formatTime(d.run.planned_publish_at_utc)}\n批次创建时间：${formatTime(d.run.created_at_utc)}\n完成时间：${formatTime(FBRunSummary.completed(d.run))}\n\n${(d.run.tasks||[]).map(t=>`Page ${t.page_id} · ${formatTime(t.planned_publish_at_utc)} · ${{preparing:"制作中",late_preparing:"制作迟到，完成后发布",waiting_publish:"已备好，等待发布",ready_to_publish:"已备好，等待执行"}[t.schedule_state]||t.status}`).join("\n")}\n\n${FBRunSummary.detail(d.run)}\n运行明细（status 为原始记录，display_status 为实时展示状态；*_utc 字段为 UTC）：\n${JSON.stringify(d.run,null,2)}`;$("detail").showModal()}catch(err){alert(err.message)}};$("rows").onclick=e=>{const id=e.target.dataset.id;if(id)void showRun(id)};$("close").onclick=()=>$("detail").close();$("reload").onclick=load;shell()})();</script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <title>FB Page 自动发布记录 - AI自动后台</title>
+  <link rel="stylesheet" href="/ui-topbar.css" />
+  <link rel="stylesheet" href="/x-tag-auto-publish.css?v=20260814language1" />
+  <style>
+    .filters { grid-template-columns: minmax(170px,2fr) repeat(4,minmax(115px,1fr)) auto; }
+    .secondary { color:#667085; font-size:12px; margin-top:4px; }
+    .detail-dialog { width:min(1180px,94vw); max-width:94vw; }
+    .detail-dialog td { overflow-wrap:anywhere; }
+    .detail-dialog details { margin-top:14px; }
+    .detail-dialog pre { max-height:32vh; overflow:auto; white-space:pre-wrap; }
+    @media(max-width:1150px){.filters {grid-template-columns:repeat(3,minmax(0,1fr));}}
+    @media(max-width:720px){.filters {grid-template-columns:repeat(2,minmax(0,1fr));}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div><strong>AI自动后台</strong><span>ai.yingliangads.com</span></div>
+      </div>
+      <nav id="quickNav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title">
+          <h1>FB Page 自动发布记录</h1>
+          <p>按模板查看自动定时和手动执行的批次、Page 任务及 Facebook 发布结果。</p>
+        </div>
+        <div class="top-actions">
+          <div id="userCard" class="user-card"></div>
+          <a class="button link-button" href="/fb-auto-publish-templates.html">模板管理</a>
+          <button id="refreshPage" class="button" type="button">刷新页面</button>
+          <button id="authButton" class="button" type="button">登录</button>
+        </div>
+      </header>
+
+      <section id="loginGate" class="panel gate hidden">
+        <strong>请先登录 AI 自动后台</strong>
+        <span>登录后才能查看 FB Page 自动发布记录。</span>
+      </section>
+      <section id="permissionGate" class="panel gate hidden">
+        <strong>当前账号没有 FB Page 自动发布权限</strong>
+        <span>请联系管理员在用户管理中开启 fb_page_posts 权限。</span>
+      </section>
+
+      <div id="pageRoot" class="hidden">
+        <section class="stats" aria-label="运行统计">
+          <article class="stat"><span>运行总数</span><strong id="totalCount">—</strong></article>
+          <article class="stat"><span>正在执行</span><strong id="activeCount">—</strong></article>
+          <article class="stat"><span>已完成</span><strong id="completedCount">—</strong></article>
+          <article class="stat"><span>失败 / 待确认</span><strong id="attentionCount">—</strong></article>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <div><h2>运行列表</h2><p>日期按北京时间的批次触发时间筛选。各 Page 的计划发布时间见详情。</p></div>
+            <button id="reloadRuns" class="button" type="button">刷新记录</button>
+          </div>
+
+          <form id="runFilters" class="filters">
+            <div class="field">
+              <label for="filterTemplateId">模板</label>
+              <select id="filterTemplateId"><option value="">全部模板</option></select>
+            </div>
+            <div class="field">
+              <label for="filterTriggerType">触发方式</label>
+              <select id="filterTriggerType">
+                <option value="">全部方式</option>
+                <option value="auto">自动定时</option>
+                <option value="manual">手动执行</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="filterStatus">状态</label>
+              <select id="filterStatus"><option value="">全部状态</option></select>
+            </div>
+            <div class="field">
+              <label for="filterFrom">开始日期</label>
+              <input id="filterFrom" type="date" />
+            </div>
+            <div class="field">
+              <label for="filterTo">结束日期</label>
+              <input id="filterTo" type="date" />
+            </div>
+            <div class="actions">
+              <button class="button primary" type="submit">查询</button>
+              <button id="resetFilters" class="button" type="button">重置</button>
+            </div>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>触发时间</th>
+                  <th>模板 / 版本</th>
+                  <th>触发方式</th>
+                  <th>Page 任务</th>
+                  <th>状态</th>
+                  <th>结果摘要</th>
+                  <th>完成时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="runRows"><tr><td colspan="8" class="empty">正在加载运行记录…</td></tr></tbody>
+            </table>
+          </div>
+
+          <div class="pager">
+            <span id="pageInfo">第 1 页</span>
+            <div class="pager-actions">
+              <button id="prevPage" class="button" type="button">上一页</button>
+              <button id="nextPage" class="button" type="button">下一页</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="runDetailDialog" class="detail-dialog">
+    <div class="dialog-head">
+      <div><h2 id="runDetailTitle">运行详情</h2><span id="runDetailSubtitle" class="secondary">—</span></div>
+      <button id="closeRunDetail" class="button" type="button">关闭</button>
+    </div>
+    <div class="dialog-body">
+      <div id="runDetailFacts" class="detail-grid"></div>
+      <h3>Page 任务</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Page / 任务</th><th>剧 / 素材</th><th>计划发布时间</th><th>准备 / 发布</th><th>状态</th><th>结果 / Facebook 帖子</th></tr></thead>
+          <tbody id="runTaskRows"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pager"><span id="taskPageInfo"></span><div class="pager-actions">
+        <button class="button" id="taskPrev" type="button">上一页</button>
+        <button class="button" id="taskNext" type="button">下一页</button>
+      </div></div>
+      <details><summary>模板配置快照</summary><pre id="runSnapshot" class="json-view"></pre></details>
+      <details id="extraPages" hidden><summary>其他 Page 记录</summary><pre id="pageNotes"></pre></details>
+    </div>
+  </dialog>
+
+  <script src="/ui-topbar.js"></script>
+  <script src="/quick-nav.js?v=43969bd46e10"></script>
+  <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
+  <script src="/fb-auto-publish-run-summary.js?v=20261124v1"></script>
+  <script src="/fb-post-address.js?v=20261124-1"></script>
+  <script src="/fb-auto-publish-runs.js?v=20261124-template"></script>
+</body></html>

@@ -9,14 +9,6 @@
         const date = new Date(normalized);
         return Number.isNaN(date.getTime()) ? raw : new Intl.DateTimeFormat("zh-CN", { dateStyle:"short", timeStyle:"medium", hour12:false, timeZone:"Asia/Shanghai" }).format(date);
       };
-      const safeLink = (value, post) => {
-        try {
-          const u = new URL(value);
-          if (u.protocol !== "https:" || u.username || u.password || u.port) return "";
-          if (post && !(u.hostname === "facebook.com" || u.hostname.endsWith(".facebook.com") || u.hostname === "fb.watch")) return "";
-          return u.href;
-        } catch (_) { return ""; }
-      };
       async function api(path, options = {}) {
         const response = await fetch(path, { credentials:"same-origin", cache:"no-store", ...options });
         const body = await response.text();
@@ -86,12 +78,14 @@
           row.appendChild(statusCell);
           const linksCell = document.createElement("td");
           linksCell.className = "links";
-          [[safeLink(item.post_url, true), "打开帖子"], [safeLink(item.short_url, false), "打开短链"]].forEach(([href,label]) => {
-            if (!href) return;
+          const address = window.FBPostAddress(item.post_url, item.graph_post_id);
+          if (address) {
             const link = document.createElement("a");
-            link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer"; text(link, label);
-            linksCell.appendChild(link);
-          });
+            link.href = address; link.target = "_blank"; link.rel = "noopener noreferrer";
+            text(link, "打开 Facebook 帖子"); linksCell.appendChild(link);
+          } else {
+            text(linksCell, "暂无帖子地址");
+          }
           if (item.graph_post_id) {
             const id = document.createElement("div"); id.className = "subtle"; text(id, "平台编号 " + item.graph_post_id); linksCell.appendChild(id);
           }
@@ -120,11 +114,18 @@
       }
       function queryString() {
         const params = new URLSearchParams({ page:String(state.page), page_size:String(state.pageSize) });
-        [["run_date","runDate"],["page_id","pageId"],["material_id","materialId"],["task_source","taskSource"],["status","status"],["unknown_outcome","unknownOutcome"]].forEach(([key,id]) => {
+        [["run_date","runDate"],["page_id","pageId"],["material_id","materialId"],["task_source","taskSource"],["template_id","templateId"],["status","status"],["unknown_outcome","unknownOutcome"]].forEach(([key,id]) => {
           const value = byId(id).value.trim();
           if (value) params.set(key, value);
         });
         return params.toString();
+      }
+      function setTemplates(templates) {
+        const select = byId("templateId"), value = select.value;
+        const options = [new Option("全部模板", ""), ...templates.map(t => new Option(t.name + " (#" + t.id + ")", String(t.id)))];
+        if (value && !options.some(o => o.value === value)) options.push(new Option("模板 #" + value, value));
+        select.replaceChildren(...options);
+        select.value = value;
       }
       async function loadLogs() {
         const requestId = ++state.loadId;
@@ -133,6 +134,7 @@
         try {
           const result = await api(`/api/admin/fb-posts/logs?${queryString()}`);
           if (requestId !== state.loadId) return;
+          setTemplates(result.templates || []);
           const items = Array.isArray(result.items) ? result.items : [];
           const pagination = result.pagination && typeof result.pagination === "object" ? result.pagination : result;
           state.total = Number(pagination.total || 0);
@@ -208,10 +210,17 @@
         byId("pageRoot").classList.remove("hidden");
         try { state.pending = JSON.parse(sessionStorage.getItem("fb-log-pending-action") || "null"); } catch (_) {}
         if (state.pending) showActionResult("上次操作结果尚未确认，请点击“重试上次操作”核对同一操作的结果。");
+        const template = new URLSearchParams(location.search).get("template_id");
+        if (/^[1-9][0-9]{0,17}$/.test(template || "")) byId("templateId").add(new Option("模板 #" + template, template, false, true));
         await loadLogs();
       }
-      byId("filters").addEventListener("submit", event => { event.preventDefault(); state.page = 1; loadLogs(); });
-      byId("resetFilters").addEventListener("click", () => { byId("filters").reset(); state.page = 1; loadLogs(); });
+      const syncTemplateUrl = () => {
+        const url = new URL(location.href), value = byId("templateId").value;
+        if (value) url.searchParams.set("template_id", value); else url.searchParams.delete("template_id");
+        history.replaceState(null, "", url);
+      };
+      byId("filters").addEventListener("submit", event => { event.preventDefault(); syncTemplateUrl(); state.page = 1; loadLogs(); });
+      byId("resetFilters").addEventListener("click", () => { byId("filters").reset(); byId("templateId").value = ""; syncTemplateUrl(); state.page = 1; loadLogs(); });
       byId("prevPage").addEventListener("click", () => { if (state.page > 1) { state.page -= 1; loadLogs(); } });
       byId("nextPage").addEventListener("click", () => { if (state.page * state.pageSize < state.total) { state.page += 1; loadLogs(); } });
       init();

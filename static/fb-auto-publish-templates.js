@@ -101,6 +101,7 @@
       '<button class="button small" type="button" data-action="run" data-template-id="', id, '"', runDisabled, runTitle, ">手动执行</button>",
       '<button class="button small primary" type="button" data-action="material" data-template-id="', id, '"', busy, ">爆款素材发布</button>",
       '<button class="button small primary" type="button" data-action="drama" data-template-id="', id, '"', busy, ">爆款剧发布</button>",
+      '<a class="button small link-button" href="/fb-auto-publish-runs.html?template_id=', id, '">记录</a>',
       "</div></td>",
       "</tr>",
     ].join("");

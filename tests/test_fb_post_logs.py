@@ -84,6 +84,22 @@ class LogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             total(material_id="invalid")
 
+    def test_template_filter_is_exact_and_combines_with_source(self):
+        with self.fixture.auto.connect() as c:
+            c.execute("""INSERT INTO fb_auto_template(id,name,status,created_at_utc,updated_at_utc)
+                         SELECT 9,name,'disabled',created_at_utc,updated_at_utc FROM fb_auto_template WHERE id=1""")
+        result = self.manager.query({"template_id": "1", "task_source": "template_manual"})
+        self.assertEqual([self.auto], [row["queue_id"] for row in result["items"]])
+        self.assertEqual({1, 9}, {row["id"] for row in result["templates"]})
+        for extra in (
+            {"template_id": "9"},
+            {"template_id": "1", "task_source": "pool"},
+            {"template_id": "1", "task_source": "excel"},
+        ):
+            self.assertEqual(self.manager.query(extra)["pagination"]["total"], 0)
+        with self.assertRaises(ValueError):
+            self.manager.query({"template_id": "1 OR 1=1"})
+
     def test_stop_reset_replay_and_actual_claim(self):
         self.store.channel_enabled("fb", True)
         self.store.register_node("cpu-main", ["publish:fb", "backend:cpu"])

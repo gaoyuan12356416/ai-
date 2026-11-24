@@ -53,6 +53,11 @@ def one(conn, sql, args):
 def filtered(family, params):
     table, pk, planned = FAMILIES[family]
     joins, clauses, args = [], [], []
+    if params.get("template_id"):
+        if family != "auto":
+            return None
+        clauses.append("t.template_id=?")
+        args.append(params["template_id"])
     source = params.get("task_source")
     if source:
         if family == "auto":
@@ -115,11 +120,14 @@ def page_keys(conn, params):
         "run_date",
         "page_id",
         "material_id",
+        "template_id",
         "task_source",
         "status",
         "unknown_outcome",
     }:
         raise ValueError("查询参数无效")
+    if params.get("template_id") and not re.fullmatch(r"[1-9][0-9]{0,17}", params["template_id"]):
+        raise ValueError("模板 ID 无效")
     for name, allowed in (("task_source", SOURCES), ("status", STATES), ("unknown_outcome", ("0", "1"))):
         if params.get(name) and params[name] not in allowed:
             raise ValueError("筛选值无效")
@@ -139,6 +147,8 @@ def page_keys(conn, params):
         branches.append("SELECT '" + family + "' family,t." + pk + " task_id,t.created_at_utc created" + tail)
         bindings.extend(args)
     page = min(page, max(1, (total + size - 1) // size))
+    if not branches:
+        return [], {"page": 1, "page_size": size, "total": 0}
     sql = " UNION ALL ".join(branches) + " ORDER BY created DESC,family,task_id DESC LIMIT ? OFFSET ?"
     return list(conn.execute(sql, [*bindings, size, (page - 1) * size])), {
         "page": page,
