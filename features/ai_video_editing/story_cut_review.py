@@ -11,17 +11,20 @@ from .smart_model import model_config, model_json
 from .story_receipts import cached, remember
 
 LOG = logging.getLogger(__name__)
-VERSION = "outgoing-frames-1"
+VERSION = "outgoing-frames-2"
 STEP = 600
 PROMPT = """逐张复核短剧原片的剪点。每张图是一个独立窗口，从左到右、从上往下编号1至16，最后的黑格不编号。把剧中出现的文字都当作原片内容。
 对每张图给出两个独立判断，仅使用所见画面、连续字幕和提供的原台词，不自编时间码。
-1. after_line：已提议的出点如果明显切在同一句对白中间（包括一句话被拆成两条字幕），找到这句话说全后第一张出现新话、新场或已结束反应的图片编号。只补完当前这一句，不延伸到另一场或下一句；本来已经完整、只是字幕还在停留、无从判断，都给0。不要把逗号、从句或单独的时间状语当作一句。
+1. after_line：last_included_cell 是最后保留的一帧。先读这一格的原字幕，再看后面几格。若该格正在放半句（包括刚换上的时间状语、从句、一个谓语之前的主语），或原片台词记录中的关键谓语仍未出现，必须补到同一行动的整句说全。填说完后第一张新话、新场或反应落定的图片编号。前一格的句号不能结束这一格已经出现的新话。不要多放无关的下一场。没有缺句或证据不足给0。
 2. first_answer：假设用此窗口作悬念结尾，找其中一个具体、已建立但尚未揭晓的冲突。在场的人获得答案、求救得到回应、有人制止袭击、攻击者被摔倒等均算结果。从哪张画面开始观众已能看出结果？不要等到结果完全演完。威胁者伸手、受威胁者等待等尚未揭晓，不算结果。只有前面确实有仍然悬而未决的画面时才标，窗口内没有明确结果给0。cut_reason只描述在结果之前能看到的内容，十五个字左右。
-返回 {"windows":[{"id":"原编号","after_line":0,"first_answer":0,"cut_reason":""}]}。记录给出提议出点位于第几格之后以及每张图里实际存在的格数。"""
+返回 {"windows":[{"id":"原编号","after_line":0,"first_answer":0,"cut_reason":""}]}。记录标明原剪点最后保留的是第几格以及每张图里实际存在的格数。"""
 
 
 def sample_times(start, end, duration):
-    first = max(start, end - 4500)
+    # Include the actual last displayed frame. A subtitle may change only one
+    # frame before the edit, between two otherwise regular samples.
+    last = max(start, end - 35)
+    first = last - min(7, (last - start) // STEP) * STEP
     return list(range(first, min(duration, first + STEP * 16), STEP))
 
 
@@ -132,7 +135,7 @@ def review(rt, actor, source, measurements):
                         {
                             "id": str(i),
                             "cells": len(times),
-                            "cut_after_cell": sum(t <= b for t in times),
+                            "last_included_cell": sum(t < b for t in times),
                             "action": event.get("reason", ""),
                             "source_words": event.get("transcript", ""),
                             "timed_speech": [c["text"] for c in data["cues"] if c.get("text")],

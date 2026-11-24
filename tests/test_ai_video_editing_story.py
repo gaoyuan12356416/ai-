@@ -209,6 +209,9 @@ class StoryTest(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT count(*) FROM tasks").fetchone()[0], 24)
 
     def test_dialogue_finishes_and_suspense_stops_before_any_visible_payoff(self):
+        # The subtitle can change in the last two frames at a boundary.
+        grid = story_cut_review.sample_times(8850, 11550, 96600)
+        self.assertIn(11515, grid)
         times = list(range(87000, 96000, 600))
         evidence = {"cuts": [93400], "cues": []}
         review = story_cut_review.decision(

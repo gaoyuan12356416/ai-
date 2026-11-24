@@ -11,7 +11,7 @@ from .story_edges import boundaries, snap
 from . import story_cut_review
 
 LOG = logging.getLogger(__name__)
-VERSION = "story-v2.2"
+VERSION = "story-v2.3"
 OUTLINE_VERSION = "story-v2.1"
 ROLES = {
     "hook": "开场冲突",
