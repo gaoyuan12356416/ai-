@@ -1,0 +1,20 @@
+[Unit]
+Description=On-demand Hong Kong immutable social report reader
+Requires=ai-backend-hk-snapshot-candidate.socket
+
+[Service]
+User=pipeline-worker
+Group=pipeline-worker
+WorkingDirectory=/data/ai-backend-offload/social-static-pilot/current
+EnvironmentFile=/etc/ai-backend-offload/reader.env
+ExecStart=/opt/pipeline-dispatch/venvs/68407465a58d99f9dd2c9a14da000f167115f804/bin/python -Bu serve.py
+Slice=ai-backend-offload-read.slice
+Nice=15
+CPUQuota=100%
+MemoryLimit=2G
+IOSchedulingClass=idle
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes

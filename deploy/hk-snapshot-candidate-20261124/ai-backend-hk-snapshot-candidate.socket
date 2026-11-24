@@ -1,0 +1,9 @@
+[Unit]
+Description=Hong Kong immutable report comparison listener
+
+[Socket]
+ListenStream=127.0.0.1:19987
+Backlog=8
+
+[Install]
+WantedBy=sockets.target
