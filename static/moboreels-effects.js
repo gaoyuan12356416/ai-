@@ -1,6 +1,7 @@
 (function(root){
   'use strict';
-  const API='/api/moboreels', DIMS={platform:'发布渠道',publisher:'发布人',story:'剧目',promotion:'推广口令',account:'发布账号',day:'日期'};
+  const API='/api/moboreels', DIMS={day:'日期',platform:'发布渠道',publisher:'发布人',story:'剧目',promotion:'推广口令',account:'发布账号'};
+  const DEFAULT_GROUPS=['day','platform'];
   const METRICS=[['clicks','点击量'],['order_recharge_count','充值订单数'],['order_recharge_usd','订单充值'],['order_refund_usd','订单退款'],['advertising_revenue_usd','广告收益'],['total_revenue_usd','合计净收入'],['links_clicked','有点击的链接'],['automated','预览及自动访问']];
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const isMoney=k=>k.endsWith('_usd');
@@ -12,8 +13,8 @@
     return (n<0?'−':'')+'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:Math.abs(n)>0&&Math.abs(n)<0.01?6:2});
   }
   function beijing(value){if(!value)return '尚未同步';const d=new Date(value);return Number.isFinite(+d)?d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+' 北京时间':'未知';}
-  function range(days=7,now=new Date()){
-    const end=new Date(+now+8*3600000).toISOString().slice(0,10);
+  function range(days=7,now=new Date(),endOffset=0){
+    const end=new Date(+now+8*3600000-endOffset*86400000).toISOString().slice(0,10);
     return {date_from:new Date(Date.parse(end+'T00:00:00Z')-(days-1)*86400000).toISOString().slice(0,10),date_to:end};
   }
   function validate(from,to){
@@ -59,8 +60,8 @@
       if(!response.ok)throw Error(data.message||'读取失败，请稍后重试（'+response.status+'）');
       return data;
     }
-    function setDates(days){const r=range(days);el.dateFrom.value=r.date_from;el.dateTo.value=r.date_to;el.dateFrom.max=el.dateTo.max=range(1).date_to;}
-    el.groups.innerHTML=Object.entries(DIMS).map(([key,label])=>`<label class="group-choice"><input type="checkbox" name="dimension" value="${key}" ${['platform','publisher'].includes(key)?'checked':''}>${label}</label>`).join('');
+    function setDates(days,endOffset=0){const r=range(days,new Date(),endOffset);el.dateFrom.value=r.date_from;el.dateTo.value=r.date_to;el.dateFrom.max=el.dateTo.max=range(1).date_to;}
+    el.groups.innerHTML=Object.entries(DIMS).map(([key,label])=>`<label class="group-choice"><input type="checkbox" name="dimension" value="${key}" ${DEFAULT_GROUPS.includes(key)?'checked':''}>${label}</label>`).join('');
     function filters(){
       const group=Array.from(el.groups.querySelectorAll('input:checked')).map(n=>n.value);
       if(!group.length||group.length>3)throw Error('请选择 1 至 3 个分组维度');
@@ -140,7 +141,8 @@
     el.filters.addEventListener('submit',e=>{e.preventDefault();apply();});
     el.groups.addEventListener('change',e=>{if(el.groups.querySelectorAll('input:checked').length>3){e.target.checked=false;message('最多选择 3 个分组维度');}});
     doc.querySelectorAll('[data-days]').forEach(btn=>btn.addEventListener('click',()=>{setDates(Number(btn.dataset.days));apply();}));
-    el.resetBtn.addEventListener('click',()=>{setDates(7);el.platform.value=el.publisher.value=el.search.value='';el.groups.querySelectorAll('input').forEach(n=>n.checked=['platform','publisher'].includes(n.value));apply();});
+    doc.querySelectorAll('[data-range="yesterday"]').forEach(btn=>btn.addEventListener('click',()=>{setDates(1,1);apply();}));
+    el.resetBtn.addEventListener('click',()=>{setDates(7);el.platform.value=el.publisher.value=el.search.value='';el.groups.querySelectorAll('input').forEach(n=>n.checked=DEFAULT_GROUPS.includes(n.value));apply();});
     el.refreshBtn.addEventListener('click',()=>{load();poll();});
     el.trendMetric.addEventListener('change',charts);el.rankMetric.addEventListener('change',charts);el.pageSize.addEventListener('change',()=>{state.page=1;table();});
     el.prev.addEventListener('click',()=>{state.page=Math.max(1,state.page-1);table();});el.next.addEventListener('click',()=>{state.page++;table();});
