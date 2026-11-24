@@ -16,4 +16,7 @@
 .story-layout li button {text-align:left}
 .story-layout [aria-current=true] {color:#154aca;background:#edf3ff}
 .story-note {color:#845313}
+.episode-range {flex-wrap:wrap}
+.episode-range label {display:inline-flex;align-items:center;gap:.35rem}
+.episode-range input {width:4.5rem;min-width:0;padding:.35rem;border:1px solid #bccbe0;border-radius:.4rem}
 @media(max-width:650px){.story-layout {grid-template-columns:1fr}.story-layout video {max-height:31vh}.story-layout ol {max-height:25vh}.story-heading{display:block}}

@@ -105,6 +105,12 @@
       function draw() {
         stopPlayer();stopPlayer=()=>{};
         const o=plan.outputs[output];
+        if (!o.segments.length) {
+          box.innerHTML='<div class="story-heading"><strong>'+esc(o.question)+'</strong></div>'+
+            plan.conflicts.map(w=>'<p class="story-note">'+esc(w)+'</p>').join('')+
+            '<button class="primary" data-assets>补选连续集</button>';
+          return;
+        }
         const byId=new Map(get().assets.map(a=>[a.id,a]));
         box.innerHTML='<div class="story-heading"><strong>'+esc(o.question)+'</strong><small>方案 v'+plan.revision+' · '+stamp(o.duration_ms)+'</small></div>'+
           (plan.outputs.length>1?'<label>查看输出 <select data-story-output>'+plan.outputs.map((v,i)=>'<option value="'+i+'" '+(i===output?'selected':'')+'>'+esc(v.title)+'</option>').join('')+'</select></label>':'')+
@@ -122,6 +128,7 @@
         if(b.hasAttribute("data-play-story")||b.hasAttribute("data-preview-segment")){
           mountPlayer(box,plan.outputs[output].segments,get().assets,Number(b.dataset.previewSegment||0),box.querySelector("[data-status]"));return;
         }
+        if(b.hasAttribute("data-assets")){close();return act(ctx.assets,"story-assets");}
         if(b.hasAttribute("data-settings")){close();return act(ctx.settings,"story-settings");}
         if(b.dataset.change)return act(async()=>{await ctx.change(b.dataset.change);if(valid())await open(ctx);},"story-change");
         if(b.hasAttribute("data-submit-story"))return act(()=>ctx.submit(plan.id),"story-submit");

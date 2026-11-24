@@ -18,6 +18,7 @@
   const clone = (v) => JSON.parse(JSON.stringify(v)),
     op = () => crypto.randomUUID();
   const methods = {
+    continuous: ["连贯剧情", "10～20 分钟，保留完整场戏和原声对白"],
     hook_first: ["热点前置", "精彩开头后完整连播"],
     highlight_montage: ["高燃混剪", "串联亮点，紧凑呈现"],
     golden_three: ["黄金三段", "开场 · 剧情 · 悬念"],
@@ -84,6 +85,7 @@
     progressRevision = "",
     previewQuality = "proxy";
   const refreshing = new Set();
+  const draftDurations = new Map();
   const sourceCount = () => session?.selection?.summary?.total || assets.length;
   let auth,
     session = null,
@@ -408,14 +410,26 @@
       });
       return estimates.join(" / ");
     }
+    if (c.strategy_version===3) return c.seconds ? "10 分钟起，上限 "+time(c.seconds*1000) : "10～20 分钟";
     return c.seconds?c.seconds+" 秒":c.strategy_version===2?"约 60～90 秒":"自动";
+  }
+  function knownStoryDuration(merge) {
+    if (!sourceCount() || assets.length < sourceCount()) return null;
+    const durations=assets.map(a=>Number(a.duration_ms||a.metadata?.duration_ms||0));
+    if (durations.some(n=>!n)) return null;
+    return merge===false?Math.min(...durations):durations.reduce((a,b)=>a+b,0);
+  }
+  function storyLengthHint(merge) {
+    const total=knownStoryDuration(merge);
+    if (total===null) return "素材就绪后核对可用时长";
+    return (merge===false?"最短一条原片 ":"原片合计 ")+time(total)+(total<600000?"，距 10 分钟至少还差 "+time(600000-total)+"，请补选后续集":"");
   }
   function configSummary(c, run) {
     if (c.youtube_regular) {
       const y = c.youtube_regular;
       return `<div class="configuration-summary"><strong>YouTube 普通视频</strong><div>正片 ${y.body_source_ids.length} 条 · ${y.hook_source_ids.length ? "片头从指定的 " + y.hook_source_ids.length + " 条素材选取" : "片头从正片选取"}</div></div>`;
     }
-    return `<div class="configuration-summary"><strong>${c.clip ? esc(methods[c.clip.method]?.[0]) : "视频创作"}${c.narration ? " · 影视解说" : ""}${c.translation ? " · 视频翻译" : ""}</strong><div class="summary-grid"><div><span>素材处理</span>${c.merge === false ? "逐条处理" : "合并素材"}</div><div><span>输出数量</span>${(c.merge === false ? sourceCount() : 1) * (c.clip?.script_count || 1) * (c.clip?.variant_count || 1)} 条</div>${c.clip ? `<div><span>${run?.tasks?.some(t=>t.output)?"成片时长":"目标时长"}</span>${esc(run?.tasks?.some(t=>t.output)
+    return `<div class="configuration-summary"><strong>${c.clip ? esc(methods[c.clip.strategy_version===3?"continuous":c.clip.method]?.[0]) : "视频创作"}${c.narration ? " · 影视解说" : ""}${c.translation ? " · 视频翻译" : ""}</strong><div class="summary-grid"><div><span>素材处理</span>${c.merge === false ? "逐条处理" : "合并素材"}</div><div><span>输出数量</span>${(c.merge === false ? sourceCount() : 1) * (c.clip?.script_count || 1) * (c.clip?.variant_count || 1)} 条</div>${c.clip ? `<div><span>${run?.tasks?.some(t=>t.output)?"成片时长":"目标时长"}</span>${esc(run?.tasks?.some(t=>t.output)
       ? run.tasks.filter(t=>t.output).map(t=>time(t.output.metadata?.duration_ms)).join(" / ")
       : c.clip.method==="hook_first"?"完整原片＋精彩开头":clipDuration(c.clip))}</div><div><span>脚本 × 裂变</span>${c.clip.script_count} × ${c.clip.variant_count}</div>` : ""}${c.translation ? `<div><span>翻译语种</span>${esc(languageName(c.translation.language))}</div><div><span>字幕</span>${c.translation.mode === "bilingual" ? "双语" : "仅译文"}</div>` : ""}</div></div>`;
   }
@@ -459,12 +473,14 @@
   }
   function updateComposer() {
     const c = config();
-    const story = c.clip?.strategy_version===2 && sourceCount()>0;
+    const story = [2,3].includes(c.clip?.strategy_version) && sourceCount()>0;
     $("storyBar").hidden=!story;
+    const known=c.clip?.strategy_version===3?knownStoryDuration(c.merge):null;
+    $("addStoryEpisodes").hidden=known===null || known>=600000;
     if(story){
-      $("storySummary").textContent="爆点引流 · "+clipDuration(c.clip)+" · "+
+      $("storySummary").textContent=(c.clip.strategy_version===3?"连贯剧情 · ":"爆点引流 · ")+clipDuration(c.clip)+" · "+
         (c.clip.story_order==="episode" && session?.story_order_hint?.verified?"按集号顺叙":"按选入顺序");
-      $("storyOrderLabel").textContent=window.AIEditorStory.orderText(session,c.clip.story_order);
+      $("storyOrderLabel").textContent=window.AIEditorStory.orderText(session,c.clip.story_order)+(c.clip.strategy_version===3?" · "+storyLengthHint(c.merge):"");
     }
     $("configChips").innerHTML = [
       "clip",
@@ -710,7 +726,7 @@
     await saveChain;
     return window.AIEditorStory.open({
       api,esc,modal:openModal,get:()=>session,act:action,
-      settings:()=>openConfig("clip"),
+      settings:()=>openConfig("clip"), assets:()=>openAssets(),
       sync:async(item)=>{if(item && item.id===session?.id && item.version>=session.version)adoptSession(item);await refresh(true);},
       change:async(key)=>{
         const c=config();await save({config:{...c,clip:{...c.clip,[key]:(c.clip[key]||0)+1}}});
@@ -1057,7 +1073,7 @@
     const paint = (data) => {
       catalogEpisodes = data.items;
       $("catalogContent").innerHTML =
-        `<div class="catalog-summary"><button id="backCatalog">‹ 返回剧目</button><strong>${esc(drama.name)}</strong><span>${esc(drama.language)} · ${data.items.length} 集</span></div><p class="muted">勾选后加入下方完整选择，确认后在后台导入和解析。每次最多 20 个素材。</p><div class="catalog-summary"><button id="selectFirstEpisodes">选择前 3 集</button><button id="clearEpisodes">清空本剧选择</button><span id="episodeCount"></span></div><div class="episode-grid">${data.items.map((e) => `<label><input type="checkbox" name="catalogEpisode" value="${e.number}">第 ${e.number} 集</label>`).join("")}</div>`;
+        `<div class="catalog-summary"><button id="backCatalog">‹ 返回剧目</button><strong>${esc(drama.name)}</strong><span>${esc(drama.language)} · ${data.items.length} 集</span></div><p class="muted">勾选后加入下方完整选择，确认后在后台导入和解析。每次最多 20 个素材。</p><div class="catalog-summary"><button id="selectFirstEpisodes">选择前 3 集</button><button id="clearEpisodes">清空本剧选择</button><span id="episodeCount"></span></div><div class="catalog-summary episode-range" role="group" aria-label="选择连续集数"><label>从第 <input id="episodeFrom" type="number" min="1" step="1" aria-label="起始集"> 集</label><label>至第 <input id="episodeTo" type="number" min="1" step="1" aria-label="结束集"> 集</label><button id="addEpisodeRange">加入所选</button></div><div class="episode-grid">${data.items.map((e) => `<label><input type="checkbox" name="catalogEpisode" value="${e.number}">第 ${e.number} 集</label>`).join("")}</div>`;
       $("backCatalog").onclick = () => readCatalog();
       $("catalogContent")
         .querySelectorAll('[name="catalogEpisode"]')
@@ -1076,6 +1092,23 @@
               }
             }),
         );
+      $("addEpisodeRange").onclick = () => {
+        const first=$("episodeFrom").valueAsNumber, last=$("episodeTo").valueAsNumber;
+        if (!Number.isSafeInteger(first)||!Number.isSafeInteger(last)||first<1||last<first)
+          return toast("请输入有效的起始集和结束集",true);
+        if (last-first>=20) return toast("一次创作最多选择 20 个不同素材",true);
+        const available=new Set(data.items.map(e=>Number(e.number)));
+        let next=[...sourceSelection];
+        try {
+          for (let n=first;n<=last;n++) {
+            if (!available.has(n)) throw new Error("剧库中缺少第 "+n+" 集，请调整范围");
+            const item=episodeIntent(n);
+            if (!next.some(x=>Sources.same(x,item))) next=Sources.toggle(next,item);
+          }
+        } catch(e) { return toast(e.message,true); }
+        sourceSelection=next;
+        drawSelection();
+      };
       $("selectFirstEpisodes").onclick = () => {
         try {
           let next = [...sourceSelection];
@@ -1236,6 +1269,8 @@
   }
   async function openAssets(afterSave) {
     ++libraryEpoch;
+    draftDurations.clear();
+    for (const a of assets) if (a.duration_ms) draftDurations.set(a.id,a.duration_ms);
     librarySource = "local";
     catalogDrama = null;
     libraryOffset = 0;
@@ -1270,7 +1305,7 @@
     $("uploadStart").onclick = () => action(uploadFiles, "upload-files");
     $("confirmAssets").onclick = () =>
       action(() => confirmSelection(afterSave), "confirm-selection");
-    $("mergeSources").onchange = persistDraft;
+    $("mergeSources").onchange = drawSelection;
     connectLibrary();
     drawSelection();
     warmCatalogs();
@@ -1342,6 +1377,7 @@
     }
   }
   function drawAssets() {
+    for (const a of library) if (a.duration_ms) draftDurations.set(a.id,a.duration_ms);
     $("assetGrid").innerHTML =
       library
         .map(
@@ -1381,7 +1417,18 @@
             `<div class="selection-item">${i + 1}. ${esc(item.name || "已选素材")}<button data-move-source="${i}" data-dir="-1" ${i === 0 ? "disabled" : ""} aria-label="上移">↑</button><button data-move-source="${i}" data-dir="1" ${i === sourceSelection.length - 1 ? "disabled" : ""} aria-label="下移">↓</button><button data-remove-source="${i}" aria-label="移除素材">×</button></div>`,
         )
         .join("") || '<span class="muted">勾选分集或选择已有素材</span>';
-    $("assetCount").textContent = `已选 ${sourceSelection.length} 个`;
+    let summary = "已选 "+sourceSelection.length+" 个";
+    if (sourceSelection.length && (config().clip?.strategy_version===3 || (!session && caps.new_session_edit_version===3))) {
+      const known=sourceSelection.map(s=>draftDurations.get(s.asset_id)).filter(Boolean);
+      const pending=sourceSelection.length-known.length;
+      const merged=$("mergeSources").checked;
+      const length=merged?known.reduce((a,b)=>a+b,0):Math.min(...known);
+      summary+=" · 成片 10～20 分钟";
+      if (known.length) summary+=" · "+(merged?"已知原片 ":"最短原片 ")+time(length);
+      if (pending) summary+=" · "+pending+" 集导入后核对时长";
+      else if (length<600000) summary+=" · 至少还差 "+time(600000-length);
+    }
+    $("assetCount").textContent = summary;
     $("confirmAssets").textContent =
       `确认 ${sourceSelection.length} 个素材并后台准备`;
     $("confirmAssets").disabled =
@@ -1598,19 +1645,19 @@
       languages = (caps.languages || []).map((l) => [l.code, l.name]);
     let body = "";
     if (kind === "clip") {
-      c.method ||= session.edit_version===2 ? "cliffhanger" : "hook_first";
-      if (!config().clip && session.edit_version===2) c.strategy_version=2;
+      c.method ||= [2,3].includes(session.edit_version) ? "cliffhanger" : "hook_first";
+      if (!config().clip && c.method==="cliffhanger") c.strategy_version=session.edit_version;
       body =
         `<div class="method-grid">${Object.entries(methods)
           .map(
             ([k, v]) =>
-              `<button class="method-card ${c.method === k ? "active" : ""}" data-method="${k}"><strong>${v[0]}</strong><small>${v[1]}</small></button>`,
+              `<button class="method-card ${(c.strategy_version===3?"continuous":c.method) === k ? "active" : ""}" data-method="${k}"><strong>${v[0]}</strong><small>${v[1]}</small></button>`,
           )
           .join("")}</div><div class="form-grid">` +
         field(
           "duration",
-          "剪辑时长",
-          input("duration", c.seconds ?? "", 'type="number" min="1" max="86400" placeholder="自动"'),
+          '<span id="durationLabel">剪辑时长（秒）</span>',
+          input("duration", c.seconds ? (c.strategy_version===3?c.seconds/60:c.seconds) : "", 'type="number" min="1" max="86400" placeholder="自动"'),
         ) +
         field("storyOrder","成片讲述顺序",select("storyOrder",[["episode","按集号顺叙"],["selection","按我选入的顺序"]],c.story_order||"episode")) +
         '<p id="cutExpectation" class="settings-note wide"></p>' +
@@ -1732,11 +1779,17 @@
     $("cancelConfig").onclick = closeModal;
     if (kind === "clip") {
       const durationVisibility = () => {
-        const modern=c.method==="cliffhanger" && c.strategy_version===2;
-        $("duration").closest("label").hidden=c.method==="hook_first";
-        $("duration").placeholder=modern?"自动，约 60～90 秒":"自动";
+        const modern=c.method==="cliffhanger" && [2,3].includes(c.strategy_version);
+        const long=modern && c.strategy_version===3;
+        const duration=$("duration");
+        duration.closest("label").hidden=c.method==="hook_first";
+        duration.min=long?"10":"1";
+        duration.max=long?"20":"86400";
+        duration.step=long?"any":"1";
+        $("durationLabel").textContent=long?"时长上限（分钟）":"剪辑时长（秒）";
+        duration.placeholder=long?"自动，10～20 分钟":modern?"自动，约 60～90 秒":"自动";
         $("storyOrder").closest("label").hidden=!modern;
-        $("cutExpectation").textContent=modern?window.AIEditorStory.orderText(session,$("storyOrder").value)
+        $("cutExpectation").textContent=modern?window.AIEditorStory.orderText(session,$("storyOrder").value)+(long?" · "+storyLengthHint(config().merge):"")
           : c.method==="hook_first"?"精彩开头后完整连播 · "+clipDuration(c):"";
       };
       $("storyOrder").onchange=durationVisibility;
@@ -1762,8 +1815,10 @@
         .forEach(
           (b) =>
             (b.onclick = () => {
-              c.method = b.dataset.method;
-              if(c.method==="cliffhanger")c.strategy_version=2;
+              const useLong=b.dataset.method==="continuous";
+              if (useLong !== (c.strategy_version===3)) $("duration").value="";
+              c.method = useLong ? "cliffhanger" : b.dataset.method;
+              c.strategy_version = useLong ? 3 : c.method==="cliffhanger" ? 2 : 1;
               $("modalBody")
                 .querySelectorAll("[data-method]")
                 .forEach((el) => el.classList.toggle("active", el === b));
@@ -1834,15 +1889,16 @@
     $("addConfig").onclick = () =>
       action(async () => {
         let next;
+        if (kind==="clip" && c.method!=="hook_first" && !$("duration").reportValidity()) return;
         if (kind === "clip")
           next = {
             method: c.method,
-            ...(c.method==="cliffhanger" && c.strategy_version===2?{strategy_version:2,story_order:$("storyOrder").value,
+            ...(c.method==="cliffhanger" && [2,3].includes(c.strategy_version)?{strategy_version:c.strategy_version,story_order:$("storyOrder").value,
               opening_take:c.opening_take||0,ending_take:c.ending_take||0}:{}),
             seconds:
               c.method === "hook_first" || !$("duration").value
                 ? null
-                : Number($("duration").value),
+                : Math.round(Number($("duration").value)*(c.strategy_version===3?60:1)),
             script_count: Number($("scriptCount").value),
             variant_count: Number($("variantCount").value),
             watermark: $("watermark").value,

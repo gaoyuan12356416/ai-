@@ -77,8 +77,11 @@ def session_config(value, version):
 
     check(isinstance(value, dict), "config_invalid", "制作配置无效")
     clip = value.get("clip")
-    if version == 2 and isinstance(clip, dict) and clip.get("method", "cliffhanger") == "cliffhanger":
-        value = {**value, "clip": {"method": "cliffhanger", "strategy_version": 2, **clip}}
+    if version in (2, 3) and isinstance(clip, dict) and clip.get("method", "cliffhanger") == "cliffhanger":
+        # Older clients can send an explicit short duration without a strategy field.
+        requested = clip.get("seconds")
+        inferred = 2 if version == 3 and type(requested) is int and 0 < requested < 600 else version
+        value = {**value, "clip": {"method": "cliffhanger", "strategy_version": inferred, **clip}}
     return configuration(value)
 
 
@@ -86,13 +89,13 @@ def initial(db, value):
     version = db.execute("SELECT version FROM studio_story_defaults WHERE singleton=1").fetchone()[0]
     check(isinstance(value, dict), "config_invalid", "制作配置无效")
     value = dict(value)
-    if version == 2 and not any(value.get(k) for k in ("clip", "translation", "narration", "youtube_regular")):
-        value["clip"] = {"method": "cliffhanger", "strategy_version": 2, "effects": ["basic"]}
+    if version in (2, 3) and not any(value.get(k) for k in ("clip", "translation", "narration", "youtube_regular")):
+        value["clip"] = {"method": "cliffhanger", "strategy_version": version, "effects": ["basic"]}
     return version, session_config(value, version)
 
 
 def is_story(config):
-    return config.get("clip", {}).get("strategy_version") == 2
+    return config.get("clip", {}).get("strategy_version") in (2, 3)
 
 
 def signature(config, selection_id, revision, source_ids):

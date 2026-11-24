@@ -94,7 +94,7 @@ def session(rt, actor, sid):
         item['selection']=progress(rt,actor,sid)
     else:
         item['selection']=None
-    item["story_order_hint"]=story_receipts.order_hint(rt,actor,item) if item["edit_version"]==2 or story_receipts.is_story(item["config"]) else None
+    item["story_order_hint"]=story_receipts.order_hint(rt,actor,item) if item["edit_version"] in (2,3) or story_receipts.is_story(item["config"]) else None
     return item
 
 
@@ -202,14 +202,16 @@ def configuration(value):
             "subtitle_protection": comp["subtitle_protection"],
         }
         version = clip.get("strategy_version", 1)
-        check(type(version) is int and version in (1,2),"config_invalid","剪辑策略版本无效")
-        if version == 2:
+        check(type(version) is int and version in (1,2,3),"config_invalid","剪辑策略版本无效")
+        if version == 3:
+            check(seconds is None or 600 <= seconds <= 1200, "config_invalid", "连贯剧情的时长上限可选 10～20 分钟")
+        if version in (2,3):
             check(clip["method"] == "cliffhanger","config_invalid","该策略仅用于爆点引流")
             order = clip.get("story_order", "episode")
             takes = [clip.get(k,0) for k in ("opening_take","ending_take")]
             check(order in ("episode","selection") and all(type(i) is int and 0<=i<=1000000 for i in takes),
                   "config_invalid","剪辑顺序或备选镜头无效")
-            result["clip"].update(strategy_version=2,story_order=order,opening_take=takes[0],ending_take=takes[1])
+            result["clip"].update(strategy_version=version,story_order=order,opening_take=takes[0],ending_take=takes[1])
     for kind in ("narration", "translation"):
         row = value.get(kind)
         if not row:
@@ -315,6 +317,13 @@ def submit(rt, actor, sid, body, kind="create"):
             sig=story_receipts.signature(config,frozen.get("selection_id",""),frozen.get("selection_revision",0),frozen["source_ids"])
             saved=story_receipts.header(db,key,sid,sig)
             check(saved and saved["id"]==frozen["edit_plan_id"],"edit_plan_conflict","剪辑方案已更新，请核对当前版本",409)
+        if kind == "create" and config.get("clip",{}).get("strategy_version") == 3:
+            from .story_long import MIN_MS, shortfall
+            ready = [i.get("asset") for i in selected["items"]] if selected else current["assets"]
+            if ready and all(a and a.get("duration_ms") for a in ready):
+                durations = [a["duration_ms"] for a in ready]
+                available = sum(durations) if config["merge"] else min(durations)
+                check(available >= MIN_MS, "story_duration_short", shortfall(available), 409)
         rid = ident("sr")
         now = time.time()
         db.execute(
@@ -833,13 +842,14 @@ def ask(rt, actor, sid, body):
     result = {"text": data["answer"], "evidence": data["evidence"]}
     # A requested edit always produces a reviewable card, never an implicit render.
     if re.search("剪辑|剪成|混剪|黄金三段|热点前置|爆点引流|高燃", text):
-        modern = current.get("edit_version",1)==2 or story_receipts.is_story(current["config"])
+        version = current["config"].get("clip", {}).get("strategy_version", current.get("edit_version", 1))
+        modern = version in (2, 3)
         method = next((k for k, v in METHODS.items() if v in text), "cliffhanger" if modern else "golden_three")
         config = {
             "merge": True,
             "clip": {
                 "method": method,
-                **({"strategy_version":2} if modern and method=="cliffhanger" else {}),
+                **({"strategy_version":version} if modern and method=="cliffhanger" else {}),
                 "script_count": 1,
                 "variant_count": 1,
                 "seconds": None,
@@ -892,7 +902,7 @@ def dispatch(rt, actor, verb, path, body, query):
         with rt.db() as db:
             version=db.execute("SELECT version FROM studio_story_defaults WHERE singleton=1").fetchone()[0]
         result["new_session_edit_version"]=version
-        result["default_clip"]={"method":"cliffhanger","strategy_version":2,"story_order":"episode","auto_seconds":[60,90]} if version==2 else {"method":"hook_first"}
+        result["default_clip"]={"method":"cliffhanger","strategy_version":version,"story_order":"episode","auto_seconds":[600,1200] if version==3 else [60,90]} if version in (2,3) else {"method":"hook_first"}
         return result
     if path == "/sessions":
         if verb == "GET":

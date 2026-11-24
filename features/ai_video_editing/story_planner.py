@@ -8,7 +8,7 @@ from .runtime import packed
 from .smart_model import model_config, model_json
 from .smart_plans import VARIANT_ZOOM
 from .story_edges import boundaries, snap
-from . import story_cut_review
+from . import story_cut_review, story_long
 
 LOG = logging.getLogger(__name__)
 VERSION = "story-v2.3"
@@ -122,31 +122,23 @@ def assemble(rt, actor, sources, cfg, analysis_id):
     units, outputs, warnings, conflicts = [], [], [], []
     for group_number, group in enumerate(groups, 1):
         story, order_mode = ordered(group, clip["story_order"])
-        question, beats, hooks, endings = outline(rt, actor, group)
-        # A per-episode shortlist independent of other episodes and their order
-        # lets revised openings, endings and sequence reuse the same media reads.
-        edge_cache = {}
-        for source in story:
-            meaningful = [
-                c for c in source["candidates"] if c["tag"] not in ("other", "signal") or c.get("transcript")
-            ]
-            source["shortlist"] = meaningful or source["candidates"]
-            for event in source["shortlist"]:
-                data = boundaries(rt, actor, source["asset"], event)
-                edge_cache[(source["source_id"], event["id"])] = (
-                    snap(event, data, source["duration_ms"]),
-                    data,
-                )
-            story_cut_review.review(rt, actor, source, edge_cache)
+        long_form = clip.get("strategy_version") == 3
+        if long_form:
+            enough = sum(s["duration_ms"] for s in story) >= story_long.MIN_MS
+            original = story_long.continuous(rt, actor, story) if enough else None
+        else:
+            legacy = candidate_evidence(rt, actor, group)
         for script in range(clip["script_count"]):
-            picked, notes, problems, story_question = select(
-                rt, actor, story, clip, script, question, beats, hooks, endings, edge_cache
-            )
+            if long_form:
+                picked, notes, problems, story_question = story_long.edit(rt, actor, story, clip, script, original)
+            else:
+                picked, notes, problems, story_question = select(rt, actor, story, clip, script, *legacy)
             warnings.extend(notes)
             conflicts.extend(problems)
             for variant, zoom in enumerate(VARIANT_ZOOM[: clip["variant_count"]], 1):
                 uid = f"story_g{group_number}_s{script + 1}_v{variant}"
-                title = group[0]["title"][:85] + f" · 爆点引流 · 脚本{script + 1}版本{variant}"
+                label = "连贯剧情" if long_form else "爆点引流"
+                title = story[0]["title"][:85] + f" · {label} · 脚本{script + 1}版本{variant}"
                 spans = [
                     {
                         "id": f"clip_{i:03}",
@@ -186,19 +178,34 @@ def assemble(rt, actor, sources, cfg, analysis_id):
                         "segments": picked,
                         "coverage": coverage,
                         "order_mode": order_mode,
-                        "duration_ms": sum(c["duration_ms"] for c in coverage),
+                        "duration_ms": story_long.output_ms(picked) if long_form else sum(c["duration_ms"] for c in coverage),
                     }
                 )
     return {
         "analysis_id": analysis_id,
-        "strategy_version": 2,
-        "algorithm": VERSION,
+        "strategy_version": clip.get("strategy_version", 2),
+        "algorithm": story_long.VERSION if clip.get("strategy_version") == 3 else VERSION,
         "selection_order": [s["source_id"] for s in sources],
         "outputs": outputs,
         "units": units,
         "warnings": list(dict.fromkeys(warnings)),
         "conflicts": list(dict.fromkeys(conflicts)),
     }
+
+
+def candidate_evidence(rt, actor, group):
+    outline_result = outline(rt, actor, group)
+    edge_cache = {}
+    for source in group:
+        meaningful = [
+            c for c in source["candidates"] if c["tag"] not in ("other", "signal") or c.get("transcript")
+        ]
+        source["shortlist"] = meaningful or source["candidates"]
+        for event in source["shortlist"]:
+            data = boundaries(rt, actor, source["asset"], event)
+            edge_cache[(source["source_id"], event["id"])] = snap(event, data, source["duration_ms"]), data
+        story_cut_review.review(rt, actor, source, edge_cache)
+    return (*outline_result, edge_cache)
 
 
 def select(rt, actor, story, clip, script, question, beats, hooks, endings, edge_cache):

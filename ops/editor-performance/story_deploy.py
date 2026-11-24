@@ -140,7 +140,7 @@ def default(manifest, version):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["stage", "resume", "enable", "rollback-default"])
+    parser.add_argument("action", choices=["stage", "resume", "enable", "enable-long", "rollback-long", "rollback-default"])
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--base")
     parser.add_argument("--static-base")
@@ -152,4 +152,4 @@ if __name__ == "__main__":
     elif args.action == "resume":
         resume(args.manifest)
     else:
-        default(args.manifest, 2 if args.action == "enable" else 1)
+        default(args.manifest, {"enable": 2, "enable-long": 3, "rollback-long": 2, "rollback-default": 1}[args.action])
