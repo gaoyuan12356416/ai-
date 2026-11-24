@@ -12,11 +12,13 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer
 
 import x_new_app_sandbox as local
+import x_ads_oauth as ads
 
 SITE = "https://ai.yingliangads.com"
 PUBLIC = SITE + "/x-app-test"
 STATE_PREFIX = "xtest_20261019_"
 COOKIE_NAME = "x_cpu_app_test"
+ADS_COOKIE = "__Host-x-ads-flow"
 
 
 def read_actor(cookie):
@@ -36,6 +38,24 @@ def read_actor(cookie):
     if user.get("role") != "admin":
         raise local.oauth.ServiceError("admin_required", "仅后台管理员可使用新 App 测试环境", 403)
     return {key: user.get(key, "") for key in ("tenant_key", "user_id", "name", "email", "role")}
+
+
+def channel_for_ads(cookie, handle):
+    handle = str(handle or "").strip().lstrip("@")
+    if not ads.HANDLE.fullmatch(handle):
+        raise ads.AdsError("invalid_handle", "请输入后台管理的 X 频道用户名。")
+    request = urllib.request.Request(
+        "http://127.0.0.1:8787/api/admin/x-accounts",
+        headers={"Cookie": cookie, "Host": "ai.yingliangads.com", "X-Forwarded-Proto": "https"})
+    try:
+        with local.oauth._NO_REDIRECT_OPENER.open(request, timeout=12) as response:
+            rows = json.loads(response.read(8 * 1024 * 1024))["items"]
+    except Exception:
+        raise ads.AdsError("channels_unavailable", "当前后台账号无法读取 X 频道列表。", 503) from None
+    for row in rows:
+        if str(row.get("username", "")).lower() == handle.lower() and str(row.get("x_user_id", "")).isdigit():
+            return {"username": row["username"], "x_user_id": str(row["x_user_id"])}
+    raise ads.AdsError("channel_not_found", "后台未找到这个 X 频道。", 404)
 
 
 def create_test_authorization(actor):
@@ -95,26 +115,43 @@ def make_handler():
                     raise local.oauth.ServiceError("test_session_required", "请从测试首页重新开始", 403)
             return actor
 
+        def ads_browser(self):
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+                value = cookie[ADS_COOKIE].value if ADS_COOKIE in cookie else ""
+            except Exception:
+                value = ""
+            return value if len(value) == 43 and all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in value) else ""
+
         def do_GET(self):
             parsed = urllib.parse.urlsplit(self.path)
             if parsed.path == "/health":
                 self.send_json(200, {"ok": True, "environment": "cpu-isolated", "publishing_enabled": False})
                 return
             try:
-                if parsed.path == "/":
+                if parsed.path in ("/", "/ads"):
+                    ads_page = parsed.path == "/ads"
                     try:
                         self.check(session=False)
                     except local.oauth.ServiceError as exc:
                         if exc.code != "auth_required":
                             raise
-                        self.send_redirect(SITE + "/api/auth/feishu/login?" + urllib.parse.urlencode({"next": "/x-app-test/"}))
+                        target = "/x-app-test/"
+                        if ads_page:
+                            handle = urllib.parse.parse_qs(parsed.query).get("channel", [""])[0]
+                            target += "ads" + ("?channel=" + handle if ads.HANDLE.fullmatch(handle) else "")
+                        self.send_redirect(SITE + "/api/auth/feishu/login?" + urllib.parse.urlencode({"next": target}))
                         return
-                    body = (local.ROOT / "static/x-new-app-cpu-test.html").read_text(encoding="utf-8").replace("__CSRF__", local.CSRF).encode("utf-8")
+                    name = "x-ads-authorization.html" if ads_page else "x-new-app-cpu-test.html"
+                    body = (local.ROOT / "static" / name).read_text(encoding="utf-8").replace("__CSRF__", local.CSRF).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))
                     self.send_header("Cache-Control", "no-store")
                     self.send_header("Set-Cookie", COOKIE_NAME + "=" + local.SESSION + "; HttpOnly; Secure; SameSite=Lax; Path=/")
+                    if ads_page and not self.ads_browser():
+                        self.send_header("Set-Cookie", ADS_COOKIE + "=" + secrets.token_urlsafe(32) + "; HttpOnly; Secure; SameSite=Lax; Path=/")
                     self.end_headers()
                     self.wfile.write(body)
                 elif parsed.path == "/api/status":
@@ -123,8 +160,12 @@ def make_handler():
                                          "callback_url": local.oauth.callback_url(), "accounts": local.accounts(),
                                          "scopes": list(local.oauth.SCOPES), "publishing_enabled": False})
                 elif parsed.path == "/callback":
-                    self.check()
+                    actor = self.check()
                     params = urllib.parse.parse_qs(parsed.query)
+                    if "state" not in params and ("oauth_token" in params or "denied" in params):
+                        _, handle = ads.finish(local.DATA, local.CONFIG, actor, self.ads_browser(), params)
+                        self.send_redirect(PUBLIC + "/ads?" + urllib.parse.urlencode({"channel": handle, "linked": "1"}))
+                        return
                     if not params.get("state", [""])[0].startswith(STATE_PREFIX):
                         raise local.oauth.ServiceError("invalid_test_state", "非本次测试授权", 400)
                     with local.CONFIG_LOCK:
@@ -133,6 +174,8 @@ def make_handler():
                         super().do_GET()
                 else:
                     self.send_json(404, {"error": "test_route_disabled"})
+            except ads.AdsError as exc:
+                self.send_text(exc.status, str(exc))
             except local.oauth.ServiceError as exc:
                 self.send_json(exc.status, {"error": exc.code, "message": "请返回测试首页检查登录或授权状态"})
             except Exception:
@@ -140,14 +183,27 @@ def make_handler():
 
         def do_POST(self):
             try:
-                self.read_json()
+                payload = self.read_json()
                 actor = self.check()
                 if (self.headers.get("Origin") != SITE
                         or self.headers.get("Content-Type", "").split(";")[0] != "application/json"
                         or not secrets.compare_digest(self.headers.get("X-Sandbox-CSRF", ""), local.CSRF)):
                     raise local.oauth.ServiceError("csrf_failed", "请求来源校验失败", 403)
                 path = urllib.parse.urlsplit(self.path).path
-                if path == "/api/authorize":
+                if path in ("/api/ads/authorize", "/api/ads/status", "/api/ads/check"):
+                    channel = channel_for_ads(self.headers.get("Cookie", ""), payload.get("channel"))
+                    x_id = channel["x_user_id"]
+                    if path == "/api/ads/authorize":
+                        browser = self.ads_browser()
+                        if not browser:
+                            raise ads.AdsError("browser_required", "请重新打开频道授权页。", 403)
+                        url = ads.start(local.DATA, local.CONFIG, local.oauth.callback_url(), actor, browser, channel)
+                        self.send_json(200, {"authorization_url": url})
+                    elif path == "/api/ads/check":
+                        self.send_json(200, {"authorized": True, "report": ads.probe(local.DATA, local.CONFIG, x_id)})
+                    else:
+                        self.send_json(200, ads.status(local.DATA, local.CONFIG, x_id))
+                elif path == "/api/authorize":
                     self.send_json(200, create_test_authorization(actor))
                 elif path == "/api/verify":
                     with local.CONFIG_LOCK:
@@ -160,6 +216,8 @@ def make_handler():
                     self.send_json(200, local.app_probe())
                 else:
                     self.send_json(404, {"error": "test_route_disabled"})
+            except ads.AdsError as exc:
+                self.send_json(exc.status, {"error": exc.code, "message": str(exc)})
             except local.oauth.ServiceError as exc:
                 self.send_json(exc.status, {"error": exc.code, "message": "操作未完成（" + exc.code + "）"})
             except Exception:

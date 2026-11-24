@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>X 视频卡片授权</title>
+<style>
+  * { box-sizing:border-box }
+  body { margin:0; background:#f6f7f9; color:#172332; font:16px/1.6 "Source Sans 3",system-ui,sans-serif }
+  main { max-width:580px; margin:9vh auto; padding:32px; background:white; border:1px solid #dbe1e7; border-radius:16px }
+  h1 { margin:0 0 12px; font-size:26px } p { margin:8px 0 24px }
+  label { display:block; font-weight:650 } input,button { font:inherit; border-radius:8px; padding:8px 14px }
+  input { width:100%; border:1px solid #9aa7b4; margin:6px 0 16px }
+  button { cursor:pointer; border:1px solid #9aa7b4; color:#172332; background:white; margin:0 6px 8px 0 }
+  #authorize { background:#153b60; color:white; border-color:#153b60 }
+  button:disabled { opacity:.55; cursor:wait } #status { white-space:pre-wrap; margin:12px 0 0 }
+  @media(max-width:600px){main{margin:24px 12px;padding:22px}}
+</style>
+<main>
+  <h1>X 视频卡片授权</h1>
+  <p>用短剧频道登录 X，授权 Lisa API 后可检查该频道能否使用视频卡片。</p>
+  <label for="channel">X 频道用户名</label>
+  <input id="channel" autocomplete="off" placeholder="@频道用户名" spellcheck="false">
+  <button id="authorize" type="button">前往 X 授权</button>
+  <button id="check" type="button">检查 Ads 权限</button>
+  <p id="status" role="status" aria-live="polite"></p>
+</main>
+<script>
+  const channel = document.querySelector('#channel')
+  const status = document.querySelector('#status')
+  const params = new URLSearchParams(location.search)
+  const buttons = [...document.querySelectorAll('button')]
+  channel.value = params.get('channel') || ''
+  function showGrant(result) {
+    if (!result.authorized) return '这个频道尚未完成 OAuth 1.0a 授权。'
+    const r = result.report
+    if (!r) return '频道已授权，可以检查 Ads 权限。'
+    const outcome = obj => obj.error ? (obj.http || '网络错误') + ' · ' + obj.error : 'HTTP ' + obj.http
+    const lines = ['频道已授权。Ads 账户接口 ' + outcome(r.accounts_api)]
+    if (!r.accounts_api.error && !r.accounts.length) lines.push('X 未返回该用户可访问的广告账户。')
+    for (const a of r.accounts) {
+      let line = a.name + ' (' + a.id + ')'
+      if (a.promotable_users_api?.error) line += ' · 频道权限查询 ' + outcome(a.promotable_users_api)
+      else if (a.handle_access) line += ' · 频道权限 ' + a.handle_access
+      else if (a.promotable_users_api) line += ' · 当前结果未列出该频道'
+      if (a.cards_api) line += ' · 卡片读取 ' + outcome(a.cards_api)
+      lines.push(line)
+    }
+    return lines.join('\n')
+  }
+  async function run(action) {
+    const handle = channel.value.trim().replace(/^@/, '')
+    if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
+      status.textContent = '请输入有效的 X 用户名。'
+      return
+    }
+    buttons.forEach(button => button.disabled = true)
+    try {
+      const response = await fetch('./api/ads/' + action, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','X-Sandbox-CSRF':'__CSRF__'},
+        body:JSON.stringify({channel:handle})
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.message || '后台请求失败')
+      if (action === 'authorize') { location.assign(data.authorization_url); return }
+      status.textContent = showGrant(data)
+    } catch (error) {
+      status.textContent = error.message
+    } finally {
+      buttons.forEach(button => button.disabled = false)
+    }
+  }
+  document.querySelector('#authorize').addEventListener('click', () => run('authorize'))
+  document.querySelector('#check').addEventListener('click', () => run('check'))
+  if (channel.value) {
+    const linked = params.get('linked') === '1'
+    if (linked) {
+      params.delete('linked')
+      history.replaceState(null, '', location.pathname + '?' + params)
+    }
+    run(linked ? 'check' : 'status')
+  }
+</script>
+</html>

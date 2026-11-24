@@ -101,6 +101,24 @@ class CPUChecks(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_ads_entry_preserves_channel_and_uses_scoped_identity_and_csrf(self):
+        error = cpu.local.oauth.ServiceError("auth_required", "login", 401)
+        with patch.object(cpu, "read_actor", side_effect=error):
+            code, headers, _ = self.request("/ads?channel=shorts", cookie=False)
+            self.assertEqual(code, 302)
+            self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(headers["Location"]).query)["next"],
+                             ["/x-app-test/ads?channel=shorts"])
+        with patch.object(cpu, "read_actor", return_value=ACTOR), patch.object(cpu, "channel_for_ads") as lookup:
+            code, headers, page = self.request("/ads?channel=shorts", cookie=False)
+            self.assertEqual(code, 200)
+            self.assertIn(cpu.ADS_COOKIE, headers["Set-Cookie"])
+            self.assertNotIn(b"__CSRF__", page)
+            self.assertEqual(self.request("/api/ads/authorize", {"channel": "shorts"}, csrf=False)[0], 403)
+            lookup.assert_not_called()
+            lookup.return_value = {"x_user_id": "1234", "username": "shorts"}
+            code, _, body = self.request("/api/ads/status", {"channel": "shorts", "x_user_id": "999"})
+            self.assertEqual((code, json.loads(body)["authorized"]), (200, False))
+
 
 if __name__ == "__main__":
     unittest.main()
