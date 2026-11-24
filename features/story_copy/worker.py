@@ -44,6 +44,7 @@ def generate_batch(c, batch, tasks, runner=generator.run):
             ready.append(t)
     tokens = [None, None]
     calls = 0
+    provider_errors = []
     for chunk in generator.splits(ready) if ready else ():
         by_key = {t["key"]: t for t in chunk}
         submitted = set()
@@ -66,7 +67,9 @@ def generate_batch(c, batch, tasks, runner=generator.run):
             runner(chunk, emit, usage)
             missed = "missing_model_row"
         except Exception as exc:
-            LOG.warning("caption batch %s provider %s", batch, type(exc).__name__)
+            detail = exc.details if isinstance(exc, generator.ProviderError) else {"exception": type(exc).__name__}
+            provider_errors.append(dict(keys=list(by_key), reason=str(exc) if isinstance(exc, generator.ProviderError) else "codex_generation_failed", details=detail))
+            LOG.warning("caption batch %s provider %s details=%s", batch, type(exc).__name__, store.dump(detail))
             missed = (
                 str(exc)
                 if str(exc) in alerts.SERVICE_REASONS
@@ -86,8 +89,8 @@ def generate_batch(c, batch, tasks, runner=generator.run):
         "SELECT count(*) FROM jobs WHERE batch=? AND draft IS NOT NULL", (batch,)
     ).fetchone()[0]
     c.execute(
-        "UPDATE batches SET finished=?,accepted=?,input_tokens=?,output_tokens=?,calls=? WHERE id=?",
-        (time.time(), accepted, *tokens, calls, batch),
+        "UPDATE batches SET finished=?,accepted=?,input_tokens=?,output_tokens=?,calls=?,reason=? WHERE id=?",
+        (time.time(), accepted, *tokens, calls, store.dump(provider_errors) if provider_errors else "", batch),
     )
     alerts.add(c, "batch:" + str(batch), failed)
     c.commit()

@@ -91,6 +91,105 @@ class CaptionTests(unittest.TestCase):
             tags=["ShortDrama", "Mystery"],
         )
 
+    def test_delayed_alert_suppresses_recovered_caption_without_fake_receipt(self):
+        task = self.task(1)
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.execute("UPDATE jobs SET state='ready'")
+            alerts.add(c, "old-failure", [worker.alert_item(task, "quota_unavailable")])
+            c.commit()
+            alerts.deliver(c, lambda *_: self.fail("recovered caption must not alert"))
+            self.assertIsNone(c.execute("SELECT sent FROM alerts").fetchone()[0])
+            self.assertEqual(c.execute("SELECT reason FROM alert_resolutions").fetchone()[0], "caption_recovered")
+            alerts.deliver(c, lambda *_: self.fail("suppression must survive another cycle"))
+
+    def test_native_fallback_receipt_overrides_ready_central_mirror(self):
+        task = self.task(1)
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.execute("UPDATE jobs SET state='ready'")
+            alerts.add(c, "old-failure", [worker.alert_item(task, "codex_generation_failed")])
+            c.commit()
+            with store.connection(self.fb) as native:
+                bridge.receipt(native, task, "legacy", "codex_generation_failed", "frozen", "", 1)
+            sent = []
+            alerts.deliver(c, lambda _, body: sent.append(body) or "receipt")
+            self.assertEqual(len(sent), 1)
+            self.assertIn("已采用现行文案，AI 文案未补成功", sent[0])
+            self.assertIn("异常记录：", sent[0])
+            self.assertIn("状态核对：", sent[0])
+
+    def test_operator_and_automatic_failure_events_count_one_task(self):
+        task = self.task(1)
+        with store.connection() as c:
+            for event in ("automatic", "operator"):
+                alerts.add(c, event, [worker.alert_item(task, "codex_generation_failed")])
+            c.commit()
+            sent = []
+            alerts.deliver(c, lambda _, body: sent.append(body) or "receipt")
+            self.assertEqual(len(sent), 1)
+            self.assertIn("影响 1 条", sent[0])
+            self.assertEqual(sent[0].count(task["key"]), 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM alerts WHERE sent IS NOT NULL").fetchone()[0], 2)
+
+    def test_active_regeneration_defers_only_its_alert(self):
+        pending, failed = self.task(1), self.task(2)
+        with store.connection() as c:
+            store.enqueue(c, pending)
+            store.enqueue(c, failed)
+            c.execute("UPDATE jobs SET state='failed' WHERE key=?", (failed["key"],))
+            alerts.add(c, "pending", [worker.alert_item(pending, "quota_unavailable")])
+            alerts.add(c, "failed", [worker.alert_item(failed, "quota_unavailable")])
+            c.commit()
+            sent = []
+            alerts.deliver(c, lambda _, body: sent.append(body) or "receipt")
+            self.assertEqual(len(sent), 1)
+            self.assertIn(failed["key"], sent[0])
+            self.assertNotIn(pending["key"], sent[0])
+            self.assertIsNone(c.execute("SELECT sent FROM alerts WHERE event='pending'").fetchone()[0])
+
+    def test_unknown_alert_delivery_keeps_exact_payload_after_recovery(self):
+        task = self.task(1)
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.execute("UPDATE jobs SET state='failed'")
+            alerts.add(c, "event", [worker.alert_item(task, "quota_unavailable")])
+            c.commit()
+            attempts = []
+            def timeout(event, body):
+                attempts.append((event, body))
+                raise TimeoutError("unknown delivery")
+            alerts.deliver(c, timeout)
+            c.execute("UPDATE jobs SET state='ready'")
+            c.execute("UPDATE alerts SET next_try=0")
+            c.commit()
+            alerts.deliver(c, lambda event, body: attempts.append((event, body)) or "receipt")
+            self.assertEqual(attempts[0], attempts[1])
+            self.assertEqual(c.execute("SELECT count(*) FROM alert_resolutions").fetchone()[0], 0)
+
+    def test_provider_error_details_are_redacted_and_saved_with_batch(self):
+        task = self.task(1)
+        error = generator.ProviderError("codex_generation_failed", {
+            "message": "upstream 502 Authorization: Bearer very-secret access_token=also-secret",
+            "code": "upstream_error", "codexErrorInfo": {"httpStatusCode": 502},
+            "access_token": "never-record-this",
+        }, method="turn/completed", status="failed")
+        def runner(*_):
+            raise error
+        with store.connection() as c:
+            store.enqueue(c, task)
+            c.commit()
+            batch, tasks = store.claim(c)
+            worker.generate_batch(c, batch, tasks, runner)
+            reason = c.execute("SELECT reason FROM batches WHERE id=?", (batch,)).fetchone()[0]
+            detail = json.loads(reason)[0]
+            self.assertEqual(detail["keys"], [task["key"]])
+            self.assertIn("502", reason)
+            self.assertIn("upstream_error", reason)
+            for secret in ("very-secret", "also-secret", "never-record-this"):
+                self.assertNotIn(secret, reason)
+            self.assertEqual(c.execute("SELECT reason FROM jobs").fetchone()[0], "codex_generation_failed")
+
     def test_unit_symbols_survive_generation_and_native_selection(self):
         task = self.task(1, "fv")
         item = dict(self.item(task), opening="The doctor treats twins with 50°C fevers.")

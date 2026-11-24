@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS retries(key TEXT PRIMARY KEY,first_batch INTEGER NOT 
 CREATE TABLE IF NOT EXISTS alerts(event TEXT PRIMARY KEY,incident TEXT,body TEXT,created REAL,sent REAL,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,receipt TEXT);
 CREATE TABLE IF NOT EXISTS alert_packets(id TEXT PRIMARY KEY,incident TEXT,events TEXT,body TEXT,delivered REAL);
 CREATE TABLE IF NOT EXISTS packed_alerts(event TEXT PRIMARY KEY,packet TEXT);
+CREATE TABLE IF NOT EXISTS alert_resolutions(event TEXT PRIMARY KEY,reason TEXT NOT NULL,at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS cursors(name TEXT PRIMARY KEY,value INTEGER);
 CREATE TABLE IF NOT EXISTS reviewed_facts(product TEXT,content TEXT,lang TEXT,material_id TEXT,episode INTEGER,
  source_ref TEXT,summary TEXT,PRIMARY KEY(product,content,lang,material_id,episode,source_ref));

@@ -2,12 +2,15 @@
 
 import importlib.util
 import json
+import logging
 import os
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from . import store
 
+LOG = logging.getLogger(__name__)
 RECIPIENT = "ou_62fed22c4918524e48ded4eab8b82b1e"
 SERVICE_REASONS = {
     "quota_unavailable",
@@ -83,10 +86,45 @@ def send(event, body):
     return result["data"]["message_id"]
 
 
+def current_alert(c, row):
+    """Refresh only an unattempted packet. Unknown deliveries keep their frozen body."""
+    items = []
+    for item in json.loads(row["body"]):
+        job = c.execute("SELECT state,reason,payload FROM jobs WHERE key=?", (item["key"],)).fetchone()
+        if job is not None:
+            state, reason = job["state"], job["reason"]
+            task = json.loads(job["payload"])
+            family = task["family"]
+            native = store.TAG_POSTS if family == "ta" else store.SOURCES[family][1]
+            # A native final receipt can be newer than the central mirror.
+            with store.connection(native, readonly=True, timeout=0.2) as src:
+                receipt = src.execute(
+                    "SELECT source,reason FROM story_copy_receipt WHERE task_key=?", (item["key"],)
+                ).fetchone()
+            if receipt:
+                state, reason = receipt["source"], receipt["reason"]
+            if state in ("pending", "generating", "retry_wait"):
+                return None
+            if state in ("ready", "ai", "manual", "off"):
+                continue
+            item = dict(item, reason=reason or item["reason"])
+            if state == "legacy":
+                item["outcome"] = "已采用现行文案，AI 文案未补成功"
+        items.append(item)
+    if not items:
+        c.execute(
+            "INSERT OR IGNORE INTO alert_resolutions VALUES(?,'caption_recovered',?)",
+            (row["event"], time.time()),
+        )
+        return None
+    return dict(row, body=store.dump(items))
+
+
 def deliver(c, send_func=send):
     now = time.time()
     rows = c.execute(
-        "SELECT * FROM alerts WHERE sent IS NULL AND next_try<=? ORDER BY created,event LIMIT 100",
+        "SELECT * FROM alerts WHERE sent IS NULL AND next_try<=? "
+        "AND event NOT IN (SELECT event FROM alert_resolutions) ORDER BY created,event LIMIT 100",
         (now,),
     ).fetchall()
     for r in rows:
@@ -134,12 +172,29 @@ def deliver(c, send_func=send):
             siblings = [r]
         if c.execute("SELECT sent FROM alerts WHERE event=?", (r["event"],)).fetchone()[
             0
-        ]:
+        ] or c.execute("SELECT 1 FROM alert_resolutions WHERE event=?", (r["event"],)).fetchone():
             continue
         if not packet:
             # Freeze membership and payload before the first send. A timeout reuses the same Feishu UUID.
             if not r["incident"].startswith("publish-batch:"):
                 siblings = siblings[:8]
+            refreshed = []
+            for sibling in siblings:
+                if c.execute("SELECT 1 FROM alert_resolutions WHERE event=?", (sibling["event"],)).fetchone():
+                    continue
+                try:
+                    current = current_alert(c, sibling)
+                except Exception as exc:
+                    # A busy native store defers this event; it must not fabricate recovery.
+                    LOG.warning("caption alert %s state lookup deferred: %s", sibling["event"], type(exc).__name__)
+                    continue
+                if current is not None:
+                    refreshed.append(current)
+            c.commit()
+            siblings = refreshed
+            if not siblings:
+                continue
+            r = siblings[0]
             keys = [(x["event"],) for x in siblings]
             message = message_for(siblings)
             c.execute(
@@ -170,7 +225,8 @@ def deliver(c, send_func=send):
 
 
 def message_for(siblings):
-    items = [i for entry in siblings for i in json.loads(entry["body"])]
+    # One task may occur in both its automatic retry and operator retry events.
+    items = list({i["key"]: i for entry in siblings for i in json.loads(entry["body"])}.values())
     groups = {}
     for i in items:
         group = (
@@ -181,7 +237,11 @@ def message_for(siblings):
             i["outcome"],
         )
         groups.setdefault(group, []).append(i["key"])
-    lines = ["短剧 AI 文案异常", f"影响 {len(items)} 条。"]
+    zone = timezone(timedelta(hours=8))
+    occurred = min(float(entry["created"]) for entry in siblings)
+    lines = ["短剧 AI 文案异常", f"影响 {len(items)} 条。",
+             "异常记录：" + datetime.fromtimestamp(occurred, zone).strftime("%m-%d %H:%M:%S"),
+             "状态核对：" + datetime.now(zone).strftime("%m-%d %H:%M:%S")]
     shown = 0
     for (end, title, lang, reason, outcome), ids in groups.items():
         detail = f"{end} · {title} · {lang} · {reason} · {outcome}\n任务 " + ", ".join(ids)

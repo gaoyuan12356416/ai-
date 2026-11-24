@@ -11,6 +11,29 @@ import time
 from . import store
 from .model import click_prefix, group_key
 
+
+def error_details(error, *, method="", status=""):
+    """Keep useful provider diagnostics without credentials or arbitrary response fields."""
+    error = error if isinstance(error, dict) else {"message": str(error)}
+    details = {"method": method, "status": status}
+    for key in ("message", "code", "codexErrorInfo", "additionalDetails"):
+        if error.get(key) is None:
+            continue
+        value = store.dump(error[key]) if isinstance(error[key], (dict, list)) else str(error[key])
+        value = re.sub(r"(?i)bearer\s+[^\s,\"}]+", "Bearer [redacted]", value)
+        value = re.sub(r"(?i)(access_token|refresh_token|api_key|authorization|password)([\"\s:=]+)[^\s,\"}&]+",
+                       r"\1\2[redacted]", value)
+        value = re.sub(r"eyJ[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+){1,2}", "[jwt-redacted]", value)
+        value = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[key-redacted]", value)
+        details[key] = value[:1000]
+    return details
+
+
+class ProviderError(RuntimeError):
+    def __init__(self, reason, error, *, method="", status=""):
+        super().__init__(reason)
+        self.details = error_details(error, method=method, status=status)
+
 HOOK_RULES = """The program prints 👆 and the supplied local click_prefix, a translation of 'watch full now'.
 Write one short story-specific continuation in an array named hooks. Keep the prefix unchanged and do not repeat it.
 Together they must invite the reader to watch a specific person, choice, action or object from THIS post. English example: 'watch full now to see who hid the seal'; never borrow the example's facts.
@@ -193,7 +216,7 @@ def run_request(instructions, request, emit, usage):
             event = next_event()
             if event.get("id") == number:
                 if "error" in event:
-                    raise RuntimeError("codex_request_failed")
+                    raise ProviderError("codex_request_failed", event["error"], method=method)
                 return event.get("result", {})
 
     try:
@@ -271,13 +294,14 @@ def run_request(instructions, request, emit, usage):
                 turn = params.get("turn", {})
                 if turn.get("status") != "completed":
                     err = store.dump(turn.get("error") or {}).lower()
-                    raise RuntimeError(
+                    raise ProviderError(
                         "quota_unavailable"
                         if any(
                             t in err
                             for t in ("quota", "usage limit", "ratelimit", "rate_limit")
                         )
-                        else "codex_generation_failed"
+                        else "codex_generation_failed",
+                        turn.get("error") or {}, method="turn/completed", status=turn.get("status", "")
                     )
                 break
     finally:
