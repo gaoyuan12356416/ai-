@@ -34,3 +34,17 @@ class BillIncomeTest(unittest.TestCase):
         self.assertEqual(ad_amount([result["late"]], "own"), "待回传")
         self.assertEqual(ad_amount([result["ready"]], "own"), "$0.00")
         self.assertIn("部分已回传", ad_amount(events, "socialkit"))
+
+    def test_coverage_and_amounts_follow_the_source_in_the_quality_report(self):
+        from features.social_analytics import report
+        from test_social_analytics import catalog, metric
+        day = "2026-11-23"
+        params = report.parameters({"start": [day], "end": [day], "platform": ["youtube"]})
+        row = dict(metric(cents=135), site_id="2284", date=day, iaa_cents=35)
+        source = dict(catalog(), site_id="2284")
+        result = report.summarize([source], [row], {"role": "admin", "_system_report": True}, params,
+                                  "snapshot", iaa_coverage={"youtube:2284": [day]})
+        channel = result["quality"]["platforms"]["youtube"]
+        self.assertEqual(channel["attributed_totals"]["iaa_cents"], 35)
+        self.assertEqual(channel["sources"]["2284"]["source_totals"]["iap_cents"], 100)
+        self.assertEqual(channel["unmatched_totals"]["iaa_cents"], 0)

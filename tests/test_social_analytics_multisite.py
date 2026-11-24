@@ -15,7 +15,7 @@ def entry(site="2049", campaign="same", owner="alice", **changes):
     value = dict(site_id=site, key=(campaign, "frozen name"), link_id=campaign, tenant="tenant",
                  owner=owner, owner_label=owner, drama="42", drama_label="Frozen drama",
                  channel="page", channel_label="Frozen Page", language="en", language_label="en",
-                 link_type="auto_template" if site == "2049" else "manual", link_type_label="发布",
+                 link_type="system" if site == "2049" else "manual", link_type_label="发布",
                  date=DAY, publications=[], excluded=False, sub_user_id="248")
     value.update(changes)
     return adapters.normalized("facebook", value)
@@ -36,6 +36,15 @@ def build(catalog, metrics, actor=SYSTEM, **kwargs):
 
 
 class MultisiteAttributionTests(unittest.TestCase):
+    def test_migrated_automatic_link_keeps_its_owner_on_the_new_site(self):
+        day = "2026-11-23"
+        automatic = entry(link_type="auto_template")
+        result = build([automatic], [metric("2310", cents=123, iaa_cents=23, date=day)],
+                       query={"start": [day], "end": [day]}, iaa_coverage={"facebook:2310": [day]})
+        self.assertEqual(result["totals"]["revenue_cents"], 123)
+        self.assertEqual(result["quality"]["platforms"]["facebook"]["sources"]["2310"]
+                         ["attributed_totals"]["iaa_cents"], 23)
+
     def test_same_id_is_separated_by_site_before_one_facebook_rollup(self):
         result = build([entry(), entry("2310", owner="bob")], [metric(cents=123), metric("2310", cents=456)])
         self.assertEqual({row["owner"]: row["revenue_cents"] for row in result["all_rows"]},

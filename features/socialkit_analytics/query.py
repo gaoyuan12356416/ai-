@@ -478,16 +478,22 @@ def warm_snapshot(root=DEFAULT_ROOT, version=None):
 def export_csv(result):
     groups = result["group_by"]
     view = result["meta"]["view"]
-    metric_fields = [k for k in METRICS if not (view == "effects" and k in PUBLICATION_METRICS) and not (view == "publications" and k not in PUBLICATION_METRICS)]
+    split_fields = [] if view == "publications" else ["iap", "iaa"]
+    metric_fields = [k for k in METRICS if k not in ("iap", "iaa")
+                     and not (view == "effects" and k in PUBLICATION_METRICS)
+                     and not (view == "publications" and k not in PUBLICATION_METRICS)]
     buf = io.StringIO(newline="")
     writer = csv.writer(buf)
-    writer.writerow([DIMENSIONS[k] for k in groups] + [METRICS[k] for k in metric_fields] + ["快照版本", "收入日期口径", "发布日期口径"])
+    writer.writerow([DIMENSIONS[k] for k in groups] + ["收入 (USD)" if k == "revenue" else METRICS[k] for k in metric_fields]
+                    + ["快照版本", "收入日期口径", "发布日期口径"] + [METRICS[k] for k in split_fields])
     def safe(value):
         if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
             return "'" + value
         return value
     for row in result["all_rows"]:
-        writer.writerow([safe(row["labels"].get(k, row.get(k, ""))) for k in groups] + ["" if row.get(k) is None else row[k] for k in metric_fields] + [result["meta"]["version"], "UTC", "账号当地日期"])
+        writer.writerow([safe(row["labels"].get(k, row.get(k, ""))) for k in groups]
+                        + [row.get(k) for k in metric_fields] + [result["meta"]["version"], "UTC", "账号当地日期"]
+                        + [row.get(k) for k in split_fields])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 

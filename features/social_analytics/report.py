@@ -238,6 +238,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
              for platform in platforms for spec in PLATFORMS[platform]["sources"]}
     # Scoped zero is valid only if the unfiltered source supplied that date.
     populated = {key: set((metric_coverage or {}).get(key, ())) for key in specs}
+    ad_dates = {key: set(days).intersection((iaa_coverage or {}).get(key, ())) for key in specs}
     platform_values = {platform: empty() for platform in platforms}
     source_values = {key: empty() for key in specs}
     channel_quality = {key: dict(source=empty(), attributed=empty(), unmatched=empty(), excluded=empty(),
@@ -368,8 +369,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             platform for platform in platforms if any(specs[key]["platform"] == platform for key in source_ids)]
         sources = source_ids if source_ids is not None else [k for k, spec in specs.items()
                                                               if spec["platform"] in included]
-        dates = {day} if day else set(days)
-        iaa_available = any(dates.intersection((iaa_coverage or {}).get(k, ())) for k in sources)
+        iaa_available = any(day in ad_dates[k] if day else ad_dates[k] for k in sources)
         result = dict(dto(value, available, publication_available, iaa_available),
                       data_status="complete" if complete else "partial" if available else "unavailable")
         if source_ids is not None:
@@ -397,6 +397,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     for key, quality in channel_quality.items():
         spec = specs[key]
         metric_available = bool(populated[key])
+        ad_available = bool(ad_dates[key])
         publication_available = not failure(catalog_errors, key)
         available = metric_available and publication_available
         complete = (set(days) <= populated[key] and not failure(errors, key)
@@ -406,7 +407,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         add(excluded_total, quality["excluded"])
         # This equality is integer-exact and cannot be broken by report filters.
         if any(quality["source"][field] != quality["attributed"][field] + quality["unmatched"][field]
-               + quality["excluded"][field] for field in FIELDS):
+               + quality["excluded"][field] for field in FIELDS + ("iaa_cents",)):
             raise ReportError("归因金额或数量不守恒，待核实", 503)
         collector = public_collector_metadata(source_metadata.get(key, {}))
         source_quality[key] = dict(
@@ -420,17 +421,17 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             collector=collector,
             unmatched_campaigns=len(quality["unmatched_keys"]), excluded_campaigns=len(quality["excluded_keys"]),
             corrected_campaigns=len(quality["corrected_keys"]),
-            source_totals=dto(quality["source"], metric_available),
-            attributed_totals=dto(quality["attributed"], available),
-            unmatched_totals=dto(quality["unmatched"], metric_available),
-            excluded_totals=dto(quality["excluded"], metric_available),
+            source_totals=dto(quality["source"], metric_available, iaa_available=ad_available),
+            attributed_totals=dto(quality["attributed"], available, iaa_available=ad_available),
+            unmatched_totals=dto(quality["unmatched"], metric_available, iaa_available=ad_available),
+            excluded_totals=dto(quality["excluded"], metric_available, iaa_available=ad_available),
             reconciliation="complete" if actor.get("_system_report") is True else "visible_candidates_only",
             publications_available=publication_available,
             publication_conflicts=publication_conflicts_by_source[key],
             publication_status=("unavailable" if not publication_available else
                                 "pending" if publication_conflicts_by_source[key] or not collector_complete(key)
                                 else "complete"),
-            totals=dict(dto(source_values[key], available, publication_available),
+            totals=dict(dto(source_values[key], available, publication_available, ad_available),
                         data_status="complete" if complete else "partial" if available else "unavailable"))
         if spec["platform"] != "x":
             source_quality[key]["totals"].update(post_count=None, repost_count=None)
@@ -439,6 +440,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         keys = [key for key, spec in specs.items() if spec["platform"] == platform]
         available, complete, publication_available = availability([platform])
         metric_available = any(populated[key] for key in keys)
+        ad_available = any(ad_dates[key] for key in keys)
         buckets = {bucket: empty() for bucket in ("source", "attributed", "unmatched", "excluded")}
         for key in keys:
             for bucket in buckets:
@@ -454,10 +456,10 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             unmatched_campaigns=sum(source_quality[key]["unmatched_campaigns"] for key in keys),
             excluded_campaigns=sum(source_quality[key]["excluded_campaigns"] for key in keys),
             corrected_campaigns=sum(source_quality[key]["corrected_campaigns"] for key in keys),
-            source_totals=dto(buckets["source"], metric_available),
-            attributed_totals=dto(buckets["attributed"], available),
-            unmatched_totals=dto(buckets["unmatched"], metric_available),
-            excluded_totals=dto(buckets["excluded"], metric_available),
+            source_totals=dto(buckets["source"], metric_available, iaa_available=ad_available),
+            attributed_totals=dto(buckets["attributed"], available, iaa_available=ad_available),
+            unmatched_totals=dto(buckets["unmatched"], metric_available, iaa_available=ad_available),
+            excluded_totals=dto(buckets["excluded"], metric_available, iaa_available=ad_available),
             reconciliation="complete" if actor.get("_system_report") is True else "visible_candidates_only",
             publications_available=publication_available, publication_conflicts=conflicts,
             publication_status=("unavailable" if not publication_available else
@@ -497,9 +499,9 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         quality=dict(platforms=platform_quality, complete=complete, missing_dates=missing_dates,
                      unverified_dates=unverified_dates,
                      unmatched_campaigns=sum(q["unmatched_campaigns"] for q in platform_quality.values()),
-                     unmatched_totals=dto(unmatched_total, metric_available),
+                     unmatched_totals=dto(unmatched_total, metric_available, iaa_available=any(ad_dates.values())),
                      excluded_campaigns=sum(q["excluded_campaigns"] for q in platform_quality.values()),
-                     excluded_totals=dto(excluded_total, metric_available),
+                     excluded_totals=dto(excluded_total, metric_available, iaa_available=any(ad_dates.values())),
                      corrected_campaigns=sum(q["corrected_campaigns"] for q in platform_quality.values()),
                      publication_conflicts=publication_conflicts),
         meta=dict(start=params["start"], end=params["end"], timezone="UTC", currency="USD",
@@ -520,8 +522,10 @@ def csv_export(report):
         fields.append((dimension if dimension == "date" else dimension + "_label", LABELS[dimension]))
         if dimension == "drama":
             fields.append(("drama_english_display", "英文剧名"))
-    fields += [(metric, LABELS[metric]) for metric in METRICS]
+    fields += [(metric, "收入（USD）" if metric == "revenue" else LABELS[metric])
+               for metric in METRICS if metric not in ("iap", "iaa")]
     fields += [("period", "统计范围（UTC）"), ("data_status_label", "数据完整性"), ("conversion_note", "转化口径")]
+    fields += [(metric, LABELS[metric]) for metric in ("iap", "iaa")]
 
     def safe(value):
         if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r", "\n")):
