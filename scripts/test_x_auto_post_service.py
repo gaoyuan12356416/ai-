@@ -368,7 +368,8 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertEqual(item["last_run"]["id"], run.id)
         self.assertEqual(item["last_run_status"], "queued")
         self.assertEqual(item["last_run_at"], run.created_at)
-        task = self.store.create_task(run_id=run.id, account_id="101", account_snapshot_version=1)
+        task = self.store.create_task(run_id=run.id, account_id="101", account_snapshot_version=1,
+                                      language="en", account_snapshot={"language_source":"account","drama_language":"en"})
         finished = "2026-08-11T10:15:00+00:00"
         with sqlite3.connect(self.store.db_path) as db:
             db.execute("UPDATE x_auto_task SET status='failed',finished_at_utc=? WHERE id=?", (finished,task.id))
