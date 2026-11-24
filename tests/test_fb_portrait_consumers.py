@@ -1,9 +1,11 @@
 from contextlib import closing
 import json
+import importlib.util
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from features import fb_portrait_matching as matching
 from features.fb_page_current import selection
@@ -64,6 +66,26 @@ class MatchingTests(unittest.TestCase):
         path.write_text(path.read_text().split('}}\n')[0])
         with self.assertRaises(ValueError):
             list(prepared.items())
+
+    def test_rollback_checks_the_main_api_pid_from_the_current_switch(self):
+        script=Path(__file__).resolve().parents[1]/'ops/fb-portrait-consumers/deploy.py'
+        spec=importlib.util.spec_from_file_location('portrait_deployer',script)
+        deploy=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(deploy)
+        dep=self.root/'deployment'
+        candidate=dep/'fb/candidate'
+        candidate.mkdir(parents=True)
+        state=dep/'fb/manifest.json'
+        state.write_text(json.dumps({'main_api_pid':'older'}))
+        (dep/'fb/schedulers-after.json').write_text('{"ok":true}')
+        info={'previous':{'fb':str(self.root/'old')},'controller_sha256':deploy.digest(script)}
+        with patch.multiple(deploy,DEP=dep,FILES={'fb':{}},LINKS={'fb':candidate},CONTROLLER=script), \
+             patch.object(deploy,'load',return_value=info),patch.object(deploy,'prop',return_value='current'), \
+             patch.object(deploy.subprocess,'run') as ctl:
+            deploy.change('fb',rollback=True)
+        ctl.assert_called_once()
+        saved=json.loads(state.read_text())
+        self.assertEqual((saved['main_api_pid'],saved['installation_main_api_pid']),('current','older'))
 
 
 if __name__=='__main__':

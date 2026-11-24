@@ -1,6 +1,5 @@
 """Install only the affected consumers, retaining the exact previous runtime directories."""
 import argparse
-import grp
 import hashlib
 import json
 import os
@@ -140,6 +139,7 @@ def change(lane,rollback=False):
                 raise RuntimeError('writer override changed')
             DROP.unlink(missing_ok=True)
         else:
+            import grp
             share=Path('/mnt/data-disk/fb-page-portraits/matching')
             share.mkdir(exist_ok=True,mode=0o750)
             os.chown(share,0,grp.getgrnam('fb-auto-post').gr_gid)
@@ -154,7 +154,18 @@ def change(lane,rollback=False):
         if digest(CONTROLLER)!=info['controller_sha256']:
             raise RuntimeError('FB controller changed')
         if LINKS['fb'].resolve()!=destination:
+            if rollback:
+                # Compare the unrelated main API across this switch, even if a later
+                # independent release legitimately restarted it after installation.
+                manifest=DEP/'fb/manifest.json'
+                state=json.loads(manifest.read_text())
+                state.setdefault('installation_main_api_pid',state['main_api_pid'])
+                state['main_api_pid']=prop('drama-material-api.service','MainPID')
+                save(manifest,state)
             subprocess.run([sys.executable,'-B',str(CONTROLLER),'rollback' if rollback else 'apply','--folder',str(DEP/'fb')],check=True)
+        elif rollback and not (DEP/'fb/schedulers-after.json').exists():
+            print('fb already on previous runtime',destination,flush=True)
+            return
         if not (DEP/'fb/schedulers-after.json').is_file() or not json.loads((DEP/'fb/schedulers-after.json').read_text())['ok']:
             raise RuntimeError('FB scheduler handoff incomplete')
     else:
