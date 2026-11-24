@@ -1,0 +1,20 @@
+[Unit]
+Description=Facebook Post admin logs and guarded queue controls
+After=network.target
+RequiresMountsFor=/mnt/data-disk
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fb-post-logs/current
+ExecStart=/usr/bin/python3 -B -m features.fb_post_logs.server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/mnt/data-disk/fb-auto-post-publisher /mnt/data-disk/pipeline-dispatch
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

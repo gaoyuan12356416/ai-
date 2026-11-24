@@ -11,6 +11,8 @@ ITEMS = [
     {"key": "fbPostMaterialPool", "label": "FB Post 素材池", "description": "按语言分配素材到 Page 组定时发布",
      "kind": "page", "href": "/fb-post-material-pool.html", "module": "fb_video_publish",
      "adminOnly": False, "enabled": True, "order": 45},
+    {"key": "fbPostLogs", "label": "FB Post 发布日志", "description": "查询 Page 发布任务、回执和队列操作",
+     "kind": "page", "href": "/fb-post-logs.html", "adminOnly": True, "enabled": True, "order": 55},
     {"key": "fbVideoPublishRecords", "label": "批量发布记录", "description": "查看批次、冻结文案和发布结果",
      "kind": "page", "href": "/fb-video-publish-records.html", "module": "fb_video_publish",
      "adminOnly": False, "enabled": True, "order": 50},
