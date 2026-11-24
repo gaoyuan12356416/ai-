@@ -1,4 +1,5 @@
 import json
+import http.client
 import os
 from pathlib import Path
 import tempfile
@@ -33,6 +34,26 @@ class CampaignSynchronizationTests(unittest.TestCase):
         self.assertEqual(self.sync()['status'],'copied')
         self.assertEqual(json.loads(render(self.root/'destination','')[1]),self.wire)
         self.assertEqual(self.sync()['status'],'unchanged')
+        self.assertNotIn('ok',current(self.root/'destination')[0])
+
+    def test_previous_transport_field_is_readable_and_removed_without_redownloading(self):
+        self.sync()
+        path=self.root/'destination/current.json'
+        legacy=json.loads(path.read_bytes());legacy['ok']=True;path.write_text(json.dumps(legacy))
+        mirror=Server(('127.0.0.1',0),path.parent,'t'*40,'company')
+        thread=threading.Thread(target=mirror.serve_forever,daemon=True);thread.start()
+        try:
+            conn=http.client.HTTPConnection('127.0.0.1',mirror.server_port,timeout=3)
+            try:
+                conn.request('GET','/v1/status',headers={'Authorization':'Bearer '+'t'*40})
+                reply=conn.getresponse();self.assertEqual(reply.status,200)
+                data=json.loads(reply.read());self.assertTrue(data['ok']);self.assertEqual(data['version'],legacy['version'])
+            finally:conn.close()
+        finally:mirror.shutdown();mirror.server_close();thread.join()
+        database=current(path.parent)[1];before=database.stat().st_ino,database.stat().st_mtime_ns
+        self.assertEqual(self.sync()['status'],'unchanged')
+        self.assertNotIn('ok',json.loads(path.read_bytes()))
+        self.assertEqual(before,(database.stat().st_ino,database.stat().st_mtime_ns))
 
     def test_corrupt_new_snapshot_keeps_last_successful_version(self):
         self.sync();before=(self.root/'destination/current.json').read_bytes()

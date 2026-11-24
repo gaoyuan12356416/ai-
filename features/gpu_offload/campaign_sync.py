@@ -28,9 +28,16 @@ def synchronize(root,port,token,rate=2*1024*1024):
             response=connection.getresponse();body=response.read(65537)
             if response.status!=200 or len(body)>65536:raise RuntimeError('snapshot_status_unavailable')
             manifest=json.loads(body);version=manifest['version']
+            manifest.pop('ok',None)  # HTTP status is not a property of the immutable index.
             if not re.fullmatch('[a-f0-9]{64}',version) or manifest['database']!=version+'.sqlite3':raise ValueError('invalid_index_manifest')
-            if (root/'current.json').exists() and json.loads((root/'current.json').read_text())['version']==version:
-                return {'status':'unchanged','version':version}
+            pointer=root/'current.json'
+            if pointer.exists():
+                local=json.loads(pointer.read_bytes())
+                if local['version']==version:
+                    if 'ok' in local:
+                        del local['ok']
+                        atomic_json(pointer,local)
+                    return {'status':'unchanged','version':version}
             if not 0<int(manifest['archive_bytes'])<=1024**3 or not 0<int(manifest['database_bytes'])<=4*1024**3:raise ValueError('index_exceeds_cache_storage_budget')
             if shutil.disk_usage(root).free<int(manifest['archive_bytes'])+int(manifest['database_bytes'])+1024**3:raise OSError('cache_disk_space_insufficient')
             connection.close();connection=http.client.HTTPConnection('127.0.0.1',port,timeout=180)

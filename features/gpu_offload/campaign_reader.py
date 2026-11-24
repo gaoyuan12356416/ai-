@@ -73,7 +73,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header('Content-Length',str(os.fstat(stream.fileno()).st_size));self.send_header('Connection','close');self.end_headers()
                     for block in iter(lambda:stream.read(65536),b''):self.wfile.write(block)
                 self.close_connection=True;return
-            self.json(200,dict(ok=True,**manifest))
+            self.json(200,dict(manifest,ok=True))
         except Exception:self.json(503,{'error':'snapshot_unavailable'})
 
     def do_POST(self):
