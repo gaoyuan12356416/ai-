@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One-shot IKEv2 client in a temporary network namespace; JSON secret on stdin."""
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -62,8 +63,11 @@ def check(config, root):
             process.stdin.close()
             ready = False
             for _ in range(90):
-                content = log_path.read_text(errors='replace')
-                if 'CHILD_SA' in content and 'established with SPIs' in content:
+                addresses = json.loads(run(['ip', '-n', namespace, '-4', '-json', 'addr', 'show']).stdout)
+                leased = any(ipaddress.ip_address(a['local']) in ipaddress.ip_network(config['pool'])
+                             for link in addresses for a in link.get('addr_info', []))
+                policy = run(['ip', '-n', namespace, 'xfrm', 'policy']).stdout
+                if leased and 'dir out' in policy and 'proto esp' in policy:
                     ready = True
                     break
                 if process.poll() is not None:
