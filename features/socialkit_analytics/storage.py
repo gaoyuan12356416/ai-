@@ -62,15 +62,20 @@ class SnapshotBuilder:
         self.connection.execute('PRAGMA journal_mode=DELETE')
         self.connection.execute('PRAGMA synchronous=FULL')
         create_snapshot_schema(self.connection)
+        if 'iaa_cents' not in {row[1] for row in self.connection.execute('PRAGMA table_info(effects)')}:
+            self.connection.execute('ALTER TABLE effects ADD COLUMN iaa_cents INTEGER')
 
     def write_day(self, day):
         with self.connection:
             for kind, fields in [('effects', EFFECT_FIELDS), ('publications', PUBLICATION_FIELDS)]:
+                if kind == 'effects':
+                    fields = fields + ('iaa_cents',)
                 self.connection.execute('DELETE FROM %s WHERE date=?' % kind, (day['date'],))
                 columns = ('row_key',) + fields
                 self.connection.executemany('INSERT INTO %s (%s) VALUES (%s)' % (
                     kind, ','.join('"%s"' % f for f in columns), ','.join('?' for _ in columns)),
-                    [(row_key(kind, row),) + tuple(row[f] for f in fields) for row in day[kind]])
+                    [(row_key(kind, row),) + tuple(row.get(f) if f == 'iaa_cents' else row[f] for f in fields)
+                     for row in day[kind]])
 
     def finish(self, manifest):
         coverage = manifest['coverage']

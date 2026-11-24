@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from features.social_analytics.bill_income import FIRST_DAY, merge_settled, window
 
 from .schema import (CREATION_SOURCES, EFFECT_METRICS, MATERIAL_TYPES, PLATFORM_ACCOUNT,
                      PLATFORM_LINK, PRODUCTS, empty_common, stable_key)
@@ -147,7 +148,20 @@ def income_statements(day):
              "GROUP BY dt,site_id,BINARY campaign,BINARY country,BINARY platform" % (day, metrics, where))
     control = ("SELECT HEX(JSON_OBJECT('kind','control','date','%s','source_rows',COUNT(*),"
                "'source_updated_at',COALESCE(CAST(MAX(updated_at) AS CHAR),''),%s))%s" % (day, metrics, where))
-    return facts, control
+    if day < FIRST_DAY:
+        return facts, control
+    start, stop = window(day)
+    bills_where = f""" FROM kunlunads_dev.ads_drama_bills FORCE INDEX(idx_event_cursor_filter)
+        WHERE event_time >= {start} AND event_time < {stop}
+          AND af_channel='socialkit' AND event_name IN ('af_purchase','ad_revenue')"""
+    amounts = """'iap_cents',CAST(COALESCE(SUM(IF(event_name='af_purchase',event_revenue_usd,0)),0)*100 AS SIGNED),
+                 'iaa_cents',CAST(COALESCE(SUM(IF(event_name='ad_revenue',event_revenue_usd,0)),0)*100 AS SIGNED),
+                 'ad_events',COALESCE(SUM(event_name='ad_revenue'),0),'updated_at',CAST(MAX(updated_at) AS CHAR)"""
+    grouped = (f"SELECT HEX(JSON_OBJECT('kind','bill','date','{day}','site_id',site_id,"
+               f"'short_code',MIN(campaign),'country',MIN(country_code),'device_os',MIN(platform),{amounts}))"
+               + bills_where + " GROUP BY site_id,BINARY campaign,BINARY country_code,BINARY platform")
+    bill_control = f"SELECT HEX(JSON_OBJECT('kind','bill_control','date','{day}',{amounts}))" + bills_where
+    return facts, control, grouped, bill_control
 
 
 class SocialKitSource:
@@ -263,6 +277,7 @@ class Dimensions:
         value = empty_common(raw['date'])
         value.update({field: str(raw.get(field) or '') for field in ('site_id', 'short_code', 'country', 'device_os')})
         value.update({field: int(raw.get(field) or 0) for field in EFFECT_METRICS})
+        value['iaa_cents'] = int(raw.get('iaa_cents') or 0)
         value.update(material_type='unknown', creation_source='unknown', matched=0)
         if link:
             value.update(self.common(raw['date'], link['team_id'],
@@ -301,6 +316,7 @@ def collect_days(reader, source, start, end):
         records = reader.query(income_statements(day))
         current = []
         control = None
+        bills, bill_control = [], None
         for record in records:
             if record.get('date') != day:
                 raise CollectionError('source result dates are inconsistent')
@@ -308,6 +324,10 @@ def collect_days(reader, source, start, end):
                 current.append(record)
             elif record.get('kind') == 'control' and control is None:
                 control = record
+            elif record.get('kind') == 'bill':
+                bills.append(record)
+            elif record.get('kind') == 'bill_control' and bill_control is None:
+                bill_control = record
             else:
                 raise CollectionError('unexpected source result kind or order')
         if control is None:
@@ -315,6 +335,17 @@ def collect_days(reader, source, start, end):
         expected = {field: int(control[field]) for field in EFFECT_METRICS}
         if control_totals(current) != expected:
             raise CollectionError('income source control totals do not match grouped facts')
+        settled = False
+        if day >= FIRST_DAY:
+            if bill_control is None or any(sum(row[k] for row in bills) != bill_control[k]
+                                           for k in ('iap_cents', 'iaa_cents', 'ad_events')):
+                raise CollectionError('social bill totals do not match grouped facts')
+            current, settled = merge_settled(current, bills, ('site_id', 'short_code', 'country', 'device_os'),
+                                              dict.fromkeys(EFFECT_METRICS, 0))
+            if settled:
+                expected['revenue_cents'] = bill_control['iap_cents'] + bill_control['iaa_cents']
+                if control_totals(current) != expected or sum(row['iaa_cents'] for row in current) != bill_control['iaa_cents']:
+                    raise CollectionError('merged income failed reconciliation')
         links = source.links(row['short_code'] for row in current)
         required_names = {(int(link['drama_app_id']), str(link['drama_content_id'])) for link in links.values()}
         missing_names = required_names - set(dimensions.dramas)
@@ -328,9 +359,10 @@ def collect_days(reader, source, start, end):
         effects = [dimensions.effect(row, links) for row in current]
         publications = [dimensions.publication(row) for row in source.publications(day, teams)]
         unknown = [row for row in effects if not row['matched']]
-        updated = str(control['source_updated_at'])
+        updated = max(str(control['source_updated_at'] or ''), str((bill_control or {}).get('updated_at') or ''))
         if updated:
             updated = datetime.fromisoformat(updated).replace(tzinfo=timezone.utc).isoformat(timespec='seconds')
         yield dict(date=day, effects=effects, publications=publications, totals=expected,
                    source_rows=int(control['source_rows']), source_updated_at=updated,
-                   quality=dict(unmatched_rows=len(unknown), unmatched=control_totals(unknown)))
+                   quality=dict(unmatched_rows=len(unknown), unmatched=control_totals(unknown),
+                                iaa_covered=settled, iaa_cents=bill_control['iaa_cents'] if settled else None))

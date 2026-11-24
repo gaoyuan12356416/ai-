@@ -22,11 +22,12 @@ PUBLICATION_DIMS = ("language", "account_country", "reason", "task_status")
 DIMENSIONS = {"date": "日期", "team_id": "团队", "product": "产品", "platform": "平台", "account": "账号", "drama": "剧目", "country": "收入国家", "device_os": "设备系统", "material_type": "素材类型", "creation_source": "短链来源", "language": "账号语言", "account_country": "账号国家", "reason": "发布方式", "task_status": "任务状态"}
 PLATFORMS = {"facebook": "Facebook", "youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram", "x": "X", "generic": "通用短链", "unattributed": "未归属"}
 LABELS = {"material_type": {"ordinary": "普通／无素材", "new": "新剧", "hit": "爆款", "historical_hit": "历史爆款", "old": "老剧", "none": "无素材", "unknown": "未知"}, "creation_source": {"automatic_material": "自动发布素材维度", "ranking_drama": "排行榜剧维度", "browser_api": "社媒浏览器外部 API", "unknown": "历史／未知"}, "task_status": {"1": "已排期", "2": "处理中", "3": "已完成", "4": "已取消", "5": "无内容", "6": "状态 6（待确认）", "7": "状态 7（待确认）"}, "reason": {"ADS_MATERIAL": "广告素材", "DRAMA_CONTINUE": "剧集续发", "PRE_PUBLISH_ADS_MATERIAL": "预发广告素材", "X_SHORT_LINK_EPISODE": "X 短链剧集", "MANUAL": "手动", "X_SHORT_LINK_AD": "X 短链广告", "PRE_PUBLISH": "预发"}}
-EFFECT_FIELDS = ("clicks", "views", "installs", "conversions", "revenue_cents", "refund_cents", "dnu_revenue_cents", "dnu_conversions")
+EFFECT_FIELDS = ("clicks", "views", "installs", "conversions", "revenue_cents", "refund_cents", "dnu_revenue_cents", "dnu_conversions", "iaa_cents")
 PUBLICATION_FIELDS = ("tasks", "planned", "success", "failed")
 PUBLICATION_METRICS = PUBLICATION_FIELDS + ("published_accounts", "unfulfilled", "success_rate")
 METRICS = {"revenue": "收入 (USD)", "refunds": "退款 (USD)", "net_revenue": "收入减退款 (USD)", "dnu_revenue": "新用户收入 (USD)", "clicks": "落地页点击", "views": "落地页访问", "installs": "安装", "conversions": "充值人数汇总", "dnu_conversions": "新用户充值人数汇总", "tasks": "任务数", "planned": "计划内容", "success": "成功发布", "published_accounts": "发布账号数", "failed": "失败字段合计", "unfulfilled": "未计入成功", "success_rate": "计划完成率 (%)", "install_rate": "安装／点击 (%)", "pay_rate": "充值／安装 (%)", "link_count": "有指标短链数"}
-PRECOMPUTED_FORMAT_VERSION = 2
+PRECOMPUTED_FORMAT_VERSION = 3
+METRICS.update(revenue="总收入 (USD)", iap="充值收入 (USD)", iaa="IAA 广告收入 (USD)")
 _CACHE = collections.OrderedDict()
 _OPTIONS_CACHE = collections.OrderedDict()
 _LOCK = threading.Lock()
@@ -233,7 +234,7 @@ def _query(conn, table, params, groups, context=None):
             entry["rows"] += 1
             entry["links"].add((row["site_id"], row["short_code"]))
             for field in EFFECT_FIELDS:
-                entry["metrics"][field] += row.get(field, 0)
+                entry["metrics"][field] += row.get(field) or 0
     sql = "SELECT " + ",".join(selections) + " FROM " + table + " WHERE " + " AND ".join(where)
     if groups:
         sql += " GROUP BY " + ",".join(groups)
@@ -255,6 +256,9 @@ def _finish(row, view):
     for target, source in (("revenue", "revenue_cents"), ("refunds", "refund_cents"), ("dnu_revenue", "dnu_revenue_cents")):
         row[target] = round(row[source] / 100, 2)
     row["net_revenue"] = round((row["revenue_cents"] - row["refund_cents"]) / 100, 2)
+    row["iap_cents"] = row["revenue_cents"] - row["iaa_cents"]
+    row["iap"] = round(row["iap_cents"] / 100, 2)
+    row["iaa"] = round(row["iaa_cents"] / 100, 2)
     row["unfulfilled"] = max(0, row["planned"] - row["success"])
     for target, numerator, denominator in (("install_rate", "installs", "clicks"), ("pay_rate", "conversions", "installs"), ("success_rate", "success", "planned")):
         row[target] = round(row[numerator] / row[denominator] * 100, 2) if row[denominator] else None
@@ -262,7 +266,7 @@ def _finish(row, view):
         for f in PUBLICATION_METRICS:
             row[f] = None
     if view == "publications":
-        for f in EFFECT_FIELDS + ("revenue", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count", "unmatched_rows", "unmatched_links"):
+        for f in EFFECT_FIELDS + ("revenue", "iap", "iaa", "iap_cents", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count", "unmatched_rows", "unmatched_links"):
             row[f] = None
     return row
 
@@ -338,10 +342,15 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
                 response = json.loads(saved[1])
                 return _refresh_report_state(response, manifest, status)
         aggregates, query_context = {}, {}
+        covered = {day for day in parsed["dates"]
+                   if manifest.get("date_manifest", {}).get(day, {}).get("quality", {}).get("iaa_covered")}
         def aggregate(groups):
             key = tuple(groups)
             if key not in aggregates:
                 aggregates[key] = _combined(conn, parsed, groups, query_context)
+                for row in aggregates[key]:
+                    if not covered or ("date" in row and row["date"] not in covered):
+                        row["iaa_cents"] = row["iaa"] = None
             # Trend source-status decoration and sorting must not mutate another
             # consumer when its group dimensions are the same.
             return [dict(row) for row in aggregates[key]]
@@ -357,8 +366,10 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
         for day in parsed["dates"]:
             row = trendmap.get(day, dict(_finish({}, parsed["view"]), date=day, labels={"date": day}))
             row["source_status"] = {t: _day_status(manifest, t, day) for t in ("effects", "publications")}
+            if day not in covered:
+                row["iaa_cents"] = row["iaa"] = None
             if row["source_status"]["effects"] == "missing":
-                for f in EFFECT_FIELDS + ("revenue", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count"):
+                for f in EFFECT_FIELDS + ("revenue", "iap", "iaa", "iap_cents", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count"):
                     row[f] = None
             if row["source_status"]["publications"] == "missing":
                 for f in PUBLICATION_METRICS:
@@ -368,11 +379,13 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
         missing = {t: [d for d in parsed["dates"] if _day_status(manifest, t, d) == "missing"] for t in tables}
         for t in tables:
             if len(missing[t]) == len(parsed["dates"]):
-                for f in (EFFECT_FIELDS + ("revenue", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count") if t == "effects" else PUBLICATION_METRICS):
+                for f in (EFFECT_FIELDS + ("revenue", "iap", "iaa", "iap_cents", "refunds", "dnu_revenue", "net_revenue", "install_rate", "pay_rate", "link_count") if t == "effects" else PUBLICATION_METRICS):
                     totals[f] = None
         pages = max(1, math.ceil(len(all_rows) / parsed["page_size"]))
         page = min(parsed["page"], pages)
         response = dict(meta=dict(version=manifest["version"], latest_version=manifest["latest_version"], generated_at=manifest.get("generated_at") or manifest.get("refreshed_at"), source_updated_at=manifest.get("source_updated_at"), view=parsed["view"], start=parsed["start"], end=parsed["end"], effect_timezone="UTC", publication_timezone="account_local", currency="USD", refresh_status=status, stale=_stale_status(status), missing_days=missing, partial=any(missing.values()), range=manifest.get("range"), quality=manifest.get("quality", {})), group_by=parsed["groups"], totals=totals, trend=trend, ranking=ranking, breakdowns={dim: sorted(aggregate([dim]), key=lambda r:r.get("success" if parsed["view"] == "publications" else "revenue") or 0, reverse=True) for dim in ("platform", "product")}, rows=all_rows[(page-1)*parsed["page_size"]:page*parsed["page_size"]], all_rows=all_rows, pagination=dict(page=page, page_size=parsed["page_size"], pages=pages, total=len(all_rows)), parameters=parsed, metric_labels=METRICS, dimension_labels=DIMENSIONS)
+        from features.social_analytics.bill_income import FIRST_DAY
+        response["meta"]["iaa_missing_dates"] = [d for d in parsed["dates"] if d >= FIRST_DAY and d not in covered]
         _refresh_report_state(response, manifest, status)
         serialized = json.dumps(response, ensure_ascii=False)
         if len(serialized) <= 2_000_000:
