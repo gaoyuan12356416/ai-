@@ -1,0 +1,17 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const ui = require('../static/fb-auto-publish-run-summary.js');
+const run = {queued_tasks:1897, skipped_tasks:516, status:'running', display_status:'stopped', display_reason:'模板已删除', completed_at_utc:'old', display_completed_at_utc:'', task_counts:{total:2413, published:1852,pending:3,active:0,review:0,failed:42,skipped:516,cancelled:0,scheduled:0,overdue:3,waiting_materials:0}};
+assert.match(ui.counts(run), /未执行 3/);
+assert.doesNotMatch(ui.counts(run), /排队1897/);
+assert.match(ui.status(run), /已停止/);
+assert.doesNotMatch(ui.status(run), />running</);
+assert.equal(ui.completed(run), '');
+assert.match(ui.status({...run, display_reason:'<script>bad</script>'}), /&lt;script&gt;/);
+assert.match(ui.counts({queued_tasks:4,skipped_tasks:1}), /创建时入队 4/);
+const html = fs.readFileSync('static/fb-auto-publish-runs.html','utf8');
+assert.match(html, /任务（实时）/);
+assert.match(html, /fb-auto-publish-run-summary.js\?v=/);
+for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) new vm.Script(script[1]);
+console.log('FB run summary UI: rendering, escaping, fallback and page syntax passed');

@@ -1267,19 +1267,28 @@ class FBAutoPostStore:
         conn.execute("UPDATE fb_auto_run SET status=?,completed_at_utc=? WHERE id=?", (status, completed, run_id))
 
     def list_runs(self, actor: ActorScope, *, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        from .run_summary import annotate_runs
         clause, params = self._scope_clause(actor, "t")
         with self.connect() as conn:
+            conn.execute("BEGIN")
             total = int(conn.execute(f"SELECT COUNT(*) FROM fb_auto_run r JOIN fb_auto_template t ON t.id=r.template_id WHERE 1=1{clause}", params).fetchone()[0])
-            rows = conn.execute(f"SELECT r.*,t.name FROM fb_auto_run r JOIN fb_auto_template t ON t.id=r.template_id WHERE 1=1{clause} ORDER BY r.id DESC LIMIT ? OFFSET ?", params + (limit, offset)).fetchall()
-        items = [{key: row[key] for key in row.keys() if key != "config_json"} for row in rows]
+            rows = conn.execute(f"SELECT r.*,t.name,t.status template_status FROM fb_auto_run r JOIN fb_auto_template t ON t.id=r.template_id WHERE 1=1{clause} ORDER BY r.id DESC LIMIT ? OFFSET ?", params + (limit, offset)).fetchall()
+            items = [dict(row) for row in rows]
+            annotate_runs(conn, items, self.now_fn())
+        for item in items:
+            item.pop("config_json", None)
         return {"ok": True, "items": items, "total": total, "limit": limit, "offset": offset}
 
     def get_run(self, run_id: int, actor: ActorScope) -> Dict[str, Any]:
+        from .run_summary import annotate_runs
         clause, params = self._scope_clause(actor, "t")
         with self.connect() as conn:
-            run = conn.execute(f"SELECT r.*,t.name FROM fb_auto_run r JOIN fb_auto_template t ON t.id=r.template_id WHERE r.id=?{clause}", (run_id,) + params).fetchone()
+            conn.execute("BEGIN")
+            run = conn.execute(f"SELECT r.*,t.name,t.status template_status FROM fb_auto_run r JOIN fb_auto_template t ON t.id=r.template_id WHERE r.id=?{clause}", (run_id,) + params).fetchone()
             if run is None:
                 raise StoreError("fb_auto_run_not_found", "运行记录不存在", 404)
+            run = dict(run)
+            annotate_runs(conn, [run], self.now_fn())
             tasks = conn.execute("SELECT id,page_id,group_id,status,skip_reason,schedule_policy,selection_json,material_id,content_id,short_url,long_url,video_template,gpu_job_id,planned_publish_at_utc,prepared_profile,prepared_sha256,prepared_size_bytes,prepared_duration_seconds,prepared_at_utc,graph_post_id,error_code,error_message,unknown_outcome,created_at_utc,completed_at_utc FROM fb_auto_task WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
             pages = conn.execute("SELECT page_id,group_id,group_ids_json,timezone,language,eligible_token_count,snapshot_status,skip_reason FROM fb_auto_run_page WHERE run_id=? ORDER BY page_id", (run_id,)).fetchall()
             waiting = conn.execute("""SELECT w.page_id,w.original_due,w.next_check,p.skip_reason
