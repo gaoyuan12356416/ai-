@@ -71,18 +71,25 @@ def socialkit_candidates(root, version, day, now, *, end=None, enforce_fresh=Tru
             if enforce_fresh and not fresh(detail.get("refreshed_at"), now,
                                             HISTORY_FRESH_SECONDS if historical else FRESH_SECONDS):
                 raise ComparisonUnavailable("socialkit_snapshot_stale")
-        if end >= FIRST_DAY and any(d >= FIRST_DAY and not detail.get('quality', {}).get('iaa_covered')
-                                    for d, detail in details.items()):
-            raise ComparisonUnavailable("socialkit_iaa_pending")
-        ad_sum = "SUM(iaa_cents)" if end >= FIRST_DAY else "NULL"
+        includes_iaa = end >= FIRST_DAY
+        has_ads = includes_iaa and any(col[1] == "iaa_cents" for col in conn.execute("PRAGMA table_info(effects)"))
+        ad_sum = "SUM(iaa_cents)" if has_ads else "NULL"
+        complete = "COUNT(iaa_cents)=COUNT(*)" if has_ads else "0"
+        available = all(d < FIRST_DAY or detail.get('quality', {}).get('iaa_covered')
+                        for d, detail in details.items())
         rows = [dict(row) for row in conn.execute(f"""
             SELECT platform,drama_app_id,drama_content_id AS drama,
-                   MAX(drama_name) AS drama_name,SUM(revenue_cents) AS revenue_cents,{ad_sum} AS iaa_cents
+                   MAX(drama_name) AS drama_name,SUM(revenue_cents) AS revenue_cents,{ad_sum} AS iaa_cents,
+                   {complete} AS iaa_complete
             FROM effects WHERE date BETWEEN ? AND ? AND drama_app_id=? AND matched=1
               AND platform IN ('facebook','youtube','x') AND drama_content_id<>''
             GROUP BY platform,drama_app_id,drama_content_id
             HAVING SUM(revenue_cents)>0
         """, (day, end, APP_ID))]
+        for row in rows:
+            row["iaa_complete"] = not includes_iaa or (available and bool(row["iaa_complete"]))
+            if includes_iaa and not available:
+                row["iaa_cents"] = None
         # Old revenue rows can legitimately retain old updated_at values.
         # Historical freshness is established by successful daily recollection.
         if rows and enforce_fresh and not historical and not all(
@@ -178,6 +185,7 @@ def warehouse_channel(app, snapshot_info, day, platform, now, enforce_fresh):
     from features.social_analytics.routes import query_source_rows
     manifest, uri = snapshot_info
     sites = SITES[platform]
+    ad_sites = {site for site in sites if day in manifest.get("iaa_coverage", {}).get(platform + ":" + site, ())}
     if enforce_fresh and not fresh(manifest["generated_at"], now, HISTORY_FRESH_SECONDS):
         raise ComparisonUnavailable("own_income_source_stale")
     for site in sites:
@@ -188,8 +196,6 @@ def warehouse_channel(app, snapshot_info, day, platform, now, enforce_fresh):
                 or health.get("state", "complete") != "complete" or health.get("freshness", "fresh") != "fresh"
                 or health.get("conflict_count")):
             raise ComparisonUnavailable("own_source_or_attribution_incomplete")
-        if day not in manifest.get("iaa_coverage", {}).get(key, ()):
-            raise ComparisonUnavailable("own_iaa_pending")
     with closing(sqlite3.connect(uri, uri=True)) as conn:
         catalog = [row for (payload,) in conn.execute("SELECT payload FROM catalog")
                    if (row := json.loads(payload))["platform"] == platform]
@@ -208,11 +214,14 @@ def warehouse_channel(app, snapshot_info, day, platform, now, enforce_fresh):
     times = {}
     for site in sorted(sites):
         rows = query_source_rows(app, by_campaign(day, site), 50000)
+        if site not in ad_sites and not any(r.get("purchase_events") for r in rows):
+            rows += query_source_rows(app, by_campaign(day, site, provisional_purchases=True), 50000)
         for row in rows:
             row["revenue_cents"] = row["iap_cents"] + row["iaa_cents"]
         blocked.update(unconfirmed_income_drama(catalog, {site: rows}, day))
         times[site] = max((str(r["updated_at"] or "") for r in rows), default="")
-    return dict(amounts=dict(amounts), iaa=dict(ads), history=history_rows, blocked=blocked,
+    return dict(amounts=dict(amounts), iaa=dict(ads) if ad_sites else None,
+                iaa_complete=ad_sites == sites, history=history_rows, blocked=blocked,
                 source_updated_at=times, source_updated_by_date={day: times}, version=manifest["version"])
 
 
@@ -278,7 +287,11 @@ def compare(candidates, own, day):
         reasons = []
         if count == 0:
             reasons.append("no_confirmed_publication")
-        if row["revenue_cents"] >= MIN_SOCIALKIT_CENTS and amount * 2 < row["revenue_cents"]:
+        sk_complete = row.get("iaa_complete", True)
+        own_complete = channel.get("iaa_complete", True)
+        if not (sk_complete and own_complete):
+            pending.append(dict(platform=platform, drama=drama, reason="iaa_pending"))
+        elif row["revenue_cents"] >= MIN_SOCIALKIT_CENTS and amount * 2 < row["revenue_cents"]:
             reasons.append("large_revenue_gap")
         if not reasons:
             continue
@@ -286,7 +299,8 @@ def compare(candidates, own, day):
                            drama_name=row.get("drama_name") or drama,
                            socialkit_revenue_cents=row["revenue_cents"], own_revenue_cents=amount,
                            socialkit_iaa_cents=row.get("iaa_cents"),
-                           own_iaa_cents=channel["iaa"].get(drama, 0) if "iaa" in channel else None,
+                           own_iaa_cents=channel["iaa"].get(drama, 0) if channel.get("iaa") is not None else None,
+                           socialkit_iaa_complete=sk_complete, own_iaa_complete=own_complete,
                            revenue_gap_cents=row["revenue_cents"] - amount,
                            period=comparison_period(day), rule_version=RULE_VERSION, reasons=reasons,
                            history_success_count=count, last_published_date=previous.get("last_date"),

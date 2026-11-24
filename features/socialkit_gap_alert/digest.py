@@ -20,18 +20,26 @@ from .runner import CHAT_ID, DEFAULT_ROOT, DEFAULT_SOCIALKIT_ROOT, DEFAULT_FEISH
 
 BEIJING = timezone(timedelta(hours=8))
 REASONS = {"no_confirmed_publication": "历史未查到成功发布", "large_revenue_gap": "收入差距较大"}
+PENDING_REASONS = {"drama_attribution_unverified": "剧目归因待核实",
+                   "iaa_pending": "IAA 广告收入待回传，收入差距待核实"}
 
 
 def reasons(event):
     return event.get("reasons") or [event["state"]]
 
 
+def ad_amount(events, side):
+    amounts = [e[side + "_iaa_cents"] for e in events if e.get(side + "_iaa_cents") is not None]
+    if not amounts:
+        return "待回传" if events else "—"
+    complete = len(amounts) == len(events) and all(e.get(side + "_iaa_complete", True) for e in events)
+    return dollars(sum(amounts)) + ("" if complete else "（部分已回传）")
+
+
 def totals(events):
     return dict(count=len(events), dramas=len({e["drama"] for e in events}),
                 socialkit=sum(e["socialkit_revenue_cents"] for e in events),
                 own=sum(e["own_revenue_cents"] for e in events),
-                socialkit_iaa=sum(e.get("socialkit_iaa_cents") or 0 for e in events),
-                own_iaa=sum(e.get("own_iaa_cents") or 0 for e in events),
                 unpublished=sum("no_confirmed_publication" in reasons(e) for e in events),
                 gap=sum("large_revenue_gap" in reasons(e) for e in events))
 
@@ -52,7 +60,9 @@ def summary_card(report, url):
         lines.append("%s：%d 项｜SocialKit %s / 我方 %s" % (label, group["count"], dollars(group["socialkit"]), dollars(group["own"])))
     if period["start"] >= FIRST_DAY:
         lines.append("命中项目中的 IAA 广告收入　SocialKit %s / 我方 %s。"
-                     % (dollars(sums["socialkit_iaa"]), dollars(sums["own_iaa"])))
+                     % (ad_amount(events, "socialkit"), ad_amount(events, "own")))
+        if any(p.get("reason") == "iaa_pending" for p in report["pending"]):
+            lines.append("部分项目的 IAA 待回传，收入差距待核实，已确认的发布情况照常列出。")
     lines += ["以上仅汇总命中项目。总收入含充值和已回传的广告收入，退款单列。",
               "采集时间（北京）：%s；每天 11:30 汇总一次。" % beijing_time(report["collected_at"])]
     if report["errors"]:
@@ -79,10 +89,11 @@ def render_html(report):
         cells = [LABELS[event["platform"]], event["drama_name"], event["drama"],
                  " / ".join(REASONS.get(r, r) for r in why), dollars(sk), dollars(own), dollars(sk-own), ratio,
                  event["history_success_count"], event.get("last_published_date") or "无"]
-        if event.get("socialkit_iaa_cents") is not None:
-            cells[4] += "（IAA " + dollars(event["socialkit_iaa_cents"]) + "）"
-        if event.get("own_iaa_cents") is not None:
-            cells[5] += "（IAA " + dollars(event["own_iaa_cents"]) + "）"
+        if period["start"] >= FIRST_DAY:
+            cells[4] += "（IAA " + ad_amount([event], "socialkit") + "）"
+            cells[5] += "（IAA " + ad_amount([event], "own") + "）"
+            if not (event.get("socialkit_iaa_complete", True) and event.get("own_iaa_complete", True)):
+                cells[6:8] = ["待核实", "待核实"]
         rows.append('<tr data-platform="%s" data-reasons="%s" data-gap="%d" data-sk="%d">%s</tr>' %
                     (esc(event["platform"]), esc(" ".join(why)), sk-own, sk,
                      "".join('<td%s>%s</td>' % (' class="number"' if 4 <= i <= 8 else '', esc(v)) for i, v in enumerate(cells))))
@@ -93,7 +104,7 @@ def render_html(report):
                              (label, part["count"], dollars(part["socialkit"]), dollars(part["own"]), dollars(part["socialkit"]-part["own"])))
     pending = "".join('<tr><td>%s</td><td>%s</td><td>%s</td></tr>' %
                       (esc(LABELS.get(p["platform"], p["platform"])), esc(p["drama"]),
-                       esc("剧目归因待核实" if p.get("reason") == "drama_attribution_unverified" else p.get("reason", "待核实"))) for p in report["pending"])
+                       esc(PENDING_REASONS.get(p.get("reason"), p.get("reason", "待核实")))) for p in report["pending"])
     source_rows = ["SocialKit：" + beijing_time(report["socialkit"].get("source_updated_at"))]
     for platform, sites in report.get("own_source_updated_at", {}).items():
         source_rows.extend("我方 %s / %s：%s" % (LABELS.get(platform, platform), site, beijing_time(value)) for site, value in sorted(sites.items()))
