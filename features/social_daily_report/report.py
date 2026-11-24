@@ -5,6 +5,7 @@ import html
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from features.social_analytics.bill_income import FIRST_DAY, SITES
 
 SAFE_PAYLOAD_BYTES = 29000
 REPORT_URL = "https://ai.yingliangads.com/social-analytics.html"
@@ -31,6 +32,17 @@ def safe_name(value):
 def metrics_line(row):
     return "激活 **%s** · 点击 **%s** · 访问 **%s**" % (
         number(row.get("installs")), number(row.get("clicks")), number(row.get("views")))
+
+
+def income_split(report, row, platform=None):
+    if report["report_date"] < FIRST_DAY:
+        return ""
+    covered = set(report.get("quality", {}).get("billing", {}).get("iaa_sites", ()))
+    needed = {site for site, name in SITES.items() if platform is None or name == platform}
+    ad = money(row.get("iaa_cents")) if needed & covered else "待回传"
+    if needed & covered and needed - covered:
+        ad += "（部分站点已回传）"
+    return "充值 " + money(row.get("iap_cents")) + " · IAA 广告 " + ad
 
 
 def _available(quality):
@@ -89,17 +101,24 @@ def blocks(report):
                                        ("💳 付费人数", number(totals["conversions"])))]}],
               [md("点击 **%s** · 访问 **%s** · %s 位发布人" % (
                   number(totals["clicks"]), number(totals["views"]), len(report["rows"])))]]
+    split = income_split(report, totals)
+    if split:
+        result[0][0]["text"]["content"] += "\n" + split
     order = {"facebook": 0, "youtube": 1, "x": 2}
     for index, person in enumerate(report["rows"], 1):
         text = "**%02d · %s**\n收入 **%s**　｜　成功发布 **%s 条**\n%s" % (
             index, safe_name(person["name"]), money(person["revenue_cents"]),
             number(person["published_count"]), metrics_line(person))
+        if split:
+            text += "\n" + income_split(report, person)
         for platform, row in sorted(person["platforms"].items(), key=lambda item: order.get(item[0], 99)):
             name = safe_name(report["platforms"][platform]["name"])
             text += "\n\n**%s**　%s · 发布 %s 条\n%s" % (
                 name, money(row["revenue_cents"]), number(row["published_count"]), metrics_line(row))
             if platform == "x":
                 text += " · Post %s / Repost %s" % (number(row["post_count"]), number(row["repost_count"]))
+            if split:
+                text += "\n" + income_split(report, row, platform)
         result.append([{"tag": "hr"}, md(text)])
     channels = ["**渠道汇总**"]
     for platform, value in sorted(report["platforms"].items(), key=lambda item: order.get(item[0], 99)):
@@ -107,6 +126,8 @@ def blocks(report):
         channels.append("%s　**%s** · 发布 %s 条 · 激活 %s" % (
             safe_name(value["name"]), money(row["revenue_cents"]), number(row["published_count"]),
             number(row["installs"])))
+        if split:
+            channels[-1] += "\n" + income_split(report, row, platform)
     result.append([{"tag": "hr"}, md("\n".join(channels))])
     exceptions = []
     for value in report["platforms"].values():

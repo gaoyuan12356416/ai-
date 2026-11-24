@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .report import require_complete
+from features.social_analytics.bill_income import FIRST_DAY
 from scripts.post_daily_report import atomic_write
 
 
@@ -29,5 +30,7 @@ def load(state, day, chat_id):
         raise ValueError("prepared_report_identity_mismatch")
     if datetime.fromisoformat(report["prepared_at"]).tzinfo is None:
         raise ValueError("prepared_report_timestamp_invalid")
+    if day >= FIRST_DAY and "iaa_sites" not in report.get("quality", {}).get("billing", {}):
+        return None
     require_complete(report)
     return report

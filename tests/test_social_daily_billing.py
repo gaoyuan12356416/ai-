@@ -72,6 +72,16 @@ class DailyBillingTests(unittest.TestCase):
                          [e["tag"] for e in new_card[0]["elements"]])
         self.assertIn("$20.11", json.dumps(new_card))
 
+    def test_ad_income_is_attributed_without_creating_an_order_or_payer(self):
+        catalog = [link()]
+        ads = [dict(site_id="2116", date=DAY, campaign_id=value, iaa_cents=cents, ad_events=2)
+               for value, cents in ((catalog[0]["key"][0], 517), ("outside", 31))]
+        result = billing.aggregate(catalog, [bill(cents=123)], DAY, ads)
+        self.assertEqual(result["total"].public(), dict(revenue_cents=640, iap_cents=123,
+                         iaa_cents=517, conversions=1, payment_orders=1))
+        self.assertEqual(result["raw"].iaa_cents, 548)
+        self.assertEqual(result["iaa_sites"], ["2116"])
+
     def test_payers_are_deduplicated_across_orders_campaigns_channels_and_owners(self):
         catalog = [link(), link("youtube", "yt", "a"), link("facebook", "fb", "b")]
         report = baseline(catalog)

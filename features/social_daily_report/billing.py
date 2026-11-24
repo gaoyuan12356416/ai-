@@ -3,21 +3,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
 import re
 
 from features.social_analytics.backend_scope import eligible
+from features.social_analytics.bill_income import FIRST_DAY, SITES, by_campaign, window
 from features.social_analytics.report import campaign_index, resolve
 from features.social_analytics.routes import query_source_rows
 
-SITES = {"2049": "facebook", "2310": "facebook", "2116": "x", "2284": "youtube"}
 MAX_BILLS = 50000
 SOURCE = "kunlunads_dev.ads_drama_bills"
-
-
-def window(day):
-    start = datetime.combine(date.fromisoformat(day), datetime.min.time(), timezone.utc)
-    return int(start.timestamp()), int((start + timedelta(days=1)).timestamp())
 
 
 def read_bills(app, day):
@@ -37,21 +31,27 @@ def read_bills(app, day):
 @dataclass
 class Bucket:
     revenue_cents: int = 0
+    iaa_cents: int = 0
     orders: int = 0
     users: set = field(default_factory=set)
 
     def add(self, bill):
+        if bill["event_name"] == "ad_revenue":
+            self.iaa_cents += bill["revenue_cents"]
+            self.revenue_cents += bill["revenue_cents"]
+            return
         self.revenue_cents += bill["revenue_cents"]
         self.orders += 1
         if bill["revenue_cents"] > 0:
             self.users.add(bill["user_key"])
 
     def public(self):
-        return dict(revenue_cents=self.revenue_cents, conversions=len(self.users),
+        return dict(revenue_cents=self.revenue_cents, iap_cents=self.revenue_cents - self.iaa_cents,
+                    iaa_cents=self.iaa_cents, conversions=len(self.users),
                     payment_orders=self.orders)
 
 
-def aggregate(catalog, bills, day):
+def aggregate(catalog, bills, day, ad_groups=()):
     """Resolve globally, then retain the existing successful-backend scope."""
     if not bills:
         # No purchase records anywhere cannot establish a completed financial feed.
@@ -76,6 +76,16 @@ def aggregate(catalog, bills, day):
         if bill["revenue_cents"] > 0 and not re.fullmatch(r"[a-fA-F0-9]{64}", bill.get("user_key") or ""):
             raise ValueError("billing_payer_missing")
         seen.add(bill["id"])
+    coverage = set()
+    ads = []
+    for row in ad_groups:
+        if row["date"] != day or row["site_id"] not in SITES or type(row["iaa_cents"]) is not int:
+            raise ValueError("billing_record_invalid")
+        if row["ad_events"]:
+            coverage.add(row["site_id"])
+            ads.append(dict(row, event_name="ad_revenue", revenue_cents=row["iaa_cents"]))
+    for bill in [*bills, *ads]:
+        site = bill["site_id"]
         raw.add(bill)
         platform = SITES[site]
         key = (platform, site, str(bill.get("campaign_id") or ""))
@@ -97,15 +107,18 @@ def aggregate(catalog, bills, day):
         for bucket in (total, owners[identity], groups[identity + (platform,)],
                        platforms[platform], sites[site]):
             bucket.add(bill)
-    if raw.revenue_cents != total.revenue_cents + sum(b.revenue_cents for b in outside.values()):
+    if any(getattr(raw, k) != getattr(total, k) + sum(getattr(b, k) for b in outside.values())
+           for k in ("revenue_cents", "iaa_cents", "orders")):
         raise ValueError("billing_reconciliation_failed")
     return dict(total=total, raw=raw, owners=owners, groups=groups, platforms=platforms,
-                sites=sites, outside=outside)
+                sites=sites, outside=outside, iaa_sites=sorted(coverage))
 
 
 def _patch(row, bucket):
     """Only the two requested metrics and their existing derived values change."""
     row["revenue_cents"] = bucket.revenue_cents if bucket is not None else None
+    row["iap_cents"] = bucket.revenue_cents - bucket.iaa_cents if bucket is not None else None
+    row["iaa_cents"] = bucket.iaa_cents if bucket is not None else None
     row["conversions"] = len(bucket.users) if bucket is not None else None
     if "revenue" in row:
         row["revenue"] = round(bucket.revenue_cents / 100, 2) if bucket is not None else None
@@ -169,11 +182,13 @@ def apply(report, financials):
                  outside=[dict(site_id=site, reason=reason, **bucket.public())
                           for (site, reason), bucket in sorted(financials["outside"].items())])
     report["quality"]["billing"] = audit
+    audit["iaa_sites"] = financials["iaa_sites"]
+    audit["revenue_events"] = ["af_purchase", "ad_revenue"]
     shared["billing_scope_audit"] = audit
     shared.setdefault("meta", {})["financial_source"] = SOURCE
     report["financial_source"] = SOURCE
     report["warnings"] = shared["warnings"] = [
-        "收入采用订单账单支付金额；付费人数在各汇总范围内按 user_id 去重，人数不跨范围相加。"
+        "收入为充值和已回传的 IAA 广告收入之和。付费人数仅按充值账单的用户去重。"
         if value.startswith("转化数采用源表充值人数") else value
         for value in report["warnings"]]
     return report
@@ -199,7 +214,13 @@ def unavailable(report, reason):
 
 def collect_financials(report, app, catalog):
     try:
-        return apply(report, aggregate(catalog, read_bills(app, report["report_date"]), report["report_date"]))
+        day = report["report_date"]
+        bills = read_bills(app, day)
+        ad_groups = []
+        if bills and day >= FIRST_DAY:
+            for site in SITES:
+                ad_groups.extend(query_source_rows(app, by_campaign(day, site), MAX_BILLS))
+        return apply(report, aggregate(catalog, bills, day, ad_groups))
     except Exception as exc:
         # Driver messages and SQL must not leak into Feishu or failure diagnostics.
         safe_codes = {
