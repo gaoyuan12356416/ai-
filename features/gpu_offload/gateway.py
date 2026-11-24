@@ -1,5 +1,6 @@
 """Authenticate every read at the existing API, then serve a scoped snapshot."""
 import http.client
+import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 from .cache import Response, SingleFlightCache, annotated, cache_key
 from .reports import PATHS
 from .monitor_snapshots import MonitorSnapshots
+from features.pipeline_dispatch.support_health import read_snapshot
 
 MONITOR_PATHS = frozenset('/api/pipeline-monitor/' + name for name in ('summary', 'tasks', 'workers'))
 FORWARD_HEADERS = {'content-type', 'content-disposition', 'x-ai-data-time', 'x-ai-data-version', 'x-ai-stale', 'set-cookie'}
@@ -20,6 +22,33 @@ FORWARD_HEADERS = {'content-type', 'content-disposition', 'x-ai-data-time', 'x-a
 
 class Denied(Exception):
     def __init__(self, status, code): self.status, self.code = status, code
+
+
+def recheck_fb_summary(value, actor, path):
+    """Re-read a fresh sample rejected by an older coordinator's request clock."""
+    if (path != '/api/pipeline-monitor/summary' or actor['role'] != 'admin'
+            or value.status != 200 or b'snapshot_stale' not in value.body):
+        return value
+    try:
+        summary = json.loads(value.body)
+        support = summary.get('fb_support') if isinstance(summary, dict) else None
+        if not isinstance(support, dict) or support.get('code') != 'snapshot_stale':
+            return value
+        collected = dt.datetime.fromisoformat(support['collected_at'])
+        def now():
+            return dt.datetime.now(dt.timezone.utc)
+        if not 0 <= (now() - collected).total_seconds() <= 150:
+            return value
+        # The origin includes this panel only after checking the user's scope
+        # and channel filter. Never add a panel absent from the origin.
+        checked = read_snapshot(now, {'is_admin': True}, ['fb'])
+        if not checked or not checked.get('available') or dt.datetime.fromisoformat(checked['collected_at']) < collected:
+            return value
+        summary['fb_support'] = checked
+        print(json.dumps({'kind':'fb_snapshot_rechecked','code':checked['code']}), flush=True)
+        return Response(value.status, value.headers, json.dumps(summary, ensure_ascii=False, separators=(',', ':')).encode())
+    except (TypeError, KeyError, ValueError):
+        return value
 
 
 def navigation_allowed(actor, config, item_key):
@@ -122,11 +151,13 @@ class Handler(BaseHTTPRequestHandler):
                 # Existing owner mapping remains authoritative for non-admins.
                 # These requests continue through the original per-request check.
                 if actor['role'] != 'admin' or not config.get('monitor_cache', False):
-                    return self.reply(request(config['api_port'], self.path, cookie=cookie))
+                    value = request(config['api_port'], self.path, cookie=cookie)
+                    return self.reply(recheck_fb_summary(value, actor, path))
                 key = cache_key(actor, self.path, 'monitor-v1')
                 target, api_port, config_path = self.path, config['api_port'], self.server.config_path
                 def load_monitor():
                     value = request(api_port, target, cookie=cookie, timeout=10, limit=4*1024*1024)
+                    value = recheck_fb_summary(value, actor, path)
                     return Response(value.status, dict(value.headers, **{'X-AI-Data-Time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}), value.body)
                 value, stale, hit = self.server.monitor_cache.get(key, load_monitor, wait=12)
                 def authorized_refresh():
