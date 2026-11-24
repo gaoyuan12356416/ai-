@@ -129,6 +129,7 @@
     $('#report-updated').textContent='报表更新：'+stamp(m.generated_at)+' · 收入源更新时间：'+stamp(m.source_updated_at);$('#report-version').textContent='快照版本：'+m.version;$('#report-version').className='version-tag';
     const warnings=[];const today=utc(new Date());if(state.view!=='publications'&&m.start<=today&&m.end>=today)warnings.push('当前 UTC 日期的数据尚未完整，收入会随回传更新；北京时间 08:00 切日。');if(m.stale)warnings.push('最近一次更新未成功，正在显示上一份成功快照。');if(m.partial)warnings.push('所选范围含未同步日期；合计仅包含已同步数据。');
     if(state.view!=='publications' && m.iaa_missing_dates?.length) warnings.push('IAA 广告收入待回传日期：'+m.iaa_missing_dates.join('、')+'。总收入仅包含已回传金额。');
+    if (state.view!=='publications' && Object.keys(m.iaa_pending_sites || {}).length) warnings.push('部分站点尚未回传 IAA，广告收入列只汇总已到金额。');
     const unmatched=r.totals.unmatched_revenue_cents;if(Number(r.totals.unmatched_rows)||Number(r.totals.unmatched_links)||Number(unmatched))warnings.push('当前筛选有 '+format(r.totals.unmatched_links,'link_count')+' 个未归属短链键（'+format(r.totals.unmatched_rows,'tasks')+' 条明细），点击 '+format(r.totals.unmatched_clicks||0,'clicks')+'、安装 '+format(r.totals.unmatched_installs||0,'installs')+'、收入 '+format(Number(unmatched||0)/100,'revenue')+'；已保留在总盘和未归属分组。');
     if(m.latest_version&&m.latest_version!==m.version)warnings.push('已有更新版本，当前查看的是固定快照；点击“读取最新数据”切换。');
     if(state.groups.includes('drama_language')||(state.filters.drama_language||[]).length){

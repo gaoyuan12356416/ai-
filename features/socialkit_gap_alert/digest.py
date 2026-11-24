@@ -11,6 +11,7 @@ import sys
 from urllib.parse import urlparse
 
 from features.post_daily_report.delivery import DeliveryStore, DefiniteFailure, send_card
+from features.social_analytics.bill_income import FIRST_DAY
 from features.socialkit_analytics.refresh import ensure_data_mount
 from features.socialkit_analytics.storage import atomic_json
 from .cards import LABELS, beijing_time, dollars, payload_size, period_text, MAX_BYTES
@@ -29,6 +30,8 @@ def totals(events):
     return dict(count=len(events), dramas=len({e["drama"] for e in events}),
                 socialkit=sum(e["socialkit_revenue_cents"] for e in events),
                 own=sum(e["own_revenue_cents"] for e in events),
+                socialkit_iaa=sum(e.get("socialkit_iaa_cents") or 0 for e in events),
+                own_iaa=sum(e.get("own_iaa_cents") or 0 for e in events),
                 unpublished=sum("no_confirmed_publication" in reasons(e) for e in events),
                 gap=sum("large_revenue_gap" in reasons(e) for e in events))
 
@@ -47,7 +50,10 @@ def summary_card(report, url):
     for platform, label in LABELS.items():
         group = totals([e for e in events if e["platform"] == platform])
         lines.append("%s：%d 项｜SocialKit %s / 我方 %s" % (label, group["count"], dollars(group["socialkit"]), dollars(group["own"])))
-    lines += ["以上仅汇总命中项目；USD 原始收入，不扣退款。",
+    if period["start"] >= FIRST_DAY:
+        lines.append("命中项目中的 IAA 广告收入　SocialKit %s / 我方 %s。"
+                     % (dollars(sums["socialkit_iaa"]), dollars(sums["own_iaa"])))
+    lines += ["以上仅汇总命中项目。总收入含充值和已回传的广告收入，退款单列。",
               "采集时间（北京）：%s；每天 11:30 汇总一次。" % beijing_time(report["collected_at"])]
     if report["errors"]:
         lines.append("部分平台采集异常，详见 HTML；缺失数据未当作零。")
@@ -73,6 +79,10 @@ def render_html(report):
         cells = [LABELS[event["platform"]], event["drama_name"], event["drama"],
                  " / ".join(REASONS.get(r, r) for r in why), dollars(sk), dollars(own), dollars(sk-own), ratio,
                  event["history_success_count"], event.get("last_published_date") or "无"]
+        if event.get("socialkit_iaa_cents") is not None:
+            cells[4] += "（IAA " + dollars(event["socialkit_iaa_cents"]) + "）"
+        if event.get("own_iaa_cents") is not None:
+            cells[5] += "（IAA " + dollars(event["own_iaa_cents"]) + "）"
         rows.append('<tr data-platform="%s" data-reasons="%s" data-gap="%d" data-sk="%d">%s</tr>' %
                     (esc(event["platform"]), esc(" ".join(why)), sk-own, sk,
                      "".join('<td%s>%s</td>' % (' class="number"' if 4 <= i <= 8 else '', esc(v)) for i, v in enumerate(cells))))

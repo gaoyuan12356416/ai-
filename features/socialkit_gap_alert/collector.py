@@ -1,12 +1,17 @@
 """Compare exact Dramawave identities; unavailable observations are never zero."""
 from collections import defaultdict
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
+import json
+from pathlib import Path
+import sqlite3
 import time
 
 from features.socialkit_analytics.query import snapshot
 from features.social_analytics.adapters import read_catalogs
 from features.social_analytics.report import campaign_index, resolve
 from features.social_analytics.backend_scope import eligible
+from features.social_analytics.bill_income import FIRST_DAY, by_campaign
 from features.social_analytics.routes import build_report, source, scoped_facebook_source
 
 APP_ID = 1479
@@ -18,7 +23,8 @@ MIN_SOCIALKIT_CENTS = 1000
 SITES = {"facebook": {"2049", "2310"}, "youtube": {"2284"}, "x": {"2116"}}
 ERROR_CODES = frozenset({"socialkit_date_unavailable", "socialkit_snapshot_stale",
                          "socialkit_income_source_stale", "own_source_or_attribution_incomplete",
-                         "own_income_source_stale", "own_income_not_integer_cents", "statistics_day_changed"})
+                         "own_income_source_stale", "own_income_not_integer_cents", "statistics_day_changed",
+                         "own_iaa_pending", "socialkit_iaa_pending"})
 
 
 class ComparisonUnavailable(ValueError):
@@ -65,9 +71,13 @@ def socialkit_candidates(root, version, day, now, *, end=None, enforce_fresh=Tru
             if enforce_fresh and not fresh(detail.get("refreshed_at"), now,
                                             HISTORY_FRESH_SECONDS if historical else FRESH_SECONDS):
                 raise ComparisonUnavailable("socialkit_snapshot_stale")
-        rows = [dict(row) for row in conn.execute("""
+        if end >= FIRST_DAY and any(d >= FIRST_DAY and not detail.get('quality', {}).get('iaa_covered')
+                                    for d, detail in details.items()):
+            raise ComparisonUnavailable("socialkit_iaa_pending")
+        ad_sum = "SUM(iaa_cents)" if end >= FIRST_DAY else "NULL"
+        rows = [dict(row) for row in conn.execute(f"""
             SELECT platform,drama_app_id,drama_content_id AS drama,
-                   MAX(drama_name) AS drama_name,SUM(revenue_cents) AS revenue_cents
+                   MAX(drama_name) AS drama_name,SUM(revenue_cents) AS revenue_cents,{ad_sum} AS iaa_cents
             FROM effects WHERE date BETWEEN ? AND ? AND drama_app_id=? AND matched=1
               AND platform IN ('facebook','youtube','x') AND drama_content_id<>''
             GROUP BY platform,drama_app_id,drama_content_id
@@ -154,13 +164,67 @@ def unconfirmed_income_drama(catalog, raw_sources, day):
     return blocked
 
 
-def own_channel(app, day, platform, now, *, end=None, enforce_fresh=True):
+def warehouse_snapshot(app):
+    root = Path(app.get("SOCIAL_ANALYTICS_WAREHOUSE_ROOT") or "/mnt/data-disk/social-analytics-warehouse")
+    manifest = json.loads((root / "current.json").read_text())
+    path = (root / manifest["database"]).resolve()
+    if path.parent != (root / "snapshots").resolve() or path.suffix != ".sqlite3":
+        raise ComparisonUnavailable("own_source_or_attribution_incomplete")
+    return manifest, path.as_uri() + "?mode=ro&immutable=1"
+
+
+def warehouse_channel(app, snapshot_info, day, platform, now, enforce_fresh):
+    """Compare the published report generation, retaining uncertain bill identities."""
+    from features.social_analytics.routes import query_source_rows
+    manifest, uri = snapshot_info
+    sites = SITES[platform]
+    if enforce_fresh and not fresh(manifest["generated_at"], now, HISTORY_FRESH_SECONDS):
+        raise ComparisonUnavailable("own_income_source_stale")
+    for site in sites:
+        key = platform + ":" + site
+        health = manifest.get("source_metadata", {}).get(key, {})
+        errors = manifest.get("catalog_errors", {})
+        if (key in errors or platform in errors or day not in manifest["coverage"].get(key, ())
+                or health.get("state", "complete") != "complete" or health.get("freshness", "fresh") != "fresh"
+                or health.get("conflict_count")):
+            raise ComparisonUnavailable("own_source_or_attribution_incomplete")
+        if day not in manifest.get("iaa_coverage", {}).get(key, ()):
+            raise ComparisonUnavailable("own_iaa_pending")
+    with closing(sqlite3.connect(uri, uri=True)) as conn:
+        catalog = [row for (payload,) in conn.execute("SELECT payload FROM catalog")
+                   if (row := json.loads(payload))["platform"] == platform]
+        history_rows, blocked = history(catalog)
+        index = campaign_index(catalog)
+        amounts, ads = defaultdict(int), defaultdict(int)
+        for (payload,) in conn.execute("SELECT payload FROM effects WHERE platform=? AND dt=?", (platform, day)):
+            fact = json.loads(payload)
+            owner = resolve(index.get((platform, fact["site_id"], fact["campaign_id"]), ()))
+            if not owner:
+                raise ComparisonUnavailable("own_source_or_attribution_incomplete")
+            amounts[owner["drama"]] += fact["revenue_cents"]
+            ads[owner["drama"]] += fact.get("iaa_cents", 0)
+    # The warehouse correctly excludes unconfirmed posts. They cannot serve as
+    # evidence of zero income in a comparison. Check the source for these only.
+    times = {}
+    for site in sorted(sites):
+        rows = query_source_rows(app, by_campaign(day, site), 50000)
+        for row in rows:
+            row["revenue_cents"] = row["iap_cents"] + row["iaa_cents"]
+        blocked.update(unconfirmed_income_drama(catalog, {site: rows}, day))
+        times[site] = max((str(r["updated_at"] or "") for r in rows), default="")
+    return dict(amounts=dict(amounts), iaa=dict(ads), history=history_rows, blocked=blocked,
+                source_updated_at=times, source_updated_by_date={day: times}, version=manifest["version"])
+
+
+def own_channel(app, day, platform, now, *, end=None, enforce_fresh=True, warehouse=None):
     end = end or day
     settings = dict(app)
     # Daily reads share one bounded budget. Keep each SQL capped at 20s.
     settings.update(SOCIAL_ANALYTICS_QUERY_DEADLINE=time.monotonic() + (300 if end != day else 150),
                     SOCIAL_ANALYTICS_STATEMENT_TIMEOUT_MS=20000,
                     SOCIAL_ANALYTICS_QUERY_ATTEMPTS=2)
+    if day == end and day >= FIRST_DAY:
+        return warehouse_channel(settings, warehouse or warehouse_snapshot(app), day, platform, now, enforce_fresh)
     catalog, errors = read_catalogs(settings, [platform])
     histories, blocked = history(catalog)
     amounts, timestamps, daily_times = defaultdict(int), {}, {}
@@ -221,6 +285,8 @@ def compare(candidates, own, day):
         events.append(dict(date=day, app_id=APP_ID, platform=platform, drama=drama,
                            drama_name=row.get("drama_name") or drama,
                            socialkit_revenue_cents=row["revenue_cents"], own_revenue_cents=amount,
+                           socialkit_iaa_cents=row.get("iaa_cents"),
+                           own_iaa_cents=channel["iaa"].get(drama, 0) if "iaa" in channel else None,
                            revenue_gap_cents=row["revenue_cents"] - amount,
                            period=comparison_period(day), rule_version=RULE_VERSION, reasons=reasons,
                            history_success_count=count, last_published_date=previous.get("last_date"),
@@ -236,12 +302,16 @@ def collect(app, socialkit_root, version=None, report_date=None, now=None, *, en
     candidates, sk = socialkit_candidates(socialkit_root, version, period["start"], now,
                                          end=period["end"], enforce_fresh=enforce_fresh)
     own, errors = {}, {}
+    warehouse = None
     for platform in CHANNELS:
         if not any(row["platform"] == platform for row in candidates):
             continue
         try:
+            if period["start"] >= FIRST_DAY and warehouse is None:
+                warehouse = warehouse_snapshot(app)
+            extra = dict(warehouse=warehouse) if warehouse is not None else {}
             own[platform] = own_channel(app, period["start"], platform, now,
-                                        end=period["end"], enforce_fresh=enforce_fresh)
+                                        end=period["end"], enforce_fresh=enforce_fresh, **extra)
         except Exception as exc:
             # No connector exception text or SQL values enter artifacts/logs.
             code = safe_error(exc)

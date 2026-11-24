@@ -219,6 +219,7 @@ def _query(conn, table, params, groups, context=None):
     for name in label_fields:
         selections.append("MIN(%s) AS %s" % (name, name))
     if table == "effects":
+        selections.append("COUNT(iaa_cents) AS iaa_rows" if "iaa_cents" in columns else "0 AS iaa_rows")
         selections.append("COUNT(DISTINCT CASE WHEN short_code<>'' THEN short_code END) AS link_count")
         if "unmatched" not in context:
             # Apply exactly the same SQL filters/search once. Usually only a few
@@ -349,7 +350,8 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
             if key not in aggregates:
                 aggregates[key] = _combined(conn, parsed, groups, query_context)
                 for row in aggregates[key]:
-                    if not covered or ("date" in row and row["date"] not in covered):
+                    if (not covered or ("date" in row and row["date"] not in covered)
+                            or (not row.get("iaa_rows") and row.get("link_count"))):
                         row["iaa_cents"] = row["iaa"] = None
             # Trend source-status decoration and sorting must not mutate another
             # consumer when its group dimensions are the same.
@@ -386,6 +388,9 @@ def report(root=DEFAULT_ROOT, params=None, _allow_precomputed=True):
         response = dict(meta=dict(version=manifest["version"], latest_version=manifest["latest_version"], generated_at=manifest.get("generated_at") or manifest.get("refreshed_at"), source_updated_at=manifest.get("source_updated_at"), view=parsed["view"], start=parsed["start"], end=parsed["end"], effect_timezone="UTC", publication_timezone="account_local", currency="USD", refresh_status=status, stale=_stale_status(status), missing_days=missing, partial=any(missing.values()), range=manifest.get("range"), quality=manifest.get("quality", {})), group_by=parsed["groups"], totals=totals, trend=trend, ranking=ranking, breakdowns={dim: sorted(aggregate([dim]), key=lambda r:r.get("success" if parsed["view"] == "publications" else "revenue") or 0, reverse=True) for dim in ("platform", "product")}, rows=all_rows[(page-1)*parsed["page_size"]:page*parsed["page_size"]], all_rows=all_rows, pagination=dict(page=page, page_size=parsed["page_size"], pages=pages, total=len(all_rows)), parameters=parsed, metric_labels=METRICS, dimension_labels=DIMENSIONS)
         from features.social_analytics.bill_income import FIRST_DAY
         response["meta"]["iaa_missing_dates"] = [d for d in parsed["dates"] if d >= FIRST_DAY and d not in covered]
+        response["meta"]["iaa_pending_sites"] = {
+            d: manifest["date_manifest"][d]["quality"]["iaa_pending_sites"] for d in covered
+            if manifest["date_manifest"][d]["quality"].get("iaa_pending_sites")}
         _refresh_report_state(response, manifest, status)
         serialized = json.dumps(response, ensure_ascii=False)
         if len(serialized) <= 2_000_000:

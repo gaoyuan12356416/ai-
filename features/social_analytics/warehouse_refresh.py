@@ -184,6 +184,8 @@ def collect(env, reader, start=None, end=None):
                 keys = ('campaign_id', 'adset_id', 'ad_id') if platform == 'facebook' else ('campaign_id',)
                 for day, _ in periods(max(start, FIRST_DAY), end, days=1):
                     bills = reader.query([by_campaign(day, site)])
+                    if any(r["ad_events"] for r in bills) and not any(r["purchase_events"] for r in bills):
+                        bills.extend(reader.query([by_campaign(day, site, provisional_purchases=True)]))
                     daily[day], settled = merge_settled(daily[day], bills, keys, empty())
                     if settled:
                         covered.append(day)
