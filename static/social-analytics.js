@@ -2,7 +2,8 @@
   'use strict';
   const $ = selector => document.querySelector(selector);
   const API = '/api/social-analytics';
-  const dimensions = {owner:'人员',platform:'渠道',drama:'剧目',channel:'账号/频道/主页',link_type:'链接类型',language:'语言',date:'日期'};
+  const dimensions = {date:'日期',platform:'渠道',owner:'人员',drama:'剧目',channel:'账号/频道/主页',link_type:'链接类型',language:'语言'};
+  const defaultGroups = ['date','platform'];
   const filterKeys = ['platform','owner','drama','channel','link_type','language'];
   const metrics = {
     clicks:{label:'落地页点击',hint:'链接带来的点击次数',color:'#4d7ddd'},
@@ -119,8 +120,8 @@
     if (exporting) { ++exportSerial; exportController?.abort(); exporting = false; }
     $('#filter-hint').textContent = '筛选尚未应用；请点击「应用筛选」更新数据。'; $('#filter-hint').className = 'dirty-hint'; updateControls();
   }
-  function dateRange(days) {
-    const end = new Date(); end.setUTCHours(0,0,0,0); end.setUTCDate(end.getUTCDate()-1);
+  function dateRange(days, endOffset = 1) {
+    const end = new Date(); end.setUTCHours(0,0,0,0); end.setUTCDate(end.getUTCDate()-endOffset);
     const start = new Date(end); start.setUTCDate(start.getUTCDate()-days+1);
     $('#date-start').value = utcDate(start); $('#date-end').value = utcDate(end);
   }
@@ -128,7 +129,7 @@
     $('#dimension-filters').innerHTML = filterKeys.map(key => `<details class="multi-filter" data-dimension="${key}"><summary><span>${dimensions[key]}</span><strong data-count>全部</strong></summary><div class="filter-popover"><input type="search" class="option-search" aria-label="搜索${dimensions[key]}选项" placeholder="搜索${dimensions[key]}"><div class="filter-option-list">${(options[key] || []).map(item => `<label class="filter-option"><input type="checkbox" name="${key}" value="${esc(item.value)}"><span>${esc(item.label || item.value)}</span></label>`).join('')}<div class="filter-empty" ${(options[key] || []).length ? 'hidden' : ''}>暂无可选项</div></div><button type="button" class="filter-clear">清除选择</button></div></details>`).join('');
   }
   function renderGroupOptions() {
-    $('#group-choices').innerHTML = Object.entries(dimensions).map(([key,label]) => `<label class="group-choice"><input type="checkbox" name="group" value="${key}" ${['owner','platform'].includes(key) ? 'checked' : ''}><span>${label}</span></label>`).join('');
+    $('#group-choices').innerHTML = Object.entries(dimensions).map(([key,label]) => `<label class="group-choice"><input type="checkbox" name="group" value="${key}" ${defaultGroups.includes(key) ? 'checked' : ''}><span>${label}</span></label>`).join('');
   }
   function selectedGroups() { return Array.from(document.querySelectorAll('[name="group"]:checked'),n => n.value); }
   function updateGroupLimit() { const count = selectedGroups().length; document.querySelectorAll('[name="group"]').forEach(input => { input.disabled = !input.checked && count >= 3; }); }
@@ -358,6 +359,7 @@
   });
   $('#dimension-filters').addEventListener('click',event => { const button = event.target.closest('.filter-clear'); if (!button) return; const detail = button.closest('.multi-filter'); detail.querySelectorAll('input[type=checkbox]').forEach(input => { input.checked = false; }); detail.querySelector('[data-count]').textContent = '全部'; markDirty(); });
   document.querySelectorAll('[data-days]').forEach(button => button.addEventListener('click',() => { dateRange(Number(button.dataset.days)); markDirty(); }));
+  document.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click',() => { dateRange(1,button.dataset.range === 'today' ? 0 : 1); markDirty(); }));
   $('#reset-filters').addEventListener('click',() => { dateRange(7); $('#report-search').value = ''; renderFilterOptions(); renderGroupOptions(); updateGroupLimit(); markDirty(); });
   $('#trend-metric').addEventListener('change',renderTrend);
   $('#ranking-metric').addEventListener('change',() => { if (!applied || dirty) return; const query = new URLSearchParams(applied); query.set('ranking_metric',$('#ranking-metric').value); void loadReport(query); });

@@ -29,7 +29,7 @@
           <div class="date-field"><label for="date-start">开始日期 <small>UTC</small></label><input type="date" id="date-start" required></div>
           <span class="date-separator" aria-hidden="true">—</span>
           <div class="date-field"><label for="date-end">结束日期 <small>UTC</small></label><input type="date" id="date-end" required></div>
-          <div class="date-shortcuts" aria-label="日期快捷选择"><button type="button" data-days="7">近 7 天</button><button type="button" data-days="30">近 30 天</button></div>
+          <div class="date-shortcuts" aria-label="日期快捷选择"><button type="button" data-range="yesterday">昨天</button><button type="button" data-range="today">今天</button><button type="button" data-days="7">近 7 天</button><button type="button" data-days="30">近 30 天</button></div>
           <label class="report-search"><span>搜索剧目</span><input type="search" id="report-search" placeholder="输入剧名或剧 ID" maxlength="200"></label>
         </div>
         <div id="dimension-filters" class="dimension-filters"></div>
@@ -80,6 +80,6 @@
 </div>
 <script src="/quick-nav.js?v=43969bd46e10"></script>
 <script src="/ui-topbar.js?v=20260903-1"></script>
-<script src="/social-analytics.js?v=20261124-iaa"></script>
+<script src="/social-analytics.js?v=20261124-date-channel"></script>
 </body>
 </html>
