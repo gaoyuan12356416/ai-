@@ -1,6 +1,4 @@
 """Project original X Tag receipts. This module never calls a publisher or X."""
-from collections import Counter
-from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -58,9 +56,11 @@ def open_ledgers(posts, auto, dispatch):
 
 def initialize(db):
     db.execute(DELIVERY_DDL)
+    db.execute("CREATE INDEX IF NOT EXISTS x_tag_failure_job ON x_tag_failed_delivery(job_id)")
     db.execute("CREATE INDEX IF NOT EXISTS x_tag_operations_by_source ON pipeline_x_operation(source_key,generation)")
     db.execute("CREATE TABLE IF NOT EXISTS x_tag_settled_task(task_id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,kind TEXT NOT NULL,proof TEXT NOT NULL,settled_at TEXT NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS a.x_tag_task_wait(task_id INTEGER PRIMARY KEY,queue_id INTEGER UNIQUE NOT NULL,retry_at TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS a.x_tag_task_activity(task_id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,stage TEXT NOT NULL,lease_until TEXT NOT NULL)")
 
 
 def rows(db, sql, args=()):
@@ -123,6 +123,7 @@ def failure_proof(db, task, q, log, expected_job, receipts):
             and log["attempt_count"]>0 and not any(log[k] for k in ("x_post_id","x_post_url","x_media_id","published_at"))
             and not task["publish_id"] and not task["publish_url"]
             and not db.execute("SELECT 1 FROM d.pipeline_publication WHERE source_key=?",(key,)).fetchone()
+            and not db.execute("SELECT 1 FROM d.pipeline_receipt WHERE job_id=?",(job["id"],)).fetchone()
             and not db.execute("SELECT 1 FROM x_post_repost_ledger WHERE queue_id=?",(q["id"],)).fetchone(),
             "later publication evidence or an incompatible native stage exists")
     require(task["status"] in {"unknown","retry_wait","reconciling","failed"},"Auto task has changed phase")
@@ -174,14 +175,16 @@ def project(db, item, receipts=()):
     kind=item["kind"]; stamp=now()
     require(kind in {"upload","late"},"unsupported outcome")
     if previous:
-        require(previous["queue_id"]==qid and previous["kind"]==kind,"conflicting previous settlement")
+        require(previous["queue_id"]==qid and (previous["kind"]==kind or kind=="late"),"conflicting previous settlement")
     if kind=="late":
         receipt=_inspect(db,db,tid)["receipt"]
         pub=one(db,"SELECT job_id,publish_id FROM d.pipeline_publication WHERE source_key=?",("x:queue:"+str(qid),))
         require(pub["publish_id"]==receipt["post_id"] and pub["job_id"]==item["job"]
                 and (not item.get("post") or receipt["post_id"]==item["post"]), "confirmed Post ID differs")
         proof=dict(receipt=receipt,job_id=pub["job_id"])
-        if previous and task["status"]=="published" and task["publish_id"]==receipt["post_id"]:
+        if previous and previous["kind"]=="upload":
+            proof["prior_upload_failure"]=json.loads(previous["proof"])
+        if previous and previous["kind"]=="late" and task["status"]=="published" and task["publish_id"]==receipt["post_id"]:
             refresh_run(db,task["run_id"],stamp)
             return "already"
         target="published"
@@ -210,16 +213,30 @@ def project(db, item, receipts=()):
             db.execute("INSERT INTO d.pipeline_event(job_id,event_type,details_json,created_at) VALUES(?,'x_tag_media_failure_settled',?,?)",
                        (job["id"],stored,stamp))
     db.execute("UPDATE a.x_auto_material_ledger SET last_task_status=?,updated_at=? WHERE task_id=?",(target,stamp,tid))
-    if not previous or task["status"]!=target:
+    if not previous or task["status"]!=target or previous["kind"]!=kind:
         db.execute("""INSERT INTO a.x_auto_event(run_id,task_id,event_type,from_status,to_status,message,details_json,created_at)
                       VALUES(?,?,'x_tag_original_receipt_settled',?,?,?,?,?)""",
                    (task["run_id"],tid,task["status"],target,FAIL_MESSAGE if kind=="upload" else "已核对原帖回执",encode(proof),stamp))
-    db.execute("INSERT OR IGNORE INTO x_tag_settled_task VALUES(?,?,?,?,?)",(tid,qid,kind,encode(proof),stamp))
+    db.execute("""INSERT INTO x_tag_settled_task VALUES(?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE
+                  SET kind=excluded.kind,proof=excluded.proof,settled_at=excluded.settled_at
+                  WHERE x_tag_settled_task.kind<>excluded.kind""",(tid,qid,kind,encode(proof),stamp))
     refresh_run(db,task["run_id"],stamp)
     return "settled"
 
 
 def refresh_waits(db, accounts):
+    leases=rows(db,"""SELECT t.id,t.execution_queue_id,j.stage,j.lease_expires_at
+                      FROM d.pipeline_job j JOIN a.x_auto_task t ON j.source_key='x:queue:'||t.execution_queue_id
+                      JOIN a.x_auto_run r ON r.id=t.run_id
+                      WHERE j.channel='x' AND j.status='running' AND j.stage IN ('prepare','publish')
+                      AND r.status IN ('queued','running') AND t.status NOT IN ('published','failed','skipped','canceled','no_candidate')
+                      AND julianday(j.lease_expires_at)>julianday('now') ORDER BY j.stage""")
+    active={r["id"]:(r["execution_queue_id"],"publishing" if r["stage"]=="publish" else "preparing",r["lease_expires_at"]) for r in leases}
+    old={r[0]:tuple(r[1:]) for r in db.execute("SELECT task_id,queue_id,stage,lease_until FROM a.x_tag_task_activity")}
+    for tid,values in active.items():
+        if old.get(tid)!=values:
+            db.execute("INSERT OR REPLACE INTO a.x_tag_task_activity VALUES(?,?,?,?)",(tid,*values))
+    db.executemany("DELETE FROM a.x_tag_task_activity WHERE task_id=?",[(tid,) for tid in old.keys()-active.keys()])
     gates=rows(db,"""SELECT t.id AS task,t.execution_queue_id AS queue,t.account_id,g.source_key,g.retry_at,g.error,
                       w.retry_at AS previous FROM a.x_auto_task t JOIN a.x_auto_run r ON r.id=t.run_id
                       JOIN d.pipeline_media_gate g ON g.source_key='x:queue:'||t.execution_queue_id
@@ -254,7 +271,7 @@ def refresh_waits(db, accounts):
                       AND error='x_account_verification_rejected' AND retry_at=?""",
                    ("x:queue:"+str(old["queue_id"]),old["retry_at"]))
         db.execute("DELETE FROM a.x_tag_task_wait WHERE task_id=?",(old["task_id"],))
-    return dict(blocked=len(keep),backoff_changed=changes)
+    return dict(blocked=len(keep),backoff_changed=changes,active=len(active))
 
 
 def candidates(db, since):
@@ -287,7 +304,7 @@ def apply_items(db, items, evidence=None):
             state=project(db,item,proof)
             db.commit()
             result[state].append(item["task"])
-        except (Review,ReceiptReconciliationError,sqlite3.OperationalError) as exc:
+        except (Review,ReceiptReconciliationError,sqlite3.Error,json.JSONDecodeError) as exc:
             db.rollback()
             result["review"].append({"task":item["task"],"reason":str(exc)[:180]})
         except BaseException:

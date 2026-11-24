@@ -28,6 +28,11 @@ class RunStates(unittest.TestCase):
         self.assertIsNone(MEDIA.fullmatch("x:POST:/2/tweets"))
         self.assertIsNone(MEDIA.fullmatch("x:POST:/2/users/123/retweets"))
 
+    def test_live_publish_lease_counts_as_execution(self):
+        task=dict(id=7,status="retry_wait",execution_queue_id=83)
+        result=summary(NS(status="running"),[task],{7:"publishing"},"2026-11-24")
+        self.assertEqual((result["display_status"],result["task_counts"]["active"],result["task_counts"]["waiting_result"]),("running",1,0))
+
 
 if __name__=="__main__":
     unittest.main()

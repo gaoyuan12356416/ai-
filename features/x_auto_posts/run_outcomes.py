@@ -22,6 +22,8 @@ def category(task, holds, now):
     if status in TERMINAL:
         return status
     hint = holds.get(field(task, "id"))
+    if hint in {"preparing","publishing"}:
+        return "active"
     if hint:
         return hint
     if status in {"ready", "pending", "retry_wait"} and (field(task, "scheduled_at_utc") or "") > now:
@@ -71,7 +73,7 @@ def read(store, runs, now):
     with closing(sqlite3.connect(Path(store.db_path).resolve().as_uri()+"?mode=ro", uri=True, timeout=3)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("BEGIN")
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE name IN ('pipeline_canonical_hold','x_tag_task_wait')")}
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE name IN ('pipeline_canonical_hold','x_tag_task_wait','x_tag_task_activity')")}
         seen = list(runs)
         for start in range(0, len(seen), 400):
             part = seen[start:start+400]
@@ -81,6 +83,9 @@ def read(store, runs, now):
                       FROM x_auto_task t WHERE t.run_id IN (""" + marks + ")"
             for row in conn.execute(sql, part):
                 groups[row["run_id"]].append(dict(row))
+            if "x_tag_task_activity" in tables:
+                for row in conn.execute("SELECT s.task_id,s.stage FROM x_tag_task_activity s JOIN x_auto_task t ON t.id=s.task_id AND t.execution_queue_id=s.queue_id WHERE t.run_id IN ("+marks+") AND julianday(s.lease_until)>julianday(?)", [*part,now]):
+                    holds[row[0]] = row[1]
             if "x_tag_task_wait" in tables:
                 for row in conn.execute("SELECT w.task_id FROM x_tag_task_wait w JOIN x_auto_task t ON t.id=w.task_id AND t.execution_queue_id=w.queue_id WHERE t.run_id IN ("+marks+")", part):
                     holds[row[0]] = "account_blocked"

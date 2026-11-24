@@ -1007,7 +1007,7 @@ class XAutoPostService:
         for task in tasks:
             item = self._task_item(task)
             category = run_outcomes.category(task, holds, now)
-            item["display_status"] = task.status if category == "active" else category
+            item["display_status"] = holds.get(task.id,task.status) if category == "active" else category
             public_tasks.append(item)
         events, event_total = self._run_events(run.id)
         return {
