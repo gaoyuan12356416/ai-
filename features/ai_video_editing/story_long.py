@@ -107,22 +107,34 @@ def title_template(profiles):
     return template if len(template) >= 25 else set()
 
 
+def poster_signature(picture):
+    # Block means retain the portrait's layout across grading, compression and differently lettered masters.
+    grid = [
+        sum(sum(picture[row * W + x : row * W + x + 8]) for row in range(y, y + 7)) / 56
+        for y in range(0, 70, 7)
+        for x in range(0, W, 8)
+    ]
+    mean = sum(grid) / len(grid)
+    centered = [value - mean for value in grid]
+    norm = math.sqrt(sum(value * value for value in centered))
+    return [value / norm for value in centered] if norm > 50 else []
+
+
 def bounds(p, peers, template, duration):
     head, tail, tail_start = p
     a, b = 0, duration
     # Distinct episodes must actually share the same opening artwork and move away from it.
     # A different master can move the show logo and the episode number on the poster.
-    portrait = head[0][: SIZE * 5 // 8]
+    portrait = poster_signature(head[0])
     matches = [
         h
         for h, _, _ in peers
-        if distance(head[0], h[0]) < 21
-        and distance(portrait, h[0][: len(portrait)]) < 8
+        if sum(a * b for a, b in zip(portrait, poster_signature(h[0]))) >= 0.975
         and distance(head[-1], h[-1]) > 12
     ]
     # A common black frame or a fade from white alone does not identify a poster.
     textured = len(strokes(head[0])) >= 40
-    if textured and len(matches) >= 2 and distance(head[0], head[-1]) > 15:
+    if textured and matches and len(matches) >= min(2, len(peers)) and distance(head[0], head[-1]) > 15:
         exit_at = next((i for i, f in enumerate(head) if distance(f, head[0]) > 12), None)
         if exit_at:
             a = math.ceil(exit_at * 1000 / RATE) + 34
@@ -149,7 +161,7 @@ def continuous(rt, actor, story):
             families[s["identity"]].append(s)
     notes = []
     for family in families.values():
-        if len({s["episode"] for s in family}) < 3 or len({s["asset"]["sha256"] for s in family}) < 3:
+        if len({s["episode"] for s in family}) < 2 or len({s["asset"]["sha256"] for s in family}) < 2:
             continue
         profiles = {}
         for s in family:

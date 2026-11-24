@@ -179,6 +179,17 @@ class ContinuityTest(unittest.TestCase):
                 with self.assertRaises(Fault):
                     studio.configuration({"clip": dict(c, method="cliffhanger", seconds=seconds)})
 
+    def test_recurring_poster_matches_across_different_encodes_but_not_blank_openings(self):
+        w, h = story_long.W, story_long.H
+        pic = bytes(190 if (x // 8 + y // 7) % 2 else 55 for y in range(h) for x in range(w))
+        master = bytes(min(255, x + 25) for x in pic)
+        master = master[: w * 70] + bytes([75]) * (w * (h - 70))
+        scene, other = bytes([85]) * len(pic), bytes([160]) * len(pic)
+        own = ([pic] * 4 + [scene] * 10, [], 0)
+        peer = ([master] * 4 + [other] * 10, [], 0)
+        self.assertGreater(story_long.bounds(own, [peer], set(), 70000)[0], 0)
+        self.assertEqual(story_long.bounds(([scene] * 4 + [other] * 10, [], 0), [peer], set(), 70000)[0], 0)
+
     def test_long_compression_checks_the_measured_cut_and_all_selected_sources(self):
         c = dict(self.clip, strategy_version=3)
         sources = [dict(s, duration_ms=500000) for s in self.story]
