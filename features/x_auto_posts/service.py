@@ -32,6 +32,7 @@ from .selector import ResolverMaterialValidator, SelectionRequest, TwoStageSelec
 from .validation import (
     expected_version,
     normalize_template_payload,
+    profile_model,
     valid_internal_bearer,
 )
 from .x_sidecar import (
@@ -273,6 +274,8 @@ class XAutoPostService:
     def _run_item(run: Any, *, template: Optional[Any] = None, tasks=None) -> Dict[str, Any]:
         item = run.as_dict()
         item["run_id"] = run.id
+        if "profile_model" in run.blacklist_snapshot:
+            item["profile_model"] = run.blacklist_snapshot["profile_model"]
         if item.get("error_message"):
             item["error_message"] = safe_public_message(item["error_message"])
         snapshot = item.get("blacklist_snapshot")
@@ -337,6 +340,7 @@ class XAutoPostService:
         """Return the frozen template DTO without querying live run state."""
 
         config = dict(snapshot.config)
+        config.setdefault("profile_model", "revenue")
         schedule = config.get("schedule") if isinstance(config.get("schedule"), Mapping) else {}
         if schedule.get("mode") == "fixed":
             schedule_summary = ", ".join(schedule.get("times") or [])
@@ -588,13 +592,14 @@ class XAutoPostService:
     def preview(self, template_id: Any, raw: Mapping[str, Any]) -> Dict[str, Any]:
         payload = dict(raw)
         _actor(payload)
-        if set(payload).difference({"expected_version", "account_id"}):
+        if set(payload).difference({"expected_version", "account_id", "profile_model"}):
             raise AutoPostServiceError("invalid_request", "preview request is invalid", 400)
         template = self.store.get_template(template_id)
         if expected_version(payload.get("expected_version")) != template.version:
             raise AutoPostServiceError(
                 "x_auto_template_version_conflict", "template version changed", 409
             )
+        model = profile_model(template.config, payload)
         requested = str(payload.get("account_id") or "").strip()
         account_ids = list(template.config.get("account_ids") or [])
         if requested:
@@ -616,7 +621,9 @@ class XAutoPostService:
                         409,
                     )
                 language = self._account_language(account)
-                selection = self._preview_selector().select_and_reserve(
+                preview_selector = self._preview_selector()
+                preview_selector.preview_profile_model = model
+                selection = preview_selector.select_and_reserve(
                     SelectionRequest(
                         run_id=index,
                         task_id=index,
@@ -648,7 +655,7 @@ class XAutoPostService:
                         "selection": _public_selection(selection.as_dict()),
                     }
                 )
-        return {"ok": True, "preview": results, "items": results, "reserved": False}
+        return {"ok": True, "profile_model": model, "preview": results, "items": results, "reserved": False}
 
     def _run_tasks(self, run: Any, config: Mapping[str, Any]) -> List[Any]:
         existing = {task.account_id: task for task in self.store.list_tasks(run_id=run.id)}
@@ -682,6 +689,8 @@ class XAutoPostService:
                 language = self._account_language(account)
                 account["drama_language"] = language
                 account["language_source"] = "account"
+                from features.x_growth_profile.store import publish_profile_context
+                account["selection_profile"] = publish_profile_context(account_id, profile_model(run.blacklist_snapshot))
                 task = self.store.create_task(
                     run_id=run.id,
                     account_id=account_id,
@@ -741,7 +750,9 @@ class XAutoPostService:
         publish_time: str,
         run_key: str,
         actor: AuditActor = AuditActor(),
+        model: Optional[str] = None,
     ) -> Tuple[Any, bool]:
+        model = model or profile_model(template.config)
         with self._run_create_lock:
             existing = self.store.get_run_by_key(run_key)
             if existing is not None:
@@ -753,6 +764,7 @@ class XAutoPostService:
                     or existing.trigger_type != trigger_type
                     or existing.template_version != template.version
                     or frozen.config_sha256 != template.config_sha256
+                    or profile_model(existing.blacklist_snapshot) != model
                 ):
                     raise AutoPostServiceError(
                         "x_auto_run_idempotency_conflict",
@@ -774,7 +786,7 @@ class XAutoPostService:
                 scheduled_at_utc=scheduled_at.astimezone(UTC),
                 shanghai_date=shanghai_date,
                 publish_time=publish_time,
-                blacklist_snapshot=_blacklist_dict(blacklist),
+                blacklist_snapshot=dict(_blacklist_dict(blacklist), profile_model=model),
                 actor=actor,
             )
             self._run_tasks(run, template.config)
@@ -794,7 +806,7 @@ class XAutoPostService:
     def run_now(self, template_id: Any, raw: Mapping[str, Any]) -> Dict[str, Any]:
         payload = dict(raw)
         actor = _actor(payload)
-        if set(payload).difference({"expected_version", "confirmed", "idempotency_key"}):
+        if set(payload).difference({"expected_version", "confirmed", "idempotency_key", "profile_model"}):
             raise AutoPostServiceError("invalid_request", "run-now request is invalid", 400)
         if payload.get("confirmed") is not True:
             raise AutoPostServiceError(
@@ -821,6 +833,7 @@ class XAutoPostService:
             scheduled_at=now,
             publish_time=now.astimezone(BEIJING_TZ).strftime("%H:%M"),
             run_key=f"x-auto:manual:v1:{digest}",
+            model=profile_model(template.config, payload),
             actor=actor,
         )
         public = self._run_item(
@@ -829,6 +842,7 @@ class XAutoPostService:
         return {
             "ok": True,
             "run_id": run.id,
+            "profile_model": profile_model(run.blacklist_snapshot),
             "run": public,
             "item": public,
             "runner_wakeup_requested": self._kick(),
