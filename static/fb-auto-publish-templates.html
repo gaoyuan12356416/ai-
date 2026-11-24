@@ -8,6 +8,7 @@
   <title>FB Page 自动发布模板 - AI自动后台</title>
   <link rel="stylesheet" href="/ui-topbar.css" />
   <link rel="stylesheet" href="/fb-auto-publish.css?v=hit-material-20261010-v1" />
+  <link rel="stylesheet" href="/fb-auto-publish-templates.css?v=20261120-layout3" />
 </head>
 <body>
   <div class="app">
@@ -43,14 +44,6 @@
       </section>
 
       <div id="pageRoot" class="hidden">
-        <section class="notice warning">
-          <div class="notice-mark">!</div>
-          <div>
-            <strong>这里只维护独立的 FB Page 自动发布模板，不会改动 TT、X 或现有发布队列。</strong>
-            手动执行会创建可追踪的异步计划；连接中断或已返回 Graph 对象 ID 时不会重发。
-          </div>
-        </section>
-
         <section class="stats" aria-label="Page 池统计">
           <article class="stat"><span>Page 池</span><strong id="groupCount">—</strong></article>
           <article class="stat"><span>Page 总数</span><strong id="pageCount">—</strong></article>
@@ -94,7 +87,7 @@
           </form>
 
           <div class="table-wrap">
-            <table>
+            <table class="template-list-table">
               <thead>
                 <tr>
                   <th>模板</th>
@@ -136,24 +129,25 @@
       <div class="dialog-head"><h2 id="materialDialogTitle">爆款素材发布</h2></div>
       <div class="dialog-body material-body">
         <p id="materialTemplateName"></p>
-        <p id="materialScope">对该模板下各语言的 Page 各发布一次同一素材，沿用模板的视频制作和文案配置。此轮为手动加发，不占用日常自动发布次数。</p>
+        <p id="materialScope">先匹配语言，再按受众与题材画像优先分配；低样本、暂无收入或题材未标注的 Page 仍可参与。所有素材构成本轮候选池，每个 Page 最多一条，同一素材可供多个 Page 选用。其他规则按模板执行。</p>
         <div class="field">
           <label for="hitMaterialId" class="required">素材 ID</label>
-          <input id="hitMaterialId" type="text" inputmode="numeric" pattern="[1-9][0-9]{0,19}" maxlength="20" autocomplete="off" placeholder="输入一个素材 ID" required />
-          <span class="helper">仅支持单个素材 ID。已暂停、缺授权、发布结果待核验，以及近 14 天已用或正在使用该素材的 Page 会跳过。</span>
+          <textarea id="hitMaterialId" rows="5" maxlength="6400" autocomplete="off" placeholder="输入多条素材 ID，可用换行、逗号或空格分隔" required></textarea>
+          <span class="helper">支持 1–200 条素材 ID，重复 ID 自动合并。不符合发布条件的 Page 会跳过。未到可投放时间的剧预约在可投放前 30 分钟发布，该时点已过则尽快发布。</span>
         </div>
         <p id="materialStatus" class="status-line" role="status" aria-live="polite"></p>
         <div id="materialResult" class="hidden">
           <a id="materialRunLink" class="button link-button" href="/fb-auto-publish-runs.html">查看发布记录</a>
+          <div id="materialAssignments"></div>
           <details id="materialSkipped" class="hidden">
             <summary id="materialSkippedSummary">跳过的 Page</summary>
-            <div class="material-skips"><table><thead><tr><th>Page ID</th><th>跳过原因</th></tr></thead><tbody id="materialSkippedRows"></tbody></table></div>
+            <div class="material-skips"><table><thead><tr><th>素材 ID</th><th>跳过原因</th></tr></thead><tbody id="materialSkippedRows"></tbody></table></div>
           </details>
         </div>
       </div>
       <div class="dialog-foot">
         <button id="materialClose" class="button" type="button">取消</button>
-        <button id="materialNew" class="button hidden" type="button">再发一个素材</button>
+        <button id="materialNew" class="button hidden" type="button">再发一批素材</button>
         <button id="materialSubmit" class="button primary" type="submit">确认发布</button>
       </div>
     </form>
@@ -162,8 +156,10 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="/ui-topbar.js"></script>
-  <script src="/quick-nav.js?v=d64e9c9ccd31"></script>
+  <script src="/quick-nav.js?v=43969bd46e10"></script>
   <script src="/fb-auto-publish-common.js?v=20260820-list-only-v2"></script>
-  <script src="/fb-auto-publish-templates.js?v=target-midnight-20261110-hit-material-20261010-v1"></script>
+  <script src="/fb-auto-publish-templates.js?v=20261121-pool1"></script>
+  <script src="/candidate-pool-publish.js?v=20261121-pool1"></script>
+<script defer src="/story-copy-settings.js?v=1.1" data-endpoint="fb"></script>
 </body>
 </html>
