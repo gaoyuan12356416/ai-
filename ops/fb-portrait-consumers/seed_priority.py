@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 
-def main(writer):
+def main(writer, verify_only=False):
     os.chdir(writer)
     sys.path.insert(0,str(writer))
     from features.fb_page_portrait.collect import paid, social_input
@@ -58,6 +58,13 @@ def main(writer):
     priority=sorted({str(r['content_id']) for k in ('paid','social') for r in scope[k]
                      if r.get('content_id') and int(r.get('app_id',1479))==1479})
     output=root/'audience-priority.json'
+    report=dict(version=v,priority_ids=len(priority),verified_pages=len(expected),
+                paid_rows=len(scope['paid']),social_rows=len(scope['social']))
+    if verify_only:
+        if json.loads(output.read_text()) != dict(version=v,ids=priority):
+            raise ValueError('published priority list differs from original facts')
+        print(json.dumps(dict(report,verified=True)))
+        return
     with tempfile.NamedTemporaryFile(dir=root,delete=False) as f:
         temp=Path(f.name)
         f.write(encoded(dict(version=v,ids=priority)).encode())
@@ -79,9 +86,13 @@ def main(writer):
                     os.replace(temp,output)
     finally:
         temp.unlink(missing_ok=True)
-    print(json.dumps(dict(version=v,priority_ids=len(priority),verified_pages=len(expected),
-                          paid_rows=len(scope['paid']),social_rows=len(scope['social']))))
+    print(json.dumps(report))
 
 
 if __name__=='__main__':
-    main(Path(sys.argv[1]).resolve())
+    import argparse
+    p=argparse.ArgumentParser()
+    p.add_argument('writer',type=Path)
+    p.add_argument('--verify-only',action='store_true')
+    args=p.parse_args()
+    main(args.writer.resolve(),args.verify_only)
