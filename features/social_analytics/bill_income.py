@@ -26,3 +26,28 @@ def by_campaign(day, site):
         WHERE site_id='{site}' AND event_name IN ('af_purchase','ad_revenue')
           AND event_time >= {start} AND event_time < {stop}
         GROUP BY {groups}"""
+
+
+def merge_settled(insights, bills, keys, metric_defaults):
+    """Use the two bill event types exactly once, including bill-only identities.
+
+    The insight feed is useful intraday. After IAA arrives the insight money may
+    be repopulated by the supplier, so replace its revenue for this source/day.
+    """
+    if not any(row["ad_events"] for row in bills):
+        return insights, False
+    def identity(row):
+        return tuple(str(row.get(key) or "") for key in keys)
+    rows = {identity(row): dict(row, revenue_cents=0, iaa_cents=0) for row in insights}
+    for bill in bills:
+        key = identity(bill)
+        if key not in rows:
+            rows[key] = dict(metric_defaults, **{field: bill.get(field) for field in keys})
+            rows[key].update(date=bill["date"], site_id=bill["site_id"])
+            if "platform" in bill:
+                rows[key]["platform"] = bill["platform"]
+        row = rows[key]
+        row["revenue_cents"] += bill["iap_cents"] + bill["iaa_cents"]
+        row["iaa_cents"] = row.get("iaa_cents", 0) + bill["iaa_cents"]
+        row["updated_at"] = max(str(row.get("updated_at") or ""), str(bill.get("updated_at") or ""))
+    return list(rows.values()), True

@@ -74,7 +74,7 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
                 for key, values in manifest['coverage'].items()}
     report = summarize(catalog, metrics, actor, params, manifest['generated_at'],
                        catalog_errors=errors, source_metadata=errors.source_metadata,
-                       metric_coverage=coverage)
+                       metric_coverage=coverage, iaa_coverage=manifest.get('iaa_coverage', {}))
     age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(manifest['generated_at'])).total_seconds())
     report['meta'].update(content_scope=SCOPE, data_source='ads_ai_hourly_warehouse',
                           warehouse_version=manifest['version'], refresh_interval_seconds=3600,
@@ -86,6 +86,15 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
     ]
     if age > 7200:
         report['warnings'].append('数仓更新已延迟，当前显示上次成功同步的数据；请核对更新时间。')
+    from .bill_income import FIRST_DAY
+    expected = {source: set(dates) for source, dates in coverage.items()
+                if source.split(':')[0] in params['platforms']}
+    missing = {source: sorted(day for day in dates if day >= FIRST_DAY
+                              and day not in manifest.get('iaa_coverage', {}).get(source, ()))
+               for source, dates in expected.items()}
+    report['meta']['iaa_missing_dates'] = {source: dates for source, dates in missing.items() if dates}
+    if any(missing.values()):
+        report['warnings'].append('部分站点或日期的 IAA 广告收入待回传。总收入包含已到的充值和广告收入。')
     if params['start'] < manifest['start'] or params['end'] > manifest['end']:
         report['warnings'].append('所选日期包含尚未入仓的日期，缺失部分不按零统计。')
     if include_titles and 'drama' in params['groups']:

@@ -12,11 +12,12 @@ from .adapters import PLATFORMS, platform_metadata, source_key, source_site
 DIMENSIONS = ("date", "owner", "platform", "drama", "channel", "link_type", "language")
 FIELDS = ("clicks", "views", "installs", "conversions", "revenue_cents", "refund_cents")
 COUNTS = ("links", "published_count", "post_count", "repost_count")
-METRICS = ("clicks", "views", "installs", "conversions", "revenue", "refunds",
+METRICS = ("clicks", "views", "installs", "conversions", "revenue", "iap", "iaa", "refunds",
            "install_rate", "pay_rate") + COUNTS
 LABELS = dict(date="统计日期（UTC）", owner="人员", platform="渠道", drama="剧名", channel="账号/频道",
               link_type="链接类型", language="语言", clicks="落地页点击", views="落地页访问",
-              installs="激活（安装）数", conversions="付费转化数（充值人数）", revenue="收入（USD）",
+              installs="激活（安装）数", conversions="付费转化数（充值人数）", revenue="总收入（USD）",
+              iap="充值收入（USD）", iaa="IAA 广告收入（USD）",
               refunds="退款（USD）", install_rate="点击安装率（%）", pay_rate="安装付费率（%）",
               links="生成链接数", published_count="成功发布数", post_count="X Post 数", repost_count="X Repost 数")
 IDENTITY = ("platform", "site_id", "tenant", "owner", "drama", "channel", "language",
@@ -160,21 +161,25 @@ def scope(actor):
 
 
 def empty():
-    return dict.fromkeys(FIELDS + COUNTS, 0)
+    return dict.fromkeys(FIELDS + COUNTS + ("iaa_cents",), 0)
 
 
 def add(target, source):
-    fields = FIELDS + COUNTS
+    fields = FIELDS + COUNTS + ("iaa_cents",)
     # JSON warehouse facts are already integers. Preserve the legacy numeric
     # conversion path for strings/floats, including its strict validation.
     if all(type(source.get(field, 0)) is int for field in fields):
         for field in fields:
             value = source.get(field, 0)
-            if value < 0 and field not in ('revenue_cents', 'refund_cents'):
+            if value < 0 and field not in ('revenue_cents', 'refund_cents', 'iaa_cents'):
                 raise ReportError('源数据指标异常，暂不能统计', 503)
             target[field] += value
         return
     legacy_add(target, source)
+    ad = source.get("iaa_cents", 0)
+    if type(ad) is not int:
+        raise ReportError('IAA 金额精度异常', 503)
+    target["iaa_cents"] += ad
     # Use the same strict integer validation for publication counts.
     for key in COUNTS[1:]:
         check = dict.fromkeys(FIELDS + ("links",), 0)
@@ -182,9 +187,14 @@ def add(target, source):
         target[key] += check["links"]
 
 
-def dto(value, available=True, publications_available=True):
+def dto(value, available=True, publications_available=True, iaa_available=False):
     result = dict(value)
     result["revenue"] = round(result["revenue_cents"] / 100, 2)
+    ad = result.get("iaa_cents", 0)
+    result["iap_cents"] = result["revenue_cents"] - ad if available else None
+    result["iaa_cents"] = ad if available and iaa_available else None
+    result["iap"] = round(result["iap_cents"] / 100, 2) if available else None
+    result["iaa"] = round(ad / 100, 2) if result["iaa_cents"] is not None else None
     result["refunds"] = round(result["refund_cents"] / 100, 2)
     result["install_rate"] = round(100 * result["installs"] / result["clicks"], 2) if result["clicks"] else None
     result["pay_rate"] = round(100 * result["conversions"] / result["installs"], 2) if result["installs"] else None
@@ -211,7 +221,7 @@ def validate_metrics(metrics, platform, days, site_id=None):
 
 
 def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_errors=None,
-              source_metadata=None, metric_coverage=None):
+              source_metadata=None, metric_coverage=None, iaa_coverage=None):
     """Resolve globally before filtering; never join names or af_channel.
 
     _system_report is an internal collector capability. HTTP handlers must
@@ -356,7 +366,11 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
         available, complete, publication_available = availability(included, day, source_ids)
         applicable = included if source_ids is None else [
             platform for platform in platforms if any(specs[key]["platform"] == platform for key in source_ids)]
-        result = dict(dto(value, available, publication_available),
+        sources = source_ids if source_ids is not None else [k for k, spec in specs.items()
+                                                              if spec["platform"] in included]
+        dates = {day} if day else set(days)
+        iaa_available = any(dates.intersection((iaa_coverage or {}).get(k, ())) for k in sources)
+        result = dict(dto(value, available, publication_available, iaa_available),
                       data_status="complete" if complete else "partial" if available else "unavailable")
         if source_ids is not None:
             result.update(source_keys=sorted(source_ids), platforms=applicable)

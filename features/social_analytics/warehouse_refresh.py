@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from .adapters import PLATFORMS, read_catalogs, source_key
 from .backend_scope import eligible, restrict
+from .bill_income import FIRST_DAY, by_campaign, merge_settled
 from .report import effect_sites
 from .report import FIELDS, ReportError, add, empty
 from .routes import metric_sql
@@ -141,7 +142,7 @@ def collect(env, reader, start=None, end=None):
     if date.fromisoformat(start) > date.fromisoformat(end) or date.fromisoformat(start).year < 2020:
         raise ValueError('invalid_collection_range')
     restricted, _, _, _ = restrict(catalog, [], end)
-    accepted, coverage = [], {}
+    accepted, coverage, iaa_coverage = [], {}, {}
     for platform, spec in PLATFORMS.items():
         for source in spec['sources']:
             site = source['site_id']
@@ -175,6 +176,19 @@ def collect(env, reader, start=None, end=None):
                     source_rows.append(row)
                 print(encoded(dict(event='source_batch', source=source_key(platform, site),
                                    start=batch[0][0], end=batch[-1][1], rows=len(rows))), flush=True)
+            covered = []
+            if end >= FIRST_DAY:
+                daily = defaultdict(list)
+                for row in source_rows:
+                    daily[row['date']].append(row)
+                keys = ('campaign_id', 'adset_id', 'ad_id') if platform == 'facebook' else ('campaign_id',)
+                for day, _ in periods(max(start, FIRST_DAY), end, days=1):
+                    bills = reader.query([by_campaign(day, site)])
+                    daily[day], settled = merge_settled(daily[day], bills, keys, empty())
+                    if settled:
+                        covered.append(day)
+                source_rows = [row for batch in daily.values() for row in batch]
+            iaa_coverage[source_key(platform, site)] = covered
             _, facts, _, audit = restrict(catalog, source_rows, end)
             accepted.extend(facts)
             coverage[source_key(platform, site)] = sorted(populated)
@@ -186,7 +200,7 @@ def collect(env, reader, start=None, end=None):
     except Exception:
         titles = {value: dict(drama_english_name='', drama_english_status='unavailable') for value in ids}
     print(encoded(dict(event='titles_complete', rows=len(titles))), flush=True)
-    return dict(catalog=catalog, metrics=accepted, coverage=coverage, titles=titles,
+    return dict(catalog=catalog, metrics=accepted, coverage=coverage, iaa_coverage=iaa_coverage, titles=titles,
                 start=start, end=end, catalog_errors=dict(errors), source_metadata=errors.source_metadata)
 
 
@@ -410,6 +424,7 @@ def refresh(env, root, start=None, end=None):
         data = collect(env, reader, start, end)
         values = table_rows(data, version)
         manifest = {key: data[key] for key in ('start', 'end', 'coverage', 'catalog_errors', 'source_metadata')}
+        manifest['iaa_coverage'] = data.get('iaa_coverage', {})
         manifest.update(version=version, started_at=started, generated_at=now(),
                         database='snapshots/' + version + '.sqlite3', tables={table: len(rows) for table, rows in values.items()})
         writer = Writer(env)

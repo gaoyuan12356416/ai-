@@ -9,15 +9,17 @@
     views:{label:'落地页访问',hint:'落地页访问次数',color:'#829acc'},
     installs:{label:'安装数',hint:'归因安装量',color:'#54a3a0'},
     conversions:{label:'付费转化数',hint:'每日充值人数累加 · 跨日不去重',color:'#aa93cf'},
-    revenue:{label:'收入 (USD)',hint:'收入金额 · 未扣除退款',color:'#ceac67',money:true},
+    revenue:{label:'总收入 (USD)',hint:'充值与已回传的 IAA 广告收入合计',color:'#ceac67',money:true},
+    iap:{label:'充值收入 (USD)',hint:'应用内购买',color:'#467ab2',money:true},
+    iaa:{label:'IAA 广告收入 (USD)',hint:'按 UTC 收益日统计',color:'#278877',money:true},
     refunds:{label:'退款 (USD)',hint:'退款金额',color:'#c39496',money:true},
     published_count:{label:'成功发布数',hint:'已确认完成的目标发布 · 按 UTC 发布日',color:'#4e809e'},
     post_count:{label:'X Post 数',hint:'X 目标账号 Post',color:'#537bb7'},
     repost_count:{label:'X Repost 数',hint:'X 目标账号 Repost',color:'#7695ae'},
     install_rate:{label:'安装率',percent:true},pay_rate:{label:'付费率',percent:true},links:{label:'生成链接数',hint:'所选 UTC 日期内创建的有效链接',color:'#8a99b0'}
   };
-  const kpiKeys = ['revenue','published_count','clicks','views','installs','conversions','refunds','links'];
-  const chartMetricKeys = ['revenue','published_count','clicks','views','installs','conversions','refunds','post_count','repost_count','links'];
+  const kpiKeys = ['revenue','iap','iaa','published_count','clicks','views','installs','conversions','refunds','links'];
+  const chartMetricKeys = ['revenue','iap','iaa','published_count','clicks','views','installs','conversions','refunds','post_count','repost_count','links'];
   const esc = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const finite = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
   const format = (value,key) => !finite(value) ? '—' : metrics[key]?.money ? '$' + Number(value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : metrics[key]?.percent ? Number(value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) + '%' : Number(value).toLocaleString('en-US',{maximumFractionDigits:2});
