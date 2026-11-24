@@ -6,7 +6,9 @@ from pathlib import Path
 import sqlite3
 import tempfile
 
-from .common import ROOT, chunks, encoded, scope_hash
+from uuid import uuid4
+
+from .common import PORTRAITS, ROOT, chunks, encoded, scope_hash
 
 FILE = ROOT / 'selection' / 'current.sqlite3'
 
@@ -50,13 +52,15 @@ class Builder:
         self.temp = Path(name)
         self.db = sqlite3.connect(self.temp)
         self.db.execute('CREATE TABLE head(payload TEXT NOT NULL,scope TEXT NOT NULL,n INTEGER NOT NULL)')
-        self.db.execute('CREATE TABLE pages(page_id TEXT PRIMARY KEY,projection TEXT NOT NULL) WITHOUT ROWID')
+        self.db.execute('CREATE TABLE pages(page_id TEXT PRIMARY KEY,projection TEXT NOT NULL,'
+                        'revenue_cents INTEGER,hierarchy_version TEXT) WITHOUT ROWID')
         self.seen = set()
 
     def add(self, pid, profile, verified_digest):
         if profile['page_id'] != pid or self.proof['payload_hashes'].get(pid) != verified_digest:
             raise ValueError('unverified selection source')
-        self.db.execute('INSERT INTO pages VALUES(?,?)', (pid, encoded(project(profile))))
+        self.db.execute('INSERT INTO pages VALUES(?,?,?,?)', (pid, encoded(project(profile)),
+                        profile.get('revenue_cents'), profile.get('hierarchy_version')))
         self.seen.add(pid)
 
     def finish(self):
@@ -78,6 +82,8 @@ class Builder:
                 old = None
             if old is None or old['version'] <= self.meta['version']:
                 self.temp.replace(self.path)
+                if self.path == FILE:
+                    share_current(self.path, PORTRAITS / 'matching')
                 if os.name == 'posix':
                     directory = os.open(self.path.parent, os.O_RDONLY)
                     try:
@@ -88,6 +94,23 @@ class Builder:
     def close(self):
         self.db.close()
         self.temp.unlink(missing_ok=True)
+
+
+def share_current(source, directory):
+    """Give the matching services read access to this one verified inode."""
+    temp = directory / ('.matching-' + uuid4().hex)
+    try:
+        os.link(source, temp)
+        os.chown(temp, -1, directory.stat().st_gid)
+        os.chmod(temp, 0o640)
+        os.replace(temp, directory / 'current.sqlite3')
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 @contextmanager

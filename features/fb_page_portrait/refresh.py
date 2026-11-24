@@ -43,6 +43,14 @@ def main():
             atomic_json(root/(data['meta']['version']+'.receipt.json'),proof)
             publish(data,proof,root)
             try:
+                # The audience catalogue keys are DramaWave (1479) content IDs.
+                # Keep zero-income and spend-only source rows in its priority list.
+                ids = {str(r['content_id']) for source in ('paid','social') for r in raw[source]
+                       if r.get('content_id') and int(r.get('app_id',1479)) == 1479}
+                atomic_json(root/'audience-priority.json',dict(version=proof['version'],ids=sorted(ids)))
+            except (OSError, TypeError, ValueError, KeyError) as exc:
+                print(encoded(dict(event='audience_priority_deferred',error=type(exc).__name__)),flush=True)
+            try:
                 from .partition_cache import complete
                 complete(raw)
             except Exception as exc:
