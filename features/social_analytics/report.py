@@ -131,9 +131,11 @@ def identity(row):
 
 
 def resolve(candidates):
-    if not candidates or len({row["key"][0] for row in candidates}) != 1:
+    if not candidates:
         return None
-    if len({identity(row) for row in candidates}) != 1:
+    if len(candidates) > 1 and (
+            len({row["key"][0] for row in candidates}) != 1 or
+            len({identity(row) for row in candidates}) != 1):
         return None
     row = candidates[0]
     return row if row.get("tenant") and row.get("owner") and not row.get("excluded") else None
@@ -259,7 +261,7 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
     def is_selected(row):
         return selected(row, actor, params)
 
-    def emit(row, value):
+    def emit(row, value, *, counters_only=False):
         key = tuple(row[dimension] for dimension in params["groups"])
         if actor.get("_system_report") is True and "owner" in params["groups"]:
             key = (row["tenant"],) + key
@@ -270,11 +272,18 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                 for name in (dimension, dimension + "_label") if name in row})
             if "owner" in params["groups"]:
                 groups[key]["owner_tenant"] = row["tenant"]
-        add(groups[key], value)
-        add(totals, value)
-        add(trend[row["date"]], value)
-        add(platform_values[row["platform"]], value)
-        add(source_values[source_key(row["platform"], row["site_id"])], value)
+        if not value:
+            return
+        destinations = (groups[key], totals, trend[row["date"]], platform_values[row["platform"]],
+                        source_values[source_key(row["platform"], row["site_id"])])
+        if counters_only:
+            # Link and publication counters are integer literals generated below.
+            for field, increment in value.items():
+                for destination in destinations:
+                    destination[field] += increment
+        else:
+            for destination in destinations:
+                add(destination, value)
 
     for metric in metrics:
         platform, day = metric["platform"], metric["date"]
@@ -323,18 +332,21 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
             continue
         for fact in row.get("publications", []):
             publications[fact["id"]].append((row, fact))
-        if not resolved.get(key):
+        if not resolved.get(key) or not is_selected(row):
             continue
-        if is_selected(row) and row["link_id"] not in counted_links and row["date"] in trend:
+        if row["link_id"] not in counted_links and row["date"] in trend:
             counted_links.add(row["link_id"])
-            emit(row, {"links": 1})
-        if is_selected(row) and "date" not in params["groups"]:
+            emit(row, {"links": 1}, counters_only=True)
+        if "date" not in params["groups"]:
             emit(dict(row, date=days[0]), {})
     publication_conflicts = 0
     publication_conflicts_by_platform = defaultdict(int)
     publication_conflicts_by_source = defaultdict(int)
     for candidates in publications.values():
-        if (len({(identity(row), fact["date"], fact["kind"]) for row, fact in candidates}) != 1
+        first_row, first_fact = candidates[0]
+        day, kind = first_fact["date"], first_fact["kind"]
+        if ((len(candidates) > 1 and
+             len({(identity(row), fact["date"], fact["kind"]) for row, fact in candidates}) != 1)
                 or any(not resolved.get((row["platform"], row["site_id"], row["key"][0]))
                        for row, _ in candidates)):
             can_report = actor.get("_system_report") is True or (
@@ -346,11 +358,10 @@ def summarize(catalog, metrics, actor, params, fetched_at, errors=None, catalog_
                 for source_id in {source_key(row["platform"], row["site_id"]) for row, _ in candidates}:
                     publication_conflicts_by_source[source_id] += 1
             continue
-        row, fact = candidates[0]
-        if is_selected(row) and fact["date"] in trend:
-            emit(dict(row, date=fact["date"]), {
-                "published_count": 1, "post_count": int(row["platform"] == "x" and fact["kind"] == "post"),
-                "repost_count": int(row["platform"] == "x" and fact["kind"] == "repost")})
+        if is_selected(first_row) and day in trend:
+            emit(dict(first_row, date=day), {
+                "published_count": 1, "post_count": int(first_row["platform"] == "x" and kind == "post"),
+                "repost_count": int(first_row["platform"] == "x" and kind == "repost")}, counters_only=True)
 
     def availability(included, day=None, source_ids=None):
         needed = {day} if day else set(days)

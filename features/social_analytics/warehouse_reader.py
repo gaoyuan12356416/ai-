@@ -69,7 +69,9 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
         metrics = [json.loads(row[0]) for row in db.execute(
             'SELECT payload FROM effects WHERE dt BETWEEN ? AND ? AND platform IN (' + placeholders + ')',
             [params['start'], params['end']] + params['platforms'])]
-        title_values = {row[0]: json.loads(row[1]) for row in db.execute('SELECT content_id,payload FROM titles')}
+        attach_titles = include_titles and 'drama' in params['groups']
+        if attach_titles:
+            title_values = {row[0]: json.loads(row[1]) for row in db.execute('SELECT content_id,payload FROM titles')}
     coverage = {key: [day for day in values if params['start'] <= day <= params['end']]
                 for key, values in manifest['coverage'].items()}
     report = summarize(catalog, metrics, actor, params, manifest['generated_at'],
@@ -97,7 +99,7 @@ def build_report(app, actor, query, *, include_titles=False, export=False):
         report['warnings'].append('部分站点或日期的 IAA 广告收入待回传。总收入包含已到的充值和广告收入。')
     if params['start'] < manifest['start'] or params['end'] > manifest['end']:
         report['warnings'].append('所选日期包含尚未入仓的日期，缺失部分不按零统计。')
-    if include_titles and 'drama' in params['groups']:
+    if attach_titles:
         for row in report['all_rows']:
             row.update(title_values.get(row['drama'], {'drama_english_name': '', 'drama_english_status': 'missing'}))
     return report
