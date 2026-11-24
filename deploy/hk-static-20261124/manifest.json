@@ -1,0 +1,168 @@
+{
+  "files": {
+    "pipeline-drain-diagnostics.js": {
+      "commit": "f1ffd28f10a41bb14c7c49102a28464c6c9bd3f5",
+      "content_type": "application/javascript",
+      "etag": "\"6afd219b-ec3\"",
+      "git_path": "static/pipeline-drain-diagnostics.js",
+      "mtime": 1794974107,
+      "response_headers": {},
+      "sha256": "e77a0a73a27000360c2728e4f8fe7ad0e67aafcdeae6e9b7933227dc10d35076",
+      "size": 3779
+    },
+    "pipeline-monitor.css": {
+      "commit": "82dcc3528df7ad0bbe889660886081650d87ec7e",
+      "content_type": "text/css",
+      "etag": "\"6aebf124-2b7b\"",
+      "git_path": "static/pipeline-monitor.css",
+      "mtime": 1793847588,
+      "response_headers": {},
+      "sha256": "d008b14869127885a06c9c34f655e0db556bd50161db8f8a98ac56b086734759",
+      "size": 11131
+    },
+    "pipeline-monitor.html": {
+      "commit": "c6d5c41ff82b2106f9cbf0ce052b8c674b36883e",
+      "content_type": "text/html",
+      "etag": "\"6b0408b0-24a1\"",
+      "git_path": "static/pipeline-monitor.html",
+      "mtime": 1795426480,
+      "response_headers": {},
+      "sha256": "88053da7dfdf6a2379ca1adba80fa8b57c636133fcf345e58307608205c29834",
+      "size": 9377
+    },
+    "pipeline-monitor.js": {
+      "commit": "c6d5c41ff82b2106f9cbf0ce052b8c674b36883e",
+      "content_type": "application/javascript",
+      "etag": "\"6b0408b0-762d\"",
+      "git_path": "static/pipeline-monitor.js",
+      "mtime": 1795426480,
+      "response_headers": {},
+      "sha256": "d1f426dbee11e4a54dec2a2308ba756d4a6883d2500586e7c53df3fa982802c5",
+      "size": 30253
+    },
+    "quick-nav.js": {
+      "commit": "e92bf7de31575f7f9cbbd38cd4fb61a5a112c3f8",
+      "content_type": "application/javascript",
+      "etag": "\"6afffc98-a435\"",
+      "git_path": "static/quick-nav.js",
+      "mtime": 1795161240,
+      "response_headers": {},
+      "sha256": "43969bd46e100762a94077fa6e7920619f47aba10627d63a07bfe39821f3a944",
+      "size": 42037
+    },
+    "social-analytics.css": {
+      "commit": "54569d0c655fb74891f6b23e2afc64b40650a7e3",
+      "content_type": "text/css",
+      "etag": "\"6ad7350f-4378\"",
+      "git_path": "static/social-analytics.css",
+      "mtime": 1792488719,
+      "response_headers": {},
+      "sha256": "024fabc078941852c4ecb64e1025beb95201124cf81e466ff56a8ce77258b8c0",
+      "size": 17272
+    },
+    "social-analytics.html": {
+      "commit": "54569d0c655fb74891f6b23e2afc64b40650a7e3",
+      "content_type": "text/html",
+      "etag": "\"6b04f9d4-2438\"",
+      "git_path": "static/social-analytics.html",
+      "mtime": 1795488212,
+      "response_headers": {},
+      "sha256": "463b5a5452a74ef903562a1f2cd787713d8febdb7cdec6ae5d6a69f919390427",
+      "size": 9272
+    },
+    "social-analytics.js": {
+      "commit": "54569d0c655fb74891f6b23e2afc64b40650a7e3",
+      "content_type": "application/javascript",
+      "etag": "\"6b04f9d4-8f97\"",
+      "git_path": "static/social-analytics.js",
+      "mtime": 1795488212,
+      "response_headers": {},
+      "sha256": "9e0001a75aa7b008b08942f917310e792264eb55b0cee0b23e2ddec29b6e72f3",
+      "size": 36759
+    },
+    "ui-topbar.css": {
+      "commit": "c6d5c41ff82b2106f9cbf0ce052b8c674b36883e",
+      "content_type": "text/css",
+      "etag": "\"6a41e791-629\"",
+      "git_path": "static/ui-topbar.css",
+      "mtime": 1782704017,
+      "response_headers": {},
+      "sha256": "bf448d78123cd152f579130d8a25d69fe0784a3542ada554df8e1afdafe56243",
+      "size": 1577
+    },
+    "ui-topbar.js": {
+      "commit": "e92bf7de31575f7f9cbbd38cd4fb61a5a112c3f8",
+      "content_type": "application/javascript",
+      "etag": "\"6afffc98-b0b\"",
+      "git_path": "static/ui-topbar.js",
+      "mtime": 1795161240,
+      "response_headers": {},
+      "sha256": "db2d3427364e87252e6a9eba0fa9eb14247d0a98e6394be4c6c8d61cc5889ab4",
+      "size": 2827
+    },
+    "youtube-publish.css": {
+      "commit": "5f035cee82b4f69024fec7d76ac708121509eede",
+      "content_type": "text/css",
+      "etag": "\"6b001976-11178\"",
+      "git_path": "static/youtube-publish.css",
+      "mtime": 1795168630,
+      "response_headers": {},
+      "sha256": "0e4158ec756a67c00ec0e4334dcebc7293fede2fe8b810851a4acfaf76323152",
+      "size": 70008
+    }
+  },
+  "urls": {
+    "/pipeline-drain-diagnostics.js?v=e77a0a73a270": {
+      "cache_control": "public, max-age=31536000, immutable",
+      "file": "pipeline-drain-diagnostics.js"
+    },
+    "/pipeline-monitor.css?v=20261105accounting1": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "pipeline-monitor.css"
+    },
+    "/pipeline-monitor.html": {
+      "cache_control": "",
+      "file": "pipeline-monitor.html"
+    },
+    "/pipeline-monitor.js?v=20261123cpuassist": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "pipeline-monitor.js"
+    },
+    "/quick-nav.js?v=43969bd46e10": {
+      "cache_control": "public, max-age=31536000, immutable",
+      "file": "quick-nav.js"
+    },
+    "/social-analytics.css?v=20261020-facebook-v2": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "social-analytics.css"
+    },
+    "/social-analytics.html": {
+      "cache_control": "",
+      "file": "social-analytics.html"
+    },
+    "/social-analytics.js?v=20261124-iaa": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "social-analytics.js"
+    },
+    "/ui-topbar.css": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "ui-topbar.css"
+    },
+    "/ui-topbar.css?v=20260903-1": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "ui-topbar.css"
+    },
+    "/ui-topbar.js": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "ui-topbar.js"
+    },
+    "/ui-topbar.js?v=20260903-1": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "ui-topbar.js"
+    },
+    "/youtube-publish.css?v=20260917-player-badges-v1": {
+      "cache_control": "public, max-age=300, must-revalidate",
+      "file": "youtube-publish.css"
+    }
+  }
+}

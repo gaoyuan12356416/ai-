@@ -1,0 +1,20 @@
+[Unit]
+Description=Verify HK static release against currently published assets
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/var/www/ai-hk-static/current
+ExecStart=/usr/bin/python3 -B -u static_assets.py guard --release . --port 19985 --live-root /usr/share/nginx/html --suspend-file /var/www/ai-hk-static/state/suspended
+Restart=on-failure
+RestartSec=10
+CPUQuota=25%
+MemoryLimit=64M
+Nice=15
+IOSchedulingClass=idle
+ProtectSystem=strict
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
