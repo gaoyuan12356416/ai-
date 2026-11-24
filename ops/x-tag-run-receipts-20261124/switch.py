@@ -40,8 +40,9 @@ def main(mode):
     after=str(prefix)+"-after.json"
     call(sys.executable,HEALTH,"snapshot","--lane","x","--output",before)
     was_active=state(RUNNER+".timer")=="active"
-    owners=[unit for unit in OWNERS if state(unit)=="active"]
-    if len(owners)!=len(OWNERS):
+    affected=["x-tag-auto.service"] if mode=="revise-summary" else OWNERS
+    owners=[unit for unit in affected if state(unit)=="active"]
+    if len(owners)!=len(affected):
         raise RuntimeError("check the existing X Tag services before switching")
     # Wait for any externally owned request to finish with its original owner.
     while busy():
@@ -52,8 +53,9 @@ def main(mode):
         while busy():
             time.sleep(2)
         installer=str(OPS/"install.py")
-        call(sys.executable,installer,"rollback" if mode=="rollback" else "code")
-        call("systemctl","daemon-reload")
+        call(sys.executable,installer,"code" if mode=="activate" else mode)
+        if mode!="revise-summary":
+            call("systemctl","daemon-reload")
         call("systemctl","restart",*owners)
         if mode=="activate":
             call(sys.executable,installer,"web")
@@ -67,5 +69,5 @@ def main(mode):
 
 if __name__=="__main__":
     parser=argparse.ArgumentParser()
-    parser.add_argument("mode",choices=("activate","rollback"))
+    parser.add_argument("mode",choices=("activate","rollback","revise-summary"))
     main(parser.parse_args().mode)

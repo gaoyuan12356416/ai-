@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -367,6 +368,17 @@ class XAutoPostServiceTests(unittest.TestCase):
         self.assertEqual(item["last_run"]["id"], run.id)
         self.assertEqual(item["last_run_status"], "queued")
         self.assertEqual(item["last_run_at"], run.created_at)
+        task = self.store.create_task(run_id=run.id, account_id="101", account_snapshot_version=1)
+        finished = "2026-08-11T10:15:00+00:00"
+        with sqlite3.connect(self.store.db_path) as db:
+            db.execute("UPDATE x_auto_task SET status='failed',finished_at_utc=? WHERE id=?", (finished,task.id))
+        template_run = service.templates({})["templates"][0]["last_run"]
+        listed_run = service.runs({})["runs"][0]
+        detail = service.run(run.id)
+        for view in (template_run, listed_run, detail["run"]):
+            self.assertEqual(view["last_progress_at_utc"], finished)
+            self.assertEqual(view["task_counts"]["failed"], 1)
+        self.assertEqual([t["display_status"] for t in detail["tasks"]], ["failed"])
 
     def test_disabled_template_does_not_advertise_next_run(self):
         service = self.service()

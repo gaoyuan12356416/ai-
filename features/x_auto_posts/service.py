@@ -999,10 +999,9 @@ class XAutoPostService:
     def run(self, run_id: Any) -> Dict[str, Any]:
         run = self.store.get_run(run_id)
         template = self.store.get_template(run.template_id, version=run.template_version)
-        tasks = self.store.list_tasks(run_id=run.id)
         now = self._now().isoformat(timespec="seconds")
-        _, holds = run_outcomes.read(self.store, [run], now)
-        public_run = self._run_item(run, template=template, outcome=run_outcomes.summary(run, tasks, holds, now))
+        outcome, holds, tasks = run_outcomes.detail(self.store, run, now)
+        public_run = self._run_item(run, template=template, outcome=outcome)
         public_tasks = []
         for task in tasks:
             item = self._task_item(task)

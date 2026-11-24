@@ -79,7 +79,7 @@ def switch(phase):
 def rollback():
     plan=json.loads(PLAN.read_text())
     for r in plan:
-        if str(Path(r["alias"]).resolve())!=r["path"] or sha(Path(r["path"])) not in (r["after"],r["before"]):
+        if str(Path(r["alias"]).resolve())!=r["path"] or sha(Path(r["path"])) not in [r["after"],r["before"],*r.get("intermediate",[])]:
             raise ValueError("later change; review "+r["path"])
     subprocess.run(["systemctl","disable","--now","x-tag-receipt-settle.timer"],check=False)
     subprocess.run(["systemctl","stop","x-tag-receipt-settle.service"],check=False)
@@ -92,9 +92,32 @@ def rollback():
     print("Restored code and web assets. Activate both X Tag processes in their next safe publishing gap.")
 
 
+def revise_summary():
+    plan=prepare()
+    targets={str(LIVE/"features/x_auto_posts"/name) for name in ("run_outcomes.py","service.py")}
+    selected=[r for r in plan if r["alias"] in targets]
+    if len(selected)!=len(targets):raise ValueError("summary module manifest does not match")
+    for r in selected:
+        updated=sha(Path(r["source"]))
+        current=sha(Path(r["path"]))
+        if not updated or str(Path(r["alias"]).resolve())!=r["path"] or current not in [r["after"],*r.get("intermediate",[])]:
+            raise ValueError("concurrent change: "+r["alias"])
+        if r["after"]!=updated:
+            r.setdefault("intermediate",[]).append(r["after"])
+            r["after"]=updated
+    # Preserve the original backups for a full rollback, including an interrupted switch.
+    temp=PLAN.with_suffix(".new")
+    temp.write_text(json.dumps(plan,indent=2))
+    os.replace(temp,PLAN)
+    for r in selected:
+        if sha(Path(r["path"]))!=r["after"]:atomic(r["path"],r["source"],r)
+        if sha(Path(r["path"]))!=r["after"]:raise ValueError("summary readback failed")
+
+
 if __name__=="__main__":
-    parser=argparse.ArgumentParser();parser.add_argument("phase",choices=("prepare","code","web","rollback"))
+    parser=argparse.ArgumentParser();parser.add_argument("phase",choices=("prepare","code","web","rollback","revise-summary"))
     phase=parser.parse_args().phase
     if phase=="prepare":print(len(prepare()))
     elif phase=="rollback":rollback()
+    elif phase=="revise-summary":revise_summary()
     else:switch(phase)

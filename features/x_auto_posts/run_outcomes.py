@@ -4,6 +4,8 @@ from contextlib import closing
 from pathlib import Path
 import sqlite3
 
+from .core import _task_from_row
+
 TERMINAL = ("published", "skipped", "no_candidate", "failed", "canceled")
 WAITING = ("unknown", "waiting_release", "historical_pause", "account_blocked",
            "waiting_result", "retry_wait", "ready", "pending")
@@ -64,11 +66,28 @@ def summary(run, tasks, holds, now):
 
 
 def read(store, runs, now):
+    summaries, holds, _ = _read(store,runs,now,include_tasks=False)
+    return summaries, holds
+
+
+def detail(store, run, now):
+    summaries, holds, tasks = _read(store,[run],now,include_tasks=True)
+    return summaries[run.id], holds, tasks
+
+
+def _read(store, runs, now, *, include_tasks):
     runs = {r.id: r for r in runs}
+    records = []
     if not runs:
-        return {}, {}
+        return {}, {}, records
     if not getattr(store, "db_path", None):
-        return {i: summary(r, store.list_tasks(run_id=i), {}, now) for i, r in runs.items()}, {}
+        result = {}
+        for rid, run in runs.items():
+            tasks = store.list_tasks(run_id=rid)
+            result[rid] = summary(run, tasks, {}, now)
+            if include_tasks:
+                records.extend(tasks)
+        return result, {}, records
     groups, holds = defaultdict(list), {}
     with closing(sqlite3.connect(Path(store.db_path).resolve().as_uri()+"?mode=ro", uri=True, timeout=3)) as conn:
         conn.row_factory = sqlite3.Row
@@ -78,11 +97,14 @@ def read(store, runs, now):
         for start in range(0, len(seen), 400):
             part = seen[start:start+400]
             marks = ",".join("?" for _ in part)
-            sql = """SELECT t.id,t.run_id,t.status,t.unknown_outcome,t.execution_queue_id,t.scheduled_at_utc,
-                      t.selected_at_utc,t.reserved_at_utc,t.bridged_at_utc,t.published_at_utc,t.finished_at_utc
-                      FROM x_auto_task t WHERE t.run_id IN (""" + marks + ")"
+            fields = "t.*" if include_tasks else (
+                "t.id,t.run_id,t.status,t.unknown_outcome,t.execution_queue_id,t.scheduled_at_utc,"
+                "t.selected_at_utc,t.reserved_at_utc,t.bridged_at_utc,t.published_at_utc,t.finished_at_utc")
+            sql = "SELECT "+fields+" FROM x_auto_task t WHERE t.run_id IN ("+marks+") ORDER BY t.id"
             for row in conn.execute(sql, part):
                 groups[row["run_id"]].append(dict(row))
+                if include_tasks:
+                    records.append(_task_from_row(row))
             if "x_tag_task_activity" in tables:
                 for row in conn.execute("SELECT s.task_id,s.stage FROM x_tag_task_activity s JOIN x_auto_task t ON t.id=s.task_id AND t.execution_queue_id=s.queue_id WHERE t.run_id IN ("+marks+") AND julianday(s.lease_until)>julianday(?)", [*part,now]):
                     holds[row[0]] = row[1]
@@ -92,4 +114,4 @@ def read(store, runs, now):
             if "pipeline_canonical_hold" in tables:
                 for row in conn.execute("SELECT t.id FROM x_auto_task t JOIN pipeline_canonical_hold h ON h.source_key='x:auto:'||t.id WHERE t.run_id IN ("+marks+") AND h.reason='historical_preparation_only'", part):
                     holds[row[0]] = "historical_pause"
-    return {i: summary(run, groups[i], holds, now) for i, run in runs.items()}, holds
+    return {i: summary(run, groups[i], holds, now) for i, run in runs.items()}, holds, records
