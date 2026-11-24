@@ -70,7 +70,6 @@ def operation(rt, actor, op):
 
 
 def submit(rt, actor, sid, body):
-    from .studio import configuration
     op=body.get('operation_id','')
     check(isinstance(op,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',op),'operation_required','缺少本次选择操作编号')
     values=body.get('items')
@@ -92,11 +91,13 @@ def submit(rt, actor, sid, body):
             session=db.execute('SELECT * FROM studio_sessions WHERE id=? AND owner=?',(sid,who)).fetchone()
             check(session,'session_missing','创作不存在',404)
             check(body.get('version')==session['version'],'version_conflict','素材选择已更新，请刷新后合并你的选择',409)
-            cfg=configuration(body.get('config',json.loads(session['config'])))
+            from .story_receipts import session_config
+            cfg=session_config(body.get('config',json.loads(session['config'])),session['edit_version'])
             revision=session['selection_revision']+1
         else:
-            sid=ident('ss');cfg=configuration(body.get('config',{}));revision=1
-            db.execute('INSERT INTO studio_sessions(id,owner,title,sources,config,updated) VALUES(?,?,?,?,?,?)',(sid,who,items[0]['name'][:180], '[]',packed(cfg),now))
+            from .story_receipts import initial
+            sid=ident('ss');edit_version,cfg=initial(db,body.get('config',{}));revision=1
+            db.execute('INSERT INTO studio_sessions(id,owner,title,sources,config,updated,edit_version) VALUES(?,?,?,?,?,?,?)',(sid,who,items[0]['name'][:180], '[]',packed(cfg),now,edit_version))
             session=db.execute('SELECT * FROM studio_sessions WHERE id=?',(sid,)).fetchone()
         bid=ident('sb')
         db.execute('INSERT INTO studio_source_batches(id,session,owner,revision,created,updated) VALUES(?,?,?,?,?,?)',(bid,sid,who,revision,now,now))
@@ -113,6 +114,7 @@ def submit(rt, actor, sid, body):
         for run in db.execute("SELECT * FROM studio_runs WHERE session=? AND status IN ('waiting_sources','needs_attention')",(sid,)).fetchall():
             frozen=json.loads(run['snapshot'])
             db.execute("UPDATE studio_runs SET status='superseded',error='已按新的素材选择继续',updated=? WHERE id=?",(now,run['id']))
+            frozen.pop('edit_plan_id',None)
             frozen.update(selection_id=bid,selection_revision=revision,source_ids=ready)
             rid=ident('sr');replacement='selection-'+run['id']+'-'+bid
             db.execute('INSERT INTO studio_runs(id,session,owner,operation,digest,snapshot,status,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?)',

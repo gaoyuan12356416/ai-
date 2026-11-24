@@ -18,10 +18,10 @@
   const clone = (v) => JSON.parse(JSON.stringify(v)),
     op = () => crypto.randomUUID();
   const methods = {
-    hook_first: ["热点前置", "精彩开场，接回完整叙事"],
+    hook_first: ["热点前置", "精彩开头后完整连播"],
     highlight_montage: ["高燃混剪", "串联亮点，紧凑呈现"],
     golden_three: ["黄金三段", "开场 · 剧情 · 悬念"],
-    cliffhanger: ["爆点引流", "铺垫冲突，留下悬念"],
+    cliffhanger: ["爆点引流", "围绕一个剧情问题，在答案揭晓前收住"],
   };
   const effects = {
     basic: "基础调整",
@@ -187,6 +187,7 @@
     if (!$("modal").open) $("modal").showModal();
   }
   function closeModal() {
+    window.AIEditorStory.close();
     if (uploading) {
       toast("文件正在上传，请稍候");
       return;
@@ -394,12 +395,27 @@
       if (session?.id === sid && epoch === navigationEpoch) queueRefresh();
     }
   }
+  function clipDuration(c) {
+    if(c.method==="hook_first") {
+      if (!assets.length || assets.length<sourceCount()) return "素材就绪后显示预计总时长";
+      const grouping=config().merge===false?assets.map(a=>[a]):[assets];
+      const estimates=grouping.map(group=>{
+        const windows=(analysis?.sources||[]).filter(s=>group.some(a=>a.id===s.source_id)).flatMap(s=>s.candidates||[]);
+        const body=group.reduce((n,a)=>n+(a.duration_ms||a.metadata?.duration_ms||0),0);
+        if(!windows.length)return time(body)+" 原片＋开头";
+        const added=Math.min(Math.max(...group.map(a=>a.duration_ms||a.metadata?.duration_ms||0)),1800+Math.max(...windows.map(e=>e.end_ms-e.start_ms)));
+        return "约 "+time(body+added);
+      });
+      return estimates.join(" / ");
+    }
+    return c.seconds?c.seconds+" 秒":c.strategy_version===2?"约 60～90 秒":"自动";
+  }
   function configSummary(c) {
     if (c.youtube_regular) {
       const y = c.youtube_regular;
       return `<div class="configuration-summary"><strong>YouTube 普通视频</strong><div>正片 ${y.body_source_ids.length} 条 · ${y.hook_source_ids.length ? "片头从指定的 " + y.hook_source_ids.length + " 条素材选取" : "片头从正片选取"}</div></div>`;
     }
-    return `<div class="configuration-summary"><strong>${c.clip ? esc(methods[c.clip.method]?.[0]) : "视频创作"}${c.narration ? " · 影视解说" : ""}${c.translation ? " · 视频翻译" : ""}</strong><div class="summary-grid"><div><span>素材处理</span>${c.merge === false ? "逐条处理" : "合并素材"}</div><div><span>输出数量</span>${(c.merge === false ? sourceCount() : 1) * (c.clip?.script_count || 1) * (c.clip?.variant_count || 1)} 条</div>${c.clip ? `<div><span>目标时长</span>${c.clip.seconds ? c.clip.seconds + " 秒" : "自动"}</div><div><span>脚本 × 裂变</span>${c.clip.script_count} × ${c.clip.variant_count}</div>` : ""}${c.translation ? `<div><span>翻译语种</span>${esc(languageName(c.translation.language))}</div><div><span>字幕</span>${c.translation.mode === "bilingual" ? "双语" : "仅译文"}</div>` : ""}</div></div>`;
+    return `<div class="configuration-summary"><strong>${c.clip ? esc(methods[c.clip.method]?.[0]) : "视频创作"}${c.narration ? " · 影视解说" : ""}${c.translation ? " · 视频翻译" : ""}</strong><div class="summary-grid"><div><span>素材处理</span>${c.merge === false ? "逐条处理" : "合并素材"}</div><div><span>输出数量</span>${(c.merge === false ? sourceCount() : 1) * (c.clip?.script_count || 1) * (c.clip?.variant_count || 1)} 条</div>${c.clip ? `<div><span>目标时长</span>${esc(clipDuration(c.clip))}</div><div><span>脚本 × 裂变</span>${c.clip.script_count} × ${c.clip.variant_count}</div>` : ""}${c.translation ? `<div><span>翻译语种</span>${esc(languageName(c.translation.language))}</div><div><span>字幕</span>${c.translation.mode === "bilingual" ? "双语" : "仅译文"}</div>` : ""}</div></div>`;
   }
   function languageName(code) {
     return caps.languages?.find((x) => x.code === code)?.name || code;
@@ -430,7 +446,7 @@
       )
       .join("");
     html += runs
-      .filter((r) => r.kind === "create" || r.status !== "completed")
+      .filter((r) => r.kind !== "plan" && (r.kind === "create" || r.status !== "completed"))
       .map((r) => {
         const p = Production.describe(r);
         return `<div class="run-card ${p.tone}"><header><strong>${esc(p.title)}</strong><span>${p.total ? `成片 ${p.completed}/${p.total}` : ""}</span></header><p>${esc(p.detail)}</p>${p.completed ? `<button class="primary" data-run-results="${r.id}">查看成片 ${p.completed} 条</button>` : ""}${r.status === "failed" ? `<button data-retry="${r.id}">重试失败项</button>` : ""}</div>`;
@@ -441,6 +457,13 @@
   }
   function updateComposer() {
     const c = config();
+    const story = c.clip?.strategy_version===2 && sourceCount()>0;
+    $("storyBar").hidden=!story;
+    if(story){
+      $("storySummary").textContent="爆点引流 · "+clipDuration(c.clip)+" · "+
+        (c.clip.story_order==="episode" && session?.story_order_hint?.verified?"按集号顺叙":"按选入顺序");
+      $("storyOrderLabel").textContent=window.AIEditorStory.orderText(session,c.clip.story_order);
+    }
     $("configChips").innerHTML = [
       "clip",
       "narration",
@@ -669,6 +692,40 @@
     view = "source";
     await refresh();
   }
+  const planOperations = new Map();
+  async function produce(c, planId) {
+    await saveChain;
+    const signature=JSON.stringify([session.id,session.selection_id || assets.map(a=>a.id),c,planId]);
+    if (!requestReceipt || requestReceipt.signature!==signature) requestReceipt={signature,operation:op()};
+    await api("/studio/sessions/"+session.id+"/submit",{
+      config:c,version:session.version,operation_id:requestReceipt.operation,...(planId?{edit_plan_id:planId}:{})
+    });
+    requestReceipt=null;
+    toast("已提交，云端将持续制作");
+    await refresh();
+  }
+  async function openStory() {
+    await saveChain;
+    return window.AIEditorStory.open({
+      api,esc,modal:openModal,get:()=>session,act:action,
+      settings:()=>openConfig("clip"),
+      sync:async(item)=>{if(item && item.id===session?.id && item.version>=session.version)adoptSession(item);await refresh(true);},
+      change:async(key)=>{
+        const c=config();await save({config:{...c,clip:{...c.clip,[key]:(c.clip[key]||0)+1}}});
+      },
+      request:async(s)=>{
+        const sig=JSON.stringify([s.id,s.selection_id||s.source_ids,s.config]);
+        if(!planOperations.has(sig))planOperations.set(sig,op());
+        const answer=await api("/studio/sessions/"+s.id+"/edit-plan",{config:s.config,version:s.version,operation_id:planOperations.get(sig)});
+        await refresh();
+        return answer;
+      },
+      submit:async(pid)=>{
+        if(session.edit_plan?.id!==pid)throw new Error("剪辑方案已更新，请重新打开核对");
+        await produce(config(),pid);closeModal();
+      },
+    });
+  }
   async function send() {
     await saveChain.catch(() => {});
     if (!sourceCount()) return openAssets();
@@ -679,22 +736,8 @@
       !text &&
       (c.clip || c.narration || c.translation || c.youtube_regular)
     ) {
-      const signature = JSON.stringify([
-        session.id,
-        session.selection_id || assets.map((a) => a.id),
-        c,
-      ]);
-      if (!requestReceipt || requestReceipt.signature !== signature)
-        requestReceipt = { signature, operation: op() };
-      await api("/studio/sessions/" + session.id + "/submit", {
-        config: c,
-        version: session.version,
-        operation_id: requestReceipt.operation,
-      });
-      requestReceipt = null;
+      await produce(c,session.edit_plan?.id);
       $("prompt").value = "";
-      toast("已提交，云端将持续制作");
-      await refresh();
     } else if (text) {
       if (analysis?.status !== "succeeded") {
         await analyze();
@@ -1553,7 +1596,8 @@
       languages = (caps.languages || []).map((l) => [l.code, l.name]);
     let body = "";
     if (kind === "clip") {
-      c.method ||= "hook_first";
+      c.method ||= session.edit_version===2 ? "cliffhanger" : "hook_first";
+      if (!config().clip && session.edit_version===2) c.strategy_version=2;
       body =
         `<div class="method-grid">${Object.entries(methods)
           .map(
@@ -1564,18 +1608,10 @@
         field(
           "duration",
           "剪辑时长",
-          select(
-            "duration",
-            [
-              ["", "自动选择"],
-              ...(caps.durations || []).map((x) => [
-                x.seconds,
-                `${x.min}–${x.max} 秒`,
-              ]),
-            ],
-            c.seconds ?? "",
-          ),
+          input("duration", c.seconds ?? "", 'type="number" min="1" max="86400" placeholder="自动"'),
         ) +
+        field("storyOrder","成片讲述顺序",select("storyOrder",[["episode","按集号顺叙"],["selection","按我选入的顺序"]],c.story_order||"episode")) +
+        '<p id="cutExpectation" class="settings-note wide"></p>' +
         field(
           "scriptCount",
           "脚本数量",
@@ -1693,8 +1729,15 @@
     );
     $("cancelConfig").onclick = closeModal;
     if (kind === "clip") {
-      const durationVisibility = () =>
-        ($("duration").closest("label").hidden = c.method === "hook_first");
+      const durationVisibility = () => {
+        const modern=c.method==="cliffhanger" && c.strategy_version===2;
+        $("duration").closest("label").hidden=c.method==="hook_first";
+        $("duration").placeholder=modern?"自动，约 60～90 秒":"自动";
+        $("storyOrder").closest("label").hidden=!modern;
+        $("cutExpectation").textContent=modern?window.AIEditorStory.orderText(session,$("storyOrder").value)
+          : c.method==="hook_first"?"精彩开头后完整连播 · "+clipDuration(c):"";
+      };
+      $("storyOrder").onchange=durationVisibility;
       durationVisibility();
       const protectionVisibility = () => {
         $("subtitleProtectionOptions").hidden = !document.querySelector(
@@ -1718,6 +1761,7 @@
           (b) =>
             (b.onclick = () => {
               c.method = b.dataset.method;
+              if(c.method==="cliffhanger")c.strategy_version=2;
               $("modalBody")
                 .querySelectorAll("[data-method]")
                 .forEach((el) => el.classList.toggle("active", el === b));
@@ -1732,12 +1776,28 @@
             if (analysis?.status !== "succeeded")
               throw new Error("请等待素材解析完成");
             $("scriptStatus").textContent = "正在生成…";
-            const d = await api("/studio/sessions/" + session.id + "/scripts", {
+            const scriptSid=session.id;
+            const payload={
               language: $("language").value,
               seconds: Number($("seconds").value),
               clip: config().clip,
               merge: config().merge !== false,
-            });
+            };
+            let d=await api("/studio/sessions/"+scriptSid+"/scripts",payload);
+            if(d.status==="preparing") {
+              const runId=d.run_id;
+              while(session?.id===scriptSid && modalKind==="narration") {
+                $("scriptStatus").textContent="正在准备与成片一致的剪辑时间线…";
+                await new Promise(resolve=>setTimeout(resolve,2000));
+                const latest=(await api("/studio/sessions/"+scriptSid)).item;
+                const run=latest.runs.find(r=>r.id===runId);
+                if(run?.status==="completed")break;
+                if(run && !isActive(run.status))throw new Error(run.error||"素材或配置已更新，请重新生成");
+              }
+              if(session?.id!==scriptSid || modalKind!=="narration")return;
+              d=await api("/studio/sessions/"+scriptSid+"/scripts",payload);
+            }
+            if(typeof d.text!=="string")throw new Error("剪辑配置已更新，请重新生成");
             $("scriptText").value = d.text;
             $("scriptText").dispatchEvent(new Event("input"));
             $("scriptStatus").textContent = "已保存到脚本历史";
@@ -1775,6 +1835,8 @@
         if (kind === "clip")
           next = {
             method: c.method,
+            ...(c.method==="cliffhanger" && c.strategy_version===2?{strategy_version:2,story_order:$("storyOrder").value,
+              opening_take:c.opening_take||0,ending_take:c.ending_take||0}:{}),
             seconds:
               c.method === "hook_first" || !$("duration").value
                 ? null
@@ -1966,6 +2028,7 @@
       });
   }
   async function handle(name) {
+    if(name==="story-plan")return openStory();
     if (name === "youtube_regular") {
       const configure = () =>
         window.YoutubeRegular.configure({
@@ -2068,7 +2131,7 @@
         [
           "请概括视频剧情并指出重要转折。",
           "哪一段最适合做短视频开场？",
-          "请用热点前置方式剪辑视频。",
+          "请用爆点引流方式剪辑视频。",
           "提供一份适合 TikTok 的短剧剪辑方案。",
           "提供一份适合 YouTube Shorts 的剪辑方案。",
           "高燃剪辑并翻译成英文。",
@@ -2290,6 +2353,7 @@
     if (uploading) e.preventDefault();
   });
   $("modal").addEventListener("close", () => {
+    window.AIEditorStory.close();
     $("captionPreview").hidden = true;
     $("stylePreviewVideo")?.pause();
     settingsObserver?.disconnect();

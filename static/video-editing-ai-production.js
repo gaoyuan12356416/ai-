@@ -30,6 +30,9 @@
         title = "制作已结束，成片待核对"; tone = "error";
         detail = "暂未取得可播放成片，请刷新状态核对。";
       }
+    } else if (run.status === "plan_attention") {
+      title = "需要调整剪辑方案"; tone = "error";
+      detail = run.error || "请查看各集贡献，调整时长或选择后重新提交。";
     } else if (run.status === "needs_attention") {
       title = "需要处理缺失素材"; tone = "error";
       detail = run.error || "请在下方素材准备区重试失败项，或主动移除后继续。";

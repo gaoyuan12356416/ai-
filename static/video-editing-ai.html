@@ -13,10 +13,12 @@
     <script defer src="/video-editing-ai-youtube-material.js?v=20261120-regular"></script>
     <script defer src="/video-editing-ai-regular.js?v=20261120-regular"></script>
     <script defer src="/video-editing-ai-source-state.js?v=20261123-sources1"></script>
-    <script defer src="/video-editing-ai-production.js?v=20261123-production1"></script>
+    <script defer src="/video-editing-ai-production.js?v=20261124-story1"></script>
+    <link rel="stylesheet" href="/video-editing-ai-story.css?v=20261124-story1" />
+    <script defer src="/video-editing-ai-story.js?v=20261124-story1"></script>
     <script
       defer
-      src="/video-editing-ai-studio.js?v=20261123-cos-preview1"
+      src="/video-editing-ai-studio.js?v=20261124-story1"
     ></script>
   </head>
   <body>
@@ -173,6 +175,10 @@
             </button>
           </div>
         </header>
+        <section id="storyBar" class="story-bar" aria-label="当前剪辑方案" hidden>
+          <div><strong id="storySummary"></strong><small id="storyOrderLabel"></small></div>
+          <button type="button" data-action="story-plan">看剪辑方案</button>
+        </section>
         <section id="productionStatus" class="production-status" role="status" aria-live="polite" aria-label="制作进度" hidden></section>
         <div id="regularActions" hidden class="regular-actions">
           <span id="regularInfo" aria-live="polite"></span>

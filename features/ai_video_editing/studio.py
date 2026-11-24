@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 
 from .runtime import Fault, check, ident, owner, packed, public_asset
-from . import smart_api
+from . import smart_api, story_receipts
 from .smart_plans import METHODS, build_plans
 from .composition import EFFECTS, normalize, store_audio
 
@@ -45,6 +45,7 @@ def setup(rt):
     (rt.root / "exports").mkdir(exist_ok=True)
     from . import selections, previews
     selections.setup(rt)
+    story_receipts.setup(rt)
     previews.setup(rt)
     rt._studio_schema_ready=True
 
@@ -66,6 +67,8 @@ def session(rt, actor, sid):
         item.pop("owner")
         item["source_ids"] = json.loads(item.pop("sources"))
         item["config"] = json.loads(item["config"])
+        key = story_receipts.signature(item["config"],item["selection_id"],item["selection_revision"],item["source_ids"])
+        item["edit_plan"] = story_receipts.header(db,owner(actor),sid,key)
         item["messages"] = [
             {
                 "id": r["id"],
@@ -91,6 +94,7 @@ def session(rt, actor, sid):
         item['selection']=progress(rt,actor,sid)
     else:
         item['selection']=None
+    item["story_order_hint"]=story_receipts.order_hint(rt,actor,item) if item["edit_version"]==2 or story_receipts.is_story(item["config"]) else None
     return item
 
 
@@ -116,6 +120,7 @@ def run_dto(rt, row, actor):
         "tasks": tasks,
         "revisions": revisions,
         "warnings": state.get("warnings", []),
+        "edit_plan_id": state.get("edit_plan_id", ""),
         "config": frozen["config"],
         "kind": json.loads(row["snapshot"])["kind"],
     }
@@ -196,6 +201,15 @@ def configuration(value):
             "effects": comp["effects"],
             "subtitle_protection": comp["subtitle_protection"],
         }
+        version = clip.get("strategy_version", 1)
+        check(type(version) is int and version in (1,2),"config_invalid","剪辑策略版本无效")
+        if version == 2:
+            check(clip["method"] == "cliffhanger","config_invalid","该策略仅用于爆点引流")
+            order = clip.get("story_order", "episode")
+            takes = [clip.get(k,0) for k in ("opening_take","ending_take")]
+            check(order in ("episode","selection") and all(type(i) is int and 0<=i<=1000000 for i in takes),
+                  "config_invalid","剪辑顺序或备选镜头无效")
+            result["clip"].update(strategy_version=2,story_order=order,opening_take=takes[0],ending_take=takes[1])
     for kind in ("narration", "translation"):
         row = value.get(kind)
         if not row:
@@ -255,7 +269,9 @@ def submit(rt, actor, sid, body, kind="create"):
     selected=current.get('selection')
     if not selected:
         smart_api.source_snapshots(rt, actor, sources)
-    config = configuration(body.get("config", current["config"]))
+    config = story_receipts.session_config(body.get("config", current["config"]),current["edit_version"])
+    if kind == "plan" or body.get("edit_plan_id"):
+        check(story_receipts.is_story(config),"story_config","请选择新版爆点引流")
     if kind == "create" and "youtube_regular" in config and (not selected or selected['status']=='succeeded'):
         from .youtube_regular import check_sources
         check_sources(config["youtube_regular"], sources)
@@ -274,6 +290,10 @@ def submit(rt, actor, sid, body, kind="create"):
     frozen = {"source_ids": [] if selected else sources, "config": config, "kind": kind, "actor": actor}
     if selected:
         frozen.update(selection_id=selected['selection_id'],selection_revision=selected['selection_revision'])
+    if not selected and story_receipts.is_story(config):
+        frozen["selection_revision"]=current["selection_revision"]
+    if body.get("edit_plan_id"):
+        frozen["edit_plan_id"] = body["edit_plan_id"]
     digest = hashlib.sha256(packed([sid, frozen]).encode()).hexdigest()
     key = owner(actor)
     with rt.db(True) as db:
@@ -291,6 +311,10 @@ def submit(rt, actor, sid, body, kind="create"):
         latest=db.execute('SELECT version FROM studio_sessions WHERE id=? AND owner=?',(sid,key)).fetchone()
         check(latest and latest['version']==current['version'] and body.get('version',current['version'])==current['version'],
               'version_conflict','创作已更新，请核对最新素材和配置后提交',409)
+        if frozen.get("edit_plan_id"):
+            sig=story_receipts.signature(config,frozen.get("selection_id",""),frozen.get("selection_revision",0),frozen["source_ids"])
+            saved=story_receipts.header(db,key,sid,sig)
+            check(saved and saved["id"]==frozen["edit_plan_id"],"edit_plan_conflict","剪辑方案已更新，请核对当前版本",409)
         rid = ident("sr")
         now = time.time()
         db.execute(
@@ -336,6 +360,7 @@ def checkpoint(rt, row, status, state, error=""):
                         (
                             "素材解析已完成，可以在时间轴查看关键片段，或继续提出创作要求。"
                             if json.loads(row["snapshot"])["kind"] == "analysis"
+                            else "剪辑方案已就绪，可连播粗剪或开始制作。" if json.loads(row["snapshot"])["kind"]=="plan"
                             else "视频制作已完成。点击下方作品切换预览，右上角可导出视频。"
                         )
                         if status == "completed"
@@ -345,7 +370,7 @@ def checkpoint(rt, row, status, state, error=""):
             )
 
 
-def script(rt, actor, sources, analysis, settings, clip=None, merge=True):
+def script(rt, actor, sources, analysis, settings, clip=None, merge=True, frozen_units=None):
     from .narration import write
 
     opts = {
@@ -358,8 +383,7 @@ def script(rt, actor, sources, analysis, settings, clip=None, merge=True):
     seconds = clip["seconds"] if clip else settings["seconds"]
     if seconds is not None:
         opts["target_duration_ms"] = seconds * 1000
-    planned = build_plans(analysis["sources"], opts)
-    unit = planned["drafts"][0]["units"][0]
+    unit = frozen_units[0] if frozen_units else build_plans(analysis["sources"], opts)["drafts"][0]["units"][0]
     for attempt in range(2):
         try:
             return " ".join(
@@ -373,7 +397,7 @@ def script(rt, actor, sources, analysis, settings, clip=None, merge=True):
                 raise
 
 
-def prepare(rt, actor, analysis, config):
+def prepare(rt, actor, analysis, config, edit_plan=None):
     if "youtube_regular" in config:
         from .youtube_regular import build
         return build(rt, actor, analysis, config["youtube_regular"])
@@ -392,7 +416,9 @@ def prepare(rt, actor, analysis, config):
         if config.get("narration")
         else None
     )
-    if planning:
+    if edit_plan is not None:
+        units, warnings = edit_plan["units"], list(edit_plan["warnings"])
+    elif planning:
         opts = {
             "analysis_id": analysis["analysis_id"],
             "method": planning["method"],
@@ -633,6 +659,34 @@ def advance(rt, row):
         checkpoint(rt, row, "preparing", state)
         return
     if status == "preparing":
+        edit_plan=None
+        if story_receipts.is_story(frozen["config"]):
+            analysis=smart_api.receipt(rt,actor,state["analysis_id"])
+            edit_plan=story_receipts.ensure(rt,actor,row["session"],frozen,analysis)
+            state.update(edit_plan_id=edit_plan["id"],warnings=edit_plan["warnings"])
+            if frozen.get("edit_plan_id"):
+                check(edit_plan["id"]==frozen["edit_plan_id"],"edit_plan_conflict","剪辑方案已更新，请核对当前版本",409)
+            if frozen["kind"]=="plan":
+                checkpoint(rt,row,"completed",state)
+                return
+            if edit_plan["conflicts"]:
+                checkpoint(rt,row,"plan_attention",state," ".join(edit_plan["conflicts"]))
+                return
+            if len(edit_plan["units"])>20:
+                # The project API accepts 20 outputs at a time. Every group uses
+                # a stable operation so a restart resumes the same saved projects.
+                units,warnings=prepare(rt,actor,analysis,frozen["config"],edit_plan)
+                projects=[];tasks=[]
+                for n in range(0,len(units),20):
+                    op=row["id"]+"-"+str(n//20)
+                    with rt.db() as db:
+                        saved=db.execute("SELECT receipt FROM operations WHERE owner=? AND kind='save:' AND op=?",(owner(actor),op)).fetchone()
+                    project=(json.loads(saved["receipt"]) if saved else rt.save(actor,{"name":"AI 创作","units":units[n:n+20],"operation_id":op}))["item"]
+                    batch=rt.render(project["id"],actor,{"expected_version":project["version"],"operation_id":op})["items"]
+                    projects.append(project["id"]);tasks.extend(t["id"] for t in batch)
+                state.update(project_ids=projects,task_ids=tasks,warnings=warnings)
+                checkpoint(rt,row,"rendering",state)
+                return
         # A prepared project is committed with the run's stable operation id.
         with rt.db() as db:
             prior = db.execute(
@@ -643,7 +697,7 @@ def advance(rt, row):
             project = json.loads(prior["receipt"])["item"]
         else:
             analysis = smart_api.receipt(rt, actor, state["analysis_id"])
-            units, warnings = prepare(rt, actor, analysis, frozen["config"])
+            units, warnings = prepare(rt, actor, analysis, frozen["config"], edit_plan) if edit_plan else prepare(rt, actor, analysis, frozen["config"])
             state["warnings"] = warnings
             project = rt.save(
                 actor, {"name": "AI 创作", "units": units, "operation_id": row["id"]},
@@ -779,11 +833,13 @@ def ask(rt, actor, sid, body):
     result = {"text": data["answer"], "evidence": data["evidence"]}
     # A requested edit always produces a reviewable card, never an implicit render.
     if re.search("剪辑|剪成|混剪|黄金三段|热点前置|爆点引流|高燃", text):
-        method = next((k for k, v in METHODS.items() if v in text), "golden_three")
+        modern = current.get("edit_version",1)==2 or story_receipts.is_story(current["config"])
+        method = next((k for k, v in METHODS.items() if v in text), "cliffhanger" if modern else "golden_three")
         config = {
             "merge": True,
             "clip": {
                 "method": method,
+                **({"strategy_version":2} if modern and method=="cliffhanger" else {}),
                 "script_count": 1,
                 "variant_count": 1,
                 "seconds": None,
@@ -827,9 +883,17 @@ def dispatch(rt, actor, verb, path, body, query):
             return {**receipt,'item':session(rt,actor,sid)}
         if verb=='POST' and selected_route[3]:
             return selections.retry(rt,actor,sid,selected_route[3])
+    match_plan=re.fullmatch(r"/sessions/(ss_[a-f0-9]{32})/edit-plans/(ep_[a-f0-9]{32})",path)
+    if match_plan and verb=="GET":
+        return {"item":story_receipts.read(rt,actor,match_plan[1],match_plan[2])}
     q = lambda k, d="": query.get(k, [d])[0]
     if path == "/capabilities" and verb == "GET":
-        return capabilities(q("seconds", "0"))
+        result=capabilities(q("seconds","0"))
+        with rt.db() as db:
+            version=db.execute("SELECT version FROM studio_story_defaults WHERE singleton=1").fetchone()[0]
+        result["new_session_edit_version"]=version
+        result["default_clip"]={"method":"cliffhanger","strategy_version":2,"story_order":"episode","auto_seconds":[60,90]} if version==2 else {"method":"hook_first"}
+        return result
     if path == "/sessions":
         if verb == "GET":
             with rt.db() as db:
@@ -853,13 +917,14 @@ def dispatch(rt, actor, verb, path, body, query):
             sid = ident("ss")
             title = (rt.asset(ids[0], actor)["name"] if ids else "新建创作")[:180]
             with rt.db(True) as db:
+                edit_version,cfg=story_receipts.initial(db,body.get("config",{}))
                 db.execute(
-                    "INSERT INTO studio_sessions(id,owner,title,sources,config,updated) VALUES(?,?,?,?,?,?)",
-                    (sid, owner(actor), title, packed(ids), "{}", time.time()),
+                    "INSERT INTO studio_sessions(id,owner,title,sources,config,updated,edit_version) VALUES(?,?,?,?,?,?,?)",
+                    (sid, owner(actor), title, packed(ids), packed(cfg), time.time(), edit_version),
                 )
             return {"item": session(rt, actor, sid)}
     match = re.fullmatch(
-        r"/sessions/(ss_[a-f0-9]{32})(/(messages|submit|analyze|scripts))?", path
+        r"/sessions/(ss_[a-f0-9]{32})(/(messages|submit|analyze|scripts|edit-plan))?", path
     )
     if match:
         sid = match[1]
@@ -873,7 +938,7 @@ def dispatch(rt, actor, verb, path, body, query):
             if ids:
                 smart_api.source_snapshots(rt, actor, ids)
             check(isinstance(ids, list), "sources_invalid", "素材列表无效")
-            config = configuration(body.get("config", current["config"]))
+            config = story_receipts.session_config(body.get("config", current["config"]),current["edit_version"])
             title = str(
                 body.get("title")
                 or (rt.asset(ids[0], actor)["name"] if ids else current["title"])
@@ -897,13 +962,13 @@ def dispatch(rt, actor, verb, path, body, query):
                     db.execute("UPDATE studio_sessions SET selection_id='',selection_revision=selection_revision+1 WHERE id=?",(sid,))
             return {"item": session(rt, actor, sid)}
         if verb == "POST":
-            if match[3] in ("submit", "analyze"):
+            if match[3] in ("submit", "analyze","edit-plan"):
                 return submit(
                     rt,
                     actor,
                     sid,
                     body,
-                    "analysis" if match[3] == "analyze" else "create",
+                    {"analyze":"analysis","edit-plan":"plan","submit":"create"}[match[3]],
                 )
             if match[3] == "messages":
                 return ask(rt, actor, sid, body)
@@ -922,6 +987,18 @@ def dispatch(rt, actor, verb, path, body, query):
                     }
                 )
                 settings = cfg["narration"]
+                frozen_units = None
+                if story_receipts.is_story(cfg):
+                    key=story_receipts.signature(cfg,current["selection_id"],current["selection_revision"],current["source_ids"])
+                    with rt.db() as db:
+                        planned=story_receipts.header(db,owner(actor),sid,key)
+                    if not planned:
+                        receipt=submit(rt,actor,sid,{"config":current["config"],"version":current["version"],
+                                       "operation_id":"script-plan-"+key},"plan")
+                        return {**receipt,"status":"preparing"}
+                    saved=story_receipts.read(rt,actor,sid,planned["id"],True)
+                    check(not saved["conflicts"],"story_conflict"," ".join(saved["conflicts"]),409)
+                    frozen_units=saved["units"]
                 text = script(
                     rt,
                     actor,
@@ -930,6 +1007,7 @@ def dispatch(rt, actor, verb, path, body, query):
                     settings,
                     cfg.get("clip"),
                     cfg["merge"],
+                    frozen_units,
                 )
                 with rt.db(True) as db:
                     message(
