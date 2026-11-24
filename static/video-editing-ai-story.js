@@ -1,7 +1,8 @@
 /* Read-only rough playback of the exact versioned source ranges submitted for export. */
 (() => {
   "use strict";
-  const stamp = (ms) => (ms / 1000).toFixed(2) + " 秒";
+  const stamp = (ms) => ms < 60000 ? (ms / 1000).toFixed(2) + " 秒"
+    : Math.floor(ms / 60000) + " 分 " + ((ms % 60000) / 1000).toFixed(2) + " 秒";
   let generation = 0, timer, stopPlayer = () => {};
   function close() {
     generation++;
