@@ -81,12 +81,14 @@ def refresh_runs(conn):
 
 # A native skip is durable. A late collector observation or a claim returning
 # to the queue is handled on a later pass. Never retire a live dispatch claim.
-MATCH = """FROM fb.fb_inactive_queue_log a
-    JOIN fb.fb_auto_task t ON t.id=a.task_id AND t.status='skipped' AND t.skip_reason=a.reason
-    JOIN pipeline_job j ON j.source_key='fb:auto:'||a.task_id
+MATCH = """FROM pipeline_job j
+    CROSS JOIN fb.fb_inactive_queue_log a
+    CROSS JOIN fb.fb_auto_task t
     WHERE j.channel='fb' AND j.family='auto'
     AND j.status IN ('queued','ready','failed') AND j.hold_reason<>'metadata_only'
     AND j.external_intent=0 AND j.canonical_receipt=''
+    AND a.task_id=CAST(j.source_id AS INTEGER) AND j.source_key='fb:auto:'||a.task_id
+    AND t.id=a.task_id AND t.status='skipped' AND t.skip_reason=a.reason
     AND NOT EXISTS (SELECT 1 FROM pipeline_publication p WHERE p.source_key=j.source_key)
     AND NOT EXISTS (SELECT 1 FROM pipeline_operation o WHERE o.job_id=j.id)
     AND NOT EXISTS (SELECT 1 FROM pipeline_checkpoint k WHERE k.job_id=j.id)
